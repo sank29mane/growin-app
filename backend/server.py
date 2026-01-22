@@ -138,9 +138,22 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Growin API", version="2.0.0", lifespan=lifespan)
 
 # CORS configuration
+# Security: Restrict origins to prevent malicious sites from accessing localhost
+allowed_origins_env = os.getenv("ALLOWED_ORIGINS")
+if allowed_origins_env:
+    origins = [origin.strip() for origin in allowed_origins_env.split(",")]
+else:
+    # Default to localhost for development
+    origins = [
+        "http://localhost",
+        "http://localhost:8002",
+        "http://127.0.0.1",
+        "http://127.0.0.1:8002",
+    ]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
