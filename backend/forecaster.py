@@ -63,20 +63,27 @@ class TTMForecaster:
         Generate forecast using TTM-R2 or fallback to statistical.
         """
         if not ohlcv_data or len(ohlcv_data) < 50:
-             return {
+            return {
                 "error": "Insufficient historical data (need at least 50 points)",
                 "forecast": [],
                 "confidence": 0.0
             }
-        
+
         try:
             # Need 512 points for TTM usually, but check availability first
             if self.ttm_available and len(ohlcv_data) >= 512:
                 return await self._ttm_forecast(ohlcv_data, prediction_steps, timeframe)
             else:
                 if self.ttm_available:
-                     logger.info(f"TTM available but insufficient data ({len(ohlcv_data)} < 512). Using statistical.")
-                return self._statistical_forecast(ohlcv_data, prediction_steps, timeframe)
+                    logger.info(f"TTM available but insufficient data ({len(ohlcv_data)} < 512). Using statistical.")
+                loop = asyncio.get_running_loop()
+                return await loop.run_in_executor(
+                    None,
+                    self._statistical_forecast,
+                    ohlcv_data,
+                    prediction_steps,
+                    timeframe
+                )
         except Exception as e:
             logger.error(f"Forecasting error: {e}")
             return {
@@ -90,6 +97,8 @@ class TTMForecaster:
         import json
         import subprocess
         
+        loop = asyncio.get_running_loop()
+
         try:
             # Prepare input
             payload = {
@@ -113,20 +122,20 @@ class TTMForecaster:
             if process.returncode != 0:
                 error_msg = stderr.decode().strip()
                 logger.error(f"Bridge failed (code {process.returncode}): {error_msg}")
-                return self._statistical_forecast(ohlcv_data, prediction_steps, timeframe)
-            
+                return await loop.run_in_executor(None, self._statistical_forecast, ohlcv_data, prediction_steps, timeframe)
+
             # Parse response
             result = json.loads(stdout.decode())
             
             if not result.get("success"):
                 logger.error(f"Bridge returned error: {result.get('error')}")
-                return self._statistical_forecast(ohlcv_data, prediction_steps, timeframe)
-            
+                return await loop.run_in_executor(None, self._statistical_forecast, ohlcv_data, prediction_steps, timeframe)
+
             # --- Sanity Check ---
             forecast = result.get("forecast", [])
             if not forecast:
-                return self._statistical_forecast(ohlcv_data, prediction_steps, timeframe)
-            
+                return await loop.run_in_executor(None, self._statistical_forecast, ohlcv_data, prediction_steps, timeframe)
+
             last_price = float(ohlcv_data[-1]['c'])
             last_forecast_price = float(forecast[-1]['close'])
             
@@ -134,13 +143,13 @@ class TTMForecaster:
             pct_change = abs(last_forecast_price - last_price) / last_price
             if pct_change > 0.3:
                 logger.warning(f"⚠️ TTM result failed sanity check ({pct_change*100:.1f}% change). Falling back to statistical.")
-                return self._statistical_forecast(ohlcv_data, prediction_steps, timeframe)
+                return await loop.run_in_executor(None, self._statistical_forecast, ohlcv_data, prediction_steps, timeframe)
                 
             return result
             
         except Exception as e:
-             logger.error(f"TTM Bridge execution failed: {e}. Falling back.")
-             return self._statistical_forecast(ohlcv_data, prediction_steps, timeframe)
+            logger.error(f"TTM Bridge execution failed: {e}. Falling back.")
+            return await loop.run_in_executor(None, self._statistical_forecast, ohlcv_data, prediction_steps, timeframe)
 
     def _statistical_forecast(self, ohlcv_data: List[Dict[str, Any]], prediction_steps: int, timeframe: str = "1Day") -> Dict[str, Any]:
         """
