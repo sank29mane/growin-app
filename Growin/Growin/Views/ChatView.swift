@@ -44,6 +44,8 @@ struct ChatView: View {
                 }) {
                     Image(systemName: "list.bullet")
                 }
+                .help("Conversation History")
+                .accessibilityLabel("Conversation History")
             }
             
             ToolbarItem(placement: .automatic) {
@@ -56,6 +58,8 @@ struct ChatView: View {
                 }) {
                     Image(systemName: "plus.circle")
                 }
+                .help("New Conversation")
+                .accessibilityLabel("New Conversation")
             }
         }
         .sheet(isPresented: $viewModel.showConfigPrompt) {
@@ -149,6 +153,8 @@ struct ChatView: View {
                             .background(Circle().fill(Color.blue))
                             .shadow(radius: 4)
                     }
+                    .help("Scroll to bottom")
+                    .accessibilityLabel("Scroll to bottom")
                     .padding(.trailing, 20)
                     .padding(.bottom, 80)
                     .transition(.scale.combined(with: .opacity))
@@ -232,6 +238,8 @@ struct ChatView: View {
                         }
                     }
                     .buttonStyle(.plain)
+                    .help(viewModel.isProcessing ? "Stop generating" : "Send message")
+                    .accessibilityLabel(viewModel.isProcessing ? "Stop generating" : "Send message")
                     .disabled(viewModel.inputText.isEmpty && !viewModel.isProcessing)
                 }
             }
