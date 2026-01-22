@@ -3,9 +3,9 @@ Coordinator Agent - Orchestrates all specialist agents
 Static SOTA model that routes queries and aggregates results
 """
 
-from base_agent import BaseAgent, AgentResponse
+from .base_agent import BaseAgent, AgentResponse
 from market_context import MarketContext
-from agents import QuantAgent, PortfolioAgent, ForecastingAgent, ResearchAgent, SocialAgent, WhaleAgent, GoalPlannerAgent
+from . import QuantAgent, PortfolioAgent, ForecastingAgent, ResearchAgent, SocialAgent, WhaleAgent, GoalPlannerAgent
 from typing import Dict, Any, List, Optional
 import asyncio
 import logging

@@ -14,7 +14,7 @@ Rate Limits:
 Supported Markets: UK (LSE), India (NSE), US
 """
 
-from base_agent import BaseAgent, AgentConfig, AgentResponse
+from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from market_context import ResearchData, NewsArticle
 from typing import Dict, Any, List
 import logging

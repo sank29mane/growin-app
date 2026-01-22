@@ -120,9 +120,10 @@ class CurrencyNormalizer:
         Normalize ALL monetary values in a position dict.
         
         Modifies:
-        - currentPrice
-        - averagePrice
-        - (ppl is already in account currency, leave untouched)
+        - currentPrice (normalized to base currency)
+        - averagePrice (normalized to base currency)
+        - Adds: currentPriceDisplay, currentPriceCurrency, currentPriceGBP
+        - Adds: averagePriceDisplay, averagePriceCurrency, averagePriceGBP
         
         Args:
             position: Position dict from data source
@@ -140,22 +141,40 @@ class CurrencyNormalizer:
         
         currency = metadata.get('currency') if metadata else None
         
-        # Normalize prices
+        # Process current price
         if 'currentPrice' in position:
-            position['currentPrice'] = CurrencyNormalizer.normalize_price(
-                position['currentPrice'],
-                ticker,
-                currency,
-                metadata
-            )
+            raw_price = position['currentPrice']
+            # We assume currentPrice might already be normalized if coming from some sources,
+            # but usually it's raw from T212.
+            # normalize_price handles raw -> normalized
+            normalized_price = CurrencyNormalizer.normalize_price(raw_price, ticker, currency, metadata)
+
+            # Display fields (using raw price usually, but if raw is GBX, we want 'p')
+            # get_display_price expects raw price and currency code
+            display_price, currency_symbol = CurrencyNormalizer.get_display_price(raw_price, currency)
+
+            position['currentPrice'] = normalized_price
+            position['currentPriceGBP'] = normalized_price
+            position['currentPriceDisplay'] = display_price
+            position['currentPriceCurrency'] = currency_symbol
         
+        # Process average price
         if 'averagePrice' in position:
-            position['averagePrice'] = CurrencyNormalizer.normalize_price(
-                position['averagePrice'],
-                ticker,
-                currency,
-                metadata
-            )
+            raw_price = position['averagePrice']
+            normalized_price = CurrencyNormalizer.normalize_price(raw_price, ticker, currency, metadata)
+            display_price, currency_symbol = CurrencyNormalizer.get_display_price(raw_price, currency)
+
+            position['averagePrice'] = normalized_price
+            position['averagePriceGBP'] = normalized_price
+            position['averagePriceDisplay'] = display_price
+            position['averagePriceCurrency'] = currency_symbol
+
+        # P&L is already in base currency from Trading212
+        if 'ppl' in position:
+            position['pplGBP'] = position['ppl']
+
+        if currency:
+            position['currency'] = currency
         
         return position
     
@@ -187,6 +206,31 @@ class CurrencyNormalizer:
         formatted = f"{amount:,.2f}"
         
         return f"{symbol}{formatted}"
+
+    @staticmethod
+    def get_display_price(price: float, currency_code: str) -> tuple[float, str]:
+        """
+        Get price in correct display format with currency symbol.
+
+        Args:
+            price: Raw price value
+            currency_code: Currency code (GBX, GBP, USD, EUR, etc.)
+
+        Returns:
+            Tuple of (display_price, currency_symbol)
+        """
+        currency_code = currency_code.upper() if currency_code else ""
+
+        if currency_code == 'GBX':
+            return (price, 'p')
+        elif currency_code == 'GBP':
+            return (price, '£')
+        elif currency_code == 'USD':
+            return (price, '$')
+        elif currency_code == 'EUR':
+            return (price, '€')
+        else:
+            return (price, currency_code)
 
 
 class DataSourceNormalizer:
@@ -290,3 +334,23 @@ def safe_divide_pence(value: Optional[float]) -> float:
     if value is None:
         return 0.0
     return CurrencyNormalizer.pence_to_pounds(value)
+
+
+def calculate_portfolio_value(positions: List[Dict[str, Any]]) -> float:
+    """
+    Calculate total portfolio value in GBP.
+    Uses normalized prices for accurate totals.
+
+    Args:
+        positions: List of normalized positions
+
+    Returns:
+        Total value in GBP
+    """
+    total = 0.0
+    for pos in positions:
+        price_gbp = pos.get('currentPriceGBP', pos.get('currentPrice', 0))
+        quantity = pos.get('quantity', 0)
+        total += price_gbp * quantity
+
+    return total

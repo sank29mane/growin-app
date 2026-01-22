@@ -125,7 +125,7 @@ async def test_currency_normalization():
     """Test currency normalization"""
     print("🧪 Testing Currency Normalization...")
     
-    from currency_utils import CurrencyNormalizer
+    from utils.currency_utils import CurrencyNormalizer
     
     # Test pence to pounds
     result = CurrencyNormalizer.pence_to_pounds(10000)

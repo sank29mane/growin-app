@@ -3,7 +3,8 @@ Social Sentiment Agent - Analyzes social media and community sentiment
 Integration with Tavily (searching Reddit, Twitter/X, etc.)
 """
 
-from base_agent import BaseAgent, AgentConfig, AgentResponse
+from .base_agent import BaseAgent, AgentConfig, AgentResponse
+from market_context import SocialData
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
 import logging
@@ -12,14 +13,6 @@ import asyncio
 
 logger = logging.getLogger(__name__)
 
-class SocialData(BaseModel):
-    """Social sentiment data structure"""
-    ticker: str
-    sentiment_score: float = 0.0  # -1 to 1
-    sentiment_label: str = "NEUTRAL"
-    mention_volume: str = "LOW" # LOW, MEDIUM, HIGH (inferred)
-    top_discussions: List[str] = []
-    platforms: List[str] = []
 
 class SocialAgent(BaseAgent):
     """
