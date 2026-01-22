@@ -1,0 +1,15 @@
+[MASTER]
+ignore=.venv,build,__pycache__,test_agents.py
+
+[MESSAGES CONTROL]
+disable=logging-fstring-interpolation,
+        line-too-long,
+        too-many-locals,
+        broad-exception-caught,
+        missing-module-docstring,
+        missing-function-docstring,
+        missing-class-docstring
+max-line-length=120
+
+[DESIGN]
+max-module-lines=1500

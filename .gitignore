@@ -1,0 +1,38 @@
+# Xcode
+.DS_Store
+/build/
+/DerivedData/
+*.xcodeproj/project.xcworkspace
+*.xcodeproj/xcuserdata/
+
+# Swift
+.build/
+Packages/
+*.swiftdoc
+*.swiftmodule
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv_forecast/
+dist/
+build/
+*.egg-info/
+*.db
+yfinance.cache
+.env.example
+ollama.log
+growin.db
+.state.json
+*.log
+.env
+backend/venv_forecast/
+
+# Models
+backend/models/
+backend/models/mlx/
+
+# Pytest
+.pytest_cache/

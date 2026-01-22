@@ -1,0 +1,111 @@
+import SwiftUI
+
+struct SettingsOverlay: View {
+    @Binding var isPresented: Bool
+    @State private var selectedTab = 0
+    
+    var body: some View {
+        ZStack {
+            // Background Blur
+            Color.black.opacity(0.4)
+                .edgesIgnoringSafeArea(.all)
+                .onTapGesture {withAnimation(.spring()) { isPresented = false }}
+            
+            // Pop-out Window
+            VStack(spacing: 0) {
+                // Header
+                headerView
+                
+                // Content Switcher
+                VStack(spacing: 0) {
+                    // Navigation
+                    HStack(spacing: 0) {
+                        tabItem(title: "AI CONFIG", icon: "brain.head.profile", index: 0)
+                        tabItem(title: "BROKERAGE", icon: "briefcase.fill", index: 1)
+                        tabItem(title: "CONSOLE", icon: "terminal.fill", index: 2)
+                    }
+                    .padding(.horizontal)
+                    .background(Color.white.opacity(0.05))
+                    
+                    Divider().background(Color.secondary.opacity(0.2))
+                    
+                    // Main View
+                    ScrollView {
+                        VStack(spacing: 24) {
+                            if selectedTab == 0 {
+                                AIConfigSection()
+                                HFModelHubSection()
+                                AgentPersonasSection()
+                            } else if selectedTab == 1 {
+                                TradingConfigSection()
+                                AccountStatusSection()
+                            } else {
+                                IntelligentConsoleView()
+                            }
+                        }
+                        .padding(24)
+                    }
+                }
+            }
+            .frame(width: 550, height: 750)
+            .background(.ultraThinMaterial)
+            .cornerRadius(32)
+            .overlay(
+                RoundedRectangle(cornerRadius: 32)
+                    .stroke(LinearGradient(colors: [.white.opacity(0.2), .clear], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.5), radius: 40, x: 0, y: 20)
+            .scaleEffect(isPresented ? 1 : 0.9)
+            .opacity(isPresented ? 1 : 0)
+        }
+    }
+    
+    private var headerView: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("System Control")
+                    .font(.system(size: 20, weight: .black))
+                Text("GROWIN INTELLIGENCE ARCHITECTURE")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+            Button(action: { withAnimation(.spring()) { isPresented = false } }) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundColor(.primary)
+                    .padding(10)
+                    .background(Circle().fill(Color.secondary.opacity(0.1)))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(24)
+    }
+    
+    private func tabItem(title: String, icon: String, index: Int) -> some View {
+        Button(action: { withAnimation(.interactiveSpring()) { selectedTab = index } }) {
+            VStack(spacing: 12) {
+                HStack(spacing: 8) {
+                    Image(systemName: icon)
+                        .font(.system(size: 14))
+                    Text(title)
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                }
+                .foregroundColor(selectedTab == index ? .primary : .secondary)
+                .frame(maxWidth: .infinity)
+                .padding(.top, 16)
+                
+                // Indicator
+                Rectangle()
+                    .fill(selectedTab == index ? Color.green : Color.clear)
+                    .frame(height: 2)
+                    .padding(.horizontal, 20)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+#Preview {
+    SettingsOverlay(isPresented: .constant(true))
+}
