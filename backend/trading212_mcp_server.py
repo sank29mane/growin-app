@@ -1772,21 +1772,29 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
                 # Let's try YFinance directly as T212 API is limited for unowned realtime data without stream.
                 source = "Yahoo Finance"
-                stock = yf.Ticker(ticker)
-                # fast info
-                info = stock.fast_info
-                current_price = info.last_price
-                if current_price is None:
-                    # Fallback to history
-                    hist = stock.history(period="1d")
-                    if not hist.empty:
-                        current_price = hist["Close"].iloc[-1]
+
+                loop = asyncio.get_running_loop()
+
+                def fetch_price_sync(ticker_symbol):
+                    stock = yf.Ticker(ticker_symbol)
+                    # fast info
+                    info = stock.fast_info
+                    current_price = info.last_price
+                    currency = info.currency
+                    if current_price is None:
+                        # Fallback to history
+                        hist = stock.history(period="1d")
+                        if not hist.empty:
+                            current_price = hist["Close"].iloc[-1]
+                    return current_price, currency
+
+                current_price, currency = await loop.run_in_executor(None, fetch_price_sync, ticker)
 
                 if current_price:
                     price_data = {
                         "ticker": ticker,
                         "price": current_price,
-                        "currency": info.currency,
+                        "currency": currency,
                         "source": source,
                     }
                 else:
