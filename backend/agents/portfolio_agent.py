@@ -13,6 +13,7 @@ from app_context import state # Access global state
 from trading212_mcp_server import normalize_ticker
 import asyncio
 import pandas as pd
+import numpy as np
 import yfinance as yf
 
 logger = logging.getLogger(__name__)
@@ -160,36 +161,48 @@ class PortfolioAgent(BaseAgent):
                 return []
             
             df = df.ffill().bfill()
-            history_points = []
             
-            for timestamp, row in df.iterrows():
-                try:
-                    total_value = free_cash
-                    for ticker, quantity in holdings.items():
-                        price = 0
-                        if isinstance(df, pd.Series):
-                            price = row
-                        elif ticker in row:
-                            price = row[ticker]
-                        else:
-                            continue
-                        
-                        # Pence to pounds conversion for UK stocks
-                        if ticker.endswith(".L") and price > 500:
-                            price = price / 100.0
-                            
-                        total_value += price * quantity
-                    
-                    import math
-                    if math.isnan(total_value) or math.isinf(total_value):
-                        total_value = 0.0
+            # Vectorized implementation
+            if isinstance(df, pd.Series):
+                ticker = list(holdings.keys())[0]
+                df = df.to_frame(name=ticker)
 
-                    history_points.append({
-                        "timestamp": timestamp.isoformat(),
-                        "total_value": round(float(total_value), 2)
-                    })
-                except Exception:
-                    continue
+            valid_holdings = {k: v for k, v in holdings.items() if k in df.columns}
+
+            if not valid_holdings:
+                 # Return free cash for all timestamps if no valid holdings match
+                 portfolio_val = pd.Series(free_cash, index=df.index)
+            else:
+                quantities = pd.Series(valid_holdings)
+
+                # Align df to quantities and ensure we work on a copy
+                df_subset = df[quantities.index].copy()
+
+                # Apply Pence conversion
+                # Find columns ending with .L
+                uk_tickers = [t for t in df_subset.columns if t.endswith(".L")]
+
+                for t in uk_tickers:
+                     series = df_subset[t]
+                     mask = series > 500
+                     # Apply transformation only where mask is true using numpy.where
+                     df_subset[t] = np.where(mask, series / 100.0, series)
+
+                # Calculate weighted sum
+                portfolio_val = df_subset.dot(quantities)
+                portfolio_val = portfolio_val + free_cash
+
+            # Handle Nan/Inf
+            portfolio_val = portfolio_val.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+            # Create result list
+            history_points = [
+                {
+                    "timestamp": ts.isoformat(),
+                    "total_value": round(float(v), 2)
+                }
+                for ts, v in zip(portfolio_val.index, portfolio_val.values)
+            ]
             
             return history_points
         except Exception as e:
