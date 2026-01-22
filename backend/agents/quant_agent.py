@@ -275,9 +275,20 @@ class QuantAgent(BaseAgent):
             return np.full(len(closes), mean + 2), np.full(len(closes), mean), np.full(len(closes), mean - 2)
 
         sma = self._calculate_sma(closes, 20)
-        std = np.zeros(len(closes))
-        for i in range(19, len(closes)):
-            std[i] = np.std(closes[i-19:i+1])
+
+        try:
+            import pandas as pd
+            # Optimized standard deviation using pandas rolling window
+            # ddof=0 to match np.std behavior (population std dev)
+            std = pd.Series(closes).rolling(window=20).std(ddof=0).to_numpy(copy=True)
+            # Replace the initial NaNs (due to rolling window) with 0.0 to match original behavior
+            # We explicitly only touch the first 19 elements to avoid masking legitimate NaNs in data
+            std[:19] = 0.0
+        except ImportError:
+            # Fallback if pandas is not available
+            std = np.zeros(len(closes))
+            for i in range(19, len(closes)):
+                std[i] = np.std(closes[i-19:i+1])
 
         bb_upper = sma + (std * 2)
         bb_lower = sma - (std * 2)
