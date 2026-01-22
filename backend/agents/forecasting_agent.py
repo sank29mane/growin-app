@@ -5,7 +5,7 @@ Forecasting Agent - Wrapper around TTM for standardized interface
 from typing import Dict, Any
 import logging
 
-from base_agent import BaseAgent, AgentConfig, AgentResponse
+from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from market_context import ForecastData
 from forecaster import get_forecaster
 

@@ -108,7 +108,7 @@ class AlpacaClient:
         try:
             import yfinance as yf
             import pandas as pd
-            from currency_utils import CurrencyNormalizer
+            from utils.currency_utils import CurrencyNormalizer
 
             # Map timeframe to yfinance period/interval
             period_map = {

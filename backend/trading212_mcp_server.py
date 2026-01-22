@@ -31,7 +31,7 @@ DEMO_API_BASE = "https://demo.trading212.com/api/v0"
 STATE_FILE = ".state.json"
 
 # Import centralized currency normalization
-from currency_utils import CurrencyNormalizer, normalize_all_positions
+from utils.currency_utils import CurrencyNormalizer, normalize_all_positions, calculate_portfolio_value
 
 
 
@@ -1120,12 +1120,6 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     f"Warning: Could not fetch instruments for metadata: {e}",
                     file=sys.stderr,
                 )
-
-            # Import currency normalizer
-            from currency_normalizer import (
-                calculate_portfolio_value,
-                normalize_all_positions,
-            )
 
             for acc_type, c_instance in all_clients.items():
                 try:

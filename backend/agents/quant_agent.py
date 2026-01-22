@@ -3,7 +3,7 @@ Quant Agent - Technical Analysis using TA-Lib
 Ultra-fast algorithmic technical indicator calculations.
 """
 
-from base_agent import BaseAgent, AgentConfig, AgentResponse
+from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from market_context import QuantData, Signal
 from typing import Dict, Any
 import logging

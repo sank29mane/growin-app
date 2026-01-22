@@ -6,7 +6,7 @@ from typing import Dict, Any
 import logging
 import json
 
-from base_agent import BaseAgent, AgentConfig, AgentResponse
+from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from market_context import PortfolioData
 from mcp_client import Trading212MCPClient
 from app_context import state # Access global state

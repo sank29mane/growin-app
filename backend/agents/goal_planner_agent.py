@@ -10,7 +10,7 @@ import logging
 import time
 import json
 import asyncio
-from base_agent import BaseAgent, AgentConfig, AgentResponse
+from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from market_context import GoalData
 # Use lazy import for app_context to avoid circular deps if needed, or import here if safe
 # form app_context import state (doing inside method to be safe as per original)

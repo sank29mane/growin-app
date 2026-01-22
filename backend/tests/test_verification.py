@@ -1,5 +1,5 @@
 import asyncio
-from coordinator_agent import CoordinatorAgent
+from agents.coordinator_agent import CoordinatorAgent
 from mcp_client import Trading212MCPClient
 from dotenv import load_dotenv
 

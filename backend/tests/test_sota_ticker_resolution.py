@@ -2,8 +2,8 @@
 import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
-from coordinator_agent import CoordinatorAgent
-from base_agent import BaseAgent, AgentResponse
+from agents.coordinator_agent import CoordinatorAgent
+from agents.base_agent import BaseAgent, AgentResponse
 
 async def test_escalation_path():
     print("=== Testing Coordinator Escalation Path ===")

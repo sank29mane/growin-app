@@ -59,8 +59,8 @@ async def chat_message(request: ChatMessage, _=Depends(default_limiter.check)):
     Coordinator → Specialists → Decision Agent
     """
     try:
-        from coordinator_agent import CoordinatorAgent
-        from decision_agent import DecisionAgent
+        from agents.coordinator_agent import CoordinatorAgent
+        from agents.decision_agent import DecisionAgent
         
         chat_manager = state.chat_manager
         conversation_id = request.conversation_id or chat_manager.create_conversation()
@@ -157,8 +157,8 @@ async def analyze_portfolio(request: AnalyzeRequest):
         raise HTTPException(status_code=503, detail="MCP Server not connected")
 
     try:
-        from coordinator_agent import CoordinatorAgent
-        from decision_agent import DecisionAgent
+        from agents.coordinator_agent import CoordinatorAgent
+        from agents.decision_agent import DecisionAgent
         
         # Extract ticker from query (simple approach)
         ticker = None
@@ -296,7 +296,7 @@ async def generate_conversation_title(conversation_id: str, model_name: Optional
             f"{messages_text}\n\nTitle:"
         )
 
-        from decision_agent import DecisionAgent
+        from agents.decision_agent import DecisionAgent
         agent = DecisionAgent(model_name=model_name or "native-mlx")
         response = await agent.generate_response(prompt)
 
