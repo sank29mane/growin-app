@@ -126,22 +126,47 @@ class AlpacaClient:
             if data.empty:
                 return None
 
-            bar_list = []
-            for idx, row in data.iterrows():
-                # NORMALIZE PRICE: Convert GBX to GBP if it's a UK stock
-                open_val = CurrencyNormalizer.normalize_price(float(row['Open']), normalized_ticker)
-                high_val = CurrencyNormalizer.normalize_price(float(row['High']), normalized_ticker)
-                low_val = CurrencyNormalizer.normalize_price(float(row['Low']), normalized_ticker)
-                close_val = CurrencyNormalizer.normalize_price(float(row['Close']), normalized_ticker)
-                
-                bar_list.append({
-                    "t": int(pd.to_datetime(idx).timestamp() * 1000),
-                    "o": open_val,
-                    "h": high_val,
-                    "l": low_val,
-                    "c": close_val,
-                    "v": int(row['Volume']),
-                })
+            # ⚡ OPTIMIZATION: Use vectorized operations instead of iterrows (~10x faster)
+            # Make a copy to avoid SettingWithCopy warnings
+            df = data.copy()
+
+            # Check if UK stock once (CurrencyNormalizer logic)
+            is_uk = CurrencyNormalizer.is_uk_stock(normalized_ticker)
+
+            if is_uk:
+                # Vectorized division for UK stocks (GBX -> GBP)
+                cols_to_normalize = ['Open', 'High', 'Low', 'Close']
+                df[cols_to_normalize] = df[cols_to_normalize] / 100.0
+
+            # Rounding to 2 decimal places (consistent with original logic)
+            df[['Open', 'High', 'Low', 'Close']] = df[['Open', 'High', 'Low', 'Close']].round(2)
+
+            # Convert index to timestamp milliseconds robustly (handle both TZ-aware and Naive)
+            if df.index.tz is not None:
+                # If TZ-aware, subtract TZ-aware epoch
+                df['t'] = (df.index - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta('1ms')
+            else:
+                # If Naive, subtract Naive epoch
+                df['t'] = (df.index - pd.Timestamp("1970-01-01")) // pd.Timedelta('1ms')
+
+            # Rename columns to match API output format
+            df = df.rename(columns={
+                'Open': 'o',
+                'High': 'h',
+                'Low': 'l',
+                'Close': 'c',
+                'Volume': 'v'
+            })
+
+            # Ensure Volume is integer
+            if 'v' in df.columns:
+                df['v'] = df['v'].fillna(0).astype(int)
+
+            # Select only needed columns
+            df = df[['t', 'o', 'h', 'l', 'c', 'v']]
+
+            # Convert to list of dicts
+            bar_list = df.to_dict('records')
 
             return {"ticker": ticker, "bars": bar_list[-limit:], "timeframe": timeframe}
 
