@@ -44,6 +44,7 @@ struct ChatView: View {
                 }) {
                     Image(systemName: "list.bullet")
                 }
+<<<<<<< Updated upstream
                 .help("Conversation History")
                 .accessibilityLabel("Conversation History")
             }
@@ -58,8 +59,8 @@ struct ChatView: View {
                 }) {
                     Image(systemName: "plus.circle")
                 }
-                .help("New Conversation")
-                .accessibilityLabel("New Conversation")
+                .help("New Chat")
+                .accessibilityLabel("New Chat")
             }
         }
         .sheet(isPresented: $viewModel.showConfigPrompt) {
