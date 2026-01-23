@@ -133,7 +133,7 @@ class ChatManager:
         cursor.execute(query)
 
         servers = []
-        for row in cursor.fetchall():
+        for row in cursor:
             servers.append(
                 {
                     "name": row["name"],
