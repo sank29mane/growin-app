@@ -73,8 +73,7 @@ SAFE_BUILTINS = {
     "isinstance": isinstance,
     "issubclass": issubclass,
     "type": type,
-    "hasattr": hasattr,
-    "getattr": getattr,
+    # "hasattr" and "getattr" removed for security (prevents sandbox escapes)
     # Iteration
     "iter": iter,
     "next": next,
