@@ -247,39 +247,54 @@ async def get_portfolio_history(days: int = 30, account_type: Optional[str] = No
             # Get list of columns that are actually in holdings
             valid_tickers = [t for t in tickers if t in df.columns] if isinstance(df, pd.DataFrame) else tickers
             
-            for timestamp, row in df.iterrows():
-                try:
-                    total_value = free_cash
+            # Vectorized calculation (Bolt Optimization ⚡)
+            try:
+                # Ensure df is a DataFrame for consistent processing
+                if isinstance(df, pd.Series):
+                    df = df.to_frame()
+
+                # Work on a copy to prevent side effects on the original dataframe
+                df_calc = df.copy()
+
+                # 1. Filter holdings to those present in df
+                valid_holdings = {t: q for t, q in holdings.items() if t in df_calc.columns}
+
+                if valid_holdings:
+                    # 2. Apply currency conversion
+                    # Convert LSE pence to pounds if price > 500
+                    for ticker in valid_holdings:
+                        if ticker.endswith(".L") and ticker in df_calc.columns:
+                            # Vectorized update: if price > 500, divide by 100
+                            vals = df_calc[ticker].to_numpy()
+                            df_calc[ticker] = np.where(vals > 500, vals / 100.0, vals)
+
+                    # 3. Calculate portfolio value using dot product
+                    ordered_tickers = list(valid_holdings.keys())
+                    weights = np.array([valid_holdings[t] for t in ordered_tickers])
+
+                    # Subset dataframe
+                    df_subset = df_calc[ordered_tickers]
                     
-                    for ticker, quantity in holdings.items():
-                        price = 0
-                        if isinstance(df, pd.Series):
-                            price = row
-                        elif ticker in row:
-                            price = row[ticker]
-                        else:
-                            continue
-                            
-                        # Currency conversion heuristic for LSE (pence to pounds)
-                        # Only apply if price looks like pence (usually > 100 for stocks like LLOY)
-                        if ticker.endswith(".L") and price > 500:
-                            price = price / 100.0
-                            
-                        total_value += price * quantity
+                    # Calculate total value
+                    portfolio_values = df_subset.dot(weights) + free_cash
                     
-                    import numpy as np
-                    if np.isnan(total_value) or np.isinf(total_value):
-                        continue
-                        
-                    history_points.append({
-                        "timestamp": timestamp.isoformat(),
-                        "total_value": round(float(total_value), 2),
-                        "total_pnl": 0,
-                        "cash_balance": round(float(free_cash), 2)
-                    })
-                except Exception as e:
-                    logger.warning(f"Error calculating point for {timestamp}: {e}")
-                    continue
+                    # 4. Filter and Format
+                    # Filter invalid values
+                    mask = ~portfolio_values.isin([np.nan, np.inf])
+                    portfolio_values = portfolio_values[mask]
+
+                    for timestamp, val in portfolio_values.items():
+                        history_points.append({
+                            "timestamp": timestamp.isoformat(),
+                            "total_value": round(float(val), 2),
+                            "total_pnl": 0,
+                            "cash_balance": round(float(free_cash), 2)
+                        })
+            except Exception as e:
+                logger.error(f"Vectorized calculation error: {e}")
+                # Fallback or just log? The original swallowed errors per row but logged them.
+                # If vectorization fails completely, we return empty list or partial.
+                pass
             
             logger.info(f"Generated {len(history_points)} portfolio history points")
             return sanitize_nan(history_points)
