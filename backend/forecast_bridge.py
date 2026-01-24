@@ -36,7 +36,7 @@ def run_forecast(ohlcv_data: List[Dict[str, Any]], prediction_steps: int, timefr
             "1Week": "W",
             "1Month": "ME"
         }
-        freq = tf_map.get(timeframe, "H")
+        requested_freq = tf_map.get(timeframe, "H")
         
         # Load model
         model = TinyTimeMixerForPrediction.from_pretrained(
@@ -63,11 +63,53 @@ def run_forecast(ohlcv_data: List[Dict[str, Any]], prediction_steps: int, timefr
             } for i, d in enumerate(ohlcv_data)
         ])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+
+        # --- Data Sanitization & Gap Filling ---
+        # Ensure continuous timeline to prevent NaNs in model pipeline
+        df = df.set_index('timestamp').sort_index()
+
+        # Try to infer frequency from actual data
+        inferred_freq = None
+        try:
+            inferred_freq = pd.infer_freq(df.index)
+        except Exception:
+            pass # Not enough data or irregular
         
+        # Use inferred freq if reasonable, otherwise fallback to requested
+        if inferred_freq:
+            use_freq = inferred_freq
+        else:
+            # Fallback logic: If 'ME' requested but we have many points, it's likely Daily
+            if requested_freq == "ME" and len(df) > 50:
+                 use_freq = "D"
+            else:
+                 use_freq = requested_freq
+
+        logger.info(f"Using frequency: {use_freq} (Inferred: {inferred_freq}, Requested: {requested_freq})")
+
+        # Reindex to ensure continuity (fills missing weekends/holidays with NaNs first)
+        try:
+            df = df[~df.index.duplicated(keep='first')] # Dedup first
+            df = df.asfreq(use_freq)
+        except Exception as e:
+             logger.warning(f"Resampling failed: {e}. Using original index.")
+
+        # Forward fill gaps (weekends) to ensure no NaNs reach the model
+        # TTM requires valid numerical input
+        df['close'] = df['close'].ffill()
+        if 'high' in df.columns: df['high'] = df['high'].ffill()
+        if 'low' in df.columns: df['low'] = df['low'].ffill()
+        if 'volume' in df.columns: df['volume'] = df['volume'].fillna(0)
+        if 'id' in df.columns: df['id'] = df['id'].ffill()
+
+        # Handle start NaNs
+        df = df.bfill().fillna(0)
+        df = df.reset_index()
+
         # Create pipeline
         pipeline = TimeSeriesForecastingPipeline(
             model=model,
-            freq=freq,
+            freq=use_freq,
             timestamp_column='timestamp',
             id_columns=['id'],
             target_columns=['close'],
@@ -116,7 +158,7 @@ def run_forecast(ohlcv_data: List[Dict[str, Any]], prediction_steps: int, timefr
             "prediction_steps": len(forecast[:prediction_steps]),
             "confidence": 0.85,
             "model_used": "TTM-R2",
-            "frequency_used": freq,
+            "frequency_used": use_freq,
             "note": "Using IBM Granite TTM-R2 with Standard Scaling"
         }
         
