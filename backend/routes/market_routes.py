@@ -50,7 +50,8 @@ async def create_goal_plan(context: dict):
         
     except Exception as e:
         logger.error(f"Goal planning failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Sentinel: Sanitized error message
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @router.post("/api/goal/execute")
 async def execute_goal_plan(plan: dict):
@@ -107,7 +108,8 @@ async def execute_goal_plan(plan: dict):
 
     except Exception as e:
         logger.error(f"Goal execution failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Sentinel: Sanitized error message
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @router.get("/portfolio/live")
 async def get_live_portfolio(account_type: Optional[str] = None):
@@ -173,7 +175,8 @@ async def get_live_portfolio(account_type: Optional[str] = None):
             return sanitize_nan(data)
         except Exception as e:
             logger.error(f"Error fetching portfolio: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+            # Sentinel: Sanitized error message
+            raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @router.get("/portfolio/history")
 async def get_portfolio_history(days: int = 30, account_type: Optional[str] = None):
@@ -508,7 +511,8 @@ async def get_technical_analysis(ticker: str, timeframe: str = "1Month"):
         logger.error(f"Analysis error for {ticker}: {e}")
         return {
             "ai_analysis": f"Error analyzing {ticker}.",
-            "algo_signals": str(e),
+            # Sentinel: Sanitized error message
+            "algo_signals": "Analysis unavailable due to internal error.",
             "last_updated": datetime.now().isoformat()
         }
 
