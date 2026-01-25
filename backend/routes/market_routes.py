@@ -247,42 +247,34 @@ async def get_portfolio_history(days: int = 30, account_type: Optional[str] = No
             history_points = []
             df = df.ffill().bfill()
             
-            # Get list of columns that are actually in holdings
-            valid_tickers = [t for t in tickers if t in df.columns] if isinstance(df, pd.DataFrame) else tickers
+            # Vectorized calculation (Bolt Optimization: replaces slow iterrows loop)
+            total_value_series = pd.Series(float(free_cash), index=df.index)
             
-            for timestamp, row in df.iterrows():
-                try:
-                    total_value = free_cash
-                    
-                    for ticker, quantity in holdings.items():
-                        price = 0
-                        if isinstance(df, pd.Series):
-                            price = row
-                        elif ticker in row:
-                            price = row[ticker]
-                        else:
-                            continue
-                            
-                        # Currency conversion heuristic for LSE (pence to pounds)
-                        # Only apply if price looks like pence (usually > 100 for stocks like LLOY)
-                        if ticker.endswith(".L") and price > 500:
-                            price = price / 100.0
-                            
-                        total_value += price * quantity
-                    
-                    import numpy as np
-                    if np.isnan(total_value) or np.isinf(total_value):
-                        continue
-                        
-                    history_points.append({
-                        "timestamp": timestamp.isoformat(),
-                        "total_value": round(float(total_value), 2),
-                        "total_pnl": 0,
-                        "cash_balance": round(float(free_cash), 2)
-                    })
-                except Exception as e:
-                    logger.warning(f"Error calculating point for {timestamp}: {e}")
+            for ticker, quantity in holdings.items():
+                if ticker not in df.columns:
                     continue
+                    
+                price_series = df[ticker].copy()
+
+                # Currency conversion heuristic for LSE (pence to pounds)
+                if ticker.endswith(".L"):
+                    price_series = np.where(price_series > 500, price_series / 100.0, price_series)
+                    
+                total_value_series += price_series * quantity
+
+            # Filter out NaNs/Infs
+            mask = ~total_value_series.isna() & ~np.isinf(total_value_series)
+            valid_series = total_value_series[mask]
+
+            history_points = [
+                {
+                    "timestamp": timestamp.isoformat(),
+                    "total_value": round(float(val), 2),
+                    "total_pnl": 0,
+                    "cash_balance": round(float(free_cash), 2)
+                }
+                for timestamp, val in valid_series.items()
+            ]
             
             logger.info(f"Generated {len(history_points)} portfolio history points")
             return sanitize_nan(history_points)
