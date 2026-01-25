@@ -127,13 +127,10 @@ async def chat_message(request: ChatMessage, _=Depends(default_limiter.check)):
         }
     except Exception as e:
         logger.error(f"Chat error: {e}\n{traceback.format_exc()}")
+        # Sentinel: Sanitized error message to prevent leaking internal details
         raise HTTPException(
             status_code=500, 
-            detail={
-                "error": "Internal Server Error",
-                "message": str(e),
-                "type": type(e).__name__
-            }
+            detail="Internal Server Error"
         )
 
 @router.post("/agent/analyze", response_model=AgentResponse)
@@ -187,7 +184,8 @@ async def analyze_portfolio(request: AnalyzeRequest):
         return {"messages": [], "final_answer": result}
     except Exception as e:
         logger.error(f"Analysis failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Sentinel: Sanitized error message
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 
 @router.get("/conversations")
