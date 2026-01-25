@@ -204,12 +204,17 @@ class CoordinatorAgent:
              status_manager.set_status("coordinator", "ready", "Educational query - Passing to Decision Core")
              return context
 
-        # COORDINATOR FIX: Try to normalize ticker using Python Terminal if it looks messy
-        if ticker and (not ticker.isalpha() or len(ticker) < 2):
-            status_manager.set_status("coordinator", "online", f"Attempting to normalize ticker: {ticker}")
-            ticker = await self._attempt_ticker_fix(ticker)
-            context.ticker = ticker
-            logger.info(f"Ticker after coordinator fix attempt: {ticker}")
+        # COORDINATOR FIX: Robust normalization via T212 rules (fast & deterministic)
+        if ticker:
+            try:
+                from trading212_mcp_server import normalize_ticker
+                original_ticker = ticker
+                ticker = normalize_ticker(ticker)
+                if ticker != original_ticker:
+                     logger.info(f"Ticker normalized: {original_ticker} -> {ticker}")
+                     context.ticker = ticker
+            except ImportError:
+                logger.warning("Could not import normalize_ticker from trading212_mcp_server")
 
         # Fetch OHLCV data if we need it
         ohlcv_data = []
@@ -500,42 +505,6 @@ class CoordinatorAgent:
         
         return None
 
-    async def _attempt_ticker_fix(self, ticker: str) -> str:
-        """Use Coordinator model + Python to normalize a messy ticker (Tier 1 Extended)"""
-        if not self.llm:
-            return ticker.upper().strip()
-
-        prompt = f"""
-        The user provided a messy ticker: "{ticker}".
-        This might be a company name, a malformed symbol, or a leveraged ETP.
-        Write a short Python script to clean and normalize it. 
-        Rules:
-        - If it's a UK stock like Lloyds, it should end in '.L'.
-        - If it looks like a leveraged ETP (e.g. MAG5, 3GLD, GLD3), DO NOT strip digits.
-        - T212 sometimes adds '1' to the end of UK stocks (e.g. LLOY1). Strip the '1' and add '.L' for LLOY.
-        
-        Return ONLY a JSON block with the Python code:
-        {{
-          "code": "result = ticker.upper().strip().replace('$', '')\\nif result == 'LLOY': result = 'LLOY.L'"
-        }}
-        """
-        try:
-            from langchain_core.messages import HumanMessage
-            response = await self.llm.ainvoke([HumanMessage(content=prompt)])
-            content = response.content if hasattr(response, 'content') else str(response)
-            match = re.search(r'\{.*\}', content, re.DOTALL)
-            if match:
-                code_data = json.loads(match.group())
-                python_code = code_data.get("code", "")
-                if python_code:
-                    exec_res = self.python_executor.execute(python_code, {"ticker": ticker})
-                    if exec_res["success"] and exec_res["result"]:
-                        return str(exec_res["result"])
-        except Exception as e:
-            logger.warning(f"Ticker fix attempt failed: {e}")
-        
-        return ticker.upper().strip()
-
     async def _handle_specialist_error(self, agent: BaseAgent, context: Dict[str, Any], error: str) -> Optional[AgentResponse]:
         """Tier 3: Attempt to fix a specialist error using LLM reasoning (Self-Healing)"""
         if not self.llm:
@@ -693,7 +662,9 @@ class CoordinatorAgent:
             "WHAT", "WHEN", "WHERE", "THAT", "THIS", "HAVE", "BEEN", "WILL", "FROM", "WITH", 
             "YOUR", "THEY", "DOES", "WANT", "NEED", "LIKE", "LOOK", "TELL", "SHOW", "GIVE", 
             "FIND", "BEST", "GOOD", "TIME", "DATA", "REAL", "USER", "SURE", "HERE", "HELP", 
-            "MAKE", "LIST", "MANY", "MUCH", "SOME", "VERY", "ALSO", "INTO", "ONTO"
+            "MAKE", "LIST", "MANY", "MUCH", "SOME", "VERY", "ALSO", "INTO", "ONTO",
+            "IS", "ARE", "WAS", "WERE", "CAN", "COULD", "SHOULD", "WOULD", "PLEASE", "THANKS",
+            "THANK", "YOU", "ABOUT", "FOR", "AND", "BUT", "OR", "NOT", "YES", "NO", "OKAY", "OK"
         }
 
         # Look at last 5 messages 
@@ -713,11 +684,23 @@ class CoordinatorAgent:
             words = content.split()
             candidates = []
             for word in words:
-                # Remove punctuation
-                clean_word = "".join(ch for ch in word if ch.isalnum())
-                if len(clean_word) >= 2 and len(clean_word) <= 5 and clean_word.isalpha():
-                     if clean_word not in safe_stop_words:
-                         candidates.append(clean_word)
+                # Remove common punctuation but allow dots and digits for tickers like VOD.L or 3GLD
+                clean_word = word.strip(".,!?;:\"'()[]{}")
+
+                # Check if it looks like a ticker:
+                # 1. 2-6 chars long
+                # 2. Mostly uppercase (heuristic)
+                # 3. Alphanumeric or contains dot
+                if 2 <= len(clean_word) <= 6:
+                     # Heuristic: mostly upper case or mixed case (not all lower)
+                     if not clean_word.islower():
+                         # Allow dots (VOD.L) and digits (3GLD), remove other junk
+                         sanitized = "".join(ch for ch in clean_word if ch.isalnum() or ch == '.')
+
+                         if sanitized.upper() not in safe_stop_words and len(sanitized) >= 2:
+                             # Additional check: shouldn't be just digits
+                             if not sanitized.isdigit():
+                                 candidates.append(sanitized)
             
             # If candidates found, return the last one mentioned? Or first?
             # "Analyze AAPL and TSLA" -> usually implies plural, but if we pick one, context is maintained.
