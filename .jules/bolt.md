@@ -5,3 +5,7 @@
 ## 2026-01-18 - Vectorization of Portfolio History
 **Learning:** Vectorizing the portfolio history calculation (replacing `iterrows`) yielded a 5x speedup (0.03s -> 0.006s for 365 days). Handling currency conversion logic vectorially using `np.where` is efficient.
 **Action:** When optimizing financial data processing, always look for per-row logic (like currency conversion based on ticker/price) and convert it to column-wise vector operations. Ensure inputs are consistently DataFrames (handle Series edge case from `yfinance`).
+
+## 2026-01-18 - EMA Vectorization & Initialization
+**Learning:** Replacing a loop-based EMA (initialized with SMA) with Pandas `.ewm` is not trivial. `ewm(adjust=False)` starts recursion from the first element, while standard TA logic (and the loop) seeds it with SMA at index `period-1`.
+**Action:** To vectorize correctly, manually calculate the SMA seed, prepend it to the rest of the data (`[SMA] + data[period:]`), run `ewm` on this concatenated array, and then pad the beginning with zeros. This achieves 2-5x speedup with exact numerical equivalence.
