@@ -261,12 +261,34 @@ class QuantAgent(BaseAgent):
         """Exponential Moving Average"""
         if len(data) < period:
             return np.full(len(data), data.mean() if len(data) > 0 else 0)
-        ema = np.zeros(len(data))
-        ema[period-1] = data[:period].mean()
-        multiplier = 2 / (period + 1)
-        for i in range(period, len(data)):
-            ema[i] = (data[i] - ema[i-1]) * multiplier + ema[i-1]
-        return ema
+
+        try:
+            import pandas as pd
+            # Use pandas ewm for vectorized calculation
+            # To match the loop implementation exactly:
+            # 1. The first valid value at index `period-1` is the SMA of data[:period].
+            # 2. Subsequent values use the recursive EMA formula.
+            # 3. Indices 0 to `period-2` are 0.0.
+
+            start_val = data[:period].mean()
+            # Construct a series starting with the seed value, followed by the rest of the data
+            rest_data = data[period:]
+            ewm_input = np.concatenate(([start_val], rest_data))
+
+            # Run EWM
+            ewm_out = pd.Series(ewm_input).ewm(span=period, adjust=False).mean().to_numpy()
+
+            # Reconstruct the full array with padding
+            padding = np.zeros(period - 1)
+            return np.concatenate((padding, ewm_out))
+        except ImportError:
+            # Fallback if pandas is somehow not available
+            ema = np.zeros(len(data))
+            ema[period-1] = data[:period].mean()
+            multiplier = 2 / (period + 1)
+            for i in range(period, len(data)):
+                ema[i] = (data[i] - ema[i-1]) * multiplier + ema[i-1]
+            return ema
 
     def _calculate_bbands(self, closes: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Pure Python Bollinger Bands"""
