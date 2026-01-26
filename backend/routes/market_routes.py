@@ -536,10 +536,16 @@ def _generate_ai_analysis_text(quant_data: dict, forecast_data: dict, bars: list
     parts.append(f"Trend identifies as {trend} on current timeframe.")
     
     # 2. Support/Resistance levels
-    # Normalize if needed (heuristic: if > 500, likely pence)
-    if resistance > 500: resistance = resistance / 100.0
-    if support > 500: support = support / 100.0
-    if current_price > 500: current_price = current_price / 100.0
+    # Determine if we need to normalize currency (pence to pounds)
+    # Only applies to LSE stocks (ending in .L)
+    ticker = quant_data.get("ticker") or forecast_data.get("ticker") or ""
+    is_uk_stock = ticker.endswith(".L")
+
+    # Normalize if needed (heuristic: if > 500 AND is UK stock, likely pence)
+    if is_uk_stock:
+        if resistance > 500: resistance = resistance / 100.0
+        if support > 500: support = support / 100.0
+        if current_price > 500: current_price = current_price / 100.0
     
     if resistance and resistance > current_price:
         distance = ((resistance - current_price) / current_price) * 100
@@ -555,7 +561,7 @@ def _generate_ai_analysis_text(quant_data: dict, forecast_data: dict, bars: list
         confidence = forecast_data.get("confidence", "MEDIUM")
         
         # Normalize forecast if needed
-        if forecast_24h and forecast_24h > 500:
+        if is_uk_stock and forecast_24h and forecast_24h > 500:
              forecast_24h = forecast_24h / 100.0
         
         if forecast_24h:

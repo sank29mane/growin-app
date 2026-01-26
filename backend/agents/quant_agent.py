@@ -163,6 +163,7 @@ class QuantAgent(BaseAgent):
         sma_50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else closes[-1]
         
         # Simple signal
+        # Mean Reversion Strategy: Buy when price dips below SMA20, Sell when price exceeds SMA50
         signal = Signal.BUY if closes[-1] < sma_20 else Signal.SELL if closes[-1] > sma_50 else Signal.NEUTRAL
         
         quant_data = QuantData(
@@ -226,7 +227,7 @@ class QuantAgent(BaseAgent):
             return Signal.NEUTRAL
     
     def _calculate_rsi(self, closes: np.ndarray, period: int = 14) -> np.ndarray:
-        """Pure Python RSI calculation using numpy"""
+        """Pure Python RSI calculation using Wilder's Smoothing (matches TA-Lib)"""
         if len(closes) < period + 1:
             return np.full(len(closes), 50.0)
 
@@ -234,16 +235,31 @@ class QuantAgent(BaseAgent):
         gains = np.where(deltas > 0, deltas, 0)
         losses = np.where(deltas < 0, -deltas, 0)
 
-        # Simple moving averages for gains and losses
-        avg_gains = np.convolve(gains, np.ones(period)/period, mode='valid')
-        avg_losses = np.convolve(losses, np.ones(period)/period, mode='valid')
+        avg_gains = np.zeros_like(gains)
+        avg_losses = np.zeros_like(losses)
+
+        # First value is SMA
+        avg_gains[period-1] = np.mean(gains[:period])
+        avg_losses[period-1] = np.mean(losses[:period])
+
+        # Subsequent values using Wilder's Smoothing
+        for i in range(period, len(gains)):
+            avg_gains[i] = (avg_gains[i-1] * (period - 1) + gains[i]) / period
+            avg_losses[i] = (avg_losses[i-1] * (period - 1) + losses[i]) / period
 
         rs = np.divide(avg_gains, avg_losses, out=np.ones_like(avg_gains), where=avg_losses != 0)
         rsi = 100 - (100 / (1 + rs))
 
         # Pad with neutral values for early data points
-        pad = np.full(len(closes) - len(rsi), 50.0)
-        return np.concatenate([pad, rsi])
+        # RSI array from this calculation has same length as deltas (len(closes)-1)
+        # Prepend 1 value to match length of closes
+        pad = np.full(1, 50.0)
+        rsi_full = np.concatenate([pad, rsi])
+
+        # Explicitly set the initialization period to 50.0 (unstable period)
+        rsi_full[:period] = 50.0
+
+        return rsi_full
 
     def _calculate_macd(self, closes: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Pure Python MACD calculation"""
