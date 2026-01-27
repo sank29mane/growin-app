@@ -103,7 +103,11 @@ def normalize_ticker(ticker: str) -> str:
     us_exclusions = {
         "AAPL", "MSFT", "GOOG", "AMZN", "NVDA", "TSLA", "META", "NFLX",
         "SPY", "QQQ", "DIA", "IWM", "IVV", "VOO", "VTI", "GLD", "SLV", "ARKK", "SMH",
-        "AMD", "INTC", "PYPL", "ADBE", "CSCO", "PEP", "COST", "AVGO", "QCOM", "TXN"
+        "AMD", "INTC", "PYPL", "ADBE", "CSCO", "PEP", "COST", "AVGO", "QCOM", "TXN",
+        # Added Common US Stocks to prevent UK misclassification
+        "IBM", "CAT", "F", "GM", "GE", "T", "VZ", "PFE", "MRK", "KO", "MCD", "NKE",
+        "DIS", "XOM", "CVX", "JPM", "BAC", "WFC", "C", "MS", "GS", "BA", "MMM",
+        "UNH", "JNJ", "PG", "HD", "WMT", "V", "MA", "ABBV", "LLY", "TSM"
     }
     
     # Determine if UK stock
