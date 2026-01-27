@@ -5,3 +5,7 @@
 ## 2026-01-18 - Vectorization of Portfolio History
 **Learning:** Vectorizing the portfolio history calculation (replacing `iterrows`) yielded a 5x speedup (0.03s -> 0.006s for 365 days). Handling currency conversion logic vectorially using `np.where` is efficient.
 **Action:** When optimizing financial data processing, always look for per-row logic (like currency conversion based on ticker/price) and convert it to column-wise vector operations. Ensure inputs are consistently DataFrames (handle Series edge case from `yfinance`).
+
+## 2026-01-18 - Vectorization of EMA (Recursive vs Convolution)
+**Learning:** `pandas.Series.ewm(span=N, adjust=False)` provides ~15x speedup (0.07s -> 0.005s) over iterative Python loops for EMA calculation. However, `np.convolve` (used for SMA) is faster than `pandas.Series.rolling` (0.0038s vs 0.0055s) because it uses optimized C-level convolution.
+**Action:** Use Pandas `ewm` for recursive indicators like EMA (matching initialization carefully), but stick to `np.convolve` for simple moving averages / convolutions where possible. Always verify speedups before switching to Pandas for simple operations.
