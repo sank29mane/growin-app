@@ -269,6 +269,7 @@ struct AccountPicker: View {
                     .foregroundStyle(selectedAccount == account ? .white : .secondary)
                 }
                 .buttonStyle(.plain)
+                .accessibilityAddTraits(selectedAccount == account ? [.isSelected] : [])
             }
         }
         .padding(6)
