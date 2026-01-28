@@ -61,6 +61,18 @@ class ChatManager:
             )
         """)
 
+        # Index for faster message retrieval by conversation
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_messages_conversation_timestamp
+            ON messages(conversation_id, timestamp DESC)
+        """)
+
+        # Index for faster conversation listing
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_conversations_created_at
+            ON conversations(created_at DESC)
+        """)
+
         # MCP Servers table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS mcp_servers (
@@ -215,7 +227,7 @@ class ChatManager:
         )
 
         messages = []
-        for row in cursor.fetchall():
+        for row in cursor:
             messages.append(
                 {
                     "id": row["id"],
@@ -252,7 +264,7 @@ class ChatManager:
             (limit,),
         )
 
-        return [dict(row) for row in cursor.fetchall()]
+        return [dict(row) for row in cursor]
 
     def get_conversation_title(self, conversation_id: str) -> Optional[str]:
         """Get the title of a specific conversation"""
@@ -326,7 +338,7 @@ class ChatManager:
             (days,),
         )
 
-        return [dict(row) for row in cursor.fetchall()]
+        return [dict(row) for row in cursor]
 
     def close(self):
         """Close database connection"""
