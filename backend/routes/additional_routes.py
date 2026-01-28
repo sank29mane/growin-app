@@ -490,7 +490,7 @@ async def get_forecast(symbol: str, steps: int = 96):
 async def get_mcp_servers():
     """Get MCP servers list"""
     try:
-        servers = state.chat_manager.get_mcp_servers()
+        servers = state.chat_manager.get_mcp_servers(sanitize=True)
         return {"servers": servers}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

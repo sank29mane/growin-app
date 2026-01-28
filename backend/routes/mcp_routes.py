@@ -22,7 +22,7 @@ async def get_mcp_status():
         Dict with list of servers and their connection statuses
     """
     try:
-        servers = state.chat_manager.get_mcp_servers()
+        servers = state.chat_manager.get_mcp_servers(sanitize=True)
         for server in servers:
             # Check connection status
             is_connected = False
