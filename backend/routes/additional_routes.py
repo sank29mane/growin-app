@@ -149,21 +149,21 @@ async def get_finnhub_chart_data(ticker: str, timeframe: str, limit: int, cache_
 @router.get("/api/chart/{symbol}")
 async def get_chart_data(symbol: str, timeframe: str = "1Day", limit: int = 500):
     """
-    Get historical chart data using market-based routing:
-    - UK stocks (LSE): Finnhub → yfinance fallback
-    - US stocks: Alpaca → yfinance fallback
-
-    Args:
-        symbol: Stock ticker symbol (e.g., AAPL, LLOY.L)
-        timeframe: Time range (1Day, 1Week, 1Month, 3Month, 1Year, Max)
-        limit: Max number of points to return
-
-    Returns:
-        Chart data with currency metadata
+    Get historical chart data using market-based routing with AnalyticsDB caching.
+    
+    Flow:
+    1. Check AnalyticsDB (fastest)
+    2. Check Memory Cache
+    3. Fetch from yfinance (fallback)
+    4. Store in AnalyticsDB
     """
     from cache_manager import cache
     from trading212_mcp_server import normalize_ticker
-
+    from utils.currency_utils import CurrencyNormalizer
+    from analytics_db import get_analytics_db
+    
+    # Initialize services
+    analytics = get_analytics_db()
     ticker = normalize_ticker(symbol)
     market = detect_market(ticker)
 
@@ -171,24 +171,81 @@ async def get_chart_data(symbol: str, timeframe: str = "1Day", limit: int = 500)
     if market == 'UK' and not ticker.endswith('.L'):
         ticker = f"{ticker}.L"
 
+    # 1. Try AnalyticsDB first (Persistent OLAP Cache)
+    # Only suitable for historical queries, not real-time intraday if not updated
+    if timeframe in ["1Year", "Max", "3Month"]:
+        db_data = analytics.get_recent_ohlcv(ticker, limit=limit)
+        if db_data is not None and not db_data.empty:
+            logger.info(f"✅ Served {len(db_data)} points from AnalyticsDB for {ticker}")
+            # Convert to dict format
+            points = []
+            for _, row in db_data.iterrows():
+                points.append({
+                    "timestamp": row["timestamp"].isoformat(),
+                    "close": row["close"],
+                    "high": row["high"],
+                    "low": row["low"],
+                    "open": row["open"],
+                    "volume": int(row["volume"])
+                })
+            
+            # AnalyticsDB stores raw values, so we still need to check currency normalization
+            # But usually we store normalized values? Let's normalize on read to be safe.
+            normalized_points = []
+            for point in points:
+                # Normalize currency (GBX -> GBP)
+                p = point.copy()
+                p["close"] = CurrencyNormalizer.normalize_price(point["close"], ticker)
+                p["high"] = CurrencyNormalizer.normalize_price(point["high"], ticker)
+                p["low"] = CurrencyNormalizer.normalize_price(point["low"], ticker)
+                p["open"] = CurrencyNormalizer.normalize_price(point["open"], ticker)
+                normalized_points.append(p)
+                
+            currency = "GBP" if market == "UK" else "USD"
+            return {
+                "data": normalized_points,
+                "metadata": {
+                    "market": market,
+                    "currency": currency,
+                    "symbol": "£" if market == "UK" else "$",
+                    "ticker": ticker,
+                    "provider": "AnalyticsDB"
+                }
+            }
+
     cache_key = f"chart_{ticker}_{timeframe.lower()}_{market.lower()}"
 
-    # Check cache first
+    # 2. Check Memory Cache
     cached_data = cache.get(cache_key)
     if cached_data:
         return cached_data
 
-    actual_provider = "yfinance"  # Default fallback
+    actual_provider = "yfinance"
     error_info = None
-    provider_errors = []
 
     try:
-        # FIXED: Use yfinance for ALL markets (Finnhub has severe rate limits)
-        # Skip Finnhub/Alpaca entirely - yfinance is more reliable for portfolio charts
         logger.info(f"Fetching chart for {ticker} using yfinance (market: {market})")
         data = await get_yfinance_chart_data(ticker, timeframe, limit, cache_key)
-        actual_provider = "yfinance"
         
+        if data:
+            # 3. Store in AnalyticsDB for future use (Async/Fire-and-forget)
+            try:
+                # Prepare data for DuckDB (rename keys to match schema)
+                analytics_data = []
+                for p in data:
+                    analytics_data.append({
+                        "t": p["timestamp"], # Will be parsed by bulk_insert
+                        "o": p["open"],
+                        "h": p["high"],
+                        "l": p["low"],
+                        "c": p["close"],
+                        "v": p["volume"]
+                    })
+                # Don't await, just run
+                analytics.bulk_insert_ohlcv(ticker, analytics_data)
+            except Exception as e:
+                logger.warning(f"Failed to cache to AnalyticsDB: {e}")
+
         if not data or len(data) < 5:
             logger.warning(f"Insufficient data from yfinance for {ticker}")
             data = []
@@ -208,19 +265,19 @@ async def get_chart_data(symbol: str, timeframe: str = "1Day", limit: int = 500)
             "fallback_used": False
         }
 
-    # Currency Normalization: Convert GBX (pence) to GBP (pounds) for UK stocks from yfinance
-    # Finnhub provides UK stock data in GBP, so skip normalization for Finnhub data
-    if data and market == 'UK' and ticker.endswith(".L"):
-        # Check magnitude - if price is > 500 it's likely pence (GBX)
-        # UK stocks are typically < £500, so > 500 is likely GBX
-        last_close = data[-1].get("close", 0) if data else 0
-        if last_close > 500:
-            logger.info(f"Normalizing chart currency for {ticker} (GBX -> GBP)")
-            for point in data:
-                point["close"] = round(point["close"] / 100.0, 4)
-                point["high"] = round(point["high"] / 100.0, 4)
-                point["low"] = round(point["low"] / 100.0, 4)
-                point["open"] = round(point["open"] / 100.0, 4)
+    # Currency Normalization using centralized utility
+    if data:
+        # Use CurrencyNormalizer to handle GBX -> GBP
+        # We need to peek at the first point to guess currency if not explicit, 
+        # but CurrencyNormalizer handles it by ticker suffix usually.
+        # But wait, yfinance data for .L is in GBX (pence).
+        # CurrencyNormalizer.normalize_price converts GBX -> GBP
+        
+        for point in data:
+            point["close"] = CurrencyNormalizer.normalize_price(point["close"], ticker)
+            point["high"] = CurrencyNormalizer.normalize_price(point["high"], ticker)
+            point["low"] = CurrencyNormalizer.normalize_price(point["low"], ticker)
+            point["open"] = CurrencyNormalizer.normalize_price(point["open"], ticker)
 
     # Return data with market and currency metadata
     currency = "GBP" if market == "UK" else "USD"
@@ -235,7 +292,6 @@ async def get_chart_data(symbol: str, timeframe: str = "1Day", limit: int = 500)
         }
     }
     
-    # Include error info if providers failed but we have fallback data
     if error_info:
         response["error"] = error_info
     

@@ -44,7 +44,6 @@ struct ChatView: View {
                 }) {
                     Image(systemName: "list.bullet")
                 }
-<<<<<<< Updated upstream
                 .help("Conversation History")
                 .accessibilityLabel("Conversation History")
             }

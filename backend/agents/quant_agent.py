@@ -110,10 +110,10 @@ class QuantAgent(BaseAgent):
         latest_macd_signal = float(macd_signal[-1]) if not np.isnan(macd_signal[-1]) else 0.0
         
         # Calculate support/resistance (simple approach)
-        recent_lows = lows[-20:]
-        recent_highs = highs[-20:]
-        support = float(np.min(recent_lows))
-        resistance = float(np.max(recent_highs))
+        # Calculate structural support/resistance using pivot point clustering
+        sr_levels = self._calculate_pivot_levels(highs, lows, closes)
+        support = sr_levels["support"]
+        resistance = sr_levels["resistance"]
         
         # Generate signal (algorithmic rules)
         signal = self._generate_signal(
@@ -303,6 +303,46 @@ class QuantAgent(BaseAgent):
         sma = np.convolve(closes, weights, mode='valid')
         pad = np.full(period - 1, closes[:period].mean())
         return np.concatenate([pad, sma])
+
+    def _calculate_pivot_levels(self, highs: np.ndarray, lows: np.ndarray, closes: np.ndarray) -> Dict[str, float]:
+        """
+        Calculates structural Support and Resistance using local extremes (Pivots).
+        Uses a sliding window to find peaks/troughs and then finds levels closest to current price.
+        """
+        current_price = closes[-1]
+        window = 5 # Looking for local high/low in a 11-bar window
+        
+        peaks = []
+        troughs = []
+        
+        for i in range(window, len(closes) - window):
+            # Peak identification
+            if all(highs[i] > highs[i-j] for j in range(1, window+1)) and \
+               all(highs[i] > highs[i+j] for j in range(1, window+1)):
+                peaks.append(highs[i])
+                
+            # Trough identification
+            if all(lows[i] < lows[i-j] for j in range(1, window+1)) and \
+               all(lows[i] < lows[i+j] for j in range(1, window+1)):
+                troughs.append(lows[i])
+        
+        # If no structural points found, fallback to 50-day extremes
+        if not peaks: peaks = [np.max(highs[-50:])]
+        if not troughs: troughs = [np.min(lows[-50:])]
+        
+        # Find closest structural levels to current price
+        # Resistance: The lowest peak above current price (or highest if none above)
+        above = [p for p in peaks if p > current_price]
+        res = min(above) if above else max(peaks)
+        
+        # Support: The highest trough below current price (or lowest if none below)
+        below = [t for t in troughs if t < current_price]
+        sup = max(below) if below else min(troughs)
+        
+        return {
+            "support": float(sup),
+            "resistance": float(res)
+        }
 
     def _calculate_simple_rsi(self, closes: list, period: int = 14) -> float:
         """Simple RSI calculation without TA-Lib"""

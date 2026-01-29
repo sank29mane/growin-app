@@ -23,7 +23,7 @@ class StockChartViewModel: ObservableObject {
     @Published var providerNotificationMessage: String = ""
 
     let symbol: String
-    private let baseURL = "http://127.0.0.1:8002"
+    private let config = AppConfig.shared
     private var cancellables = Set<AnyCancellable>()
     private var webSocketTask: URLSessionWebSocketTask?
     
@@ -43,7 +43,7 @@ class StockChartViewModel: ObservableObject {
 
         let timeframe = selectedTimeframe
         // Try Alpaca first, fallback to yfinance
-        guard let url = URL(string: "\(baseURL)/api/chart/\(symbol)?timeframe=\(timeframe)&provider=alpaca") else {
+        guard let url = URL(string: "\(config.baseURL)/api/chart/\(symbol)?timeframe=\(timeframe)&provider=alpaca") else {
             errorMessage = "Invalid URL"
             isLoading = false
             return
@@ -107,7 +107,7 @@ class StockChartViewModel: ObservableObject {
     
     func fetchAnalysis() {
         let timeframe = selectedTimeframe
-        guard let url = URL(string: "\(baseURL)/api/analysis/\(symbol)?timeframe=\(timeframe)") else {
+        guard let url = URL(string: "\(config.baseURL)/api/analysis/\(symbol)?timeframe=\(timeframe)") else {
             return
         }
         
@@ -145,7 +145,7 @@ class StockChartViewModel: ObservableObject {
     }
 
     private func connectWebSocket() {
-        guard let url = URL(string: "ws://127.0.0.1:8002/ws/chart/\(symbol)") else {
+        guard let url = URL(string: "\(config.webSocketURL)/ws/chart/\(symbol)") else {
             print("Invalid WebSocket URL")
             return
         }

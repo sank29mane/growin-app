@@ -375,6 +375,30 @@ async def clear_cache():
     logger.info("Cache cleared successfully")
     return {"status": "success", "message": "Cache cleared"}
 
+@router.get("/debug/logs")
+async def get_logs(limit: int = 50):
+    """
+    Get recent backend logs for TTM debugging.
+    """
+    from app_logging import get_recent_logs
+    logs = get_recent_logs()
+    return {"logs": logs[-limit:]}
+
+@router.get("/debug/ttm_status")
+async def get_ttm_status():
+    """
+    Check TTM model availability and bridge status.
+    """
+    from forecaster import get_forecaster
+    forecaster = get_forecaster()
+    return {
+        "ttm_available": forecaster.ttm_available,
+        "platform": forecaster.platform,
+        "bridge_script": forecaster.bridge_script,
+        "venv_python": forecaster.venv_python,
+        "bridge_exists": True if forecaster.ttm_available else False
+    }
+
 @router.get("/api/analysis/{ticker}")
 async def get_technical_analysis(ticker: str, timeframe: str = "1Month"):
     """
@@ -402,23 +426,70 @@ async def get_technical_analysis(ticker: str, timeframe: str = "1Month"):
         # Fetch OHLCV data
         alpaca = get_alpaca_client()
         
-        # Map timeframe to limit
-        # SOTA: We need at least 512 bars for the TTM-R2 model to trigger!
-        limit_map = {
-            "1Day": 512, "1Week": 512, "1Month": 512,
-            "3Month": 512, "1Year": 512, "Max": 1000
-        }
-        limit = limit_map.get(timeframe, 512)
+        # --- CASCADING DATA FETCH STRATEGY (TTM-R2 Requirement: 512+ bars) ---
+        # Strategy: 
+        # 1. Try requested timeframe (Monthly/Weekly) with 1000 limit.
+        # 2. If < 512 bars, fallback to higher resolution (Daily) to get enough context for Deep Learning.
+        # 3. If still < 512, fallback to Hourly.
         
+        limit = 1000 # Always request buffer
+        
+        # 1. Primary Attempt
         result = await alpaca.get_historical_bars(ticker, timeframe=timeframe, limit=limit)
         bars = result.get("bars", [])
+        logger.info(f"📊 Primary Data Fetch: {ticker} ({timeframe}) -> {len(bars)} bars.")
         
-        if not bars or len(bars) < 50:
-            return {
-                "ai_analysis": "Insufficient data for analysis.",
-                "algo_signals": "Need at least 50 data points.",
-                "last_updated": datetime.now().isoformat()
-            }
+        forecast_timeframe = timeframe
+        forecast_note = ""
+
+        # --- OPTIMIZED TTM STRATEGY: PREFER HOURLY DATA ---
+        # TTM-R2 performs significantly better with granular (Hourly) context than sparse Daily data.
+        # We aggressively try to use 1Hour resolution for the forecast if the requested window is compatible.
+        
+        # Determine improved resolution
+        target_resolution = None
+        if timeframe == "1Day":
+             target_resolution = "1Hour" # 512 Hours = ~3 months history (Easier to satisfy than 2 years of Daily)
+        elif timeframe in ["1Week", "1Month"]:
+             target_resolution = "1Day"  # 512 Days = ~2 years (Better than Monthly)
+        
+        # Fetch data for forecast specifically
+        bars_for_forecast = bars
+        
+        if target_resolution:
+            logger.info(f"🚀 TTM Optimization: Attempting to upgrade resolution {timeframe} -> {target_resolution} for better accuracy...")
+            opt_result = await alpaca.get_historical_bars(ticker, timeframe=target_resolution, limit=1000)
+            opt_bars = opt_result.get("bars", [])
+            
+            # Use optimized data if robust (at least 200 bars for good context)
+            if len(opt_bars) >= 200:
+                bars_for_forecast = opt_bars
+                forecast_timeframe = target_resolution
+                forecast_note = f" (High-Res Context: {target_resolution})"
+            else:
+                logger.info(f"Optimization skipped: Insufficient {target_resolution} data ({len(opt_bars)}). Reverting to {timeframe}.")
+                # If optimization failed, check if we need the original "Safety Fallback"
+                if len(bars) < 512:
+                    # Logic from previous step: Downgrade if primary is broken
+                    pass # We effectively just stay with 'bars' (Primary), or could try one more fallback logic if needed.
+                         # But usually if 1Hour failed, 1Day might exist. 
+                         # Let's keep it simple: If Optimization fails, we stick to Primary.
+        
+        # Final safety check on whatever bars we decided to use
+        if not bars_for_forecast or len(bars_for_forecast) < 50:
+             bars_for_forecast = bars # Revert to primary if optimized array somehow broke
+
+        # Basic validity check for UI
+        if not bars or len(bars) < 20: 
+             # If primary is completely empty, try to use alt bars for EVERYTHING, not just forecast
+             if 'bars_for_forecast' in locals() and len(bars_for_forecast) > 20:
+                 bars = bars_for_forecast # display alt data on chart/signals if primary is dead
+             else:
+                return {
+                    "ai_analysis": "Insufficient data for analysis.",
+                    "algo_signals": "Need at least 20 data points.",
+                    "last_updated": datetime.now().isoformat()
+                }
         
         # Run QuantAgent and ForecastingAgent in parallel with timeouts
         quant = QuantAgent()
@@ -426,10 +497,11 @@ async def get_technical_analysis(ticker: str, timeframe: str = "1Month"):
         
         async def run_quant():
             try:
+                # Quant uses the USER requested timeframe (visual alignment)
                 return await asyncio.wait_for(
                     quant.execute({
                         "ticker": ticker,
-                        "ohlcv_data": bars
+                        "ohlcv_data": bars 
                     }),
                     timeout=10.0
                 )
@@ -441,22 +513,39 @@ async def get_technical_analysis(ticker: str, timeframe: str = "1Month"):
                 return None
         
         async def run_forecast():
-            try:
-                return await asyncio.wait_for(
-                    forecast_agent.execute({
-                        "ticker": ticker,
-                        "ohlcv_data": bars,
-                        "days": 7,  # Default horizon
-                        "timeframe": timeframe
-                    }),
-                    timeout=10.0
-                )
-            except asyncio.TimeoutError:
-                logger.warning(f"ForecastingAgent timeout for {ticker}")
-                return None
-            except Exception as e:
-                logger.error(f"ForecastingAgent error for {ticker}: {e}")
-                return None
+            # 1. Try Optimized Forecast (e.g. Hourly)
+            response = await forecast_agent.execute({
+                "ticker": ticker,
+                "ohlcv_data": bars_for_forecast,
+                "days": 7,
+                "timeframe": forecast_timeframe
+            })
+            
+            # 2. Check for Sanity Failure or Bridge Error
+            data = response.data
+            is_failure = not response.success or \
+                         "Sanity Check Failed" in data.get("note", "") or \
+                         "Bridge Error" in data.get("note", "")
+                         
+            # 3. Retry with Primary Timeframe if Optimization failed
+            if is_failure and forecast_timeframe != timeframe:
+                logger.warning(f"⚠️ Optimized Forecast ({forecast_timeframe}) failed sanity/execution. Retrying with Primary ({timeframe})...")
+                
+                # Retry with original bars
+                response = await forecast_agent.execute({
+                    "ticker": ticker,
+                    "ohlcv_data": bars, # Original user-requested bars (Daily/Monthly)
+                    "days": 7,
+                    "timeframe": timeframe
+                })
+                # Append note about retry
+                if response.success:
+                    if response.data.get("note"):
+                         response.data["note"] += " [Retry: Optimized failed]"
+                    else:
+                         response.data["note"] = "[Retry: Optimized failed]"
+            
+            return response
         
         # Execute both agents in parallel
         results = await asyncio.gather(run_quant(), run_forecast(), return_exceptions=True)
@@ -474,7 +563,7 @@ async def get_technical_analysis(ticker: str, timeframe: str = "1Month"):
         
         # Generate AI Analysis text (combines technical + forecast)
         try:
-            ai_analysis = _generate_ai_analysis_text(quant_data, forecast_data, bars)
+            ai_analysis = _generate_ai_analysis_text(quant_data, forecast_data, bars, ticker)
         except Exception as e:
             logger.error(f"Error generating AI analysis: {e}")
             ai_analysis = "Analysis generation failed."
@@ -508,7 +597,7 @@ async def get_technical_analysis(ticker: str, timeframe: str = "1Month"):
             "last_updated": datetime.now().isoformat()
         }
 
-def _generate_ai_analysis_text(quant_data: dict, forecast_data: dict, bars: list) -> str:
+def _generate_ai_analysis_text(quant_data: dict, forecast_data: dict, bars: list, ticker: str) -> str:
     """Generate human-readable AI analysis from quant + forecast data."""
     parts = []
     
@@ -553,56 +642,124 @@ def _generate_ai_analysis_text(quant_data: dict, forecast_data: dict, bars: list
     if forecast_data:
         forecast_24h = forecast_data.get("forecast_24h")
         confidence = forecast_data.get("confidence", "MEDIUM")
+        algorithm = forecast_data.get("algorithm", "Unknown Model")
+        is_fallback = forecast_data.get("is_fallback", False)
         
         # Normalize forecast if needed
-        if forecast_24h and forecast_24h > 500:
+        from utils.currency_utils import CurrencyNormalizer
+        
+        # Heuristic for forecast normalization (using same logic as rest of app)
+        # If the current price is in pounds (small number) but forecast is in pence (large number), normalize.
+        # Or if we know the ticker is UK.
+        if CurrencyNormalizer.is_uk_stock(ticker):
+             # Ensure consistency
+             if forecast_24h and forecast_24h > 2000: # Sanity check for massive penny stocks vs valid pounds
+                  forecast_24h = CurrencyNormalizer.pence_to_pounds(forecast_24h)
+        elif forecast_24h and forecast_24h > 500: # Fallback legacy check
              forecast_24h = forecast_24h / 100.0
         
         if forecast_24h:
             change_pct = ((forecast_24h - current_price) / current_price) * 100
             direction = "up" if change_pct > 0 else "down"
-            parts.append(f"Forecast predicts {direction} {abs(change_pct):.1f}% in 24h ({confidence} confidence).")
-    
+            
+            # Construct distinct source label
+            if is_fallback:
+
+                note = forecast_data.get("note", "")
+                source_label = f"⚠️ Using Statistical Fallback"
+                
+                # Special handling for Sanity Check failures
+                if "Sanity Check Failed" in note:
+                    source_label += " (Model Uncertainty)"
+                elif note:
+                    source_label += f" ({note})"
+            else:
+                source_label = "✅ Using TTM-R2 Model"
+            
+            parts.append(f"Forecast ({algorithm}) predicts {direction} {abs(change_pct):.1f}% in 24h ({confidence} confidence). {source_label}")
+            
+            # --- 4. Auxiliary Forecasts (Comparison) ---
+            aux = forecast_data.get("auxiliary_forecasts")
+            if aux:
+                aux_parts = []
+                for a in aux:
+                    model_name = a.get("model", "Unknown")
+                    
+                    # Ignore if the primary is the same as this aux
+                    # (e.g. if TTM failed and we fell back to XGBoost/Holt-Winters)
+                    if model_name.split(" ")[0].lower() in algorithm.lower():
+                         continue
+                         
+                    pct = a.get("prediction_pct", 0)
+                    aux_parts.append(f"{model_name}: {pct:+.1f}%")
+                
+                if aux_parts:
+                    parts.append(f" | Peer Models: {', '.join(aux_parts)}.")
+
     return " ".join(parts)
 
 def _generate_algo_signals_text(quant_data: dict) -> str:
-    """Generate algo signals text from technical indicators."""
+    """Generate synthesized algo signals from technical indicators."""
     if not quant_data:
         return "Technical indicators unavailable."
     
+    # Extract RSI
+    rsi = quant_data.get("rsi")
+    if rsi is None:
+        rsi = 50.0  # Default to neutral if missing
+        
+    # Extract MACD
+    macd_condition = "neutral"
+    macd_data = quant_data.get("macd")
+    
+    if macd_data and isinstance(macd_data, dict):
+        macd_value = macd_data.get("value")
+        macd_signal = macd_data.get("signal")
+        
+        # Only determine condition if we have valid numbers
+        if macd_value is not None and macd_signal is not None:
+            if macd_value > macd_signal:
+                macd_condition = "bullish"
+            elif macd_value < macd_signal:
+                macd_condition = "bearish"
+    
+    # Synthesize Signals needed
     parts = []
     
-    # RSI signal
-    rsi = quant_data.get("rsi") or 50
-    if rsi < 30:
-        parts.append(f"RSI oversold at {rsi:.1f}.")
-    elif rsi > 70:
-        parts.append(f"RSI overbought at {rsi:.1f}.")
-    else:
-        parts.append(f"RSI neutral at {rsi:.1f}.")
+    # RSI Categories
+    is_overbought = rsi >= 70
+    is_oversold = rsi <= 30
     
-    # MACD signal (handle null values)
-    macd_data = quant_data.get("macd")
-    if macd_data and isinstance(macd_data, dict):
-        macd_value = macd_data.get("value") or 0
-        macd_signal = macd_data.get("signal") or 0
-        
-        if macd_value and macd_signal:
-            if macd_value > macd_signal:
-                if macd_value > 0:
-                    parts.append("MACD bullish crossover confirmed.")
-                else:
-                    parts.append("MACD showing early bullish divergence.")
-            elif macd_value < macd_signal:
-                if macd_value < 0:
-                    parts.append("MACD bearish crossover confirmed.")
-                else:
-                    parts.append("MACD showing early bearish divergence.")
-            else:
-                parts.append("MACD crossover imminent.")
+    # Synthesis Logic
+    if is_overbought:
+        if macd_condition == "bullish":
+            parts.append(f"Strong upward momentum, but approaching overbought levels (RSI {rsi:.1f}). Watch for potential consolidation.")
+        elif macd_condition == "bearish":
+            parts.append(f"Bearish divergence detected: Price overbought (RSI {rsi:.1f}) with weakening momentum (MACD). Potential reversal warning.")
         else:
-            parts.append("MACD data incomplete.")
-    else:
-        parts.append("MACD unavailable.")
-    
+            parts.append(f"RSI overbought at {rsi:.1f}. Monitor for trend exhaustion.")
+            
+    elif is_oversold:
+        if macd_condition == "bullish":
+            parts.append(f"Bullish divergence detected: Price oversold (RSI {rsi:.1f}) with improving momentum (MACD). Potential buying opportunity.")
+        elif macd_condition == "bearish":
+            parts.append(f"Strong downward pressure. Price is oversold (RSI {rsi:.1f}) but momentum remains bearish. Wait for stabilization.")
+        else:
+            parts.append(f"RSI oversold at {rsi:.1f}. Monitor for support.")
+            
+    else:  # Neutral RSI
+        # Add context about where in neutral it is
+        context = ""
+        if rsi > 60:
+            context = "(Upper Range)"
+        elif rsi < 40:
+            context = "(Lower Range)"
+            
+        if macd_condition == "bullish":
+            parts.append(f"Bullish momentum confirmed (MACD) with room to run (RSI {rsi:.1f}).")
+        elif macd_condition == "bearish":
+            parts.append(f"Bearish momentum confirmed (MACD) with room for further downside (RSI {rsi:.1f}).")
+        else:
+            parts.append(f"Market is consolidating (RSI {rsi:.1f} {context}). Awaiting clearer directional signals.")
+            
     return " ".join(parts)

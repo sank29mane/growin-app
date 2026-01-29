@@ -13,8 +13,16 @@ fi
 # Activate venv
 source .venv/bin/activate
 
+# Check for libomp (Required for XGBoost on Mac)
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    if ! brew list libomp > /dev/null 2>&1; then
+        echo "Installing libomp for XGBoost support..."
+        brew install libomp
+    fi
+fi
+
 # Install dependencies
-echo "Installing dependencies..."
+echo "Installing SOTA dependencies..."
 .venv/bin/pip install -r requirements.txt -q
 .venv/bin/pip install . 2>/dev/null || echo "Could not install current project as package, relying on manual deps"
 

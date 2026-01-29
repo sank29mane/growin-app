@@ -59,52 +59,53 @@ def normalize_ticker(ticker: str) -> str:
     ticker = ticker.replace("_", "") # Fallback for messy underscores
     
     # 4. SPECIAL MAPPINGS (SOTA curated list for T212 -> YFinance)
-    # This addresses the "brittle hardcoded rules" by expanding them to high-value targets
+    # Map specifically known problematic tickers
     special_mappings = {
-        "SSLNL": "SSLN",
-        "SGLNL": "SGLN",
-        "3GLD": "3GLD",
-        "SGLN": "SGLN",
-        "PHGP": "PHGP",
-        "PHAU": "PHAU",
-        "3LTS": "3LTS",
-        "3USL": "3USL",
-        "LLOY1": "LLOY", # T212 duplicate ID
-        "VOD1": "VOD",
-        "BARC1": "BARC",
-        "TSCO1": "TSCO",
-        "BPL1": "BP",
-        "AZNL1": "AZN",
+        "SSLNL": "SSLN", "SGLNL": "SGLN", "3GLD": "3GLD", "SGLN": "SGLN",
+        "PHGP": "PHGP", "PHAU": "PHAU", "3LTS": "3LTS", "3USL": "3USL",
+        "LLOY1": "LLOY", "VOD1": "VOD", "BARC1": "BARC", "TSCO1": "TSCO",
+        "BPL1": "BP", "BPL": "BP", # BP.L
+        "AZNL1": "AZN", "AZNL": "AZN", # Astrazeneca
         "SGLN1": "SGLN",
-        "MAG5": "MAG5",      # Leverage Shares 5x Long Mag 7
-        "MAG7": "MAG7",
-        "GLD3": "GLD3",      # Leverage Shares 3x Long Gold
-        "3UKL": "3UKL",      # 3x Long FTSE 100
-        "5QQQ": "5QQQ",      # 5x Long QQQ
-        "TSL3": "TSL3",      # 3x Long Tesla
-        "NVD3": "NVD3",      # 3x Long Nvidia
+        "MAG5": "MAG5", "MAG5L": "MAG5",
+        "MAG7": "MAG7", "MAG7L": "MAG7",
+        "GLD3": "GLD3", 
+        "3UKL": "3UKL", 
+        "5QQQ": "5QQQ", 
+        "TSL3": "TSL3", 
+        "NVD3": "NVD3",
+        "AVL": "AV",   # Aviva
+        "UUL": "UU",   # United Utilities
+        "BAL": "BA",   # BAE Systems (BA.L)
+        "SLL": "SL",   # Standard Life / Segro? (Check context usually SL.L)
+        "AU": "AUT",   # Auto Trader? Or Au (Gold)? Assuming AUT for AU.L usually.
+        "REL": "REL",  # RELX (REL.L) - Keep as is
+        "AAL": "AAL",  # Anglo American (AAL.L) - Keep as is
+        "RBL": "RKT",  # Reckitt Benckiser
+        "MICCL": "MICC", # Midwich Group (MICC.L)
     }
     
     if ticker in special_mappings:
         ticker = special_mappings[ticker]
 
-    # 5. Suffix Protection for Leveraged Products
-    # Leveraged ETPs often end in digits (3, 5, 7). 
-    # T212 duplicates end in '1'.
-    # RULE: If it ends in '1' and len > 3, strip it IF it's likely a duplicate.
-    if ticker.endswith("1") and len(ticker) > 3:
-        # Check against common UK stock stems
+    # 5. Suffix Protection for Leveraged Products & Extra 'L' Handling
+    # Many UK tickers arrive with an extra 'L' (e.g., BARCL, SHELL, GSKL).
+    # If len > 3 and ends in 'L', it's likely a suffix we should strip.
+    is_leveraged_etp = ticker.endswith("1") and len(ticker) > 3
+    
+    # Check against common UK stock stems for "1" suffix
+    if is_leveraged_etp:
         stems = ["LLOY", "BARC", "VOD", "HSBA", "TSCO", "BP", "AZN", "RR", "NG", "SGLN", "SSLN"]
         if any(ticker.startswith(stem) for stem in stems):
             ticker = ticker[:-1]
-
+            
     # 6. Global Exchange Logic (UK vs US)
-    # Exclude common US Tech/ETFs from UK suffixing
     us_exclusions = {
         # Tech & Growth
         "AAPL", "MSFT", "GOOG", "AMZN", "NVDA", "TSLA", "META", "NFLX",
         "AMD", "INTC", "PYPL", "ADBE", "CSCO", "PEP", "COST", "AVGO", "QCOM", "TXN",
         "ORCL", "CRM", "IBM", "UBER", "ABNB", "SNOW", "PLTR", "SQ", "SHOP", "SPOT",
+        "GOOGL", # Explicitly exclude GOOGL
 
         # Financials
         "JPM", "BAC", "WFC", "C", "GS", "MS", "BLK", "AXP", "V", "MA", "COF", "USB",
@@ -131,12 +132,24 @@ def normalize_ticker(ticker: str) -> str:
         "F", "T", "C", "V", "Z", "O", "D", "R", "K", "X", "S", "M", "A", "G"
     }
     
-    # Determine if UK stock
-    # - T212 explicitly marked it with _EQ (and not _US)
-    # - Or it matches UK pattern (len <= 4, alphanumeric stem) and not in US list
     is_explicit_uk = "_EQ" in original and "_US" not in original
-    is_likely_uk = (len(ticker) <= 4 or ticker.endswith("L")) and ticker not in us_exclusions
+    is_likely_uk = (len(ticker) <= 5 or ticker.endswith("L")) and ticker not in us_exclusions
     
+    # Heuristic for stripping extra 'L' (e.g. BARCL -> BARC)
+    # We apply this if it looks like a UK stock and satisfies length constraints.
+    # Exclude typical 3-letter codes that are valid (like AAL, REL) unless mapped.
+    if is_likely_uk and ticker.endswith("L") and len(ticker) > 3 and ticker not in us_exclusions:
+        # Check if stripping L leaves a valid-looking numeric suffix or leveraged token?
+        # Usually valid tickers are 3 or 4 chars. 
+        # BARCL (5) -> BARC (4). OK.
+        # SHELL (5) -> SHEL (4). OK.
+        # GSKL (4) -> GSK (3). OK.
+        # RELL (4) -> REL (3). OK.
+        # Don't strip if it becomes too short (<2) or is in keep-list?
+        # But we handle 3-letter via mappings mostly.
+        # Safe heuristic: Strip L.
+        ticker = ticker[:-1]
+
     # Leveraged ETPs (Granular detection)
     is_leveraged = bool(re.search(r'^(3|5|7)[A-Z]+', ticker)) or \
                     bool(re.search(r'[A-Z]+(2|3|5|7)$', ticker))
@@ -1203,9 +1216,10 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     "current_value": round(total_current, 2),
                     "total_pnl": round(total_pnl, 2),
                     "total_pnl_percent": round(
-                        (total_pnl / total_invested) if total_invested > 0 else 0,
-                        4,
+                        (total_pnl / total_invested * 100) if total_invested > 0 else 0,
+                        2,
                     ),
+                    "net_deposits": round(total_current - total_pnl, 2),
                     "cash_balance": {
                         "total": round(total_cash, 2),
                         "free": round(free_cash, 2),

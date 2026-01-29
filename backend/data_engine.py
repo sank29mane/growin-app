@@ -42,8 +42,20 @@ class AlpacaClient:
 
     async def get_historical_bars(self, ticker: str, timeframe="1Day", limit: int = 512) -> Optional[Dict[str, Any]]:
         """Fetch historical bars using Alpaca Data API, fallback to yfinance."""
+        from cache_manager import cache
+        cache_key = f"bars_{ticker}_{timeframe}_{limit}"
+        cached_data = cache.get(cache_key)
+        if cached_data:
+            return cached_data
+
         normalized_ticker = normalize_ticker(ticker)
         
+        # OPTIMIZATION: Skip Alpaca for UK stocks (they are not supported on standard Alpaca plan)
+        # This avoids "invalid symbol" errors and speeds up the response
+        if normalized_ticker.endswith('.L'):
+            logger.info(f"AlpacaClient: Skipping Alpaca for UK stock {normalized_ticker}, using fallback.")
+            self.data_client = None # Temporarily disable to force fallback for this call
+
         # Try Alpaca first
         if self.data_client:
             try:
@@ -66,12 +78,14 @@ class AlpacaClient:
                 now = datetime.now(timezone.utc)
                 
                 # Default lookback if not specified
+                # OPTIMIZATION: Multipliers increased to account for market closures (nights/weekends)
+                # We need to request enough 'wall clock' time to get 'limit' trading bars.
                 delta_map = {
-                    "1Min": timedelta(minutes=limit * 2),
+                    "1Min": timedelta(minutes=limit * 5),
                     "5Min": timedelta(minutes=limit * 10),
                     "15Min": timedelta(minutes=limit * 30),
-                    "1Hour": timedelta(hours=limit * 2),
-                    "1Day": timedelta(days=limit + 100), # Add buffer
+                    "1Hour": timedelta(hours=limit * 5),  # 1000 bars * 5 = 5000 hours (~200 days)
+                    "1Day": timedelta(days=limit * 1.6 + 100), # ~1.5x for weekends + buffer
                 }
                 start_time = now - delta_map.get(timeframe, timedelta(days=365))
 
@@ -99,7 +113,9 @@ class AlpacaClient:
                             "timestamp": bar.timestamp.isoformat() # Add explicit ISO string for easier parsing
                         })
                     
-                    return {"ticker": ticker, "bars": bar_list, "timeframe": timeframe}
+                    result = {"ticker": ticker, "bars": bar_list, "timeframe": timeframe}
+                    cache.set(cache_key, result, ttl=300) # Cache for 5 mins
+                    return result
                     
             except Exception as e:
                 logger.warning(f"AlpacaClient: Error fetching bars from Alpaca: {e}. Falling back to yfinance.")
@@ -111,14 +127,17 @@ class AlpacaClient:
             from utils.currency_utils import CurrencyNormalizer
 
             # Map timeframe to yfinance period/interval
+            # OPTIMIZATION: Request max viable history for fallback to ensure TTM context (512+)
             period_map = {
-                "1Min": ("1d", "1m"),
-                "5Min": ("1d", "5m"),
-                "15Min": ("1d", "15m"),
-                "1Hour": ("1mo", "1h"),
-                "1Day": ("1y", "1d"),
+                "1Min": ("5d", "1m"),     # Max 7d usually
+                "5Min": ("60d", "5m"),    # Max 60d
+                "15Min": ("60d", "15m"),  # Max 60d
+                "1Hour": ("730d", "1h"),  # Max 730d (2y) - ample for 512 bars
+                "1Day": ("5y", "1d"),     # 5y is plenty
+                "1Week": ("5y", "1wk"),
+                "1Month": ("max", "1mo")
             }
-            period, interval = period_map.get(timeframe, ("1y", "1d"))
+            period, interval = period_map.get(timeframe, ("5y", "1d"))
 
             ticker_obj = yf.Ticker(normalized_ticker)
             data = ticker_obj.history(period=period, interval=interval)
@@ -168,34 +187,14 @@ class AlpacaClient:
             # Convert to list of dicts
             bar_list = df.to_dict('records')
 
-            return {"ticker": ticker, "bars": bar_list[-limit:], "timeframe": timeframe}
+            result = {"ticker": ticker, "bars": bar_list[-limit:], "timeframe": timeframe}
+            cache.set(cache_key, result, ttl=300)
+            return result
 
         except Exception as e:
             logger.warning(f"AlpacaClient: Error fetching bars (yfinance): {e}")
-            # Return mock data instead of None
-            import random
-            from datetime import datetime, timedelta
-
-            bar_list = []
-            base_price = 150.0 + random.uniform(-50, 50)  # Random base price
-            current_time = datetime.now()
-
-            for i in range(min(limit, 30)):  # Generate up to 30 days of mock data
-                # Generate realistic price movement
-                daily_change = random.uniform(-3.0, 3.0)
-                price = base_price + daily_change + (i * 0.1)  # Slight trend
-
-                bar_list.append({
-                    "t": int((current_time - timedelta(days=29-i)).timestamp() * 1000),
-                    "o": round(price + random.uniform(-1.0, 1.0), 2),
-                    "h": round(price + random.uniform(0.5, 2.0), 2),
-                    "l": round(price - random.uniform(0.5, 2.0), 2),
-                    "c": round(price, 2),
-                    "v": random.randint(1000000, 50000000)
-                })
-
-            logger.info("AlpacaClient: Using generated mock data")
-            return {"ticker": ticker, "bars": bar_list, "timeframe": timeframe}
+            # Do NOT return mock data for invalid tickers. This causes AI hallucinations.
+            return None
 
     async def get_recent_trades(self, ticker: str, limit: int = 100) -> List[Dict[str, Any]]:
         """Fetch latest trades for a ticker."""
@@ -342,7 +341,7 @@ class FinnhubClient:
                 return None
 
             # Convert Finnhub format to our standard format
-            from currency_utils import CurrencyNormalizer
+            from utils.currency_utils import CurrencyNormalizer
             bar_list = []
             for i in range(len(candles['c'])):
                 bar_list.append({
@@ -376,18 +375,24 @@ class FinnhubClient:
             return None
 
         normalized_ticker = ticker.replace('.L', '')
+
         try:
-            from currency_utils import CurrencyNormalizer
+            from utils.currency_utils import CurrencyNormalizer
             quote = self.client.quote(normalized_ticker)
+            
+            # Helper to safely get value or 0 if None
+            def get_val(key):
+                return quote.get(key) if quote.get(key) is not None else 0
+
             return {
                 "symbol": ticker,
-                "current_price": CurrencyNormalizer.normalize_price(quote.get('c', 0), ticker),
-                "change": CurrencyNormalizer.normalize_price(quote.get('d', 0), ticker),
-                "change_percent": quote.get('dp', 0),
-                "high": CurrencyNormalizer.normalize_price(quote.get('h', 0), ticker),
-                "low": CurrencyNormalizer.normalize_price(quote.get('l', 0), ticker),
-                "open": CurrencyNormalizer.normalize_price(quote.get('o', 0), ticker),
-                "previous_close": CurrencyNormalizer.normalize_price(quote.get('pc', 0), ticker),
+                "current_price": CurrencyNormalizer.normalize_price(get_val('c'), ticker),
+                "change": CurrencyNormalizer.normalize_price(get_val('d'), ticker),
+                "change_percent": get_val('dp'),
+                "high": CurrencyNormalizer.normalize_price(get_val('h'), ticker),
+                "low": CurrencyNormalizer.normalize_price(get_val('l'), ticker),
+                "open": CurrencyNormalizer.normalize_price(get_val('o'), ticker),
+                "previous_close": CurrencyNormalizer.normalize_price(get_val('pc'), ticker),
                 "timestamp": datetime.now().isoformat()
             }
         except Exception as e:

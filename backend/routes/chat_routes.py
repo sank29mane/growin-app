@@ -119,7 +119,7 @@ async def chat_message(request: ChatMessage, _=Depends(default_limiter.check)):
             "conversation_id": conversation_id,
             "agent": "DecisionAgent",
             "response": response,
-            "tool_calls": [],
+            "tool_calls": None, # Explicitly null to prevent frontend from treating it as a tool/search result
             "timestamp": timestamp,
             "model_name": request.model_name,
             "coordinator_model": request.coordinator_model,

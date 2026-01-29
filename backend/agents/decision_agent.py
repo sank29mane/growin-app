@@ -95,8 +95,10 @@ class DecisionAgent:
                             raise ValueError("No chat models loaded in LM Studio (only embedding models found)")
                     else:
                         raise ValueError("No model loaded in LM Studio")
+                else:
+                    raise ValueError("No model loaded in LM Studio")
                         
-            elif "mlx" in self.model_name.lower():
+            elif "mlx" in self.model_name.lower() or "granite" in self.model_name.lower():
                 from mlx_langchain import ChatMLX
                 logger.info(f"Initializing MLX Model: {self.model_name}")
                 self.llm = ChatMLX(model_name=self.model_name)
@@ -129,6 +131,14 @@ class DecisionAgent:
         # Build comprehensive prompt with account-aware context
         prompt = self._build_prompt(context, query, account_filter)
         
+        # --- SKILL INJECTION ---
+        from utils.skill_loader import get_skill_loader
+        skills_text = get_skill_loader().get_relevant_skills(query)
+        if skills_text:
+            logger.info("DecisionAgent: Injecting relevant skills into prompt")
+            prompt += f"\n\n=== RELEVANT EXPERT GUIDELINES ===\n{skills_text}\n=================================="
+        # -----------------------
+        
         # Invoke LLM
         try:
             from langchain_core.messages import HumanMessage, SystemMessage
@@ -148,30 +158,34 @@ class DecisionAgent:
                 system_content = """You are a highly qualified Financial & Trading Advisor specializing in global markets (US, LSE, and India).
                 
                 CORE PRINCIPLES:
-                1. DEEP SYNTHESIS: You must connect the dots between Portfolio data, Technicals, and Broader Market Insights. If NewsData.io indicates a business shift, analyze its impact on the technical trend.
-                2. ACCURACY IS PARAMOUNT: Base all responses ONLY on the provided Market Context. 
-                3. STRICT NO FABRICATION (RULE 3): If any specialist agent is listed as "MISSING (FAILED)" or "NO DATA", you MUST explicitly state that you do not have that specific data. NEVER invent numbers, sentiment, or outlooks for missing fields. Ensure your final advice is tempered by the lack of data.
-                4. GLOBAL CONTEXT: When providing market outlooks, prioritize insights for US (S&P 500), UK (LSE/FTSE), and Indian (NSE/NIFTY) markets.
-                5. PORTFOLIO ALIGNMENT & LISTING PREFERENCE: 
-                   - The user's portfolio is mainly LSE-based. PRIORITIZE SUGGESTING LSE (London Stock Exchange) listings for trades. 
-                   - You MAY suggest US stocks, but you MUST explicitly label them as "US Stock" or "Nasdaq/NYSE" and use USD ($).
-                   - For US listings, ALWAYS show the price/value in USD ($) and provide an estimated conversion to GBP (£) in parentheses (e.g., "$150 (~£120)").
-                   - For LSE stocks, ALWAYS use GBP (£). If quoting a price in pence (e.g. 150p), convert to pounds (£1.50) or clearly state "pence".
-                6. TRADING EXPERTISE: Provide actionable insights for intraday, swing, and long-term horizons based on reality.
-                7. NO HALLUCINATION: If a user asks about a stock outside the provided context, offer to research it rather than guessing.
+                1. DEEP SYNTHESIS: Connect Portfolio data, Technicals, and Broader Market Insights.
+                2. ACCURACY & DATA INTEGRITY (SOTA PROTOCOL): 
+                   - Evaluate the provided context for missing sources before answering.
+                   - If a source is listed as "UNAVAILABLE (NO DATA)" or "FAILED", you MUST explicitly state in your first paragraph: "My decision/analysis is hampered by the lack of real-time [Source Name] data."
+                   - **MANDATORY**: You MUST explicitly cite the Forecast Algorithm (e.g., "IBM Granite TTM-R2" or "Statistical Fallback") in your response headers or summary. Do NOT omit this.
+                   - If a Forecast is labeled as a "Statistical Fallback", you MUST mention that the prediction is based on historical trends rather than the deep-learning model.
+                   - NEVER invent specific numbers, trends, or "block trade" details if that agent's data is missing.
+                3. SAFE FALLBACK (NO HALLUCINATION): 
+                   - If real-time Research or Social data is missing, you MAY provide general educational context about the stock's historical sector performance, but you MUST label it clearly as "General Market Knowledge (not real-time)".
+                   - If Quant or Forecast data is missing, REFUSE to give a high-confidence "BUY" or "SELL" recommendation. Instead, advise the user to wait for data restoration or provide a "Neutral" outlook based on safety.
+                4. GLOBAL CONTEXT & PREFERENCE: 
+                   - Prioritize LSE (London Stock Exchange) listings. Use GBP (£).
+                   - Label US listings clearly as "US Stock" and use USD ($) with parenthetical GBP (~£) estimates.
+
+                [OUTPUT FORMAT INSTRUCTION]
+                You will receive a pre-filled "MANDATORY ANSWER FORMAT" at the end of the user prompt.
+                You must COPY this format exactly for the "Market Pulse", "Technical Levels", and "AI Forecast" sections. 
+                Do NOT rephrase or summarize these sections. Use the variables exactly as provided in the prompt.
+                Your creative synthesis goes in the "Strategic Synthesis" section only.
                 
-                CONVERSATIONAL STYLE & FORMATTING:
-                - Use a friendly, professional, and lively tone.
-                - NO THINKING OUT LOUD: Never include tags like <think>, **Thinking**, or phrases like "We need to...", "Let's analyze...".
-                - RESPONSE STRUCTURE: 
-                  - Start with a direct, conversational answer.
-                  - If data is missing (see "MISSING/FAILED DATA SOURCES"), acknowledge it clearly in the first paragraph.
-                  - Use bolding for key figures and tickers.
-                  - Use bullet points or tables ONLY for complex data comparisons.
-                  - Keep it concise but insightful.
+                CONVERSATIONAL STYLE:
+                - Friendly, professional, and transparent about limitations.
+                - NO INTERNAL MONOLOGUE: Never use tags like <think> or phrases like "I should analyze...".
+                - Start with a direct answer that includes a Data Integrity disclosure.
+                - Use bolding for figures and bullet points for readability.
                 
-                STRICT RULE: NO INTERNAL MONOLOGUE. NO META-COMMENTARY. JUST THE ANSWER. EXACTLY FOLLOW RULE 3.
-"""
+                STRICT: Be an Honest Advisor. Accuracy is better than completeness. If data is sparse, the decision is HAMPERED.
+                """
             
             system_message = SystemMessage(content=system_content)
             human_message = HumanMessage(content=prompt)
@@ -195,6 +209,22 @@ class DecisionAgent:
                         recommendation += f"\nRecommended price: £{validation['recommended_price']:.2f}"
             
             status_manager.set_status("decision_agent", "ready", "Decision delivered", model=self.model_name)
+            
+            # --- INTERACTIVE ACTIONS ---
+            # Detect implicit goal planning intent (e.g. "I want 30% return") OR explicit routing to GoalPlanner
+            is_goal_intent = (
+                context.intent == "goal_planning" or 
+                "return" in query.lower() or 
+                "goal" in query.lower() or
+                "plan" in query.lower()
+            )
+            
+            # Append Action Marker if meaningful goal context exists or is requested, 
+            # AND we haven't already executed the GoalPlanner (to avoid specific loops, though re-running is fine)
+            if is_goal_intent and "CREATE_GOAL_PLAN" not in recommendation:
+                recommendation += "\n\n[ACTION:CREATE_GOAL_PLAN]"
+            # ---------------------------
+            
             return recommendation
             
         except Exception as e:
@@ -265,6 +295,23 @@ class DecisionAgent:
     def _build_prompt(self, context: MarketContext, query: str, account_filter: str = "all") -> str:
         """Build comprehensive prompt from market context"""
         
+        # --- PROMPT TEMPLATE PATTERN (Skill: prompt-engineering) ---
+        # Enforce structured output for critical data points
+        structured_template = """
+        [MANDATORY ANSWER FORMAT - COPY EXACTLY]
+        1. **Market Pulse**: {sentiment_label} (Score: {sentiment_score})
+        2. **Technical Levels**: 
+           - Structural Support: {support}
+           - Structural Resistance: {resistance}
+           - Breakout Signals: {signals}
+        3. **AI Forecast ({forecast_algo})**:
+           - 24h Target: {forecast_24h} ({forecast_trend})
+           - Confidence: {forecast_conf}
+           - Note: {forecast_note}
+        4. **Strategic Synthesis**: [Your detailed reasoning here...]
+        """
+        # -----------------------------------------------------------
+        
         # PRIORITY: Use coordinator's detected account_type from context if available
         coordinator_account = context.user_context.get("account_type")
         if coordinator_account:
@@ -282,8 +329,6 @@ class DecisionAgent:
             failed = [a for a in context.agents_failed]
             
             # Detect missing but potentially relevant agents based on intent
-            # Detect missing but potentially relevant agents based on intent
-            # e.g. if analytical, we expect quant/forecast/research
             expected = []
             has_ticker = context.ticker and context.ticker != "MARKET"
             
@@ -356,12 +401,22 @@ class DecisionAgent:
         # Forecast
         if context.forecast:
             f = context.forecast
+            source_tag = f" ({f.algorithm})" if f.algorithm else ""
+            fallback_note = "\n- *Note: Using statistical fallback (Holt-Winters) due to TTM model unavailability.*" if f.is_fallback else ""
             sections.append(f"""
-**AI PROJECTIONS** ({f.ticker}):
+**AI PROJECTIONS** ({f.ticker}){source_tag}:
 - 24h Prediction: £{f.forecast_24h:.2f}
 - Confidence: {f.confidence}
-- Predicted Trend: {f.trend}
+- Predicted Trend: {f.trend}{fallback_note}
 """)
+            
+            # Add Auxiliary models context if available
+            if f.auxiliary_forecasts:
+                aux_info = []
+                for aux in f.auxiliary_forecasts:
+                    aux_info.append(f"{aux.get('model', 'Unknown')}: {aux.get('prediction_pct', 0):+.1f}%")
+                if aux_info:
+                    sections.append(f"- **Peer Model Consensus**: {', '.join(aux_info)}")
         
         # Research/Sentiment (Deep Integration)
         if context.research:
@@ -405,6 +460,26 @@ class DecisionAgent:
         
         # Metadata
         sections.append(f"\n*Analysis completed in {context.total_latency_ms:.0f}ms*")
+        
+        # --- TEMPLATE VARIABLE MAPPING ---
+        # Robustly handle missing data for the template
+        tmpl_vars = {
+            "sentiment_label": context.research.sentiment_label if context.research else "N/A",
+            "sentiment_score": f"{context.research.sentiment_score:.2f}" if context.research else "0.0",
+            "support": f"£{context.quant.support_level:.2f}" if context.quant and context.quant.support_level else "N/A",
+            "resistance": f"£{context.quant.resistance_level:.2f}" if context.quant and context.quant.resistance_level else "N/A",
+            "signals": context.quant.signal if context.quant else "N/A",
+            "forecast_algo": context.forecast.algorithm if context.forecast else "Unavailable",
+            "forecast_24h": f"£{context.forecast.forecast_24h:.2f}" if context.forecast else "N/A",
+            "forecast_trend": context.forecast.trend if context.forecast else "N/A",
+            "forecast_conf": context.forecast.confidence if context.forecast else "N/A",
+            "forecast_note": "⚠️ USING STATISTICAL FALLBACK" if context.forecast and context.forecast.is_fallback else "✅ Using TTM-R2 Model"
+        }
+        
+        # Inject the mandatory format instruction at the END of the prompt to ensure recency bias
+        sections.append("\n\nIMPORTANT: You must use the following format exactly for the data section. Do not summarize it differently.")
+        sections.append(structured_template.format(**tmpl_vars))
+        # ---------------------------------
         
         return "\n".join(sections)
 
