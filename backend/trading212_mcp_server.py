@@ -101,9 +101,34 @@ def normalize_ticker(ticker: str) -> str:
     # 6. Global Exchange Logic (UK vs US)
     # Exclude common US Tech/ETFs from UK suffixing
     us_exclusions = {
+        # Tech & Growth
         "AAPL", "MSFT", "GOOG", "AMZN", "NVDA", "TSLA", "META", "NFLX",
-        "SPY", "QQQ", "DIA", "IWM", "IVV", "VOO", "VTI", "GLD", "SLV", "ARKK", "SMH",
-        "AMD", "INTC", "PYPL", "ADBE", "CSCO", "PEP", "COST", "AVGO", "QCOM", "TXN"
+        "AMD", "INTC", "PYPL", "ADBE", "CSCO", "PEP", "COST", "AVGO", "QCOM", "TXN",
+        "ORCL", "CRM", "IBM", "UBER", "ABNB", "SNOW", "PLTR", "SQ", "SHOP", "SPOT",
+
+        # Financials
+        "JPM", "BAC", "WFC", "C", "GS", "MS", "BLK", "AXP", "V", "MA", "COF", "USB",
+
+        # Industrial & Auto
+        "CAT", "DE", "GE", "GM", "F", "BA", "LMT", "RTX", "HON", "UPS", "FDX", "UNP", "MMM",
+
+        # Consumer
+        "WMT", "TGT", "HD", "LOW", "MCD", "SBUX", "NKE", "KO", "PEP", "PG", "CL", "MO", "PM", "DIS", "CMCSA",
+
+        # Healthcare
+        "JNJ", "PFE", "MRK", "ABBV", "LLY", "UNH", "CVS", "AMGN", "GILD", "BMY", "ISRG", "TMO", "ABT", "DHR",
+
+        # Energy
+        "XOM", "CVX", "COP", "SLB", "EOG", "OXY", "KMI", "HAL",
+
+        # Telecom
+        "T", "VZ", "TMUS",
+
+        # ETFs
+        "SPY", "QQQ", "DIA", "IWM", "IVV", "VOO", "VTI", "GLD", "SLV", "ARKK", "SMH", "XLF", "XLE", "XLK", "XLV",
+
+        # Single Letter US Tickers
+        "F", "T", "C", "V", "Z", "O", "D", "R", "K", "X", "S", "M", "A", "G"
     }
     
     # Determine if UK stock
