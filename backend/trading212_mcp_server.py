@@ -33,6 +33,65 @@ STATE_FILE = ".state.json"
 # Import centralized currency normalization
 from utils.currency_utils import CurrencyNormalizer, normalize_all_positions, calculate_portfolio_value
 
+# --- Ticker Normalization Constants ---
+SPECIAL_MAPPINGS = {
+    "SSLNL": "SSLN", "SGLNL": "SGLN", "3GLD": "3GLD", "SGLN": "SGLN",
+    "PHGP": "PHGP", "PHAU": "PHAU", "3LTS": "3LTS", "3USL": "3USL",
+    "LLOY1": "LLOY", "VOD1": "VOD", "BARC1": "BARC", "TSCO1": "TSCO",
+    "BPL1": "BP", "BPL": "BP", # BP.L
+    "AZNL1": "AZN", "AZNL": "AZN", # Astrazeneca
+    "SGLN1": "SGLN",
+    "MAG5": "MAG5", "MAG5L": "MAG5",
+    "MAG7": "MAG7", "MAG7L": "MAG7",
+    "GLD3": "GLD3",
+    "3UKL": "3UKL",
+    "5QQQ": "5QQQ",
+    "TSL3": "TSL3",
+    "NVD3": "NVD3",
+    "AVL": "AV",   # Aviva
+    "UUL": "UU",   # United Utilities
+    "BAL": "BA",   # BAE Systems (BA.L)
+    "SLL": "SL",   # Standard Life / Segro? (Check context usually SL.L)
+    "AU": "AUT",   # Auto Trader? Or Au (Gold)? Assuming AUT for AU.L usually.
+    "REL": "REL",  # RELX (REL.L) - Keep as is
+    "AAL": "AAL",  # Anglo American (AAL.L) - Keep as is
+    "RBL": "RKT",  # Reckitt Benckiser
+    "MICCL": "MICC", # Midwich Group (MICC.L)
+}
+
+US_EXCLUSIONS = {
+    # Tech & Growth
+    "AAPL", "MSFT", "GOOG", "AMZN", "NVDA", "TSLA", "META", "NFLX",
+    "AMD", "INTC", "PYPL", "ADBE", "CSCO", "PEP", "COST", "AVGO", "QCOM", "TXN",
+    "ORCL", "CRM", "IBM", "UBER", "ABNB", "SNOW", "PLTR", "SQ", "SHOP", "SPOT",
+    "GOOGL", # Explicitly exclude GOOGL
+
+    # Financials
+    "JPM", "BAC", "WFC", "C", "GS", "MS", "BLK", "AXP", "V", "MA", "COF", "USB",
+
+    # Industrial & Auto
+    "CAT", "DE", "GE", "GM", "F", "BA", "LMT", "RTX", "HON", "UPS", "FDX", "UNP", "MMM",
+
+    # Consumer
+    "WMT", "TGT", "HD", "LOW", "MCD", "SBUX", "NKE", "KO", "PEP", "PG", "CL", "MO", "PM", "DIS", "CMCSA",
+
+    # Healthcare
+    "JNJ", "PFE", "MRK", "ABBV", "LLY", "UNH", "CVS", "AMGN", "GILD", "BMY", "ISRG", "TMO", "ABT", "DHR",
+
+    # Energy
+    "XOM", "CVX", "COP", "SLB", "EOG", "OXY", "KMI", "HAL",
+
+    # Telecom
+    "T", "VZ", "TMUS",
+
+    # ETFs
+    "SPY", "QQQ", "DIA", "IWM", "IVV", "VOO", "VTI", "GLD", "SLV", "ARKK", "SMH", "XLF", "XLE", "XLK", "XLV",
+
+    # Single Letter US Tickers
+    "F", "T", "C", "V", "Z", "O", "D", "R", "K", "X", "S", "M", "A", "G"
+}
+
+LEVERAGED_STEMS = tuple(["LLOY", "BARC", "VOD", "HSBA", "TSCO", "BP", "AZN", "RR", "NG", "SGLN", "SSLN"])
 
 
 def normalize_ticker(ticker: str) -> str:
@@ -59,34 +118,8 @@ def normalize_ticker(ticker: str) -> str:
     ticker = ticker.replace("_", "") # Fallback for messy underscores
     
     # 4. SPECIAL MAPPINGS (SOTA curated list for T212 -> YFinance)
-    # Map specifically known problematic tickers
-    special_mappings = {
-        "SSLNL": "SSLN", "SGLNL": "SGLN", "3GLD": "3GLD", "SGLN": "SGLN",
-        "PHGP": "PHGP", "PHAU": "PHAU", "3LTS": "3LTS", "3USL": "3USL",
-        "LLOY1": "LLOY", "VOD1": "VOD", "BARC1": "BARC", "TSCO1": "TSCO",
-        "BPL1": "BP", "BPL": "BP", # BP.L
-        "AZNL1": "AZN", "AZNL": "AZN", # Astrazeneca
-        "SGLN1": "SGLN",
-        "MAG5": "MAG5", "MAG5L": "MAG5",
-        "MAG7": "MAG7", "MAG7L": "MAG7",
-        "GLD3": "GLD3", 
-        "3UKL": "3UKL", 
-        "5QQQ": "5QQQ", 
-        "TSL3": "TSL3", 
-        "NVD3": "NVD3",
-        "AVL": "AV",   # Aviva
-        "UUL": "UU",   # United Utilities
-        "BAL": "BA",   # BAE Systems (BA.L)
-        "SLL": "SL",   # Standard Life / Segro? (Check context usually SL.L)
-        "AU": "AUT",   # Auto Trader? Or Au (Gold)? Assuming AUT for AU.L usually.
-        "REL": "REL",  # RELX (REL.L) - Keep as is
-        "AAL": "AAL",  # Anglo American (AAL.L) - Keep as is
-        "RBL": "RKT",  # Reckitt Benckiser
-        "MICCL": "MICC", # Midwich Group (MICC.L)
-    }
-    
-    if ticker in special_mappings:
-        ticker = special_mappings[ticker]
+    if ticker in SPECIAL_MAPPINGS:
+        ticker = SPECIAL_MAPPINGS[ticker]
 
     # 5. Suffix Protection for Leveraged Products & Extra 'L' Handling
     # Many UK tickers arrive with an extra 'L' (e.g., BARCL, SHELL, GSKL).
@@ -95,58 +128,15 @@ def normalize_ticker(ticker: str) -> str:
     
     # Check against common UK stock stems for "1" suffix
     if is_leveraged_etp:
-        stems = ["LLOY", "BARC", "VOD", "HSBA", "TSCO", "BP", "AZN", "RR", "NG", "SGLN", "SSLN"]
-        if any(ticker.startswith(stem) for stem in stems):
+        if ticker.startswith(LEVERAGED_STEMS):
             ticker = ticker[:-1]
             
     # 6. Global Exchange Logic (UK vs US)
-    us_exclusions = {
-        # Tech & Growth
-        "AAPL", "MSFT", "GOOG", "AMZN", "NVDA", "TSLA", "META", "NFLX",
-        "AMD", "INTC", "PYPL", "ADBE", "CSCO", "PEP", "COST", "AVGO", "QCOM", "TXN",
-        "ORCL", "CRM", "IBM", "UBER", "ABNB", "SNOW", "PLTR", "SQ", "SHOP", "SPOT",
-        "GOOGL", # Explicitly exclude GOOGL
-
-        # Financials
-        "JPM", "BAC", "WFC", "C", "GS", "MS", "BLK", "AXP", "V", "MA", "COF", "USB",
-
-        # Industrial & Auto
-        "CAT", "DE", "GE", "GM", "F", "BA", "LMT", "RTX", "HON", "UPS", "FDX", "UNP", "MMM",
-
-        # Consumer
-        "WMT", "TGT", "HD", "LOW", "MCD", "SBUX", "NKE", "KO", "PEP", "PG", "CL", "MO", "PM", "DIS", "CMCSA",
-
-        # Healthcare
-        "JNJ", "PFE", "MRK", "ABBV", "LLY", "UNH", "CVS", "AMGN", "GILD", "BMY", "ISRG", "TMO", "ABT", "DHR",
-
-        # Energy
-        "XOM", "CVX", "COP", "SLB", "EOG", "OXY", "KMI", "HAL",
-
-        # Telecom
-        "T", "VZ", "TMUS",
-
-        # ETFs
-        "SPY", "QQQ", "DIA", "IWM", "IVV", "VOO", "VTI", "GLD", "SLV", "ARKK", "SMH", "XLF", "XLE", "XLK", "XLV",
-
-        # Single Letter US Tickers
-        "F", "T", "C", "V", "Z", "O", "D", "R", "K", "X", "S", "M", "A", "G"
-    }
-    
     is_explicit_uk = "_EQ" in original and "_US" not in original
-    is_likely_uk = (len(ticker) <= 5 or ticker.endswith("L")) and ticker not in us_exclusions
+    is_likely_uk = (len(ticker) <= 5 or ticker.endswith("L")) and ticker not in US_EXCLUSIONS
     
     # Heuristic for stripping extra 'L' (e.g. BARCL -> BARC)
-    # We apply this if it looks like a UK stock and satisfies length constraints.
-    # Exclude typical 3-letter codes that are valid (like AAL, REL) unless mapped.
-    if is_likely_uk and ticker.endswith("L") and len(ticker) > 3 and ticker not in us_exclusions:
-        # Check if stripping L leaves a valid-looking numeric suffix or leveraged token?
-        # Usually valid tickers are 3 or 4 chars. 
-        # BARCL (5) -> BARC (4). OK.
-        # SHELL (5) -> SHEL (4). OK.
-        # GSKL (4) -> GSK (3). OK.
-        # RELL (4) -> REL (3). OK.
-        # Don't strip if it becomes too short (<2) or is in keep-list?
-        # But we handle 3-letter via mappings mostly.
+    if is_likely_uk and ticker.endswith("L") and len(ticker) > 3 and ticker not in US_EXCLUSIONS:
         # Safe heuristic: Strip L.
         ticker = ticker[:-1]
 
@@ -160,6 +150,46 @@ def normalize_ticker(ticker: str) -> str:
             return f"{ticker}.L"
 
     return ticker
+
+
+def _compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """Helper to compute technical indicators efficiently."""
+    if df.empty:
+        return df
+
+    # SMA
+    df["SMA_50"] = df["Close"].rolling(window=50).mean()
+    df["SMA_200"] = df["Close"].rolling(window=200).mean()
+
+    # RSI
+    # Standard RSI uses Wilder's Smoothing (alpha=1/14), but we use SMA (rolling mean)
+    # to maintain compatibility with previous implementation logic.
+    delta = df["Close"].diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+
+    avg_gain = gain.rolling(window=14).mean()
+    avg_loss = loss.rolling(window=14).mean()
+
+    rs = avg_gain / avg_loss
+    df["RSI"] = 100 - (100 / (1 + rs))
+
+    # MACD
+    exp1 = df["Close"].ewm(span=12, adjust=False).mean()
+    exp2 = df["Close"].ewm(span=26, adjust=False).mean()
+    df["MACD"] = exp1 - exp2
+    df["Signal_Line"] = df["MACD"].ewm(span=9, adjust=False).mean()
+
+    # Bollinger Bands
+    # Optimize: reuse rolling object for mean and std
+    roller_20 = df["Close"].rolling(window=20)
+    df["BB_Middle"] = roller_20.mean()
+    std_dev = roller_20.std()
+
+    df["BB_Upper"] = df["BB_Middle"] + (std_dev * 2)
+    df["BB_Lower"] = df["BB_Middle"] - (std_dev * 2)
+
+    return df
 
 
 class Cache:
@@ -1366,7 +1396,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             )
 
             # Fetch metadata for normalization
-            instruments = await c.get_all_instruments()
+            instruments = await c.get_instruments()
             metadata_cache = {i.get("ticker"): i for i in instruments}
 
             # Normalize positions
@@ -1720,30 +1750,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 if df.empty:
                     return None
 
-                # SMA
-                df["SMA_50"] = df["Close"].rolling(window=50).mean()
-                df["SMA_200"] = df["Close"].rolling(window=200).mean()
-
-                # RSI
-                delta = df["Close"].diff()
-                gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-                loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-                rs = gain / loss
-                df["RSI"] = 100 - (100 / (1 + rs))
-
-                # MACD
-                exp1 = df["Close"].ewm(span=12, adjust=False).mean()
-                exp2 = df["Close"].ewm(span=26, adjust=False).mean()
-                df["MACD"] = exp1 - exp2
-                df["Signal_Line"] = df["MACD"].ewm(span=9, adjust=False).mean()
-
-                # Bollinger Bands
-                df["BB_Middle"] = df["Close"].rolling(window=20).mean()
-                std_dev = df["Close"].rolling(window=20).std()
-                df["BB_Upper"] = df["BB_Middle"] + (std_dev * 2)
-                df["BB_Lower"] = df["BB_Middle"] - (std_dev * 2)
-
-                return df
+                return _compute_indicators(df)
 
             df = await loop.run_in_executor(None, calc_indicators)
 
