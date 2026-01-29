@@ -124,8 +124,14 @@ class ChatManager:
         )
         self.conn.commit()
 
-    def get_mcp_servers(self, active_only: bool = False) -> List[Dict]:
-        """Get all configured MCP servers"""
+    def get_mcp_servers(self, active_only: bool = False, sanitize: bool = False) -> List[Dict]:
+        """
+        Get all configured MCP servers.
+
+        Args:
+            active_only: If True, return only active servers.
+            sanitize: If True, mask sensitive environment variables (keys).
+        """
         cursor = self.conn.cursor()
         query = "SELECT * FROM mcp_servers"
         if active_only:
@@ -134,13 +140,27 @@ class ChatManager:
 
         servers = []
         for row in cursor:
+            env = json.loads(row["env"]) if row["env"] else None
+
+            # Sanitize environment variables if requested
+            if sanitize and env:
+                # Mask all values in env to prevent leakage
+                # If value is present (non-empty), mask it. If empty, keep empty.
+                sanitized_env = {}
+                for k, v in env.items():
+                    if v:
+                        sanitized_env[k] = "********"
+                    else:
+                        sanitized_env[k] = v
+                env = sanitized_env
+
             servers.append(
                 {
                     "name": row["name"],
                     "type": row["type"],
                     "command": row["command"],
                     "args": json.loads(row["args"]) if row["args"] else None,
-                    "env": json.loads(row["env"]) if row["env"] else None,
+                    "env": env,
                     "url": row["url"],
                     "active": bool(row["active"]),
                 }
