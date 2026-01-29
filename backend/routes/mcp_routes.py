@@ -35,7 +35,8 @@ async def get_mcp_status():
             
         return {"servers": servers}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error fetching MCP status: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @router.post("/mcp/trading212/config")
 async def update_t212_config(request: T212ConfigRequest):
@@ -105,4 +106,5 @@ async def update_t212_config(request: T212ConfigRequest):
             return {"status": "saved", "message": "Configuration saved, but MCP not connected"}
             
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error updating T212 config: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal Server Error")
