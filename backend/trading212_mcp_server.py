@@ -129,11 +129,16 @@ def normalize_ticker(ticker: str) -> str:
         "SPY", "QQQ", "DIA", "IWM", "IVV", "VOO", "VTI", "GLD", "SLV", "ARKK", "SMH", "XLF", "XLE", "XLK", "XLV",
 
         # Single Letter US Tickers
-        "F", "T", "C", "V", "Z", "O", "D", "R", "K", "X", "S", "M", "A", "G"
+        "F", "T", "C", "V", "Z", "O", "D", "R", "K", "X", "S", "M", "A", "G", "U",
+
+        # Popular Growth/Tech (4 letters)
+        "SMCI", "RDDT", "ARM", "MSTR", "COIN", "PLTR", "SOFI", "AFRM", "HOOD",
+        "DKNG", "RBLX", "PATH", "DDOG", "NET"
     }
     
     is_explicit_uk = "_EQ" in original and "_US" not in original
-    is_likely_uk = (len(ticker) <= 5 or ticker.endswith("L")) and ticker not in us_exclusions
+    is_explicit_us = "_US" in original
+    is_likely_uk = (len(ticker) <= 5 or ticker.endswith("L")) and ticker not in us_exclusions and not is_explicit_us
     
     # Heuristic for stripping extra 'L' (e.g. BARCL -> BARC)
     # We apply this if it looks like a UK stock and satisfies length constraints.
