@@ -17,8 +17,10 @@ The current ticker normalization logic (`backend/trading212_mcp_server.py:normal
 
 **Proposal:**
 Implement a dedicated `TickerResolutionService` (or Agent) backed by a master symbol database (e.g., SQLite or a lightweight trie).
-- **Capabilities:**
-    - unambiguous resolution of `VOD` -> `VOD.L` (LSE) vs `VOD` (Nasdaq).
+- **Capabilities (Tiered Approach):**
+    - **Tier 1 (Cache/Rules):** Check against a curated local database of common tickers (US & UK) for ambiguous symbols like `VOD`.
+    - **Tier 2 (API Verification):** Use `yfinance` or `Alpaca` info APIs to verify if a ticker exists on the assumed exchange before appending suffixes.
+    - **Tier 3 (Search):** Use `search_instruments` only as a fallback.
     - Support for ISIN/CUSIP lookup if available.
     - Context-aware resolution (e.g., "Buy Vodafone" -> prefer user's home exchange).
 - **Implementation:**
@@ -40,3 +42,28 @@ Data fetching is currently mixed between `asyncio` calls and blocking libraries 
 
 **Proposal:**
 Migrate to a fully async data pipeline where possible, or isolate blocking compute (heavy pandas math) into a separate process/worker to avoid blocking the main event loop, especially as user load increases.
+
+## 3. Improved Search Fallback
+**Issue:**
+In `market_routes.py`, the search fallback when MCP is unavailable is a hardcoded list of ~8 tech stocks (`common_tickers`). This provides a poor user experience if the connection to T212 is lost or in development mode.
+
+**Proposal:**
+Implement a real fallback using `yfinance` or `Alpaca` search.
+- If MCP is offline, use `yfinance.Ticker(query)` or `alpaca.data_client` to find matches.
+- This ensures users can still "search" for stocks even without a live broker connection.
+
+## 4. Concurrency Stress Testing
+**Issue:**
+The `QuantAgent` and `PortfolioAgent` use `asyncio.gather` and thread pools (`run_in_executor`). While manual locks (`portfolio_lock`) are in place, there is no formalized stress testing for race conditions under high load.
+
+**Proposal:**
+Add a `tests/stress_test.py` suite using `locust` or `asyncio` to simulate 100+ concurrent agent requests.
+- Verify `SafePythonExecutor` isolation under load.
+- Verify `cache_manager` thread safety.
+
+## 5. SafePythonExecutor Audit
+**Issue:**
+The `SafePythonExecutor` relies on `ast` parsing and `exec`. While it blocks common dangerous imports, `exec` is inherently risky.
+
+**Proposal:**
+Consider migrating to a WASM-based runtime (e.g., `pyodide` or a separate sandboxed process) for `CoordinatorAgent` code execution to strictly isolate memory and CPU usage.
