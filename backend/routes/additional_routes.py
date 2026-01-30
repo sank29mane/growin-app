@@ -503,14 +503,14 @@ async def get_yfinance_chart_data(ticker: str, timeframe: str, limit: int, cache
 
         # Format results
         points = []
-        for timestamp, row in history.iterrows():
+        for row in history.itertuples():
             points.append({
-                "timestamp": timestamp.isoformat(),
-                "close": round(float(row["Close"]), 2),
-                "high": round(float(row["High"]), 2),
-                "low": round(float(row["Low"]), 2),
-                "open": round(float(row["Open"]), 2),
-                "volume": int(row["Volume"])
+                "timestamp": row[0].isoformat(),
+                "close": round(float(row.Close), 2),
+                "high": round(float(row.High), 2),
+                "low": round(float(row.Low), 2),
+                "open": round(float(row.Open), 2),
+                "volume": int(row.Volume)
             })
 
         # Apply limit reduction if too many points
