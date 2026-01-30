@@ -26,6 +26,21 @@ async def get_trade_stats():
     }
 
 # Chart Data Endpoint
+# Common UK ticker patterns (major UK stocks without .L)
+COMMON_UK_TICKERS = {
+    'LLOY', 'HSBA', 'BARC', 'BP', 'VOD', 'GSK', 'AZN', 'RIO', 'BHP',
+    'ULVR', 'DGE', 'BT.A', 'NG.L', 'PRU', 'AV.L', 'RR.L', 'EXPN',
+    'SSE', 'ITV', 'STAN', 'LGEN', 'AAL', 'CCL', 'CPG', 'EZJ', 'IAG',
+    'BLND', 'INF', 'ABF', 'ADM', 'AHT', 'ANTO', 'AVST', 'BAES', 'BDEV',
+    'BNZL', 'BRBY', 'CCH', 'CTEC', 'DCC', 'EDV', 'ENT', 'EXPN', 'FERG',
+    'FLTR', 'FRES', 'GFS', 'GLEN', 'HIK', 'HWDN', 'ICG', 'IHG', 'III',
+    'IMB', 'INCH', 'ITRK', 'JD.', 'KGF', 'LAND', 'LMP', 'LSEG', 'MKS',
+    'MNDI', 'MRO', 'NG.', 'NXT', 'OCDO', 'PHNX', 'PSH', 'PSN', 'RDSB',
+    'REL', 'RKT', 'RMG', 'RMV', 'RR.', 'RTO', 'SBRY', 'SDR', 'SGE',
+    'SGRO', 'SHEL', 'SKG', 'SMDS', 'SMIN', 'SN.', 'SPX', 'TSCO', 'TW.',
+    'ULVR', 'UU.', 'VOD', 'WPP'
+}
+
 def detect_market(ticker: str) -> str:
     """
     Detect market for a ticker symbol.
@@ -37,22 +52,7 @@ def detect_market(ticker: str) -> str:
     if ticker.endswith('.L') or '_EQ' in ticker:
         return 'UK'
 
-    # Common UK ticker patterns (major UK stocks without .L)
-    uk_tickers = {
-        'LLOY', 'HSBA', 'BARC', 'BP', 'VOD', 'GSK', 'AZN', 'RIO', 'BHP',
-        'ULVR', 'DGE', 'BT.A', 'NG.L', 'PRU', 'AV.L', 'RR.L', 'EXPN',
-        'SSE', 'ITV', 'STAN', 'LGEN', 'AAL', 'CCL', 'CPG', 'EZJ', 'IAG',
-        'BLND', 'INF', 'ABF', 'ADM', 'AHT', 'ANTO', 'AVST', 'BAES', 'BDEV',
-        'BNZL', 'BRBY', 'CCH', 'CTEC', 'DCC', 'EDV', 'ENT', 'EXPN', 'FERG',
-        'FLTR', 'FRES', 'GFS', 'GLEN', 'HIK', 'HWDN', 'ICG', 'IHG', 'III',
-        'IMB', 'INCH', 'ITRK', 'JD.', 'KGF', 'LAND', 'LMP', 'LSEG', 'MKS',
-        'MNDI', 'MRO', 'NG.', 'NXT', 'OCDO', 'PHNX', 'PSH', 'PSN', 'RDSB',
-        'REL', 'RKT', 'RMG', 'RMV', 'RR.', 'RTO', 'SBRY', 'SDR', 'SGE',
-        'SGRO', 'SHEL', 'SKG', 'SMDS', 'SMIN', 'SN.', 'SPX', 'TSCO', 'TW.',
-        'ULVR', 'UU.', 'VOD', 'WPP'
-    }
-
-    if ticker in uk_tickers:
+    if ticker in COMMON_UK_TICKERS:
         return 'UK'
 
     # Default to US for most other tickers
