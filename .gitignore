@@ -4,6 +4,7 @@
 /DerivedData/
 *.xcodeproj/project.xcworkspace
 *.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
 
 # Swift
 .build/
