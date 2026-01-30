@@ -23,20 +23,6 @@ async def get_mcp_status():
     """
     try:
         servers = state.chat_manager.get_mcp_servers(sanitize=True)
-        sanitized_servers = servers # It returns list of dicts, already sanitized if sanitize=True is passed
-        
-        # We need to ensure the variable name 'sanitized_servers' is used as expected by the return statement
-        # HEAD code:
-        # servers = state.chat_manager.get_mcp_servers(sanitize=True)
-        # return {"servers": servers}  <-- Wait, HEAD return might be different?
-        
-        # Let's check the return statement in the file.
-        # The file shows:
-        # 43:         return {"servers": sanitized_servers}
-        
-        # So I need to assign 'servers' to 'sanitized_servers' or change the return.
-        # Actually, get_mcp_servers(sanitize=True) returns a list of sanitized server dicts.
-        # So I can just say:
         sanitized_servers = state.chat_manager.get_mcp_servers(sanitize=True)
 
         for server in sanitized_servers:

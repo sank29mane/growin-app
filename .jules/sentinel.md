@@ -7,3 +7,8 @@
 **Vulnerability:** The `/mcp/status` and `/mcp/servers` endpoints returned the full configuration of MCP servers, including the `env` dictionary which contains sensitive API keys (e.g., `HF_TOKEN`, `TRADING212_API_KEY`).
 **Learning:** Returning internal configuration objects directly to the client often leaks secrets. Even "status" endpoints can be dangerous if they dump raw configuration data.
 **Prevention:** Implement strict serialization logic (DTOs) or sanitization helpers for API responses. Never return raw configuration objects that might contain secrets.
+
+## 2026-01-24 - Information Leakage via Exception Details
+**Vulnerability:** Several API endpoints (`/conversations/*`, `/mcp/status`) were catching generic exceptions and returning `str(e)` in the HTTP 500 response. This exposed internal database errors, SQL queries, and potentially partial secrets or file paths to the client.
+**Learning:** Returning raw exception messages is a common "developer convenience" that becomes a security risk in production. It provides attackers with details about the technology stack (SQLite), schema, and internal logic.
+**Prevention:** Catch exceptions and log them server-side with full tracebacks. Return a generic "Internal Server Error" message to the client. Use distinct error handling for expected errors (4xx) vs unexpected ones (5xx).
