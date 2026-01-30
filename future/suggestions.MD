@@ -7,7 +7,7 @@ This document tracks architectural improvements and technical debt that require 
 **Status:** In Progress (Partial Mitigation Applied)
 **Priority:** High
 **Context:**
-The current ticker normalization logic (`backend/trading212_mcp_server.py:normalize_ticker`) relies on fragile regex heuristics and hardcoded exclusion lists to distinguish between US and UK stocks. This caused a bug where US tickers like `IBM`, `F`, and `SMCI` were incorrectly suffixed with `.L`. A tactical fix expanded the exclusion list and refactored constants for performance, but the fundamental fragility remains.
+The current ticker normalization logic (`backend/trading212_mcp_server.py:normalize_ticker`) relies on fragile regex heuristics and hardcoded exclusion lists to distinguish between US and UK stocks. This caused a bug where US tickers like `IBM`, `F`, `SMCI`, `RDDT`, and `ARM` were incorrectly suffixed with `.L`. A tactical fix expanded the exclusion list and refactored constants for performance, but the fundamental fragility remains.
 
 **Problem:**
 - Heuristics (e.g., "length <= 4 implies UK") are inaccurate for a global market.
