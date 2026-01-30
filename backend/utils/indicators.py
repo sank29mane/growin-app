@@ -3,16 +3,18 @@ import pandas as pd
 import numpy as np
 from typing import List, Dict, Any
 
+import growin_core
+
 def calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
-    """Calculate Relative Strength Index."""
-    delta = prices.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    """Calculate Relative Strength Index using Rust core."""
+    # Convert Series to list for Rust
+    prices_list = prices.fillna(0).tolist()
     
-    # Avoid division by zero
-    rs = gain / loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.fillna(50)  # Default to neutral
+    # Call Rust extension
+    rsi_values = growin_core.calculate_rsi(prices_list, period)
+    
+    # Return as Series with same index
+    return pd.Series(rsi_values, index=prices.index, name="RSI")
 
 def calculate_volatility(high: pd.Series, low: pd.Series, period: int = 14) -> pd.Series:
     """Calculate price volatility (High-Low spread smoothed)."""

@@ -63,24 +63,21 @@ class DecisionAgent:
                     google_api_key=key
                 )
             
-            elif "gemma" in self.model_name.lower() or "mistral" in self.model_name.lower():
-                from langchain_ollama import ChatOllama
-                self.llm = ChatOllama(
-                    model=self.model_name,
-                    base_url="http://127.0.0.1:11434"
-                )
-            
+            elif "mlx" in self.model_name.lower() or "granite" in self.model_name.lower():
+                from mlx_langchain import ChatMLX
+                logger.info(f"Initializing Native MLX Model: {self.model_name}")
+                self.llm = ChatMLX(model_name=self.model_name)
+
             elif "lmstudio" in self.model_name.lower() or "auto-detect" in self.model_name.lower():
                 from langchain_openai import ChatOpenAI
                 import httpx
                 
-                # Detect loaded model
-                response = httpx.get("http://127.0.0.1:1234/v1/models", timeout=5.0)
-                if response.status_code == 200:
-                    models_data = response.json()
-                    if models_data.get("data") and len(models_data["data"]) > 0:
-                        # Filter out embedding models (SOTA: Ensures we don't try to use an embedding model as an LLM)
-                        chat_models = [m for m in models_data["data"] if "embedding" not in m["id"].lower()]
+                try:
+                    # Detect loaded model
+                    response = httpx.get("http://127.0.0.1:1234/v1/models", timeout=2.0)
+                    if response.status_code == 200:
+                        models_data = response.json()
+                        chat_models = [m for m in models_data.get("data", []) if "embedding" not in m["id"].lower()]
                         
                         if chat_models:
                             loaded_model = chat_models[0]["id"]
@@ -92,31 +89,36 @@ class DecisionAgent:
                                 openai_api_key="lm-studio"
                             )
                         else:
-                            raise ValueError("No chat models loaded in LM Studio (only embedding models found)")
+                            raise ValueError("No chat models loaded in LM Studio")
                     else:
-                        raise ValueError("No model loaded in LM Studio")
-                else:
-                    raise ValueError("No model loaded in LM Studio")
-                        
-            elif "mlx" in self.model_name.lower() or "granite" in self.model_name.lower():
-                from mlx_langchain import ChatMLX
-                logger.info(f"Initializing MLX Model: {self.model_name}")
-                self.llm = ChatMLX(model_name=self.model_name)
+                        raise ValueError(f"LM Studio status {response.status_code}")
+                except Exception as e:
+                    logger.warning(f"LM Studio/Auto-detect failed ({e}). Falling back to Native MLX.")
+                    self.model_name = "native-mlx"
+                    from mlx_langchain import ChatMLX
+                    self.llm = ChatMLX(model_name="native-mlx")
+            
+            elif "gemma" in self.model_name.lower() or "mistral" in self.model_name.lower():
+                from langchain_ollama import ChatOllama
+                self.llm = ChatOllama(
+                    model=self.model_name,
+                    base_url="http://127.0.0.1:11434"
+                )
 
             else:
                 raise ValueError(f"Unsupported model: {self.model_name}")
             
-            logger.info(f"DecisionAgent initialized with {self.model_name}")
+            logger.info(f"DecisionAgent successfully initialized with {self.model_name}")
             
         except Exception as e:
-            logger.error(f"Failed to initialize LLM: {e}")
-            # Fallback to a safe default if initialization fails, or re-raise
-            if "mlx" in self.model_name.lower():
-                 logger.warning("MLX initialization failed (model might not be loaded). Continuing...")
-                 from mlx_langchain import ChatMLX
-                 self.llm = ChatMLX(model_name=self.model_name)
-            else:
-                raise
+            logger.error(f"Critical failure in DecisionAgent initialization: {e}")
+            # Final fallback: Hard-force MLX if it's not already attempted
+            try:
+                from mlx_langchain import ChatMLX
+                self.llm = ChatMLX(model_name="native-mlx")
+                logger.info("Successfully forced Native MLX fallback.")
+            except:
+                raise RuntimeError(f"Total failure in DecisionAgent: {e}")
     
     async def make_decision(self, context: MarketContext, query: str) -> str:
         """
@@ -138,6 +140,17 @@ class DecisionAgent:
             logger.info("DecisionAgent: Injecting relevant skills into prompt")
             prompt += f"\n\n=== RELEVANT EXPERT GUIDELINES ===\n{skills_text}\n=================================="
         # -----------------------
+
+        # --- LOCAL RAG CONTEXT (Phase 2 Upgrade) ---
+        # Retrieve relevant historical context (past trades, chat logs)
+        from app_context import state
+        if state.rag_manager:
+            rag_docs = state.rag_manager.query(query, n_results=3)
+            if rag_docs:
+                rag_text = "\n".join([f"- {d['content']} (Source: {d['metadata'].get('type','unknown')})" for d in rag_docs])
+                logger.info(f"DecisionAgent: Injecting {len(rag_docs)} RAG documents")
+                prompt += f"\n\n=== HISTORICAL CONTEXT (RAG) ===\n{rag_text}\n================================"
+        # -------------------------------------------
         
         # Invoke LLM
         try:
@@ -190,10 +203,42 @@ class DecisionAgent:
             system_message = SystemMessage(content=system_content)
             human_message = HumanMessage(content=prompt)
             
-            response = await self.llm.ainvoke([system_message, human_message])
+            # --- RECURSIVE THINKING LOOP (Phase 2 Upgrade) ---
+            # 1. Draft Phase
+            status_manager.set_status("decision_agent", "working", "Drafting initial analysis...", model=self.model_name)
+            draft_response = await self.llm.ainvoke([system_message, human_message])
+            draft_content = draft_response.content
             
-            # Clean up the response to remove thinking artifacts
-            recommendation = self._clean_response(response.content)
+            # 2. Critique & Refine Phase (Only for complex intents)
+            if context.intent in ["hybrid", "analytical"] and "gpt" in self.model_name:
+                status_manager.set_status("decision_agent", "working", "Refining strategy (Self-Critique)...", model=self.model_name)
+                
+                critique_prompt = f"""
+                [SELF-REFLECTION STEP]
+                Review your Draft Analysis above.
+                Check for:
+                1. Did you hallucinate any data not present in the Context?
+                2. Did you strictly follow the "MANDATORY ANSWER FORMAT"?
+                3. Is the risk assessment balanced?
+                
+                If the draft is perfect, repeat it exactly.
+                If flaws are found, rewrite the "Strategic Synthesis" section to be more accurate.
+                Ensure the final output is ONLY the corrected response, following the format constraints.
+                """
+                
+                messages = [
+                    system_message,
+                    human_message,
+                    draft_response, # The draft
+                    HumanMessage(content=critique_prompt)
+                ]
+                
+                final_response = await self.llm.ainvoke(messages)
+                recommendation = self._clean_response(final_response.content)
+            else:
+                # Skip recursion for simple queries or non-capable models to save time
+                recommendation = self._clean_response(draft_content)
+            # -------------------------------------------------
             
             # Price validation if trade recommended
             if any(word in recommendation.upper() for word in ["BUY", "SELL"]):

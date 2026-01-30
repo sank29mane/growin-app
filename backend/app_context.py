@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
 import asyncio
 from chat_manager import ChatManager
+from rag_manager import RAGManager
 from mcp_client import Trading212MCPClient
 
 import time
@@ -22,6 +23,7 @@ class AppState:
     """Manages global application state"""
     def __init__(self):
         self.chat_manager = ChatManager()
+        self.rag_manager = RAGManager()
         self.mcp_client = Trading212MCPClient()
         self.start_time = time.time()
         # On-device ANE configuration (default off; auto-detect on startup)

@@ -258,15 +258,22 @@ class QuantAgent(BaseAgent):
         return macd, macd_signal, macd_hist
 
     def _calculate_ema(self, data: np.ndarray, period: int) -> np.ndarray:
-        """Exponential Moving Average"""
+        """Exponential Moving Average (Vectorized using Pandas)"""
         if len(data) < period:
             return np.full(len(data), data.mean() if len(data) > 0 else 0)
-        ema = np.zeros(len(data))
-        ema[period-1] = data[:period].mean()
-        multiplier = 2 / (period + 1)
-        for i in range(period, len(data)):
-            ema[i] = (data[i] - ema[i-1]) * multiplier + ema[i-1]
-        return ema
+        
+        try:
+            import pandas as pd
+            # Use pandas EWM for C-optimized calculation (~100x faster than python loop)
+            return pd.Series(data).ewm(span=period, adjust=False).mean().to_numpy()
+        except ImportError:
+            # Fallback to python loop
+            ema = np.zeros(len(data))
+            ema[period-1] = data[:period].mean()
+            multiplier = 2 / (period + 1)
+            for i in range(period, len(data)):
+                ema[i] = (data[i] - ema[i-1]) * multiplier + ema[i-1]
+            return ema
 
     def _calculate_bbands(self, closes: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Pure Python Bollinger Bands"""
@@ -306,38 +313,53 @@ class QuantAgent(BaseAgent):
 
     def _calculate_pivot_levels(self, highs: np.ndarray, lows: np.ndarray, closes: np.ndarray) -> Dict[str, float]:
         """
-        Calculates structural Support and Resistance using local extremes (Pivots).
-        Uses a sliding window to find peaks/troughs and then finds levels closest to current price.
+        Calculates structural Support and Resistance using local extremes (Vectorized).
+        Uses scipy.signal.argrelextrema for efficiency.
         """
         current_price = closes[-1]
-        window = 5 # Looking for local high/low in a 11-bar window
+        order = 5 # Window size (lookback/lookahead)
         
-        peaks = []
-        troughs = []
-        
-        for i in range(window, len(closes) - window):
-            # Peak identification
-            if all(highs[i] > highs[i-j] for j in range(1, window+1)) and \
-               all(highs[i] > highs[i+j] for j in range(1, window+1)):
-                peaks.append(highs[i])
-                
-            # Trough identification
-            if all(lows[i] < lows[i-j] for j in range(1, window+1)) and \
-               all(lows[i] < lows[i+j] for j in range(1, window+1)):
-                troughs.append(lows[i])
-        
+        try:
+            from scipy.signal import argrelextrema
+            
+            # Find local maxima (peaks) and minima (troughs)
+            # order=5 means it must be the max/min within 5 points on EITHER side
+            peak_idx = argrelextrema(highs, np.greater, order=order)[0]
+            trough_idx = argrelextrema(lows, np.less, order=order)[0]
+            
+            peaks = highs[peak_idx]
+            troughs = lows[trough_idx]
+        except ImportError:
+            # Fallback to window loop logic if scipy missing
+            peaks = []
+            troughs = []
+            window = order
+            for i in range(window, len(closes) - window):
+                if all(highs[i] > highs[i-j] for j in range(1, window+1)) and \
+                   all(highs[i] > highs[i+j] for j in range(1, window+1)):
+                    peaks.append(highs[i])
+                if all(lows[i] < lows[i-j] for j in range(1, window+1)) and \
+                   all(lows[i] < lows[i+j] for j in range(1, window+1)):
+                    troughs.append(lows[i])
+
         # If no structural points found, fallback to 50-day extremes
-        if not peaks: peaks = [np.max(highs[-50:])]
-        if not troughs: troughs = [np.min(lows[-50:])]
+        if len(peaks) == 0: peaks = np.array([np.max(highs[-50:])])
+        if len(troughs) == 0: troughs = np.array([np.min(lows[-50:])])
         
         # Find closest structural levels to current price
-        # Resistance: The lowest peak above current price (or highest if none above)
-        above = [p for p in peaks if p > current_price]
-        res = min(above) if above else max(peaks)
-        
-        # Support: The highest trough below current price (or lowest if none below)
-        below = [t for t in troughs if t < current_price]
-        sup = max(below) if below else min(troughs)
+        # Resistance: Lowest peak above price, or highest peak if none above
+        above_mask = peaks > current_price
+        if np.any(above_mask):
+            res = np.min(peaks[above_mask])
+        else:
+            res = np.max(peaks)
+            
+        # Support: Highest trough below price, or lowest trough if none below
+        below_mask = troughs < current_price
+        if np.any(below_mask):
+            sup = np.max(troughs[below_mask])
+        else:
+            sup = np.min(troughs)
         
         return {
             "support": float(sup),

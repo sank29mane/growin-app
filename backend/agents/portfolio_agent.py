@@ -64,7 +64,11 @@ class PortfolioAgent(BaseAgent):
                  raise ValueError("Empty response from MCP tool")
 
             content = result.content[0].text
-            data = json.loads(content)
+            try:
+                data = json.loads(content)
+            except json.JSONDecodeError as decode_err:
+                self.logger.error(f"Failed to parse portfolio JSON. Raw content: {content[:200]}")
+                raise ValueError(f"Invalid JSON response from portfolio tool: {decode_err}")
             
             # Check for error in tool response
             if "error" in data:

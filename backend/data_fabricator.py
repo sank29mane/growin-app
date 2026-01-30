@@ -156,7 +156,12 @@ class DataFabricator:
                     def fetch_yf_price():
                         y_ticker = ticker
                         t = yf.Ticker(y_ticker)
-                        p = t.fast_info.last_price
+                        p = getattr(t.fast_info, 'last_price', 0.0)
+                        if not p or p <= 0:
+                            # Fallback: Get most recent close from history
+                            hist = t.history(period="1d")
+                            if not hist.empty:
+                                p = hist['Close'].iloc[-1]
                         return p if p else 0.0
                         
                     yf_price = await asyncio.to_thread(fetch_yf_price)
