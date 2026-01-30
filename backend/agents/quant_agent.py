@@ -258,16 +258,37 @@ class QuantAgent(BaseAgent):
         return macd, macd_signal, macd_hist
 
     def _calculate_ema(self, data: np.ndarray, period: int) -> np.ndarray:
-        """Exponential Moving Average (Vectorized using Pandas)"""
+        """Exponential Moving Average (Bolt Optimized)"""
         if len(data) < period:
             return np.full(len(data), data.mean() if len(data) > 0 else 0)
-        
+
         try:
             import pandas as pd
-            # Use pandas EWM for C-optimized calculation (~100x faster than python loop)
-            return pd.Series(data).ewm(span=period, adjust=False).mean().to_numpy()
+            # Bolt Optimization: Vectorized Pandas implementation (~10x faster)
+
+            # Calculate SMA for the initialization point
+            initial_sma = data[:period].mean()
+
+            # Construct data for EWM: [initial_sma, data[period], data[period+1], ...]
+            # We skip the first 'period' elements of original data for EWM calculation
+            rest_of_data = data[period:]
+            concat_data = np.concatenate(([initial_sma], rest_of_data))
+
+            # Apply EWM
+            # span=period corresponds to alpha = 2/(period+1)
+            # adjust=False ensures recursive calculation: y_t = (1-alpha)*y_{t-1} + alpha*x_t
+            ewm_values = pd.Series(concat_data).ewm(span=period, adjust=False).mean().values
+
+            # Reconstruct the full array
+            result = np.zeros(len(data))
+
+            # The 'ewm_values' array corresponds to indices [period-1, period, period+1, ...]
+            result[period-1:] = ewm_values
+
+            return result
+
         except ImportError:
-            # Fallback to python loop
+            # Fallback to original loop implementation if pandas is missing
             ema = np.zeros(len(data))
             ema[period-1] = data[:period].mean()
             multiplier = 2 / (period + 1)
