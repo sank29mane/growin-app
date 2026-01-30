@@ -33,7 +33,18 @@ STATE_FILE = ".state.json"
 # Import centralized currency normalization
 from utils.currency_utils import CurrencyNormalizer, normalize_all_positions, calculate_portfolio_value
 
-# --- Ticker Normalization Constants ---
+# --- Ticker Normalization Constants & Optimization ---
+
+try:
+    import growin_core
+    HAS_GROWIN_CORE = True
+except ImportError:
+    HAS_GROWIN_CORE = False
+
+# Pre-compiled regex patterns for performance
+SUFFIX_REGEX = re.compile(r'(_EQ|_US|_BE|_DE|_GB|_FR|_NL|_ES|_IT)+$')
+LEVERAGED_PREFIX_REGEX = re.compile(r'^(3|5|7)[A-Z]+')
+LEVERAGED_SUFFIX_REGEX = re.compile(r'[A-Z]+(2|3|5|7)$')
 
 SPECIAL_MAPPINGS = {
     "SSLNL": "SSLN", "SGLNL": "SGLN", "3GLD": "3GLD", "SGLN": "SGLN",
@@ -102,60 +113,62 @@ def normalize_ticker(ticker: str) -> str:
     SOTA Ticker Normalization: Resolves discrepancies between Trading212, 
     Yahoo Finance, Alpaca, and Finnhub via Rust-optimized core.
     """
-    try:
-        import growin_core
-        return growin_core.normalize_ticker(ticker)
-    except Exception as e:
-        # Fallback to robust Python logic if Rust fails or is missing
-        if not ticker:
-            return ""
+    if HAS_GROWIN_CORE:
+        try:
+            return growin_core.normalize_ticker(ticker)
+        except Exception:
+            # Fallback to robust Python logic if Rust fails
+            pass
 
-        # 1. Basic Cleaning
-        ticker = ticker.upper().strip().replace("$", "")
-        
-        # 2. Already Normalized (contains dot)
-        if "." in ticker:
-            return ticker
+    if not ticker:
+        return ""
 
-        # 3. Handle Platform-Specific Artifacts
-        original = ticker
-        # Strip T212 suffixes (handles multiple like _US_EQ)
-        ticker = re.sub(r'(_EQ|_US|_BE|_DE|_GB|_FR|_NL|_ES|_IT)+$', '', ticker)
-        ticker = ticker.replace("_", "") # Fallback for messy underscores
-        
-        # 4. SPECIAL MAPPINGS (SOTA curated list for T212 -> YFinance)
-        if ticker in SPECIAL_MAPPINGS:
-            ticker = SPECIAL_MAPPINGS[ticker]
+    # 1. Basic Cleaning
+    ticker = ticker.upper().strip().replace("$", "")
 
-        # 5. Suffix Protection for Leveraged Products & Extra 'L' Handling
-        # Many UK tickers arrive with an extra 'L' (e.g., BARCL, SHELL, GSKL).
-        # If len > 3 and ends in 'L', it's likely a suffix we should strip.
-        is_leveraged_etp = ticker.endswith("1") and len(ticker) > 3
-        
-        # Check against common UK stock stems for "1" suffix
-        if is_leveraged_etp:
-            if ticker.startswith(LEVERAGED_STEMS):
-                ticker = ticker[:-1]
-                
-        # 6. Global Exchange Logic (UK vs US)
-        is_explicit_uk = "_EQ" in original and "_US" not in original
-        is_likely_uk = (len(ticker) <= 5 or ticker.endswith("L")) and ticker not in US_EXCLUSIONS
-        
-        # Heuristic for stripping extra 'L' (e.g. BARCL -> BARC)
-        if is_likely_uk and ticker.endswith("L") and len(ticker) > 3 and ticker not in US_EXCLUSIONS:
-            # Safe heuristic: Strip L.
+    # 2. Already Normalized (contains dot)
+    if "." in ticker:
+        return ticker
+
+    # 3. Handle Platform-Specific Artifacts
+    original = ticker
+    # Strip T212 suffixes (handles multiple like _US_EQ)
+    ticker = SUFFIX_REGEX.sub('', ticker)
+    ticker = ticker.replace("_", "") # Fallback for messy underscores
+
+    # 4. SPECIAL MAPPINGS (SOTA curated list for T212 -> YFinance)
+    if ticker in SPECIAL_MAPPINGS:
+        ticker = SPECIAL_MAPPINGS[ticker]
+
+    # 5. Suffix Protection for Leveraged Products & Extra 'L' Handling
+    # Many UK tickers arrive with an extra 'L' (e.g., BARCL, SHELL, GSKL).
+    # If len > 3 and ends in 'L', it's likely a suffix we should strip.
+    is_leveraged_etp = ticker.endswith("1") and len(ticker) > 3
+
+    # Check against common UK stock stems for "1" suffix
+    if is_leveraged_etp:
+        if ticker.startswith(LEVERAGED_STEMS):
             ticker = ticker[:-1]
 
-        # Leveraged ETPs (Granular detection)
-        is_leveraged = bool(re.search(r'^(3|5|7)[A-Z]+', ticker)) or \
-                        bool(re.search(r'[A-Z]+(2|3|5|7)$', ticker))
-                        
-        if is_explicit_uk or is_likely_uk or is_leveraged:
-            # Ensure it doesn't already have .L (redundant check)
-            if not ticker.endswith(".L") and "." not in ticker:
-                return f"{ticker}.L"
+    # 6. Global Exchange Logic (UK vs US)
+    is_explicit_uk = "_EQ" in original and "_US" not in original
+    is_likely_uk = (len(ticker) <= 5 or ticker.endswith("L")) and ticker not in US_EXCLUSIONS
 
-        return ticker
+    # Heuristic for stripping extra 'L' (e.g. BARCL -> BARC)
+    if is_likely_uk and ticker.endswith("L") and len(ticker) > 3 and ticker not in US_EXCLUSIONS:
+        # Safe heuristic: Strip L.
+        ticker = ticker[:-1]
+
+    # Leveraged ETPs (Granular detection)
+    is_leveraged = bool(LEVERAGED_PREFIX_REGEX.search(ticker)) or \
+                    bool(LEVERAGED_SUFFIX_REGEX.search(ticker))
+
+    if is_explicit_uk or is_likely_uk or is_leveraged:
+        # Ensure it doesn't already have .L (redundant check)
+        if not ticker.endswith(".L") and "." not in ticker:
+            return f"{ticker}.L"
+
+    return ticker
 
 
 def _compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
