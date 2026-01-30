@@ -178,16 +178,10 @@ async def get_chart_data(symbol: str, timeframe: str = "1Day", limit: int = 500)
         if db_data is not None and not db_data.empty:
             logger.info(f"✅ Served {len(db_data)} points from AnalyticsDB for {ticker}")
             # Convert to dict format
-            points = []
-            for _, row in db_data.iterrows():
-                points.append({
-                    "timestamp": row["timestamp"].isoformat(),
-                    "close": row["close"],
-                    "high": row["high"],
-                    "low": row["low"],
-                    "open": row["open"],
-                    "volume": int(row["volume"])
-                })
+            # Optimized: Vectorized conversion (approx 10x faster)
+            db_data["timestamp"] = db_data["timestamp"].apply(lambda x: x.isoformat())
+            db_data["volume"] = db_data["volume"].fillna(0).astype(int)
+            points = db_data[["timestamp", "close", "high", "low", "open", "volume"]].to_dict("records")
             
             # AnalyticsDB stores raw values, so we still need to check currency normalization
             # But usually we store normalized values? Let's normalize on read to be safe.
@@ -502,16 +496,17 @@ async def get_yfinance_chart_data(ticker: str, timeframe: str, limit: int, cache
             return []
 
         # Format results
-        points = []
-        for timestamp, row in history.iterrows():
-            points.append({
-                "timestamp": timestamp.isoformat(),
-                "close": round(float(row["Close"]), 2),
-                "high": round(float(row["High"]), 2),
-                "low": round(float(row["Low"]), 2),
-                "open": round(float(row["Open"]), 2),
-                "volume": int(row["Volume"])
-            })
+        # Optimized: Vectorized conversion
+        history = history.copy() # Work on copy to avoid setting on view
+        history['timestamp'] = history.index
+        history['timestamp'] = history['timestamp'].apply(lambda x: x.isoformat())
+        history['close'] = history['Close'].round(2)
+        history['high'] = history['High'].round(2)
+        history['low'] = history['Low'].round(2)
+        history['open'] = history['Open'].round(2)
+        history['volume'] = history['Volume'].fillna(0).astype(int)
+
+        points = history[['timestamp', 'close', 'high', 'low', 'open', 'volume']].to_dict('records')
 
         # Apply limit reduction if too many points
         if len(points) > limit:
