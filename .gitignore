@@ -36,3 +36,6 @@ backend/models/mlx/
 
 # Pytest
 .pytest_cache/
+
+# RAG Database
+backend/growin_rag_db/
