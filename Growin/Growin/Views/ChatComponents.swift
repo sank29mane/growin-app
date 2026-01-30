@@ -194,6 +194,7 @@ struct SuggestionChip: View {
             )
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("Ask about \(item.title)")
         .onHover { hovering in
             withAnimation(.easeOut(duration: 0.15)) {
                 isHovered = hovering
@@ -240,6 +241,9 @@ struct AccountPicker: View {
                         Text(displayName(account))
                             .font(.system(size: 12, weight: .medium))
                     }
+                    .accessibilityLabel(displayName(account))
+                    .accessibilityAddTraits(selectedAccount == account ? [.isSelected] : [])
+                    .accessibilityHint("Filters conversation context")
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
                     .background(
