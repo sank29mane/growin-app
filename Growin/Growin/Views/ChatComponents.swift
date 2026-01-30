@@ -156,6 +156,7 @@ struct SuggestionChip: View {
                 Image(systemName: "arrow.right.circle.fill")
                     .font(.system(size: 16))
                     .foregroundStyle(item.color.opacity(isHovered ? 0.8 : 0.4))
+                    .accessibilityHidden(true)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 14)
@@ -273,6 +274,7 @@ struct AccountPicker: View {
                     .foregroundStyle(selectedAccount == account ? .white : .secondary)
                 }
                 .buttonStyle(.plain)
+                .accessibilityAddTraits(selectedAccount == account ? [.isSelected] : [])
             }
         }
         .padding(6)

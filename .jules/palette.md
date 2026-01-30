@@ -1,7 +1,7 @@
-# Palette's Journal
+# Palette's UX Journal
 
-This journal records critical UX and accessibility learnings from the Growin project.
+This journal tracks critical UX and accessibility learnings for the Growin project.
 
-## 2024-05-22 - Initial Setup
-**Learning:** Accessibility state exposure is critical for custom selection controls.
-**Action:** Always verify that custom segmented controls or pickers use `.accessibilityAddTraits([.isSelected])` to communicate state to screen readers.
+## 2026-01-28 - Accessibility Traits on Custom Controls
+**Learning:** Custom selection controls like "chips" or "pills" implemented with `Button` do not convey their selected state to VoiceOver users by default. They act like stateless buttons.
+**Action:** Always add `.accessibilityAddTraits(isSelected ? [.isSelected] : [])` to custom radio-like buttons to ensure screen readers announce "Selected" state.
