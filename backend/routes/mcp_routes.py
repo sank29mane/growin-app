@@ -22,20 +22,18 @@ async def get_mcp_status():
         Dict with list of servers and their connection statuses
     """
     try:
-        servers = state.chat_manager.get_mcp_servers()
-        for server in servers:
+        servers = state.chat_manager.get_mcp_servers(sanitize=True)
+        sanitized_servers = state.chat_manager.get_mcp_servers(sanitize=True)
+
+        for server in sanitized_servers:
             # Check connection status
-            is_connected = False
-            for session in state.mcp_client.sessions:
-                # This is a bit hacky, need better way to map session to server name
-                # For now assume if we have sessions, we are connected
-                pass
-            
             server["status"] = "connected" if state.mcp_client.session else "disconnected"
-            
-        return {"servers": servers}
+
+        return {"servers": sanitized_servers}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error fetching MCP status: {e}", exc_info=True)
+        # Sentinel: Generic error message
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @router.post("/mcp/trading212/config")
 async def update_t212_config(request: T212ConfigRequest):
@@ -105,4 +103,6 @@ async def update_t212_config(request: T212ConfigRequest):
             return {"status": "saved", "message": "Configuration saved, but MCP not connected"}
             
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error updating T212 config: {e}", exc_info=True)
+        # Sentinel: Generic error message
+        raise HTTPException(status_code=500, detail="Internal Server Error")

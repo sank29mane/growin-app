@@ -11,6 +11,7 @@ from market_context import PortfolioData
 from mcp_client import Trading212MCPClient
 from app_context import state # Access global state
 from trading212_mcp_server import normalize_ticker
+from cache_manager import cache # Import global cache
 import asyncio
 import pandas as pd
 import numpy as np
@@ -63,7 +64,11 @@ class PortfolioAgent(BaseAgent):
                  raise ValueError("Empty response from MCP tool")
 
             content = result.content[0].text
-            data = json.loads(content)
+            try:
+                data = json.loads(content)
+            except json.JSONDecodeError as decode_err:
+                self.logger.error(f"Failed to parse portfolio JSON. Raw content: {content[:200]}")
+                raise ValueError(f"Invalid JSON response from portfolio tool: {decode_err}")
             
             # Check for error in tool response
             if "error" in data:
@@ -122,6 +127,7 @@ class PortfolioAgent(BaseAgent):
             total_value=summary.get("current_value", 0.0), # Schema mapping
             total_pnl=summary.get("total_pnl", 0.0),
             pnl_percent=summary.get("total_pnl_percent", 0.0),
+            net_deposits=summary.get("net_deposits", 0.0),
             cash_balance=summary.get("cash_balance", {"total": 0.0, "free": 0.0}),
             accounts=accounts,
             positions=data.get("positions", [])
@@ -154,8 +160,21 @@ class PortfolioAgent(BaseAgent):
             loop = asyncio.get_running_loop()
             tickers_str = " ".join(tickers)
             
-            # Download historical prices
-            df = await loop.run_in_executor(None, lambda: yf.download(tickers_str, period=period, progress=False)['Close'])
+            # Check cache first
+            cache_key = f"portfolio_history_{tickers_str}_{period}"
+            cached_data = cache.get(cache_key)
+            
+            if cached_data is not None:
+                self.logger.info(f"Cache hit for portfolio history: {cache_key}")
+                df = cached_data
+            else:
+                self.logger.info(f"Cache miss for portfolio history. Fetching from yfinance: {tickers_str}")
+                # Download historical prices
+                df = await loop.run_in_executor(None, lambda: yf.download(tickers_str, period=period, progress=False)['Close'])
+                
+                if not df.empty:
+                    # Cache the result (TTL 1 hour)
+                    cache.set(cache_key, df, ttl=3600)
             
             if df.empty:
                 return []

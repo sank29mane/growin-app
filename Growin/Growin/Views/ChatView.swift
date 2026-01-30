@@ -58,8 +58,8 @@ struct ChatView: View {
                 }) {
                     Image(systemName: "plus.circle")
                 }
-                .help("New Conversation")
-                .accessibilityLabel("New Conversation")
+                .help("New Chat")
+                .accessibilityLabel("New Chat")
             }
         }
         .sheet(isPresented: $viewModel.showConfigPrompt) {

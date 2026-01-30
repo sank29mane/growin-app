@@ -119,7 +119,7 @@ async def chat_message(request: ChatMessage, _=Depends(default_limiter.check)):
             "conversation_id": conversation_id,
             "agent": "DecisionAgent",
             "response": response,
-            "tool_calls": [],
+            "tool_calls": None, # Explicitly null to prevent frontend from treating it as a tool/search result
             "timestamp": timestamp,
             "model_name": request.model_name,
             "coordinator_model": request.coordinator_model,
@@ -202,7 +202,8 @@ async def list_conversations():
     try:
         return state.chat_manager.list_conversations()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error listing conversations: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 
 @router.get("/conversations/{conversation_id}/history")
@@ -222,7 +223,8 @@ async def get_conversation_history(conversation_id: str):
     try:
         return state.chat_manager.load_history(conversation_id)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error loading history for {conversation_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 
 @router.delete("/conversations/{conversation_id}")
@@ -243,7 +245,8 @@ async def delete_conversation(conversation_id: str):
         state.chat_manager.delete_conversation(conversation_id)
         return {"status": "success"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error deleting conversation {conversation_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 
 @router.delete("/conversations/{conversation_id}/clear")
@@ -264,7 +267,8 @@ async def clear_conversation(conversation_id: str):
         state.chat_manager.clear_conversation(conversation_id)
         return {"status": "success"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error clearing conversation {conversation_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 
 async def generate_conversation_title(conversation_id: str, model_name: Optional[str] = None):

@@ -46,6 +46,7 @@ struct PersonaIcon: View {
         Image(systemName: iconName)
             .foregroundStyle(iconColor)
             .font(.system(size: 14, weight: .bold))
+            .accessibilityLabel(name)
     }
     
     private var iconName: String {

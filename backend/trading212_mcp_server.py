@@ -33,95 +33,169 @@ STATE_FILE = ".state.json"
 # Import centralized currency normalization
 from utils.currency_utils import CurrencyNormalizer, normalize_all_positions, calculate_portfolio_value
 
+# --- Ticker Normalization Constants ---
 
+SPECIAL_MAPPINGS = {
+    "SSLNL": "SSLN", "SGLNL": "SGLN", "3GLD": "3GLD", "SGLN": "SGLN",
+    "PHGP": "PHGP", "PHAU": "PHAU", "3LTS": "3LTS", "3USL": "3USL",
+    "LLOY1": "LLOY", "VOD1": "VOD", "BARC1": "BARC", "TSCO1": "TSCO",
+    "BPL1": "BP", "BPL": "BP", # BP.L
+    "AZNL1": "AZN", "AZNL": "AZN", # Astrazeneca
+    "SGLN1": "SGLN",
+    "MAG5": "MAG5", "MAG5L": "MAG5",
+    "MAG7": "MAG7", "MAG7L": "MAG7",
+    "GLD3": "GLD3",
+    "3UKL": "3UKL",
+    "5QQQ": "5QQQ",
+    "TSL3": "TSL3",
+    "NVD3": "NVD3",
+    "AVL": "AV",   # Aviva
+    "UUL": "UU",   # United Utilities
+    "BAL": "BA",   # BAE Systems (BA.L)
+    "SLL": "SL",   # Standard Life / Segro? (Check context usually SL.L)
+    "AU": "AUT",   # Auto Trader? Or Au (Gold)? Assuming AUT for AU.L usually.
+    "REL": "REL",  # RELX (REL.L) - Keep as is
+    "AAL": "AAL",  # Anglo American (AAL.L) - Keep as is
+    "RBL": "RKT",  # Reckitt Benckiser
+    "MICCL": "MICC", # Midwich Group (MICC.L)
+}
+
+US_EXCLUSIONS = {
+    # Tech & Growth
+    "AAPL", "MSFT", "GOOG", "AMZN", "NVDA", "TSLA", "META", "NFLX",
+    "AMD", "INTC", "PYPL", "ADBE", "CSCO", "PEP", "COST", "AVGO", "QCOM", "TXN",
+    "ORCL", "CRM", "IBM", "UBER", "ABNB", "SNOW", "PLTR", "SQ", "SHOP", "SPOT",
+    "GOOGL", # Explicitly exclude GOOGL
+    # New additions from PR #37
+    "SMCI", "MSTR", "COIN", "HOOD", "ARM", "DKNG", "SOFI", "MARA", "RIOT",
+    "CRWD", "PANW", "NET", "DDOG", "ZS", "TEAM", "MDB", "OKTA", "DOCU",
+
+    # Financials
+    "JPM", "BAC", "WFC", "C", "GS", "MS", "BLK", "AXP", "V", "MA", "COF", "USB",
+
+    # Industrial & Auto
+    "CAT", "DE", "GE", "GM", "F", "BA", "LMT", "RTX", "HON", "UPS", "FDX", "UNP", "MMM",
+
+    # Consumer
+    "WMT", "TGT", "HD", "LOW", "MCD", "SBUX", "NKE", "KO", "PEP", "PG", "CL", "MO", "PM", "DIS", "CMCSA",
+
+    # Healthcare
+    "JNJ", "PFE", "MRK", "ABBV", "LLY", "UNH", "CVS", "AMGN", "GILD", "BMY", "ISRG", "TMO", "ABT", "DHR",
+
+    # Energy
+    "XOM", "CVX", "COP", "SLB", "EOG", "OXY", "KMI", "HAL",
+
+    # Telecom
+    "T", "VZ", "TMUS",
+
+    # ETFs
+    "SPY", "QQQ", "DIA", "IWM", "IVV", "VOO", "VTI", "GLD", "SLV", "ARKK", "SMH", "XLF", "XLE", "XLK", "XLV",
+
+    # Single Letter US Tickers
+    "F", "T", "C", "V", "Z", "O", "D", "R", "K", "X", "S", "M", "A", "G"
+}
+
+LEVERAGED_STEMS = tuple(["LLOY", "BARC", "VOD", "HSBA", "TSCO", "BP", "AZN", "RR", "NG", "SGLN", "SSLN"])
 
 def normalize_ticker(ticker: str) -> str:
     """
     SOTA Ticker Normalization: Resolves discrepancies between Trading212, 
-    Yahoo Finance, Alpaca, and Finnhub.
-    
-    Tier 1 Resolution: Rule-based fast path.
+    Yahoo Finance, Alpaca, and Finnhub via Rust-optimized core.
     """
-    if not ticker:
-        return ""
+    try:
+        import growin_core
+        return growin_core.normalize_ticker(ticker)
+    except Exception as e:
+        # Fallback to robust Python logic if Rust fails or is missing
+        if not ticker:
+            return ""
 
-    # 1. Basic Cleaning
-    ticker = ticker.upper().strip().replace("$", "")
-    
-    # 2. Already Normalized (contains dot)
-    if "." in ticker:
-        return ticker
+        # 1. Basic Cleaning
+        ticker = ticker.upper().strip().replace("$", "")
+        
+        # 2. Already Normalized (contains dot)
+        if "." in ticker:
+            return ticker
 
-    # 3. Handle Platform-Specific Artifacts
-    original = ticker
-    # Strip T212 suffixes (handles multiple like _US_EQ)
-    ticker = re.sub(r'(_EQ|_US|_BE|_DE|_GB|_FR|_NL|_ES|_IT)+$', '', ticker)
-    ticker = ticker.replace("_", "") # Fallback for messy underscores
-    
-    # 4. SPECIAL MAPPINGS (SOTA curated list for T212 -> YFinance)
-    # This addresses the "brittle hardcoded rules" by expanding them to high-value targets
-    special_mappings = {
-        "SSLNL": "SSLN",
-        "SGLNL": "SGLN",
-        "3GLD": "3GLD",
-        "SGLN": "SGLN",
-        "PHGP": "PHGP",
-        "PHAU": "PHAU",
-        "3LTS": "3LTS",
-        "3USL": "3USL",
-        "LLOY1": "LLOY", # T212 duplicate ID
-        "VOD1": "VOD",
-        "BARC1": "BARC",
-        "TSCO1": "TSCO",
-        "BPL1": "BP",
-        "AZNL1": "AZN",
-        "SGLN1": "SGLN",
-        "MAG5": "MAG5",      # Leverage Shares 5x Long Mag 7
-        "MAG7": "MAG7",
-        "GLD3": "GLD3",      # Leverage Shares 3x Long Gold
-        "3UKL": "3UKL",      # 3x Long FTSE 100
-        "5QQQ": "5QQQ",      # 5x Long QQQ
-        "TSL3": "TSL3",      # 3x Long Tesla
-        "NVD3": "NVD3",      # 3x Long Nvidia
-    }
-    
-    if ticker in special_mappings:
-        ticker = special_mappings[ticker]
+        # 3. Handle Platform-Specific Artifacts
+        original = ticker
+        # Strip T212 suffixes (handles multiple like _US_EQ)
+        ticker = re.sub(r'(_EQ|_US|_BE|_DE|_GB|_FR|_NL|_ES|_IT)+$', '', ticker)
+        ticker = ticker.replace("_", "") # Fallback for messy underscores
+        
+        # 4. SPECIAL MAPPINGS (SOTA curated list for T212 -> YFinance)
+        if ticker in SPECIAL_MAPPINGS:
+            ticker = SPECIAL_MAPPINGS[ticker]
 
-    # 5. Suffix Protection for Leveraged Products
-    # Leveraged ETPs often end in digits (3, 5, 7). 
-    # T212 duplicates end in '1'.
-    # RULE: If it ends in '1' and len > 3, strip it IF it's likely a duplicate.
-    if ticker.endswith("1") and len(ticker) > 3:
-        # Check against common UK stock stems
-        stems = ["LLOY", "BARC", "VOD", "HSBA", "TSCO", "BP", "AZN", "RR", "NG", "SGLN", "SSLN"]
-        if any(ticker.startswith(stem) for stem in stems):
+        # 5. Suffix Protection for Leveraged Products & Extra 'L' Handling
+        # Many UK tickers arrive with an extra 'L' (e.g., BARCL, SHELL, GSKL).
+        # If len > 3 and ends in 'L', it's likely a suffix we should strip.
+        is_leveraged_etp = ticker.endswith("1") and len(ticker) > 3
+        
+        # Check against common UK stock stems for "1" suffix
+        if is_leveraged_etp:
+            if ticker.startswith(LEVERAGED_STEMS):
+                ticker = ticker[:-1]
+                
+        # 6. Global Exchange Logic (UK vs US)
+        is_explicit_uk = "_EQ" in original and "_US" not in original
+        is_likely_uk = (len(ticker) <= 5 or ticker.endswith("L")) and ticker not in US_EXCLUSIONS
+        
+        # Heuristic for stripping extra 'L' (e.g. BARCL -> BARC)
+        if is_likely_uk and ticker.endswith("L") and len(ticker) > 3 and ticker not in US_EXCLUSIONS:
+            # Safe heuristic: Strip L.
             ticker = ticker[:-1]
 
-    # 6. Global Exchange Logic (UK vs US)
-    # Exclude common US Tech/ETFs from UK suffixing
-    us_exclusions = {
-        "AAPL", "MSFT", "GOOG", "AMZN", "NVDA", "TSLA", "META", "NFLX",
-        "SPY", "QQQ", "DIA", "IWM", "IVV", "VOO", "VTI", "GLD", "SLV", "ARKK", "SMH",
-        "AMD", "INTC", "PYPL", "ADBE", "CSCO", "PEP", "COST", "AVGO", "QCOM", "TXN"
-    }
-    
-    # Determine if UK stock
-    # - T212 explicitly marked it with _EQ (and not _US)
-    # - Or it matches UK pattern (len <= 4, alphanumeric stem) and not in US list
-    is_explicit_uk = "_EQ" in original and "_US" not in original
-    is_likely_uk = (len(ticker) <= 4 or ticker.endswith("L")) and ticker not in us_exclusions
-    
-    # Leveraged ETPs (Granular detection)
-    is_leveraged = bool(re.search(r'^(3|5|7)[A-Z]+', ticker)) or \
-                    bool(re.search(r'[A-Z]+(2|3|5|7)$', ticker))
-                    
-    if is_explicit_uk or is_likely_uk or is_leveraged:
-        # Ensure it doesn't already have .L (redundant check)
-        if not ticker.endswith(".L") and "." not in ticker:
-            return f"{ticker}.L"
+        # Leveraged ETPs (Granular detection)
+        is_leveraged = bool(re.search(r'^(3|5|7)[A-Z]+', ticker)) or \
+                        bool(re.search(r'[A-Z]+(2|3|5|7)$', ticker))
+                        
+        if is_explicit_uk or is_likely_uk or is_leveraged:
+            # Ensure it doesn't already have .L (redundant check)
+            if not ticker.endswith(".L") and "." not in ticker:
+                return f"{ticker}.L"
 
-    return ticker
+        return ticker
+
+
+def _compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """Helper to compute technical indicators efficiently."""
+    if df.empty:
+        return df
+
+    # SMA
+    df["SMA_50"] = df["Close"].rolling(window=50).mean()
+    df["SMA_200"] = df["Close"].rolling(window=200).mean()
+
+    # RSI
+    # Standard RSI uses Wilder's Smoothing (alpha=1/14), but we use SMA (rolling mean)
+    # to maintain compatibility with previous implementation logic.
+    delta = df["Close"].diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+
+    avg_gain = gain.rolling(window=14).mean()
+    avg_loss = loss.rolling(window=14).mean()
+
+    rs = avg_gain / avg_loss
+    df["RSI"] = 100 - (100 / (1 + rs))
+
+    # MACD
+    exp1 = df["Close"].ewm(span=12, adjust=False).mean()
+    exp2 = df["Close"].ewm(span=26, adjust=False).mean()
+    df["MACD"] = exp1 - exp2
+    df["Signal_Line"] = df["MACD"].ewm(span=9, adjust=False).mean()
+
+    # Bollinger Bands
+    # Optimize: reuse rolling object for mean and std
+    roller_20 = df["Close"].rolling(window=20)
+    df["BB_Middle"] = roller_20.mean()
+    std_dev = roller_20.std()
+
+    df["BB_Upper"] = df["BB_Middle"] + (std_dev * 2)
+    df["BB_Lower"] = df["BB_Middle"] - (std_dev * 2)
+
+    return df
 
 
 class Cache:
@@ -1178,9 +1252,10 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     "current_value": round(total_current, 2),
                     "total_pnl": round(total_pnl, 2),
                     "total_pnl_percent": round(
-                        (total_pnl / total_invested) if total_invested > 0 else 0,
-                        4,
+                        (total_pnl / total_invested * 100) if total_invested > 0 else 0,
+                        2,
                     ),
+                    "net_deposits": round(total_current - total_pnl, 2),
                     "cash_balance": {
                         "total": round(total_cash, 2),
                         "free": round(free_cash, 2),
@@ -1327,7 +1402,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             )
 
             # Fetch metadata for normalization
-            instruments = await c.get_all_instruments()
+            instruments = await c.get_instruments()
             metadata_cache = {i.get("ticker"): i for i in instruments}
 
             # Normalize positions
@@ -1681,30 +1756,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 if df.empty:
                     return None
 
-                # SMA
-                df["SMA_50"] = df["Close"].rolling(window=50).mean()
-                df["SMA_200"] = df["Close"].rolling(window=200).mean()
-
-                # RSI
-                delta = df["Close"].diff()
-                gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-                loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-                rs = gain / loss
-                df["RSI"] = 100 - (100 / (1 + rs))
-
-                # MACD
-                exp1 = df["Close"].ewm(span=12, adjust=False).mean()
-                exp2 = df["Close"].ewm(span=26, adjust=False).mean()
-                df["MACD"] = exp1 - exp2
-                df["Signal_Line"] = df["MACD"].ewm(span=9, adjust=False).mean()
-
-                # Bollinger Bands
-                df["BB_Middle"] = df["Close"].rolling(window=20).mean()
-                std_dev = df["Close"].rolling(window=20).std()
-                df["BB_Upper"] = df["BB_Middle"] + (std_dev * 2)
-                df["BB_Lower"] = df["BB_Middle"] - (std_dev * 2)
-
-                return df
+                return _compute_indicators(df)
 
             df = await loop.run_in_executor(None, calc_indicators)
 
@@ -1813,7 +1865,13 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             raise ValueError(f"Unknown tool: {name}")
 
     except Exception as e:
-        return [TextContent(type="text", text=f"Error executing {name}: {str(e)}")]
+        # ALWAYS return JSON for tool results to avoid "Expecting value" errors in clients
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps({"error": f"Error executing {name}: {str(e)}", "success": False})
+            )
+        ]
 
 
 # Global clients map

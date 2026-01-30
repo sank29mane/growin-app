@@ -54,8 +54,10 @@ except Exception:
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import ORJSONResponse
 from contextlib import asynccontextmanager
 import os
+import sys
 
 # Routes will be imported later to avoid circular dependencies
 
@@ -135,7 +137,13 @@ async def lifespan(app: FastAPI):
         state.chat_manager.close()
 
 
-app = FastAPI(title="Growin API", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="Growin API", version="2.0.0", lifespan=lifespan, default_response_class=ORJSONResponse)
+
+# Silencing favicon 404s
+from fastapi.responses import FileResponse
+@app.get('/favicon.ico', include_in_schema=False)
+async def favicon():
+    return FileResponse('favicon.ico')
 
 # CORS configuration
 # Security: Restrict origins to prevent malicious sites from accessing localhost
@@ -201,4 +209,6 @@ async def health_check():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("server:app", host="0.0.0.0", port=8002, reload=True)
+    # uvloop is automatically used by uvicorn.run when loop="auto" (default) or loop="uvloop"
+    # explicit configuration is good for confirming intent
+    uvicorn.run("server:app", host="127.0.0.1", port=8002, reload=True, loop="uvloop")
