@@ -33,7 +33,67 @@ STATE_FILE = ".state.json"
 # Import centralized currency normalization
 from utils.currency_utils import CurrencyNormalizer, normalize_all_positions, calculate_portfolio_value
 
+# 4. SPECIAL MAPPINGS (SOTA curated list for T212 -> YFinance)
+# Map specifically known problematic tickers
+SPECIAL_MAPPINGS = {
+    "SSLNL": "SSLN", "SGLNL": "SGLN", "3GLD": "3GLD", "SGLN": "SGLN",
+    "PHGP": "PHGP", "PHAU": "PHAU", "3LTS": "3LTS", "3USL": "3USL",
+    "LLOY1": "LLOY", "VOD1": "VOD", "BARC1": "BARC", "TSCO1": "TSCO",
+    "BPL1": "BP", "BPL": "BP", # BP.L
+    "AZNL1": "AZN", "AZNL": "AZN", # Astrazeneca
+    "SGLN1": "SGLN",
+    "MAG5": "MAG5", "MAG5L": "MAG5",
+    "MAG7": "MAG7", "MAG7L": "MAG7",
+    "GLD3": "GLD3",
+    "3UKL": "3UKL",
+    "5QQQ": "5QQQ",
+    "TSL3": "TSL3",
+    "NVD3": "NVD3",
+    "AVL": "AV",   # Aviva
+    "UUL": "UU",   # United Utilities
+    "BAL": "BA",   # BAE Systems (BA.L)
+    "SLL": "SL",   # Standard Life / Segro? (Check context usually SL.L)
+    "AU": "AUT",   # Auto Trader? Or Au (Gold)? Assuming AUT for AU.L usually.
+    "REL": "REL",  # RELX (REL.L) - Keep as is
+    "AAL": "AAL",  # Anglo American (AAL.L) - Keep as is
+    "RBL": "RKT",  # Reckitt Benckiser
+    "MICCL": "MICC", # Midwich Group (MICC.L)
+}
 
+# 6. Global Exchange Logic (UK vs US)
+US_EXCLUSIONS = {
+    # Tech & Growth
+    "AAPL", "MSFT", "GOOG", "AMZN", "NVDA", "TSLA", "META", "NFLX",
+    "AMD", "INTC", "PYPL", "ADBE", "CSCO", "PEP", "COST", "AVGO", "QCOM", "TXN",
+    "ORCL", "CRM", "IBM", "UBER", "ABNB", "SNOW", "PLTR", "SQ", "SHOP", "SPOT",
+    "GOOGL", # Explicitly exclude GOOGL
+    "SMCI", "MSTR", "COIN", "HOOD", "ARM", "DKNG", "SOFI", "MARA", "RIOT",
+    "CRWD", "PANW", "NET", "DDOG", "ZS", "TEAM", "MDB", "OKTA", "DOCU",
+
+    # Financials
+    "JPM", "BAC", "WFC", "C", "GS", "MS", "BLK", "AXP", "V", "MA", "COF", "USB",
+
+    # Industrial & Auto
+    "CAT", "DE", "GE", "GM", "F", "BA", "LMT", "RTX", "HON", "UPS", "FDX", "UNP", "MMM",
+
+    # Consumer
+    "WMT", "TGT", "HD", "LOW", "MCD", "SBUX", "NKE", "KO", "PEP", "PG", "CL", "MO", "PM", "DIS", "CMCSA",
+
+    # Healthcare
+    "JNJ", "PFE", "MRK", "ABBV", "LLY", "UNH", "CVS", "AMGN", "GILD", "BMY", "ISRG", "TMO", "ABT", "DHR",
+
+    # Energy
+    "XOM", "CVX", "COP", "SLB", "EOG", "OXY", "KMI", "HAL",
+
+    # Telecom
+    "T", "VZ", "TMUS",
+
+    # ETFs
+    "SPY", "QQQ", "DIA", "IWM", "IVV", "VOO", "VTI", "GLD", "SLV", "ARKK", "SMH", "XLF", "XLE", "XLK", "XLV",
+
+    # Single Letter US Tickers
+    "F", "T", "C", "V", "Z", "O", "D", "R", "K", "X", "S", "M", "A", "G"
+}
 
 def normalize_ticker(ticker: str) -> str:
     """
@@ -58,35 +118,8 @@ def normalize_ticker(ticker: str) -> str:
     ticker = re.sub(r'(_EQ|_US|_BE|_DE|_GB|_FR|_NL|_ES|_IT)+$', '', ticker)
     ticker = ticker.replace("_", "") # Fallback for messy underscores
     
-    # 4. SPECIAL MAPPINGS (SOTA curated list for T212 -> YFinance)
-    # Map specifically known problematic tickers
-    special_mappings = {
-        "SSLNL": "SSLN", "SGLNL": "SGLN", "3GLD": "3GLD", "SGLN": "SGLN",
-        "PHGP": "PHGP", "PHAU": "PHAU", "3LTS": "3LTS", "3USL": "3USL",
-        "LLOY1": "LLOY", "VOD1": "VOD", "BARC1": "BARC", "TSCO1": "TSCO",
-        "BPL1": "BP", "BPL": "BP", # BP.L
-        "AZNL1": "AZN", "AZNL": "AZN", # Astrazeneca
-        "SGLN1": "SGLN",
-        "MAG5": "MAG5", "MAG5L": "MAG5",
-        "MAG7": "MAG7", "MAG7L": "MAG7",
-        "GLD3": "GLD3", 
-        "3UKL": "3UKL", 
-        "5QQQ": "5QQQ", 
-        "TSL3": "TSL3", 
-        "NVD3": "NVD3",
-        "AVL": "AV",   # Aviva
-        "UUL": "UU",   # United Utilities
-        "BAL": "BA",   # BAE Systems (BA.L)
-        "SLL": "SL",   # Standard Life / Segro? (Check context usually SL.L)
-        "AU": "AUT",   # Auto Trader? Or Au (Gold)? Assuming AUT for AU.L usually.
-        "REL": "REL",  # RELX (REL.L) - Keep as is
-        "AAL": "AAL",  # Anglo American (AAL.L) - Keep as is
-        "RBL": "RKT",  # Reckitt Benckiser
-        "MICCL": "MICC", # Midwich Group (MICC.L)
-    }
-    
-    if ticker in special_mappings:
-        ticker = special_mappings[ticker]
+    if ticker in SPECIAL_MAPPINGS:
+        ticker = SPECIAL_MAPPINGS[ticker]
 
     # 5. Suffix Protection for Leveraged Products & Extra 'L' Handling
     # Many UK tickers arrive with an extra 'L' (e.g., BARCL, SHELL, GSKL).
@@ -99,46 +132,13 @@ def normalize_ticker(ticker: str) -> str:
         if any(ticker.startswith(stem) for stem in stems):
             ticker = ticker[:-1]
             
-    # 6. Global Exchange Logic (UK vs US)
-    us_exclusions = {
-        # Tech & Growth
-        "AAPL", "MSFT", "GOOG", "AMZN", "NVDA", "TSLA", "META", "NFLX",
-        "AMD", "INTC", "PYPL", "ADBE", "CSCO", "PEP", "COST", "AVGO", "QCOM", "TXN",
-        "ORCL", "CRM", "IBM", "UBER", "ABNB", "SNOW", "PLTR", "SQ", "SHOP", "SPOT",
-        "GOOGL", # Explicitly exclude GOOGL
-
-        # Financials
-        "JPM", "BAC", "WFC", "C", "GS", "MS", "BLK", "AXP", "V", "MA", "COF", "USB",
-
-        # Industrial & Auto
-        "CAT", "DE", "GE", "GM", "F", "BA", "LMT", "RTX", "HON", "UPS", "FDX", "UNP", "MMM",
-
-        # Consumer
-        "WMT", "TGT", "HD", "LOW", "MCD", "SBUX", "NKE", "KO", "PEP", "PG", "CL", "MO", "PM", "DIS", "CMCSA",
-
-        # Healthcare
-        "JNJ", "PFE", "MRK", "ABBV", "LLY", "UNH", "CVS", "AMGN", "GILD", "BMY", "ISRG", "TMO", "ABT", "DHR",
-
-        # Energy
-        "XOM", "CVX", "COP", "SLB", "EOG", "OXY", "KMI", "HAL",
-
-        # Telecom
-        "T", "VZ", "TMUS",
-
-        # ETFs
-        "SPY", "QQQ", "DIA", "IWM", "IVV", "VOO", "VTI", "GLD", "SLV", "ARKK", "SMH", "XLF", "XLE", "XLK", "XLV",
-
-        # Single Letter US Tickers
-        "F", "T", "C", "V", "Z", "O", "D", "R", "K", "X", "S", "M", "A", "G"
-    }
-    
     is_explicit_uk = "_EQ" in original and "_US" not in original
-    is_likely_uk = (len(ticker) <= 5 or ticker.endswith("L")) and ticker not in us_exclusions
+    is_likely_uk = (len(ticker) <= 5 or ticker.endswith("L")) and ticker not in US_EXCLUSIONS
     
     # Heuristic for stripping extra 'L' (e.g. BARCL -> BARC)
     # We apply this if it looks like a UK stock and satisfies length constraints.
     # Exclude typical 3-letter codes that are valid (like AAL, REL) unless mapped.
-    if is_likely_uk and ticker.endswith("L") and len(ticker) > 3 and ticker not in us_exclusions:
+    if is_likely_uk and ticker.endswith("L") and len(ticker) > 3 and ticker not in US_EXCLUSIONS:
         # Check if stripping L leaves a valid-looking numeric suffix or leveraged token?
         # Usually valid tickers are 3 or 4 chars. 
         # BARCL (5) -> BARC (4). OK.
