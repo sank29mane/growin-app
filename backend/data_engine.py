@@ -4,7 +4,7 @@ import time
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
-from trading212_mcp_server import normalize_ticker
+from utils.ticker_utils import normalize_ticker
 
 # Set up logging
 logger = logging.getLogger(__name__)
