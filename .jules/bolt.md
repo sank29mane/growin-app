@@ -13,3 +13,7 @@
 ## 2026-01-18 - Vectorization of EMA (Recursive vs Convolution)
 **Learning:** `pandas.Series.ewm(span=N, adjust=False)` provides ~15x speedup (0.07s -> 0.005s) over iterative Python loops for EMA calculation. However, `np.convolve` (used for SMA) is faster than `pandas.Series.rolling` (0.0038s vs 0.0055s) because it uses optimized C-level convolution.
 **Action:** Use Pandas `ewm` for recursive indicators like EMA (matching initialization carefully), but stick to `np.convolve` for simple moving averages / convolutions where possible. Always verify speedups before switching to Pandas for simple operations.
+
+## 2026-01-20 - Exception Handling Overhead in Loops
+**Learning:** Checking for an optional dependency using `try...import...except` *inside* a frequently called function (like `normalize_ticker`) adds massive overhead (~2µs per call) if the dependency is missing, due to repeated exception raising.
+**Action:** Move conditional imports to module scope and use a boolean flag (`HAS_DEPENDENCY`) to guard the optional logic. This reduced execution time by ~32% and nearly matched pure Python performance.
