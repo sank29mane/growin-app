@@ -1,7 +1,6 @@
-"""
-Quant Agent - Technical Analysis using TA-Lib
+"Quant Agent - Technical Analysis using TA-Lib
 Ultra-fast algorithmic technical indicator calculations.
-"""
+"
 
 from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from market_context import QuantData, Signal
@@ -192,7 +191,7 @@ class QuantAgent(BaseAgent):
             return Signal.NEUTRAL
     
     def _calculate_rsi(self, closes: np.ndarray, period: int = 14) -> np.ndarray:
-        """Pure Python RSI calculation using Wilder's Smoothing"""
+        """Pure Python RSI calculation using Wilder's Smoothing (matches TA-Lib)"""
         if len(closes) < period + 1:
             return np.full(len(closes), 50.0)
 
@@ -217,9 +216,6 @@ class QuantAgent(BaseAgent):
             avg_losses = wilders_smoothing(losses, period)
 
             # Reconstruct RSI array
-            # avg_gains/losses match length of deltas - period + 1
-            # They correspond to the tail of the closes array
-
             with np.errstate(divide='ignore', invalid='ignore'):
                 rs = avg_gains / avg_losses
                 rsi_vals = 100.0 - (100.0 / (1.0 + rs))
@@ -229,14 +225,13 @@ class QuantAgent(BaseAgent):
             rsi_vals[(avg_gains == 0) & (avg_losses == 0)] = 50.0
 
             # Pad with neutral values for early data points
-            # The valid RSI values start at index `period` of the original `closes` array
             result = np.full(len(closes), 50.0)
             result[period:] = rsi_vals
 
             return result
 
         except ImportError:
-            # Fallback to loop if pandas missing (should not happen in prod)
+            # Fallback to loop if pandas missing
             avg_gains = np.zeros(len(gains))
             avg_losses = np.zeros(len(losses))
 
