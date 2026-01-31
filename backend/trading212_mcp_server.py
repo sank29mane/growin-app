@@ -156,7 +156,7 @@ class FileCache:
 
     def set(self, key: str, value: Any, custom_ttl: Optional[int] = None):
         """
-        Set value in cache.
+        Set value in cache. 
         
         Args:
             key: Cache key
@@ -685,7 +685,7 @@ async def read_resource(uri: str) -> str:
         raise ValueError(f"Unknown resource: {uri}")
 
     data = await resource_map[uri]()
-    return json.dumps(data, separators=(",", ":"))
+    return json.dumps(data, separators=( ",", ":"))
 
 
 @app.list_tools()
@@ -1068,9 +1068,7 @@ async def list_tools() -> list[Tool]:
             description="Get detailed analysis, metadata, and financial ratios for a ticker",
             inputSchema={
                 "type": "object",
-                "properties": {
-                    "ticker": {"type": "string", "description": "Ticker symbol"}
-                },
+                "properties": {"ticker": {"type": "string", "description": "Ticker symbol"}},
                 "required": ["ticker"],
             },
         ),
@@ -1079,22 +1077,21 @@ async def list_tools() -> list[Tool]:
             description="Calculate technical indicators (SMA, RSI, MACD, Bollinger Bands) for a ticker",
             inputSchema={
                 "type": "object",
-                "properties": {
-                    "ticker": {"type": "string", "description": "Ticker symbol"},
-                    "period": {
-                        "type": "string",
-                        "enum": ["3mo", "6mo", "1y", "2y", "5y"],
-                        "description": "Historical data period to use for calculation",
-                        "default": "1y",
-                    },
-                    "interval": {
-                        "type": "string",
-                        "enum": ["1d", "1wk", "1mo"],
-                        "description": "Data interval",
-                        "default": "1d",
-                    },
+                "properties": {"ticker": {"type": "string", "description": "Ticker symbol"}},
+                "period": {
+                    "type": "string",
+                    "enum": ["3mo", "6mo", "1y", "2y", "5y"],
+                    "description": "Historical data period to use for calculation",
+                    "default": "1y",
                 },
-                "required": ["ticker"],
+                "interval": {
+                    "type": "string",
+                    "enum": ["1d", "1wk", "1mo"],
+                    "description": "Data interval",
+                    "default": "1d",
+                },
+            },
+            "required": ["ticker"],
             },
         ),
         Tool(
@@ -1102,9 +1099,7 @@ async def list_tools() -> list[Tool]:
             description="Get the current real-time or delayed price for a ticker. Tries Trading 212 first, falls back to Yahoo Finance.",
             inputSchema={
                 "type": "object",
-                "properties": {
-                    "ticker": {"type": "string", "description": "Ticker symbol"}
-                },
+                "properties": {"ticker": {"type": "string", "description": "Ticker symbol"}},
                 "required": ["ticker"],
             },
         ),
@@ -1138,7 +1133,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                         return [
                             TextContent(
                                 type="text",
-                                text=json.dumps(sanitize_nan(position), separators=(",", ":")),
+                                text=json.dumps(sanitize_nan(position), separators=( ",", ":"))
                             )
                         ]
                 except:
@@ -1224,8 +1219,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 TextContent(
                     type="text",
                     text=json.dumps(
-                        sanitize_nan(results[:20]), separators=(",", ":")
-                    ),  # Limit to top 20 results
+                        sanitize_nan(results[:20]), separators=( ",", ":")) # Limit to top 20 results
                 )
             ]
 
@@ -1284,14 +1278,14 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
             return [
                 TextContent(
-                    type="text", text=json.dumps(sanitize_nan(metrics), separators=(",", ":"))
+                    type="text", text=json.dumps(sanitize_nan(metrics), separators=( ",", ":"))
                 )
             ]
 
         elif name == "get_all_pies":
             pies = await c.get_all_pies()
             return [
-                TextContent(type="text", text=json.dumps(pies, separators=(",", ":")))
+                TextContent(type="text", text=json.dumps(pies, separators=( ",", ":")))
             ]
 
         elif name == "get_pie_details":
@@ -1388,229 +1382,3 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 TextContent(
                     type="text",
                     text=f"Successfully switched active account to {account_type.upper()}.",
-                )
-            ]
-
-        elif name == "get_price_history":
-            return await handle_get_price_history(arguments)
-
-        elif name == "get_ticker_analysis":
-            ticker = normalize_ticker(arguments["ticker"])
-
-            loop = asyncio.get_running_loop()
-
-            def fetch_info():
-                stock = yf.Ticker(ticker)
-                return stock.info
-
-            info = await loop.run_in_executor(None, fetch_info)
-
-            keys_to_keep = [
-                "sector",
-                "industry",
-                "marketCap",
-                "forwardPE",
-                "trailingPE",
-                "dividendYield",
-                "fiftyTwoWeekHigh",
-                "fiftyTwoWeekLow",
-                "averageVolume",
-                "currentPrice",
-                "targetMeanPrice",
-                "recommendationKey",
-                "ebitda",
-                "debtToEquity",
-                "returnOnEquity",
-                "freeCashflow",
-                "beta",
-                "shortName",
-                "longName",
-                "currency",
-            ]
-
-            filtered_info = {k: v for k, v in info.items() if k in keys_to_keep}
-
-            return [TextContent(type="text", text=json.dumps(filtered_info, indent=2))]
-
-        elif name == "calculate_technical_indicators":
-            ticker = normalize_ticker(arguments["ticker"])
-            period = arguments.get("period", "1y")
-            interval = arguments.get("interval", "1d")
-
-            loop = asyncio.get_running_loop()
-
-            def calc_indicators():
-                stock = yf.Ticker(ticker)
-                df = stock.history(period=period, interval=interval)
-
-                if df.empty:
-                    return None
-
-                return _compute_indicators(df)
-
-            df = await loop.run_in_executor(None, calc_indicators)
-
-            if df is None or df.empty:
-                return [
-                    TextContent(
-                        type="text", text=f"No historical data found for {ticker}"
-                    )
-                ]
-
-            latest = df.iloc[-10:].copy()
-            latest = latest.reset_index()
-            latest["Date"] = latest["Date"].apply(
-                lambda x: x.isoformat() if hasattr(x, "isoformat") else str(x)
-            )
-
-            cols = [
-                "Date",
-                "Close",
-                "Volume",
-                "SMA_50",
-                "SMA_200",
-                "RSI",
-                "MACD",
-                "Signal_Line",
-                "BB_Upper",
-                "BB_Lower",
-            ]
-            cols = [c for c in cols if c in latest.columns]
-
-            result = latest[cols].to_dict(orient="records")
-
-            summary = {
-                "ticker": ticker,
-                "latest_indicators": result[-1],
-                "recent_trend": result,
-            }
-
-            return [
-                TextContent(
-                    type="text", text=json.dumps(summary, indent=2, default=str)
-                )
-            ]
-
-        elif name == "get_current_price":
-            return await handle_get_current_price(arguments)
-
-        else:
-            raise ValueError(f"Unknown tool: {name}")
-
-    except Exception as e:
-        # ALWAYS return JSON for tool results to avoid "Expecting value" errors in clients
-        return [
-            TextContent(
-                type="text",
-                text=json.dumps({"error": f"Error executing {name}: {str(e)}", "success": False})
-            )
-        ]
-
-
-# Global clients map
-clients: Dict[str, Trading212Client] = {}
-credentials: dict = {}
-active_account_type: str = "invest"
-
-
-def get_clients() -> Dict[str, Trading212Client]:
-    """Get all initialized clients."""
-    return {k: v for k, v in clients.items() if v is not None}
-
-
-def get_active_client() -> Trading212Client:
-    """Get the currently active client for trading operations."""
-    global active_account_type
-    c = clients.get(active_account_type)
-    if not c:
-        # Fallback to any available client
-        available = get_clients()
-        if not available:
-            raise ValueError(
-                "No Trading 212 clients initialized. Please set API credentials."
-            )
-        return list(available.values())[0]
-    return c
-
-
-async def main():
-    """Main entry point for the MCP server."""
-    global clients, credentials
-
-    # Load environment variables from .env file
-    load_dotenv()
-
-    def get_env_var(name: str) -> Optional[str]:
-        val = os.getenv(name)
-        return val if val and val.strip() else None
-
-    # Get API credentials from environment variables
-    # Try specific keys first, fall back to generic key
-    generic_key = get_env_var("TRADING212_API_KEY")
-    invest_key = get_env_var("TRADING212_API_KEY_INVEST") or generic_key
-    isa_key = get_env_var("TRADING212_API_KEY_ISA")
-
-    generic_secret = get_env_var("TRADING212_API_SECRET")
-    invest_secret = get_env_var("TRADING212_API_SECRET_INVEST") or generic_secret
-    isa_secret = get_env_var("TRADING212_API_SECRET_ISA") or generic_secret
-
-    use_demo = (get_env_var("TRADING212_USE_DEMO") or "false").lower() == "true"
-
-    if not invest_key and not isa_key:
-        print(
-            "Warning: No Trading 212 API credentials found in environment. Please configure at runtime via 'switch_account' tool.",
-            file=sys.stderr,
-        )
-
-    if not invest_secret and not isa_secret:
-        print(
-            "Warning: No Trading 212 API secrets found in environment.", file=sys.stderr
-        )
-
-    # Store credentials
-    credentials = {
-        "invest": {"key": invest_key, "secret": invest_secret},
-        "isa": {"key": isa_key, "secret": isa_secret},
-        "use_demo": use_demo,
-    }
-
-    print("Initializing Trading 212 accounts...", file=sys.stderr)
-    
-    # DEDUPLICATION FIX: If both keys are the same, only create one client
-    # This prevents double-counting when querying "all" accounts
-    if invest_key and isa_key and invest_key == isa_key:
-        print("Note: Same API key for Invest and ISA. Using single client.", file=sys.stderr)
-        clients["invest"] = Trading212Client(invest_key, invest_secret or "", use_demo)
-        # Point ISA to the same client to avoid duplicate queries
-        clients["isa"] = clients["invest"]
-    else:
-        if invest_key:
-            clients["invest"] = Trading212Client(invest_key, invest_secret or "", use_demo)
-        if isa_key:
-            clients["isa"] = Trading212Client(isa_key, isa_secret or "", use_demo)
-
-    global active_account_type
-    active_account_type = (
-        "invest" if "invest" in clients else ("isa" if "isa" in clients else "invest")
-    )
-
-    # Try to load state for active account
-    try:
-        if os.path.exists(STATE_FILE):
-            with open(STATE_FILE, "r") as f:
-                state = json.load(f)
-                saved_type = state.get("account_type")
-                if saved_type in credentials:
-                    active_account_type = saved_type
-    except Exception as e:
-        print(f"Warning: Failed to load state: {e}", file=sys.stderr)
-
-    print(f"Active account set to {active_account_type.upper()}", file=sys.stderr)
-
-    # Run the server
-    async with stdio_server() as (read_stream, write_stream):
-        await app.run(read_stream, write_stream, app.create_initialization_options())
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

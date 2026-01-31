@@ -56,6 +56,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
 from contextlib import asynccontextmanager
+from security_middleware import SecurityHeadersMiddleware
 import os
 import sys
 
@@ -166,6 +167,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.add_middleware(SecurityHeadersMiddleware)
 
 # --------------------------------------------------------------------------- #
 # Route Registration
