@@ -71,15 +71,11 @@ class QuantAgent(BaseAgent):
                 latency_ms=0
             )
         
-        if not self.available:
-            # Fallback to simple calculations
-            return await self._simple_analysis(ticker, ohlcv_data)
-        
-        # Use TA-Lib for fast calculations
-        return await self._talib_analysis(ticker, ohlcv_data)
+        # Use centralized analysis method with fallbacks
+        return await self._perform_analysis(ticker, ohlcv_data)
     
-    async def _talib_analysis(self, ticker: str, bars: list) -> AgentResponse:
-        """TA-Lib powered analysis (5-10ms)"""
+    async def _perform_analysis(self, ticker: str, bars: list) -> AgentResponse:
+        """Technical analysis using TA-Lib (5-10ms) or NumPy fallbacks"""
         import numpy as np
         
         # Extract price arrays (ensure float64 for TA-Lib)
@@ -96,7 +92,7 @@ class QuantAgent(BaseAgent):
             sma_20 = self.talib.SMA(closes, timeperiod=20)
             sma_50 = self.talib.SMA(closes, timeperiod=50)
         else:
-            # Pure Python fallbacks
+            # Pure Python/Numpy fallbacks
             rsi = self._calculate_rsi(closes, 14)
             macd, macd_signal, macd_hist = self._calculate_macd(closes)
             bb_upper, bb_middle, bb_lower = self._calculate_bbands(closes)
@@ -151,36 +147,6 @@ class QuantAgent(BaseAgent):
             latency_ms=0  # Will be set by execute()
         )
     
-    async def _simple_analysis(self, ticker: str, bars: list) -> AgentResponse:
-        """Fallback without TA-Lib (slower but functional)"""
-        closes = [b['c'] for b in bars]
-        
-        # Simple RSI calculation
-        rsi = self._calculate_simple_rsi(closes)
-        
-        # Simple moving averages
-        sma_20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else closes[-1]
-        sma_50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else closes[-1]
-        
-        # Simple signal
-        signal = Signal.BUY if closes[-1] < sma_20 else Signal.SELL if closes[-1] > sma_50 else Signal.NEUTRAL
-        
-        quant_data = QuantData(
-            ticker=ticker,
-            rsi=rsi,
-            signal=signal,
-            support_level=0,
-            resistance_level=0
-        )
-        
-        return AgentResponse(
-            agent_name=self.config.name,
-            success=True,
-            data=quant_data.model_dump(),
-            latency_ms=0,
-            error="Using simple calculations (install TA-Lib for better performance)"
-        )
-    
     def _generate_signal(self, rsi: float, macd: float, macd_signal: float, 
                         price: float, sma20: float, sma50: float) -> Signal:
         """
@@ -226,7 +192,7 @@ class QuantAgent(BaseAgent):
             return Signal.NEUTRAL
     
     def _calculate_rsi(self, closes: np.ndarray, period: int = 14) -> np.ndarray:
-        """Pure Python RSI calculation using numpy"""
+        """Pure Python RSI calculation using Wilder's Smoothing"""
         if len(closes) < period + 1:
             return np.full(len(closes), 50.0)
 
@@ -234,16 +200,65 @@ class QuantAgent(BaseAgent):
         gains = np.where(deltas > 0, deltas, 0)
         losses = np.where(deltas < 0, -deltas, 0)
 
-        # Simple moving averages for gains and losses
-        avg_gains = np.convolve(gains, np.ones(period)/period, mode='valid')
-        avg_losses = np.convolve(losses, np.ones(period)/period, mode='valid')
+        try:
+            import pandas as pd
+            # Optimized Wilder's Smoothing using Vectorized Pandas
 
-        rs = np.divide(avg_gains, avg_losses, out=np.ones_like(avg_gains), where=avg_losses != 0)
-        rsi = 100 - (100 / (1 + rs))
+            def wilders_smoothing(data, p):
+                # First value is SMA
+                first_val = data[:p].mean()
+                # Construct data for EWM
+                rest_of_data = data[p:]
+                concat_data = np.concatenate(([first_val], rest_of_data))
+                # Apply EWM with alpha=1/period (Wilder's definition)
+                return pd.Series(concat_data).ewm(alpha=1/p, adjust=False).mean().values
 
-        # Pad with neutral values for early data points
-        pad = np.full(len(closes) - len(rsi), 50.0)
-        return np.concatenate([pad, rsi])
+            avg_gains = wilders_smoothing(gains, period)
+            avg_losses = wilders_smoothing(losses, period)
+
+            # Reconstruct RSI array
+            # avg_gains/losses match length of deltas - period + 1
+            # They correspond to the tail of the closes array
+
+            with np.errstate(divide='ignore', invalid='ignore'):
+                rs = avg_gains / avg_losses
+                rsi_vals = 100.0 - (100.0 / (1.0 + rs))
+
+            # Handle 0 loss case (RSI = 100) and 0/0 case (RSI = 50)
+            rsi_vals[avg_losses == 0] = 100.0
+            rsi_vals[(avg_gains == 0) & (avg_losses == 0)] = 50.0
+
+            # Pad with neutral values for early data points
+            # The valid RSI values start at index `period` of the original `closes` array
+            result = np.full(len(closes), 50.0)
+            result[period:] = rsi_vals
+
+            return result
+
+        except ImportError:
+            # Fallback to loop if pandas missing (should not happen in prod)
+            avg_gains = np.zeros(len(gains))
+            avg_losses = np.zeros(len(losses))
+
+            avg_gains[period-1] = np.mean(gains[:period])
+            avg_losses[period-1] = np.mean(losses[:period])
+
+            for i in range(period, len(gains)):
+                avg_gains[i] = ((avg_gains[i-1] * (period - 1)) + gains[i]) / period
+                avg_losses[i] = ((avg_losses[i-1] * (period - 1)) + losses[i]) / period
+
+            rs = np.zeros_like(avg_gains)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                rs = avg_gains / avg_losses
+
+            rsi = np.full(len(closes), 50.0)
+            for i in range(period, len(closes)):
+                idx = i - 1
+                if avg_losses[idx] == 0:
+                    rsi[i] = 100.0 if avg_gains[idx] != 0 else 50.0
+                else:
+                    rsi[i] = 100.0 - (100.0 / (1.0 + rs[idx]))
+            return rsi
 
     def _calculate_macd(self, closes: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Pure Python MACD calculation"""
@@ -264,7 +279,7 @@ class QuantAgent(BaseAgent):
 
         try:
             import pandas as pd
-            # Bolt Optimization: Vectorized Pandas implementation (~10x faster)
+            # Vectorized Pandas implementation (~10x faster)
 
             # Calculate SMA for the initialization point
             initial_sma = data[:period].mean()
@@ -281,7 +296,6 @@ class QuantAgent(BaseAgent):
 
             # Reconstruct the full array
             result = np.zeros(len(data))
-
             # The 'ewm_values' array corresponds to indices [period-1, period, period+1, ...]
             result[period-1:] = ewm_values
 
@@ -310,7 +324,6 @@ class QuantAgent(BaseAgent):
             # ddof=0 to match np.std behavior (population std dev)
             std = pd.Series(closes).rolling(window=20).std(ddof=0).to_numpy(copy=True)
             # Replace the initial NaNs (due to rolling window) with 0.0 to match original behavior
-            # We explicitly only touch the first 19 elements to avoid masking legitimate NaNs in data
             std[:19] = 0.0
         except ImportError:
             # Fallback if pandas is not available
@@ -386,23 +399,3 @@ class QuantAgent(BaseAgent):
             "support": float(sup),
             "resistance": float(res)
         }
-
-    def _calculate_simple_rsi(self, closes: list, period: int = 14) -> float:
-        """Simple RSI calculation without TA-Lib"""
-        if len(closes) < period + 1:
-            return 50.0
-        
-        deltas = [closes[i] - closes[i-1] for i in range(1, len(closes))]
-        gains = [d if d > 0 else 0 for d in deltas[-period:]]
-        losses = [-d if d < 0 else 0 for d in deltas[-period:]]
-        
-        avg_gain = sum(gains) / period
-        avg_loss = sum(losses) / period
-        
-        if avg_loss == 0:
-            return 100.0
-        
-        rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
-        
-        return rsi
