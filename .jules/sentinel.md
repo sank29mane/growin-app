@@ -12,3 +12,8 @@
 **Vulnerability:** Several API endpoints (`/conversations/*`, `/mcp/status`) were catching generic exceptions and returning `str(e)` in the HTTP 500 response. This exposed internal database errors, SQL queries, and potentially partial secrets or file paths to the client.
 **Learning:** Returning raw exception messages is a common "developer convenience" that becomes a security risk in production. It provides attackers with details about the technology stack (SQLite), schema, and internal logic.
 **Prevention:** Catch exceptions and log them server-side with full tracebacks. Return a generic "Internal Server Error" message to the client. Use distinct error handling for expected errors (4xx) vs unexpected ones (5xx).
+
+## 2026-02-05 - Missing Security Headers
+**Vulnerability:** The application lacked standard security headers (`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Content-Security-Policy`), leaving it vulnerable to clickjacking and MIME-type sniffing.
+**Learning:** FastAPI does not include these headers by default. A dedicated middleware is the cleanest way to enforce them globally.
+**Prevention:** Use a `SecurityHeadersMiddleware` to inject headers into every response. Enforce strict CSP where possible.
