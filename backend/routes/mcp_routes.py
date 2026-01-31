@@ -2,7 +2,7 @@
 MCP Routes - Server management and tool execution
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, BackgroundTasks
 from app_context import state, T212ConfigRequest
 import logging
 import json
@@ -22,12 +22,13 @@ async def get_mcp_status():
         Dict with list of servers and their connection statuses
     """
     try:
-        servers = state.chat_manager.get_mcp_servers(sanitize=True)
         sanitized_servers = state.chat_manager.get_mcp_servers(sanitize=True)
 
         for server in sanitized_servers:
             # Check connection status
-            server["status"] = "connected" if state.mcp_client.session else "disconnected"
+            # MultiMCPManager stores sessions in a dict keyed by server name
+            is_connected = server["name"] in state.mcp_client.sessions
+            server["status"] = "connected" if is_connected else "disconnected"
 
         return {"servers": sanitized_servers}
     except Exception as e:
@@ -96,7 +97,8 @@ async def update_t212_config(request: T212ConfigRequest):
             tool_args["key"] = request.isa_key
             tool_args["secret"] = request.isa_secret
 
-        if state.mcp_client.session:
+
+        if "Trading 212" in state.mcp_client.sessions:
             result = await state.mcp_client.call_tool("switch_account", tool_args)
             return {"status": "success", "message": str(result)}
         else:
@@ -106,3 +108,54 @@ async def update_t212_config(request: T212ConfigRequest):
         logger.error(f"Error updating T212 config: {e}", exc_info=True)
         # Sentinel: Generic error message
         raise HTTPException(status_code=500, detail="Internal Server Error")
+
+
+@router.get("/mcp/servers")
+async def get_mcp_servers_list():
+    """Get MCP servers list with status"""
+    return await get_mcp_status()
+
+
+@router.post("/mcp/servers/add")
+async def add_mcp_server(server_data: dict, background_tasks: BackgroundTasks):
+    """Add new MCP server"""
+    try:
+        state.chat_manager.add_mcp_server(
+            name=server_data.get("name"),
+            type=server_data.get("type"),
+            command=server_data.get("command"),
+            args=server_data.get("args", []),
+            env=server_data.get("env", {}),
+            url=server_data.get("url")
+        )
+        
+        # Add background task to connect
+        background_tasks.add_task(state.mcp_client.connect_server, {
+            "name": server_data.get("name"),
+            "type": server_data.get("type"),
+            "command": server_data.get("command"),
+            "args": server_data.get("args", []),
+            "env": server_data.get("env", {}),
+            "url": server_data.get("url")
+        })
+        
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/mcp/servers/{server_name}")
+async def delete_mcp_server(server_name: str):
+    """Delete MCP server"""
+    try:
+        # Check if server exists first
+        servers = state.chat_manager.get_mcp_servers()
+        if not any(s['name'] == server_name for s in servers):
+            raise HTTPException(status_code=404, detail="Server not found")
+            
+        state.chat_manager.delete_mcp_server(server_name)
+        return {"status": "success", "message": f"Server {server_name} deleted"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

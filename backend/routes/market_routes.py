@@ -4,17 +4,31 @@ Market Routes - Portfolio and Market Data
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from typing import Optional
+import logging
+import asyncio
+import json
+import numpy as np
+from utils import sanitize_nan
+
 from app_context import state
 from cache_manager import cache
 from trading212_mcp_server import normalize_ticker
 from market_context import GoalData
-import logging
-import asyncio
-import numpy as np
-from utils import sanitize_nan
+from data_engine import get_alpaca_client, get_finnhub_client
+
+
+
+# Specialist Agent Imports
+from agents.quant_agent import QuantAgent
+from agents.forecasting_agent import ForecastingAgent
+from agents.base_agent import AgentConfig, AgentResponse
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Initialize agents
+quant_agent = QuantAgent()
+forecast_agent = ForecastingAgent()
 
 # Global lock for portfolio fetching to prevent race conditions
 portfolio_lock = asyncio.Lock()
@@ -403,13 +417,6 @@ async def get_ttm_status():
 async def get_technical_analysis(ticker: str, timeframe: str = "1Month"):
     """
     Get comprehensive technical analysis + TTM forecast for a ticker.
-    
-    Returns:
-    - AI analysis summary (trend, support/resistance, TTM forecast)
-    - Algo signals (RSI, MACD, Bollinger Bands)
-    - Timestamp
-    
-    Cached for 30 seconds to reduce compute.
     """
     from datetime import datetime
     
@@ -419,182 +426,69 @@ async def get_technical_analysis(ticker: str, timeframe: str = "1Month"):
         return cached
     
     try:
-        from agents.quant_agent import QuantAgent
-        from agents.forecasting_agent import ForecastingAgent
         from data_engine import get_alpaca_client
         
-        # Fetch OHLCV data
+        # 1. Fetch OHLCV data using Alpaca
         alpaca = get_alpaca_client()
-        
-        # --- CASCADING DATA FETCH STRATEGY (TTM-R2 Requirement: 512+ bars) ---
-        # Strategy: 
-        # 1. Try requested timeframe (Monthly/Weekly) with 1000 limit.
-        # 2. If < 512 bars, fallback to higher resolution (Daily) to get enough context for Deep Learning.
-        # 3. If still < 512, fallback to Hourly.
-        
-        limit = 1000 # Always request buffer
-        
-        # 1. Primary Attempt
-        result = await alpaca.get_historical_bars(ticker, timeframe=timeframe, limit=limit)
+        result = await alpaca.get_historical_bars(ticker, timeframe=timeframe, limit=1000)
         bars = result.get("bars", [])
-        logger.info(f"📊 Primary Data Fetch: {ticker} ({timeframe}) -> {len(bars)} bars.")
         
-        forecast_timeframe = timeframe
-        forecast_note = ""
+        if not bars or len(bars) < 20:
+             # Basic validity check for UI
+             return {
+                 "ai_analysis": "Insufficient historical data for analysis.",
+                 "algo_signals": "Need at least 20 data points.",
+                 "last_updated": datetime.now().isoformat()
+             }
 
-        # --- OPTIMIZED TTM STRATEGY: PREFER HOURLY DATA ---
-        # TTM-R2 performs significantly better with granular (Hourly) context than sparse Daily data.
-        # We aggressively try to use 1Hour resolution for the forecast if the requested window is compatible.
-        
-        # Determine improved resolution
-        target_resolution = None
-        if timeframe == "1Day":
-             target_resolution = "1Hour" # 512 Hours = ~3 months history (Easier to satisfy than 2 years of Daily)
-        elif timeframe in ["1Week", "1Month"]:
-             target_resolution = "1Day"  # 512 Days = ~2 years (Better than Monthly)
-        
-        # Fetch data for forecast specifically
+        # 2. Optimized context for TTM-R2 (Prefer 1Hour resolution for 1Day requests)
+        target_res = "1Hour" if timeframe == "1Day" else "1Day" if timeframe in ["1Week", "1Month"] else None
         bars_for_forecast = bars
+        forecast_tf = timeframe
         
-        if target_resolution:
-            logger.info(f"🚀 TTM Optimization: Attempting to upgrade resolution {timeframe} -> {target_resolution} for better accuracy...")
-            opt_result = await alpaca.get_historical_bars(ticker, timeframe=target_resolution, limit=1000)
+        if target_res:
+            opt_result = await alpaca.get_historical_bars(ticker, timeframe=target_res, limit=1000)
             opt_bars = opt_result.get("bars", [])
-            
-            # Use optimized data if robust (at least 200 bars for good context)
             if len(opt_bars) >= 200:
                 bars_for_forecast = opt_bars
-                forecast_timeframe = target_resolution
-                forecast_note = f" (High-Res Context: {target_resolution})"
-            else:
-                logger.info(f"Optimization skipped: Insufficient {target_resolution} data ({len(opt_bars)}). Reverting to {timeframe}.")
-                # If optimization failed, check if we need the original "Safety Fallback"
-                if len(bars) < 512:
-                    # Logic from previous step: Downgrade if primary is broken
-                    pass # We effectively just stay with 'bars' (Primary), or could try one more fallback logic if needed.
-                         # But usually if 1Hour failed, 1Day might exist. 
-                         # Let's keep it simple: If Optimization fails, we stick to Primary.
-        
-        # Final safety check on whatever bars we decided to use
-        if not bars_for_forecast or len(bars_for_forecast) < 50:
-             bars_for_forecast = bars # Revert to primary if optimized array somehow broke
+                forecast_tf = target_res
 
-        # Basic validity check for UI
-        if not bars or len(bars) < 20: 
-             # If primary is completely empty, try to use alt bars for EVERYTHING, not just forecast
-             if 'bars_for_forecast' in locals() and len(bars_for_forecast) > 20:
-                 bars = bars_for_forecast # display alt data on chart/signals if primary is dead
-             else:
-                return {
-                    "ai_analysis": "Insufficient data for analysis.",
-                    "algo_signals": "Need at least 20 data points.",
-                    "last_updated": datetime.now().isoformat()
-                }
+        # 3. Parallel Execution of Agents
+        results = await asyncio.gather(
+            quant_agent.analyze({"ticker": ticker, "ohlcv_data": bars}),
+            forecast_agent.analyze({"ticker": ticker, "ohlcv_data": bars_for_forecast, "days": 7, "timeframe": forecast_tf}),
+            return_exceptions=True
+        )
         
-        # Run QuantAgent and ForecastingAgent in parallel with timeouts
-        quant = QuantAgent()
-        forecast_agent = ForecastingAgent()
+        quant_res = results[0] if not isinstance(results[0], Exception) else None
+        forecast_res = results[1] if not isinstance(results[1], Exception) else None
         
-        async def run_quant():
-            try:
-                # Quant uses the USER requested timeframe (visual alignment)
-                return await asyncio.wait_for(
-                    quant.execute({
-                        "ticker": ticker,
-                        "ohlcv_data": bars 
-                    }),
-                    timeout=10.0
-                )
-            except asyncio.TimeoutError:
-                logger.warning(f"QuantAgent timeout for {ticker}")
-                return None
-            except Exception as e:
-                logger.error(f"QuantAgent error for {ticker}: {e}")
-                return None
+        quant_data = quant_res.data if quant_res and quant_res.success else {}
+        forecast_data = forecast_res.data if forecast_res and forecast_res.success else {}
         
-        async def run_forecast():
-            # 1. Try Optimized Forecast (e.g. Hourly)
-            response = await forecast_agent.execute({
-                "ticker": ticker,
-                "ohlcv_data": bars_for_forecast,
-                "days": 7,
-                "timeframe": forecast_timeframe
-            })
-            
-            # 2. Check for Sanity Failure or Bridge Error
-            data = response.data
-            is_failure = not response.success or \
-                         "Sanity Check Failed" in data.get("note", "") or \
-                         "Bridge Error" in data.get("note", "")
-                         
-            # 3. Retry with Primary Timeframe if Optimization failed
-            if is_failure and forecast_timeframe != timeframe:
-                logger.warning(f"⚠️ Optimized Forecast ({forecast_timeframe}) failed sanity/execution. Retrying with Primary ({timeframe})...")
-                
-                # Retry with original bars
-                response = await forecast_agent.execute({
-                    "ticker": ticker,
-                    "ohlcv_data": bars, # Original user-requested bars (Daily/Monthly)
-                    "days": 7,
-                    "timeframe": timeframe
-                })
-                # Append note about retry
-                if response.success:
-                    if response.data.get("note"):
-                         response.data["note"] += " [Retry: Optimized failed]"
-                    else:
-                         response.data["note"] = "[Retry: Optimized failed]"
-            
-            return response
-        
-        # Execute both agents in parallel
-        results = await asyncio.gather(run_quant(), run_forecast(), return_exceptions=True)
-        quant_response = results[0] if not isinstance(results[0], Exception) else None
-        forecast_response = results[1] if not isinstance(results[1], Exception) else None
-        
-        # Handle errors gracefully
-        quant_data = {}
-        if quant_response and hasattr(quant_response, 'success') and quant_response.success:
-            quant_data = quant_response.data or {}
-        
-        forecast_data = {}
-        if forecast_response and hasattr(forecast_response, 'success') and forecast_response.success:
-            forecast_data = forecast_response.data or {}
-        
-        # Generate AI Analysis text (combines technical + forecast)
-        try:
-            ai_analysis = _generate_ai_analysis_text(quant_data, forecast_data, bars, ticker)
-        except Exception as e:
-            logger.error(f"Error generating AI analysis: {e}")
-            ai_analysis = "Analysis generation failed."
-        
-        # Generate Algo Signals text (technical indicators only)
-        try:
-            algo_signals = _generate_algo_signals_text(quant_data)
-        except Exception as e:
-            logger.error(f"Error generating algo signals: {e}")
-            algo_signals = "Signals generation failed."
+        # 4. Synthesize AI Responses
+        ai_analysis = _generate_ai_analysis_text(quant_data, forecast_data, bars, ticker)
+        algo_signals = _generate_algo_signals_text(quant_data)
         
         result = {
             "ai_analysis": ai_analysis,
             "algo_signals": algo_signals,
             "last_updated": datetime.now().isoformat(),
-            "raw_quant": quant_data,  # For debugging
-            "raw_forecast": forecast_data  # For debugging
+            "raw_quant": quant_data,
+            "raw_forecast": forecast_data
         }
         
-        # Cache for 30 seconds
+        # Cache for performance
         cache.set(cache_key, result, ttl=30)
-        
         return sanitize_nan(result)
         
     except Exception as e:
         logger.error(f"Analysis error for {ticker}: {e}")
         return {
-            "ai_analysis": f"Error analyzing {ticker}.",
-            # Sentinel: Sanitized error message
-            "algo_signals": "Analysis unavailable due to internal error.",
-            "last_updated": datetime.now().isoformat()
+            "ai_analysis": f"Analysis service unavailable for {ticker}.",
+            "algo_signals": "No technical signals generated.",
+            "last_updated": datetime.now().isoformat(),
+            "error": str(e)
         }
 
 def _generate_ai_analysis_text(quant_data: dict, forecast_data: dict, bars: list, ticker: str) -> str:
@@ -763,3 +657,98 @@ def _generate_algo_signals_text(quant_data: dict) -> str:
             parts.append(f"Market is consolidating (RSI {rsi:.1f} {context}). Awaiting clearer directional signals.")
             
     return " ".join(parts)
+
+# Portfolio Stats Endpoint
+@router.get("/api/trade/stats")
+async def get_trade_stats():
+    """Get current trade statistics from Trading 212 MCP"""
+    try:
+        # Fetch historical performance to get trade counts
+        # This will query the underlying MCP server (call_tool routes by tool name)
+        response_list = await state.mcp_client.call_tool("get_historical_performance", {"limit": 50})
+
+        
+        # response_list is a list of TextContent objects
+        if response_list and len(response_list) > 0:
+            content = json.loads(response_list[0].text)
+            orders = content.get("orders", [])
+            
+            # Simple stats based on available orders
+            from datetime import datetime
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            
+            trades_today = sum(1 for o in orders if o.get("date", "").startswith(today_str))
+            
+            return {
+                "trades_today": trades_today,
+                "daily_limit": 100,
+                "trades_this_hour": min(trades_today, 5), # Simplified
+                "hourly_limit": 20,
+                "daily_utilization": round((trades_today / 100) * 100, 1)
+            }
+            
+    except Exception as e:
+        logger.error(f"Error fetching trade stats: {e}")
+        
+    # Standard fallback
+    return {
+        "trades_today": 0,
+        "daily_limit": 100,
+        "trades_this_hour": 0,
+        "hourly_limit": 20,
+        "daily_utilization": 0
+    }
+
+# Quant Indicators Endpoint
+@router.get("/api/quant/{symbol}/indicators")
+async def get_symbol_indicators(symbol: str, timeframe: str = "1Day"):
+    """Get real-time technical indicators for a symbol"""
+    try:
+        alpaca = get_alpaca_client()
+        bars_data = await alpaca.get_historical_bars(symbol, timeframe=timeframe, limit=100)
+        
+        if not bars_data or "bars" not in bars_data:
+             return {"error": "Failed to fetch historical data for indicators"}
+             
+        # Call Quant Agent
+        response: AgentResponse = await quant_agent.analyze({
+            "ticker": symbol,
+            "ohlcv_data": bars_data["bars"]
+        })
+        
+        if response.success:
+            return response.data
+        else:
+            return {"error": response.error or "Quant analysis failed"}
+            
+    except Exception as e:
+        logger.error(f"Quant indicator error: {e}")
+        return {"error": str(e)}
+
+# Forecaster Endpoint
+@router.get("/api/forecast/{symbol}")
+async def get_symbol_forecast(symbol: str):
+    """Get AI price forecast for a symbol"""
+    try:
+        alpaca = get_alpaca_client()
+        # TTM needs 512 bars for optimal performance
+        bars_data = await alpaca.get_historical_bars(symbol, timeframe="1Day", limit=512)
+        
+        if not bars_data or "bars" not in bars_data:
+             return {"error": "Failed to fetch historical data for forecasting"}
+             
+        # Call Forecasting Agent
+        response: AgentResponse = await forecast_agent.analyze({
+            "ticker": symbol,
+            "ohlcv_data": bars_data["bars"],
+            "days": 5
+        })
+        
+        if response.success:
+            return response.data
+        else:
+            return {"error": response.error or "Forecast generation failed"}
+            
+    except Exception as e:
+        logger.error(f"Forecast error: {e}")
+        return {"error": str(e)}

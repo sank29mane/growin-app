@@ -92,6 +92,28 @@ struct ConversationListView: View {
         selectedIds.count == viewModel.conversations.count ? "Deselect All" : "Select All"
     }
 
+    // Group conversations by date
+    var groupedConversations: [(String, [ConversationItem])] {
+        let grouped = Dictionary(grouping: viewModel.conversations) { conversation -> String in
+            let date = ISO8601DateFormatter().date(from: conversation.createdAt) ?? Date()
+            if Calendar.current.isDateInToday(date) {
+                return "Today"
+            } else if Calendar.current.isDateInYesterday(date) {
+                return "Yesterday"
+            } else if Calendar.current.isDate(date, equalTo: Date(), toGranularity: .weekOfYear) {
+                return "This Week"
+            } else {
+                return "Older"
+            }
+        }
+        
+        let order = ["Today", "Yesterday", "This Week", "Older"]
+        return order.compactMap { key in
+            guard let items = grouped[key] else { return nil }
+            return (key, items.sorted { $0.createdAt > $1.createdAt })
+        }
+    }
+
     func toggleSelectAll() {
         if selectedIds.count == viewModel.conversations.count {
             selectedIds.removeAll()
@@ -115,29 +137,43 @@ struct ConversationListView: View {
                         Text("Start chatting to see your conversation history here")
                     }
                 } else {
-                    ScrollView {
-                        LazyVStack(spacing: 12) {
-                            ForEach(viewModel.conversations) { conversation in
-                                ConversationCard(
-                                    conversation: conversation,
-                                    isSelected: selectedIds.contains(conversation.id),
-                                    isEditing: isEditing
-                                ) {
-                                    if isEditing {
-                                        if selectedIds.contains(conversation.id) {
-                                            selectedIds.remove(conversation.id)
+                    List {
+                        ForEach(groupedConversations, id: \.0) { sectionTitle, conversations in
+                            Section(header: Text(sectionTitle).foregroundStyle(.secondary)) {
+                                ForEach(conversations) { conversation in
+                                    ConversationCard(
+                                        conversation: conversation,
+                                        isSelected: selectedIds.contains(conversation.id),
+                                        isEditing: isEditing
+                                    ) {
+                                        if isEditing {
+                                            if selectedIds.contains(conversation.id) {
+                                                selectedIds.remove(conversation.id)
+                                            } else {
+                                                selectedIds.insert(conversation.id)
+                                            }
                                         } else {
-                                            selectedIds.insert(conversation.id)
+                                            selectedConversationId = conversation.id
+                                            dismiss()
                                         }
-                                    } else {
-                                        selectedConversationId = conversation.id
-                                        dismiss()
+                                    }
+                                    .listRowBackground(Color.clear)
+                                    .listRowSeparator(.hidden)
+                                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                        Button(role: .destructive) {
+                                            Task {
+                                                await viewModel.deleteConversations(ids: [conversation.id])
+                                            }
+                                        } label: {
+                                            Label("Delete", systemImage: "trash")
+                                        }
                                     }
                                 }
                             }
                         }
-                        .padding()
                     }
+                    .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
                     .refreshable {
                         await viewModel.fetchConversations()
                     }
@@ -160,11 +196,19 @@ struct ConversationListView: View {
                         }
                         .foregroundStyle(.white)
                     } else {
-                        Button(action: {
-                            selectedConversationId = nil
-                            dismiss()
-                        }) {
-                            Image(systemName: "plus")
+                        HStack {
+                            Button(action: {
+                                Task { await viewModel.fetchConversations() }
+                            }) {
+                                Image(systemName: "arrow.clockwise")
+                            }
+                            
+                            Button(action: {
+                                selectedConversationId = nil
+                                dismiss()
+                            }) {
+                                Image(systemName: "plus")
+                            }
                         }
                     }
                 }
@@ -205,6 +249,9 @@ struct ConversationListView: View {
             .task {
                 await viewModel.fetchConversations()
             }
+            .onAppear {
+                Task { await viewModel.fetchConversations() }
+            }
             .alert("Delete \(selectedIds.count) Conversation\(selectedIds.count == 1 ? "" : "s")?", isPresented: $showDeleteConfirmation) {
                 Button("Cancel", role: .cancel) { }
                 Button("Delete", role: .destructive) {
@@ -238,28 +285,29 @@ struct ConversationCard: View {
                 }
 
                 GlassCard(cornerRadius: 12) {
-                    VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 8) {
                         HStack {
                             Text(conversation.title ?? "Untitled Conversation")
-                                .font(.system(size: 14, weight: .bold))
+                                .font(.system(size: 15, weight: .semibold))
                                 .foregroundStyle(.white)
                                 .lineLimit(1)
 
                             Spacer()
 
                             Text(formatDate(conversation.createdAt))
-                                .font(.system(size: 10))
+                                .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
                         }
 
                         if let preview = conversation.lastMessage {
                             Text(preview)
-                                .font(.system(size: 12))
+                                .font(.system(size: 13))
                                 .foregroundStyle(.white.opacity(0.7))
                                 .lineLimit(2)
+                                .multilineTextAlignment(.leading)
                         }
                     }
-                    .padding(12)
+                    .padding(14)
                 }
             }
         }
@@ -267,12 +315,31 @@ struct ConversationCard: View {
     }
 
     private func formatDate(_ dateString: String) -> String {
-        let formatter = ISO8601DateFormatter()
-        if let date = formatter.date(from: dateString) {
+        // Try multiple parsers for robustness
+        let isoFormatter = ISO8601DateFormatter()
+        let isoFormatterWithFractional = ISO8601DateFormatter()
+        isoFormatterWithFractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        
+        var date: Date? = isoFormatter.date(from: dateString)
+        if date == nil {
+            date = isoFormatterWithFractional.date(from: dateString)
+        }
+        
+        if let validDate = date {
             let relativeFormatter = RelativeDateTimeFormatter()
             relativeFormatter.unitsStyle = .abbreviated
-            return relativeFormatter.localizedString(for: date, relativeTo: Date())
+            return relativeFormatter.localizedString(for: validDate, relativeTo: Date())
         }
+        
+        // Fallback to simple date parsing if ISO fails
+        let simpleFormatter = DateFormatter()
+        simpleFormatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ssZ"
+        if let fallbackDate = simpleFormatter.date(from: dateString) {
+            let relativeFormatter = RelativeDateTimeFormatter()
+            relativeFormatter.unitsStyle = .abbreviated
+            return relativeFormatter.localizedString(for: fallbackDate, relativeTo: Date())
+        }
+        
         return dateString
     }
 }

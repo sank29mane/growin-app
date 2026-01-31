@@ -2,7 +2,7 @@
 Portfolio Agent - Fetches portfolio data via MCP
 """
 
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import logging
 import json
 

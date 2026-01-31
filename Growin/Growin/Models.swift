@@ -432,6 +432,40 @@ struct ChatMessageModel: Codable, Identifiable {
     var displayName: String {
         isUser ? "You" : (agentName ?? "AI Assistant")
     }
+    
+    var date: Date {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: timestamp) {
+            return date
+        }
+        
+        formatter.formatOptions = [.withInternetDateTime]
+        if let date = formatter.date(from: timestamp) {
+            return date
+        }
+        
+        let simpleFormatter = DateFormatter()
+        simpleFormatter.locale = Locale(identifier: "en_US_POSIX")
+        simpleFormatter.timeZone = TimeZone(secondsFromGMT: 0)
+        
+        let formats = [
+            "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ",
+            "yyyy-MM-dd'T'HH:mm:ss.SSSSSS",
+            "yyyy-MM-dd'T'HH:mm:ssZ",
+            "yyyy-MM-dd'T'HH:mm:ss",
+            "yyyy-MM-dd HH:mm:ss",
+            "yyyy-MM-dd"
+        ]
+        
+        for format in formats {
+            simpleFormatter.dateFormat = format
+            if let date = simpleFormatter.date(from: timestamp) {
+                return date
+            }
+        }
+        return Date()
+    }
 }
 
 struct ToolCall: Codable {

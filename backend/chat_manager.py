@@ -237,7 +237,7 @@ class ChatManager:
 
         cursor.execute(
             """
-            SELECT id, role, content, timestamp, tool_calls, agent_name, model_name
+            SELECT id, role, content, strftime('%Y-%m-%dT%H:%M:%SZ', timestamp) as timestamp, tool_calls, agent_name, model_name
             FROM messages
             WHERE conversation_id = ?
             ORDER BY timestamp DESC
@@ -250,7 +250,7 @@ class ChatManager:
         for row in cursor:
             messages.append(
                 {
-                    "id": row["id"],
+                    "message_id": row["id"],
                     "role": row["role"],
                     "content": row["content"],
                     "timestamp": row["timestamp"],
@@ -271,14 +271,23 @@ class ChatManager:
         return self.load_history(conversation_id, limit)
 
     def list_conversations(self, limit: int = 20) -> List[Dict]:
-        """List recent conversations"""
+        """List recent conversations with their last message preview"""
         cursor = self.conn.cursor()
 
         cursor.execute(
             """
-            SELECT id, created_at, title
-            FROM conversations
-            ORDER BY created_at DESC
+            SELECT 
+                c.id, 
+                strftime('%Y-%m-%dT%H:%M:%SZ', c.created_at) as created_at, 
+                c.title,
+                m.content as last_message
+            FROM conversations c
+            LEFT JOIN (
+                SELECT conversation_id, content, MAX(timestamp)
+                FROM messages
+                GROUP BY conversation_id
+            ) m ON c.id = m.conversation_id
+            ORDER BY c.created_at DESC
             LIMIT ?
             """,
             (limit,),
@@ -323,6 +332,16 @@ class ChatManager:
             self.conn.commit()
         except Exception as e:
             print(f"Error deleting conversation: {e}")
+            raise
+
+    def clear_conversation(self, conversation_id: str):
+        """Clear all messages from a conversation"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
+            self.conn.commit()
+        except Exception as e:
+            print(f"Error clearing conversation: {e}")
             raise
 
     def save_portfolio_snapshot(

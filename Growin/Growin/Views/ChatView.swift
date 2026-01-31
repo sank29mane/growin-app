@@ -52,8 +52,7 @@ struct ChatView: View {
                 Button(action: {
                     // Start new conversation
                     withAnimation(.spring()) {
-                        viewModel.currentConversationId = nil
-                        viewModel.messages.removeAll()
+                        viewModel.startNewConversation()
                     }
                 }) {
                     Image(systemName: "plus.circle")
@@ -66,7 +65,7 @@ struct ChatView: View {
             ConfigView(provider: viewModel.missingConfigProvider)
         }
         .sheet(isPresented: $showConversationList) {
-            ConversationListView(selectedConversationId: $viewModel.currentConversationId)
+            ConversationListView(selectedConversationId: $viewModel.selectedConversationId)
         }
     }
     
@@ -109,7 +108,8 @@ struct ChatView: View {
                     scrollToBottom(proxy: proxy)
                 }
             }
-            .onChange(of: viewModel.currentConversationId) { _, newId in
+            // Fix: React to selectedConversationId changes
+            .onChange(of: viewModel.selectedConversationId) { _, newId in
                 Task {
                     if newId != nil {
                         await viewModel.loadConversationHistory()
@@ -123,7 +123,7 @@ struct ChatView: View {
             }
             .task {
                 // Load conversation history if we have a conversation ID
-                if viewModel.currentConversationId != nil && viewModel.messages.isEmpty {
+                if viewModel.selectedConversationId != nil && viewModel.messages.isEmpty {
                     await viewModel.loadConversationHistory()
                 }
             }

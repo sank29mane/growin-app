@@ -10,7 +10,32 @@ class ChatViewModel: ObservableObject {
     @Published var errorMessage: String?
     @Published var inputText: String = ""
 
-    @AppStorage("currentConversationId") var currentConversationId: String?
+    // Manual observation to ensure view updates
+    @Published var selectedConversationId: String? = nil {
+        didSet {
+            if oldValue != selectedConversationId {
+                currentConversationId = selectedConversationId
+            }
+        }
+    }
+
+    @AppStorage("currentConversationId") var currentConversationId: String? {
+        didSet {
+            if selectedConversationId != currentConversationId {
+                selectedConversationId = currentConversationId
+                // Automatically load history when the ID changes via storage (e.g. from a notification or sidebar)
+                if currentConversationId != nil {
+                    Task {
+                        await loadConversationHistory()
+                    }
+                    // Trigger sidebar refresh
+                    NotificationCenter.default.post(
+                        name: NSNotification.Name("RefreshConversations"), object: nil)
+                }
+            }
+        }
+    }
+    
     @AppStorage("selectedModel") private var selectedModel = "native-mlx"
     @AppStorage("selectedCoordinatorModel") private var selectedCoordinatorModel = "granite-tiny"
     @AppStorage("selectedProvider") private var selectedProvider = "mlx"
@@ -23,6 +48,11 @@ class ChatViewModel: ObservableObject {
     @Published var selectedAccountType: String = "all"  // Account picker: "all", "isa", "invest"
 
     private let baseURL = "http://127.0.0.1:8002"
+    
+    init() {
+        // Sync initial state
+        self.selectedConversationId = UserDefaults.standard.string(forKey: "currentConversationId")
+    }
 
     private var effectiveModelName: String {
         return selectedModel
@@ -119,16 +149,13 @@ class ChatViewModel: ObservableObject {
 
                     // Try to parse complex error structure (from our new backend handler)
                     struct BackendError: Decodable {
-                        let detail: ErrorDetail
-                        struct ErrorDetail: Decodable {
-                            let message: String
-                        }
+                        let detail: String
                     }
 
-                    if let complexError = try? JSONDecoder().decode(BackendError.self, from: data) {
+                    if let backendError = try? JSONDecoder().decode(BackendError.self, from: data) {
                         throw URLError(
                             .badServerResponse,
-                            userInfo: [NSLocalizedDescriptionKey: complexError.detail.message])
+                            userInfo: [NSLocalizedDescriptionKey: backendError.detail])
                     }
 
                     throw URLError(
@@ -198,24 +225,39 @@ class ChatViewModel: ObservableObject {
     }
 
     func loadConversationHistory() async {
-        guard let conversationId = currentConversationId else { return }
+        // Use selectedConversationId as the source of truth
+        guard let conversationId = selectedConversationId else { return }
 
         let url = URL(string: "\(baseURL)/conversations/\(conversationId)/history")!
 
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
+            let (data, response) = try await URLSession.shared.data(from: url)
+            
+            guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+                throw URLError(.badServerResponse)
+            }
+            
             let history = try JSONDecoder().decode([ChatMessageModel].self, from: data)
 
             await MainActor.run {
-                messages = history
+                // Ensure we are still looking at the same conversation
+                if self.selectedConversationId == conversationId {
+                    self.messages = history
+                    self.errorMessage = nil
+                }
             }
         } catch {
             print("Failed to load history: \(error)")
+            await MainActor.run {
+                if self.selectedConversationId == conversationId {
+                    self.errorMessage = "Failed to load history. Pull to refresh."
+                }
+            }
         }
     }
 
     func startNewConversation() {
-        currentConversationId = nil
+        selectedConversationId = nil
         messages = []
         isProcessing = false
         errorMessage = nil

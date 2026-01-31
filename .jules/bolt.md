@@ -10,6 +10,6 @@
 **Learning:** `cursor.fetchall()` loads the entire result set into memory, creating an intermediate list. Direct cursor iteration is more memory-efficient. Adding a composite index `(conversation_id, timestamp DESC)` improved `load_history` performance by ~14x (3.2ms -> 0.23ms) for 100 concurrent conversations.
 **Action:** Prefer direct cursor iteration over `fetchall()`. Always add composite indexes for columns involved in both filtering (`WHERE`) and sorting (`ORDER BY`) to enable efficient index scans.
 
-## 2026-01-18 - Vectorization of EMA (Recursive vs Convolution)
-**Learning:** `pandas.Series.ewm(span=N, adjust=False)` provides ~15x speedup (0.07s -> 0.005s) over iterative Python loops for EMA calculation. However, `np.convolve` (used for SMA) is faster than `pandas.Series.rolling` (0.0038s vs 0.0055s) because it uses optimized C-level convolution.
-**Action:** Use Pandas `ewm` for recursive indicators like EMA (matching initialization carefully), but stick to `np.convolve` for simple moving averages / convolutions where possible. Always verify speedups before switching to Pandas for simple operations.
+## 2026-01-30 - Rust Core Integration & Tiered Ticker Resolution
+**Learning:** Python-level regex and string indexing for ticker normalization (e.g., stripping `_US_EQ`) becomes a hotspot when processing large portfolios (40+ symbols). Rust-based string manipulation via `PyO3` is ~10-20x faster than equivalent Python regex.
+**Action:** Implemented `growin_core` in Rust. Integrated it as "Tier 1" in `trading212_mcp_server.py`. Falling back to Python heuristics only if the Rust extension is missing or fails, ensuring both speed and safety. Verified via `maturin develop`.

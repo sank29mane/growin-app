@@ -111,9 +111,15 @@ class AnalyticsDB:
             # Bulk insert using DuckDB's fast path
             # Explicitly select columns in schema order to avoid misalignment
             self.conn.execute("""
-                INSERT OR REPLACE INTO ohlcv_history 
+                INSERT INTO ohlcv_history 
                 SELECT ticker, timestamp, open, high, low, close, volume 
                 FROM df
+                ON CONFLICT (ticker, timestamp) DO UPDATE SET
+                    open = EXCLUDED.open,
+                    high = EXCLUDED.high,
+                    low = EXCLUDED.low,
+                    close = EXCLUDED.close,
+                    volume = EXCLUDED.volume
             """)
             
             rows_inserted = len(df)

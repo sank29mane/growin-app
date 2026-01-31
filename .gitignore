@@ -40,3 +40,10 @@ backend/models/mlx/
 
 # RAG Database
 backend/growin_rag_db/
+backend/.venv/
+.server.pid
+data/
+backend/build/
+
+.gemini/
+.agent/

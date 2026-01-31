@@ -172,14 +172,15 @@ app.add_middleware(
 # --------------------------------------------------------------------------- #
 
 # Include specialized routers
-from routes import chat_routes, agent_routes, market_routes, mcp_routes, additional_routes, status_routes
+# Include specialized routers
+from routes import chat_routes, agent_routes, market_routes, mcp_routes, chart_routes, status_routes
 
 app.include_router(chat_routes.router)
 app.include_router(agent_routes.router)
 app.include_router(market_routes.router)
 app.include_router(mcp_routes.router)
 app.include_router(status_routes.router) # Detailed health & agent status
-app.include_router(additional_routes.router)  # Stub endpoints for Mac app compatibility
+app.include_router(chart_routes.router)  # Chart data and visualization
 
 # --------------------------------------------------------------------------- #
 # Root Endpoints

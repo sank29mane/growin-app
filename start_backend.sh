@@ -1,82 +1,62 @@
 #!/bin/bash
 cd "$(dirname "$0")/backend"
 
-# PID file to track server
+# === Configuration ===
 PID_FILE=".server.pid"
+PORT=8002
+HOST="127.0.0.1"
 
-# Create venv if not exists
-if [ ! -d ".venv" ]; then
-    echo "Creating virtual environment..."
-    python3 -m venv .venv
-fi
+# === Colors ===
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
 
-# Activate venv
-source .venv/bin/activate
+echo -e "${YELLOW}🚀 Initializing Growin Backend (UV Powered)...${NC}"
 
-# Check for libomp (Required for XGBoost on Mac)
+# 1. Host Check (Mac Optimization)
 if [[ "$OSTYPE" == "darwin"* ]]; then
     if ! brew list libomp > /dev/null 2>&1; then
-        echo "Installing libomp for XGBoost support..."
+        echo -e "${YELLOW}Installing libomp (XGBoost req)...${NC}"
         brew install libomp
     fi
 fi
 
-# Install dependencies
-echo "Installing SOTA dependencies..."
-.venv/bin/pip install -r requirements.txt -q
-.venv/bin/pip install . 2>/dev/null || echo "Could not install current project as package, relying on manual deps"
-
-# Kill existing server gracefully
-if [ -f "$PID_FILE" ]; then
-    PID=$(cat "$PID_FILE")
-    if ps -p $PID > /dev/null; then
-        echo "Stopping existing server (PID: $PID)..."
-        kill $PID
-        sleep 2
-    fi
-    rm "$PID_FILE"
+# 2. Port Cleanup
+if lsof -i:$PORT >/dev/null; then
+    echo -e "${YELLOW}Freeing port $PORT...${NC}"
+    lsof -ti:$PORT | xargs kill -9 2>/dev/null
+    sleep 1
 fi
 
-# Force kill port 8002 if still occupied
-lsof -ti:8002 | xargs kill -9 2>/dev/null && echo "Force cleaned port 8002"
+# 3. Start Server
+echo -e "${GREEN}Starting Uvicorn Server via UV...${NC}"
 
-# Wait for port to be free
-echo "Waiting for port 8002 to clear..."
-while lsof -i:8002 >/dev/null; do
-    sleep 1
-done
-
-# Run Server
-echo ""
-echo "🚀 Starting Growin Backend Server (Mac Native)"
-echo "📍 Server: http://127.0.0.1:8002"
-echo "🧠 Configuration: M4 Pro Optimized (MLX)"
-echo ""
-
-# Start in background to save PID
-.venv/bin/python -m uvicorn server:app --reload --host 127.0.0.1 --port 8002 &
+# Use uv run to handle venv and deps
+uv run python -m uvicorn server:app --reload --host $HOST --port $PORT --loop uvloop > server.log 2>&1 &
 NEW_PID=$!
 echo $NEW_PID > "$PID_FILE"
 
-# Wait for server to come online
-echo "Waiting for server health check..."
+# 4. Health Check Loop
+echo -n "Waiting for health check"
 MAX_RETRIES=30
 COUNT=0
-URL="http://127.0.0.1:8002/health"
+URL="http://$HOST:$PORT/health"
 
 while [ $COUNT -lt $MAX_RETRIES ]; do
     if curl -s $URL > /dev/null; then
-        echo "✅ Backend is ONLINE!"
-        break
+        echo ""
+        echo -e "${GREEN}✅ SYSTEM ONLINE${NC} - PID: $NEW_PID"
+        echo -e "   Dashboard: http://$HOST:$PORT"
+        echo -e "   Logs:      backend/server.log"
+        exit 0
     fi
+    echo -n "."
     sleep 1
     let COUNT=COUNT+1
-    echo -n "."
 done
 
-if [ $COUNT -eq $MAX_RETRIES ]; then
-    echo "❌ Server failed to start within 30 seconds."
-    exit 1
-fi
+echo ""
+echo -e "${RED}❌ Server failed to start. Check backend/server.log${NC}"
+exit 1
 
-wait $NEW_PID
