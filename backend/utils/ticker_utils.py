@@ -4,6 +4,15 @@ Shared logic for resolving ticker discrepancies between T212, Yahoo Finance, and
 """
 
 import re
+from typing import Dict, List, Optional, Tuple
+
+# Bolt Optimization: Import optional dependencies at module level to avoid repeated ImportErrors (PR #48)
+try:
+    import growin_core
+    GROWIN_CORE_AVAILABLE = True
+except ImportError:
+    growin_core = None
+    GROWIN_CORE_AVAILABLE = False
 
 # --- Ticker Normalization Constants ---
 
@@ -74,13 +83,16 @@ def normalize_ticker(ticker: str) -> str:
     SOTA Ticker Normalization: Resolves discrepancies between Trading212, 
     Yahoo Finance, Alpaca, and Finnhub via Rust-optimized core.
     """
-    try:
-        import growin_core
-        return growin_core.normalize_ticker(ticker)
-    except Exception as e:
-        # Fallback to robust Python logic if Rust fails or is missing
-        if not ticker:
-            return ""
+    if GROWIN_CORE_AVAILABLE:
+        try:
+            return growin_core.normalize_ticker(ticker)
+        except Exception:
+            # Fallback if Rust binding fails even if module exists
+            pass
+
+    # Fallback to robust Python logic if Rust fails or is missing
+    if not ticker:
+        return ""
 
         # 1. Basic Cleaning
         ticker = ticker.upper().strip().replace("$", "")
