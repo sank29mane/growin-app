@@ -17,3 +17,8 @@
 **Vulnerability:** The application lacked standard security headers (`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Content-Security-Policy`), leaving it vulnerable to clickjacking and MIME-type sniffing.
 **Learning:** FastAPI does not include these headers by default. A dedicated middleware is the cleanest way to enforce them globally.
 **Prevention:** Use a `SecurityHeadersMiddleware` to inject headers into every response. Enforce strict CSP where possible.
+
+## 2026-02-14 - Information Leakage via Exception Details (Recurring)
+**Vulnerability:** Several endpoints in `mcp_routes`, `chat_routes`, and `market_routes` were catching generic exceptions and returning `str(e)` in the JSON body or HTTP exception detail. This exposed internal error states, potentially leaking file paths, partial keys, or database schema info.
+**Learning:** The "Information Leakage via Exception Details" pattern persists because it's the easiest way to debug during development. Developers copy-paste exception handling blocks.
+**Prevention:** Strictly enforce a "Sanitize All Errors" policy. Use `logging.error(..., exc_info=True)` for debugging, but ALWAYS return "Internal Server Error" to the client for 500s. I've updated the test suite to explicitly check for this leakage.
