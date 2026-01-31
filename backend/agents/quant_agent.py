@@ -11,6 +11,14 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# Bolt Optimization: Import optional dependencies at module level to avoid repeated ImportErrors
+try:
+    from scipy.signal import argrelextrema
+    SCIPY_AVAILABLE = True
+except ImportError:
+    argrelextrema = None
+    SCIPY_AVAILABLE = False
+
 
 class QuantAgent(BaseAgent):
     """
@@ -340,9 +348,7 @@ class QuantAgent(BaseAgent):
         current_price = closes[-1]
         order = 5 # Window size (lookback/lookahead)
         
-        try:
-            from scipy.signal import argrelextrema
-            
+        if SCIPY_AVAILABLE:
             # Find local maxima (peaks) and minima (troughs)
             # order=5 means it must be the max/min within 5 points on EITHER side
             peak_idx = argrelextrema(highs, np.greater, order=order)[0]
@@ -350,7 +356,7 @@ class QuantAgent(BaseAgent):
             
             peaks = highs[peak_idx]
             troughs = lows[trough_idx]
-        except ImportError:
+        else:
             # Fallback to window loop logic if scipy missing
             peaks = []
             troughs = []
