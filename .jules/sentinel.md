@@ -22,3 +22,8 @@
 **Vulnerability:** Several endpoints in `mcp_routes`, `chat_routes`, and `market_routes` were catching generic exceptions and returning `str(e)` in the JSON body or HTTP exception detail. This exposed internal error states, potentially leaking file paths, partial keys, or database schema info.
 **Learning:** The "Information Leakage via Exception Details" pattern persists because it's the easiest way to debug during development. Developers copy-paste exception handling blocks.
 **Prevention:** Strictly enforce a "Sanitize All Errors" policy. Use `logging.error(..., exc_info=True)` for debugging, but ALWAYS return "Internal Server Error" to the client for 500s. I've updated the test suite to explicitly check for this leakage.
+
+## 2026-02-18 - MCP Server Command Injection
+**Vulnerability:** The `/mcp/servers/add` endpoint accepted arbitrary `command` and `args` parameters which were directly passed to `subprocess.Popen` via the MCP client, allowing unauthenticated Remote Code Execution (RCE) if a malicious user could reach the API.
+**Learning:** Features that allow "configuration" of external tools (like MCP servers) are effectively Remote Code Execution features if not strictly validated. Trusting input for process execution is a critical risk.
+**Prevention:** Implement a strict allowlist or blocklist for executable commands. For "plugin" systems, validation must happen at the API boundary.
