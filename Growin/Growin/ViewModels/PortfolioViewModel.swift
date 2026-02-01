@@ -1,6 +1,52 @@
 import SwiftUI
 import Combine
 
+// MARK: - Data Service Actor
+/// Dedicated actor for background data processing to keep Main Thread free for 120Hz UI
+actor PortfolioDataService {
+    private let session = URLSession.shared
+    private let baseURL = "http://127.0.0.1:8002"
+    
+    func fetchPortfolio(accountType: String) async throws -> PortfolioSnapshot {
+        guard let url = URL(string: "\(baseURL)/portfolio/live?account_type=\(accountType)") else {
+            throw URLError(.badURL)
+        }
+        
+        let (data, _) = try await session.data(from: url)
+        return try JSONDecoder().decode(PortfolioSnapshot.self, from: data)
+    }
+    
+    func fetchHistory(days: Int, accountType: String) async throws -> [PortfolioHistoryPoint] {
+        guard let url = URL(string: "\(baseURL)/portfolio/history?days=\(days)&account_type=\(accountType)") else {
+            throw URLError(.badURL)
+        }
+        
+        let (data, _) = try await session.data(from: url)
+        return try JSONDecoder().decode([PortfolioHistoryPoint].self, from: data)
+    }
+    
+    func switchAccountConfig(config: [String: Any]) async throws {
+        guard let url = URL(string: "\(baseURL)/mcp/trading212/config") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: config)
+        let (_, _) = try await session.data(for: request)
+    }
+    
+    func syncAccount(accountType: String) async throws {
+        guard let url = URL(string: "\(baseURL)/account/active") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body = ["account_type": accountType]
+        request.httpBody = try? JSONEncoder().encode(body)
+        let (_, _) = try await session.data(for: request)
+    }
+}
+
+// MARK: - Main ViewModel
+@MainActor
 class PortfolioViewModel: ObservableObject {
     @Published var snapshot: PortfolioSnapshot?
     @Published var isLoading: Bool = false
@@ -19,16 +65,28 @@ class PortfolioViewModel: ObservableObject {
     
     @Published var isSwitchingAccount = false
     
+    private let dataService = PortfolioDataService()
+    
     // Initializer
     init() {
         // Auto-fetch on init if needed, or wait for onAppear
     }
     
     func onAppear() async {
+        // Only fetch if stale or empty
         if snapshot == nil {
-            await fetchPortfolio()
-            await fetchHistory()
+            await refreshAll()
         }
+    }
+    
+    func refreshAll() async {
+        isLoading = true
+        defer { isLoading = false }
+        
+        async let portfolio = fetchPortfolio()
+        async let history = fetchHistory()
+        
+        _ = await (portfolio, history)
     }
     
     func switchAccount(newType: String) async {
@@ -44,84 +102,39 @@ class PortfolioViewModel: ObservableObject {
             "isa_secret": t212IsaSecret
         ]
         
-        guard let url = URL(string: "http://127.0.0.1:8002/mcp/trading212/config") else { return }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: config)
-        
         do {
-            let (_, _) = try await URLSession.shared.data(for: request)
-            
-            // Sync active state
-            await syncAccountToBackend(t212AccountType)
-            
-            // Refresh data after switch
-            await fetchPortfolio()
-            await fetchHistory()
+            try await dataService.switchAccountConfig(config: config)
+            try await dataService.syncAccount(accountType: t212AccountType)
+            await refreshAll()
         } catch {
             print("Switch account error: \(error)")
+            self.errorMsg = "Failed to switch account"
         }
     }
     
     func fetchPortfolio() async {
-        await MainActor.run { isLoading = true }
-        defer { Task { await MainActor.run { isLoading = false } } }
-        
-        guard let url = URL(string: "http://127.0.0.1:8002/portfolio/live?account_type=\(t212AccountType)") else { return }
-        
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
-            let decoded = try JSONDecoder().decode(PortfolioSnapshot.self, from: data)
-            
-            await MainActor.run {
-                withAnimation(.spring(response: 0.5, dampingFraction: 0.7)) {
-                    self.snapshot = decoded
-                    self.lastUpdated = Date()
-                    self.errorMsg = nil
-                }
+            let result = try await dataService.fetchPortfolio(accountType: t212AccountType)
+            withAnimation(.spring(response: 0.5, dampingFraction: 0.7)) {
+                self.snapshot = result
+                self.lastUpdated = Date()
+                self.errorMsg = nil
             }
         } catch {
-            await MainActor.run {
-                self.errorMsg = error.localizedDescription
-                print("Portfolio fetch error: \(error)")
-            }
+            self.errorMsg = error.localizedDescription
+            print("Portfolio fetch error: \(error)")
         }
     }
     
     func fetchHistory() async {
         let days = selectedTimeRange.days
-        guard let url = URL(string: "http://127.0.0.1:8002/portfolio/history?days=\(days)&account_type=\(t212AccountType)") else { return }
-        
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
-            let decoded = try JSONDecoder().decode([PortfolioHistoryPoint].self, from: data)
-            
-            await MainActor.run {
-                withAnimation(.easeInOut) {
-                    self.portfolioHistory = decoded
-                }
+            let result = try await dataService.fetchHistory(days: days, accountType: t212AccountType)
+            withAnimation(.easeInOut) {
+                self.portfolioHistory = result
             }
         } catch {
             print("History fetch error: \(error)")
-        }
-    }
-    
-    func syncAccountToBackend(_ accountType: String) async {
-        guard let url = URL(string: "http://127.0.0.1:8002/account/active") else { return }
-        
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        
-        let body = ["account_type": accountType]
-        request.httpBody = try? JSONEncoder().encode(body)
-        
-        do {
-            let (_, _) = try await URLSession.shared.data(for: request)
-            print("✅ Synced active account to backend: \(accountType)")
-        } catch {
-            print("❌ Failed to sync account: \(error)")
         }
     }
 }

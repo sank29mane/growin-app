@@ -29,57 +29,64 @@ class QuantEngine:
 
     def calculate_technical_indicators(self, ohlcv_data: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
-        Calculate technical indicators from OHLCV data.
+        Calculate technical indicators from OHLCV data using Rust-optimized core.
         Input: List of dicts with keys 't', 'o', 'h', 'l', 'c', 'v'
         Output: Dict with indicators and signals
         """
-        if not PANDAS_TA_AVAILABLE:
-            return {"error": "pandas-ta not available - technical analysis disabled"}
-
         if not ohlcv_data:
             return {"error": "No OHLCV data provided"}
 
-        # Convert to pandas DataFrame
+        # Convert to pandas DataFrame for lightweight preprocessing (sorting/filling)
+        # We still use pandas for data alignment convenience, but heavy calc goes to Rust
         df = pd.DataFrame(ohlcv_data)
         df['timestamp'] = pd.to_datetime(df['t'], unit='ms')
         df.set_index('timestamp', inplace=True)
         df.rename(columns={'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close', 'v': 'volume'}, inplace=True)
-
-        # Ensure data is sorted by time
         df.sort_index(inplace=True)
 
-        # Calculate indicators
+        # Extract vectors for Rust
+        close_prices = df['close'].fillna(0).tolist()
+        
+        # Calculate indicators via Rust Core
         indicators = {}
-
-        # RSI (Relative Strength Index)
-        indicators['rsi'] = ta.rsi(df['close'], length=14).iloc[-1] if len(df) >= 14 else None
-
-        # MACD (Moving Average Convergence Divergence)
-        macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
-        if macd is not None:
-            indicators['macd'] = macd['MACD_12_26_9'].iloc[-1]
-            indicators['macd_signal'] = macd['MACDs_12_26_9'].iloc[-1]
-            indicators['macd_hist'] = macd['MACDh_12_26_9'].iloc[-1]
-
-        # Bollinger Bands
+        
         try:
-            bbands = ta.bbands(df['close'], length=20, std=2)
-            if bbands is not None and not bbands.empty:
-                # Use the actual column names from pandas-ta
-                bb_cols = bbands.columns.tolist()
-                if len(bb_cols) >= 3:
-                    indicators['bb_upper'] = bbands[bb_cols[0]].iloc[-1]
-                    indicators['bb_middle'] = bbands[bb_cols[1]].iloc[-1]
-                    indicators['bb_lower'] = bbands[bb_cols[2]].iloc[-1]
+            import growin_core
+            
+            # RSI
+            rsi_vals = growin_core.calculate_rsi(close_prices, 14)
+            indicators['rsi'] = rsi_vals[-1] if rsi_vals else None
+
+            # MACD
+            # Rust returns tuple (macd_line, signal_line, histogram)
+            macd_line, macd_signal, macd_hist = growin_core.calculate_macd(close_prices, 12, 26, 9)
+            if macd_line:
+                indicators['macd'] = macd_line[-1]
+                indicators['macd_signal'] = macd_signal[-1]
+                indicators['macd_hist'] = macd_hist[-1]
+
+            # Bollinger Bands
+            upper, middle, lower = growin_core.calculate_bbands(close_prices, 20, 2.0)
+            if upper:
+                indicators['bb_upper'] = upper[-1]
+                indicators['bb_middle'] = middle[-1]
+                indicators['bb_lower'] = lower[-1]
+
+            # EMA
+            ema_50_vals = growin_core.calculate_ema(close_prices, 50)
+            indicators['ema_50'] = ema_50_vals[-1] if len(ema_50_vals) >= 50 else None
+            
+            ema_200_vals = growin_core.calculate_ema(close_prices, 200)
+            indicators['ema_200'] = ema_200_vals[-1] if len(ema_200_vals) >= 200 else None
+            
+            # Volume SMA
+            vol_vals = growin_core.calculate_sma(df['volume'].fillna(0).tolist(), 20)
+            indicators['volume_sma'] = vol_vals[-1] if vol_vals else None
+
+        except ImportError as e:
+            return {"error": f"growin_core (Rust extension) not available: {e}"}
         except Exception as e:
-            print(f"Bollinger Bands calculation error: {e}")
-
-        # EMA (Exponential Moving Averages)
-        indicators['ema_50'] = ta.ema(df['close'], length=50).iloc[-1] if len(df) >= 50 else None
-        indicators['ema_200'] = ta.ema(df['close'], length=200).iloc[-1] if len(df) >= 200 else None
-
-        # Volume indicators
-        indicators['volume_sma'] = ta.sma(df['volume'], length=20).iloc[-1] if len(df) >= 20 else None
+            return {"error": f"Indicator calculation failed: {e}"}
 
         # Generate signals
         signals = self._generate_signals(indicators, df['close'].iloc[-1])
@@ -93,8 +100,8 @@ class QuantEngine:
 
     def calculate_portfolio_metrics(self, positions: List[Dict[str, Any]], benchmark_returns: Optional[List[float]] = None) -> Dict[str, Any]:
         """
-        Calculate portfolio-level metrics like Sharpe Ratio, Sortino Ratio, etc.
-        Input: List of position dicts with 'symbol', 'qty', 'current_price', 'avg_cost' (optional)
+        Calculate portfolio-level metrics using MLX for Apple Silicon acceleration.
+        Input: List of position dicts with 'symbol', 'qty', 'current_price', 'avg_cost'
         """
         if not positions:
             return {"error": "No positions provided"}
@@ -113,24 +120,67 @@ class QuantEngine:
         if not position_returns:
             return {"total_value": total_value, "note": "No cost basis available for returns calculation"}
 
-        portfolio_return = np.mean(position_returns)
-        portfolio_volatility = np.std(position_returns) if len(position_returns) > 1 else 0
+        # Use MLX for calculation
+        try:
+            import mlx.core as mx
+            
+            # Convert to MLX array on GPU/Unified Memory
+            returns_mx = mx.array(position_returns)
+            
+            portfolio_return = float(mx.mean(returns_mx))
+            
+            # MLX std dev
+            # Note: mx.std defaults to population std usually, numpy defaults to population too unless ddof specified
+            portfolio_volatility = float(mx.std(returns_mx)) if len(position_returns) > 1 else 0.0
 
-        # Sharpe Ratio (assuming risk-free rate of 0.02 or 2%)
-        risk_free_rate = 0.02
-        sharpe_ratio = (portfolio_return - risk_free_rate) / portfolio_volatility if portfolio_volatility > 0 else 0
+            # Sharpe Ratio (risk-free 2%)
+            risk_free_rate = 0.02
+            sharpe_ratio = (portfolio_return - risk_free_rate) / portfolio_volatility if portfolio_volatility > 0 else 0
 
-        # Sortino Ratio (downside deviation)
-        negative_returns = [r for r in position_returns if r < 0]
-        downside_deviation = np.std(negative_returns) if negative_returns else 0
-        sortino_ratio = (portfolio_return - risk_free_rate) / downside_deviation if downside_deviation > 0 else 0
+            # Sortino Ratio
+            # Boolean indexing in MLX: returns_mx[returns_mx < 0]
+            neg_mask = returns_mx < 0
+            # Check if any negative returns exist
+            if mx.any(neg_mask).item():
+                negative_returns = returns_mx[neg_mask]
+                downside_deviation = float(mx.std(negative_returns))
+            else:
+                downside_deviation = 0.0
+                
+            sortino_ratio = (portfolio_return - risk_free_rate) / downside_deviation if downside_deviation > 0 else 0
 
-        # Beta calculation (if benchmark provided)
-        beta = None
-        if benchmark_returns:
-            covariance = np.cov(position_returns, benchmark_returns)[0][1]
-            benchmark_variance = np.var(benchmark_returns)
-            beta = covariance / benchmark_variance if benchmark_variance > 0 else 0
+            # Beta calculation (requires Covariance)
+            beta = None
+            if benchmark_returns and len(benchmark_returns) == len(position_returns):
+                bench_mx = mx.array(benchmark_returns)
+                
+                # Covariance in MLX? mlx.core doesn't have direct cov/corr yet in 0.0.x sometimes
+                # Manual Covariance: E[(X-meanX)(Y-meanY)]
+                x_mean = mx.mean(returns_mx)
+                y_mean = mx.mean(bench_mx)
+                
+                # Center data
+                x_centered = returns_mx - x_mean
+                y_centered = bench_mx - y_mean
+                
+                # Covariance = mean(x_centered * y_centered)
+                covariance = float(mx.mean(x_centered * y_centered))
+                
+                # Variance of benchmark
+                bench_var = float(mx.var(bench_mx))
+                
+                beta = covariance / bench_var if bench_var > 0 else 0
+            
+            # Fallback for benchmark length mismatch
+            elif benchmark_returns:
+                 # If lengths mismatch, we surely can't calculate per-asset correlation easily without time-series alignment
+                 # Here we assume inputs are aligned vectors of returns.
+                 pass
+
+        except ImportError:
+            return {"error": "MLX not available for portfolio metrics"}
+        except Exception as e:
+            return {"error": f"MLX Calculation error: {e}"}
 
         return {
             "total_value": total_value,

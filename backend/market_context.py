@@ -35,7 +35,11 @@ class ForecastData(BaseModel):
     forecast_7d: Optional[float] = None
     confidence: str = "MEDIUM"  # HIGH, MEDIUM, LOW
     trend: str = "NEUTRAL"  # BULLISH, BEARISH, NEUTRAL
+    algorithm: str = "Unknown" # e.g. "TTM-Zero", "LinearRegression"
+    is_fallback: bool = False
+    note: Optional[str] = None  # Reason for fallback or extra info
     raw_series: List[TimeSeriesItem] = [] # Full forecast series for charts
+    auxiliary_forecasts: Optional[List[Dict[str, Any]]] = None # Secondary model predictions for comparison
 
 
 class QuantData(BaseModel):
@@ -57,6 +61,7 @@ class PortfolioData(BaseModel):
     total_value: float = 0.0  # Used as currentValue in frontend
     total_pnl: float = 0.0
     pnl_percent: float = 0.0
+    net_deposits: float = 0.0
     cash_balance: Dict[str, float] = {"total": 0.0, "free": 0.0}
     accounts: Optional[Dict[str, Any]] = None
     
