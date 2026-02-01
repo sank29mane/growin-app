@@ -141,7 +141,8 @@ async def add_mcp_server(server_data: dict, background_tasks: BackgroundTasks):
         
         return {"status": "success"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Failed to add MCP server: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 
 @router.delete("/mcp/servers/{server_name}")
@@ -158,4 +159,5 @@ async def delete_mcp_server(server_name: str):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Failed to delete MCP server {server_name}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal Server Error")

@@ -12,12 +12,13 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 modules_to_mock = [
     "mcp", "mcp.server", "mcp.server.stdio", "mcp.types",
     "mcp.client", "mcp.client.stdio", "mcp.client.sse",
-    "chromadb", "chromadb.config",
+    "chromadb", "chromadb.config", "chromadb.utils",
     "granite_tsfm",
     "langchain", "langchain_core", "langchain_openai",
     "langchain_anthropic", "langchain_google_genai", "langchain_ollama",
     # "yfinance", "pandas", "numpy", # These are actually used in tests, so don't mock if available
-    "scikit-learn", "xgboost", "prophet",
+    "sklearn", "sklearn.preprocessing", "scikit-learn", "xgboost", "prophet",
+    "scipy", "scipy.optimize",
     "torch", "transformers", "mlx", "mlx_lm", "duckdb",
     "rapidfuzz", "newsapi", "tavily", "vaderSentiment", "psutil", "alpaca_trade_api"
 ]

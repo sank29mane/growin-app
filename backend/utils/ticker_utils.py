@@ -14,6 +14,14 @@ except ImportError:
     growin_core = None
     GROWIN_CORE_AVAILABLE = False
 
+# Bolt Optimization: Import optional dependencies at module level to avoid repeated ImportErrors
+try:
+    import growin_core
+    GROWIN_CORE_AVAILABLE = True
+except ImportError:
+    growin_core = None
+    GROWIN_CORE_AVAILABLE = False
+
 # --- Ticker Normalization Constants ---
 
 SPECIAL_MAPPINGS = {
@@ -130,13 +138,22 @@ def normalize_ticker(ticker: str) -> str:
             # Safe heuristic: Strip L.
             ticker = ticker[:-1]
 
-        # Leveraged ETPs (Granular detection)
-        is_leveraged = bool(re.search(r'^(3|5|7)[A-Z]+', ticker)) or \
-                        bool(re.search(r'[A-Z]+(2|3|5|7)$', ticker))
-                        
-        if is_explicit_uk or is_likely_uk or is_leveraged:
-            # Ensure it doesn't already have .L (redundant check)
-            if not ticker.endswith(".L") and "." not in ticker:
-                return f"{ticker}.L"
+    # 6. Global Exchange Logic (UK vs US)
+    is_explicit_uk = "_EQ" in original and "_US" not in original
+    is_likely_uk = (len(ticker) <= 5 or ticker.endswith("L")) and ticker not in US_EXCLUSIONS
 
-        return ticker
+    # Heuristic for stripping extra 'L' (e.g. BARCL -> BARC)
+    if is_likely_uk and ticker.endswith("L") and len(ticker) > 3 and ticker not in US_EXCLUSIONS:
+        # Safe heuristic: Strip L.
+        ticker = ticker[:-1]
+
+    # Leveraged ETPs (Granular detection)
+    is_leveraged = bool(re.search(r'^(3|5|7)[A-Z]+', ticker)) or \
+                    bool(re.search(r'[A-Z]+(2|3|5|7)$', ticker))
+
+    if is_explicit_uk or is_likely_uk or is_leveraged:
+        # Ensure it doesn't already have .L (redundant check)
+        if not ticker.endswith(".L") and "." not in ticker:
+            return f"{ticker}.L"
+
+    return ticker

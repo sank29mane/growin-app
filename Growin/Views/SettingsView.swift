@@ -239,6 +239,7 @@ struct HFModelHubSection: View {
                             .clipShape(.rect(cornerRadius: 8))
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Search Models")
                 }
                 
                 if !hfModels.isEmpty {

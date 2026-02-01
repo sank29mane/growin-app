@@ -6,6 +6,15 @@ try:
 except ImportError:
     ta = None
     PANDAS_TA_AVAILABLE = False
+
+# Bolt Optimization: Import optional dependencies at module level to avoid repeated ImportErrors
+try:
+    import growin_core
+    RUST_CORE_AVAILABLE = True
+except ImportError:
+    growin_core = None
+    RUST_CORE_AVAILABLE = False
+
 from typing import Dict, List, Any, Optional
 from enum import Enum
 
@@ -50,43 +59,41 @@ class QuantEngine:
         # Calculate indicators via Rust Core
         indicators = {}
         
-        try:
-            import growin_core
-            
-            # RSI
-            rsi_vals = growin_core.calculate_rsi(close_prices, 14)
-            indicators['rsi'] = rsi_vals[-1] if rsi_vals else None
+        if RUST_CORE_AVAILABLE:
+            try:
+                # RSI
+                rsi_vals = growin_core.calculate_rsi(close_prices, 14)
+                indicators['rsi'] = rsi_vals[-1] if rsi_vals else None
 
-            # MACD
-            # Rust returns tuple (macd_line, signal_line, histogram)
-            macd_line, macd_signal, macd_hist = growin_core.calculate_macd(close_prices, 12, 26, 9)
-            if macd_line:
-                indicators['macd'] = macd_line[-1]
-                indicators['macd_signal'] = macd_signal[-1]
-                indicators['macd_hist'] = macd_hist[-1]
+                # MACD
+                # Rust returns tuple (macd_line, signal_line, histogram)
+                macd_line, macd_signal, macd_hist = growin_core.calculate_macd(close_prices, 12, 26, 9)
+                if macd_line:
+                    indicators['macd'] = macd_line[-1]
+                    indicators['macd_signal'] = macd_signal[-1]
+                    indicators['macd_hist'] = macd_hist[-1]
 
-            # Bollinger Bands
-            upper, middle, lower = growin_core.calculate_bbands(close_prices, 20, 2.0)
-            if upper:
-                indicators['bb_upper'] = upper[-1]
-                indicators['bb_middle'] = middle[-1]
-                indicators['bb_lower'] = lower[-1]
+                # Bollinger Bands
+                upper, middle, lower = growin_core.calculate_bbands(close_prices, 20, 2.0)
+                if upper:
+                    indicators['bb_upper'] = upper[-1]
+                    indicators['bb_middle'] = middle[-1]
+                    indicators['bb_lower'] = lower[-1]
 
-            # EMA
-            ema_50_vals = growin_core.calculate_ema(close_prices, 50)
-            indicators['ema_50'] = ema_50_vals[-1] if len(ema_50_vals) >= 50 else None
-            
-            ema_200_vals = growin_core.calculate_ema(close_prices, 200)
-            indicators['ema_200'] = ema_200_vals[-1] if len(ema_200_vals) >= 200 else None
-            
-            # Volume SMA
-            vol_vals = growin_core.calculate_sma(df['volume'].fillna(0).tolist(), 20)
-            indicators['volume_sma'] = vol_vals[-1] if vol_vals else None
+                # EMA
+                ema_50_vals = growin_core.calculate_ema(close_prices, 50)
+                indicators['ema_50'] = ema_50_vals[-1] if len(ema_50_vals) >= 50 else None
 
-        except ImportError as e:
-            return {"error": f"growin_core (Rust extension) not available: {e}"}
-        except Exception as e:
-            return {"error": f"Indicator calculation failed: {e}"}
+                ema_200_vals = growin_core.calculate_ema(close_prices, 200)
+                indicators['ema_200'] = ema_200_vals[-1] if len(ema_200_vals) >= 200 else None
+
+                # Volume SMA
+                vol_vals = growin_core.calculate_sma(df['volume'].fillna(0).tolist(), 20)
+                indicators['volume_sma'] = vol_vals[-1] if vol_vals else None
+            except Exception as e:
+                return {"error": f"Indicator calculation failed: {e}"}
+        else:
+            return {"error": "growin_core (Rust extension) not available"}
 
         # Generate signals
         signals = self._generate_signals(indicators, df['close'].iloc[-1])

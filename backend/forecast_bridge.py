@@ -36,7 +36,7 @@ def run_forecast(ohlcv_data: List[Dict[str, Any]], prediction_steps: int, timefr
             "1Week": "W",
             "1Month": "ME"
         }
-        freq = tf_map.get(timeframe, "H")
+        requested_freq = tf_map.get(timeframe, "H")
         
         # Load model
         # TTM-R2 is a Zero-Shot model by default. We load it in evaluation mode.
