@@ -63,7 +63,7 @@ async def create_goal_plan(context: dict):
         return response.data
         
     except Exception as e:
-        logger.error(f"Goal planning failed: {e}")
+        logger.error(f"Goal planning failed: {e}", exc_info=True)
         # Sentinel: Sanitized error message
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
@@ -121,7 +121,7 @@ async def execute_goal_plan(plan: dict):
         return {"status": "success", "result": str(result), "pie_name": pie_payload["name"]}
 
     except Exception as e:
-        logger.error(f"Goal execution failed: {e}")
+        logger.error(f"Goal execution failed: {e}", exc_info=True)
         # Sentinel: Sanitized error message
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
@@ -188,7 +188,7 @@ async def get_live_portfolio(account_type: Optional[str] = None):
 
             return sanitize_nan(data)
         except Exception as e:
-            logger.error(f"Error fetching portfolio: {e}")
+            logger.error(f"Error fetching portfolio: {e}", exc_info=True)
             # Sentinel: Sanitized error message
             raise HTTPException(status_code=500, detail="Internal Server Error")
 
@@ -483,12 +483,12 @@ async def get_technical_analysis(ticker: str, timeframe: str = "1Month"):
         return sanitize_nan(result)
         
     except Exception as e:
-        logger.error(f"Analysis error for {ticker}: {e}")
+        logger.error(f"Analysis error for {ticker}: {e}", exc_info=True)
         return {
             "ai_analysis": f"Analysis service unavailable for {ticker}.",
             "algo_signals": "No technical signals generated.",
             "last_updated": datetime.now().isoformat(),
-            "error": str(e)
+            "error": "Internal Server Error"
         }
 
 def _generate_ai_analysis_text(quant_data: dict, forecast_data: dict, bars: list, ticker: str) -> str:
@@ -722,8 +722,8 @@ async def get_symbol_indicators(symbol: str, timeframe: str = "1Day"):
             return {"error": response.error or "Quant analysis failed"}
             
     except Exception as e:
-        logger.error(f"Quant indicator error: {e}")
-        return {"error": str(e)}
+        logger.error(f"Quant indicator error: {e}", exc_info=True)
+        return {"error": "Internal Server Error"}
 
 # Forecaster Endpoint
 @router.get("/api/forecast/{symbol}")
@@ -750,5 +750,5 @@ async def get_symbol_forecast(symbol: str):
             return {"error": response.error or "Forecast generation failed"}
             
     except Exception as e:
-        logger.error(f"Forecast error: {e}")
-        return {"error": str(e)}
+        logger.error(f"Forecast error: {e}", exc_info=True)
+        return {"error": "Internal Server Error"}

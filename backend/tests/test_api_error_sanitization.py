@@ -72,3 +72,30 @@ def test_update_t212_config_sanitization():
             detail = response.json().get("detail")
             assert detail == "Internal Server Error"
             assert "API_KEY_LEAK_IN_TRACEBACK" not in str(response.content)
+
+def test_add_mcp_server_sanitization():
+    """Test that adding MCP server sanitizes errors."""
+    with TestClient(app) as client:
+        # Mock chat_manager.add_mcp_server to raise exception
+        with patch.object(state.chat_manager, 'add_mcp_server', side_effect=Exception("SENSITIVE_ARGS_LEAK")):
+            response = client.post("/mcp/servers/add", json={"name": "test", "type": "stdio"})
+
+            assert response.status_code == 500
+            detail = response.json().get("detail")
+            assert detail == "Internal Server Error"
+            assert "SENSITIVE_ARGS_LEAK" not in str(response.content)
+
+def test_market_forecast_sanitization():
+    """Test that market forecast sanitizes errors."""
+    with TestClient(app) as client:
+        # Import the router to patch the agent
+        from routes.market_routes import forecast_agent
+
+        with patch.object(forecast_agent, 'analyze', side_effect=Exception("FORECAST_MODEL_PATH_LEAK")):
+            response = client.get("/api/forecast/AAPL")
+
+            # This endpoint returns 200 with error key
+            assert response.status_code == 200
+            error_msg = response.json().get("error")
+            assert error_msg == "Internal Server Error"
+            assert "FORECAST_MODEL_PATH_LEAK" not in str(response.content)

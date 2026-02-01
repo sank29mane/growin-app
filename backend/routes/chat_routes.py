@@ -349,8 +349,8 @@ async def ingest_knowledge(request: IngestRequest):
         
         return {"status": "success", "message": "Knowledge ingested successfully"}
     except Exception as e:
-        logger.error(f"Ingestion failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Ingestion failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @router.get("/api/models/lmstudio")
 async def list_lmstudio_models():
@@ -376,5 +376,5 @@ async def list_lmstudio_models():
         
         return {"models": llm_models}
     except Exception as e:
-        logger.error(f"Failed to list LM Studio models: {e}")
-        return {"models": [], "error": str(e)}
+        logger.error(f"Failed to list LM Studio models: {e}", exc_info=True)
+        return {"models": [], "error": "Internal Server Error"}
