@@ -128,7 +128,7 @@ async def get_yfinance_chart_data(ticker: str, timeframe: str, limit: int, cache
         history['volume'] = history['Volume'].fillna(0).astype(int)
 
         points = history[['timestamp', 'close', 'high', 'low', 'open', 'volume']].to_dict('records')
-        
+
         if len(points) > limit:
             step = max(1, len(points) // limit)
             points = points[::step]
@@ -148,10 +148,10 @@ async def get_chart_data(symbol: str, timeframe: str = "1Day", limit: int = 500)
     """
     from cache_manager import cache
     from analytics_db import get_analytics_db
-    
+
     ticker = normalize_ticker(symbol)
     market = detect_market(ticker)
-    
+
     # Ensure .L for UK stocks in yfinance/analytics
     if market == 'UK' and not ticker.endswith('.L'):
         ticker = f"{ticker}.L"
@@ -164,14 +164,14 @@ async def get_chart_data(symbol: str, timeframe: str = "1Day", limit: int = 500)
             if db_data is not None and not db_data.empty:
                 db_data["timestamp"] = db_data["timestamp"].apply(lambda x: x.isoformat())
                 points = db_data[["timestamp", "close", "high", "low", "open", "volume"]].to_dict("records")
-                
+
                 # Normalize currency on read
                 for p in points:
                     p["close"] = CurrencyNormalizer.normalize_price(p["close"], ticker)
                     p["high"] = CurrencyNormalizer.normalize_price(p["high"], ticker)
                     p["low"] = CurrencyNormalizer.normalize_price(p["low"], ticker)
                     p["open"] = CurrencyNormalizer.normalize_price(p["open"], ticker)
-                
+
                 return {
                     "data": points,
                     "metadata": {"market": market, "currency": "GBP" if market == "UK" else "USD", "ticker": ticker, "provider": "AnalyticsDB"}
@@ -188,7 +188,7 @@ async def get_chart_data(symbol: str, timeframe: str = "1Day", limit: int = 500)
     # 3. Fetch from Providers
     data = []
     provider = "yfinance"
-    
+
     if market == 'US':
         try:
             data = await get_alpaca_chart_data(ticker, timeframe, limit, cache_key)
@@ -239,20 +239,62 @@ async def get_chart_data(symbol: str, timeframe: str = "1Day", limit: int = 500)
 
 @router.websocket("/ws/chart/{symbol}")
 async def websocket_chart_data(websocket: WebSocket, symbol: str):
-    """WebSocket for real-time updates"""
+    """WebSocket for high-frequency real-time price ticks (10s refresh)"""
+    from data_engine import get_alpaca_client, get_finnhub_client
+
     await websocket.accept()
+    ticker = normalize_ticker(symbol)
+    market = detect_market(ticker)
+
+    alpaca = get_alpaca_client()
+    finnhub = get_finnhub_client()
+
     try:
+        # Initial full data burst
+        chart_response = await get_chart_data(symbol, timeframe="1Day", limit=100)
+        await websocket.send_json({
+            "type": "chart_init",
+            "symbol": symbol,
+            "data": chart_response.get("data", []),
+            "metadata": chart_response.get("metadata", {})
+        })
+
         while True:
-            chart_response = await get_chart_data(symbol, timeframe="1Day", limit=50)
-            await websocket.send_json({
-                "type": "chart_update",
-                "symbol": symbol,
-                "data": chart_response.get("data", []),
-                "metadata": chart_response.get("metadata", {}),
-                "timestamp": asyncio.get_event_loop().time()
-            })
-            await asyncio.sleep(60)
+            # High-frequency ticks
+            quote = None
+            if market == "UK":
+                quote = await finnhub.get_real_time_quote(ticker)
+            else:
+                quote = await alpaca.get_real_time_quote(ticker)
+
+            if quote:
+                await websocket.send_json({
+                    "type": "realtime_quote",
+                    "symbol": symbol,
+                    "data": {
+                        "current_price": float(quote["current_price"]),
+                        "change": float(quote["change"]),
+                        "change_percent": float(quote["change_percent"]),
+                        "timestamp": quote["timestamp"]
+                    }
+                })
+
+                # Also send a tick that can be appended to charts
+                await websocket.send_json({
+                    "type": "chart_tick",
+                    "symbol": symbol,
+                    "tick": {
+                        "timestamp": quote["timestamp"],
+                        "close": float(quote["current_price"]),
+                        "volume": 0 # Trades not usually in simple quote
+                    }
+                })
+
+            await asyncio.sleep(10) # 10s is a good balance for paper/free tiers
     except WebSocketDisconnect:
-        pass
+        logger.info(f"WebSocket disconnected for {symbol}")
     except Exception as e:
         logger.error(f"WebSocket error for {symbol}: {e}")
+        try:
+            await websocket.send_json({"type": "error", "message": str(e)})
+        except: pass
