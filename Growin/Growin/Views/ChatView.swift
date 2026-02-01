@@ -360,6 +360,7 @@ struct ChatBubble: View {
                     .font(.system(size: 9))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 4)
+                    .accessibilityLabel("Sent at \(formatTimestamp(message.timestamp))")
             }
             
             if !message.isUser {
@@ -523,8 +524,9 @@ struct ToolExecutionBlock: View {
             ForEach(toolCalls, id: \.id) { toolCall in
                 HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass.circle.fill")
-                        . font(.system(size: 14))
+                        .font(.system(size: 14))
                         .foregroundStyle(.blue)
+                        .accessibilityHidden(true)
                     
                     Text(formatToolName(toolCall.function.name))
                         .font(.system(size: 11, design: .monospaced))
@@ -535,10 +537,13 @@ struct ToolExecutionBlock: View {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.system(size: 10))
                         .foregroundStyle(.green)
+                        .accessibilityHidden(true)
                 }
                 .padding(8)
                 .background(Color.white.opacity(0.05))
                 .cornerRadius(8)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Completed research step: \(formatToolName(toolCall.function.name))")
             }
         }
         .padding(8)
