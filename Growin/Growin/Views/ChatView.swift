@@ -52,21 +52,20 @@ struct ChatView: View {
                 Button(action: {
                     // Start new conversation
                     withAnimation(.spring()) {
-                        viewModel.currentConversationId = nil
-                        viewModel.messages.removeAll()
+                        viewModel.startNewConversation()
                     }
                 }) {
                     Image(systemName: "plus.circle")
                 }
-                .help("New Conversation")
-                .accessibilityLabel("New Conversation")
+                .help("New Chat")
+                .accessibilityLabel("New Chat")
             }
         }
         .sheet(isPresented: $viewModel.showConfigPrompt) {
             ConfigView(provider: viewModel.missingConfigProvider)
         }
         .sheet(isPresented: $showConversationList) {
-            ConversationListView(selectedConversationId: $viewModel.currentConversationId)
+            ConversationListView(selectedConversationId: $viewModel.selectedConversationId)
         }
     }
     
@@ -109,7 +108,8 @@ struct ChatView: View {
                     scrollToBottom(proxy: proxy)
                 }
             }
-            .onChange(of: viewModel.currentConversationId) { _, newId in
+            // Fix: React to selectedConversationId changes
+            .onChange(of: viewModel.selectedConversationId) { _, newId in
                 Task {
                     if newId != nil {
                         await viewModel.loadConversationHistory()
@@ -123,7 +123,7 @@ struct ChatView: View {
             }
             .task {
                 // Load conversation history if we have a conversation ID
-                if viewModel.currentConversationId != nil && viewModel.messages.isEmpty {
+                if viewModel.selectedConversationId != nil && viewModel.messages.isEmpty {
                     await viewModel.loadConversationHistory()
                 }
             }
@@ -360,6 +360,7 @@ struct ChatBubble: View {
                     .font(.system(size: 9))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 4)
+                    .accessibilityLabel("Sent at \(formatTimestamp(message.timestamp))")
             }
             
             if !message.isUser {
@@ -523,8 +524,9 @@ struct ToolExecutionBlock: View {
             ForEach(toolCalls, id: \.id) { toolCall in
                 HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass.circle.fill")
-                        . font(.system(size: 14))
+                        .font(.system(size: 14))
                         .foregroundStyle(.blue)
+                        .accessibilityHidden(true)
                     
                     Text(formatToolName(toolCall.function.name))
                         .font(.system(size: 11, design: .monospaced))
@@ -535,10 +537,13 @@ struct ToolExecutionBlock: View {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.system(size: 10))
                         .foregroundStyle(.green)
+                        .accessibilityHidden(true)
                 }
                 .padding(8)
                 .background(Color.white.opacity(0.05))
                 .cornerRadius(8)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Completed research step: \(formatToolName(toolCall.function.name))")
             }
         }
         .padding(8)

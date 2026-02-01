@@ -9,35 +9,40 @@ struct StockChartView: View {
     let timeframes = ["1Day", "1Week", "1Month", "3Month", "1Year", "Max"]
     
     var body: some View {
-        VStack(spacing: 20) {
-            // Provider notification banner
-            if viewModel.showProviderNotification {
-                HStack {
-                    Image(systemName: "exclamationmark.triangle")
-                        .foregroundColor(.orange)
-                    Text(viewModel.providerNotificationMessage)
-                        .font(.caption)
-                        .foregroundColor(.primary)
-                    Spacer()
-                    Button(action: {
-                        viewModel.showProviderNotification = false
-                    }) {
-                        Image(systemName: "xmark")
-                            .foregroundColor(.secondary)
+        ScrollView {
+            VStack(spacing: 20) {
+                // Provider notification banner
+                if viewModel.showProviderNotification {
+                    HStack {
+                        Image(systemName: "exclamationmark.triangle")
+                            .foregroundColor(.orange)
+                        Text(viewModel.providerNotificationMessage)
+                            .font(.caption)
+                            .foregroundColor(.primary)
+                        Spacer()
+                        Button(action: {
+                            viewModel.showProviderNotification = false
+                        }) {
+                            Image(systemName: "xmark")
+                                .foregroundColor(.secondary)
+                        }
                     }
+                    .padding(.horizontal)
+                    .padding(.vertical, 8)
+                    .background(Color.orange.opacity(0.1))
+                    .cornerRadius(8)
+                    .transition(.slide)
                 }
-                .padding(.horizontal)
-                .padding(.vertical, 8)
-                .background(Color.orange.opacity(0.1))
-                .cornerRadius(8)
-                .transition(.slide)
-            }
 
-            headerView
-            chartContainerView
-            timeframePickerView
+                headerView
+                chartContainerView
+                timeframePickerView
+                
+                // Advanced Features - REAL ANALYSIS
+                analysisView
+            }
+            .padding(.vertical)
         }
-        .padding(.vertical)
         .background(
             RoundedRectangle(cornerRadius: 24)
                 .fill(Color.secondary.opacity(0.05))
@@ -229,6 +234,7 @@ struct StockChartView: View {
         .chartXAxis(.hidden)
         .chartYAxis(.hidden)
         .chartYScale(domain: minValue...maxValue)
+        .drawingGroup() // Offload rendering to Metal for performance
         .chartOverlay { proxy in
             GeometryReader { geometry in
                 Rectangle().fill(.clear).contentShape(Rectangle())
@@ -282,6 +288,56 @@ struct StockChartView: View {
         case "Max": return "ALL"
         default: return tf
         }
+    }
+
+    @ViewBuilder
+    private var analysisView: some View {
+        HStack(spacing: 16) {
+            GlassCard {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("AI ANALYSIS")
+                            .font(.system(size: 10, weight: .black, design: .monospaced))
+                            .foregroundColor(.blue)
+                        
+                        Spacer()
+                        
+                        if let updated = viewModel.lastUpdated {
+                            Text(updated, style: .relative)
+                                .font(.system(size: 8))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    
+                    Text(viewModel.aiAnalysis)
+                        .font(.system(size: 11))
+                        .foregroundColor(.white.opacity(0.8))
+                }
+            }
+            
+            GlassCard {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("ALGO SIGNALS")
+                            .font(.system(size: 10, weight: .black, design: .monospaced))
+                            .foregroundColor(.green)
+                        
+                        Spacer()
+                        
+                        if let updated = viewModel.lastUpdated {
+                            Text(updated, style: .relative)
+                                .font(.system(size: 8))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    
+                    Text(viewModel.algoSignals)
+                        .font(.system(size: 11))
+                        .foregroundColor(.white.opacity(0.8))
+                }
+            }
+        }
+        .padding(.horizontal)
     }
 
     private func createNewChatFromChart() {

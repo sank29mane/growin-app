@@ -4,17 +4,31 @@ Market Routes - Portfolio and Market Data
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from typing import Optional
+import logging
+import asyncio
+import json
+import numpy as np
+from utils import sanitize_nan
+
 from app_context import state
 from cache_manager import cache
 from trading212_mcp_server import normalize_ticker
 from market_context import GoalData
-import logging
-import asyncio
-import numpy as np
-from utils import sanitize_nan
+from data_engine import get_alpaca_client, get_finnhub_client
+
+
+
+# Specialist Agent Imports
+from agents.quant_agent import QuantAgent
+from agents.forecasting_agent import ForecastingAgent
+from agents.base_agent import AgentConfig, AgentResponse
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Initialize agents
+quant_agent = QuantAgent()
+forecast_agent = ForecastingAgent()
 
 # Global lock for portfolio fetching to prevent race conditions
 portfolio_lock = asyncio.Lock()
@@ -49,7 +63,7 @@ async def create_goal_plan(context: dict):
         return response.data
         
     except Exception as e:
-        logger.error(f"Goal planning failed: {e}")
+        logger.error(f"Goal planning failed: {e}", exc_info=True)
         # Sentinel: Sanitized error message
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
@@ -107,7 +121,7 @@ async def execute_goal_plan(plan: dict):
         return {"status": "success", "result": str(result), "pie_name": pie_payload["name"]}
 
     except Exception as e:
-        logger.error(f"Goal execution failed: {e}")
+        logger.error(f"Goal execution failed: {e}", exc_info=True)
         # Sentinel: Sanitized error message
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
@@ -174,7 +188,7 @@ async def get_live_portfolio(account_type: Optional[str] = None):
 
             return sanitize_nan(data)
         except Exception as e:
-            logger.error(f"Error fetching portfolio: {e}")
+            logger.error(f"Error fetching portfolio: {e}", exc_info=True)
             # Sentinel: Sanitized error message
             raise HTTPException(status_code=500, detail="Internal Server Error")
 
@@ -375,17 +389,34 @@ async def clear_cache():
     logger.info("Cache cleared successfully")
     return {"status": "success", "message": "Cache cleared"}
 
+@router.get("/debug/logs")
+async def get_logs(limit: int = 50):
+    """
+    Get recent backend logs for TTM debugging.
+    """
+    from app_logging import get_recent_logs
+    logs = get_recent_logs()
+    return {"logs": logs[-limit:]}
+
+@router.get("/debug/ttm_status")
+async def get_ttm_status():
+    """
+    Check TTM model availability and bridge status.
+    """
+    from forecaster import get_forecaster
+    forecaster = get_forecaster()
+    return {
+        "ttm_available": forecaster.ttm_available,
+        "platform": forecaster.platform,
+        "bridge_script": forecaster.bridge_script,
+        "venv_python": forecaster.venv_python,
+        "bridge_exists": True if forecaster.ttm_available else False
+    }
+
 @router.get("/api/analysis/{ticker}")
 async def get_technical_analysis(ticker: str, timeframe: str = "1Month"):
     """
     Get comprehensive technical analysis + TTM forecast for a ticker.
-    
-    Returns:
-    - AI analysis summary (trend, support/resistance, TTM forecast)
-    - Algo signals (RSI, MACD, Bollinger Bands)
-    - Timestamp
-    
-    Cached for 30 seconds to reduce compute.
     """
     from datetime import datetime
     
@@ -395,120 +426,72 @@ async def get_technical_analysis(ticker: str, timeframe: str = "1Month"):
         return cached
     
     try:
-        from agents.quant_agent import QuantAgent
-        from agents.forecasting_agent import ForecastingAgent
         from data_engine import get_alpaca_client
         
-        # Fetch OHLCV data
+        # 1. Fetch OHLCV data using Alpaca
         alpaca = get_alpaca_client()
-        
-        # Map timeframe to limit
-        # SOTA: We need at least 512 bars for the TTM-R2 model to trigger!
-        limit_map = {
-            "1Day": 512, "1Week": 512, "1Month": 512,
-            "3Month": 512, "1Year": 512, "Max": 1000
-        }
-        limit = limit_map.get(timeframe, 512)
-        
-        result = await alpaca.get_historical_bars(ticker, timeframe=timeframe, limit=limit)
+        result = await alpaca.get_historical_bars(ticker, timeframe=timeframe, limit=1000)
         bars = result.get("bars", [])
         
-        if not bars or len(bars) < 50:
-            return {
-                "ai_analysis": "Insufficient data for analysis.",
-                "algo_signals": "Need at least 50 data points.",
-                "last_updated": datetime.now().isoformat()
-            }
+        if not bars or len(bars) < 20:
+             # Basic validity check for UI
+             return {
+                 "ai_analysis": "Insufficient historical data for analysis.",
+                 "algo_signals": "Need at least 20 data points.",
+                 "last_updated": datetime.now().isoformat()
+             }
+
+        # 2. Optimized context for TTM-R2 (Prefer 1Hour resolution for 1Day requests)
+        target_res = "1Hour" if timeframe == "1Day" else "1Day" if timeframe in ["1Week", "1Month"] else None
+        bars_for_forecast = bars
+        forecast_tf = timeframe
         
-        # Run QuantAgent and ForecastingAgent in parallel with timeouts
-        quant = QuantAgent()
-        forecast_agent = ForecastingAgent()
+        if target_res:
+            opt_result = await alpaca.get_historical_bars(ticker, timeframe=target_res, limit=1000)
+            opt_bars = opt_result.get("bars", [])
+            if len(opt_bars) >= 200:
+                bars_for_forecast = opt_bars
+                forecast_tf = target_res
+
+        # 3. Parallel Execution of Agents
+        results = await asyncio.gather(
+            quant_agent.analyze({"ticker": ticker, "ohlcv_data": bars}),
+            forecast_agent.analyze({"ticker": ticker, "ohlcv_data": bars_for_forecast, "days": 7, "timeframe": forecast_tf}),
+            return_exceptions=True
+        )
         
-        async def run_quant():
-            try:
-                return await asyncio.wait_for(
-                    quant.execute({
-                        "ticker": ticker,
-                        "ohlcv_data": bars
-                    }),
-                    timeout=10.0
-                )
-            except asyncio.TimeoutError:
-                logger.warning(f"QuantAgent timeout for {ticker}")
-                return None
-            except Exception as e:
-                logger.error(f"QuantAgent error for {ticker}: {e}")
-                return None
+        quant_res = results[0] if not isinstance(results[0], Exception) else None
+        forecast_res = results[1] if not isinstance(results[1], Exception) else None
         
-        async def run_forecast():
-            try:
-                return await asyncio.wait_for(
-                    forecast_agent.execute({
-                        "ticker": ticker,
-                        "ohlcv_data": bars,
-                        "days": 7,  # Default horizon
-                        "timeframe": timeframe
-                    }),
-                    timeout=10.0
-                )
-            except asyncio.TimeoutError:
-                logger.warning(f"ForecastingAgent timeout for {ticker}")
-                return None
-            except Exception as e:
-                logger.error(f"ForecastingAgent error for {ticker}: {e}")
-                return None
+        quant_data = quant_res.data if quant_res and quant_res.success else {}
+        forecast_data = forecast_res.data if forecast_res and forecast_res.success else {}
         
-        # Execute both agents in parallel
-        results = await asyncio.gather(run_quant(), run_forecast(), return_exceptions=True)
-        quant_response = results[0] if not isinstance(results[0], Exception) else None
-        forecast_response = results[1] if not isinstance(results[1], Exception) else None
-        
-        # Handle errors gracefully
-        quant_data = {}
-        if quant_response and hasattr(quant_response, 'success') and quant_response.success:
-            quant_data = quant_response.data or {}
-        
-        forecast_data = {}
-        if forecast_response and hasattr(forecast_response, 'success') and forecast_response.success:
-            forecast_data = forecast_response.data or {}
-        
-        # Generate AI Analysis text (combines technical + forecast)
-        try:
-            ai_analysis = _generate_ai_analysis_text(quant_data, forecast_data, bars)
-        except Exception as e:
-            logger.error(f"Error generating AI analysis: {e}")
-            ai_analysis = "Analysis generation failed."
-        
-        # Generate Algo Signals text (technical indicators only)
-        try:
-            algo_signals = _generate_algo_signals_text(quant_data)
-        except Exception as e:
-            logger.error(f"Error generating algo signals: {e}")
-            algo_signals = "Signals generation failed."
+        # 4. Synthesize AI Responses
+        ai_analysis = _generate_ai_analysis_text(quant_data, forecast_data, bars, ticker)
+        algo_signals = _generate_algo_signals_text(quant_data)
         
         result = {
             "ai_analysis": ai_analysis,
             "algo_signals": algo_signals,
             "last_updated": datetime.now().isoformat(),
-            "raw_quant": quant_data,  # For debugging
-            "raw_forecast": forecast_data  # For debugging
+            "raw_quant": quant_data,
+            "raw_forecast": forecast_data
         }
         
-        # Cache for 30 seconds
+        # Cache for performance
         cache.set(cache_key, result, ttl=30)
-        
         return sanitize_nan(result)
         
     except Exception as e:
-        logger.error(f"Analysis error for {ticker}: {e}")
+        logger.error(f"Analysis error for {ticker}: {e}", exc_info=True)
         return {
-            "ai_analysis": f"Error analyzing {ticker}.",
-            # Sentinel: Sanitized error message
-            "algo_signals": "Analysis unavailable due to internal error.",
-            "last_updated": datetime.now().isoformat()
+            "ai_analysis": f"Analysis service unavailable for {ticker}.",
+            "algo_signals": "No technical signals generated.",
+            "last_updated": datetime.now().isoformat(),
+            "error": "Internal Server Error"
         }
 
-def _generate_ai_analysis_text(quant_data: dict, forecast_data: dict, bars: list) -> str:
+def _generate_ai_analysis_text(quant_data: dict, forecast_data: dict, bars: list, ticker: str) -> str:
     """Generate human-readable AI analysis from quant + forecast data."""
     parts = []
     
@@ -559,56 +542,219 @@ def _generate_ai_analysis_text(quant_data: dict, forecast_data: dict, bars: list
     if forecast_data:
         forecast_24h = forecast_data.get("forecast_24h")
         confidence = forecast_data.get("confidence", "MEDIUM")
+        algorithm = forecast_data.get("algorithm", "Unknown Model")
+        is_fallback = forecast_data.get("is_fallback", False)
         
         # Normalize forecast if needed
-        if is_uk_stock and forecast_24h and forecast_24h > 500:
+        from utils.currency_utils import CurrencyNormalizer
+        
+        # Heuristic for forecast normalization (using same logic as rest of app)
+        # If the current price is in pounds (small number) but forecast is in pence (large number), normalize.
+        # Or if we know the ticker is UK.
+        if CurrencyNormalizer.is_uk_stock(ticker):
+             # Ensure consistency
+             if forecast_24h and forecast_24h > 2000: # Sanity check for massive penny stocks vs valid pounds
+                  forecast_24h = CurrencyNormalizer.pence_to_pounds(forecast_24h)
+        elif forecast_24h and forecast_24h > 500: # Fallback legacy check
              forecast_24h = forecast_24h / 100.0
         
         if forecast_24h:
             change_pct = ((forecast_24h - current_price) / current_price) * 100
             direction = "up" if change_pct > 0 else "down"
-            parts.append(f"Forecast predicts {direction} {abs(change_pct):.1f}% in 24h ({confidence} confidence).")
-    
+            
+            # Construct distinct source label
+            if is_fallback:
+
+                note = forecast_data.get("note", "")
+                source_label = f"⚠️ Using Statistical Fallback"
+                
+                # Special handling for Sanity Check failures
+                if "Sanity Check Failed" in note:
+                    source_label += " (Model Uncertainty)"
+                elif note:
+                    source_label += f" ({note})"
+            else:
+                source_label = "✅ Using TTM-R2 Model"
+            
+            parts.append(f"Forecast ({algorithm}) predicts {direction} {abs(change_pct):.1f}% in 24h ({confidence} confidence). {source_label}")
+            
+            # --- 4. Auxiliary Forecasts (Comparison) ---
+            aux = forecast_data.get("auxiliary_forecasts")
+            if aux:
+                aux_parts = []
+                for a in aux:
+                    model_name = a.get("model", "Unknown")
+                    
+                    # Ignore if the primary is the same as this aux
+                    # (e.g. if TTM failed and we fell back to XGBoost/Holt-Winters)
+                    if model_name.split(" ")[0].lower() in algorithm.lower():
+                         continue
+                         
+                    pct = a.get("prediction_pct", 0)
+                    aux_parts.append(f"{model_name}: {pct:+.1f}%")
+                
+                if aux_parts:
+                    parts.append(f" | Peer Models: {', '.join(aux_parts)}.")
+
     return " ".join(parts)
 
 def _generate_algo_signals_text(quant_data: dict) -> str:
-    """Generate algo signals text from technical indicators."""
+    """Generate synthesized algo signals from technical indicators."""
     if not quant_data:
         return "Technical indicators unavailable."
     
+    # Extract RSI
+    rsi = quant_data.get("rsi")
+    if rsi is None:
+        rsi = 50.0  # Default to neutral if missing
+        
+    # Extract MACD
+    macd_condition = "neutral"
+    macd_data = quant_data.get("macd")
+    
+    if macd_data and isinstance(macd_data, dict):
+        macd_value = macd_data.get("value")
+        macd_signal = macd_data.get("signal")
+        
+        # Only determine condition if we have valid numbers
+        if macd_value is not None and macd_signal is not None:
+            if macd_value > macd_signal:
+                macd_condition = "bullish"
+            elif macd_value < macd_signal:
+                macd_condition = "bearish"
+    
+    # Synthesize Signals needed
     parts = []
     
-    # RSI signal
-    rsi = quant_data.get("rsi") or 50
-    if rsi < 30:
-        parts.append(f"RSI oversold at {rsi:.1f}.")
-    elif rsi > 70:
-        parts.append(f"RSI overbought at {rsi:.1f}.")
-    else:
-        parts.append(f"RSI neutral at {rsi:.1f}.")
+    # RSI Categories
+    is_overbought = rsi >= 70
+    is_oversold = rsi <= 30
     
-    # MACD signal (handle null values)
-    macd_data = quant_data.get("macd")
-    if macd_data and isinstance(macd_data, dict):
-        macd_value = macd_data.get("value") or 0
-        macd_signal = macd_data.get("signal") or 0
-        
-        if macd_value and macd_signal:
-            if macd_value > macd_signal:
-                if macd_value > 0:
-                    parts.append("MACD bullish crossover confirmed.")
-                else:
-                    parts.append("MACD showing early bullish divergence.")
-            elif macd_value < macd_signal:
-                if macd_value < 0:
-                    parts.append("MACD bearish crossover confirmed.")
-                else:
-                    parts.append("MACD showing early bearish divergence.")
-            else:
-                parts.append("MACD crossover imminent.")
+    # Synthesis Logic
+    if is_overbought:
+        if macd_condition == "bullish":
+            parts.append(f"Strong upward momentum, but approaching overbought levels (RSI {rsi:.1f}). Watch for potential consolidation.")
+        elif macd_condition == "bearish":
+            parts.append(f"Bearish divergence detected: Price overbought (RSI {rsi:.1f}) with weakening momentum (MACD). Potential reversal warning.")
         else:
-            parts.append("MACD data incomplete.")
-    else:
-        parts.append("MACD unavailable.")
-    
+            parts.append(f"RSI overbought at {rsi:.1f}. Monitor for trend exhaustion.")
+            
+    elif is_oversold:
+        if macd_condition == "bullish":
+            parts.append(f"Bullish divergence detected: Price oversold (RSI {rsi:.1f}) with improving momentum (MACD). Potential buying opportunity.")
+        elif macd_condition == "bearish":
+            parts.append(f"Strong downward pressure. Price is oversold (RSI {rsi:.1f}) but momentum remains bearish. Wait for stabilization.")
+        else:
+            parts.append(f"RSI oversold at {rsi:.1f}. Monitor for support.")
+            
+    else:  # Neutral RSI
+        # Add context about where in neutral it is
+        context = ""
+        if rsi > 60:
+            context = "(Upper Range)"
+        elif rsi < 40:
+            context = "(Lower Range)"
+            
+        if macd_condition == "bullish":
+            parts.append(f"Bullish momentum confirmed (MACD) with room to run (RSI {rsi:.1f}).")
+        elif macd_condition == "bearish":
+            parts.append(f"Bearish momentum confirmed (MACD) with room for further downside (RSI {rsi:.1f}).")
+        else:
+            parts.append(f"Market is consolidating (RSI {rsi:.1f} {context}). Awaiting clearer directional signals.")
+            
     return " ".join(parts)
+
+# Portfolio Stats Endpoint
+@router.get("/api/trade/stats")
+async def get_trade_stats():
+    """Get current trade statistics from Trading 212 MCP"""
+    try:
+        # Fetch historical performance to get trade counts
+        # This will query the underlying MCP server (call_tool routes by tool name)
+        response_list = await state.mcp_client.call_tool("get_historical_performance", {"limit": 50})
+
+        
+        # response_list is a list of TextContent objects
+        if response_list and len(response_list) > 0:
+            content = json.loads(response_list[0].text)
+            orders = content.get("orders", [])
+            
+            # Simple stats based on available orders
+            from datetime import datetime
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            
+            trades_today = sum(1 for o in orders if o.get("date", "").startswith(today_str))
+            
+            return {
+                "trades_today": trades_today,
+                "daily_limit": 100,
+                "trades_this_hour": min(trades_today, 5), # Simplified
+                "hourly_limit": 20,
+                "daily_utilization": round((trades_today / 100) * 100, 1)
+            }
+            
+    except Exception as e:
+        logger.error(f"Error fetching trade stats: {e}")
+        
+    # Standard fallback
+    return {
+        "trades_today": 0,
+        "daily_limit": 100,
+        "trades_this_hour": 0,
+        "hourly_limit": 20,
+        "daily_utilization": 0
+    }
+
+# Quant Indicators Endpoint
+@router.get("/api/quant/{symbol}/indicators")
+async def get_symbol_indicators(symbol: str, timeframe: str = "1Day"):
+    """Get real-time technical indicators for a symbol"""
+    try:
+        alpaca = get_alpaca_client()
+        bars_data = await alpaca.get_historical_bars(symbol, timeframe=timeframe, limit=100)
+        
+        if not bars_data or "bars" not in bars_data:
+             return {"error": "Failed to fetch historical data for indicators"}
+             
+        # Call Quant Agent
+        response: AgentResponse = await quant_agent.analyze({
+            "ticker": symbol,
+            "ohlcv_data": bars_data["bars"]
+        })
+        
+        if response.success:
+            return response.data
+        else:
+            return {"error": response.error or "Quant analysis failed"}
+            
+    except Exception as e:
+        logger.error(f"Quant indicator error: {e}", exc_info=True)
+        return {"error": "Internal Server Error"}
+
+# Forecaster Endpoint
+@router.get("/api/forecast/{symbol}")
+async def get_symbol_forecast(symbol: str):
+    """Get AI price forecast for a symbol"""
+    try:
+        alpaca = get_alpaca_client()
+        # TTM needs 512 bars for optimal performance
+        bars_data = await alpaca.get_historical_bars(symbol, timeframe="1Day", limit=512)
+        
+        if not bars_data or "bars" not in bars_data:
+             return {"error": "Failed to fetch historical data for forecasting"}
+             
+        # Call Forecasting Agent
+        response: AgentResponse = await forecast_agent.analyze({
+            "ticker": symbol,
+            "ohlcv_data": bars_data["bars"],
+            "days": 5
+        })
+        
+        if response.success:
+            return response.data
+        else:
+            return {"error": response.error or "Forecast generation failed"}
+            
+    except Exception as e:
+        logger.error(f"Forecast error: {e}", exc_info=True)
+        return {"error": "Internal Server Error"}
