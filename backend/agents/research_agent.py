@@ -474,21 +474,3 @@ class ResearchAgent(BaseAgent):
         elif score <= -0.05:
             return "BEARISH"
         return "NEUTRAL"
-
-    def _neutral_response(self, ticker: str, error: str = None) -> AgentResponse:
-        """Return neutral sentiment when no data available."""
-        research_data = ResearchData(
-            ticker=ticker,
-            sentiment_score=0.0,
-            sentiment_label="NEUTRAL",
-            top_headlines=[f"News unavailable: {error}" if error else "No data"],
-            sources=["System"]
-        )
-        
-        return AgentResponse(
-            agent_name=self.config.name,
-            success=False, # Mark as failure when no data found
-            data=research_data.model_dump(),
-            latency_ms=0,
-            error=error
-        )
