@@ -1,5 +1,7 @@
 
 import asyncio
+import os
+os.environ["OPENAI_API_KEY"] = "sk-fake-key-for-testing"
 import json
 from unittest.mock import AsyncMock, MagicMock
 from agents.coordinator_agent import CoordinatorAgent
@@ -19,7 +21,7 @@ async def test_escalation_path():
     
     # 2. Setup Coordinator
     # We use a mock LLM to avoid real API calls in this test
-    coordinator = CoordinatorAgent(mock_mcp, model_name="mock-model")
+    coordinator = CoordinatorAgent(mock_mcp, model_name="gpt-4o")
     coordinator.llm = AsyncMock()
     coordinator.llm.ainvoke.return_value = MagicMock(content=json.dumps({
         "type": "price_check",

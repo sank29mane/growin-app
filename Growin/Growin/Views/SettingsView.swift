@@ -83,6 +83,7 @@ struct AIConfigSection: View {
     @State private var showExportSuccess = false
     @State private var showImportSuccess = false
     @State private var showImportError = false
+    @State private var lmStudioModels: [String] = []
 
     var body: some View {
         SettingsCard(title: "AI Core Config", icon: "brain") {
@@ -99,6 +100,11 @@ struct AIConfigSection: View {
                         Text("MLX (Local)").tag("mlx")
                     }
                     .pickerStyle(.menu)
+                    .onChange(of: selectedProvider) { _, newValue in
+                        if newValue == "lmstudio" {
+                            fetchLMStudioModels()
+                        }
+                    }
                 }
                 
                 // Decision Agent Model
@@ -141,6 +147,34 @@ struct AIConfigSection: View {
                 statusNote
             }
         }
+        .onAppear {
+            if selectedProvider == "lmstudio" {
+                fetchLMStudioModels()
+            }
+        }
+    }
+    
+    private func fetchLMStudioModels() {
+        Task {
+            guard let url = URL(string: "http://127.0.0.1:8002/api/models/lmstudio") else { return }
+            do {
+                let (data, _) = try await URLSession.shared.data(from: url)
+                // Decode response: {"models": ["id1", "id2"], "error": "..."}
+                if let response = try? JSONDecoder().decode([String: [String]].self, from: data),
+                   let models = response["models"] {
+                    await MainActor.run {
+                        self.lmStudioModels = models
+                        // Auto-select first if current selection is invalid
+                        if !models.isEmpty && (selectedModel == "lmstudio-auto" || !models.contains(selectedModel)) {
+                            // Keep 'lmstudio-auto' as a valid option or switch?
+                            // Let's keep it as option, but update list
+                        }
+                    }
+                }
+            } catch {
+                print("Failed to fetch LM Studio models: \(error)")
+            }
+        }
     }
 
 
@@ -166,7 +200,10 @@ struct AIConfigSection: View {
             Text("Llama 3").tag("llama3")
             Text("Gemma").tag("gemma")
         case "lmstudio":
-            Text("Auto-Detect").tag("lmstudio:auto")
+            Text("Auto-Detect").tag("lmstudio-auto")
+            ForEach(lmStudioModels, id: \.self) { model in
+                Text(model).tag(model)
+            }
         case "openai":
             Text("GPT-4o").tag("gpt-4o")
             Text("GPT-4 Turbo").tag("gpt-4-turbo")

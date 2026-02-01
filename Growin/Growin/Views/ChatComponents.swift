@@ -156,6 +156,7 @@ struct SuggestionChip: View {
                 Image(systemName: "arrow.right.circle.fill")
                     .font(.system(size: 16))
                     .foregroundStyle(item.color.opacity(isHovered ? 0.8 : 0.4))
+                    .accessibilityHidden(true)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 14)
@@ -194,6 +195,7 @@ struct SuggestionChip: View {
             )
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("Ask about \(item.title)")
         .onHover { hovering in
             withAnimation(.easeOut(duration: 0.15)) {
                 isHovered = hovering
@@ -240,6 +242,9 @@ struct AccountPicker: View {
                         Text(displayName(account))
                             .font(.system(size: 12, weight: .medium))
                     }
+                    .accessibilityLabel(displayName(account))
+                    .accessibilityAddTraits(selectedAccount == account ? [.isSelected] : [])
+                    .accessibilityHint("Filters conversation context")
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
                     .background(
@@ -269,7 +274,6 @@ struct AccountPicker: View {
                     .foregroundStyle(selectedAccount == account ? .white : .secondary)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(displayName(account))
                 .accessibilityAddTraits(selectedAccount == account ? [.isSelected] : [])
             }
         }
