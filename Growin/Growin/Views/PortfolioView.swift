@@ -218,6 +218,7 @@ struct MiniMetricCard: View {
     let value: String
     let icon: String
     let color: Color
+    @State private var isHovered = false
     
     var body: some View {
         GlassCard(cornerRadius: 12) {
@@ -226,6 +227,7 @@ struct MiniMetricCard: View {
                     Image(systemName: icon)
                         .foregroundStyle(color)
                         .font(.system(size: 12))
+                        .accessibilityHidden(true)
                     Text(title)
                         .font(.system(size: 9, weight: .bold))
                         .foregroundStyle(.secondary)
@@ -237,6 +239,13 @@ struct MiniMetricCard: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .scaleEffect(isHovered ? 1.02 : 1.0)
+        .animation(.spring(response: 0.3, dampingFraction: 0.6), value: isHovered)
+        .onHover { hovering in
+            isHovered = hovering
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title): \(value)")
     }
 }
 

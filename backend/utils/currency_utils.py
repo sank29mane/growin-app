@@ -6,6 +6,7 @@ Trading212, Alpaca, and yfinance data sources.
 
 from typing import Dict, Any, Optional, List
 from enum import Enum
+from decimal import Decimal
 
 class Currency(str, Enum):
     """Supported currencies"""
@@ -80,7 +81,12 @@ class CurrencyNormalizer:
             94725 pence → 947.25 pounds
             442.82 pence → 4.43 pounds
         """
-        return round(pence / 100.0, 2)
+        if pence is None:
+            return 0.0
+        # Use Decimal for precision then cast back to float for API compatibility
+        d_pence = Decimal(str(pence))
+        d_pounds = d_pence / Decimal("100.0")
+        return float(round(d_pounds, 2))
     
     @staticmethod
     def normalize_price(
@@ -107,6 +113,9 @@ class CurrencyNormalizer:
             normalize_price(94725, "SSLN_EQ.L", "GBX") → 947.25
             normalize_price(150.50, "AAPL", "USD") → 150.50
         """
+        if price is None:
+            return 0.0
+            
         # Detect if UK stock
         if CurrencyNormalizer.is_uk_stock(ticker, currency, metadata):
             return CurrencyNormalizer.pence_to_pounds(price)

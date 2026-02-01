@@ -5,7 +5,6 @@ struct ChartsView: View {
     @State private var selectedSymbol: String? = "AAPL" // Default to AAPL for a good first impression
     @State private var searchResults: [SearchResult] = []
     @State private var isSearching = false
-    @State private var chartViewModel: StockChartViewModel? = nil
     @FocusState private var isSearchFocused: Bool
     
     var body: some View {
@@ -34,65 +33,8 @@ struct ChartsView: View {
                 } else if !searchResults.isEmpty {
                     suggestionsList
                 } else if let symbol = selectedSymbol {
-                    ScrollView {
-                        VStack(spacing: 24) {
-                            StockChartView(viewModel: StockChartViewModel(symbol: symbol))
-                                .padding()
-                            
-                            // Advanced Features - REAL ANALYSIS
-                            HStack(spacing: 16) {
-                                GlassCard {
-                                    VStack(alignment: .leading, spacing: 8) {
-                                        HStack {
-                                            Text("AI ANALYSIS")
-                                                .font(.system(size: 10, weight: .black, design: .monospaced))
-                                                .foregroundColor(.blue)
-                                            
-                                            Spacer()
-                                            
-                                            if let vm = chartViewModel, let updated = vm.lastUpdated {
-                                                Text(updated, style: .relative)
-                                                    .font(.system(size: 8))
-                                                    .foregroundColor(.secondary)
-                                            }
-                                        }
-                                        
-                                        Text(chartViewModel?.aiAnalysis ?? "Loading analysis...")
-                                            .font(.system(size: 11))
-                                            .foregroundColor(.white.opacity(0.8))
-                                    }
-                                }
-                                
-                                GlassCard {
-                                    VStack(alignment: .leading, spacing: 8) {
-                                        HStack {
-                                            Text("ALGO SIGNALS")
-                                                .font(.system(size: 10, weight: .black, design: .monospaced))
-                                                .foregroundColor(.green)
-                                            
-                                            Spacer()
-                                            
-                                            if let vm = chartViewModel, let updated = vm.lastUpdated {
-                                                Text(updated, style: .relative)
-                                                    .font(.system(size: 8))
-                                                    .foregroundColor(.secondary)
-                                            }
-                                        }
-                                        
-                                        Text(chartViewModel?.algoSignals ?? "Loading signals...")
-                                            .font(.system(size: 11))
-                                            .foregroundColor(.white.opacity(0.8))
-                                    }
-                                }
-                            }
-                            .padding(.horizontal)
-                        }
-                    }
-                    .onAppear {
-                        if chartViewModel == nil || chartViewModel?.symbol != symbol {
-                            chartViewModel = StockChartViewModel(symbol: symbol)
-                        }
-                    }
+                    StockChartView(viewModel: StockChartViewModel(symbol: symbol))
+                        .padding()
                 } else {
                     emptyState
                 }
