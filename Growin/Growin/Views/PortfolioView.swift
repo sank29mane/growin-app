@@ -339,6 +339,18 @@ struct PositionDeepCard: View {
                 }
             }
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityLabel)
+    }
+
+    private var accessibilityLabel: String {
+        let name = position.name ?? position.ticker ?? "Unknown stock"
+        let quantity = String(format: "%.2f", position.quantity ?? 0)
+        let value = String(format: "£%.2f", (position.currentPrice ?? 0) * (position.quantity ?? 0))
+        let pnl = String(format: "%@£%.2f", (position.ppl ?? 0) >= 0 ? "+" : "", position.ppl ?? 0)
+        let account = position.accountType?.uppercased() ?? "Unknown account"
+
+        return "\(name), \(quantity) shares. Value: \(value). P and L: \(pnl). Account: \(account)."
     }
 }
 
