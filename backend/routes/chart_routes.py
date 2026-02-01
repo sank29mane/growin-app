@@ -14,6 +14,21 @@ from utils.currency_utils import CurrencyNormalizer
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+# Common UK ticker patterns (major UK stocks without .L)
+# Hoisted to module level for performance optimization (PR #38)
+UK_TICKERS = {
+    'LLOY', 'HSBA', 'BARC', 'BP', 'VOD', 'GSK', 'AZN', 'RIO', 'BHP',
+    'ULVR', 'DGE', 'BT.A', 'PRU', 'STAN', 'LGEN', 'AAL', 'CCL', 'CPG', 'EZJ', 'IAG',
+    'BLND', 'INF', 'ABF', 'ADM', 'AHT', 'ANTO', 'AVST', 'BAES', 'BDEV',
+    'BNZL', 'BRBY', 'CCH', 'CTEC', 'DCC', 'EDV', 'ENT', 'EXPN', 'FERG',
+    'FLTR', 'FRES', 'GFS', 'GLEN', 'HIK', 'HWDN', 'ICG', 'IHG', 'III',
+    'IMB', 'INCH', 'ITRK', 'JD.', 'KGF', 'LAND', 'LMP', 'LSEG', 'MKS',
+    'MNDI', 'MRO', 'NG.', 'NXT', 'OCDO', 'PHNX', 'PSH', 'PSN', 'RDSB',
+    'REL', 'RKT', 'RMG', 'RMV', 'RR.', 'RTO', 'SBRY', 'SDR', 'SGE',
+    'SGRO', 'SHEL', 'SKG', 'SMDS', 'SMIN', 'SN.', 'SPX', 'TSCO', 'TW.',
+    'ULVR', 'UU.', 'VOD', 'WPP'
+}
+
 def detect_market(ticker: str) -> str:
     """
     Detect market for a ticker symbol.
@@ -25,21 +40,7 @@ def detect_market(ticker: str) -> str:
     if ticker.endswith('.L') or '_EQ' in ticker:
         return 'UK'
 
-    # Common UK ticker patterns (major UK stocks without .L)
-    uk_tickers = {
-        'LLOY', 'HSBA', 'BARC', 'BP', 'VOD', 'GSK', 'AZN', 'RIO', 'BHP',
-        'ULVR', 'DGE', 'BT.A', 'PRU', 'STAN', 'LGEN', 'AAL', 'CCL', 'CPG', 'EZJ', 'IAG',
-        'BLND', 'INF', 'ABF', 'ADM', 'AHT', 'ANTO', 'AVST', 'BAES', 'BDEV',
-        'BNZL', 'BRBY', 'CCH', 'CTEC', 'DCC', 'EDV', 'ENT', 'EXPN', 'FERG',
-        'FLTR', 'FRES', 'GFS', 'GLEN', 'HIK', 'HWDN', 'ICG', 'IHG', 'III',
-        'IMB', 'INCH', 'ITRK', 'JD.', 'KGF', 'LAND', 'LMP', 'LSEG', 'MKS',
-        'MNDI', 'MRO', 'NG.', 'NXT', 'OCDO', 'PHNX', 'PSH', 'PSN', 'RDSB',
-        'REL', 'RKT', 'RMG', 'RMV', 'RR.', 'RTO', 'SBRY', 'SDR', 'SGE',
-        'SGRO', 'SHEL', 'SKG', 'SMDS', 'SMIN', 'SN.', 'SPX', 'TSCO', 'TW.',
-        'ULVR', 'UU.', 'VOD', 'WPP'
-    }
-
-    if ticker in uk_tickers:
+    if ticker in UK_TICKERS:
         return 'UK'
 
     return 'US'
