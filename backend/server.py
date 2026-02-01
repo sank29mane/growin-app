@@ -54,8 +54,11 @@ except Exception:
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import ORJSONResponse
 from contextlib import asynccontextmanager
+from security_middleware import SecurityHeadersMiddleware
 import os
+import sys
 
 # Routes will be imported later to avoid circular dependencies
 
@@ -135,7 +138,13 @@ async def lifespan(app: FastAPI):
         state.chat_manager.close()
 
 
-app = FastAPI(title="Growin API", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="Growin API", version="2.0.0", lifespan=lifespan, default_response_class=ORJSONResponse)
+
+# Silencing favicon 404s
+from fastapi.responses import FileResponse
+@app.get('/favicon.ico', include_in_schema=False)
+async def favicon():
+    return FileResponse('favicon.ico')
 
 # CORS configuration
 # Security: Restrict origins to prevent malicious sites from accessing localhost
@@ -159,19 +168,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.add_middleware(SecurityHeadersMiddleware)
+
 # --------------------------------------------------------------------------- #
 # Route Registration
 # --------------------------------------------------------------------------- #
 
 # Include specialized routers
-from routes import chat_routes, agent_routes, market_routes, mcp_routes, additional_routes, status_routes
+# Include specialized routers
+from routes import chat_routes, agent_routes, market_routes, mcp_routes, chart_routes, status_routes
 
 app.include_router(chat_routes.router)
 app.include_router(agent_routes.router)
 app.include_router(market_routes.router)
 app.include_router(mcp_routes.router)
 app.include_router(status_routes.router) # Detailed health & agent status
-app.include_router(additional_routes.router)  # Stub endpoints for Mac app compatibility
+app.include_router(chart_routes.router)  # Chart data and visualization
 
 # --------------------------------------------------------------------------- #
 # Root Endpoints
@@ -201,4 +213,6 @@ async def health_check():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("server:app", host="0.0.0.0", port=8002, reload=True)
+    # uvloop is automatically used by uvicorn.run when loop="auto" (default) or loop="uvloop"
+    # explicit configuration is good for confirming intent
+    uvicorn.run("server:app", host="127.0.0.1", port=8002, reload=True, loop="uvloop")

@@ -52,29 +52,47 @@ class SocialAgent(BaseAgent):
         try:
             from tavily import TavilyClient
             from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+            from resilience import retry_with_backoff
             
             tavily = TavilyClient(api_key=self.tavily_key)
             sentiment_analyzer = SentimentIntensityAnalyzer()
             
-            def fetch_social():
-                # Search for cashtags and discussions
-                if ticker == "MARKET":
-                    query = "retail investor sentiment reddit stockmarket wallstreetbets"
-                else:
-                    query = f"${ticker} stock discussion reddit twitter"
-                
-                return tavily.search(
-                    query=query,
-                    search_depth="advanced", # Deeper search for social 
+            # --- Query Strategy with Fallback ---
+            # 1. Ticker Query
+            # 2. Company Query (if no results for ticker)
+            
+            results = []
+            
+            @retry_with_backoff(max_retries=2, base_delay=1.0)
+            async def fetch_with_query(q):
+                # Tavily client is sync, so offload to thread here
+                return await asyncio.to_thread(
+                    tavily.search,
+                    query=q,
+                    search_depth="advanced",
                     include_domains=["reddit.com", "x.com", "twitter.com", "stocktwits.com"],
                     max_results=7
                 )
+
+            # Strategy 1: Ticker Search
+            if ticker == "MARKET":
+                query = "retail investor sentiment reddit stockmarket wallstreetbets"
+            else:
+                query = f"${ticker} stock discussion reddit twitter"
             
-            response = await asyncio.to_thread(fetch_social)
+            response = await fetch_with_query(query)
             results = response.get('results', [])
             
+            # Strategy 2: Company Name Fallback (if specific ticker yields nothing)
+            if not results and ticker != "MARKET" and company_name and company_name != ticker:
+                logger.info(f"SocialAgent: No results for ${ticker}. Retrying with '{company_name}'...")
+                query = f"{company_name} stock sentiment discussion"
+                response = await fetch_with_query(query)
+                results = response.get('results', [])
+
             if not results:
-                return self._neutral_response(ticker, error="No social discussions found")
+                # FAIL SOFT: Return success with neutral data
+                return self._neutral_response(ticker, error=None, success=True, msg="No social discussions found.")
                 
             sentiments = []
             discussions = []
@@ -125,16 +143,18 @@ class SocialAgent(BaseAgent):
 
         except Exception as e:
             logger.error(f"Social analysis failed: {e}")
-            return self._neutral_response(ticker, error=str(e))
+            # Fail soft on generic errors
+            return self._neutral_response(ticker, error=str(e), success=True)
 
-    def _neutral_response(self, ticker: str, error: str = None) -> AgentResponse:
+    def _neutral_response(self, ticker: str, error: str = None, success: bool = False, msg: str = None) -> AgentResponse:
+        final_msg = msg or (f"Social data unavailable: {error}" if error else "No discussions found")
         data = SocialData(
             ticker=ticker,
-            top_discussions=[f"Social data unavailable: {error}" if error else "No discussions found"]
+            top_discussions=[final_msg]
         )
         return AgentResponse(
             agent_name=self.config.name,
-            success=False, # Return success false so Decision Agent knows data is missing
+            success=success, 
             data=data.model_dump(),
             latency_ms=0,
             error=error
