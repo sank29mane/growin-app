@@ -3,7 +3,17 @@
 **Learning:** Default copy-paste CORS configurations often use wildcards for convenience during development but expose significant security risks. Native apps don't typically need CORS, but local development tools might.
 **Prevention:** Always use a whitelist of allowed origins. Use environment variables to configure origins for different environments (dev/prod).
 
-## 2026-01-19 - Python Sandbox RCE via Introspection
-**Vulnerability:** The `SafePythonExecutor` relied on `ast` parsing to block dunder method access (e.g., `__class__`) but allowed `getattr` in the built-ins. An attacker could bypass the AST check by using `getattr(obj, "__class__")` (with string obfuscation to bypass string filters) to access the class hierarchy, find a class with global scope access (like `catch_warnings`), and gain RCE via `__import__` and `os.system`.
-**Learning:** String-based and AST-based sandboxes are fundamentally fragile if they allow reflection/introspection mechanisms like `getattr`. Blacklisting patterns is a losing battle; whitelisting safe operations is harder but necessary. Introspection + Obfuscation = Sandbox Escape.
-**Prevention:** Remove `getattr`, `hasattr`, `setattr`, `delattr` from safe built-ins. Ensure the sandbox environment is minimal and does not expose any mechanism to walk the object graph back to globals.
+## 2026-01-20 - API Key Leakage via Status Endpoint
+**Vulnerability:** The `/mcp/status` and `/mcp/servers` endpoints returned the full configuration of MCP servers, including the `env` dictionary which contains sensitive API keys (e.g., `HF_TOKEN`, `TRADING212_API_KEY`).
+**Learning:** Returning internal configuration objects directly to the client often leaks secrets. Even "status" endpoints can be dangerous if they dump raw configuration data.
+**Prevention:** Implement strict serialization logic (DTOs) or sanitization helpers for API responses. Never return raw configuration objects that might contain secrets.
+
+## 2026-01-24 - Information Leakage via Exception Details
+**Vulnerability:** Several API endpoints (`/conversations/*`, `/mcp/status`) were catching generic exceptions and returning `str(e)` in the HTTP 500 response. This exposed internal database errors, SQL queries, and potentially partial secrets or file paths to the client.
+**Learning:** Returning raw exception messages is a common "developer convenience" that becomes a security risk in production. It provides attackers with details about the technology stack (SQLite), schema, and internal logic.
+**Prevention:** Catch exceptions and log them server-side with full tracebacks. Return a generic "Internal Server Error" message to the client. Use distinct error handling for expected errors (4xx) vs unexpected ones (5xx).
+
+## 2026-02-05 - Missing Security Headers
+**Vulnerability:** The application lacked standard security headers (`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Content-Security-Policy`), leaving it vulnerable to clickjacking and MIME-type sniffing.
+**Learning:** FastAPI does not include these headers by default. A dedicated middleware is the cleanest way to enforce them globally.
+**Prevention:** Use a `SecurityHeadersMiddleware` to inject headers into every response. Enforce strict CSP where possible.

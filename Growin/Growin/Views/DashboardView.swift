@@ -134,6 +134,7 @@ struct DashboardView: View {
                 }) {
                     Image(systemName: "arrow.clockwise")
                 }
+                .accessibilityLabel("Refresh Portfolio")
                 .disabled(viewModel.isLoading)
             }
         }

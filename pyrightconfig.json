@@ -1,0 +1,11 @@
+{
+    "exclude": [
+        "**/node_modules",
+        "**/__pycache__",
+        "**/backend/models/**",
+        "**/backend/.venv/**",
+        "**/backend/venv_forecast/**"
+    ],
+    "venvPath": "backend",
+    "venv": ".venv"
+}
