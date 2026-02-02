@@ -92,8 +92,80 @@ class QuantEngine:
                 indicators['volume_sma'] = vol_vals[-1] if vol_vals else None
             except Exception as e:
                 return {"error": f"Indicator calculation failed: {e}"}
+        elif PANDAS_TA_AVAILABLE and ta is not None:
+             # Fallback to pandas-ta if Rust is missing
+             try:
+                # RSI
+                df.ta.rsi(length=14, append=True)
+                indicators['rsi'] = df['RSI_14'].iloc[-1] if 'RSI_14' in df else None
+
+                # MACD
+                df.ta.macd(fast=12, slow=26, signal=9, append=True)
+                if 'MACD_12_26_9' in df:
+                    indicators['macd'] = df['MACD_12_26_9'].iloc[-1]
+                    indicators['macd_signal'] = df['MACDs_12_26_9'].iloc[-1]
+                    indicators['macd_hist'] = df['MACDh_12_26_9'].iloc[-1]
+
+                # Bollinger Bands
+                df.ta.bbands(length=20, std=2.0, append=True)
+                if 'BBU_20_2.0' in df:
+                    indicators['bb_upper'] = df['BBU_20_2.0'].iloc[-1]
+                    indicators['bb_middle'] = df['BBM_20_2.0'].iloc[-1]
+                    indicators['bb_lower'] = df['BBL_20_2.0'].iloc[-1]
+
+                # EMA
+                df.ta.ema(length=50, append=True)
+                indicators['ema_50'] = df['EMA_50'].iloc[-1] if 'EMA_50' in df else None
+
+                df.ta.ema(length=200, append=True)
+                indicators['ema_200'] = df['EMA_200'].iloc[-1] if 'EMA_200' in df else None
+
+                # Volume SMA
+                vol_sma = df['volume'].rolling(window=20).mean()
+                indicators['volume_sma'] = vol_sma.iloc[-1] if not vol_sma.empty else None
+
+             except Exception as e:
+                 return {"error": f"pandas-ta calculation failed: {e}"}
         else:
-            return {"error": "growin_core (Rust extension) not available"}
+            # Fallback to Pure Pandas (Vectorized)
+            try:
+                close = df['close']
+
+                # RSI (Wilder's Smoothing)
+                delta = close.diff()
+                gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14, adjust=False).mean()
+                loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
+                rs = gain / loss
+                rsi_series = 100 - (100 / (1 + rs))
+                indicators['rsi'] = rsi_series.iloc[-1] if not rsi_series.empty else None
+
+                # MACD (12, 26, 9)
+                exp1 = close.ewm(span=12, adjust=False).mean()
+                exp2 = close.ewm(span=26, adjust=False).mean()
+                macd_line = exp1 - exp2
+                signal_line = macd_line.ewm(span=9, adjust=False).mean()
+                macd_hist = macd_line - signal_line
+
+                indicators['macd'] = macd_line.iloc[-1]
+                indicators['macd_signal'] = signal_line.iloc[-1]
+                indicators['macd_hist'] = macd_hist.iloc[-1]
+
+                # Bollinger Bands (20, 2)
+                sma20 = close.rolling(window=20).mean()
+                std20 = close.rolling(window=20).std()
+                indicators['bb_upper'] = (sma20 + (std20 * 2)).iloc[-1]
+                indicators['bb_middle'] = sma20.iloc[-1]
+                indicators['bb_lower'] = (sma20 - (std20 * 2)).iloc[-1]
+
+                # EMA
+                indicators['ema_50'] = close.ewm(span=50, adjust=False).mean().iloc[-1]
+                indicators['ema_200'] = close.ewm(span=200, adjust=False).mean().iloc[-1]
+
+                # Volume SMA
+                indicators['volume_sma'] = df['volume'].rolling(window=20).mean().iloc[-1]
+
+            except Exception as e:
+                return {"error": f"Pure Pandas calculation failed: {e}"}
 
         # Generate signals
         signals = self._generate_signals(indicators, df['close'].iloc[-1])
@@ -240,36 +312,47 @@ class QuantEngine:
 
         return signals
 
-    def analyze_rebalancing_opportunity(self, current_allocation: Dict[str, str], target_allocation: Dict[str, float], 
-                                      current_prices: Dict[str, float]) -> Dict[str, Any]:
+    def analyze_rebalancing_opportunity(self, current_allocation: Dict[str, str], target_allocation: Dict[str, float],
+                                      total_portfolio_value: float) -> Dict[str, Any]:
         """
         Analyze if portfolio needs rebalancing based on target allocations.
-        Input: current_allocation (dict of symbol: percentage as string), target_allocation (dict of symbol: percentage)
+        Input:
+            current_allocation: dict of symbol: percentage as string (e.g., "50%")
+            target_allocation: dict of symbol: percentage as float (e.g., 0.5)
+            total_portfolio_value: total value of the portfolio in account currency
         """
+        if total_portfolio_value <= 0:
+             return {"error": "Total portfolio value must be positive"}
+
         # Parse current allocation
         current_parsed = {}
         for symbol, pct_str in current_allocation.items():
             try:
-                current_parsed[symbol] = float(pct_str.strip('%')) / 100
+                # Handle cases where input might already be float
+                if isinstance(pct_str, (float, int)):
+                     current_parsed[symbol] = float(pct_str)
+                else:
+                    current_parsed[symbol] = float(str(pct_str).strip('%')) / 100
             except ValueError:
                 current_parsed[symbol] = 0.0
-
-        total_value = sum(current_parsed[symbol] * current_prices.get(symbol, 0) for symbol in current_parsed)
-
-        if total_value == 0:
-            return {"error": "Unable to calculate total portfolio value"}
 
         # Calculate deviations
         deviations = {}
         rebalance_actions = []
 
-        for symbol, target_pct in target_allocation.items():
+        # Iterate through all unique symbols involved
+        all_symbols = set(current_parsed.keys()) | set(target_allocation.keys())
+
+        for symbol in all_symbols:
             current_pct = current_parsed.get(symbol, 0.0)
+            target_pct = target_allocation.get(symbol, 0.0)
             deviation = target_pct - current_pct
             
+            deviations[symbol] = deviation
+
             if abs(deviation) > 0.05:  # 5% threshold
-                current_value = current_parsed[symbol] * total_value if symbol in current_parsed else 0
-                target_value = target_pct * total_value
+                current_value = current_pct * total_portfolio_value
+                target_value = target_pct * total_portfolio_value
                 value_change = target_value - current_value
                 
                 rebalance_actions.append({
@@ -282,7 +365,7 @@ class QuantEngine:
                 })
 
         return {
-            "total_value": total_value,
+            "total_value": total_portfolio_value,
             "deviations": deviations,
             "rebalance_actions": rebalance_actions,
             "needs_rebalancing": len(rebalance_actions) > 0
