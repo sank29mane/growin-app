@@ -237,6 +237,8 @@ struct MiniMetricCard: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title): \(value)")
     }
 }
 
@@ -330,6 +332,17 @@ struct PositionDeepCard: View {
                 }
             }
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityString)
+    }
+
+    private var accessibilityString: String {
+        let name = position.name ?? position.ticker ?? "Unknown Position"
+        let shareCount = position.quantity ?? 0
+        let totalValue = (position.currentPrice ?? 0) * shareCount
+        let pnlVal = position.ppl ?? 0
+
+        return "\(name). \(String(format: "%.2f", shareCount)) shares. Value £\(String(format: "%.2f", totalValue)). \(pnlVal >= 0 ? "Profit" : "Loss") £\(String(format: "%.2f", abs(pnlVal)))."
     }
 }
 
