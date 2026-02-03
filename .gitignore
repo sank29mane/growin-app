@@ -47,3 +47,17 @@ backend/build/
 
 .gemini/
 .agent/
+
+# Server runtime files
+backend/.server.pid
+backend/*.pid
+
+# Backup files
+*_backup
+.git_old_root/
+
+# AI assistant working directory
+.abacusai/
+
+# macOS
+.DS_Store

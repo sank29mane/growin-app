@@ -67,3 +67,13 @@ The `SafePythonExecutor` relies on `ast` parsing and `exec`. While it blocks com
 
 **Proposal:**
 Consider migrating to a WASM-based runtime (e.g., `pyodide` or a separate sandboxed process) for `CoordinatorAgent` code execution to strictly isolate memory and CPU usage.
+
+## 6. Cross-Platform Portfolio Metrics (MLX Fallback)
+**Issue:**
+The `QuantEngine.calculate_portfolio_metrics` method strictly depends on `mlx` (Apple Silicon optimized machine learning library). If `mlx` is not available (e.g., on Linux/x86 CI runners or Windows), the function returns an error, breaking portfolio analysis features.
+
+**Proposal:**
+Implement a fallback to `numpy`/`pandas` for standard deviation, Sharpe ratio, and beta calculations when `mlx` is missing.
+- Check `if MLX_AVAILABLE:` use MLX logic.
+- `else:` use standard `numpy` vectorized operations.
+- This ensures the app is portable and testable in non-Apple environments.

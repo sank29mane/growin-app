@@ -1,6 +1,7 @@
-"Quant Agent - Technical Analysis using TA-Lib
+"""
+Quant Agent - Technical Analysis using TA-Lib
 Ultra-fast algorithmic technical indicator calculations.
-"
+"""
 
 from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from market_context import QuantData, Signal
@@ -22,11 +23,11 @@ except ImportError:
 class QuantAgent(BaseAgent):
     """
     Fast algorithmic technical analysis using TA-Lib.
-    
+
     Performance: ~5-10ms for all indicators
     No LLM needed - pure algorithmic calculations
     """
-    
+
     def __init__(self, config: AgentConfig = None):
         if config is None:
             config = AgentConfig(
@@ -36,7 +37,7 @@ class QuantAgent(BaseAgent):
                 cache_ttl=60  # Cache for 1 minute
             )
         super().__init__(config)
-        
+
         # Try to import TA-Lib
         try:
             import talib
@@ -57,18 +58,18 @@ class QuantAgent(BaseAgent):
             logger.info("Core ML model loaded for on-device inference")
         else:
             logger.info("Core ML not available, using CPU fallbacks")
-    
+
     async def analyze(self, context: Dict[str, Any]) -> AgentResponse:
         """
         Calculate technical indicators and generate trading signal.
-        
+
         Context should include:
         - ohlcv_data: List of bars with o, h, l, c, v keys
         - ticker: Stock symbol
         """
         ticker = context.get("ticker", "UNKNOWN")
         ohlcv_data = context.get("ohlcv_data", [])
-        
+
         if not ohlcv_data or len(ohlcv_data) < 50:
             return AgentResponse(
                 agent_name=self.config.name,
@@ -77,14 +78,14 @@ class QuantAgent(BaseAgent):
                 error="Insufficient data for technical analysis (need 50+ bars)",
                 latency_ms=0
             )
-        
+
         # Use centralized analysis method with fallbacks
         return await self._perform_analysis(ticker, ohlcv_data)
-    
+
     async def _perform_analysis(self, ticker: str, bars: list) -> AgentResponse:
         """Technical analysis using TA-Lib (5-10ms) or NumPy fallbacks"""
         import numpy as np
-        
+
         # Extract price arrays (ensure float64 for TA-Lib)
         closes = np.array([b['c'] for b in bars], dtype=np.float64)
         highs = np.array([b['h'] for b in bars], dtype=np.float64)
@@ -105,29 +106,29 @@ class QuantAgent(BaseAgent):
             bb_upper, bb_middle, bb_lower = self._calculate_bbands(closes)
             sma_20 = self._calculate_sma(closes, 20)
             sma_50 = self._calculate_sma(closes, 50)
-        
+
         # Get latest values
         current_price = closes[-1]
         latest_rsi = float(rsi[-1]) if not np.isnan(rsi[-1]) else 50.0
         latest_macd = float(macd[-1]) if not np.isnan(macd[-1]) else 0.0
         latest_macd_signal = float(macd_signal[-1]) if not np.isnan(macd_signal[-1]) else 0.0
-        
+
         # Calculate support/resistance (simple approach)
         # Calculate structural support/resistance using pivot point clustering
         sr_levels = self._calculate_pivot_levels(highs, lows, closes)
         support = sr_levels["support"]
         resistance = sr_levels["resistance"]
-        
+
         # Generate signal (algorithmic rules)
         signal = self._generate_signal(
-            latest_rsi, 
-            latest_macd, 
+            latest_rsi,
+            latest_macd,
             latest_macd_signal,
             current_price,
             float(sma_20[-1]),
             float(sma_50[-1])
         )
-        
+
         # Build response
         quant_data = QuantData(
             ticker=ticker,
@@ -146,19 +147,19 @@ class QuantAgent(BaseAgent):
             support_level=support,
             resistance_level=resistance
         )
-        
+
         return AgentResponse(
             agent_name=self.config.name,
             success=True,
             data=quant_data.model_dump(),
             latency_ms=0  # Will be set by execute()
         )
-    
-    def _generate_signal(self, rsi: float, macd: float, macd_signal: float, 
+
+    def _generate_signal(self, rsi: float, macd: float, macd_signal: float,
                         price: float, sma20: float, sma50: float) -> Signal:
         """
         Algorithmic signal generation based on multiple indicators.
-        
+
         Rules:
         - Strong BUY: RSI < 30 AND price < SMA20 AND MACD bullish cross
         - BUY: RSI < 40 AND price near SMA20
@@ -167,7 +168,7 @@ class QuantAgent(BaseAgent):
         """
         buy_signals = 0
         sell_signals = 0
-        
+
         # RSI signals
         if rsi < 30:
             buy_signals += 2
@@ -177,19 +178,19 @@ class QuantAgent(BaseAgent):
             sell_signals += 2
         elif rsi > 60:
             sell_signals += 1
-        
+
         # MACD signals
         if macd > macd_signal and macd > 0:
             buy_signals += 1
         elif macd < macd_signal and macd < 0:
             sell_signals += 1
-        
+
         # Trend signals (SMA)
         if price < sma20:
             buy_signals += 1
         elif price > sma50:
             sell_signals += 1
-        
+
         # Decision
         if buy_signals >= 3:
             return Signal.BUY
@@ -197,7 +198,7 @@ class QuantAgent(BaseAgent):
             return Signal.SELL
         else:
             return Signal.NEUTRAL
-    
+
     def _calculate_rsi(self, closes: np.ndarray, period: int = 14) -> np.ndarray:
         """Pure Python RSI calculation using Wilder's Smoothing (matches TA-Lib)"""
         if len(closes) < period + 1:
@@ -355,13 +356,13 @@ class QuantAgent(BaseAgent):
         """
         current_price = closes[-1]
         order = 5 # Window size (lookback/lookahead)
-        
+
         if SCIPY_AVAILABLE:
             # Find local maxima (peaks) and minima (troughs)
             # order=5 means it must be the max/min within 5 points on EITHER side
             peak_idx = argrelextrema(highs, np.greater, order=order)[0]
             trough_idx = argrelextrema(lows, np.less, order=order)[0]
-            
+
             peaks = highs[peak_idx]
             troughs = lows[trough_idx]
         else:
@@ -380,7 +381,7 @@ class QuantAgent(BaseAgent):
         # If no structural points found, fallback to 50-day extremes
         if len(peaks) == 0: peaks = np.array([np.max(highs[-50:])])
         if len(troughs) == 0: troughs = np.array([np.min(lows[-50:])])
-        
+
         # Find closest structural levels to current price
         # Resistance: Lowest peak above price, or highest peak if none above
         above_mask = peaks > current_price
@@ -388,14 +389,14 @@ class QuantAgent(BaseAgent):
             res = np.min(peaks[above_mask])
         else:
             res = np.max(peaks)
-            
+
         # Support: Highest trough below price, or lowest trough if none below
         below_mask = troughs < current_price
         if np.any(below_mask):
             sup = np.max(troughs[below_mask])
         else:
             sup = np.min(troughs)
-        
+
         return {
             "support": float(sup),
             "resistance": float(res)

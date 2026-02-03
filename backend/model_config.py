@@ -56,6 +56,12 @@ DECISION_MODELS = {
         "model_path": str(BACKEND_DIR / "models/mlx/lmstudio-community--LFM2.5-1.2B-Instruct-MLX-8bit"),
         "description": "Native MLX - Optimized for Apple Silicon",
         "requires_key": None
+    },
+    "gpt-oss-20b": {
+        "provider": "lmstudio",
+        "model_id": "gpt-oss-20b",
+        "description": "GPT-OSS 20B - Local high-performance model",
+        "requires_key": None
     }
 }
 
