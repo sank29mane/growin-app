@@ -62,10 +62,14 @@ Add a `tests/stress_test.py` suite using `locust` or `asyncio` to simulate 100+ 
 - Verify `cache_manager` thread safety.
 
 ## 5. SafePythonExecutor Audit
+**Status:** Mitigated (AST Validation Applied)
 **Issue:**
 The `SafePythonExecutor` relies on `ast` parsing and `exec`. While it blocks common dangerous imports, `exec` is inherently risky.
 
-**Proposal:**
+**Mitigation (Applied):**
+Refactored `_validate_code` to use robust AST traversal instead of fragile string matching. Now blocks `ast.Call` nodes for dangerous builtins (`exec`, `eval`, `open`) and `ast.Attribute` access to dunder methods (`__subclasses__`). Verified with exploit tests.
+
+**Proposal (Long-term):**
 Consider migrating to a WASM-based runtime (e.g., `pyodide` or a separate sandboxed process) for `CoordinatorAgent` code execution to strictly isolate memory and CPU usage.
 
 ## 6. Cross-Platform Portfolio Metrics (MLX Fallback)
