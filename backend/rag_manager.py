@@ -1,69 +1,113 @@
-import chromadb
-from chromadb.config import Settings
+
 import logging
+import os
 from typing import List, Dict, Any, Optional
+import chromadb
+from chromadb.utils import embedding_functions
 
 logger = logging.getLogger(__name__)
 
 class RAGManager:
     """
-    Local RAG (Retrieval-Augmented Generation) Manager using ChromaDB.
-    Persists embeddings of chat history and important context.
+    Manages Retrieval-Augmented Generation (RAG) using ChromaDB.
+    Stores and retrieves historical context, trade logs, and user preferences.
     """
-    def __init__(self, persist_directory: str = "growin_rag_db"):
-        try:
-            self.client = chromadb.PersistentClient(path=persist_directory)
-            self.collection = self.client.get_or_create_collection(name="growin_knowledge")
-            logger.info(f"✅ RAG Manager initialized at {persist_directory}")
-        except Exception as e:
-            logger.error(f"❌ RAG Manager initialization failed: {e}")
-            self.client = None
-            self.collection = None
+    def __init__(self, persistent_path: str = "./data/chroma_db"):
+        self.persistent_path = persistent_path
+        self._client = None
+        self._collection = None
+        self._init_db()
 
-    def add_document(self, doc_id: str, text: str, metadata: Dict[str, Any] = None):
-        """Add or update a document in the vector store"""
-        if not self.collection: return
-        
+    def _init_db(self):
+        """Initialize ChromaDB client and collection"""
         try:
-            self.collection.upsert(
-                ids=[doc_id],
-                documents=[text],
-                metadatas=[metadata or {}]
+            # Ensure directory exists
+            os.makedirs(self.persistent_path, exist_ok=True)
+            
+            self._client = chromadb.PersistentClient(path=self.persistent_path)
+            
+            # Use default embedding function (all-MiniLM-L6-v2)
+            self._embedding_fn = embedding_functions.DefaultEmbeddingFunction()
+            
+            self._collection = self._client.get_or_create_collection(
+                name="growin_knowledge_base",
+                embedding_function=self._embedding_fn
             )
+            logger.info(f"RAGManager initialized at {self.persistent_path}")
+            
         except Exception as e:
-            logger.error(f"Failed to add document using RAG: {e}")
+            logger.error(f"Failed to initialize RAGManager: {e}")
+            # Fallback to ephemeral client regarding failure vs crashing
+            try:
+                self._client = chromadb.Client()
+                self._collection = self._client.get_or_create_collection("growin_temp")
+                logger.warning("RAGManager using ephemeral in-memory DB due to initialization error.")
+            except Exception as e2:
+                logger.error(f"Critical RAG failure: {e2}")
 
-    def query(self, query_text: str, n_results: int = 3, where: Optional[Dict] = None) -> List[Dict]:
-        """Semantic search for relevant documents"""
-        if not self.collection: return []
+    def add_document(self, content: str, metadata: Dict[str, Any], doc_id: Optional[str] = None):
+        """
+        Add a document to the knowledge base.
         
+        Args:
+            content: Text content to index
+            metadata: Key-value pairs (e.g., {'type': 'trade_log', 'ticker': 'AAPL'})
+            doc_id: Unique ID (auto-generated if None)
+        """
+        if not self._collection:
+            logger.warning("RAG collection not available. Skipping add_document.")
+            return
+
         try:
-            results = self.collection.query(
+            import uuid
+            if not doc_id:
+                doc_id = str(uuid.uuid4())
+            
+            self._collection.add(
+                documents=[content],
+                metadatas=[metadata],
+                ids=[doc_id]
+            )
+            logger.debug(f"Added document {doc_id} to RAG")
+            
+        except Exception as e:
+            logger.error(f"Error adding document to RAG: {e}")
+
+    def query(self, query_text: str, n_results: int = 3) -> List[Dict[str, Any]]:
+        """
+        Retrieve relevant documents for a query.
+        
+        Returns:
+            List of dicts with 'content' and 'metadata'
+        """
+        if not self._collection:
+            return []
+
+        try:
+            results = self._collection.query(
                 query_texts=[query_text],
-                n_results=n_results,
-                where=where
+                n_results=n_results
             )
             
-            output = []
-            if results and results['documents']:
-                # Chroma returns list of lists (one per query)
-                docs = results['documents'][0]
-                metas = results['metadatas'][0] if results['metadatas'] else [{}] * len(docs)
-                dists = results['distances'][0] if results['distances'] else [0.0] * len(docs)
-                
-                for i, doc in enumerate(docs):
-                    output.append({
+            # Format results
+            formatted_results = []
+            if results['documents']:
+                for i, doc in enumerate(results['documents'][0]):
+                    meta = results['metadatas'][0][i] if results['metadatas'] else {}
+                    formatted_results.append({
                         "content": doc,
-                        "metadata": metas[i],
-                        "distance": dists[i]
+                        "metadata": meta,
+                        "distance": results['distances'][0][i] if results['distances'] else 0
                     })
-            return output
+            
+            return formatted_results
+            
         except Exception as e:
             logger.error(f"RAG query failed: {e}")
             return []
-            
-    def index_chat_message(self, message_id: str, role: str, content: str, timestamp: str):
-        """Helper to index a chat message"""
-        text = f"{role.upper()}: {content}"
-        meta = {"type": "chat_log", "role": role, "timestamp": str(timestamp)}
-        self.add_document(message_id, text, meta)
+
+    def count(self) -> int:
+        """Return number of documents in collection"""
+        if self._collection:
+            return self._collection.count()
+        return 0

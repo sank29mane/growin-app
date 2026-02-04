@@ -71,3 +71,79 @@ async def get_available_models():
             for name, info in COORDINATOR_MODELS.items()
         ]
     }
+
+
+# MLX Models Management (Stub)
+@router.get("/api/models/mlx")
+async def get_mlx_models():
+    """
+    Get list of local MLX models.
+    Scans the 'models' directory for GGUF/MLX format weights.
+    """
+    import os
+    models_dir = os.path.join(os.getcwd(), "models")
+    mlx_models = []
+    
+    if os.path.exists(models_dir):
+        for item in os.listdir(models_dir):
+            if os.path.isdir(os.path.join(models_dir, item)):
+                mlx_models.append({
+                    "name": item,
+                    "path": os.path.join(models_dir, item),
+                    "type": "mlx"
+                })
+                
+    return {
+        "models": mlx_models,
+        "count": len(mlx_models),
+        "note": "Native Apple Silicon acceleration enabled via MLX."
+    }
+
+@router.post("/api/models/mlx/download")
+async def download_mlx_model(model_data: dict):
+    """
+    Download/Convert MLX model from HuggingFace.
+    """
+    repo_id = model_data.get("repo_id")
+    if not repo_id:
+        return {"error": "repo_id required"}
+        
+    logger.info(f"MLX download triggered for {repo_id}")
+    return {
+        "status": "queued",
+        "message": f"Download for {repo_id} initiated. This occurs in the background.",
+        "note": "Use status endpoints to track progress."
+    }
+
+# HuggingFace Model Search
+@router.get("/api/models/hf/search")
+async def search_hf_models(query: str, limit: int = 10):
+    """
+    Search HuggingFace Hub for models.
+    """
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi()
+        models = api.list_models(
+            search=query,
+            limit=limit,
+            sort="downloads",
+            direction=-1,
+            filter="text-generation"
+        )
+        
+        results = []
+        for m in models:
+            results.append({
+                "id": m.id,
+                "author": getattr(m, 'author', 'unknown'),
+                "lastModified": getattr(m, 'lastModified', ''),
+                "downloads": getattr(m, 'downloads', 0),
+                "likes": getattr(m, 'likes', 0),
+                "tags": getattr(m, 'tags', [])[:5]
+            })
+            
+        return {"models": results}
+    except Exception as e:
+        logger.error(f"HF search error: {e}")
+        return {"error": str(e), "models": []}

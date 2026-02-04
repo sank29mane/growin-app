@@ -95,18 +95,25 @@ class CoordinatorAgent:
         
         logger.info(f"CoordinatorAgent initialized (Centralized Mode) with model: {model_name}")
     
-    def _initialize_llm(self):
+    async def _initialize_llm(self):
         """Initialize the routing LLM"""
         import os
         try:
-            # Using simple routing model (Mistral/Ollama) for speed
             if "gpt" in self.model_name.lower():
                 from langchain_openai import ChatOpenAI
                 self.llm = ChatOpenAI(model=self.model_name, temperature=0)
             elif "mlx" in self.model_name.lower() or "granite" in self.model_name.lower():
-                from mlx_langchain import ChatMLX
-                # GUARDRAIL: Enforce deterministic output
-                self.llm = ChatMLX(model_name=self.model_name, temperature=0, top_p=1.0)
+                if "mlx" in self.model_name.lower():
+                    from mlx_langchain import ChatMLX
+                    self.llm = ChatMLX(model_name=self.model_name, temperature=0, top_p=1.0)
+                else:
+                    # For granite in LM Studio
+                    from lm_studio_client import LMStudioClient
+                    self.llm = LMStudioClient()
+                    # Check connection
+                    if not await self.llm.check_connection():
+                        logger.warning("Coordinator: LM Studio not available for routing. Falling back.")
+                        self.llm = None
             else:
                 from langchain_ollama import ChatOllama
                 self.llm = ChatOllama(model=self.model_name, base_url="http://127.0.0.1:11434")
@@ -115,12 +122,15 @@ class CoordinatorAgent:
     
     async def _classify_intent(self, query: str) -> Dict[str, Any]:
         """Classify user intent using Granite-Optimized Few-Shot Prompting"""
+        # Ensure LLM is initialized (async init for LM Studio)
+        if not self.llm:
+            await self._initialize_llm()
+            
         if not self.llm:
             return {"type": "analytical", "needs": ["portfolio", "quant", "forecast"]}
             
         clean_query = query.strip()[:500]
-
-        # GRANITE-OPTIMIZED PROMPT (Key-Value Format)
+        # ... prompt remains same ...
         prompt = f"""You are the Coordinator Agent.
 Route queries to specialist agents.
 Format your response EXACTLY as:
@@ -154,12 +164,25 @@ Query: "{clean_query}"
 """
 
         try:
-            from langchain_core.messages import HumanMessage
-            
-            # Use simple HumanMessage for Granite (works best as instruction)
-            response = await self.llm.ainvoke([HumanMessage(content=prompt)])
-            content = response.content if hasattr(response, 'content') else str(response)
-            
+            if hasattr(self.llm, "ainvoke"):
+                from langchain_core.messages import HumanMessage
+                response = await self.llm.ainvoke([HumanMessage(content=prompt)])
+                content = response.content if hasattr(response, 'content') else str(response)
+            else:
+                # LMStudioClient
+                from model_config import get_model_info
+                info = get_model_info(self.model_name)
+                model_id = info.get("model_id") or self.model_name
+                
+                # Check loaded models to pick one if auto
+                if "auto" in model_id:
+                    models = await self.llm.list_models()
+                    if models:
+                        model_id = models[0]["id"]
+                
+                resp = await self.llm.chat(model_id=model_id, input_text=prompt, temperature=0, max_tokens=100)
+                content = resp.get("content", "")
+
             # PARSE KEY-VALUE OUTPUT (Robust Regex)
             intent_match = re.search(r'INTENT:\s*(\w+)', content, re.IGNORECASE)
             ticker_match = re.search(r'TICKER:\s*([A-Z0-9.]+)', content, re.IGNORECASE)
@@ -230,6 +253,17 @@ Query: "{clean_query}"
             elif detected_account != "all":
                  account_type = detected_account
 
+        # COORDINATOR FIX: Robust normalization via T212 rules (fast & deterministic)
+        if ticker:
+            try:
+                from trading212_mcp_server import normalize_ticker
+                original_ticker = ticker
+                ticker = normalize_ticker(ticker)
+                if ticker != original_ticker:
+                     logger.info(f"Ticker normalized: {original_ticker} -> {ticker}")
+            except ImportError:
+                logger.warning("Could not import normalize_ticker from trading212_mcp_server")
+
         # 2. CENTRALIZED DATA FABRICATION
         status_manager.set_status("coordinator", "working", "Fabricating Market Context...")
         
@@ -242,6 +276,8 @@ Query: "{clean_query}"
         
         # Inject Intent metadata
         context.routing_reason = intent.get("reason", "")
+        if account_type:
+            context.user_context["account_type"] = account_type
 
         # --- SKILL INJECTION ---
         # Coordinator also benefits from skills (e.g. knowing 'tax' queries need different handling)
@@ -264,8 +300,7 @@ Query: "{clean_query}"
             return await self._run_specialist(agent, ctx_data)
 
         # Prepare Tasks
-        if "portfolio" in needs:
-            specialist_tasks.append(run_agent(self.portfolio_agent, {"account_type": account_type}))
+        # DUPLICATE REMOVED: PortfolioAgent task is handled later with correct context
             
         if "goal_planner" in needs:
             params = intent.get("params", {})
@@ -307,6 +342,14 @@ Query: "{clean_query}"
             
         if "whale" in needs:
             specialist_tasks.append(run_agent(self.whale_agent, {"ticker": context.ticker}))
+
+        if "portfolio" in needs:
+            # Ensure account type is passed from context or analysis
+            acc_type = context.user_context.get("account_type", "all")
+            specialist_tasks.append(run_agent(self.portfolio_agent, {
+                "account_type": acc_type,
+                "force_refresh": True
+            }))
             
         # Execute Specialists
         if specialist_tasks:
@@ -490,42 +533,6 @@ Query: "{clean_query}"
         
         return None
 
-    async def _attempt_ticker_fix(self, ticker: str) -> str:
-        """Use Coordinator model + Python to normalize a messy ticker (Tier 1 Extended)"""
-        if not self.llm:
-            return ticker.upper().strip()
-
-        prompt = f"""
-        The user provided a messy ticker: "{ticker}".
-        This might be a company name, a malformed symbol, or a leveraged ETP.
-        Write a short Python script to clean and normalize it. 
-        Rules:
-        - If it's a UK stock like Lloyds, it should end in '.L'.
-        - If it looks like a leveraged ETP (e.g. MAG5, 3GLD, GLD3), DO NOT strip digits.
-        - T212 sometimes adds '1' to the end of UK stocks (e.g. LLOY1). Strip the '1' and add '.L' for LLOY.
-        
-        Return ONLY a JSON block with the Python code:
-        {{
-          "code": "result = ticker.upper().strip().replace('$', '')\\nif result == 'LLOY': result = 'LLOY.L'"
-        }}
-        """
-        try:
-            from langchain_core.messages import HumanMessage
-            response = await self.llm.ainvoke([HumanMessage(content=prompt)])
-            content = response.content if hasattr(response, 'content') else str(response)
-            match = re.search(r'\{.*\}', content, re.DOTALL)
-            if match:
-                code_data = json.loads(match.group())
-                python_code = code_data.get("code", "")
-                if python_code:
-                    exec_res = self.python_executor.execute(python_code, {"ticker": ticker})
-                    if exec_res["success"] and exec_res["result"]:
-                        return str(exec_res["result"])
-        except Exception as e:
-            logger.warning(f"Ticker fix attempt failed: {e}")
-        
-        return ticker.upper().strip()
-
     async def _handle_specialist_error(self, agent: BaseAgent, context: Dict[str, Any], error: str) -> Optional[AgentResponse]:
         """Tier 3: Attempt to fix a specialist error using LLM reasoning (Self-Healing)"""
         if not self.llm:
@@ -682,5 +689,7 @@ Query: "{clean_query}"
             found = extract_ticker_from_text(content)
             if found:
                 return found
+                
+        return None
                 
         return None
