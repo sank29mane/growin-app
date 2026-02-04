@@ -106,17 +106,25 @@ async def handle_analyze_portfolio(
             )
 
             # ✅ NORMALIZE POSITIONS
-            positions = normalize_all_positions(positions, instrument_metadata)
+            position_objs = normalize_all_positions(positions, instrument_metadata)
 
-            # Calculate account totals
+            # Use objects for calculation before dumping (cleaner)
+            acc_current = float(calculate_portfolio_value(position_objs))
+
+            # Convert to dicts for JSON serialization and legacy key access downstream
+            positions = [p.model_dump(by_alias=True) for p in position_objs]
+
+            # Calculate account totals (using normalized values)
             acc_invested = sum(
-                pos.get("averagePriceGBP", pos.get("averagePrice", 0))
-                * pos.get("quantity", 0)
+                float(pos.get("averagePrice", 0)) * float(pos.get("quantity", 0))
                 for pos in positions
             )
-            acc_current = calculate_portfolio_value(positions)
+
+            # Market value is already calculated in Position object
+            # acc_current = calculate_portfolio_value(positions) # Replaced above
+
             acc_pnl = sum(
-                pos.get("pplGBP", pos.get("ppl", 0)) for pos in positions
+                float(pos.get("unrealizedPnl", 0)) for pos in positions
             )
 
             # Tag positions
@@ -196,7 +204,7 @@ async def handle_analyze_portfolio(
 
     return [
         TextContent(
-            type="text", text=json.dumps(sanitize_nan(analysis), separators=( ",", ":"))
+            type="text", text=json.dumps(sanitize_nan(analysis), default=str, separators=( ",", ":"))
         )
     ]
 
@@ -212,7 +220,7 @@ async def handle_market_order(
         if validation["action"] == "block":
                 return [
                 TextContent(
-                    type="text", 
+                    type="text",
                     text=json.dumps({
                         "error": "Trade blocked due to price variance > 3%",
                         "details": validation["message"],

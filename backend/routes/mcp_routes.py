@@ -4,6 +4,7 @@ MCP Routes - Server management and tool execution
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from app_context import state, T212ConfigRequest
+from utils.mcp_validation import validate_mcp_config
 import logging
 import json
 
@@ -120,6 +121,10 @@ async def get_mcp_servers_list():
 async def add_mcp_server(server_data: dict, background_tasks: BackgroundTasks):
     """Add new MCP server"""
     try:
+        # Sentinel: Validate command to prevent injection
+        if server_data.get("type") == "stdio":
+            validate_mcp_config(server_data.get("command"), server_data.get("args", []))
+
         state.chat_manager.add_mcp_server(
             name=server_data.get("name"),
             type=server_data.get("type"),
@@ -140,6 +145,9 @@ async def add_mcp_server(server_data: dict, background_tasks: BackgroundTasks):
         })
         
         return {"status": "success"}
+    except ValueError as e:
+        # Client error for validation failure
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to add MCP server: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal Server Error")

@@ -14,20 +14,20 @@ logger = logging.getLogger(__name__)
 class LMStudioClient:
     """
     Async client for LM Studio's v1 REST API.
-    
+
     Supports:
     - Authentication via LM_API_TOKEN
     - Stateful Chat (/api/v1/chat)
     - Model Management (Load/Unload/Download)
     - MCP Integrations
     """
-    
+
     BASE_URL = "http://127.0.0.1:1234"
-    
+
     def __init__(self, base_url: str = None, api_token: str = None):
         self.base_url = base_url or os.getenv("LM_STUDIO_URL", self.BASE_URL)
         self.api_token = api_token or os.getenv("LM_API_TOKEN")
-        
+
         self.headers = {
             "Content-Type": "application/json"
         }
@@ -65,7 +65,7 @@ class LMStudioClient:
         """List all available models using root API."""
         data = await self._request("GET", "/v1/models")
         return data.get("data", [])
-    
+
     async def list_loaded_models(self) -> List[str]:
         """List IDs of currently loaded models."""
         models = await self.list_models()
@@ -75,7 +75,7 @@ class LMStudioClient:
     async def load_model(self, model_id: str, context_length: int = 8192, gpu_offload: str = "max") -> Dict[str, Any]:
         """
         Load a model into memory.
-        
+
         Args:
             model_id: The specific model ID/path
             context_length: Max context window
@@ -113,7 +113,7 @@ class LMStudioClient:
                 messages.append({"role": "system", "content": system_prompt})
             if input_text:
                 messages.append({"role": "user", "content": input_text})
-        
+
         payload = {
             "model": model_id,
             "messages": messages,
@@ -121,7 +121,7 @@ class LMStudioClient:
             "max_tokens": max_tokens,
             "stream": False
         }
-        
+
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = tool_choice
@@ -136,14 +136,14 @@ class LMStudioClient:
                 )
                 response.raise_for_status()
                 data = response.json()
-                
+
                 choice = data["choices"][0]
                 message = choice["message"]
-                
+
                 # Handle tool calls if present
                 if message.get("tool_calls"):
                     return await self._handle_tool_calls(model_id, messages, message["tool_calls"], tools)
-                
+
                 return {
                     "content": message.get("content", ""),
                     "role": "assistant"
@@ -151,15 +151,27 @@ class LMStudioClient:
         except httpx.HTTPStatusError as e:
             error_body = e.response.text
             logger.error(f"LM Studio chat failed ({e.response.status_code}): {error_body}")
+
+            # Specific handling for known LM Studio/Inference engine errors
+            if "Channel Error" in error_body:
+                error_msg = f"Inference engine reported a Channel Error. This usually means the model ({model_id}) is in a bad state or the context window was exceeded."
+                logger.error(error_msg)
+                return {"error": error_msg, "content": ""}
+
             return {"error": f"HTTP {e.response.status_code}: {error_body}", "content": ""}
         except Exception as e:
-            logger.error(f"LM Studio chat failed: {e}")
-            return {"error": str(e), "content": ""}
+            err_str = str(e)
+            logger.error(f"LM Studio chat failed: {err_str}")
+
+            if "Channel Error" in err_str:
+                return {"error": f"Channel Error detected in inference: {err_str}", "content": ""}
+
+            return {"error": err_str, "content": ""}
 
     async def _handle_tool_calls(
-        self, 
-        model_id: str, 
-        messages: List[Dict], 
+        self,
+        model_id: str,
+        messages: List[Dict],
         tool_calls: List[Dict],
         tools: List[Dict]
     ) -> Dict[str, Any]:
@@ -169,24 +181,24 @@ class LMStudioClient:
             "role": "assistant",
             "tool_calls": tool_calls
         })
-        
+
         for tool_call in tool_calls:
             function_name = tool_call["function"]["name"]
             arguments = json.loads(tool_call["function"]["arguments"])
-            
+
             logger.info(f"LM Studio calling tool: {function_name} with {arguments}")
-            
+
             # Here we would normally call the actual tool
             # For this integration, we link it to the AppState's MCP client or similar
             result = await self._execute_mcp_tool(function_name, arguments)
-            
+
             messages.append({
                 "role": "tool",
                 "tool_call_id": tool_call["id"],
                 "name": function_name,
                 "content": json.dumps(result)
             })
-            
+
         # Resubmit with tool results
         return await self.chat(
             model_id=model_id,
@@ -200,18 +212,18 @@ class LMStudioClient:
             # Try to get the MCP client from global AppState if available
             # This avoids circular imports by doing it inside the method
             from app_context import AppState
-            # We assume a global AppState or similar exists. 
+            # We assume a global AppState or similar exists.
             # In this project, it's usually initialized in main.py or similar.
             # However, since this is a library client, we might need a better way.
             # For now, let's assume we can import it or it's passed in.
-            
+
             # Generic fallback: if we have registered local functions, use them
             # For Growin App, we specifically want to interface with the Trading212 MCP
             import app_context
             if hasattr(app_context, "state") and app_context.state.mcp_client:
                  logger.info(f"Routing tool call {tool_name} to Trading212 MCP")
                  return await app_context.state.mcp_client.call_tool(tool_name, arguments)
-            
+
             return {"error": f"Tool execution for {tool_name} not implemented in client"}
         except Exception as e:
             logger.error(f"Tool execution failed: {e}")
@@ -245,7 +257,7 @@ class LMStudioClient:
             loaded = await self.list_loaded_models()
             if model_id in loaded:
                 return True
-            
+
             await self.load_model(model_id)
             return True
         except Exception as e:

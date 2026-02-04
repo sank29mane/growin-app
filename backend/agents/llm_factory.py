@@ -16,33 +16,37 @@ class LLMFactory:
     async def create_llm(model_name: str, api_keys: Dict[str, str] = None):
         """
         Initialize and return an LLM instance.
-        
+
         Args:
             model_name: Name/ID of the model.
             api_keys: Dictionary of API keys.
-            
+
         Returns:
             LangChain compatible LLM or custom client.
         """
         api_keys = api_keys or {}
-        
+
+        from model_config import get_model_info
+        info = get_model_info(model_name)
+        provider = info.get("provider", "").lower()
+
         try:
-            if "gpt" in model_name.lower():
+            if provider == "openai" or (not provider and "gpt" in model_name.lower() and "oss" not in model_name.lower()):
                 return LLMFactory._create_openai(model_name, api_keys)
-            
-            elif "claude" in model_name.lower():
+
+            elif provider == "anthropic" or (not provider and "claude" in model_name.lower()):
                 return LLMFactory._create_anthropic(model_name, api_keys)
-            
-            elif "gemini" in model_name.lower():
+
+            elif provider == "google" or (not provider and "gemini" in model_name.lower()):
                 return LLMFactory._create_google(model_name, api_keys)
-            
-            elif "mlx" in model_name.lower() or "granite" in model_name.lower():
+
+            elif provider == "mlx" or (not provider and ("mlx" in model_name.lower() or "granite" in model_name.lower())):
                 return LLMFactory._create_mlx(model_name)
 
-            elif "lmstudio" in model_name.lower() or "nemotron" in model_name.lower():
+            elif provider == "lmstudio" or (not provider and ("lmstudio" in model_name.lower() or "nemotron" in model_name.lower() or "oss" in model_name.lower())):
                 return await LLMFactory._create_lmstudio(model_name)
-            
-            elif "gemma" in model_name.lower() or "mistral" in model_name.lower():
+
+            elif provider == "ollama" or (not provider and ("gemma" in model_name.lower() or "mistral" in model_name.lower())):
                 return LLMFactory._create_ollama(model_name)
 
             else:
@@ -53,7 +57,7 @@ class LLMFactory:
             # Fallback handling
             if "native-mlx" in model_name:
                  raise RuntimeError(f"Native MLX Model failed to load: {e}")
-            
+
             # Attempt Native MLX fallback for critical failures
             try:
                 logger.info("Attempting fallback to Native MLX...")
@@ -100,17 +104,17 @@ class LLMFactory:
     async def _create_lmstudio(model_name: str):
         from lm_studio_client import LMStudioClient
         from model_config import get_model_info
-        
+
         info = get_model_info(model_name)
         client = LMStudioClient()
-        
+
         # If specific model_id is fixed in config, use it
         target_model_id = info.get("model_id")
-        
+
         # Check connection
         if not await client.check_connection():
             raise ConnectionError("LM Studio server not reachable")
-        
+
         if target_model_id:
             logger.info(f"LM Studio: Ensuring model loaded: {target_model_id}")
             await client.ensure_model_loaded(target_model_id)
@@ -120,18 +124,18 @@ class LLMFactory:
             models = await client.list_models()
             if models:
                 llm_candidates = [
-                    m["id"] for m in models 
-                    if "embed" not in m["id"].lower() 
+                    m["id"] for m in models
+                    if "embed" not in m["id"].lower()
                     and "nomic" not in m["id"].lower()
                     and "bert" not in m["id"].lower()
                 ]
-                
+
                 if llm_candidates:
                     loaded_id = llm_candidates[0]
                     logger.info(f"LM Studio: Auto-detected LLM: {loaded_id}")
                     # Note: We return the client, but the caller needs to know the model ID
-                    # The client handles 'chat' with model_id. 
-                    # Wrapper needed? 
+                    # The client handles 'chat' with model_id.
+                    # Wrapper needed?
                     # DecisionAgent expects an object with 'ainvoke' or 'chat'.
                     # LMStudioClient has 'chat'.
                     # But DecisionAgent stores self.model_name.
@@ -143,5 +147,5 @@ class LLMFactory:
                     logger.warning(f"LM Studio: Only embedding models found. Using first: {models[0]['id']}")
                     client.active_model_id = models[0]["id"]
                     return client
-            
+
             raise ValueError("No models available in LM Studio")
