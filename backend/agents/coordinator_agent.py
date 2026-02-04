@@ -253,6 +253,17 @@ Query: "{clean_query}"
             elif detected_account != "all":
                  account_type = detected_account
 
+        # COORDINATOR FIX: Robust normalization via T212 rules (fast & deterministic)
+        if ticker:
+            try:
+                from trading212_mcp_server import normalize_ticker
+                original_ticker = ticker
+                ticker = normalize_ticker(ticker)
+                if ticker != original_ticker:
+                     logger.info(f"Ticker normalized: {original_ticker} -> {ticker}")
+            except ImportError:
+                logger.warning("Could not import normalize_ticker from trading212_mcp_server")
+
         # 2. CENTRALIZED DATA FABRICATION
         status_manager.set_status("coordinator", "working", "Fabricating Market Context...")
         
@@ -522,42 +533,6 @@ Query: "{clean_query}"
         
         return None
 
-    async def _attempt_ticker_fix(self, ticker: str) -> str:
-        """Use Coordinator model + Python to normalize a messy ticker (Tier 1 Extended)"""
-        if not self.llm:
-            return ticker.upper().strip()
-
-        prompt = f"""
-        The user provided a messy ticker: "{ticker}".
-        This might be a company name, a malformed symbol, or a leveraged ETP.
-        Write a short Python script to clean and normalize it. 
-        Rules:
-        - If it's a UK stock like Lloyds, it should end in '.L'.
-        - If it looks like a leveraged ETP (e.g. MAG5, 3GLD, GLD3), DO NOT strip digits.
-        - T212 sometimes adds '1' to the end of UK stocks (e.g. LLOY1). Strip the '1' and add '.L' for LLOY.
-        
-        Return ONLY a JSON block with the Python code:
-        {{
-          "code": "result = ticker.upper().strip().replace('$', '')\\nif result == 'LLOY': result = 'LLOY.L'"
-        }}
-        """
-        try:
-            from langchain_core.messages import HumanMessage
-            response = await self.llm.ainvoke([HumanMessage(content=prompt)])
-            content = response.content if hasattr(response, 'content') else str(response)
-            match = re.search(r'\{.*\}', content, re.DOTALL)
-            if match:
-                code_data = json.loads(match.group())
-                python_code = code_data.get("code", "")
-                if python_code:
-                    exec_res = self.python_executor.execute(python_code, {"ticker": ticker})
-                    if exec_res["success"] and exec_res["result"]:
-                        return str(exec_res["result"])
-        except Exception as e:
-            logger.warning(f"Ticker fix attempt failed: {e}")
-        
-        return ticker.upper().strip()
-
     async def _handle_specialist_error(self, agent: BaseAgent, context: Dict[str, Any], error: str) -> Optional[AgentResponse]:
         """Tier 3: Attempt to fix a specialist error using LLM reasoning (Self-Healing)"""
         if not self.llm:
@@ -714,5 +689,7 @@ Query: "{clean_query}"
             found = extract_ticker_from_text(content)
             if found:
                 return found
+                
+        return None
                 
         return None
