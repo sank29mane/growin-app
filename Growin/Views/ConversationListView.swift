@@ -358,6 +358,22 @@ struct ConversationCard: View {
             }
         }
         .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityLabelString)
+        .accessibilityHint(isEditing ? "Double tap to toggle selection" : "Double tap to open conversation")
+        .accessibilityAddTraits(isEditing && isSelected ? [.isSelected] : [])
+    }
+
+    private var accessibilityLabelString: String {
+        let date = formatDate(conversation.createdAt)
+        let title = conversation.title ?? "Untitled Conversation"
+
+        if isEditing {
+            return "Select \(title), created \(date)"
+        } else {
+            let preview = conversation.lastMessage ?? "No preview"
+            return "Conversation: \(title). Created \(date). Last message: \(preview)"
+        }
     }
 
     private func formatDate(_ dateString: String) -> String {
