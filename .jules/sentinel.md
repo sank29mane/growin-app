@@ -32,3 +32,8 @@
 **Vulnerability:** The MCP configuration allowed setting `command` to `python` (which is allowed) but permitted passing dangerous flags like `-c` or `-e` in the `args` array, enabling inline code execution that bypassed the script file requirement.
 **Learning:** Validating the executable name is insufficient for interpreters (Python, Node, etc.). The arguments must also be sanitized to prevent "flag injection" attacks that turn a safe interpreter invocation into a command execution primitive.
 **Prevention:** For known interpreters, strictly whitelist allowed arguments or blocklist dangerous flags (e.g., `-c`, `-e`, `-r`).
+
+## 2026-02-23 - SQL Injection via DuckDB INTERVAL f-strings
+**Vulnerability:** The `AnalyticsDB` class used Python f-strings to inject the `window_days` parameter directly into SQL queries as an `INTERVAL` value (e.g., `INTERVAL '{window_days}' DAY`). This allowed attackers to manipulate the query logic by breaking out of the quote.
+**Learning:** DuckDB's `INTERVAL` syntax (e.g., `INTERVAL '30' DAY`) makes parameterization non-intuitive because standard `?` binding often fails for the interval literal itself. Developers may resort to f-strings for structure, introducing injection risks.
+**Prevention:** Use arithmetic parameterization for intervals: `INTERVAL 1 DAY * ?`. This allows passing an integer parameter safely while maintaining valid SQL syntax.
