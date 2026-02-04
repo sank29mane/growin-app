@@ -279,6 +279,7 @@ struct AccountPicker: View {
                 .accessibilityAddTraits(selectedAccount == account ? [.isSelected] : [])
                 .accessibilityHint("Select to view \(displayName(account)) data")
 
+
             }
         }
         .padding(6)
