@@ -197,6 +197,7 @@ struct SuggestionChip: View {
         .buttonStyle(.plain)
         .accessibilityLabel("Ask about \(item.title)")
         .accessibilityHint("Asks: \(item.prompt)")
+
         .onHover { hovering in
             withAnimation(.easeOut(duration: 0.15)) {
                 isHovered = hovering
@@ -276,6 +277,7 @@ struct AccountPicker: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityAddTraits(selectedAccount == account ? [.isSelected] : [])
+
             }
         }
         .padding(6)
