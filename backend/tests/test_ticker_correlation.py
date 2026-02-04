@@ -7,43 +7,10 @@ import sys
 import os
 
 # Updated normalization function to test it locally
-def normalize_ticker(ticker: str) -> str:
-    """SOTA Ticker Normalization: Tested locally for correlation analysis."""
-    if not ticker: return ""
-    ticker = ticker.upper().strip().replace("$", "")
-    if "." in ticker: return ticker
-    original = ticker
-    # Strip T212 suffixes (handles multiple like _US_EQ)
-    ticker = re.sub(r'(_EQ|_US|_BE|_DE|_GB|_FR|_NL|_ES|_IT)+$', '', ticker)
-    ticker = ticker.replace("_", "")
-    
-    special_mappings = {
-        "SSLNL": "SSLN", "SGLNL": "SGLN", "3GLD": "3GLD", "SGLN": "SGLN",
-        "LLOY1": "LLOY", "VOD1": "VOD", "BARC1": "BARC", "TSCO1": "TSCO",
-        "BPL1": "BP", "AZNL1": "AZN", "SGLN1": "SGLN", "MAG5": "MAG5", "MAG7": "MAG7",
-        "GLD3": "GLD3", "3UKL": "3UKL", "5QQQ": "5QQQ", "TSL3": "TSL3", "NVD3": "NVD3",
-    }
-    if ticker in special_mappings: ticker = special_mappings[ticker]
+# Add backend directory to path so we can import modules
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-    if ticker.endswith("1") and len(ticker) > 3:
-        stems = ["LLOY", "BARC", "VOD", "HSBA", "TSCO", "BP", "AZN", "RR", "NG", "SGLN", "SSLN"]
-        if any(ticker.startswith(stem) for stem in stems):
-            ticker = ticker[:-1]
-
-    us_exclusions = {
-        "AAPL", "MSFT", "GOOG", "AMZN", "NVDA", "TSLA", "META", "NFLX",
-        "SPY", "QQQ", "DIA", "IWM", "IVV", "VOO", "VTI", "GLD", "SLV", "ARKK", "SMH",
-        "AMD", "INTC", "PYPL", "ADBE", "CSCO", "PEP", "COST", "AVGO", "QCOM", "TXN"
-    }
-    
-    is_explicit_uk = "_EQ" in original and "_US" not in original
-    is_likely_uk = (len(ticker) <= 4 or ticker.endswith("L")) and ticker not in us_exclusions
-    is_leveraged = bool(re.search(r'^(3|5|7)[A-Z]+', ticker)) or bool(re.search(r'[A-Z]+(2|3|5|7)$', ticker))
-                    
-    if is_explicit_uk or is_likely_uk or is_leveraged:
-        if not ticker.endswith(".L") and "." not in ticker:
-            return f"{ticker}.L"
-    return ticker
+from trading212_mcp_server import normalize_ticker
 
 # Correlation Test Cases
 test_cases = [
@@ -62,6 +29,32 @@ test_cases = [
     ("$MSFT", "MSFT"),
     ("lloy", "LLOY.L"),
     ("BARC.L", "BARC.L"),
+    # New cases for fixing the extra "L" issue
+    ("BARCL", "BARC.L"),
+    ("SHELL", "SHEL.L"),
+    ("GSKL", "GSK.L"),
+    ("RELL", "REL.L"),
+    ("LLOYL", "LLOY.L"),
+    ("TSCOL", "TSCO.L"),
+    ("AZNL", "AZN.L"),
+    ("BNZLL", "BNZL.L"), # Bunzl
+    ("MNGL", "MNG.L"),   # M&G
+    ("RBL", "RKT.L"),    # Reckitt Benckiser
+    ("LGENL", "LGEN.L"), # Legal & General
+    ("PHNXL", "PHNX.L"), # Phoenix Group
+    ("MICCL", "MICC.L"), # Midwich Group
+    ("SLL", "SL.L"),
+    ("AIEL", "AIE.L"),
+    ("CCHL", "CCH.L"),   # Coca Cola HBC? 
+    ("BAL", "BA.L"),
+    ("MONYL", "MONY.L"),
+    ("BPL", "BP.L"),
+    ("UUL", "UU.L"),
+    ("ABFL", "ABF.L"),   # Associated British Foods
+    ("GLENL", "GLEN.L"), # Glencore
+    ("BATSL", "BATS.L"), # British American Tobacco
+    ("TATEL", "TATE.L"), # Tate & Lyle
+    ("GAWL", "GAW.L"),   # Games Workshop
 ]
 
 def run_correlation_test():

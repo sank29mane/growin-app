@@ -17,6 +17,10 @@ from mcp.types import (
     TextContent
 )
 from utils import sanitize_nan
+from utils.process_guard import start_parent_watchdog
+
+# Start watchdog immediately
+start_parent_watchdog()
 
 # Global model cache
 loaded_models = {}

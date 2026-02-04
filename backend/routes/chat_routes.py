@@ -3,7 +3,8 @@ Chat Routes - Conversation and Message Handling
 """
 
 from fastapi import APIRouter, HTTPException, Depends
-from typing import Optional
+from typing import Optional, Dict, Any
+from pydantic import BaseModel
 from app_context import state, ChatMessage, AnalyzeRequest, AgentResponse
 from rate_limiter import default_limiter
 from utils import extract_ticker_from_text, sanitize_nan
@@ -96,10 +97,13 @@ async def chat_message(request: ChatMessage, _=Depends(default_limiter.check)):
         )
         response = await decision_agent.make_decision(market_context, request.message)
 
+        # Generate timestamp and ensure ISO format
+        timestamp = datetime.utcnow().isoformat() + "Z"
+
         # Save assistant reply
         chat_manager.save_message(
             conversation_id=conversation_id,
-            role="assistant:DecisionAgent",
+            role="assistant",
             content=response,
             tool_calls=[],
             agent_name="DecisionAgent",
@@ -109,31 +113,31 @@ async def chat_message(request: ChatMessage, _=Depends(default_limiter.check)):
         # Iteratively update conversation title based on growing context
         await update_conversation_title_if_needed(conversation_id, request.model_name)
 
-        timestamp = chat_manager.conn.execute(
-            "SELECT timestamp FROM messages WHERE conversation_id = ? "
-            "ORDER BY timestamp DESC LIMIT 1",
-            (conversation_id,),
-        ).fetchone()[0]
-
         return {
             "conversation_id": conversation_id,
             "agent": "DecisionAgent",
             "response": response,
-            "tool_calls": [],
+            "tool_calls": None, # Explicitly null to prevent frontend from treating it as a tool/search result
             "timestamp": timestamp,
             "model_name": request.model_name,
             "coordinator_model": request.coordinator_model,
-            "data": sanitize_nan(market_context.model_dump())
+            "data": sanitize_nan(market_context.model_dump() if hasattr(market_context, "model_dump") else market_context.dict())
         }
     except Exception as e:
-        logger.error(f"Chat error: {e}\n{traceback.format_exc()}")
+        logger.error(f"Chat error: {str(e)}\n{traceback.format_exc()}")
+        
+        # Check for specific error types to provide safe feedback
+        if "LM Studio" in str(e) or "Connection" in type(e).__name__:
+            error_detail = "LLM Connection Error: Please ensure LM Studio/Ollama is running."
+        elif "native-mlx" in str(e).lower():
+            error_detail = "MLX Model Error: Check model path and hardware compatibility."
+        else:
+            # Mask all other internal errors to prevent leakage
+            error_detail = "Internal Server Error"
+        
         raise HTTPException(
             status_code=500, 
-            detail={
-                "error": "Internal Server Error",
-                "message": str(e),
-                "type": type(e).__name__
-            }
+            detail=error_detail
         )
 
 @router.post("/agent/analyze", response_model=AgentResponse)
@@ -187,7 +191,8 @@ async def analyze_portfolio(request: AnalyzeRequest):
         return {"messages": [], "final_answer": result}
     except Exception as e:
         logger.error(f"Analysis failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Sentinel: Sanitized error message
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 
 @router.get("/conversations")
@@ -204,7 +209,8 @@ async def list_conversations():
     try:
         return state.chat_manager.list_conversations()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error listing conversations: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 
 @router.get("/conversations/{conversation_id}/history")
@@ -224,7 +230,8 @@ async def get_conversation_history(conversation_id: str):
     try:
         return state.chat_manager.load_history(conversation_id)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error loading history for {conversation_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 
 @router.delete("/conversations/{conversation_id}")
@@ -245,7 +252,8 @@ async def delete_conversation(conversation_id: str):
         state.chat_manager.delete_conversation(conversation_id)
         return {"status": "success"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error deleting conversation {conversation_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 
 @router.delete("/conversations/{conversation_id}/clear")
@@ -266,91 +274,107 @@ async def clear_conversation(conversation_id: str):
         state.chat_manager.clear_conversation(conversation_id)
         return {"status": "success"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error clearing conversation {conversation_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 
 async def generate_conversation_title(conversation_id: str, model_name: Optional[str] = None):
     """
     Generate a concise AI-powered title for a conversation.
-    Strips reasoning/think blocks from LLM output.
     """
-    import re
-    
     try:
+        from utils.text_processing import extract_title_from_text
+        
         chat_manager = state.chat_manager
         history = chat_manager.get_conversation_history(conversation_id)
         if not history:
             return {"title": "New Conversation"}
 
         # Build concise summary (limit to last 4 messages for speed)
+        # Focus on user messages as they define the topic best
         messages_text = ""
         for msg in history[-4:]:
             role = "User" if msg['role'] == "user" else "Assistant"
-            content = msg['content'][:200]  # Truncate long messages
+            content = msg['content'][:250]  # Truncate long messages
             messages_text += f"{role}: {content}\n"
 
         prompt = (
-            "Create a 3-6 word title for this conversation. "
-            "Include ticker symbols if mentioned. "
-            "Output ONLY the title, nothing else.\n\n"
-            f"{messages_text}\n\nTitle:"
+            "Create a very short, specific title (3-5 words) for this conversation based on the user's intent. "
+            "Examples: 'Apple Stock Analysis', 'Portfolio Risk Review', 'Tech Sector Trends'. "
+            "Do NOT use 'Chat', 'Conversation', 'Regarding', or generic terms. "
+            "If a ticker symbol is mentioned (like AAPL, TSLA), INCLUDE it. "
+            "Output ONLY the title text. No thinking, no quotes, no preamble.\n\n"
+            f"Conversation:\n{messages_text}\n\nTitle:"
         )
 
         from agents.decision_agent import DecisionAgent
         agent = DecisionAgent(model_name=model_name or "native-mlx")
         response = await agent.generate_response(prompt)
 
-        # AGGRESSIVE CLEANING: Strip ALL common reasoning/think blocks
-        title = str(response)
-        
-        # 1. Strip <think>...</think> (including incomplete tags)
-        title = re.sub(r'<think>.*?</think>', '', title, flags=re.DOTALL | re.IGNORECASE)
-        title = re.sub(r'<think>.*', '', title, flags=re.DOTALL | re.IGNORECASE)
-        title = re.sub(r'.*?</think>', '', title, flags=re.DOTALL | re.IGNORECASE)
-        
-        # 2. Strip common reasoning markers
-        title = re.sub(r'\*\*thinking\*\*.*?\*\*', '', title, flags=re.DOTALL | re.IGNORECASE)
-        title = re.sub(r'thinking:.*?\n', '', title, flags=re.IGNORECASE)
-        
-        # 3. Strip meta-instrution bleed (e.g. "We must output only...")
-        title = re.sub(r'we (must|need|should).*?(?=\n|$)', '', title, flags=re.IGNORECASE)
-        title = re.sub(r'I (will|am going to).*?(?=\n|$)', '', title, flags=re.IGNORECASE)
-        title = re.sub(r'Let me.*?(?=\n|$)', '', title, flags=re.IGNORECASE)
-        title = re.sub(r'The title should.*?(?=\n|$)', '', title, flags=re.IGNORECASE)
-        
-        # 4. Strip quotes and surrounding artifacts before splitting
-        title = title.strip().strip('"').strip("'").strip('`')
-        
-        # 5. Extract first "real" line that isn't empty or meta
-        lines = [l.strip() for l in title.split('\n') if l.strip()]
-        
-        # Filter out lines that look like meta-instructions
-        clean_lines = []
-        for l in lines:
-            l_lower = l.lower()
-            if any(x in l_lower for x in ["output only", "3-6 word", "title:", "user:", "assistant:"]):
-                continue
-            if len(l) > 1:
-                clean_lines.append(l)
-        
-        title = clean_lines[0] if clean_lines else "Financial Conversation"
-        
-        # Final formatting
-        title = title.strip().strip('"').strip("'").strip('*').strip()
-        
-        # Limit length
-        if len(title) > 40:
-            title = title[:37] + "..."
-        if len(title) < 2:
-            title = "Financial Conversation"
+        # Use utility for robust extraction
+        title = extract_title_from_text(str(response))
 
         chat_manager.update_conversation_title(conversation_id, title)
         return {"title": title}
     except Exception as e:
         logger.error(f"Title generation error: {e}")
-        return {"title": "Financial Conversation"}
+        return {"title": "Financial Analysis"}
 
 @router.post("/conversations/{conversation_id}/generate-title")
 async def generate_conversation_title_endpoint(conversation_id: str, model_name: Optional[str] = None):
     """Endpoint wrapper for title generation"""
     return await generate_conversation_title(conversation_id, model_name)
+
+class IngestRequest(BaseModel):
+    content: str
+    metadata: Dict[str, Any] = {}
+
+@router.post("/api/knowledge/ingest")
+async def ingest_knowledge(request: IngestRequest):
+    """
+    Manually ingest knowledge into the RAG system.
+    Useful for users to save strategy notes, specific news, or goals.
+    """
+    try:
+        from app_context import state
+        if not state.rag_manager:
+            raise HTTPException(status_code=503, detail="RAG system not initialized")
+            
+        # Enforce metadata defaults
+        meta = request.metadata
+        meta["type"] = meta.get("type", "manual_entry")
+        meta["timestamp"] = datetime.now().isoformat()
+        
+        state.rag_manager.add_document(content=request.content, metadata=meta)
+        
+        return {"status": "success", "message": "Knowledge ingested successfully"}
+    except Exception as e:
+        logger.error(f"Ingestion failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+
+@router.get("/api/models/lmstudio")
+async def list_lmstudio_models():
+    """List available models from LM Studio."""
+    try:
+        from app_context import state
+        from lm_studio_client import LMStudioClient
+        
+        client = state.lm_studio_client or LMStudioClient()
+        
+        # Check connection first
+        if not await client.check_connection():
+            return {"models": [], "error": "LM Studio not running"}
+            
+        # Get models (filtering out embeddings)
+        models = await client.list_models()
+        llm_models = [
+            m["id"] for m in models 
+            if "embed" not in m["id"].lower() 
+            and "nomic" not in m["id"].lower()
+            and "bert" not in m["id"].lower()
+        ]
+        
+        return {"models": llm_models}
+    except Exception as e:
+        logger.error(f"Failed to list LM Studio models: {e}", exc_info=True)
+        return {"models": [], "error": "Internal Server Error"}
