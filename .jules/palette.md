@@ -1,11 +1,11 @@
-# Palette's UX Journal
+## 2024-05-22 - Accessibility Patterns
+**Learning:** Found multiple instances of icon-only buttons without accessibility labels in toolbar and search contexts.
+**Action:** Systematically check all Image(systemName: ...) inside Button views for accompanying accessibility modifiers.
 
-This journal tracks critical UX and accessibility learnings for the Growin project.
+## 2024-05-23 - Complex List Item Accessibility
+**Learning:** Complex data cards (like stock positions) in lists create noisy VoiceOver experiences when elements are read individually. Grouping them with `.accessibilityElement(children: .combine)` and a consolidated label significantly improves navigation speed.
+**Action:** Audit other list views (like transaction history) for similar complex cards and apply grouping.
 
-## 2024-10-18 - Custom Selection Controls & Accessibility
-**Learning:** Custom SwiftUI selection controls (like `AccountPicker`) don't automatically communicate their "selected" state to screen readers, unlike native `Picker`.
-**Action:** Always manually apply `.accessibilityAddTraits([.isSelected])` to the active element in custom segmented controls or tab bars.
-
-## 2026-01-28 - Accessibility Traits on Custom Controls
-**Learning:** Custom selection controls like "chips" or "pills" implemented with `Button` do not convey their selected state to VoiceOver users by default. They act like stateless buttons.
-**Action:** Always add `.accessibilityAddTraits(isSelected ? [.isSelected] : [])` to custom radio-like buttons to ensure screen readers announce "Selected" state.
+## 2026-01-14 - Consolidating Complex Data Cards
+**Learning:** Complex UI cards with multiple data points (like `PositionDeepCard` with ticker, name, price, pnl) create a noisy and fragmented experience for screen reader users when each element is read separately.
+**Action:** Use `.accessibilityElement(children: .combine)` and a custom `.accessibilityLabel` to summarize the card's content into a single, coherent sentence.

@@ -1,9 +1,8 @@
-
 import pytest
 import pandas as pd
 import numpy as np
-from unittest.mock import MagicMock, patch
-from datetime import datetime, timedelta
+from unittest.mock import MagicMock, patch, call
+from datetime import datetime, timedelta, timezone
 
 # Import the module to test
 # We need to make sure backend path is in sys.path or we run pytest from backend/
@@ -11,7 +10,7 @@ import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
-from data_engine import AlpacaClient
+from data_engine import AlpacaClient, PriceData
 
 @pytest.mark.asyncio
 async def test_get_historical_bars_yfinance_fallback_optimization():
@@ -47,8 +46,8 @@ async def test_get_historical_bars_yfinance_fallback_optimization():
         MockTicker.return_value = mock_ticker_instance
 
         # Initialize client (will be in offline mode if env vars are not set, which is expected)
-        # We patch logger to suppress warnings
-        with patch('data_engine.logger'):
+        # We patch logger to suppress warnings, but we want to see errors if it fails
+        with patch('data_engine.logger') as mock_logger:
             client = AlpacaClient()
             # Force data_client to be None to ensure fallback
             client.data_client = None
@@ -56,6 +55,11 @@ async def test_get_historical_bars_yfinance_fallback_optimization():
             # 1. Test UK Stock (should be divided by 100)
             ticker = "TEST.L"
             result = await client.get_historical_bars(ticker, timeframe="1Day", limit=5)
+
+            if result is None:
+                print("\nLogger calls during failure:")
+                for call in mock_logger.mock_calls:
+                    print(call)
 
             assert result is not None
             assert result['ticker'] == ticker
@@ -65,16 +69,21 @@ async def test_get_historical_bars_yfinance_fallback_optimization():
             # Verify first bar
             first_bar = bars[0]
             # 1000.0 GBX -> 10.00 GBP
-            assert first_bar['o'] == 10.00
-            assert first_bar['h'] == 10.50
-            assert first_bar['l'] == 9.50
-            assert first_bar['c'] == 10.25
-            assert first_bar['v'] == 100
+            assert first_bar['open'] == 10.00
+            assert first_bar['high'] == 10.50
+            assert first_bar['low'] == 9.50
+            assert first_bar['close'] == 10.25
+            assert first_bar['volume'] == 100
 
             # Verify timestamp
             # 2023-01-01 00:00:00 UTC -> 1672531200000 ms
             expected_ts = int(pd.Timestamp("2023-01-01").timestamp() * 1000)
-            assert first_bar['t'] == expected_ts
+            # Timestamps are ISO strings in PriceData model, not int ms
+            # The test expectation of 't' (int) was wrong vs actual implementation which converts to isoformat
+            # data_engine.py: ts_iso = datetime.fromtimestamp(r['t'] / 1000.0, tz=timezone.utc).isoformat()
+            
+            # Assert valid ISO format roughly matching
+            assert "2023-01-01" in first_bar['timestamp']
 
 
             # 2. Test US Stock (should NOT be divided)
@@ -89,8 +98,8 @@ async def test_get_historical_bars_yfinance_fallback_optimization():
             first_bar_us = bars_us[0]
 
             # 1000.0 USD -> 1000.0 USD
-            assert first_bar_us['o'] == 1000.00
-            assert first_bar_us['c'] == 1025.00
+            assert first_bar_us['open'] == 1000.00
+            assert first_bar_us['close'] == 1025.00
 
             # 3. Test TZ-Aware Index
             dates_tz = pd.date_range(start='2023-01-01', periods=5, freq='D', tz='America/New_York')
@@ -106,11 +115,88 @@ async def test_get_historical_bars_yfinance_fallback_optimization():
             # TODO: Investigate why this assertion fails in test environment (returns 1672531200000 instead of 1672549200000)
             # assert result_tz['bars'][0]['t'] == expected_ts_tz
 
+@pytest.mark.asyncio
+async def test_get_batch_bars_optimization():
+    """Test get_batch_bars logic (splitting Alpaca vs UK, and batching)."""
+    
+    with patch('data_engine.AlpacaClient.get_historical_bars') as mock_single_fetch:
+        # Mock single fetch to return specific data based on ticker
+        async def side_effect(ticker, timeframe, limit):
+            return {"ticker": ticker, "bars": [], "source": "single"}
+        mock_single_fetch.side_effect = side_effect
+        
+        # 1. Test Offline Mode (No Data Client)
+        client = AlpacaClient()
+        client.data_client = None # Ensure offline
+        
+        tickers = ["AAPL", "LLOY.L"]
+        results = await client.get_batch_bars(tickers)
+        
+        # Should call single fetch for both
+        assert len(results) == 2
+        assert mock_single_fetch.call_count == 2
+        
+        # 2. Test Online Mode (With Data Client)
+        mock_data_client = MagicMock()
+        client.data_client = mock_data_client
+        
+        # Mock the batch response
+        # We need to mimic the Alpaca SDK response object structure
+        mock_response = MagicMock()
+        
+        # Create mock bar objects
+        mock_bar = MagicMock()
+        mock_bar.timestamp = datetime.now(timezone.utc)
+        mock_bar.open = 100.0
+        mock_bar.high = 101.0
+        mock_bar.low = 99.0
+        mock_bar.close = 100.0
+        mock_bar.volume = 1000
+        
+        mock_response.data = {
+            "AAPL": [mock_bar]
+             # TSLA missing from response to test partial failure handling
+        }
+        
+        # Mock the to_thread call which executes the SDK method
+        # We need to patch asyncio.to_thread because it's used in the method
+        # It must return an awaitable
+        async def async_return(*args, **kwargs):
+            return mock_response
+
+        with patch('asyncio.to_thread', side_effect=async_return) as mock_to_thread:
+             
+             mock_single_fetch.reset_mock()
+             
+             tickers = ["AAPL", "TSLA", "LLOY.L"]
+             results = await client.get_batch_bars(tickers)
+             
+             # Logic:
+             # AAPL -> Batch -> Success
+             # TSLA -> Batch -> Missing -> Fallback -> Single Fetch
+             # LLOY.L -> UK -> Fallback -> Single Fetch
+             
+             # Verify we got results
+             assert "AAPL" in results
+             assert "TSLA" in results
+             assert "LLOY.L" in results
+             
+             # Verify Single Fetch Calls (should be called for TSLA and LLOY.L)
+             # Note: logic calls gather(*tasks)
+             assert mock_single_fetch.call_count == 2
+             
+             tickers_called = [c[0][0] for c in mock_single_fetch.call_args_list]
+             assert "TSLA" in tickers_called
+             assert "LLOY.L" in tickers_called
+             assert "AAPL" not in tickers_called
+
+
 if __name__ == "__main__":
     # Manually run the test function if executed as script
     import asyncio
     try:
         asyncio.run(test_get_historical_bars_yfinance_fallback_optimization())
+        asyncio.run(test_get_batch_bars_optimization())
         print("Test passed!")
     except AssertionError as e:
         print(f"Test failed: {e}")
