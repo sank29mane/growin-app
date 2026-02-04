@@ -25,6 +25,7 @@ class AppState:
         self.chat_manager = ChatManager()
         self.rag_manager = RAGManager()
         self.mcp_client = Trading212MCPClient()
+        self.lm_studio_client = None  # Lazy init to avoid startup blocking
         self.start_time = time.time()
         # On-device ANE configuration (default off; auto-detect on startup)
         self.ane_config = ANEConfig()
