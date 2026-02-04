@@ -9,8 +9,13 @@
 
 ## 🏗️ System Architecture
 
-Growin implements a **hybrid algorithmic-LLM architecture** that combines structured quantitative analysis with advanced AI reasoning for comprehensive financial intelligence.
+Growin implements a **hybrid algorithmic-LLM architecture** that combines structured quantitative analysis with advanced AI reasoning. High-performance paths are accelerated via a **Rust Native Core** and **Vectorized Python Agents**.
 
+### Key SOTA Features
+- **🚀 Bolt-Optimized Quant Engine**: Vectorized technical analysis (EMA, RSI) using Pandas/NumPy.
+- **🛡️ Sentinel Security Layer**: Automated API key masking and secure error sanitization.
+- **⚙️ Hybrid Ticker Engine**: Rust-accelerated symbol normalization with global exchange heuristics.
+- **🎨 Palette UI System**: Accessible, 120Hz smooth interface with glassmorphism and native macOS traits.
 ### High-Level System Overview
 ```mermaid
 graph TB
@@ -205,13 +210,11 @@ ollama pull llama3:8b-instruct-q4_0
 
 #### 5. Start Backend Services
 ```bash
-# Use the provided startup script
-./start_backend.sh
+# Use the simplified startup script
+./run
 
-# Or manually:
-cd backend
-source .venv/bin/activate
-python -m uvicorn server:app --host 0.0.0.0 --port 8002 --reload
+# This handles environment setup, dependencies, and server launch automatically.
+
 ```
 
 **Verify Backend is Running:**

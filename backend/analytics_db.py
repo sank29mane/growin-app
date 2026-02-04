@@ -65,7 +65,7 @@ class AnalyticsDB:
         
         Args:
             ticker: Stock ticker symbol
-            data: List of OHLCV dicts with keys: o, h, l, c, v, t
+            data: List of OHLCV dicts with keys: o, h, l, c, v, t OR timestamp, open, high, low, close, volume
         
         Returns:
             Number of rows inserted
@@ -74,25 +74,53 @@ class AnalyticsDB:
             return 0
         
         try:
+            # Normalize list of dicts first to ensure consistency
+            normalized_data = []
+            for d in data:
+                # Handle both 't' (ms/s) and 'timestamp' (ISO string)
+                ts = d.get('timestamp')
+                if ts is None:
+                    # Fallback to 't' if timestamp missing
+                    t_val = d.get('t')
+                    if t_val:
+                        # Convert ms/s to ISO string for consistent pandas parsing
+                        if isinstance(t_val, (int, float)):
+                             # Assume ms if large, s if small
+                             unit = 'ms' if t_val > 2000000000 else 's'
+                             ts = pd.to_datetime(t_val, unit=unit).isoformat()
+                        else:
+                             ts = str(t_val)
+                
+                normalized_data.append({
+                    'timestamp': ts,
+                    'open': d.get('open', d.get('o', 0.0)),
+                    'high': d.get('high', d.get('h', 0.0)),
+                    'low': d.get('low', d.get('l', 0.0)),
+                    'close': d.get('close', d.get('c', 0.0)),
+                    'volume': d.get('volume', d.get('v', 0))
+                })
+
             # Convert to DataFrame
-            df = pd.DataFrame(data)
+            df = pd.DataFrame(normalized_data)
             df['ticker'] = ticker
             
-            # Rename columns for schema compatibility
-            df = df.rename(columns={
-                'o': 'open',
-                'h': 'high',
-                'l': 'low',
-                'c': 'close',
-                'v': 'volume',
-                't': 'timestamp'
-            })
-            
-            # Convert timestamp to datetime
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+            # Ensure timestamp is datetime type (smart inference)
+            # This handles ISO strings automatically
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
             
             # Bulk insert using DuckDB's fast path
-            self.conn.execute("INSERT OR REPLACE INTO ohlcv_history SELECT * FROM df")
+            # Explicitly select columns in schema order to avoid misalignment
+            self.conn.execute("""
+                INSERT INTO ohlcv_history 
+                SELECT ticker, timestamp, open, high, low, close, volume 
+                FROM df
+                ON CONFLICT (ticker, timestamp) DO UPDATE SET
+                    open = EXCLUDED.open,
+                    high = EXCLUDED.high,
+                    low = EXCLUDED.low,
+                    close = EXCLUDED.close,
+                    volume = EXCLUDED.volume
+            """)
             
             rows_inserted = len(df)
             logger.info(f"📊 Inserted {rows_inserted} rows for {ticker}")

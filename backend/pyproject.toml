@@ -1,31 +1,56 @@
 [project]
-name = "trading212-mcp-server"
+name = "backend"
 version = "0.1.0"
-description = "Model Context Protocol server for Trading 212 API integration"
-authors = [{name = "Trading212 MCP"}]
+description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.10"
-
+requires-python = ">=3.11"
 dependencies = [
-    "mcp>=0.9.0",
-    "httpx>=0.27.0",
-    "python-dotenv>=1.0.0",
-    "yfinance>=0.2.36",
-    "pandas>=2.2.0",
+    "alpaca-py>=0.32.0",
+    "chromadb>=0.4.0",
+    "duckdb>=0.9.0,<0.10.0",
+    "fastapi>=0.109.0,<0.110.0",
+    "finnhub-python>=2.4.19,<3.0.0",
+    "granite-tsfm",
+    "httpx>=0.26.0,<0.28.0",
+    "huggingface-hub>=0.20.0,<1.0.0",
+    "langchain>=0.2.0",
+    "langchain-anthropic>=0.1.0",
+    "langchain-core>=0.2.0",
+    "langchain-google-genai>=1.0.0",
+    "langchain-ollama>=0.1.0",
+    "langchain-openai>=0.1.0",
+    "langgraph>=0.2.0",
+    "mcp>=0.1.0,<1.0.0",
+    "mlx>=0.20.0",
+    "mlx-lm>=0.10.0",
+    "newsapi-python>=0.2.7,<0.3.0",
+    "numpy>=1.26.3",
+    "orjson>=3.9.10,<4.0.0",
+    "pandas>=2.1.4",
+    "prophet>=1.1.5",
+    "psutil>=5.9.0",
+    "pydantic>=2.5.0,<3.0.0",
+    "pylint>=3.0.3,<4.0.0",
+    "pytest>=7.4.3,<8.0.0",
+    "pytest-asyncio>=0.21.1,<0.22.0",
+    "python-dotenv>=1.0.0,<2.0.0",
+    "rapidfuzz>=3.0.0",
+    "scikit-learn>=1.3.0",
+    "tavily-python>=0.3.0,<0.4.0",
+    "torch>=2.1.0,<3.0.0",
+    "transformers>=4.36.0,<5.0.0",
+    "uvicorn[standard]>=0.27.0,<0.28.0",
+    "uvloop>=0.19.0,<1.0.0 ; sys_platform != 'win32'",
+    "vadersentiment>=3.3.2,<4.0.0",
+    "websockets>=13.0",
+    "xgboost>=2.0.0",
+    "yfinance>=0.2.35,<0.3.0",
 ]
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=8.0.0",
-    "pytest-asyncio>=0.23.0",
-]
-
-[build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
-
-[tool.setuptools]
-py-modules = ["trading212_mcp_server"]
+[tool.uv.sources]
+granite-tsfm = { git = "https://github.com/ibm-granite/granite-tsfm.git", rev = "v0.2.22" }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]

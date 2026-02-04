@@ -2,9 +2,12 @@ import os
 import asyncio
 import time
 import logging
+from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
-from trading212_mcp_server import normalize_ticker
+from utils.ticker_utils import normalize_ticker
+from utils.currency_utils import CurrencyNormalizer, normalize_all_positions
+from data_models import Position, PriceData
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -26,12 +29,12 @@ class AlpacaClient:
     def __init__(self):
         self.trading_client = None
         self.data_client = None
-        
+
         if API_KEY and API_SECRET:
             try:
                 from alpaca.trading.client import TradingClient
                 from alpaca.data.historical import StockHistoricalDataClient
-                
+
                 self.trading_client = TradingClient(API_KEY, API_SECRET, paper="paper" in BASE_URL)
                 self.data_client = StockHistoricalDataClient(API_KEY, API_SECRET)
                 logger.info("AlpacaClient: Successfully connected to Alpaca API.")
@@ -42,14 +45,26 @@ class AlpacaClient:
 
     async def get_historical_bars(self, ticker: str, timeframe="1Day", limit: int = 512) -> Optional[Dict[str, Any]]:
         """Fetch historical bars using Alpaca Data API, fallback to yfinance."""
+        from cache_manager import cache
+        cache_key = f"bars_{ticker}_{timeframe}_{limit}"
+        cached_data = cache.get(cache_key)
+        if cached_data:
+            return cached_data
+
         normalized_ticker = normalize_ticker(ticker)
-        
+
+        # OPTIMIZATION: Skip Alpaca for UK stocks (they are not supported on standard Alpaca plan)
+        # This avoids "invalid symbol" errors and speeds up the response
+        if normalized_ticker.endswith('.L'):
+            logger.info(f"AlpacaClient: Skipping Alpaca for UK stock {normalized_ticker}, using fallback.")
+            self.data_client = None # Temporarily disable to force fallback for this call
+
         # Try Alpaca first
         if self.data_client:
             try:
                 from alpaca.data.requests import StockBarsRequest
                 from alpaca.data.timeframe import TimeFrame
-                
+
                 # Map timeframe string to Alpaca TimeFrame
                 tf_map = {
                     "1Min": TimeFrame.Minute,
@@ -59,19 +74,21 @@ class AlpacaClient:
                     "1Day": TimeFrame.Day,
                 }
                 tf = tf_map.get(timeframe, TimeFrame.Day)
-                
+
                 # Calculate start date based on timeframe and limit
                 from datetime import datetime, timedelta, timezone
-                
+
                 now = datetime.now(timezone.utc)
-                
+
                 # Default lookback if not specified
+                # OPTIMIZATION: Multipliers increased to account for market closures (nights/weekends)
+                # We need to request enough 'wall clock' time to get 'limit' trading bars.
                 delta_map = {
-                    "1Min": timedelta(minutes=limit * 2),
+                    "1Min": timedelta(minutes=limit * 5),
                     "5Min": timedelta(minutes=limit * 10),
                     "15Min": timedelta(minutes=limit * 30),
-                    "1Hour": timedelta(hours=limit * 2),
-                    "1Day": timedelta(days=limit + 100), # Add buffer
+                    "1Hour": timedelta(hours=limit * 5),  # 1000 bars * 5 = 5000 hours (~200 days)
+                    "1Day": timedelta(days=limit * 1.6 + 100), # ~1.5x for weekends + buffer
                 }
                 start_time = now - delta_map.get(timeframe, timedelta(days=365))
 
@@ -81,26 +98,28 @@ class AlpacaClient:
                     limit=limit,
                     start=start_time
                 )
-                
+
                 # Run synchronous SDK method in thread pool
                 bars_response = await asyncio.to_thread(self.data_client.get_stock_bars, request_params)
-                
+
                 if normalized_ticker in bars_response.data:
                     alpaca_bars = bars_response.data[normalized_ticker]
                     bar_list = []
                     for bar in alpaca_bars:
-                        bar_list.append({
-                            "t": int(bar.timestamp.timestamp() * 1000),
-                            "o": bar.open,
-                            "h": bar.high,
-                            "l": bar.low,
-                            "c": bar.close,
-                            "v": bar.volume,
-                            "timestamp": bar.timestamp.isoformat() # Add explicit ISO string for easier parsing
-                        })
-                    
-                    return {"ticker": ticker, "bars": bar_list, "timeframe": timeframe}
-                    
+                        bar_list.append(PriceData(
+                            ticker=ticker,
+                            timestamp=bar.timestamp.isoformat(),
+                            open=Decimal(str(bar.open)),
+                            high=Decimal(str(bar.high)),
+                            low=Decimal(str(bar.low)),
+                            close=Decimal(str(bar.close)),
+                            volume=int(bar.volume)
+                        ).model_dump()) # Store as dict in cache/return for now to avoid serialization issues downstream
+
+                    result = {"ticker": ticker, "bars": bar_list, "timeframe": timeframe}
+                    cache.set(cache_key, result, ttl=300) # Cache for 5 mins
+                    return result
+
             except Exception as e:
                 logger.warning(f"AlpacaClient: Error fetching bars from Alpaca: {e}. Falling back to yfinance.")
 
@@ -111,14 +130,17 @@ class AlpacaClient:
             from utils.currency_utils import CurrencyNormalizer
 
             # Map timeframe to yfinance period/interval
+            # OPTIMIZATION: Request max viable history for fallback to ensure TTM context (512+)
             period_map = {
-                "1Min": ("1d", "1m"),
-                "5Min": ("1d", "5m"),
-                "15Min": ("1d", "15m"),
-                "1Hour": ("1mo", "1h"),
-                "1Day": ("1y", "1d"),
+                "1Min": ("5d", "1m"),     # Max 7d usually
+                "5Min": ("60d", "5m"),    # Max 60d
+                "15Min": ("60d", "15m"),  # Max 60d
+                "1Hour": ("730d", "1h"),  # Max 730d (2y) - ample for 512 bars
+                "1Day": ("5y", "1d"),     # 5y is plenty
+                "1Week": ("5y", "1wk"),
+                "1Month": ("max", "1mo")
             }
-            period, interval = period_map.get(timeframe, ("1y", "1d"))
+            period, interval = period_map.get(timeframe, ("5y", "1d"))
 
             ticker_obj = yf.Ticker(normalized_ticker)
             data = ticker_obj.history(period=period, interval=interval)
@@ -134,7 +156,7 @@ class AlpacaClient:
             is_uk = CurrencyNormalizer.is_uk_stock(normalized_ticker)
 
             if is_uk:
-                # Vectorized division for UK stocks (GBX -> GBP)
+                 # Vectorized division for UK stocks (GBX -> GBP)
                 cols_to_normalize = ['Open', 'High', 'Low', 'Close']
                 df[cols_to_normalize] = df[cols_to_normalize] / 100.0
 
@@ -149,7 +171,7 @@ class AlpacaClient:
                 # If Naive, subtract Naive epoch
                 df['t'] = (df.index - pd.Timestamp("1970-01-01")) // pd.Timedelta('1ms')
 
-            # Rename columns to match API output format
+            # Rename columns to match API output format (intermediate step)
             df = df.rename(columns={
                 'Open': 'o',
                 'High': 'h',
@@ -166,36 +188,31 @@ class AlpacaClient:
             df = df[['t', 'o', 'h', 'l', 'c', 'v']]
 
             # Convert to list of dicts
-            bar_list = df.to_dict('records')
+            raw_records = df.to_dict('records')
 
-            return {"ticker": ticker, "bars": bar_list[-limit:], "timeframe": timeframe}
+            bar_list = []
+            for r in raw_records:
+                # Convert timestamp ms to isoformat
+                ts_iso = datetime.fromtimestamp(r['t'] / 1000.0, tz=timezone.utc).isoformat()
+
+                bar_list.append(PriceData(
+                    ticker=ticker,
+                    timestamp=ts_iso,
+                    open=Decimal(str(r['o'])),
+                    high=Decimal(str(r['h'])),
+                    low=Decimal(str(r['l'])),
+                    close=Decimal(str(r['c'])),
+                    volume=r['v']
+                ).model_dump())
+
+            result = {"ticker": ticker, "bars": bar_list[-limit:], "timeframe": timeframe}
+            cache.set(cache_key, result, ttl=300)
+            return result
 
         except Exception as e:
             logger.warning(f"AlpacaClient: Error fetching bars (yfinance): {e}")
-            # Return mock data instead of None
-            import random
-            from datetime import datetime, timedelta
-
-            bar_list = []
-            base_price = 150.0 + random.uniform(-50, 50)  # Random base price
-            current_time = datetime.now()
-
-            for i in range(min(limit, 30)):  # Generate up to 30 days of mock data
-                # Generate realistic price movement
-                daily_change = random.uniform(-3.0, 3.0)
-                price = base_price + daily_change + (i * 0.1)  # Slight trend
-
-                bar_list.append({
-                    "t": int((current_time - timedelta(days=29-i)).timestamp() * 1000),
-                    "o": round(price + random.uniform(-1.0, 1.0), 2),
-                    "h": round(price + random.uniform(0.5, 2.0), 2),
-                    "l": round(price - random.uniform(0.5, 2.0), 2),
-                    "c": round(price, 2),
-                    "v": random.randint(1000000, 50000000)
-                })
-
-            logger.info("AlpacaClient: Using generated mock data")
-            return {"ticker": ticker, "bars": bar_list, "timeframe": timeframe}
+            # Do NOT return mock data for invalid tickers. This causes AI hallucinations.
+            return None
 
     async def get_recent_trades(self, ticker: str, limit: int = 100) -> List[Dict[str, Any]]:
         """Fetch latest trades for a ticker."""
@@ -204,22 +221,22 @@ class AlpacaClient:
             try:
                 from alpaca.data.requests import StockTradesRequest
                 from datetime import datetime, timedelta, timezone
-                
+
                 request_params = StockTradesRequest(
                     symbol_or_symbols=normalized_ticker,
                     start=datetime.now(timezone.utc) - timedelta(hours=24), # Last 24 hours
                     limit=limit
                 )
-                
+
                 trades_response = await asyncio.to_thread(self.data_client.get_stock_trades, request_params)
-                
+
                 if normalized_ticker in trades_response.data:
                     alpaca_trades = trades_response.data[normalized_ticker]
                     trade_list = []
                     for trade in alpaca_trades:
                         trade_list.append({
                             "t": int(trade.timestamp.timestamp() * 1000),
-                            "p": trade.price,
+                            "p": Decimal(str(trade.price)),
                             "s": trade.size,
                             "c": trade.conditions, # List of condition codes
                             "i": trade.id
@@ -227,7 +244,7 @@ class AlpacaClient:
                     return trade_list
             except Exception as e:
                 logger.error(f"AlpacaClient: Error fetching trades: {e}")
-        
+
         return []
 
     async def get_account_info(self) -> Dict[str, Any]:
@@ -236,47 +253,48 @@ class AlpacaClient:
             try:
                 account = await asyncio.to_thread(self.trading_client.get_account)
                 return {
-                    "cash_balance": {"total": float(account.cash), "currency": account.currency},
-                    "portfolio_value": float(account.portfolio_value),
-                    "unrealized_pnl": float(account.equity) - float(account.last_equity), # Approx
-                    "buying_power": float(account.buying_power),
+                    "cash_balance": {"total": Decimal(str(account.cash)), "currency": account.currency},
+                    "portfolio_value": Decimal(str(account.portfolio_value)),
+                    "unrealized_pnl": Decimal(str(account.equity)) - Decimal(str(account.last_equity)), # Approx
+                    "buying_power": Decimal(str(account.buying_power)),
                     "status": str(account.status)
                 }
             except Exception as e:
                 logger.error(f"AlpacaClient: Error fetching account info: {e}")
-        
+
         # Mock fallback
         return {
-            "cash_balance": {"total": 10000.0, "currency": "USD"},
-            "portfolio_value": 15000.0,
-            "unrealized_plpc": 0.05
+            "cash_balance": {"total": Decimal("10000.0"), "currency": "USD"},
+            "portfolio_value": Decimal("15000.0"),
+            "unrealized_plpc": Decimal("0.05")
         }
 
-    async def get_portfolio_positions(self) -> List[Dict[str, Any]]:
-        """Fetch open positions from Alpaca Trading API."""
-        if self.trading_client:
+    async def get_real_time_quote(self, ticker: str) -> Optional[Dict[str, Any]]:
+        """Get real-time quote for a ticker from Alpaca."""
+        normalized_ticker = normalize_ticker(ticker)
+        if self.data_client:
             try:
-                positions = await asyncio.to_thread(self.trading_client.get_all_positions)
-                result = []
-                for pos in positions:
-                    result.append({
-                        "symbol": pos.symbol,
-                        "qty": float(pos.qty),
-                        "current_price": float(pos.current_price),
-                        "market_value": float(pos.market_value),
-                        "unrealized_pnl": float(pos.unrealized_pl),
-                        "unrealized_plpc": float(pos.unrealized_plpc)
-                    })
-                return result
+                from alpaca.data.requests import StockLatestQuoteRequest
+                request_params = StockLatestQuoteRequest(symbol_or_symbols=normalized_ticker)
+
+                # Use thread pool for sync SDK call
+                quote_resp = await asyncio.to_thread(self.data_client.get_stock_latest_quote, request_params)
+
+                if normalized_ticker in quote_resp:
+                    quote = quote_resp[normalized_ticker]
+                    return {
+                        "symbol": ticker,
+                        "current_price": Decimal(str(quote.ask_price)),
+                        "change": Decimal("0"), # Needs historical context for change
+                        "change_percent": Decimal("0"),
+                        "high": Decimal("0"),
+                        "low": Decimal("0"),
+                        "open": Decimal("0"),
+                        "timestamp": quote.timestamp.isoformat()
+                    }
             except Exception as e:
-                logger.error(f"AlpacaClient: Error fetching positions: {e}")
-
-        # Mock fallback
-        return [
-            {"symbol": "AAPL", "qty": 10, "current_price": 180.0, "market_value": 1800.0},
-            {"symbol": "MSFT", "qty": 5, "current_price": 300.0, "market_value": 1500.0}
-        ]
-
+                logger.error(f"AlpacaClient: Error fetching latest quote: {e}")
+        return None
 
 class FinnhubClient:
     """
@@ -342,30 +360,40 @@ class FinnhubClient:
                 return None
 
             # Convert Finnhub format to our standard format
-            from currency_utils import CurrencyNormalizer
             bar_list = []
             for i in range(len(candles['c'])):
-                bar_list.append({
-                    "t": candles['t'][i] * 1000,  # Convert to milliseconds
-                    "o": CurrencyNormalizer.normalize_price(candles['o'][i], ticker),
-                    "h": CurrencyNormalizer.normalize_price(candles['h'][i], ticker),
-                    "l": CurrencyNormalizer.normalize_price(candles['l'][i], ticker),
-                    "c": CurrencyNormalizer.normalize_price(candles['c'][i], ticker),
-                    "v": candles['v'][i] if i < len(candles['v']) else 0,
-                    "timestamp": datetime.fromtimestamp(candles['t'][i]).isoformat()
-                })
+                # Normalize prices
+                # Note: CurrencyNormalizer now used inside the loop or logic
+                # normalize_price returns Decimal
+                o = CurrencyNormalizer.normalize_price(candles['o'][i], ticker)
+                h = CurrencyNormalizer.normalize_price(candles['h'][i], ticker)
+                l = CurrencyNormalizer.normalize_price(candles['l'][i], ticker)
+                c = CurrencyNormalizer.normalize_price(candles['c'][i], ticker)
+                v = candles['v'][i] if i < len(candles['v']) else 0
+
+                ts_iso = datetime.fromtimestamp(candles['t'][i]).isoformat()
+
+                bar_list.append(PriceData(
+                    ticker=ticker,
+                    timestamp=ts_iso,
+                    open=o,
+                    high=h,
+                    low=l,
+                    close=c,
+                    volume=int(v)
+                ).model_dump())
 
             return {"ticker": ticker, "bars": bar_list[-limit:], "timeframe": timeframe}
 
         except Exception as e:
             error_msg = str(e)
-            
+
             # Check if it's a 403 error (access denied)
             if "403" in error_msg or "access" in error_msg.lower():
                 # Don't log 403 errors repeatedly - these are expected for some symbols
                 # The fallback system will handle this gracefully
                 return None
-            
+
             # Log other errors
             logger.error(f"FinnhubClient: Error fetching bars from Finnhub: {e}")
             return None
@@ -376,18 +404,24 @@ class FinnhubClient:
             return None
 
         normalized_ticker = ticker.replace('.L', '')
+
         try:
-            from currency_utils import CurrencyNormalizer
+            from utils.currency_utils import CurrencyNormalizer
             quote = self.client.quote(normalized_ticker)
+
+            # Helper to safely get value or 0 if None
+            def get_val(key):
+                return quote.get(key) if quote.get(key) is not None else 0
+
             return {
                 "symbol": ticker,
-                "current_price": CurrencyNormalizer.normalize_price(quote.get('c', 0), ticker),
-                "change": CurrencyNormalizer.normalize_price(quote.get('d', 0), ticker),
-                "change_percent": quote.get('dp', 0),
-                "high": CurrencyNormalizer.normalize_price(quote.get('h', 0), ticker),
-                "low": CurrencyNormalizer.normalize_price(quote.get('l', 0), ticker),
-                "open": CurrencyNormalizer.normalize_price(quote.get('o', 0), ticker),
-                "previous_close": CurrencyNormalizer.normalize_price(quote.get('pc', 0), ticker),
+                "current_price": CurrencyNormalizer.normalize_price(get_val('c'), ticker),
+                "change": CurrencyNormalizer.normalize_price(get_val('d'), ticker),
+                "change_percent": Decimal(str(get_val('dp') if get_val('dp') is not None else 0)),
+                "high": CurrencyNormalizer.normalize_price(get_val('h'), ticker),
+                "low": CurrencyNormalizer.normalize_price(get_val('l'), ticker),
+                "open": CurrencyNormalizer.normalize_price(get_val('o'), ticker),
+                "previous_close": CurrencyNormalizer.normalize_price(get_val('pc'), ticker),
                 "timestamp": datetime.now().isoformat()
             }
         except Exception as e:
