@@ -1,5 +1,9 @@
+<<<<<<< HEAD
+"""Quant Agent - Technical Analysis using TA-Lib
+=======
 """
 Quant Agent - Technical Analysis using TA-Lib
+>>>>>>> origin/main
 Ultra-fast algorithmic technical indicator calculations.
 """
 
