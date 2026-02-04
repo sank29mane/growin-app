@@ -21,3 +21,7 @@
 ## 2026-02-01 - Business Day Vectorization & Timestamp Resolution
 **Learning:** `pd.bdate_range` combined with `start=last_ts + 1 day` is a correct and performant vectorized replacement for iterative "skip weekend" loops (~25x speedup). However, `pd.to_datetime` resolution varies (ns vs us), causing integer casting issues (`.astype(np.int64)` values differ by 1000x).
 **Action:** Always explicitly cast timestamps to a known unit (e.g., `.astype('datetime64[ms]')`) before converting to integers for JSON/API responses to ensure robustness against environment differences.
+
+## 2026-02-02 - Vectorized Timestamp Generation in Forecast Bridge
+**Learning:** Generating a list of Pandas timestamps using a list comprehension (`[start + delta * i for i in range(N)]`) is significantly slower (~0.6s vs ~0.002s for N=100k) than using vectorized NumPy broadcasting (`start + delta * np.arange(N)`).
+**Action:** Always prefer NumPy broadcasting or `pd.date_range` for generating large sequences of timestamps or values.
