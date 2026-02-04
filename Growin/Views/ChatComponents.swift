@@ -276,8 +276,9 @@ struct AccountPicker: View {
                     .foregroundStyle(selectedAccount == account ? .white : .secondary)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(displayName(account))
                 .accessibilityAddTraits(selectedAccount == account ? [.isSelected] : [])
-                .accessibilityHint("Select to view \(displayName(account)) data")
+                .accessibilityHint("Filters chat context to \(displayName(account))")
 
 
             }
