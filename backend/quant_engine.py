@@ -179,95 +179,28 @@ class QuantEngine:
 
     def calculate_portfolio_metrics(self, positions: List[Dict[str, Any]], benchmark_returns: Optional[List[float]] = None) -> Dict[str, Any]:
         """
-        Calculate portfolio-level metrics using MLX for Apple Silicon acceleration.
+        Calculate snapshot portfolio-level metrics.
         Input: List of position dicts with 'symbol', 'qty', 'current_price', 'avg_cost'
+        Note: This does NOT calculate time-series metrics like Sharpe Ratio or Beta,
+        as those require historical data which is not available in a snapshot.
         """
         if not positions:
             return {"error": "No positions provided"}
 
-        total_value = sum(pos['qty'] * pos['current_price'] for pos in positions if 'qty' in pos and 'current_price' in pos)
+        total_value = sum(pos.get('qty', 0) * pos.get('current_price', 0) for pos in positions)
+        total_cost = sum(pos.get('qty', 0) * pos.get('avg_cost', 0) for pos in positions)
+
         if total_value == 0:
             return {"error": "Portfolio value is zero"}
 
-        # Calculate returns for each position
-        position_returns = []
-        for pos in positions:
-            if 'avg_cost' in pos and pos['avg_cost'] > 0:
-                ret = (pos['current_price'] - pos['avg_cost']) / pos['avg_cost']
-                position_returns.append(ret)
-
-        if not position_returns:
-            return {"total_value": total_value, "note": "No cost basis available for returns calculation"}
-
-        # Use MLX for calculation
-        try:
-            import mlx.core as mx
-            
-            # Convert to MLX array on GPU/Unified Memory
-            returns_mx = mx.array(position_returns)
-            
-            portfolio_return = float(mx.mean(returns_mx))
-            
-            # MLX std dev
-            # Note: mx.std defaults to population std usually, numpy defaults to population too unless ddof specified
-            portfolio_volatility = float(mx.std(returns_mx)) if len(position_returns) > 1 else 0.0
-
-            # Sharpe Ratio (risk-free 2%)
-            risk_free_rate = 0.02
-            sharpe_ratio = (portfolio_return - risk_free_rate) / portfolio_volatility if portfolio_volatility > 0 else 0
-
-            # Sortino Ratio
-            # Boolean indexing in MLX: returns_mx[returns_mx < 0]
-            neg_mask = returns_mx < 0
-            # Check if any negative returns exist
-            if mx.any(neg_mask).item():
-                negative_returns = returns_mx[neg_mask]
-                downside_deviation = float(mx.std(negative_returns))
-            else:
-                downside_deviation = 0.0
-                
-            sortino_ratio = (portfolio_return - risk_free_rate) / downside_deviation if downside_deviation > 0 else 0
-
-            # Beta calculation (requires Covariance)
-            beta = None
-            if benchmark_returns and len(benchmark_returns) == len(position_returns):
-                bench_mx = mx.array(benchmark_returns)
-                
-                # Covariance in MLX? mlx.core doesn't have direct cov/corr yet in 0.0.x sometimes
-                # Manual Covariance: E[(X-meanX)(Y-meanY)]
-                x_mean = mx.mean(returns_mx)
-                y_mean = mx.mean(bench_mx)
-                
-                # Center data
-                x_centered = returns_mx - x_mean
-                y_centered = bench_mx - y_mean
-                
-                # Covariance = mean(x_centered * y_centered)
-                covariance = float(mx.mean(x_centered * y_centered))
-                
-                # Variance of benchmark
-                bench_var = float(mx.var(bench_mx))
-                
-                beta = covariance / bench_var if bench_var > 0 else 0
-            
-            # Fallback for benchmark length mismatch
-            elif benchmark_returns:
-                 # If lengths mismatch, we surely can't calculate per-asset correlation easily without time-series alignment
-                 # Here we assume inputs are aligned vectors of returns.
-                 pass
-
-        except ImportError:
-            return {"error": "MLX not available for portfolio metrics"}
-        except Exception as e:
-            return {"error": f"MLX Calculation error: {e}"}
+        total_pnl = total_value - total_cost
+        portfolio_return = (total_pnl / total_cost) if total_cost > 0 else 0.0
 
         return {
             "total_value": total_value,
+            "total_cost": total_cost,
+            "total_pnl": total_pnl,
             "portfolio_return": portfolio_return,
-            "portfolio_volatility": portfolio_volatility,
-            "sharpe_ratio": sharpe_ratio,
-            "sortino_ratio": sortino_ratio,
-            "beta": beta,
             "position_count": len(positions)
         }
 

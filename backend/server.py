@@ -52,7 +52,7 @@ except Exception:
 # FastAPI App Initialization
 # --------------------------------------------------------------------------- #
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
 from contextlib import asynccontextmanager
@@ -169,6 +169,7 @@ app.add_middleware(
 )
 
 app.add_middleware(SecurityHeadersMiddleware)
+
 
 # --------------------------------------------------------------------------- #
 # Route Registration

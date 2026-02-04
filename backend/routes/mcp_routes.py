@@ -11,6 +11,10 @@ import json
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+# Security: Block potentially dangerous shell commands
+# BLOCKED_COMMANDS and validate_mcp_config are imported from utils.mcp_validation
+
+
 @router.get("/mcp/status")
 async def get_mcp_status():
     """

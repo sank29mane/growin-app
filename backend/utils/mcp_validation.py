@@ -45,3 +45,21 @@ def validate_mcp_config(command: str, args: Optional[List[str]] = None) -> None:
 
     if base_cmd in BLOCKED_COMMANDS:
         raise ValueError(f"Command '{base_cmd}' is not allowed for security reasons.")
+
+    # Sentinel: Interpreter Argument Validation
+    # Prevent code execution flags that bypass script file requirement
+    INTERPRETER_FLAGS = {
+        "python": {"-c"},
+        "python3": {"-c"},
+        "node": {"-e", "--eval"},
+        "nodejs": {"-e", "--eval"},
+        "php": {"-r"},
+        "perl": {"-e"},
+        "ruby": {"-e"},
+    }
+
+    if args and base_cmd in INTERPRETER_FLAGS:
+        blocked_flags = INTERPRETER_FLAGS[base_cmd]
+        for arg in args:
+            if arg in blocked_flags:
+                raise ValueError(f"Interpreter flag '{arg}' is not allowed for security reasons.")
