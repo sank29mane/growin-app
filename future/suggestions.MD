@@ -73,11 +73,33 @@ Refactored `_validate_code` to use robust AST traversal instead of fragile strin
 Consider migrating to a WASM-based runtime (e.g., `pyodide` or a separate sandboxed process) for `CoordinatorAgent` code execution to strictly isolate memory and CPU usage.
 
 ## 6. Cross-Platform Portfolio Metrics (MLX Fallback)
+**Status:** Resolved (Refactored to Standard Python)
 **Issue:**
-The `QuantEngine.calculate_portfolio_metrics` method strictly depends on `mlx` (Apple Silicon optimized machine learning library). If `mlx` is not available (e.g., on Linux/x86 CI runners or Windows), the function returns an error, breaking portfolio analysis features.
+The `QuantEngine.calculate_portfolio_metrics` method strictly depended on `mlx` (Apple Silicon optimized machine learning library). It was also calculating time-series metrics (Sharpe, Beta) using cross-sectional data, which was mathematically incorrect.
+
+**Resolution:**
+Refactored the method to calculate only snapshot metrics (Total Value, Cost, PnL, Weighted Return) using standard Python sum/math operations. Removed `mlx` dependency for this specific function as it was unnecessary overhead for simple arithmetic.
+
+## 7. Unified Financial Math Library
+**Status:** Proposed
+**Priority:** Medium
+**Context:**
+Currently, `QuantEngine` (backend/quant_engine.py), `QuantAgent` (backend/agents/quant_agent.py), and `PortfolioAgent` (backend/agents/portfolio_agent.py) all contain overlapping logic for technical indicators (RSI, MACD, SMA) and portfolio math. Some use `pandas_ta`, some use `talib`, and others use custom `numpy`/`pandas` implementations.
 
 **Proposal:**
-Implement a fallback to `numpy`/`pandas` for standard deviation, Sharpe ratio, and beta calculations when `mlx` is missing.
-- Check `if MLX_AVAILABLE:` use MLX logic.
-- `else:` use standard `numpy` vectorized operations.
-- This ensures the app is portable and testable in non-Apple environments.
+Create a single `growin_math` or `backend/lib/financial_math.py` module that serves as the Source of Truth.
+- Implement robust, vectorized versions of all core indicators.
+- Agents should import from this library instead of re-implementing logic.
+- Ensure consistent handling of edge cases (NaNs, insufficient data) across the app.
+
+## 8. True Portfolio Analysis Module
+**Status:** Proposed
+**Priority:** High
+**Context:**
+The current `calculate_portfolio_metrics` in `QuantEngine` was previously attempting to calculate Sharpe Ratio, Beta, and Volatility using a single snapshot of positions. This is dimensionally incorrect (Cross-Sectional vs Time-Series).
+
+**Proposal:**
+Implement a proper `PortfolioAnalyzer` class that:
+- Ingests **historical** portfolio value (time-series).
+- Calculates true Daily Returns, Volatility (std dev of daily returns), Sharpe Ratio, Sortino Ratio, and Beta against a benchmark.
+- Can leverage the "Backcast" history generation logic currently in `PortfolioAgent` to approximate history if real transaction data is missing.

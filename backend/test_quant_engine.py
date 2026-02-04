@@ -35,8 +35,15 @@ def test_quant_engine():
         print(f"Error in metrics: {metrics['error']}")
     else:
         print(f"Total Value: {metrics.get('total_value')}")
+        print(f"Total Cost: {metrics.get('total_cost')}")
+        print(f"Total PnL: {metrics.get('total_pnl')}")
         print(f"Portfolio Return: {metrics.get('portfolio_return')}")
-        print(f"Sharpe Ratio: {metrics.get('sharpe_ratio')}")
+
+        # Simple verification
+        assert metrics.get('total_value') == 3000.0, f"Expected total value 3000.0, got {metrics.get('total_value')}"
+        assert metrics.get('total_cost') == 2800.0, f"Expected total cost 2800.0, got {metrics.get('total_cost')}"
+        assert abs(metrics.get('portfolio_return') - (200/2800)) < 1e-6, "Portfolio return calculation incorrect"
+        print("Verification passed.")
 
 if __name__ == "__main__":
     test_quant_engine()
