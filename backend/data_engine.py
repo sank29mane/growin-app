@@ -76,7 +76,7 @@ class AlpacaClient:
                 tf = tf_map.get(timeframe, TimeFrame.Day)
 
                 # Calculate start date based on timeframe and limit
-                from datetime import datetime, timedelta, timezone
+                # from datetime import datetime, timedelta, timezone (Removed to fix scope shadowing)
 
                 now = datetime.now(timezone.utc)
 
@@ -213,6 +213,119 @@ class AlpacaClient:
             logger.warning(f"AlpacaClient: Error fetching bars (yfinance): {e}")
             # Do NOT return mock data for invalid tickers. This causes AI hallucinations.
             return None
+
+    async def get_batch_bars(self, tickers: List[str], timeframe="1Day", limit: int = 512) -> Dict[str, Any]:
+        """
+        Fetch historical bars for multiple tickers in parallel.
+        Optimized to use Alpaca Batch API for compatible symbols.
+        """
+        from cache_manager import cache
+        from datetime import datetime, timedelta, timezone
+        
+        results = {}
+        missing_tickers = []
+        
+        # 1. Check Cache
+        for t in tickers:
+            cache_key = f"bars_{t}_{timeframe}_{limit}"
+            cached = cache.get(cache_key)
+            if cached:
+                results[t] = cached
+            else:
+                missing_tickers.append(t)
+                
+        if not missing_tickers:
+            return results
+
+        # 2. Separate Alpaca-compatible vs Fallback (e.g. UK stocks)
+        alpaca_candidates = []
+        fallback_candidates = []
+        
+        for t in missing_tickers:
+            norm = normalize_ticker(t)
+            if norm.endswith('.L'): # UK stocks not on Alpaca
+                fallback_candidates.append(t)
+            else:
+                alpaca_candidates.append(t)
+
+        # 3. Batch Fetch from Alpaca
+        if self.data_client and alpaca_candidates:
+            try:
+                from alpaca.data.requests import StockBarsRequest
+                from alpaca.data.timeframe import TimeFrame
+                
+                tf_map = {
+                    "1Min": TimeFrame.Minute,
+                    "5Min": TimeFrame.Minute,
+                    "15Min": TimeFrame.Minute,
+                    "1Hour": TimeFrame.Hour,
+                    "1Day": TimeFrame.Day,
+                }
+                tf = tf_map.get(timeframe, TimeFrame.Day)
+                
+                # Calculate start time (same logic as get_historical_bars)
+                now = datetime.now(timezone.utc)
+                delta_map = {
+                    "1Min": timedelta(minutes=limit * 5),
+                    "5Min": timedelta(minutes=limit * 10),
+                    "15Min": timedelta(minutes=limit * 30),
+                    "1Hour": timedelta(hours=limit * 5),
+                    "1Day": timedelta(days=limit * 1.6 + 100),
+                }
+                start_time = now - delta_map.get(timeframe, timedelta(days=365))
+                
+                # Alpaca Batch Request
+                # Map original tickers to normalized for the request
+                norm_map = {normalize_ticker(t): t for t in alpaca_candidates}
+                request_syms = list(norm_map.keys())
+                
+                request_params = StockBarsRequest(
+                    symbol_or_symbols=request_syms,
+                    timeframe=tf,
+                    limit=limit,
+                    start=start_time
+                )
+                
+                bars_response = await asyncio.to_thread(self.data_client.get_stock_bars, request_params)
+                
+                # Process Batch Response
+                for norm_sym, alpaca_bars in bars_response.data.items():
+                    original_ticker = norm_map.get(norm_sym, norm_sym)
+                    
+                    bar_list = []
+                    for bar in alpaca_bars:
+                        bar_list.append(PriceData(
+                            ticker=original_ticker,
+                            timestamp=bar.timestamp.isoformat(),
+                            open=Decimal(str(bar.open)),
+                            high=Decimal(str(bar.high)),
+                            low=Decimal(str(bar.low)),
+                            close=Decimal(str(bar.close)),
+                            volume=int(bar.volume)
+                        ).model_dump())
+                    
+                    res = {"ticker": original_ticker, "bars": bar_list, "timeframe": timeframe}
+                    results[original_ticker] = res
+                    cache.set(f"bars_{original_ticker}_{timeframe}_{limit}", res, ttl=300)
+                    
+            except Exception as e:
+                logger.warning(f"Batch fetch failed: {e}. Falling back to individual.")
+                fallback_candidates.extend(alpaca_candidates) # Add back to fallback queue
+
+        # 4. Process Fallbacks (UK stocks + any failed Alpaca + ones missing from batch response)
+        # Check what we still miss
+        still_missing = [t for t in missing_tickers if t not in results]
+        
+        if still_missing:
+            # Parallelize individual fetches
+            tasks = [self.get_historical_bars(t, timeframe, limit) for t in still_missing]
+            fallback_res = await asyncio.gather(*tasks)
+            
+            for res in fallback_res:
+                if res:
+                    results[res['ticker']] = res
+                    
+        return results
 
     async def get_recent_trades(self, ticker: str, limit: int = 100) -> List[Dict[str, Any]]:
         """Fetch latest trades for a ticker."""
