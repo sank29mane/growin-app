@@ -277,6 +277,8 @@ struct AccountPicker: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityAddTraits(selectedAccount == account ? [.isSelected] : [])
+                .accessibilityHint("Select to view \(displayName(account)) data")
+
 
             }
         }
