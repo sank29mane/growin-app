@@ -162,7 +162,8 @@ class AnalyticsDB:
             DataFrame with aggregated statistics
         """
         try:
-            result = self.conn.execute(f"""
+            # Sentinel: Use parameterized query for interval to prevent SQL injection
+            result = self.conn.execute("""
                 SELECT 
                     ticker,
                     COUNT(*) as data_points,
@@ -176,9 +177,9 @@ class AnalyticsDB:
                     (MAX(close) - MIN(close)) / MIN(close) * 100 as price_change_pct
                 FROM ohlcv_history
                 WHERE ticker = ? 
-                  AND timestamp >= CURRENT_TIMESTAMP - INTERVAL '{window_days}' DAY
+                  AND timestamp >= CURRENT_TIMESTAMP - (INTERVAL 1 DAY * ?)
                 GROUP BY ticker
-            """, (ticker,)).fetchdf()
+            """, (ticker, int(window_days))).fetchdf()
             
             return result if not result.empty else None
             
@@ -238,7 +239,8 @@ class AnalyticsDB:
             Annualized volatility (standard deviation of returns)
         """
         try:
-            result = self.conn.execute(f"""
+            # Sentinel: Use parameterized query for interval to prevent SQL injection
+            result = self.conn.execute("""
                 WITH daily_returns AS (
                     SELECT 
                         ticker,
@@ -248,14 +250,14 @@ class AnalyticsDB:
                             LAG(close) OVER (ORDER BY timestamp) as daily_return
                     FROM ohlcv_history
                     WHERE ticker = ?
-                      AND timestamp >= CURRENT_TIMESTAMP - INTERVAL '{window_days}' DAY
+                      AND timestamp >= CURRENT_TIMESTAMP - (INTERVAL 1 DAY * ?)
                     ORDER BY timestamp
                 )
                 SELECT 
                     STDDEV(daily_return) * SQRT(252) as annualized_volatility
                 FROM daily_returns
                 WHERE daily_return IS NOT NULL
-            """, (ticker,)).fetchone()
+            """, (ticker, int(window_days))).fetchone()
             
             return result[0] if result and result[0] is not None else None
             
@@ -279,7 +281,8 @@ class AnalyticsDB:
             Trend description: 'bullish', 'bearish', or 'neutral'
         """
         try:
-            result = self.conn.execute(f"""
+            # Sentinel: Use parameterized query for interval to prevent SQL injection
+            result = self.conn.execute("""
                 WITH price_data AS (
                     SELECT 
                         close,
@@ -287,13 +290,13 @@ class AnalyticsDB:
                         COUNT(*) OVER () as total
                     FROM ohlcv_history
                     WHERE ticker = ?
-                      AND timestamp >= CURRENT_TIMESTAMP - INTERVAL '{window_days}' DAY
+                      AND timestamp >= CURRENT_TIMESTAMP - (INTERVAL 1 DAY * ?)
                 )
                 SELECT 
                     AVG(CASE WHEN rn <= total/2 THEN close END) as first_half_avg,
                     AVG(CASE WHEN rn > total/2 THEN close END) as second_half_avg
                 FROM price_data
-            """, (ticker,)).fetchone()
+            """, (ticker, int(window_days))).fetchone()
             
             if not result or None in result:
                 return 'neutral'
