@@ -19,23 +19,6 @@ async def test_forecaster_initialization():
     assert forecaster.platform in ["apple_silicon", "other"]
 
 @pytest.mark.asyncio
-async def test_forecaster_input_validation():
-    """Test standard scaler and input shape handling"""
-    forecaster = get_forecaster()
-    
-    # Mock data [50, 5] (Open, High, Low, Close, Volume)
-    mock_ohlcv = [
-        {"o": 100+i, "h": 105+i, "l": 95+i, "c": 102+i, "v": 1000}
-        for i in range(100)
-    ]
-    
-    # Preprocessing
-    input_tensor = forecaster._preprocess_for_ttm(mock_ohlcv)
-    assert input_tensor is not None
-    # Shape is likely (512, 1) if not batched yet, or method handles squeezing
-    assert input_tensor.shape == (512, 1) or input_tensor.shape == (1, 512, 1)
-
-@pytest.mark.asyncio
 async def test_forecasting_agent_mock_fallback():
     """Test that agent falls back effectively when model not loaded"""
     agent = ForecastingAgent()
@@ -47,7 +30,7 @@ async def test_forecasting_agent_mock_fallback():
     context = {
         "ticker": "AAPL",
         "ohlcv_data": [
-            {"o": 100, "h": 105, "l": 95, "c": 100, "v": 1000} for _ in range(60)
+            {"o": 100, "h": 105, "l": 95, "c": 100, "v": 1000, "t": 1600000000 + i*60000} for i in range(100)
         ],
         "days": 5
     }

@@ -6,6 +6,14 @@
 **Learning:** Vectorizing the portfolio history calculation (replacing `iterrows`) yielded a 5x speedup (0.03s -> 0.006s for 365 days). Handling currency conversion logic vectorially using `np.where` is efficient.
 **Action:** When optimizing financial data processing, always look for per-row logic (like currency conversion based on ticker/price) and convert it to column-wise vector operations. Ensure inputs are consistently DataFrames (handle Series edge case from `yfinance`).
 
-## 2026-01-18 - EMA Vectorization & Initialization
-**Learning:** Replacing a loop-based EMA (initialized with SMA) with Pandas `.ewm` is not trivial. `ewm(adjust=False)` starts recursion from the first element, while standard TA logic (and the loop) seeds it with SMA at index `period-1`.
-**Action:** To vectorize correctly, manually calculate the SMA seed, prepend it to the rest of the data (`[SMA] + data[period:]`), run `ewm` on this concatenated array, and then pad the beginning with zeros. This achieves 2-5x speedup with exact numerical equivalence.
+## 2025-01-20 - SQLite Optimization: Cursor Iteration & Indexing
+**Learning:** `cursor.fetchall()` loads the entire result set into memory, creating an intermediate list. Direct cursor iteration is more memory-efficient. Adding a composite index `(conversation_id, timestamp DESC)` improved `load_history` performance by ~14x (3.2ms -> 0.23ms) for 100 concurrent conversations.
+**Action:** Prefer direct cursor iteration over `fetchall()`. Always add composite indexes for columns involved in both filtering (`WHERE`) and sorting (`ORDER BY`) to enable efficient index scans.
+
+## 2026-01-18 - Vectorization of EMA (Recursive vs Convolution)
+**Learning:** `pandas.Series.ewm(span=N, adjust=False)` provides ~15x speedup (0.07s -> 0.005s) over iterative Python loops for EMA calculation. However, `np.convolve` (used for SMA) is faster than `pandas.Series.rolling` (0.0038s vs 0.0055s) because it uses optimized C-level convolution.
+**Action:** Use Pandas `ewm` for recursive indicators like EMA (matching initialization carefully), but stick to `np.convolve` for simple moving averages / convolutions where possible. Always verify speedups before switching to Pandas for simple operations.
+
+## 2026-01-20 - Exception Handling Overhead in Loops
+**Learning:** Checking for an optional dependency using `try...import...except` *inside* a frequently called function (like `normalize_ticker`) adds massive overhead (~2µs per call) if the dependency is missing, due to repeated exception raising.
+**Action:** Move conditional imports to module scope and use a boolean flag (`HAS_DEPENDENCY`) to guard the optional logic. This reduced execution time by ~32% and nearly matched pure Python performance.
