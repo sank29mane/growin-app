@@ -69,6 +69,7 @@ newsapi-python>=0.2.7,<0.3.0
 tavily-python>=0.3.0,<0.4.0
 vaderSentiment>=3.3.2,<4.0.0
 
+
 ## Time Series Forecasting (TTM-R2)
 # Note: Requires Python 3.9-3.12
 granite-tsfm @ git+https://github.com/ibm-granite/granite-tsfm.git@v0.2.22

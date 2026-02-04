@@ -4,6 +4,7 @@ MCP Routes - Server management and tool execution
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from app_context import state, T212ConfigRequest
+from utils.mcp_validation import validate_mcp_config
 import logging
 import json
 
@@ -11,29 +12,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # Security: Block potentially dangerous shell commands
-BLOCKED_COMMANDS = {
-    "bash", "sh", "zsh", "dash", "ksh", "csh", "tcsh",
-    "powershell", "pwsh", "cmd", "cmd.exe",
-    "nc", "netcat", "ncat"
-}
+# BLOCKED_COMMANDS and validate_mcp_config are imported from utils.mcp_validation
 
-def validate_mcp_config(command: str):
-    """
-    Validates MCP server configuration to prevent command injection.
-    Ensures that known shell interpreters and dangerous tools are not used as commands.
-    """
-    if not command:
-        return
-
-    # Normalize command to handle paths (e.g. /bin/bash -> bash)
-    cmd_name = command.replace("\\", "/").split("/")[-1].lower()
-
-    if cmd_name in BLOCKED_COMMANDS:
-        logger.warning(f"Blocked attempt to add forbidden MCP command: {cmd_name}")
-        raise HTTPException(
-            status_code=400,
-            detail=f"Command '{cmd_name}' is not allowed for security reasons."
-        )
 
 @router.get("/mcp/status")
 async def get_mcp_status():
@@ -145,8 +125,9 @@ async def get_mcp_servers_list():
 async def add_mcp_server(server_data: dict, background_tasks: BackgroundTasks):
     """Add new MCP server"""
     try:
-        # Sentinel: Validate command to prevent shell injection
-        validate_mcp_config(server_data.get("command"))
+        # Sentinel: Validate command to prevent injection
+        if server_data.get("type") == "stdio":
+            validate_mcp_config(server_data.get("command"), server_data.get("args", []))
 
         state.chat_manager.add_mcp_server(
             name=server_data.get("name"),
@@ -168,8 +149,9 @@ async def add_mcp_server(server_data: dict, background_tasks: BackgroundTasks):
         })
         
         return {"status": "success"}
-    except HTTPException:
-        raise
+    except ValueError as e:
+        # Client error for validation failure
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to add MCP server: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal Server Error")

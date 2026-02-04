@@ -23,7 +23,14 @@
 **Learning:** The "Information Leakage via Exception Details" pattern persists because it's the easiest way to debug during development. Developers copy-paste exception handling blocks.
 **Prevention:** Strictly enforce a "Sanitize All Errors" policy. Use `logging.error(..., exc_info=True)` for debugging, but ALWAYS return "Internal Server Error" to the client for 500s. I've updated the test suite to explicitly check for this leakage.
 
+<<<<<<< HEAD
 ## 2026-02-18 - MCP Server Command Injection
 **Vulnerability:** The `/mcp/servers/add` endpoint accepted arbitrary `command` and `args` parameters which were directly passed to `subprocess.Popen` via the MCP client, allowing unauthenticated Remote Code Execution (RCE) if a malicious user could reach the API.
 **Learning:** Features that allow "configuration" of external tools (like MCP servers) are effectively Remote Code Execution features if not strictly validated. Trusting input for process execution is a critical risk.
 **Prevention:** Implement a strict allowlist or blocklist for executable commands. For "plugin" systems, validation must happen at the API boundary.
+=======
+## 2026-02-20 - Command Injection via MCP Configuration
+**Vulnerability:** The `/mcp/servers/add` endpoint accepted any string as the `command` for a new MCP server. This allowed defining servers that execute dangerous commands (e.g., `bash`, `rm`) instead of valid tools.
+**Learning:** Even in "safe" subprocess calls (list-based args), the executable itself must be validated. Furthermore, `os.path.basename` is platform-specific; a Windows path like `C:\Windows\cmd.exe` is treated as a single filename on Linux, bypassing blocklists that check the basename.
+**Prevention:** Implement a strict blocklist (or allowlist) for executables. normalize paths by replacing backslashes with forward slashes before splitting to ensure cross-platform safety.
+>>>>>>> main
