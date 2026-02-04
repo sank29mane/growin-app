@@ -52,5 +52,32 @@ class TestMCPValidation(unittest.TestCase):
         except Exception as e:
             self.fail(f"None raised unexpected exception: {e}")
 
+    def test_malicious_interpreter_args(self):
+        """Test blocking of dangerous flags for interpreters"""
+        # Python injection
+        with self.assertRaises(ValueError):
+            validate_mcp_config("python", ["-c", "import os; os.system('rm -rf /')"])
+
+        with self.assertRaises(ValueError):
+            validate_mcp_config("python3", ["-c", "print('hacked')"])
+
+        # Node injection
+        with self.assertRaises(ValueError):
+            validate_mcp_config("node", ["-e", "require('child_process').exec('...')"])
+
+        with self.assertRaises(ValueError):
+            validate_mcp_config("node", ["--eval", "console.log('hacked')"])
+
+        # PHP injection
+        with self.assertRaises(ValueError):
+            validate_mcp_config("php", ["-r", "system('ls');"])
+
+        # Legitimate use should pass
+        try:
+            validate_mcp_config("python", ["trading212_mcp_server.py"])
+            validate_mcp_config("node", ["server.js"])
+        except ValueError as e:
+            self.fail(f"Legitimate interpreter usage blocked: {e}")
+
 if __name__ == "__main__":
     unittest.main()

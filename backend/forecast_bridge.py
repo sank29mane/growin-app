@@ -326,6 +326,7 @@ def run_forecast(ohlcv_data: List[Dict[str, Any]], prediction_steps: int, timefr
         
         last_vol = ohlcv_data[-1]['v']
         
+
         # --- ANCHORING (BIAS CORRECTION) ---
         last_actual_price = float(ohlcv_data[-1]['c'])
         
