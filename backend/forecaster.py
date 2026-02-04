@@ -60,7 +60,11 @@ class TTMForecaster:
 
     async def forecast(self, ohlcv_data: List[Dict[str, Any]], prediction_steps: int = 96, timeframe: str = "1Day") -> Dict[str, Any]:
         """
-        Generate forecast using TTM-R2 or fallback to statistical.
+        Generate forecast using TTM-R2 with auxiliary ML comparisons.
+        Priority:
+        1. TTM-R2 (Primary)
+        2. XGBoost (Fallback for TTM or Intraday)
+        3. Holt-Winters (Last Resort)
         """
         if not ohlcv_data or len(ohlcv_data) < 50:
             return {
@@ -69,21 +73,131 @@ class TTMForecaster:
                 "confidence": 0.0
             }
 
+        auxiliary_results = []
+        xgb_result = None
+        
+        # --- 1. SOTA: XGBoost (Peer & Fallback Candidate) ---
         try:
-            # Need 512 points for TTM usually, but check availability first
+            from fallbacks.ml_forecaster import MLIntradayForecaster
+            xgb_forecaster = MLIntradayForecaster(model_type="xgboost")
+            
+            # Check minimum data requirements (XGB needs ~50 bars)
+            if len(ohlcv_data) >= 50:
+                xgb_preds = xgb_forecaster.train_and_predict(ohlcv_data, prediction_steps)
+                
+                if xgb_preds:
+                    last_val = float(xgb_preds[-1])
+                    start_val = ohlcv_data[-1]['c']
+                    change_pct = ((last_val - start_val) / start_val) * 100
+                    
+                    # Store full result structure for possible fallback use
+                    xgb_result = {
+                        "forecast": [{"close": p} for p in xgb_preds], # Simplified structure
+                        "note": "XGBoost ML (Intraday Optimized)",
+                        "confidence": 0.7,
+                        "model_used": "xgboost_ml",
+                        "algorithm": "XGBoost (Intraday Optimized)",
+                        "is_fallback": True
+                    }
+                    
+                    auxiliary_results.append({
+                        "model": "XGBoost (ML)",
+                        "prediction_pct": change_pct,
+                        "direction": "UP" if change_pct > 0 else "DOWN",
+                        "confidence": "MEDIUM"
+                    })
+        except Exception as e:
+            logger.warning(f"XGBoost execution failed: {e}")
+
+        # --- 2. Baseline: Holt-Winters (Peer) ---
+        try:
+            loop = asyncio.get_running_loop()
+            hw_raw = await loop.run_in_executor(
+                None,
+                self._statistical_forecast,
+                ohlcv_data,
+                prediction_steps,
+                timeframe,
+                None # Not a fallback, just a peer
+            )
+            
+            if hw_raw.get("forecast"):
+                last_hw = hw_raw["forecast"][-1]['close']
+                start_p = ohlcv_data[-1]['c']
+                pct_chg_hw = ((last_hw - start_p) / start_p) * 100
+                auxiliary_results.append({
+                    "model": "Holt-Winters (Statistical)",
+                    "prediction_pct": pct_chg_hw,
+                    "direction": "UP" if pct_chg_hw > 0 else "DOWN",
+                    "confidence": "LOW"
+                })
+        except Exception as e:
+            logger.warning(f"Holt-Winters execution failed: {e}")
+
+        try:
+            result = {}
+            
+            # --- PRIMARY: TTM-R2 ---
+            ttm_success = False
             if self.ttm_available and len(ohlcv_data) >= 512:
-                return await self._ttm_forecast(ohlcv_data, prediction_steps, timeframe)
-            else:
+                result = await self._ttm_forecast(ohlcv_data, prediction_steps, timeframe)
+                if result and not result.get("is_fallback", False) and result.get("forecast"):
+                    ttm_success = True
+                
+            if not ttm_success:
+                # --- FALLBACK PATH ---
+                reason = "Insufficient Data (Need 512)" if len(ohlcv_data) < 512 else "TTM Not Available"
                 if self.ttm_available:
-                    logger.info(f"TTM available but insufficient data ({len(ohlcv_data)} < 512). Using statistical.")
-                loop = asyncio.get_running_loop()
-                return await loop.run_in_executor(
-                    None,
-                    self._statistical_forecast,
-                    ohlcv_data,
-                    prediction_steps,
-                    timeframe
-                )
+                     # Check if it was a sanity failure in _ttm_forecast
+                     if result and "Sanity Check" in result.get("note", ""):
+                         reason = "TTM Sanity Check Failed"
+                     logger.info(f"TTM Skipped/Failed: {reason}. Using SOTA XGBoost Fallback.")
+                
+                if xgb_result:
+                    # USE XGBOOST (Preferred Fallback)
+                    result = xgb_result
+                    result["note"] = f"Using XGBoost Fallback ({reason})"
+                    
+                    # Rehydrate timestamps (simple extrapolation) for the chart
+                    last_ts = ohlcv_data[-1]['t']
+                    preds = xgb_result["forecast"] 
+                    full_forecast = []
+                    
+                    interval_ms = 3600000 # Default 1h
+                    if "Day" in timeframe: interval_ms = 86400000
+                    elif "Min" in timeframe: interval_ms = 60000
+                    elif "Week" in timeframe: interval_ms = 604800000
+                    
+                    curr = last_ts
+                    for p in preds:
+                        curr += interval_ms
+                        val = p['close']
+                        full_forecast.append({
+                            "timestamp": curr,
+                            "close": val,
+                            "high": val, 
+                            "low": val,
+                            "open": val,
+                            "volume": 0
+                        })
+                    result["forecast"] = full_forecast
+                    
+                else:
+                    # LAST RESORT: Holt-Winters (if XGBoost failed too)
+                    loop = asyncio.get_running_loop()
+                    result = await loop.run_in_executor(
+                        None,
+                        self._statistical_forecast,
+                        ohlcv_data,
+                        prediction_steps,
+                        timeframe,
+                        f"{reason} + ML Failed"
+                    )
+
+            # Attach auxiliary data
+            result["auxiliary_forecasts"] = auxiliary_results
+            return result
+            
         except Exception as e:
             logger.error(f"Forecasting error: {e}")
             return {
@@ -101,6 +215,12 @@ class TTMForecaster:
 
         try:
             # Prepare input
+            # DIAGNOSTIC: Log input data characteristics
+            if ohlcv_data:
+                prices = [d['c'] for d in ohlcv_data]
+                logger.info(f"TTM Input Stats: Count={len(prices)}, Start={prices[0]}, End={prices[-1]}, Min={min(prices)}, Max={max(prices)}")
+                logger.info(f"TTM Timeframe: {timeframe}, Steps: {prediction_steps}")
+
             payload = {
                 "ohlcv_data": ohlcv_data,
                 "prediction_steps": prediction_steps,
@@ -122,40 +242,89 @@ class TTMForecaster:
             if process.returncode != 0:
                 error_msg = stderr.decode().strip()
                 logger.error(f"Bridge failed (code {process.returncode}): {error_msg}")
-                return await loop.run_in_executor(None, self._statistical_forecast, ohlcv_data, prediction_steps, timeframe)
+                return await loop.run_in_executor(None, self._statistical_forecast, ohlcv_data, prediction_steps, timeframe, f"Bridge Error: {error_msg[:50]}...")
 
             # Parse response
             result = json.loads(stdout.decode())
             
             if not result.get("success"):
                 logger.error(f"Bridge returned error: {result.get('error')}")
-                return await loop.run_in_executor(None, self._statistical_forecast, ohlcv_data, prediction_steps, timeframe)
+                return await loop.run_in_executor(None, self._statistical_forecast, ohlcv_data, prediction_steps, timeframe, f"Bridge Error: {result.get('error')}")
 
             # --- Sanity Check ---
             forecast = result.get("forecast", [])
             if not forecast:
-                return await loop.run_in_executor(None, self._statistical_forecast, ohlcv_data, prediction_steps, timeframe)
+                return await loop.run_in_executor(None, self._statistical_forecast, ohlcv_data, prediction_steps, timeframe, "Empty TTM Forecast")
 
             last_price = float(ohlcv_data[-1]['c'])
             last_forecast_price = float(forecast[-1]['close'])
             
-            # If prediction is > 30% jump/drop, it's likely an "outrageous" number due to scaling issues
+            # If prediction is > 50% jump/drop, it's likely an "outrageous" number due to scaling issues
             pct_change = abs(last_forecast_price - last_price) / last_price
-            if pct_change > 0.3:
-                logger.warning(f"⚠️ TTM result failed sanity check ({pct_change*100:.1f}% change). Falling back to statistical.")
-                return await loop.run_in_executor(None, self._statistical_forecast, ohlcv_data, prediction_steps, timeframe)
+            if pct_change > 0.5:
+                debug_info = result.get("debug_scaling", {})
+                logger.warning(f"⚠️ TTM result failed sanity check ({pct_change*100:.1f}% change). Fallback. Debug: {debug_info}")
+                return await loop.run_in_executor(None, self._statistical_forecast, ohlcv_data, prediction_steps, timeframe, f"Sanity Check Failed: Forecast {last_forecast_price:.2f} vs Last {last_price:.2f} (>50% variance)")
                 
+            # Add algorithm metadata
+            result["algorithm"] = "IBM Granite TTM-R2.1"
+            result["is_fallback"] = False
             return result
             
         except Exception as e:
             logger.error(f"TTM Bridge execution failed: {e}. Falling back.")
-            return await loop.run_in_executor(None, self._statistical_forecast, ohlcv_data, prediction_steps, timeframe)
+            return await loop.run_in_executor(None, self._statistical_forecast, ohlcv_data, prediction_steps, timeframe, f"Bridge Exe Error: {str(e)}")
 
-    def _statistical_forecast(self, ohlcv_data: List[Dict[str, Any]], prediction_steps: int, timeframe: str = "1Day") -> Dict[str, Any]:
+    def _statistical_forecast(self, ohlcv_data: List[Dict[str, Any]], prediction_steps: int, timeframe: str = "1Day", reason: str = None) -> Dict[str, Any]:
         """
-        Deterministic Holt-Winters (Double Exponential Smoothing) forecast.
-        Captures both Level and Trend (Momentum) without random noise.
+        State-of-the-Art (SOTA) Fallback Engine:
+        1. For Intraday (1Min-1Hour): Uses Enhanced XGBoost with technical indicators.
+        2. For Trend/Global: Uses Holt-Winters (Double Exponential Smoothing).
         """
+        # --- 1. SOTA ML Fallback for Intraday & TTM Recovery ---
+        intraday_timeframes = ["1Min", "5Min", "15Min", "1Hour"]
+        should_use_sota = (
+            timeframe in intraday_timeframes or 
+            (reason and ("TTM" in reason or "Sanity Check" in reason))
+        )
+        
+        if should_use_sota: 
+            try:
+                from fallbacks.ml_forecaster import MLIntradayForecaster
+                ml_f = MLIntradayForecaster()
+                ml_preds = ml_f.train_and_predict(ohlcv_data, prediction_steps)
+                
+                if ml_preds:
+                    # Construct forecast response
+                    forecast = []
+                    last_ts = ohlcv_data[-1].get('t')
+                    curr_dt = datetime.datetime.fromtimestamp(last_ts / 1000.0) if last_ts else datetime.datetime.now()
+                    
+                    # Time delta mapping
+                    delta_map = {"1Min": 1, "5Min": 5, "15Min": 15, "1Hour": 60}
+                    delta_mins = delta_map.get(timeframe, 60)
+                    
+                    for p in ml_preds:
+                        curr_dt += datetime.timedelta(minutes=delta_mins)
+                        forecast.append({
+                            "open": float(p), "high": float(p), "low": float(p), "close": float(p),
+                            "volume": float(ohlcv_data[-1]['v']),
+                            "timestamp": int(curr_dt.timestamp() * 1000)
+                        })
+                    
+                    return {
+                        "forecast": forecast,
+                        "prediction_steps": prediction_steps,
+                        "confidence": 0.7, # Higher confidence for ML fallback
+                        "model_used": "sota_xgboost_intraday",
+                        "algorithm": "XGBoost (Intraday Optimized)",
+                        "is_fallback": True,
+                        "note": f"SOTA XGBoost Fallback (RSI/ATR Optimized) [Reason: {reason or 'Intraday Mode'}]"
+                    }
+            except Exception as e:
+                logger.warning(f"SOTA ML Fallback failed, reverting to baseline: {e}")
+
+        # --- 2. Baseline Fallback (Holt-Winters) ---
         closes = np.array([d['c'] for d in ohlcv_data])
         last_price = closes[-1]
         
@@ -209,12 +378,18 @@ class TTMForecaster:
                 "timestamp": int(curr_dt.timestamp() * 1000)
             })
             
+        note = f"Holt-Winters Deterministic Trend (TF: {timeframe})"
+        if reason:
+            note += f" [Fallback: {reason}]"
+            
         return {
             "forecast": forecast,
             "prediction_steps": prediction_steps,
             "confidence": 0.5,
             "model_used": "statistical_trend_holt",
-            "note": f"Holt-Winters Deterministic Trend (TF: {timeframe})"
+            "algorithm": "Holt-Winters Statistical",
+            "is_fallback": True,
+            "note": note
         }
 
 

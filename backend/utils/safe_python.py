@@ -73,8 +73,8 @@ SAFE_BUILTINS = {
     "isinstance": isinstance,
     "issubclass": issubclass,
     "type": type,
-    "hasattr": hasattr,
-    "getattr": getattr,
+    # "hasattr": hasattr, # Removed for security (prevents sandbox escapes)
+    # "getattr": getattr, # Removed for security (prevents sandbox escapes)
     # Iteration
     "iter": iter,
     "next": next,
@@ -83,38 +83,6 @@ SAFE_BUILTINS = {
     # Print (captured to stdout)
     "print": print,
 }
-
-# Dangerous patterns to block
-BLOCKED_PATTERNS = [
-    "import os",
-    "import sys",
-    "import subprocess",
-    "import shutil",
-    "import socket",
-    "import requests",
-    "import urllib",
-    "import http",
-    "__import__",
-    "exec(",
-    "eval(",
-    "compile(",
-    "open(",
-    "input(",
-    "globals(",
-    "locals(",
-    "vars(",
-    "dir(",
-    "delattr",
-    "setattr",
-    "__builtins__",
-    "__class__",
-    "__bases__",
-    "__subclasses__",
-    "__mro__",
-    "__code__",
-    "__globals__",
-]
-
 
 class SafePythonExecutor:
     """
@@ -147,12 +115,6 @@ class SafePythonExecutor:
         Returns:
             (is_safe, error_message)
         """
-        # Check for blocked patterns
-        code_lower = code.lower()
-        for pattern in BLOCKED_PATTERNS:
-            if pattern.lower() in code_lower:
-                return False, f"Blocked pattern detected: {pattern}"
-        
         # Parse AST to check for dangerous constructs
         try:
             tree = ast.parse(code)
@@ -172,6 +134,13 @@ class SafePythonExecutor:
                 if isinstance(node, ast.ImportFrom):
                     if node.module and node.module.split(".")[0] not in ALLOWED_IMPORTS:
                         return False, f"Import not allowed: {node.module}"
+
+                # Block dangerous function calls
+                if isinstance(node, ast.Call):
+                    func = node.func
+                    if isinstance(func, ast.Name):
+                        if func.id in ("exec", "eval", "compile", "open", "input", "globals", "locals", "vars", "dir", "delattr", "setattr", "help", "exit", "quit", "__import__"):
+                            return False, f"Blocked function call: {func.id}"
                         
         except SyntaxError as e:
             return False, f"Syntax error: {e}"
