@@ -42,9 +42,10 @@ Risks & Mitigations
 - macOS version fragmentation: Build universal binaries and conditionals for Intel vs Apple Silicon.
 
 Roadmap Snippet
-- Phase 1: Prototyping bridge + a minimal SwiftUI view that calls the bridge and displays a forecast value.
-- Phase 2: Add on-device Core ML models for lightweight forecasting tasks.
-- Phase 3: Integrate a more sophisticated on-device AI module (LLM-like reasoning) via Core ML or ONNX with Core ML Tools.
+- Phase 1 (Completed): Prototyping bridge + minimal SwiftUI view. Integrated with FastAPI backend over localhost.
+- Phase 2 (Completed): Core performance optimizations (Bolt vectorization) and high-speed ticker resolution via Rust Native Core (`growin_core`).
+- Phase 3 (In Progress): Expanding on-device AI capabilities via MLX (Granite-Tiny) and Core ML for ultra-low latency inference.
+- Phase 4: Full ANE-enabled local agentic workflows.
 
 References (SOTA & Core ML on-device)
 - TFT: arXiv:1912.09363

@@ -3,6 +3,12 @@ Model Configuration for Decision Agent
 Allows easy model switching and supports multiple providers
 """
 
+import os
+from pathlib import Path
+
+# Get the absolute path to the backend directory
+BACKEND_DIR = Path(__file__).parent.absolute()
+
 DECISION_MODELS = {
     "gpt-4o": {
         "provider": "openai",
@@ -24,6 +30,17 @@ DECISION_MODELS = {
         "description": "Gemini 1.5 Pro - Google's best",
         "requires_key": "GOOGLE_API_KEY"
     },
+    "nemotron-3-nano": {
+        "provider": "lmstudio",
+        "model_id": "nvidia/nemotron-3-nano",
+        "description": "Nvidia Nemotron 3 Nano - User User Preference",
+        "requires_key": None
+    },
+    "lmstudio-auto": {
+        "provider": "lmstudio",
+        "description": "LM Studio - Auto-detect loaded model",
+        "requires_key": None
+    },
     "gemma-2-27b-it": {
         "provider": "ollama",
         "description": "Gemma 2 27B - Local (requires Ollama)",
@@ -34,15 +51,16 @@ DECISION_MODELS = {
         "description": "Mistral Large - Local (requires Ollama)",
         "requires_key": None
     },
-    "lmstudio:auto": {
-        "provider": "lmstudio",
-        "description": "LM Studio - Whatever model you have loaded",
-        "requires_key": None
-    },
     "native-mlx": {
         "provider": "mlx",
-        "model_path": "models/mlx/lmstudio-community--LFM2.5-1.2B-Instruct-MLX-8bit",
+        "model_path": str(BACKEND_DIR / "models/mlx/lmstudio-community--LFM2.5-1.2B-Instruct-MLX-8bit"),
         "description": "Native MLX - Optimized for Apple Silicon",
+        "requires_key": None
+    },
+    "gpt-oss-20b": {
+        "provider": "lmstudio",
+        "model_id": "gpt-oss-20b",
+        "description": "GPT-OSS 20B - Local high-performance model",
         "requires_key": None
     }
 }
@@ -50,7 +68,7 @@ DECISION_MODELS = {
 COORDINATOR_MODELS = {
     "granite-tiny": {
         "provider": "mlx",
-        "model_path": "models/mlx/granite-4.0-h-tiny-MLX-8bit",
+        "model_path": str(BACKEND_DIR / "models/mlx/granite-4.0-h-tiny-MLX-8bit"),
         "description": "Granite 4.0 Tiny - Ultra-lightweight coordinator",
         "temperature": 0,
         "max_tokens": 512,

@@ -55,10 +55,68 @@ class ForecastingAgent(BaseAgent):
             )
 
         # Calculate steps based on timeframe
-        if "Hour" in timeframe:
-            steps = days * 24
+        # TTM-R2 has a logical max prediction length of 96
+        MAX_STEPS = 96
+
+        if "Min" in timeframe:
+            # Estimate minutes per bar
+            mins = 1
+            if "5" in timeframe: mins = 5
+            if "15" in timeframe: mins = 15
+            if "30" in timeframe: mins = 30
+            
+            total_minutes = days * 24 * 60
+            steps = min(int(total_minutes / mins), MAX_STEPS)
+            
+        elif "Hour" in timeframe:
+            steps = min(days * 24, MAX_STEPS)
+            
         else:
-            steps = days
+            # Day, Week, Month
+            steps = min(days, MAX_STEPS)
+
+        # --- DATA SANITIZATION (Robust Whole-Series Unit Fix) ---
+        # Fixes GBP/GBX inconsistencies by normalizing outliers to the series median.
+        if len(ohlcv_data) > 10:
+            try:
+                import numpy as np
+                # Extract closes to find median
+                closes = [float(d.get('c', 0)) for d in ohlcv_data if d.get('c')]
+                if closes:
+                    median_price = np.median(closes)
+                    
+                    # Heuristic: If median is < 5 (likely GBP) and we see points > 50 (likely GBX), or vice versa.
+                    # Or simpler: anything deviation > 50x from median is a unit error.
+                    
+                    corrections = 0
+                    for bar in ohlcv_data:
+                        c = float(bar.get('c', 0))
+                        if c <= 0: continue
+                        
+                        ratio = c / median_price
+                        factor = 1.0
+                        
+                        # Case 1: Point is 100x larger than median (GBX in GBP series)
+                        if ratio > 50.0: 
+                             factor = 0.01 # Divide by 100
+                        
+                        # Case 2: Point is 100x smaller than median (GBP in GBX series)
+                        elif ratio < 0.02:
+                             factor = 100.0 # Multiply by 100
+                             
+                        if factor != 1.0:
+                            corrections += 1
+                            # Apply to all fields
+                            for f in ['o', 'h', 'l', 'c']:
+                                if f in bar and bar[f] is not None:
+                                    bar[f] = float(bar[f]) * factor
+                                    
+                    if corrections > 0:
+                        logger.warning(f"ForecastingAgent: Sanitized {corrections} bars with unit mismatches (Median: {median_price:.2f}).")
+                        
+            except Exception as ex:
+                logger.warning(f"ForecastingAgent sanitization error: {ex}")
+        # ---------------------------------------------
             
         try:
             # Generate forecast using TTM
@@ -112,10 +170,13 @@ class ForecastingAgent(BaseAgent):
                 forecast_24h=forecast_24h,
                 forecast_48h=forecast_48h,
                 forecast_7d=forecast_7d,
-                confidence=result.get(
-                    "confidence", 0.5) > 0.7 and "HIGH" or "MEDIUM",
+                confidence=result.get("confidence", 0.5) > 0.7 and "HIGH" or "MEDIUM",
                 trend=trend,
-                raw_series=forecast_bars # Already matches TimeSeriesItem structure
+                algorithm=result.get("algorithm") or result.get("model_used") or "IBM Granite TTM-R2.1",
+                is_fallback=result.get("is_fallback", False) or result.get("model_used") == "statistical_trend_holt",
+                note=result.get("note"),
+                raw_series=forecast_bars, # Already matches TimeSeriesItem structure
+                auxiliary_forecasts=result.get("auxiliary_forecasts")
             )
 
             return AgentResponse(
