@@ -280,6 +280,7 @@ struct AccountPicker: View {
                 .accessibilityAddTraits(selectedAccount == account ? [.isSelected] : [])
                 .accessibilityHint("Filters chat context to \(displayName(account))")
 
+
             }
         }
         .padding(6)
