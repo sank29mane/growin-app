@@ -102,46 +102,37 @@ def normalize_ticker(ticker: str) -> str:
     if not ticker:
         return ""
 
-        # 1. Basic Cleaning
-        ticker = ticker.upper().strip().replace("$", "")
-        
-        # 2. Already Normalized (contains dot)
-        if "." in ticker:
-            return ticker
+    # 1. Basic Cleaning
+    ticker = ticker.upper().strip().replace("$", "")
+    
+    # 2. Already Normalized (contains dot)
+    if "." in ticker:
+        return ticker
 
-        # 3. Handle Platform-Specific Artifacts
-        original = ticker
-        # Strip T212 suffixes (handles multiple like _US_EQ)
-        ticker = re.sub(r'(_EQ|_US|_BE|_DE|_GB|_FR|_NL|_ES|_IT)+$', '', ticker)
-        ticker = ticker.replace("_", "") # Fallback for messy underscores
-        
-        # 4. SPECIAL MAPPINGS (SOTA curated list for T212 -> YFinance)
-        if ticker in SPECIAL_MAPPINGS:
-            ticker = SPECIAL_MAPPINGS[ticker]
+    # 3. Handle Platform-Specific Artifacts
+    original = ticker
+    # Strip T212 suffixes (handles multiple like _US_EQ)
+    ticker = re.sub(r'(_EQ|_US|_BE|_DE|_GB|_FR|_NL|_ES|_IT)+$', '', ticker)
+    ticker = ticker.replace("_", "") # Fallback for messy underscores
+    
+    # 4. SPECIAL MAPPINGS (SOTA curated list for T212 -> YFinance)
+    if ticker in SPECIAL_MAPPINGS:
+        ticker = SPECIAL_MAPPINGS[ticker]
 
-        # 5. Suffix Protection for Leveraged Products & Extra 'L' Handling
-        # Many UK tickers arrive with an extra 'L' (e.g., BARCL, SHELL, GSKL).
-        # If len > 3 and ends in 'L', it's likely a suffix we should strip.
-        is_leveraged_etp = ticker.endswith("1") and len(ticker) > 3
-        
-        # Check against common UK stock stems for "1" suffix
-        if is_leveraged_etp:
-            if ticker.startswith(LEVERAGED_STEMS):
-                ticker = ticker[:-1]
-                
-        # 6. Global Exchange Logic (UK vs US)
-        is_explicit_uk = "_EQ" in original and "_US" not in original
-        is_likely_uk = (len(ticker) <= 5 or ticker.endswith("L")) and ticker not in US_EXCLUSIONS
-        
-        # Heuristic for stripping extra 'L' (e.g. BARCL -> BARC)
-        if is_likely_uk and ticker.endswith("L") and len(ticker) > 3 and ticker not in US_EXCLUSIONS:
-            # Safe heuristic: Strip L.
+    # 5. Suffix Protection for Leveraged Products & Extra 'L' Handling
+    # Many UK tickers arrive with an extra 'L' (e.g., BARCL, SHELL, GSKL).
+    # If len > 3 and ends in 'L', it's likely a suffix we should strip.
+    is_leveraged_etp = ticker.endswith("1") and len(ticker) > 3
+    
+    # Check against common UK stock stems for "1" suffix
+    if is_leveraged_etp:
+        if ticker.startswith(LEVERAGED_STEMS):
             ticker = ticker[:-1]
-
+            
     # 6. Global Exchange Logic (UK vs US)
     is_explicit_uk = "_EQ" in original and "_US" not in original
     is_likely_uk = (len(ticker) <= 5 or ticker.endswith("L")) and ticker not in US_EXCLUSIONS
-
+    
     # Heuristic for stripping extra 'L' (e.g. BARCL -> BARC)
     if is_likely_uk and ticker.endswith("L") and len(ticker) > 3 and ticker not in US_EXCLUSIONS:
         # Safe heuristic: Strip L.
