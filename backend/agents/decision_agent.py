@@ -18,32 +18,32 @@ logger = logging.getLogger(__name__)
 class DecisionAgent:
     """
     The "Brain" - Uses high-reasoning LLM to make final decisions.
-    
+
     Model: User-selectable (GPT-4o, Claude, Gemma-2-27B, etc.)
     Role: Synthesize all data, validate prices, make recommendations
     Performance: 5-8s (LLM reasoning time)
     """
-    
+
     def __init__(self, model_name: str = "gpt-4o", api_keys: Optional[Dict[str, str]] = None):
         self.model_name = model_name
         self.api_keys = api_keys or {}
         self.llm = None
         self._lm_studio_client = None # Deprecated, kept for compat if needed, but Factory handles it
         self._initialized = False
-    
+
     async def _initialize_llm(self):
         """Initialize the LLM using the Factory"""
         try:
             self.llm = await LLMFactory.create_llm(self.model_name, self.api_keys)
-            
+
             # Update model name if auto-detected by LM Studio
             if hasattr(self.llm, "active_model_id"):
                 self.model_name = self.llm.active_model_id
                 self._lm_studio_client = self.llm # For explicit checks if needed
-                
+
             logger.info(f"DecisionAgent successfully initialized with {self.model_name}")
             self._initialized = True
-            
+
         except Exception as e:
             logger.error(f"DecisionAgent initialization failed: {e}")
             raise
@@ -57,42 +57,42 @@ class DecisionAgent:
 
         from status_manager import status_manager
         status_manager.set_status("decision_agent", "working", "Applying reasoning...", model=self.model_name)
-        
+
         # Analyze query for account mentions
         account_filter = self._detect_account_mentions(query)
 
         # Build prompt
         prompt = self._build_prompt(context, query, account_filter)
-        
+
         # Inject Skills & RAG
         prompt = self._inject_context_layers(prompt, query)
-        
+
         # Invoke LLM
         try:
             system_content = self._get_system_persona(context.intent)
-            
+
             # --- RECURSIVE THINKING LOOP ---
             draft_content = await self._generate_draft(system_content, prompt)
-            
+
             # Critique & Refine (Only for cloud models to save local resources)
             is_local = "mlx" in self.model_name.lower() or hasattr(self.llm, "chat")
-            
+
             if not is_local and context.intent in ["hybrid", "analytical"] and "gpt" in self.model_name:
                 recommendation = await self._critique_response(system_content, prompt, draft_content)
             else:
                 recommendation = self._clean_response(draft_content)
-            
+
             # Price validation
             recommendation = await self._validate_prices(recommendation, context.ticker)
-            
+
             status_manager.set_status("decision_agent", "ready", "Decision delivered", model=self.model_name)
-            
+
             # Interactive Actions
             if (context.intent == "goal_planning" or "plan" in query.lower()) and "CREATE_GOAL_PLAN" not in recommendation:
                 recommendation += "\n\n[ACTION:CREATE_GOAL_PLAN]"
-            
+
             return recommendation
-            
+
         except Exception as e:
             logger.error(f"Decision making failed: {e}")
             status_manager.set_status("decision_agent", "error", f"Error: {str(e)}", model=self.model_name)
@@ -109,6 +109,10 @@ class DecisionAgent:
             # LM Studio Client
             msg_dicts = [{"role": "system", "content": system_content}, {"role": "user", "content": prompt}]
             resp = await self.llm.chat(model_id=self.model_name, messages=msg_dicts, temperature=0)
+
+            if "error" in resp:
+                raise RuntimeError(resp["error"])
+
             return resp.get("content", "")
         else:
             raise ValueError("LLM interface not recognized")
@@ -121,14 +125,14 @@ class DecisionAgent:
         Check for:
         1. Did you hallucinate any data?
         2. Did you strictly follow the "MANDATORY ANSWER FORMAT"?
-        3. Is the risk assessment balanced? 
-        
+        3. Is the risk assessment balanced?
+
         If perfect, repeat exactly. If flaws found, rewrite the "Strategic Synthesis".
         """
-        
+
         from status_manager import status_manager
         status_manager.set_status("decision_agent", "working", "Refining strategy...", model=self.model_name)
-        
+
         if hasattr(self.llm, "ainvoke"):
             messages = [
                 SystemMessage(content=system_content),
@@ -146,7 +150,7 @@ class DecisionAgent:
             from status_manager import status_manager
             status_manager.set_status("decision_agent", "working", f"Validating price for {ticker}...", model=self.model_name)
             validation = await PriceValidator.validate_trade_price(ticker)
-            
+
             if validation["action"] == "block":
                 text += f"\n\n⚠️ **TRADE BLOCKED**: {validation['message']}"
             elif validation["action"] == "warn":
@@ -158,7 +162,7 @@ class DecisionAgent:
         """Inject RAG and Skills into prompt."""
         # Detect small model for aggressive optimization
         is_small_model = any(k in self.model_name.lower() for k in ["nano", "mobile", "phi", "tiny", "gemma-2b"])
-        
+
         # Skills (Limit length for small models)
         from utils.skill_loader import get_skill_loader
         skills_text = get_skill_loader().get_relevant_skills(query)
@@ -183,11 +187,11 @@ class DecisionAgent:
                     if len(content) > limit:
                         content = content[:limit] + "..."
                     rag_lines.append(f"- {content} (Source: {d['metadata'].get('type','unknown')})")
-                
+
                 rag_text = "\n".join(rag_lines)
                 logger.info(f"DecisionAgent: Injecting {len(rag_docs)} RAG documents")
                 prompt += f"\n\n=== HISTORICAL CONTEXT (RAG) ===\n{rag_text}\n================================"
-        
+
         return prompt
 
     def _get_system_persona(self, intent: str) -> str:
@@ -200,12 +204,12 @@ class DecisionAgent:
             return """You are an expert financial educator. Explain concepts (RSI, MACD) in simple terms. Focus on 'why' and 'how'."""
         elif intent == "hybrid":
             return """You are a senior financial analyst. Synthesize data from multiple sources (Quant, Portfolio, Research). Cite your sources."""
-        
+
         return """You are a highly qualified Financial & Trading Advisor specializing in global markets (US, LSE, India).
-        
+
         CORE PRINCIPLES:
         1. DEEP SYNTHESIS: Connect Portfolio data, Technicals, and Broader Insights.
-        2. ACCURACY & DATA INTEGRITY: 
+        2. ACCURACY & DATA INTEGRITY:
            - Evaluate missing sources. If a source is "UNAVAILABLE", explicitly state it limits your decision.
            - Cite Forecast Algorithms (e.g. "IBM Granite TTM-R2" or "Statistical Fallback").
         3. GLOBAL CONTEXT: Prioritize LSE (GBP). Label US stocks clearly (USD).
@@ -213,7 +217,7 @@ class DecisionAgent:
         [OUTPUT FORMAT INSTRUCTION]
         You must COPY the "MANDATORY ANSWER FORMAT" exactly for the data sections.
         Your creative synthesis goes in "Strategic Synthesis".
-        
+
         CONVERSATIONAL STYLE:
         - Professional, transparent.
         - NO INTERNAL MONOLOGUE tags (<think>).
@@ -223,7 +227,7 @@ class DecisionAgent:
         """Clean LLM response to remove thinking artifacts and meta-commentary."""
         response = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL | re.IGNORECASE)
         response = re.sub(r'<think>.*', '', response, flags=re.DOTALL | re.IGNORECASE)
-        
+
         meta_patterns = [
             r'\*\*thinking\*\*.*?\n',
             r'^we need to', r'^let\'s', r'^based on my instructions',
@@ -232,7 +236,7 @@ class DecisionAgent:
         ]
         for pattern in meta_patterns:
             response = re.sub(pattern, '', response, flags=re.IGNORECASE | re.MULTILINE)
-        
+
         return response.strip().replace('\n{3,}', '\n\n')
 
     def _detect_account_mentions(self, query: str) -> str:
@@ -248,12 +252,12 @@ class DecisionAgent:
 
     def _build_prompt(self, context: MarketContext, query: str, account_filter: str = "all") -> str:
         """Build prompt from market context"""
-        
+
         # Template
         structured_template = """
         [MANDATORY ANSWER FORMAT - COPY EXACTLY]
         1. **Market Pulse**: {sentiment_label} (Score: {sentiment_score})
-        2. **Technical Levels**: 
+        2. **Technical Levels**:
            - Structural Support: {support}
            - Structural Resistance: {resistance}
            - Breakout Signals: {signals}
@@ -263,49 +267,49 @@ class DecisionAgent:
            - Note: {forecast_note}
         4. **Strategic Synthesis**: [Your detailed reasoning here...]
         """
-        
+
         coordinator_account = context.user_context.get("account_type")
         if coordinator_account:
             account_filter = coordinator_account
-        
+
         sections = [
             f"**User Query**: {query}",
             f"**System Intent**: {context.intent}",
             f"**Routing Logic**: {context.routing_reason or 'Direct Analysis'}\n"
         ]
-        
+
         # Specialist Execution Summary
         if context.agents_executed or context.agents_failed:
             executed = list(context.agents_executed)
             failed = list(context.agents_failed)
             sections.append(f"**DATA CONTEXT**: Executed: {executed}, Failed: {failed}")
-        
+
         # Portfolio Data (Compacted)
         if context.portfolio:
             p = context.portfolio
             label = f"📊 **{account_filter.upper()} ACCOUNT DATA**"
             cash = p.cash_balance.get('total', 0.0) if isinstance(p.cash_balance, dict) else p.cash_balance
-            
+
             # Context Optimization: Compact summary
             p_text = f"{label}:\n- Value: £{p.total_value:,.0f} | Cash: £{cash:,.0f} | Perf: {p.pnl_percent*100:+.1f}%"
-            
+
             if hasattr(p, 'accounts') and p.accounts:
                 # Compact account breakdown (one line)
                 acc_info = [f"{k[:3].upper()}: £{v.get('current_value',0):,.0f}" for k,v in p.accounts.items()]
                 if acc_info: p_text += f"\n- Split: {' | '.join(acc_info)}"
-            
+
             sections.append(p_text)
-        
+
         # Technicals (Compacted)
         if context.quant:
             q = context.quant
             sections.append(f"**TECH**: {q.ticker} | RSI: {q.rsi:.1f} | Signal: {q.signal}")
-        
+
         # Forecast (Compacted)
         if context.forecast:
             f = context.forecast
             sections.append(f"**AI MODEL**: {f.ticker} | Target: £{f.forecast_24h:.2f} ({f.trend}) | Conf: {f.confidence}")
-            
+
         # Research (Compacted)
         if context.research:
             r = context.research
@@ -326,10 +330,10 @@ class DecisionAgent:
             "forecast_conf": context.forecast.confidence if context.forecast else "N/A",
             "forecast_note": "Using TTM-R2 Model" if (context.forecast and not context.forecast.is_fallback) else "Fallback/Unavailable"
         }
-        
+
         sections.append("\n\nIMPORTANT: Use this format:")
         sections.append(structured_template.format(**tmpl_vars))
-        
+
         return "\n".join(sections)
 
     def switch_model(self, new_model: str):

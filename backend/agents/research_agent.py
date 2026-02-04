@@ -474,3 +474,4 @@ class ResearchAgent(BaseAgent):
         elif score <= -0.05:
             return "BEARISH"
         return "NEUTRAL"
+
