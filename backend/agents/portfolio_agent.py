@@ -124,13 +124,6 @@ class PortfolioAgent(BaseAgent):
             except Exception as e:
                 self.logger.warning(f"Failed to fetch portfolio history: {e}")
 
-                portfolio_data.portfolio_history = history
-            except asyncio.TimeoutError:
-                self.logger.warning("Portfolio history fetch timed out (5s). Skipping history, returning core data.")
-                # We do NOT fail the request; we just yield data without history
-            except Exception as e:
-                self.logger.warning(f"Failed to fetch portfolio history: {e}")
-
             # --- RAG INTEGRATION: Store Portfolio Snapshot ---
             try:
                 from app_context import state

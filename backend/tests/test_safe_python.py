@@ -28,13 +28,15 @@ class TestSafePython(unittest.TestCase):
         code = "import os"
         res = self.executor.execute(code)
         self.assertFalse(res['success'])
-        self.assertIn("Blocked pattern", res['error'])
+        # Can be "Import not allowed" (AST) or "Blocked pattern" (Legacy string check if kept, but we removed it)
+        # We removed string check, so it should be "Import not allowed"
+        self.assertIn("Import not allowed", res['error'])
 
     def test_blocked_exec(self):
         code = "exec('print(1)')"
         res = self.executor.execute(code)
         self.assertFalse(res['success'])
-        self.assertIn("Blocked pattern", res['error'])
+        self.assertIn("Blocked function call", res['error'])
 
     def test_rce_attempt(self):
         # This is the RCE payload that attempted to use getattr

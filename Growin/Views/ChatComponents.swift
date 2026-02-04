@@ -196,7 +196,7 @@ struct SuggestionChip: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Ask about \(item.title)")
-        .accessibilityHint(item.prompt)
+        .accessibilityHint("Asks: \(item.prompt)")
 
         .onHover { hovering in
             withAnimation(.easeOut(duration: 0.15)) {
@@ -318,6 +318,8 @@ struct QuickActionButtons: View {
                         .foregroundStyle(.blue)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel(action.label)
+                    .accessibilityHint("Asks: \(action.prompt)")
                 }
             }
         }
@@ -374,6 +376,8 @@ struct EnhancedTypingIndicator: View {
             RoundedRectangle(cornerRadius: 16)
                 .fill(.ultraThinMaterial)
         )
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(statusText)
         .onReceive(timer) { _ in
             withAnimation(.easeInOut(duration: 0.3)) {
                 dotIndex = (dotIndex + 1) % 3

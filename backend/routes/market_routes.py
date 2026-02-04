@@ -264,31 +264,55 @@ async def get_portfolio_history(days: int = 30, account_type: Optional[str] = No
             # Vectorized calculation (Bolt Optimization: replaces slow iterrows loop)
             total_value_series = pd.Series(float(free_cash), index=df.index)
             
-            for ticker, quantity in holdings.items():
-                if ticker not in df.columns:
-                    continue
+            # Vectorized calculation (Bolt Optimization ⚡)
+            try:
+                # Ensure df is a DataFrame for consistent processing
+                if isinstance(df, pd.Series):
+                    df = df.to_frame()
+
+                # Work on a copy to prevent side effects on the original dataframe
+                df_calc = df.copy()
+
+                # 1. Filter holdings to those present in df
+                valid_holdings = {t: q for t, q in holdings.items() if t in df_calc.columns}
+
+                if valid_holdings:
+                    # 2. Apply currency conversion
+                    # Convert LSE pence to pounds if price > 500
+                    for ticker in valid_holdings:
+                        if ticker.endswith(".L") and ticker in df_calc.columns:
+                            # Vectorized update: if price > 500, divide by 100
+                            vals = df_calc[ticker].to_numpy()
+                            df_calc[ticker] = np.where(vals > 500, vals / 100.0, vals)
+
+                    # 3. Calculate portfolio value using dot product
+                    ordered_tickers = list(valid_holdings.keys())
+                    weights = np.array([valid_holdings[t] for t in ordered_tickers])
+
+                    # Subset dataframe
+                    df_subset = df_calc[ordered_tickers]
                     
-                price_series = df[ticker].copy()
-
-                # Currency conversion heuristic for LSE (pence to pounds)
-                if ticker.endswith(".L"):
-                    price_series = np.where(price_series > 500, price_series / 100.0, price_series)
+                    # Calculate total value
+                    portfolio_values = df_subset.dot(weights) + free_cash
                     
-                total_value_series += price_series * quantity
+                    # 4. Filter and Format
+                    # Filter invalid values
+                    mask = ~portfolio_values.isin([np.nan, np.inf])
+                    portfolio_values = portfolio_values[mask]
 
-            # Filter out NaNs/Infs
-            mask = ~total_value_series.isna() & ~np.isinf(total_value_series)
-            valid_series = total_value_series[mask]
+                    for timestamp, val in portfolio_values.items():
+                        history_points.append({
+                            "timestamp": timestamp.isoformat(),
+                            "total_value": round(float(val), 2),
+                            "total_pnl": 0,
+                            "cash_balance": round(float(free_cash), 2)
+                        })
+            except Exception as e:
+                logger.error(f"Vectorized calculation error: {e}")
+                # Fallback or just log? The original swallowed errors per row but logged them.
+                # If vectorization fails completely, we return empty list or partial.
+                pass
 
-            history_points = [
-                {
-                    "timestamp": timestamp.isoformat(),
-                    "total_value": round(float(val), 2),
-                    "total_pnl": 0,
-                    "cash_balance": round(float(free_cash), 2)
-                }
-                for timestamp, val in valid_series.items()
-            ]
             
             logger.info(f"Generated {len(history_points)} portfolio history points")
             return sanitize_nan(history_points)

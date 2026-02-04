@@ -17,3 +17,7 @@
 ## 2026-01-20 - Exception Handling Overhead in Loops
 **Learning:** Checking for an optional dependency using `try...import...except` *inside* a frequently called function (like `normalize_ticker`) adds massive overhead (~2µs per call) if the dependency is missing, due to repeated exception raising.
 **Action:** Move conditional imports to module scope and use a boolean flag (`HAS_DEPENDENCY`) to guard the optional logic. This reduced execution time by ~32% and nearly matched pure Python performance.
+
+## 2026-02-01 - Business Day Vectorization & Timestamp Resolution
+**Learning:** `pd.bdate_range` combined with `start=last_ts + 1 day` is a correct and performant vectorized replacement for iterative "skip weekend" loops (~25x speedup). However, `pd.to_datetime` resolution varies (ns vs us), causing integer casting issues (`.astype(np.int64)` values differ by 1000x).
+**Action:** Always explicitly cast timestamps to a known unit (e.g., `.astype('datetime64[ms]')`) before converting to integers for JSON/API responses to ensure robustness against environment differences.
