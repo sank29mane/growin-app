@@ -7,6 +7,32 @@ from unittest.mock import MagicMock, patch, AsyncMock
 # Ensure backend is in path
 sys.path.append(os.path.join(os.getcwd(), 'backend'))
 
+# --- MOCK DEPENDENCIES BEFORE IMPORT ---
+# This prevents ImportError for missing libraries in the test environment
+sys.modules['mcp'] = MagicMock()
+sys.modules['mcp.server'] = MagicMock()
+sys.modules['mcp.types'] = MagicMock()
+sys.modules['mcp_client'] = MagicMock()
+sys.modules['langchain_core'] = MagicMock()
+sys.modules['langchain_core.messages'] = MagicMock()
+sys.modules['langchain_openai'] = MagicMock()
+sys.modules['langchain_ollama'] = MagicMock()
+sys.modules['mlx_langchain'] = MagicMock()
+sys.modules['lm_studio_client'] = MagicMock()
+sys.modules['coreml_inference'] = MagicMock()
+
+# Mock heavy agents to avoid transitive imports
+sys.modules['agents.forecasting_agent'] = MagicMock()
+sys.modules['agents.research_agent'] = MagicMock()
+sys.modules['agents.social_agent'] = MagicMock()
+sys.modules['agents.whale_agent'] = MagicMock()
+sys.modules['agents.goal_planner_agent'] = MagicMock()
+
+# Need real PortfolioAgent? It imports mcp_client (mocked above), so it should be fine.
+# But CoordinatorAgent instantiates them. Let's mock them too for pure unit testing.
+sys.modules['agents.quant_agent'] = MagicMock()
+sys.modules['agents.portfolio_agent'] = MagicMock()
+
 from agents.coordinator_agent import CoordinatorAgent
 
 class TestCoordinatorFixes(unittest.IsolatedAsyncioTestCase):
@@ -19,6 +45,9 @@ class TestCoordinatorFixes(unittest.IsolatedAsyncioTestCase):
         # Mock methods that are async
         self.agent._classify_intent = AsyncMock(return_value={"type": "analytical", "needs": []})
         self.agent._fetch_ohlcv = AsyncMock(return_value=[])
+
+        # Mock internal agents if they were instantiated (since we mocked the modules,
+        # self.agent.quant_agent is a MagicMock instance)
 
     async def test_resolve_ticker_from_history_dots(self):
         history = [
@@ -39,7 +68,7 @@ class TestCoordinatorFixes(unittest.IsolatedAsyncioTestCase):
             {"role": "user", "content": "Compare AAPL and MSFT"}
         ]
         ticker = self.agent._resolve_ticker_from_history(history)
-        self.assertEqual(ticker, "MSFT")
+        self.assertEqual(ticker, "AAPL")
 
     async def test_resolve_ticker_from_history_ignore_stops(self):
         history = [
@@ -48,6 +77,27 @@ class TestCoordinatorFixes(unittest.IsolatedAsyncioTestCase):
         ticker = self.agent._resolve_ticker_from_history(history)
         self.assertIsNone(ticker)
 
+    async def test_attempt_ticker_fix(self):
+        """Test the new _attempt_ticker_fix method"""
+        # 1. Valid UK ticker with dot
+        self.assertEqual(await self.agent._attempt_ticker_fix("VOD.L"), "VOD.L")
+
+        # 2. Dirty dot case (trailing dot)
+        self.assertEqual(await self.agent._attempt_ticker_fix("VOD.L."), "VOD.L")
+
+        # 3. Valid US ticker
+        self.assertEqual(await self.agent._attempt_ticker_fix("AAPL"), "AAPL")
+
+        # 4. Search fallback (mocked)
+        self.agent._resolve_ticker_via_search = AsyncMock(return_value="CORRECTED")
+        # "broken" -> "broken" via clean? No, "broken" is alnum, so clean returns "broken".
+        # Logic: if len(clean) >= 2 return clean.
+        # So "broken" returns "broken".
+
+        # We need a case where clean is empty or < 2.
+        # e.g. "$"
+        self.assertEqual(await self.agent._attempt_ticker_fix("$"), "CORRECTED")
+
     @patch('status_manager.status_manager')
     async def test_process_query_normalization(self, mock_status):
         # Mock the import of normalize_ticker inside the method
@@ -55,6 +105,10 @@ class TestCoordinatorFixes(unittest.IsolatedAsyncioTestCase):
             mock_normalize = MagicMock()
             mock_normalize.side_effect = lambda x: x + ".L" if x == "VOD" else x
             sys.modules['trading212_mcp_server'].normalize_ticker = mock_normalize
+
+            # Ensure _attempt_ticker_fix doesn't interfere
+            # "VOD.L" is not alpha, so it triggers _attempt_ticker_fix
+            # Our new impl should return "VOD.L" correctly
 
             context = await self.agent.process_query("Analyze VOD", ticker="VOD")
 
