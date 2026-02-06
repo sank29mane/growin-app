@@ -6,7 +6,7 @@ Separated logic for handling MCP tool calls to reduce complexity.
 import asyncio
 import json
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 from datetime import datetime
 import pandas as pd
 import yfinance as yf
@@ -19,7 +19,7 @@ from utils.ticker_utils import normalize_ticker
 # Type checking import
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from trading212_mcp_server import Trading212Client
+    pass
 
 async def handle_analyze_portfolio(
     arguments: Dict[str, Any],

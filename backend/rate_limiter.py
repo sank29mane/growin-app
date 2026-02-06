@@ -5,7 +5,7 @@ Uses Token Bucket algorithm for smoother rate limiting.
 
 import time
 import threading
-from typing import Dict, Optional
+from typing import Dict
 from fastapi import Request, HTTPException
 import logging
 

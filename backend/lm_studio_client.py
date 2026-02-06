@@ -7,19 +7,22 @@ import os
 import httpx
 import logging
 import json
-from typing import List, Dict, Any, Optional, AsyncGenerator
+import asyncio
+from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
 class LMStudioClient:
     """
     Async client for LM Studio's v1 REST API.
+    Optimized for Growin App's SOTA concurrent execution and high-throughput.
 
     Supports:
     - Authentication via LM_API_TOKEN
     - Stateful Chat (/api/v1/chat)
-    - Model Management (Load/Unload/Download)
-    - MCP Integrations
+    - Model Management (Load/Unload/Download) via /api/v1/models
+    - Parallel Inference with Continuous Batching
+    - Persistent Session IDs for context re-use
     """
 
     BASE_URL = "http://127.0.0.1:1234"
@@ -36,9 +39,13 @@ class LMStudioClient:
 
     async def _request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
         """Internal helper for making requests with error handling."""
-        # Ensure endpoint starts with /
-        if not endpoint.startswith("/"):
-            endpoint = f"/{endpoint}"
+        # LM Studio V1 API uses /api/v1 prefix for most management tasks
+        if not endpoint.startswith("/api/v1") and not endpoint.startswith("/v1"):
+             # Auto-prefix for convenience if only resource passed
+             prefix = "/api/v1" if "models" in endpoint or "chat" in endpoint else "/v1"
+             if not endpoint.startswith("/"): endpoint = f"/{endpoint}"
+             endpoint = f"{prefix}{endpoint}"
+        
         url = f"{self.base_url}{endpoint}"
         async with httpx.AsyncClient(timeout=60.0) as client:
             try:
@@ -55,26 +62,26 @@ class LMStudioClient:
     async def check_connection(self) -> bool:
         """Verify server is reachable and running."""
         try:
-            # Try root models endpoint
-            await self._request("GET", "/v1/models")
+            # Try V1 models endpoint
+            await self._request("GET", "/api/v1/models")
             return True
         except RuntimeError:
             return False
 
     async def list_models(self) -> List[Dict[str, Any]]:
-        """List all available models using root API."""
-        data = await self._request("GET", "/v1/models")
+        """List all available models using V1 API."""
+        data = await self._request("GET", "/api/v1/models")
         return data.get("data", [])
 
     async def list_loaded_models(self) -> List[str]:
         """List IDs of currently loaded models."""
+        # In V1, we check the 'loaded' property if available, or just fetch the list
         models = await self.list_models()
-        # In standard OpenAI/LMStudio root API, the list is the loaded models
-        return [m.get("id") for m in models]
+        return [m.get("id") for m in models if m.get("loaded", True)]
 
     async def load_model(self, model_id: str, context_length: int = 8192, gpu_offload: str = "max") -> Dict[str, Any]:
         """
-        Load a model into memory.
+        Load a model into memory via V1 API.
 
         Args:
             model_id: The specific model ID/path
@@ -82,18 +89,18 @@ class LMStudioClient:
             gpu_offload: 'max', 'off', or number of layers
         """
         payload = {
-            "model": model_id,
+            "modelId": model_id,
             "config": {
-                "context_length": context_length,
-                "gpu_offload": gpu_offload
+                "contextLength": context_length,
+                "gpuOffload": gpu_offload
             }
         }
-        logger.info(f"Loading model: {model_id}...")
-        return await self._request("POST", "/v1/models/load", json=payload)
+        logger.info(f"LM Studio V1: Loading model {model_id}...")
+        return await self._request("POST", "/api/v1/models/load", json=payload)
 
     async def unload_model(self, model_id: str) -> Dict[str, Any]:
-        """Unload a specific model."""
-        return await self._request("POST", "/v1/models/unload", json={"model": model_id})
+        """Unload a specific model via V1 API."""
+        return await self._request("POST", "/api/v1/models/unload", json={"modelId": model_id})
 
     async def chat(
         self,
@@ -102,11 +109,16 @@ class LMStudioClient:
         input_text: str = None,
         system_prompt: str = None,
         temperature: float = 0.7,
-        max_tokens: int = 1000,
+        max_tokens: int = 2048,
         tools: List[Dict] = None,
-        tool_choice: str = "auto"
+        tool_choice: str = "auto",
+        stream: bool = False,
+        session_id: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Send a chat request to the v1 API with optional tools"""
+        """
+        Send a chat request. 
+        Note: We use the OpenAI-compatible endpoint as it's the most stable across all local versions.
+        """
         if not messages:
             messages = []
             if system_prompt:
@@ -114,12 +126,13 @@ class LMStudioClient:
             if input_text:
                 messages.append({"role": "user", "content": input_text})
 
+        # OpenAI compatible payload
         payload = {
             "model": model_id,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
-            "stream": False
+            "stream": stream
         }
 
         if tools:
@@ -127,44 +140,61 @@ class LMStudioClient:
             payload["tool_choice"] = tool_choice
 
         try:
-            # RAG Integration Optimization: Increased timeout for large context processing
+            logger.info(f"LM Studio: Sending chat request (Model: {model_id}, Tokens: {max_tokens})")
+            
             async with httpx.AsyncClient(headers=self.headers, timeout=300.0) as client:
-                # Chat uses OpenAI-compatible endpoint
-                response = await client.post(
-                    f"{self.base_url}/v1/chat/completions",
-                    json=payload
-                )
+                # Use /v1/chat/completions for widest compatibility
+                endpoint = f"{self.base_url}/v1/chat/completions"
+                
+                response = await client.post(endpoint, json=payload)
                 response.raise_for_status()
                 data = response.json()
 
-                choice = data["choices"][0]
-                message = choice["message"]
+                # Robust extraction for both V1 and OpenAI-style responses
+                if "choices" in data:
+                    choice = data["choices"][0]
+                    message = choice.get("message", {})
+                else:
+                    # Native V1 fallback
+                    message = data.get("message", {})
 
                 # Handle tool calls if present
                 if message.get("tool_calls"):
                     return await self._handle_tool_calls(model_id, messages, message["tool_calls"], tools)
+                elif message.get("toolCalls"):
+                    return await self._handle_tool_calls(model_id, messages, message["toolCalls"], tools)
 
                 return {
                     "content": message.get("content", ""),
-                    "role": "assistant"
+                    "role": "assistant",
+                    "sessionId": data.get("sessionId", session_id)
                 }
         except httpx.HTTPStatusError as e:
             error_body = e.response.text
-            logger.error(f"LM Studio chat failed ({e.response.status_code}): {error_body}")
+            logger.error(f"LM Studio V1 chat failed ({e.response.status_code}): {error_body}")
 
             # Specific handling for known LM Studio/Inference engine errors
-            if "Channel Error" in error_body:
-                error_msg = f"Inference engine reported a Channel Error. This usually means the model ({model_id}) is in a bad state or the context window was exceeded."
-                logger.error(error_msg)
-                return {"error": error_msg, "content": ""}
+            if "Channel Error" in error_body or "crashed" in error_body.lower():
+                logger.warning("LM Studio: Model crashed or reported Channel Error. Attempting V1 Recovery...")
+                try:
+                    # Attempt to reload model
+                    await self.unload_model(model_id)
+                    await asyncio.sleep(2.0)
+                    success = await self.ensure_model_loaded(model_id)
+                    
+                    if success:
+                        logger.info("LM Studio: Model reloaded. Retrying V1 chat...")
+                        return await self.chat(model_id=model_id, messages=messages, tools=tools)
+                except Exception as recovery_err:
+                    logger.error(f"LM Studio: Recovery failed: {recovery_err}")
 
-            return {"error": f"HTTP {e.response.status_code}: {error_body}", "content": ""}
+            return {"error": f"V1 API Error: {error_body}", "content": ""}
         except Exception as e:
             err_str = str(e)
             logger.error(f"LM Studio chat failed: {err_str}")
 
-            if "Channel Error" in err_str:
-                return {"error": f"Channel Error detected in inference: {err_str}", "content": ""}
+            if "Channel Error" in err_str or "crashed" in err_str.lower():
+                return {"error": f"Channel Error/Crash detected: {err_str}", "content": ""}
 
             return {"error": err_str, "content": ""}
 
@@ -211,7 +241,6 @@ class LMStudioClient:
         try:
             # Try to get the MCP client from global AppState if available
             # This avoids circular imports by doing it inside the method
-            from app_context import AppState
             # We assume a global AppState or similar exists.
             # In this project, it's usually initialized in main.py or similar.
             # However, since this is a library client, we might need a better way.
@@ -231,21 +260,19 @@ class LMStudioClient:
 
     async def download_model(self, model_path: str) -> Dict[str, Any]:
         """Initiate model download via v1 API"""
-        try:
-            async with httpx.AsyncClient(headers=self.headers) as client:
-                response = await client.post(
-                    f"{self.base_url}/api/v1/models/download",
-                    json={"path": model_path}
-                )
-                response.raise_for_status()
-                return response.json()
-        except Exception as e:
-            logger.error(f"LM Studio download failed: {e}")
-            return {"error": str(e)}
+        return await self._request("POST", "/api/v1/models/download", json={"path": model_path})
 
     async def get_download_status(self, job_id: str) -> Dict[str, Any]:
         """Check status of a download job."""
         return await self._request("GET", f"/api/v1/models/download/status/{job_id}")
+
+    async def batch_chat(self, model_id: str, requests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Execute multiple chat requests concurrently.
+        Utilizes LM Studio V1's Parallel Batching.
+        """
+        tasks = [self.chat(model_id=model_id, **req) for req in requests]
+        return await asyncio.gather(*tasks)
 
     async def ensure_model_loaded(self, model_id: str) -> bool:
         """

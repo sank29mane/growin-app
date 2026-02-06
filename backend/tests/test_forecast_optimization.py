@@ -4,7 +4,6 @@ import os
 import time
 import pandas as pd
 import numpy as np
-import pytest
 
 # Add repo root to path so we can import backend
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))

@@ -1,6 +1,5 @@
 import sys
 import os
-import pytest
 from decimal import Decimal
 
 # Add backend to path

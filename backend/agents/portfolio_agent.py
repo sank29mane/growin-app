@@ -8,7 +8,6 @@ import json
 
 from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from market_context import PortfolioData
-from mcp_client import Trading212MCPClient
 from app_context import state # Access global state
 from utils.ticker_utils import normalize_ticker
 from cache_manager import cache # Import global cache
@@ -52,7 +51,9 @@ class PortfolioAgent(BaseAgent):
         
         try:
             # Call MCP tool
-            # The MCP server's analyze_portfolio tool expects "account_type" argument
+            from status_manager import status_manager
+            status_manager.set_status("portfolio_agent", "running", f"Syncing {requested_account} holdings...")
+            
             result = await self.mcp_client.call_tool(
                 "analyze_portfolio", 
                 arguments={"account_type": requested_account}
@@ -156,6 +157,8 @@ class PortfolioAgent(BaseAgent):
                 self.logger.warning(f"PortfolioAgent: Failed to store RAG snapshot: {e}")
             # -------------------------------------------------
             
+            from status_manager import status_manager
+            status_manager.set_status("portfolio_agent", "ready", f"Value: £{portfolio_data.total_value:,.0f}")
             return AgentResponse(
                 agent_name=self.config.name,
                 success=True,
@@ -165,11 +168,19 @@ class PortfolioAgent(BaseAgent):
             
         except Exception as e:
             self.logger.error(f"Portfolio analysis failed: {e}")
+            error_msg = str(e)
+            
+            # Enrich error message for better UI handling
+            if "401" in error_msg or "Unauthorized" in error_msg:
+                error_msg = "Invalid API Credential"
+            elif "Connection refused" in error_msg or "ClientConnectorError" in error_msg:
+                error_msg = "Connection Refused (Is MCP running?)"
+            
             return AgentResponse(
                 agent_name=self.config.name,
                 success=False,
                 data={},
-                error=str(e),
+                error=error_msg,
                 latency_ms=0
             )
 
@@ -344,10 +355,14 @@ class PortfolioAgent(BaseAgent):
                 uk_tickers = [t for t in df_subset.columns if t.endswith(".L")]
 
                 for t in uk_tickers:
-                     series = df_subset[t]
-                     mask = series > 500
-                     # Apply transformation only where mask is true using numpy.where
-                     df_subset[t] = np.where(mask, series / 100.0, series)
+                    try:
+                        # Ensure numeric comparison - yfinance can return strings
+                        series = pd.to_numeric(df_subset[t], errors='coerce')
+                        mask = series > 500
+                        # Apply transformation only where mask is true using numpy.where
+                        df_subset[t] = np.where(mask, series / 100.0, series)
+                    except Exception as e:
+                        self.logger.warning(f"Currency conversion failed for {t}: {e}")
 
                 # Calculate weighted sum
                 portfolio_val = df_subset.dot(quantities)

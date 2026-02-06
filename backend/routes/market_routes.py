@@ -2,7 +2,7 @@
 Market Routes - Portfolio and Market Data
 """
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException
 from typing import Optional
 import logging
 import asyncio
@@ -13,15 +13,14 @@ from utils import sanitize_nan
 from app_context import state
 from cache_manager import cache
 from trading212_mcp_server import normalize_ticker
-from market_context import GoalData
-from data_engine import get_alpaca_client, get_finnhub_client
+from data_engine import get_alpaca_client
 
 
 
 # Specialist Agent Imports
 from agents.quant_agent import QuantAgent
 from agents.forecasting_agent import ForecastingAgent
-from agents.base_agent import AgentConfig, AgentResponse
+from agents.base_agent import AgentResponse
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -48,7 +47,7 @@ async def create_goal_plan(context: dict):
     Returns:
         Expert investment plan with asset allocation, strategy, and Trading 212 Pie implementation details.
     """
-    from agents.goal_planner_agent import GoalPlannerAgent, AgentConfig
+    from agents.goal_planner_agent import GoalPlannerAgent
     
     try:
         # Create ad-hoc specialist
@@ -170,16 +169,28 @@ async def get_live_portfolio(account_type: Optional[str] = None):
             response = await agent.analyze({"account_type": account_type})
             
             if not response.success:
-                raise RuntimeError(f"Portfolio analysis failed: {response.error}")
+                error_msg = response.error or "Unknown Error"
+                
+                # SOTA: Map Agent errors to HTTP Status Codes for UI handling
+                if "Invalid API Credential" in error_msg or "401" in error_msg:
+                    raise HTTPException(status_code=401, detail="Invalid API Credentials. Please check Settings.")
+                elif "Connection Refused" in error_msg:
+                   raise HTTPException(status_code=503, detail="Trading 212 Service Unavailable.")
+                elif "demo" in error_msg.lower(): # Explicit user instruction invalidation
+                   raise HTTPException(status_code=400, detail="Demo mode disabled by policy.")
+                else:
+                    # Propagate the actual error instead of 500
+                    raise HTTPException(status_code=400, detail=error_msg)
                 
             data = response.data or {}
             
             # Save snapshot using ChatManager
             if data:
+                summary = data.get("summary", {})
                 state.chat_manager.save_portfolio_snapshot(
-                    total_value=data.get("total_value", 0),
-                    total_pnl=data.get("total_pnl", 0),
-                    cash_balance=data.get("cash_balance", {}).get("total", 0) if isinstance(data.get("cash_balance"), dict) else data.get("cash_balance", 0),
+                    total_value=summary.get("current_value", 0),
+                    total_pnl=summary.get("total_pnl", 0),
+                    cash_balance=summary.get("cash_balance", {}).get("total", 0) if isinstance(summary.get("cash_balance"), dict) else summary.get("cash_balance", 0),
                     positions=data.get("positions", []),
                 )
 
@@ -187,10 +198,13 @@ async def get_live_portfolio(account_type: Optional[str] = None):
                 cache.set(cache_key, data, ttl=60)
 
             return sanitize_nan(data)
+            
+        except HTTPException:
+            raise # Re-raise HTTP exceptions defined above
         except Exception as e:
             logger.error(f"Error fetching portfolio: {e}", exc_info=True)
-            # Sentinel: Sanitized error message
-            raise HTTPException(status_code=500, detail="Internal Server Error")
+            # Only fall back to 500 for truly unexpected internal crashes
+            raise HTTPException(status_code=500, detail=f"Internal System Error: {str(e)}")
 
 @router.get("/portfolio/history")
 async def get_portfolio_history(days: int = 30, account_type: Optional[str] = None):
@@ -455,7 +469,7 @@ async def get_technical_analysis(ticker: str, timeframe: str = "1Month"):
         # 1. Fetch OHLCV data using Alpaca
         alpaca = get_alpaca_client()
         result = await alpaca.get_historical_bars(ticker, timeframe=timeframe, limit=1000)
-        bars = result.get("bars", [])
+        bars = result.get("bars", []) if result else []
         
         if not bars or len(bars) < 20:
              # Basic validity check for UI
@@ -472,7 +486,7 @@ async def get_technical_analysis(ticker: str, timeframe: str = "1Month"):
         
         if target_res:
             opt_result = await alpaca.get_historical_bars(ticker, timeframe=target_res, limit=1000)
-            opt_bars = opt_result.get("bars", [])
+            opt_bars = opt_result.get("bars", []) if opt_result else []
             if len(opt_bars) >= 200:
                 bars_for_forecast = opt_bars
                 forecast_tf = target_res
@@ -515,6 +529,21 @@ async def get_technical_analysis(ticker: str, timeframe: str = "1Month"):
             "error": "Internal Server Error"
         }
 
+def _get_bar_close(bar: dict) -> float:
+    """Safely extract close price from bar, handling multiple schemas."""
+    # Try common keys in order of preference
+    for key in ['c', 'close', 'Close']:
+        if key in bar:
+            val = bar[key]
+            # Handle Decimal or other numeric types
+            try:
+                if hasattr(val, '__float__'):
+                    return float(val)
+                return float(val) if val is not None else 0.0
+            except (TypeError, ValueError):
+                continue
+    return 0.0
+
 def _generate_ai_analysis_text(quant_data: dict, forecast_data: dict, bars: list, ticker: str) -> str:
     """Generate human-readable AI analysis from quant + forecast data."""
     parts = []
@@ -526,11 +555,11 @@ def _generate_ai_analysis_text(quant_data: dict, forecast_data: dict, bars: list
     if not bars or len(bars) < 21:
         return "Insufficient data for trend analysis."
     
-    current_price = bars[-1]['c']
+    current_price = _get_bar_close(bars[-1])
     
     # Determine trend (compare to 20 bars ago)
     if len(bars) >= 21:
-        past_price = bars[-21]['c']
+        past_price = _get_bar_close(bars[-21])
         if current_price > past_price:
             trend = "bullish"
         elif current_price < past_price:
@@ -590,7 +619,7 @@ def _generate_ai_analysis_text(quant_data: dict, forecast_data: dict, bars: list
             if is_fallback:
 
                 note = forecast_data.get("note", "")
-                source_label = f"⚠️ Using Statistical Fallback"
+                source_label = "⚠️ Using Statistical Fallback"
                 
                 # Special handling for Sanity Check failures
                 if "Sanity Check Failed" in note:

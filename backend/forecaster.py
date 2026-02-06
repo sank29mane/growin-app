@@ -9,9 +9,8 @@ import numpy as np
 import logging
 import asyncio
 import platform
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from sklearn.preprocessing import StandardScaler
-import pandas as pd
 import datetime
 
 logger = logging.getLogger(__name__)

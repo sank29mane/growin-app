@@ -1,7 +1,6 @@
 
 import pytest
 import pandas as pd
-import numpy as np
 from unittest.mock import MagicMock, patch
 import sys
 import asyncio
@@ -50,7 +49,6 @@ async def test_get_portfolio_history_vectorized():
         mock_get_live.return_value = f
 
         # Patch yfinance inside the function execution
-        import yfinance
         with patch('yfinance.download') as mock_download:
             # yf.download(...) returns a DataFrame, then code calls ['Close'] on it.
             # So we simulate that structure.

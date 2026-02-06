@@ -1,9 +1,6 @@
-<<<<<<< HEAD
-"""Quant Agent - Technical Analysis using TA-Lib
-=======
 """
 Quant Agent - Technical Analysis using TA-Lib
->>>>>>> origin/main
+
 Ultra-fast algorithmic technical indicator calculations.
 """
 
@@ -91,9 +88,10 @@ class QuantAgent(BaseAgent):
         import numpy as np
 
         # Extract price arrays (ensure float64 for TA-Lib)
-        closes = np.array([b['c'] for b in bars], dtype=np.float64)
-        highs = np.array([b['h'] for b in bars], dtype=np.float64)
-        lows = np.array([b['l'] for b in bars], dtype=np.float64)
+        # Robust key handling for different schemas (c/close, h/high, l/low)
+        closes = np.array([float(b.get('c', b.get('close', 0))) for b in bars], dtype=np.float64)
+        highs = np.array([float(b.get('h', b.get('high', 0))) for b in bars], dtype=np.float64)
+        lows = np.array([float(b.get('l', b.get('low', 0))) for b in bars], dtype=np.float64)
 
 
         # Calculate indicators (use TA-Lib if available, otherwise pure Python fallbacks)
@@ -151,6 +149,9 @@ class QuantAgent(BaseAgent):
             support_level=support,
             resistance_level=resistance
         )
+
+        from status_manager import status_manager
+        status_manager.set_status("quant_agent", "ready", f"Signal: {quant_data.signal}")
 
         return AgentResponse(
             agent_name=self.config.name,
@@ -383,8 +384,10 @@ class QuantAgent(BaseAgent):
                     troughs.append(lows[i])
 
         # If no structural points found, fallback to 50-day extremes
-        if len(peaks) == 0: peaks = np.array([np.max(highs[-50:])])
-        if len(troughs) == 0: troughs = np.array([np.min(lows[-50:])])
+        if len(peaks) == 0:
+            peaks = np.array([np.max(highs[-50:])])
+        if len(troughs) == 0:
+            troughs = np.array([np.min(lows[-50:])])
 
         # Find closest structural levels to current price
         # Resistance: Lowest peak above price, or highest peak if none above

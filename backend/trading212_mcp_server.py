@@ -9,10 +9,8 @@ import asyncio
 import base64
 import json
 import os
-import re
 import sys
 import time
-from datetime import datetime
 from typing import Any, Dict, Optional
 from urllib.parse import urlencode
 
@@ -35,7 +33,7 @@ DEMO_API_BASE = "https://demo.trading212.com/api/v0"
 STATE_FILE = ".state.json"
 
 # Import centralized currency normalization
-from utils.currency_utils import CurrencyNormalizer, normalize_all_positions, calculate_portfolio_value
+from utils.currency_utils import normalize_all_positions
 from utils.ticker_utils import normalize_ticker
 from t212_handlers import (
     handle_analyze_portfolio,
@@ -237,23 +235,27 @@ class Trading212Client:
 
     async def get_historical_orders(self, cursor: Optional[int] = None, limit: int = 50) -> dict:
         params = {"limit": min(limit, 50)}
-        if cursor: params["cursor"] = cursor
+        if cursor:
+            params["cursor"] = cursor
         return await self._request("GET", f"equity/history/orders?{urlencode(params)}")
 
     async def get_dividends(self, cursor: Optional[int] = None, limit: int = 50) -> dict:
         params = {"limit": min(limit, 50)}
-        if cursor: params["cursor"] = cursor
+        if cursor:
+            params["cursor"] = cursor
         return await self._request("GET", f"equity/history/dividends?{urlencode(params)}")
 
     async def get_transactions(self, cursor: Optional[int] = None, limit: int = 50) -> dict:
         params = {"limit": min(limit, 50)}
-        if cursor: params["cursor"] = cursor
+        if cursor:
+            params["cursor"] = cursor
         return await self._request("GET", f"equity/history/transactions?{urlencode(params)}")
 
     async def get_instruments(self) -> list:
         cache_key = "instruments"
         cached = self.cache.get(cache_key)
-        if cached: return cached
+        if cached:
+            return cached
         try:
             data = await self._request("GET", "equity/metadata/instruments")
             self.cache.set(cache_key, data)
@@ -261,13 +263,15 @@ class Trading212Client:
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 429:
                 stale_data, _ = self.cache.get_with_expiry_status(cache_key)
-                if stale_data: return stale_data
+                if stale_data:
+                    return stale_data
             raise
 
     async def get_exchanges(self) -> list:
         cache_key = "exchanges"
         cached = self.cache.get(cache_key)
-        if cached: return cached
+        if cached:
+            return cached
         try:
             data = await self._request("GET", "equity/metadata/exchanges")
             self.cache.set(cache_key, data)
@@ -275,7 +279,8 @@ class Trading212Client:
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 429:
                 stale_data, _ = self.cache.get_with_expiry_status(cache_key)
-                if stale_data: return stale_data
+                if stale_data:
+                    return stale_data
             raise
 
     async def get_all_pies(self) -> list:
@@ -328,7 +333,8 @@ async def read_resource(uri: str) -> str:
         "trading212://history/dividends": lambda: c.get_dividends(limit=50),
         "trading212://history/transactions": lambda: c.get_transactions(limit=50),
     }
-    if uri not in resource_map: raise ValueError(f"Unknown resource: {uri}")
+    if uri not in resource_map:
+        raise ValueError(f"Unknown resource: {uri}")
     data = await resource_map[uri]()
     return json.dumps(data, separators=( ",", ":"))
 
@@ -362,10 +368,18 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     global active_account_type
     c = get_active_client()
     try:
-        if name == "analyze_portfolio": return await handle_analyze_portfolio(arguments, active_account_type, get_clients, clients)
-        elif name == "place_market_order": return await handle_market_order(arguments, c)
-        elif name == "get_price_history": return await handle_get_price_history(arguments)
-        elif name == "get_current_price": return await handle_get_current_price(arguments)
+        if name == "analyze_portfolio":
+            return await handle_analyze_portfolio(arguments, active_account_type, get_clients, clients)
+        
+        elif name == "place_market_order":
+            return await handle_market_order(arguments, c)
+        
+        elif name == "get_price_history":
+            return await handle_get_price_history(arguments)
+        
+        elif name == "get_current_price":
+            return await handle_get_current_price(arguments)
+        
         elif name == "get_position_details":
             ticker = arguments["ticker"].upper()
             all_clients = get_clients()
@@ -375,29 +389,56 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     if position:
                         position["account_type"] = acc_type
                         return [TextContent(type="text", text=json.dumps(sanitize_nan(position), separators=(",", ":")))]
-                except: continue
+                except Exception:
+                    continue
             return [TextContent(type="text", text=f"Position {ticker} not found.")]
+        
         elif name == "place_limit_order":
-            result = await c.place_limit_order(ticker=arguments["ticker"], quantity=arguments["quantity"], limit_price=arguments["limit_price"], order_type=arguments["order_type"], time_validity=arguments.get("time_validity", "DAY"))
+            result = await c.place_limit_order(
+                ticker=arguments["ticker"],
+                quantity=arguments["quantity"],
+                limit_price=arguments["limit_price"],
+                order_type=arguments["order_type"],
+                time_validity=arguments.get("time_validity", "DAY")
+            )
             return [TextContent(type="text", text=f"Limit order placed:\n{json.dumps(result, indent=2)}")]
+        
         elif name == "place_stop_order":
-            result = await c.place_stop_order(ticker=arguments["ticker"], quantity=arguments["quantity"], stop_price=arguments["stop_price"], order_type=arguments["order_type"], time_validity=arguments.get("time_validity", "DAY"))
+            result = await c.place_stop_order(
+                ticker=arguments["ticker"],
+                quantity=arguments["quantity"],
+                stop_price=arguments["stop_price"],
+                order_type=arguments["order_type"],
+                time_validity=arguments.get("time_validity", "DAY")
+            )
             return [TextContent(type="text", text=f"Stop order placed:\n{json.dumps(result, indent=2)}")]
+        
         elif name == "place_stop_limit_order":
-            result = await c.place_stop_limit_order(ticker=arguments["ticker"], quantity=arguments["quantity"], stop_price=arguments["stop_price"], limit_price=arguments["limit_price"], order_type=arguments["order_type"], time_validity=arguments.get("time_validity", "DAY"))
+            result = await c.place_stop_limit_order(
+                ticker=arguments["ticker"],
+                quantity=arguments["quantity"],
+                stop_price=arguments["stop_price"],
+                limit_price=arguments["limit_price"],
+                order_type=arguments["order_type"],
+                time_validity=arguments.get("time_validity", "DAY")
+            )
             return [TextContent(type="text", text=f"Stop-limit order placed:\n{json.dumps(result, indent=2)}")]
+        
         elif name == "cancel_order":
             result = await c.cancel_order(arguments["order_id"])
             return [TextContent(type="text", text=f"Order cancelled:\n{json.dumps(result, indent=2)}")]
+        
         elif name == "search_instruments":
             query = arguments["query"].upper()
             instruments = await c.get_instruments()
             results = [inst for inst in instruments if query in inst.get("ticker", "").upper() or query in inst.get("name", "").upper()]
             return [TextContent(type="text", text=json.dumps(sanitize_nan(results[:20]), separators=( ",", ":")))]
+        
         elif name == "get_historical_performance":
             limit = arguments.get("limit", 50)
             history = await c.get_historical_orders(limit=min(limit, 50))
             return [TextContent(type="text", text=json.dumps(sanitize_nan(history), indent=2))]
+        
         elif name == "calculate_portfolio_metrics":
             positions, cash = await asyncio.gather(c.get_all_positions(), c.get_account_cash())
             instruments = await c.get_instruments()
@@ -408,43 +449,63 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             total_pnl = sum(pos.get("ppl", 0) for pos in positions)
             sorted_by_pnl = sorted(positions, key=lambda x: x.get("ppl", 0), reverse=True)
             metrics = {
-                "portfolio_value": round(total_value, 2), "total_invested": round(total_cost, 2), "total_pnl": round(total_pnl, 2),
+                "portfolio_value": round(total_value, 2),
+                "total_invested": round(total_cost, 2),
+                "total_pnl": round(total_pnl, 2),
                 "pnl_percentage": round((total_pnl / total_cost * 100) if total_cost > 0 else 0, 2),
-                "cash_balance": cash, "number_of_positions": len(positions), "top_performers": sorted_by_pnl[:5],
+                "cash_balance": cash,
+                "number_of_positions": len(positions),
+                "top_performers": sorted_by_pnl[:5],
                 "worst_performers": sorted_by_pnl[-5:] if len(sorted_by_pnl) > 5 else [],
             }
             return [TextContent(type="text", text=json.dumps(sanitize_nan(metrics), separators=( ",", ":")))]
+        
         elif name == "get_all_pies":
             pies = await c.get_all_pies()
             return [TextContent(type="text", text=json.dumps(pies, separators=( ",", ":")))]
+        
         elif name == "get_pie_details":
             pie = await c.get_pie(arguments["pie_id"])
             return [TextContent(type="text", text=json.dumps(pie, indent=2))]
+        
         elif name == "create_investment_pie":
             result = await c.create_pie(name=arguments["name"], icon=arguments["icon"], instruments=arguments["instruments"])
             return [TextContent(type="text", text=f"Pie created:\n{json.dumps(result, indent=2)}")]
+        
         elif name == "update_investment_pie":
             result = await c.update_pie(pie_id=arguments["pie_id"], name=arguments["name"], icon=arguments["icon"], instruments=arguments["instruments"])
             return [TextContent(type="text", text=f"Pie updated:\n{json.dumps(result, indent=2)}")]
+        
         elif name == "delete_investment_pie":
             result = await c.delete_pie(arguments["pie_id"])
             return [TextContent(type="text", text=f"Pie deleted:\n{json.dumps(result, indent=2)}")]
+        
         elif name == "switch_account":
             account_type = arguments["account_type"].lower()
             new_key, new_secret = arguments.get("key"), arguments.get("secret")
-            if account_type not in ["invest", "isa"]: raise ValueError("Invalid account type.")
+            if account_type not in ["invest", "isa"]:
+                raise ValueError("Invalid account type.")
             active_account_type = account_type
             if new_key:
-                if account_type not in credentials: credentials[account_type] = {}
+                if account_type not in credentials:
+                    credentials[account_type] = {}
                 credentials[account_type]["key"] = new_key
-                if new_secret is not None: credentials[account_type]["secret"] = new_secret
-                if clients.get(account_type): await clients[account_type].close()
+                if new_secret is not None:
+                    credentials[account_type]["secret"] = new_secret
+                if clients.get(account_type):
+                    await clients[account_type].close()
                 clients[account_type] = Trading212Client(new_key, new_secret or "", credentials.get("use_demo", False))
-            if not clients.get(account_type): raise ValueError(f"No API key found for {account_type.upper()}.")
+            
+            if not clients.get(account_type):
+                raise ValueError(f"No API key found for {account_type.upper()}.")
+            
             try:
-                with open(STATE_FILE, "w") as f: json.dump({"account_type": active_account_type}, f)
-            except Exception: pass
+                with open(STATE_FILE, "w") as f:
+                    json.dump({"account_type": active_account_type}, f)
+            except Exception:
+                pass
             return [TextContent(type="text", text=f"Switched to {account_type.upper()}.")]
+        
         elif name == "get_ticker_analysis":
             ticker = normalize_ticker(arguments["ticker"])
             loop = asyncio.get_running_loop()
@@ -452,12 +513,14 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             keys = ["sector", "industry", "marketCap", "forwardPE", "trailingPE", "dividendYield", "fiftyTwoWeekHigh", "fiftyTwoWeekLow", "averageVolume", "currentPrice", "targetMeanPrice", "recommendationKey", "ebitda", "debtToEquity", "returnOnEquity", "freeCashflow", "beta", "shortName", "longName", "currency"]
             filtered = {k: v for k, v in info.items() if k in keys}
             return [TextContent(type="text", text=json.dumps(filtered, indent=2))]
+        
         elif name == "calculate_technical_indicators":
             ticker = normalize_ticker(arguments["ticker"])
             period, interval = arguments.get("period", "1y"), arguments.get("interval", "1d")
             loop = asyncio.get_running_loop()
             df = await loop.run_in_executor(None, lambda: _compute_indicators(yf.Ticker(ticker).history(period=period, interval=interval)))
-            if df is None or df.empty: return [TextContent(type="text", text=f"No data for {ticker}")]
+            if df is None or df.empty:
+                return [TextContent(type="text", text=f"No data for {ticker}")]
             latest = df.iloc[-10:].copy().reset_index()
             latest["Date"] = latest["Date"].apply(lambda x: x.isoformat() if hasattr(x, "isoformat") else str(x))
             cols = ["Date", "Close", "Volume", "SMA_50", "SMA_200", "RSI", "MACD", "Signal_Line", "BB_Upper", "BB_Lower"]
@@ -465,7 +528,10 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             result = latest[cols].to_dict(orient="records")
             summary = {"ticker": ticker, "latest_indicators": result[-1], "recent_trend": result}
             return [TextContent(type="text", text=json.dumps(summary, indent=2, default=str))]
-        else: raise ValueError(f"Unknown tool: {name}")
+        
+        else:
+            raise ValueError(f"Unknown tool: {name}")
+            
     except Exception as e:
         return [TextContent(type="text", text=json.dumps({"error": str(e), "success": False}))]
 
@@ -481,7 +547,8 @@ def get_active_client() -> Trading212Client:
     c = clients.get(active_account_type)
     if not c:
         available = get_clients()
-        if not available: raise ValueError("No Trading 212 clients initialized.")
+        if not available:
+            raise ValueError("No Trading 212 clients initialized.")
         return list(available.values())[0]
     return c
 
@@ -491,29 +558,45 @@ async def main():
     def get_env_var(name: str) -> Optional[str]:
         val = os.getenv(name)
         return val if val and val.strip() else None
+    
     generic_key = get_env_var("TRADING212_API_KEY")
     invest_key = get_env_var("TRADING212_API_KEY_INVEST") or generic_key
     isa_key = get_env_var("TRADING212_API_KEY_ISA")
+    
     generic_secret = get_env_var("TRADING212_API_SECRET")
     invest_secret = get_env_var("TRADING212_API_SECRET_INVEST") or generic_secret
     isa_secret = get_env_var("TRADING212_API_SECRET_ISA") or generic_secret
+    
     use_demo = (get_env_var("TRADING212_USE_DEMO") or "false").lower() == "true"
-    credentials = {"invest": {"key": invest_key, "secret": invest_secret}, "isa": {"key": isa_key, "secret": isa_secret}, "use_demo": use_demo}
+    
+    credentials = {
+        "invest": {"key": invest_key, "secret": invest_secret},
+        "isa": {"key": isa_key, "secret": isa_secret},
+        "use_demo": use_demo
+    }
+    
     if invest_key and isa_key and invest_key == isa_key:
         clients["invest"] = Trading212Client(invest_key, invest_secret or "", use_demo)
         clients["isa"] = clients["invest"]
     else:
-        if invest_key: clients["invest"] = Trading212Client(invest_key, invest_secret or "", use_demo)
-        if isa_key: clients["isa"] = Trading212Client(isa_key, isa_secret or "", use_demo)
+        if invest_key:
+            clients["invest"] = Trading212Client(invest_key, invest_secret or "", use_demo)
+        if isa_key:
+            clients["isa"] = Trading212Client(isa_key, isa_secret or "", use_demo)
+            
     global active_account_type
     active_account_type = "invest" if "invest" in clients else ("isa" if "isa" in clients else "invest")
+    
     try:
         if os.path.exists(STATE_FILE):
             with open(STATE_FILE, "r") as f:
                 state_data = json.load(f)
                 saved_type = state_data.get("account_type")
-                if saved_type in credentials: active_account_type = saved_type
-    except Exception: pass
+                if saved_type in credentials:
+                    active_account_type = saved_type
+    except Exception:
+        pass
+        
     async with stdio_server() as (read_stream, write_stream):
         await app.run(read_stream, write_stream, app.create_initialization_options())
 

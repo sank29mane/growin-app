@@ -5,10 +5,9 @@ User-selectable model with price validation integration
 
 from market_context import MarketContext
 from price_validation import PriceValidator
-from typing import Dict, Optional, List, Any
+from typing import Dict, Optional
 import logging
 import re
-import os
 from langchain_core.messages import SystemMessage, HumanMessage
 from .llm_factory import LLMFactory
 
@@ -106,16 +105,24 @@ class DecisionAgent:
             response = await self.llm.ainvoke(messages)
             return response.content
         elif hasattr(self.llm, "chat"):
-            # LM Studio Client
+            # LM Studio Client - Optimized for High Token Throughput
             msg_dicts = [{"role": "system", "content": system_content}, {"role": "user", "content": prompt}]
-            resp = await self.llm.chat(model_id=self.model_name, messages=msg_dicts, temperature=0)
+            # Use higher max_tokens for complex synthesis
+            resp = await self.llm.chat(
+                model_id=self.model_name, 
+                messages=msg_dicts, 
+                temperature=0.2, # Slight temperature for better synthesis
+                max_tokens=2048
+            )
 
             if "error" in resp:
                 raise RuntimeError(resp["error"])
 
             return resp.get("content", "")
         else:
-            raise ValueError("LLM interface not recognized")
+            llm_type = type(self.llm).__name__
+            llm_attrs = dir(self.llm) if self.llm else "None"
+            raise ValueError(f"LLM interface not recognized. Type: {llm_type}, Attrs: {llm_attrs}")
 
     async def _critique_response(self, system_content: str, prompt: str, draft: str) -> str:
         """Critique and refine the draft."""
@@ -245,9 +252,12 @@ class DecisionAgent:
         has_isa = any(w in q for w in ["isa", "tax-free"])
         has_both = any(w in q for w in ["both", "all", "compare", "portfolio"])
 
-        if has_both or (has_invest and has_isa): return "all"
-        if has_isa: return "isa"
-        if has_invest: return "invest"
+        if has_both or (has_invest and has_isa):
+            return "all"
+        if has_isa:
+            return "isa"
+        if has_invest:
+            return "invest"
         return "all"
 
     def _build_prompt(self, context: MarketContext, query: str, account_filter: str = "all") -> str:
@@ -296,7 +306,8 @@ class DecisionAgent:
             if hasattr(p, 'accounts') and p.accounts:
                 # Compact account breakdown (one line)
                 acc_info = [f"{k[:3].upper()}: £{v.get('current_value',0):,.0f}" for k,v in p.accounts.items()]
-                if acc_info: p_text += f"\n- Split: {' | '.join(acc_info)}"
+                if acc_info:
+                    p_text += f"\n- Split: {' | '.join(acc_info)}"
 
             sections.append(p_text)
 
@@ -343,5 +354,6 @@ class DecisionAgent:
 
     async def generate_response(self, prompt: str) -> str:
         """Utility generation"""
-        if not self._initialized: await self._initialize_llm()
+        if not self._initialized:
+            await self._initialize_llm()
         return await self._generate_draft("You are a helpful assistant.", prompt)

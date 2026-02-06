@@ -130,9 +130,13 @@ class StockChartViewModel {
                 } else {
                     self.errorMessage = error.message
                 }
-            } else if (self.market == "UK" && self.provider != "finnhub") ||
-                        (self.market == "US" && self.provider != "alpaca") {
-                self.showProviderNotification(message: "Using \(self.provider) data")
+            } else if self.provider == "Synthetic" {
+                // STRICT: This should never happen now
+                self.errorMessage = "⚠️ No real market data available. Check your connection."
+            } else if (self.market == "UK" && self.provider == "yfinance") ||
+                        (self.market == "US" && self.provider == "yfinance") {
+                // Fallback to yfinance is OK but inform user
+                self.showProviderNotification(message: "ℹ️ Using yfinance (delayed data)")
             }
             
             self.updateChartMetadata()

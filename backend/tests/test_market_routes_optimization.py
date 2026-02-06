@@ -1,6 +1,5 @@
 
 import pytest
-import asyncio
 import pandas as pd
 import numpy as np
 from unittest.mock import MagicMock, patch

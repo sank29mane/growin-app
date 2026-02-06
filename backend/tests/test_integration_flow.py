@@ -3,15 +3,13 @@ import asyncio
 import sys
 import os
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 from dotenv import load_dotenv
 
 # Add backend to path
 sys.path.append(os.path.abspath("backend"))
 
 from agents.coordinator_agent import CoordinatorAgent
-from agents.research_agent import ResearchAgent
-from market_context import MarketContext
 
 load_dotenv()
 

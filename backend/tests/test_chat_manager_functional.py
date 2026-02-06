@@ -1,7 +1,5 @@
 import pytest
 import os
-import json
-import sqlite3
 from chat_manager import ChatManager
 
 @pytest.fixture

@@ -1,4 +1,3 @@
-import os
 from typing import List, Optional
 
 def validate_mcp_config(command: str, args: Optional[List[str]] = None) -> None:

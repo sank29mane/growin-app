@@ -6,8 +6,8 @@ Prevents "God Object" Coordinator by isolating IO logic here.
 
 import asyncio
 import logging
-from typing import Dict, Any, List, Optional
-from datetime import datetime, timedelta
+from typing import Dict, Any, Optional
+from datetime import datetime
 
 from market_context import MarketContext, PriceData, TimeSeriesItem, ResearchData, NewsArticle, SocialData, WhaleData
 from data_engine import get_alpaca_client, get_finnhub_client
@@ -94,8 +94,10 @@ class DataFabricator:
         return context
 
     async def _fetch_price_data(self, ticker: str) -> Optional[PriceData]:
-        """Fetch OHLCV and current price with robust normalization"""
         try:
+            from status_manager import status_manager
+            status_manager.set_status("coordinator", "working", f"Fetching price data for {ticker}...")
+            
             from utils.data_frayer import get_data_frayer
             frayer = get_data_frayer()
             
@@ -243,47 +245,14 @@ class DataFabricator:
                 history_series=history_series
             )
         except Exception as e:
-            logger.warning(f"Price fetch failed/insufficient for {ticker}: {e}. triggering fallback.")
-            # FALBACK: Return synthetic data instead of empty
-            try:
-                from utils.mock_data import generate_synthetic_chart_data
-                mock_series = generate_synthetic_chart_data(ticker, timeframe="1Day", limit=100)
-                
-                # Convert to TimeSeriesItem
-                history_series = [
-                    TimeSeriesItem(
-                        timestamp=int(datetime.fromisoformat(d['timestamp'].replace('Z', '+00:00')).timestamp() * 1000),
-                        open=d['open'],
-                        high=d['high'],
-                        low=d['low'],
-                        close=d['close'],
-                        volume=d['volume']
-                    ) for d in mock_series
-                ]
-                
-                return PriceData(
-                    ticker=ticker,
-                    current_price=mock_series[-1]['close'],
-                    currency="USD",
-                    source="Synthetic (Fallback)",
-                    history_series=history_series
-                )
-            except Exception as ex:
-                logger.error(f"Synthetic fallback failed: {ex}")
-                return PriceData(
-                    ticker=ticker,
-                    current_price=0.0,
-                    currency="USD",
-                    source="error_fallback",
-                    history_series=[]
-                )
+            logger.error(f"Price fetch failed for {ticker}: {e}")
+            # STRICT POLICY: No synthetic data. Return None to indicate failure.
+            return None
 
     async def _fetch_news_data(self, ticker: str) -> Optional[ResearchData]:
-        """
-        Fetch news using existing logic (migrated from ResearchAgent).
-        For now, we'll keep the actual API call logic in the existing helper or mock it, 
-        but in a full migration, this would call NewsData.io directly.
-        """
+        """Fetch news using existing logic."""
+        from status_manager import status_manager
+        status_manager.set_status("research_agent", "working", f"Searching news for {ticker}...")
         try:
             # Placeholder: In a real refactor, we'd move the NewsDataIOClient usage here.
             # Using a basic stub that would be populated by the actual API

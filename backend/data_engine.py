@@ -1,13 +1,12 @@
 import os
 import asyncio
-import time
 import logging
 from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 from utils.ticker_utils import normalize_ticker
-from utils.currency_utils import CurrencyNormalizer, normalize_all_positions
-from data_models import Position, PriceData
+from utils.currency_utils import CurrencyNormalizer
+from data_models import PriceData
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -396,9 +395,13 @@ class AlpacaClient:
 
                 if normalized_ticker in quote_resp:
                     quote = quote_resp[normalized_ticker]
+                    price = float(quote.ask_price)
+                    if price <= 0:
+                        return None
+                        
                     return {
                         "symbol": ticker,
-                        "current_price": Decimal(str(quote.ask_price)),
+                        "current_price": Decimal(str(price)),
                         "change": Decimal("0"), # Needs historical context for change
                         "change_percent": Decimal("0"),
                         "high": Decimal("0"),
@@ -522,14 +525,18 @@ class FinnhubClient:
         try:
             from utils.currency_utils import CurrencyNormalizer
             quote = self.client.quote(normalized_ticker)
-
-            # Helper to safely get value or 0 if None
+            
+            # Helper to safely get values from quote dict
             def get_val(key):
                 return quote.get(key) if quote.get(key) is not None else 0
 
+            current_price = get_val('c')
+            if current_price <= 0:
+                return None
+                
             return {
                 "symbol": ticker,
-                "current_price": CurrencyNormalizer.normalize_price(get_val('c'), ticker),
+                "current_price": CurrencyNormalizer.normalize_price(current_price, ticker),
                 "change": CurrencyNormalizer.normalize_price(get_val('d'), ticker),
                 "change_percent": Decimal(str(get_val('dp') if get_val('dp') is not None else 0)),
                 "high": CurrencyNormalizer.normalize_price(get_val('h'), ticker),
@@ -550,8 +557,8 @@ def get_alpaca_client():
     try:
         return AlpacaClient()
     except EnvironmentError:
-        logger.info("Using MockAlpacaClient for development.")
-        return MockAlpacaClient()
+        logger.info("Using AlpacaClient in fallback mode for development.")
+        return AlpacaClient()
 
 
 def get_finnhub_client():

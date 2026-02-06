@@ -1,6 +1,5 @@
 import sys
 import os
-import pytest
 from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
@@ -78,7 +77,8 @@ def test_add_mcp_server_sanitization():
     with TestClient(app) as client:
         # Mock chat_manager.add_mcp_server to raise exception
         with patch.object(state.chat_manager, 'add_mcp_server', side_effect=Exception("SENSITIVE_ARGS_LEAK")):
-            response = client.post("/mcp/servers/add", json={"name": "test", "type": "stdio"})
+            # Add command to pass validation
+            response = client.post("/mcp/servers/add", json={"name": "test", "type": "stdio", "command": "echo", "args": []})
 
             assert response.status_code == 500
             detail = response.json().get("detail")

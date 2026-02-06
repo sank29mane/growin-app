@@ -3,10 +3,8 @@ Chart Routes - Historical and Real-time Market Data
 """
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
-from app_context import state
 import logging
 import asyncio
-import json
 from datetime import datetime, timezone
 from utils.ticker_utils import normalize_ticker
 from utils.currency_utils import CurrencyNormalizer
@@ -69,13 +67,25 @@ async def get_alpaca_chart_data(ticker: str, timeframe: str, limit: int, cache_k
                 if not timestamp_str.endswith("Z") and "+" not in timestamp_str:
                     timestamp_str += "Z"
 
+                # Normalize currency AT SOURCE
+                close_val = float(CurrencyNormalizer.normalize_price(bar_data.get("c", bar_data.get("close", 0)), ticker))
+                high_val = float(CurrencyNormalizer.normalize_price(bar_data.get("h", bar_data.get("high", 0)), ticker))
+                low_val = float(CurrencyNormalizer.normalize_price(bar_data.get("l", bar_data.get("low", 0)), ticker))
+                open_val = float(CurrencyNormalizer.normalize_price(bar_data.get("o", bar_data.get("open", 0)), ticker))
+                volume_val = int(bar_data.get("v", bar_data.get("volume", 0)))
+
                 points.append({
                     "timestamp": timestamp_str,
-                    "close": round(float(bar_data.get("c", 0)), 2),
-                    "high": round(float(bar_data.get("h", 0)), 2),
-                    "low": round(float(bar_data.get("l", 0)), 2),
-                    "open": round(float(bar_data.get("o", 0)), 2),
-                    "volume": int(bar_data.get("v", 0))
+                    "close": close_val,
+                    "high": high_val,
+                    "low": low_val,
+                    "open": open_val,
+                    "volume": volume_val,
+                    "c": close_val,
+                    "h": high_val,
+                    "l": low_val,
+                    "o": open_val,
+                    "v": volume_val
                 })
             except Exception:
                 continue
@@ -95,7 +105,6 @@ async def get_yfinance_chart_data(ticker: str, timeframe: str, limit: int, cache
     """Fallback chart data using yfinance."""
     from cache_manager import cache
     import yfinance as yf
-    import pandas as pd
 
     timeframe_normalized = timeframe.lower()
     timeframe_map = {
@@ -126,8 +135,30 @@ async def get_yfinance_chart_data(ticker: str, timeframe: str, limit: int, cache
         history['low'] = history['Low'].round(2)
         history['open'] = history['Open'].round(2)
         history['volume'] = history['Volume'].fillna(0).astype(int)
+        
+        # Add short keys
+        history['c'] = history['close']
+        history['h'] = history['high']
+        history['l'] = history['low']
+        history['o'] = history['open']
+        history['v'] = history['volume']
 
-        points = history[['timestamp', 'close', 'high', 'low', 'open', 'volume']].to_dict('records')
+        raw_points = history[['timestamp', 'close', 'high', 'low', 'open', 'volume', 'c', 'h', 'l', 'o', 'v']].to_dict('records')
+
+        # Normalize currency BEFORE caching
+        points = []
+        for p in raw_points:
+            p_norm = p.copy()
+            close_val = float(CurrencyNormalizer.normalize_price(p.get("close", p.get("c", 0)), ticker))
+            p_norm["close"] = close_val
+            p_norm["c"] = close_val
+            p_norm["high"] = float(CurrencyNormalizer.normalize_price(p.get("high", p.get("h", 0)), ticker))
+            p_norm["h"] = p_norm["high"]
+            p_norm["low"] = float(CurrencyNormalizer.normalize_price(p.get("low", p.get("l", 0)), ticker))
+            p_norm["l"] = p_norm["low"]
+            p_norm["open"] = float(CurrencyNormalizer.normalize_price(p.get("open", p.get("o", 0)), ticker))
+            p_norm["o"] = p_norm["open"]
+            points.append(p_norm)
 
         if len(points) > limit:
             step = max(1, len(points) // limit)
@@ -165,13 +196,7 @@ async def get_chart_data(symbol: str, timeframe: str = "1Day", limit: int = 500)
                 db_data["timestamp"] = db_data["timestamp"].apply(lambda x: x.isoformat())
                 points = db_data[["timestamp", "close", "high", "low", "open", "volume"]].to_dict("records")
 
-                # Normalize currency on read
-                for p in points:
-                    p["close"] = CurrencyNormalizer.normalize_price(p["close"], ticker)
-                    p["high"] = CurrencyNormalizer.normalize_price(p["high"], ticker)
-                    p["low"] = CurrencyNormalizer.normalize_price(p["low"], ticker)
-                    p["open"] = CurrencyNormalizer.normalize_price(p["open"], ticker)
-
+                # No normalization here: we store normalized data in AnalyticsDB
                 return {
                     "data": points,
                     "metadata": {"market": market, "currency": "GBP" if market == "UK" else "USD", "ticker": ticker, "provider": "AnalyticsDB"}
@@ -185,43 +210,57 @@ async def get_chart_data(symbol: str, timeframe: str = "1Day", limit: int = 500)
     if cached:
         return {"data": cached, "metadata": {"market": market, "currency": "GBP" if market == "UK" else "USD", "ticker": ticker, "provider": "Cache"}}
 
-    # 3. Fetch from Providers
+    # 3. Fetch from Providers based on Market
+    # STRICT POLICY: Use real data sources only. No synthetic fallback.
+    from data_engine import get_finnhub_client
+    
     data = []
-    provider = "yfinance"
-
-    if market == 'US':
+    provider = "Unknown"
+    
+    if market == 'UK':
+        # UK Stocks: Try Finnhub first, then yfinance
+        finnhub = get_finnhub_client()
+        if finnhub and finnhub.client:
+            try:
+                result = await finnhub.get_historical_bars(ticker, timeframe, limit)
+                if result and result.get("bars"):
+                    data = _convert_bars_to_chart_format(result["bars"], ticker)
+                    provider = "Finnhub"
+                    cache.set(cache_key, data, ttl=600)
+            except Exception as e:
+                logger.warning(f"Finnhub fetch failed for {ticker}: {e}")
+        
+        # Fallback to yfinance for UK stocks
+        if not data:
+            try:
+                data = await get_yfinance_chart_data(ticker, timeframe, limit, cache_key)
+                provider = "yfinance"
+            except Exception as e:
+                logger.warning(f"yfinance UK fallback failed for {ticker}: {e}")
+    else:
+        # US Stocks: Try Alpaca first, then yfinance
         try:
             data = await get_alpaca_chart_data(ticker, timeframe, limit, cache_key)
             provider = "Alpaca"
         except Exception:
-            pass # Fallback to yfinance
+            pass  # Fallback to yfinance
+        
+        if not data:
+            try:
+                data = await get_yfinance_chart_data(ticker, timeframe, limit, cache_key)
+                provider = "yfinance"
+            except Exception as e:
+                logger.warning(f"yfinance US fallback failed for {ticker}: {e}")
 
+    # STRICT: No synthetic data. Return 404 if no real data available.
     if not data:
-        try:
-            data = await get_yfinance_chart_data(ticker, timeframe, limit, cache_key)
-            provider = "yfinance"
-        except Exception:
-            pass
+        raise HTTPException(status_code=404, detail=f"No market data available for {symbol}. Check ticker symbol or try again later.")
 
-    # 4. Last Resort: Synthetic
-    if not data:
-        try:
-            from utils.mock_data import generate_synthetic_chart_data
-            data = generate_synthetic_chart_data(ticker, timeframe, limit)
-            provider = "Synthetic"
-        except Exception:
-            raise HTTPException(status_code=404, detail=f"No data found for {symbol}")
-
-    # 5. Normalize & Cache to DB
-    for p in data:
-        p["close"] = CurrencyNormalizer.normalize_price(p["close"], ticker)
-        p["high"] = CurrencyNormalizer.normalize_price(p["high"], ticker)
-        p["low"] = CurrencyNormalizer.normalize_price(p["low"], ticker)
-        p["open"] = CurrencyNormalizer.normalize_price(p["open"], ticker)
-
+    # 4. Final Processing & Persistent Backup
     try:
-        analytics_data = [{"t": p["timestamp"], "o": p["open"], "h": p["high"], "l": p["low"], "c": p["close"], "v": p["volume"]} for p in data]
-        analytics.bulk_insert_ohlcv(ticker, analytics_data)
+        if provider not in ["AnalyticsDB", "Cache"]:
+            analytics_data = [{"t": p["timestamp"], "o": p["open"], "h": p["high"], "l": p["low"], "c": p["close"], "v": p["volume"]} for p in data]
+            analytics.bulk_insert_ohlcv(ticker, analytics_data)
     except Exception as e:
         logger.warning(f"Failed to cache to AnalyticsDB: {e}")
 
@@ -235,6 +274,30 @@ async def get_chart_data(symbol: str, timeframe: str = "1Day", limit: int = 500)
             "provider": provider
         }
     }
+
+
+def _convert_bars_to_chart_format(bars: list, ticker: str) -> list:
+    """Convert data_engine bar format to chart route format."""
+    points = []
+    for bar in bars:
+        ts = bar.get("timestamp", "")
+        if not ts.endswith("Z") and "+" not in ts:
+            ts += "Z"
+        
+        points.append({
+            "timestamp": ts,
+            "close": float(bar.get("close", 0)),
+            "high": float(bar.get("high", 0)),
+            "low": float(bar.get("low", 0)),
+            "open": float(bar.get("open", 0)),
+            "volume": int(bar.get("volume", 0)),
+            "c": float(bar.get("close", 0)),
+            "h": float(bar.get("high", 0)),
+            "l": float(bar.get("low", 0)),
+            "o": float(bar.get("open", 0)),
+            "v": int(bar.get("volume", 0))
+        })
+    return points
 
 
 @router.websocket("/ws/chart/{symbol}")

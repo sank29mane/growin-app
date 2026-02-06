@@ -233,54 +233,16 @@ struct AccountPicker: View {
     var body: some View {
         HStack(spacing: 6) {
             ForEach(accounts, id: \.self) { account in
-                Button(action: {
+                AccountPickerButton(
+                    account: account,
+                    isSelected: selectedAccount == account,
+                    displayName: displayName(account),
+                    icon: icon(account)
+                ) {
                     withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
                         selectedAccount = account
                     }
-                }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: icon(account))
-                            .font(.system(size: 10))
-                        Text(displayName(account))
-                            .font(.system(size: 12, weight: .medium))
-                    }
-                    .accessibilityLabel(displayName(account))
-                    .accessibilityAddTraits(selectedAccount == account ? [.isSelected] : [])
-                    .accessibilityHint("Filters conversation context")
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(
-                        Capsule()
-                            .fill(selectedAccount == account
-                                ? LinearGradient(
-                                    colors: [.blue, .blue.opacity(0.8)],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                  )
-                                : LinearGradient(
-                                    colors: [Color.white.opacity(0.08), Color.white.opacity(0.05)],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                  )
-                            )
-                    )
-                    .overlay(
-                        Capsule()
-                            .stroke(
-                                selectedAccount == account 
-                                    ? Color.blue.opacity(0.3) 
-                                    : Color.white.opacity(0.1),
-                                lineWidth: 1
-                            )
-                    )
-                    .foregroundStyle(selectedAccount == account ? .white : .secondary)
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel(displayName(account))
-                .accessibilityAddTraits(selectedAccount == account ? [.isSelected] : [])
-                .accessibilityHint("Filters chat context to \(displayName(account))")
-
-
             }
         }
         .padding(6)
@@ -288,6 +250,66 @@ struct AccountPicker: View {
             Capsule()
                 .fill(Color.black.opacity(0.3))
         )
+    }
+}
+
+private struct AccountPickerButton: View {
+    let account: String
+    let isSelected: Bool
+    let displayName: String
+    let icon: String
+    let action: () -> Void
+    
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 10))
+                Text(displayName)
+                    .font(.system(size: 12, weight: .medium))
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(backgroundView)
+            .overlay(overlayView)
+            .foregroundStyle(isSelected ? .white : .secondary)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(displayName)
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+        .accessibilityHint("Filters chat context to \(displayName)")
+    }
+    
+    @ViewBuilder
+    private var backgroundView: some View {
+        if isSelected {
+            Capsule()
+                .fill(
+                    LinearGradient(
+                        colors: [.blue, .blue.opacity(0.8)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+        } else {
+            Capsule()
+                .fill(
+                    LinearGradient(
+                        colors: [Color.white.opacity(0.08), Color.white.opacity(0.05)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+        }
+    }
+    
+    @ViewBuilder
+    private var overlayView: some View {
+        Capsule()
+            .stroke(
+                isSelected ? Color.blue.opacity(0.3) : Color.white.opacity(0.1),
+                lineWidth: 1
+            )
     }
 }
 

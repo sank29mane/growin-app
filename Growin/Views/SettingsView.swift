@@ -159,10 +159,11 @@ struct AIConfigSection: View {
             guard let url = URL(string: "\(AppConfig.shared.baseURL)/api/models/lmstudio") else { return }
             do {
                 let (data, _) = try await URLSession.shared.data(from: url)
-                // Decode response: {"models": ["id1", "id2"], "error": "..."}
                 if let response = try? JSONDecoder().decode([String: [String]].self, from: data),
                    let models = response["models"] {
-                    self.lmStudioModels = models
+                    await MainActor.run {
+                        self.lmStudioModels = models
+                    }
                 }
             } catch {
                 print("Failed to fetch LM Studio models: \(error)")

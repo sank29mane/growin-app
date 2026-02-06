@@ -7,7 +7,7 @@ from datetime import datetime
 from app_logging import setup_logging
 
 # Import shared state and models from app_context (single source of truth)
-from app_context import state, ChatMessage, AnalyzeRequest, AgentResponse, T212ConfigRequest
+from app_context import state
 
 # Initialize Logging
 logger = setup_logging("growin_server")
@@ -52,7 +52,7 @@ except Exception:
 # FastAPI App Initialization
 # --------------------------------------------------------------------------- #
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
 from contextlib import asynccontextmanager
@@ -76,7 +76,7 @@ async def lifespan(app: FastAPI):
         {
             "name": "Trading 212",
             "type": "stdio",
-            "command": "python",
+            "command": sys.executable,
             "args": ["trading212_mcp_server.py"],
             "env": {},
             "url": None,
@@ -84,7 +84,7 @@ async def lifespan(app: FastAPI):
         {
             "name": "HuggingFace",
             "type": "stdio",
-            "command": "python",
+            "command": sys.executable,
             "args": ["huggingface_mcp_server.py"],
             "env": {"HF_TOKEN": os.getenv("HF_TOKEN", "")},
             "url": None,

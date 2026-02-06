@@ -15,10 +15,11 @@ struct ConversationItem: Codable, Identifiable {
     }
 }
 
-class ConversationListViewModel: ObservableObject {
-    @Published var conversations: [ConversationItem] = []
-    @Published var isLoading = false
-    @Published var errorMessage: String?
+@Observable @MainActor
+class ConversationListViewModel {
+    var conversations: [ConversationItem] = []
+    var isLoading = false
+    var errorMessage: String?
 
     private let config = AppConfig.shared
     private var cancellables = Set<AnyCancellable>()
@@ -86,7 +87,7 @@ class ConversationListViewModel: ObservableObject {
 }
 
 struct ConversationListView: View {
-    @StateObject private var viewModel = ConversationListViewModel()
+    @State private var viewModel = ConversationListViewModel()
     @Binding var selectedConversationId: String?
     @Environment(\.dismiss) private var dismiss
 

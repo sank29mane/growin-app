@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 import sys
 import os
 from unittest.mock import MagicMock

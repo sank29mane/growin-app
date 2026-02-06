@@ -4,7 +4,7 @@ Skill Loader - Injects specialist skills into LLM contexts
 import os
 import glob
 import logging
-from typing import Dict, List, Optional
+from typing import Dict
 import re
 
 logger = logging.getLogger(__name__)

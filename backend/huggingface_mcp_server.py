@@ -7,6 +7,7 @@ Provides tools to load, unload, and run inference on models from HuggingFace.
 
 import asyncio
 import sys
+import json
 from typing import Any
 
 from mcp.server import Server

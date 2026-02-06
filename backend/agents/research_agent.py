@@ -61,9 +61,12 @@ class ResearchAgent(BaseAgent):
         
         # Log available sources
         sources = []
-        if self.newsapi_key: sources.append("NewsAPI")
-        if self.tavily_key: sources.append("Tavily")
-        if self.newsdata_key: sources.append("NewsData.io")
+        if self.newsapi_key:
+            sources.append("NewsAPI")
+        if self.tavily_key:
+            sources.append("Tavily")
+        if self.newsdata_key:
+            sources.append("NewsData.io")
         
         if sources:
             logger.info(f"ResearchAgent initialized with sources: {', '.join(sources)}")
@@ -429,7 +432,8 @@ class ResearchAgent(BaseAgent):
             
             if clean_title and clean_title not in seen_titles and (not url or url not in seen_urls):
                 seen_titles.add(clean_title)
-                if url: seen_urls.add(url)
+                if url:
+                    seen_urls.add(url)
                 unique.append(art)
         return unique
 

@@ -2,7 +2,7 @@ import SwiftUI
 import Charts
 
 struct DashboardView: View {
-    @StateObject private var viewModel = DashboardViewModel()
+    @Bindable var viewModel: DashboardViewModel
     @State private var selectedPosition: Position?
     
     var body: some View {
