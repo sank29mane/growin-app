@@ -3,7 +3,6 @@ import unittest
 from unittest.mock import MagicMock, patch, AsyncMock
 import sys
 import os
-import json
 from datetime import datetime
 
 # Add backend to sys.path
@@ -11,7 +10,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from app_context import state, ChatMessage
 from chat_manager import ChatManager
-from routes.chat_routes import chat_message, list_conversations, get_conversation_history, update_conversation_title_if_needed
+from routes.chat_routes import chat_message, list_conversations, get_conversation_history
 
 class TestChatEndpoints(unittest.IsolatedAsyncioTestCase):
     

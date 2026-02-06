@@ -3,8 +3,7 @@ Whale Alert Agent - Monitors large block trades and institutional flow
 """
 
 import logging
-import asyncio
-from typing import Dict, Any, List
+from typing import Dict, Any
 from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from market_context import WhaleData
 from data_engine import get_alpaca_client

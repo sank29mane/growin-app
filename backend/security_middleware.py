@@ -1,6 +1,6 @@
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.types import ASGIApp, Receive, Scope, Send
-from fastapi import Request, Response
+from starlette.types import ASGIApp
+from fastapi import Request
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     def __init__(self, app: ASGIApp):

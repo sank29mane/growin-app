@@ -17,7 +17,6 @@ import sys
 import logging
 from typing import Dict, Any, Optional, Tuple
 from io import StringIO
-import traceback
 
 logger = logging.getLogger(__name__)
 

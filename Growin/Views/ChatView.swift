@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct ChatView: View {
-    @ObservedObject var viewModel: ChatViewModel
+    @Bindable var viewModel: ChatViewModel
     @State private var isUserScrolling = false
     @State private var showScrollToBottom = false
     @State private var showConversationList = false

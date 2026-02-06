@@ -7,7 +7,6 @@ import os
 import sys
 import time
 import threading
-import signal
 import logging
 
 # Configure basic logging if not already configured

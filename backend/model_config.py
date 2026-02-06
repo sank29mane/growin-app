@@ -3,7 +3,6 @@ Model Configuration for Decision Agent
 Allows easy model switching and supports multiple providers
 """
 
-import os
 from pathlib import Path
 
 # Get the absolute path to the backend directory

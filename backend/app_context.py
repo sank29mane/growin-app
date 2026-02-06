@@ -4,7 +4,6 @@ Shared application state and models to avoid circular imports.
 
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
-import asyncio
 from chat_manager import ChatManager
 from rag_manager import RAGManager
 from mcp_client import Trading212MCPClient

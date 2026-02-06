@@ -1,4 +1,3 @@
-import pytest
 from unittest.mock import MagicMock
 import os
 import sys
@@ -9,9 +8,9 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # MOCK DEPENDENCIES BEFORE IMPORTING APP
 # This is necessary because we haven't installed heavy ML libs in the test environment
 mock_modules = [
-    "numpy", "pandas", "yfinance", "duckdb",
-    "sklearn", "scikit-learn", "xgboost", "prophet",
-    "scipy", "torch", "transformers", "mlx", "mlx_lm",
+    "duckdb",
+    "xgboost", "prophet",
+    "torch", "transformers", "mlx", "mlx_lm",
     "rapidfuzz", "newsapi", "tavily", "vaderSentiment",
     "alpaca_trade_api", "granite_tsfm", "langchain",
     "langchain_core", "langchain_openai", "langchain_anthropic",

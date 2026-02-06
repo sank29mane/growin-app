@@ -8,7 +8,6 @@ from unittest.mock import MagicMock, patch
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
 from agents.research_agent import ResearchAgent
-from rag_manager import RAGManager
 from app_context import state
 
 async def test_deep_integration():

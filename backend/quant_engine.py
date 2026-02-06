@@ -1,5 +1,4 @@
 import pandas as pd
-import numpy as np
 try:
     import pandas_ta as ta
     PANDAS_TA_AVAILABLE = True

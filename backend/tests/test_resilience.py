@@ -1,8 +1,7 @@
 import pytest
 import asyncio
-import time
-from unittest.mock import AsyncMock, MagicMock, patch
-from resilience import CircuitBreaker, CircuitBreakerOpenError, retry_with_backoff, fallback, CircuitState
+from unittest.mock import AsyncMock
+from resilience import CircuitBreaker, retry_with_backoff, fallback, CircuitState
 
 @pytest.mark.asyncio
 async def test_circuit_breaker_state_transitions():

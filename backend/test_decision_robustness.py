@@ -1,8 +1,7 @@
 import asyncio
 import logging
 from agents.decision_agent import DecisionAgent
-from market_context import MarketContext, PriceData, PortfolioData, ResearchData, Signal
-import os
+from market_context import MarketContext, PriceData, PortfolioData
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

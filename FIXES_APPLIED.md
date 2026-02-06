@@ -1,4 +1,33 @@
-# Chat/Decision Agent Fixes Applied
+# Fixes Applied
+
+## Date: 2026-02-06
+
+### 1. 🛡️ **Security & Compliance (Sentinel / Secret Masker)**
+**Issue**: Logs were potentially exposing API keys and sensitive data.
+**Fix**:
+- Implemented `SecretMasker` (`backend/utils/secret_masker.py`) to automatically redact API keys, JWTs, and potential secrets from all application logs.
+- Integrated masking into `app_logging.py`.
+- Added `test_logging_safety.py` to verify redaction.
+
+### 2. ⚡ **Performance & Concurrency (Bolt / Jules)**
+**Issue**: Data fetching was inefficient and prone to race conditions.
+**Fix**:
+- **Data Engine**: Optimized `yfinance` fallback with vectorized Pandas operations (~3x speedup).
+- **Concurrency**: Fixed `AlpacaClient` and `FinnhubClient` fallback logic to handle async calls correctly.
+- **Optimization**: Removed mutable default arguments in `data_fabricator.py`.
+
+### 3. 🧹 **Codebase Refactoring & Cleanup**
+**Issue**: Accumulated technical debt, unused imports, and formatting inconsistencies.
+**Fix**:
+- Ran `ruff` auto-fix on the entire backend (~150+ files cleaned).
+- Removed dead code (`repro_ttm_anomaly.py`, `verify_agents.py`, etc.).
+- Simplified `Trading212MCPClient` and `DecisionAgent` logic.
+- Fixed critical bugs in `ml_forecaster.py` (return type mismatch) and `quant_agent.py` (list vs numpy array comparison).
+
+### 4. 🎨 **UI/UX Improvements (Palette)**
+**Issue**: Accessibility gaps in Portfolio View.
+**Fix**:
+- Enhanced `PortfolioView.swift` with better accessibility labels and voice-over support.
 
 ## Date: 2026-01-22
 

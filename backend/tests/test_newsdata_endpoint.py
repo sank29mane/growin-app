@@ -11,7 +11,7 @@ def test_market_endpoint():
     print(f"Testing NewsData.io 'market' endpoint with key: {api_key[:5]}...")
     
     # User suggested URL structure
-    url = f"https://newsdata.io/api/1/market"
+    url = "https://newsdata.io/api/1/market"
     params = {
         "apikey": api_key,
         "removeduplicate": 0,

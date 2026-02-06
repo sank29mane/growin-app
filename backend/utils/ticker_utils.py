@@ -4,17 +4,8 @@ Shared logic for resolving ticker discrepancies between T212, Yahoo Finance, and
 """
 
 import re
-from typing import Dict, List, Optional, Tuple
 
 # Bolt Optimization: Import optional dependencies at module level to avoid repeated ImportErrors (PR #48)
-try:
-    import growin_core
-    GROWIN_CORE_AVAILABLE = True
-except ImportError:
-    growin_core = None
-    GROWIN_CORE_AVAILABLE = False
-
-# Bolt Optimization: Import optional dependencies at module level to avoid repeated ImportErrors
 try:
     import growin_core
     GROWIN_CORE_AVAILABLE = True

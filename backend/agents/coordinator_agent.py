@@ -14,8 +14,6 @@ import logging
 import re
 import json
 import difflib
-import inspect
-from utils import run_safe_python
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +95,6 @@ class CoordinatorAgent:
     
     async def _initialize_llm(self):
         """Initialize the routing LLM"""
-        import os
         try:
             if "gpt" in self.model_name.lower():
                 from langchain_openai import ChatOpenAI
@@ -180,7 +177,7 @@ Query: "{clean_query}"
                     if models:
                         model_id = models[0]["id"]
                 
-                resp = await self.llm.chat(model_id=model_id, input_text=prompt, temperature=0, max_tokens=100)
+                resp = await self.llm.chat(model_id=model_id, input_text=prompt, temperature=0, max_tokens=512)
                 content = resp.get("content", "")
 
             # PARSE KEY-VALUE OUTPUT (Robust Regex)
@@ -415,7 +412,7 @@ Query: "{clean_query}"
                                 # Retry with new ticker
                                 retry_result = await agent.execute(new_context)
                                 if retry_result.success:
-                                    status_manager.set_status(agent_key, "ready", f"Resolved via Tier 2")
+                                    status_manager.set_status(agent_key, "ready", "Resolved via Tier 2")
                                     return retry_result
                                 else:
                                     result = retry_result # Update original result for Tier 3 fallthrough
@@ -433,7 +430,7 @@ Query: "{clean_query}"
                 status_manager.set_status(agent_key, "ready", "Task complete")
                 return result
         except asyncio.TimeoutError:
-            error_msg = f"Timout after 15s"
+            error_msg = "Timout after 15s"
             logger.warning(f"Specialist {agent.config.name} timed out")
             status_manager.set_status(agent_key, "error", "Timed out")
             return AgentResponse(
@@ -462,6 +459,34 @@ Query: "{clean_query}"
                 error=str(e),
                 latency_ms=0
             )
+
+    async def _attempt_ticker_fix(self, ticker: str) -> Optional[str]:
+        """
+        Attempt to fix malformed tickers or those containing special characters
+        that might have triggered the validation check (e.g. VOD.L is not alpha).
+        """
+        if not ticker:
+            return None
+
+        # Strip trailing dots first
+        ticker = ticker.strip('.')
+
+        # 1. Allow dot notation for UK/Exchanges (e.g. VOD.L, BRK.B)
+        if "." in ticker and ticker.replace(".", "").isalnum():
+            # It's likely valid if it has 1 dot and rest are alphanum
+            return ticker
+
+        # 2. Strip noise (punctuation other than dot)
+        clean = "".join(c for c in ticker if c.isalnum() or c == '.')
+
+        # If the result is a clean ticker (e.g. "AAPL."), strip trailing dot
+        clean = clean.strip('.')
+
+        if len(clean) >= 2:
+            return clean
+
+        # 3. Fallback to search if really broken or too short
+        return await self._resolve_ticker_via_search(ticker)
 
     async def _resolve_ticker_via_search(self, term: str) -> Optional[str]:
         """
@@ -613,7 +638,7 @@ Query: "{clean_query}"
 
             # Populate PriceData with history for charts
             if ohlcv_data:
-                from market_context import PriceData, TimeSeriesItem
+                from market_context import TimeSeriesItem
                 last_bar = ohlcv_data[-1]
                 history_series = [
                     TimeSeriesItem(
@@ -638,6 +663,7 @@ Query: "{clean_query}"
         if needs_portfolio:
             tasks.append(("PortfolioAgent", PortfolioAgent().execute({"account_type": account_type})))
         if needs_forecast and ohlcv_data:
+            status_manager.set_status("forecasting_agent", "running", "TTM Price Prediction...")
             tasks.append(("ForecastingAgent", ForecastingAgent().execute({"ticker": context.ticker, "ohlcv_data": ohlcv_data, "days": 5})))
         if needs_research:
             tasks.append(("ResearchAgent", ResearchAgent().execute({"ticker": context.ticker, "company_name": None})))
@@ -676,6 +702,22 @@ Query: "{clean_query}"
             return []
 
 
+    async def _attempt_ticker_fix(self, ticker: str) -> str:
+        """
+        Attempt to fix a malformed ticker symbol.
+        Uses search-based resolution as fallback.
+        """
+        if not ticker:
+            return ticker
+        
+        # Try search-based resolution
+        resolved = await self._resolve_ticker_via_search(ticker)
+        if resolved:
+            logger.info(f"Coordinator: Fixed ticker {ticker} -> {resolved}")
+            return resolved
+        
+        return ticker
+
     def _resolve_ticker_from_history(self, history: List[Dict]) -> Optional[str]:
         """Attempt to find last discussed ticker in history"""
         # history is passed in chronological order. history[-1] is the most recent.
@@ -686,10 +728,8 @@ Query: "{clean_query}"
                 continue
                 
             from utils import extract_ticker_from_text
-            found = extract_ticker_from_text(content)
+            found = extract_ticker_from_text(content, find_last=True)
             if found:
                 return found
-                
-        return None
                 
         return None

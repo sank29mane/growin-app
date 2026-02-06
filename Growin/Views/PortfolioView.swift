@@ -41,6 +41,9 @@ struct PortfolioView: View {
                                         .foregroundStyle(defaults.string(forKey: "t212AccountType") == type ? .primary : .secondary)
                                 }
                                 .buttonStyle(.plain)
+                                .accessibilityLabel(type == "invest" ? "General Account" : "ISA Account")
+                                .accessibilityHint("Switches portfolio view to \(type == "invest" ? "General" : "ISA") account")
+                                .accessibilityAddTraits(defaults.string(forKey: "t212AccountType") == type ? [.isSelected] : [])
                             }
                         }
                         .background(Color.white.opacity(0.05))
@@ -57,6 +60,9 @@ struct PortfolioView: View {
                         }
                         .buttonStyle(.plain)
                         .opacity(viewModel.isLoading ? 0.5 : 1)
+                        .accessibilityLabel("Refresh Portfolio")
+                        .accessibilityHint("Refreshes portfolio data from the server")
+                        .disabled(viewModel.isLoading)
                     }
                     .padding(.horizontal)
                     .padding(.top, 24)
@@ -366,6 +372,9 @@ extension PortfolioView {
                         .clipShape(Capsule())
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(accessibilityRangeTitle(for: range))
+                .accessibilityHint("Shows performance history for this period")
+                .accessibilityAddTraits(viewModel.selectedTimeRange == range ? [.isSelected] : [])
             }
         }
     }
@@ -378,6 +387,17 @@ extension PortfolioView {
         case .threeMonths: return "3M"
         case .year: return "1Y"
         case .all: return "ALL"
+        }
+    }
+
+    private func accessibilityRangeTitle(for range: TimeRange) -> String {
+        switch range {
+        case .day: return "1 Day"
+        case .week: return "1 Week"
+        case .month: return "1 Month"
+        case .threeMonths: return "3 Months"
+        case .year: return "1 Year"
+        case .all: return "All Time"
         }
     }
 }
