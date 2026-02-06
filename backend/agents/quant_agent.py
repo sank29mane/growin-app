@@ -382,6 +382,8 @@ class QuantAgent(BaseAgent):
                 if all(lows[i] < lows[i-j] for j in range(1, window+1)) and \
                    all(lows[i] < lows[i+j] for j in range(1, window+1)):
                     troughs.append(lows[i])
+            peaks = np.array(peaks)
+            troughs = np.array(troughs)
 
         # If no structural points found, fallback to 50-day extremes
         if len(peaks) == 0:
