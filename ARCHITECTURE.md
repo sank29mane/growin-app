@@ -293,7 +293,7 @@ except:
 #### Data Processing Pipeline
 ```mermaid
 graph TD
-    A[Raw API Data] --> B[Currency Normalization]
+    A[Raw API Data] --> B[DataFabricator<br/>Centralized IO]
     B --> C[Data Validation]
     C --> D[Business Logic Processing]
     D --> E[Response Formatting]
@@ -700,6 +700,7 @@ class APIKeyManager:
 - **Session Data**: AES-256 encryption for sensitive user data
 - **Network Traffic**: TLS 1.3 for all external communications
 - **Local Storage**: File-level encryption for SQLite databases
+- **Logging**: `SecretMasker` middleware redacts sensitive data (API keys, tokens) from system logs.
 
 ### Rate Limiting Implementation
 ```python
