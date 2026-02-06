@@ -13,14 +13,6 @@ except ImportError:
     growin_core = None
     GROWIN_CORE_AVAILABLE = False
 
-# Bolt Optimization: Import optional dependencies at module level to avoid repeated ImportErrors
-try:
-    import growin_core
-    GROWIN_CORE_AVAILABLE = True
-except ImportError:
-    growin_core = None
-    GROWIN_CORE_AVAILABLE = False
-
 # --- Ticker Normalization Constants ---
 
 SPECIAL_MAPPINGS = {

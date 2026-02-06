@@ -13,7 +13,8 @@ TICKER_STOP_WORDS = {
     "MONTH", "WEEK", "DAY", "HOUR", "MIN", "SEC", "ALL", "NONE", "NULL", "TRUE", "FALSE",
     "THINK", "VERY", "SOME", "MANY", "COULD", "WOULD", "SHOULD", "THEIR", "THERE", "THESE",
     "IS", "ARE", "WAS", "WERE", "BE", "BEEN", "BEING", "FOR", "AND", "BUT", "OR", "YET", "SO",
-    "PLEASE", "DO", "CAN", "THANKS", "THANK", "YOU", "ME", "MY", "I", "WE", "US", "OUR", "IN", "TO"
+    "PLEASE", "DO", "CAN", "THANKS", "THANK", "YOU", "ME", "MY", "I", "WE", "US", "OUR", "IN", "TO",
+    "COMPARE", "VERSUS", "BETWEEN"
 }
 
 def extract_ticker_from_text(text: str, find_last: bool = False) -> Optional[str]:

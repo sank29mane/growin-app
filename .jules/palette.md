@@ -1,11 +1,3 @@
-## 2024-05-22 - Accessibility Patterns
-**Learning:** Found multiple instances of icon-only buttons without accessibility labels in toolbar and search contexts.
-**Action:** Systematically check all Image(systemName: ...) inside Button views for accompanying accessibility modifiers.
-
-## 2024-05-23 - Complex List Item Accessibility
-**Learning:** Complex data cards (like stock positions) in lists create noisy VoiceOver experiences when elements are read individually. Grouping them with `.accessibilityElement(children: .combine)` and a consolidated label significantly improves navigation speed.
-**Action:** Audit other list views (like transaction history) for similar complex cards and apply grouping.
-
-## 2026-01-14 - Consolidating Complex Data Cards
-**Learning:** Complex UI cards with multiple data points (like `PositionDeepCard` with ticker, name, price, pnl) create a noisy and fragmented experience for screen reader users when each element is read separately.
-**Action:** Use `.accessibilityElement(children: .combine)` and a custom `.accessibilityLabel` to summarize the card's content into a single, coherent sentence.
+## 2024-10-23 - Custom SwiftUI Buttons Missing Accessibility
+**Learning:** This app frequently uses `.buttonStyle(.plain)` with custom view hierarchies (GlassCard, Images, etc.) for buttons. This pattern systematically strips standard accessibility behaviors, leading to many icon-only buttons having no labels.
+**Action:** When seeing `.buttonStyle(.plain)` or complex `Button` content, assume accessibility is broken and manually add `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits`.

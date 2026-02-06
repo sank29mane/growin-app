@@ -460,6 +460,34 @@ Query: "{clean_query}"
                 latency_ms=0
             )
 
+    async def _attempt_ticker_fix(self, ticker: str) -> Optional[str]:
+        """
+        Attempt to fix malformed tickers or those containing special characters
+        that might have triggered the validation check (e.g. VOD.L is not alpha).
+        """
+        if not ticker:
+            return None
+
+        # Strip trailing dots first
+        ticker = ticker.strip('.')
+
+        # 1. Allow dot notation for UK/Exchanges (e.g. VOD.L, BRK.B)
+        if "." in ticker and ticker.replace(".", "").isalnum():
+            # It's likely valid if it has 1 dot and rest are alphanum
+            return ticker
+
+        # 2. Strip noise (punctuation other than dot)
+        clean = "".join(c for c in ticker if c.isalnum() or c == '.')
+
+        # If the result is a clean ticker (e.g. "AAPL."), strip trailing dot
+        clean = clean.strip('.')
+
+        if len(clean) >= 2:
+            return clean
+
+        # 3. Fallback to search if really broken or too short
+        return await self._resolve_ticker_via_search(ticker)
+
     async def _resolve_ticker_via_search(self, term: str) -> Optional[str]:
         """
         Tier 2: Search-Augmented Discovery.
@@ -703,7 +731,5 @@ Query: "{clean_query}"
             found = extract_ticker_from_text(content, find_last=True)
             if found:
                 return found
-                
-        return None
                 
         return None
