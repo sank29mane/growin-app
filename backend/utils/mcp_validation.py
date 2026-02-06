@@ -57,8 +57,14 @@ def validate_mcp_config(command: str, args: Optional[List[str]] = None) -> None:
         "ruby": {"-e"},
     }
 
-    if args and base_cmd in INTERPRETER_FLAGS:
-        blocked_flags = INTERPRETER_FLAGS[base_cmd]
-        for arg in args:
-            if arg in blocked_flags:
-                raise ValueError(f"Interpreter flag '{arg}' is not allowed for security reasons.")
+    if args:
+        for interpreter, blocked_flags in INTERPRETER_FLAGS.items():
+            # Check if base_cmd starts with the interpreter name
+            if base_cmd.startswith(interpreter):
+                suffix = base_cmd[len(interpreter):]
+                # Verify suffix is valid for a versioned interpreter (empty, or digits/dots)
+                # This allows "python3.11" (matches "python") but rejects "nodes" (matches "node")
+                if not suffix or all(c.isdigit() or c == '.' for c in suffix):
+                    for arg in args:
+                        if arg in blocked_flags:
+                            raise ValueError(f"Interpreter flag '{arg}' is not allowed for security reasons.")
