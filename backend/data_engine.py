@@ -168,8 +168,20 @@ class AlpacaClient:
                 # If TZ-aware, subtract TZ-aware epoch
                 df['t'] = (df.index - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta('1ms')
             else:
-                # If Naive, subtract Naive epoch
-                df['t'] = (df.index - pd.Timestamp("1970-01-01")) // pd.Timedelta('1ms')
+                # If Naive, assume market time and localize
+                # Determine market timezone (Heuristic based on ticker)
+                market_tz = "Europe/London" if is_uk else "America/New_York"
+                try:
+                    # Localize naive timestamp to market time, then convert to UTC
+                    # ambiguous='NaT' prevents errors on DST overlap; nonexistent='shift_forward' handles missing hours
+                    df.index = df.index.tz_localize(market_tz, ambiguous='NaT', nonexistent='shift_forward')
+                    df.index = df.index.tz_convert("UTC")
+                except Exception as e:
+                    logger.warning(f"AlpacaClient: Timezone localization failed: {e}. Treating as UTC.")
+                    df.index = df.index.tz_localize("UTC")
+
+                # Now df.index is TZ-aware (UTC). Subtract UTC epoch.
+                df['t'] = (df.index - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta('1ms')
 
             # Rename columns to match API output format (intermediate step)
             df = df.rename(columns={
