@@ -79,5 +79,22 @@ class TestMCPValidation(unittest.TestCase):
         except ValueError as e:
             self.fail(f"Legitimate interpreter usage blocked: {e}")
 
+    def test_versioned_interpreter_args(self):
+        """Test blocking of dangerous flags for versioned interpreters (e.g. python3.11)"""
+        # Python versions
+        with self.assertRaises(ValueError):
+            validate_mcp_config("python3.11", ["-c", "print('hacked')"])
+
+        with self.assertRaises(ValueError):
+            validate_mcp_config("python3.12", ["-c", "print('hacked')"])
+
+        with self.assertRaises(ValueError):
+            validate_mcp_config("/usr/bin/python3.9", ["-c", "print('hacked')"])
+
+        # Node versions (if applicable, though node usually uses nvm, but node18 etc exists)
+        # Assuming nodejs/node
+        with self.assertRaises(ValueError):
+             validate_mcp_config("nodejs", ["-e", "console.log('hacked')"])
+
 if __name__ == "__main__":
     unittest.main()
