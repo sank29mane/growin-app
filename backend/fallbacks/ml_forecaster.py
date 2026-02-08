@@ -80,4 +80,4 @@ class MLIntradayForecaster:
 
         except Exception as e:
             logger.error(f"MLIntradayForecaster failed: {e}")
-            return None
+            return []

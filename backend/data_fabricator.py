@@ -26,7 +26,7 @@ class DataFabricator:
         # Initialize other clients as needed (News API, Social API) if we move them here
         # For now, we will use mock/stub logic for News/Social until we migrate the actual API calls
         
-    async def fabricate_context(self, intent: str, ticker: Optional[str], account_type: Optional[str], user_settings: Dict[str, Any] = {}) -> MarketContext:
+    async def fabricate_context(self, intent: str, ticker: Optional[str], account_type: Optional[str], user_settings: Optional[Dict[str, Any]] = None) -> MarketContext:
         """
         Main entry point: Build the context based on intent.
         
@@ -39,6 +39,8 @@ class DataFabricator:
         Returns:
             MarketContext: Populated with all available raw data.
         """
+        if user_settings is None:
+            user_settings = {}
         start_time = datetime.now()
         
         # 1. Initialize empty context
@@ -204,14 +206,14 @@ class DataFabricator:
                         if last_hist_close > 0 and yf_diff < 0.10:
                             logger.info(f"Verification: Rejecting Finnhub ({current_price}), Accepting YF ({yf_price}) which matches History.")
                             current_price = yf_price
-                        elif abs(yf_price - current_price) / current_price < 0.05:
+                        elif current_price > 0 and abs(yf_price - current_price) / current_price < 0.05:
                             logger.info(f"Verification: YF ({yf_price}) confirms Finnhub ({current_price}). Real Volatility detected.")
                             # Current price accepted
                         else:
                             # Both diverge from history, or conflict. 
                             # If they agree with each other (even if far from history), take them?
                             # If they disagree, fallback to HISTORY.
-                            if abs(yf_price - current_price) / current_price < 0.10:
+                            if current_price > 0 and abs(yf_price - current_price) / current_price < 0.10:
                                  logger.info("Verification: Sources agree on new price level.")
                                  # Current price accepted
                             else:
