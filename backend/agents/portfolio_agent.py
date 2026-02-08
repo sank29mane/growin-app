@@ -8,7 +8,6 @@ import json
 
 from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from market_context import PortfolioData
-from mcp_client import Trading212MCPClient
 from app_context import state # Access global state
 from utils.ticker_utils import normalize_ticker
 from cache_manager import cache # Import global cache
@@ -16,6 +15,8 @@ import asyncio
 import pandas as pd
 import numpy as np
 import yfinance as yf
+from decimal import Decimal
+from utils.financial_math import create_decimal
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +53,9 @@ class PortfolioAgent(BaseAgent):
         
         try:
             # Call MCP tool
-            # The MCP server's analyze_portfolio tool expects "account_type" argument
+            from status_manager import status_manager
+            status_manager.set_status("portfolio_agent", "running", f"Syncing {requested_account} holdings...")
+            
             result = await self.mcp_client.call_tool(
                 "analyze_portfolio", 
                 arguments={"account_type": requested_account}
@@ -156,6 +159,8 @@ class PortfolioAgent(BaseAgent):
                 self.logger.warning(f"PortfolioAgent: Failed to store RAG snapshot: {e}")
             # -------------------------------------------------
             
+            from status_manager import status_manager
+            status_manager.set_status("portfolio_agent", "ready", f"Value: £{portfolio_data.total_value:,.0f}")
             return AgentResponse(
                 agent_name=self.config.name,
                 success=True,
@@ -165,11 +170,19 @@ class PortfolioAgent(BaseAgent):
             
         except Exception as e:
             self.logger.error(f"Portfolio analysis failed: {e}")
+            error_msg = str(e)
+            
+            # Enrich error message for better UI handling
+            if "401" in error_msg or "Unauthorized" in error_msg:
+                error_msg = "Invalid API Credential"
+            elif "Connection refused" in error_msg or "ClientConnectorError" in error_msg:
+                error_msg = "Connection Refused (Is MCP running?)"
+            
             return AgentResponse(
                 agent_name=self.config.name,
                 success=False,
                 data={},
-                error=str(e),
+                error=error_msg,
                 latency_ms=0
             )
 
@@ -188,17 +201,19 @@ class PortfolioAgent(BaseAgent):
 
         try:
             # 1. Update Cash
-            cost = quantity * price
-            current_cash = p_data.cash_balance.get("free", 0.0)
+            qty_dec = create_decimal(quantity)
+            price_dec = create_decimal(price)
+            cost = qty_dec * price_dec
+            
+            # Ensure we get Decimal from cash_balance
+            current_cash = create_decimal(p_data.cash_balance.get("free", 0.0))
             
             if side.upper() == "BUY":
                 new_cash = current_cash - cost
-                p_data.total_invested += cost
+                p_data.total_invested = create_decimal(p_data.total_invested) + cost
             else: # SELL
                 new_cash = current_cash + cost
-                p_data.total_invested -= (cost) # Simplified: reducing invested basis
-                # Note: Accurate PnL update requires knowing the cost basis of sold shares, 
-                # which is complex to guess. We'll rely on the next T212 sync for exact PnL.
+                p_data.total_invested = create_decimal(p_data.total_invested) - cost 
 
             p_data.cash_balance["free"] = new_cash
             p_data.cash_balance["total"] = new_cash # Simplified
@@ -208,12 +223,17 @@ class PortfolioAgent(BaseAgent):
             found = False
             for pos in p_data.positions:
                 if normalize_ticker(pos.get("ticker", "")) == ticker:
-                    current_qty = pos.get("quantity", 0)
-                    new_qty = current_qty + quantity if side.upper() == "BUY" else current_qty - quantity
+                    current_qty = create_decimal(pos.get("quantity", 0))
+                    new_qty = current_qty + qty_dec if side.upper() == "BUY" else current_qty - qty_dec
                     
+                    pos["quantity"] = float(new_qty) # Keep positions dict compatible with JSON/float consumers if needed?
+                    # actually PortfolioData.positions is List[Dict[str, Any]], so keeping it consistent as float or Decimal? 
+                    # Let's use Decimal if we can, but if it breaks downstream... 
+                    # The cached object is PortfolioData, which stores `positions`.
+                    # Let's store Decimal in the Dict for consistency.
                     pos["quantity"] = new_qty
-                    pos["currentPrice"] = price # Update to execution price
-                    pos["value"] = new_qty * price
+                    pos["currentPrice"] = price_dec
+                    pos["value"] = new_qty * price_dec
                     found = True
                     break
             
@@ -221,21 +241,22 @@ class PortfolioAgent(BaseAgent):
                 # Add new position
                 new_pos = {
                     "ticker": ticker,
-                    "quantity": quantity,
-                    "averagePrice": price,
-                    "currentPrice": price,
-                    "ppl": 0.0,
-                    "fxPpl": 0.0,
+                    "quantity": qty_dec,
+                    "averagePrice": price_dec,
+                    "currentPrice": price_dec,
+                    "ppl": Decimal(0),
+                    "fxPpl": Decimal(0),
                     "initialFillDate": asyncio.get_event_loop().time(),
-                    "frontend": "MANUAL_TRADE", # Tag it
-                    "maxBuy": quantity,
-                    "maxSell": quantity,
-                    "pieQuantity": 0.0
+                    "frontend": "MANUAL_TRADE",
+                    "maxBuy": qty_dec,
+                    "maxSell": qty_dec,
+                    "pieQuantity": Decimal(0)
                 }
                 p_data.positions.append(new_pos)
 
             # 3. Update Totals
-            total_val = sum(p.get("quantity", 0) * p.get("currentPrice", 0) for p in p_data.positions)
+            # Ensure p["quantity"] and p["currentPrice"] are Decimals
+            total_val = sum(create_decimal(p.get("quantity", 0)) * create_decimal(p.get("currentPrice", 0)) for p in p_data.positions)
             p_data.total_value = total_val + new_cash
             
             # Save back to cache
@@ -256,8 +277,8 @@ class PortfolioAgent(BaseAgent):
         if not accounts and isinstance(summary, dict):
             accounts = summary.get("accounts")
             
-        total_invested = summary.get("total_invested", 0.0)
-        pnl_percent = summary.get("total_pnl_percent", 0.0)
+        total_invested = create_decimal(summary.get("total_invested", 0.0))
+        pnl_percent = summary.get("total_pnl_percent", 0.0) # Keep float for percent
         
         # SAFETY CHECK: If invested amount is negligible, PnL% is noise. Reset to 0.
         if total_invested < 1.0:
@@ -266,11 +287,14 @@ class PortfolioAgent(BaseAgent):
         return PortfolioData(
             total_positions=summary.get("total_positions", 0),
             total_invested=total_invested,
-            total_value=summary.get("current_value", 0.0), # Schema mapping
-            total_pnl=summary.get("total_pnl", 0.0),
+            total_value=create_decimal(summary.get("current_value", 0.0)),
+            total_pnl=create_decimal(summary.get("total_pnl", 0.0)),
             pnl_percent=pnl_percent,
-            net_deposits=summary.get("net_deposits", 0.0),
-            cash_balance=summary.get("cash_balance", {"total": 0.0, "free": 0.0}),
+            net_deposits=create_decimal(summary.get("net_deposits", 0.0)),
+            cash_balance={
+                "total": create_decimal(summary.get("cash_balance", {}).get("total", 0)),
+                "free": create_decimal(summary.get("cash_balance", {}).get("free", 0))
+            },
             accounts=accounts,
             positions=data.get("positions", [])
         )
@@ -278,7 +302,8 @@ class PortfolioAgent(BaseAgent):
     async def _fetch_portfolio_history(self, p_data: PortfolioData, days: int = 30) -> list:
         """Synthetic history generator using current holdings and yfinance"""
         positions = p_data.positions
-        free_cash = p_data.cash_balance.get("free", 0.0) if isinstance(p_data.cash_balance, dict) else 0.0
+        free_cash = float(p_data.cash_balance.get("free", 0.0)) if isinstance(p_data.cash_balance, dict) else 0.0
+        # Convert free_cash to float for pandas calc
         
         if not positions:
             return []
@@ -344,10 +369,14 @@ class PortfolioAgent(BaseAgent):
                 uk_tickers = [t for t in df_subset.columns if t.endswith(".L")]
 
                 for t in uk_tickers:
-                     series = df_subset[t]
-                     mask = series > 500
-                     # Apply transformation only where mask is true using numpy.where
-                     df_subset[t] = np.where(mask, series / 100.0, series)
+                    try:
+                        # Ensure numeric comparison - yfinance can return strings
+                        series = pd.to_numeric(df_subset[t], errors='coerce')
+                        mask = series > 500
+                        # Apply transformation only where mask is true using numpy.where
+                        df_subset[t] = np.where(mask, series / 100.0, series)
+                    except Exception as e:
+                        self.logger.warning(f"Currency conversion failed for {t}: {e}")
 
                 # Calculate weighted sum
                 portfolio_val = df_subset.dot(quantities)

@@ -12,6 +12,6 @@ try:
     info = status_manager.get_system_info()
     print(f"Result: {info}")
     
-except Exception as e:
+except Exception:
     import traceback
     traceback.print_exc()

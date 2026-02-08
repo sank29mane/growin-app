@@ -86,7 +86,6 @@ def run_forecast(ohlcv_data: List[Dict[str, Any]], prediction_steps: int, timefr
     try:
         from tsfm_public.models.tinytimemixer import TinyTimeMixerForPrediction
         from tsfm_public.toolkit.time_series_forecasting_pipeline import TimeSeriesForecastingPipeline
-        from sklearn.preprocessing import StandardScaler
         import numpy as np
         
         logger.info(f"Loading TTM-R2 model for {len(ohlcv_data)} points with timeframe {timeframe}...")

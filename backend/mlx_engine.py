@@ -1,6 +1,5 @@
 """MLX-powered inference engine for Apple Silicon optimized models"""
 import logging
-import asyncio
 from typing import Optional, AsyncIterator, Any, Dict
 import mlx.core as mx
 

@@ -41,8 +41,19 @@ actor PortfolioDataService {
         
         let (data, response) = try await session.data(from: url)
         
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200...299).contains(httpResponse.statusCode) else {
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw URLError(.badServerResponse)
+        }
+        
+        if !(200...299).contains(httpResponse.statusCode) {
+            // Try to parse backend error message
+            if let errorJson = try? JSONDecoder().decode(BackendError.self, from: data) {
+                 throw errorJson
+            }
+            // Fallback for known status codes
+            if httpResponse.statusCode == 401 { throw BackendError(detail: "Unauthorized: Please check your API keys") }
+            if httpResponse.statusCode == 503 { throw BackendError(detail: "Service Unavailable: T212 connection failed") }
+            
             throw URLError(.badServerResponse)
         }
         
@@ -57,11 +68,26 @@ actor PortfolioDataService {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(body)
         
-        let (_, response) = try await session.data(for: request)
+        let (data, response) = try await session.data(for: request)
         
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200...299).contains(httpResponse.statusCode) else {
+        guard let httpResponse = response as? HTTPURLResponse else {
             throw URLError(.badServerResponse)
         }
+        
+        if !(200...299).contains(httpResponse.statusCode) {
+             if let errorJson = try? JSONDecoder().decode(BackendError.self, from: data) {
+                 throw errorJson
+             }
+             throw URLError(.badServerResponse)
+        }
+    }
+}
+
+// MARK: - Error Handling
+struct BackendError: Error, Decodable, LocalizedError {
+    let detail: String
+    
+    var errorDescription: String? {
+        return detail
     }
 }

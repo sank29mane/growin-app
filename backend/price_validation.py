@@ -5,7 +5,7 @@ Ensures price consistency before executing trades.
 
 from typing import Dict, Optional, Any
 from decimal import Decimal
-from utils.currency_utils import DataSourceNormalizer, CurrencyNormalizer
+from utils.currency_utils import DataSourceNormalizer
 import asyncio
 import logging
 

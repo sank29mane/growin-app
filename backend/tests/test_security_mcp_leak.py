@@ -1,6 +1,4 @@
-import pytest
 from fastapi.testclient import TestClient
-from app_context import state
 from server import app
 
 # We rely on conftest.py's prevent_db_close fixture to handle DB connection safety.

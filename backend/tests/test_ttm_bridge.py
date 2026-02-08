@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import json
 import time
 from forecaster import TTMForecaster
 

@@ -3,7 +3,7 @@ import asyncio
 import time
 import sys
 import os
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 import json
 
 # Add backend to path

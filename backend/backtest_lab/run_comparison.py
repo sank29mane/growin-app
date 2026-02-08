@@ -4,8 +4,7 @@ import sys
 import pandas as pd
 import numpy as np
 import logging
-import asyncio
-from typing import List, Dict, Any, Tuple
+from typing import List, Tuple
 from datetime import datetime, timedelta
 
 # Ensure backend path is in sys.path
@@ -19,7 +18,7 @@ from forecaster import TTMForecaster
 import xgboost as xgb
 from sklearn.ensemble import RandomForestRegressor
 from prophet import Prophet
-from sklearn.metrics import mean_absolute_percentage_error, mean_squared_error
+from sklearn.metrics import mean_absolute_percentage_error
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("BacktestLab")
@@ -131,7 +130,7 @@ def get_test_data(ticker="1HOUR_INTRADAY", days=20):
 def run_benchmark():
     # FOCUS ON INTRADAY
     df = get_test_data()
-    print(f"\n--- Benchmarking INTRADAY (Hourly) ---")
+    print("\n--- Benchmarking INTRADAY (Hourly) ---")
     
     train_size = int(len(df) * 0.95)
     train_df = df.iloc[:train_size]
@@ -140,7 +139,6 @@ def run_benchmark():
     steps = len(test_df)
 
     # 1. Holt-Winters
-    from forecaster import TTMForecaster
     fc = TTMForecaster()
     ohlcv = train_df.rename(columns={'timestamp': 't', 'open':'o','high':'h','low':'l','close':'c','volume':'v'}).to_dict('records')
     for x in ohlcv: x['t'] = int(x['t'].timestamp()*1000)

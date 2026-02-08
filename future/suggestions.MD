@@ -4,29 +4,26 @@ This document tracks architectural improvements and technical debt that require 
 
 ## 1. Unified Ticker Resolution Service
 
-**Status:** In Progress (Tier 1 Native Rust Mitigation Applied)
+**Status:** In Progress (Tier 1 Native Rust Mitigation Applied, Tier 2/3 Search Fallbacks Enhanced)
 **Priority:** High
 **Context:**
-The current ticker normalization logic (`backend/trading212_mcp_server.py:normalize_ticker`) relies on fragile regex heuristics and hardcoded exclusion lists to distinguish between US and UK stocks. This caused a bug where US tickers like `IBM`, `F`, `SMCI`, `RDDT`, and `ARM` were incorrectly suffixed with `.L`. A tactical fix expanded the exclusion list and refactored constants for performance, but the fundamental fragility remains.
+The current ticker normalization logic (`backend/trading212_mcp_server.py:normalize_ticker`) relies on fragile regex heuristics and hardcoded exclusion lists to distinguish between US and UK stocks. `CoordinatorAgent` was missing fallback logic for malformed tickers (e.g., `VOD.L.`).
+
+**Recent Improvements:**
+- Added `_attempt_ticker_fix` in `CoordinatorAgent` to handle punctuation and cleaning.
+- Enhanced `extract_ticker_from_text` to support alphanumeric tickers (e.g. `3GLD`) and stop words.
 
 **Problem:**
 - Heuristics (e.g., "length <= 4 implies UK") are inaccurate for a global market.
-- Maintaining hardcoded lists (`us_exclusions`) is a game of whack-a-mole.
+- `extract_ticker_from_text` is still regex/heuristic based.
 - Inconsistent behavior across agents (some use the MCP server, others might use raw input).
-- `AlpacaClient` and `FinnhubClient` have different expectations for ticker formats.
 
 **Proposal:**
-Implement a dedicated `TickerResolutionService` (or Agent) backed by a master symbol database (e.g., SQLite or a lightweight trie).
-- **Capabilities (Tiered Approach):**
-    - **Tier 1 (Cache/Rules):** Check against a curated local database of common tickers (US & UK) for ambiguous symbols like `VOD`.
-    - **Tier 2 (API Verification):** Use `yfinance` or `Alpaca` info APIs to verify if a ticker exists on the assumed exchange before appending suffixes.
-    - **Tier 3 (Search):** Use `search_instruments` only as a fallback.
-    - Support for ISIN/CUSIP lookup if available.
-    - Context-aware resolution (e.g., "Buy Vodafone" -> prefer user's home exchange).
-- **Implementation:**
-    - A standalone module in `backend/services/`.
-    - Populate a local cache/db from Trading212 and Alpaca instrument lists on startup.
-    - Expose a clean API: `resolve(symbol: str, context: UserContext) -> NormalizedTicker`.
+Implement a dedicated `TickerResolutionService` (or Agent) backed by a master symbol database.
+- **Capabilities:**
+    - **NLP Extraction:** Replace regex with a small NER model (Spacy/LLM) to accurately identify tickers in complex queries ("Compare AAPL vs MSFT").
+    - **Unified Normalization:** Centralize all cleaning logic (stripping dots, handling suffixes) in one module, removing duplicated logic in Agents.
+    - **Tiered Resolution:** Cache -> API Verification -> Search Fallback.
 
 **Impact:**
 - Eliminates "wrong exchange" errors.

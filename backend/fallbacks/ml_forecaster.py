@@ -1,10 +1,7 @@
 
-import os
 import pandas as pd
-import numpy as np
 import xgboost as xgb
-from datetime import datetime, timedelta
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 import logging
 from utils.indicators import add_intraday_features
 
@@ -83,4 +80,4 @@ class MLIntradayForecaster:
 
         except Exception as e:
             logger.error(f"MLIntradayForecaster failed: {e}")
-            return None
+            return []
