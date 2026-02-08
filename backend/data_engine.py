@@ -449,6 +449,8 @@ class FinnhubClient:
                 "15Min": "15",
                 "1Hour": "60",
                 "1Day": "D",
+                "1Week": "W",
+                "1Month": "M"
             }
             resolution = resolution_map.get(timeframe, "D")
 
@@ -459,7 +461,11 @@ class FinnhubClient:
 
             # Adjust based on timeframe and limit
             if timeframe == "1Day":
-                from_time = to_time - timedelta(days=limit)
+                from_time = to_time - timedelta(days=limit + 30) # Buffer for holidays
+            elif timeframe == "1Week":
+                from_time = to_time - timedelta(weeks=limit + 4)
+            elif timeframe == "1Month":
+                from_time = to_time - timedelta(days=(limit * 30) + 60)
             elif timeframe == "1Hour":
                 from_time = to_time - timedelta(hours=limit)
             elif timeframe in ["1Min", "5Min", "15Min"]:
