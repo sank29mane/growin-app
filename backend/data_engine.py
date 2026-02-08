@@ -222,7 +222,9 @@ class AlpacaClient:
         result = await asyncio.to_thread(self._fetch_from_yfinance, ticker, normalized_ticker, timeframe, limit)
         if result:
             cache.set(cache_key, result, ttl=300)
-        return result
+            return result
+
+        return None
 
     async def get_batch_bars(self, tickers: List[str], timeframe="1Day", limit: int = 512) -> Dict[str, Any]:
         """

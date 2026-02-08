@@ -262,7 +262,13 @@ class QuantEngine:
             try:
                 # Handle cases where input might already be float
                 if isinstance(pct_str, (float, int)):
-                     current_parsed[symbol] = float(pct_str)
+                     val = float(pct_str)
+                     # Heuristic: If value > 1.0, assume it's a percentage (e.g. 50 = 50%)
+                     # This catches cases where users pass "50" as int/float instead of 0.5
+                     # Note: This prevents using ratios > 1.0 (leverage), but prevents 5000% errors.
+                     if val > 1.0:
+                         val = val / 100.0
+                     current_parsed[symbol] = val
                 else:
                     current_parsed[symbol] = float(str(pct_str).strip('%')) / 100
             except ValueError:
