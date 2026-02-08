@@ -42,87 +42,8 @@ class AlpacaClient:
         else:
             logger.info("AlpacaClient: API keys not set. Running in offline/mock mode.")
 
-    async def get_historical_bars(self, ticker: str, timeframe="1Day", limit: int = 512) -> Optional[Dict[str, Any]]:
-        """Fetch historical bars using Alpaca Data API, fallback to yfinance."""
-        from cache_manager import cache
-        cache_key = f"bars_{ticker}_{timeframe}_{limit}"
-        cached_data = cache.get(cache_key)
-        if cached_data:
-            return cached_data
-
-        normalized_ticker = normalize_ticker(ticker)
-
-        # OPTIMIZATION: Skip Alpaca for UK stocks (they are not supported on standard Alpaca plan)
-        # This avoids "invalid symbol" errors and speeds up the response
-        if normalized_ticker.endswith('.L'):
-            logger.info(f"AlpacaClient: Skipping Alpaca for UK stock {normalized_ticker}, using fallback.")
-            self.data_client = None # Temporarily disable to force fallback for this call
-
-        # Try Alpaca first
-        if self.data_client:
-            try:
-                from alpaca.data.requests import StockBarsRequest
-                from alpaca.data.timeframe import TimeFrame
-
-                # Map timeframe string to Alpaca TimeFrame
-                tf_map = {
-                    "1Min": TimeFrame.Minute,
-                    "5Min": TimeFrame.Minute, # Approximate
-                    "15Min": TimeFrame.Minute, # Approximate
-                    "1Hour": TimeFrame.Hour,
-                    "1Day": TimeFrame.Day,
-                }
-                tf = tf_map.get(timeframe, TimeFrame.Day)
-
-                # Calculate start date based on timeframe and limit
-                # from datetime import datetime, timedelta, timezone (Removed to fix scope shadowing)
-
-                now = datetime.now(timezone.utc)
-
-                # Default lookback if not specified
-                # OPTIMIZATION: Multipliers increased to account for market closures (nights/weekends)
-                # We need to request enough 'wall clock' time to get 'limit' trading bars.
-                delta_map = {
-                    "1Min": timedelta(minutes=limit * 5),
-                    "5Min": timedelta(minutes=limit * 10),
-                    "15Min": timedelta(minutes=limit * 30),
-                    "1Hour": timedelta(hours=limit * 5),  # 1000 bars * 5 = 5000 hours (~200 days)
-                    "1Day": timedelta(days=limit * 1.6 + 100), # ~1.5x for weekends + buffer
-                }
-                start_time = now - delta_map.get(timeframe, timedelta(days=365))
-
-                request_params = StockBarsRequest(
-                    symbol_or_symbols=normalized_ticker,
-                    timeframe=tf,
-                    limit=limit,
-                    start=start_time
-                )
-
-                # Run synchronous SDK method in thread pool
-                bars_response = await asyncio.to_thread(self.data_client.get_stock_bars, request_params)
-
-                if normalized_ticker in bars_response.data:
-                    alpaca_bars = bars_response.data[normalized_ticker]
-                    bar_list = []
-                    for bar in alpaca_bars:
-                        bar_list.append(PriceData(
-                            ticker=ticker,
-                            timestamp=bar.timestamp.isoformat(),
-                            open=Decimal(str(bar.open)),
-                            high=Decimal(str(bar.high)),
-                            low=Decimal(str(bar.low)),
-                            close=Decimal(str(bar.close)),
-                            volume=int(bar.volume)
-                        ).model_dump()) # Store as dict in cache/return for now to avoid serialization issues downstream
-
-                    result = {"ticker": ticker, "bars": bar_list, "timeframe": timeframe}
-                    cache.set(cache_key, result, ttl=300) # Cache for 5 mins
-                    return result
-
-            except Exception as e:
-                logger.warning(f"AlpacaClient: Error fetching bars from Alpaca: {e}. Falling back to yfinance.")
-
-        # Fallback to yfinance
+    def _fetch_from_yfinance(self, ticker: str, normalized_ticker: str, timeframe: str, limit: int) -> Optional[Dict[str, Any]]:
+        """Synchronous helper to fetch bars from yfinance (to be run in thread)."""
         try:
             import yfinance as yf
             import pandas as pd
@@ -206,13 +127,102 @@ class AlpacaClient:
                 })
 
             result = {"ticker": ticker, "bars": bar_list[-limit:], "timeframe": timeframe}
-            cache.set(cache_key, result, ttl=300)
             return result
 
         except Exception as e:
             logger.warning(f"AlpacaClient: Error fetching bars (yfinance): {e}")
             # Do NOT return mock data for invalid tickers. This causes AI hallucinations.
             return None
+
+    async def get_historical_bars(self, ticker: str, timeframe="1Day", limit: int = 512) -> Optional[Dict[str, Any]]:
+        """Fetch historical bars using Alpaca Data API, fallback to yfinance."""
+        from cache_manager import cache
+        cache_key = f"bars_{ticker}_{timeframe}_{limit}"
+        cached_data = cache.get(cache_key)
+        if cached_data:
+            return cached_data
+
+        normalized_ticker = normalize_ticker(ticker)
+
+        # OPTIMIZATION: Skip Alpaca for UK stocks (they are not supported on standard Alpaca plan)
+        # This avoids "invalid symbol" errors and speeds up the response
+        if normalized_ticker.endswith('.L'):
+            logger.info(f"AlpacaClient: Skipping Alpaca for UK stock {normalized_ticker}, using fallback.")
+            self.data_client = None # Temporarily disable to force fallback for this call
+
+        # Try Alpaca first
+        if self.data_client:
+            try:
+                from alpaca.data.requests import StockBarsRequest
+                from alpaca.data.timeframe import TimeFrame
+
+                # Map timeframe string to Alpaca TimeFrame
+                tf_map = {
+                    "1Min": TimeFrame.Minute,
+                    "5Min": TimeFrame.Minute, # Approximate
+                    "15Min": TimeFrame.Minute, # Approximate
+                    "1Hour": TimeFrame.Hour,
+                    "1Day": TimeFrame.Day,
+                    "1Week": TimeFrame.Week,
+                    "1Month": TimeFrame.Month,
+                }
+                tf = tf_map.get(timeframe, TimeFrame.Day)
+
+                # Calculate start date based on timeframe and limit
+                # from datetime import datetime, timedelta, timezone (Removed to fix scope shadowing)
+
+                now = datetime.now(timezone.utc)
+
+                # Default lookback if not specified
+                # OPTIMIZATION: Multipliers increased to account for market closures (nights/weekends)
+                # We need to request enough 'wall clock' time to get 'limit' trading bars.
+                delta_map = {
+                    "1Min": timedelta(minutes=limit * 5),
+                    "5Min": timedelta(minutes=limit * 10),
+                    "15Min": timedelta(minutes=limit * 30),
+                    "1Hour": timedelta(hours=limit * 5),  # 1000 bars * 5 = 5000 hours (~200 days)
+                    "1Day": timedelta(days=limit * 1.6 + 100), # ~1.5x for weekends + buffer
+                    "1Week": timedelta(weeks=limit * 1.1 + 10),
+                    "1Month": timedelta(days=limit * 32 + 30)
+                }
+                start_time = now - delta_map.get(timeframe, timedelta(days=365))
+
+                request_params = StockBarsRequest(
+                    symbol_or_symbols=normalized_ticker,
+                    timeframe=tf,
+                    limit=limit,
+                    start=start_time
+                )
+
+                # Run synchronous SDK method in thread pool
+                bars_response = await asyncio.to_thread(self.data_client.get_stock_bars, request_params)
+
+                if normalized_ticker in bars_response.data:
+                    alpaca_bars = bars_response.data[normalized_ticker]
+                    bar_list = []
+                    for bar in alpaca_bars:
+                        bar_list.append(PriceData(
+                            ticker=ticker,
+                            timestamp=bar.timestamp.isoformat(),
+                            open=Decimal(str(bar.open)),
+                            high=Decimal(str(bar.high)),
+                            low=Decimal(str(bar.low)),
+                            close=Decimal(str(bar.close)),
+                            volume=int(bar.volume)
+                        ).model_dump()) # Store as dict in cache/return for now to avoid serialization issues downstream
+
+                    result = {"ticker": ticker, "bars": bar_list, "timeframe": timeframe}
+                    cache.set(cache_key, result, ttl=300) # Cache for 5 mins
+                    return result
+
+            except Exception as e:
+                logger.warning(f"AlpacaClient: Error fetching bars from Alpaca: {e}. Falling back to yfinance.")
+
+        # Fallback to yfinance (Non-blocking)
+        result = await asyncio.to_thread(self._fetch_from_yfinance, ticker, normalized_ticker, timeframe, limit)
+        if result:
+            cache.set(cache_key, result, ttl=300)
+        return result
 
     async def get_batch_bars(self, tickers: List[str], timeframe="1Day", limit: int = 512) -> Dict[str, Any]:
         """
@@ -260,6 +270,8 @@ class AlpacaClient:
                     "15Min": TimeFrame.Minute,
                     "1Hour": TimeFrame.Hour,
                     "1Day": TimeFrame.Day,
+                    "1Week": TimeFrame.Week,
+                    "1Month": TimeFrame.Month,
                 }
                 tf = tf_map.get(timeframe, TimeFrame.Day)
                 
@@ -271,6 +283,8 @@ class AlpacaClient:
                     "15Min": timedelta(minutes=limit * 30),
                     "1Hour": timedelta(hours=limit * 5),
                     "1Day": timedelta(days=limit * 1.6 + 100),
+                    "1Week": timedelta(weeks=limit * 1.1 + 10),
+                    "1Month": timedelta(days=limit * 32 + 30)
                 }
                 start_time = now - delta_map.get(timeframe, timedelta(days=365))
                 
@@ -470,6 +484,10 @@ class FinnhubClient:
                 from_time = to_time - timedelta(hours=limit)
             elif timeframe in ["1Min", "5Min", "15Min"]:
                 from_time = to_time - timedelta(minutes=limit * int(resolution))
+            elif timeframe == "1Week":
+                from_time = to_time - timedelta(weeks=limit)
+            elif timeframe == "1Month":
+                from_time = to_time - timedelta(days=limit * 30)
 
             # Fetch candle data
             candles = self.client.stock_candles(
