@@ -70,3 +70,8 @@ def setup_logging(name: str = "growin_backend", level: int = logging.INFO) -> lo
 def get_recent_logs():
     """Returns the last 100 logs as a list of strings."""
     return list(log_buffer)
+
+# --- Audit Logging Facade ---
+from utils.audit_log import log_audit, AuditLogger
+
+__all__ = ["setup_logging", "get_recent_logs", "log_audit", "AuditLogger"]

@@ -158,6 +158,20 @@ class LMStudioClient:
                     # Native V1 fallback
                     message = data.get("message", {})
 
+                # Handle reasoning field (for R1/Reasoning models in LM Studio)
+                content = message.get("content", "")
+                reasoning = message.get("reasoning", "")
+                
+                # If content is empty but reasoning has content, use reasoning
+                # Some models return thought process in 'reasoning' and final answer in 'content'
+                # For Growin App, we want the synthesized output.
+                if not content and reasoning:
+                    content = reasoning
+                elif content and reasoning:
+                    # Optional: Include reasoning as a think block if we want to show it?
+                    # But for now, let's keep it simple as the user complained about it not working.
+                    pass
+
                 # Handle tool calls if present
                 if message.get("tool_calls"):
                     return await self._handle_tool_calls(model_id, messages, message["tool_calls"], tools)
@@ -165,7 +179,7 @@ class LMStudioClient:
                     return await self._handle_tool_calls(model_id, messages, message["toolCalls"], tools)
 
                 return {
-                    "content": message.get("content", ""),
+                    "content": content,
                     "role": "assistant",
                     "sessionId": data.get("sessionId", session_id)
                 }

@@ -16,6 +16,8 @@ except ImportError:
 
 from typing import Dict, List, Any, Optional
 from enum import Enum
+from decimal import Decimal
+from backend.utils.financial_math import create_decimal, safe_div, PRECISION_CURRENCY
 
 
 class TimeFrame(Enum):
@@ -186,20 +188,28 @@ class QuantEngine:
         if not positions:
             return {"error": "No positions provided"}
 
-        total_value = sum(pos.get('qty', 0) * pos.get('current_price', 0) for pos in positions)
-        total_cost = sum(pos.get('qty', 0) * pos.get('avg_cost', 0) for pos in positions)
+        total_value = Decimal(0)
+        total_cost = Decimal(0)
 
-        if total_value == 0:
+        for pos in positions:
+            qty = create_decimal(pos.get('qty', 0))
+            price = create_decimal(pos.get('current_price', 0))
+            avg_cost = create_decimal(pos.get('avg_cost', 0))
+            
+            total_value += qty * price
+            total_cost += qty * avg_cost
+
+        if total_value == Decimal(0):
             return {"error": "Portfolio value is zero"}
 
         total_pnl = total_value - total_cost
-        portfolio_return = (total_pnl / total_cost) if total_cost > 0 else 0.0
+        portfolio_return = safe_div(total_pnl, total_cost)
 
         return {
-            "total_value": total_value,
-            "total_cost": total_cost,
-            "total_pnl": total_pnl,
-            "portfolio_return": portfolio_return,
+            "total_value": float(total_value),  # Return float for JSON compatibility
+            "total_cost": float(total_cost),
+            "total_pnl": float(total_pnl),
+            "portfolio_return": float(portfolio_return),
             "position_count": len(positions)
         }
 
@@ -253,57 +263,61 @@ class QuantEngine:
             target_allocation: dict of symbol: percentage as float (e.g., 0.5)
             total_portfolio_value: total value of the portfolio in account currency
         """
-        if total_portfolio_value <= 0:
+        # Parse current allocation
+        current_parsed: Dict[str, Decimal] = {}
+        
+        # Convert total portfolio value to Decimal
+        total_value_dec = create_decimal(total_portfolio_value)
+        if total_value_dec <= 0:
              return {"error": "Total portfolio value must be positive"}
 
-        # Parse current allocation
-        current_parsed = {}
-        for symbol, pct_str in current_allocation.items():
+        for symbol, pct_val in current_allocation.items():
             try:
-                # Handle cases where input might already be float
-                if isinstance(pct_str, (float, int)):
-                     val = float(pct_str)
-                     # Heuristic: If value > 1.0, assume it's a percentage (e.g. 50 = 50%)
-                     # This catches cases where users pass "50" as int/float instead of 0.5
-                     # Note: This prevents using ratios > 1.0 (leverage), but prevents 5000% errors.
-                     if val > 1.0:
-                         val = val / 100.0
-                     current_parsed[symbol] = val
-                else:
-                    current_parsed[symbol] = float(str(pct_str).strip('%')) / 100
-            except ValueError:
-                current_parsed[symbol] = 0.0
+                # Handle string "50%" or float 0.5 or 50
+                val_str = str(pct_val).strip().replace('%', '')
+                val_dec = create_decimal(val_str)
+                
+                # Heuristic: if > 1.0, assume it's a percentage (e.g. 50 -> 0.5)
+                # Unless it's exactly 1.0 (100% or 1.0 ratio? Ambiguous, assume ratio if not formatted as %)
+                if val_dec > 1:
+                    val_dec = val_dec / 100
+                
+                current_parsed[symbol] = val_dec
+            except Exception:
+                current_parsed[symbol] = Decimal(0)
 
         # Calculate deviations
         deviations = {}
         rebalance_actions = []
 
-        # Iterate through all unique symbols involved
+        # Iterate through all unique symbols
         all_symbols = set(current_parsed.keys()) | set(target_allocation.keys())
 
         for symbol in all_symbols:
-            current_pct = current_parsed.get(symbol, 0.0)
-            target_pct = target_allocation.get(symbol, 0.0)
-            deviation = target_pct - current_pct
+            current_pct = current_parsed.get(symbol, Decimal(0))
+            target_pct = create_decimal(target_allocation.get(symbol, 0))
             
-            deviations[symbol] = deviation
+            deviation = target_pct - current_pct
+            deviations[symbol] = float(deviation)
 
-            if abs(deviation) > 0.05:  # 5% threshold
-                current_value = current_pct * total_portfolio_value
-                target_value = target_pct * total_portfolio_value
-                value_change = target_value - current_value
+            # Threshold: 5% deviation (0.05)
+            if abs(deviation) > Decimal("0.05"):
+                current_val_amt = current_pct * total_value_dec
+                target_val_amt = target_pct * total_value_dec
+                
+                value_change = target_val_amt - current_val_amt
                 
                 rebalance_actions.append({
                     "symbol": symbol,
-                    "current_pct": current_pct,
-                    "target_pct": target_pct,
-                    "deviation": deviation,
+                    "current_pct": float(current_pct),
+                    "target_pct": float(target_pct),
+                    "deviation": float(deviation),
                     "action": "buy" if value_change > 0 else "sell",
-                    "value_change": abs(value_change)
+                    "value_change": float(abs(value_change))
                 })
 
         return {
-            "total_value": total_portfolio_value,
+            "total_value": float(total_value_dec),
             "deviations": deviations,
             "rebalance_actions": rebalance_actions,
             "needs_rebalancing": len(rebalance_actions) > 0

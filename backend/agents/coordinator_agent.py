@@ -85,7 +85,7 @@ class CoordinatorAgent:
         self.goal_planner_agent = GoalPlannerAgent()
         
         self.llm = None
-        self._initialize_llm()
+        # Initialize LLM will be called on first process_query if not already done
         
         # Initialize Safe Python Executor for data cleaning/fixes
         from utils import get_safe_executor
@@ -94,28 +94,18 @@ class CoordinatorAgent:
         logger.info(f"CoordinatorAgent initialized (Centralized Mode) with model: {model_name}")
     
     async def _initialize_llm(self):
-        """Initialize the routing LLM"""
+        """Initialize the routing LLM using the Factory"""
         try:
-            if "gpt" in self.model_name.lower():
-                from langchain_openai import ChatOpenAI
-                self.llm = ChatOpenAI(model=self.model_name, temperature=0)
-            elif "mlx" in self.model_name.lower() or "granite" in self.model_name.lower():
-                if "mlx" in self.model_name.lower():
-                    from mlx_langchain import ChatMLX
-                    self.llm = ChatMLX(model_name=self.model_name, temperature=0, top_p=1.0)
-                else:
-                    # For granite in LM Studio
-                    from lm_studio_client import LMStudioClient
-                    self.llm = LMStudioClient()
-                    # Check connection
-                    if not await self.llm.check_connection():
-                        logger.warning("Coordinator: LM Studio not available for routing. Falling back.")
-                        self.llm = None
-            else:
-                from langchain_ollama import ChatOllama
-                self.llm = ChatOllama(model=self.model_name, base_url="http://127.0.0.1:11434")
+            from .llm_factory import LLMFactory
+            self.llm = await LLMFactory.create_llm(self.model_name)
+            
+            # Update local model name if auto-detected
+            if hasattr(self.llm, "active_model_id"):
+                self.model_name = self.llm.active_model_id
+                
         except Exception as e:
             logger.warning(f"Failed to initialize Coordinator LLM: {e}. Routing will be static.")
+            self.llm = None
     
     async def _classify_intent(self, query: str) -> Dict[str, Any]:
         """Classify user intent using Granite-Optimized Few-Shot Prompting"""

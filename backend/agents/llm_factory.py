@@ -30,25 +30,46 @@ class LLMFactory:
         info = get_model_info(model_name)
         provider = info.get("provider", "").lower()
 
+        # Normalization and Provider Detection
+        model_lower = model_name.lower()
+        
         try:
             llm_instance = None
-            if provider == "openai" or (not provider and "gpt" in model_name.lower() and "oss" not in model_name.lower()):
-                llm_instance = LLMFactory._create_openai(model_name, api_keys)
+            
+            # 1. LM Studio Priority (Check if running and if model name matches common local patterns)
+            is_lmstudio_hint = any(x in model_lower for x in ["oss", "r1", "think", "lmstudio", "local", "nemotron"])
+            
+            if provider == "lmstudio" or (not provider and is_lmstudio_hint):
+                try:
+                    llm_instance = await LLMFactory._create_lmstudio(model_name)
+                except Exception as lm_err:
+                    logger.warning(f"LM Factory: LM Studio creation failed for {model_name}: {lm_err}")
+                    # If provider was explicitly lmstudio, we should probably fall through to auto-detect later
+                    # but if it was just a hint, we keep going to other providers
 
-            elif provider == "anthropic" or (not provider and "claude" in model_name.lower()):
-                llm_instance = LLMFactory._create_anthropic(model_name, api_keys)
+            if not llm_instance:
+                if provider == "openai" or (not provider and "gpt" in model_lower and "oss" not in model_lower):
+                    llm_instance = LLMFactory._create_openai(model_name, api_keys)
 
-            elif provider == "google" or (not provider and "gemini" in model_name.lower()):
-                llm_instance = LLMFactory._create_google(model_name, api_keys)
+                elif provider == "anthropic" or (not provider and "claude" in model_lower):
+                    llm_instance = LLMFactory._create_anthropic(model_name, api_keys)
 
-            elif provider == "lmstudio" or (not provider and ("lmstudio" in model_name.lower() or "nemotron" in model_name.lower() or "oss" in model_name.lower())):
-                llm_instance = await LLMFactory._create_lmstudio(model_name)
+                elif provider == "google" or (not provider and "gemini" in model_lower):
+                    llm_instance = LLMFactory._create_google(model_name, api_keys)
 
-            elif provider == "mlx" or (not provider and ("mlx" in model_name.lower() or "granite" in model_name.lower()) and "lmstudio" not in model_name.lower()):
-                llm_instance = LLMFactory._create_mlx(model_name)
+                elif provider == "mlx" or (not provider and ("mlx" in model_lower or "granite" in model_lower) and "lmstudio" not in model_lower):
+                    llm_instance = LLMFactory._create_mlx(model_name)
 
-            elif provider == "ollama" or (not provider and ("gemma" in model_name.lower() or "mistral" in model_name.lower())):
-                llm_instance = LLMFactory._create_ollama(model_name)
+                elif provider == "ollama" or (not provider and ("gemma" in model_lower or "mistral" in model_lower)):
+                    llm_instance = LLMFactory._create_ollama(model_name)
+
+            if not llm_instance:
+                # Last resort: Try auto-detecting ANY loaded model in LM Studio
+                logger.info("LLM Factory: Attempting last-resort auto-detection in LM Studio")
+                try:
+                    llm_instance = await LLMFactory._create_lmstudio("lmstudio-auto")
+                except Exception:
+                    pass
 
             if not llm_instance:
                 raise ValueError(f"Unsupported model or provider failed to return instance: {model_name}")
@@ -59,16 +80,20 @@ class LLMFactory:
         except Exception as e:
             logger.error(f"LLM Factory: Failed to initialize {model_name}: {e}")
 
-            # Fallback handling
+            # Safe Fallback Strategy
             if "native-mlx" in model_name:
-                 raise RuntimeError(f"Native MLX Model failed to load: {e}")
+                 raise RuntimeError(f"Native MLX Model failed to load and no fallbacks available: {e}")
 
-            # Attempt Native MLX fallback for critical failures
-            try:
-                logger.info("Attempting fallback to Native MLX...")
-                return LLMFactory._create_mlx("native-mlx")
-            except Exception as fallback_error:
-                raise RuntimeError(f"Total failure (Original: {e}, Fallback: {fallback_error})")
+            # Attempt Native MLX fallback ONLY if hardware is likely to support it (Apple Silicon)
+            import platform
+            if platform.processor() == "arm" and platform.system() == "Darwin":
+                try:
+                    logger.info("Attempting fallback to Native MLX (Apple Silicon detected)...")
+                    return LLMFactory._create_mlx("native-mlx")
+                except Exception as fallback_error:
+                    logger.error(f"MLX Fallback failed: {fallback_error}")
+
+            raise RuntimeError(f"Total failure: Model {model_name} could not be initialized and no suitable fallbacks found. Error: {e}")
 
     @staticmethod
     def _create_openai(model_name: str, api_keys: Dict[str, str]):

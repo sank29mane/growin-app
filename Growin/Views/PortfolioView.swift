@@ -9,146 +9,13 @@ struct PortfolioView: View {
             // Main Content Area
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 32) {
-                    // Integrated Navigation Header
-                    HStack(alignment: .bottom) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Portfolio")
-                                .font(.caption)
-                                .fontWeight(.semibold)
-                                .foregroundStyle(.secondary)
-                            
-                            Text("Overview")
-                                .font(.title)
-                                .fontWeight(.bold)
-                                .foregroundStyle(.primary)
-                        }
-                        
-                        Spacer()
-                        
-                        // Premium Account Toggle
-                        HStack(spacing: 0) {
-                            let defaults = UserDefaults.standard
-                            ForEach(["invest", "isa"], id: \.self) { type in
-                                Button(action: {
-                                    Task { await viewModel.switchAccount(newType: type) }
-                                }) {
-                                    Text(type == "invest" ? "General" : "ISA")
-                                        .font(.caption)
-                                        .fontWeight(.semibold)
-                                        .padding(.horizontal, 16)
-                                        .padding(.vertical, 8)
-                                        .background(defaults.string(forKey: "t212AccountType") == type ? Color.white.opacity(0.1) : Color.clear)
-                                        .foregroundStyle(defaults.string(forKey: "t212AccountType") == type ? .primary : .secondary)
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel(type == "invest" ? "General Account" : "ISA Account")
-                                .accessibilityHint("Switches portfolio view to \(type == "invest" ? "General" : "ISA") account")
-                                .accessibilityAddTraits(defaults.string(forKey: "t212AccountType") == type ? [.isSelected] : [])
-                            }
-                        }
-                        .background(Color.white.opacity(0.05))
-                        .clipShape(Capsule())
-                        .overlay(Capsule().stroke(Color.white.opacity(0.1), lineWidth: 0.5))
-                        .disabled(viewModel.isSwitchingAccount)
-                        
-                        Button(action: { Task { await viewModel.fetchPortfolio() } }) {
-                            Image(systemName: "arrow.clockwise")
-                                .font(.system(size: 12, weight: .bold))
-                                .frame(width: 32, height: 32)
-                                .background(Color.white.opacity(0.05))
-                                .clipShape(Circle())
-                        }
-                        .buttonStyle(.plain)
-                        .opacity(viewModel.isLoading ? 0.5 : 1)
-                        .accessibilityLabel("Refresh Portfolio")
-                        .accessibilityHint("Refreshes portfolio data from the server")
-                        .disabled(viewModel.isLoading)
-                    }
-                    .padding(.horizontal)
-                    .padding(.top, 24)
-
+                    headerView
+                    
                     if let snapshot = viewModel.snapshot {
-                        // Analytics Engine Block
-                        VStack(spacing: 24) {
-                            MetricGrid(summary: snapshot.summary)
-                            
-                            HStack(spacing: 20) {
-                                // Performance Perspective
-                                if !viewModel.portfolioHistory.isEmpty {
-                                    GlassCard(cornerRadius: 24) {
-                                        VStack(alignment: .leading, spacing: 16) {
-                                            HStack {
-                                                Label("Performance", systemImage: "waveform.path.ecg")
-                                                    .font(.caption)
-                                                    .fontWeight(.semibold)
-                                                    .foregroundStyle(.secondary)
-                                                
-                                                Spacer()
-                                                
-                                                timeRangePicker
-                                            }
-                                            
-                                            PerformanceLineChart(history: viewModel.portfolioHistory, timeRange: viewModel.selectedTimeRange)
-                                                .frame(height: 200)
-                                        }
-                                    }
-                                }
-                                
-                                // Allocation Vectors
-                                if let positions = snapshot.positions, !positions.isEmpty {
-                                    GlassCard(cornerRadius: 24) {
-                                        VStack(alignment: .leading, spacing: 16) {
-                                            Label("Allocation", systemImage: "chart.pie.fill")
-                                                .font(.caption)
-                                                .fontWeight(.semibold)
-                                                .foregroundStyle(.secondary)
-                                            
-                                            AllocationDonutChart(positions: positions)
-                                                .frame(height: 200)
-                                        }
-                                    }
-                                    .frame(width: 320)
-                                }
-                            }
-                        }
-                        .padding(.horizontal)
-                        
-                        // Strategic Holdings
-                        VStack(alignment: .leading, spacing: 20) {
-                            HStack {
-                                Text("Holdings")
-                                    .font(.caption)
-                                    .fontWeight(.semibold)
-                                    .foregroundStyle(.secondary)
-                                
-                                Spacer()
-                                
-                                Text("\(snapshot.positions?.count ?? 0) ACTIVE")
-                                    .font(.caption2)
-                                    .fontWeight(.bold)
-                                    .foregroundStyle(Color.growinPrimary)
-                            }
-                            .padding(.horizontal)
-                            
-                            LazyVStack(spacing: 12) {
-                                ForEach(snapshot.positions ?? []) { position in
-                                    PositionDeepCard(position: position)
-                                        .glassEffect(.thin.interactive(), in: .rect(cornerRadius: 14))
-                                        .onTapGesture {
-                                            viewModel.selectedPosition = position
-                                        }
-                                }
-                            }
-                            .padding(.horizontal)
-                        }
-                        .padding(.top, 8)
+                        analyticsSection(snapshot: snapshot)
+                        holdingsSection(snapshot: snapshot)
                     } else if !viewModel.isLoading {
-                        IntelligenceOfflineView {
-                            Task {
-                                await viewModel.fetchPortfolio()
-                                await viewModel.fetchHistory()
-                            }
-                        }
+                        offlineView
                     }
                 }
                 .padding(.bottom, 40)
@@ -405,6 +272,7 @@ extension PortfolioView {
 
 
 struct IntelligenceOfflineView: View {
+    let errorMessage: String?
     let retryAction: () -> Void
     
     var body: some View {
@@ -421,7 +289,7 @@ struct IntelligenceOfflineView: View {
                     Text("Connection Error")
                         .font(.title3)
                         .fontWeight(.semibold)
-                    Text("Unable to connect to the server.")
+                    Text(errorMessage ?? "Unable to connect to the server.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -524,6 +392,157 @@ struct PerformanceLineChart: View {
             }
             .chartYScale(domain: minValue...maxValue)
             .chartXScale(domain: minDate...maxDate)
+        }
+    }
+}
+
+extension PortfolioView {
+    // MARK: - Subviews
+    
+    private var headerView: some View {
+        HStack(alignment: .bottom) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Portfolio")
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.secondary)
+                
+                Text("Overview")
+                    .font(.title)
+                    .fontWeight(.bold)
+                    .foregroundStyle(.primary)
+            }
+            
+            Spacer()
+            
+            // Premium Account Toggle
+            HStack(spacing: 0) {
+                let defaults = UserDefaults.standard
+                ForEach(["invest", "isa"], id: \.self) { type in
+                    Button(action: {
+                        Task { await viewModel.switchAccount(newType: type) }
+                    }) {
+                        Text(type == "invest" ? "General" : "ISA")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                            .background(defaults.string(forKey: "t212AccountType") == type ? Color.white.opacity(0.1) : Color.clear)
+                            .foregroundStyle(defaults.string(forKey: "t212AccountType") == type ? .primary : .secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(type == "invest" ? "General Account" : "ISA Account")
+                    .accessibilityHint("Switches portfolio view to \(type == "invest" ? "General" : "ISA") account")
+                    .accessibilityAddTraits(defaults.string(forKey: "t212AccountType") == type ? [.isSelected] : [])
+                }
+            }
+            .background(Color.white.opacity(0.05))
+            .clipShape(Capsule())
+            .overlay(Capsule().stroke(Color.white.opacity(0.1), lineWidth: 0.5))
+            .disabled(viewModel.isSwitchingAccount)
+            
+            Button(action: { Task { await viewModel.fetchPortfolio() } }) {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(width: 32, height: 32)
+                    .background(Color.white.opacity(0.05))
+                    .clipShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .opacity(viewModel.isLoading ? 0.5 : 1)
+            .accessibilityLabel("Refresh Portfolio")
+            .accessibilityHint("Refreshes portfolio data from the server")
+            .disabled(viewModel.isLoading)
+        }
+        .padding(.horizontal)
+        .padding(.top, 24)
+    }
+
+    private func analyticsSection(snapshot: PortfolioSnapshot) -> some View {
+        // Analytics Engine Block
+        VStack(spacing: 24) {
+            MetricGrid(summary: snapshot.summary)
+            
+            HStack(spacing: 20) {
+                // Performance Perspective
+                if !viewModel.portfolioHistory.isEmpty {
+                    GlassCard(cornerRadius: 24) {
+                        VStack(alignment: .leading, spacing: 16) {
+                            HStack {
+                                Label("Performance", systemImage: "waveform.path.ecg")
+                                    .font(.caption)
+                                    .fontWeight(.semibold)
+                                    .foregroundStyle(.secondary)
+                                
+                                Spacer()
+                                
+                                timeRangePicker
+                            }
+                            
+                            PerformanceLineChart(history: viewModel.portfolioHistory, timeRange: viewModel.selectedTimeRange)
+                                .frame(height: 200)
+                        }
+                    }
+                }
+                
+                // Allocation Vectors
+                if let positions = snapshot.positions, !positions.isEmpty {
+                    GlassCard(cornerRadius: 24) {
+                        VStack(alignment: .leading, spacing: 16) {
+                            Label("Allocation", systemImage: "chart.pie.fill")
+                                .font(.caption)
+                                .fontWeight(.semibold)
+                                .foregroundStyle(.secondary)
+                            
+                            AllocationDonutChart(positions: positions)
+                                .frame(height: 200)
+                        }
+                    }
+                    .frame(width: 320)
+                }
+            }
+        }
+        .padding(.horizontal)
+    }
+
+    private func holdingsSection(snapshot: PortfolioSnapshot) -> some View {
+        // Strategic Holdings
+        VStack(alignment: .leading, spacing: 20) {
+            HStack {
+                Text("Holdings")
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.secondary)
+                
+                Spacer()
+                
+                Text("\(snapshot.positions?.count ?? 0) ACTIVE")
+                    .font(.caption2)
+                    .fontWeight(.bold)
+                    .foregroundStyle(Color.growinPrimary)
+            }
+            .padding(.horizontal)
+            
+            LazyVStack(spacing: 12) {
+                ForEach(snapshot.positions ?? []) { position in
+                    PositionDeepCard(position: position)
+                        .glassEffect(.thin.interactive(), in: .rect(cornerRadius: 14))
+                        .onTapGesture {
+                            viewModel.selectedPosition = position
+                        }
+                }
+            }
+            .padding(.horizontal)
+        }
+        .padding(.top, 8)
+    }
+    
+    private var offlineView: some View {
+        IntelligenceOfflineView(errorMessage: viewModel.errorMsg) {
+            Task {
+                await viewModel.fetchPortfolio()
+                await viewModel.fetchHistory()
+            }
         }
     }
 }

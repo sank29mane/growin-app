@@ -11,6 +11,29 @@ struct DashboardView: View {
             
             ScrollView {
                 VStack(spacing: 24) {
+                    // Error Banner
+                    if let error = viewModel.errorMessage {
+                        GlassCard(cornerRadius: 12) {
+                            HStack {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.red)
+                                Text(error)
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(.white)
+                                Spacer()
+                                Button(action: { Task { await viewModel.fetchPortfolioData() } }) {
+                                    Image(systemName: "arrow.clockwise")
+                                        .font(.system(size: 10, weight: .bold))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 12)
+                        }
+                        .padding(.horizontal)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+
                     // Header
                     AppHeader(
                         title: "Market Intelligence",

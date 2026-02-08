@@ -91,5 +91,9 @@ def get_available_models():
 
 
 def get_model_info(model_name: str):
-    """Get information about a specific model"""
-    return DECISION_MODELS.get(model_name, {})
+    """Get information about a specific model from either Decision or Coordinator registries"""
+    if model_name in DECISION_MODELS:
+        return DECISION_MODELS[model_name]
+    if model_name in COORDINATOR_MODELS:
+        return COORDINATOR_MODELS[model_name]
+    return {}

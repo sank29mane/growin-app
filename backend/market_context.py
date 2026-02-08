@@ -7,6 +7,8 @@ from typing import Dict, List, Optional, Any
 from pydantic import BaseModel, Field
 from datetime import datetime
 from enum import Enum
+from decimal import Decimal
+from utils.financial_math import create_decimal
 
 
 class Signal(str, Enum):
@@ -57,12 +59,12 @@ class PortfolioData(BaseModel):
     """Portfolio holdings and metrics"""
     # Summary (matching frontend PortfolioSummary struct)
     total_positions: int = 0
-    total_invested: float = 0.0
-    total_value: float = 0.0  # Used as currentValue in frontend
-    total_pnl: float = 0.0
-    pnl_percent: float = 0.0
-    net_deposits: float = 0.0
-    cash_balance: Dict[str, float] = {"total": 0.0, "free": 0.0}
+    total_invested: Decimal = Decimal(0)
+    total_value: Decimal = Decimal(0)  # Used as currentValue in frontend
+    total_pnl: Decimal = Decimal(0)
+    pnl_percent: float = 0.0 # Percentages can remain float
+    net_deposits: Decimal = Decimal(0)
+    cash_balance: Dict[str, Decimal] = {"total": Decimal(0), "free": Decimal(0)}
     accounts: Optional[Dict[str, Any]] = None
     
     # Detailed data
@@ -150,7 +152,7 @@ class GoalData(BaseModel):
 class PriceData(BaseModel):
     """Current price information"""
     ticker: str
-    current_price: float
+    current_price: Decimal
     currency: str = "USD"
     source: str = "Alpaca"
     variance: Optional[float] = None  # From PriceValidator
@@ -233,5 +235,6 @@ class MarketContext(BaseModel):
     
     class Config:
         json_encoders = {
-            datetime: lambda v: v.isoformat()
+            datetime: lambda v: v.isoformat(),
+            Decimal: lambda v: float(v) # Serialize Decimal as float for frontend compatibility
         }

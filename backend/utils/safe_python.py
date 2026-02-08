@@ -50,7 +50,7 @@ SAFE_BUILTINS = {
     "frozenset": frozenset,
     # Safe operations
     "len": len,
-    "range": range,
+    # "range": range, # Replaced with safe_range
     "enumerate": enumerate,
     "zip": zip,
     "map": map,
@@ -62,7 +62,7 @@ SAFE_BUILTINS = {
     "sum": sum,
     "abs": abs,
     "round": round,
-    "pow": pow,
+    # "pow": pow, # Replaced with safe_pow
     "divmod": divmod,
     # String operations
     "ord": ord,
@@ -82,6 +82,29 @@ SAFE_BUILTINS = {
     # Print (captured to stdout)
     "print": print,
 }
+
+# --- Safe Wrappers ---
+
+def safe_range(*args):
+    """Restricted range to prevent memory exhaustion."""
+    r = range(*args)
+    if len(r) > 100_000:
+        raise ValueError("Range exceeds maximum limit of 100,000")
+    return r
+
+def safe_pow(base, exp, mod=None):
+    """Restricted power to prevent CPU exhaustion."""
+    if mod is None:
+        # Check for potential large numbers
+        if abs(exp) > 1000:
+             raise ValueError("Exponent exceeds limit of 1000")
+        if abs(base) > 1000 and exp > 10:
+             raise ValueError("Result likely too large")
+    return pow(base, exp, mod)
+
+# Update SAFE_BUILTINS with wrappers
+SAFE_BUILTINS["range"] = safe_range
+SAFE_BUILTINS["pow"] = safe_pow
 
 class SafePythonExecutor:
     """
