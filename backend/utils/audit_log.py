@@ -5,7 +5,7 @@ Provides tamper-evident structured logging for sensitive financial operations.
 
 from typing import Dict, Any, Optional
 from pydantic import BaseModel, Field
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 import hashlib
 import json
@@ -27,7 +27,7 @@ class AuditJSONEncoder(json.JSONEncoder):
 class AuditEntry(BaseModel):
     """Immutable audit log entry with cryptographic linking."""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     action: str
     actor: str
     details: Dict[str, Any]

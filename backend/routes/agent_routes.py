@@ -7,6 +7,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+from schemas import MLXDownloadRequest
 
 
 @router.get("/api/agents/status")
@@ -141,11 +142,11 @@ async def get_mlx_models():
     }
 
 @router.post("/api/models/mlx/download")
-async def download_mlx_model(model_data: dict):
+async def download_mlx_model(request: MLXDownloadRequest):
     """
     Download/Convert MLX model from HuggingFace.
     """
-    repo_id = model_data.get("repo_id")
+    repo_id = request.repo_id
     if not repo_id:
         return {"error": "repo_id required"}
         

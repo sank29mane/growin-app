@@ -1,118 +1,155 @@
-"""
-Global Cache Manager for Growin App
-Provides centralized caching for agents and API responses with LRU eviction.
-"""
-
 import time
 import logging
+import os
+import json
+import threading
 from typing import Any, Dict, Optional
 from collections import OrderedDict
-import threading
 
 logger = logging.getLogger(__name__)
 
+try:
+    import redis
+    REDIS_AVAILABLE = True
+except ImportError:
+    msg = "Redis module not found. Install 'redis' for L2 caching."
+    logger.warning(msg)
+    REDIS_AVAILABLE = False
 
 class CacheManager:
     """
-    Singleton Cache Manager with LRU eviction.
-    
-    Features:
-    - In-memory cache with TTL
-    - LRU eviction when max size reached
-    - Thread-safe operations
-    - Hit/miss statistics
+    Two-Level Cache Manager (L1: In-Memory, L2: Redis).
+    Singleton pattern.
     """
     _instance = None
     _lock = threading.Lock()
     
-    def __new__(cls, max_size: int = 1000):
+    # Type hints for instance attributes
+    _cache: OrderedDict
+    _expiry: Dict[str, float]
+    _max_size: int
+    _l1_hits: int
+    _l1_misses: int
+    _redis: Optional[Any]
+
+    
+    def __new__(cls, max_size: int = 1000, redis_url: Optional[str] = None):
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
                     cls._instance = super(CacheManager, cls).__new__(cls)
+                    # L1 Init
                     cls._instance._cache = OrderedDict()
                     cls._instance._expiry = {}
                     cls._instance._max_size = max_size
-                    cls._instance._hits = 0
-                    cls._instance._misses = 0
+                    cls._instance._l1_hits = 0
+                    cls._instance._l1_misses = 0
+                    
+                    # L2 Init
+                    cls._instance._redis = None
+                    if REDIS_AVAILABLE:
+                         # Use env var or passed arg
+                        url = redis_url or os.getenv("REDIS_URL")
+                        if url:
+                            try:
+                                cls._instance._redis = redis.from_url(url, socket_connect_timeout=1)
+                                cls._instance._redis.ping() # Check connection
+                                logger.info(f"L2 Cache (Redis) connected: {url}")
+                            except Exception as e:
+                                logger.warning(f"L2 Cache (Redis) connection failed: {e}. Running in L1-only mode.")
+                                cls._instance._redis = None
         return cls._instance
     
     def get(self, key: str) -> Optional[Any]:
-        """Retrieve item from cache if not expired, using LRU ordering."""
+        """Retrieve item from L1, then L2."""
         with self._lock:
-            if key not in self._cache:
-                self._misses += 1
-                return None
-                
-            expire_at = self._expiry.get(key, 0)
-            if time.time() > expire_at:
-                self._delete_unsafe(key)
-                self._misses += 1
-                return None
+            # 1. Check L1
+            if key in self._cache:
+                expire_at = self._expiry.get(key, 0)
+                if time.time() > expire_at:
+                    self._delete_l1_unsafe(key)
+                else:
+                    self._cache.move_to_end(key)
+                    self._l1_hits += 1
+                    return self._cache[key]
             
-            # Move to end (most recently used)
-            self._cache.move_to_end(key)
-            self._hits += 1
-            return self._cache[key]
+            self._l1_misses += 1
+            
+        # 2. Check L2 (Outside lock for IO)
+        if self._redis:
+            try:
+                # Assuming simple string values or serialized JSON
+                # For complex objects, we might need pickle, but usually JSON is safer for interoperability
+                # Here assuming the user handles serialization if needed, or we use pickle?
+                # The prompt implies standard cache. Let's try pickle for Python objects transparency?
+                # Or JSON. Let's stick to simple get for now, assuming value is bytes/string.
+                # Actually, standard pattern: use pickle for Python object cache.
+                import pickle
+                if self._redis: # Check again for Mypy
+                    data = self._redis.get(key)
+                    if data:
+                        val = pickle.loads(data)
+                        # Populate L1
+                        self.set(key, val, ttl=300) # Default TTL refresh
+                        return val
+            except Exception as e:
+                logger.warning(f"L2 Cache get failed: {e}")
+                
+        return None
     
     def set(self, key: str, value: Any, ttl: int = 300):
-        """Store item in cache with TTL (seconds), evicting LRU if needed."""
+        """Set item in L1 and L2."""
+        # 1. Set L1
         with self._lock:
-            # If key exists, update and move to end
-            if key in self._cache:
-                self._cache.move_to_end(key)
-            else:
-                # Evict LRU items if at capacity
-                while len(self._cache) >= self._max_size:
-                    oldest_key = next(iter(self._cache))
-                    self._delete_unsafe(oldest_key)
-                    logger.debug(f"LRU evicted: {oldest_key}")
+            if len(self._cache) >= self._max_size:
+                 self._cache.popitem(last=False)
             
             self._cache[key] = value
             self._expiry[key] = time.time() + ttl
+            
+        # 2. Set L2
+        if self._redis:
+            try:
+                import pickle
+                data = pickle.dumps(value)
+                if self._redis: # Check again for Mypy
+                     self._redis.setex(key, ttl, data)
+            except Exception as e:
+                logger.warning(f"L2 Cache set failed: {e}")
     
-    def _delete_unsafe(self, key: str):
-        """Delete without lock (internal use only)."""
+    def _delete_l1_unsafe(self, key: str):
         self._cache.pop(key, None)
         self._expiry.pop(key, None)
         
     def delete(self, key: str):
-        """Remove item from cache."""
         with self._lock:
-            self._delete_unsafe(key)
-        
+            self._delete_l1_unsafe(key)
+        if self._redis:
+            try:
+                self._redis.delete(key)
+            except Exception:
+                pass
+
     def clear(self):
-        """Clear all cache."""
         with self._lock:
             self._cache.clear()
             self._expiry.clear()
-            self._hits = 0
-            self._misses = 0
-        logger.info("Global cache cleared.")
+            self._l1_hits = 0
+            self._l1_misses = 0
+        if self._redis:
+            try:
+                self._redis.flushdb()
+            except Exception:
+                pass
     
     def get_stats(self) -> Dict[str, Any]:
-        """Get cache statistics."""
-        with self._lock:
-            total = self._hits + self._misses
-            hit_rate = (self._hits / total * 100) if total > 0 else 0.0
-            return {
-                "size": len(self._cache),
-                "max_size": self._max_size,
-                "hits": self._hits,
-                "misses": self._misses,
-                "hit_rate": f"{hit_rate:.1f}%"
-            }
-    
-    def cleanup_expired(self) -> int:
-        """Remove expired entries. Returns count of removed items."""
-        with self._lock:
-            now = time.time()
-            expired_keys = [k for k, exp in self._expiry.items() if now > exp]
-            for key in expired_keys:
-                self._delete_unsafe(key)
-            return len(expired_keys)
+        return {
+            "l1_size": len(self._cache),
+            "l1_hits": self._l1_hits,
+            "l1_misses": self._l1_misses,
+            "l2_status": "Connected" if self._redis else "Disabled"
+        }
 
-
-# Shared instance
+# Initializer for easy access
 cache = CacheManager()
 

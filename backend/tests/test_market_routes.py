@@ -7,9 +7,7 @@ import asyncio
 
 # Ensure backend is in path
 import os
-sys.path.insert(0, os.path.join(os.getcwd(), 'backend'))
-
-from backend.routes.market_routes import get_portfolio_history
+from routes.market_routes import get_portfolio_history
 
 @pytest.mark.asyncio
 async def test_get_portfolio_history_vectorized():
@@ -42,7 +40,7 @@ async def test_get_portfolio_history_vectorized():
     df = pd.DataFrame(data, index=dates)
 
     # 3. Setup mocks
-    with patch('backend.routes.market_routes.get_live_portfolio', new_callable=MagicMock) as mock_get_live:
+    with patch('routes.market_routes.get_live_portfolio', new_callable=MagicMock) as mock_get_live:
         # Mocking async result
         f = asyncio.Future()
         f.set_result(mock_portfolio_data)
@@ -58,11 +56,11 @@ async def test_get_portfolio_history_vectorized():
             mock_download.return_value = mock_df_result
 
             # Patch app_context.account_context (patching where it is defined since it is imported inside function)
-            with patch('backend.app_context.account_context') as mock_account_context:
+            with patch('app_context.account_context') as mock_account_context:
                 mock_account_context.get_account_or_default.return_value = "invest"
 
                 # Patch state.chat_manager to avoid fallback errors if logic fails
-                with patch('backend.routes.market_routes.state') as mock_state:
+                with patch('routes.market_routes.state') as mock_state:
                     mock_state.chat_manager.get_portfolio_history.return_value = []
 
                     # 4. Execute

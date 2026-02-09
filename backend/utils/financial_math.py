@@ -1,96 +1,44 @@
 """
-Financial Math Utilities
-Provides safe Decimal arithmetic and standardized rounding for financial calculations.
+Financial Math Utilities - Precision-safe calculations for Growin App
+Uses Python's decimal module to avoid floating point errors.
+Standard: 2026 SOTA Financial Best Practices
 """
 
-from decimal import Decimal, ROUND_HALF_UP, Context, setcontext, getcontext, InvalidOperation
-from typing import Union, Optional, List
-import logging
+from decimal import Decimal, getcontext, ROUND_HALF_UP
+from typing import Union, Any
 
-logger = logging.getLogger(__name__)
+# Standard Financial Precision (4 decimal places for intermediate, 2 for display)
+PRECISION_INTERNAL = 4
+PRECISION_DISPLAY = 2
+PRECISION_CURRENCY = Decimal('0.01')
 
-# Type alias for inputs that can be converted to money
-MoneyInput = Union[Decimal, float, str, int]
+# Set global context for financial calculations
+getcontext().rounding = ROUND_HALF_UP
 
-# Standard precisions
-PRECISION_CURRENCY = Decimal("0.01")      # 2 decimal places (Fiat)
-PRECISION_PRICE = Decimal("0.0001")       # 4 decimal places (Stock prices)
-PRECISION_CRYPTO = Decimal("0.00000001")  # 8 decimal places (Crypto)
-
-def create_decimal(value: MoneyInput, precision: Optional[Decimal] = None) -> Decimal:
-    """
-    Safely creates a Decimal from various input types.
-    
-    Args:
-        value: The value to convert (float, str, int, Decimal)
-        precision: Optional quantization precision (e.g., PRECISION_CURRENCY)
-        
-    Returns:
-        Decimal: The converted value, or 0 if conversion fails.
-    """
+def create_decimal(value: Any) -> Decimal:
+    """Safe conversion to Decimal, handling strings, floats, and ints."""
     if value is None:
-        return Decimal(0)
-        
-    try:
-        # Convert float to string first to avoid binary floating point artifacts
-        # e.g., Decimal(0.1) -> Decimal('0.1000000000000000055511151231257827021181583404541015625')
-        if isinstance(value, float):
-            d = Decimal(str(value))
-        else:
-            d = Decimal(value)
+        return Decimal('0')
+    if isinstance(value, str):
+        # Remove currency symbols or commas if present
+        clean_val = value.replace('£', '').replace('$', '').replace(',', '').strip()
+        return Decimal(clean_val)
+    return Decimal(str(value))
 
-        if precision:
-            return d.quantize(precision, rounding=ROUND_HALF_UP)
-            
-        return d
-    except (InvalidOperation, TypeError, ValueError):
-        logger.warning(f"Failed to convert '{value}' to Decimal. Defaulting to 0.")
-        return Decimal(0)
+def safe_div(numerator: Union[Decimal, float, str], denominator: Union[Decimal, float, str]) -> Decimal:
+    """Divide with zero-check and return Decimal."""
+    n = create_decimal(numerator)
+    d = create_decimal(denominator)
+    if d == 0:
+        return Decimal('0')
+    return n / d
 
-def safe_div(numerator: MoneyInput, denominator: MoneyInput, precision: Optional[Decimal] = None) -> Decimal:
-    """
-    Safely divides two numbers, handling division by zero.
-    """
-    num = create_decimal(numerator)
-    den = create_decimal(denominator)
-    
-    if den == 0:
-        return Decimal(0)
-        
-    result = num / den
-    if precision:
-        return result.quantize(precision, rounding=ROUND_HALF_UP)
-    return result
+def quantize_currency(value: Union[Decimal, float, str]) -> Decimal:
+    """Round to 2 decimal places using ROUND_HALF_UP."""
+    return create_decimal(value).quantize(PRECISION_CURRENCY, rounding=ROUND_HALF_UP)
 
-class FinancialContext:
-    """
-    Context manager for setting decimal precision/rounding locally.
-    Usage:
-        with FinancialContext():
-             # calculations
-    """
-    def __init__(self, prec: int = 28, rounding: str = ROUND_HALF_UP):
-        self.context = Context(prec=prec, rounding=rounding)
-        self.token = None
-
-    def __enter__(self):
-        self.token = setcontext(self.context)
-        return self.context
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        # Restore previous context implicitly by exiting the block scope if we used setcontext
-        # Python's decimal module uses thread-local context.
-        # Ideally we should use localcontext() but implementing a custom class allows us to enforce project standards.
-        # Actually, decimal.localcontext is better. Let's wrap that instead?
-        # Re-implementing essentially what localcontext does but with defaults.
-        if self.token:
-             # setcontext returns the OLD context, we don't need to restore manually if we use localcontext
-             pass
-        return False
-
-def format_currency(value: MoneyInput, symbol: str = "£") -> str:
-    """
-    Formats a decimal as a currency string.
-    """
-    d = create_decimal(value, PRECISION_CURRENCY)
-    return f"{symbol}{d:,.2f}"
+def calculate_pnl_percent(current_value: Decimal, total_invested: Decimal) -> float:
+    """Calculate PnL percentage safely."""
+    if total_invested == 0:
+        return 0.0
+    return float((current_value - total_invested) / total_invested)

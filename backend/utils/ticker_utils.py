@@ -7,7 +7,7 @@ import re
 
 # Bolt Optimization: Import optional dependencies at module level to avoid repeated ImportErrors (PR #48)
 try:
-    import growin_core
+    import growin_core # type: ignore
     GROWIN_CORE_AVAILABLE = True
 except ImportError:
     growin_core = None
@@ -92,6 +92,8 @@ def normalize_ticker(ticker: str) -> str:
     # Fallback to robust Python logic if Rust fails or is missing
     if not ticker:
         return ""
+    
+
 
     # 1. Basic Cleaning
     ticker = ticker.upper().strip().replace("$", "")

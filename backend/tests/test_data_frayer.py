@@ -4,11 +4,8 @@ import pandas as pd
 from unittest.mock import patch
 import asyncio
 import sys
-import os
 
-# Add backend to path
-sys.path.append(os.path.join(os.getcwd(), 'backend'))
-
+# Imports are handled by conftest.py or pytest automatic path discovery
 from utils.data_frayer import MarketDataFrayer
 
 @pytest.mark.asyncio

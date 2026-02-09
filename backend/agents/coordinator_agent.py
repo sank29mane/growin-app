@@ -549,7 +549,7 @@ Query: "{clean_query}"
         return None
 
     async def _handle_specialist_error(self, agent: BaseAgent, context: Dict[str, Any], error: str) -> Optional[AgentResponse]:
-        """Tier 3: Attempt to fix a specialist error using LLM reasoning (Self-Healing)"""
+        """Tier 3: Attempt to fix a specialist error using LLM reasoning (Self-Healing via Docker Sandbox)"""
         if not self.llm:
             return None
 
@@ -560,11 +560,16 @@ Query: "{clean_query}"
         If it's a Ticker Not Found/Delisted error, try adding/removing .L or correcting the symbol.
         Leveraged stocks often have digits (MAG5, GLD3) - ensure they are preserved.
         
-        Write a Python script to return a modified 'new_context' dict.
-        Return ONLY a JSON block:
+        Write a Python script that prints the JSON of the modified 'new_context'.
+        The script will run in an ISOLATED Docker container.
+        
+        Input Context:
+        {json.dumps(context)}
+        
+        Return ONLY a JSON block with the script:
         {{
           "reasoning": "Explain the fix",
-          "code": "new_context = context.copy()\\nif 'ticker' in new_context: new_context['ticker'] = new_context['ticker'] + '.L'"
+          "code": "import json\\ncontext = {json.dumps(context)}\\n# ... fix logic ...\\nprint(json.dumps(context))"
         }}
         """
         try:
@@ -579,16 +584,33 @@ Query: "{clean_query}"
                 except json.JSONDecodeError as je:
                     logger.warning(f"Coordinator: JSON decode failed for fix: {je}")
                     return None
+                
                 if python_code:
-                    logger.debug(f"Coordinator: Executing fix script:\n{python_code}")
-                    exec_res = self.python_executor.execute(python_code, {"context": context})
-                    if exec_res["success"] and exec_res["result"]:
-                        new_context = exec_res["result"]
-                        logger.info(f"Coordinator retry for {agent.config.name} with fixed context: {new_context}")
-                        # Retry once with fixed context
-                        return await agent.execute(new_context)
-                    else:
-                        logger.warning(f"Coordinator: Fix script failed: {exec_res.get('error') or 'No result'}")
+                    logger.info(f"Coordinator: Delegating fix to Docker Sandbox...")
+                    # SOTA 2026: Use Docker MCP for isolation
+                    try:
+                        # Call docker_run_python tool
+                        # We assume the tool is registered in the MCP client available to the coordinator
+                        result = await self.mcp_client.call_tool("docker_run_python", {"script": python_code})
+                        
+                        # Parse the output from the tool
+                        if result and result.content:
+                            output_text = result.content[0].text
+                            # The tool returns a string rep of a dict: {'stdout': '...', ...}
+                            # We need to parse that string safely
+                            import ast
+                            exec_res = ast.literal_eval(output_text)
+                            
+                            if exec_res.get("exit_code") == 0:
+                                stdout = exec_res.get("stdout", "")
+                                new_context = json.loads(stdout)
+                                logger.info(f"Coordinator retry for {agent.config.name} with fixed context: {new_context}")
+                                return await agent.execute(new_context)
+                            else:
+                                logger.warning(f"Docker execution failed: {exec_res}")
+                    except Exception as e:
+                        logger.error(f"Failed to execute Docker fix: {e}")
+                        
         except Exception as e:
             logger.warning(f"Self-correction failed: {e}")
             
@@ -692,34 +714,15 @@ Query: "{clean_query}"
             return []
 
 
-    async def _attempt_ticker_fix(self, ticker: str) -> str:
-        """
-        Attempt to fix a malformed ticker symbol.
-        Uses search-based resolution as fallback.
-        """
-        if not ticker:
-            return ticker
-        
-        # Try search-based resolution
-        resolved = await self._resolve_ticker_via_search(ticker)
-        if resolved:
-            logger.info(f"Coordinator: Fixed ticker {ticker} -> {resolved}")
-            return resolved
-        
-        return ticker
-
     def _resolve_ticker_from_history(self, history: List[Dict]) -> Optional[str]:
         """Attempt to find last discussed ticker in history"""
         # history is passed in chronological order. history[-1] is the most recent.
-        
+        from utils import extract_ticker_from_text
         for msg in reversed(history):
             content = msg.get("content", "")
             if not content:
                 continue
-                
-            from utils import extract_ticker_from_text
-            found = extract_ticker_from_text(content, find_last=True)
+            found = extract_ticker_from_text(content, find_last=False)
             if found:
                 return found
-                
         return None

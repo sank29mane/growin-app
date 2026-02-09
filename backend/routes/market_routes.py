@@ -14,6 +14,7 @@ from app_context import state
 from cache_manager import cache
 from trading212_mcp_server import normalize_ticker
 from data_engine import get_alpaca_client
+from schemas import GoalPlanContext, GoalExecutionRequest, SetActiveAccountRequest
 
 
 
@@ -33,16 +34,12 @@ forecast_agent = ForecastingAgent()
 portfolio_lock = asyncio.Lock()
 
 @router.post("/api/goal/plan")
-async def create_goal_plan(context: dict):
+async def create_goal_plan(context: GoalPlanContext):
     """
     Generate a comprehensive goal-based investment plan.
     
     Args:
-        context: Dictionary containing:
-            - initial_capital (float)
-            - target_returns_percent (float)
-            - duration_years (float)
-            - risk_profile (str: LOW, MEDIUM, HIGH, AGGRESSIVE_PLUS)
+        context: GoalPlanContext model containing investment parameters.
             
     Returns:
         Expert investment plan with asset allocation, strategy, and Trading 212 Pie implementation details.
@@ -54,7 +51,7 @@ async def create_goal_plan(context: dict):
         agent = GoalPlannerAgent()
         
         # Execute analysis
-        response = await agent.analyze(context)
+        response = await agent.analyze(context.model_dump())
         
         if not response.success:
              raise HTTPException(status_code=500, detail=response.error)
@@ -67,15 +64,12 @@ async def create_goal_plan(context: dict):
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @router.post("/api/goal/execute")
-async def execute_goal_plan(plan: dict):
+async def execute_goal_plan(plan: GoalExecutionRequest):
     """
     Execute a goal plan by creating or updating a Trading 212 Pie.
     
     Args:
-        plan: The 'implementation' dictionary from the goal plan response.
-              Must contain: 'type': 'TRADING212_PIE', 'name', 'action', and weights logic.
-              Actually, the UI should probably pass the full 'goal_data' or specialized params.
-              Let's accept the raw 'implementation' block + 'weights'.
+        plan: GoalExecutionRequest model containing implementation details and instrument weights.
     
     Returns:
         Status of the Pie execution.
@@ -87,18 +81,18 @@ async def execute_goal_plan(plan: dict):
         if not state.mcp_client.session:
              raise HTTPException(status_code=503, detail="Trading 212 connection not active")
              
-        impl = plan.get("implementation", {})
-        if impl.get("type") != "TRADING212_PIE":
+        impl = plan.implementation
+        if impl.type != "TRADING212_PIE":
              raise HTTPException(status_code=400, detail="Invalid execution type. Only TRADING212_PIE supported.")
         
         # Extract weights from plan (suggested_instruments)
-        instruments = plan.get("suggested_instruments", [])
+        instruments = plan.suggested_instruments
         if not instruments:
              raise HTTPException(status_code=400, detail="No instruments found in plan")
              
         pie_payload = {
-            "name": impl.get("name", "Goal Portfolio"),
-            "instruments": {i["ticker"]: i["weight"] for i in instruments}
+            "name": impl.name,
+            "instruments": {i.ticker: i.weight for i in instruments}
         }
         
         logger.info(f"Executing Pie Creation: {pie_payload['name']}")
@@ -395,13 +389,13 @@ async def get_active_account():
     return {"account_type": account_context.get_active_account()}
 
 @router.post("/account/active")
-async def set_active_account(request: dict):
+async def set_active_account(request: SetActiveAccountRequest):
     """
     Set the active account type.
     Called automatically when user switches accounts in portfolio view.
     """
     from app_context import account_context
-    account_type = request.get("account_type")
+    account_type = request.account_type
     
     if not account_type:
         raise HTTPException(status_code=400, detail="account_type is required")

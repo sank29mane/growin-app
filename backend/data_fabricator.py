@@ -96,6 +96,13 @@ class DataFabricator:
         return context
 
     async def _fetch_price_data(self, ticker: str) -> Optional[PriceData]:
+        from cache_manager import cache
+        cache_key = f"price_data:{ticker}"
+        cached = cache.get(cache_key)
+        if cached:
+            # logger.info(f"Cache hit for {ticker}")
+            return cached
+
         try:
             from status_manager import status_manager
             status_manager.set_status("coordinator", "working", f"Fetching price data for {ticker}...")
@@ -239,13 +246,15 @@ class DataFabricator:
             if not history_series or current_price <= 0:
                 raise ValueError("Insufficient data retrieved from providers")
 
-            return PriceData(
+            p_data = PriceData(
                 ticker=ticker,
                 current_price=float(current_price),
                 currency=currency,
                 source="DataFabricator",
                 history_series=history_series
             )
+            cache.set(cache_key, p_data, ttl=60) # 60s cache for prices
+            return p_data
         except Exception as e:
             logger.error(f"Price fetch failed for {ticker}: {e}")
             # STRICT POLICY: No synthetic data. Return None to indicate failure.

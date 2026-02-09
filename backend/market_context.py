@@ -4,8 +4,8 @@ Aggregates all data from specialist agents for the Decision Agent.
 """
 
 from typing import Dict, List, Optional, Any
-from pydantic import BaseModel, Field
-from datetime import datetime
+from pydantic import BaseModel, Field, ConfigDict, field_serializer
+from datetime import datetime, timezone
 from enum import Enum
 from decimal import Decimal
 from utils.financial_math import create_decimal
@@ -19,6 +19,11 @@ class Signal(str, Enum):
     NEUTRAL = "NEUTRAL"
 
 
+def to_camel(string: str) -> str:
+    """Convert snake_case to camelCase"""
+    return "".join(word.capitalize() if i > 0 else word for i, word in enumerate(string.split("_")))
+
+
 class TimeSeriesItem(BaseModel):
     """Single data point for a chart"""
     timestamp: int  # ms
@@ -27,6 +32,8 @@ class TimeSeriesItem(BaseModel):
     low: float
     close: float
     volume: Optional[float] = None
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
 class ForecastData(BaseModel):
@@ -43,6 +50,8 @@ class ForecastData(BaseModel):
     raw_series: List[TimeSeriesItem] = [] # Full forecast series for charts
     auxiliary_forecasts: Optional[List[Dict[str, Any]]] = None # Secondary model predictions for comparison
 
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
 
 class QuantData(BaseModel):
     """Technical indicators from QuantAgent"""
@@ -53,6 +62,8 @@ class QuantData(BaseModel):
     signal: Signal = Signal.NEUTRAL
     support_level: Optional[float] = None
     resistance_level: Optional[float] = None
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
 class PortfolioData(BaseModel):
@@ -81,15 +92,34 @@ class PortfolioData(BaseModel):
             "current_value": self.total_value,
             "total_pnl": self.total_pnl,
             "total_pnl_percent": self.pnl_percent,
-            "cash_balance": self.cash_balance,
+            "cash_balance": {
+                "total": self.cash_balance.get("total", Decimal(0)),
+                "free": self.cash_balance.get("free", Decimal(0))
+            },
             "accounts": self.accounts
+        }
+    
+    @property
+    def snapshot(self) -> Dict[str, Any]:
+        """Wrap summary and positions for Swift PortfolioSnapshot compatibility"""
+        return {
+            "summary": self.summary,
+            "positions": self.positions
         }
     
     def model_dump(self, **kwargs) -> Dict[str, Any]:
         data = super().model_dump(**kwargs)
-        # Inject 'summary' for frontend compatibility
+        # Inject 'summary' and 'snapshot' for frontend compatibility
+        data["total_value"] = self.total_value
+        data["total_pnl"] = self.total_pnl
+        data["pnl_percent"] = self.pnl_percent
+        data["cash_balance"] = self.cash_balance
+        
         data["summary"] = self.summary
+        data["snapshot"] = self.snapshot
         return data
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
 class NewsArticle(BaseModel):
@@ -120,6 +150,8 @@ class SocialData(BaseModel):
     top_discussions: List[str] = []
     platforms: List[str] = []
 
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
 
 class WhaleData(BaseModel):
     """Institutional/Large trade activity"""
@@ -128,6 +160,8 @@ class WhaleData(BaseModel):
     unusual_volume: bool = False
     sentiment_impact: str = "NEUTRAL" # BULLISH, BEARISH, NEUTRAL
     summary: str = ""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
 class GoalData(BaseModel):
@@ -148,6 +182,8 @@ class GoalData(BaseModel):
     rebalancing_strategy: Optional[Dict[str, Any]] = None
     implementation: Optional[Dict[str, Any]] = None
 
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
 
 class PriceData(BaseModel):
     """Current price information"""
@@ -158,6 +194,8 @@ class PriceData(BaseModel):
     variance: Optional[float] = None  # From PriceValidator
     validated: bool = False
     history_series: List[TimeSeriesItem] = [] # Historical series for charts
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
 class MarketContext(BaseModel):
@@ -170,7 +208,7 @@ class MarketContext(BaseModel):
     query: str
     intent: str = "analytical"
     routing_reason: Optional[str] = None
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     ticker: Optional[str] = None
     
     # Specialist Agent Data
@@ -233,8 +271,14 @@ class MarketContext(BaseModel):
         
         return " | ".join(parts) if parts else "No data available"
     
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat(),
-            Decimal: lambda v: float(v) # Serialize Decimal as float for frontend compatibility
-        }
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    @field_serializer('timestamp')
+    def serialize_dt(self, dt: datetime, _info):
+        return dt.isoformat()
+
+    @field_serializer('price', 'forecast', 'quant', 'portfolio', 'research', 'social', 'whale', 'goal', check_fields=False)
+    def serialize_nested(self, v, _info):
+        if v is None:
+            return None
+        return v.model_dump()

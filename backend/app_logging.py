@@ -3,6 +3,20 @@ import sys
 from collections import deque
 from utils.secret_masker import SecretMasker
 
+from contextvars import ContextVar
+import uuid
+
+# Global context for correlation IDs
+correlation_id_ctx: ContextVar[str] = ContextVar("correlation_id", default="-")
+
+class CorrelationIdFilter(logging.Filter):
+    """
+    Log filter that injects the current correlation ID into the log record.
+    """
+    def filter(self, record):
+        record.correlation_id = correlation_id_ctx.get()
+        return True
+
 # Global buffer for real-time logs (last 100 lines)
 log_buffer = deque(maxlen=100)
 
@@ -47,9 +61,11 @@ def setup_logging(name: str = "growin_backend", level: int = logging.INFO) -> lo
         
     logger.setLevel(level)
 
+    logger.addFilter(CorrelationIdFilter())
+
     # Formatter
     formatter = SecretMaskingFormatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        '%(asctime)s - %(name)s - [%(correlation_id)s] - %(levelname)s - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
 

@@ -54,3 +54,8 @@ granite-tsfm = { git = "https://github.com/ibm-granite/granite-tsfm.git", rev = 
 asyncio_mode = "auto"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+
+[dependency-groups]
+dev = [
+    "pytest-cov>=7.0.0",
+]

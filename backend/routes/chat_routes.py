@@ -2,7 +2,7 @@
 Chat Routes - Conversation and Message Handling
 """
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Header
 from typing import Optional, Dict, Any
 from pydantic import BaseModel
 from app_context import state, ChatMessage, AnalyzeRequest, AgentResponse
@@ -11,6 +11,9 @@ from utils import extract_ticker_from_text, sanitize_nan
 import logging
 import traceback
 from datetime import datetime
+import uuid
+from app_logging import correlation_id_ctx
+from utils.audit_log import log_audit
 
 # Constants
 TITLE_UPDATE_INTERVAL = 6  # Update title every 6 messages
@@ -54,11 +57,23 @@ async def update_conversation_title_if_needed(conversation_id: str, model_name: 
         # Don't fail the main chat flow if title update fails
 
 @router.post("/api/chat/message")
-async def chat_message(request: ChatMessage, _=Depends(default_limiter.check)):
+async def chat_message(
+    request: ChatMessage, 
+    accept: str = Header(default="application/json"),
+    _: Any = Depends(default_limiter.check)
+):
     """
-    Chat endpoint using NEW Hybrid Architecture:
-    Coordinator → Specialists → Decision Agent
+    Chat endpoint using Hybrid Architecture with Streaming Support.
     """
+    # Set Request Correlation ID
+    request_id = str(uuid.uuid4())
+    token = correlation_id_ctx.set(request_id)
+    
+    # Check for SSE request
+    if "text/event-stream" in accept:
+        from sse_starlette.sse import EventSourceResponse
+        return EventSourceResponse(stream_chat_generator(request))
+
     try:
         from agents.coordinator_agent import CoordinatorAgent
         from agents.decision_agent import DecisionAgent
@@ -80,15 +95,27 @@ async def chat_message(request: ChatMessage, _=Depends(default_limiter.check)):
         history = chat_manager.load_history(conversation_id, limit=6)
         
         # Phase 1: Coordinator orchestrates specialists
-        coordinator = CoordinatorAgent(state.mcp_client, model_name=request.coordinator_model or "granite-tiny")
-        market_context = await coordinator.process_query(
-            query=request.message,
-            ticker=ticker,
-            account_type=request.account_type,  # Pass account context
-            history=history
-        )
-        
-        market_context.user_context["history"] = history
+        try:
+            coordinator = CoordinatorAgent(state.mcp_client, model_name=request.coordinator_model or "granite-tiny")
+            market_context = await coordinator.process_query(
+                query=request.message,
+                ticker=ticker,
+                account_type=request.account_type,  # Pass account context
+                history=history
+            )
+            market_context.user_context["history"] = history
+            
+        except Exception as coord_error:
+            logger.error(f"Coordinator functionality failed: {coord_error}. Proceeding with Degradation Mode.")
+            # Graceful Degradation: Construct minimal context to bypass coordinator failure
+            from market_context import MarketContext
+            market_context = MarketContext(
+                intent="general_chat",
+                ticker=ticker,
+                routing_reason="Coordinator Fallback - Degradation Mode",
+                user_context={"account_type": request.account_type, "history": history}
+            )
+            market_context.agents_failed.append("coordinator_agent")
         
         # Phase 2: Decision Agent makes final recommendation
         decision_agent = DecisionAgent(
@@ -98,7 +125,8 @@ async def chat_message(request: ChatMessage, _=Depends(default_limiter.check)):
         response = await decision_agent.make_decision(market_context, request.message)
 
         # Generate timestamp and ensure ISO format
-        timestamp = datetime.utcnow().isoformat() + "Z"
+        from datetime import timezone
+        timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
         # Save assistant reply
         chat_manager.save_message(
@@ -121,24 +149,87 @@ async def chat_message(request: ChatMessage, _=Depends(default_limiter.check)):
             "timestamp": timestamp,
             "model_name": request.model_name,
             "coordinator_model": request.coordinator_model,
-            "data": sanitize_nan(market_context.model_dump() if hasattr(market_context, "model_dump") else market_context.dict())
+            "data": sanitize_nan(market_context.model_dump(by_alias=True))
         }
     except Exception as e:
         logger.error(f"Chat error: {str(e)}\n{traceback.format_exc()}")
-        
-        # Check for specific error types to provide safe feedback
-        if "LM Studio" in str(e) or "Connection" in type(e).__name__:
-            error_detail = "LLM Connection Error: Please ensure LM Studio/Ollama is running."
-        elif "native-mlx" in str(e).lower():
-            error_detail = "MLX Model Error: Check model path and hardware compatibility."
-        else:
-            # Mask all other internal errors to prevent leakage
-            error_detail = "Internal Server Error"
-        
         raise HTTPException(
             status_code=500, 
-            detail=error_detail
+            detail=str(e)
         )
+
+async def stream_chat_generator(request: ChatMessage):
+    """Generator for SSE streaming responses."""
+    try:
+        from agents.coordinator_agent import CoordinatorAgent
+        from agents.decision_agent import DecisionAgent
+        import json
+        
+        chat_manager = state.chat_manager
+        conversation_id = request.conversation_id or chat_manager.create_conversation()
+
+        # Save user message IMMEDIATELY
+        chat_manager.save_message(
+            conversation_id=conversation_id,
+            role="user",
+            content=request.message,
+        )
+        
+        yield {
+            "event": "meta",
+            "data": json.dumps({"conversation_id": conversation_id, "status": "planning"})
+        }
+
+        # Extract ticker
+        ticker = extract_ticker_from_text(request.message)
+        history = chat_manager.load_history(conversation_id, limit=6)
+        
+        # Phase 1: Coordinator (Yield status)
+        yield { "event": "status", "data": "Coordinating agents..." }
+        
+        coordinator = CoordinatorAgent(state.mcp_client, model_name=request.coordinator_model or "granite-tiny")
+        market_context = await coordinator.process_query(
+            query=request.message,
+            ticker=ticker,
+            account_type=request.account_type,
+            history=history
+        )
+        market_context.user_context["history"] = history
+        
+        # Yield Context Data (optional, mostly for debugging or UI context)
+        # yield { "event": "context", "data": json.dumps(market_context.model_dump(by_alias=True)) }
+        
+        # Phase 2: Streaming Decision
+        yield { "event": "status", "data": "Thinking..." }
+        
+        decision_agent = DecisionAgent(
+            model_name=request.model_name or "native-mlx",
+            api_keys=request.api_keys
+        )
+        
+        full_response = ""
+        async for chunk in decision_agent.make_decision_stream(market_context, request.message):
+            full_response += chunk
+            yield { "event": "token", "data": chunk }
+            
+        # Save final message
+        chat_manager.save_message(
+            conversation_id=conversation_id,
+            role="assistant",
+            content=full_response,
+            agent_name="DecisionAgent",
+            model_name=request.model_name
+        )
+        
+        # Signal done
+        yield { "event": "done", "data": "[DONE]" }
+        
+        # Async title update
+        await update_conversation_title_if_needed(conversation_id, request.model_name)
+        
+    except Exception as e:
+        logger.error(f"Streaming error: {e}")
+        yield { "event": "error", "data": str(e) }
 
 @router.post("/agent/analyze", response_model=AgentResponse)
 async def analyze_portfolio(request: AnalyzeRequest):

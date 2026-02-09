@@ -10,6 +10,8 @@ import logging
 import re
 from langchain_core.messages import SystemMessage, HumanMessage
 from .llm_factory import LLMFactory
+from utils.audit_log import log_audit
+from app_logging import correlation_id_ctx
 
 logger = logging.getLogger(__name__)
 
@@ -90,12 +92,92 @@ class DecisionAgent:
             if (context.intent == "goal_planning" or "plan" in query.lower()) and "CREATE_GOAL_PLAN" not in recommendation:
                 recommendation += "\n\n[ACTION:CREATE_GOAL_PLAN]"
 
+            # Audit Log
+            log_audit(
+                action="DECISION_MADE",
+                actor=f"DecisionAgent::{self.model_name}",
+                details={
+                    "query": query,
+                    "ticker": context.ticker,
+                    "intent": context.intent,
+                    "correlation_id": correlation_id_ctx.get(),
+                    "recommendation_snippet": recommendation[:200]
+                }
+            )
+
             return recommendation
 
         except Exception as e:
             logger.error(f"Decision making failed: {e}")
             status_manager.set_status("decision_agent", "error", f"Error: {str(e)}", model=self.model_name)
             return f"Error generating recommendation: {str(e)}"
+
+    async def make_decision_stream(self, context: MarketContext, query: str):
+        """
+        Stream the decision making process.
+        Yields chunks of text.
+        """
+        if not self._initialized:
+            await self._initialize_llm()
+
+        from status_manager import status_manager
+        status_manager.set_status("decision_agent", "working", "Streaming reasoning...", model=self.model_name)
+
+        # Same prep logic as make_decision
+        account_filter = self._detect_account_mentions(query)
+        prompt = self._build_prompt(context, query, account_filter)
+        prompt = self._inject_context_layers(prompt, query)
+        system_content = self._get_system_persona(context.intent)
+
+        try:
+            # Check if validation logic needs to run *before* streaming?
+            # Validation runs on the output. If we stream, we can't block it easily.
+            # We will validate *after* collecting, or concurrently?
+            # For streaming, we might skip strict price validation interception
+            # OR we stream the raw LLM output and if it violates, we append a warning.
+            
+            # Streaming logic
+            full_response = ""
+            
+            if hasattr(self.llm, "astream"):
+                messages = [SystemMessage(content=system_content), HumanMessage(content=prompt)]
+                async for chunk in self.llm.astream(messages):
+                    content = chunk.content
+                    full_response += content
+                    yield content
+            else:
+                # Fallback
+                response = await self._generate_draft(system_content, prompt)
+                full_response = response
+                yield response
+                
+            # Post-stream processing (Price Validation)
+            # We can yield an extra chunk if validation fails
+            validation = await PriceValidator.validate_trade_price(context.ticker)
+            if validation["action"] in ["block", "warn"] and context.ticker:
+                 if any(word in full_response.upper() for word in ["BUY", "SELL"]):
+                     warning = f"\n\n⚠️ **Price Warning**: {validation['message']}"
+                     yield warning
+            
+            status_manager.set_status("decision_agent", "ready", "Stream complete", model=self.model_name)
+            
+            # Audit Log (Stream Complete)
+            log_audit(
+                action="DECISION_STREAM_COMPLETE",
+                actor=f"DecisionAgent::{self.model_name}",
+                details={
+                    "query": query,
+                    "ticker": context.ticker,
+                    "intent": context.intent,
+                    "correlation_id": correlation_id_ctx.get(),
+                    "full_response_length": len(full_response)
+                }
+            )
+            
+            
+        except Exception as e:
+            logger.error(f"Streaming failed: {e}")
+            yield f"Error: {str(e)}"
 
     async def _generate_draft(self, system_content: str, prompt: str) -> str:
         """Generate initial draft."""

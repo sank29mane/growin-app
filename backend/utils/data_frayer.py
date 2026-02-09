@@ -81,7 +81,9 @@ class MarketDataFrayer:
         def process_bars(raw_bars):
             if not raw_bars: return []
             df = pd.DataFrame(raw_bars)
-            df['t'] = pd.to_numeric(df['t'])
+            df['t'] = pd.to_numeric(df['t'], errors='coerce')
+            df = df.dropna(subset=['t'])
+            df['t'] = df['t'].astype(int)
             df = df.sort_values(by=['t', '_p'], ascending=[True, True])
             df = df.drop_duplicates(subset=['t'], keep='first')
             return df
@@ -147,11 +149,16 @@ class MarketDataFrayer:
             # Robust Timestamp Conversion (Vectorized)
             # Handles both TZ-aware and Naive indices correctly matching .timestamp() behavior
             if df.index.tz is not None:
+                # Convert to UTC first to be safe
+                df.index = df.index.tz_convert("UTC")
                 epoch = pd.Timestamp("1970-01-01", tz="UTC")
-                df['t'] = (df.index - epoch) // pd.Timedelta("1ms")
             else:
                 epoch = pd.Timestamp("1970-01-01")
-                df['t'] = (df.index - epoch) // pd.Timedelta("1ms")
+            
+            # Use total_seconds() * 1000 for robustness
+            df['t'] = (df.index - epoch).total_seconds() * 1000
+            df = df.dropna(subset=['t'])
+            df['t'] = df['t'].astype(int)
 
             # Rename and Select
             df = df.rename(columns={

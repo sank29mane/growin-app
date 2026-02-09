@@ -14,10 +14,43 @@ except ImportError:
     growin_core = None
     RUST_CORE_AVAILABLE = False
 
-from typing import Dict, List, Any, Optional
+try:
+    import mlx.core as mx
+    import mlx.nn as nn
+    MLX_AVAILABLE = True
+except ImportError:
+    mx = None
+    MLX_AVAILABLE = False
+
+from typing import Dict, List, Any, Optional, TypedDict, Union
 from enum import Enum
 from decimal import Decimal
 from backend.utils.financial_math import create_decimal, safe_div, PRECISION_CURRENCY
+
+class TechnicalIndicators(TypedDict, total=False):
+    rsi: Optional[float]
+    macd: Optional[float]
+    macd_signal: Optional[float]
+    macd_hist: Optional[float]
+    bb_upper: Optional[float]
+    bb_middle: Optional[float]
+    bb_lower: Optional[float]
+    ema_50: Optional[float]
+    ema_200: Optional[float]
+    volume_sma: Optional[float]
+
+class AnalysisResult(TypedDict):
+    indicators: TechnicalIndicators
+    signals: Dict[str, str]
+    current_price: float
+    data_points: int
+
+class PortfolioMetrics(TypedDict):
+    total_value: float
+    total_cost: float
+    total_pnl: float
+    portfolio_return: float
+    position_count: int
 
 
 class TimeFrame(Enum):
@@ -37,7 +70,7 @@ class QuantEngine:
     def __init__(self):
         pass
 
-    def calculate_technical_indicators(self, ohlcv_data: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def calculate_technical_indicators(self, ohlcv_data: List[Dict[str, Any]]) -> Union[AnalysisResult, Dict[str, str]]:
         """
         Calculate technical indicators from OHLCV data using Rust-optimized core.
         Input: List of dicts with keys 't', 'o', 'h', 'l', 'c', 'v'
@@ -60,39 +93,103 @@ class QuantEngine:
         # Calculate indicators via Rust Core
         indicators = {}
         
+        # Priority: MLX (M-series NPU) > Rust > Pandas-TA > Pure Pandas
+        # Hybrid Approach: Use MLX for vectorized ops (SMA, BBands), allow fallback to Rust/Pandas for recursive ops (RSI, EMI)
+        if MLX_AVAILABLE and len(close_prices) > 0:
+            try:
+                 # convert to MLX array (float32 for NPU optimization)
+                 price_array = mx.array(close_prices).astype(mx.float32)
+                 
+                 # --- Bollinger Bands & SMA (Convolution-based) ---
+                 # We use 1D convolution for rolling mean, which is highly parallelizable on NPU
+                 window_size = 20
+                 weight_sma = mx.full((window_size,), 1.0/window_size).astype(mx.float32)
+                 
+                 # Reshape for conv1d: [Batch, Length, Channels] = [1, L, 1]
+                 # Weights: [Out_Channels, Kernel_Size, In_Channels] = [1, 20, 1]
+                 x_reshaped = price_array.reshape(1, -1, 1)
+                 w_reshaped = weight_sma.reshape(1, window_size, 1)
+                 
+                 # Compute SMA20 via convolution
+                 # padding=0 gives 'valid' output (size reduces by window-1)
+                 sma20_conv = mx.conv1d(x_reshaped, w_reshaped, stride=1, padding=0)
+                 
+                 if sma20_conv.size > 0:
+                     # Access element: [0, -1, 0] -> Last time step
+                     indicators['bb_middle'] = float(sma20_conv[0, -1, 0].item())
+                     
+                     # Standard Deviation Calculation
+                     # Var(X) = E[X^2] - (E[X])^2
+                     x2 = price_array ** 2
+                     x2_reshaped = x2.reshape(1, -1, 1)
+                     
+                     # E[X^2] windowed
+                     sma20_x2 = mx.conv1d(x2_reshaped, w_reshaped, stride=1, padding=0)
+                     
+                     # Variance = Mean(Square) - Square(Mean)
+                     # Note: sma20_conv ** 2 is element-wise square of the mean
+                     var20 = sma20_x2 - (sma20_conv ** 2)
+                     var20 = mx.maximum(var20, 0.0) # Clip negative optimized errors
+                     std20 = mx.sqrt(var20)
+                     
+                     std_val = std20[0, -1, 0]
+                     mean_val = sma20_conv[0, -1, 0]
+                     
+                     indicators['bb_upper'] = float((mean_val + 2 * std_val).item())
+                     indicators['bb_lower'] = float((mean_val - 2 * std_val).item())
+
+                 # --- Volume SMA (Vectorized) ---
+                 if 'volume' in df:
+                     vol_array = mx.array(df['volume'].fillna(0).tolist()).astype(mx.float32)
+                     vol_reshaped = vol_array.reshape(1, -1, 1)
+                     # Reuse kernel since window is same (20)
+                     vol_sma_conv = mx.conv1d(vol_reshaped, w_reshaped, stride=1, padding=0)
+                     if vol_sma_conv.size > 0:
+                         indicators['volume_sma'] = float(vol_sma_conv[0, -1, 0].item())
+
+            except Exception as e:
+                # Log usage failure but continue seamlessly to Rust/Pandas fallback
+                print(f"MLX NPU Calculation Warning: {e} - Falling back to CPU.")
+                pass
         if RUST_CORE_AVAILABLE:
             try:
                 # RSI
-                rsi_vals = growin_core.calculate_rsi(close_prices, 14)
-                indicators['rsi'] = rsi_vals[-1] if rsi_vals else None
+                if 'rsi' not in indicators:
+                    rsi_vals = growin_core.calculate_rsi(close_prices, 14)
+                    indicators['rsi'] = rsi_vals[-1] if rsi_vals else None
 
                 # MACD
-                # Rust returns tuple (macd_line, signal_line, histogram)
-                macd_line, macd_signal, macd_hist = growin_core.calculate_macd(close_prices, 12, 26, 9)
-                if macd_line:
-                    indicators['macd'] = macd_line[-1]
-                    indicators['macd_signal'] = macd_signal[-1]
-                    indicators['macd_hist'] = macd_hist[-1]
+                if 'macd' not in indicators:
+                    macd_line, macd_signal, macd_hist = growin_core.calculate_macd(close_prices, 12, 26, 9)
+                    if macd_line:
+                        indicators['macd'] = macd_line[-1]
+                        indicators['macd_signal'] = macd_signal[-1]
+                        indicators['macd_hist'] = macd_hist[-1]
 
                 # Bollinger Bands
-                upper, middle, lower = growin_core.calculate_bbands(close_prices, 20, 2.0)
-                if upper:
-                    indicators['bb_upper'] = upper[-1]
-                    indicators['bb_middle'] = middle[-1]
-                    indicators['bb_lower'] = lower[-1]
+                if 'bb_upper' not in indicators:
+                    upper, middle, lower = growin_core.calculate_bbands(close_prices, 20, 2.0)
+                    if upper:
+                        indicators['bb_upper'] = upper[-1]
+                        indicators['bb_middle'] = middle[-1]
+                        indicators['bb_lower'] = lower[-1]
 
                 # EMA
-                ema_50_vals = growin_core.calculate_ema(close_prices, 50)
-                indicators['ema_50'] = ema_50_vals[-1] if len(ema_50_vals) >= 50 else None
+                if 'ema_50' not in indicators:
+                    ema_50_vals = growin_core.calculate_ema(close_prices, 50)
+                    indicators['ema_50'] = ema_50_vals[-1] if len(ema_50_vals) >= 50 else None
 
-                ema_200_vals = growin_core.calculate_ema(close_prices, 200)
-                indicators['ema_200'] = ema_200_vals[-1] if len(ema_200_vals) >= 200 else None
+                if 'ema_200' not in indicators:
+                    ema_200_vals = growin_core.calculate_ema(close_prices, 200)
+                    indicators['ema_200'] = ema_200_vals[-1] if len(ema_200_vals) >= 200 else None
 
                 # Volume SMA
-                vol_vals = growin_core.calculate_sma(df['volume'].fillna(0).tolist(), 20)
-                indicators['volume_sma'] = vol_vals[-1] if vol_vals else None
+                if 'volume_sma' not in indicators:
+                    vol_vals = growin_core.calculate_sma(df['volume'].fillna(0).tolist(), 20)
+                    indicators['volume_sma'] = vol_vals[-1] if vol_vals else None
             except Exception as e:
-                return {"error": f"Indicator calculation failed: {e}"}
+                # If Rust fails, we might still have partials/MLX
+                if not indicators: return {"error": f"Indicator calculation failed: {e}"}
         elif PANDAS_TA_AVAILABLE and ta is not None:
              # Fallback to pandas-ta if Rust is missing
              try:
@@ -178,7 +275,7 @@ class QuantEngine:
             "data_points": len(df)
         }
 
-    def calculate_portfolio_metrics(self, positions: List[Dict[str, Any]], benchmark_returns: Optional[List[float]] = None) -> Dict[str, Any]:
+    def calculate_portfolio_metrics(self, positions: List[Dict[str, Any]], benchmark_returns: Optional[List[float]] = None) -> Union[PortfolioMetrics, Dict[str, str]]:
         """
         Calculate snapshot portfolio-level metrics.
         Input: List of position dicts with 'symbol', 'qty', 'current_price', 'avg_cost'

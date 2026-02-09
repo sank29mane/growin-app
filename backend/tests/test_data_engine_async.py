@@ -4,29 +4,16 @@ from unittest.mock import MagicMock, patch
 import sys
 import os
 
-# Mock dependencies to avoid import errors in environment
-sys.modules['utils'] = MagicMock()
-sys.modules['utils.ticker_utils'] = MagicMock()
-sys.modules['utils.currency_utils'] = MagicMock()
-sys.modules['data_models'] = MagicMock()
-# Mock Alpaca SDK
-sys.modules['alpaca'] = MagicMock()
-sys.modules['alpaca.data'] = MagicMock()
-sys.modules['alpaca.data.requests'] = MagicMock()
-sys.modules['alpaca.data.timeframe'] = MagicMock()
-sys.modules['alpaca.trading'] = MagicMock()
-sys.modules['alpaca.trading.client'] = MagicMock()
-sys.modules['alpaca.data.historical'] = MagicMock()
-sys.modules['finnhub'] = MagicMock()
-
-# Set env vars
+# Environment setup
+os.environ["ALPACA_API_KEY"] = "mock_key"
+os.environ["ALPACA_SECRET_KEY"] = "mock_secret"
 os.environ["ALPACA_API_KEY"] = "mock_key"
 os.environ["ALPACA_SECRET_KEY"] = "mock_secret"
 
 # Import the module under test
 # We need to ensure we can import it even if dependencies are missing in the real env
 # The sys.modules mocks above should handle imports inside the file.
-from backend.data_engine import AlpacaClient, FinnhubClient
+from data_engine import AlpacaClient, FinnhubClient
 
 class TestDataEngineAsync(unittest.TestCase):
     def setUp(self):
@@ -43,7 +30,7 @@ class TestDataEngineAsync(unittest.TestCase):
         sys.modules['cache_manager'] = mock_cache_mgr
 
         # We need to instantiate AlpacaClient but prevent __init__ from failing or doing too much
-        with patch('backend.data_engine.AlpacaClient.__init__', return_value=None):
+        with patch('data_engine.AlpacaClient.__init__', return_value=None):
             client = AlpacaClient()
             client.data_client = None # Force fallback
             client.trading_client = None
@@ -52,7 +39,7 @@ class TestDataEngineAsync(unittest.TestCase):
             client._fetch_from_yfinance = MagicMock(return_value={"bars": []})
 
             # Mock normalize_ticker
-            with patch('backend.data_engine.normalize_ticker', return_value="AAPL"):
+            with patch('data_engine.normalize_ticker', return_value="AAPL"):
                  # Run async test
                 async def run_test():
                     await client.get_historical_bars("AAPL", timeframe="1Day")
@@ -71,7 +58,7 @@ class TestDataEngineAsync(unittest.TestCase):
     def test_finnhub_timeframe_mapping(self):
         """Test Finnhub resolution mapping logic"""
 
-        with patch('backend.data_engine.FinnhubClient.__init__', return_value=None):
+        with patch('data_engine.FinnhubClient.__init__', return_value=None):
             fh_client = FinnhubClient()
             fh_client.client = MagicMock()
 

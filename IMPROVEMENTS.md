@@ -90,14 +90,34 @@ The request pipeline is synchronous and multi-stage (Coordinator -> Specialist -
 
 ## Roadmap for Next Sprint
 
-1.  **Safety First**: Implement `SecretMasker` to secure logs.
-2.  **Precision**: Migrate `QuantEngine` to `Decimal`.
-3.  **Security**: Harden `SafePythonExecutor` or replace dynamic code generation with static tools.
-4.  **Architecture**: Centralize Ticker Normalization.
+1.  **Safety First**: Implement `SecretMasker` to secure logs (Verify Coverage).
+2.  **Precision**: Migrate `QuantEngine` to `Decimal` using `utils.financial_math`.
+3.  **Security**: Harden `SafePythonExecutor` toward Docker-based isolation.
+    - **Implementation**: Transition from AST-validation to the **Docker MCP** plugin for executing agent-generated scripts in isolated `python:3.11-slim` containers.
+4.  **Architecture**: Centralize Ticker Normalization in a dedicated service.
 
 ---
 
-## Appendix: 2026 Audit Notes
+## 🚀 2026 SOTA Roadmap
+
+### 1. Multi-Agent Observability Dashboard
+Implement a structured telemetry system to visualize the reasoning chain.
+- **Goal**: Show the user *why* a specific agent was called and what data it returned.
+- **Metric**: Track agent latency and token usage per intent type.
+
+### 2. Docker-Native Agent Operations
+Move all agentic "Fix" operations to a dedicated Docker Network.
+- **Security**: No network egress allowed for "Fix" containers.
+- **Lifecycle**: Containers are destroyed immediately after execution to prevent persistence.
+
+### 2. Phased Autonomy (HITL)
+Transition from "Advisory" to "Layered Autonomy".
+- **Short Term**: Implement "Confirmation Gates" for all trade-related suggestions.
+- **Long Term**: Allow agents to perform low-risk maintenance tasks (e.g., auto-rebalancing within 1% threshold) autonomously with audit logs.
+
+### 3. Native Backend Launcher (Frontend)
+Refactor `GrowinApp.swift` to use `Process` instead of `NSAppleScript`.
+- **Reason**: `NSAppleScript` is fragile and depends on the Terminal app state. `Process` allows for better lifecycle management and log capture.
 
 - **Codebase Investigator Results**: Confirmed clean separation of IO (DataFabricator) but highlighted the `python_executor` risk.
 - **Performance**: Apple Silicon (ANE) optimization is correctly configured in `server.py`.

@@ -36,10 +36,13 @@ class LLMFactory:
         try:
             llm_instance = None
             
-            # 1. LM Studio Priority (Check if running and if model name matches common local patterns)
-            is_lmstudio_hint = any(x in model_lower for x in ["oss", "r1", "think", "lmstudio", "local", "nemotron"])
+            # 2. Native MLX Priority (Apple Silicon NPU/M4 Optimization)
+            # User requested NOT to load LLM on ANE/NPU implicitly.
+            # Using standard provider logic below.
             
-            if provider == "lmstudio" or (not provider and is_lmstudio_hint):
+            if not llm_instance:
+                if provider == "lmstudio" or (not provider and is_lmstudio_hint):
+                    # ... (rest of LM Studio logic)
                 try:
                     llm_instance = await LLMFactory._create_lmstudio(model_name)
                 except Exception as lm_err:
