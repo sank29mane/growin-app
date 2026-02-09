@@ -61,9 +61,12 @@ class ForecastingAgent(BaseAgent):
         if "Min" in timeframe:
             # Estimate minutes per bar
             mins = 1
-            if "5" in timeframe: mins = 5
-            if "15" in timeframe: mins = 15
-            if "30" in timeframe: mins = 30
+            if "5" in timeframe:
+                mins = 5
+            if "15" in timeframe:
+                mins = 15
+            if "30" in timeframe:
+                mins = 30
             
             total_minutes = days * 24 * 60
             steps = min(int(total_minutes / mins), MAX_STEPS)
@@ -91,7 +94,8 @@ class ForecastingAgent(BaseAgent):
                     corrections = 0
                     for bar in ohlcv_data:
                         c = float(bar.get('c', 0))
-                        if c <= 0: continue
+                        if c <= 0:
+                            continue
                         
                         ratio = c / median_price
                         factor = 1.0
@@ -179,6 +183,8 @@ class ForecastingAgent(BaseAgent):
                 auxiliary_forecasts=result.get("auxiliary_forecasts")
             )
 
+            from status_manager import status_manager
+            status_manager.set_status("forecasting_agent", "ready", f"Trend: {forecast_data.trend}")
             return AgentResponse(
                 agent_name=self.config.name,
                 success=True,

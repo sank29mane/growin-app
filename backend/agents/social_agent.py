@@ -5,8 +5,7 @@ Integration with Tavily (searching Reddit, Twitter/X, etc.)
 
 from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from market_context import SocialData
-from typing import Dict, Any, List, Optional
-from pydantic import BaseModel
+from typing import Dict, Any
 import logging
 import os
 import asyncio
@@ -104,9 +103,12 @@ class SocialAgent(BaseAgent):
                 url = res.get('url', '')
                 
                 # Identify platform
-                if "reddit" in url: platforms.add("Reddit")
-                elif "twitter" in url or "x.com" in url: platforms.add("X (Twitter)")
-                elif "stocktwits" in url: platforms.add("StockTwits")
+                if "reddit" in url:
+                    platforms.add("Reddit")
+                elif "twitter" in url or "x.com" in url:
+                    platforms.add("X (Twitter)")
+                elif "stocktwits" in url:
+                    platforms.add("StockTwits")
                 
                 # Sentiment
                 text = f"{title}. {content}"
@@ -117,9 +119,12 @@ class SocialAgent(BaseAgent):
             
             avg_sentiment = sum(sentiments) / len(sentiments) if sentiments else 0.0
             
-            if avg_sentiment >= 0.15: label = "BULLISH"
-            elif avg_sentiment <= -0.15: label = "BEARISH"
-            else: label = "NEUTRAL"
+            if avg_sentiment >= 0.15:
+                label = "BULLISH"
+            elif avg_sentiment <= -0.15:
+                label = "BEARISH"
+            else:
+                label = "NEUTRAL"
             
             # Infer volume/hype (heuristic based on result count/relevance)
             # This is a weak proxy but better than nothing

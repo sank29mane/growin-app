@@ -40,7 +40,7 @@ struct AgentClient {
         
         let body: [String: Any] = [
             "query": query,
-            "model_name": "mistral" // Default to local model
+            "model_name": "native-mlx" // SOTA 2026 default
         ]
         
         do {

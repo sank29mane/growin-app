@@ -2,13 +2,12 @@
 import sys
 import os
 import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, AsyncMock
 
 # Add backend to path
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
 from agents.research_agent import ResearchAgent
-from rag_manager import RAGManager
 from app_context import state
 
 async def test_deep_integration():
@@ -64,9 +63,6 @@ async def test_deep_integration():
         else:
             print(f"❌ Research analysis failed: {result.error}")
 
-class AsyncMock(MagicMock):
-    async def __call__(self, *args, **kwargs):
-        return super(AsyncMock, self).__call__(*args, **kwargs)
 
 if __name__ == "__main__":
     asyncio.run(test_deep_integration())

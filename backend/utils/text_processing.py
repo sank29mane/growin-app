@@ -5,7 +5,6 @@ Handles text cleaning, title generation, and sanitization.
 
 import re
 import logging
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 

@@ -7,7 +7,7 @@ from datetime import datetime
 from app_logging import setup_logging
 
 # Import shared state and models from app_context (single source of truth)
-from app_context import state, ChatMessage, AnalyzeRequest, AgentResponse, T212ConfigRequest
+from app_context import state
 
 # Initialize Logging
 logger = setup_logging("growin_server")
@@ -52,7 +52,7 @@ except Exception:
 # FastAPI App Initialization
 # --------------------------------------------------------------------------- #
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
 from contextlib import asynccontextmanager
@@ -67,16 +67,23 @@ import sys
 async def lifespan(app: FastAPI):
     """Lifecycle events - MCP connection and model initialization"""
     # Startup
-    logger.info("Starting Growin Server...")
-    # ANE auto-detection: enable on Apple Silicon by default (but gated by user flag)
-
+    logger.info("Starting Growin Server (SOTA 2026 Mode)...")
+    
+    # Check Active Components for Observability
+    try:
+        from growin_core_src import growin_core
+        logger.info("✅ Rust Core: Enabled (Performance Mode)")
+    except ImportError:
+        logger.info("⚠️  Rust Core: Disabled (Fallback Mode)")
+        
+    logger.info(f"🧠 ANE Acceleration: {'Enabled' if _ane_enabled else 'Disabled'}")
     
     # 1. Ensure default MCP servers are configured
     default_servers = [
         {
             "name": "Trading 212",
             "type": "stdio",
-            "command": "python",
+            "command": sys.executable,
             "args": ["trading212_mcp_server.py"],
             "env": {},
             "url": None,
@@ -84,9 +91,17 @@ async def lifespan(app: FastAPI):
         {
             "name": "HuggingFace",
             "type": "stdio",
-            "command": "python",
+            "command": sys.executable,
             "args": ["huggingface_mcp_server.py"],
             "env": {"HF_TOKEN": os.getenv("HF_TOKEN", "")},
+            "url": None,
+        },
+        {
+            "name": "Docker Sandbox",
+            "type": "stdio",
+            "command": sys.executable,
+            "args": ["docker_mcp_server.py"],
+            "env": {},
             "url": None,
         },
     ]

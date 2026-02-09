@@ -11,10 +11,11 @@
 
 Growin implements a **hybrid algorithmic-LLM architecture** that combines structured quantitative analysis with advanced AI reasoning. High-performance paths are accelerated via a **Rust Native Core** and **Vectorized Python Agents**.
 
-### Key SOTA Features
-- **🚀 Bolt-Optimized Quant Engine**: Vectorized technical analysis (EMA, RSI) using Pandas/NumPy.
-- **🛡️ Sentinel Security Layer**: Automated API key masking and secure error sanitization.
-- **⚙️ Hybrid Ticker Engine**: Rust-accelerated symbol normalization with global exchange heuristics.
+### Key SOTA Features (2026)
+- **💎 Financial Precision Layer**: Eliminates binary float errors using string-initialized `Decimal` arithmetic.
+- **🚀 Bolt-Optimized Quant Engine**: Rust-accelerated technical analysis (EMA, RSI) with MLX-optimized inference.
+- **🛡️ Sentinel Security Enclave**: AST-validated Python sandboxing with log-masking for agent safety.
+- **⚙️ Hybrid Ticker Engine**: High-speed Rust symbol normalization with global exchange heuristics.
 - **🎨 Palette UI System**: Accessible, 120Hz smooth interface with glassmorphism and native macOS traits.
 ### High-Level System Overview
 ```mermaid

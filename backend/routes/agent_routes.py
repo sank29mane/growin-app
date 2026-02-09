@@ -7,6 +7,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+from schemas import MLXDownloadRequest
 
 
 @router.get("/api/agents/status")
@@ -54,7 +55,18 @@ async def get_available_models():
         Dict with decision_models and coordinator_models lists
     """
     from model_config import DECISION_MODELS, COORDINATOR_MODELS
+    from lm_studio_client import LMStudioClient
     
+    # Attempt to enrich with currently loaded LM Studio model for 'lmstudio-auto'
+    try:
+        lms = LMStudioClient()
+        loaded = await lms.list_loaded_models()
+        if loaded:
+             # Update common models list if needed or just provide as info
+             pass
+    except:
+        pass
+
     return {
         "decision_models": [
             {
@@ -71,6 +83,36 @@ async def get_available_models():
             for name, info in COORDINATOR_MODELS.items()
         ]
     }
+
+@router.get("/api/models/lmstudio")
+async def get_lmstudio_models():
+    """
+    Get live list of models from LM Studio V1 API.
+    Allows the UI to see exactly what is downloaded/available locally.
+    """
+    from lm_studio_client import LMStudioClient
+    client = LMStudioClient()
+    try:
+        models = await client.list_models()
+        # Filter for LLMs and return simple list of IDs for UI compatibility
+        llm_ids = [
+            m.get("id") for m in models 
+            if m.get("id") and "embed" not in m.get("id", "").lower() 
+            and "nomic" not in m.get("id", "").lower()
+        ]
+        return {
+            "models": llm_ids,
+            "count": len(llm_ids),
+            "status": "online"
+        }
+    except Exception as e:
+        logger.warning(f"Failed to fetch LM Studio models: {e}")
+        return {
+            "models": [],
+            "count": 0,
+            "status": "offline",
+            "error": str(e)
+        }
 
 
 # MLX Models Management (Stub)
@@ -100,11 +142,11 @@ async def get_mlx_models():
     }
 
 @router.post("/api/models/mlx/download")
-async def download_mlx_model(model_data: dict):
+async def download_mlx_model(request: MLXDownloadRequest):
     """
     Download/Convert MLX model from HuggingFace.
     """
-    repo_id = model_data.get("repo_id")
+    repo_id = request.repo_id
     if not repo_id:
         return {"error": "repo_id required"}
         

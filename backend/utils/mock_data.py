@@ -2,7 +2,6 @@
 import random
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any
-import math
 
 def generate_synthetic_chart_data(ticker: str, timeframe: str = "1Day", limit: int = 100) -> List[Dict[str, Any]]:
     """
@@ -65,7 +64,13 @@ def generate_synthetic_chart_data(ticker: str, timeframe: str = "1Day", limit: i
             "high": round(high_price, 2),
             "low": round(low_price, 2),
             "close": round(close_price, 2),
-            "volume": volume
+            "volume": volume,
+            # Add short keys for compatibility
+            "o": round(open_price, 2),
+            "h": round(high_price, 2),
+            "l": round(low_price, 2),
+            "c": round(close_price, 2),
+            "v": volume
         })
         
         current_time += dt

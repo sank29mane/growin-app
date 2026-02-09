@@ -1,15 +1,11 @@
 
 import pytest
 import pandas as pd
-import numpy as np
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 import asyncio
 import sys
-import os
 
-# Add backend to path
-sys.path.append(os.path.join(os.getcwd(), 'backend'))
-
+# Imports are handled by conftest.py or pytest automatic path discovery
 from utils.data_frayer import MarketDataFrayer
 
 @pytest.mark.asyncio
@@ -36,7 +32,6 @@ async def test_fetch_yfinance_fallback_correctness():
 
     # 3. Mock yfinance
     # Import yfinance to ensure it's loaded and we can patch it
-    import yfinance
     with patch('yfinance.Ticker') as MockTicker:
         mock_instance = MockTicker.return_value
         mock_instance.history.return_value = df

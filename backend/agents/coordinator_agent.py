@@ -14,8 +14,6 @@ import logging
 import re
 import json
 import difflib
-import inspect
-from utils import run_safe_python
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +85,7 @@ class CoordinatorAgent:
         self.goal_planner_agent = GoalPlannerAgent()
         
         self.llm = None
-        self._initialize_llm()
+        # Initialize LLM will be called on first process_query if not already done
         
         # Initialize Safe Python Executor for data cleaning/fixes
         from utils import get_safe_executor
@@ -96,29 +94,18 @@ class CoordinatorAgent:
         logger.info(f"CoordinatorAgent initialized (Centralized Mode) with model: {model_name}")
     
     async def _initialize_llm(self):
-        """Initialize the routing LLM"""
-        import os
+        """Initialize the routing LLM using the Factory"""
         try:
-            if "gpt" in self.model_name.lower():
-                from langchain_openai import ChatOpenAI
-                self.llm = ChatOpenAI(model=self.model_name, temperature=0)
-            elif "mlx" in self.model_name.lower() or "granite" in self.model_name.lower():
-                if "mlx" in self.model_name.lower():
-                    from mlx_langchain import ChatMLX
-                    self.llm = ChatMLX(model_name=self.model_name, temperature=0, top_p=1.0)
-                else:
-                    # For granite in LM Studio
-                    from lm_studio_client import LMStudioClient
-                    self.llm = LMStudioClient()
-                    # Check connection
-                    if not await self.llm.check_connection():
-                        logger.warning("Coordinator: LM Studio not available for routing. Falling back.")
-                        self.llm = None
-            else:
-                from langchain_ollama import ChatOllama
-                self.llm = ChatOllama(model=self.model_name, base_url="http://127.0.0.1:11434")
+            from .llm_factory import LLMFactory
+            self.llm = await LLMFactory.create_llm(self.model_name)
+            
+            # Update local model name if auto-detected
+            if hasattr(self.llm, "active_model_id"):
+                self.model_name = self.llm.active_model_id
+                
         except Exception as e:
             logger.warning(f"Failed to initialize Coordinator LLM: {e}. Routing will be static.")
+            self.llm = None
     
     async def _classify_intent(self, query: str) -> Dict[str, Any]:
         """Classify user intent using Granite-Optimized Few-Shot Prompting"""
@@ -180,7 +167,7 @@ Query: "{clean_query}"
                     if models:
                         model_id = models[0]["id"]
                 
-                resp = await self.llm.chat(model_id=model_id, input_text=prompt, temperature=0, max_tokens=100)
+                resp = await self.llm.chat(model_id=model_id, input_text=prompt, temperature=0, max_tokens=512)
                 content = resp.get("content", "")
 
             # PARSE KEY-VALUE OUTPUT (Robust Regex)
@@ -415,7 +402,7 @@ Query: "{clean_query}"
                                 # Retry with new ticker
                                 retry_result = await agent.execute(new_context)
                                 if retry_result.success:
-                                    status_manager.set_status(agent_key, "ready", f"Resolved via Tier 2")
+                                    status_manager.set_status(agent_key, "ready", "Resolved via Tier 2")
                                     return retry_result
                                 else:
                                     result = retry_result # Update original result for Tier 3 fallthrough
@@ -433,7 +420,7 @@ Query: "{clean_query}"
                 status_manager.set_status(agent_key, "ready", "Task complete")
                 return result
         except asyncio.TimeoutError:
-            error_msg = f"Timout after 15s"
+            error_msg = "Timout after 15s"
             logger.warning(f"Specialist {agent.config.name} timed out")
             status_manager.set_status(agent_key, "error", "Timed out")
             return AgentResponse(
@@ -462,6 +449,34 @@ Query: "{clean_query}"
                 error=str(e),
                 latency_ms=0
             )
+
+    async def _attempt_ticker_fix(self, ticker: str) -> Optional[str]:
+        """
+        Attempt to fix malformed tickers or those containing special characters
+        that might have triggered the validation check (e.g. VOD.L is not alpha).
+        """
+        if not ticker:
+            return None
+
+        # Strip trailing dots first
+        ticker = ticker.strip('.')
+
+        # 1. Allow dot notation for UK/Exchanges (e.g. VOD.L, BRK.B)
+        if "." in ticker and ticker.replace(".", "").isalnum():
+            # It's likely valid if it has 1 dot and rest are alphanum
+            return ticker
+
+        # 2. Strip noise (punctuation other than dot)
+        clean = "".join(c for c in ticker if c.isalnum() or c == '.')
+
+        # If the result is a clean ticker (e.g. "AAPL."), strip trailing dot
+        clean = clean.strip('.')
+
+        if len(clean) >= 2:
+            return clean
+
+        # 3. Fallback to search if really broken or too short
+        return await self._resolve_ticker_via_search(ticker)
 
     async def _resolve_ticker_via_search(self, term: str) -> Optional[str]:
         """
@@ -534,7 +549,7 @@ Query: "{clean_query}"
         return None
 
     async def _handle_specialist_error(self, agent: BaseAgent, context: Dict[str, Any], error: str) -> Optional[AgentResponse]:
-        """Tier 3: Attempt to fix a specialist error using LLM reasoning (Self-Healing)"""
+        """Tier 3: Attempt to fix a specialist error using LLM reasoning (Self-Healing via Docker Sandbox)"""
         if not self.llm:
             return None
 
@@ -545,11 +560,16 @@ Query: "{clean_query}"
         If it's a Ticker Not Found/Delisted error, try adding/removing .L or correcting the symbol.
         Leveraged stocks often have digits (MAG5, GLD3) - ensure they are preserved.
         
-        Write a Python script to return a modified 'new_context' dict.
-        Return ONLY a JSON block:
+        Write a Python script that prints the JSON of the modified 'new_context'.
+        The script will run in an ISOLATED Docker container.
+        
+        Input Context:
+        {json.dumps(context)}
+        
+        Return ONLY a JSON block with the script:
         {{
           "reasoning": "Explain the fix",
-          "code": "new_context = context.copy()\\nif 'ticker' in new_context: new_context['ticker'] = new_context['ticker'] + '.L'"
+          "code": "import json\\ncontext = {json.dumps(context)}\\n# ... fix logic ...\\nprint(json.dumps(context))"
         }}
         """
         try:
@@ -564,16 +584,33 @@ Query: "{clean_query}"
                 except json.JSONDecodeError as je:
                     logger.warning(f"Coordinator: JSON decode failed for fix: {je}")
                     return None
+                
                 if python_code:
-                    logger.debug(f"Coordinator: Executing fix script:\n{python_code}")
-                    exec_res = self.python_executor.execute(python_code, {"context": context})
-                    if exec_res["success"] and exec_res["result"]:
-                        new_context = exec_res["result"]
-                        logger.info(f"Coordinator retry for {agent.config.name} with fixed context: {new_context}")
-                        # Retry once with fixed context
-                        return await agent.execute(new_context)
-                    else:
-                        logger.warning(f"Coordinator: Fix script failed: {exec_res.get('error') or 'No result'}")
+                    logger.info(f"Coordinator: Delegating fix to Docker Sandbox...")
+                    # SOTA 2026: Use Docker MCP for isolation
+                    try:
+                        # Call docker_run_python tool
+                        # We assume the tool is registered in the MCP client available to the coordinator
+                        result = await self.mcp_client.call_tool("docker_run_python", {"script": python_code})
+                        
+                        # Parse the output from the tool
+                        if result and result.content:
+                            output_text = result.content[0].text
+                            # The tool returns a string rep of a dict: {'stdout': '...', ...}
+                            # We need to parse that string safely
+                            import ast
+                            exec_res = ast.literal_eval(output_text)
+                            
+                            if exec_res.get("exit_code") == 0:
+                                stdout = exec_res.get("stdout", "")
+                                new_context = json.loads(stdout)
+                                logger.info(f"Coordinator retry for {agent.config.name} with fixed context: {new_context}")
+                                return await agent.execute(new_context)
+                            else:
+                                logger.warning(f"Docker execution failed: {exec_res}")
+                    except Exception as e:
+                        logger.error(f"Failed to execute Docker fix: {e}")
+                        
         except Exception as e:
             logger.warning(f"Self-correction failed: {e}")
             
@@ -613,7 +650,7 @@ Query: "{clean_query}"
 
             # Populate PriceData with history for charts
             if ohlcv_data:
-                from market_context import PriceData, TimeSeriesItem
+                from market_context import TimeSeriesItem
                 last_bar = ohlcv_data[-1]
                 history_series = [
                     TimeSeriesItem(
@@ -638,6 +675,7 @@ Query: "{clean_query}"
         if needs_portfolio:
             tasks.append(("PortfolioAgent", PortfolioAgent().execute({"account_type": account_type})))
         if needs_forecast and ohlcv_data:
+            status_manager.set_status("forecasting_agent", "running", "TTM Price Prediction...")
             tasks.append(("ForecastingAgent", ForecastingAgent().execute({"ticker": context.ticker, "ohlcv_data": ohlcv_data, "days": 5})))
         if needs_research:
             tasks.append(("ResearchAgent", ResearchAgent().execute({"ticker": context.ticker, "company_name": None})))
@@ -679,17 +717,12 @@ Query: "{clean_query}"
     def _resolve_ticker_from_history(self, history: List[Dict]) -> Optional[str]:
         """Attempt to find last discussed ticker in history"""
         # history is passed in chronological order. history[-1] is the most recent.
-        
+        from utils import extract_ticker_from_text
         for msg in reversed(history):
             content = msg.get("content", "")
             if not content:
                 continue
-                
-            from utils import extract_ticker_from_text
-            found = extract_ticker_from_text(content)
+            found = extract_ticker_from_text(content, find_last=False)
             if found:
                 return found
-                
-        return None
-                
         return None
