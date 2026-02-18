@@ -9,8 +9,64 @@ struct PortfolioView: View {
             // Main Content Area
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 32) {
-                    headerView
-                    
+                    // Integrated Navigation Header
+                    HStack(alignment: .bottom) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Portfolio")
+                                .font(.caption)
+                                .fontWeight(.semibold)
+                                .foregroundStyle(.secondary)
+                            
+                            Text("Overview")
+                                .font(.title)
+                                .fontWeight(.bold)
+                                .foregroundStyle(.primary)
+                        }
+                        
+                        Spacer()
+                        
+                        // Premium Account Toggle
+                        HStack(spacing: 0) {
+                            let defaults = UserDefaults.standard
+                            ForEach(["invest", "isa"], id: \.self) { type in
+                                Button(action: {
+                                    Task { await viewModel.switchAccount(newType: type) }
+                                }) {
+                                    Text(type == "invest" ? "General" : "ISA")
+                                        .font(.caption)
+                                        .fontWeight(.semibold)
+                                        .padding(.horizontal, 16)
+                                        .padding(.vertical, 8)
+                                        .background(defaults.string(forKey: "t212AccountType") == type ? Color.white.opacity(0.1) : Color.clear)
+                                        .foregroundStyle(defaults.string(forKey: "t212AccountType") == type ? .primary : .secondary)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel(type == "invest" ? "General Account" : "ISA Account")
+                                .accessibilityHint("Switches portfolio view to \(type == "invest" ? "General" : "ISA") account")
+                                .accessibilityAddTraits(defaults.string(forKey: "t212AccountType") == type ? [.isSelected] : [])
+                            }
+                        }
+                        .background(Color.white.opacity(0.05))
+                        .clipShape(Capsule())
+                        .overlay(Capsule().stroke(Color.white.opacity(0.1), lineWidth: 0.5))
+                        .disabled(viewModel.isSwitchingAccount)
+                        
+                        Button(action: { Task { await viewModel.fetchPortfolio() } }) {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 12, weight: .bold))
+                                .frame(width: 32, height: 32)
+                                .background(Color.white.opacity(0.05))
+                                .clipShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .opacity(viewModel.isLoading ? 0.5 : 1)
+                        .accessibilityLabel("Refresh Portfolio")
+                        .accessibilityHint("Refreshes portfolio data from the server")
+                        .disabled(viewModel.isLoading)
+                    }
+                    .padding(.horizontal)
+                    .padding(.top, 24)
+
                     if let snapshot = viewModel.snapshot {
                         analyticsSection(snapshot: snapshot)
                         holdingsSection(snapshot: snapshot)

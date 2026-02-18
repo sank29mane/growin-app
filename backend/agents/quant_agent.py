@@ -1,6 +1,5 @@
 """
 Quant Agent - Technical Analysis using TA-Lib
-
 Ultra-fast algorithmic technical indicator calculations.
 """
 

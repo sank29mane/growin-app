@@ -7,7 +7,7 @@ import re
 
 # Bolt Optimization: Import optional dependencies at module level to avoid repeated ImportErrors (PR #48)
 try:
-    import growin_core # type: ignore
+    import growin_core
     GROWIN_CORE_AVAILABLE = True
 except ImportError:
     growin_core = None

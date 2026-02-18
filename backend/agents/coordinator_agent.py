@@ -725,4 +725,5 @@ Query: "{clean_query}"
             found = extract_ticker_from_text(content, find_last=False)
             if found:
                 return found
+                
         return None

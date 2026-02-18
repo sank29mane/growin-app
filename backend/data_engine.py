@@ -106,65 +106,70 @@ class AlpacaClient:
             if data.empty:
                 return None
 
-            # ⚡ OPTIMIZATION: Use vectorized operations and direct dict creation (~30x faster)
-            # Avoids iterrows and Pydantic instantiation overhead for every row
-
-            # Use original dataframe directly where possible to avoid copy overhead,
-            # but usually we need a copy if we modify it. Here we just extract values.
-            df = data # Alias for convenience
+            # ⚡ OPTIMIZATION: Use vectorized operations instead of iterrows (~10x faster)
+            # Make a copy to avoid SettingWithCopy warnings
+            df = data.copy()
 
             # Check if UK stock once (CurrencyNormalizer logic)
             is_uk = CurrencyNormalizer.is_uk_stock(normalized_ticker)
 
-            # Extract columns to numpy arrays and round/normalize
             if is_uk:
-                # Vectorized division for UK stocks (GBX -> GBP)
-                opens = np.round(df['Open'].values / 100.0, 2)
-                highs = np.round(df['High'].values / 100.0, 2)
-                lows = np.round(df['Low'].values / 100.0, 2)
-                closes = np.round(df['Close'].values / 100.0, 2)
-            else:
-                opens = np.round(df['Open'].values, 2)
-                highs = np.round(df['High'].values, 2)
-                lows = np.round(df['Low'].values, 2)
-                closes = np.round(df['Close'].values, 2)
+                 # Vectorized division for UK stocks (GBX -> GBP)
+                cols_to_normalize = ['Open', 'High', 'Low', 'Close']
+                df[cols_to_normalize] = df[cols_to_normalize] / 100.0
 
-            # Volume: handle NaN and convert to int
-            if 'Volume' in df.columns:
-                volumes = df['Volume'].fillna(0).astype(int).values
+            # Rounding to 2 decimal places (consistent with original logic)
+            df[['Open', 'High', 'Low', 'Close']] = df[['Open', 'High', 'Low', 'Close']].round(2)
+
+            # --- Robust Timezone Handling (from PR #74) ---
+            if df.index.tz is None:
+                # Localize naive timestamps to market timezone, then convert to UTC
+                # yfinance daily data is often naive but represents market time
+                market_tz = "Europe/London" if is_uk else "America/New_York"
+                df.index = df.index.tz_localize(market_tz).tz_convert('UTC')
             else:
-                volumes = np.zeros(len(df), dtype=int)
+                # Ensure all are converted to UTC for consistency
+                df.index = df.index.tz_convert('UTC')
 
             # Convert index to timestamp milliseconds robustly
-            if df.index.tz is not None:
-                # If TZ-aware, subtract TZ-aware epoch
-                ts_values = (df.index - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta('1ms')
-            else:
-                # If Naive, localize based on ticker suffix
-                # US stocks (no suffix) -> US/Eastern, UK stocks (.L) -> Europe/London
-                tz_name = "Europe/London" if normalized_ticker.endswith(".L") else "US/Eastern"
-                localized_index = df.index.tz_localize(tz_name).tz_convert("UTC")
-                ts_values = (localized_index - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta('1ms')
+            # Using astype('datetime64[ms]') ensures correct resolution handling
+            # Must remove TZ before astype('datetime64[ms]') in newer pandas
+            df['t'] = df.index.tz_localize(None).astype('datetime64[ms]').astype(np.int64)
 
-            # Convert Series to numpy array if needed
-            if isinstance(ts_values, pd.Series):
-                ts_values = ts_values.values
+            # Rename columns to match API output format (intermediate step)
+            df = df.rename(columns={
+                'Open': 'o',
+                'High': 'h',
+                'Low': 'l',
+                'Close': 'c',
+                'Volume': 'v'
+            })
 
-            # Generate ISO strings using list comprehension (faster than loop with datetime.fromtimestamp)
-            timestamps = [datetime.fromtimestamp(t/1000.0, tz=timezone.utc).isoformat() for t in ts_values]
+            # Ensure Volume is integer
+            if 'v' in df.columns:
+                df['v'] = df['v'].fillna(0).astype(int)
 
-            # Build list of dicts directly
+            # Select only needed columns
+            df = df[['t', 'o', 'h', 'l', 'c', 'v']]
+
+            # Convert to list of dicts
+            raw_records = df.to_dict('records')
+
             bar_list = []
-            for ts, o, h, l, c, v in zip(timestamps, opens, highs, lows, closes, volumes):
-                bar_list.append({
-                    'ticker': ticker,
-                    'timestamp': ts,
-                    'open': Decimal(str(o)),
-                    'high': Decimal(str(h)),
-                    'low': Decimal(str(l)),
-                    'close': Decimal(str(c)),
-                    'volume': int(v)
-                })
+            for r in raw_records:
+                # Convert timestamp ms to isoformat
+                ts_iso = datetime.fromtimestamp(r['t'] / 1000.0, tz=timezone.utc).isoformat()
+
+                bar_list.append(PriceData(
+                    ticker=ticker,
+                    timestamp=ts_iso,
+                    t=int(r['t']),
+                    open=Decimal(str(r['o'])),
+                    high=Decimal(str(r['h'])),
+                    low=Decimal(str(r['l'])),
+                    close=Decimal(str(r['c'])),
+                    volume=int(r['v'])
+                ).model_dump())
 
             result: BarDataDict = {"ticker": ticker, "bars": bar_list[-limit:], "timeframe": timeframe}
             return result
@@ -185,14 +190,8 @@ class AlpacaClient:
 
         normalized_ticker = normalize_ticker(ticker)
 
-        # OPTIMIZATION: Skip Alpaca for UK stocks (they are not supported on standard Alpaca plan)
-        # This avoids "invalid symbol" errors and speeds up the response
-        if normalized_ticker.endswith('.L'):
-            logger.info(f"AlpacaClient: Skipping Alpaca for UK stock {normalized_ticker}, using fallback.")
-            self.data_client = None # Temporarily disable to force fallback for this call
-
-        # Try Alpaca first
-        if self.data_client:
+        # Try Alpaca first (Skip for UK stocks as they are not supported)
+        if self.data_client and not normalized_ticker.endswith('.L'):
             try:
                 from alpaca.data.requests import StockBarsRequest
                 from alpaca.data.timeframe import TimeFrame
@@ -208,9 +207,6 @@ class AlpacaClient:
                     "1Month": TimeFrame.Month,
                 }
                 tf = tf_map.get(timeframe, TimeFrame.Day)
-
-                # Calculate start date based on timeframe and limit
-                # from datetime import datetime, timedelta, timezone (Removed to fix scope shadowing)
 
                 now = datetime.now(timezone.utc)
 
@@ -246,6 +242,7 @@ class AlpacaClient:
                         bar_list.append(PriceData(
                             ticker=ticker,
                             timestamp=bar.timestamp.isoformat(),
+                            t=int(bar.timestamp.timestamp() * 1000),
                             open=Decimal(str(bar.open)),
                             high=Decimal(str(bar.high)),
                             low=Decimal(str(bar.low)),
@@ -303,6 +300,9 @@ class AlpacaClient:
             else:
                 alpaca_candidates.append(t)
 
+        # Ensure alpaca candidates only contains non-UK stocks
+        alpaca_candidates = [t for t in alpaca_candidates if not normalize_ticker(t).endswith('.L')]
+
         # 3. Batch Fetch from Alpaca
         if self.data_client and alpaca_candidates:
             try:
@@ -357,6 +357,7 @@ class AlpacaClient:
                         bar_list.append(PriceData(
                             ticker=original_ticker,
                             timestamp=bar.timestamp.isoformat(),
+                            t=int(bar.timestamp.timestamp() * 1000),
                             open=Decimal(str(bar.open)),
                             high=Decimal(str(bar.high)),
                             low=Decimal(str(bar.low)),
@@ -583,6 +584,7 @@ class FinnhubClient:
                 bar_list.append(PriceData(
                     ticker=ticker,
                     timestamp=ts_iso,
+                    t=int(candles['t'][i] * 1000),
                     open=o,
                     high=h,
                     low=l,
