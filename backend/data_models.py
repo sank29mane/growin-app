@@ -8,6 +8,7 @@ class PriceData(BaseModel):
     """
     ticker: str
     timestamp: str  # ISO 8601
+    t: Optional[int] = None # Unix timestamp in milliseconds
     open: Decimal
     high: Decimal
     low: Decimal

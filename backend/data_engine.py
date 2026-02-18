@@ -109,6 +109,7 @@ class AlpacaClient:
                         bar_list.append(PriceData(
                             ticker=ticker,
                             timestamp=bar.timestamp.isoformat(),
+                            t=int(bar.timestamp.timestamp() * 1000),
                             open=Decimal(str(bar.open)),
                             high=Decimal(str(bar.high)),
                             low=Decimal(str(bar.low)),
@@ -127,6 +128,7 @@ class AlpacaClient:
         try:
             import yfinance as yf
             import pandas as pd
+            import numpy as np
             from utils.currency_utils import CurrencyNormalizer
 
             # Map timeframe to yfinance period/interval
@@ -163,13 +165,19 @@ class AlpacaClient:
             # Rounding to 2 decimal places (consistent with original logic)
             df[['Open', 'High', 'Low', 'Close']] = df[['Open', 'High', 'Low', 'Close']].round(2)
 
-            # Convert index to timestamp milliseconds robustly (handle both TZ-aware and Naive)
-            if df.index.tz is not None:
-                # If TZ-aware, subtract TZ-aware epoch
-                df['t'] = (df.index - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta('1ms')
+            # --- Robust Timezone Handling ---
+            if df.index.tz is None:
+                # Localize naive timestamps to market timezone, then convert to UTC
+                # yfinance daily data is often naive but represents market time
+                market_tz = "Europe/London" if is_uk else "America/New_York"
+                df.index = df.index.tz_localize(market_tz).tz_convert('UTC')
             else:
-                # If Naive, subtract Naive epoch
-                df['t'] = (df.index - pd.Timestamp("1970-01-01")) // pd.Timedelta('1ms')
+                # Ensure all are converted to UTC for consistency
+                df.index = df.index.tz_convert('UTC')
+
+            # Convert index to timestamp milliseconds robustly
+            # Using astype('datetime64[ms]') ensures correct resolution handling
+            df['t'] = df.index.astype('datetime64[ms]').astype(np.int64)
 
             # Rename columns to match API output format (intermediate step)
             df = df.rename(columns={
@@ -198,6 +206,7 @@ class AlpacaClient:
                 bar_list.append(PriceData(
                     ticker=ticker,
                     timestamp=ts_iso,
+                    t=int(r['t']),
                     open=Decimal(str(r['o'])),
                     high=Decimal(str(r['h'])),
                     low=Decimal(str(r['l'])),
@@ -297,6 +306,7 @@ class AlpacaClient:
                         bar_list.append(PriceData(
                             ticker=original_ticker,
                             timestamp=bar.timestamp.isoformat(),
+                            t=int(bar.timestamp.timestamp() * 1000),
                             open=Decimal(str(bar.open)),
                             high=Decimal(str(bar.high)),
                             low=Decimal(str(bar.low)),
@@ -489,6 +499,7 @@ class FinnhubClient:
                 bar_list.append(PriceData(
                     ticker=ticker,
                     timestamp=ts_iso,
+                    t=int(candles['t'][i] * 1000),
                     open=o,
                     high=h,
                     low=l,

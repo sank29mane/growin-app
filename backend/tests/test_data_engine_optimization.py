@@ -77,12 +77,10 @@ async def test_get_historical_bars_yfinance_fallback_optimization():
 
             # Verify timestamp
             # 2023-01-01 00:00:00 UTC -> 1672531200000 ms
-            expected_ts = int(pd.Timestamp("2023-01-01").timestamp() * 1000)
-            # Timestamps are ISO strings in PriceData model, not int ms
-            # The test expectation of 't' (int) was wrong vs actual implementation which converts to isoformat
-            # data_engine.py: ts_iso = datetime.fromtimestamp(r['t'] / 1000.0, tz=timezone.utc).isoformat()
+            expected_ts = int(pd.Timestamp("2023-01-01", tz="UTC").timestamp() * 1000)
             
-            # Assert valid ISO format roughly matching
+            # Now PriceData includes 't' (int ms) as well as 'timestamp' (ISO string)
+            assert first_bar['t'] == expected_ts
             assert "2023-01-01" in first_bar['timestamp']
 
 
@@ -112,8 +110,9 @@ async def test_get_historical_bars_yfinance_fallback_optimization():
             # 2023-01-01 00:00:00 EST -> 2023-01-01 05:00:00 UTC
             # 1672531200 + 5*3600 = 1672549200
             expected_ts_tz = 1672549200000
-            # TODO: Investigate why this assertion fails in test environment (returns 1672531200000 instead of 1672549200000)
-            # assert result_tz['bars'][0]['t'] == expected_ts_tz
+            # Verified: Robust timezone handling in data_engine.py now correctly converts to UTC
+            assert result_tz['bars'][0]['t'] == expected_ts_tz
+            assert "2023-01-01T05:00:00" in result_tz['bars'][0]['timestamp']
 
 @pytest.mark.asyncio
 async def test_get_batch_bars_optimization():
