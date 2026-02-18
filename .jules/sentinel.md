@@ -37,3 +37,8 @@
 **Vulnerability:** The `AnalyticsDB` class used Python f-strings to inject the `window_days` parameter directly into SQL queries as an `INTERVAL` value (e.g., `INTERVAL '{window_days}' DAY`). This allowed attackers to manipulate the query logic by breaking out of the quote.
 **Learning:** DuckDB's `INTERVAL` syntax (e.g., `INTERVAL '30' DAY`) makes parameterization non-intuitive because standard `?` binding often fails for the interval literal itself. Developers may resort to f-strings for structure, introducing injection risks.
 **Prevention:** Use arithmetic parameterization for intervals: `INTERVAL 1 DAY * ?`. This allows passing an integer parameter safely while maintaining valid SQL syntax.
+
+## 2026-02-27 - Command Injection via Versioned Interpreters
+**Vulnerability:** The MCP configuration allowed bypassing flag validation (e.g., `-c`) by using versioned interpreter names like `python3.11`. The validation logic relied on an exact dictionary lookup (`if base_cmd in INTERPRETER_FLAGS`), which failed for suffixed names.
+**Learning:** Security blocklists based on exact string matching are fragile. Interpreters often have multiple valid aliases (version suffixes, platform variations).
+**Prevention:** Use prefix-based matching with strict suffix validation (digits/dots) for tools like Python or Node to catch all version variations while avoiding false positives (like `nodes` vs `node`).
