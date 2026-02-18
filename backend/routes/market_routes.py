@@ -240,12 +240,25 @@ async def get_portfolio_history(days: int = 30, account_type: Optional[str] = No
         period = period_map.get(days, "1mo")
         
         # Download in bulk
-        tickers_str = " ".join(tickers)
+        tickers_str = " ".join(sorted(tickers))
         
         try:
             # Run in executor to not block
             loop = asyncio.get_running_loop()
-            df = await loop.run_in_executor(None, lambda: yf.download(tickers_str, period=period, progress=False)['Close'])
+
+            # Check cache first (Performance Optimization ⚡)
+            cache_key = f"portfolio_history_{tickers_str}_{period}"
+            cached_df = cache.get(cache_key)
+
+            if cached_df is not None:
+                df = cached_df
+                logger.info(f"Cache hit for portfolio history: {cache_key}")
+            else:
+                df = await loop.run_in_executor(None, lambda: yf.download(tickers_str, period=period, progress=False)['Close'])
+
+                if not df.empty:
+                    # Cache the result (TTL 1 hour) to match PortfolioAgent strategy
+                    cache.set(cache_key, df, ttl=3600)
             
             if df.empty:
                  return state.chat_manager.get_portfolio_history(days=days)
