@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from unittest.mock import MagicMock, patch, call
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 # Import the module to test
 # We need to make sure backend path is in sys.path or we run pytest from backend/
@@ -69,10 +70,10 @@ async def test_get_historical_bars_yfinance_fallback_optimization():
             # Verify first bar
             first_bar = bars[0]
             # 1000.0 GBX -> 10.00 GBP
-            assert first_bar['open'] == 10.00
-            assert first_bar['high'] == 10.50
-            assert first_bar['low'] == 9.50
-            assert first_bar['close'] == 10.25
+            assert first_bar['open'] == Decimal('10.00')
+            assert first_bar['high'] == Decimal('10.50')
+            assert first_bar['low'] == Decimal('9.50')
+            assert first_bar['close'] == Decimal('10.25')
             assert first_bar['volume'] == 100
 
             # Verify timestamp
@@ -96,8 +97,8 @@ async def test_get_historical_bars_yfinance_fallback_optimization():
             first_bar_us = bars_us[0]
 
             # 1000.0 USD -> 1000.0 USD
-            assert first_bar_us['open'] == 1000.00
-            assert first_bar_us['close'] == 1025.00
+            assert first_bar_us['open'] == Decimal('1000.00')
+            assert first_bar_us['close'] == Decimal('1025.00')
 
             # 3. Test TZ-Aware Index
             dates_tz = pd.date_range(start='2023-01-01', periods=5, freq='D', tz='America/New_York')

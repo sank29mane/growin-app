@@ -97,7 +97,8 @@ class AlpacaClient:
 
             # Convert index to timestamp milliseconds robustly
             # Using astype('datetime64[ms]') ensures correct resolution handling
-            df['t'] = df.index.astype('datetime64[ms]').astype(np.int64)
+            # Must remove TZ before astype('datetime64[ms]') in newer pandas
+            df['t'] = df.index.tz_localize(None).astype('datetime64[ms]').astype(np.int64)
 
             # Rename columns to match API output format (intermediate step)
             df = df.rename(columns={
@@ -152,14 +153,8 @@ class AlpacaClient:
 
         normalized_ticker = normalize_ticker(ticker)
 
-        # OPTIMIZATION: Skip Alpaca for UK stocks (they are not supported on standard Alpaca plan)
-        # This avoids "invalid symbol" errors and speeds up the response
-        if normalized_ticker.endswith('.L'):
-            logger.info(f"AlpacaClient: Skipping Alpaca for UK stock {normalized_ticker}, using fallback.")
-            self.data_client = None # Temporarily disable to force fallback for this call
-
-        # Try Alpaca first
-        if self.data_client:
+        # Try Alpaca first (Skip for UK stocks as they are not supported)
+        if self.data_client and not normalized_ticker.endswith('.L'):
             try:
                 from alpaca.data.requests import StockBarsRequest
                 from alpaca.data.timeframe import TimeFrame
@@ -263,6 +258,9 @@ class AlpacaClient:
                 fallback_candidates.append(t)
             else:
                 alpaca_candidates.append(t)
+
+        # Ensure alpaca candidates only contains non-UK stocks
+        alpaca_candidates = [t for t in alpaca_candidates if not normalize_ticker(t).endswith('.L')]
 
         # 3. Batch Fetch from Alpaca
         if self.data_client and alpaca_candidates:
