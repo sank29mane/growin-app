@@ -500,8 +500,10 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 raise ValueError(f"No API key found for {account_type.upper()}.")
             
             try:
-                with open(STATE_FILE, "w") as f:
-                    json.dump({"account_type": active_account_type}, f)
+                def _write_state(acc_type):
+                    with open(STATE_FILE, "w") as f:
+                        json.dump({"account_type": acc_type}, f)
+                await asyncio.to_thread(_write_state, active_account_type)
             except Exception:
                 pass
             return [TextContent(type="text", text=f"Switched to {account_type.upper()}.")]
