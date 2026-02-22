@@ -1,3 +1,4 @@
+completed: 2026-02-22
 ---
 created: 2026-02-22T14:09:12.961Z
 title: Implement Agent Telemetry & Observability

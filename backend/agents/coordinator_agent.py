@@ -206,6 +206,15 @@ Query: "{clean_query}"
         Process user query and coordinate specialist agents based on intent.
         """
         from status_manager import status_manager
+        import uuid
+        from app_logging import correlation_id_ctx
+        
+        # Ensure tracking of the decision_id/correlation_id globally for this request
+        c_id = correlation_id_ctx.get() if correlation_id_ctx else None
+        if not c_id or c_id == "-":
+            c_id = str(uuid.uuid4())
+            if correlation_id_ctx:
+                correlation_id_ctx.set(c_id)
         
         # 0. Resolve Context (Ticker) from History if missing
         if not ticker and history:
