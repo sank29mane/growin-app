@@ -97,6 +97,9 @@ class DataFabricator:
 
     async def _fetch_price_data(self, ticker: str) -> Optional[PriceData]:
         from cache_manager import cache
+        from decimal import Decimal
+        from utils.financial_math import create_decimal, safe_div
+
         cache_key = f"price_data:{ticker}"
         cached = cache.get(cache_key)
         if cached:
@@ -113,12 +116,12 @@ class DataFabricator:
             # Use SOTA Data Fraying to combine all providers
             frayed_bars = await frayer.fetch_frayed_bars(ticker, limit=1000)
             
-            # Extract last close and history
-            last_hist_close = 0.0
+            # Extract last close and history using Decimal
+            last_hist_close = Decimal('0')
             history_series = []
             
             if frayed_bars:
-                last_hist_close = float(frayed_bars[-1]["c"])
+                last_hist_close = create_decimal(frayed_bars[-1]["c"])
                 history_series = [
                     TimeSeriesItem(
                         timestamp=int(b['t']),
@@ -132,11 +135,11 @@ class DataFabricator:
 
             # Fetch current quote from primary source
             quote_result = await self.finnhub.get_real_time_quote(ticker)
-            current_price = 0.0
+            current_price = Decimal('0')
             currency = "USD"
             
             if quote_result and "current_price" in quote_result and quote_result["current_price"] > 0:
-                 current_price = float(quote_result["current_price"])
+                 current_price = create_decimal(quote_result["current_price"])
 
             # --- T212 PORTFOLIO CHECK (Real-time fallback for owned assets) ---
             # If external APIs fail, check if we own the asset in T212.
@@ -146,9 +149,6 @@ class DataFabricator:
                     from app_context import state
                     if state.mcp_client:
                          # Attempt to get position details
-                         # We use a direct check to the cached portfolio or tool if possible, 
-                         # but tool call is safest to route through MCP logic.
-                         # Note: This might be slower, but it's a fallback.
                          pos_result = await state.mcp_client.call_tool("get_position_details", {"ticker": ticker}, timeout=5.0)
                          
                          # Parse result (TextContent list)
@@ -161,28 +161,28 @@ class DataFabricator:
                                  t212_price = pos_data.get("currentPrice") or pos_data.get("current_price")
                                  if t212_price:
                                      logger.info(f"✅ Recovered Real-Time Price from T212 Portfolio for {ticker}: {t212_price}")
-                                     current_price = float(t212_price)
+                                     current_price = create_decimal(t212_price)
                                      currency = pos_data.get("currencyCode", "GBP") # Default to GBP for T212 usually
                 except Exception as mcp_e:
                     logger.warning(f"Failed to check T212 portfolio for price: {mcp_e}")
 
             # --- SOTA DATA VALIDATION LOGIC ---
-            # Compare Real-Time Quote vs Historical Close to detect anomalies (Unit mismatch, API errors)
+            # Compare Real-Time Quote vs Historical Close using Decimal to detect anomalies
             needs_verification = False
             
             if last_hist_close > 0 and current_price > 0:
                 diff_pct = abs(current_price - last_hist_close) / last_hist_close
                 
                 # Check for Pence/Pound mismatch (approx 100x factor)
-                if 90 < (current_price / last_hist_close) < 110:
+                if Decimal('90') < (current_price / last_hist_close) < Decimal('110'):
                     logger.warning(f"Data Mismatch (GBX/GBP): History={last_hist_close}, Curr={current_price}. Treating as GBX->GBP adjustment.")
-                    current_price /= 100.0  # Normalize to match history (assuming history is valid base)
+                    current_price = current_price / Decimal('100')  # Normalize to match history
                     
-                elif 0.009 < (current_price / last_hist_close) < 0.011:
+                elif Decimal('0.009') < (current_price / last_hist_close) < Decimal('0.011'):
                      logger.warning(f"Data Mismatch (GBP/GBX): History={last_hist_close}, Curr={current_price}. Treating as GBP->GBX adjustment.")
-                     current_price *= 100.0
+                     current_price = current_price * Decimal('100')
                      
-                elif diff_pct > 0.20: # >20% unexplained gap
+                elif diff_pct > Decimal('0.20'): # >20% unexplained gap
                      logger.warning(f"Significant price gap detected for {ticker}: Hist={last_hist_close}, Curr={current_price} ({diff_pct*100:.1f}%). Verifying...")
                      needs_verification = True
             elif current_price <= 0:
@@ -203,24 +203,23 @@ class DataFabricator:
                                 p = hist['Close'].iloc[-1]
                         return p if p else 0.0
                         
-                    yf_price = await asyncio.to_thread(fetch_yf_price)
+                    yf_price_val = await asyncio.to_thread(fetch_yf_price)
+                    yf_price = create_decimal(yf_price_val)
                     
                     if yf_price > 0:
                         # Verify against History
-                        yf_diff = abs(yf_price - last_hist_close) / last_hist_close if last_hist_close > 0 else 0.0
+                        yf_diff = abs(yf_price - last_hist_close) / last_hist_close if last_hist_close > 0 else Decimal('0')
                         
                         # Decision Matrix
-                        if last_hist_close > 0 and yf_diff < 0.10:
+                        if last_hist_close > 0 and yf_diff < Decimal('0.10'):
                             logger.info(f"Verification: Rejecting Finnhub ({current_price}), Accepting YF ({yf_price}) which matches History.")
                             current_price = yf_price
-                        elif current_price > 0 and abs(yf_price - current_price) / current_price < 0.05:
+                        elif current_price > 0 and abs(yf_price - current_price) / current_price < Decimal('0.05'):
                             logger.info(f"Verification: YF ({yf_price}) confirms Finnhub ({current_price}). Real Volatility detected.")
                             # Current price accepted
                         else:
                             # Both diverge from history, or conflict. 
-                            # If they agree with each other (even if far from history), take them?
-                            # If they disagree, fallback to HISTORY.
-                            if current_price > 0 and abs(yf_price - current_price) / current_price < 0.10:
+                            if current_price > 0 and abs(yf_price - current_price) / current_price < Decimal('0.10'):
                                  logger.info("Verification: Sources agree on new price level.")
                                  # Current price accepted
                             else:
@@ -248,7 +247,7 @@ class DataFabricator:
 
             p_data = PriceData(
                 ticker=ticker,
-                current_price=float(current_price),
+                current_price=current_price,
                 currency=currency,
                 source="DataFabricator",
                 history_series=history_series
@@ -257,7 +256,6 @@ class DataFabricator:
             return p_data
         except Exception as e:
             logger.error(f"Price fetch failed for {ticker}: {e}")
-            # STRICT POLICY: No synthetic data. Return None to indicate failure.
             return None
 
     async def _fetch_news_data(self, ticker: str) -> Optional[ResearchData]:

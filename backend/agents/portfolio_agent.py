@@ -206,7 +206,7 @@ class PortfolioAgent(BaseAgent):
             cost = qty_dec * price_dec
             
             # Ensure we get Decimal from cash_balance
-            current_cash = create_decimal(p_data.cash_balance.get("free", 0.0))
+            current_cash = create_decimal(p_data.cash_balance.get("free", Decimal('0')))
             
             if side.upper() == "BUY":
                 new_cash = current_cash - cost
@@ -223,14 +223,9 @@ class PortfolioAgent(BaseAgent):
             found = False
             for pos in p_data.positions:
                 if normalize_ticker(pos.get("ticker", "")) == ticker:
-                    current_qty = create_decimal(pos.get("quantity", 0))
+                    current_qty = create_decimal(pos.get("quantity", Decimal('0')))
                     new_qty = current_qty + qty_dec if side.upper() == "BUY" else current_qty - qty_dec
                     
-                    pos["quantity"] = float(new_qty) # Keep positions dict compatible with JSON/float consumers if needed?
-                    # actually PortfolioData.positions is List[Dict[str, Any]], so keeping it consistent as float or Decimal? 
-                    # Let's use Decimal if we can, but if it breaks downstream... 
-                    # The cached object is PortfolioData, which stores `positions`.
-                    # Let's store Decimal in the Dict for consistency.
                     pos["quantity"] = new_qty
                     pos["currentPrice"] = price_dec
                     pos["value"] = new_qty * price_dec
@@ -244,19 +239,18 @@ class PortfolioAgent(BaseAgent):
                     "quantity": qty_dec,
                     "averagePrice": price_dec,
                     "currentPrice": price_dec,
-                    "ppl": Decimal(0),
-                    "fxPpl": Decimal(0),
+                    "ppl": Decimal('0'),
+                    "fxPpl": Decimal('0'),
                     "initialFillDate": asyncio.get_event_loop().time(),
                     "frontend": "MANUAL_TRADE",
                     "maxBuy": qty_dec,
                     "maxSell": qty_dec,
-                    "pieQuantity": Decimal(0)
+                    "pieQuantity": Decimal('0')
                 }
                 p_data.positions.append(new_pos)
 
             # 3. Update Totals
-            # Ensure p["quantity"] and p["currentPrice"] are Decimals
-            total_val = sum(create_decimal(p.get("quantity", 0)) * create_decimal(p.get("currentPrice", 0)) for p in p_data.positions)
+            total_val = sum(create_decimal(p.get("quantity", Decimal('0'))) * create_decimal(p.get("currentPrice", Decimal('0'))) for p in p_data.positions)
             p_data.total_value = total_val + new_cash
             
             # Save back to cache
@@ -277,23 +271,23 @@ class PortfolioAgent(BaseAgent):
         if not accounts and isinstance(summary, dict):
             accounts = summary.get("accounts")
             
-        total_invested = create_decimal(summary.get("total_invested", 0.0))
-        pnl_percent = summary.get("total_pnl_percent", 0.0) # Keep float for percent
+        total_invested = create_decimal(summary.get("total_invested", Decimal('0')))
+        pnl_percent = float(summary.get("total_pnl_percent", 0.0))
         
         # SAFETY CHECK: If invested amount is negligible, PnL% is noise. Reset to 0.
-        if total_invested < 1.0:
+        if total_invested < Decimal('1.0'):
             pnl_percent = 0.0
             
         return PortfolioData(
             total_positions=summary.get("total_positions", 0),
             total_invested=total_invested,
-            total_value=create_decimal(summary.get("current_value", 0.0)),
-            total_pnl=create_decimal(summary.get("total_pnl", 0.0)),
+            total_value=create_decimal(summary.get("current_value", Decimal('0'))),
+            total_pnl=create_decimal(summary.get("total_pnl", Decimal('0'))),
             pnl_percent=pnl_percent,
-            net_deposits=create_decimal(summary.get("net_deposits", 0.0)),
+            net_deposits=create_decimal(summary.get("net_deposits", Decimal('0'))),
             cash_balance={
-                "total": create_decimal(summary.get("cash_balance", {}).get("total", 0)),
-                "free": create_decimal(summary.get("cash_balance", {}).get("free", 0))
+                "total": create_decimal(summary.get("cash_balance", {}).get("total", Decimal('0'))),
+                "free": create_decimal(summary.get("cash_balance", {}).get("free", Decimal('0')))
             },
             accounts=accounts,
             positions=data.get("positions", [])

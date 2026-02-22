@@ -5,7 +5,8 @@ All specialist agents inherit from this for consistency and scalability.
 
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from datetime import datetime, timezone
 import logging
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,17 @@ class AgentConfig(BaseModel):
     cache_ttl: Optional[int] = 300  # 5 minutes
 
 
+class TelemetryData(BaseModel):
+    """Structured telemetry for observability"""
+    agent_name: str
+    model_version: Optional[str] = None
+    latency_ms: float
+    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    correlation_id: Optional[str] = None
+    cached: bool = False
+    tokens_used: Optional[int] = None
+
+
 class AgentResponse(BaseModel):
     """Standardized response from any agent"""
     agent_name: str
@@ -27,6 +39,7 @@ class AgentResponse(BaseModel):
     error: Optional[str] = None
     latency_ms: float
     cached: bool = False
+    telemetry: Optional[TelemetryData] = None
 
 
 class BaseAgent(ABC):
@@ -45,6 +58,7 @@ class BaseAgent(ABC):
         self.logger = logging.getLogger(f"agents.{config.name}")
         from cache_manager import cache
         self.cache = cache
+        self.model_version = "v1.0.0" # Default, override in specialists
     
     @abstractmethod
     async def analyze(self, context: Dict[str, Any]) -> AgentResponse:
@@ -64,6 +78,7 @@ class BaseAgent(ABC):
         Wrapper that handles errors, caching, and timing.
         """
         import time
+        from app_logging import correlation_id_ctx
         
         if not self.config.enabled:
             return AgentResponse(
@@ -75,6 +90,7 @@ class BaseAgent(ABC):
             )
         
         start = time.time()
+        c_id = correlation_id_ctx.get() if correlation_id_ctx else None
         
         try:
             # Check cache
@@ -84,13 +100,23 @@ class BaseAgent(ABC):
                 if cached_data:
                     latency = (time.time() - start) * 1000
                     self.logger.debug(f"{self.config.name}: Cache hit ({latency:.1f}ms)")
-                    return AgentResponse(
+                    
+                    response = AgentResponse(
                         agent_name=self.config.name,
                         success=True,
                         data=cached_data,
                         latency_ms=latency,
                         cached=True
                     )
+                    
+                    response.telemetry = TelemetryData(
+                        agent_name=self.config.name,
+                        model_version=self.model_version,
+                        latency_ms=latency,
+                        correlation_id=c_id,
+                        cached=True
+                    )
+                    return response
             
             # Execute actual analysis
             response = await self.analyze(context)
@@ -102,6 +128,15 @@ class BaseAgent(ABC):
             latency = (time.time() - start) * 1000
             response.latency_ms = latency
             
+            # Populate Telemetry
+            response.telemetry = TelemetryData(
+                agent_name=self.config.name,
+                model_version=getattr(self, "model_name", self.model_version),
+                latency_ms=latency,
+                correlation_id=c_id,
+                cached=False
+            )
+            
             self.logger.info(
                 f"{self.config.name}: {'Success' if response.success else 'Failed'} "
                 f"({latency:.1f}ms)"
@@ -112,13 +147,24 @@ class BaseAgent(ABC):
         except Exception as e:
             latency = (time.time() - start) * 1000
             self.logger.error(f"{self.config.name}: Exception - {e}")
-            return AgentResponse(
+            
+            response = AgentResponse(
                 agent_name=self.config.name,
                 success=False,
                 data={},
                 error=str(e),
                 latency_ms=latency
             )
+            
+            response.telemetry = TelemetryData(
+                agent_name=self.config.name,
+                model_version=self.model_version,
+                latency_ms=latency,
+                correlation_id=c_id,
+                cached=False
+            )
+            
+            return response
     
     def _get_cache_key(self, context: Dict[str, Any]) -> Optional[str]:
         """Generate cache key from context (override if needed)"""

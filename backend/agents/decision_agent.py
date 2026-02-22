@@ -62,10 +62,16 @@ class DecisionAgent:
         # Analyze query for account mentions
         account_filter = self._detect_account_mentions(query)
 
-        # Build prompt
+        # 1. Identify Cross-Agent Contradictions (Agentic Debate Phase)
+        contradictions = self._identify_contradictions(context)
+        if contradictions:
+            logger.info(f"DecisionAgent: Identified {len(contradictions)} cross-agent contradictions. Entering Debate Mode.")
+            context.user_context["contradictions"] = contradictions
+
+        # 2. Build prompt with debate context
         prompt = self._build_prompt(context, query, account_filter)
 
-        # Inject Skills & RAG
+        # 3. Inject Skills & RAG
         prompt = self._inject_context_layers(prompt, query)
 
         # Invoke LLM
@@ -75,7 +81,7 @@ class DecisionAgent:
             # --- RECURSIVE THINKING LOOP ---
             draft_content = await self._generate_draft(system_content, prompt)
 
-            # Critique & Refine (Only for cloud models to save local resources)
+            # Critique & Refine (Debate Reflection)
             is_local = "mlx" in self.model_name.lower() or hasattr(self.llm, "chat")
 
             if not is_local and context.intent in ["hybrid", "analytical"] and "gpt" in self.model_name:
@@ -101,7 +107,8 @@ class DecisionAgent:
                     "ticker": context.ticker,
                     "intent": context.intent,
                     "correlation_id": correlation_id_ctx.get(),
-                    "recommendation_snippet": recommendation[:200]
+                    "recommendation_snippet": recommendation[:200],
+                    "contradictions_count": len(contradictions) if contradictions else 0
                 }
             )
 
@@ -111,6 +118,42 @@ class DecisionAgent:
             logger.error(f"Decision making failed: {e}")
             status_manager.set_status("decision_agent", "error", f"Error: {str(e)}", model=self.model_name)
             return f"Error generating recommendation: {str(e)}"
+
+    def _identify_contradictions(self, context: MarketContext) -> List[str]:
+        """Identify conflicting signals between agents for the debate phase."""
+        contradictions = []
+        
+        # 1. Technicals vs. Sentiment
+        if context.quant and context.research:
+            q_signal = context.quant.signal
+            r_sent = context.research.sentiment_label
+            
+            if q_signal == "BUY" and r_sent == "BEARISH":
+                contradictions.append("Technical indicators suggest a BUY, but News Sentiment is BEARISH.")
+            elif q_signal == "SELL" and r_sent == "BULLISH":
+                contradictions.append("Technical indicators suggest a SELL, but News Sentiment is BULLISH.")
+                
+        # 2. Forecast vs. Technicals
+        if context.forecast and context.quant:
+            f_trend = context.forecast.trend
+            q_signal = context.quant.signal
+            
+            if f_trend == "BULLISH" and q_signal == "SELL":
+                contradictions.append("AI Forecast predicts growth, but Technical signals suggest selling.")
+            elif f_trend == "BEARISH" and q_signal == "BUY":
+                contradictions.append("AI Forecast predicts a decline, but Technical signals suggest buying.")
+                
+        # 3. Whales vs. Retail Sentiment
+        if context.whale and context.social:
+            w_impact = context.whale.sentiment_impact
+            s_sent = context.social.sentiment_label
+            
+            if w_impact == "BULLISH" and s_sent == "BEARISH":
+                contradictions.append("Whale activity is BULLISH, but Social Media sentiment is BEARISH.")
+            elif w_impact == "BEARISH" and s_sent == "BULLISH":
+                contradictions.append("Whale activity is BEARISH, but Social Media sentiment is BULLISH.")
+                
+        return contradictions
 
     async def make_decision_stream(self, context: MarketContext, query: str):
         """
@@ -409,6 +452,15 @@ class DecisionAgent:
             # Limit to 2 articles, titles only, truncated
             news = " | ".join([f"{a.title[:50]}..." for a in r.articles[:2]])
             sections.append(f"**NEWS**: Sent: {r.sentiment_label} | {news}")
+
+        # Debate Context
+        contradictions = context.user_context.get("contradictions", [])
+        if contradictions:
+            sections.append("\n=== AGENT CONTRADICTIONS (DEBATE PHASE) ===")
+            sections.append("The following conflicting signals were detected across your specialist agents. You MUST resolve these in your Strategic Synthesis:")
+            for c in contradictions:
+                sections.append(f"- {c}")
+            sections.append("==========================================\n")
 
         # Template Vars
         tmpl_vars = {

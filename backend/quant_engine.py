@@ -275,7 +275,7 @@ class QuantEngine:
             "data_points": len(df)
         }
 
-    def calculate_portfolio_metrics(self, positions: List[Dict[str, Any]], benchmark_returns: Optional[List[float]] = None) -> Union[PortfolioMetrics, Dict[str, str]]:
+    def calculate_portfolio_metrics(self, positions: List[Dict[str, Any]], benchmark_returns: Optional[List[float]] = None) -> Union[Dict[str, Any], Dict[str, str]]:
         """
         Calculate snapshot portfolio-level metrics.
         Input: List of position dicts with 'symbol', 'qty', 'current_price', 'avg_cost'
@@ -285,28 +285,29 @@ class QuantEngine:
         if not positions:
             return {"error": "No positions provided"}
 
-        total_value = Decimal(0)
-        total_cost = Decimal(0)
+        total_value = Decimal('0')
+        total_cost = Decimal('0')
 
         for pos in positions:
-            qty = create_decimal(pos.get('qty', 0))
-            price = create_decimal(pos.get('current_price', 0))
-            avg_cost = create_decimal(pos.get('avg_cost', 0))
+            # Use create_decimal for high-precision conversion
+            qty = create_decimal(pos.get('qty') or pos.get('quantity') or 0)
+            price = create_decimal(pos.get('current_price') or pos.get('currentPrice') or 0)
+            avg_cost = create_decimal(pos.get('avg_cost') or pos.get('averagePrice') or 0)
             
             total_value += qty * price
             total_cost += qty * avg_cost
 
-        if total_value == Decimal(0):
-            return {"error": "Portfolio value is zero"}
-
+        # Calculate P&L and Returns using Decimal
         total_pnl = total_value - total_cost
+        
+        # Safe division for portfolio return
         portfolio_return = safe_div(total_pnl, total_cost)
 
         return {
-            "total_value": float(total_value),  # Return float for JSON compatibility
-            "total_cost": float(total_cost),
-            "total_pnl": float(total_pnl),
-            "portfolio_return": float(portfolio_return),
+            "total_value": total_value,
+            "total_cost": total_cost,
+            "total_pnl": total_pnl,
+            "portfolio_return": portfolio_return,
             "position_count": len(positions)
         }
 
