@@ -179,7 +179,7 @@ enum TimeRange: String, Codable, CaseIterable, Sendable {
     }
 }
 
-struct TimeSeriesItem: Codable, Identifiable, Sendable {
+struct TimeSeriesItem: Codable, Identifiable, Equatable, Sendable {
     var id: Double { timestamp }
     let timestamp: Double
     let open: Double

@@ -32,6 +32,24 @@ LIVE_API_BASE = "https://live.trading212.com/api/v0"
 DEMO_API_BASE = "https://demo.trading212.com/api/v0"
 STATE_FILE = ".state.json"
 
+def _load_state(filepath: str) -> Optional[Dict[str, Any]]:
+    """Loads state from file synchronously."""
+    try:
+        if os.path.exists(filepath):
+            with open(filepath, "r") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return None
+
+def _save_state(filepath: str, data: Dict[str, Any]):
+    """Saves state to file synchronously."""
+    try:
+        with open(filepath, "w") as f:
+            json.dump(data, f)
+    except Exception:
+        pass
+
 # Import centralized currency normalization
 from utils.currency_utils import normalize_all_positions
 from utils.ticker_utils import normalize_ticker
@@ -499,13 +517,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             if not clients.get(account_type):
                 raise ValueError(f"No API key found for {account_type.upper()}.")
             
-            try:
-                def _write_state(acc_type):
-                    with open(STATE_FILE, "w") as f:
-                        json.dump({"account_type": acc_type}, f)
-                await asyncio.to_thread(_write_state, active_account_type)
-            except Exception:
-                pass
+            await asyncio.to_thread(_save_state, STATE_FILE, {"account_type": active_account_type})
             return [TextContent(type="text", text=f"Switched to {account_type.upper()}.")]
         
         elif name == "get_ticker_analysis":
@@ -589,16 +601,12 @@ async def main():
     global active_account_type
     active_account_type = "invest" if "invest" in clients else ("isa" if "isa" in clients else "invest")
     
-    try:
-        if os.path.exists(STATE_FILE):
-            with open(STATE_FILE, "r") as f:
-                state_data = json.load(f)
-                saved_type = state_data.get("account_type")
-                if saved_type in credentials:
-                    active_account_type = saved_type
-    except Exception:
-        pass
-        
+    state_data = await asyncio.to_thread(_load_state, STATE_FILE)
+    if state_data:
+        saved_type = state_data.get("account_type")
+        if saved_type in credentials:
+            active_account_type = saved_type
+
     async with stdio_server() as (read_stream, write_stream):
         await app.run(read_stream, write_stream, app.create_initialization_options())
 

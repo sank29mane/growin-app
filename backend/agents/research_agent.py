@@ -73,6 +73,9 @@ class ResearchAgent(BaseAgent):
         else:
             logger.warning("No news API keys found. ResearchAgent will run in placeholder mode.")
 
+        # Cache for prompt template
+        self._prompt_template = None
+
     async def analyze(self, context: Dict[str, Any]) -> AgentResponse:
         """
         Fetch news from multiple sources and analyze sentiment.
@@ -372,16 +375,20 @@ class ResearchAgent(BaseAgent):
                 return None
             model_id = models[0]["id"]
 
-            # 2. Read prompt
-            prompt_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "prompts", "news_query.md")
-            if not os.path.exists(prompt_path):
-                logger.warning(f"Prompt file missing: {prompt_path}")
-                return None
+            # 2. Read prompt (Cached + Async)
+            if not self._prompt_template:
+                prompt_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "prompts", "news_query.md")
+                if not os.path.exists(prompt_path):
+                    logger.warning(f"Prompt file missing: {prompt_path}")
+                    return None
+
+                def read_template():
+                    with open(prompt_path, "r") as f:
+                        return f.read()
                 
-            with open(prompt_path, "r") as f:
-                template = f.read()
+                self._prompt_template = await asyncio.to_thread(read_template)
             
-            prompt = template.replace("{{query}}", user_query)
+            prompt = self._prompt_template.replace("{{query}}", user_query)
             
             # 3. Chat
             resp = await client.chat(

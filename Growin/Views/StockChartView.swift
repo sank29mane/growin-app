@@ -188,7 +188,7 @@ struct StockChartView: View {
             ForEach(viewModel.chartData) { point in
                 AreaMark(
                     x: .value("Date", point.date),
-                    yStart: .value("Baseline", minValue),
+                    yStart: .value("Baseline", viewModel.minValue),
                     yEnd: .value("Price", point.close)
                 )
                 .foregroundStyle(
@@ -229,7 +229,7 @@ struct StockChartView: View {
         }
         .chartXAxis(.hidden)
         .chartYAxis(.hidden)
-        .chartYScale(domain: minValue...maxValue)
+        .chartYScale(domain: viewModel.minValue...viewModel.maxValue)
         .drawingGroup()
         .chartOverlay { proxy in
             GeometryReader { geometry in
@@ -240,9 +240,7 @@ struct StockChartView: View {
                                 if let plotFrame = proxy.plotFrame {
                                     let x = value.location.x - geometry[plotFrame].origin.x
                                     if let date: Date = proxy.value(atX: x) {
-                                        if let closest = viewModel.chartData.min(by: {
-                                            abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date))
-                                        }) {
+                                        if let closest = findClosestPoint(to: date, in: viewModel.chartData) {
                                             selectedPoint = closest
                                         }
                                     }
@@ -255,17 +253,45 @@ struct StockChartView: View {
             }
         }
     }
-    
-    private var minValue: Double {
-        let values = viewModel.chartData.map { $0.close }
-        let min = values.min() ?? 0
-        return min * 0.99
-    }
-    
-    private var maxValue: Double {
-        let values = viewModel.chartData.map { $0.close }
-        let max = values.max() ?? 100
-        return max * 1.01
+
+    /// Optimized binary search for closest point.
+    /// O(log N) instead of O(N) linear scan.
+    private func findClosestPoint(to targetDate: Date, in data: [ChartDataPoint]) -> ChartDataPoint? {
+        guard !data.isEmpty else { return nil }
+
+        var low = 0
+        var high = data.count - 1
+        var closest: ChartDataPoint? = nil
+        var minDiff: TimeInterval = .infinity
+
+        // Binary search to find insertion point
+        while low <= high {
+            let mid = (low + high) / 2
+            let midDate = data[mid].date
+            let diff = midDate.timeIntervalSince(targetDate)
+
+            if diff == 0 {
+                return data[mid]
+            } else if diff < 0 {
+                low = mid + 1
+            } else {
+                high = mid - 1
+            }
+        }
+
+        // Check candidates around insertion point (high and low)
+        let candidates = [high, low]
+        for idx in candidates {
+            if idx >= 0 && idx < data.count {
+                let diff = abs(data[idx].date.timeIntervalSince(targetDate))
+                if diff < minDiff {
+                    minDiff = diff
+                    closest = data[idx]
+                }
+            }
+        }
+
+        return closest
     }
     
     private func updateChartColor() {
