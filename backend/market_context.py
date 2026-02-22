@@ -198,6 +198,9 @@ class PriceData(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
+from agents.base_agent import TelemetryData
+
+
 class MarketContext(BaseModel):
     """
     Aggregated market context from all specialist agents.
@@ -221,20 +224,25 @@ class MarketContext(BaseModel):
     whale: Optional[WhaleData] = None
     goal: Optional[GoalData] = None
     
-    # Agent Status
+    # Agent Status & Telemetry
     agents_executed: List[str] = []
     agents_failed: List[str] = []
+    telemetry_trace: List[TelemetryData] = []
     total_latency_ms: float = 0.0
     
     # Additional Context
     user_context: Dict[str, Any] = {}
     
-    def add_agent_result(self, agent_name: str, success: bool, latency_ms: float):
-        """Track which agents ran and their status"""
+    def add_agent_result(self, agent_name: str, success: bool, latency_ms: float, telemetry: Optional[TelemetryData] = None):
+        """Track which agents ran and their status with full telemetry"""
         if success:
             self.agents_executed.append(agent_name)
         else:
             self.agents_failed.append(agent_name)
+        
+        if telemetry:
+            self.telemetry_trace.append(telemetry)
+            
         self.total_latency_ms += latency_ms
     
     def is_complete(self) -> bool:

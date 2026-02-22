@@ -348,7 +348,13 @@ Query: "{clean_query}"
                     logger.error(f"Agent failed: {res}")
                     continue
                 if isinstance(res, AgentResponse):
-                    context.add_agent_result(res.agent_name, res.success, res.latency_ms)
+                    # Pass full telemetry to context
+                    context.add_agent_result(
+                        res.agent_name, 
+                        res.success, 
+                        res.latency_ms, 
+                        telemetry=res.telemetry
+                    )
                     if res.success:
                         await self._merge_result_into_context(context, res)
 
