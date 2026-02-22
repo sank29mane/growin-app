@@ -10,19 +10,8 @@ struct InteractiveChartView: View {
 
     @State private var selectedDate: Date? = nil
     @State private var selectedPrice: Double? = nil
-
-    // Separate data processing for TTM forecasts
-    var historicalDataPoints: [(Date, Double)] {
-        history.map {
-            (Date(timeIntervalSince1970: Double($0.timestamp) / 1000.0), $0.close)
-        }
-    }
-
-    var ttmForecastDataPoints: [(Date, Double)] {
-        forecast.map {
-            (Date(timeIntervalSince1970: Double($0.timestamp) / 1000.0), $0.close)
-        }
-    }
+    @State private var selectedType: String? = nil
+    @State private var sortedData: [(Date, Double, String)] = []
 
     // TTM Model metadata
     var hasTTMData: Bool {
@@ -37,7 +26,7 @@ struct InteractiveChartView: View {
         )
     }
 
-    var combinedData: [(Date, Double, String)] {
+    private func updateSortedData() {
         var result: [(Date, Double, String)] = []
 
         let historyPoints = history.map {
@@ -50,7 +39,9 @@ struct InteractiveChartView: View {
         }
         result.append(contentsOf: forecastPoints)
 
-        return result
+        // Pre-sort once when data changes
+        result.sort { $0.0 < $1.0 }
+        self.sortedData = result
     }
 
     private var headerView: some View {
@@ -154,7 +145,7 @@ struct InteractiveChartView: View {
                     .offset(yStart: -10)
                     .annotation(position: .top) {
                         if let price = selectedPrice {
-                            let isTTMData = ttmForecastDataPoints.contains { abs($0.0.timeIntervalSince(selectedDate)) < 3600 } // Within 1 hour
+                            let isTTMData = selectedType == "TTM Forecast"
                             VStack(spacing: 2) {
                                 Text("\(price, specifier: "%.2f")")
                                     .font(.caption)
@@ -208,6 +199,7 @@ struct InteractiveChartView: View {
                             .onEnded { _ in
                                 selectedDate = nil
                                 selectedPrice = nil
+                                selectedType = nil
                             }
                     )
                     .onHover { isHovering in
@@ -232,15 +224,53 @@ struct InteractiveChartView: View {
                         .stroke(.white.opacity(0.1), lineWidth: 1)
                 }
         }
+        .onAppear {
+            updateSortedData()
+        }
+        .onChange(of: history) { _, _ in
+            updateSortedData()
+        }
+        .onChange(of: forecast) { _, _ in
+            updateSortedData()
+        }
     }
     
     private func resolvePrice(at date: Date) {
-        let all = combinedData.sorted { $0.0 < $1.0 }
+        if sortedData.isEmpty { return }
         
-        // Find closest point
-        if let closest = all.min(by: { abs($0.0.timeIntervalSince(date)) < abs($1.0.timeIntervalSince(date)) }) {
-            selectedPrice = closest.1
+        // Binary search for insertion point
+        var l = 0
+        var r = sortedData.count
+        while l < r {
+            let mid = l + (r - l) / 2
+            if sortedData[mid].0 >= date {
+                r = mid
+            } else {
+                l = mid + 1
+            }
         }
+
+        // l is the index of the first element >= date
+        var closestIndex = 0
+
+        if l == 0 {
+            closestIndex = 0
+        } else if l == sortedData.count {
+            closestIndex = sortedData.count - 1
+        } else {
+            let before = sortedData[l - 1]
+            let after = sortedData[l]
+
+            if abs(before.0.timeIntervalSince(date)) < abs(after.0.timeIntervalSince(date)) {
+                closestIndex = l - 1
+            } else {
+                closestIndex = l
+            }
+        }
+
+        let item = sortedData[closestIndex]
+        selectedPrice = item.1
+        selectedType = item.2
     }
 }
 
