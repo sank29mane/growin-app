@@ -66,6 +66,40 @@ private final class WebSocketManager: Sendable {
     }
 }
 
+// MARK: - WebSocket Message Types
+enum WSMessageResult: Sendable {
+    case chartInit([ChartDataPoint])
+    case chartTick(ChartDataPoint)
+    case realtimeQuote(price: Double?, change: Double?, percent: Double?)
+    case error(String)
+    case unknown
+}
+
+private struct WSMessageEnvelope: Codable {
+    let type: String
+}
+
+private struct WSChartInitMessage: Codable {
+    let data: [ChartDataPoint]
+}
+
+private struct WSChartTickMessage: Codable {
+    let tick: ChartDataPoint
+}
+
+private struct WSRealtimeQuoteMessage: Codable {
+    struct QuoteData: Codable {
+        let current_price: Double?
+        let change: Double?
+        let change_percent: Double?
+    }
+    let data: QuoteData
+}
+
+private struct WSErrorMessage: Codable {
+    let message: String
+}
+
 @Observable @MainActor
 class StockChartViewModel {
     var chartData: [ChartDataPoint] = []
@@ -191,8 +225,12 @@ class StockChartViewModel {
             do {
                 while !Task.isCancelled {
                     let message = try await manager.receive()
-                    // Fixed: remove await as we are on MainActor and handleWebSocketMessage is synchronous
-                    self.handleWebSocketMessage(message) 
+                    // M4 PRO OPTIMIZATION: Move JSON parsing to background thread
+                    // parseWebSocketMessage is nonisolated async, so it runs on global pool
+                    let result = await self.parseWebSocketMessage(message)
+
+                    // Update UI state on MainActor
+                    self.applyWebSocketMessage(result)
                 }
             } catch {
                 // Connection lost or cancelled, reconnect after delay
@@ -204,59 +242,64 @@ class StockChartViewModel {
         }
     }
     
-    private func handleWebSocketMessage(_ message: URLSessionWebSocketTask.Message) {
+    private func applyWebSocketMessage(_ result: WSMessageResult) {
+        switch result {
+        case .chartInit(let newPoints):
+            self.chartData = newPoints
+        case .chartTick(let tick):
+            // Prevent duplicates and append
+            if self.chartData.last?.timestamp != tick.timestamp {
+                withAnimation(.linear(duration: 0.5)) {
+                    self.chartData.append(tick)
+                    // Keep only last 1000 points for performance
+                    if self.chartData.count > 1000 {
+                        self.chartData.removeFirst()
+                    }
+                }
+            }
+        case .realtimeQuote(let price, let change, let percent):
+            self.realtimePrice = price
+            self.priceChange = change
+            self.priceChangePercent = percent
+            self.lastUpdated = Date()
+        case .error(let message):
+            self.errorMessage = message
+        case .unknown:
+            break
+        }
+    }
+
+    nonisolated private func parseWebSocketMessage(_ message: URLSessionWebSocketTask.Message) async -> WSMessageResult {
         switch message {
         case .string(let text):
-            guard let data = text.data(using: .utf8) else { return }
+            guard let data = text.data(using: .utf8) else { return .unknown }
+            let decoder = JSONDecoder()
             do {
-                let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-                guard let type = json?["type"] as? String else { return }
-                
-                switch type {
+                let envelope = try decoder.decode(WSMessageEnvelope.self, from: data)
+                switch envelope.type {
                 case "chart_init":
-                    if let data = json?["data"] as? [[String: Any]] {
-                        let decoder = JSONDecoder()
-                        let jsonData = try JSONSerialization.data(withJSONObject: data)
-                        let newPoints = try decoder.decode([ChartDataPoint].self, from: jsonData)
-                        self.chartData = newPoints
-                    }
+                    let msg = try decoder.decode(WSChartInitMessage.self, from: data)
+                    return .chartInit(msg.data)
                 case "chart_tick":
-                    if let tickData = json?["tick"] as? [String: Any] {
-                        let decoder = JSONDecoder()
-                        let jsonData = try JSONSerialization.data(withJSONObject: tickData)
-                        let tick = try decoder.decode(ChartDataPoint.self, from: jsonData)
-                        
-                        // Prevent duplicates and append
-                        if self.chartData.last?.timestamp != tick.timestamp {
-                            withAnimation(.linear(duration: 0.5)) {
-                                self.chartData.append(tick)
-                                // Keep only last 1000 points for performance
-                                if self.chartData.count > 1000 {
-                                    self.chartData.removeFirst()
-                                }
-                            }
-                        }
-                    }
+                    let msg = try decoder.decode(WSChartTickMessage.self, from: data)
+                    return .chartTick(msg.tick)
                 case "realtime_quote":
-                    if let quoteData = json?["data"] as? [String: Any] {
-                        self.realtimePrice = quoteData["current_price"] as? Double
-                        self.priceChange = quoteData["change"] as? Double
-                        self.priceChangePercent = quoteData["change_percent"] as? Double
-                        self.lastUpdated = Date()
-                    }
-                case "chart_update":
-                    break 
+                    let msg = try decoder.decode(WSRealtimeQuoteMessage.self, from: data)
+                    return .realtimeQuote(price: msg.data.current_price,
+                                        change: msg.data.change,
+                                        percent: msg.data.change_percent)
                 case "error":
-                    if let errorMsg = json?["message"] as? String {
-                        self.errorMessage = errorMsg
-                    }
+                    let msg = try decoder.decode(WSErrorMessage.self, from: data)
+                    return .error(msg.message)
                 default:
-                    break
+                    return .unknown
                 }
             } catch {
                 print("Failed to parse WebSocket message: \(error)")
+                return .unknown
             }
-        default: break
+        default:
+            return .unknown
         }
     }
     
