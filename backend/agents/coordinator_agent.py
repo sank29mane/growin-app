@@ -282,6 +282,21 @@ Query: "{clean_query}"
         needs = intent.get("needs", [])
         specialist_tasks = []
         
+        # Broadcast intent to the agent bus (SOTA Decentralized Path)
+        from .messenger import AgentMessage
+        from .governance import get_governance
+        from app_logging import correlation_id_ctx
+        
+        c_id = correlation_id_ctx.get()
+        broadcast_msg = AgentMessage(
+            sender="CoordinatorAgent",
+            recipient="broadcast",
+            subject="intent_classified",
+            payload={"intent": intent, "ticker": ticker, "context_summary": context.get_summary()},
+            correlation_id=c_id
+        )
+        await get_governance().secure_dispatch(broadcast_msg)
+
         # Helper to wrap agent execution
         async def run_agent(agent, ctx_data):
             return await self._run_specialist(agent, ctx_data)

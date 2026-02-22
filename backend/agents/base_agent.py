@@ -59,6 +59,10 @@ class BaseAgent(ABC):
         from cache_manager import cache
         self.cache = cache
         self.model_version = "v1.0.0" # Default, override in specialists
+        
+        # Register with Messenger
+        from .messenger import get_messenger
+        get_messenger().register_agent(self.config.name, self.handle_message)
     
     @abstractmethod
     async def analyze(self, context: Dict[str, Any]) -> AgentResponse:
@@ -72,6 +76,28 @@ class BaseAgent(ABC):
             AgentResponse with results or error
         """
         pass
+
+    async def handle_message(self, message: Any):
+        """Standard message handler for decentralized communication."""
+        self.logger.debug(f"Received message: {message.subject} from {message.sender}")
+        # Default behavior: if subject is 'request_analysis', run execute
+        if message.subject == "request_analysis":
+            result = await self.execute(message.payload)
+            await self.publish_result(result, message.correlation_id)
+
+    async def publish_result(self, result: AgentResponse, correlation_id: Optional[str] = None):
+        """Publish analysis results to the agent bus."""
+        from .messenger import AgentMessage
+        from .governance import get_governance
+        
+        message = AgentMessage(
+            sender=self.config.name,
+            recipient="broadcast",
+            subject="analysis_result",
+            payload=result.model_dump(),
+            correlation_id=correlation_id
+        )
+        await get_governance().secure_dispatch(message)
     
     async def execute(self, context: Dict[str, Any]) -> AgentResponse:
         """
