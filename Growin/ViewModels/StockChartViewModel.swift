@@ -68,7 +68,16 @@ private final class WebSocketManager: Sendable {
 
 @Observable @MainActor
 class StockChartViewModel {
-    var chartData: [ChartDataPoint] = []
+    var chartData: [ChartDataPoint] = [] {
+        didSet {
+            updateMinMax()
+        }
+    }
+
+    // Performance optimization: Cache min/max values to avoid O(N) calculation in View body
+    var minValue: Double = 0
+    var maxValue: Double = 100
+
     var isLoading: Bool = false
     var errorMessage: String? = nil
     var selectedTimeframe: String = "1Month"
@@ -260,6 +269,26 @@ class StockChartViewModel {
         }
     }
     
+    private func updateMinMax() {
+        if chartData.isEmpty {
+            minValue = 0
+            maxValue = 100
+            return
+        }
+
+        var min = Double.greatestFiniteMagnitude
+        var max = -Double.greatestFiniteMagnitude
+
+        // Single pass O(N) to find min/max without intermediate array allocation
+        for point in chartData {
+            if point.close < min { min = point.close }
+            if point.close > max { max = point.close }
+        }
+
+        minValue = min * 0.99
+        maxValue = max * 1.01
+    }
+
     private func updateChartMetadata() {
         let timeframeDescriptions = [
             "1Day": "Intraday", "1Week": "Weekly", "1Month": "Monthly",

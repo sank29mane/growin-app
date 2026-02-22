@@ -188,7 +188,7 @@ struct StockChartView: View {
             ForEach(viewModel.chartData) { point in
                 AreaMark(
                     x: .value("Date", point.date),
-                    yStart: .value("Baseline", minValue),
+                    yStart: .value("Baseline", viewModel.minValue),
                     yEnd: .value("Price", point.close)
                 )
                 .foregroundStyle(
@@ -229,7 +229,7 @@ struct StockChartView: View {
         }
         .chartXAxis(.hidden)
         .chartYAxis(.hidden)
-        .chartYScale(domain: minValue...maxValue)
+        .chartYScale(domain: viewModel.minValue...viewModel.maxValue)
         .drawingGroup()
         .chartOverlay { proxy in
             GeometryReader { geometry in
@@ -254,18 +254,6 @@ struct StockChartView: View {
                     )
             }
         }
-    }
-    
-    private var minValue: Double {
-        let values = viewModel.chartData.map { $0.close }
-        let min = values.min() ?? 0
-        return min * 0.99
-    }
-    
-    private var maxValue: Double {
-        let values = viewModel.chartData.map { $0.close }
-        let max = values.max() ?? 100
-        return max * 1.01
     }
     
     private func updateChartColor() {
