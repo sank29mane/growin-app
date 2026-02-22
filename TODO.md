@@ -1,7 +1,7 @@
 # Growin Project: Comprehensive Master Plan & TODO
 
 **Status**: Active Development
-**Last Updated**: February 6, 2026
+**Last Updated**: February 22, 2026
 **Target**: Enterprise-Grade Financial Intelligence Platform
 
 ---
@@ -10,16 +10,16 @@
 
 These items represent significant risks to data integrity, security, or financial accuracy.
 
-- [ ] **[CRITICAL] Migrate Float to Decimal** (`backend/quant_engine.py`, `backend/agents/portfolio_agent.py`)
-    - [ ] Replace remaining `float` logic with `utils.financial_math.create_decimal`.
-    - [ ] Ensure all P&L outputs are quantized to 2 decimal places.
+- [x] **[CRITICAL] Migrate Float to Decimal** (`backend/quant_engine.py`, `backend/agents/portfolio_agent.py`)
+    - [x] Replace remaining `float` logic with `utils.financial_math.create_decimal`.
+    - [x] Ensure all P&L outputs are quantized to 2 decimal places.
 - [ ] **[CRITICAL] Sandbox Security Hardening** (`backend/utils/safe_python.py`)
     - [ ] Audit `SafePythonExecutor` for AST bypass vulnerabilities.
     - [x] **Action**: Integrate **Docker MCP** for secure agent code execution.
     - [ ] **Next**: Refactor Coordinator Agent to route fix scripts to Docker containers instead of local `exec()`.
-- [ ] **[HIGH] Implement Agent Telemetry & Observability**
-    - [ ] Log `decision_id`, `model_version`, and `latency` for every agent hop.
-    - [ ] Track "Self-Healing" success rates for the Coordinator Agent.
+- [x] **[HIGH] Implement Agent Telemetry & Observability**
+    - [x] Log `decision_id`, `model_version`, and `latency` for every agent hop.
+    - [x] Track "Self-Healing" success rates for the Coordinator Agent.
 
 ---
 
