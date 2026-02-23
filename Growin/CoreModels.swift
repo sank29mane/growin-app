@@ -192,3 +192,17 @@ struct TimeSeriesItem: Codable, Identifiable, Equatable, Sendable {
         Date(timeIntervalSince1970: timestamp / 1000.0)
     }
 }
+
+// MARK: - UI Models
+
+struct GrowinAllocationData: Identifiable, Sendable, Equatable {
+    let id: UUID
+    let label: String
+    let value: Decimal
+    
+    init(id: UUID = UUID(), label: String, value: Decimal) {
+        self.id = id
+        self.label = label
+        self.value = value
+    }
+}

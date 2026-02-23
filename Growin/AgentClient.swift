@@ -13,6 +13,16 @@ enum AgentStreamEvent: Sendable {
     case done
 }
 
+struct AgentResponse: Codable, Sendable {
+    let messages: [[String: AnySendable]]
+    let finalAnswer: String
+    
+    enum CodingKeys: String, CodingKey {
+        case messages
+        case finalAnswer = "final_answer"
+    }
+}
+
 struct AnySendable: @unchecked Sendable, Codable {
     let value: Any
     
@@ -57,37 +67,10 @@ struct AnySendable: @unchecked Sendable, Codable {
     }
 }
 
-struct AgentResponse: Codable {
-    let messages: [Message]
-    let final_answer: String
-    
-    enum CodingKeys: String, CodingKey {
-        case messages
-        case final_answer = "final_answer"
-    }
-}
-
-// Flexible Message decoding
-struct Message: Codable, Identifiable {
-    let id = UUID()
-    let type: String
-    let content: String
-    
-    enum CodingKeys: String, CodingKey {
-        case type
-        case content
-    }
-    
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.type = try container.decode(String.self, forKey: .type)
-        self.content = try container.decode(String.self, forKey: .content)
-    }
-}
-
 struct AgentClient {
     private let config = AppConfig.shared
     
+    /// SOTA: Implementing robust SSE streaming with AsyncStream
     func streamMessage(query: String, conversationId: String? = nil, model: String? = nil) -> AsyncStream<AgentStreamEvent> {
         AsyncStream { continuation in
             let url = URL(string: "\(config.baseURL)/api/chat/message")!
@@ -96,47 +79,52 @@ struct AgentClient {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
             
+            // Context from UserDefaults
+            let defaults = UserDefaults.standard
             let body: [String: Any] = [
                 "message": query,
                 "conversation_id": conversationId as Any,
-                "model_name": model ?? "native-mlx"
+                "model_name": model ?? "native-mlx",
+                "coordinator_model": defaults.string(forKey: "selectedCoordinatorModel") ?? "granite-tiny",
+                "account_type": defaults.string(forKey: "t212AccountType") ?? "invest"
             ]
             
             do {
                 request.httpBody = try JSONSerialization.data(withJSONObject: body)
                 
-                Task {
+                let task = Task {
                     do {
-                        let (result, _) = try await URLSession.shared.bytes(for: request)
+                        let (result, response) = try await URLSession.shared.bytes(for: request)
+                        
+                        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+                            continuation.yield(.error("Server error: \((response as? HTTPURLResponse)?.statusCode ?? 0)"))
+                            continuation.finish()
+                            return
+                        }
+                        
+                        var currentEvent: String?
                         
                         for try await line in result.lines {
-                            guard line.hasPrefix("data: ") else { continue }
-                            let data = String(line.dropFirst(6))
-                            
-                            if data == "[DONE]" {
-                                continuation.yield(.done)
-                                break
+                            // Check for task cancellation
+                            if Task.isCancelled {
+                                continuation.finish()
+                                return
                             }
                             
-                            // Simple parsing for this pass
-                            if let jsonData = data.data(using: .utf8) {
-                                if let dict = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
-                                    if let event = dict["event"] as? String {
-                                        let payload = dict["data"] as? String ?? ""
-                                        
-                                        switch event {
-                                        case "token": continuation.yield(.token(payload))
-                                        case "status": continuation.yield(.status(payload))
-                                        case "meta": 
-                                            if let metaData = payload.data(using: .utf8),
-                                               let metaDict = try? JSONDecoder().decode([String: AnySendable].self, from: metaData) {
-                                                continuation.yield(.meta(metaDict))
-                                            }
-                                        case "error": continuation.yield(.error(payload))
-                                        default: break
-                                        }
-                                    }
+                            let trimmedLine = line.trimmingCharacters(in: .whitespaces)
+                            if trimmedLine.isEmpty { continue }
+                            
+                            if trimmedLine.hasPrefix("event: ") {
+                                currentEvent = String(trimmedLine.dropFirst(7))
+                            } else if trimmedLine.hasPrefix("data: ") {
+                                let data = String(trimmedLine.dropFirst(6))
+                                
+                                if data == "[DONE]" {
+                                    continuation.yield(.done)
+                                    break
                                 }
+                                
+                                handleEvent(currentEvent ?? "token", data: data, into: continuation)
                             }
                         }
                         continuation.finish()
@@ -145,10 +133,34 @@ struct AgentClient {
                         continuation.finish()
                     }
                 }
+                
+                continuation.onTermination = { @Sendable _ in
+                    task.cancel()
+                }
+                
             } catch {
                 continuation.yield(.error(error.localizedDescription))
                 continuation.finish()
             }
+        }
+    }
+    
+    private func handleEvent(_ event: String, data: String, into continuation: AsyncStream<AgentStreamEvent>.Continuation) {
+        switch event {
+        case "token":
+            continuation.yield(.token(data))
+        case "status":
+            continuation.yield(.status(data))
+        case "meta":
+            if let jsonData = data.data(using: .utf8),
+               let metaDict = try? JSONDecoder().decode([String: AnySendable].self, from: jsonData) {
+                continuation.yield(.meta(metaDict))
+            }
+        case "error":
+            continuation.yield(.error(data))
+        default:
+            // Default to token if event is unspecified (SOTA 2026 standard)
+            continuation.yield(.token(data))
         }
     }
     
@@ -160,7 +172,7 @@ struct AgentClient {
         
         let body: [String: Any] = [
             "query": query,
-            "model_name": "native-mlx" // SOTA 2026 default
+            "model_name": "native-mlx"
         ]
         
         do {

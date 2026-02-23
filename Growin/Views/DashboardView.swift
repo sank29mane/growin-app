@@ -57,7 +57,7 @@ struct DashboardView: View {
                                 if !viewModel.allocationData.isEmpty {
                                     Chart(viewModel.allocationData) { item in
                                         SectorMark(
-                                            angle: .value("Value", item.value),
+                                            angle: .value("Value", Double(truncating: item.value as NSNumber)),
                                             innerRadius: .ratio(0.618),
                                             angularInset: 1.5
                                         )
@@ -85,11 +85,11 @@ struct DashboardView: View {
                                     
                                     Spacer()
                                     VStack(alignment: .leading) {
-                                        Text(String(format: "£%.2f", pnl))
+                                        Text("£\(pnl.formatted(.number.precision(.fractionLength(2))))")
                                             .font(.system(size: 20, weight: .black))
                                             .foregroundStyle(pnl >= 0 ? .green : .red)
                                         
-                                        Text(String(format: "%@%.2f%%", pnl >= 0 ? "+" : "", pnlPercent))
+                                        Text("\(pnl >= 0 ? "+" : "")\(pnlPercent.formatted(.number.precision(.fractionLength(2))))%")
                                             .font(.system(size: 14, weight: .bold))
                                             .foregroundStyle(pnl >= 0 ? .green : .red)
                                     }
@@ -182,17 +182,20 @@ struct AccountSectionView: View {
                     // Mini metrics for this account
                     VStack(spacing: 8) {
                         HStack(spacing: 8) {
+                            let val = data.summary.currentValue ?? Decimal(0)
                             MiniMetricCard(
                                 title: "Value",
-                                value: String(format: "£%.0f", data.summary.currentValue ?? 0),
+                                value: "£\(val.formatted(.number.precision(.fractionLength(0))))",
                                 icon: "chart.bar.fill",
                                 color: .blue
                             )
+                            
+                            let pnl = data.summary.totalPnl ?? Decimal(0)
                             MiniMetricCard(
                                 title: "P&L",
-                                value: String(format: "%@£%.0f", (data.summary.totalPnl ?? 0) >= 0 ? "+" : "", data.summary.totalPnl ?? 0),
+                                value: "\(pnl >= 0 ? "+" : "")£\(pnl.formatted(.number.precision(.fractionLength(0))))",
                                 icon: "arrow.up.right.circle.fill",
-                                color: (data.summary.totalPnl ?? 0) >= 0 ? .green : .red
+                                color: pnl >= 0 ? .green : .red
                             )
                         }
                         HStack(spacing: 8) {
@@ -201,7 +204,7 @@ struct AccountSectionView: View {
                                 value: {
                                     if let pnl = data.summary.totalPnl, let invested = data.summary.totalInvested, invested > 0 {
                                         let percent = (pnl / invested) * 100
-                                        return String(format: "%.1f%%", percent)
+                                        return "\(percent.formatted(.number.precision(.fractionLength(1))))%"
                                     } else {
                                         return "N/A"
                                     }
@@ -209,9 +212,11 @@ struct AccountSectionView: View {
                                 icon: "percent",
                                 color: .purple
                             )
+                            
+                            let cash = data.summary.cashBalance?.free ?? Decimal(0)
                             MiniMetricCard(
                                 title: "Cash",
-                                value: String(format: "£%.0f", data.summary.cashBalance?.free ?? 0),
+                                value: "£\(cash.formatted(.number.precision(.fractionLength(0))))",
                                 icon: "sterlingsign.circle.fill",
                                 color: .orange
                             )
@@ -229,7 +234,7 @@ struct AccountSectionView: View {
 
                                 Chart(data.allocationData) { item in
                                     SectorMark(
-                                        angle: .value("Value", item.value),
+                                        angle: .value("Value", Double(truncating: item.value as NSNumber)),
                                         innerRadius: .ratio(0.618),
                                         angularInset: 1.5
                                     )
@@ -274,5 +279,3 @@ struct AccountSectionView: View {
         }
     }
 }
-
-

@@ -46,6 +46,7 @@ dependencies = [
     "xgboost>=2.0.0",
     "yfinance>=0.2.35,<0.3.0",
     "growin_core",
+    "docker>=7.1.0",
 ]
 
 [tool.uv.sources]

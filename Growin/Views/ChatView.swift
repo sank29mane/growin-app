@@ -50,7 +50,6 @@ struct ChatView: View {
             
             ToolbarItem(placement: .automatic) {
                 Button(action: {
-                    // Start new conversation
                     withAnimation(.spring()) {
                         viewModel.startNewConversation()
                     }
@@ -85,7 +84,6 @@ struct ChatView: View {
                             ))
                     }
                     
-                    // Enhanced typing indicator
                     if viewModel.isProcessing {
                         EnhancedTypingIndicator(statusText: viewModel.streamingStatus ?? "Synthesizing market data...")
                             .id("typing")
@@ -93,7 +91,6 @@ struct ChatView: View {
                             .padding(.horizontal, 8)
                     }
                     
-                    // Bottom anchor
                     Color.clear
                         .frame(height: 1)
                         .id(bottomAnchorID)
@@ -110,10 +107,9 @@ struct ChatView: View {
                     scrollToBottom(proxy: proxy)
                 }
             }
-            // Fix: React to selectedConversationId changes
             .onChange(of: viewModel.selectedConversationId) { _, newId in
                 Task {
-                    if newId != nil {
+                    if let id = newId {
                         await viewModel.loadConversationHistory()
                     } else {
                         viewModel.startNewConversation()
@@ -124,28 +120,8 @@ struct ChatView: View {
                 scrollToBottom(proxy: proxy, animated: false)
             }
             .task {
-                // Load conversation history if we have a conversation ID
                 if viewModel.selectedConversationId != nil && viewModel.messages.isEmpty {
                     await viewModel.loadConversationHistory()
-                }
-            }
-            .overlay(alignment: .bottomTrailing) {
-                if showScrollToBottom {
-                    Button(action: {
-                        scrollToBottom(proxy: proxy)
-                        showScrollToBottom = false
-                    }) {
-                        Image(systemName: "arrow.down.circle.fill")
-                            .font(.system(size: 36))
-                            .foregroundStyle(.white)
-                            .background(Circle().fill(Color.blue))
-                            .shadow(radius: 4)
-                    }
-                    .help("Scroll to bottom")
-                    .accessibilityLabel("Scroll to bottom")
-                    .padding(.trailing, 20)
-                    .padding(.bottom, 80)
-                    .transition(.scale.combined(with: .opacity))
                 }
             }
         }
@@ -179,14 +155,12 @@ struct ChatView: View {
             }
             
             VStack(spacing: 10) {
-                // Account Picker
                 HStack {
                     AccountPicker(selectedAccount: $viewModel.selectedAccountType)
                     Spacer()
                 }
                 .padding(.horizontal, 4)
                 
-                // Input Field
                 HStack(spacing: 12) {
                     TextField("Ask about your portfolio...", text: $viewModel.inputText, axis: .vertical)
                         .textFieldStyle(.plain)
@@ -226,8 +200,6 @@ struct ChatView: View {
                         }
                     }
                     .buttonStyle(.plain)
-                    .help(viewModel.isProcessing ? "Stop generating" : "Send message")
-                    .accessibilityLabel(viewModel.isProcessing ? "Stop generating" : "Send message")
                     .disabled(viewModel.inputText.isEmpty && !viewModel.isProcessing)
                 }
             }
@@ -261,7 +233,6 @@ struct ChatBubble: View {
             }
             
             VStack(alignment: message.isUser ? .trailing : .leading, spacing: 6) {
-                // Agent/Persona Header
                 if !message.isUser {
                     HStack(spacing: 4) {
                         Text(message.displayName)
@@ -277,9 +248,7 @@ struct ChatBubble: View {
                     .padding(.leading, 4)
                 }
                 
-                // Content Card
                 if message.isUser {
-                    // User message - right aligned with blue gradient
                     Text(message.content)
                         .padding(14)
                         .background(
@@ -290,14 +259,14 @@ struct ChatBubble: View {
                             )
                         )
                         .foregroundStyle(.white)
-                        .cornerRadius(18)
                         .cornerRadius(18, corners: [.topLeft, .topRight, .bottomLeft])
                 } else {
-                    // AI message - glass card
                     GlassCard(cornerRadius: 16) {
                         VStack(alignment: .leading, spacing: 12) {
-                            MarkdownText(content: message.content)
-                                .foregroundStyle(.white.opacity(0.9))
+                            if !message.content.isEmpty {
+                                MarkdownText(content: message.content)
+                                    .foregroundStyle(.white.opacity(0.9))
+                            }
                             
                             // Reasoning Trace UI (Wave 2)
                             if let data = message.data {
@@ -313,7 +282,6 @@ struct ChatBubble: View {
                                 ToolExecutionBlock(toolCalls: toolCalls)
                             }
                             
-                            // Quick action buttons
                             if !message.content.contains("Quick Actions") && !message.content.isEmpty {
                                 QuickActionButtons(actions: defaultQuickActions) { prompt in
                                     onQuickAction?(prompt)
@@ -323,7 +291,6 @@ struct ChatBubble: View {
                     }
                 }
                 
-                // Timestamp
                 Text(formatTimestamp(message.timestamp))
                     .font(.system(size: 9))
                     .foregroundStyle(.secondary)
@@ -365,57 +332,149 @@ struct ChatBubble: View {
     }
 }
 
-// Support view for ReasoningTraceView (Stub for now)
 struct ReasoningTraceView: View {
     let data: MarketContextData
     
     var body: some View {
         DisclosureGroup {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 10) {
                 if let quant = data.quant {
-                    ReasoningStepView(agent: "QuantAgent", status: "Success", color: .blue, detail: "Signal: \(quant.signal)")
+                    ReasoningStepRow(
+                        agent: "QuantAgent",
+                        status: "ANALYZED",
+                        icon: "chart.line.uptrend.xyaxis",
+                        color: Color.Persona.trader,
+                        detail: "Signal: \(quant.signal)"
+                    )
                 }
+                
                 if let forecast = data.forecast {
-                    ReasoningStepView(agent: "ForecastingAgent", status: "Success", color: .green, detail: "Trend: \(forecast.trend)")
+                    ReasoningStepRow(
+                        agent: "ForecastingAgent",
+                        status: "PREDICTED",
+                        icon: "brain.head.profile",
+                        color: .green,
+                        detail: "Trend: \(forecast.trend)"
+                    )
                 }
+                
                 if let research = data.research {
-                    ReasoningStepView(agent: "ResearchAgent", status: "Success", color: .red, detail: "Sentiment: \(research.sentimentLabel)")
+                    ReasoningStepRow(
+                        agent: "ResearchAgent",
+                        status: "SCANNED",
+                        icon: "newspaper.fill",
+                        color: Color.Persona.risk,
+                        detail: "Sentiment: \(research.sentimentLabel)"
+                    )
+                }
+                
+                if let whale = data.whale {
+                    ReasoningStepRow(
+                        agent: "WhaleAgent",
+                        status: "DETECTED",
+                        icon: "water.waves",
+                        color: .indigo,
+                        detail: whale.sentimentImpact
+                    )
                 }
             }
-            .padding(.top, 8)
+            .padding(.vertical, 8)
         } label: {
-            HStack {
+            HStack(spacing: 8) {
                 Image(systemName: "brain.head.profile")
-                Text("Reasoning Trace")
-                    .font(.caption.bold())
+                    .font(.system(size: 14))
+                Text("Reasoning Chain")
+                    .font(.system(size: 11, weight: .bold))
+                Spacer()
             }
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.white.opacity(0.6))
         }
-        .padding(8)
-        .background(Color.white.opacity(0.05))
-        .cornerRadius(8)
+        .padding(10)
+        .background(Color.white.opacity(0.03))
+        .cornerRadius(12)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.white.opacity(0.05), lineWidth: 1)
+        )
     }
 }
 
-struct ReasoningStepView: View {
+struct ToolExecutionBlock: View {
+    let toolCalls: [ToolCall]
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("RESEARCH STEPS")
+                .font(.system(size: 9, weight: .black))
+                .foregroundStyle(.secondary)
+            
+            ForEach(toolCalls, id: \.id) { toolCall in
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass.circle.fill")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.blue)
+                    
+                    Text(formatToolName(toolCall.function.name))
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.7))
+                    
+                    Spacer()
+                    
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.green)
+                }
+                .padding(8)
+                .background(Color.white.opacity(0.05))
+                .cornerRadius(8)
+            }
+        }
+        .padding(8)
+        .background(Color.black.opacity(0.2))
+        .cornerRadius(10)
+    }
+    
+    private func formatToolName(_ name: String) -> String {
+        name.replacingOccurrences(of: "_", with: " ").capitalized
+    }
+}
+
+struct ReasoningStepRow: View {
     let agent: String
     let status: String
+    let icon: String
     let color: Color
     let detail: String
     
     var body: some View {
-        HStack(spacing: 8) {
-            Circle().fill(color).frame(width: 6, height: 6)
-            Text(agent)
-                .font(.system(size: 10, weight: .bold))
-            Text(status)
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-            Spacer()
-            Text(detail)
-                .font(.system(size: 10))
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 12))
                 .foregroundStyle(color)
+                .frame(width: 24, height: 24)
+                .background(color.opacity(0.1))
+                .clipShape(Circle())
+            
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 4) {
+                    Text(agent)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.white)
+                    Text(status)
+                        .font(.system(size: 8, weight: .black))
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(color.opacity(0.2))
+                        .foregroundStyle(color)
+                        .cornerRadius(3)
+                }
+                
+                Text(detail)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+            
+            Spacer()
         }
-        .padding(.horizontal, 4)
     }
 }

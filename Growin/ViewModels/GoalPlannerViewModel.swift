@@ -3,6 +3,7 @@ import Combine
 
 @Observable @MainActor
 class GoalPlannerViewModel {
+    // SOTA: Using Double for Slider/Stepper bindings but converting to Decimal for logic
     var capital: Double = 5000
     var targetReturn: Double = 15
     var durationYears: Double = 5
@@ -23,10 +24,11 @@ class GoalPlannerViewModel {
         self.errorMsg = nil
         self.plan = nil
         
+        // Convert to Decimal for precision-safe networking
         let result = await client.createGoalPlan(
-            capital: capital,
-            targetReturn: targetReturn,
-            years: durationYears,
+            capital: Decimal(capital),
+            targetReturn: Decimal(targetReturn),
+            years: Decimal(durationYears),
             risk: selectedRisk
         )
         

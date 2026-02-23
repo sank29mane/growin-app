@@ -37,10 +37,8 @@ struct WelcomeView: View {
         VStack(spacing: 32) {
             Spacer()
             
-            // Header with animated icon
             VStack(spacing: 16) {
                 ZStack {
-                    // Glow effect
                     Circle()
                         .fill(
                             RadialGradient(
@@ -53,7 +51,6 @@ struct WelcomeView: View {
                         .frame(width: 120, height: 120)
                         .blur(radius: 10)
                     
-                    // Icon
                     Image(systemName: "brain.head.profile")
                         .font(.system(size: 56, weight: .light))
                         .foregroundStyle(
@@ -80,7 +77,6 @@ struct WelcomeView: View {
                 .offset(y: appearAnimation ? 0 : 10)
             }
             
-            // Suggestion Chips Grid
             VStack(spacing: 12) {
                 Text("What would you like to explore?")
                     .font(.system(size: 13, weight: .medium))
@@ -109,7 +105,6 @@ struct WelcomeView: View {
             
             Spacer()
             
-            // Hint text
             Text("Or type any question below...")
                 .font(.caption)
                 .foregroundStyle(.secondary.opacity(0.7))
@@ -124,8 +119,6 @@ struct WelcomeView: View {
         }
     }
 }
-
-// MARK: - Suggestion Chip
 
 struct SuggestionChip: View {
     let item: SuggestionItem
@@ -156,18 +149,15 @@ struct SuggestionChip: View {
                 Image(systemName: "arrow.right.circle.fill")
                     .font(.system(size: 16))
                     .foregroundStyle(item.color.opacity(isHovered ? 0.8 : 0.4))
-                    .accessibilityHidden(true)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 14)
             .frame(maxWidth: .infinity)
             .background(
                 ZStack {
-                    // Glass effect
                     RoundedRectangle(cornerRadius: 14)
                         .fill(.ultraThinMaterial)
                     
-                    // Gradient overlay on hover
                     if isHovered {
                         RoundedRectangle(cornerRadius: 14)
                             .fill(
@@ -195,9 +185,6 @@ struct SuggestionChip: View {
             )
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Ask about \(item.title)")
-        .accessibilityHint("Asks: \(item.prompt)")
-
         .onHover { hovering in
             withAnimation(.easeOut(duration: 0.15)) {
                 isHovered = hovering
@@ -205,8 +192,6 @@ struct SuggestionChip: View {
         }
     }
 }
-
-// MARK: - Account Picker
 
 struct AccountPicker: View {
     @Binding var selectedAccount: String
@@ -275,9 +260,6 @@ private struct AccountPickerButton: View {
             .foregroundStyle(isSelected ? .white : .secondary)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(displayName)
-        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
-        .accessibilityHint("Filters chat context to \(displayName)")
     }
     
     @ViewBuilder
@@ -313,8 +295,6 @@ private struct AccountPickerButton: View {
     }
 }
 
-// MARK: - Quick Action Buttons (for responses)
-
 struct QuickActionButtons: View {
     let actions: [QuickAction]
     let onTap: (String) -> Void
@@ -343,16 +323,12 @@ struct QuickActionButtons: View {
                         .foregroundStyle(.blue)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel(action.label)
-                    .accessibilityHint("Asks: \(action.prompt)")
                 }
             }
         }
         .padding(.top, 8)
     }
 }
-
-// MARK: - Enhanced Typing Indicator
 
 struct EnhancedTypingIndicator: View {
     var statusText: String = "Analyzing your request..."
@@ -363,7 +339,6 @@ struct EnhancedTypingIndicator: View {
     
     var body: some View {
         HStack(spacing: 14) {
-            // Animated brain icon
             ZStack {
                 Circle()
                     .fill(Color.blue.opacity(0.2))
@@ -376,7 +351,6 @@ struct EnhancedTypingIndicator: View {
             }
             
             VStack(alignment: .leading, spacing: 6) {
-                // Animated dots
                 HStack(spacing: 4) {
                     ForEach(0..<3) { i in
                         Circle()
@@ -387,7 +361,6 @@ struct EnhancedTypingIndicator: View {
                     }
                 }
                 
-                // Status text
                 Text(statusText)
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
@@ -401,41 +374,11 @@ struct EnhancedTypingIndicator: View {
             RoundedRectangle(cornerRadius: 16)
                 .fill(.ultraThinMaterial)
         )
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(statusText)
         .onReceive(timer) { _ in
             withAnimation(.easeInOut(duration: 0.3)) {
                 dotIndex = (dotIndex + 1) % 3
                 pulseScale = pulseScale == 1.0 ? 1.1 : 1.0
             }
         }
-    }
-}
-
-// MARK: - Preview
-
-#Preview("Welcome View") {
-    ZStack {
-        Color.black.ignoresSafeArea()
-        WelcomeView { prompt in
-            print("Selected: \(prompt)")
-        }
-    }
-}
-
-#Preview("Account Picker") {
-    ZStack {
-        Color.black.ignoresSafeArea()
-        VStack {
-            AccountPicker(selectedAccount: .constant("all"))
-        }
-    }
-}
-
-#Preview("Typing Indicator") {
-    ZStack {
-        Color.black.ignoresSafeArea()
-        EnhancedTypingIndicator(statusText: "Fetching portfolio data...")
-            .padding()
     }
 }

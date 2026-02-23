@@ -227,6 +227,21 @@ struct ErrorCard: View {
     }
 }
 
+struct GradientBackground: View {
+    var body: some View {
+        ZStack {
+            Color.growinDarkBg
+            
+            LinearGradient(
+                colors: [Color.growinDarkBg, Color.growinSurface.opacity(0.8)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        }
+        .ignoresSafeArea()
+    }
+}
+
 // MARK: - Safety Components
 
 struct SlideToConfirm: View {

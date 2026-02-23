@@ -9,63 +9,7 @@ struct PortfolioView: View {
             // Main Content Area
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 32) {
-                    // Integrated Navigation Header
-                    HStack(alignment: .bottom) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Portfolio")
-                                .font(.caption)
-                                .fontWeight(.semibold)
-                                .foregroundStyle(.secondary)
-                            
-                            Text("Overview")
-                                .font(.title)
-                                .fontWeight(.bold)
-                                .foregroundStyle(.primary)
-                        }
-                        
-                        Spacer()
-                        
-                        // Premium Account Toggle
-                        HStack(spacing: 0) {
-                            let defaults = UserDefaults.standard
-                            ForEach(["invest", "isa"], id: \.self) { type in
-                                Button(action: {
-                                    Task { await viewModel.switchAccount(newType: type) }
-                                }) {
-                                    Text(type == "invest" ? "General" : "ISA")
-                                        .font(.caption)
-                                        .fontWeight(.semibold)
-                                        .padding(.horizontal, 16)
-                                        .padding(.vertical, 8)
-                                        .background(defaults.string(forKey: "t212AccountType") == type ? Color.white.opacity(0.1) : Color.clear)
-                                        .foregroundStyle(defaults.string(forKey: "t212AccountType") == type ? .primary : .secondary)
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel(type == "invest" ? "General Account" : "ISA Account")
-                                .accessibilityHint("Switches portfolio view to \(type == "invest" ? "General" : "ISA") account")
-                                .accessibilityAddTraits(defaults.string(forKey: "t212AccountType") == type ? [.isSelected] : [])
-                            }
-                        }
-                        .background(Color.white.opacity(0.05))
-                        .clipShape(Capsule())
-                        .overlay(Capsule().stroke(Color.white.opacity(0.1), lineWidth: 0.5))
-                        .disabled(viewModel.isSwitchingAccount)
-                        
-                        Button(action: { Task { await viewModel.fetchPortfolio() } }) {
-                            Image(systemName: "arrow.clockwise")
-                                .font(.system(size: 12, weight: .bold))
-                                .frame(width: 32, height: 32)
-                                .background(Color.white.opacity(0.05))
-                                .clipShape(Circle())
-                        }
-                        .buttonStyle(.plain)
-                        .opacity(viewModel.isLoading ? 0.5 : 1)
-                        .accessibilityLabel("Refresh Portfolio")
-                        .accessibilityHint("Refreshes portfolio data from the server")
-                        .disabled(viewModel.isLoading)
-                    }
-                    .padding(.horizontal)
-                    .padding(.top, 24)
+                    headerView
 
                     if let snapshot = viewModel.snapshot {
                         analyticsSection(snapshot: snapshot)
@@ -109,11 +53,20 @@ struct MetricGrid: View {
     var body: some View {
         VStack(spacing: 16) {
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 16) {
-                MiniMetricCard(title: "Total Capital", value: String(format: "£%.2f", (summary?.currentValue ?? 0) + (summary?.cashBalance?.free ?? 0)), icon: "banknote.fill", color: .growinAccent)
-                MiniMetricCard(title: "Equity", value: String(format: "£%.2f", summary?.currentValue ?? 0), icon: "chart.bar.fill", color: .growinPrimary)
-                MiniMetricCard(title: "Net Profit", value: String(format: "£%.2f", summary?.totalPnl ?? 0), icon: "waveform.path.ecg", color: (summary?.totalPnl ?? 0) >= 0 ? .growinGreen : .growinRed)
-                MiniMetricCard(title: "ROI", value: String(format: "%.2f%%", summary?.totalPnlPercent ?? 0), icon: "percent", color: .white)
-                MiniMetricCard(title: "Cash", value: String(format: "£%.2f", summary?.cashBalance?.free ?? 0), icon: "pouch.fill", color: .growinOrange)
+                let totalCap = (summary?.currentValue ?? Decimal(0)) + (summary?.cashBalance?.free ?? Decimal(0))
+                MiniMetricCard(title: "Total Capital", value: "£\(totalCap.formatted(.number.precision(.fractionLength(2))))", icon: "banknote.fill", color: .growinAccent)
+                
+                let equity = summary?.currentValue ?? Decimal(0)
+                MiniMetricCard(title: "Equity", value: "£\(equity.formatted(.number.precision(.fractionLength(2))))", icon: "chart.bar.fill", color: .growinPrimary)
+                
+                let pnl = summary?.totalPnl ?? Decimal(0)
+                MiniMetricCard(title: "Net Profit", value: "£\(pnl.formatted(.number.precision(.fractionLength(2))))", icon: "waveform.path.ecg", color: pnl >= 0 ? .growinGreen : .growinRed)
+                
+                let roi = summary?.totalPnlPercent ?? 0.0
+                MiniMetricCard(title: "ROI", value: "\(roi.formatted(.number.precision(.fractionLength(2))))%", icon: "percent", color: .white)
+                
+                let cash = summary?.cashBalance?.free ?? Decimal(0)
+                MiniMetricCard(title: "Cash", value: "£\(cash.formatted(.number.precision(.fractionLength(2))))", icon: "pouch.fill", color: .growinOrange)
             }
             
             if let accounts = summary?.accounts, accounts.count > 1 {
@@ -124,7 +77,8 @@ struct MetricGrid: View {
                                 Text(key.uppercased())
                                     .font(.system(size: 8, weight: .black))
                                     .foregroundStyle(.secondary)
-                                Text(String(format: "£%.2f", acc.currentValue ?? 0))
+                                let val = acc.currentValue ?? Decimal(0)
+                                Text("£\(val.formatted(.number.precision(.fractionLength(2))))")
                                     .font(.system(size: 10, weight: .bold))
                             }
                             .padding(.horizontal, 10)
@@ -171,6 +125,7 @@ struct MiniMetricCard: View {
     }
 }
 
+
 struct AllocationDonutChart: View {
     let positions: [Position]
     
@@ -178,7 +133,7 @@ struct AllocationDonutChart: View {
         Chart {
             ForEach(topFiveAllocation) { item in
                 SectorMark(
-                    angle: .value("Value", item.value),
+                    angle: .value("Value", Double(truncating: item.value as NSNumber)),
                     innerRadius: .ratio(0.65),
                     angularInset: 2
                 )
@@ -189,15 +144,16 @@ struct AllocationDonutChart: View {
         .chartLegend(position: .trailing)
     }
     
-    private var topFiveAllocation: [AllocationItem] {
+    private var topFiveAllocation: [GrowinAllocationData] {
         let items = positions.map { pos in
-            AllocationItem(label: pos.ticker ?? "???", value: (pos.currentPrice ?? 0) * (pos.quantity ?? 0))
+            let val = (pos.currentPrice ?? Decimal(0)) * (pos.quantity ?? Decimal(0))
+            return GrowinAllocationData(label: pos.ticker ?? "???", value: val)
         }.sorted { $0.value > $1.value }
         
         var result = Array(items.prefix(5))
         if items.count > 5 {
-            let othersValue = items.dropFirst(5).reduce(0) { $0 + $1.value }
-            result.append(AllocationItem(label: "Others", value: othersValue))
+            let othersValue = items.dropFirst(5).reduce(Decimal(0)) { $0 + $1.value }
+            result.append(GrowinAllocationData(label: "Others", value: othersValue))
         }
         return result
     }
@@ -241,7 +197,8 @@ struct PositionDeepCard: View {
                             .foregroundStyle(.white.opacity(0.4))
                     }
                     
-                    Text("\(String(format: "%.2f", position.quantity ?? 0)) shares")
+                    let qty = position.quantity ?? Decimal(0)
+                    Text("\(qty.formatted(.number.precision(.fractionLength(2)))) shares")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.white.opacity(0.5))
                 }
@@ -249,13 +206,13 @@ struct PositionDeepCard: View {
                 Spacer()
                 
                 VStack(alignment: .trailing, spacing: 4) {
-                    let value = (position.currentPrice ?? 0) * (position.quantity ?? 0)
-                    Text(String(format: "£%.2f", value))
+                    let value = (position.currentPrice ?? Decimal(0)) * (position.quantity ?? Decimal(0))
+                    Text("£\(value.formatted(.number.precision(.fractionLength(2))))")
                         .font(.system(size: 16, weight: .black))
                         .foregroundStyle(.white)
                     
-                    let pnl = position.ppl ?? 0
-                    Text(String(format: "%@£%.2f", pnl >= 0 ? "+" : "", pnl))
+                    let pnl = position.ppl ?? Decimal(0)
+                    Text("\(pnl >= 0 ? "+" : "")£\(pnl.formatted(.number.precision(.fractionLength(2))))")
                         .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(pnl >= 0 ? .green : .red)
                 }
@@ -267,11 +224,11 @@ struct PositionDeepCard: View {
 
     private var accessibilityString: String {
         let name = position.name ?? position.ticker ?? "Unknown Position"
-        let shareCount = position.quantity ?? 0
-        let totalValue = (position.currentPrice ?? 0) * shareCount
-        let pnlVal = position.ppl ?? 0
+        let shareCount = position.quantity ?? Decimal(0)
+        let totalValue = (position.currentPrice ?? Decimal(0)) * shareCount
+        let pnlVal = position.ppl ?? Decimal(0)
 
-        return "\(name). \(String(format: "%.2f", shareCount)) shares. Value £\(String(format: "%.2f", totalValue)). \(pnlVal >= 0 ? "Profit" : "Loss") £\(String(format: "%.2f", abs(pnlVal)))."
+        return "\(name). \(shareCount.formatted(.number.precision(.fractionLength(2)))) shares. Value £\(totalValue.formatted()). \(pnlVal >= 0 ? "Profit" : "Loss") £\(abs(pnlVal).formatted(.number.precision(.fractionLength(2))))."
     }
 }
 
@@ -372,12 +329,6 @@ struct IntelligenceOfflineView: View {
     }
 }
 
-struct GradientBackground: View {
-    var body: some View {
-        Color.growinDarkBg.ignoresSafeArea()
-    }
-}
-
 struct PerformanceLineChart: View {
     let history: [PortfolioHistoryPoint]
     let timeRange: TimeRange
@@ -387,7 +338,7 @@ struct PerformanceLineChart: View {
             ContentUnavailableView("No Data", systemImage: "chart.line.uptrend.xyaxis")
                 .scaleEffect(0.5)
         } else {
-            let values = history.map { $0.totalValue }
+            let values = history.map { Double(truncating: $0.totalValue as NSNumber) }
             let rawMin = values.min() ?? 0
             let rawMax = values.max() ?? 0
             
@@ -403,7 +354,7 @@ struct PerformanceLineChart: View {
             Chart(history) { point in
                 LineMark(
                     x: .value("Date", point.date),
-                    y: .value("Value", point.totalValue)
+                    y: .value("Value", Double(truncating: point.totalValue as NSNumber))
                 )
                 .foregroundStyle(Color.growinAccent)
                 .lineStyle(StrokeStyle(lineWidth: 3))
@@ -411,7 +362,7 @@ struct PerformanceLineChart: View {
                 
                 AreaMark(
                     x: .value("Date", point.date),
-                    y: .value("Value", point.totalValue)
+                    y: .value("Value", Double(truncating: point.totalValue as NSNumber))
                 )
                 .foregroundStyle(
                     LinearGradient(
@@ -602,4 +553,3 @@ extension PortfolioView {
         }
     }
 }
-

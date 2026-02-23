@@ -1,45 +1,27 @@
 import Foundation
 import SwiftUI
 import Combine
-import Accelerate
 
-// MARK: - High Performance Data Processor (M4 Pro Optimized)
+// MARK: - High Performance Data Processor
 actor ChartDataService {
     private let session = URLSession.shared
     
-    func fetchChartData(url: URL) async throws -> (ChartResponse, [Double]) {
+    func fetchChartData(url: URL) async throws -> ChartResponse {
         let (data, _) = try await session.data(from: url)
         let response = try JSONDecoder().decode(ChartResponse.self, from: data)
-        
-        // M4 PRO OPTIMIZATION: Prepare numerical data for SIMD processing
-        let closes = response.data.map { $0.close }
-        return (response, closes)
-    }
-    
-    /// Calculate Moving Average using Apple's vDSP (Vector Digital Signal Processing)
-    /// This utilizes the AMX units on M-series chips for massive speedup over loops.
-    func calculateSMA(data: [Double], period: Int) -> [Double] {
-        let n = data.count
-        guard n >= period else { return [] }
-        
-        // M4 Pro Optimization: Use sliding window sum directly
-        // This is O(N) and uses vector units.
-        let sums = vDSP.slidingWindowSum(data, usingWindowLength: period)
-        
-        // Vector division by period
-        return vDSP.divide(sums, Double(period))
+        return response
     }
     
     /// Downsample data to target count using reliable stride (Visually consistent)
     func downsample(_ data: [ChartDataPoint], target: Int = 1000) -> [ChartDataPoint] {
         guard data.count > target else { return data }
         
-        let stride = Float(data.count) / Float(target)
+        let stride = Double(data.count) / Double(target)
         var result: [ChartDataPoint] = []
         result.reserveCapacity(target)
         
         for i in 0..<target {
-            let index = Int(Float(i) * stride)
+            let index = Int(Double(i) * stride)
             if index < data.count {
                 result.append(data[index])
             }
@@ -70,7 +52,7 @@ private final class WebSocketManager: Sendable {
 enum WSMessageResult: Sendable {
     case chartInit([ChartDataPoint])
     case chartTick(ChartDataPoint)
-    case realtimeQuote(price: Double?, change: Double?, percent: Double?)
+    case realtimeQuote(price: Decimal?, change: Decimal?, percent: Decimal?)
     case error(String)
     case unknown
 }
@@ -89,9 +71,9 @@ private struct WSChartTickMessage: Codable {
 
 private struct WSRealtimeQuoteMessage: Codable {
     struct QuoteData: Codable {
-        let current_price: Double?
-        let change: Double?
-        let change_percent: Double?
+        let current_price: Decimal?
+        let change: Decimal?
+        let change_percent: Decimal?
     }
     let data: QuoteData
 }
@@ -109,8 +91,8 @@ class StockChartViewModel {
     }
 
     // Performance optimization: Cache min/max values to avoid O(N) calculation in View body
-    var minValue: Double = 0
-    var maxValue: Double = 100
+    var minValue: Decimal = 0
+    var maxValue: Decimal = 100
 
     var isLoading: Bool = false
     var errorMessage: String? = nil
@@ -120,9 +102,9 @@ class StockChartViewModel {
     var aiAnalysis: String = "Loading analysis..."
     var algoSignals: String = "Loading signals..."
     var lastUpdated: Date? = nil
-    var realtimePrice: Double? = nil
-    var priceChange: Double? = nil
-    var priceChangePercent: Double? = nil
+    var realtimePrice: Decimal? = nil
+    var priceChange: Decimal? = nil
+    var priceChangePercent: Decimal? = nil
     var currency: String = "GBP"
     var market: String = "UK"
     var provider: String = "yfinance"
@@ -140,9 +122,6 @@ class StockChartViewModel {
         connectWebSocket()
     }
     
-    // Deinit is now safe because WebSocketManager handles cancellation
-    deinit { }
-    
     func fetchChartData() async {
         isLoading = true
         errorMessage = nil
@@ -155,7 +134,7 @@ class StockChartViewModel {
         }
         
         do {
-            let (response, _) = try await dataService.fetchChartData(url: url)
+            let response = try await dataService.fetchChartData(url: url)
             let displayData = await dataService.downsample(response.data, target: 800)
             
             withAnimation(.easeInOut) {
@@ -173,17 +152,12 @@ class StockChartViewModel {
                 } else {
                     self.errorMessage = error.message
                 }
-            } else if self.provider == "Synthetic" {
-                // STRICT: This should never happen now
-                self.errorMessage = "⚠️ No real market data available. Check your connection."
             } else if (self.market == "UK" && self.provider == "yfinance") ||
                         (self.market == "US" && self.provider == "yfinance") {
-                // Fallback to yfinance is OK but inform user
                 self.showProviderNotification(message: "ℹ️ Using yfinance (delayed data)")
             }
             
             self.updateChartMetadata()
-            
             await fetchAnalysis()
             
         } catch {
@@ -234,17 +208,12 @@ class StockChartViewModel {
             do {
                 while !Task.isCancelled {
                     let message = try await manager.receive()
-                    // M4 PRO OPTIMIZATION: Move JSON parsing to background thread
-                    // parseWebSocketMessage is nonisolated async, so it runs on global pool
                     let result = await self.parseWebSocketMessage(message)
-
-                    // Update UI state on MainActor
                     self.applyWebSocketMessage(result)
                 }
             } catch {
-                // Connection lost or cancelled, reconnect after delay
                 try? await Task.sleep(for: .seconds(5))
-                if self.wsManager != nil { // Only reconnect if not deinitialized
+                if self.wsManager != nil {
                     self.connectWebSocket()
                 }
             }
@@ -256,11 +225,9 @@ class StockChartViewModel {
         case .chartInit(let newPoints):
             self.chartData = newPoints
         case .chartTick(let tick):
-            // Prevent duplicates and append
             if self.chartData.last?.timestamp != tick.timestamp {
                 withAnimation(.linear(duration: 0.5)) {
                     self.chartData.append(tick)
-                    // Keep only last 1000 points for performance
                     if self.chartData.count > 1000 {
                         self.chartData.removeFirst()
                     }
@@ -304,7 +271,6 @@ class StockChartViewModel {
                     return .unknown
                 }
             } catch {
-                print("Failed to parse WebSocket message: \(error)")
                 return .unknown
             }
         default:
@@ -313,23 +279,22 @@ class StockChartViewModel {
     }
     
     private func updateMinMax() {
-        if chartData.isEmpty {
+        guard let first = chartData.first else {
             minValue = 0
             maxValue = 100
             return
         }
 
-        var min = Double.greatestFiniteMagnitude
-        var max = -Double.greatestFiniteMagnitude
+        var min: Decimal = first.close
+        var max: Decimal = first.close
 
-        // Single pass O(N) to find min/max without intermediate array allocation
         for point in chartData {
             if point.close < min { min = point.close }
             if point.close > max { max = point.close }
         }
 
-        minValue = min * 0.99
-        maxValue = max * 1.01
+        minValue = min * Decimal(0.99)
+        maxValue = max * Decimal(1.01)
     }
 
     private func updateChartMetadata() {
@@ -347,5 +312,3 @@ class StockChartViewModel {
         Task { await fetchChartData() }
     }
 }
- 
-// AnalysisResponse moved to CoreModels.swift

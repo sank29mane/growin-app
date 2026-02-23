@@ -54,7 +54,6 @@ struct StockChartView: View {
     @ViewBuilder
     private var headerView: some View {
         VStack(alignment: .leading, spacing: 16) {
-            // Chart Title and Description
             VStack(alignment: .leading, spacing: 4) {
                 Text(viewModel.chartTitle.isEmpty ? viewModel.symbol.uppercased() : viewModel.chartTitle)
                     .font(.system(size: 24, weight: .bold, design: .rounded))
@@ -67,7 +66,6 @@ struct StockChartView: View {
                 }
             }
 
-            // Price and Change Info
             HStack(alignment: .bottom) {
                 VStack(alignment: .leading, spacing: 8) {
                     if let selected = selectedPoint {
@@ -87,12 +85,15 @@ struct StockChartView: View {
 
                         if let first = viewModel.chartData.first {
                             let change = last.close - first.close
-                            let percent = (change / first.close) * 100
+                            let percent = first.close != 0 ? (change / first.close) * 100 : 0
 
                             HStack(spacing: 6) {
                                 Image(systemName: change >= 0 ? "arrow.up.right" : "arrow.down.right")
                                     .font(.system(size: 12, weight: .bold))
-                                Text("\(change >= 0 ? "+" : "")\(change, specifier: "%.2f") (\(percent, specifier: "%.2f")%)")
+                                
+                                let changeVal = Double(truncating: change as NSNumber)
+                                let percentVal = Double(truncating: percent as NSNumber)
+                                Text("\(change >= 0 ? "+" : "")\(String(format: "%.2f", changeVal)) (\(String(format: "%.2f", percentVal))%)")
                             }
                             .font(.system(size: 14, weight: .bold, design: .rounded))
                             .foregroundStyle(change >= 0 ? Color.growinGreen : Color.growinRed)
@@ -107,13 +108,13 @@ struct StockChartView: View {
 
                 Spacer()
 
-                // Action Buttons
                 HStack(spacing: 12) {
                     PremiumButton(title: "Analyze", icon: "sparkles", color: .growinPrimary) {
                         createNewChatFromChart()
                     }
                     
-                    ShareLink(item: "Intelligence Report: \(viewModel.symbol) Current: \(viewModel.currency) \(String(format: "%.2f", viewModel.chartData.last?.close ?? 0))") {
+                    let lastClose = Double(truncating: (viewModel.chartData.last?.close ?? 0) as NSNumber)
+                    ShareLink(item: "Intelligence Report: \(viewModel.symbol) Current: \(viewModel.currency) \(String(format: "%.2f", lastClose))") {
                         Image(systemName: "square.and.arrow.up")
                             .font(.system(size: 14))
                             .foregroundStyle(.white)
@@ -188,8 +189,8 @@ struct StockChartView: View {
             ForEach(viewModel.chartData) { point in
                 AreaMark(
                     x: .value("Date", point.date),
-                    yStart: .value("Baseline", viewModel.minValue),
-                    yEnd: .value("Price", point.close)
+                    yStart: .value("Baseline", Double(truncating: viewModel.minValue as NSNumber)),
+                    yEnd: .value("Price", Double(truncating: point.close as NSNumber))
                 )
                 .foregroundStyle(
                     LinearGradient(
@@ -202,7 +203,7 @@ struct StockChartView: View {
                 
                 LineMark(
                     x: .value("Date", point.date),
-                    y: .value("Price", point.close)
+                    y: .value("Price", Double(truncating: point.close as NSNumber))
                 )
                 .foregroundStyle(chartColor)
                 .interpolationMethod(.catmullRom)
@@ -216,7 +217,7 @@ struct StockChartView: View {
                 
                 PointMark(
                     x: .value("Selected Date", selected.date),
-                    y: .value("Selected Price", selected.close)
+                    y: .value("Selected Price", Double(truncating: selected.close as NSNumber))
                 )
                 .foregroundStyle(.white)
                 .symbolSize(80)
@@ -229,7 +230,7 @@ struct StockChartView: View {
         }
         .chartXAxis(.hidden)
         .chartYAxis(.hidden)
-        .chartYScale(domain: viewModel.minValue...viewModel.maxValue)
+        .chartYScale(domain: Double(truncating: viewModel.minValue as NSNumber)...Double(truncating: viewModel.maxValue as NSNumber))
         .drawingGroup()
         .chartOverlay { proxy in
             GeometryReader { geometry in
@@ -254,32 +255,20 @@ struct StockChartView: View {
         }
     }
 
-    /// Optimized binary search for closest point.
-    /// O(log N) instead of O(N) linear scan.
     private func findClosestPoint(to targetDate: Date, in data: [ChartDataPoint]) -> ChartDataPoint? {
         guard !data.isEmpty else { return nil }
-
         var low = 0
         var high = data.count - 1
         var closest: ChartDataPoint? = nil
         var minDiff: TimeInterval = .infinity
-
-        // Binary search to find insertion point
         while low <= high {
             let mid = (low + high) / 2
             let midDate = data[mid].date
             let diff = midDate.timeIntervalSince(targetDate)
-
-            if diff == 0 {
-                return data[mid]
-            } else if diff < 0 {
-                low = mid + 1
-            } else {
-                high = mid - 1
-            }
+            if diff == 0 { return data[mid] }
+            else if diff < 0 { low = mid + 1 }
+            else { high = mid - 1 }
         }
-
-        // Check candidates around insertion point (high and low)
         let candidates = [high, low]
         for idx in candidates {
             if idx >= 0 && idx < data.count {
@@ -290,7 +279,6 @@ struct StockChartView: View {
                 }
             }
         }
-
         return closest
     }
     
@@ -321,16 +309,13 @@ struct StockChartView: View {
                             Label("NEURAL INSIGHT", systemImage: "brain.headset")
                                 .font(.system(size: 10, weight: .black))
                                 .foregroundStyle(Color.Persona.analyst)
-                            
                             Spacer()
-                            
                             if let updated = viewModel.lastUpdated {
                                 Text(updated, style: .relative)
                                     .font(.system(size: 9, weight: .bold))
                                     .foregroundStyle(.secondary)
                             }
                         }
-                        
                         Text(viewModel.aiAnalysis)
                             .font(.system(size: 12, weight: .medium, design: .rounded))
                             .foregroundStyle(.white.opacity(0.8))
@@ -344,16 +329,13 @@ struct StockChartView: View {
                             Label("QUANT VECTORS", systemImage: "bolt.shield.fill")
                                 .font(.system(size: 10, weight: .black))
                                 .foregroundStyle(Color.growinAccent)
-                            
                             Spacer()
-                            
                             if let updated = viewModel.lastUpdated {
                                 Text(updated, style: .relative)
                                     .font(.system(size: 9, weight: .bold))
                                     .foregroundStyle(.secondary)
                             }
                         }
-                        
                         Text(viewModel.algoSignals)
                             .font(.system(size: 12, weight: .medium, design: .rounded))
                             .foregroundStyle(.white.opacity(0.8))
@@ -366,19 +348,13 @@ struct StockChartView: View {
     }
 
     private func createNewChatFromChart() {
-        // This would navigate to chat view with chart context
-        // For now, we'll implement a notification-based approach
+        let lastClose = Double(truncating: (viewModel.chartData.last?.close ?? 0) as NSNumber)
         let chartContext: [String: Any] = [
             "symbol": viewModel.symbol,
             "timeframe": viewModel.selectedTimeframe,
-            "currentPrice": viewModel.chartData.last?.close ?? 0,
+            "currentPrice": lastClose,
             "chartTitle": viewModel.chartTitle
         ]
-
-        NotificationCenter.default.post(
-            name: NSNotification.Name("CreateChatFromChart"),
-            object: nil,
-            userInfo: chartContext
-        )
+        NotificationCenter.default.post(name: NSNotification.Name("CreateChatFromChart"), object: nil, userInfo: chartContext)
     }
 }

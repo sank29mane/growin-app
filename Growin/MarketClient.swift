@@ -3,7 +3,7 @@ import Foundation
 struct MarketClient {
     private let config = AppConfig.shared
     
-    func createGoalPlan(capital: Double, targetReturn: Double, years: Double, risk: String) async -> GoalPlan? {
+    func createGoalPlan(capital: Decimal, targetReturn: Decimal, years: Decimal, risk: String) async -> GoalPlan? {
         let url = URL(string: "\(config.baseURL)/api/goal/plan")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"

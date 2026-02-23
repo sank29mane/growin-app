@@ -148,7 +148,7 @@ struct GoalPlannerView: View {
                             .foregroundStyle(.secondary)
                         
                         HStack {
-                            Text("\(viewModel.durationYears) Yrs")
+                            Text("\(Int(viewModel.durationYears)) Yrs")
                                 .font(.system(size: 20, weight: .bold, design: .rounded))
                             Spacer()
                             Stepper("", value: $viewModel.durationYears, in: 1...30)
@@ -216,7 +216,8 @@ struct GoalPlannerView: View {
             HStack(spacing: 16) {
                 GlassCard {
                     VStack(spacing: 12) {
-                        FeasibilityGauge(score: plan.probabilityOfSuccess)
+                        let score = Double(truncating: plan.probabilityOfSuccess as NSNumber)
+                        FeasibilityGauge(score: score)
                         Text("Success Probability")
                             .font(.system(size: 10, weight: .bold))
                             .foregroundStyle(.secondary)
@@ -281,9 +282,12 @@ struct GrowthChart: View {
     var body: some View {
         Chart {
             ForEach(points) { point in
+                let val = Double(truncating: point.value as NSNumber)
+                let tgt = Double(truncating: point.target as NSNumber)
+                
                 LineMark(
                     x: .value("Year", point.year),
-                    y: .value("Expected", point.value),
+                    y: .value("Expected", val),
                     series: .value("Series", "Projected")
                 )
                 .foregroundStyle(by: .value("Series", "Projected"))
@@ -292,7 +296,7 @@ struct GrowthChart: View {
                 
                 AreaMark(
                     x: .value("Year", point.year),
-                    y: .value("Expected", point.value)
+                    y: .value("Expected", val)
                 )
                 .foregroundStyle(
                     LinearGradient(
@@ -305,7 +309,7 @@ struct GrowthChart: View {
                 
                 LineMark(
                     x: .value("Year", point.year),
-                    y: .value("Target", point.target),
+                    y: .value("Target", tgt),
                     series: .value("Series", "Target")
                 )
                 .foregroundStyle(by: .value("Series", "Target"))
@@ -433,7 +437,8 @@ struct AssetAllocationList: View {
                     Spacer()
                     
                     VStack(alignment: .trailing, spacing: 2) {
-                        Text("\(Int(inst.weight * 100))%")
+                        let weight = Double(truncating: inst.weight as NSNumber)
+                        Text("\(Int(weight * 100))%")
                             .font(.system(size: 14, weight: .black))
                             .foregroundStyle(.white)
                         Text(inst.category)
