@@ -5,20 +5,24 @@ struct PortfolioView: View {
     @Bindable var viewModel: PortfolioViewModel
     
     var body: some View {
-        VStack(spacing: 0) {
-            // Main Content Area
-            ScrollView(showsIndicators: false) {
-                VStack(spacing: 32) {
-                    headerView
+        ZStack {
+            MeshBackground()
+            
+            VStack(spacing: 0) {
+                // Main Content Area
+                ScrollView(showsIndicators: false) {
+                    VStack(spacing: 32) {
+                        headerView
 
-                    if let snapshot = viewModel.snapshot {
-                        analyticsSection(snapshot: snapshot)
-                        holdingsSection(snapshot: snapshot)
-                    } else if !viewModel.isLoading {
-                        offlineView
+                        if let snapshot = viewModel.snapshot {
+                            analyticsSection(snapshot: snapshot)
+                            holdingsSection(snapshot: snapshot)
+                        } else if !viewModel.isLoading {
+                            offlineView
+                        }
                     }
+                    .padding(.bottom, 40)
                 }
-                .padding(.bottom, 40)
             }
         }
         .sheet(item: $viewModel.selectedPosition) { position in
@@ -54,19 +58,19 @@ struct MetricGrid: View {
         VStack(spacing: 16) {
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 16) {
                 let totalCap = (summary?.currentValue ?? Decimal(0)) + (summary?.cashBalance?.free ?? Decimal(0))
-                MiniMetricCard(title: "Total Capital", value: "£\(totalCap.formatted(.number.precision(.fractionLength(2))))", icon: "banknote.fill", color: .growinAccent)
+                MiniMetricCard(title: "Total Capital", value: "£\(totalCap.formatted(.number.precision(.fractionLength(2))))", icon: "banknote.fill", color: .stitchNeonPurple)
                 
                 let equity = summary?.currentValue ?? Decimal(0)
-                MiniMetricCard(title: "Equity", value: "£\(equity.formatted(.number.precision(.fractionLength(2))))", icon: "chart.bar.fill", color: .growinPrimary)
+                MiniMetricCard(title: "Equity", value: "£\(equity.formatted(.number.precision(.fractionLength(2))))", icon: "chart.bar.fill", color: .stitchNeonIndigo)
                 
                 let pnl = summary?.totalPnl ?? Decimal(0)
-                MiniMetricCard(title: "Net Profit", value: "£\(pnl.formatted(.number.precision(.fractionLength(2))))", icon: "waveform.path.ecg", color: pnl >= 0 ? .growinGreen : .growinRed)
+                MiniMetricCard(title: "Net Profit", value: "£\(pnl.formatted(.number.precision(.fractionLength(2))))", icon: "waveform.path.ecg", color: pnl >= 0 ? .stitchNeonGreen : .growinRed)
                 
                 let roi = summary?.totalPnlPercent ?? 0.0
                 MiniMetricCard(title: "ROI", value: "\(roi.formatted(.number.precision(.fractionLength(2))))%", icon: "percent", color: .white)
                 
                 let cash = summary?.cashBalance?.free ?? Decimal(0)
-                MiniMetricCard(title: "Cash", value: "£\(cash.formatted(.number.precision(.fractionLength(2))))", icon: "pouch.fill", color: .growinOrange)
+                MiniMetricCard(title: "Cash", value: "£\(cash.formatted(.number.precision(.fractionLength(2))))", icon: "pouch.fill", color: .stitchNeonYellow)
             }
             
             if let accounts = summary?.accounts, accounts.count > 1 {
@@ -75,11 +79,11 @@ struct MetricGrid: View {
                         if let acc = accounts[key] {
                             HStack(spacing: 4) {
                                 Text(key.uppercased())
-                                    .font(.system(size: 8, weight: .black))
-                                    .foregroundStyle(.secondary)
+                                    .premiumTypography(.overline)
                                 let val = acc.currentValue ?? Decimal(0)
                                 Text("£\(val.formatted(.number.precision(.fractionLength(2))))")
-                                    .font(.system(size: 10, weight: .bold))
+                                    .premiumTypography(.body)
+                                    .fontWeight(.bold)
                             }
                             .padding(.horizontal, 10)
                             .padding(.vertical, 5)
@@ -109,13 +113,11 @@ struct MiniMetricCard: View {
                         .foregroundStyle(color)
                         .font(.system(size: 14))
                     Text(title)
-                        .font(.caption2)
-                        .fontWeight(.bold)
-                        .foregroundStyle(.secondary)
+                        .premiumTypography(.overline)
                 }
                 
                 Text(value)
-                    .font(.system(size: 20, weight: .heavy, design: .rounded))
+                    .premiumTypography(.title)
                     .foregroundStyle(.white)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -167,40 +169,40 @@ struct PositionDeepCard: View {
             HStack(spacing: 16) {
                 VStack(spacing: 4) {
                     Circle()
-                        .fill(Color.blue.opacity(0.1))
+                        .fill(Color.stitchNeonIndigo.opacity(0.1))
                         .frame(width: 36, height: 36)
                         .overlay(
                             Text(position.ticker?.prefix(1) ?? "?")
-                                .font(.system(size: 14, weight: .bold))
-                                .foregroundStyle(.blue)
+                                .premiumTypography(.body)
+                                .fontWeight(.bold)
+                                .foregroundStyle(Color.stitchNeonIndigo)
                         )
                     
                     if let acc = position.accountType {
                         Text(acc.uppercased())
-                            .font(.system(size: 6, weight: .black))
+                            .premiumTypography(.overline)
                             .padding(.horizontal, 4)
                             .padding(.vertical, 2)
-                            .background(acc == "isa" ? Color.purple.opacity(0.2) : Color.blue.opacity(0.2))
-                            .foregroundStyle(acc == "isa" ? .purple : .blue)
+                            .background(acc == "isa" ? Color.stitchNeonPurple.opacity(0.2) : Color.stitchNeonIndigo.opacity(0.2))
+                            .foregroundStyle(acc == "isa" ? Color.stitchNeonPurple : Color.stitchNeonIndigo)
                             .clipShape(.rect(cornerRadius: 3))
                     }
                 }
                 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(position.name ?? position.ticker ?? "UNKNOWN")
-                        .font(.system(size: 16, weight: .black))
+                        .premiumTypography(.body)
+                        .fontWeight(.bold)
                         .foregroundStyle(.white)
                     
                     if position.name != nil {
                         Text(position.ticker ?? "")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(.white.opacity(0.4))
+                            .premiumTypography(.caption)
                     }
                     
                     let qty = position.quantity ?? Decimal(0)
                     Text("\(qty.formatted(.number.precision(.fractionLength(2)))) shares")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.5))
+                        .premiumTypography(.caption)
                 }
                 
                 Spacer()
@@ -208,13 +210,15 @@ struct PositionDeepCard: View {
                 VStack(alignment: .trailing, spacing: 4) {
                     let value = (position.currentPrice ?? Decimal(0)) * (position.quantity ?? Decimal(0))
                     Text("£\(value.formatted(.number.precision(.fractionLength(2))))")
-                        .font(.system(size: 16, weight: .black))
+                        .premiumTypography(.body)
+                        .fontWeight(.black)
                         .foregroundStyle(.white)
                     
                     let pnl = position.ppl ?? Decimal(0)
                     Text("\(pnl >= 0 ? "+" : "")£\(pnl.formatted(.number.precision(.fractionLength(2))))")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(pnl >= 0 ? .green : .red)
+                        .premiumTypography(.caption)
+                        .fontWeight(.bold)
+                        .foregroundStyle(pnl >= 0 ? Color.stitchNeonGreen : .growinRed)
                 }
             }
         }

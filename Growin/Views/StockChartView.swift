@@ -56,13 +56,13 @@ struct StockChartView: View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(viewModel.chartTitle.isEmpty ? viewModel.symbol.uppercased() : viewModel.chartTitle)
-                    .font(.system(size: 24, weight: .bold, design: .rounded))
+                    .premiumTypography(.heading)
                     .foregroundStyle(.white)
 
                 if !viewModel.chartDescription.isEmpty {
                     Text(viewModel.chartDescription)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.secondary)
+                        .premiumTypography(.body)
+                        .foregroundStyle(Color.textSecondary)
                 }
             }
 
@@ -70,18 +70,17 @@ struct StockChartView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     if let selected = selectedPoint {
                         Text(selected.close, format: .currency(code: viewModel.currency))
-                            .font(.system(size: 40, weight: .bold, design: .rounded))
+                            .premiumTypography(.heading)
                         
                         HStack(spacing: 8) {
                             Text(selected.date, style: .date)
                             Text("•")
                             Text("\(viewModel.market) • \(viewModel.provider)")
                         }
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(.secondary.opacity(0.8))
+                        .premiumTypography(.overline)
                     } else if let last = viewModel.chartData.last {
                         Text(last.close, format: .currency(code: viewModel.currency))
-                            .font(.system(size: 40, weight: .bold, design: .rounded))
+                            .premiumTypography(.heading)
 
                         if let first = viewModel.chartData.first {
                             let change = last.close - first.close
@@ -89,17 +88,17 @@ struct StockChartView: View {
 
                             HStack(spacing: 6) {
                                 Image(systemName: change >= 0 ? "arrow.up.right" : "arrow.down.right")
-                                    .font(.system(size: 12, weight: .bold))
+                                    .fontWeight(.black)
                                 
                                 let changeVal = Double(truncating: change as NSNumber)
                                 let percentVal = Double(truncating: percent as NSNumber)
                                 Text("\(change >= 0 ? "+" : "")\(String(format: "%.2f", changeVal)) (\(String(format: "%.2f", percentVal))%)")
                             }
-                            .font(.system(size: 14, weight: .bold, design: .rounded))
-                            .foregroundStyle(change >= 0 ? Color.growinGreen : Color.growinRed)
+                            .premiumTypography(.title)
+                            .foregroundStyle(change >= 0 ? Color.stitchNeonGreen : Color.growinRed)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 4)
-                            .background((change >= 0 ? Color.growinGreen : Color.growinRed).opacity(0.1))
+                            .background((change >= 0 ? Color.stitchNeonGreen : Color.growinRed).opacity(0.1))
                             .clipShape(Capsule())
                             .glassEffect(.thin.interactive())
                         }
@@ -109,7 +108,7 @@ struct StockChartView: View {
                 Spacer()
 
                 HStack(spacing: 12) {
-                    PremiumButton(title: "Analyze", icon: "sparkles", color: .growinPrimary) {
+                    PremiumButton(title: "Analyze", icon: "sparkles", color: Color.stitchNeonIndigo) {
                         createNewChatFromChart()
                     }
                     
@@ -284,7 +283,7 @@ struct StockChartView: View {
     
     private func updateChartColor() {
         guard let first = viewModel.chartData.first, let last = viewModel.chartData.last else { return }
-        chartColor = last.close >= first.close ? Color.growinGreen : Color.growinRed
+        chartColor = last.close >= first.close ? Color.stitchNeonGreen : Color.growinRed
     }
     
     private func tfShort(_ tf: String) -> String {
@@ -307,17 +306,17 @@ struct StockChartView: View {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack {
                             Label("NEURAL INSIGHT", systemImage: "brain.headset")
-                                .font(.system(size: 10, weight: .black))
+                                .premiumTypography(.overline)
                                 .foregroundStyle(Color.Persona.analyst)
                             Spacer()
                             if let updated = viewModel.lastUpdated {
                                 Text(updated, style: .relative)
-                                    .font(.system(size: 9, weight: .bold))
-                                    .foregroundStyle(.secondary)
+                                    .premiumTypography(.caption)
+                                    .fontWeight(.bold)
                             }
                         }
                         Text(viewModel.aiAnalysis)
-                            .font(.system(size: 12, weight: .medium, design: .rounded))
+                            .premiumTypography(.body)
                             .foregroundStyle(.white.opacity(0.8))
                             .lineSpacing(2)
                     }
@@ -327,17 +326,17 @@ struct StockChartView: View {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack {
                             Label("QUANT VECTORS", systemImage: "bolt.shield.fill")
-                                .font(.system(size: 10, weight: .black))
-                                .foregroundStyle(Color.growinAccent)
+                                .premiumTypography(.overline)
+                                .foregroundStyle(Color.stitchNeonCyan)
                             Spacer()
                             if let updated = viewModel.lastUpdated {
                                 Text(updated, style: .relative)
-                                    .font(.system(size: 9, weight: .bold))
-                                    .foregroundStyle(.secondary)
+                                    .premiumTypography(.caption)
+                                    .fontWeight(.bold)
                             }
                         }
                         Text(viewModel.algoSignals)
-                            .font(.system(size: 12, weight: .medium, design: .rounded))
+                            .premiumTypography(.body)
                             .foregroundStyle(.white.opacity(0.8))
                             .lineSpacing(2)
                     }

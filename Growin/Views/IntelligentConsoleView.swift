@@ -15,113 +15,88 @@ struct IntelligentConsoleView: View {
     }
     
     var body: some View {
-        ScrollView(showsIndicators: false) {
-            VStack(spacing: 32) {
-                // Integrated Console Header
-                HStack(alignment: .bottom) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("VITAL MONITOR")
-                            .font(.system(size: 11, weight: .bold, design: .monospaced))
-                            .foregroundStyle(Color.growinAccent)
-                        
-                        HStack(spacing: 12) {
-                            Text(systemStatus?.status?.uppercased() ?? "OFFLINE")
-                                .font(.system(size: 34, weight: .bold, design: .rounded))
-                                .foregroundStyle(systemStatus?.status?.lowercased() == "healthy" ? Color.growinGreen : Color.growinRed)
-                            
-                            StatusPulseLight(isOnline: systemStatus?.status?.lowercased() == "healthy")
-                        }
-                    }
-                    
-                    Spacer()
-                    
+        ZStack {
+            MeshBackground()
+            
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 32) {
+                    // Integrated Console Header
+                    AppHeader(
+                        title: "VITAL MONITOR",
+                        subtitle: systemStatus?.status?.uppercased() ?? "OFFLINE",
+                        icon: "bolt.fill"
+                    )
+                    .padding(.horizontal)
+                    .padding(.top, 24)
+
                     if !backendStatus.isOnline {
-                        Button(action: {
+                        PremiumButton(title: "BOOT ENGINE", icon: "power", color: .growinRed) {
                             backendStatus.launchBackend()
-                        }) {
-                            HStack(spacing: 8) {
-                                Image(systemName: "power")
-                                Text("BOOT ENGINE")
-                            }
-                            .font(.system(size: 11, weight: .black))
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 10)
-                            .background(Color.growinRed)
-                            .clipShape(Capsule())
-                            .foregroundStyle(.white)
-                            .shadow(color: Color.growinRed.opacity(0.3), radius: 10, x: 0, y: 5)
                         }
-                        .buttonStyle(.plain)
+                        .padding(.horizontal)
                         .transition(.scale.combined(with: .opacity))
                     }
-                }
-                .padding(.horizontal)
-                .padding(.top, 24)
 
-                // Desktop Layout
-                HStack(alignment: .top, spacing: 24) {
-                    VStack(alignment: .leading, spacing: 20) {
-                        Text("SYSTEM METRICS")
-                            .font(.system(size: 12, weight: .black))
-                            .tracking(2)
-                            .foregroundStyle(.secondary)
+                    // Desktop Layout
+                    HStack(alignment: .top, spacing: 24) {
+                        VStack(alignment: .leading, spacing: 20) {
+                            Text("SYSTEM METRICS")
+                                .premiumTypography(.overline)
+                            
+                            metricsGrid
+                        }
+                        .frame(maxWidth: .infinity)
                         
-                        metricsGrid
-                    }
-                    .frame(maxWidth: .infinity)
-                    
-                    VStack(alignment: .leading, spacing: 20) {
-                        Text("AGENT CORE ARCHITECTURE")
-                            .font(.system(size: 12, weight: .black))
-                            .tracking(2)
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal)
+                        VStack(alignment: .leading, spacing: 20) {
+                            Text("AGENT CORE ARCHITECTURE")
+                                .premiumTypography(.overline)
+                                .padding(.horizontal)
 
-                        VStack(spacing: 0) {
-                            if let agents = agents {
-                                if let coord = agents["coordinator"] {
-                                    AgentStatusBlock(name: "Coordinator", status: coord, icon: "cpu.fill")
-                                    Divider().background(Color.secondary.opacity(0.2))
-                                }
-                                
-                                if let decision = agents["decision_agent"] {
-                                    AgentStatusBlock(name: "Decision Agent", status: decision, icon: "brain.head.profile")
-                                    Divider().background(Color.secondary.opacity(0.2))
-                                }
-                                
-                                // Specialists
-                                ForEach(agents.keys.sorted(), id: \.self) { key in
-                                    if key != "coordinator" && key != "decision_agent" {
-                                        if let status = agents[key] {
-                                            AgentStatusBlock(name: key.replacingOccurrences(of: "_", with: " ").capitalized, 
-                                                           status: status, 
-                                                           icon: specialistIcon(for: key))
-                                            Divider().background(Color.secondary.opacity(0.2))
+                            VStack(spacing: 0) {
+                                if let agents = agents {
+                                    if let coord = agents["coordinator"] {
+                                        AgentStatusBlock(name: "Coordinator", status: coord, icon: "cpu.fill")
+                                        Divider().background(Color.secondary.opacity(0.2))
+                                    }
+                                    
+                                    if let decision = agents["decision_agent"] {
+                                        AgentStatusBlock(name: "Decision Agent", status: decision, icon: "brain.head.profile")
+                                        Divider().background(Color.secondary.opacity(0.2))
+                                    }
+                                    
+                                    // Specialists
+                                    ForEach(agents.keys.sorted(), id: \.self) { key in
+                                        if key != "coordinator" && key != "decision_agent" {
+                                            if let status = agents[key] {
+                                                AgentStatusBlock(name: key.replacingOccurrences(of: "_", with: " ").capitalized, 
+                                                               status: status, 
+                                                               icon: specialistIcon(for: key))
+                                                Divider().background(Color.secondary.opacity(0.2))
+                                            }
                                         }
                                     }
+                                } else {
+                                    ProgressView()
+                                        .padding()
                                 }
-                            } else {
-                                ProgressView()
-                                    .padding()
                             }
+                            .glassEffect(.thin)
+                            .cornerRadius(12)
+                            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.secondary.opacity(0.2)))
                         }
-                        .background(Color.black.opacity(0.2))
-                        .cornerRadius(12)
-                        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.secondary.opacity(0.2)))
+                        .frame(maxWidth: .infinity)
                     }
-                    .frame(maxWidth: .infinity)
+                    
+                    // Dynamic Architecture Diagram
+                    DynamicArchitectureView(agents: specialistAgentsStatus)
+                        .padding(.top, 8)
+                    
+                    // Live Logs Terminal
+                    logSection
                 }
-                
-                // Dynamic Architecture Diagram
-                DynamicArchitectureView(agents: specialistAgentsStatus)
-                    .padding(.top, 8)
-                
-                // Live Logs Terminal
-                logSection
+                .padding()
             }
-            .padding()
         }
-        .background(Color.black.ignoresSafeArea())
         .onAppear(perform: fetchLogs)
         .navigationTitle("Intelligent Console")
     }
@@ -234,17 +209,16 @@ struct MetricCard: View {
                     .foregroundColor(color)
                     .font(.system(size: 16))
                 Text(title)
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(.secondary)
+                    .premiumTypography(.overline)
             }
 
             Text(value)
-                .font(.system(size: 18, weight: .black))
+                .premiumTypography(.title)
                 .foregroundColor(.white)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
-        .background(Color.white.opacity(0.05))
+        .glassEffect(.thin)
         .cornerRadius(16)
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.1), lineWidth: 1))
     }
@@ -269,16 +243,16 @@ struct AgentStatusBlock: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 4) {
                     Text(name)
-                        .font(.system(size: 14, weight: .bold))
+                        .premiumTypography(.body)
+                        .fontWeight(.bold)
                     if let model = status.model {
                         Text("(\(model))")
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundColor(.secondary)
+                            .premiumTypography(.caption)
                     }
                 }
                 
                 Text(status.detail ?? "Idle")
-                    .font(.system(size: 11, design: .monospaced))
+                    .premiumTypography(.overline)
                     .foregroundColor(statusColor)
                     .lineLimit(1)
             }
@@ -287,12 +261,12 @@ struct AgentStatusBlock: View {
             
             VStack(alignment: .trailing, spacing: 2) {
                 Text(status.status.uppercased())
-                    .font(.system(size: 10, weight: .black))
+                    .premiumTypography(.overline)
                     .foregroundColor(statusColor)
                 
                 if let model = status.model {
                     Text(model)
-                        .font(.system(size: 9))
+                        .premiumTypography(.overline)
                         .foregroundColor(.secondary)
                 }
             }
@@ -302,9 +276,9 @@ struct AgentStatusBlock: View {
     
     private var statusColor: Color {
         switch status.status.lowercased() {
-        case "ready", "online": return .green
-        case "working", "loading", "thinking": return .orange
-        case "error": return .red
+        case "ready", "online": return Color.stitchNeonGreen
+        case "working", "loading", "thinking": return Color.stitchNeonYellow
+        case "error": return Color.growinRed
         default: return .secondary
         }
     }
