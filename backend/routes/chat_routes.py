@@ -110,6 +110,7 @@ async def chat_message(
             # Graceful Degradation: Construct minimal context to bypass coordinator failure
             from market_context import MarketContext
             market_context = MarketContext(
+                query=request.message,
                 intent="general_chat",
                 ticker=ticker,
                 routing_reason="Coordinator Fallback - Degradation Mode",

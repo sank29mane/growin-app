@@ -7,19 +7,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 # Add backend to sys.path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Extensive mocking to bypass missing/broken dependencies during test collection
-sys.modules["scipy"] = MagicMock()
-sys.modules["scipy.signal"] = MagicMock()
-sys.modules["scipy.stats"] = MagicMock()
-sys.modules["scipy.sparse"] = MagicMock()
-sys.modules["scipy.optimize"] = MagicMock()
-sys.modules["sklearn"] = MagicMock()
-sys.modules["sklearn.preprocessing"] = MagicMock()
-sys.modules["torch"] = MagicMock()
-sys.modules["agents.quant_agent"] = MagicMock()
-sys.modules["agents.forecasting_agent"] = MagicMock()
-sys.modules["agents.goal_planner_agent"] = MagicMock()
-
 from app_context import state, ChatMessage
 from market_context import MarketContext
 from routes.chat_routes import stream_chat_generator, extract_ticker_from_text

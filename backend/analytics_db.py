@@ -125,18 +125,24 @@ class AnalyticsDB:
             df['ticker'] = ticker
             
             # Bulk insert using DuckDB's fast path
-            # Explicitly select columns in schema order to avoid misalignment
-            self.conn.execute("""
-                INSERT INTO ohlcv_history 
-                SELECT ticker, timestamp, open, high, low, close, volume 
-                FROM df
-                ON CONFLICT (ticker, timestamp) DO UPDATE SET
-                    open = EXCLUDED.open,
-                    high = EXCLUDED.high,
-                    low = EXCLUDED.low,
-                    close = EXCLUDED.close,
-                    volume = EXCLUDED.volume
-            """)
+            # SOTA: Registering dataframe explicitly to avoid scope resolution issues
+            try:
+                self.conn.register('df_tmp', df)
+                self.conn.execute("""
+                    INSERT INTO ohlcv_history 
+                    SELECT ticker, timestamp, open, high, low, close, volume 
+                    FROM df_tmp
+                    ON CONFLICT (ticker, timestamp) DO UPDATE SET
+                        open = EXCLUDED.open,
+                        high = EXCLUDED.high,
+                        low = EXCLUDED.low,
+                        close = EXCLUDED.close,
+                        volume = EXCLUDED.volume
+                """)
+                self.conn.unregister('df_tmp')
+            except Exception as duck_err:
+                logger.error(f"DuckDB execution failed: {duck_err}")
+                raise duck_err
             
             rows_inserted = len(df)
             logger.info(f"📊 Inserted {rows_inserted} rows for {ticker}")

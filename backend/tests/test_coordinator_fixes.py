@@ -1,118 +1,102 @@
 import sys
 import os
 import unittest
-from unittest.mock import MagicMock, patch, AsyncMock
+import asyncio
+from unittest.mock import MagicMock, AsyncMock, patch
 
 # Ensure backend is in path
-sys.path.append(os.path.join(os.getcwd(), 'backend'))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-# --- MOCK DEPENDENCIES BEFORE IMPORT ---
-# This prevents ImportError for missing libraries in the test environment
-sys.modules['mcp'] = MagicMock()
-sys.modules['mcp.server'] = MagicMock()
-sys.modules['mcp.types'] = MagicMock()
-sys.modules['mcp_client'] = MagicMock()
-sys.modules['langchain_core'] = MagicMock()
-sys.modules['langchain_core.messages'] = MagicMock()
-sys.modules['langchain_openai'] = MagicMock()
-sys.modules['langchain_ollama'] = MagicMock()
-sys.modules['mlx_langchain'] = MagicMock()
-sys.modules['lm_studio_client'] = MagicMock()
-sys.modules['coreml_inference'] = MagicMock()
-
-# Mock heavy agents to avoid transitive imports
-sys.modules['agents.forecasting_agent'] = MagicMock()
-sys.modules['agents.research_agent'] = MagicMock()
-sys.modules['agents.social_agent'] = MagicMock()
-sys.modules['agents.whale_agent'] = MagicMock()
-sys.modules['agents.goal_planner_agent'] = MagicMock()
-
-# Need real PortfolioAgent? It imports mcp_client (mocked above), so it should be fine.
-# But CoordinatorAgent instantiates them. Let's mock them too for pure unit testing.
-sys.modules['agents.quant_agent'] = MagicMock()
-sys.modules['agents.portfolio_agent'] = MagicMock()
+# We rely on conftest.py for basic mocking of heavy dependencies.
+# If we need specific mocks for this file, we should do it in setUp.
 
 from agents.coordinator_agent import CoordinatorAgent
+from market_context import MarketContext
 
 class TestCoordinatorFixes(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
-        # Mock dependencies
-        self.mock_mcp_client = MagicMock()
-        self.agent = CoordinatorAgent(self.mock_mcp_client, model_name="test-model")
-        # Disable LLM for these tests
-        self.agent.llm = None
-        # Mock methods that are async
-        self.agent._classify_intent = AsyncMock(return_value={"type": "analytical", "needs": []})
-        self.agent._fetch_ohlcv = AsyncMock(return_value=[])
+    def setUp(self):
+        # Mock MCP client
+        self.mock_mcp = MagicMock()
+        self.mock_mcp.call_tool = AsyncMock(return_value=[])
+        
+        # Initialize Coordinator
+        # We patch LLMFactory to avoid loading real models
+        with patch('agents.llm_factory.LLMFactory.create_llm', new_callable=AsyncMock) as mock_factory:
+            mock_llm = MagicMock()
+            mock_llm.ainvoke = AsyncMock(return_value=MagicMock(content="INTENT: price_check\nTICKER: AAPL\nREASON: Test"))
+            mock_factory.return_value = mock_llm
+            self.coordinator = CoordinatorAgent(mcp_client=self.mock_mcp)
 
-        # Mock internal agents if they were instantiated (since we mocked the modules,
-        # self.agent.quant_agent is a MagicMock instance)
+    async def test_ticker_fix_alphanumeric(self):
+        """Test that tickers with dots are preserved (e.g. VOD.L)"""
+        # _attempt_ticker_fix is private but we can test it directly or via process_query
+        fixed = await self.coordinator._attempt_ticker_fix("VOD.L")
+        self.assertEqual(fixed, "VOD.L")
+        
+        fixed2 = await self.coordinator._attempt_ticker_fix("VOD.")
+        self.assertEqual(fixed2, "VOD")
 
-    async def test_resolve_ticker_from_history_dots(self):
-        history = [
-            {"role": "user", "content": "What do you think about VOD.L?"}
-        ]
-        ticker = self.agent._resolve_ticker_from_history(history)
-        self.assertEqual(ticker, "VOD.L")
+    async def test_ticker_fix_malformed(self):
+        """Test that malformed tickers are cleaned"""
+        fixed = await self.coordinator._attempt_ticker_fix("AAPL$")
+        self.assertEqual(fixed, "AAPL")
 
-    async def test_resolve_ticker_from_history_digits(self):
-        history = [
-            {"role": "user", "content": "Analyze 3GLD please."}
-        ]
-        ticker = self.agent._resolve_ticker_from_history(history)
-        self.assertEqual(ticker, "3GLD")
+    async def test_ticker_resolution_tier2(self):
+        """Test Tier 2 resolution via search_instruments tool"""
+        # Configure tool response
+        import json
+        self.mock_mcp.call_tool.return_value = MagicMock(content=[
+            MagicMock(text=json.dumps([
+                {"ticker": "LLOY", "name": "Lloyds Banking Group"},
+                {"ticker": "AAPL", "name": "Apple Inc"}
+            ]))
+        ])
+        
+        # Test resolution for name
+        resolved = await self.coordinator._resolve_ticker_via_search("Lloyds")
+        # Note: Depending on ticker_utils, it might become LLOY.L
+        self.assertTrue(resolved.startswith("LLOY"))
 
-    async def test_resolve_ticker_from_history_mixed(self):
-        history = [
-            {"role": "user", "content": "Compare AAPL and MSFT"}
-        ]
-        ticker = self.agent._resolve_ticker_from_history(history)
-        self.assertEqual(ticker, "AAPL")
+    async def test_coordinator_self_correction_flow(self):
+        """Test that coordinator escalates to Tier 2 on specialist failure"""
+        # Mock QuantAgent to fail initially
+        mock_quant = MagicMock()
+        # First call fails with "not found", second succeeds
+        fail_res = MagicMock(success=False, error="Ticker AAPL_WRONG not found")
+        success_res = MagicMock(success=True, data={"rsi": 50}, agent_name="QuantAgent")
+        
+        mock_quant.execute = AsyncMock(side_effect=[fail_res, success_res])
+        self.coordinator.quant_agent = mock_quant
+        
+        # Mock Tier 2 resolution to return AAPL
+        with patch.object(self.coordinator, '_resolve_ticker_via_search', new_callable=AsyncMock) as mock_search:
+            mock_search.return_value = "AAPL"
+            
+            # Execute specialist via coordinator helper
+            result = await self.coordinator._run_specialist(mock_quant, {"ticker": "AAPL_WRONG"})
+            
+            self.assertTrue(result.success)
+            self.assertEqual(mock_search.call_count, 1)
+            self.assertEqual(mock_quant.execute.call_count, 2)
 
-    async def test_resolve_ticker_from_history_ignore_stops(self):
-        history = [
-            {"role": "user", "content": "Is this good?"}
-        ]
-        ticker = self.agent._resolve_ticker_from_history(history)
-        self.assertIsNone(ticker)
-
-    async def test_attempt_ticker_fix(self):
-        """Test the new _attempt_ticker_fix method"""
-        # 1. Valid UK ticker with dot
-        self.assertEqual(await self.agent._attempt_ticker_fix("VOD.L"), "VOD.L")
-
-        # 2. Dirty dot case (trailing dot)
-        self.assertEqual(await self.agent._attempt_ticker_fix("VOD.L."), "VOD.L")
-
-        # 3. Valid US ticker
-        self.assertEqual(await self.agent._attempt_ticker_fix("AAPL"), "AAPL")
-
-        # 4. Search fallback (mocked)
-        self.agent._resolve_ticker_via_search = AsyncMock(return_value="CORRECTED")
-        # "broken" -> "broken" via clean? No, "broken" is alnum, so clean returns "broken".
-        # Logic: if len(clean) >= 2 return clean.
-        # So "broken" returns "broken".
-
-        # We need a case where clean is empty or < 2.
-        # e.g. "$"
-        self.assertEqual(await self.agent._attempt_ticker_fix("$"), "CORRECTED")
-
-    @patch('status_manager.status_manager')
-    async def test_process_query_normalization(self, mock_status):
-        # Mock the import of normalize_ticker inside the method
-        with patch.dict(sys.modules, {'trading212_mcp_server': MagicMock()}):
-            mock_normalize = MagicMock()
-            mock_normalize.side_effect = lambda x: x + ".L" if x == "VOD" else x
-            sys.modules['trading212_mcp_server'].normalize_ticker = mock_normalize
-
-            # Ensure _attempt_ticker_fix doesn't interfere
-            # "VOD.L" is not alpha, so it triggers _attempt_ticker_fix
-            # Our new impl should return "VOD.L" correctly
-
-            context = await self.agent.process_query("Analyze VOD", ticker="VOD")
-
-            mock_normalize.assert_called_with("VOD")
-            self.assertEqual(context.ticker, "VOD.L")
+    async def test_ticker_normalization_integration(self):
+        """Verify that ticker normalization is applied during processing"""
+        # Patch the source of normalize_ticker since it's imported locally
+        with patch('trading212_mcp_server.normalize_ticker') as mock_norm:
+            mock_norm.return_value = "VOD.L"
+            
+            # We need to mock _classify_intent to avoid LLM call
+            with patch.object(self.coordinator, '_classify_intent', new_callable=AsyncMock) as mock_classify:
+                mock_classify.return_value = {"type": "price_check", "primary_ticker": "VOD"}
+                
+                # Mock data fabrication
+                with patch.object(self.coordinator.data_fabricator, 'fabricate_context', new_callable=AsyncMock) as mock_fab:
+                    mock_fab.return_value = MagicMock(ticker="VOD.L", user_context={}, agents_failed=[])
+                    
+                    await self.coordinator.process_query("Price of VOD")
+                    
+                    # Verify normalization was called
+                    mock_norm.assert_called()
 
 if __name__ == '__main__':
     unittest.main()

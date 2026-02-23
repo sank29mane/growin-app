@@ -16,14 +16,26 @@ PRECISION_CURRENCY = Decimal('0.01')
 getcontext().rounding = ROUND_HALF_UP
 
 def create_decimal(value: Any) -> Decimal:
-    """Safe conversion to Decimal, handling strings, floats, and ints."""
+    """Safe conversion to Decimal, handling strings, floats, ints, and NaN."""
     if value is None:
         return Decimal('0')
+    if isinstance(value, float):
+        import math
+        if math.isnan(value) or math.isinf(value):
+            return Decimal('0')
     if isinstance(value, str):
         # Remove currency symbols or commas if present
         clean_val = value.replace('£', '').replace('$', '').replace(',', '').strip()
-        return Decimal(clean_val)
-    return Decimal(str(value))
+        if clean_val.lower() in ['nan', 'inf', '-inf']:
+            return Decimal('0')
+        try:
+            return Decimal(clean_val)
+        except Exception:
+            return Decimal('0')
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return Decimal('0')
 
 def safe_div(numerator: Union[Decimal, float, str], denominator: Union[Decimal, float, str]) -> Decimal:
     """Divide with zero-check and return Decimal."""

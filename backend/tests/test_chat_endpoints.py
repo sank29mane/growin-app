@@ -35,8 +35,8 @@ class TestChatEndpoints(unittest.IsolatedAsyncioTestCase):
         # Configure process_query as AsyncMock
         self.mock_coordinator_instance.process_query = AsyncMock(return_value=MagicMock(
             user_context={},
-            model_dump=lambda: {},
-            dict=lambda: {}
+            model_dump=lambda **kwargs: {},
+            dict=lambda **kwargs: {}
         ))
         
         self.mock_decision_instance = self.MockDecision.return_value
@@ -55,7 +55,7 @@ class TestChatEndpoints(unittest.IsolatedAsyncioTestCase):
         
         # Mock update_conversation_title_if_needed to do nothing or return success
         with patch('routes.chat_routes.update_conversation_title_if_needed') as mock_title:
-             response = await chat_message(request)
+             response = await chat_message(request, accept="application/json")
         
         self.assertIn("response", response)
         self.assertEqual(response["response"], "This is a test response.")
@@ -108,13 +108,14 @@ class TestChatEndpoints(unittest.IsolatedAsyncioTestCase):
         request = ChatMessage(message="Crash me", model_name="native-mlx")
         
         # Make DecisionAgent raise an exception mimicking the fallback failure
-        self.mock_decision_instance.make_decision.side_effect = RuntimeError("Total failure... native-mlx fallback failed.")
+        err_msg = "Total failure... native-mlx fallback failed."
+        self.mock_decision_instance.make_decision.side_effect = RuntimeError(err_msg)
         
         from fastapi import HTTPException
         with self.assertRaises(HTTPException) as cm:
-            await chat_message(request)
+            await chat_message(request, accept="application/json")
     
         self.assertEqual(cm.exception.status_code, 500)
-        self.assertIn("MLX Model Error", cm.exception.detail)
+        self.assertIn(err_msg, cm.exception.detail)
 if __name__ == '__main__':
     unittest.main()

@@ -75,18 +75,20 @@ US_EXCLUSIONS = {
     "F", "T", "C", "V", "Z", "O", "D", "R", "K", "X", "S", "M", "A", "G"
 }
 
-LEVERAGED_STEMS = tuple(["LLOY", "BARC", "VOD", "HSBA", "TSCO", "BP", "AZN", "RR", "NG", "SGLN", "SSLN"])
+UK_COMMON_STEMS = tuple(["LLOY", "BARC", "VOD", "HSBA", "TSCO", "BP", "AZN", "RR", "NG", "SGLN", "SSLN", "GSK", "SHELL", "BATS", "AHT", "NWG", "GLEN"])
 
 def normalize_ticker(ticker: str) -> str:
     """
     SOTA Ticker Normalization: Resolves discrepancies between Trading212, 
     Yahoo Finance, Alpaca, and Finnhub via Rust-optimized core.
     """
-    if GROWIN_CORE_AVAILABLE:
+    # Dynamic check for growin_core to support test mocking
+    import sys
+    g_core = sys.modules.get("growin_core")
+    if g_core and hasattr(g_core, "normalize_ticker"):
         try:
-            return growin_core.normalize_ticker(ticker)
+            return g_core.normalize_ticker(ticker)
         except Exception:
-            # Fallback if Rust binding fails even if module exists
             pass
 
     # Fallback to robust Python logic if Rust fails or is missing
@@ -119,7 +121,7 @@ def normalize_ticker(ticker: str) -> str:
     
     # Check against common UK stock stems for "1" suffix
     if is_leveraged_etp:
-        if ticker.startswith(LEVERAGED_STEMS):
+        if ticker.startswith(UK_COMMON_STEMS):
             ticker = ticker[:-1]
             
     # 6. Global Exchange Logic (UK vs US)
@@ -133,6 +135,10 @@ def normalize_ticker(ticker: str) -> str:
     # SOTA Fix: SMCI and other 4-char US tickers should NOT be likely UK
     if len(ticker) == 4 and not ticker.endswith("L"):
         is_likely_uk = False
+
+    # Force likelihood for known UK stems (LLOY, BARC, TSCO, etc)
+    if ticker.startswith(UK_COMMON_STEMS):
+        is_likely_uk = True
 
     # Heuristic for stripping extra 'L' (e.g. BARCL -> BARC)
     if is_likely_uk and ticker.endswith("L") and len(ticker) > 3 and ticker not in US_EXCLUSIONS:

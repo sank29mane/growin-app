@@ -5,21 +5,6 @@ import sys
 # Add backend to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# MOCK DEPENDENCIES BEFORE IMPORTING APP
-# This is necessary because we haven't installed heavy ML libs in the test environment
-mock_modules = [
-    "duckdb",
-    "xgboost", "prophet",
-    "torch", "transformers", "mlx", "mlx_lm",
-    "rapidfuzz", "newsapi", "tavily", "vaderSentiment",
-    "alpaca_trade_api", "granite_tsfm", "langchain",
-    "langchain_core", "langchain_openai", "langchain_anthropic",
-    "langchain_google_genai", "langchain_ollama"
-]
-
-for mod in mock_modules:
-    sys.modules[mod] = MagicMock()
-
 from fastapi.testclient import TestClient
 from app_context import state
 from chat_manager import ChatManager

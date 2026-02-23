@@ -2,50 +2,10 @@ import asyncio
 import os
 import sys
 import unittest
-from unittest.mock import MagicMock, patch, mock_open
+from unittest.mock import MagicMock, patch, mock_open, AsyncMock
 
 # Add backend to path
 sys.path.append(os.path.abspath("backend"))
-
-# Mock imports that might fail or are irrelevant
-mock_lm_client_module = MagicMock()
-sys.modules["lm_studio_client"] = mock_lm_client_module
-
-mock_vader = MagicMock()
-sys.modules["vaderSentiment"] = mock_vader
-sys.modules["vaderSentiment.vaderSentiment"] = mock_vader
-
-# Mock heavy dependencies
-sys.modules["chromadb"] = MagicMock()
-sys.modules["chromadb.config"] = MagicMock()
-sys.modules["chromadb.utils"] = MagicMock()
-sys.modules["sklearn"] = MagicMock()
-sys.modules["sklearn.preprocessing"] = MagicMock()
-sys.modules["sklearn.linear_model"] = MagicMock()
-sys.modules["pandas"] = MagicMock()
-
-# Mock other potential dependencies
-sys.modules["newsapi"] = MagicMock()
-sys.modules["tavily"] = MagicMock()
-sys.modules["httpx"] = MagicMock()
-
-# Mock peer agents to avoid their dependencies loading
-sys.modules["agents.quant_agent"] = MagicMock()
-sys.modules["agents.portfolio_agent"] = MagicMock()
-sys.modules["agents.forecasting_agent"] = MagicMock()
-sys.modules["agents.social_agent"] = MagicMock()
-sys.modules["agents.whale_agent"] = MagicMock()
-sys.modules["agents.goal_planner_agent"] = MagicMock()
-
-# We also need to mock app_context because it imports rag_manager -> chromadb
-sys.modules["app_context"] = MagicMock()
-sys.modules["rag_manager"] = MagicMock()
-
-# Also mock market_context which ResearchAgent imports
-# Actually ResearchAgent imports from market_context, so we might need it real or mocked
-# market_context.py defines dataclasses, which might depend on pydantic (installed)
-# Let's see if we can use the real one or if it pulls in stuff.
-# market_context imports are simple usually.
 
 from agents.research_agent import ResearchAgent
 
@@ -73,41 +33,35 @@ class TestResearchAgentCache(unittest.TestCase):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
-        # Configure the mock LMStudioClient
-        mock_client_instance = mock_lm_client_module.LMStudioClient.return_value
+        # Mock LMStudioClient correctly within this test context
+        with patch('agents.llm_factory.LLMFactory.create_llm', new_callable=AsyncMock) as mock_factory:
+            mock_client_instance = MagicMock()
+            mock_factory.return_value = mock_client_instance
 
-        # Async methods on the client need to return awaitables (Futures)
-        f_conn = asyncio.Future()
-        f_conn.set_result(True)
-        mock_client_instance.check_connection.return_value = f_conn
+            # Async methods on the client need to return awaitables (Futures)
+            mock_client_instance.check_connection = AsyncMock(return_value=True)
+            mock_client_instance.list_models = AsyncMock(return_value=[{"id": "model-1"}])
+            mock_client_instance.chat = AsyncMock(return_value={"content": '{"q": "test query"}'})
 
-        f_models = asyncio.Future()
-        f_models.set_result([{"id": "model-1"}])
-        mock_client_instance.list_models.return_value = f_models
+            # Mock open() to track file access
+            m_open = mock_open(read_data="template {{query}}")
 
-        f_chat = asyncio.Future()
-        f_chat.set_result({"content": '{"q": "test query"}'})
-        mock_client_instance.chat.return_value = f_chat
+            with patch('builtins.open', m_open):
+                # First call
+                loop.run_until_complete(self.agent._generate_smart_query("test query"))
 
-        # Mock open() to track file access
-        m_open = mock_open(read_data="template {{query}}")
+                # Verify template is cached
+                self.assertEqual(self.agent._prompt_template, "template {{query}}")
 
-        with patch('builtins.open', m_open):
-            # First call
-            loop.run_until_complete(self.agent._generate_smart_query("test query"))
+                # Verify file was opened
+                self.assertTrue(m_open.called, "File should have been opened on first call")
+                first_call_count = m_open.call_count
 
-            # Verify template is cached
-            self.assertEqual(self.agent._prompt_template, "template {{query}}")
+                # Second call
+                loop.run_until_complete(self.agent._generate_smart_query("test query"))
 
-            # Verify file was opened
-            self.assertTrue(m_open.called, "File should have been opened on first call")
-            first_call_count = m_open.call_count
-
-            # Second call
-            loop.run_until_complete(self.agent._generate_smart_query("test query"))
-
-            # Verify file was NOT opened again
-            self.assertEqual(m_open.call_count, first_call_count, "File should not be opened on second call")
+                # Verify file was NOT opened again
+                self.assertEqual(m_open.call_count, first_call_count, "File should not be opened on second call")
 
         loop.close()
 

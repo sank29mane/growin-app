@@ -88,10 +88,21 @@ class QuantEngine:
         # 0. Preprocessing
         try:
             df = pd.DataFrame(ohlcv_data)
-            df['timestamp'] = pd.to_datetime(df['t'], unit='ms')
+            if 't' in df.columns:
+                df['timestamp'] = pd.to_datetime(df['t'], unit='ms')
+            elif 'timestamp' in df.columns:
+                # Handle potential ISO strings or numeric timestamps
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms' if df['timestamp'].dtype != 'object' else None)
+            else:
+                return {"error": "OHLCV data missing timestamp key ('t' or 'timestamp')"}
+                
             df.set_index('timestamp', inplace=True)
             df.rename(columns={'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close', 'v': 'volume'}, inplace=True)
             df.sort_index(inplace=True)
+            
+            if df.empty:
+                return {"error": "OHLCV DataFrame is empty after preprocessing"}
+                
             close_prices = df['close'].fillna(0).tolist()
         except Exception as e:
             return {"error": f"Preprocessing failed: {e}"}
@@ -246,6 +257,11 @@ class QuantEngine:
                     indicators['bb_upper'] = create_decimal((sma20 + (std20 * 2)).iloc[-1])
                     indicators['bb_middle'] = create_decimal(sma20.iloc[-1])
                     indicators['bb_lower'] = create_decimal((sma20 - (std20 * 2)).iloc[-1])
+
+                if 'ema_50' not in indicators and len(close) >= 50:
+                    indicators['ema_50'] = create_decimal(close.ewm(span=50, adjust=False).mean().iloc[-1])
+                if 'ema_200' not in indicators and len(close) >= 200:
+                    indicators['ema_200'] = create_decimal(close.ewm(span=200, adjust=False).mean().iloc[-1])
             except Exception as e:
                 import logging
                 logging.getLogger("quant_engine").error(f"Pure Pandas Fallback Error: {e}")

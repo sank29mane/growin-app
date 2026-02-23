@@ -49,6 +49,7 @@ class WhaleAgent(BaseAgent):
             )
 
         try:
+            from utils.financial_math import create_decimal, safe_div
             # 2. Fetch recent trades (last 500)
             logger.info(f"WhaleAgent: Fetching trades for {ticker}...")
             
@@ -68,15 +69,17 @@ class WhaleAgent(BaseAgent):
             
             # 3. Identify Large Trades
             large_trades = []
-            total_whale_volume_usd = 0.0
+            total_whale_volume_usd = create_decimal(0)
             
             for t in trades:
-                value = t['p'] * t['s']
-                if value >= self.whale_threshold_usd:
+                p = create_decimal(t['p'])
+                s = create_decimal(t['s'])
+                value = p * s
+                if value >= create_decimal(self.whale_threshold_usd):
                     large_trades.append({
-                        "price": t['p'],
-                        "size": t['s'],
-                        "value_usd": value,
+                        "price": float(p),
+                        "size": float(s),
+                        "value_usd": float(value),
                         "timestamp": t['t'],
                         "is_whale": True
                     })
@@ -91,17 +94,17 @@ class WhaleAgent(BaseAgent):
             # If price is at the High of recent trades and we see whales, it might be accumulation
             impact = "NEUTRAL"
             if len(large_trades) > 0:
-                avg_price = sum(t['p'] for t in trades) / len(trades)
-                whale_avg_price = sum(w['price'] for w in large_trades) / len(large_trades)
+                avg_price = sum(create_decimal(t['p']) for t in trades) / len(trades)
+                whale_avg_price = sum(create_decimal(w['price']) for w in large_trades) / len(large_trades)
                 
-                if whale_avg_price > avg_price * 1.001:
+                if whale_avg_price > avg_price * create_decimal(1.001):
                     impact = "BULLISH"
-                elif whale_avg_price < avg_price * 0.999:
+                elif whale_avg_price < avg_price * create_decimal(0.999):
                     impact = "BEARISH"
             
             # 6. Build Summary
             if len(large_trades) > 0:
-                summary = f"Detected {len(large_trades)} large block trades (Whales) totaling ${total_whale_volume_usd/1e6:.2f}M in the last hour. "
+                summary = f"Detected {len(large_trades)} large block trades (Whales) totaling ${float(total_whale_volume_usd)/1e6:.2f}M in the last hour. "
                 if impact == "BULLISH":
                     summary += "Activity suggests institutional accumulation."
                 elif impact == "BEARISH":
@@ -142,6 +145,7 @@ class WhaleAgent(BaseAgent):
         Useful when granular trade data is unavailable (e.g. some LSE stocks or free tier).
         """
         try:
+            from utils.financial_math import create_decimal
             # Fetch daily bars
             bars_resp = await self.alpaca.get_historical_bars(ticker, limit=25, timeframe="1Day")
             if not bars_resp or "bars" not in bars_resp or len(bars_resp["bars"]) < 20:
@@ -153,19 +157,21 @@ class WhaleAgent(BaseAgent):
                 )
             
             bars = bars_resp["bars"]
-            current_vol = bars[-1]['v']
+            current_vol = create_decimal(bars[-1]['v'])
             
             # Calculate avg volume of previous 20 days
-            prev_vols = [b['v'] for b in bars[:-1][-20:]]
-            avg_vol = sum(prev_vols) / len(prev_vols) if prev_vols else 1
+            prev_vols = [create_decimal(b['v']) for b in bars[:-1][-20:]]
+            avg_vol = sum(prev_vols) / len(prev_vols) if prev_vols else create_decimal(1)
             
-            ratio = current_vol / avg_vol
+            ratio = float(current_vol / avg_vol)
             impact = "NEUTRAL"
             summary = f"Volume is {ratio:.1f}x average. "
             
             if ratio > 1.5:
                 # High volume
-                price_change = (bars[-1]['c'] - bars[-1]['o']) / bars[-1]['o']
+                c = create_decimal(bars[-1]['c'])
+                o = create_decimal(bars[-1]['o'])
+                price_change = float((c - o) / o) if o > 0 else 0.0
                 if price_change > 0:
                     impact = "BULLISH"
                     summary += "High volume on up day suggests institutional buying (Accumulation)."
