@@ -6,15 +6,17 @@
 - **Context Threshold:** PEAK (0-30%) - Fresh Session Recommended
 
 ## Verification Snapshot
-- Milestone "Foundation & Precision Alpha": COMPLETED.
-- `QuantEngine`: 100% Decimal logic verified.
-- `MLX`: On-device inference verified (~12ms).
-- `TickerUtils`: US Ticker fix (SMCI) verified.
+- Phase 2 (Frontend & Telemetry): COMPLETED.
+- Swift Models: Fully synchronized with Backend v2.0.0 (Decimal based).
+- SSE Streaming: Implemented in `AgentClient` and `ChatViewModel`.
+- Reasoning Trace: Native SwiftUI UI for inter-agent debate observability.
+- Safety Gates: "Slide to Confirm" implemented for goal execution.
+- Charts: Swift Charts integrated for Portfolio/Forecast overlays.
 
 ## Immediate Next Actions (TODO)
-- /new-milestone — Start Phase 2: Frontend & Telemetry Integration.
-- Implement structured telemetry for Decision Agent reasoning.
-- Map SwiftUI components to GSD wave implementations.
+- Perform end-to-end integration testing between Frontend and Backend.
+- Finalize documentation for telemetry trace schema.
+- Clean up test suite (42 failures).
 
 ## Risks/Debt
 - 42 residual test failures in optimization/mocking suite (needs cleanup).

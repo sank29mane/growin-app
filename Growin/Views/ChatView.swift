@@ -87,7 +87,7 @@ struct ChatView: View {
                     
                     // Enhanced typing indicator
                     if viewModel.isProcessing {
-                        EnhancedTypingIndicator(statusText: "Synthesizing market data...")
+                        EnhancedTypingIndicator(statusText: viewModel.streamingStatus ?? "Synthesizing market data...")
                             .id("typing")
                             .transition(.opacity.combined(with: .move(edge: .bottom)))
                             .padding(.horizontal, 8)
@@ -100,8 +100,10 @@ struct ChatView: View {
                 }
                 .padding()
             }
-            .onChange(of: viewModel.messages.count) { _, _ in
-                scrollToBottom(proxy: proxy)
+            .onChange(of: viewModel.messages.last?.content) { _, _ in
+                if !isUserScrolling {
+                    scrollToBottom(proxy: proxy)
+                }
             }
             .onChange(of: viewModel.isProcessing) { _, isProcessing in
                 if isProcessing {
@@ -125,20 +127,6 @@ struct ChatView: View {
                 // Load conversation history if we have a conversation ID
                 if viewModel.selectedConversationId != nil && viewModel.messages.isEmpty {
                     await viewModel.loadConversationHistory()
-                }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CreateChatFromTickerSearch"))) { notification in
-                if let ticker = notification.userInfo?["ticker"] as? String {
-                    Task {
-                        await handleTickerAnalysisCreation(ticker)
-                    }
-                }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CreateChatFromChart"))) { notification in
-                if let chartContext = notification.userInfo as? [String: Any] {
-                    Task {
-                        await handleChartChatCreation(chartContext)
-                    }
                 }
             }
             .overlay(alignment: .bottomTrailing) {
@@ -218,7 +206,7 @@ struct ChatView: View {
                         viewModel.sendMessage()
                     }) {
                         ZStack {
-                            if viewModel.inputText.isEmpty {
+                            if viewModel.inputText.isEmpty && !viewModel.isProcessing {
                                 Circle()
                                     .fill(Color.gray.opacity(0.2))
                                     .frame(width: 40, height: 40)
@@ -245,31 +233,6 @@ struct ChatView: View {
             }
             .padding()
             .background(.ultraThinMaterial)
-        }
-    }
-    
-    
-    private func handleTickerAnalysisCreation(_ ticker: String) async {
-        viewModel.startNewConversation()
-        let prompt = "Please analyze the financial health and technical signals for \(ticker). Should I consider a trade here?"
-        viewModel.inputText = prompt
-        viewModel.sendMessage()
-    }
-
-    private func handleChartChatCreation(_ chartContext: [String: Any]) async {
-        // Start a new conversation with chart context
-        viewModel.startNewConversation()
-        
-        // Create an initial message with chart analysis context
-        if let symbol = chartContext["symbol"] as? String,
-           let timeframe = chartContext["timeframe"] as? String,
-           let currentPrice = chartContext["currentPrice"] as? Double {
-            
-            let contextMessage = "I'm looking at the \(symbol) chart on \(timeframe) timeframe. The current price is £\(String(format: "%.2f", currentPrice)). What analysis or insights can you provide about this stock?"
-            
-            // Send the context message
-            viewModel.inputText = contextMessage
-            viewModel.sendMessage()
         }
     }
     
@@ -336,6 +299,11 @@ struct ChatBubble: View {
                             MarkdownText(content: message.content)
                                 .foregroundStyle(.white.opacity(0.9))
                             
+                            // Reasoning Trace UI (Wave 2)
+                            if let data = message.data {
+                                ReasoningTraceView(data: data)
+                            }
+                            
                             // Rich Data Visualization
                             if let data = message.data {
                                 RichDataView(data: data)
@@ -345,8 +313,8 @@ struct ChatBubble: View {
                                 ToolExecutionBlock(toolCalls: toolCalls)
                             }
                             
-                            // Quick action buttons (if no markdown suggestions)
-                            if !message.content.contains("Quick Actions") {
+                            // Quick action buttons
+                            if !message.content.contains("Quick Actions") && !message.content.isEmpty {
                                 QuickActionButtons(actions: defaultQuickActions) { prompt in
                                     onQuickAction?(prompt)
                                 }
@@ -360,7 +328,6 @@ struct ChatBubble: View {
                     .font(.system(size: 9))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 4)
-                    .accessibilityLabel("Sent at \(formatTimestamp(message.timestamp))")
             }
             
             if !message.isUser {
@@ -398,167 +365,57 @@ struct ChatBubble: View {
     }
 }
 
-// Extension for rounded corners on specific sides
-extension View {
-    func cornerRadius(_ radius: CGFloat, corners: UIRectCorner) -> some View {
-        clipShape(RoundedCorner(radius: radius, corners: corners))
-    }
-}
-
-struct RoundedCorner: Shape {
-    var radius: CGFloat = .infinity
-    var corners: UIRectCorner = .allCorners
-
-    func path(in rect: CGRect) -> Path {
-        let path = NSBezierPath(
-            roundedRect: rect,
-            byRoundingCorners: corners,
-            cornerRadii: CGSize(width: radius, height: radius)
-        )
-        return Path(path.cgPath)
-    }
-}
-
-// NSBezierPath extension for macOS
-extension NSBezierPath {
-    convenience init(roundedRect rect: CGRect, byRoundingCorners corners: UIRectCorner, cornerRadii: CGSize) {
-        self.init()
-        
-        let radius = cornerRadii.width
-        
-        let topLeft = corners.contains(.topLeft) ? radius : 0
-        let topRight = corners.contains(.topRight) ? radius : 0
-        let bottomLeft = corners.contains(.bottomLeft) ? radius : 0
-        let bottomRight = corners.contains(.bottomRight) ? radius : 0
-        
-        move(to: CGPoint(x: rect.minX + topLeft, y: rect.minY))
-        
-        // Top edge
-        line(to: CGPoint(x: rect.maxX - topRight, y: rect.minY))
-        if topRight > 0 {
-            appendArc(withCenter: CGPoint(x: rect.maxX - topRight, y: rect.minY + topRight),
-                     radius: topRight,
-                     startAngle: -90,
-                     endAngle: 0,
-                     clockwise: false)
-        }
-        
-        // Right edge
-        line(to: CGPoint(x: rect.maxX, y: rect.maxY - bottomRight))
-        if bottomRight > 0 {
-            appendArc(withCenter: CGPoint(x: rect.maxX - bottomRight, y: rect.maxY - bottomRight),
-                     radius: bottomRight,
-                     startAngle: 0,
-                     endAngle: 90,
-                     clockwise: false)
-        }
-        
-        // Bottom edge
-        line(to: CGPoint(x: rect.minX + bottomLeft, y: rect.maxY))
-        if bottomLeft > 0 {
-            appendArc(withCenter: CGPoint(x: rect.minX + bottomLeft, y: rect.maxY - bottomLeft),
-                     radius: bottomLeft,
-                     startAngle: 90,
-                     endAngle: 180,
-                     clockwise: false)
-        }
-        
-        // Left edge
-        line(to: CGPoint(x: rect.minX, y: rect.minY + topLeft))
-        if topLeft > 0 {
-            appendArc(withCenter: CGPoint(x: rect.minX + topLeft, y: rect.minY + topLeft),
-                     radius: topLeft,
-                     startAngle: 180,
-                     endAngle: 270,
-                     clockwise: false)
-        }
-        
-        close()
-    }
-    
-    var cgPath: CGPath {
-        let path = CGMutablePath()
-        var points = [CGPoint](repeating: .zero, count: 3)
-        
-        for i in 0..<elementCount {
-            let type = element(at: i, associatedPoints: &points)
-            
-            switch type {
-            case .moveTo:
-                path.move(to: points[0])
-            case .lineTo:
-                path.addLine(to: points[0])
-            case .curveTo:
-                path.addCurve(to: points[2], control1: points[0], control2: points[1])
-            case .closePath:
-                path.closeSubpath()
-            default:
-                break
-            }
-        }
-        
-        return path
-    }
-}
-
-// UIRectCorner equivalent for macOS
-struct UIRectCorner: OptionSet {
-    let rawValue: Int
-    
-    static let topLeft = UIRectCorner(rawValue: 1 << 0)
-    static let topRight = UIRectCorner(rawValue: 1 << 1)
-    static let bottomLeft = UIRectCorner(rawValue: 1 << 2)
-    static let bottomRight = UIRectCorner(rawValue: 1 << 3)
-    static let allCorners: UIRectCorner = [.topLeft, .topRight, .bottomLeft, .bottomRight]
-}
-
-struct ToolExecutionBlock: View {
-    let toolCalls: [ToolCall]
+// Support view for ReasoningTraceView (Stub for now)
+struct ReasoningTraceView: View {
+    let data: MarketContextData
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("RESEARCH STEPS")
-                .font(.system(size: 9, weight: .black))
-                .foregroundStyle(.secondary)
-            
-            ForEach(toolCalls, id: \.id) { toolCall in
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass.circle.fill")
-                        .font(.system(size: 14))
-                        .foregroundStyle(.blue)
-                        .accessibilityHidden(true)
-                    
-                    Text(formatToolName(toolCall.function.name))
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.7))
-                    
-                    Spacer()
-                    
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.green)
-                        .accessibilityHidden(true)
+        DisclosureGroup {
+            VStack(alignment: .leading, spacing: 8) {
+                if let quant = data.quant {
+                    ReasoningStepView(agent: "QuantAgent", status: "Success", color: .blue, detail: "Signal: \(quant.signal)")
                 }
-                .padding(8)
-                .background(Color.white.opacity(0.05))
-                .cornerRadius(8)
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel("Completed research step: \(formatToolName(toolCall.function.name))")
+                if let forecast = data.forecast {
+                    ReasoningStepView(agent: "ForecastingAgent", status: "Success", color: .green, detail: "Trend: \(forecast.trend)")
+                }
+                if let research = data.research {
+                    ReasoningStepView(agent: "ResearchAgent", status: "Success", color: .red, detail: "Sentiment: \(research.sentimentLabel)")
+                }
             }
+            .padding(.top, 8)
+        } label: {
+            HStack {
+                Image(systemName: "brain.head.profile")
+                Text("Reasoning Trace")
+                    .font(.caption.bold())
+            }
+            .foregroundStyle(.secondary)
         }
         .padding(8)
-        .background(Color.black.opacity(0.2))
-        .cornerRadius(10)
-    }
-    
-    private func formatToolName(_ name: String) -> String {
-        name.replacingOccurrences(of: "_", with: " ").capitalized
+        .background(Color.white.opacity(0.05))
+        .cornerRadius(8)
     }
 }
 
-
-#Preview {
-    NavigationStack {
-        ChatView(viewModel: ChatViewModel())
+struct ReasoningStepView: View {
+    let agent: String
+    let status: String
+    let color: Color
+    let detail: String
+    
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle().fill(color).frame(width: 6, height: 6)
+            Text(agent)
+                .font(.system(size: 10, weight: .bold))
+            Text(status)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+            Spacer()
+            Text(detail)
+                .font(.system(size: 10))
+                .foregroundStyle(color)
+        }
+        .padding(.horizontal, 4)
     }
 }

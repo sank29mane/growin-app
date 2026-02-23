@@ -227,6 +227,86 @@ struct ErrorCard: View {
     }
 }
 
+// MARK: - Safety Components
+
+struct SlideToConfirm: View {
+    let title: String
+    let action: () -> Void
+    
+    @State private var offset: CGFloat = 0
+    @State private var isConfirmed = false
+    private let trackWidth: CGFloat = 300
+    private let handleSize: CGFloat = 56
+    
+    var body: some View {
+        ZStack {
+            // Track
+            Capsule()
+                .fill(Color.white.opacity(0.05))
+                .frame(width: trackWidth, height: handleSize)
+                .overlay(
+                    Text(title)
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.3))
+                )
+            
+            // Progress Fill
+            HStack {
+                Capsule()
+                    .fill(Color.growinPrimary)
+                    .frame(width: handleSize + offset, height: handleSize)
+                Spacer()
+            }
+            .frame(width: trackWidth)
+            
+            // Handle
+            HStack {
+                ZStack {
+                    Circle()
+                        .fill(.white)
+                        .frame(width: handleSize - 8, height: handleSize - 8)
+                        .shadow(radius: 5)
+                    
+                    Image(systemName: isConfirmed ? "checkmark" : "chevron.right.2")
+                        .foregroundStyle(Color.growinPrimary)
+                        .font(.system(size: 18, weight: .black))
+                }
+                .offset(x: offset + 4)
+                .gesture(
+                    DragGesture()
+                        .onChanged { value in
+                            if !isConfirmed {
+                                let newOffset = value.translation.width
+                                if newOffset > 0 && newOffset < trackWidth - handleSize {
+                                    offset = newOffset
+                                }
+                            }
+                        }
+                        .onEnded { value in
+                            if !isConfirmed {
+                                if offset > trackWidth * 0.7 {
+                                    withAnimation(.spring()) {
+                                        offset = trackWidth - handleSize
+                                        isConfirmed = true
+                                    }
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                        action()
+                                    }
+                                } else {
+                                    withAnimation(.spring()) {
+                                        offset = 0
+                                    }
+                                }
+                            }
+                        }
+                )
+                Spacer()
+            }
+            .frame(width: trackWidth)
+        }
+    }
+}
+
 // MARK: - Glass Effect System
 
 enum Glass {

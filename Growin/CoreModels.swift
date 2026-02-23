@@ -12,9 +12,9 @@ struct PortfolioSnapshot: Codable, Sendable {
 
 struct PortfolioSummary: Codable, Sendable {
     let totalPositions: Int?
-    let totalInvested: Double?
-    let currentValue: Double?
-    let totalPnl: Double?
+    let totalInvested: Decimal?
+    let currentValue: Decimal?
+    let totalPnl: Decimal?
     let totalPnlPercent: Double?
     let cashBalance: CashBalance?
     let accounts: [String: AccountSummary]?
@@ -31,9 +31,9 @@ struct PortfolioSummary: Codable, Sendable {
 }
 
 struct AccountSummary: Codable, Sendable {
-    let totalInvested: Double?
-    let currentValue: Double?
-    let totalPnl: Double?
+    let totalInvested: Decimal?
+    let currentValue: Decimal?
+    let totalPnl: Decimal?
     let cashBalance: CashBalance?
     
     enum CodingKeys: String, CodingKey {
@@ -45,8 +45,8 @@ struct AccountSummary: Codable, Sendable {
 }
 
 struct CashBalance: Codable, Sendable {
-    let total: Double?
-    let free: Double?
+    let total: Decimal?
+    let free: Decimal?
 }
 
 struct Position: Codable, Identifiable, Sendable {
@@ -57,10 +57,10 @@ struct Position: Codable, Identifiable, Sendable {
     }
     let ticker: String?
     let name: String?
-    let quantity: Double?
-    let currentPrice: Double?
-    let averagePrice: Double?
-    let ppl: Double?
+    let quantity: Decimal?
+    let currentPrice: Decimal?
+    let averagePrice: Decimal?
+    let ppl: Decimal?
     let accountType: String?
     
     enum CodingKeys: String, CodingKey {
@@ -75,9 +75,9 @@ struct Position: Codable, Identifiable, Sendable {
 struct PortfolioHistoryPoint: Codable, Identifiable, Sendable {
     var id: String { timestamp }
     let timestamp: String
-    let totalValue: Double
-    let totalPnl: Double
-    let cashBalance: Double
+    let totalValue: Decimal
+    let totalPnl: Decimal
+    let cashBalance: Decimal
     
     enum CodingKeys: String, CodingKey {
         case timestamp
@@ -139,10 +139,10 @@ struct ChartErrorInfo: Codable, Sendable {
 struct ChartDataPoint: Codable, Identifiable, Equatable, Sendable {
     var id: String { timestamp }
     let timestamp: String
-    let close: Double
-    let high: Double?
-    let low: Double?
-    let open: Double?
+    let close: Decimal
+    let high: Decimal?
+    let low: Decimal?
+    let open: Decimal?
     let volume: Int?
     
     var date: Date {
@@ -182,11 +182,11 @@ enum TimeRange: String, Codable, CaseIterable, Sendable {
 struct TimeSeriesItem: Codable, Identifiable, Equatable, Sendable {
     var id: Double { timestamp }
     let timestamp: Double
-    let open: Double
-    let high: Double
-    let low: Double
-    let close: Double
-    let volume: Double?
+    let open: Decimal
+    let high: Decimal
+    let low: Decimal
+    let close: Decimal
+    let volume: Decimal?
     
     var date: Date {
         Date(timeIntervalSince1970: timestamp / 1000.0)

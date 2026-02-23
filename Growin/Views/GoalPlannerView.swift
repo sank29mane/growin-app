@@ -249,7 +249,7 @@ struct GoalPlannerView: View {
             }
             
             // Strategy Execution Call to Action
-            VStack(spacing: 12) {
+            VStack(spacing: 20) {
                 HStack {
                     Image(systemName: "info.circle.fill")
                         .foregroundStyle(Color.growinAccent)
@@ -258,22 +258,10 @@ struct GoalPlannerView: View {
                         .foregroundStyle(.secondary)
                 }
                 
-                Button(action: {
+                SlideToConfirm(title: "SLIDE TO EXECUTE STRATEGY") {
                     Task { await viewModel.executePlan() }
-                }) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "tray.and.arrow.down.fill")
-                        Text("Execute Strategy")
-                            .font(.system(size: 14, weight: .black))
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 18)
-                    .background(Color.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 16))
-                    .foregroundStyle(.black)
-                    .shadow(color: .white.opacity(0.1), radius: 10, x: 0, y: 5)
                 }
-                .buttonStyle(.plain)
+                .padding(.top, 10)
             }
             .padding(.top, 10)
         }
