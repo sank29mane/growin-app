@@ -271,7 +271,7 @@ struct PositionDeepCard: View {
         let totalValue = (position.currentPrice ?? 0) * shareCount
         let pnlVal = position.ppl ?? 0
 
-        return "\(name). \(String(format: "%.2f", shareCount)) shares. Value £\(String(format: "%.2f", totalValue)). \(pnlVal >= 0 ? "Profit" : "Loss") £\(String(format: "%.2f", abs(pnlVal)))."
+        return "\(name). \(String(format: "%.2f", shareCount)) shares, valued at £\(String(format: "%.2f", totalValue)). \(pnlVal >= 0 ? "Profit" : "Loss") of £\(String(format: "%.2f", abs(pnlVal)))."
     }
 }
 
@@ -581,11 +581,14 @@ extension PortfolioView {
             
             LazyVStack(spacing: 12) {
                 ForEach(snapshot.positions ?? []) { position in
-                    PositionDeepCard(position: position)
-                        .glassEffect(.thin.interactive(), in: .rect(cornerRadius: 14))
-                        .onTapGesture {
-                            viewModel.selectedPosition = position
-                        }
+                    Button(action: {
+                        viewModel.selectedPosition = position
+                    }) {
+                        PositionDeepCard(position: position)
+                            .glassEffect(.thin.interactive(), in: .rect(cornerRadius: 14))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Double tap to view detailed analysis")
                 }
             }
             .padding(.horizontal)
