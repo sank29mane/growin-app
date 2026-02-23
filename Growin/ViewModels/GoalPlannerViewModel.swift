@@ -1,5 +1,4 @@
 import SwiftUI
-import Combine
 
 @Observable @MainActor
 class GoalPlannerViewModel {
@@ -9,11 +8,11 @@ class GoalPlannerViewModel {
     var durationYears: Double = 5
     var selectedRisk: String = "MEDIUM"
     
-    var plan: GoalPlan?
-    var isLoading = false
-    var errorMsg: String?
-    var executionSuccess = false
-    var showExecutionConfirmation = false
+    private(set) var plan: GoalPlan?
+    private(set) var isLoading = false
+    private(set) var errorMsg: String?
+    private(set) var executionSuccess = false
+    var showExecutionConfirmation = false // Bound to alert state
     
     private let client = MarketClient()
     
