@@ -1,19 +1,21 @@
 # GSD STATE MEMORY
 
 ## Current Session Details
-- **Active Objective:** Scaffold GSD Meta-Prompting Setup (Phase 0)
-- **Current Wave:** Wave 1 (Foundation Tasks)
-- **Context Threshold:** PEAK (0-30%) - Fresh Session Started
+- **Active Objective:** Milestone "Foundation & Precision Alpha" Complete.
+- **Current Wave:** Transitioning to Phase 2 (Frontend)
+- **Context Threshold:** PEAK (0-30%) - Fresh Session Recommended
 
 ## Verification Snapshot
-- `PROJECT_RULES.md`: Core rules reviewed and understood.
-- `GSD-STYLE.md`: Styling and phrasing rules verified.
-- `.gsd/SPEC.md`: Created and set to FINALIZED.
-- `.gsd/ROADMAP.md`: Configured with current phases mapped from README.
+- Milestone "Foundation & Precision Alpha": COMPLETED.
+- `QuantEngine`: 100% Decimal logic verified.
+- `MLX`: On-device inference verified (~12ms).
+- `TickerUtils`: US Ticker fix (SMCI) verified.
 
 ## Immediate Next Actions (TODO)
-- Create the `.agent/workflows/gsd-setup.md` script.
-- Verify directories using `ls -la .gsd` and `ls -la .agent/workflows`.
+- /new-milestone — Start Phase 2: Frontend & Telemetry Integration.
+- Implement structured telemetry for Decision Agent reasoning.
+- Map SwiftUI components to GSD wave implementations.
 
 ## Risks/Debt
-- None currently. Basic scaffolding is isolated from the React/Python systems.
+- 42 residual test failures in optimization/mocking suite (needs cleanup).
+- Docker I/O errors persistent (System-level issue).

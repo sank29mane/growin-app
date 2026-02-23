@@ -7,20 +7,15 @@ import pytest
 # Ensure backend is in path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Mock heavy dependencies immediately upon loading conftest
-# Only mock if they are not installed
+# Mock truly heavy/missing dependencies if they aren't installed
 modules_to_mock = [
     "mcp", "mcp.server", "mcp.server.stdio", "mcp.types",
     "mcp.client", "mcp.client.stdio", "mcp.client.sse",
-    "chromadb", "chromadb.config", "chromadb.utils",
     "granite_tsfm",
     "langchain", "langchain_core", "langchain_openai",
     "langchain_anthropic", "langchain_google_genai", "langchain_ollama",
-    # "yfinance", "pandas", "numpy", # These are actually used in tests, so don't mock if available
-    "sklearn", "sklearn.preprocessing", "scikit-learn", "xgboost", "prophet",
-    "scipy", "scipy.optimize",
-    "torch", "transformers", "mlx", "mlx_lm", "duckdb",
-    "rapidfuzz", "newsapi", "tavily", "vaderSentiment", "psutil", "alpaca_trade_api"
+    "chromadb", "duckdb",
+    "newsapi", "tavily", "vaderSentiment", "psutil"
 ]
 
 for module in modules_to_mock:

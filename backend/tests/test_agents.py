@@ -18,9 +18,11 @@ async def test_specialist_agents():
     from agents import QuantAgent, ForecastingAgent, ResearchAgent
     
     # Mock OHLCV data
+    import time
+    now_ms = int(time.time() * 1000)
     mock_ohlcv = [
-        {"o": 100, "h": 105, "l": 99, "c": 103, "v": 1000000}
-        for _ in range(100)
+        {"t": now_ms - (100-i)*86400000, "o": 100+i, "h": 105+i, "l": 99+i, "c": 103+i, "v": 1000000}
+        for i in range(100)
     ]
     
     # Test QuantAgent

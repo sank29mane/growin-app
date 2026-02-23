@@ -45,10 +45,12 @@ dependencies = [
     "websockets>=13.0",
     "xgboost>=2.0.0",
     "yfinance>=0.2.35,<0.3.0",
+    "growin_core",
 ]
 
 [tool.uv.sources]
 granite-tsfm = { git = "https://github.com/ibm-granite/granite-tsfm.git", rev = "v0.2.22" }
+growin_core = { path = "./growin_core_src" }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

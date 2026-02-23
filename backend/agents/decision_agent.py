@@ -5,7 +5,7 @@ User-selectable model with price validation integration
 
 from market_context import MarketContext
 from price_validation import PriceValidator
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 import logging
 import re
 from langchain_core.messages import SystemMessage, HumanMessage
