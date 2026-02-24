@@ -91,8 +91,18 @@ Create entry in `.gsd/JOURNAL.md`:
 ```
 
 ---
+## 3. Research Update (Optional)
 
-## 3. Commit State
+Ask the user:
+> "Would you like to trigger a deep research update in NotebookLM for the 'Growin Research' notebook before we pause? This ensures the next session starts with the latest SOTA findings."
+
+If yes:
+- Run `/research "deep" query="..."`
+- Wait for completion or inform user it's running in background.
+
+---
+
+## 4. Commit State
 
 ```bash
 git add .gsd/STATE.md .gsd/JOURNAL.md
@@ -101,7 +111,7 @@ git commit -m "docs: pause session - {brief reason}"
 
 ---
 
-## 4. Display Handoff
+## 5. Display Handoff
 
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

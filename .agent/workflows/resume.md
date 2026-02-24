@@ -16,7 +16,15 @@ Read `.gsd/STATE.md` completely.
 
 ---
 
-## 2. Display Context
+## 2. Check for Research Updates
+
+Query NotebookLM for any new sources or summaries added since the last session.
+Review findings and determine if they impact the current roadmap, architecture, or implementation strategy.
+If significant findings exist, summarize them in the session intro.
+
+---
+
+## 3. Display Context
 
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

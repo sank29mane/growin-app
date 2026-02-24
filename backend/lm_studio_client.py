@@ -8,6 +8,7 @@ import httpx
 import logging
 import json
 import asyncio
+import psutil
 from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -21,7 +22,8 @@ class LMStudioClient:
     - Authentication via LM_API_TOKEN
     - Stateful Chat (/api/v1/chat)
     - Model Management (Load/Unload/Download) via /api/v1/models
-    - Parallel Inference with Continuous Batching
+    - Parallel Inference with Continuous Batching (Semaphore-guarded)
+    - Content-Based Prefix Caching for TTFT reduction
     - Persistent Session IDs for context re-use
     """
 
@@ -36,6 +38,29 @@ class LMStudioClient:
         }
         if self.api_token:
             self.headers["Authorization"] = f"Bearer {self.api_token}"
+
+        self._setup_concurrency_limits()
+
+    def _setup_concurrency_limits(self):
+        """
+        SOTA: Implement 60% RAM Rule for M4 Pro/Max memory bandwidth safety.
+        Prevents SSD swapping during heavy parallel multi-agent bursts.
+        """
+        total_ram_gb = psutil.virtual_memory().total / (1024**3)
+        
+        # Rule: Use only 60% of RAM for LLM tasks to leave room for OS/Apps
+        safe_ram_limit = total_ram_gb * 0.6
+        
+        # Heuristics for M4 Pro optimizations
+        # Typical model size (Q4_K_M or Q8) + KV Cache overhead
+        estimated_model_size = 8.0  # GB
+        kv_cache_per_request = 0.5  # GB (8k context)
+        
+        concurrency = int((safe_ram_limit - estimated_model_size) / kv_cache_per_request)
+        self.max_concurrent_predictions = max(1, min(concurrency, 16)) # Cap at 16 for stability
+        
+        self.semaphore = asyncio.Semaphore(self.max_concurrent_predictions)
+        logger.info(f"LM Studio: Memory Guard active. Total RAM: {total_ram_gb:.1f}GB. Slots: {self.max_concurrent_predictions}")
 
     async def _request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
         """Internal helper for making requests with error handling."""
@@ -113,7 +138,9 @@ class LMStudioClient:
         tools: List[Dict] = None,
         tool_choice: str = "auto",
         stream: bool = False,
-        session_id: Optional[str] = None
+        session_id: Optional[str] = None,
+        enable_thinking: bool = True,
+        truncate_thinking: bool = True
     ) -> Dict[str, Any]:
         """
         Send a chat request. 
@@ -126,91 +153,92 @@ class LMStudioClient:
             if input_text:
                 messages.append({"role": "user", "content": input_text})
 
-        # OpenAI compatible payload
+        # OpenAI compatible payload with 0.4.0+ specialized fields
+        # SOTA: cache_prompt=True enables Content-Based Prefix Caching for TTFT reduction
         payload = {
             "model": model_id,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
-            "stream": stream
+            "stream": stream,
+            "cache_prompt": True,
+            "extra_fields": {
+                "nvidia.nemotron3Nano.enableThinking": enable_thinking,
+                "nvidia.nemotron3Nano.truncateThinkingHistory": truncate_thinking
+            }
         }
 
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = tool_choice
 
-        try:
-            logger.info(f"LM Studio: Sending chat request (Model: {model_id}, Tokens: {max_tokens})")
-            
-            async with httpx.AsyncClient(headers=self.headers, timeout=300.0) as client:
-                # Use /v1/chat/completions for widest compatibility
-                endpoint = f"{self.base_url}/v1/chat/completions"
+        async with self.semaphore:
+            try:
+                logger.info(f"LM Studio: Sending chat request (Model: {model_id}, Slots: {self.semaphore._value})")
                 
-                response = await client.post(endpoint, json=payload)
-                response.raise_for_status()
-                data = response.json()
-
-                # Robust extraction for both V1 and OpenAI-style responses
-                if "choices" in data:
-                    choice = data["choices"][0]
-                    message = choice.get("message", {})
-                else:
-                    # Native V1 fallback
-                    message = data.get("message", {})
-
-                # Handle reasoning field (for R1/Reasoning models in LM Studio)
-                content = message.get("content", "")
-                reasoning = message.get("reasoning", "")
-                
-                # If content is empty but reasoning has content, use reasoning
-                # Some models return thought process in 'reasoning' and final answer in 'content'
-                # For Growin App, we want the synthesized output.
-                if not content and reasoning:
-                    content = reasoning
-                elif content and reasoning:
-                    # Optional: Include reasoning as a think block if we want to show it?
-                    # But for now, let's keep it simple as the user complained about it not working.
-                    pass
-
-                # Handle tool calls if present
-                if message.get("tool_calls"):
-                    return await self._handle_tool_calls(model_id, messages, message["tool_calls"], tools)
-                elif message.get("toolCalls"):
-                    return await self._handle_tool_calls(model_id, messages, message["toolCalls"], tools)
-
-                return {
-                    "content": content,
-                    "role": "assistant",
-                    "sessionId": data.get("sessionId", session_id)
-                }
-        except httpx.HTTPStatusError as e:
-            error_body = e.response.text
-            logger.error(f"LM Studio V1 chat failed ({e.response.status_code}): {error_body}")
-
-            # Specific handling for known LM Studio/Inference engine errors
-            if "Channel Error" in error_body or "crashed" in error_body.lower():
-                logger.warning("LM Studio: Model crashed or reported Channel Error. Attempting V1 Recovery...")
-                try:
-                    # Attempt to reload model
-                    await self.unload_model(model_id)
-                    await asyncio.sleep(2.0)
-                    success = await self.ensure_model_loaded(model_id)
+                async with httpx.AsyncClient(headers=self.headers, timeout=300.0) as client:
+                    # Use /v1/chat/completions for widest compatibility
+                    endpoint = f"{self.base_url}/v1/chat/completions"
                     
-                    if success:
-                        logger.info("LM Studio: Model reloaded. Retrying V1 chat...")
-                        return await self.chat(model_id=model_id, messages=messages, tools=tools)
-                except Exception as recovery_err:
-                    logger.error(f"LM Studio: Recovery failed: {recovery_err}")
+                    response = await client.post(endpoint, json=payload)
+                    response.raise_for_status()
+                    data = response.json()
 
-            return {"error": f"V1 API Error: {error_body}", "content": ""}
-        except Exception as e:
-            err_str = str(e)
-            logger.error(f"LM Studio chat failed: {err_str}")
+                    # Robust extraction for both V1 and OpenAI-style responses
+                    if "choices" in data:
+                        choice = data["choices"][0]
+                        message = choice.get("message", {})
+                    else:
+                        # Native V1 fallback
+                        message = data.get("message", {})
 
-            if "Channel Error" in err_str or "crashed" in err_str.lower():
-                return {"error": f"Channel Error/Crash detected: {err_str}", "content": ""}
+                    # Handle reasoning field (for R1/Reasoning models in LM Studio)
+                    content = message.get("content", "")
+                    reasoning = message.get("reasoning", "")
+                    
+                    # If content is empty but reasoning has content, use reasoning
+                    if not content and reasoning:
+                        content = reasoning
 
-            return {"error": err_str, "content": ""}
+                    # Handle tool calls if present
+                    if message.get("tool_calls"):
+                        return await self._handle_tool_calls(model_id, messages, message["tool_calls"], tools)
+                    elif message.get("toolCalls"):
+                        return await self._handle_tool_calls(model_id, messages, message["toolCalls"], tools)
+
+                    return {
+                        "content": content,
+                        "role": "assistant",
+                        "sessionId": data.get("sessionId", session_id)
+                    }
+            except httpx.HTTPStatusError as e:
+                error_body = e.response.text
+                logger.error(f"LM Studio V1 chat failed ({e.response.status_code}): {error_body}")
+
+                # Specific handling for known LM Studio/Inference engine errors
+                if "Channel Error" in error_body or "crashed" in error_body.lower():
+                    logger.warning("LM Studio: Model crashed or reported Channel Error. Attempting V1 Recovery...")
+                    try:
+                        # Attempt to reload model
+                        await self.unload_model(model_id)
+                        await asyncio.sleep(2.0)
+                        success = await self.ensure_model_loaded(model_id)
+                        
+                        if success:
+                            logger.info("LM Studio: Model reloaded. Retrying V1 chat...")
+                            return await self.chat(model_id=model_id, messages=messages, tools=tools)
+                    except Exception as recovery_err:
+                        logger.error(f"LM Studio: Recovery failed: {recovery_err}")
+
+                return {"error": f"V1 API Error: {error_body}", "content": ""}
+            except Exception as e:
+                err_str = str(e)
+                logger.error(f"LM Studio chat failed: {err_str}")
+
+                if "Channel Error" in err_str or "crashed" in err_str.lower():
+                    return {"error": f"Channel Error/Crash detected: {err_str}", "content": ""}
+
+                return {"error": err_str, "content": ""}
 
     async def _handle_tool_calls(
         self,
