@@ -185,6 +185,8 @@ struct SuggestionChip: View {
             )
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(item.title)
+        .accessibilityHint("Asks: \(item.prompt)")
         .onHover { hovering in
             withAnimation(.easeOut(duration: 0.15)) {
                 isHovered = hovering
@@ -260,6 +262,9 @@ private struct AccountPickerButton: View {
             .foregroundStyle(isSelected ? .white : .secondary)
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(displayName)
+        .accessibilityHint("Filters chat context to \(displayName)")
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
     }
     
     @ViewBuilder
@@ -323,6 +328,8 @@ struct QuickActionButtons: View {
                         .foregroundStyle(.blue)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel(action.label)
+                    .accessibilityHint("Asks: \(action.prompt)")
                 }
             }
         }
@@ -374,6 +381,8 @@ struct EnhancedTypingIndicator: View {
             RoundedRectangle(cornerRadius: 16)
                 .fill(.ultraThinMaterial)
         )
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(statusText)
         .onReceive(timer) { _ in
             withAnimation(.easeInOut(duration: 0.3)) {
                 dotIndex = (dotIndex + 1) % 3
