@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, root_validator
+from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Dict, Any, Optional
 from decimal import Decimal
 
@@ -23,12 +23,10 @@ class GoalExecutionImplementation(BaseModel):
     action: Optional[str] = "create"
 
 class GoalExecutionRequest(BaseModel):
+    model_config = ConfigDict(extra='ignore')
+    
     implementation: GoalExecutionImplementation
     suggested_instruments: List[InstrumentWeight]
-    
-    # Allow extra fields for flexibility if agent returns more data
-    class Config:
-        extra = "ignore" 
 
 # --- Account Models ---
 
@@ -49,4 +47,16 @@ class AnalysisRequest(BaseModel):
 # --- Agent Models ---
 class MLXDownloadRequest(BaseModel):
     repo_id: str = Field(..., description="HuggingFace repository ID")
+
+# --- Math Delegation Models ---
+
+class MathScriptRequest(BaseModel):
+    query: str = Field(..., description="The user's math-related question or simulation request")
+    context_data: Dict[str, Any] = Field(default_factory=dict, description="Numerical data, price history, or parameters")
+    required_stats: List[str] = Field(default_factory=list, description="List of specific statistical measures needed (e.g., RSI, Sharpe)")
+
+class MathScriptResponse(BaseModel):
+    script: str = Field(..., description="The generated Python/MLX script ready for sandbox execution")
+    explanation: str = Field(..., description="Human-readable explanation of the math strategy")
+    engine_requirement: str = Field("npu", description="Hardware requirement for execution")
 
