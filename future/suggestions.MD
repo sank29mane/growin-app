@@ -100,3 +100,25 @@ Implement a proper `PortfolioAnalyzer` class that:
 - Ingests **historical** portfolio value (time-series).
 - Calculates true Daily Returns, Volatility (std dev of daily returns), Sharpe Ratio, Sortino Ratio, and Beta against a benchmark.
 - Can leverage the "Backcast" history generation logic currently in `PortfolioAgent` to approximate history if real transaction data is missing.
+
+## 9. Comprehensive Fallback Testing Strategy
+**Status:** Proposed
+**Priority:** Medium
+**Context:**
+A critical bug was found in the fallback logic of `QuantEngine.calculate_pivot_levels` which crashed when optional dependencies (`scipy`) were missing. This highlights a gap in testing where only the "happy path" (full environment) is tested.
+
+**Proposal:**
+Implement a test strategy that explicitly mocks the absence of optional dependencies (e.g. `sys.modules['scipy'] = None`) to verify fallback paths.
+- Add CI matrix or parameterized tests to run test suites with and without optional packages (MLX, Scipy, Pandas-TA).
+- Ensure all fallback implementations (pure Python/Pandas) are mathematically equivalent to the optimized versions.
+
+## 10. Standardized Timezone Handling
+**Status:** In Progress (Partial Fixes Applied)
+**Priority:** Medium
+**Context:**
+`FinnhubClient` was using `datetime.now()` (local time) while `AlpacaClient` correctly uses UTC. This inconsistency can lead to data gaps or overlapping bars when requesting historical data across different providers.
+
+**Proposal:**
+Enforce `datetime.now(timezone.utc)` globally across all Data Engine clients.
+- Create a `TimeUtils.now_utc()` helper to prevent regressions.
+- Audit all `datetime` instantiations in `backend/data_engine.py` and `backend/utils/`.
