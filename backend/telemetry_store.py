@@ -27,7 +27,22 @@ def init_db():
             )
         ''')
         cursor.execute('''
+            CREATE TABLE IF NOT EXISTS math_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                correlation_id TEXT,
+                success BOOLEAN,
+                execution_time_ms REAL,
+                npu_utilization_proxy REAL,
+                exit_code INTEGER,
+                timestamp TEXT,
+                metadata TEXT
+            )
+        ''')
+        cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_correlation_id ON traces (correlation_id)
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_math_correlation_id ON math_metrics (correlation_id)
         ''')
         conn.commit()
     except Exception as e:
@@ -57,6 +72,38 @@ def record_trace(telemetry: Any, metadata: Optional[Dict[str, Any]] = None):
         conn.commit()
     except Exception as e:
         logger.error(f"Failed to record telemetry trace: {e}")
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+def record_math_metric(
+    correlation_id: str,
+    success: bool,
+    execution_time_ms: float,
+    npu_utilization_proxy: float,
+    exit_code: int,
+    metadata: Optional[Dict[str, Any]] = None
+):
+    """Record metrics for math delegation and sandbox execution."""
+    from datetime import datetime
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO math_metrics (correlation_id, success, execution_time_ms, npu_utilization_proxy, exit_code, timestamp, metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            correlation_id,
+            success,
+            execution_time_ms,
+            npu_utilization_proxy,
+            exit_code,
+            datetime.utcnow().isoformat(),
+            json.dumps(metadata) if metadata else None
+        ))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Failed to record math metric: {e}")
     finally:
         if 'conn' in locals():
             conn.close()
