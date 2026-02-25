@@ -388,6 +388,47 @@ class AlpacaClient:
                     
         return results
 
+    async def get_portfolio_positions(self) -> List[Dict[str, Any]]:
+        """Fetch all open positions."""
+        if self.trading_client:
+            try:
+                positions = await asyncio.to_thread(self.trading_client.get_all_positions)
+                # Convert to list of dicts
+                pos_list = []
+                # Handle case where positions might be a list or object depending on SDK version
+                # Assuming list of Position objects
+                for p in positions:
+                    pos_list.append({
+                        "symbol": p.symbol,
+                        "qty": Decimal(str(p.qty)),
+                        "market_value": Decimal(str(p.market_value)) if p.market_value else Decimal(0),
+                        "cost_basis": Decimal(str(p.cost_basis)),
+                        "unrealized_pl": Decimal(str(p.unrealized_pl)) if p.unrealized_pl else Decimal(0),
+                        "unrealized_plpc": Decimal(str(p.unrealized_plpc)) if p.unrealized_plpc else Decimal(0),
+                        "current_price": Decimal(str(p.current_price)),
+                        "lastday_price": Decimal(str(p.lastday_price)),
+                        "change_today": Decimal(str(p.change_today)),
+                    })
+                return pos_list
+            except Exception as e:
+                logger.error(f"AlpacaClient: Error fetching positions: {e}")
+                return []
+
+        # Mock fallback
+        return [
+            {
+                "symbol": "AAPL",
+                "qty": Decimal("10"),
+                "market_value": Decimal("1500.00"),
+                "cost_basis": Decimal("1400.00"),
+                "unrealized_pl": Decimal("100.00"),
+                "unrealized_plpc": Decimal("0.0714"),
+                "current_price": Decimal("150.00"),
+                "lastday_price": Decimal("145.00"),
+                "change_today": Decimal("0.0345")
+            }
+        ]
+
     async def get_recent_trades(self, ticker: str, limit: int = 100) -> List[TradeDataDict]:
         """Fetch latest trades for a ticker."""
         normalized_ticker = normalize_ticker(ticker)
