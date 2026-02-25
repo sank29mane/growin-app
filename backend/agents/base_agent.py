@@ -122,6 +122,19 @@ class BaseAgent(ABC):
         start = time.time()
         c_id = correlation_id_ctx.get() if correlation_id_ctx else None
         
+        from .messenger import AgentMessage, get_messenger
+        messenger = get_messenger()
+
+        # Emit Start Event
+        start_msg = AgentMessage(
+            sender=self.config.name,
+            recipient="broadcast",
+            subject="agent_started",
+            payload={"agent": self.config.name, "ticker": context.get("ticker")},
+            correlation_id=c_id
+        )
+        await messenger.send_message(start_msg)
+
         try:
             # Check cache
             cache_key = self._get_cache_key(context)
@@ -149,6 +162,15 @@ class BaseAgent(ABC):
                     
                     from telemetry_store import record_trace
                     record_trace(response.telemetry)
+                    
+                    # Emit Cache Hit Event
+                    await messenger.send_message(AgentMessage(
+                        sender=self.config.name,
+                        recipient="broadcast",
+                        subject="agent_complete",
+                        payload={"agent": self.config.name, "success": True, "cached": True, "latency_ms": latency},
+                        correlation_id=c_id
+                    ))
                     
                     return response
             
@@ -179,6 +201,21 @@ class BaseAgent(ABC):
             from telemetry_store import record_trace
             record_trace(response.telemetry)
             
+            # Emit Success Event
+            await messenger.send_message(AgentMessage(
+                sender=self.config.name,
+                recipient="broadcast",
+                subject="agent_complete",
+                payload={
+                    "agent": self.config.name, 
+                    "success": response.success, 
+                    "cached": False, 
+                    "latency_ms": latency,
+                    "error": response.error if not response.success else None
+                },
+                correlation_id=c_id
+            ))
+            
             return response
             
         except Exception as e:
@@ -203,6 +240,15 @@ class BaseAgent(ABC):
             
             from telemetry_store import record_trace
             record_trace(response.telemetry)
+            
+            # Emit Failure Event
+            await messenger.send_message(AgentMessage(
+                sender=self.config.name,
+                recipient="broadcast",
+                subject="agent_complete",
+                payload={"agent": self.config.name, "success": False, "error": str(e), "latency_ms": latency},
+                correlation_id=c_id
+            ))
             
             return response
     

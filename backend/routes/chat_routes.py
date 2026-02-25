@@ -73,7 +73,14 @@ async def chat_message(
     # Check for SSE request
     if "text/event-stream" in accept:
         from sse_starlette.sse import EventSourceResponse
-        return EventSourceResponse(stream_chat_generator(request))
+        return EventSourceResponse(
+            stream_chat_generator(request),
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no"
+            }
+        )
 
     try:
         from agents.coordinator_agent import CoordinatorAgent
@@ -97,7 +104,11 @@ async def chat_message(
         
         # Phase 1: Coordinator orchestrates specialists
         try:
-            coordinator = CoordinatorAgent(state.mcp_client, model_name=request.coordinator_model or "granite-tiny")
+            coordinator = CoordinatorAgent(
+                mcp_client=state.mcp_client, 
+                chat_manager=state.chat_manager,
+                model_name=request.coordinator_model or "granite-tiny"
+            )
             market_context = await coordinator.process_query(
                 query=request.message,
                 ticker=ticker,
@@ -122,7 +133,8 @@ async def chat_message(
         # Phase 2: Decision Agent makes final recommendation
         decision_agent = DecisionAgent(
             model_name=request.model_name or "native-mlx",
-            api_keys=request.api_keys
+            api_keys=request.api_keys,
+            mcp_client=state.mcp_client
         )
         response = await decision_agent.make_decision(market_context, request.message)
 
@@ -165,7 +177,7 @@ async def chat_message(
         )
 
 async def stream_chat_generator(request: ChatMessage):
-    """Generator for SSE streaming responses."""
+    """Generator for SSE streaming responses with SOTA 2026 telemetry."""
     queue = asyncio.Queue()
     
     async def telemetry_handler(msg):
@@ -195,9 +207,16 @@ async def stream_chat_generator(request: ChatMessage):
             content=request.message,
         )
         
+        # RUN_STARTED Event
         yield {
             "event": "meta",
-            "data": json.dumps({"conversation_id": conversation_id, "request_id": request_id, "status": "planning"})
+            "data": json.dumps({
+                "type": "RUN_STARTED",
+                "conversation_id": conversation_id, 
+                "request_id": request_id, 
+                "timestamp": datetime.now().isoformat(),
+                "status": "planning"
+            })
         }
 
         # Background task to process the query
@@ -208,7 +227,11 @@ async def stream_chat_generator(request: ChatMessage):
                 history = chat_manager.load_history(conversation_id, limit=6)
                 
                 # Phase 1: Coordinator
-                coordinator = CoordinatorAgent(state.mcp_client, model_name=request.coordinator_model or "granite-tiny")
+                coordinator = CoordinatorAgent(
+                    mcp_client=state.mcp_client, 
+                    chat_manager=state.chat_manager,
+                    model_name=request.coordinator_model or "granite-tiny"
+                )
                 market_context = await coordinator.process_query(
                     query=request.message,
                     ticker=ticker,
@@ -219,7 +242,8 @@ async def stream_chat_generator(request: ChatMessage):
                 # Phase 2: Decision
                 decision_agent = DecisionAgent(
                     model_name=request.model_name or "native-mlx",
-                    api_keys=request.api_keys
+                    api_keys=request.api_keys,
+                    mcp_client=state.mcp_client
                 )
                 
                 full_response = ""
@@ -240,14 +264,28 @@ async def stream_chat_generator(request: ChatMessage):
                 if state.rag_manager:
                     state.rag_manager.add_chat_message("assistant", full_response, conversation_id)
                 
-                await queue.put({"type": "done", "content": "[DONE]"})
+                # SOTA 2026: Include metadata in done event
+                await queue.put({
+                    "type": "done", 
+                    "content": "[DONE]", 
+                    "metadata": {
+                        "agents_executed": list(market_context.agents_executed)
+                    }
+                })
                 
                 # Async title update
                 await update_conversation_title_if_needed(conversation_id, request.model_name)
                 
             except Exception as e:
                 logger.error(f"Processing error: {e}")
-                await queue.put({"type": "error", "content": str(e)})
+                # SOTA 2026: Distinguish recoverable errors
+                recoverable = any(x in str(e).lower() for x in ["timeout", "rate limit", "connection"])
+                await queue.put({
+                    "type": "error", 
+                    "content": str(e),
+                    "recoverable": recoverable,
+                    "retryAfterMs": 2000 if recoverable else 0
+                })
 
         # Start processing in background
         process_task = asyncio.create_task(process_query())
@@ -261,15 +299,29 @@ async def stream_chat_generator(request: ChatMessage):
                 if item["type"] == "token":
                     yield { "event": "token", "data": item["content"] }
                 elif item["type"] == "done":
+                    yield {
+                        "event": "meta",
+                        "data": json.dumps({"type": "RUN_FINISHED", "status": "success", "metadata": item.get("metadata")})
+                    }
                     break
                 elif item["type"] == "error":
-                    yield { "event": "error", "data": item["content"] }
+                    yield { 
+                        "event": "error", 
+                        "data": json.dumps({
+                            "type": "RUN_ERROR",
+                            "message": item["content"],
+                            "recoverable": item.get("recoverable", False),
+                            "retryAfterMs": item.get("retryAfterMs", 0)
+                        }) 
+                    }
                     break
             else:
-                # AgentMessage from Messenger
+                # AgentMessage from Messenger (Telemetry)
+                event_type = "STEP_STARTED" if item.subject == "agent_started" else "STEP_FINISHED"
                 yield {
                     "event": "telemetry",
                     "data": json.dumps({
+                        "type": event_type,
                         "sender": item.sender,
                         "subject": item.subject,
                         "payload": item.payload,
@@ -321,7 +373,11 @@ async def analyze_portfolio(request: AnalyzeRequest):
                     break
         
         # 1. Coordinate: Gather data from specialists
-        coordinator = CoordinatorAgent(state.mcp_client, model_name=request.coordinator_model or "granite-tiny")
+        coordinator = CoordinatorAgent(
+            mcp_client=state.mcp_client, 
+            chat_manager=state.chat_manager,
+            model_name=request.coordinator_model or "granite-tiny"
+        )
         market_context = await coordinator.process_query(
             query=request.query,
             ticker=ticker,
@@ -331,7 +387,8 @@ async def analyze_portfolio(request: AnalyzeRequest):
         # 2. Decide: Generate final recommendation
         decision_agent = DecisionAgent(
             model_name=request.model_name or "native-mlx",
-            api_keys=request.api_keys
+            api_keys=request.api_keys,
+            mcp_client=state.mcp_client
         )
         result = await decision_agent.make_decision(market_context, request.query)
         

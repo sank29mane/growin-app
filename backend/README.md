@@ -51,3 +51,9 @@ The backend uses a **Coordinator-Specialist** pattern:
 1. **Coordinator** (Granite-Tiny): Classifies intent and routes to agents.
 2. **Specialists**: Execute parallel domain-specific tasks (e.g., fetching T212 data).
 3. **Decision Agent**: Synthesizes results into a human-readable advisory response.
+
+## 🔭 Observability & Audit
+- **SSE Streaming**: Real-time token and agent telemetry delivery.
+- **Reasoning Trace**: Full visibility into the multi-agent decision chain via `GET /api/telemetry/trace/{id}`.
+- **Tamper-Evident Audit**: Cryptographically chained logs at `backend/data/audit.log` (SHA-256/RFC 8785).
+- **Spec**: See `docs/TELEMETRY_SPEC.md` for full interface details.

@@ -27,9 +27,11 @@ class DecisionAgent:
     Performance: 5-8s (LLM reasoning time)
     """
 
-    def __init__(self, model_name: str = "gpt-4o", api_keys: Optional[Dict[str, str]] = None):
+    def __init__(self, model_name: str = "gpt-4o", api_keys: Optional[Dict[str, str]] = None, mcp_client=None):
         self.model_name = model_name
         self.api_keys = api_keys or {}
+        from app_context import state
+        self.mcp_client = mcp_client or state.mcp_client
         self.llm = None
         self._lm_studio_client = None # Deprecated, kept for compat if needed, but Factory handles it
         self._initialized = False
@@ -229,6 +231,18 @@ class DecisionAgent:
         from status_manager import status_manager
         status_manager.set_status("decision_agent", "working", "Streaming reasoning...", model=self.model_name)
 
+        # SOTA 2026: Emit Decision Start Telemetry
+        from .messenger import AgentMessage, get_messenger
+        messenger = get_messenger()
+        c_id = correlation_id_ctx.get()
+        await messenger.send_message(AgentMessage(
+            sender="DecisionAgent",
+            recipient="broadcast",
+            subject="agent_started",
+            payload={"agent": "DecisionAgent", "model": self.model_name},
+            correlation_id=c_id
+        ))
+
         # Same prep logic as make_decision
         account_filter = self._detect_account_mentions(query)
         prompt = self._build_prompt(context, query, account_filter)
@@ -267,6 +281,15 @@ class DecisionAgent:
             
             status_manager.set_status("decision_agent", "ready", "Stream complete", model=self.model_name)
             
+            # SOTA 2026: Emit Decision Completion Telemetry
+            await messenger.send_message(AgentMessage(
+                sender="DecisionAgent",
+                recipient="broadcast",
+                subject="agent_complete",
+                payload={"agent": "DecisionAgent", "success": True, "tokens_proxy": len(full_response.split())},
+                correlation_id=c_id
+            ))
+
             # Audit Log (Stream Complete)
             log_audit(
                 action="DECISION_STREAM_COMPLETE",
@@ -293,8 +316,7 @@ class DecisionAgent:
             {"role": "user", "content": prompt}
         ]
         
-        from app_context import state
-        mcp = state.mcp_client
+        mcp = self.mcp_client
         
         # Limit loop to 3 turns to prevent runaway costs/latency
         for _ in range(3):

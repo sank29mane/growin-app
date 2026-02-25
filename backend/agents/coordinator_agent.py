@@ -67,13 +67,15 @@ class CoordinatorAgent:
     Performance: 2-3s for routing + specialist execution
     """
     
-    def __init__(self, mcp_client, model_name: str = "granite-tiny"):
+    def __init__(self, mcp_client=None, chat_manager=None, model_name: str = "granite-tiny"):
+        from app_context import state
         self.model_name = model_name
-        self.mcp_client = mcp_client
+        self.mcp_client = mcp_client or state.mcp_client
+        self.chat_manager = chat_manager or state.chat_manager
         
         # Initialize Core Components (Centralized Arch)
         self.data_fabricator = DataFabricator()
-        self.decision_agent = DecisionAgent(model_name=model_name)
+        self.decision_agent = DecisionAgent(model_name=model_name, mcp_client=self.mcp_client)
         
         # Initialize specialist agents
         self.quant_agent = QuantAgent()
@@ -224,6 +226,17 @@ Query: "{clean_query}"
 
         status_manager.set_status("coordinator", "online", f"Analyzing: '{query}'", model=self.model_name)
         
+        # SOTA 2026: Emit Coordinator Start Telemetry
+        from .messenger import AgentMessage, get_messenger
+        messenger = get_messenger()
+        await messenger.send_message(AgentMessage(
+            sender="CoordinatorAgent",
+            recipient="broadcast",
+            subject="agent_started",
+            payload={"agent": "CoordinatorAgent", "query_snippet": query[:50]},
+            correlation_id=c_id
+        ))
+
         # 1. Intent Classification
         intent = await self._classify_intent(query)
         logger.info(f"Coordinator Intent: {intent['type']} - Needs: {intent.get('needs', [])}")
@@ -394,6 +407,16 @@ Query: "{clean_query}"
             context.user_context["final_answer"] = f"Analysis complete, but synthesis failed: {e}"
 
         status_manager.set_status("coordinator", "ready", "Task complete")
+        
+        # SOTA 2026: Emit Coordinator Completion Telemetry
+        await messenger.send_message(AgentMessage(
+            sender="CoordinatorAgent",
+            recipient="broadcast",
+            subject="agent_complete",
+            payload={"agent": "CoordinatorAgent", "success": True, "intent": intent.get("type")},
+            correlation_id=c_id
+        ))
+        
         return context
     
     async def _run_specialist(self, agent: BaseAgent, context: Dict[str, Any]) -> AgentResponse:
