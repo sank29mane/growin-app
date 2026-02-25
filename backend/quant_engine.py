@@ -308,8 +308,8 @@ class QuantEngine:
         else:
             peaks, troughs = [], []
             for i in range(order, len(closes) - order):
-                if all(highs[i] > highs[i-j] for j in range(1, order+1)) and all(highs[i] > highs[i+order]): peaks.append(highs[i])
-                if all(lows[i] < lows[i-j] for j in range(1, order+1)) and all(lows[i] < lows[i+order]): troughs.append(lows[i])
+                if all(highs[i] > highs[i-j] for j in range(1, order+1)) and all(highs[i] > highs[i+j] for j in range(1, order+1)): peaks.append(highs[i])
+                if all(lows[i] < lows[i-j] for j in range(1, order+1)) and all(lows[i] < lows[i+j] for j in range(1, order+1)): troughs.append(lows[i])
             peaks, troughs = np.array(peaks), np.array(troughs)
         if len(peaks) == 0: peaks = np.array([np.max(highs[-50:])])
         if len(troughs) == 0: troughs = np.array([np.min(lows[-50:])])
