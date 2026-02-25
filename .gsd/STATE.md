@@ -1,27 +1,40 @@
 # GSD STATE MEMORY
 
-## Current Session Details
-- **Active Objective**: Phase 06 - Interactive Python Sandbox (Live Research & Modeling)
-- **Current Position**: Phase 06-02 Complete
-- **Status**: Phase 06-01 & 06-02 Complete. End-to-end NPU math delegation verified.
+## Current Position
+- **Phase**: Phase 13 - Live System Integration Planning
+- **Task**: Initial Research & Environment Verification
+- **Status**: Paused at 2026-02-25 21:55
 
-## Progress Recap
-- **Phase 06-01**: [██████████] 100%
-  - Implemented `docker_mcp_server.py`.
-- **Phase 06-02**: [██████████] 100%
-  - Implemented `MathGeneratorAgent` with Granite-Tiny MLX.
-  - Developed NPU Injections Library (`mlx_injections.py`).
-  - Built `MathValidator` with AST security and NPU sandbox integration.
-  - Integrated math delegation loop and telemetry into `DecisionAgent`.
+## Last Session Summary
+- **Phase 12 Verification & Completion**: Finalized stability hardening, resolved `SectorMark` crashes, and verified pure macOS native architecture.
+- **Documentation Update**: Synchronized `ARCHITECTURE.md` and `ROADMAP.md` with the latest project state.
+- **LM Studio Verification**: Confirmed local LLM (`nvidia/nemotron-3-nano`) is responsive and functional via `lms` CLI.
+- **Polling Optimization**: Implemented a caching layer (60s for routes, 5m for factory) to eliminate excessive LM Studio log noise ("Returning 10 models").
 
-## Verification Snapshot
-- **NPU Delegation**: DecisionAgent successfully offloads complex math to MathGeneratorAgent.
-- **Security**: AST validation prevents dangerous operations in the sandbox.
-- **Telemetry**: Success, latency, and NPU utilization recorded in `math_metrics` table.
+## In-Progress Work
+- Initial preparation for Phase 13 (Live System Integration).
+- **Files modified**:
+    - `docs/ARCHITECTURE.md` (Added Stability & Resilience section)
+    - `.gsd/ROADMAP.md` (Marked Ph 11/12 COMPLETED, added Ph 13)
+    - `backend/routes/agent_routes.py` (Added caching to model endpoints)
+    - `backend/agents/llm_factory.py` (Added caching to auto-detection)
+    - `.gsd/STATE.md` (State tracking)
 
-## Immediate Next Actions (TODO)
-1. Perform E2E UAT on "Monte Carlo" queries.
-2. Update `ARCHITECTURE.md` to reflect the Docker Sandbox integration.
+## Blockers
+None.
 
-## Risks/Debt
-- Docker container overhead: Cold starts for 'npu' engine may add ~500ms latency.
+## Context Dump
+### Decisions Made
+- **Caching over Throttling**: Chose 60s/300s caching for LM Studio requests to maintain UI freshness while silencing logs, rather than hard rate-limiting which could affect UX.
+- **NSViewRepresentable Standard**: Finalized on `NSViewRepresentable` as the mandatory bridge for Metal-backed charts to ensure macOS native performance.
+
+### Approaches Tried
+- **LMS CLI Verification**: Used `lms chat` to bypass potential backend issues and confirm the inference engine itself was healthy.
+
+### Current Hypothesis
+The repetitive logs were purely informational and caused by aggressive UI polling; the caching fix should maintain a "quiet" production-like log environment.
+
+## Next Steps
+1. Research Alpaca/T212 live API requirements (OAuth scopes, production endpoints).
+2. Draft `plan-phase-13.md` for live system transition.
+3. Audit production environment secrets management.

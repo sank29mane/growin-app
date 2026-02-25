@@ -137,6 +137,7 @@ class LLMFactory:
     async def _create_lmstudio(model_name: str):
         from lm_studio_client import LMStudioClient
         from model_config import get_model_info
+        from status_manager import status_manager
 
         info = get_model_info(model_name)
         client = LMStudioClient()
@@ -150,23 +151,36 @@ class LLMFactory:
 
         # Check connection
         if not await client.check_connection():
+            status_manager.set_status("lmstudio", "error", "LM Studio not reachable")
             raise ConnectionError("LM Studio server not reachable")
 
         if target_model_id:
+            status_manager.set_status("lmstudio", "working", f"Loading {target_model_id}...")
             logger.info(f"LM Studio: Ensuring model loaded: {target_model_id}")
             try:
                 await client.ensure_model_loaded(target_model_id)
-                # Explicitly set the active model ID on the client wrapper/mock property
+                # Explicitly set the active model ID on the client wrapper
                 client.active_model_id = target_model_id 
+                status_manager.set_status("lmstudio", "ready", f"Model {target_model_id} active")
                 return client
             except Exception as e:
                 logger.warning(f"Failed to load requested model {target_model_id}: {e}")
-                # If loading fails, fall through to auto-detect as safety net? 
-                # No, user asked for specific model, we should probably error or behave predictably.
-                # But to maintain robustness, we can try auto-detect if the specific one fails.
+                status_manager.set_status("lmstudio", "error", f"Load failed: {target_model_id}")
                 logger.info("Falling back to auto-detected model...")
 
         # Auto-detect currently loaded model (filter out embeddings)
+        status_manager.set_status("lmstudio", "working", "Auto-detecting loaded model...")
+        
+        from cache_manager import cache
+        cache_key = "lmstudio_autodetect_id"
+        cached_id = cache.get(cache_key)
+        
+        if cached_id:
+            logger.info(f"LM Studio: Using cached auto-detected LLM: {cached_id}")
+            client.active_model_id = cached_id
+            status_manager.set_status("lmstudio", "ready", f"Model {cached_id} active (cached)")
+            return client
+
         models = await client.list_models()
         if models:
             llm_candidates = [
@@ -180,10 +194,14 @@ class LLMFactory:
                 loaded_id = llm_candidates[0]
                 logger.info(f"LM Studio: Auto-detected LLM: {loaded_id}")
                 client.active_model_id = loaded_id
+                status_manager.set_status("lmstudio", "ready", f"Model {loaded_id} active")
+                # Cache for 5 minutes as models don't change frequently
+                cache.set(cache_key, loaded_id, ttl=300)
                 return client
             elif models:
                 logger.warning(f"LM Studio: Only embedding models found. Using first: {models[0]['id']}")
                 client.active_model_id = models[0]["id"]
                 return client
 
+            status_manager.set_status("lmstudio", "error", "No models available")
             raise ValueError("No models available in LM Studio")

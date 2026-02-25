@@ -56,7 +56,13 @@ async def get_available_models():
     """
     from model_config import DECISION_MODELS, COORDINATOR_MODELS
     from lm_studio_client import LMStudioClient
+    from cache_manager import cache
     
+    cache_key = "models_available_info"
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
+
     # Attempt to enrich with currently loaded LM Studio model for 'lmstudio-auto'
     try:
         lms = LMStudioClient()
@@ -67,7 +73,7 @@ async def get_available_models():
     except:
         pass
 
-    return {
+    result = {
         "decision_models": [
             {
                 "name": name,
@@ -83,6 +89,10 @@ async def get_available_models():
             for name, info in COORDINATOR_MODELS.items()
         ]
     }
+    
+    # Cache for 60 seconds to reduce polling pressure
+    cache.set(cache_key, result, ttl=60)
+    return result
 
 @router.get("/api/models/lmstudio")
 async def get_lmstudio_models():
@@ -91,6 +101,13 @@ async def get_lmstudio_models():
     Allows the UI to see exactly what is downloaded/available locally.
     """
     from lm_studio_client import LMStudioClient
+    from cache_manager import cache
+    
+    cache_key = "lmstudio_models_list"
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
+
     client = LMStudioClient()
     try:
         models = await client.list_models()
@@ -100,11 +117,15 @@ async def get_lmstudio_models():
             if m.get("id") and "embed" not in m.get("id", "").lower() 
             and "nomic" not in m.get("id", "").lower()
         ]
-        return {
+        result = {
             "models": llm_ids,
             "count": len(llm_ids),
             "status": "online"
         }
+        
+        # Cache for 60 seconds to reduce log noise and polling
+        cache.set(cache_key, result, ttl=60)
+        return result
     except Exception as e:
         logger.warning(f"Failed to fetch LM Studio models: {e}")
         return {

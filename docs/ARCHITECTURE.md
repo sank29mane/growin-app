@@ -72,7 +72,17 @@ To eliminate "one-cent drift" and binary floating-point errors common in financi
 
 ---
 
-## 3. Agentic Reasoning & Collaborative Debate
+## 3. Stability & Resilience (Phase 12 Hardening)
+To ensure production-grade reliability on macOS, the system underwent a rigorous hardening phase focused on crash resolution and architectural purity.
+
+- **Crash Resolution (SectorMark)**: Resolved persistent memory and data-filtering crashes in the chart rendering pipeline by implementing strict defensive checks in `calculateAllocationData`, ensuring only positive, non-zero values reach the `SectorMark` view.
+- **Architectural Purity**: Verified a "pure-play" macOS native architecture. All remaining iOS/UIKit traces were removed, ensuring `NSViewRepresentable` is used correctly for Metal-backed views.
+- **Memory Management**: Implemented explicit `deinit` cleanup and cancellation tokens for long-running data synchronization tasks to prevent memory leaks during rapid context switching in the MAS.
+- **Concurrency Safety**: Conducted a full audit of `@MainActor` isolation for UI-bound view models, preventing race conditions during high-frequency market data updates.
+
+---
+
+## 4. Agentic Reasoning & Collaborative Debate
 Instead of a single "Chain of Thought," Growin uses a **Multi-Agent Debate Model**.
 
 ### The Debate Phase
@@ -88,7 +98,34 @@ Every reasoning chain is traceable via **TelemetryData**:
 
 ---
 
-## 4. Frontend Architecture
+## 4. Frontend Architecture (macOS SwiftUI)
+
+### UI/UX Paradigm: High-Fidelity & Emotionally Intelligent
+Growin's 2026 frontend embraces a "Calm UI" philosophy with a "Liquid Glass" design language, delivering a premium, high-performance, and emotionally regulated user experience.
+
+-   **Calm UI**: Interfaces adapt to user cognitive states, employing soft gradients and neutral palettes to reduce stress, especially during market volatility. Critical warnings are reserved for genuine risks.
+-   **Liquid Glass Design**: Translucent surfaces, background blurs, and diffused shadows create a sophisticated, immersive aesthetic, bridging 2D interfaces with future 3D/AR environments.
+-   **Bento Grid Architecture**: Modular information architecture for dashboards, allowing diverse content (charts, metrics, AI text) to coexist with clear visual hierarchy, ensuring functional data density.
+-   **Multi-Agent Transparency (Glass Box AI)**: AI insights are presented with "Confidence Visualization Patterns" (CVP) and "Progressive Disclosure," allowing users to understand the AI's reasoning without cognitive overload.
+
+### Core UI Components & Design System
+All UI elements are standardized within a `Palette` component library, built for consistency and reusability.
+-   **GlassCard**: Enhanced with Liquid Glass effects, serving as a primary container for information.
+-   **PremiumButton**: Designed for clear, tactile feedback.
+-   **AgentStatusBadge**: Visualizes agent states and confidence.
+-   **FinancialMetricView**: Displays key financial data with high precision.
+
+### High-Performance Rendering (120Hz Optimized)
+Optimized for Apple's ProMotion displays, ensuring a superfluid 120Hz experience.
+-   **Metal-Backed SwiftUI Charts**: Core financial charts (e.g., `PerformanceLineChart`) are powered by native Metal compute shaders via `NSViewRepresentable` for GPU-accelerated, dual-pipeline rendering (visuals vs. indicator calculations), handling millions of data points without frame drops.
+-   **Main-Thread Isolation**: All data fetching, AI reasoning, and real-time stream processing (SSE/WebSockets) are strictly offloaded to background `Task`s or `Actors`, ensuring the main thread remains unblocked for smooth UI interactions.
+-   **Optimistic State Management**: SwiftUI's `@State` and `@Binding` are leveraged for instant UI feedback on user actions (e.g., trade execution), paired with custom `CoreHaptics` for tactile confirmation.
+
+### Interactive AI: Reasoning Trace & Collaboration
+The frontend provides unprecedented transparency and collaboration with the Multi-Agent System.
+-   **Reasoning Trace UI**: A "Thinking..." expandable view showing step-by-step agent consultation via SSE, with "Confidence Visualization Patterns" and progressive disclosure.
+-   **Challenge Logic Interface**: Users can interactively challenge specific logical steps within the reasoning trace, providing alternative data or questions to the local LLM, leading to user-AI collaboration.
+-   **Revised Strategy Outcome Screen**: Presents the updated strategy after user feedback, highlighting changes and updated confidence, allowing for implementation or further refinement.
 
 ### Application Structure
 ```mermaid
@@ -99,25 +136,27 @@ graph TD
     B --> D[PortfolioView<br/>Live Holdings]
     B --> E[DashboardView<br/>Multi-Account Overview]
     B --> F[SettingsView<br/>Configuration]
+    B --> G[ReasoningTraceView<br/>AI Logic Trace]
 
-    C --> G[ChatViewModel<br/>Message Management]
-    D --> H[PortfolioViewModel<br/>Data Aggregation]
-    E --> I[DashboardViewModel<br/>Cross-Account Analysis]
-    F --> J[SettingsViewModel<br/>Configuration State]
+    C --> H[ChatViewModel<br/>Message Management]
+    D --> I[PortfolioViewModel<br/>Data Aggregation]
+    E --> J[DashboardViewModel<br/>Cross-Account Analysis]
+    F --> K[SettingsViewModel<br/>Configuration State]
+    G --> H
 
-    G --> K[AgentClient<br/>Backend Communication]
-    H --> K
-    I --> K
-    J --> K
+    H --> L[AgentClient<br/>Backend Communication]
+    I --> L
+    J --> L
+    K --> L
 
-    K --> L[HTTP/REST API<br/>localhost:8002]
+    L --> M[HTTP/REST API<br/>localhost:8002]
 
     style A fill:#e3f2fd
     style B fill:#f3e5f5
     style C fill:#e8f5e8
     style D fill:#fff3e0
-    style G fill:#fce4ec
-    style L fill:#efebe9
+    style H fill:#fce4ec
+    style M fill:#efebe9
 ```
 
 ---
@@ -126,8 +165,8 @@ graph TD
 As AI agents move toward autonomy, the **Sentinel Security Layer** provides robust guardrails.
 
 ### Safe Code Execution
-- **Current**: `SafePythonExecutor` uses AST analysis and restricted builtins to execute model-generated "fixes".
-- **Roadmap**: Migration to **Docker-based Isolation** via Docker MCP for 2026 SOTA agent safety.
+-   **Current**: `SafePythonExecutor` uses AST analysis and restricted builtins to execute model-generated "fixes".
+-   **Roadmap**: Migration to **Docker-based Isolation** via Docker MCP for 2026 SOTA agent safety. This is now **CONFIRMED** and actively being integrated for the interactive Python sandbox.
   
 ---
 
