@@ -5,74 +5,76 @@ struct GoalPlannerView: View {
     @Bindable var viewModel: GoalPlannerViewModel
     
     var body: some View {
-        ScrollView(showsIndicators: false) {
-            VStack(spacing: 32) {
-                // Integrated Goal Header
-                HStack(alignment: .bottom) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("PLANNING")
-                            .font(.caption)
-                            .fontWeight(.semibold)
-                            .foregroundStyle(.secondary)
-                        
-                        Text("Goal Planner")
-                            .font(.title)
-                            .fontWeight(.bold)
-                            .foregroundStyle(.primary)
-                    }
-                    
-                    Spacer()
-                    
-                    // Goal Target Pill
-                    HStack(spacing: 8) {
-                        Image(systemName: "target")
-                            .font(.system(size: 14))
-                            .foregroundStyle(Color.growinAccent)
-                        Text("TARGET")
-                            .font(.caption2)
-                            .fontWeight(.bold)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(Color.growinAccent.opacity(0.1))
-                    .clipShape(Capsule())
-                }
-                .padding(.horizontal)
-                .padding(.top, 24)
-                
-                inputSection
-                
-                if viewModel.isLoading {
-                    VStack(spacing: 24) {
-                        ProgressView()
-                            .scaleEffect(1.2)
-                            .tint(Color.growinAccent)
-                        
-                        VStack(spacing: 8) {
-                            Text("CALCULATING")
-                                .font(.caption)
-                                .fontWeight(.bold)
-                                .foregroundStyle(Color.growinAccent)
-                            Text("Running simulations to optimize your plan...")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
+        GeometryReader { geo in
+            let isWide = geo.size.width > 900
+            
+            HStack(spacing: 0) {
+                if isWide {
+                    // AI Strategy Hub Sidebar (Wide Layout)
+                    VStack(spacing: 0) {
+                        ScrollView {
+                            inputSection
+                                .padding(.vertical, 40)
                         }
                     }
-                    .padding(.top, 40)
-                }
-                
-                if let plan = viewModel.plan {
-                    planResultsSection(plan: plan)
-                }
-                
-                if let error = viewModel.errorMsg {
-                    ErrorCard(message: error) {
-                        Task { await viewModel.generatePlan() }
+                    .frame(width: 420)
+                    .background(
+                        Rectangle()
+                            .fill(.ultraThinMaterial)
+                            .opacity(0.5)
+                    )
+                    .overlay(alignment: .trailing) {
+                        Divider().background(Color.white.opacity(0.1))
                     }
-                    .transition(AnyTransition.move(edge: .bottom).combined(with: .opacity))
                 }
+                
+                ScrollView(showsIndicators: false) {
+                    VStack(spacing: 32) {
+                        AppHeader(
+                            title: "Goal Planner",
+                            subtitle: "Strategic Wealth Projection",
+                            icon: "target"
+                        )
+                        .padding(.horizontal)
+                        .padding(.top, 24)
+                        
+                        if !isWide {
+                            inputSection
+                        }
+                        
+                        if viewModel.isLoading {
+                            VStack(spacing: 24) {
+                                ProgressView()
+                                    .scaleEffect(1.5)
+                                    .tint(Color.stitchNeonIndigo)
+                                
+                                VStack(spacing: 8) {
+                                    Text("COMPUTING")
+                                        .premiumTypography(.overline)
+                                        .foregroundStyle(Color.stitchNeonIndigo)
+                                    Text("Optimizing risk-adjusted returns...")
+                                        .premiumTypography(.caption)
+                                }
+                            }
+                            .padding(.top, 40)
+                            .frame(maxWidth: .infinity)
+                        }
+                        
+                        if let plan = viewModel.plan {
+                            planResultsSection(plan: plan)
+                        }
+                        
+                        if let error = viewModel.errorMsg {
+                            ErrorCard(message: error) {
+                                Task { await viewModel.generatePlan() }
+                            }
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                        }
+                    }
+                    .padding(.bottom, 60)
+                }
+                .frame(maxWidth: .infinity)
             }
-            .padding(.bottom, 40)
         }
         .navigationTitle("")
         .alert("Strategy Deployed", isPresented: $viewModel.showExecutionConfirmation) {
@@ -80,96 +82,88 @@ struct GoalPlannerView: View {
         } message: {
             Text("Investment plan '\(viewModel.plan?.implementation?.name ?? "Goal Portfolio")' has been successfully sent to Trading 212.")
         }
-        .glassEffect(.thin)
     }
     
     private var inputSection: some View {
         GlassCard(cornerRadius: 32) {
-            VStack(spacing: 24) {
-                // Capital Area
+            VStack(spacing: 32) {
+                // Capital Area - Scenario Simulator
                 VStack(alignment: .leading, spacing: 16) {
                     HStack {
-                        Text("INITIAL CAPITAL")
-                            .font(.system(size: 10, weight: .black))
-                            .tracking(1)
-                            .foregroundStyle(.secondary)
+                        Text("SCENARIO SIMULATOR")
+                            .premiumTypography(.overline)
                         
                         Spacer()
                         
                         HStack(spacing: 4) {
                             Text("£")
-                                .font(.system(size: 16, weight: .bold))
-                                .foregroundStyle(.secondary)
+                                .font(.system(size: 20, weight: .bold, design: .rounded))
+                                .foregroundStyle(Color.textSecondary)
                             TextField("Amount", value: $viewModel.capital, format: .number)
                                 .multilineTextAlignment(.trailing)
                                 .textFieldStyle(.plain)
-                                .font(.system(size: 24, weight: .heavy, design: .rounded))
+                                .font(.system(size: 28, weight: .heavy, design: .rounded))
                                 .foregroundStyle(.white)
-                                .frame(width: 140)
+                                .frame(width: 160)
                         }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(Color.white.opacity(0.05))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(Color.white.opacity(0.03))
+                        .clipShape(RoundedRectangle(cornerRadius: 16))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 16)
+                                .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                        )
                     }
                     
-                    Slider(value: $viewModel.capital, in: 100...100000, step: 500)
-                        .tint(Color.growinPrimary)
+                    CustomSlider(value: $viewModel.capital, range: 100...100000, step: 500)
                 }
                 
                 Divider().background(Color.white.opacity(0.05))
                 
                 // Target & Duration Combined
-                HStack(spacing: 24) {
+                HStack(spacing: 20) {
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("TARGET RETURN")
-                            .font(.system(size: 10, weight: .black))
-                            .tracking(1)
-                            .foregroundStyle(.secondary)
+                        Text("TARGET ROI")
+                            .premiumTypography(.overline)
                         
                         HStack {
                             Text("\(Int(viewModel.targetReturn))%")
-                                .font(.system(size: 20, weight: .bold, design: .rounded))
+                                .font(.system(size: 24, weight: .bold, design: .rounded))
                             Spacer()
                             Stepper("", value: $viewModel.targetReturn, in: 2...50)
                                 .labelsHidden()
-                                .scaleEffect(0.8)
+                                .scaleEffect(0.9)
                         }
-                        .padding(12)
-                        .background(Color.white.opacity(0.05))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .padding(16)
+                        .background(Color.white.opacity(0.03))
+                        .clipShape(RoundedRectangle(cornerRadius: 16))
                     }
-                    .frame(maxWidth: .infinity)
                     
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("DURATION")
-                            .font(.system(size: 10, weight: .black))
-                            .tracking(1)
-                            .foregroundStyle(.secondary)
+                        Text("HORIZON")
+                            .premiumTypography(.overline)
                         
                         HStack {
-                            Text("\(viewModel.durationYears) Yrs")
-                                .font(.system(size: 20, weight: .bold, design: .rounded))
+                            Text("\(Int(viewModel.durationYears))Y")
+                                .font(.system(size: 24, weight: .bold, design: .rounded))
                             Spacer()
                             Stepper("", value: $viewModel.durationYears, in: 1...30)
                                 .labelsHidden()
-                                .scaleEffect(0.8)
+                                .scaleEffect(0.9)
                         }
-                        .padding(12)
-                        .background(Color.white.opacity(0.05))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .padding(16)
+                        .background(Color.white.opacity(0.03))
+                        .clipShape(RoundedRectangle(cornerRadius: 16))
                     }
-                    .frame(maxWidth: .infinity)
                 }
                 
                 Divider().background(Color.white.opacity(0.05))
                 
                 // Risk Selector
                 VStack(alignment: .leading, spacing: 16) {
-                    Text("RISK APPETITE")
-                        .font(.system(size: 10, weight: .black))
-                        .tracking(1)
-                        .foregroundStyle(.secondary)
+                    Text("RISK PROFILE")
+                        .premiumTypography(.overline)
                     
                     HStack(spacing: 12) {
                         ForEach(viewModel.riskOptions, id: \.self) { risk in
@@ -186,24 +180,10 @@ struct GoalPlannerView: View {
                     }
                 }
                 
-                Button(action: {
+                PremiumButton(title: "Generate Strategy", icon: "sparkles", color: Color.stitchNeonIndigo) {
                     Task { await viewModel.generatePlan() }
-                }) {
-                    HStack(spacing: 10) {
-                        Text("Generate Plan")
-                        Image(systemName: "sparkles")
-                    }
-                    .font(.system(size: 14, weight: .black))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 18)
-                    .background(
-                        LinearGradient(colors: [Color.growinPrimary, Color.growinAccent], startPoint: .leading, endPoint: .trailing)
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 16))
-                    .foregroundStyle(.white)
-                    .shadow(color: Color.growinPrimary.opacity(0.3), radius: 15, x: 0, y: 8)
                 }
-                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity)
             }
             .padding(24)
         }
@@ -215,73 +195,118 @@ struct GoalPlannerView: View {
             // Summary Row
             HStack(spacing: 16) {
                 GlassCard {
-                    VStack(spacing: 12) {
-                        FeasibilityGauge(score: plan.probabilityOfSuccess)
-                        Text("Success Probability")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(.secondary)
+                    VStack(spacing: 16) {
+                        let score = Double(truncating: plan.probabilityOfSuccess as NSNumber)
+                        FeasibilityGauge(score: score)
+                        
+                        Text("FEASIBILITY")
+                            .premiumTypography(.overline)
                     }
                     .frame(maxWidth: .infinity)
                 }
+                .frame(width: 140)
                 
                 GlassCard {
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("GROWTH PROJECTION")
-                            .font(.system(size: 10, weight: .black))
-                            .foregroundStyle(.secondary)
+                        Text("PROJECTION MATRIX")
+                            .premiumTypography(.overline)
                         
                         GrowthChart(points: plan.simulatedGrowthPath ?? [])
-                            .frame(height: 180)
+                            .frame(height: 140)
                     }
                     .frame(maxWidth: .infinity)
                 }
             }
             
             // Asset Allocation
-            GlassCard(cornerRadius: 20) {
-                VStack(alignment: .leading, spacing: 16) {
-                    Text("OPTIMAL ASSET MIX")
-                        .font(.system(size: 12, weight: .black))
-                        .foregroundStyle(.secondary)
+            GlassCard(cornerRadius: 24) {
+                VStack(alignment: .leading, spacing: 20) {
+                    HStack {
+                        Text("ASSET COMPOSITION")
+                            .premiumTypography(.overline)
+                        Spacer()
+                        Text("\(plan.suggestedInstruments.count) ASSETS")
+                            .premiumTypography(.caption)
+                            .foregroundStyle(Color.stitchNeonCyan)
+                    }
                     
                     AssetAllocationList(instruments: plan.suggestedInstruments)
                 }
             }
             
-            // Strategy Execution Call to Action
-            VStack(spacing: 12) {
-                HStack {
-                    Image(systemName: "info.circle.fill")
-                        .foregroundStyle(Color.growinAccent)
-                    Text("This plan is optimized for Trading 212 Pie execution.")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
+            // Strategy Execution
+            VStack(spacing: 24) {
+                HStack(spacing: 12) {
+                    Image(systemName: "cpu")
+                        .font(.system(size: 20))
+                        .foregroundStyle(Color.stitchNeonIndigo)
+                    Text("Automated rebalancing enabled for this strategy.")
+                        .premiumTypography(.caption)
                 }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .background(Color.stitchNeonIndigo.opacity(0.1))
+                .clipShape(Capsule())
                 
-                Button(action: {
+                SlideToConfirm(title: "SLIDE TO DEPLOY STRATEGY") {
                     Task { await viewModel.executePlan() }
-                }) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "tray.and.arrow.down.fill")
-                        Text("Execute Strategy")
-                            .font(.system(size: 14, weight: .black))
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 18)
-                    .background(Color.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 16))
-                    .foregroundStyle(.black)
-                    .shadow(color: .white.opacity(0.1), radius: 10, x: 0, y: 5)
                 }
-                .buttonStyle(.plain)
             }
-            .padding(.top, 10)
+            .padding(.top, 12)
         }
         .padding(.horizontal)
         .transition(.asymmetric(
-            insertion: AnyTransition.move(edge: .bottom).combined(with: .opacity),
+            insertion: .move(edge: .bottom).combined(with: .opacity),
             removal: .opacity
         ))
+    }
+}
+
+// MARK: - Enhanced Subcomponents
+
+struct CustomSlider: View {
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    let step: Double
+    
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                // Track
+                Rectangle()
+                    .fill(Color.white.opacity(0.05))
+                    .frame(height: 8)
+                    .clipShape(Capsule())
+                
+                // Progress
+                Rectangle()
+                    .fill(
+                        LinearGradient(
+                            colors: [Color.stitchNeonIndigo, Color.stitchNeonCyan],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .frame(width: max(0, CGFloat((value - range.lowerBound) / (range.upperBound - range.lowerBound)) * geo.size.width), height: 8)
+                    .clipShape(Capsule())
+                    .shadow(color: Color.stitchNeonIndigo.opacity(0.3), radius: 10, x: 0, y: 0)
+                
+                // Handle
+                Circle()
+                    .fill(.white)
+                    .frame(width: 24, height: 24)
+                    .shadow(color: .black.opacity(0.5), radius: 5)
+                    .offset(x: max(0, CGFloat((value - range.lowerBound) / (range.upperBound - range.lowerBound)) * geo.size.width) - 12)
+                    .gesture(
+                        DragGesture()
+                            .onChanged { gesture in
+                                let newValue = range.lowerBound + Double(gesture.location.x / geo.size.width) * (range.upperBound - range.lowerBound)
+                                value = Swift.min(Swift.max(range.lowerBound, (newValue / step).rounded() * step), range.upperBound)
+                            }
+                    )
+            }
+        }
+        .frame(height: 24)
     }
 }
 
@@ -293,22 +318,25 @@ struct GrowthChart: View {
     var body: some View {
         Chart {
             ForEach(points) { point in
+                let val = Double(truncating: point.value as NSNumber)
+                let tgt = Double(truncating: point.target as NSNumber)
+                
                 LineMark(
                     x: .value("Year", point.year),
-                    y: .value("Expected", point.value),
+                    y: .value("Expected", val),
                     series: .value("Series", "Projected")
                 )
-                .foregroundStyle(by: .value("Series", "Projected"))
-                .lineStyle(StrokeStyle(lineWidth: 3))
+                .foregroundStyle(Color.stitchNeonIndigo)
+                .lineStyle(StrokeStyle(lineWidth: 3, lineCap: .round))
                 .interpolationMethod(.catmullRom)
                 
                 AreaMark(
                     x: .value("Year", point.year),
-                    y: .value("Expected", point.value)
+                    y: .value("Expected", val)
                 )
                 .foregroundStyle(
                     LinearGradient(
-                        colors: [Color.growinPrimary.opacity(0.3), Color.growinPrimary.opacity(0.0)],
+                        colors: [Color.stitchNeonIndigo.opacity(0.2), Color.stitchNeonIndigo.opacity(0.0)],
                         startPoint: .top,
                         endPoint: .bottom
                     )
@@ -317,38 +345,34 @@ struct GrowthChart: View {
                 
                 LineMark(
                     x: .value("Year", point.year),
-                    y: .value("Target", point.target),
+                    y: .value("Target", tgt),
                     series: .value("Series", "Target")
                 )
-                .foregroundStyle(by: .value("Series", "Target"))
-                .lineStyle(StrokeStyle(lineWidth: 2, dash: [5, 5]))
+                .foregroundStyle(Color.white.opacity(0.15))
+                .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
                 .interpolationMethod(.catmullRom)
             }
         }
-        .chartForegroundStyleScale([
-            "Projected": Color.growinPrimary,
-            "Target": Color.white.opacity(0.3)
-        ])
         .chartXAxis {
             AxisMarks(values: .automatic) { value in
-                AxisGridLine(stroke: StrokeStyle(dash: [2, 4])).foregroundStyle(.white.opacity(0.1))
+                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5)).foregroundStyle(.white.opacity(0.05))
                 AxisValueLabel() {
                     if let year = value.as(Double.self) {
                         Text("Y\(Int(year))")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(.secondary)
+                            .premiumTypography(.overline)
+                            .font(.system(size: 8))
                     }
                 }
             }
         }
         .chartYAxis {
             AxisMarks(position: .leading) { value in
-                AxisGridLine(stroke: StrokeStyle(dash: [2, 4])).foregroundStyle(.white.opacity(0.1))
+                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5)).foregroundStyle(.white.opacity(0.05))
                 AxisValueLabel() {
                     if let val = value.as(Double.self) {
                         Text("£\(Int(val/1000))k")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(.secondary)
+                            .premiumTypography(.overline)
+                            .font(.system(size: 8))
                     }
                 }
             }
@@ -366,20 +390,22 @@ struct RiskButton: View {
         Button(action: action) {
             VStack(spacing: 8) {
                 Image(systemName: icon)
-                    .font(.system(size: 20))
+                    .font(.system(size: 22))
+                    .foregroundStyle(isSelected ? Color.stitchNeonIndigo : Color.textSecondary)
+                
                 Text(title.replacingOccurrences(of: "_", with: " "))
-                    .font(.system(size: 9, weight: .black))
-                    .tracking(0.5)
+                    .premiumTypography(.overline)
+                    .font(.system(size: 8))
+                    .foregroundStyle(isSelected ? .white : Color.textSecondary)
             }
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 14)
-            .background(isSelected ? Color.growinPrimary.opacity(0.2) : Color.white.opacity(0.05))
-            .clipShape(.rect(cornerRadius: 16))
+            .padding(.vertical, 16)
+            .background(isSelected ? Color.stitchNeonIndigo.opacity(0.15) : Color.white.opacity(0.03))
+            .clipShape(RoundedRectangle(cornerRadius: 20))
             .overlay(
-                RoundedRectangle(cornerRadius: 16)
-                    .stroke(isSelected ? Color.growinPrimary : .white.opacity(0.1), lineWidth: 1.5)
+                RoundedRectangle(cornerRadius: 20)
+                    .stroke(isSelected ? Color.stitchNeonIndigo : Color.white.opacity(0.1), lineWidth: 1.5)
             )
-            .foregroundStyle(isSelected ? .white : .secondary)
         }
         .buttonStyle(.plain)
     }
@@ -391,28 +417,31 @@ struct FeasibilityGauge: View {
     var body: some View {
         ZStack {
             Circle()
-                .stroke(Color.white.opacity(0.05), lineWidth: 10)
+                .stroke(Color.white.opacity(0.05), lineWidth: 8)
             
             Circle()
                 .trim(from: 0, to: score)
                 .stroke(
-                    LinearGradient(colors: [Color.growinOrange, Color.growinGreen], startPoint: .top, endPoint: .bottom),
+                    LinearGradient(
+                        colors: [Color.stitchNeonYellow, Color.stitchNeonGreen],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    ),
                     style: StrokeStyle(lineWidth: 10, lineCap: .round)
                 )
                 .rotationEffect(.degrees(-90))
-                .shadow(color: Color.growinGreen.opacity(0.3), radius: 5)
+                .shadow(color: Color.stitchNeonGreen.opacity(0.3), radius: 8)
             
-            VStack(spacing: 0) {
+            VStack(spacing: -2) {
                 Text("\(Int(score * 100))%")
-                    .font(.system(size: 20, weight: .heavy, design: .rounded))
+                    .font(.system(size: 24, weight: .heavy, design: .rounded))
                     .foregroundStyle(.white)
-                Text("CHANCE")
-                    .font(.caption2)
-                    .fontWeight(.bold)
-                    .foregroundStyle(.secondary)
+                Text("SCORE")
+                    .premiumTypography(.overline)
+                    .font(.system(size: 8))
             }
         }
-        .frame(width: 80, height: 80)
+        .frame(width: 90, height: 90)
     }
 }
 
@@ -420,37 +449,37 @@ struct AssetAllocationList: View {
     let instruments: [SuggestedInstrument]
     
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 16) {
             ForEach(instruments) { inst in
-                HStack {
+                HStack(spacing: 16) {
                     ZStack {
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(Color.blue.opacity(0.1))
-                            .frame(width: 36, height: 36)
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(Color.stitchNeonIndigo.opacity(0.1))
+                            .frame(width: 44, height: 44)
                         Text(inst.ticker.prefix(2))
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(.blue)
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(Color.stitchNeonIndigo)
                     }
                     
-                    VStack(alignment: .leading, spacing: 2) {
+                    VStack(alignment: .leading, spacing: 4) {
                         Text(inst.ticker)
-                            .font(.system(size: 14, weight: .bold))
-                            .foregroundStyle(.white)
+                            .premiumTypography(.title)
+                            .font(.system(size: 16))
                         Text(inst.name)
-                            .font(.system(size: 10))
+                            .premiumTypography(.caption)
                             .lineLimit(1)
-                            .foregroundStyle(.secondary)
                     }
                     
                     Spacer()
                     
-                    VStack(alignment: .trailing, spacing: 2) {
-                        Text("\(Int(inst.weight * 100))%")
-                            .font(.system(size: 14, weight: .black))
-                            .foregroundStyle(.white)
+                    VStack(alignment: .trailing, spacing: 4) {
+                        let weight = Double(truncating: inst.weight as NSNumber)
+                        Text("\(Int(weight * 100))%")
+                            .premiumTypography(.title)
+                            .foregroundStyle(Color.stitchNeonGreen)
                         Text(inst.category)
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(.blue.opacity(0.8))
+                            .premiumTypography(.overline)
+                            .font(.system(size: 8))
                     }
                 }
                 

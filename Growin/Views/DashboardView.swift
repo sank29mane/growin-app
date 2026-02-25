@@ -7,30 +7,15 @@ struct DashboardView: View {
     
     var body: some View {
         ZStack {
-            GradientBackground()
+            MeshBackground()
             
             ScrollView {
                 VStack(spacing: 24) {
                     // Error Banner
                     if let error = viewModel.errorMessage {
-                        GlassCard(cornerRadius: 12) {
-                            HStack {
-                                Image(systemName: "exclamationmark.triangle.fill")
-                                    .foregroundStyle(.red)
-                                Text(error)
-                                    .font(.system(size: 12, weight: .medium))
-                                    .foregroundStyle(.white)
-                                Spacer()
-                                Button(action: { Task { await viewModel.fetchPortfolioData() } }) {
-                                    Image(systemName: "arrow.clockwise")
-                                        .font(.system(size: 10, weight: .bold))
-                                }
-                                .buttonStyle(.plain)
-                            }
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 12)
+                        ErrorCard(message: error) {
+                            Task { await viewModel.fetchPortfolioData() }
                         }
-                        .padding(.horizontal)
                         .transition(.move(edge: .top).combined(with: .opacity))
                     }
 
@@ -50,14 +35,13 @@ struct DashboardView: View {
                         // Allocation Pie Chart
                         GlassCard {
                             VStack(alignment: .leading, spacing: 12) {
-                                Text("Allocation")
-                                    .font(.system(size: 11, weight: .bold))
-                                    .foregroundStyle(.secondary)
+                                Text("ALLOCATION VECTORS")
+                                    .premiumTypography(.overline)
                                 
                                 if !viewModel.allocationData.isEmpty {
                                     Chart(viewModel.allocationData) { item in
                                         SectorMark(
-                                            angle: .value("Value", item.value),
+                                            angle: .value("Value", Double(truncating: item.value as NSNumber)),
                                             innerRadius: .ratio(0.618),
                                             angularInset: 1.5
                                         )
@@ -66,6 +50,9 @@ struct DashboardView: View {
                                     }
                                     .frame(height: 150)
                                     .chartLegend(.hidden)
+                                    .chartForegroundStyleScale([
+                                        "Others": Color.textSecondary.opacity(0.3)
+                                    ])
                                 } else {
                                     ContentUnavailableView("No Data", systemImage: "chart.pie")
                                         .scaleEffect(0.5)
@@ -76,22 +63,24 @@ struct DashboardView: View {
                         // Performance Info
                         GlassCard {
                             VStack(alignment: .leading, spacing: 12) {
-                                Text("Performance")
-                                    .font(.system(size: 11, weight: .bold))
-                                    .foregroundStyle(.secondary)
+                                Text("PERFORMANCE DELTA")
+                                    .premiumTypography(.overline)
                                 
                                 if let pnl = viewModel.portfolioData?.summary?.totalPnl,
                                    let pnlPercent = viewModel.portfolioData?.summary?.totalPnlPercent {
                                     
                                     Spacer()
-                                    VStack(alignment: .leading) {
-                                        Text(String(format: "£%.2f", pnl))
-                                            .font(.system(size: 20, weight: .black))
-                                            .foregroundStyle(pnl >= 0 ? .green : .red)
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text("£\(pnl.formatted(.number.precision(.fractionLength(2))))")
+                                            .premiumTypography(.heading)
+                                            .foregroundStyle(pnl >= 0 ? Color.stitchNeonGreen : .growinRed)
                                         
-                                        Text(String(format: "%@%.2f%%", pnl >= 0 ? "+" : "", pnlPercent))
-                                            .font(.system(size: 14, weight: .bold))
-                                            .foregroundStyle(pnl >= 0 ? .green : .red)
+                                        HStack(spacing: 4) {
+                                            Image(systemName: pnl >= 0 ? "arrow.up.right" : "arrow.down.right")
+                                            Text("\(pnl >= 0 ? "+" : "")\(pnlPercent.formatted(.number.precision(.fractionLength(2))))%")
+                                        }
+                                        .premiumTypography(.title)
+                                        .foregroundStyle(pnl >= 0 ? Color.stitchNeonGreen : .growinRed)
                                     }
                                     Spacer()
                                 } else {
@@ -108,7 +97,7 @@ struct DashboardView: View {
                     HStack(spacing: 16) {
                         // INVEST Account Section
                         AccountSectionView(
-                            title: "INVEST ACCOUNT",
+                            title: "INVESTMENT PORTFOLIO",
                             accountData: viewModel.investData,
                             isLoading: viewModel.isLoading,
                             onPositionTap: { position in
@@ -118,7 +107,7 @@ struct DashboardView: View {
 
                         // ISA Account Section
                         AccountSectionView(
-                            title: "ISA ACCOUNT",
+                            title: "ISA STRATEGIC ASSETS",
                             accountData: viewModel.isaData,
                             isLoading: viewModel.isLoading,
                             onPositionTap: { position in
@@ -174,46 +163,50 @@ struct AccountSectionView: View {
         GlassCard {
             VStack(alignment: .leading, spacing: 16) {
                 Text(title)
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.7))
+                    .premiumTypography(.overline)
                     .padding(.horizontal)
 
                 if let data = accountData {
                     // Mini metrics for this account
                     VStack(spacing: 8) {
                         HStack(spacing: 8) {
+                            let val = data.summary.currentValue ?? Decimal(0)
                             MiniMetricCard(
-                                title: "Value",
-                                value: String(format: "£%.0f", data.summary.currentValue ?? 0),
+                                title: "EQUITY",
+                                value: "£\(val.formatted(.number.precision(.fractionLength(0))))",
                                 icon: "chart.bar.fill",
-                                color: .blue
+                                color: Color.stitchNeonIndigo
                             )
+                            
+                            let pnl = data.summary.totalPnl ?? Decimal(0)
                             MiniMetricCard(
-                                title: "P&L",
-                                value: String(format: "%@£%.0f", (data.summary.totalPnl ?? 0) >= 0 ? "+" : "", data.summary.totalPnl ?? 0),
+                                title: "DELTA",
+                                value: "\(pnl >= 0 ? "+" : "")£\(pnl.formatted(.number.precision(.fractionLength(0))))",
                                 icon: "arrow.up.right.circle.fill",
-                                color: (data.summary.totalPnl ?? 0) >= 0 ? .green : .red
+                                color: pnl >= 0 ? Color.stitchNeonGreen : .growinRed
                             )
                         }
                         HStack(spacing: 8) {
                             MiniMetricCard(
-                                title: "Return",
+                                title: "ALPHA",
                                 value: {
                                     if let pnl = data.summary.totalPnl, let invested = data.summary.totalInvested, invested > 0 {
                                         let percent = (pnl / invested) * 100
-                                        return String(format: "%.1f%%", percent)
+                                        return "\(percent.formatted(.number.precision(.fractionLength(1))))%"
                                     } else {
                                         return "N/A"
                                     }
                                 }(),
                                 icon: "percent",
-                                color: .purple
+                                color: Color.stitchNeonPurple
                             )
+                            
+                            let cash = data.summary.cashBalance?.free ?? Decimal(0)
                             MiniMetricCard(
-                                title: "Cash",
-                                value: String(format: "£%.0f", data.summary.cashBalance?.free ?? 0),
+                                title: "LIQUIDITY",
+                                value: "£\(cash.formatted(.number.precision(.fractionLength(0))))",
                                 icon: "sterlingsign.circle.fill",
-                                color: .orange
+                                color: Color.stitchNeonYellow
                             )
                         }
                     }
@@ -223,13 +216,12 @@ struct AccountSectionView: View {
                     if !data.allocationData.isEmpty {
                         GlassCard {
                             VStack(alignment: .leading, spacing: 8) {
-                                Text("Allocation")
-                                    .font(.system(size: 11, weight: .bold))
-                                    .foregroundStyle(.secondary)
+                                Text("CONCENTRATION")
+                                    .premiumTypography(.overline)
 
                                 Chart(data.allocationData) { item in
                                     SectorMark(
-                                        angle: .value("Value", item.value),
+                                        angle: .value("Value", Double(truncating: item.value as NSNumber)),
                                         innerRadius: .ratio(0.618),
                                         angularInset: 1.5
                                     )
@@ -244,9 +236,8 @@ struct AccountSectionView: View {
 
                     // Positions for this account
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Holdings")
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(.secondary)
+                        Text("STRATEGIC HOLDINGS")
+                            .premiumTypography(.overline)
                             .padding(.horizontal)
 
                         ScrollView {
@@ -274,5 +265,3 @@ struct AccountSectionView: View {
         }
     }
 }
-
-

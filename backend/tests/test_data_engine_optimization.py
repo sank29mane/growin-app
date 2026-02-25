@@ -118,6 +118,8 @@ async def test_get_historical_bars_yfinance_fallback_optimization():
 @pytest.mark.asyncio
 async def test_get_batch_bars_optimization():
     """Test get_batch_bars logic (splitting Alpaca vs UK, and batching)."""
+    from cache_manager import cache
+    cache.clear()
     
     with patch('data_engine.AlpacaClient.get_historical_bars') as mock_single_fetch:
         # Mock single fetch to return specific data based on ticker

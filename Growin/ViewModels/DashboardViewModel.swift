@@ -12,7 +12,7 @@ class DashboardViewModel {
 
     // Chart Data
     var pnlHistory: [Double] = [] 
-    var allocationData: [AllocationItem] = []
+    var allocationData: [GrowinAllocationData] = []
     
     private let dataService = PortfolioDataService()
     private var syncTask: Task<Void, Never>?
@@ -82,19 +82,19 @@ class DashboardViewModel {
     }
 
     private func createAccountSummary(from positions: [Position], accountType: String, totalSummary: PortfolioSummary?) -> AccountSummary {
-        let totalValue = positions.reduce(0.0) { sum, pos in
-            sum + ((pos.currentPrice ?? 0) * (pos.quantity ?? 0))
+        let totalValue = positions.reduce(Decimal(0)) { sum, pos in
+            sum + ((pos.currentPrice ?? Decimal(0)) * (pos.quantity ?? Decimal(0)))
         }
 
-        let totalInvested = positions.reduce(0.0) { sum, pos in
-            sum + ((pos.averagePrice ?? 0) * (pos.quantity ?? 0))
+        let totalInvested = positions.reduce(Decimal(0)) { sum, pos in
+            sum + ((pos.averagePrice ?? Decimal(0)) * (pos.quantity ?? Decimal(0)))
         }
 
-        let totalPnl = positions.reduce(0.0) { sum, pos in
-            sum + (pos.ppl ?? 0)
+        let totalPnl = positions.reduce(Decimal(0)) { sum, pos in
+            sum + (pos.ppl ?? Decimal(0))
         }
 
-        let cashBalance = totalSummary?.cashBalance ?? CashBalance(total: 0.0, free: 0.0)
+        let cashBalance = totalSummary?.cashBalance ?? CashBalance(total: Decimal(0), free: Decimal(0))
 
         return AccountSummary(
             totalInvested: totalInvested,
@@ -104,10 +104,10 @@ class DashboardViewModel {
         )
     }
 
-    private func calculateAllocationData(for positions: [Position]) -> [AllocationItem] {
-        let positionValues = positions.map { pos -> (Position, Double) in
-            let price = pos.currentPrice ?? 0.0
-            let qty = pos.quantity ?? 0.0
+    private func calculateAllocationData(for positions: [Position]) -> [GrowinAllocationData] {
+        let positionValues = positions.map { pos -> (Position, Decimal) in
+            let price = pos.currentPrice ?? Decimal(0)
+            let qty = pos.quantity ?? Decimal(0)
             return (pos, price * qty)
         }
 
@@ -115,15 +115,15 @@ class DashboardViewModel {
         let top5 = sorted.prefix(5)
 
         var allocationData = top5.map { (pos, val) in
-            AllocationItem(label: pos.ticker ?? "Unknown", value: val)
+            GrowinAllocationData(label: pos.ticker ?? "Unknown", value: val)
         }
 
         if positionValues.count > 5 {
-            let otherVal = sorted.dropFirst(5).reduce(0.0) { result, item in
+            let otherVal = sorted.dropFirst(5).reduce(Decimal(0)) { result, item in
                 result + item.1
             }
             if otherVal > 0 {
-                allocationData.append(AllocationItem(label: "Others", value: otherVal))
+                allocationData.append(GrowinAllocationData(label: "Others", value: otherVal))
             }
         }
 
@@ -139,11 +139,5 @@ class DashboardViewModel {
 struct AccountData {
     let summary: AccountSummary
     let positions: [Position]
-    let allocationData: [AllocationItem]
-}
-
-struct AllocationItem: Identifiable {
-    let id = UUID()
-    let label: String
-    let value: Double
+    let allocationData: [GrowinAllocationData]
 }

@@ -75,18 +75,20 @@ US_EXCLUSIONS = {
     "F", "T", "C", "V", "Z", "O", "D", "R", "K", "X", "S", "M", "A", "G"
 }
 
-LEVERAGED_STEMS = tuple(["LLOY", "BARC", "VOD", "HSBA", "TSCO", "BP", "AZN", "RR", "NG", "SGLN", "SSLN"])
+UK_COMMON_STEMS = tuple(["LLOY", "BARC", "VOD", "HSBA", "TSCO", "BP", "AZN", "RR", "NG", "SGLN", "SSLN", "GSK", "SHELL", "BATS", "AHT", "NWG", "GLEN"])
 
 def normalize_ticker(ticker: str) -> str:
     """
     SOTA Ticker Normalization: Resolves discrepancies between Trading212, 
     Yahoo Finance, Alpaca, and Finnhub via Rust-optimized core.
     """
-    if GROWIN_CORE_AVAILABLE:
+    # Dynamic check for growin_core to support test mocking
+    import sys
+    g_core = sys.modules.get("growin_core")
+    if g_core and hasattr(g_core, "normalize_ticker"):
         try:
-            return growin_core.normalize_ticker(ticker)
+            return g_core.normalize_ticker(ticker)
         except Exception:
-            # Fallback if Rust binding fails even if module exists
             pass
 
     # Fallback to robust Python logic if Rust fails or is missing
@@ -119,23 +121,36 @@ def normalize_ticker(ticker: str) -> str:
     
     # Check against common UK stock stems for "1" suffix
     if is_leveraged_etp:
-        if ticker.startswith(LEVERAGED_STEMS):
+        if ticker.startswith(UK_COMMON_STEMS):
             ticker = ticker[:-1]
             
     # 6. Global Exchange Logic (UK vs US)
     is_explicit_uk = "_EQ" in original and "_US" not in original
-    is_likely_uk = (len(ticker) <= 5 or ticker.endswith("L")) and ticker not in US_EXCLUSIONS
     
+    # Improved Likelihood check:
+    # 1. Must NOT be in US Exclusions
+    # 2. Must either be short (<= 3 chars) OR end in L (with reasonable length)
+    is_likely_uk = (len(ticker) <= 3 or (len(ticker) <= 5 and ticker.endswith("L"))) and ticker not in US_EXCLUSIONS
+    
+    # SOTA Fix: SMCI and other 4-char US tickers should NOT be likely UK
+    if len(ticker) == 4 and not ticker.endswith("L"):
+        is_likely_uk = False
+
+    # Force likelihood for known UK stems (LLOY, BARC, TSCO, etc)
+    if ticker.startswith(UK_COMMON_STEMS):
+        is_likely_uk = True
+
     # Heuristic for stripping extra 'L' (e.g. BARCL -> BARC)
     if is_likely_uk and ticker.endswith("L") and len(ticker) > 3 and ticker not in US_EXCLUSIONS:
-        # Safe heuristic: Strip L.
+        # Safe heuristic: Strip L if it's likely a UK suffix artifact
         ticker = ticker[:-1]
 
-    # Leveraged ETPs (Granular detection)
-    is_leveraged = bool(re.search(r'^(3|5|7)[A-Z]+', ticker)) or \
-                    bool(re.search(r'[A-Z]+(2|3|5|7)$', ticker))
+    # Leveraged ETPs (Granular detection - must have a digit and be short)
+    is_leveraged = (bool(re.search(r'^[357][A-Z]+', ticker)) or \
+                    bool(re.search(r'^[A-Z]+[2357]$', ticker))) and len(ticker) <= 5
 
-    if is_explicit_uk or is_likely_uk or is_leveraged:
+    # FINAL DECISION: Should we add .L?
+    if (is_explicit_uk or is_likely_uk or is_leveraged) and ticker not in US_EXCLUSIONS:
         # Ensure it doesn't already have .L (redundant check)
         if not ticker.endswith(".L") and "." not in ticker:
             return f"{ticker}.L"

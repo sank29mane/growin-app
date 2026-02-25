@@ -6,11 +6,7 @@ import sys
 from unittest.mock import MagicMock, patch
 from datetime import datetime, timezone
 
-# Mock yfinance before importing backend.data_engine or running the method
-sys.modules["yfinance"] = MagicMock()
-
 # We need to ensure we can import data_engine.
-# Depending on where this is run from, we might need to adjust path.
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -44,7 +40,7 @@ class TestTimezoneFix(unittest.IsolatedAsyncioTestCase):
 
         # Patch yfinance.Ticker to return our mock
         with patch("yfinance.Ticker", return_value=mock_ticker):
-            result = await client.get_historical_bars("AAPL", timeframe="1Day")
+            result = await client.get_historical_bars("AAPL", timeframe="1Day", limit=1)
 
             self.assertIsNotNone(result)
             bars = result["bars"]

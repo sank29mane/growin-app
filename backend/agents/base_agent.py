@@ -30,6 +30,10 @@ class TelemetryData(BaseModel):
     cached: bool = False
     tokens_used: Optional[int] = None
 
+    @property
+    def decision_id(self) -> Optional[str]:
+        return self.correlation_id
+
 
 class AgentResponse(BaseModel):
     """Standardized response from any agent"""
@@ -142,6 +146,10 @@ class BaseAgent(ABC):
                         correlation_id=c_id,
                         cached=True
                     )
+                    
+                    from telemetry_store import record_trace
+                    record_trace(response.telemetry)
+                    
                     return response
             
             # Execute actual analysis
@@ -168,6 +176,9 @@ class BaseAgent(ABC):
                 f"({latency:.1f}ms)"
             )
             
+            from telemetry_store import record_trace
+            record_trace(response.telemetry)
+            
             return response
             
         except Exception as e:
@@ -189,6 +200,9 @@ class BaseAgent(ABC):
                 correlation_id=c_id,
                 cached=False
             )
+            
+            from telemetry_store import record_trace
+            record_trace(response.telemetry)
             
             return response
     

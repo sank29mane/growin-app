@@ -51,12 +51,15 @@ def extract_ticker_from_text(text: str, find_last: bool = False) -> Optional[str
 def sanitize_nan(obj: Any) -> Any:
     """
     Recursively walk through an object and replace NaN/Inf values with 0.0.
-    This ensures JSON compatibility for FastAPI responses.
+    Also converts Decimal to string for JSON compatibility.
     """
+    from decimal import Decimal
     if isinstance(obj, float):
         if math.isnan(obj) or math.isinf(obj):
             return 0.0
         return obj
+    elif isinstance(obj, Decimal):
+        return str(obj)
     elif isinstance(obj, dict):
         return {k: sanitize_nan(v) for k, v in obj.items()}
     elif isinstance(obj, list):

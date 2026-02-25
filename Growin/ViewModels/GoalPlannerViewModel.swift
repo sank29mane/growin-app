@@ -1,18 +1,18 @@
 import SwiftUI
-import Combine
 
 @Observable @MainActor
 class GoalPlannerViewModel {
+    // SOTA: Using Double for Slider/Stepper bindings but converting to Decimal for logic
     var capital: Double = 5000
     var targetReturn: Double = 15
     var durationYears: Double = 5
     var selectedRisk: String = "MEDIUM"
     
-    var plan: GoalPlan?
-    var isLoading = false
-    var errorMsg: String?
-    var executionSuccess = false
-    var showExecutionConfirmation = false
+    private(set) var plan: GoalPlan?
+    private(set) var isLoading = false
+    private(set) var errorMsg: String?
+    private(set) var executionSuccess = false
+    var showExecutionConfirmation = false // Bound to alert state
     
     private let client = MarketClient()
     
@@ -23,10 +23,11 @@ class GoalPlannerViewModel {
         self.errorMsg = nil
         self.plan = nil
         
+        // Convert to Decimal for precision-safe networking
         let result = await client.createGoalPlan(
-            capital: capital,
-            targetReturn: targetReturn,
-            years: durationYears,
+            capital: Decimal(capital),
+            targetReturn: Decimal(targetReturn),
+            years: Decimal(durationYears),
             risk: selectedRisk
         )
         

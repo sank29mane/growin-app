@@ -1,19 +1,26 @@
 import SwiftUI
 
 extension Color {
-    // MARK: - Brand Core (macOS Optimized)
-    static let growinPrimary = Color(hex: "6366F1") // Indigo 500
-    static let growinSecondary = Color(hex: "06B6D4") // Cyan 500
-    static let growinAccent = Color(hex: "A855F7") // Purple 500
+    // MARK: - Brand Core (Stitch Design System)
+    static let growinPrimary = Color(hex: "6366F1") // Stitch Neon Indigo
+    static let growinSecondary = Color(hex: "06B6D4") // Stitch Neon Cyan
+    static let growinAccent = Color(hex: "A855F7") // Stitch Neon Purple
     
-    // MARK: - Backgrounds (Vibrant Slate)
-    static let growinDarkBg = Color(hex: "020617") // Slate 950
-    static let growinSurface = Color(hex: "0F172A") // Slate 900
+    // Stitch Neon Palette
+    static let stitchNeonIndigo = Color(hex: "6366F1")
+    static let stitchNeonCyan = Color(hex: "06B6D4")
+    static let stitchNeonPurple = Color(hex: "A855F7")
+    static let stitchNeonGreen = Color(hex: "10B981")
+    static let stitchNeonYellow = Color(hex: "F59E0B")
     
-    // MARK: - Mesh Components
-    static let meshIndigo = Color(hex: "312E81")
+    // MARK: - Backgrounds (Deep Charcoal)
+    static let growinDarkBg = Color(hex: "0A0A0B") // Stitch Deep Charcoal
+    static let growinSurface = Color(hex: "141416") // Stitch Surface
+    
+    // MARK: - Mesh Components (Stitch Palette)
+    static let meshIndigo = Color(hex: "1E1B4B")
     static let meshEmerald = Color(hex: "064E3B")
-    static let meshSlate = Color(hex: "1E293B")
+    static let meshSlate = Color(hex: "09090B")
     
     // MARK: - Gradients
     static let primaryGradient = LinearGradient(
@@ -35,12 +42,12 @@ extension Color {
         static let execution = Color(hex: "60A5FA") // Blue 400
     }
     
-    // MARK: - UI Utilities
+    // MARK: - UI Utilities (Premium Contrast)
     static let glassBorder = Color.white.opacity(0.12)
     static let glassShine = Color.white.opacity(0.06)
     static let textPrimary = Color.white
-    static let textSecondary = Color.white.opacity(0.65)
-    static let textTertiary = Color.white.opacity(0.4)
+    static let textSecondary = Color(hex: "A1A1AA") // Zinc 400
+    static let textTertiary = Color(hex: "71717A") // Zinc 500
     
     // Helper to init from Hex
     init(hex: String) {

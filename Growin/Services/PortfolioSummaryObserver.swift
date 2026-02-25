@@ -42,7 +42,7 @@ class PortfolioSummaryObserver {
             // Update Menu Bar Label
             if let pnl = decoded.summary?.totalPnl {
                 let sign = pnl >= 0 ? "+" : ""
-                self.menuBarLabel = "G: \(sign)£\(String(format: "%.0f", pnl))"
+                self.menuBarLabel = "G: \(sign)£\(pnl.formatted(.number.precision(.fractionLength(0))))"
                 self.menuBarIcon = pnl >= 0 ? "chart.line.uptrend.xyaxis" : "chart.line.downtrend.xyaxis"
             }
         } catch {

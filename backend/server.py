@@ -79,6 +79,15 @@ async def lifespan(app: FastAPI):
     logger.info(f"🧠 ANE Acceleration: {'Enabled' if _ane_enabled else 'Disabled'}")
     
     # 1. Ensure default MCP servers are configured
+    def is_docker_available():
+        try:
+            import docker
+            client = docker.from_env()
+            client.ping()
+            return True
+        except Exception:
+            return False
+
     default_servers = [
         {
             "name": "Trading 212",
@@ -96,15 +105,19 @@ async def lifespan(app: FastAPI):
             "env": {"HF_TOKEN": os.getenv("HF_TOKEN", "")},
             "url": None,
         },
-        {
+    ]
+
+    if is_docker_available():
+        default_servers.append({
             "name": "Docker Sandbox",
             "type": "stdio",
             "command": sys.executable,
             "args": ["docker_mcp_server.py"],
             "env": {},
             "url": None,
-        },
-    ]
+        })
+    else:
+        logger.info("ℹ️  Docker Sandbox MCP disabled (Docker library or daemon unavailable)")
 
     for server in default_servers:
         try:

@@ -62,10 +62,11 @@ struct GrowinApp: App {
         MenuBarExtra(portfolioObserver.menuBarLabel, systemImage: portfolioObserver.menuBarIcon) {
             Group {
                 if let summary = portfolioObserver.lastSummary {
-                    Text("Total Value: £\(String(format: "%.2f", summary.currentValue ?? 0))")
+                    let totalVal = summary.currentValue ?? 0
+                    Text("Total Value: £\(totalVal.formatted(.number.precision(.fractionLength(2))))")
                     
                     let pnl = summary.totalPnl ?? 0
-                    Text("Day's P&L: \(pnl >= 0 ? "+" : "")£\(String(format: "%.2f", pnl))")
+                    Text("Day's P&L: \(pnl >= 0 ? "+" : "")£\(pnl.formatted(.number.precision(.fractionLength(2))))")
                         .foregroundColor(pnl >= 0 ? .green : .red)
                     
                     Divider()
@@ -98,7 +99,6 @@ struct GrowinApp: App {
     }
     
     private func checkBackendConnection() {
-        // ... (existing implementation)
         Task {
             let url = URL(string: "\(AppConfig.shared.baseURL)/health")!
             do {

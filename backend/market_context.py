@@ -27,11 +27,11 @@ def to_camel(string: str) -> str:
 class TimeSeriesItem(BaseModel):
     """Single data point for a chart"""
     timestamp: int  # ms
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: Optional[float] = None
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Optional[Decimal] = None
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
@@ -39,9 +39,9 @@ class TimeSeriesItem(BaseModel):
 class ForecastData(BaseModel):
     """TTM forecast predictions"""
     ticker: str
-    forecast_24h: float
-    forecast_48h: Optional[float] = None
-    forecast_7d: Optional[float] = None
+    forecast_24h: Decimal
+    forecast_48h: Optional[Decimal] = None
+    forecast_7d: Optional[Decimal] = None
     confidence: str = "MEDIUM"  # HIGH, MEDIUM, LOW
     trend: str = "NEUTRAL"  # BULLISH, BEARISH, NEUTRAL
     algorithm: str = "Unknown" # e.g. "TTM-Zero", "LinearRegression"
@@ -56,12 +56,12 @@ class ForecastData(BaseModel):
 class QuantData(BaseModel):
     """Technical indicators from QuantAgent"""
     ticker: str
-    rsi: Optional[float] = None
-    macd: Optional[Dict[str, float]] = None
-    bollinger_bands: Optional[Dict[str, float]] = None
+    rsi: Optional[Decimal] = None
+    macd: Optional[Dict[str, Decimal]] = None
+    bollinger_bands: Optional[Dict[str, Decimal]] = None
     signal: Signal = Signal.NEUTRAL
-    support_level: Optional[float] = None
-    resistance_level: Optional[float] = None
+    support_level: Optional[Decimal] = None
+    resistance_level: Optional[Decimal] = None
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
@@ -128,13 +128,13 @@ class NewsArticle(BaseModel):
     description: Optional[str] = None
     source: str
     url: Optional[str] = None
-    sentiment: Optional[float] = None
+    sentiment: Optional[Decimal] = None
 
 
 class ResearchData(BaseModel):
     """News and sentiment analysis"""
     ticker: str
-    sentiment_score: float = 0.0  # -1 to 1
+    sentiment_score: Decimal = Decimal(0)  # -1 to 1
     sentiment_label: str = "NEUTRAL"  # BULLISH, BEARISH, NEUTRAL
     articles: List[NewsArticle] = []
     top_headlines: List[str] = []  # For backward compatibility
@@ -144,8 +144,8 @@ class ResearchData(BaseModel):
 class SocialData(BaseModel):
     """Social sentiment data structure"""
     ticker: str
-    sentiment_score: float = 0.0  # -1 to 1
-    sentiment_label: str = "NEUTRAL"
+    sentiment_score: Decimal = Decimal(0)  # -1 to 1
+    sentiment_label: str = "NEUTRAL"  # BULLISH, BEARISH, NEUTRAL
     mention_volume: str = "LOW" # LOW, MEDIUM, HIGH
     top_discussions: List[str] = []
     platforms: List[str] = []
@@ -166,17 +166,17 @@ class WhaleData(BaseModel):
 
 class GoalData(BaseModel):
     """Goal-based investment plan data"""
-    target_returns_percent: float
-    duration_years: float
-    initial_capital: float
+    target_returns_percent: Decimal
+    duration_years: Decimal
+    initial_capital: Decimal
     risk_profile: str  # LOW, MEDIUM, HIGH
-    feasibility_score: float = 0.0  # 0 to 1
-    optimal_weights: Dict[str, float] = {}  # ticker: weight
-    expected_annual_return: float = 0.0
-    expected_volatility: float = 0.0
-    sharpe_ratio: float = 0.0
-    simulated_final_value_avg: float = 0.0
-    probability_of_success: float = 0.0
+    feasibility_score: Decimal = Decimal(0)  # 0 to 1
+    optimal_weights: Dict[str, Decimal] = {}  # ticker: weight
+    expected_annual_return: Decimal = Decimal(0)
+    expected_volatility: Decimal = Decimal(0)
+    sharpe_ratio: Decimal = Decimal(0)
+    simulated_final_value_avg: Decimal = Decimal(0)
+    probability_of_success: Decimal = Decimal(0)
     suggested_instruments: List[Dict[str, Any]] = []
     simulated_growth_path: List[Dict[str, Any]] = []  # List of {year, value, target}
     rebalancing_strategy: Optional[Dict[str, Any]] = None
@@ -289,4 +289,4 @@ class MarketContext(BaseModel):
     def serialize_nested(self, v, _info):
         if v is None:
             return None
-        return v.model_dump()
+        return v.model_dump(mode='json')

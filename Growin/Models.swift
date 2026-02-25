@@ -67,17 +67,17 @@ struct GSpecialistAgentsStatus {
 // MARK: - Goal Planning Models
 
 struct GoalPlan: Codable {
-    let targetReturnsPercent: Double
-    let durationYears: Double
-    let initialCapital: Double
+    let targetReturnsPercent: Decimal
+    let durationYears: Decimal
+    let initialCapital: Decimal
     let riskProfile: String
-    let feasibilityScore: Double
-    let optimalWeights: [String: Double]
-    let expectedAnnualReturn: Double
-    let expectedVolatility: Double
-    let sharpeRatio: Double
-    let simulatedFinalValueAvg: Double
-    let probabilityOfSuccess: Double
+    let feasibilityScore: Decimal
+    let optimalWeights: [String: Decimal]
+    let expectedAnnualReturn: Decimal
+    let expectedVolatility: Decimal
+    let sharpeRatio: Decimal
+    let simulatedFinalValueAvg: Decimal
+    let probabilityOfSuccess: Decimal
     let suggestedInstruments: [SuggestedInstrument]
     let simulatedGrowthPath: [GrowthPoint]?
     let rebalancingStrategy: RebalancingStrategy?
@@ -105,16 +105,16 @@ struct GoalPlan: Codable {
 struct GrowthPoint: Codable, Identifiable {
     var id: Double { year }
     let year: Double
-    let value: Double
-    let target: Double
+    let value: Decimal
+    let target: Decimal
 }
 
 struct SuggestedInstrument: Codable, Identifiable {
     var id: String { ticker }
     let ticker: String
     let name: String
-    let weight: Double
-    let expectedReturn: Double
+    let weight: Decimal
+    let expectedReturn: Decimal
     let category: String
     
     enum CodingKeys: String, CodingKey {
@@ -165,9 +165,9 @@ struct WhaleData: Codable {
 }
 struct WhaleTrade: Codable, Identifiable {
     var id: Double { Double(timestamp) }
-    let price: Double
-    let size: Double
-    let valueUsd: Double
+    let price: Decimal
+    let size: Decimal
+    let valueUsd: Decimal
     let timestamp: Int
     let isWhale: Bool
     
@@ -180,9 +180,9 @@ struct WhaleTrade: Codable, Identifiable {
 
 struct ForecastData: Codable {
     let ticker: String
-    let forecast24h: Double
-    let forecast48h: Double?
-    let forecast7d: Double?
+    let forecast24h: Decimal
+    let forecast48h: Decimal?
+    let forecast7d: Decimal?
     let confidence: String
     let trend: String
     let algorithm: String?
@@ -203,11 +203,11 @@ struct ForecastData: Codable {
 struct QuantData: Codable {
     let ticker: String
     let signal: String
-    let rsi: Double?
-    let macd: [String: Double]?
-    let bollingerBands: [String: Double]?
-    let supportLevel: Double?
-    let resistanceLevel: Double?
+    let rsi: Decimal?
+    let macd: [String: Decimal]?
+    let bollingerBands: [String: Decimal]?
+    let supportLevel: Decimal?
+    let resistanceLevel: Decimal?
     
     enum CodingKeys: String, CodingKey {
         case ticker, signal, rsi, macd
@@ -219,9 +219,9 @@ struct QuantData: Codable {
 
 struct ResearchData: Codable {
     let ticker: String
-    let sentimentScore: Double
+    let sentimentScore: Decimal
     let sentimentLabel: String
-    let topHeadlines: [String]
+    let topHeadlines: [String]?
     
     enum CodingKeys: String, CodingKey {
         case ticker
@@ -233,7 +233,7 @@ struct ResearchData: Codable {
 
 struct PriceData: Codable {
     let ticker: String
-    let currentPrice: Double?
+    let currentPrice: Decimal?
     let currency: String?
     let source: String?
     let validated: Bool?
@@ -247,16 +247,18 @@ struct PriceData: Codable {
 }
 
 struct PortfolioData: Codable {
-    let totalValue: Double?
-    let totalPnL: Double?
+    let totalValue: Decimal?
+    let totalPnL: Decimal?
     let pnlPercent: Double?
-    let cashBalance: CashBalance?
+    let netDeposits: Decimal?
+    let cashBalance: [String: Decimal]?
     let snapshot: PortfolioSnapshot?
     
     enum CodingKeys: String, CodingKey {
         case totalValue = "total_value"
         case totalPnL = "total_pnl"
         case pnlPercent = "pnl_percent"
+        case netDeposits = "net_deposits"
         case cashBalance = "cash_balance"
         case snapshot
     }

@@ -29,12 +29,6 @@ async def mock_call_tool(name, args):
 
 mock_mcp_client.call_tool = mock_call_tool
 
-# Create a mock module for app_context
-mock_app_context = MagicMock()
-mock_app_context.state.mcp_client = mock_mcp_client
-sys.modules['app_context'] = mock_app_context
-# --- MOCKING END ---
-
 from agents.goal_planner_agent import GoalPlannerAgent
 
 # Configure logging

@@ -66,7 +66,9 @@ fn normalize_ticker(ticker: String) -> PyResult<String> {
         "AAPL", "MSFT", "GOOG", "AMZN", "NVDA", "TSLA", "META", "NFLX",
         "AMD", "INTC", "PYPL", "ADBE", "CSCO", "PEP", "COST", "AVGO", "QCOM", "TXN",
         "ORCL", "CRM", "IBM", "UBER", "ABNB", "SNOW", "PLTR", "SQ", "SHOP", "SPOT",
-        "GOOGL", "JPM", "BAC", "WFC", "C", "GS", "MS", "BLK", "AXP", "V", "MA", "COF", "USB",
+        "GOOGL", "SMCI", "MSTR", "COIN", "HOOD", "ARM", "DKNG", "SOFI", "MARA", "RIOT",
+        "CRWD", "PANW", "NET", "DDOG", "ZS", "TEAM", "MDB", "OKTA", "DOCU",
+        "JPM", "BAC", "WFC", "C", "GS", "MS", "BLK", "AXP", "V", "MA", "COF", "USB",
         "CAT", "DE", "GE", "GM", "F", "BA", "LMT", "RTX", "HON", "UPS", "FDX", "UNP", "MMM",
         "WMT", "TGT", "HD", "LOW", "MCD", "SBUX", "NKE", "KO", "PEP", "PG", "CL", "MO", "PM", "DIS", "CMCSA",
         "JNJ", "PFE", "MRK", "ABBV", "LLY", "UNH", "CVS", "AMGN", "GILD", "BMY", "ISRG", "TMO", "ABT", "DHR",
@@ -76,7 +78,12 @@ fn normalize_ticker(ticker: String) -> PyResult<String> {
     ];
 
     let is_explicit_uk = original.contains("_EQ") && !original.contains("_US");
-    let is_likely_uk = (normalized.len() <= 5 || normalized.ends_with('L')) && !us_exclusions.contains(&normalized.as_str());
+    let mut is_likely_uk = (normalized.len() <= 3 || (normalized.len() <= 5 && normalized.ends_with('L'))) && !us_exclusions.contains(&normalized.as_str());
+    
+    // Additional check: 4-char tickers not ending in L are likely US (unless explicit EQ)
+    if normalized.len() == 4 && !normalized.ends_with('L') {
+        is_likely_uk = false;
+    }
 
     if is_likely_uk && normalized.ends_with('L') && normalized.len() > 3 && !us_exclusions.contains(&normalized.as_str()) {
         normalized.pop();

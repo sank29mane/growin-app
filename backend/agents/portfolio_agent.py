@@ -190,7 +190,7 @@ class PortfolioAgent(BaseAgent):
         """Retrieve the currently cached portfolio data."""
         return cache.get("current_portfolio")
 
-    def update_local_portfolio(self, ticker: str, quantity: float, price: float, side: str):
+    def update_local_portfolio(self, ticker: str, quantity: Any, price: Any, side: str):
         """
         Iteratively update the cached portfolio after a trade.
         This provides immediate feedback without waiting for a full T212 sync.

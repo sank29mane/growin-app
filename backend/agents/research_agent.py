@@ -350,30 +350,14 @@ class ResearchAgent(BaseAgent):
     async def _generate_smart_query(self, user_query: str) -> Optional[Dict]:
         """Use LLM to generate optimized NewsData.io query parameters."""
         try:
-            from lm_studio_client import LMStudioClient
+            from .llm_factory import LLMFactory
             
-            # Try to get LLM config
-            api_key = os.getenv("OPENAI_API_KEY")
+            # 1. Initialize LLM (defaults to granite-tiny for fast routing/query gen)
+            model_name = os.getenv("COORDINATOR_MODEL", "granite-tiny")
+            llm = await LLMFactory.create_llm(model_name)
             
-            # Use LMStudioClient if no OpenAI key, or if specifically configured
-            client = LMStudioClient()
-            
-            # Check if LM Studio is up
-            if not await client.check_connection():
-                if not api_key:
-                    return None
-                # Fallback to OpenAI if LM Studio is down but key exists
-                from openai import AsyncOpenAI
-                openai_client = AsyncOpenAI(api_key=api_key)
-                
-                # ... existing OpenAI logic ...
-                # (For now I'll keep it simple and focus on LMStudio path)
-            
-            # 1. Detect model
-            models = await client.list_models()
-            if not models:
+            if not llm:
                 return None
-            model_id = models[0]["id"]
 
             # 2. Read prompt (Cached + Async)
             if not self._prompt_template:
@@ -390,15 +374,19 @@ class ResearchAgent(BaseAgent):
             
             prompt = self._prompt_template.replace("{{query}}", user_query)
             
-            # 3. Chat
-            resp = await client.chat(
-                model_id=model_id,
-                input_text=prompt,
-                system_prompt="You are a helpful API query generator.",
-                temperature=0
-            )
+            # 3. Invoke LLM
+            content = ""
+            if hasattr(llm, "ainvoke"):
+                from langchain_core.messages import HumanMessage
+                response = await llm.ainvoke([HumanMessage(content=prompt)])
+                content = response.content if hasattr(response, 'content') else str(response)
+            elif hasattr(llm, "chat"):
+                resp = await llm.chat(model_id=model_name, input_text=prompt, temperature=0)
+                content = resp.get("content", "")
             
-            content = resp.get("content", "")
+            if not content:
+                return None
+
             # Extract JSON
             import json
             # Handle potential markdown fence

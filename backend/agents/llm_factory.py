@@ -41,12 +41,12 @@ class LLMFactory:
             # Using standard provider logic below.
             
             if not llm_instance:
+                is_lmstudio_hint = "lmstudio" in model_lower
                 if provider == "lmstudio" or (not provider and is_lmstudio_hint):
-                    # ... (rest of LM Studio logic)
-                try:
-                    llm_instance = await LLMFactory._create_lmstudio(model_name)
-                except Exception as lm_err:
-                    logger.warning(f"LM Factory: LM Studio creation failed for {model_name}: {lm_err}")
+                    try:
+                        llm_instance = await LLMFactory._create_lmstudio(model_name)
+                    except Exception as lm_err:
+                        logger.warning(f"LM Factory: LM Studio creation failed for {model_name}: {lm_err}")
                     # If provider was explicitly lmstudio, we should probably fall through to auto-detect later
                     # but if it was just a hint, we keep going to other providers
 

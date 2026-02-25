@@ -16,7 +16,7 @@ struct RichDataView: View {
                 }
             }
             
-            // 2. Interactive Chart (New)
+            // 2. Interactive Chart
             if let history = data.price?.historySeries, 
                let forecast = data.forecast?.rawSeries,
                let ticker = data.price?.ticker {
@@ -33,7 +33,7 @@ struct RichDataView: View {
                 TechnicalCard(quant: quant)
             }
             
-            // 5. Whale Activity (New)
+            // 5. Whale Activity
             if let whale = data.whale {
                 WhaleCard(whale: whale)
             }
@@ -86,10 +86,14 @@ struct WhaleCard: View {
                     HStack(spacing: 8) {
                         ForEach(trades.prefix(5)) { trade in
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("$\(trade.valueUsd / 1000, specifier: "%.0f")k")
+                                // Decimal conversion for formatting
+                                let valueK = Double(truncating: trade.valueUsd as NSNumber) / 1000.0
+                                Text("$\(String(format: "%.0f", valueK))k")
                                     .font(.system(size: 12, weight: .bold))
                                     .foregroundStyle(.white)
-                                Text("\(trade.size, specifier: "%.0f") shares")
+                                
+                                let size = Double(truncating: trade.size as NSNumber)
+                                Text("\(String(format: "%.0f", size)) shares")
                                     .font(.system(size: 9))
                                     .foregroundStyle(.secondary)
                             }
@@ -118,7 +122,9 @@ struct PriceCard: View {
                 Text(price.ticker)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text(verbatim: "\(price.currency ?? "£") \(String(format: "%.2f", price.currentPrice ?? 0.0))")
+                
+                let priceValue = Double(truncating: (price.currentPrice ?? Decimal(0)) as NSNumber)
+                Text(verbatim: "\(price.currency ?? "£") \(String(format: "%.2f", priceValue))")
                     .font(.system(size: 16, weight: .bold))
                     .foregroundStyle(.white)
             }
@@ -182,12 +188,11 @@ struct ForecastCard: View {
             }
             
             HStack(alignment: .lastTextBaseline) {
-                Text(String(format: "£%.2f", forecast.forecast24h))
+                let forecastValue = Double(truncating: forecast.forecast24h as NSNumber)
+                Text(String(format: "£%.2f", forecastValue))
                     .font(.system(size: 20, weight: .bold))
                     .foregroundStyle(.white)
             }
-            
-            // Simple trend bar could go here
         }
         .padding(12)
         .background(Color.blue.opacity(0.1))
@@ -209,11 +214,13 @@ struct TechnicalCard: View {
                 MetricItem(label: "Signal", value: quant.signal)
                 
                 if let rsi = quant.rsi {
-                    MetricItem(label: "RSI", value: String(format: "%.0f", rsi))
+                    let rsiVal = Double(truncating: rsi as NSNumber)
+                    MetricItem(label: "RSI", value: String(format: "%.0f", rsiVal))
                 }
                 
                 if let support = quant.supportLevel {
-                    MetricItem(label: "Support", value: String(format: "%.1f", support))
+                    let supportVal = Double(truncating: support as NSNumber)
+                    MetricItem(label: "Support", value: String(format: "%.1f", supportVal))
                 }
             }
         }
@@ -242,7 +249,9 @@ struct PortfolioSnapshotCard: View {
                     Text("Total Value")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Text(String(format: "£%.2f", portfolio.totalValue ?? 0.0))
+                    
+                    let totalValue = Double(truncating: (portfolio.totalValue ?? Decimal(0)) as NSNumber)
+                    Text(String(format: "£%.2f", totalValue))
                         .font(.system(size: 18, weight: .bold))
                         .foregroundStyle(.white)
                 }
@@ -261,13 +270,15 @@ struct PortfolioSnapshotCard: View {
                 
                 Spacer()
                 
-                // Cash Balance (if available)
-                if let cash = portfolio.cashBalance?.total {
+                // Cash Balance
+                if let cashDict = portfolio.cashBalance, let cash = cashDict["total"] {
                     VStack(alignment: .trailing, spacing: 4) {
                         Text("Cash")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        Text(String(format: "£%.2f", cash))
+                        
+                        let cashVal = Double(truncating: cash as NSNumber)
+                        Text(String(format: "£%.2f", cashVal))
                             .font(.system(size: 16, weight: .bold))
                             .foregroundStyle(.cyan)
                     }

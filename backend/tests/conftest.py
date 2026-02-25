@@ -7,20 +7,15 @@ import pytest
 # Ensure backend is in path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Mock heavy dependencies immediately upon loading conftest
-# Only mock if they are not installed
+# Mock truly heavy/missing dependencies if they aren't installed
 modules_to_mock = [
     "mcp", "mcp.server", "mcp.server.stdio", "mcp.types",
     "mcp.client", "mcp.client.stdio", "mcp.client.sse",
-    "chromadb", "chromadb.config", "chromadb.utils",
     "granite_tsfm",
     "langchain", "langchain_core", "langchain_openai",
     "langchain_anthropic", "langchain_google_genai", "langchain_ollama",
-    # "yfinance", "pandas", "numpy", # These are actually used in tests, so don't mock if available
-    "sklearn", "sklearn.preprocessing", "scikit-learn", "xgboost", "prophet",
-    "scipy", "scipy.optimize",
-    "torch", "transformers", "mlx", "mlx_lm", "duckdb",
-    "rapidfuzz", "newsapi", "tavily", "vaderSentiment", "psutil", "alpaca_trade_api"
+    "chromadb", "duckdb",
+    "newsapi", "tavily", "vaderSentiment", "psutil"
 ]
 
 for module in modules_to_mock:
@@ -33,10 +28,29 @@ for module in modules_to_mock:
         # Handle submodules like mcp.server by checking base package first
         base_module = module.split('.')[0]
         if importlib.util.find_spec(base_module) is None:
-            sys.modules[module] = MagicMock()
+            mock = MagicMock()
+            
+            # Helper to make mocks async-friendly
+            def make_async(m):
+                m.ainvoke = AsyncMock(return_value=MagicMock(content="Mocked LLM Response"))
+                m.generate_response = AsyncMock(return_value="Mocked response")
+                m.forecast = AsyncMock(return_value={"forecast": []})
+                m.analyze = AsyncMock(return_value=MagicMock(success=True, data={}, agent_name="MockAgent"))
+                m.execute = AsyncMock(return_value=MagicMock(success=True, data={}, agent_name="MockAgent"))
+                m.process_query = AsyncMock(return_value=MagicMock(user_context={}, agents_executed=[]))
+                m.make_decision = AsyncMock(return_value="Mocked Decision")
+            
+            make_async(mock)
+            make_async(mock.return_value)
+            # Handle one more level for common factory patterns
+            make_async(mock.return_value.return_value)
+            
+            sys.modules[module] = mock
     except (ImportError, AttributeError, ValueError):
         # If any error during check, assume missing and mock
-        sys.modules[module] = MagicMock()
+        mock = MagicMock()
+        mock.ainvoke = AsyncMock(return_value=MagicMock(content="Mocked LLM Response"))
+        sys.modules[module] = mock
 
 from app_context import state
 

@@ -9,25 +9,17 @@ struct InteractiveChartView: View {
     let showTTMIndicator: Bool = true
 
     @State private var selectedDate: Date? = nil
-    @State private var selectedPrice: Double? = nil
+    @State private var selectedPrice: Decimal? = nil
     @State private var selectedType: String? = nil
-    @State private var sortedData: [(Date, Double, String)] = []
+    @State private var sortedData: [(Date, Decimal, String)] = []
 
     // TTM Model metadata
     var hasTTMData: Bool {
         !forecast.isEmpty
     }
 
-    var ttmForecastRange: (start: Date, end: Date)? {
-        guard let first = forecast.first, let last = forecast.last else { return nil }
-        return (
-            Date(timeIntervalSince1970: Double(first.timestamp) / 1000.0),
-            Date(timeIntervalSince1970: Double(last.timestamp) / 1000.0)
-        )
-    }
-
     private func updateSortedData() {
-        var result: [(Date, Double, String)] = []
+        var result: [(Date, Decimal, String)] = []
 
         let historyPoints = history.map {
             (Date(timeIntervalSince1970: Double($0.timestamp) / 1000.0), $0.close, "Historical")
@@ -52,7 +44,7 @@ struct InteractiveChartView: View {
                     .foregroundStyle(.white)
 
                 if let price = selectedPrice, let date = selectedDate {
-                    Text("\(price, specifier: "%.2f") at \(date, format: .dateTime.hour().minute().day())")
+                    Text("\(price.formatted(.number.precision(.fractionLength(2)))) at \(date, format: .dateTime.hour().minute().day())")
                         .font(.caption)
                         .foregroundStyle(.blue)
                 } else {
@@ -73,8 +65,8 @@ struct InteractiveChartView: View {
 
             // Enhanced Legend with TTM indicator
             HStack(spacing: 12) {
-                LegendItem(label: "History", color: .blue, dashed: false)
-                LegendItem(label: "TTM-R2 Forecast", color: .green, dashed: true)
+                LegendItem(label: "History", color: Color.blue, dashed: false)
+                LegendItem(label: "TTM-R2 Forecast", color: Color.green, dashed: true)
                 if showTTMIndicator && hasTTMData {
                     HStack(spacing: 4) {
                         Image(systemName: "brain.fill")
@@ -101,26 +93,26 @@ struct InteractiveChartView: View {
             ForEach(history) { item in
                 LineMark(
                     x: .value("Time", Date(timeIntervalSince1970: Double(item.timestamp) / 1000.0)),
-                    y: .value("Price", item.close),
+                    y: .value("Price", Double(truncating: item.close as NSNumber)),
                     series: .value("Type", "History")
                 )
-                .foregroundStyle(.blue)
+                .foregroundStyle(Color.blue)
                 .interpolationMethod(.catmullRom)
             }
 
-            // TTM-R2 Forecast Line with enhanced styling
+            // TTM-R2 Forecast Line
             ForEach(forecast) { item in
                 LineMark(
                     x: .value("Time", Date(timeIntervalSince1970: Double(item.timestamp) / 1000.0)),
-                    y: .value("Price", item.close),
+                    y: .value("Price", Double(truncating: item.close as NSNumber)),
                     series: .value("Type", "TTM Forecast")
                 )
-                .foregroundStyle(.green)
+                .foregroundStyle(Color.green)
                 .lineStyle(StrokeStyle(lineWidth: 3, dash: [8, 4]))
                 .interpolationMethod(.catmullRom)
             }
 
-            // Transition marker between historical and TTM data
+            // Transition marker
             if let lastHistoricalDate = history.last?.timestamp,
                let firstForecastDate = forecast.first?.timestamp,
                lastHistoricalDate < firstForecastDate {
@@ -138,7 +130,7 @@ struct InteractiveChartView: View {
                     }
             }
 
-            // Selection Rule with enhanced TTM information
+            // Selection Rule
             if let selectedDate = selectedDate {
                 RuleMark(x: .value("Selected", selectedDate))
                     .foregroundStyle(.white.opacity(0.3))
@@ -147,7 +139,7 @@ struct InteractiveChartView: View {
                         if let price = selectedPrice {
                             let isTTMData = selectedType == "TTM Forecast"
                             VStack(spacing: 2) {
-                                Text("\(price, specifier: "%.2f")")
+                                Text(price.formatted(.number.precision(.fractionLength(2))))
                                     .font(.caption)
                                     .fontWeight(.bold)
                                 Text(isTTMData ? "TTM-R2 Forecast" : "Historical")
@@ -202,9 +194,6 @@ struct InteractiveChartView: View {
                                 selectedType = nil
                             }
                     )
-                    .onHover { isHovering in
-                        // Could add hover effects here in the future
-                    }
             }
         }
     }
@@ -238,7 +227,6 @@ struct InteractiveChartView: View {
     private func resolvePrice(at date: Date) {
         if sortedData.isEmpty { return }
         
-        // Binary search for insertion point
         var l = 0
         var r = sortedData.count
         while l < r {
@@ -250,9 +238,7 @@ struct InteractiveChartView: View {
             }
         }
 
-        // l is the index of the first element >= date
         var closestIndex = 0
-
         if l == 0 {
             closestIndex = 0
         } else if l == sortedData.count {
@@ -260,7 +246,6 @@ struct InteractiveChartView: View {
         } else {
             let before = sortedData[l - 1]
             let after = sortedData[l]
-
             if abs(before.0.timeIntervalSince(date)) < abs(after.0.timeIntervalSince(date)) {
                 closestIndex = l - 1
             } else {

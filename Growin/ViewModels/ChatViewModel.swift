@@ -2,12 +2,11 @@ import Combine
 import Foundation
 import SwiftUI
 
-// Models moved to Models.swift
-
 @Observable @MainActor
 class ChatViewModel {
     var messages: [ChatMessageModel] = []
     var isProcessing = false
+    var streamingStatus: String?
     var errorMessage: String?
     var inputText: String = ""
     var selectedConversationId: String? = nil
@@ -16,8 +15,7 @@ class ChatViewModel {
     var missingConfigProvider: String?
 
     private let config = AppConfig.shared
-    
-    // Shared defaults for settings
+    private let agentClient = AgentClient()
     private let defaults = UserDefaults.standard
     
     init() {
@@ -58,6 +56,7 @@ class ChatViewModel {
     private func sendMessageAsync(_ message: String) async {
         isProcessing = true
         errorMessage = nil
+        streamingStatus = "Planning..."
         
         let userModel = ChatMessageModel(
             messageId: UUID().uuidString,
@@ -72,66 +71,78 @@ class ChatViewModel {
         )
         messages.append(userModel)
 
-        let url = URL(string: "\(config.baseURL)/api/chat/message")!
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // Create placeholder for assistant response
+        let assistantMessageId = UUID().uuidString
+        let assistantModel = ChatMessageModel(
+            messageId: assistantMessageId,
+            role: "assistant",
+            content: "",
+            timestamp: ISO8601DateFormatter().string(from: Date()),
+            toolCalls: nil,
+            toolCallId: nil,
+            agentName: "DecisionAgent",
+            modelName: effectiveModelName,
+            data: nil
+        )
+        messages.append(assistantModel)
 
+        var accumulatedContent = ""
+        
         do {
-            let chatRequest = GrowinChatMessage(
-                message: message,
+            let stream = agentClient.streamMessage(
+                query: message,
                 conversationId: selectedConversationId,
-                modelName: effectiveModelName,
-                coordinatorModel: defaults.string(forKey: "selectedCoordinatorModel") ?? "granite-tiny",
-                apiKeys: [
-                    "openai": defaults.string(forKey: "openaiApiKey") ?? "",
-                    "gemini": defaults.string(forKey: "geminiApiKey") ?? ""
-                ],
-                accountType: selectedAccountType == "all" ? nil : selectedAccountType
+                model: effectiveModelName
             )
-
-            request.httpBody = try JSONEncoder().encode(chatRequest)
-
-            let configuration = URLSessionConfiguration.default
-            configuration.timeoutIntervalForRequest = 120
-            let session = URLSession(configuration: configuration)
-
-            let (data, response) = try await session.data(for: request)
-
-            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
-                throw URLError(.badServerResponse)
+            
+            for await event in stream {
+                switch event {
+                case .token(let token):
+                    accumulatedContent += token
+                    updateAssistantMessage(id: assistantMessageId, content: accumulatedContent)
+                case .status(let status):
+                    streamingStatus = status
+                case .meta(let meta):
+                    if let convId = meta["conversation_id"]?.value as? String {
+                        if selectedConversationId == nil {
+                            selectedConversationId = convId
+                            defaults.set(convId, forKey: "currentConversationId")
+                        }
+                    }
+                case .error(let error):
+                    errorMessage = error
+                case .done:
+                    isProcessing = false
+                    streamingStatus = nil
+                }
             }
-
-            let chatResponse = try JSONDecoder().decode(ChatResponse.self, from: data)
-
-            if selectedConversationId == nil {
-                selectedConversationId = chatResponse.conversationId
-                defaults.set(chatResponse.conversationId, forKey: "currentConversationId")
-            }
-
-            messages.append(
-                ChatMessageModel(
-                    messageId: UUID().uuidString,
-                    role: "assistant",
-                    content: chatResponse.response,
-                    timestamp: chatResponse.timestamp,
-                    toolCalls: chatResponse.toolCalls,
-                    toolCallId: nil,
-                    agentName: chatResponse.agent,
-                    modelName: nil,
-                    data: chatResponse.data
-                ))
-
-            isProcessing = false
-
-            if messages.count >= 2 && messages.count <= 4 {
-                await generateTitle(for: chatResponse.conversationId)
+            
+            if messages.count >= 2 && messages.count <= 4, let convId = selectedConversationId {
+                await generateTitle(for: convId)
             }
 
         } catch {
             errorMessage = "Failed to send message: \(error.localizedDescription)"
             isProcessing = false
+            streamingStatus = nil
             inputText = message
+        }
+    }
+
+    private func updateAssistantMessage(id: String, content: String) {
+        if let index = messages.firstIndex(where: { $0.messageId == id }) {
+            let old = messages[index]
+            messages[index] = ChatMessageModel(
+                messageId: old.messageId,
+                role: old.role,
+                content: content,
+                timestamp: old.timestamp,
+                toolCalls: old.toolCalls,
+                toolCallId: old.toolCallId,
+                agentName: old.agentName,
+                modelName: old.modelName,
+                data: old.data
+            )
         }
     }
 

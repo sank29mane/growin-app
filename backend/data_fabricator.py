@@ -125,11 +125,11 @@ class DataFabricator:
                 history_series = [
                     TimeSeriesItem(
                         timestamp=int(b['t']),
-                        open=float(b['o']),
-                        high=float(b['h']),
-                        low=float(b['l']),
-                        close=float(b['c']),
-                        volume=float(b['v'])
+                        open=create_decimal(b['o']),
+                        high=create_decimal(b['h']),
+                        low=create_decimal(b['l']),
+                        close=create_decimal(b['c']),
+                        volume=create_decimal(b['v'])
                     ) for b in frayed_bars
                 ]
 

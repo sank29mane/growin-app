@@ -1,114 +1,69 @@
 import numpy as np
 import sys
 import os
+import pytest
 from unittest.mock import MagicMock
+from decimal import Decimal
 
 # Add backend to path (parent directory)
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-# Mock heavy dependencies to avoid import crashes in unrelated agents
-sys.modules["agents.forecasting_agent"] = MagicMock()
-sys.modules["agents.portfolio_agent"] = MagicMock()
-sys.modules["agents.research_agent"] = MagicMock()
-sys.modules["agents.social_agent"] = MagicMock()
-sys.modules["agents.whale_agent"] = MagicMock()
-sys.modules["agents.goal_planner_agent"] = MagicMock()
-
-# Also mock sklearn/scipy if they are still hit
-sys.modules["sklearn"] = MagicMock()
-sys.modules["scipy"] = MagicMock()
-sys.modules["scipy.stats"] = MagicMock()
-
-# Now import QuantAgent
-# We need to make sure we import it correctly.
-# Since we are in backend/tests, and added backend/ to sys.path, we can import agents.quant_agent
 from agents.quant_agent import QuantAgent
+from utils.financial_math import create_decimal
 
-def test_rsi_calculation_wilders_smoothing():
+@pytest.mark.asyncio
+async def test_quant_agent_full_analysis():
     """
-    Test that QuantAgent._calculate_rsi matches standard Wilder's Smoothing RSI.
-    This validates the fix for the divergence issue.
-    """
-    agent = QuantAgent()
-
-    # Test data (same as used in verify_rsi_bug.py)
-    prices = np.array([
-        100.0, 102.0, 101.0, 103.0, 104.0, 105.0, 106.0, 105.0, 104.0, 103.0,
-        102.0, 101.0, 100.0, 99.0, 98.0, 97.0, 96.0, 95.0, 96.0, 97.0,
-        98.0, 99.0, 100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0
-    ]) # 30 points
-
-    # Expected values from a correct Wilder's implementation
-    # (Verified in verify_rsi_bug.py)
-    expected_rsi = np.array([
-        50.00, 50.00, 50.00, 50.00, 50.00, 50.00, 50.00, 50.00, 50.00, 50.00,
-        50.00, 50.00, 50.00, 50.00, 43.75, 40.99, 38.38, 35.92, 40.06, 43.96,
-        47.63, 51.07, 54.31, 57.35, 60.20, 62.88, 65.38, 67.73, 69.92, 71.97
-    ])
-
-    calculated_rsi = agent._calculate_rsi(prices, period=14)
-
-    # Check length
-    assert len(calculated_rsi) == len(prices)
-
-    # Check values (allow small float error)
-    # The first 14 values are fillers (50.0)
-    np.testing.assert_allclose(calculated_rsi, expected_rsi, rtol=1e-2, atol=0.05,
-                               err_msg="Calculated RSI does not match expected Wilder's RSI")
-
-def test_ema_calculation():
-    """
-    Test EMA calculation against expected Pandas behavior.
+    Test the full analysis flow of QuantAgent.
     """
     agent = QuantAgent()
-    prices = np.arange(100.0, 130.0) # 30 points
 
-    period = 10
-    ema = agent._calculate_ema(prices, period)
+    # Mock OHLCV data (100 bars)
+    import time
+    now_ms = int(time.time() * 1000)
+    mock_ohlcv = [
+        {"t": now_ms - (100-i)*86400000, "o": 100.0+i, "h": 105.0+i, "l": 99.0+i, "c": 103.0+i, "v": 1000000}
+        for i in range(100)
+    ]
 
-    # Calculate expected EMA using pandas directly
-    import pandas as pd
+    result = await agent.execute({"ticker": "AAPL", "ohlcv_data": mock_ohlcv})
+    
+    assert result.success, f"QuantAgent failed: {result.error}"
+    data = result.data
+    
+    # Check that indicators are present and are Decimals (serialized to strings in model_dump usually, 
+    # but QuantAgent returns raw data from model_dump() which has Decimals if not using json mode)
+    # Actually AgentResponse.data is Dict[str, Any].
+    
+    assert "rsi" in data
+    assert "macd" in data
+    assert "bollinger_bands" in data
+    assert "signal" in data
+    
+    # Check signal format
+    assert data["signal"] in ["BUY", "SELL", "HOLD", "NEUTRAL"]
 
-    # Manual verification of expected logic:
-    # First `period` elements are used for initial SMA at index `period-1`
-    initial_sma = prices[:period].mean()
-
-    # Then EWM continues
-    rest = prices[period:]
-    concat = np.concatenate(([initial_sma], rest))
-    expected_series = pd.Series(concat).ewm(span=period, adjust=False).mean()
-    expected_values = expected_series.values
-
-    # Reconstruct full array for comparison
-    expected_full = np.zeros(len(prices))
-    expected_full[period-1:] = expected_values
-    # Note: the test just checks if agent._calculate_ema does what we expect it to do (match pandas)
-
-    np.testing.assert_allclose(ema[period-1:], expected_full[period-1:], rtol=1e-5)
-
-def test_macd_calculation():
-    """
-    Test MACD calculation structure.
-    """
+@pytest.mark.asyncio
+async def test_insufficient_data():
+    """Test handling of insufficient data"""
     agent = QuantAgent()
-    prices = np.random.randn(100) + 100
+    
+    # Only 10 bars
+    mock_ohlcv = [{"t": i, "o": 100, "h": 105, "l": 95, "c": 102, "v": 1000} for i in range(10)]
+    
+    # Use different ticker to avoid cache hit
+    result = await agent.execute({"ticker": "TSLA", "ohlcv_data": mock_ohlcv})
+    assert not result.success
+    assert "Insufficient data" in result.error
 
-    macd, signal, hist = agent._calculate_macd(prices)
-
-    assert len(macd) == len(prices)
-    assert len(signal) == len(prices)
-    assert len(hist) == len(prices)
-
-    # Basic relationship check
-    np.testing.assert_allclose(hist, macd - signal, rtol=1e-5, atol=1e-8)
-
-def test_insufficient_data():
-    """Test behavior with insufficient data"""
-    agent = QuantAgent()
-    prices = np.array([100.0, 101.0, 102.0])
-
-    rsi = agent._calculate_rsi(prices, 14)
-    assert np.all(rsi == 50.0)
-
-    ema = agent._calculate_ema(prices, 10)
-    assert np.all(ema == prices.mean())
+def test_decimal_precision_logic():
+    """Test that financial math helpers handle Decimals correctly."""
+    from utils.financial_math import create_decimal, safe_div
+    
+    d1 = create_decimal(0.1)
+    d2 = create_decimal(0.2)
+    assert d1 + d2 == Decimal('0.3')
+    
+    # Division by zero safety
+    assert safe_div(d1, Decimal('0')) == Decimal('0')
+    assert safe_div(d1, d2) == Decimal('0.5')

@@ -388,6 +388,47 @@ class AlpacaClient:
                     
         return results
 
+    async def get_portfolio_positions(self) -> List[Dict[str, Any]]:
+        """Fetch all open positions."""
+        if self.trading_client:
+            try:
+                positions = await asyncio.to_thread(self.trading_client.get_all_positions)
+                # Convert to list of dicts
+                pos_list = []
+                # Handle case where positions might be a list or object depending on SDK version
+                # Assuming list of Position objects
+                for p in positions:
+                    pos_list.append({
+                        "symbol": p.symbol,
+                        "qty": Decimal(str(p.qty)),
+                        "market_value": Decimal(str(p.market_value)) if p.market_value else Decimal(0),
+                        "cost_basis": Decimal(str(p.cost_basis)),
+                        "unrealized_pl": Decimal(str(p.unrealized_pl)) if p.unrealized_pl else Decimal(0),
+                        "unrealized_plpc": Decimal(str(p.unrealized_plpc)) if p.unrealized_plpc else Decimal(0),
+                        "current_price": Decimal(str(p.current_price)),
+                        "lastday_price": Decimal(str(p.lastday_price)),
+                        "change_today": Decimal(str(p.change_today)),
+                    })
+                return pos_list
+            except Exception as e:
+                logger.error(f"AlpacaClient: Error fetching positions: {e}")
+                return []
+
+        # Mock fallback
+        return [
+            {
+                "symbol": "AAPL",
+                "qty": Decimal("10"),
+                "market_value": Decimal("1500.00"),
+                "cost_basis": Decimal("1400.00"),
+                "unrealized_pl": Decimal("100.00"),
+                "unrealized_plpc": Decimal("0.0714"),
+                "current_price": Decimal("150.00"),
+                "lastday_price": Decimal("145.00"),
+                "change_today": Decimal("0.0345")
+            }
+        ]
+
     async def get_recent_trades(self, ticker: str, limit: int = 100) -> List[TradeDataDict]:
         """Fetch latest trades for a ticker."""
         normalized_ticker = normalize_ticker(ticker)
@@ -460,6 +501,44 @@ class AlpacaClient:
             "buying_power": Decimal("15000.0"),
             "status": "ACTIVE"
         }
+
+    async def get_portfolio_positions(self) -> List[Dict[str, Any]]:
+        """Fetch all open positions from Alpaca."""
+        if self.trading_client:
+            try:
+                positions = await asyncio.to_thread(self.trading_client.get_all_positions)
+
+                pos_list = []
+                for p in positions:
+                    # Map Alpaca Position object to dict
+                    # SDK returns Position model, attributes access
+                    pos_list.append({
+                        "symbol": str(p.symbol),
+                        "qty": Decimal(str(p.qty)),
+                        "current_price": Decimal(str(p.current_price)),
+                        "avg_entry_price": Decimal(str(p.avg_entry_price)),
+                        "market_value": Decimal(str(p.market_value)),
+                        "unrealized_pl": Decimal(str(p.unrealized_pl)),
+                        "unrealized_plpc": Decimal(str(p.unrealized_plpc)),
+                        "side": str(p.side)
+                    })
+                return pos_list
+            except Exception as e:
+                logger.error(f"AlpacaClient: Error fetching positions: {e}")
+
+        # Mock fallback
+        return [
+            {
+                "symbol": "AAPL",
+                "qty": Decimal("10"),
+                "current_price": Decimal("150.00"),
+                "avg_entry_price": Decimal("140.00"),
+                "market_value": Decimal("1500.00"),
+                "unrealized_pl": Decimal("100.00"),
+                "unrealized_plpc": Decimal("0.07"),
+                "side": "long"
+            }
+        ]
 
     async def get_real_time_quote(self, ticker: str) -> Optional[RealTimeQuoteDict]:
         """Get real-time quote for a ticker from Alpaca."""
@@ -537,7 +616,7 @@ class FinnhubClient:
 
             # Calculate from date (Finnhub needs Unix timestamp)
             from datetime import datetime, timedelta
-            to_time = datetime.now()
+            to_time = datetime.now(timezone.utc)
             from_time = to_time - timedelta(days=365)  # Default 1 year
 
             # Adjust based on timeframe and limit
@@ -636,7 +715,7 @@ class FinnhubClient:
                 "low": CurrencyNormalizer.normalize_price(get_val('l'), ticker),
                 "open": CurrencyNormalizer.normalize_price(get_val('o'), ticker),
                 "previous_close": CurrencyNormalizer.normalize_price(get_val('pc'), ticker),
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat()
             }
         except Exception as e:
             logger.error(f"FinnhubClient: Error fetching real-time quote: {e}")
@@ -665,23 +744,7 @@ async def mock_call_tool(tool_name: str, args: Dict[str, Any]):
     if tool_name == "get_account_info":
         return await client.get_account_info()
     if tool_name == "get_portfolio_positions":
-        # Placeholder as get_portfolio_positions wasn't in the class explicitly but it's part of the tool contract
-        # Assuming mapped to get_account_info or separate method I missed. 
-        # Checking file content... get_portfolio_positions is NOT in AlpacaClient in my view?
-        # Ah, logic error in original file or it was there and I missed it?
-        # Step 338 didn't show get_portfolio_positions in AlpacaClient!
-        # It's referenced in mock_call_tool line 612 of original.
-        # So I will just return client.get_account_info() as placeholder or similar?
-        # Or better, add it to AlpacaClient? The user didn't ask for that.
-        # I'll keep the mock logic from Step 338 which called client.get_portfolio_positions() which implies
-        # it might fail or I missed a part of the file?
-        # Wait, Step 338 line 613: "return await client.get_portfolio_positions()"
-        # But AlpacaClient definition lines 29-441 DOES NOT have that method.
-        # This implies dynamic dispatch or broken code.
-        # I will keep the call but it might error if method is missing. I won't fix unrelated bugs now.
-        # Actually, let's look at 338 again. It's not there.
-        # I will leave mock_call_tool as is, but it might crash if called.
-        return {"error": "Method get_portfolio_positions not found on client"}
+        return await client.get_portfolio_positions()
     if tool_name == "get_price_history":
         ticker = args.get("ticker", "AAPL")
         timeframe_str = args.get("timeframe", "1Day")

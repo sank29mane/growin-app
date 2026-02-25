@@ -1,8 +1,6 @@
 import SwiftUI
 import Combine
 
-
-// MARK: - Main ViewModel
 @Observable @MainActor
 class PortfolioViewModel {
     var snapshot: PortfolioSnapshot?
@@ -17,7 +15,6 @@ class PortfolioViewModel {
     private let dataService = PortfolioDataService()
     private let defaults = UserDefaults.standard
     
-    // Settings getters/setters helper
     private var accountType: String {
         defaults.string(forKey: "t212AccountType") ?? "invest"
     }
@@ -33,19 +30,19 @@ class PortfolioViewModel {
     func refreshAll() async {
         isLoading = true
         errorMsg = nil
-        defer { isLoading = false }
         
         await withTaskGroup(of: Void.self) { group in
             group.addTask { await self.fetchPortfolio() }
             group.addTask { await self.fetchHistory() }
         }
+        
+        isLoading = false
     }
     
     func switchAccount(newType: String) async {
         defaults.set(newType, forKey: "t212AccountType")
         isSwitchingAccount = true
         errorMsg = nil
-        defer { isSwitchingAccount = false }
         
         let config = TradingConfig(
             accountType: newType,
@@ -60,9 +57,10 @@ class PortfolioViewModel {
             try await dataService.syncAccount(accountType: newType)
             await refreshAll()
         } catch {
-            print("Switch account error: \(error)")
             self.errorMsg = "Failed to switch account: \(error.localizedDescription)"
         }
+        
+        isSwitchingAccount = false
     }
     
     func fetchPortfolio() async {
@@ -71,11 +69,9 @@ class PortfolioViewModel {
             withAnimation(.spring(response: 0.5, dampingFraction: 0.7)) {
                 self.snapshot = result
                 self.lastUpdated = Date()
-                // Don't clear error if it was set by history fetch
             }
         } catch {
             self.errorMsg = "Portfolio Error: \(error.localizedDescription)"
-            print("Portfolio fetch error: \(error)")
         }
     }
     
@@ -90,7 +86,6 @@ class PortfolioViewModel {
             if self.errorMsg == nil {
                 self.errorMsg = "History Error: \(error.localizedDescription)"
             }
-            print("History fetch error: \(error)")
         }
     }
 }

@@ -1,0 +1,93 @@
+prompt = """<trigger>
+Use this workflow when:
+- Starting a new session on an existing project
+- User says "continue", "what's next", "where were we", "resume"
+- Any planning operation when .planning/ already exists
+- User returns after time away from project
+</trigger>
+
+<purpose>
+Instantly restore full project context so "Where were we?" has an immediate, complete answer.
+</purpose>
+
+<required_reading>
+@/Users/sanketmane/.gemini/get-shit-done/references/continuation-format.md
+</required_reading>
+
+<process>
+
+<step name="initialize">
+Load all context in one call:
+
+```bash
+INIT=$(node /Users/sanketmane/.gemini/get-shit-done/bin/gsd-tools.cjs init resume)
+```
+
+Parse JSON for: `state_exists`, `roadmap_exists`, `project_exists`, `planning_exists`, `has_interrupted_agent`, `interrupted_agent_id`, `commit_docs`.
+
+**If `state_exists` is true:** Proceed to load_state
+**If `state_exists` is false but `roadmap_exists` or `project_exists` is true:** Offer to reconstruct STATE.md
+**If `planning_exists` is false:** This is a new project - route to /gsd:new-project
+</step>
+
+<step name="load_state">
+
+Read and parse STATE.md, then PROJECT.md:
+
+```bash
+cat .planning/STATE.md
+cat .planning/PROJECT.md
+```
+
+**From STATE.md extract:**
+
+- **Project Reference**: Core value and current focus
+- **Current Position**: Phase X of Y, Plan A of B, Status
+- **Progress**: Visual progress bar
+- **Recent Decisions**: Key decisions affecting current work
+- **Pending Todos**: Ideas captured during sessions
+- **Blockers/Concerns**: Issues carried forward
+- **Session Continuity**: Where we left off, any resume files
+
+**From PROJECT.md extract:**
+
+- **What This Is**: Current accurate description
+- **Requirements**: Validated, Active, Out of Scope
+- **Key Decisions**: Full decision log with outcomes
+- **Constraints**: Hard limits on implementation
+
+</step>
+
+<step name="research_sync">
+**CRITICAL: Research Integration**
+Check for the latest research in NotebookLM (Growin Research):
+1. Review the `<research>` section in the most recent `.continue-here.md`.
+2. Access the 'Growin Research' notebook to see if a Deep Research task completed.
+3. **Action**: If new SOTA findings exist (e.g. intraday accuracy, M4 silicon optimizations), propose an immediate update to the ROADMAP.md or technical SPEC.md.
+</step>
+
+<step name="check_incomplete_work">
+Look for incomplete work that needs attention:
+
+```bash
+# Check most recent plan
+LATEST_PHASE_DIR=$(node /Users/sanketmane/.gemini/get-shit-done/bin/gsd-tools.cjs find-phase current --raw)
+ls -t $LATEST_PHASE_DIR/*-PLAN.md | head -1
+```
+
+If a plan exists but has no summary, check its progress.
+If an agent was interrupted, offer to resume from its exact state.
+</step>
+
+<step name="report">
+Synthesize everything into a "Welcome back" report:
+
+1. **Where we are**: [Phase/Plan/Task]
+2. **Mental state**: [Restore the context from .continue-here.md]
+3. **Next task**: [What's next in the plan]
+4. **Research Update**: [Summary of latest NotebookLM findings and roadmap impact]
+
+Ask: "Ready to proceed with [Next Task]?"
+</step>
+
+</process>"""
