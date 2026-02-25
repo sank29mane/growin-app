@@ -161,24 +161,19 @@ class ResearchAgent(BaseAgent):
                 sources=sources[:5]
             )
 
-            # --- RAG INTEGRATION: Store findings ---
+            # --- RAG INTEGRATION: Store individual articles for Timeline ---
             try:
                 from app_context import state
                 if state.rag_manager and rich_articles:
-                    # Create a summary document for the knowledge base
-                    top_headline = headlines[0] if headlines else "Market News"
-                    rag_content = f"Market Research for {ticker}: {label} ({avg_sentiment:.2f}). Top Story: {top_headline}. Sources: {', '.join(sources[:3])}"
-                    
-                    state.rag_manager.add_document(
-                        content=rag_content,
-                        metadata={
-                            "type": "market_news",
-                            "ticker": ticker,
-                            "sentiment": label,
-                            "timestamp": asyncio.get_event_loop().time() # Approximation
-                        }
-                    )
-                    logger.info(f"ResearchAgent: Stored analysis for {ticker} in RAG")
+                    for art in rich_articles:
+                        state.rag_manager.add_news_article(
+                            ticker=ticker,
+                            title=art.title,
+                            summary=art.description or "",
+                            sentiment=float(art.sentiment or 0.0),
+                            source=art.source
+                        )
+                    logger.info(f"ResearchAgent: Stored {len(rich_articles)} articles in RAG for timeline.")
             except Exception as e:
                 logger.warning(f"ResearchAgent: Failed to store in RAG: {e}")
             # ---------------------------------------
@@ -250,11 +245,13 @@ class ResearchAgent(BaseAgent):
             from tavily import TavilyClient
             
             tavily = TavilyClient(api_key=self.tavily_key)
+            is_uk = ticker.upper().endswith(".L")
             
             if ticker == "MARKET":
                 query = "latest stock market outlook for LSE (UK), NSE (India), and US markets"
             else:
-                query = f"latest financial news for {company_name} ({ticker}) stock"
+                region = "LSE UK" if is_uk else "US"
+                query = f"latest financial news for {company_name} ({ticker}) stock on {region} market"
             
             def fetch():
                 return tavily.search(
@@ -323,7 +320,10 @@ class ResearchAgent(BaseAgent):
                      url = "https://newsdata.io/api/1/latest"
                      q = f"{company_name} OR {ticker} stock" if company_name else f"{ticker} stock"
                      params["q"] = q
-                     params["country"] = "gb,us,in"
+                     is_uk = ticker.upper().endswith(".L")
+                     params["country"] = "gb" if is_uk else "us"
+                     # Add 'in' for India support if requested, but architecture mandates US/UK partitioning
+                     if "NSE" in ticker.upper(): params["country"] = "in"
 
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.get(url, params=params)

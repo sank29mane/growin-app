@@ -50,76 +50,64 @@ class MarketDataFrayer:
 
     async def fetch_frayed_bars(self, ticker: str, limit: int = 1000, timeframe: str = "1Day") -> List[Dict[str, Any]]:
         """
-        Fetches and frays bar data from all available providers.
-        Guarantees minimum 512 data points for TTM-R2.
+        Architecture Resilience:
+        US -> Alpaca (Primary) -> yfinance (Fallback)
+        UK -> Finnhub (Primary) -> yfinance (Fallback)
         """
         symbols = self._resolve_tickers(ticker)
-        logger.info(f"Fraying data for '{ticker}' using symbols: {symbols} (Target: {limit} bars)")
-
-        async def execute_fray(current_limit: int):
-            tasks = [
-                self.alpaca.get_historical_bars(symbols["alpaca"], limit=current_limit, timeframe=timeframe),
-                self.finnhub.get_historical_bars(symbols["finnhub"], limit=current_limit, timeframe=timeframe),
-                self._fetch_yfinance_fallback(symbols["yfinance"], limit=current_limit, timeframe=timeframe)
-            ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            all_bars = []
-            for i, res in enumerate(results):
-                provider = ["Alpaca", "Finnhub", "YFinance"][i]
-                if isinstance(res, dict) and "bars" in res:
-                    for b in res["bars"]:
-                        b["_p"] = provider
-                    all_bars.extend(res["bars"])
-            return all_bars
-
-        # 1. Initial Fetch
-        all_bars = await execute_fray(limit)
+        is_uk = ticker.upper().endswith(".L")
         
+        primary_name = "Finnhub" if is_uk else "Alpaca"
+        logger.info(f"Architecture Resilience: Fetching {ticker} (Primary: {primary_name})")
+
+        async def execute_primary():
+            if is_uk:
+                # UK Primary: Finnhub
+                from data_engine import get_finnhub_client
+                finnhub = get_finnhub_client()
+                res = await finnhub.get_historical_bars(ticker, limit=limit, timeframe=timeframe)
+                if res and "bars" in res and len(res["bars"]) > 0:
+                    for b in res["bars"]: b["_p"] = "Finnhub"
+                    return res["bars"]
+            else:
+                # US Primary: Alpaca
+                res = await self.alpaca.get_historical_bars(symbols["alpaca"], limit=limit, timeframe=timeframe)
+                if res and "bars" in res and len(res["bars"]) > 0:
+                    for b in res["bars"]: b["_p"] = "Alpaca"
+                    return res["bars"]
+            return []
+
+        # 1. Try Primary
+        all_bars = await execute_primary()
+        
+        # 2. Check if Fallback needed (Empty or insufficient for TTM)
+        if not all_bars or len(all_bars) < 512:
+            logger.info(f"Primary {primary_name} failed or insufficient ({len(all_bars)} bars). Falling back to yfinance.")
+            yf_res = await self._fetch_yfinance_fallback(symbols["yfinance"], limit=limit, timeframe=timeframe)
+            if yf_res and "bars" in yf_res and len(yf_res["bars"]) > 0:
+                all_bars = yf_res["bars"]
+                for b in all_bars: b["_p"] = "YFinance"
+
         # --- SOTA HISTORY GUARANTEE ---
-        # If combined result is < 512 but limit was higher, we might need a longer timeframe request.
         def process_bars(raw_bars):
             if not raw_bars: return []
             df = pd.DataFrame(raw_bars)
             df['t'] = pd.to_numeric(df['t'], errors='coerce')
             df = df.dropna(subset=['t'])
             df['t'] = df['t'].astype(int)
-            df = df.sort_values(by=['t', '_p'], ascending=[True, True])
+            df = df.sort_values(by=['t'], ascending=[True])
             df = df.drop_duplicates(subset=['t'], keep='first')
             return df
 
         df = process_bars(all_bars)
         
-        # If we failed to get 512 bars, escalation is needed
-        if len(df) < 512 and "Day" in timeframe:
-            logger.warning(f"TTM Context Alert: Only found {len(df)} bars. Escalating history request...")
-            # Deep fetch (years of history) from YFinance/Finnhub specifically
-            extended_bars = await execute_fray(2000) # Request 2000 points
-            df = process_bars(extended_bars)
-            
         if len(df) == 0:
             return []
 
-        # 2. Unit Normalization (Significant Outlier Fix)
-        # Some providers return GBP (0.7) some GBX (70.0)
-        median_c = df['c'].median()
-        if median_c > 0:
-            for col in ['o', 'h', 'l', 'c']:
-                # Factor of 100 check
-                df[col] = np.where(df[col] > median_c * 50, df[col] / 100.0, df[col])
-                df[col] = np.where(df[col] < median_c * 0.02, df[col] * 100.0, df[col])
-
-        # 3. Hole Filling & Sorting
-        df = df.sort_values('t')
+        # 3. Final result limited to the most recent 'limit' points
+        result_bars = df[['t', 'o', 'h', 'l', 'c', 'v', '_p']].tail(limit).to_dict('records')
         
-        # Final result limited to the most recent 'limit' points
-        result_bars = df[['t', 'o', 'h', 'l', 'c', 'v']].tail(limit).to_dict('records')
-        
-        if len(result_bars) < 512:
-            logger.warning(f"⚠️ TTM Critical: Only {len(result_bars)}/{limit} bars available for {ticker}. TTM performance will be degraded.")
-        else:
-            logger.info(f"✅ TTM Context Guaranteed: {len(result_bars)} bars provided for {ticker}.")
-            
+        logger.info(f"✅ Data Fraying Complete: {len(result_bars)} bars provided for {ticker}.")
         return result_bars
 
     async def _fetch_yfinance_fallback(self, ticker: str, limit: int, timeframe: str) -> Dict[str, Any]:

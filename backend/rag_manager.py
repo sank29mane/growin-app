@@ -45,6 +45,37 @@ class RAGManager:
             except Exception as e2:
                 logger.error(f"Critical RAG failure: {e2}")
 
+            # Auto-seed abstract context if empty
+            if self._collection and self._collection.count() == 0:
+                self.seed_abstract_context()
+
+    def seed_abstract_context(self):
+        """Seed the database with broad macroeconomic and portfolio theory concepts."""
+        abstract_docs = [
+            {
+                "content": "Sector Rotation Theory: During inflationary periods or rising interest rates, growth stocks (Tech, Consumer Discretionary) tend to underperform while value stocks (Financials, Energy, Materials) often outperform. A flat tech-heavy portfolio during rate hikes is expected.",
+                "type": "abstract_concept",
+                "topic": "sector_rotation"
+            },
+            {
+                "content": "Portfolio Diversification and Correlation: If an entire portfolio is flat despite market movement, the assets might be highly correlated and cancelling each other out, or they are concentrated in a stagnant sector. High correlation reduces the benefit of diversification.",
+                "type": "abstract_concept",
+                "topic": "correlation"
+            },
+            {
+                "content": "Macroeconomic Impact of Yield Curves: An inverted yield curve often signals an impending recession, leading investors to flee to safety (bonds, defensive stocks). Equity portfolios may stall or drop as liquidity tightens.",
+                "type": "abstract_concept",
+                "topic": "macroeconomics"
+            }
+        ]
+        
+        for doc in abstract_docs:
+            self.add_document(
+                content=doc["content"], 
+                metadata={"type": doc["type"], "topic": doc["topic"]}
+            )
+        logger.info(f"RAGManager: Seeded {len(abstract_docs)} abstract financial concepts.")
+
     def add_document(self, content: str, metadata: Dict[str, Any], doc_id: Optional[str] = None):
         """
         Add a document to the knowledge base.
@@ -73,7 +104,7 @@ class RAGManager:
         except Exception as e:
             logger.error(f"Error adding document to RAG: {e}")
 
-    def query(self, query_text: str, n_results: int = 3) -> List[Dict[str, Any]]:
+    def query(self, query_text: str, n_results: int = 3, where: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
         Retrieve relevant documents for a query.
         
@@ -84,10 +115,14 @@ class RAGManager:
             return []
 
         try:
-            results = self._collection.query(
-                query_texts=[query_text],
-                n_results=n_results
-            )
+            kwargs = {
+                "query_texts": [query_text],
+                "n_results": n_results
+            }
+            if where:
+                kwargs["where"] = where
+                
+            results = self._collection.query(**kwargs)
             
             # Format results
             formatted_results = []
@@ -104,6 +139,64 @@ class RAGManager:
             
         except Exception as e:
             logger.error(f"RAG query failed: {e}")
+            return []
+
+    def add_chat_message(self, role: str, content: str, conversation_id: str):
+        """Index a chat message for semantic retrieval."""
+        from datetime import datetime, timezone
+        metadata = {
+            "type": "chat_history",
+            "role": role,
+            "conversation_id": conversation_id,
+            "timestamp": datetime.now(timezone.utc).timestamp()
+        }
+        self.add_document(content, metadata)
+
+    def add_news_article(self, ticker: str, title: str, summary: str, sentiment: float, source: str):
+        """Index an individual news article with sentiment and timestamp."""
+        from datetime import datetime, timezone
+        metadata = {
+            "type": "news_article",
+            "ticker": ticker,
+            "sentiment": sentiment,
+            "source": source,
+            "timestamp": datetime.now(timezone.utc).timestamp()
+        }
+        content = f"[{source}] {title}: {summary}"
+        self.add_document(content, metadata)
+
+    def get_news_timeline(self, ticker: str, days: int = 7) -> List[Dict[str, Any]]:
+        """Retrieve a time-stamped timeline of news insights for a ticker."""
+        from datetime import datetime, timedelta, timezone
+        start_ts = (datetime.now(timezone.utc) - timedelta(days=days)).timestamp()
+        
+        # Query for news articles related to the ticker
+        # Note: ChromaDB doesn't support complex time-range filters in simple query,
+        # we filter in-memory after a semantic search or use 'where' if supported.
+        try:
+            results = self._collection.get(
+                where={"$and": [
+                    {"type": "news_article"},
+                    {"ticker": ticker},
+                    {"timestamp": {"$gte": start_ts}}
+                ]}
+            )
+            
+            timeline = []
+            if results['documents']:
+                for i in range(len(results['documents'])):
+                    timeline.append({
+                        "timestamp": results['metadatas'][i]['timestamp'],
+                        "content": results['documents'][i],
+                        "sentiment": results['metadatas'][i]['sentiment'],
+                        "source": results['metadatas'][i]['source']
+                    })
+            
+            # Sort by timestamp ascending
+            timeline.sort(key=lambda x: x['timestamp'])
+            return timeline
+        except Exception as e:
+            logger.error(f"Failed to generate news timeline: {e}")
             return []
 
     def count(self) -> int:

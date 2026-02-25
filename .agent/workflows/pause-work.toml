@@ -10,7 +10,7 @@ Read all files referenced by the invoking prompt's execution_context before star
 
 <step name="research_augmentation">
 **CRITICAL: Research Check-in**
-Always ask the user: "would you like to update our deep research?"
+Always ask the user: "Would you like to trigger a SOTA research update in NotebookLM (Growin Research) before pausing?"
 If they say yes:
 1. Identify the current technical focus (e.g. intraday prediction, M4 optimization).
 2. Use the `notebooklm-deep-research` skill to augment the 'Growin Research' notebook.

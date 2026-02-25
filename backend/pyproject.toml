@@ -47,6 +47,7 @@ dependencies = [
     "yfinance>=0.2.35,<0.3.0",
     "growin_core",
     "docker>=7.1.0",
+    "redis>=5.0.0",
 ]
 
 [tool.uv.sources]
@@ -57,6 +58,10 @@ growin_core = { path = "./growin_core_src" }
 asyncio_mode = "auto"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+filterwarnings = [
+    "ignore:The 'app' shortcut is now deprecated:DeprecationWarning",
+    "ignore:websockets.legacy is deprecated:DeprecationWarning",
+]
 
 [dependency-groups]
 dev = [

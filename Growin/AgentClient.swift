@@ -2,12 +2,13 @@ import Foundation
 import Combine
 
 enum SSEEvent: String {
-    case token, status, meta, done, error
+    case token, status, meta, done, error, telemetry
 }
 
 enum AgentStreamEvent: Sendable {
     case token(String)
     case status(String)
+    case telemetry([String: AnySendable])
     case meta([String: AnySendable])
     case error(String)
     case done
@@ -151,6 +152,11 @@ struct AgentClient {
             continuation.yield(.token(data))
         case "status":
             continuation.yield(.status(data))
+        case "telemetry":
+            if let jsonData = data.data(using: .utf8),
+               let telemetryDict = try? JSONDecoder().decode([String: AnySendable].self, from: jsonData) {
+                continuation.yield(.telemetry(telemetryDict))
+            }
         case "meta":
             if let jsonData = data.data(using: .utf8),
                let metaDict = try? JSONDecoder().decode([String: AnySendable].self, from: jsonData) {

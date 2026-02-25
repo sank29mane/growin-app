@@ -10,6 +10,7 @@ from rate_limiter import default_limiter
 from utils import extract_ticker_from_text, sanitize_nan
 import logging
 import traceback
+import asyncio
 from datetime import datetime
 import uuid
 from app_logging import correlation_id_ctx
@@ -139,6 +140,10 @@ async def chat_message(
             model_name=request.model_name,
         )
 
+        # Index in RAG for semantic retrieval
+        if state.rag_manager:
+            state.rag_manager.add_chat_message("assistant", response, conversation_id)
+
         # Iteratively update conversation title based on growing context
         await update_conversation_title_if_needed(conversation_id, request.model_name)
 
@@ -161,13 +166,27 @@ async def chat_message(
 
 async def stream_chat_generator(request: ChatMessage):
     """Generator for SSE streaming responses."""
+    queue = asyncio.Queue()
+    
+    async def telemetry_handler(msg):
+        await queue.put(msg)
+        
     try:
         from agents.coordinator_agent import CoordinatorAgent
         from agents.decision_agent import DecisionAgent
+        from agents.messenger import get_messenger
         import json
         
         chat_manager = state.chat_manager
         conversation_id = request.conversation_id or chat_manager.create_conversation()
+        messenger = get_messenger()
+
+        # Set Correlation ID for this trace
+        request_id = str(uuid.uuid4())
+        correlation_id_ctx.set(request_id)
+        
+        # Subscribe to telemetry for this request
+        messenger.subscribe_to_trace(request_id, telemetry_handler)
 
         # Save user message IMMEDIATELY
         chat_manager.save_message(
@@ -178,59 +197,95 @@ async def stream_chat_generator(request: ChatMessage):
         
         yield {
             "event": "meta",
-            "data": json.dumps({"conversation_id": conversation_id, "status": "planning"})
+            "data": json.dumps({"conversation_id": conversation_id, "request_id": request_id, "status": "planning"})
         }
 
-        # Extract ticker
-        ticker = extract_ticker_from_text(request.message)
-        history = chat_manager.load_history(conversation_id, limit=6)
+        # Background task to process the query
+        async def process_query():
+            try:
+                # Extract ticker
+                ticker = extract_ticker_from_text(request.message)
+                history = chat_manager.load_history(conversation_id, limit=6)
+                
+                # Phase 1: Coordinator
+                coordinator = CoordinatorAgent(state.mcp_client, model_name=request.coordinator_model or "granite-tiny")
+                market_context = await coordinator.process_query(
+                    query=request.message,
+                    ticker=ticker,
+                    account_type=request.account_type,
+                    history=history
+                )
+                
+                # Phase 2: Decision
+                decision_agent = DecisionAgent(
+                    model_name=request.model_name or "native-mlx",
+                    api_keys=request.api_keys
+                )
+                
+                full_response = ""
+                async for chunk in decision_agent.make_decision_stream(market_context, request.message):
+                    full_response += chunk
+                    await queue.put({"type": "token", "content": chunk})
+                    
+                # Save final message
+                chat_manager.save_message(
+                    conversation_id=conversation_id,
+                    role="assistant",
+                    content=full_response,
+                    agent_name="DecisionAgent",
+                    model_name=request.model_name
+                )
+                
+                # Index in RAG
+                if state.rag_manager:
+                    state.rag_manager.add_chat_message("assistant", full_response, conversation_id)
+                
+                await queue.put({"type": "done", "content": "[DONE]"})
+                
+                # Async title update
+                await update_conversation_title_if_needed(conversation_id, request.model_name)
+                
+            except Exception as e:
+                logger.error(f"Processing error: {e}")
+                await queue.put({"type": "error", "content": str(e)})
+
+        # Start processing in background
+        process_task = asyncio.create_task(process_query())
         
-        # Phase 1: Coordinator (Yield status)
-        yield { "event": "status", "data": "Coordinating agents..." }
-        
-        coordinator = CoordinatorAgent(state.mcp_client, model_name=request.coordinator_model or "granite-tiny")
-        market_context = await coordinator.process_query(
-            query=request.message,
-            ticker=ticker,
-            account_type=request.account_type,
-            history=history
-        )
-        market_context.user_context["history"] = history
-        
-        # Yield Context Data (optional, mostly for debugging or UI context)
-        # yield { "event": "context", "data": json.dumps(market_context.model_dump(by_alias=True)) }
-        
-        # Phase 2: Streaming Decision
-        yield { "event": "status", "data": "Thinking..." }
-        
-        decision_agent = DecisionAgent(
-            model_name=request.model_name or "native-mlx",
-            api_keys=request.api_keys
-        )
-        
-        full_response = ""
-        async for chunk in decision_agent.make_decision_stream(market_context, request.message):
-            full_response += chunk
-            yield { "event": "token", "data": chunk }
+        # Consume from queue and yield to SSE
+        while True:
+            item = await queue.get()
             
-        # Save final message
-        chat_manager.save_message(
-            conversation_id=conversation_id,
-            role="assistant",
-            content=full_response,
-            agent_name="DecisionAgent",
-            model_name=request.model_name
-        )
-        
-        # Signal done
-        yield { "event": "done", "data": "[DONE]" }
-        
-        # Async title update
-        await update_conversation_title_if_needed(conversation_id, request.model_name)
+            if isinstance(item, dict):
+                # Manual events (token, done, error)
+                if item["type"] == "token":
+                    yield { "event": "token", "data": item["content"] }
+                elif item["type"] == "done":
+                    break
+                elif item["type"] == "error":
+                    yield { "event": "error", "data": item["content"] }
+                    break
+            else:
+                # AgentMessage from Messenger
+                yield {
+                    "event": "telemetry",
+                    "data": json.dumps({
+                        "sender": item.sender,
+                        "subject": item.subject,
+                        "payload": item.payload,
+                        "timestamp": item.timestamp.isoformat()
+                    })
+                }
+                
+        # Wait for task to be fully done
+        await process_task
         
     except Exception as e:
         logger.error(f"Streaming error: {e}")
         yield { "event": "error", "data": str(e) }
+    finally:
+        # Cleanup
+        messenger.unsubscribe_from_trace(request_id, telemetry_handler)
 
 @router.post("/agent/analyze", response_model=AgentResponse)
 async def analyze_portfolio(request: AnalyzeRequest):

@@ -399,9 +399,24 @@ Query: "{clean_query}"
     async def _run_specialist(self, agent: BaseAgent, context: Dict[str, Any]) -> AgentResponse:
         """Run a specialist agent with error handling and timeout"""
         from status_manager import status_manager
+        from .messenger import AgentMessage, get_messenger
+        from app_logging import correlation_id_ctx
+        
         agent_key = agent.config.name.lower().replace("agent", "_agent")
+        c_id = correlation_id_ctx.get()
+        messenger = get_messenger()
         
         status_manager.set_status(agent_key, "working", "Executing task...")
+        
+        # Emit telemetry: Start
+        start_msg = AgentMessage(
+            sender="CoordinatorAgent",
+            recipient=agent.config.name,
+            subject="agent_started",
+            payload={"agent": agent.config.name, "ticker": context.get("ticker")},
+            correlation_id=c_id
+        )
+        await messenger.send_message(start_msg)
         
         try:
             # 15s timeout per specialist to prevent hanging
@@ -433,21 +448,39 @@ Query: "{clean_query}"
                                 retry_result = await agent.execute(new_context)
                                 if retry_result.success:
                                     status_manager.set_status(agent_key, "ready", "Resolved via Tier 2")
-                                    return retry_result
+                                    result = retry_result
                                 else:
                                     result = retry_result # Update original result for Tier 3 fallthrough
 
-                        # Tier 3: LLM Self-Correction fallback (Reasoning)
-                        logger.info(f"Coordinator: Escalating Ticker Resolution to Tier 3 (LLM) for {agent.config.name}")
-                        status_manager.set_status(agent_key, "working", "Attempting LLM self-healing (Tier 3)...")
-                        
-                        fixed_result = await self._handle_specialist_error(agent, context, result.error)
-                        if fixed_result:
-                            logger.info(f"Coordinator Tier 3: Successfully healed error for {agent.config.name}")
-                            status_manager.set_status(agent_key, "ready", "Fixed via Coordinator Self-Healing")
-                            return fixed_result
+                        if not result.success:
+                            # Tier 3: LLM Self-Correction fallback (Reasoning)
+                            logger.info(f"Coordinator: Escalating Ticker Resolution to Tier 3 (LLM) for {agent.config.name}")
+                            status_manager.set_status(agent_key, "working", "Attempting LLM self-healing (Tier 3)...")
+                            
+                            fixed_result = await self._handle_specialist_error(agent, context, result.error)
+                            if fixed_result:
+                                logger.info(f"Coordinator Tier 3: Successfully healed error for {agent.config.name}")
+                                status_manager.set_status(agent_key, "ready", "Fixed via Coordinator Self-Healing")
+                                result = fixed_result
                 
                 status_manager.set_status(agent_key, "ready", "Task complete")
+                
+                # Emit telemetry: Success/Complete
+                complete_msg = AgentMessage(
+                    sender=agent.config.name,
+                    recipient="CoordinatorAgent",
+                    subject="agent_complete",
+                    payload={
+                        "agent": agent.config.name, 
+                        "success": result.success,
+                        "latency_ms": result.latency_ms,
+                        "ticker": context.get("ticker"),
+                        "error": result.error if not result.success else None
+                    },
+                    correlation_id=c_id
+                )
+                await messenger.send_message(complete_msg)
+                
                 return result
         except asyncio.TimeoutError:
             error_msg = "Timout after 15s"

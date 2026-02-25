@@ -53,7 +53,7 @@ fn normalize_ticker(ticker: String) -> PyResult<String> {
     }
 
     // 5. Suffix Protection for Leveraged Products
-    let stems = ["LLOY", "BARC", "VOD", "HSBA", "TSCO", "BP", "AZN", "RR", "NG", "SGLN", "SSLN"];
+    let stems = ["LLOY", "BARC", "VOD", "HSBA", "TSCO", "BP", "AZN", "RR", "NG", "SGLN", "SSLN", "GSK", "SHELL", "BATS", "AHT", "NWG", "GLEN"];
     if normalized.ends_with('1') && normalized.len() > 3 {
         let stem_check = normalized[..normalized.len()-1].to_string();
         if stems.contains(&stem_check.as_str()) {
@@ -83,6 +83,11 @@ fn normalize_ticker(ticker: String) -> PyResult<String> {
     // Additional check: 4-char tickers not ending in L are likely US (unless explicit EQ)
     if normalized.len() == 4 && !normalized.ends_with('L') {
         is_likely_uk = false;
+    }
+
+    // Force likelihood for known UK stems
+    if stems.iter().any(|&s| normalized.starts_with(s)) {
+        is_likely_uk = true;
     }
 
     if is_likely_uk && normalized.ends_with('L') && normalized.len() > 3 && !us_exclusions.contains(&normalized.as_str()) {

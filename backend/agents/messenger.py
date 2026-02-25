@@ -29,6 +29,7 @@ class AgentMessenger:
     """
     def __init__(self):
         self._subscribers: Dict[str, Callable[[AgentMessage], Awaitable[None]]] = {}
+        self._trace_subscribers: Dict[str, List[Callable[[AgentMessage], Awaitable[None]]]] = {}
         self._message_history: list[AgentMessage] = []
         self._lock = asyncio.Lock()
 
@@ -37,6 +38,23 @@ class AgentMessenger:
         self._subscribers[agent_name] = handler
         logger.info(f"Messenger: Registered agent '{agent_name}'")
 
+    def subscribe_to_trace(self, correlation_id: str, handler: Callable[[AgentMessage], Awaitable[None]]):
+        """Subscribe to all messages with a specific correlation_id."""
+        if correlation_id not in self._trace_subscribers:
+            self._trace_subscribers[correlation_id] = []
+        self._trace_subscribers[correlation_id].append(handler)
+        logger.info(f"Messenger: Subscribed to trace '{correlation_id}'")
+
+    def unsubscribe_from_trace(self, correlation_id: str, handler: Callable[[AgentMessage], Awaitable[None]]):
+        """Unsubscribe from a trace."""
+        if correlation_id in self._trace_subscribers:
+            try:
+                self._trace_subscribers[correlation_id].remove(handler)
+                if not self._trace_subscribers[correlation_id]:
+                    del self._trace_subscribers[correlation_id]
+            except ValueError:
+                pass
+
     async def send_message(self, message: AgentMessage):
         """Route a message to its recipient."""
         async with self._lock:
@@ -44,6 +62,11 @@ class AgentMessenger:
             # Limit history
             if len(self._message_history) > 1000:
                 self._message_history.pop(0)
+
+        # Notify trace subscribers first
+        if message.correlation_id and message.correlation_id in self._trace_subscribers:
+            for handler in self._trace_subscribers[message.correlation_id]:
+                asyncio.create_task(handler(message))
 
         recipient = message.recipient
         if recipient in self._subscribers:

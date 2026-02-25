@@ -25,45 +25,46 @@ class PriceValidator:
     @staticmethod
     async def fetch_multi_source_price(ticker: str) -> Dict[str, Any]:
         """
-        Fetch price from all available sources.
-
-        Returns:
-            {
-                "trading212": Decimal('150.25'),
-                "alpaca": Decimal('150.22'),
-                "yfinance": Decimal('150.20'),
-                "currency": "GBP" or "USD"
-            }
+        Architecture Resilience:
+        US -> Alpaca (Primary) -> yfinance (Fallback)
+        UK -> Finnhub (Primary) -> yfinance (Fallback)
         """
-        from data_engine import get_alpaca_client
+        from data_engine import get_alpaca_client, get_finnhub_client
         from trading212_mcp_server import normalize_ticker
 
         results = {
             "trading212": None,
             "alpaca": None,
             "yfinance": None,
+            "finnhub": None,
             "currency": DataSourceNormalizer.get_currency_for_ticker(ticker)
         }
 
-        # Normalize ticker for each source
         normalized_ticker = normalize_ticker(ticker)
+        is_uk = normalized_ticker.endswith(".L")
 
-        # Fetch from all sources in parallel
-        async def fetch_alpaca():
+        async def fetch_us_primary():
             try:
                 alpaca_client = get_alpaca_client()
-                # data_engine's get_historical_bars now returns dict with 'bars' list of dicts (from PriceData.model_dump)
-                # values are Decimal objects
                 data = await alpaca_client.get_historical_bars(normalized_ticker, limit=1)
                 if data and "bars" in data and data["bars"]:
-                    # PriceData dump has 'close' as Decimal (if not json dump mode)
                     raw_price = data["bars"][0]["close"]
                     results["alpaca"] = DataSourceNormalizer.normalize_alpaca_price(raw_price, normalized_ticker)
-                    logger.info(f"Alpaca price for {ticker}: {results['alpaca']}")
+                    logger.info(f"Primary Alpaca price for US {ticker}: {results['alpaca']}")
             except Exception as e:
-                logger.warning(f"Alpaca price fetch failed for {ticker}: {e}")
+                logger.warning(f"Primary Alpaca fetch failed for {ticker}: {e}")
 
-        async def fetch_yfinance():
+        async def fetch_uk_primary():
+            try:
+                finnhub = get_finnhub_client()
+                quote = await finnhub.get_real_time_quote(ticker)
+                if quote and "current_price" in quote:
+                    results["finnhub"] = quote["current_price"]
+                    logger.info(f"Primary Finnhub price for UK {ticker}: {results['finnhub']}")
+            except Exception as e:
+                logger.warning(f"Primary Finnhub fetch failed for {ticker}: {e}")
+
+        async def fetch_global_fallback():
             try:
                 import yfinance as yf
                 ticker_obj = yf.Ticker(normalized_ticker)
@@ -71,25 +72,21 @@ class PriceValidator:
                 if not info.empty:
                     raw_price = float(info['Close'].iloc[-1])
                     results["yfinance"] = DataSourceNormalizer.normalize_yfinance_price(raw_price, normalized_ticker)
-                    logger.info(f"yfinance price for {ticker}: {results['yfinance']}")
+                    logger.info(f"Fallback yfinance price for {ticker}: {results['yfinance']}")
             except Exception as e:
-                logger.warning(f"yfinance price fetch failed for {ticker}: {e}")
+                logger.warning(f"Fallback yfinance fetch failed for {ticker}: {e}")
 
-        async def fetch_trading212():
-            try:
-                # Trading212 price fetching would go here
-                # For now, we'll leave it as None and rely on other sources
-                pass
-            except Exception as e:
-                logger.warning(f"Trading212 price fetch failed for {ticker}: {e}")
+        # Execute based on region
+        tasks = []
+        if is_uk:
+            tasks.append(fetch_uk_primary())
+        else:
+            tasks.append(fetch_us_primary())
+        
+        # Always run fallback for robustness or comparison
+        tasks.append(fetch_global_fallback())
 
-        # Execute all fetches concurrently
-        await asyncio.gather(
-            fetch_alpaca(),
-            fetch_yfinance(),
-            fetch_trading212(),
-            return_exceptions=True
-        )
+        await asyncio.gather(*tasks, return_exceptions=True)
 
         return results
 

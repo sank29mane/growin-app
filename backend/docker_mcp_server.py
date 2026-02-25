@@ -42,37 +42,46 @@ class DockerMCPServer:
             logger.error(f"Could not connect to Docker daemon: {e}")
             return False
 
-    def _ensure_image(self):
+    def _ensure_image(self, image_name: Optional[str] = None):
         """Ensure the execution image is present"""
         if not self._initialize_client():
             return False
             
+        target_image = image_name or self.image
         try:
-            self.client.images.get(self.image)
+            self.client.images.get(target_image)
             return True
         except Exception:
             try:
-                logger.info(f"Pulling image {self.image}...")
-                self.client.images.pull(self.image)
+                logger.info(f"Pulling image {target_image}...")
+                self.client.images.pull(target_image)
                 return True
             except Exception as e:
-                logger.error(f"Failed to pull image {self.image}: {e}")
+                logger.error(f"Failed to pull image {target_image}: {e}")
                 return False
 
-    def execute_script(self, script_content: str, timeout: int = 15) -> Dict[str, Any]:
+    def execute_script(self, script_content: str, timeout: int = 15, engine: str = "standard") -> Dict[str, Any]:
         """
         Execute a Python script in an isolated container.
         
         Args:
             script_content: The Python code to run
             timeout: Max execution time in seconds
+            engine: 'standard' or 'npu' (NPU uses MLX/Core ML optimized image)
             
         Returns:
             Dict with 'stdout', 'stderr', 'exit_code'
         """
-        if not self._ensure_image():
+        # Select image based on engine
+        image_to_use = self.image
+        if engine == "npu":
+            # Using specialized image with MLX and coremltools pre-installed
+            image_to_use = os.getenv("DOCKER_NPU_IMAGE", "growin-npu-compute:latest")
+            logger.info(f"Using NPU-Optimized Engine for calculation")
+
+        if not self._ensure_image(image_to_use):
             return {
-                "error": "Docker is not available or image could not be pulled.",
+                "error": f"Docker is not available or image {image_to_use} could not be pulled.",
                 "status": "error"
             }
 
@@ -80,12 +89,12 @@ class DockerMCPServer:
         try:
             # Create container with strict limits
             container = self.client.containers.create(
-                self.image,
+                image_to_use,
                 command="python /app/script.py",
                 working_dir="/app",
-                network_mode="none",  # No network access
-                mem_limit="128m",     # 128MB RAM limit
-                pids_limit=20,        # Limit processes
+                network_mode="none",
+                mem_limit="256m" if engine == "npu" else "128m", # Extra RAM for MLX
+                pids_limit=20,
                 detach=True,
                 tty=False
             )
@@ -101,11 +110,16 @@ class DockerMCPServer:
             try:
                 result = container.wait(timeout=timeout)
                 exit_code = result.get("StatusCode", -1)
-            except Exception:
-                # Handle timeout
-                container.kill()
+            except Exception as e:
+                # Handle timeout or failure
+                logger.warning(f"Container wait failed or timed out: {e}")
+                try:
+                    container.kill()
+                except Exception:
+                    pass
+                
                 return {
-                    "error": f"Script execution timed out after {timeout}s",
+                    "error": f"Script execution timed out after {timeout}s or wait failed",
                     "status": "timeout",
                     "exit_code": -1
                 }
@@ -147,7 +161,7 @@ async def list_tools() -> List[Tool]:
     return [
         Tool(
             name="docker_run_python",
-            description="Execute a Python script in a secure, isolated Docker container. Use this for data cleaning or logic fixes.",
+            description="Execute a Python script in a secure, isolated Docker container. Use 'npu' engine for mathematical modeling to utilize Apple Neural Engine.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -159,6 +173,12 @@ async def list_tools() -> List[Tool]:
                         "type": "integer",
                         "description": "Timeout in seconds (default 15)",
                         "default": 15
+                    },
+                    "engine": {
+                        "type": "string",
+                        "enum": ["standard", "npu"],
+                        "description": "Compute engine to use. 'npu' is optimized for Apple Silicon math.",
+                        "default": "standard"
                     }
                 },
                 "required": ["script"]
@@ -171,12 +191,13 @@ async def call_tool(name: str, arguments: dict) -> List[TextContent]:
     if name == "docker_run_python":
         script = arguments.get("script")
         timeout = arguments.get("timeout", 15)
+        engine = arguments.get("engine", "standard")
         
         if not script:
             return [TextContent(type="text", text="Error: Missing 'script' argument")]
             
         # Run in a thread to not block the event loop since docker-py is synchronous
-        result = await asyncio.to_thread(docker_tool.execute_script, script, timeout)
+        result = await asyncio.to_thread(docker_tool.execute_script, script, timeout, engine)
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
     
     return [TextContent(type="text", text=f"Error: Unknown tool {name}")]

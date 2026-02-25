@@ -210,47 +210,48 @@ async def get_chart_data(symbol: str, timeframe: str = "1Day", limit: int = 500)
     if cached:
         return {"data": cached, "metadata": {"market": market, "currency": "GBP" if market == "UK" else "USD", "ticker": ticker, "provider": "Cache"}}
 
-    # 3. Fetch from Providers based on Market
-    # STRICT POLICY: Use real data sources only. No synthetic fallback.
-    from data_engine import get_finnhub_client
-    
+    # 3. Fetch from Resilient Providers based on Market
     data = []
     provider = "Unknown"
     
-    if market == 'UK':
-        # UK Stocks: Try Finnhub first, then yfinance
-        finnhub = get_finnhub_client()
-        if finnhub and finnhub.client:
+    try:
+        if market == 'UK':
+            # UK Stocks: Primary Finnhub
+            from data_engine import get_finnhub_client
+            finnhub = get_finnhub_client()
+            if finnhub and finnhub.client:
+                try:
+                    result = await finnhub.get_historical_bars(ticker, timeframe, limit)
+                    if result and result.get("bars"):
+                        data = _convert_bars_to_chart_format(result["bars"], ticker)
+                        provider = "Finnhub"
+                except Exception as e:
+                    logger.warning(f"Finnhub primary failed for {ticker}: {e}")
+        else:
+            # US Stocks: Primary Alpaca
             try:
-                result = await finnhub.get_historical_bars(ticker, timeframe, limit)
-                if result and result.get("bars"):
-                    data = _convert_bars_to_chart_format(result["bars"], ticker)
-                    provider = "Finnhub"
-                    cache.set(cache_key, data, ttl=600)
+                data = await get_alpaca_chart_data(ticker, timeframe, limit, cache_key)
+                provider = "Alpaca"
             except Exception as e:
-                logger.warning(f"Finnhub fetch failed for {ticker}: {e}")
-        
-        # Fallback to yfinance for UK stocks
+                logger.warning(f"Alpaca primary failed for {ticker}: {e}")
+
+        # GLOBAL FALLBACK: Yahoo Finance
         if not data:
+            logger.info(f"Primary failed for {ticker} ({market}). Falling back to yfinance for chart.")
             try:
                 data = await get_yfinance_chart_data(ticker, timeframe, limit, cache_key)
                 provider = "yfinance"
             except Exception as e:
-                logger.warning(f"yfinance UK fallback failed for {ticker}: {e}")
-    else:
-        # US Stocks: Try Alpaca first, then yfinance
-        try:
-            data = await get_alpaca_chart_data(ticker, timeframe, limit, cache_key)
-            provider = "Alpaca"
-        except Exception:
-            pass  # Fallback to yfinance
-        
-        if not data:
-            try:
-                data = await get_yfinance_chart_data(ticker, timeframe, limit, cache_key)
-                provider = "yfinance"
-            except Exception as e:
-                logger.warning(f"yfinance US fallback failed for {ticker}: {e}")
+                logger.error(f"yfinance fallback failed for {ticker}: {e}")
+                
+    except Exception as e:
+        logger.error(f"Chart fetch system failure for {ticker}: {e}")
+
+    # STRICT: Return 404 if no real data available after all attempts
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Market data unavailable for {symbol}. All providers (Primary + Fallback) exhausted.")
+
+    # 4. Final Processing & Persistent Backup
 
     # STRICT: No synthetic data. Return 404 if no real data available.
     if not data:
@@ -310,10 +311,9 @@ async def websocket_chart_data(websocket: WebSocket, symbol: str):
     market = detect_market(ticker)
 
     alpaca = get_alpaca_client()
-    finnhub = get_finnhub_client()
 
     try:
-        # Initial full data burst
+        # Initial full data burst (already region-locked in get_chart_data)
         chart_response = await get_chart_data(symbol, timeframe="1Day", limit=100)
         await websocket.send_json({
             "type": "chart_init",
@@ -323,24 +323,48 @@ async def websocket_chart_data(websocket: WebSocket, symbol: str):
         })
 
         while True:
-            # High-frequency ticks
+            # High-frequency ticks from Resilient Sources
             quote = None
             if market == "UK":
-                quote = await finnhub.get_real_time_quote(ticker)
-            else:
-                quote = await alpaca.get_real_time_quote(ticker)
-
-            if quote:
-                await websocket.send_json({
-                    "type": "realtime_quote",
-                    "symbol": symbol,
-                    "data": {
-                        "current_price": float(quote["current_price"]),
-                        "change": float(quote["change"]),
-                        "change_percent": float(quote["change_percent"]),
-                        "timestamp": quote["timestamp"]
+                # UK Primary: Finnhub
+                quote_res = await finnhub.get_real_time_quote(ticker)
+                if quote_res:
+                    quote = {
+                        "current_price": float(quote_res["current_price"]),
+                        "change": float(quote_res["change"]),
+                        "change_percent": float(quote_res["change_percent"]),
+                        "timestamp": quote_res["timestamp"]
                     }
-                })
+            else:
+                # US Primary: Alpaca
+                quote_res = await alpaca.get_real_time_quote(ticker)
+                if quote_res:
+                    quote = {
+                        "current_price": float(quote_res["current_price"]),
+                        "change": float(quote_res["change"]),
+                        "change_percent": float(quote_res["change_percent"]),
+                        "timestamp": quote_res["timestamp"]
+                    }
+
+            # GLOBAL FALLBACK: yfinance (Simulated tick from history tail)
+            if not quote:
+                import yfinance as yf
+                def fetch_yf_tick():
+                    t = yf.Ticker(ticker)
+                    p = getattr(t.fast_info, 'last_price', 0.0)
+                    if not p or p <= 0:
+                        hist = t.history(period="1d")
+                        if not hist.empty: p = hist['Close'].iloc[-1]
+                    return p
+                
+                price = await asyncio.to_thread(fetch_yf_tick)
+                if price:
+                    quote = {
+                        "current_price": price,
+                        "change": 0,
+                        "change_percent": 0,
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    }
 
                 # Also send a tick that can be appended to charts
                 await websocket.send_json({

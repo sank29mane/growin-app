@@ -226,6 +226,15 @@ wheels = [
 ]
 
 [[package]]
+name = "async-timeout"
+version = "5.0.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a5/ae/136395dfbfe00dfc94da3f3e136d0b13f394cba8f4841120e34226265780/async_timeout-5.0.1.tar.gz", hash = "sha256:d9321a7a3d5a6a5e187e824d2fa0793ce379a202935782d555d6e9d2735677d3", size = 9274, upload-time = "2024-11-06T16:41:39.6Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fe/ba/e2081de779ca30d473f21f5b30e0e737c438205440784c7dfc81efc2b029/async_timeout-5.0.1-py3-none-any.whl", hash = "sha256:39e3809566ff85354557ec2398b55e096c8364bacac9405a7a1fa429e77fe76c", size = 6233, upload-time = "2024-11-06T16:41:37.9Z" },
+]
+
+[[package]]
 name = "attrs"
 version = "25.4.0"
 source = { registry = "https://pypi.org/simple" }
@@ -271,6 +280,7 @@ dependencies = [
     { name = "pytest-asyncio" },
     { name = "python-dotenv" },
     { name = "rapidfuzz" },
+    { name = "redis" },
     { name = "scikit-learn" },
     { name = "tavily-python" },
     { name = "torch" },
@@ -322,6 +332,7 @@ requires-dist = [
     { name = "pytest-asyncio", specifier = ">=0.21.1,<0.22.0" },
     { name = "python-dotenv", specifier = ">=1.0.0,<2.0.0" },
     { name = "rapidfuzz", specifier = ">=3.0.0" },
+    { name = "redis", specifier = ">=5.0.0" },
     { name = "scikit-learn", specifier = ">=1.3.0" },
     { name = "tavily-python", specifier = ">=0.3.0,<0.4.0" },
     { name = "torch", specifier = ">=2.1.0,<3.0.0" },
@@ -4081,6 +4092,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/85/33/cd87d92b23f0b06e8914a61cea6850c6d495ca027f669fab7a379041827a/rapidfuzz-3.14.3-pp311-pypy311_pp73-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:1faa0f8f76ba75fd7b142c984947c280ef6558b5067af2ae9b8729b0a0f99ede", size = 1352187, upload-time = "2025-11-01T11:54:45.518Z" },
     { url = "https://files.pythonhosted.org/packages/22/20/9d30b4a1ab26aac22fff17d21dec7e9089ccddfe25151d0a8bb57001dc3d/rapidfuzz-3.14.3-pp311-pypy311_pp73-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:1e6eefec45625c634926a9fd46c9e4f31118ac8f3156fff9494422cee45207e6", size = 3101472, upload-time = "2025-11-01T11:54:47.255Z" },
     { url = "https://files.pythonhosted.org/packages/b1/ad/fa2d3e5c29a04ead7eaa731c7cd1f30f9ec3c77b3a578fdf90280797cbcb/rapidfuzz-3.14.3-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:56fefb4382bb12250f164250240b9dd7772e41c5c8ae976fd598a32292449cc5", size = 1511361, upload-time = "2025-11-01T11:54:49.057Z" },
+]
+
+[[package]]
+name = "redis"
+version = "7.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "async-timeout", marker = "python_full_version < '3.11.3'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9f/32/6fac13a11e73e1bc67a2ae821a72bfe4c2d8c4c48f0267e4a952be0f1bae/redis-7.2.0.tar.gz", hash = "sha256:4dd5bf4bd4ae80510267f14185a15cba2a38666b941aff68cccf0256b51c1f26", size = 4901247, upload-time = "2026-02-16T17:16:22.797Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/86/cf/f6180b67f99688d83e15c84c5beda831d1d341e95872d224f87ccafafe61/redis-7.2.0-py3-none-any.whl", hash = "sha256:01f591f8598e483f1842d429e8ae3a820804566f1c73dca1b80e23af9fba0497", size = 394898, upload-time = "2026-02-16T17:16:20.693Z" },
 ]
 
 [[package]]

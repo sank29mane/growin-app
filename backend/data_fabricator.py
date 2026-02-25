@@ -133,113 +133,91 @@ class DataFabricator:
                     ) for b in frayed_bars
                 ]
 
-            # Fetch current quote from primary source
-            quote_result = await self.finnhub.get_real_time_quote(ticker)
+            # Fetch current quote from mandated source with fallback
             current_price = Decimal('0')
             currency = "USD"
-            
-            if quote_result and "current_price" in quote_result and quote_result["current_price"] > 0:
-                 current_price = create_decimal(quote_result["current_price"])
+            source_used = "Unknown"
+            is_uk = ticker.upper().endswith(".L")
+
+            async def fetch_primary_quote():
+                nonlocal current_price, currency, source_used
+                if not is_uk:
+                    # US Primary: Alpaca
+                    quote_result = await self.alpaca.get_real_time_quote(ticker)
+                    if quote_result and "current_price" in quote_result and quote_result["current_price"] > 0:
+                        current_price = create_decimal(quote_result["current_price"])
+                        source_used = "Alpaca"
+                        return True
+                else:
+                    # UK Primary: Finnhub
+                    quote_result = await self.finnhub.get_real_time_quote(ticker)
+                    if quote_result and "current_price" in quote_result and quote_result["current_price"] > 0:
+                        current_price = create_decimal(quote_result["current_price"])
+                        source_used = "Finnhub"
+                        currency = "GBP"
+                        return True
+                return False
+
+            primary_success = await fetch_primary_quote()
+
+            if not primary_success:
+                # UNIVERSAL FALLBACK: Yahoo Finance
+                try:
+                    import yfinance as yf
+                    def fetch_yf_quote():
+                        t = yf.Ticker(ticker)
+                        p = getattr(t.fast_info, 'last_price', 0.0)
+                        if not p or p <= 0:
+                            hist = t.history(period="1d")
+                            if not hist.empty: p = hist['Close'].iloc[-1]
+                        return p if p else 0.0
+                    
+                    yf_val = await asyncio.to_thread(fetch_yf_quote)
+                    if yf_val > 0:
+                        current_price = create_decimal(yf_val)
+                        source_used = "YFinance"
+                        currency = "GBP" if is_uk else "USD"
+                        logger.info(f"✅ Fallback yfinance Quote for {ticker}: {current_price}")
+                except Exception as yf_e:
+                    logger.warning(f"Fallback yfinance quote failed for {ticker}: {yf_e}")
 
             # --- T212 PORTFOLIO CHECK (Real-time fallback for owned assets) ---
-            # If external APIs fail, check if we own the asset in T212.
-            # T212 API gives real-time prices for held positions.
             if current_price <= 0:
                 try:
                     from app_context import state
                     if state.mcp_client:
-                         # Attempt to get position details
                          pos_result = await state.mcp_client.call_tool("get_position_details", {"ticker": ticker}, timeout=5.0)
-                         
-                         # Parse result (TextContent list)
                          if pos_result and hasattr(pos_result, 'content') and pos_result.content:
                              import json
                              text = pos_result.content[0].text
                              if "not found" not in text.lower():
                                  pos_data = json.loads(text)
-                                 # T212 returns 'currentPrice' or 'current_price'
                                  t212_price = pos_data.get("currentPrice") or pos_data.get("current_price")
                                  if t212_price:
                                      logger.info(f"✅ Recovered Real-Time Price from T212 Portfolio for {ticker}: {t212_price}")
                                      current_price = create_decimal(t212_price)
-                                     currency = pos_data.get("currencyCode", "GBP") # Default to GBP for T212 usually
+                                     source_used = "Trading212"
+                                     currency = pos_data.get("currencyCode", "GBP")
                 except Exception as mcp_e:
                     logger.warning(f"Failed to check T212 portfolio for price: {mcp_e}")
 
             # --- SOTA DATA VALIDATION LOGIC ---
-            # Compare Real-Time Quote vs Historical Close using Decimal to detect anomalies
-            needs_verification = False
-            
             if last_hist_close > 0 and current_price > 0:
-                diff_pct = abs(current_price - last_hist_close) / last_hist_close
-                
                 # Check for Pence/Pound mismatch (approx 100x factor)
-                if Decimal('90') < (current_price / last_hist_close) < Decimal('110'):
+                # Ratio of 100 means current is GBX, history is GBP
+                if Decimal('80') < (current_price / last_hist_close) < Decimal('120'):
                     logger.warning(f"Data Mismatch (GBX/GBP): History={last_hist_close}, Curr={current_price}. Treating as GBX->GBP adjustment.")
-                    current_price = current_price / Decimal('100')  # Normalize to match history
+                    current_price = current_price / Decimal('100')
                     
-                elif Decimal('0.009') < (current_price / last_hist_close) < Decimal('0.011'):
+                # Ratio of 0.01 means current is GBP, history is GBX
+                elif Decimal('0.008') < (current_price / last_hist_close) < Decimal('0.012'):
                      logger.warning(f"Data Mismatch (GBP/GBX): History={last_hist_close}, Curr={current_price}. Treating as GBP->GBX adjustment.")
                      current_price = current_price * Decimal('100')
-                     
-                elif diff_pct > Decimal('0.20'): # >20% unexplained gap
-                     logger.warning(f"Significant price gap detected for {ticker}: Hist={last_hist_close}, Curr={current_price} ({diff_pct*100:.1f}%). Verifying...")
-                     needs_verification = True
-            elif current_price <= 0:
-                needs_verification = True
-
-            # FALLBACK / VERIFICATION (YFinance)
-            if needs_verification:
-                try:
-                    import yfinance as yf
-                    def fetch_yf_price():
-                        y_ticker = ticker
-                        t = yf.Ticker(y_ticker)
-                        p = getattr(t.fast_info, 'last_price', 0.0)
-                        if not p or p <= 0:
-                            # Fallback: Get most recent close from history
-                            hist = t.history(period="1d")
-                            if not hist.empty:
-                                p = hist['Close'].iloc[-1]
-                        return p if p else 0.0
-                        
-                    yf_price_val = await asyncio.to_thread(fetch_yf_price)
-                    yf_price = create_decimal(yf_price_val)
-                    
-                    if yf_price > 0:
-                        # Verify against History
-                        yf_diff = abs(yf_price - last_hist_close) / last_hist_close if last_hist_close > 0 else Decimal('0')
-                        
-                        # Decision Matrix
-                        if last_hist_close > 0 and yf_diff < Decimal('0.10'):
-                            logger.info(f"Verification: Rejecting Finnhub ({current_price}), Accepting YF ({yf_price}) which matches History.")
-                            current_price = yf_price
-                        elif current_price > 0 and abs(yf_price - current_price) / current_price < Decimal('0.05'):
-                            logger.info(f"Verification: YF ({yf_price}) confirms Finnhub ({current_price}). Real Volatility detected.")
-                            # Current price accepted
-                        else:
-                            # Both diverge from history, or conflict. 
-                            if current_price > 0 and abs(yf_price - current_price) / current_price < Decimal('0.10'):
-                                 logger.info("Verification: Sources agree on new price level.")
-                                 # Current price accepted
-                            else:
-                                 logger.warning(f"Verification Failed: YF={yf_price}, Finn={current_price}, Hist={last_hist_close}. Fallback to History.")
-                                 current_price = last_hist_close
-                    else:
-                        logger.warning("Verification Failed: YF returned 0. Fallback to History.")
-                        current_price = last_hist_close if last_hist_close > 0 else current_price
-                        
-                except Exception as ex:
-                    logger.warning(f"Verification Error for {ticker}: {ex}. Fallback to History.")
-                    current_price = last_hist_close if last_hist_close > 0 else current_price
-
+            
             # Final Safety: If still 0, use history
             if current_price <= 0 and last_hist_close > 0:
                  current_price = last_hist_close
-            
-            # Detect currency (simple heuristic)
-            if ticker.endswith(".L"):
-                currency = "GBP" # Actually GBX but normalized usually
+                 source_used = "History"
 
             # CHECK FOR VALID DATA - Trigger Fallback if empty
             if not history_series or current_price <= 0:
@@ -249,7 +227,7 @@ class DataFabricator:
                 ticker=ticker,
                 current_price=current_price,
                 currency=currency,
-                source="DataFabricator",
+                source=source_used,
                 history_series=history_series
             )
             cache.set(cache_key, p_data, ttl=60) # 60s cache for prices

@@ -102,6 +102,8 @@ class ChatViewModel {
                     updateAssistantMessage(id: assistantMessageId, content: accumulatedContent)
                 case .status(let status):
                     streamingStatus = status
+                case .telemetry(let telemetry):
+                    handleTelemetry(telemetry)
                 case .meta(let meta):
                     if let convId = meta["conversation_id"]?.value as? String {
                         if selectedConversationId == nil {
@@ -126,6 +128,29 @@ class ChatViewModel {
             isProcessing = false
             streamingStatus = nil
             inputText = message
+        }
+    }
+
+    private func handleTelemetry(_ telemetry: [String: AnySendable]) {
+        let sender = telemetry["sender"]?.value as? String ?? "Agent"
+        let subject = telemetry["subject"]?.value as? String ?? ""
+        let payload = telemetry["payload"]?.value as? [String: Any] ?? [:]
+        
+        if subject == "agent_started" {
+            let agent = payload["agent"] as? String ?? sender
+            streamingStatus = "Agent \(agent) starting..."
+        } else if subject == "agent_complete" {
+            let agent = payload["agent"] as? String ?? sender
+            let success = payload["success"] as? Bool ?? true
+            if success {
+                streamingStatus = "Agent \(agent) finished."
+            } else {
+                streamingStatus = "Agent \(agent) failed."
+            }
+        } else if subject == "intent_classified" {
+            if let intent = payload["intent"] as? [String: Any], let type = intent["type"] as? String {
+                streamingStatus = "Intent: \(type)"
+            }
         }
     }
 
