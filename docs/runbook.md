@@ -34,6 +34,38 @@ git branch --show-current
 
 ---
 
+## System Health & Observability
+
+### Telemetry Verification
+**Goal:** Confirm real-time agentic reasoning trace is flowing from backend to frontend.
+
+1.  **Monitor intelligent Console:** Open the macOS app and navigate to "Vital Monitor".
+2.  **Verify SSE Stream:**
+    ```bash
+    curl -N -H "Accept: text/event-stream" http://localhost:8002/api/chat/message -d '{"message": "Analyze AAPL"}'
+    ```
+    Ensure `event: telemetry` packets are visible.
+3.  **Neural Pathway Pulse:** Confirm specialized nodes (Quant, Research, Forecast) transition to `working` state during a live query.
+
+### Python Sandbox (Docker) Operations
+**Goal:** Manage and verify secure mathematical modeling.
+
+1.  **Check Sandbox Readiness:**
+    ```bash
+    docker ps | grep growin-npu
+    ```
+2.  **Manual Test Execution:**
+    ```python
+    # Use the docker_run_python tool via MCP with engine="npu"
+    result = await mcp.call_tool("docker_run_python", {"script": "print(2+2)", "engine": "npu"})
+    ```
+3.  **Resource Cleanup:** The system automatically removes containers on completion. If runaway containers are detected:
+    ```bash
+    docker rm -f $(docker ps -a -q --filter "ancestor=growin-npu-compute")
+    ```
+
+---
+
 ## Wave Validation
 
 ### Verify Wave Completion
