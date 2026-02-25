@@ -119,7 +119,7 @@ At the end of each wave or significant work block, create a state snapshot:
 
 **Adapter Pattern:**
 ```
-adapters/
+.gemini/adapters/
 ├── CLAUDE.md    # Optional Claude enhancements
 ├── GEMINI.md    # Optional Gemini enhancements
 └── GPT_OSS.md   # Optional GPT/OSS enhancements
@@ -158,13 +158,14 @@ type(scope): description
 
 ```
 PROJECT_RULES.md          # ← This file (canonical rules)
-GSD-STYLE.md              # Style and conventions
+docs/GSD-STYLE.md         # Style and conventions
 
 .agent/
 ├── workflows/            # Slash commands (/plan, /execute, etc.)
 └── skills/               # Agent specializations
 
 .gemini/                  # Gemini-specific configuration
+├── adapters/             # Optional model-specific enhancements
 .gsd/                     # Project state and artifacts
 ├── SPEC.md               # Requirements (must be FINALIZED)
 ├── ROADMAP.md            # Phases and progress
@@ -172,7 +173,6 @@ GSD-STYLE.md              # Style and conventions
 ├── templates/            # Document templates
 └── examples/             # Usage examples
 
-adapters/                 # Optional model-specific enhancements
 docs/                     # Operational documentation
 scripts/                  # Utility scripts
 ```

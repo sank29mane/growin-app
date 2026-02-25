@@ -132,7 +132,7 @@ def get_audit_logger() -> AuditLogger:
     global _audit_logger
     if _audit_logger is None:
         # Determine strict path (e.g. absolute path or env var)
-        log_path = os.environ.get("AUDIT_LOG_PATH", "audit.log")
+        log_path = os.environ.get("AUDIT_LOG_PATH", "backend/data/audit.log")
         _audit_logger = AuditLogger(log_path)
     return _audit_logger
 

@@ -200,9 +200,9 @@ PYTHONPATH=. uv run pytest backend/tests/test_financial_precision.py backend/tes
 ```
 
 ## 📜 Documentation
-*   `ARCHITECTURE.md`: Deep dive into system design and diagrams.
-*   `MAS_Strategy.md`: 2026 SOTA Multi-Agent Strategy & Roadmap.
-*   `AGENTS.md`: Detailed agent roles and debate protocols.
+*   `docs/ARCHITECTURE.md`: Deep dive into system design and diagrams.
+*   `docs/MAS_Strategy.md`: 2026 SOTA Multi-Agent Strategy & Roadmap.
+*   `docs/GSD-STYLE.md`: Methodology and style guide.
 
 ---
 

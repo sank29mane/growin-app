@@ -79,7 +79,7 @@ self.llm = ChatMLX(model_name=self.model_name, temperature=0, top_p=1.0)
 - Updated database info: SQLite `growin.db`
 - Updated quantization info: 8-bit (not 4-bit)
 
-#### ARCHITECTURE.md
+#### docs/ARCHITECTURE.md
 - Added new section: **Coordinator Model Guardrails**
 - Added model specifications table
 - Added guardrail implementation code examples
@@ -149,7 +149,7 @@ Created comprehensive test suite covering:
 | `backend/coordinator_agent.py` | Modified | System prompt, JSON enforcement |
 | `tests/test_coordinator_model.py` | Created | Verification test suite |
 | `README.md` | Modified | Hardware reqs, model specs |
-| `ARCHITECTURE.md` | Modified | Added guardrails section |
+| `docs/ARCHITECTURE.md` | Modified | Added guardrails section |
 | `docs/coordinator_config_complete.md` | Created | This walkthrough |
 
 ---
