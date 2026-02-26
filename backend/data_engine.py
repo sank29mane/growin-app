@@ -397,25 +397,39 @@ class AlpacaClient:
         return results
 
     async def get_portfolio_positions(self) -> List[Dict[str, Any]]:
-        """Fetch all open positions."""
+        """Fetch all open positions from Alpaca."""
         if self.trading_client:
             try:
                 positions = await asyncio.to_thread(self.trading_client.get_all_positions)
-                # Convert to list of dicts
+
                 pos_list = []
-                # Handle case where positions might be a list or object depending on SDK version
-                # Assuming list of Position objects
                 for p in positions:
+                    # Map Alpaca Position object to dict
+                    # robustly handle Decimal conversions and optional fields
+
+                    qty = Decimal(str(p.qty))
+                    market_val = Decimal(str(p.market_value)) if p.market_value else Decimal(0)
+                    cost_basis = Decimal(str(p.cost_basis))
+
+                    # Calculate avg_entry_price if not explicitly present
+                    avg_price = Decimal(0)
+                    if hasattr(p, 'avg_entry_price'):
+                        avg_price = Decimal(str(p.avg_entry_price))
+                    elif qty != 0:
+                        avg_price = cost_basis / qty
+
                     pos_list.append({
-                        "symbol": p.symbol,
-                        "qty": Decimal(str(p.qty)),
-                        "market_value": Decimal(str(p.market_value)) if p.market_value else Decimal(0),
-                        "cost_basis": Decimal(str(p.cost_basis)),
+                        "symbol": str(p.symbol),
+                        "qty": qty,
+                        "market_value": market_val,
+                        "cost_basis": cost_basis,
                         "unrealized_pl": Decimal(str(p.unrealized_pl)) if p.unrealized_pl else Decimal(0),
                         "unrealized_plpc": Decimal(str(p.unrealized_plpc)) if p.unrealized_plpc else Decimal(0),
                         "current_price": Decimal(str(p.current_price)),
-                        "lastday_price": Decimal(str(p.lastday_price)),
-                        "change_today": Decimal(str(p.change_today)),
+                        "avg_entry_price": avg_price,
+                        "lastday_price": Decimal(str(p.lastday_price)) if hasattr(p, 'lastday_price') else Decimal(0),
+                        "change_today": Decimal(str(p.change_today)) if hasattr(p, 'change_today') else Decimal(0),
+                        "side": str(p.side)
                     })
                 return pos_list
             except Exception as e:
@@ -432,8 +446,10 @@ class AlpacaClient:
                 "unrealized_pl": Decimal("100.00"),
                 "unrealized_plpc": Decimal("0.0714"),
                 "current_price": Decimal("150.00"),
+                "avg_entry_price": Decimal("140.00"),
                 "lastday_price": Decimal("145.00"),
-                "change_today": Decimal("0.0345")
+                "change_today": Decimal("0.0345"),
+                "side": "long"
             }
         ]
 
@@ -510,43 +526,6 @@ class AlpacaClient:
             "status": "ACTIVE"
         }
 
-    async def get_portfolio_positions(self) -> List[Dict[str, Any]]:
-        """Fetch all open positions from Alpaca."""
-        if self.trading_client:
-            try:
-                positions = await asyncio.to_thread(self.trading_client.get_all_positions)
-
-                pos_list = []
-                for p in positions:
-                    # Map Alpaca Position object to dict
-                    # SDK returns Position model, attributes access
-                    pos_list.append({
-                        "symbol": str(p.symbol),
-                        "qty": Decimal(str(p.qty)),
-                        "current_price": Decimal(str(p.current_price)),
-                        "avg_entry_price": Decimal(str(p.avg_entry_price)),
-                        "market_value": Decimal(str(p.market_value)),
-                        "unrealized_pl": Decimal(str(p.unrealized_pl)),
-                        "unrealized_plpc": Decimal(str(p.unrealized_plpc)),
-                        "side": str(p.side)
-                    })
-                return pos_list
-            except Exception as e:
-                logger.error(f"AlpacaClient: Error fetching positions: {e}")
-
-        # Mock fallback
-        return [
-            {
-                "symbol": "AAPL",
-                "qty": Decimal("10"),
-                "current_price": Decimal("150.00"),
-                "avg_entry_price": Decimal("140.00"),
-                "market_value": Decimal("1500.00"),
-                "unrealized_pl": Decimal("100.00"),
-                "unrealized_plpc": Decimal("0.07"),
-                "side": "long"
-            }
-        ]
 
     async def get_real_time_quote(self, ticker: str) -> Optional[RealTimeQuoteDict]:
         """Get real-time quote for a ticker from Alpaca."""
@@ -637,11 +616,12 @@ class FinnhubClient:
             elif timeframe == "1Hour":
                 from_time = to_time - timedelta(hours=limit)
             elif timeframe in ["1Min", "5Min", "15Min"]:
-                from_time = to_time - timedelta(minutes=limit * int(resolution))
-            elif timeframe == "1Week":
-                from_time = to_time - timedelta(weeks=limit)
-            elif timeframe == "1Month":
-                from_time = to_time - timedelta(days=limit * 30)
+                # Safe int conversion
+                res_val = int(resolution) if resolution.isdigit() else 1
+                from_time = to_time - timedelta(minutes=limit * res_val)
+            else:
+                 # Default fallback
+                 from_time = to_time - timedelta(days=365)
 
             # Fetch candle data
             candles = self.client.stock_candles(
@@ -734,11 +714,7 @@ class FinnhubClient:
 
 def get_alpaca_client():
     """Returns an AlpacaClient or MockAlpacaClient based on API key availability."""
-    try:
-        return AlpacaClient()
-    except EnvironmentError:
-        logger.info("Using AlpacaClient in fallback mode for development.")
-        return AlpacaClient()
+    return AlpacaClient()
 
 
 def get_finnhub_client():
