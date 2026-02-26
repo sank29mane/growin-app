@@ -233,6 +233,7 @@ struct ConversationListView: View {
                         Image(systemName: "xmark.circle.fill")
                             .foregroundStyle(.gray.opacity(0.8))
                     }
+                    .accessibilityLabel("Close conversations list")
                 }
 
                 ToolbarItem {
@@ -249,6 +250,7 @@ struct ConversationListView: View {
                             }) {
                                 Image(systemName: "arrow.clockwise")
                             }
+                            .accessibilityLabel("Refresh conversations")
                             
                             Button(action: {
                                 selectedConversationId = nil
@@ -256,6 +258,7 @@ struct ConversationListView: View {
                             }) {
                                 Image(systemName: "plus")
                             }
+                            .accessibilityLabel("Start new conversation")
                         }
                     }
                 }
