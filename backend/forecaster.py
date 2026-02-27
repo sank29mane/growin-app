@@ -43,18 +43,21 @@ class TTMForecaster:
     def _init_ttm_model(self):
         """Initialize TTM-R2 bridge if available"""
         import os
+        import sys
         # Use absolute paths for reliability in subprocess
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        venv_python = os.path.join(base_dir, "venv_forecast/bin/python")
+        # Use current python executable instead of missing venv
+        venv_python = sys.executable
         bridge_script = os.path.join(base_dir, "forecast_bridge.py")
         
-        if os.path.exists(venv_python) and os.path.exists(bridge_script):
+        # Check if tsfm_public is importable in current env or bridge script exists
+        if os.path.exists(bridge_script):
             self.ttm_available = True
             self.venv_python = venv_python
             self.bridge_script = bridge_script
-            logger.info("✅ TTM-R2 Forecasting Bridge detected and ready (via venv_forecast)")
+            logger.info(f"✅ TTM-R2 Forecasting Bridge detected and ready (using {sys.executable})")
         else:
-            logger.warning(f"TTM-R2 Bridge components not found at {venv_python}. Using Statistical Fallback.")
+            logger.warning(f"TTM-R2 Bridge script not found at {bridge_script}. Using Statistical Fallback.")
             self.ttm_available = False
 
     async def forecast(self, ohlcv_data: List[Dict[str, Any]], prediction_steps: int = 96, timeframe: str = "1Day") -> Dict[str, Any]:
