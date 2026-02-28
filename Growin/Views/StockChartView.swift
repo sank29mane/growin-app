@@ -24,6 +24,7 @@ struct StockChartView: View {
                                 .font(.system(size: 10, weight: .bold))
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel("Dismiss notification")
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 10)
@@ -123,6 +124,7 @@ struct StockChartView: View {
                             .overlay(Circle().stroke(Color.white.opacity(0.1), lineWidth: 0.5))
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Share Intelligence Report")
                 }
             }
         }
