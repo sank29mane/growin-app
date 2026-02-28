@@ -83,7 +83,7 @@ class TestCoordinatorFixes(unittest.IsolatedAsyncioTestCase):
     async def test_ticker_normalization_integration(self):
         """Verify that ticker normalization is applied during processing"""
         # Patch the source of normalize_ticker since it's imported locally
-        with patch('trading212_mcp_server.normalize_ticker') as mock_norm:
+        with patch('utils.ticker_utils.normalize_ticker') as mock_norm:
             mock_norm.return_value = "VOD.L"
             
             # We need to mock _classify_intent to avoid LLM call

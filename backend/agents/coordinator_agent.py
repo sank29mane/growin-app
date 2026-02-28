@@ -264,14 +264,11 @@ Query: "{clean_query}"
 
         # COORDINATOR FIX: Robust normalization via T212 rules (fast & deterministic)
         if ticker:
-            try:
-                from trading212_mcp_server import normalize_ticker
-                original_ticker = ticker
-                ticker = normalize_ticker(ticker)
-                if ticker != original_ticker:
-                     logger.info(f"Ticker normalized: {original_ticker} -> {ticker}")
-            except ImportError:
-                logger.warning("Could not import normalize_ticker from trading212_mcp_server")
+            from utils.ticker_utils import normalize_ticker
+            original_ticker = ticker
+            ticker = normalize_ticker(ticker)
+            if ticker != original_ticker:
+                 logger.info(f"Ticker normalized: {original_ticker} -> {ticker}")
 
         # 2. CENTRALIZED DATA FABRICATION
         status_manager.set_status("coordinator", "working", "Fabricating Market Context...")
@@ -621,7 +618,7 @@ Query: "{clean_query}"
                     found_ticker = best_match["ticker"]
                     
                     # Normalize the found ticker (SOTA rule path)
-                    from trading212_mcp_server import normalize_ticker
+                    from utils.ticker_utils import normalize_ticker
                     normalized = normalize_ticker(found_ticker)
                     
                     logger.info(f"Coordinator Tier 2: Found best match '{best_match['name']}' ({found_ticker}) score={highest_score:.2f} -> {normalized}")
