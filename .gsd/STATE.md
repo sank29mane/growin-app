@@ -1,41 +1,24 @@
 # GSD STATE MEMORY
 
 ## Current Position
-- **Phase**: Phase 14 - Dynamic LM Studio Model Management
-- **Task**: Planning & Backend Preparation
-- **Status**: Paused at 2026-02-28 15:30
+- **Phase**: Phase 15 - Stateful Chat & UI Stability
+- **Task**: Post-Refactor Verification & Live Integration Prep
+- **Status**: Refactoring COMPLETE, Monitoring active
 
 ## Last Session Summary
-- **Phase 14 Planning**: Created comprehensive `SPEC.md` and a 3-wave implementation plan.
-- **Bug Fixes**: Resolved critical issues in `LLMFactory` and `LMStudioClient` regarding `lmstudio-auto` detection and stateful model tracking.
-- **Infrastructure**: Consolidated all project test directories into a unified root `tests/` structure (`backend/`, `ios/`, `ios-ui/`, etc.).
-- **UI Design**: Generated high-fidelity SwiftUI templates for the Preferences and Activity Log using Stitch.
-
-## In-Progress Work
-- Ready to implement Wave 1: Backend API & State Management.
-- Files modified: `backend/lm_studio_client.py`, `backend/agents/llm_factory.py`, `backend/schemas.py`, and extensive test folder reorganization.
-- Tests status: 13/13 backend tests passing.
-
-## Blockers
-None.
-
-## Context Dump
-### Decisions Made
-- **Test Consolidation**: Unified all tests in `/tests` to improve discoverability and maintain clear boundaries between Backend and iOS.
-- **Stateful Client**: Added `active_model_id` to `LMStudioClient` to allow the DecisionAgent to use the correctly loaded model without explicit ID passing.
-
-### Approaches Tried
-- **LM Studio Detection**: Refined the `_create_lmstudio` logic to ensure the client is returned even in auto-detect mode.
-
-### Current Hypothesis
-The backend is now primed for explicit model control. The next step is simply exposing the `load` and `status` actions via FastAPI.
-
-### Files of Interest
-- `backend/routes/agent_routes.py`: Target for next API additions.
-- `backend/lm_studio_client.py`: Key logic for LM Studio interaction.
-- `tests/backend/`: Organized location for future integration tests.
+- **Stateful Chat**: Refactored `DecisionAgent.py` to support `previous_response_id` and server-side state via `LMStudioClient.stateful_chat`.
+- **Flicker Shield**: Extended `LMStudioViewModel.swift` shield to 30s and implemented auto-clear for stuck requests (120s timeout).
+- **CoT Extraction**: Implemented `<think>` tag extraction in `DecisionAgent` and added `ReasoningChainView` to SwiftUI for transparent LLM internal logic.
+- **Data Integrity**: Cleaned up redundant logic blocks in `DecisionAgent.make_decision`.
 
 ## Next Steps
-1. Implement `POST /api/models/lmstudio/load` and `GET /api/models/lmstudio/status`.
-2. Create `LMStudioViewModel.swift` in the iOS project.
-3. Integrate Stitch patterns into `SettingsView.swift`.
+1. **Verify Stateful Streaming**: Test if `make_decision_stream` correctly maintains context across turns.
+2. **Live Endpoint Health Check**: Verify connectivity to production Alpaca/T212 endpoints (Phase 13 audit).
+3. **NPU Math Stress Test**: Run complex Monte Carlo simulations via `MathGeneratorAgent` to verify sandbox stability.
+4. **Reasoning UI Polish**: Add character-limit handling for ultra-long CoT traces in `ReasoningChainView`.
+
+## Quick Tasks Completed
+| Task | Description | Date |
+|------|-------------|------|
+| Jules Workflow | Created `/jules-delegate` workflow for task handoff. | 2026-03-01 |
+
