@@ -42,5 +42,33 @@ Environment switching is now robust and controlled via standard environment vari
 Next step is to provide the user with a guide for secure live credential management.
 Also, recommend running the GSD update (`npx get-shit-done-cc --global`).
 
+## Session: 2026-02-28 15:35
+
+### Objective
+Initiate Phase 14: Dynamic LM Studio Model Management and consolidate project test infrastructure.
+
+### Accomplished
+- **Phase 14 Planning**: Created `SPEC.md` and 3-wave execution plan for dynamic model loading.
+- **Backend Fixes**: 
+    - Updated `LMStudioClient` to track `active_model_id`.
+    - Fixed `LLMFactory` to correctly handle `lmstudio-auto` detection.
+    - Added LM Studio management schemas to `backend/schemas.py`.
+- **Infrastructure**: 
+    - Consolidated all test folders (`backend/tests`, `GrowinTests`, `GrowinUITests`, `tests/unit`) into a unified root `/tests` directory.
+    - Verified backend stability with 13/13 passing tests in the new location.
+- **UI Design**: Generated high-fidelity Preference and Activity Log screens with Stitch.
+
+### Verification
+- [x] Backend 13/13 tests passing.
+- [x] LM Studio auto-detection logic verified.
+- [x] Test structure unified and verified.
+
+### Paused Because
+User requested to pause work.
+
+### Handoff Notes
+The project is in a highly organized and stable state. Phase 14 is fully planned and ready for implementation. The next session should start with implementing the new LM Studio API endpoints in `backend/routes/agent_routes.py`.
+
+
 ### Handoff Notes
 The system is in its most stable state yet. The next step is the high-stakes transition from paper/mock to live APIs. Caching in `agent_routes.py` is the most recent code change.
