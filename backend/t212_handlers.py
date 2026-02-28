@@ -247,37 +247,70 @@ async def handle_market_order(
 async def handle_get_price_history(
     arguments: Dict[str, Any]
 ) -> List[TextContent]:
-    """Handle get_price_history using yfinance."""
+    """Handle get_price_history using Yahoo Finance API directly."""
+    import httpx
+
     ticker = normalize_ticker(arguments["ticker"])
     start_date = arguments.get("start_date")
     end_date = arguments.get("end_date")
     period = arguments.get("period", "3mo")
     interval = arguments.get("interval", "1d")
 
-    # Run in executor to avoid blocking async loop since yfinance is sync
-    loop = asyncio.get_running_loop()
+    headers = {'User-Agent': 'Mozilla/5.0'}
 
-    def fetch_history():
-        stock = yf.Ticker(ticker)
+    if start_date:
+        end = end_date if end_date else datetime.now().strftime("%Y-%m-%d")
 
-        # Use custom date range if provided, otherwise use period
-        if start_date:
-            # If end_date not provided, use today
-            end = end_date if end_date else datetime.now().strftime("%Y-%m-%d")
-            return stock.history(start=start_date, end=end, interval=interval)
-        else:
-            return stock.history(period=period, interval=interval)
+        try:
+            start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").timestamp())
+            end_ts = int(datetime.strptime(end, "%Y-%m-%d").timestamp())
+            url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}?period1={start_ts}&period2={end_ts}&interval={interval}"
+        except Exception as e:
+            return [TextContent(type="text", text=f"Error parsing dates: {e}")]
+    else:
+        url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}?range={period}&interval={interval}"
 
-    hist = await loop.run_in_executor(None, fetch_history)
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            resp = await client.get(url, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+             return [TextContent(type="text", text=f"Failed to fetch historical data for {ticker}: {e}")]
 
-    if hist.empty:
-        return [
-            TextContent(
-                type="text", text=f"No historical data found for {ticker}"
-            )
-        ]
+    result_data = data.get("chart", {}).get("result", [])
+    if not result_data:
+        return [TextContent(type="text", text=f"No historical data found for {ticker}")]
 
-    # Calculate statistics
+    res = result_data[0]
+    timestamps = res.get("timestamp", [])
+    if not timestamps:
+        return [TextContent(type="text", text=f"No historical data found for {ticker}")]
+
+    quote = res.get("indicators", {}).get("quote", [{}])[0]
+
+    # Check if adjclose exists and use it if possible to mimic yfinance default behavior
+    adjclose = res.get("indicators", {}).get("adjclose", [{}])[0].get("adjclose")
+
+    df = pd.DataFrame({
+        "Date": pd.to_datetime(timestamps, unit="s", utc=True),
+        "Open": quote.get("open", []),
+        "High": quote.get("high", []),
+        "Low": quote.get("low", []),
+        "Close": quote.get("close", []),
+        "Volume": quote.get("volume", [])
+    })
+
+    # Forward fill missing values then dropna, similar to yf behavior
+    df = df.ffill().dropna()
+
+    if df.empty:
+        return [TextContent(type="text", text=f"No valid historical data points found for {ticker}")]
+
+    # yfinance makes index timezone-aware and sets "Date" as index
+    df.set_index("Date", inplace=True)
+
+    hist = df
     hist_copy = hist.copy()
     hist_copy["Daily_Change"] = hist_copy["Close"].diff()
     hist_copy["Daily_Change_Pct"] = hist_copy["Close"].pct_change() * 100
@@ -411,25 +444,35 @@ async def handle_get_current_price(arguments: Dict[str, Any]) -> List[TextConten
     source = "Trading 212"
 
     try:
-        source = "Yahoo Finance"
-        loop = asyncio.get_running_loop()
+        source = "Yahoo Finance API"
+        import httpx
+        url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}?range=1d&interval=1d"
+        headers = {'User-Agent': 'Mozilla/5.0'}
 
-        def fetch_price_sync(ticker_symbol):
-            stock = yf.Ticker(ticker_symbol)
-            # fast info
-            info = stock.fast_info
-            current_price = info.last_price
-            currency = info.currency
-            if current_price is None:
-                # Fallback to history
-                hist = stock.history(period="1d")
-                if not hist.empty:
-                    current_price = hist["Close"].iloc[-1]
-            return current_price, currency
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
 
-        current_price, currency = await loop.run_in_executor(None, fetch_price_sync, ticker)
+        result = data.get("chart", {}).get("result", [])
+        if not result:
+            raise ValueError("No result in API response")
 
-        if current_price:
+        res = result[0]
+        meta = res.get("meta", {})
+
+        current_price = meta.get("regularMarketPrice")
+        if current_price is None:
+            # Fallback to last close in quote
+            quote = res.get("indicators", {}).get("quote", [{}])[0]
+            close_prices = quote.get("close", [])
+            valid_closes = [p for p in close_prices if p is not None]
+            if valid_closes:
+                current_price = valid_closes[-1]
+
+        currency = meta.get("currency", "USD")
+
+        if current_price is not None:
             price_data = {
                 "ticker": ticker,
                 "price": current_price,
