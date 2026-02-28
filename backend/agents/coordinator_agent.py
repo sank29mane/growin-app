@@ -297,7 +297,19 @@ Query: "{clean_query}"
         # -----------------------
         
         # COORDINATOR FIX: Ticker normalization
-        if context.ticker and (not context.ticker.isalpha() or len(context.ticker) < 2):
+        # Allow alphanumeric tickers (e.g. 3GLD) and single dots for UK/exchanges (e.g. VOD.L)
+        needs_fix = False
+        if context.ticker:
+            if len(context.ticker) < 2:
+                needs_fix = True
+            elif not context.ticker.replace(".", "").isalnum():
+                needs_fix = True
+            elif context.ticker.startswith(".") or context.ticker.endswith("."):
+                needs_fix = True
+            elif context.ticker.count(".") > 1:
+                needs_fix = True
+
+        if needs_fix:
             context.ticker = await self._attempt_ticker_fix(context.ticker)
 
         # 3. PARALLEL AGENT_EXECUTION (Pure Processors)
