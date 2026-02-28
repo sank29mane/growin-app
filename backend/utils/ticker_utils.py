@@ -133,11 +133,11 @@ def normalize_ticker(ticker: str) -> str:
     is_likely_uk = (len(ticker) <= 3 or (len(ticker) <= 5 and ticker.endswith("L"))) and ticker not in US_EXCLUSIONS
     
     # SOTA Fix: SMCI and other 4-char US tickers should NOT be likely UK
-    if len(ticker) == 4 and not ticker.endswith("L"):
+    if len(ticker) == 4:
         is_likely_uk = False
 
     # Force likelihood for known UK stems (LLOY, BARC, TSCO, etc)
-    if ticker.startswith(UK_COMMON_STEMS):
+    if any(ticker == stem or ticker == f"{stem}1" or ticker == f"{stem}L" for stem in UK_COMMON_STEMS):
         is_likely_uk = True
 
     # Heuristic for stripping extra 'L' (e.g. BARCL -> BARC)
