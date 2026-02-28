@@ -83,22 +83,19 @@ def forecast_ml(df: pd.DataFrame, periods: int = 7, model_type="xgboost") -> pd.
     model.fit(X, y)
     
     # Recursive Prediction (Simplified: Technicals kept static for window)
-    history_rows = df_train.tail(1).copy()
+    current_row = df_train.tail(1).copy()
     predictions = []
     
     for _ in range(periods):
-        X_next = history_rows[feature_cols].iloc[-1:]
-        pred_val = float(model.predict(X_next)[0])
+        pred_val = float(model.predict(current_row[feature_cols])[0])
         predictions.append(pred_val)
         
-        # Update history row for next step (approximate)
-        new_row = history_rows.iloc[-1:].copy()
-        new_row['close'] = pred_val
+        # Update current row for next step (approximate)
+        current_row['close'] = pred_val
         # Shift lags
         for i in range(len(lags)-1, 0, -1):
-            new_row[f'lag_{lags[i]}'] = new_row[f'lag_{lags[i-1]}']
-        new_row['lag_1'] = pred_val
-        history_rows = pd.concat([history_rows, new_row])
+            current_row[f'lag_{lags[i]}'] = current_row[f'lag_{lags[i-1]}']
+        current_row['lag_1'] = pred_val
     
     return predictions
 
