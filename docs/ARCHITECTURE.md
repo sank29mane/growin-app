@@ -31,103 +31,97 @@ graph TB
         DB[SQLite<br/>Chat History]
     end
 
-    subgraph "AI Processing Layer (MAS)"
-        COORD[Coordinator Agent<br/>Intent Routing]
+    subgraph "AI Processing Layer (MAS - SOTA 2026)"
+        ORCH[Orchestrator Agent<br/>Unified Entry & Synthesis]
         SWARM[Specialist Swarm<br/>Quant, Research, Portfolio]
-        DECISION[Decision Moderator<br/>Debate & Synthesis]
+        RISK[Risk Agent<br/>The Critic / Governance]
     end
 
     UI --> API
     API --> CACHE
     API --> DB
-    API --> COORD
-    COORD --> SWARM
-    SWARM --> DECISION
-    DECISION --> UI
+    API --> ORCH
+    ORCH --> SWARM
+    SWARM --> ORCH
+    ORCH --> RISK
+    RISK --> ORCH
+    ORCH --> UI
 
     SWARM --> T212
     SWARM --> ALP
     SWARM --> YF
     SWARM --> NEWS
     SWARM --> TAVILY
-    DECISION --> OPENAI
-    DECISION --> GEMINI
+    ORCH --> OPENAI
+    ORCH --> GEMINI
 
     style UI fill:#e1f5fe
     style API fill:#f3e5f5
-    style COORD fill:#e8f5e8
-    style DECISION fill:#fff3e0
+    style ORCH fill:#e8f5e8
+    style RISK fill:#fff3e0
 ```
 
 ---
 
-## 2. Financial Precision Layer (2026 SOTA)
-To eliminate "one-cent drift" and binary floating-point errors common in financial apps, Growin implements a dedicated Precision Layer.
+## 2. Flattened MAS Architecture (Phase 16)
+As of Phase 16, Growin has migrated to a flattened hierarchy to reduce latency and improve reasoning coherence.
 
-- **Engine**: All monetary calculations use Python `decimal.Decimal`.
-- **Initialization**: Decimals are initialized exclusively from string representations to avoid implicit float conversion.
-- **Rounding**: Standardized on `ROUND_HALF_UP` (Commercial Rounding).
-- **Scale**: Intermediate calculations use 4 decimal places; display outputs are quantized to 2 places (`0.01`).
-- **Validation**: Every price fetch is verified across multiple sources (Alpaca, yFinance, T212) with a `0.5%` variance threshold.
+### The Unified Orchestrator
+The `OrchestratorAgent` replaces the previous multi-hop "Coordinator + Decision" model.
+- **Single Hop**: Natural language is directly classified and dispatched by the Orchestrator.
+- **Parallel Swarm**: Specialists (Quant, Research, Portfolio, Whale, Social) execute concurrently via `asyncio.gather`.
+- **Integrated Reasoning**: The Orchestrator performs final synthesis using 2026 SOTA local models (e.g., LFM 2.5, Granite 4.0).
 
----
-
-## 3. Stability & Resilience (Phase 12 Hardening)
-To ensure production-grade reliability on macOS, the system underwent a rigorous hardening phase focused on crash resolution and architectural purity.
-
-- **Crash Resolution (SectorMark)**: Resolved persistent memory and data-filtering crashes in the chart rendering pipeline by implementing strict defensive checks in `calculateAllocationData`, ensuring only positive, non-zero values reach the `SectorMark` view.
-- **Architectural Purity**: Verified a "pure-play" macOS native architecture. All remaining iOS/UIKit traces were removed, ensuring `NSViewRepresentable` is used correctly for Metal-backed views.
-- **Memory Management**: Implemented explicit `deinit` cleanup and cancellation tokens for long-running data synchronization tasks to prevent memory leaks during rapid context switching in the MAS.
-- **Concurrency Safety**: Conducted a full audit of `@MainActor` isolation for UI-bound view models, preventing race conditions during high-frequency market data updates.
+### The Critic Pattern (Risk Governance)
+Mandatory auditing is performed by the `RiskAgent` before any suggestion reaches the user.
+- **Audit Stage**: Every proposed strategy is audited for exposure, compliance, and volatility risks.
+- **Safety Gates**: Risk Agent appends warnings or blocks suggestions that exceed safety thresholds.
 
 ---
 
-## 4. Agentic Reasoning & Collaborative Debate
-Instead of a single "Chain of Thought," Growin uses a **Multi-Agent Debate Model**.
+## 3. Financial Precision & Hardware Optimization
+To maximize performance on Apple Silicon M4 Pro, the system leverages hardware-level optimizations.
 
-### The Debate Phase
-1.  **Specialist Analysis**: The Swarm executes in parallel (e.g., `QuantAgent` finds a bullish pattern, while `ResearchAgent` finds negative earnings news).
-2.  **Contradiction Identification**: The **Decision Moderator** identifies conflicting signals.
-3.  **Synthesis**: The LLM reconciles these signals (e.g., "The technical breakout is strong, but the macro sentiment suggests a trap; recommend caution").
-
-### Structured Telemetry
-Every reasoning chain is traceable via **TelemetryData**:
-- **Correlation ID**: Links every specialist output to the final user response.
-- **Latency Tracking**: High-precision timing for every agent hop.
-- **Reasoning Trace**: The `MarketContext` accumulates full agent rationale for auditability.
+- **8-bit AFFINE Quantization**: Implemented in `mlx_engine.py` to maximize NPU/GPU throughput while maintaining Decimal-level reasoning precision.
+- **Precision Layer**: All monetary calculations use Python `decimal.Decimal` with string-only initialization and `ROUND_HALF_UP` standards.
+- **Validation**: Every price fetch is verified across multiple sources with a `0.5%` variance threshold.
 
 ---
 
-## 4. Frontend Architecture (macOS SwiftUI)
+## 4. AG-UI Streaming & Telemetry
+Transparency is achieved via real-time logic traces.
 
-### UI/UX Paradigm: High-Fidelity & Emotionally Intelligent
-Growin's 2026 frontend embraces a "Calm UI" philosophy with a "Liquid Glass" design language, delivering a premium, high-performance, and emotionally regulated user experience.
+- **AgentMessenger**: A decoupled message bus that broadcasts granular lifecycle events (e.g., `intent_classified`, `swarm_started`, `risk_review_started`).
+- **Reasoning Trace UI**: SwiftUI `ReasoningTraceView` uses `PhaseAnimator` to visualize live agent state changes from the SSE stream.
+- **HITL Verification**: High-stakes actions require a signed HMAC `approval_token` generated by the UI after user confirmation.
 
--   **Calm UI**: Interfaces adapt to user cognitive states, employing soft gradients and neutral palettes to reduce stress, especially during market volatility. Critical warnings are reserved for genuine risks.
--   **Liquid Glass Design**: Translucent surfaces, background blurs, and diffused shadows create a sophisticated, immersive aesthetic, bridging 2D interfaces with future 3D/AR environments.
--   **Bento Grid Architecture**: Modular information architecture for dashboards, allowing diverse content (charts, metrics, AI text) to coexist with clear visual hierarchy, ensuring functional data density.
--   **Multi-Agent Transparency (Glass Box AI)**: AI insights are presented with "Confidence Visualization Patterns" (CVP) and "Progressive Disclosure," allowing users to understand the AI's reasoning without cognitive overload.
+---
 
-### Core UI Components & Design System
-All UI elements are standardized within a `Palette` component library, built for consistency and reusability.
--   **GlassCard**: Enhanced with Liquid Glass effects, serving as a primary container for information.
--   **PremiumButton**: Designed for clear, tactile feedback.
--   **AgentStatusBadge**: Visualizes agent states and confidence.
--   **FinancialMetricView**: Displays key financial data with high precision.
+## 5. Local LLM Strategy & Model Management (Phase 14/15)
+To maximize privacy and performance, Growin prioritizes local inference while maintaining a flexible, multi-provider backend.
 
-### High-Performance Rendering (120Hz Optimized)
-Optimized for Apple's ProMotion displays, ensuring a superfluid 120Hz experience.
--   **Metal-Backed SwiftUI Charts**: Core financial charts (e.g., `PerformanceLineChart`) are powered by native Metal compute shaders via `NSViewRepresentable` for GPU-accelerated, dual-pipeline rendering (visuals vs. indicator calculations), handling millions of data points without frame drops.
--   **Main-Thread Isolation**: All data fetching, AI reasoning, and real-time stream processing (SSE/WebSockets) are strictly offloaded to background `Task`s or `Actors`, ensuring the main thread remains unblocked for smooth UI interactions.
--   **Optimistic State Management**: SwiftUI's `@State` and `@Binding` are leveraged for instant UI feedback on user actions (e.g., trade execution), paired with custom `CoreHaptics` for tactile confirmation.
+### Dynamic Model Management (Phase 14)
+Growin implements a dynamic management layer for local LLMs, specifically optimized for LM Studio 0.4.x.
+- **On-Demand Loading**: Models are loaded/unloaded dynamically via the Preferences UI, preventing VRAM over-allocation.
+- **VRAM Guard**: Implements a "60% RAM Rule" for Apple Silicon (M4 Pro/Max) to ensure LLM memory bandwidth doesn't starve the OS or the SwiftUI Metal pipeline.
 
-### Interactive AI: Reasoning Trace & Collaboration
-The frontend provides unprecedented transparency and collaboration with the Multi-Agent System.
--   **Reasoning Trace UI**: A "Thinking..." expandable view showing step-by-step agent consultation via SSE, with "Confidence Visualization Patterns" and progressive disclosure.
--   **Challenge Logic Interface**: Users can interactively challenge specific logical steps within the reasoning trace, providing alternative data or questions to the local LLM, leading to user-AI collaboration.
--   **Revised Strategy Outcome Screen**: Presents the updated strategy after user feedback, highlighting changes and updated confidence, allowing for implementation or further refinement.
+### Stateful Chat Architecture (Phase 15)
+The conversational engine transitioned from stateless history injection to a **Server-Side Stateful** model.
+- **Context Preservation**: Uses LM Studio's Native V1 `/api/v1/chat` with `response_id` linking.
+- **Thinking Extraction (CoT)**: Automatically extracts `<think>` tags from reasoning models and stores them in `MarketContext.reasoning`.
 
-### Application Structure
+---
+
+## 6. Security Enclave & Agent Sandboxing
+As AI agents move toward autonomy, the **Sentinel Security Layer** provides robust guardrails.
+
+### Safe Code Execution
+- **Docker-based Isolation**: Migration to Docker MCP for 2026 SOTA agent safety. Model-generated code is executed in isolated containers.
+- **Trade Approval Gate**: Backend HITL enforcement prevents any autonomous trade execution without a valid UI-generated signature.
+
+---
+
+## 7. Application Structure (SwiftUI Frontend)
 ```mermaid
 graph TD
     A[GrowinApp.swift<br/>App Entry Point] --> B[ContentView.swift<br/>Main Tab Controller]
@@ -158,68 +152,3 @@ graph TD
     style H fill:#fce4ec
     style M fill:#efebe9
 ```
-
----
-
-## 5. Security Enclave & Agent Sandboxing
-As AI agents move toward autonomy, the **Sentinel Security Layer** provides robust guardrails.
-
-### Safe Code Execution
--   **Current**: `SafePythonExecutor` uses AST analysis and restricted builtins to execute model-generated "fixes".
--   **Roadmap**: Migration to **Docker-based Isolation** via Docker MCP for 2026 SOTA agent safety. This is now **CONFIRMED** and actively being integrated for the interactive Python sandbox.
-  
----
-
-## 6. Deployment & Operations
-
-### Deployment Architecture
-```mermaid
-graph TD
-    subgraph "Desktop Application"
-        UI[macOS SwiftUI App<br/>localhost:8002]
-    end
-
-    subgraph "Local Backend Services"
-        API[FastAPI Server<br/>localhost:8002]
-        CACHE[(In-memory Cache<br/>Per Session)]
-        DB[(SQLite<br/>Chat History)]
-    end
-
-    subgraph "External APIs"
-        T212[Trading 212 API]
-        ALP[Alpaca API]
-        OPENAI[OpenAI/Gemini APIs]
-        NEWS[NewsAPI/TAVILY]
-    end
-
-    UI --> API
-    API --> CACHE
-    API --> DB
-
-    API --> T212
-    API --> ALP
-    API --> OPENAI
-    API --> NEWS
-
-    style UI fill:#e3f2fd
-    style API fill:#f3e5f5
-    style CACHE fill:#e8f5e8
-    style DB fill:#fff3e0
-```
-
----
-
-## 7. Testing Architecture
-
-### Test Pyramid Implementation
-```mermaid
-graph TD
-    A[End-to-End Tests<br/>5% of tests] --> B[Integration Tests<br/>20% of tests]
-    B --> C[Unit Tests<br/>75% of tests]
-
-    A --> D[User Scenarios<br/>Full app workflows]
-    B --> E[Component Integration<br/>API + Database]
-    C --> F[Function Testing<br/>Individual methods]
-```
-
-*Note: Special emphasis is placed on **Financial Precision Tests** to ensure zero regression in Decimal math.*

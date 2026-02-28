@@ -1,6 +1,7 @@
 import duckdb
 import pandas as pd
 import logging
+import json
 from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -35,7 +36,7 @@ class AnalyticsDB:
         logger.info(f"✅ AnalyticsDB initialized (mode: {'memory' if db_path == ':memory:' else 'persistent'})")
     
     def _init_schema(self):
-        """Create optimized schema for time-series analytics"""
+        """Create optimized schema for time-series and agent analytics"""
         # OHLCV historical data table
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS ohlcv_history (
@@ -50,13 +51,147 @@ class AnalyticsDB:
             )
         """)
         
-        # Create index for fast queries
+        # Agent Telemetry table (SOTA 2026 Reasoning Trace)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS agent_telemetry (
+                id VARCHAR PRIMARY KEY,
+                correlation_id VARCHAR,
+                agent_name VARCHAR,
+                subject VARCHAR,
+                payload JSON,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Agent Performance table (SOTA 2026 Alpha Metrics)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS agent_performance (
+                correlation_id VARCHAR PRIMARY KEY,
+                ticker VARCHAR,
+                entry_price DOUBLE,
+                return_1d DOUBLE,
+                return_5d DOUBLE,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Create indices for fast queries
         self.conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_ticker_time 
             ON ohlcv_history(ticker, timestamp DESC)
         """)
         
-        logger.info("Analytics schema initialized")
+        self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_telemetry_correlation 
+            ON agent_telemetry(correlation_id)
+        """)
+        
+        self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_performance_ticker 
+            ON agent_performance(ticker)
+        """)
+        
+        logger.info("Analytics schema initialized (including agent_telemetry and agent_performance)")
+
+    def log_agent_message(self, message_data: Dict[str, Any]):
+        """Persist an agent message to the telemetry table."""
+        try:
+            # DuckDB handles JSON type directly from dict
+            self.conn.execute("""
+                INSERT INTO agent_telemetry (id, correlation_id, agent_name, subject, payload, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                message_data.get('id'),
+                message_data.get('correlation_id'),
+                message_data.get('sender'),
+                message_data.get('subject'),
+                json.dumps(message_data.get('payload')),
+                message_data.get('timestamp')
+            ))
+        except Exception as e:
+            logger.error(f"Failed to log agent message: {e}")
+
+    def calculate_agent_alpha(self, correlation_id: str):
+        """
+        Correlate agent reasoning with subsequent price action.
+        Calculates 1-day and 5-day forward returns for the subject ticker.
+        """
+        try:
+            # 1. Get ticker and timestamp from telemetry
+            telemetry = self.conn.execute("""
+                SELECT agent_name, payload, timestamp 
+                FROM agent_telemetry 
+                WHERE correlation_id = ? AND subject = 'agent_started' AND agent_name = 'OrchestratorAgent'
+                LIMIT 1
+            """, (correlation_id,)).fetchone()
+            
+            if not telemetry:
+                return
+                
+            payload = json.loads(telemetry[1]) if isinstance(telemetry[1], str) else telemetry[1]
+            # Need to extract ticker from payload (it's in 'query' or 'ticker' depending on event)
+            # Orchestrator agent_started usually has the query. 
+            # Better to find 'intent_classified' or 'context_fabricated' which has ticker explicitly.
+            
+            ticker_info = self.conn.execute("""
+                SELECT payload 
+                FROM agent_telemetry 
+                WHERE correlation_id = ? AND subject = 'context_fabricated'
+                LIMIT 1
+            """, (correlation_id,)).fetchone()
+            
+            if not ticker_info:
+                return
+                
+            ticker_payload = json.loads(ticker_info[0]) if isinstance(ticker_info[0], str) else ticker_info[0]
+            ticker = ticker_payload.get('ticker')
+            if not ticker:
+                return
+                
+            timestamp = telemetry[2]
+            
+            # 2. Fetch entry price (closest to reasoning timestamp)
+            entry_row = self.conn.execute("""
+                SELECT close FROM ohlcv_history 
+                WHERE ticker = ? AND timestamp <= ?
+                ORDER BY timestamp DESC LIMIT 1
+            """, (ticker, timestamp)).fetchone()
+            
+            if not entry_row:
+                return
+            
+            entry_price = entry_row[0]
+            
+            # 3. Fetch future prices (1d and 5d forward)
+            # DuckDB allows powerful interval arithmetic
+            price_1d = self.conn.execute("""
+                SELECT close FROM ohlcv_history 
+                WHERE ticker = ? AND timestamp >= ? + INTERVAL 1 DAY
+                ORDER BY timestamp ASC LIMIT 1
+            """, (ticker, timestamp)).fetchone()
+            
+            price_5d = self.conn.execute("""
+                SELECT close FROM ohlcv_history 
+                WHERE ticker = ? AND timestamp >= ? + INTERVAL 5 DAY
+                ORDER BY timestamp ASC LIMIT 1
+            """, (ticker, timestamp)).fetchone()
+            
+            return_1d = (price_1d[0] - entry_price) / entry_price if price_1d else None
+            return_5d = (price_5d[0] - entry_price) / entry_price if price_5d else None
+            
+            # 4. Store Performance Result
+            self.conn.execute("""
+                INSERT INTO agent_performance (correlation_id, ticker, entry_price, return_1d, return_5d, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT (correlation_id) DO UPDATE SET
+                    return_1d = EXCLUDED.return_1d,
+                    return_5d = EXCLUDED.return_5d
+            """, (correlation_id, ticker, entry_price, return_1d, return_5d, timestamp))
+            
+            logger.info(f"Alpha Audit: {ticker} (1d: {return_1d}, 5d: {return_5d})")
+            
+        except Exception as e:
+            logger.error(f"Failed to calculate agent alpha: {e}")
     
     def bulk_insert_ohlcv(self, ticker: str, data: List[Dict[str, Any]]) -> int:
         """
@@ -321,28 +456,63 @@ class AnalyticsDB:
             logger.error(f"Trend calculation failed: {e}")
             return 'neutral'
     
-    def close(self):
-        """Close database connection"""
-        self.conn.close()
-        logger.info("AnalyticsDB connection closed")
+    def get_agent_alpha_metrics(self, ticker: Optional[str] = None) -> Dict[str, Any]:
+        """Summarize agent performance metrics."""
+        try:
+            query = "SELECT ticker, AVG(return_1d) as avg_1d, AVG(return_5d) as avg_5d, COUNT(*) as count FROM agent_performance"
+            params = []
+            if ticker:
+                query += " WHERE ticker = ? GROUP BY ticker"
+                params.append(ticker)
+            else:
+                query += " GROUP BY ticker"
+                
+            res = self.conn.execute(query, params).fetchdf()
+            if res.empty:
+                return {"avg_1d": 0.0, "avg_5d": 0.0, "total_sessions": 0}
+                
+            if ticker:
+                return {
+                    "avg_1d": float(res.iloc[0]['avg_1d']) if not pd.isna(res.iloc[0]['avg_1d']) else 0.0,
+                    "avg_5d": float(res.iloc[0]['avg_5d']) if not pd.isna(res.iloc[0]['avg_5d']) else 0.0,
+                    "total_sessions": int(res.iloc[0]['count'])
+                }
+            else:
+                # Overall average across all tickers
+                return {
+                    "avg_1d": float(res['avg_1d'].mean()),
+                    "avg_5d": float(res['avg_5d'].mean()),
+                    "total_sessions": int(res['count'].sum())
+                }
+        except Exception as e:
+            logger.error(f"Failed to fetch alpha metrics: {e}")
+            return {"avg_1d": 0.0, "avg_5d": 0.0, "total_sessions": 0}
 
 
 # --- Utility Functions ---
 
 _analytics_instance = None
 
-def get_analytics_db(db_path: str = ":memory:"):
+def get_analytics_db(db_path: Optional[str] = None):
     """
     Singleton pattern for AnalyticsDB.
     
     Args:
-        db_path: Path to database file or ":memory:"
+        db_path: Path to database file or None for default persistent path
     
     Returns:
         AnalyticsDB instance
     """
     global _analytics_instance
     if _analytics_instance is None:
+        if db_path is None:
+            # SOTA 2026: Persistent local analytics
+            import os
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            data_dir = os.path.join(base_dir, "data")
+            os.makedirs(data_dir, exist_ok=True)
+            db_path = os.path.join(data_dir, "analytics.duckdb")
+            
         _analytics_instance = AnalyticsDB(db_path)
     return _analytics_instance
 

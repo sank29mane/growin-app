@@ -5,7 +5,7 @@ User-selectable model with price validation integration
 
 from market_context import MarketContext
 from price_validation import PriceValidator
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Any
 import logging
 import re
 import json
@@ -26,6 +26,17 @@ class DecisionAgent:
     Role: Synthesize all data, validate prices, make recommendations
     Performance: 5-8s (LLM reasoning time)
     """
+
+    INTERCEPTED_TOOLS = [
+        "place_market_order",
+        "place_limit_order",
+        "place_stop_order",
+        "place_stop_limit_order",
+        "cancel_order",
+        "create_investment_pie",
+        "update_investment_pie",
+        "delete_investment_pie"
+    ]
 
     def __init__(self, model_name: str = "gpt-4o", api_keys: Optional[Dict[str, str]] = None, mcp_client=None):
         self.model_name = model_name
@@ -53,9 +64,10 @@ class DecisionAgent:
             logger.error(f"DecisionAgent initialization failed: {e}")
             raise
 
-    async def make_decision(self, context: MarketContext, query: str) -> str:
+    async def make_decision(self, context: MarketContext, query: str, previous_response_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Make a trading decision based on aggregated market context.
+        Returns a dict with 'content' and 'response_id'.
         """
         if not self._initialized:
             await self._initialize_llm()
@@ -63,96 +75,94 @@ class DecisionAgent:
         from status_manager import status_manager
         status_manager.set_status("decision_agent", "working", "Applying reasoning...", model=self.model_name)
 
-        # 1. Architecture Optimization (Parallel Multi-Model Burst)
-        # For Nemotron Nano, we exploit LM Studio 0.4.0's continuous batching
-        is_nano = "nano" in self.model_name.lower()
-        
-        # 2. Identify Cross-Agent Contradictions
+        # 1. Identify Cross-Agent Contradictions
         contradictions = self._identify_contradictions(context)
         if contradictions:
             context.user_context["contradictions"] = contradictions
 
-        # 3. Build optimized prompt
+        # 2. Build optimized prompt
         prompt = self._build_prompt(context, query)
         prompt = self._inject_context_layers(prompt, query)
+
+        # 3. Math Delegation Workflow (NPU Accelerated)
+        if any(k in query.lower() for k in ["simulate", "calculate", "math", "model", "monte carlo", "forecast"]):
+            logger.info("DecisionAgent: Math query detected. Enforcing NPU-Accelerated Sandbox.")
+            try:
+                from .math_generator_agent import MathGeneratorAgent
+                from utils.math_validator import MathValidator
+                
+                # Prepare context for math agent
+                math_input = {
+                    "query": query,
+                    "context_data": {
+                        "ticker": context.ticker,
+                        "price": context.price.price if context.price else 0,
+                        "rsi": context.quant.rsi if context.quant else 0,
+                        "portfolio_value": context.portfolio.total_value if context.portfolio else 0,
+                        "cash": context.portfolio.cash_balance.get('total', 0) if context.portfolio and isinstance(context.portfolio.cash_balance, dict) else 0
+                    },
+                    "required_stats": ["simulated_projection", "risk_parameters"]
+                }
+                
+                math_agent = MathGeneratorAgent()
+                math_response = await math_agent.analyze(math_input)
+                
+                if math_response.success:
+                    script = math_response.data.get("script")
+                    explanation = math_response.data.get("explanation")
+                    
+                    logger.info(f"DecisionAgent: Math script generated. Explanation: {explanation}")
+                    
+                    validator = MathValidator()
+                    math_start = time.time()
+                    exec_result = await validator.execute_and_validate(script)
+                    math_duration = (time.time() - math_start) * 1000
+                    
+                    # Integrate Math Telemetry
+                    try:
+                        from telemetry_store import record_math_metric
+                        # Utilization proxy: if successful, assume 45% for NPU baseline
+                        util_proxy = 45.0 if exec_result.get("status") == "success" else 0.0
+                        
+                        record_math_metric(
+                            correlation_id=correlation_id_ctx.get() or "none",
+                            success=(exec_result.get("status") == "success"),
+                            execution_time_ms=math_duration,
+                            npu_utilization_proxy=util_proxy,
+                            exit_code=exec_result.get("exit_code", -1),
+                            metadata={
+                                "engine": "npu",
+                                "explanation": explanation,
+                                "schema_valid": exec_result.get("schema_valid", False)
+                            }
+                        )
+                    except Exception as telem_err:
+                        logger.error(f"Failed to record math telemetry: {telem_err}")
+
+                    if exec_result.get("status") == "success":
+                        math_output = exec_result.get("stdout", "")
+                        logger.info("DecisionAgent: Math execution successful on NPU.")
+                        
+                        # Inject math findings into prompt for the reasoning loop
+                        prompt += f"\n\n=== NPU-ACCELERATED MATH RESULTS ===\n"
+                        prompt += f"MODEL: {explanation}\n"
+                        prompt += f"RAW OUTPUT: {math_output}\n"
+                        prompt += f"====================================\n"
+                    else:
+                        logger.warning(f"DecisionAgent: Math execution failed: {exec_result.get('error')}")
+                else:
+                    logger.warning(f"DecisionAgent: Math generation failed: {math_response.error}")
+            except Exception as me:
+                logger.error(f"DecisionAgent: Math delegation workflow failed: {me}", exc_info=True)
 
         # 4. Agentic Loop with NPU Acceleration
         try:
             system_content = self._get_system_persona(context.intent)
             
-            # If complex math detected, delegate to MathGeneratorAgent
-            if any(k in query.lower() for k in ["simulate", "calculate", "math", "model", "monte carlo", "forecast"]):
-                logger.info("DecisionAgent: Math query detected. Enforcing NPU-Accelerated Sandbox.")
-                try:
-                    from .math_generator_agent import MathGeneratorAgent
-                    from utils.math_validator import MathValidator
-                    
-                    # Prepare context for math agent
-                    math_input = {
-                        "query": query,
-                        "context_data": {
-                            "ticker": context.ticker,
-                            "price": context.price.price if context.price else 0,
-                            "rsi": context.quant.rsi if context.quant else 0,
-                            "portfolio_value": context.portfolio.total_value if context.portfolio else 0,
-                            "cash": context.portfolio.cash_balance.get('total', 0) if context.portfolio and isinstance(context.portfolio.cash_balance, dict) else 0
-                        },
-                        "required_stats": ["simulated_projection", "risk_parameters"]
-                    }
-                    
-                    math_agent = MathGeneratorAgent()
-                    math_response = await math_agent.analyze(math_input)
-                    
-                    if math_response.success:
-                        script = math_response.data.get("script")
-                        explanation = math_response.data.get("explanation")
-                        
-                        logger.info(f"DecisionAgent: Math script generated. Explanation: {explanation}")
-                        
-                        validator = MathValidator()
-                        math_start = time.time()
-                        exec_result = await validator.execute_and_validate(script)
-                        math_duration = (time.time() - math_start) * 1000
-                        
-                        # Integrate Math Telemetry
-                        try:
-                            from telemetry_store import record_math_metric
-                            # Utilization proxy: if successful, assume 45% for NPU baseline 
-                            # (Matches RESEARCH.md proxy requirements)
-                            util_proxy = 45.0 if exec_result.get("status") == "success" else 0.0
-                            
-                            record_math_metric(
-                                correlation_id=correlation_id_ctx.get() or "none",
-                                success=(exec_result.get("status") == "success"),
-                                execution_time_ms=math_duration,
-                                npu_utilization_proxy=util_proxy,
-                                exit_code=exec_result.get("exit_code", -1),
-                                metadata={
-                                    "engine": "npu",
-                                    "explanation": explanation,
-                                    "schema_valid": exec_result.get("schema_valid", False)
-                                }
-                            )
-                        except Exception as telem_err:
-                            logger.error(f"Failed to record math telemetry: {telem_err}")
-
-                        if exec_result.get("status") == "success":
-                            math_output = exec_result.get("stdout", "")
-                            logger.info(f"DecisionAgent: Math execution successful on NPU.")
-                            
-                            # Inject math findings into prompt for the reasoning loop
-                            prompt += f"\n\n=== NPU-ACCELERATED MATH RESULTS ===\n"
-                            prompt += f"MODEL: {explanation}\n"
-                            prompt += f"RAW OUTPUT: {math_output}\n"
-                            prompt += f"====================================\n"
-                        else:
-                            logger.warning(f"DecisionAgent: Math execution failed: {exec_result.get('error')}")
-                    else:
-                        logger.warning(f"DecisionAgent: Math generation failed: {math_response.error}")
-                except Exception as me:
-                    logger.error(f"DecisionAgent: Math delegation workflow failed: {me}", exc_info=True)
-
-            recommendation = await self._run_agentic_loop(system_content, prompt, context)
+            # Execute loop (Stateful and Consolidated)
+            loop_result = await self._run_agentic_loop(system_content, prompt, context, previous_response_id)
+            recommendation = loop_result.get("content", "")
+            response_id = loop_result.get("response_id")
             
             # Price validation
             recommendation = await self._validate_prices(recommendation, context.ticker)
@@ -173,16 +183,20 @@ class DecisionAgent:
                     "intent": context.intent,
                     "correlation_id": correlation_id_ctx.get(),
                     "recommendation_snippet": recommendation[:200],
+                    "response_id": response_id,
                     "contradictions_count": len(contradictions) if contradictions else 0
                 }
             )
 
-            return recommendation
+            return {
+                "content": recommendation,
+                "response_id": response_id
+            }
 
         except Exception as e:
             logger.error(f"Decision making failed: {e}")
             status_manager.set_status("decision_agent", "error", f"Error: {str(e)}", model=self.model_name)
-            return f"Error generating recommendation: {str(e)}"
+            return {"content": f"Error generating recommendation: {str(e)}", "response_id": None}
 
     def _identify_contradictions(self, context: MarketContext) -> List[str]:
         """Identify conflicting signals between agents for the debate phase."""
@@ -250,12 +264,6 @@ class DecisionAgent:
         system_content = self._get_system_persona(context.intent)
 
         try:
-            # Check if validation logic needs to run *before* streaming?
-            # Validation runs on the output. If we stream, we can't block it easily.
-            # We will validate *after* collecting, or concurrently?
-            # For streaming, we might skip strict price validation interception
-            # OR we stream the raw LLM output and if it violates, we append a warning.
-            
             # Streaming logic
             full_response = ""
             
@@ -270,9 +278,13 @@ class DecisionAgent:
                 response = await self._generate_draft(system_content, prompt)
                 full_response = response
                 yield response
+            
+            # Post-stream processing: Reasoning Extraction
+            reasoning = self._extract_reasoning(full_response)
+            if reasoning:
+                context.reasoning = reasoning
                 
             # Post-stream processing (Price Validation)
-            # We can yield an extra chunk if validation fails
             validation = await PriceValidator.validate_trade_price(context.ticker)
             if validation["action"] in ["block", "warn"] and context.ticker:
                  if any(word in full_response.upper() for word in ["BUY", "SELL"]):
@@ -303,54 +315,94 @@ class DecisionAgent:
                 }
             )
             
-            
         except Exception as e:
             logger.error(f"Streaming failed: {e}")
             yield f"Error: {str(e)}"
 
-    async def _run_agentic_loop(self, system_content: str, prompt: str, context: MarketContext) -> str:
-        """Runs multi-turn LLM loop with tool support."""
+    async def _run_agentic_loop(self, system_content: str, prompt: str, context: MarketContext, previous_response_id: Optional[str] = None) -> Dict[str, Any]:
+        """Runs multi-turn LLM loop with tool support and server-side state."""
         import asyncio
+        
+        # 1. Stateful Priority: If LM Studio Client supports it, use server-side context
+        from lm_studio_client import LMStudioClient
+        if isinstance(self.llm, LMStudioClient) and hasattr(self.llm, "stateful_chat"):
+            try:
+                logger.info(f"DecisionAgent: Initiating stateful chat turn (Prev ID: {previous_response_id})")
+                stateful_resp = await self.llm.stateful_chat(
+                    model_id=self.model_name,
+                    input_text=prompt,
+                    previous_response_id=previous_response_id,
+                    system_prompt=system_content,
+                    temperature=0.1
+                )
+                if "error" not in stateful_resp:
+                    content = stateful_resp.get("content", "")
+                    reasoning = stateful_resp.get("reasoning", "")
+                    
+                    # Capture reasoning if not provided by client directly
+                    if not reasoning:
+                         reasoning = self._extract_reasoning(content)
+                    
+                    if reasoning:
+                         context.reasoning = reasoning
+
+                    return {
+                        "content": self._clean_response(content),
+                        "response_id": stateful_resp.get("response_id")
+                    }
+                else:
+                    logger.warning(f"Stateful chat failed: {stateful_resp['error']}. Falling back to stateless loop.")
+            except Exception as se:
+                logger.error(f"Stateful transition error: {se}. Falling back.")
+
+        # 2. Stateless Fallback: Standard Agentic Loop
         messages = [
             {"role": "system", "content": system_content},
             {"role": "user", "content": prompt}
         ]
         
         mcp = self.mcp_client
+        response_id = None
         
-        # Limit loop to 3 turns to prevent runaway costs/latency
+        # Limit loop to 3 turns
         for _ in range(3):
-            # 1. Get LLM response
             if hasattr(self.llm, "chat"):
-                # Use LFM Factory compatible chat interface
                 resp = await self.llm.chat(
                     model_id=self.model_name,
                     messages=messages,
                     temperature=0.1
                 )
                 content = resp.get("content", "")
+                reasoning = resp.get("reasoning", "")
                 
-                # Check for tool call signature in content (SOTA 2026 Regex Parser)
-                # Format: [TOOL:tool_name(args_json)]
+                # Capture reasoning
+                if not reasoning:
+                    reasoning = self._extract_reasoning(content)
+                if reasoning:
+                    context.reasoning = reasoning
+
+                response_id = resp.get("sessionId") or resp.get("response_id")
+                
                 tool_matches = list(re.finditer(r'\[TOOL:(\w+)\((.*?)\)\]', content, re.DOTALL))
                 
                 if tool_matches:
-                    import asyncio
                     from status_manager import status_manager
-                    
                     if len(tool_matches) > 1:
                         logger.info(f"DecisionAgent: Executing {len(tool_matches)} Parallel Consultations")
                         status_manager.set_status("decision_agent", "working", f"Executing {len(tool_matches)} parallel consultations...", model=self.model_name)
-                        if getattr(context, "telemetry_trace", None) is not None:
-                            context.telemetry_trace.append(f"Parallel Consultation: {len(tool_matches)} agents")
                     
                     async def execute_tool(match):
                         tool_name = match.group(1)
                         tool_args_str = match.group(2)
                         try:
-                            # Handle empty string args safely
                             tool_args = json.loads(tool_args_str) if tool_args_str.strip() else {}
-                            logger.info(f"DecisionAgent: Executing Tool {tool_name} via Agentic Loop")
+                            
+                            # Security Interception
+                            if tool_name in self.INTERCEPTED_TOOLS:
+                                logger.info(f"DecisionAgent: INTERCEPTING sensitive tool {tool_name}")
+                                return f"[ACTION_REQUIRED:{tool_name}] Parameters: {tool_args_str}. Unauthorized for autonomous execution. Requires UI confirmation."
+
+                            logger.info(f"DecisionAgent: Executing Tool {tool_name}")
                             result = await mcp.call_tool(tool_name, tool_args)
                             result_text = result.content[0].text if hasattr(result, 'content') else str(result)
                             return f"[TOOL_RESULT:{tool_name}] {result_text}"
@@ -358,23 +410,22 @@ class DecisionAgent:
                             logger.warning(f"Tool execution failed in loop: {e}")
                             return f"[TOOL_RESULT:{tool_name}] Error: {str(e)}"
 
-                    # Execute all tools in parallel
                     tool_results = await asyncio.gather(*(execute_tool(m) for m in tool_matches))
-                    
-                    # Add to history and continue loop
                     messages.append({"role": "assistant", "content": content})
-                    # Add all results as a single user message back
-                    combined_results = "\n".join(tool_results)
-                    messages.append({"role": "user", "content": combined_results})
+                    messages.append({"role": "user", "content": "\n".join(tool_results)})
                     continue
                 
-                return self._clean_response(content)
+                return {"content": self._clean_response(content), "response_id": response_id}
             else:
-                # Fallback for standard LangChain (Simplified turn)
+                # Basic generation fallback
                 draft = await self._generate_draft(system_content, prompt)
-                return self._clean_response(draft)
+                reasoning = self._extract_reasoning(draft)
+                if reasoning:
+                    context.reasoning = reasoning
+                return {"content": self._clean_response(draft), "response_id": None}
                 
-        return "Reasoning loop exceeded max turns."
+        return {"content": "Reasoning loop exceeded max turns.", "response_id": None}
+
 
     async def _generate_draft(self, system_content: str, prompt: str) -> str:
         """Generate initial draft."""
@@ -549,20 +600,74 @@ class DecisionAgent:
         """
 
     def _clean_response(self, response: str) -> str:
-        """Clean LLM response to remove thinking artifacts and meta-commentary."""
+        """
+        SOTA 2026: Ultra-Aggressive Response Cleaning.
+        Strips thinking tags, internal monologues, and prompt instruction echoes.
+        """
+        # 1. Strip all variations of <think> tags (including malformed or unclosed ones)
         response = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL | re.IGNORECASE)
         response = re.sub(r'<think>.*', '', response, flags=re.DOTALL | re.IGNORECASE)
+        response = re.sub(r'.*?</think>', '', response, flags=re.DOTALL | re.IGNORECASE)
 
+        # 2. Strip common internal monologue markers and prefixes
         meta_patterns = [
             r'\*\*thinking\*\*.*?\n',
-            r'^we need to', r'^let\'s', r'^based on my instructions',
-            r'^i will follow', r'^i should', r'^i must',
-            r'style guidelines:', r'as requested,'
+            r'\[THOUGHTS\].*?\[/THOUGHTS\]',
+            r'^thinking:.*?\n',
+            r'^we need to.*?\n', 
+            r'^let\'s think.*?\n',
+            r'^i will follow.*?\n', 
+            r'^i should.*?\n', 
+            r'^i must.*?\n',
+            r'^based on.*?\n',
+            r'^analyzing portfolio.*?\n',
+            r'^style guidelines:.*?\n', 
+            r'^as requested,.*?\n',
+            r'^certainly!.*?\n',
+            r'^here is.*?\n'
         ]
         for pattern in meta_patterns:
             response = re.sub(pattern, '', response, flags=re.IGNORECASE | re.MULTILINE)
 
-        return response.strip().replace('\n{3,}', '\n\n')
+        # 3. Strip instruction echoes and "mandatory" markers
+        response = re.sub(r'Must include sections.*?\n', '', response, flags=re.IGNORECASE)
+        response = re.sub(r'Align trade ideas.*?\n', '', response, flags=re.IGNORECASE)
+        response = re.sub(r'\[MANDATORY ANSWER FORMAT.*?\]', '', response, flags=re.DOTALL | re.IGNORECASE)
+
+        # 4. Collapse excessive whitespace and redundant newlines
+        response = response.strip()
+        response = re.sub(r'\n{3,}', '\n\n', response)
+        
+        # 5. Header Deduplication: Models sometimes echo headers they just wrote
+        lines = response.split('\n')
+        deduped_lines = []
+        last_line = ""
+        for line in lines:
+            trimmed = line.strip()
+            if trimmed and trimmed == last_line:
+                continue
+            deduped_lines.append(line)
+            last_line = trimmed
+        response = '\n'.join(deduped_lines)
+
+        # 6. Final fallback: if the model echoed the entire template, try to find the actual content
+        if "Strategic Synthesis" in response and response.count("Strategic Synthesis") > 1:
+             # Take the last occurrence which is usually the actual answer
+             parts = response.split("Strategic Synthesis")
+             response = "4. **Strategic Synthesis" + parts[-1]
+
+        return response.strip()
+
+    def _extract_reasoning(self, response: str) -> Optional[str]:
+        """Extract content within <think> tags."""
+        matches = re.findall(r'<think>(.*?)</think>', response, flags=re.DOTALL | re.IGNORECASE)
+        if matches:
+            return "\n".join(matches).strip()
+        # Fallback: check for unclosed <think> tag
+        unclosed = re.search(r'<think>(.*)', response, flags=re.DOTALL | re.IGNORECASE)
+        if unclosed:
+            return unclosed.group(1).strip()
+        return None
 
     def _detect_account_mentions(self, query: str) -> str:
         q = query.lower()

@@ -41,91 +41,86 @@ async def stream_strategy_events(
     )
 
 async def strategy_event_generator(session_id: str, ticker: Optional[str]):
-    """Generator for strategy events with R-Stitch logic simulation."""
+    """Generator for strategy events using real Orchestrator and Messenger telemetry."""
+    from agents.orchestrator_agent import OrchestratorAgent
+    from agents.messenger import get_messenger
+    
+    queue = asyncio.Queue()
+    messenger = get_messenger()
+    correlation_id = str(uuid.uuid4())
+    
+    # Mapper for subjects to event types
+    subject_map = {
+        "intent_classified": "status_update",
+        "context_fabricated": "status_update",
+        "swarm_started": "status_update",
+        "agent_started": "reasoning_step",
+        "agent_complete": "reasoning_step",
+        "reasoning_started": "reasoning_step",
+        "risk_review_started": "reasoning_step"
+    }
+
+    async def messenger_handler(msg):
+        event_type = subject_map.get(msg.subject, "status_update")
+        
+        # Build the structured event for the UI
+        event_data = {
+            "event_type": event_type,
+            "agent": msg.sender,
+            "status": "working" if msg.subject.endswith("_started") else "ready",
+            "timestamp": msg.timestamp.timestamp(),
+            "step": {
+                "agent": msg.sender,
+                "action": msg.subject.replace("_", " ").title(),
+                "content": json.dumps(msg.payload),
+                "timestamp": msg.timestamp.timestamp()
+            }
+        }
+        await queue.put(event_data)
+
+    # Subscribe to this session's trace
+    messenger.subscribe_to_trace(correlation_id, messenger_handler)
+    
     try:
-        # 1. Initial Status (SLM Logic - Quick & Lightweight)
-        yield {
-            "event": "status_update",
-            "data": json.dumps({
-                "event_type": "status_update",
-                "agent": "System",
-                "status": "Initializing Strategy Protocol",
-                "timestamp": datetime.now().timestamp()
-            })
-        }
-        await asyncio.sleep(0.5)
+        # Start Orchestrator in background
+        orchestrator = OrchestratorAgent()
+        
+        # Use task to run orchestrator so we can yield from queue in parallel
+        query = f"Generate a comprehensive investment strategy for {ticker or 'my portfolio'}."
+        orch_task = asyncio.create_task(orchestrator.run(
+            query=query, 
+            ticker=ticker
+        ))
+        
+        # Yield events from queue as they arrive
+        while not orch_task.done() or not queue.empty():
+            try:
+                # Use a timeout to avoid blocking forever if task hangs
+                event = await asyncio.wait_for(queue.get(), timeout=1.0)
+                yield {
+                    "event": event["event_type"],
+                    "data": json.dumps(event)
+                }
+            except asyncio.TimeoutError:
+                continue
 
-        # 2. Portfolio Analyst (Deep Scan)
-        yield {
-            "event": "reasoning_step",
-            "data": json.dumps({
-                "event_type": "reasoning_step",
-                "agent": "Portfolio Analyst",
-                "status": "working",
-                "step": {
-                    "agent": "Portfolio Analyst",
-                    "action": f"Scanning {ticker or 'Portfolio'} Exposure",
-                    "content": "Analyzing current asset distribution and sector correlation...",
-                    "timestamp": datetime.now().timestamp()
-                },
-                "timestamp": datetime.now().timestamp()
-            })
-        }
-        await asyncio.sleep(1.5)
-
-        # 3. Risk Manager (R-Stitch: Delegation to LLM for Complex Logic)
-        yield {
-            "event": "reasoning_step",
-            "data": json.dumps({
-                "event_type": "reasoning_step",
-                "agent": "Risk Manager",
-                "status": "working",
-                "step": {
-                    "agent": "Risk Manager",
-                    "action": "Stitching Deep Risk Assessment",
-                    "content": "R-Stitch detected high entropy in market volatility; delegating to LLM for trajectory analysis.",
-                    "timestamp": datetime.now().timestamp()
-                },
-                "timestamp": datetime.now().timestamp()
-            })
-        }
-        await asyncio.sleep(2.0)
-
-        # 4. Technical Trader (Validation)
-        yield {
-            "event": "reasoning_step",
-            "data": json.dumps({
-                "event_type": "reasoning_step",
-                "agent": "Technical Trader",
-                "status": "working",
-                "step": {
-                    "agent": "Technical Trader",
-                    "action": "Optimizing Entry Vectors",
-                    "content": "Identifying supply/demand zones and liquidity pools for revised strategy.",
-                    "timestamp": datetime.now().timestamp()
-                },
-                "timestamp": datetime.now().timestamp()
-            })
-        }
-        await asyncio.sleep(1.0)
-
-        # 5. Final Result
+        # Get final result
+        result = await orch_task
+        context = result.get("context")
+        
         strategy_id = str(uuid.uuid4())
+        # Map Orchestrator context to AIStrategyResponse
         final_strategy = {
             "strategy_id": strategy_id,
-            "title": "Aggressive Recovery Alpha",
-            "summary": "Strategic reallocation to high-conviction tech assets with a 3:1 reward-to-risk ratio.",
-            "confidence": 0.89,
+            "title": f"{ticker or 'Portfolio'} Strategic Alpha",
+            "summary": result.get("content", ""),
+            "confidence": 0.85, # Default or extracted
             "reasoning_trace": [
-                {"agent": "Portfolio Analyst", "action": "Exposure Scan", "content": "Detected 12% concentration in underperforming sectors.", "timestamp": datetime.now().timestamp() - 5},
-                {"agent": "Risk Manager", "action": "Volatility Buffer", "content": "Adjusted stop-losses based on 30-day ATR.", "timestamp": datetime.now().timestamp() - 3}
-            ],
-            "instruments": [
-                {"ticker": "AAPL", "weight": 0.4},
-                {"ticker": "NVDA", "weight": 0.3},
-                {"ticker": "TSLA", "weight": 0.3}
-            ],
-            "risk_assessment": "High-conviction, medium-term volatility expected.",
+                {"agent": t.agent_name, "action": "Analysis", "content": t.input_tokens if hasattr(t, 'input_tokens') else "", "timestamp": datetime.now().timestamp()}
+                for t in context.telemetry_trace
+            ] if context else [],
+            "instruments": [], # Map from context if needed
+            "risk_assessment": context.user_context.get("risk_review", {}).get("risk_assessment", "Standard Risk"),
             "last_updated": datetime.now().timestamp()
         }
         
@@ -135,7 +130,7 @@ async def strategy_event_generator(session_id: str, ticker: Optional[str]):
             "event": "final_result",
             "data": json.dumps({
                 "event_type": "final_result",
-                "agent": "Decision Agent",
+                "agent": "OrchestratorAgent",
                 "status": "ready",
                 "strategy_id": strategy_id,
                 "timestamp": datetime.now().timestamp()
@@ -145,6 +140,8 @@ async def strategy_event_generator(session_id: str, ticker: Optional[str]):
     except Exception as e:
         logger.error(f"Strategy streaming error: {e}")
         yield { "event": "error", "data": json.dumps({"message": str(e)}) }
+    finally:
+        messenger.unsubscribe_from_trace(correlation_id, messenger_handler)
 
 @router.get("/strategy/{strategy_id}", response_model=AIStrategyResponse)
 async def get_strategy(strategy_id: str):

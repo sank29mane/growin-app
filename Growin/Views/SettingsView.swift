@@ -83,7 +83,7 @@ struct AIConfigSection: View {
     @State private var showExportSuccess = false
     @State private var showImportSuccess = false
     @State private var showImportError = false
-    @State private var lmStudioModels: [String] = []
+    @State private var lmStudioViewModel = LMStudioViewModel.shared
 
     var body: some View {
         SettingsCard(title: "AI Core Config", icon: "brain") {
@@ -102,7 +102,7 @@ struct AIConfigSection: View {
                     .pickerStyle(.menu)
                     .onChange(of: selectedProvider) { _, newValue in
                         if newValue == "lmstudio" {
-                            fetchLMStudioModels()
+                            lmStudioViewModel.fetchModels()
                         }
                     }
                 }
@@ -111,10 +111,45 @@ struct AIConfigSection: View {
                 HStack {
                     Label("Decision Engine", systemImage: "brain.head.profile")
                     Spacer()
+                    
+                    if selectedProvider == "lmstudio" {
+                        if lmStudioViewModel.isLoadingModel {
+                            HStack(spacing: 8) {
+                                ProgressView().controlSize(.small)
+                                Text(lmStudioViewModel.loadingStatus)
+                                    .font(.caption2)
+                                    .foregroundColor(.stitchNeonYellow)
+                            }
+                        } else if let current = lmStudioViewModel.currentModel, !current.isEmpty {
+                            // SOTA: High-Fidelity Active Indicator
+                            HStack(spacing: 6) {
+                                StatusLight(color: .stitchNeonGreen, isAnimated: true)
+                                Text("Active")
+                                    .font(.system(size: 10, weight: .bold))
+                                    .foregroundColor(.stitchNeonGreen)
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.stitchNeonGreen.opacity(0.1))
+                            .cornerRadius(6)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(Color.stitchNeonGreen.opacity(0.3), lineWidth: 0.5)
+                            )
+                            .padding(.trailing, 4)
+                        }
+                    }
+                    
                     Picker("", selection: $selectedModel) {
                         modelOptions
                     }
                     .pickerStyle(.menu)
+                    .disabled(selectedProvider == "lmstudio" && lmStudioViewModel.isLoadingModel)
+                    .onChange(of: selectedModel) { _, newValue in
+                        if selectedProvider == "lmstudio" && newValue != "lmstudio-auto" {
+                            lmStudioViewModel.loadModel(newValue)
+                        }
+                    }
                 }
 
                 Divider().background(Color.secondary.opacity(0.1))
@@ -149,39 +184,21 @@ struct AIConfigSection: View {
         }
         .onAppear {
             if selectedProvider == "lmstudio" {
-                fetchLMStudioModels()
+                lmStudioViewModel.fetchModels()
             }
         }
     }
     
-    private func fetchLMStudioModels() {
-        Task {
-            guard let url = URL(string: "\(AppConfig.shared.baseURL)/api/models/lmstudio") else { return }
-            do {
-                let (data, _) = try await URLSession.shared.data(from: url)
-                if let response = try? JSONDecoder().decode([String: [String]].self, from: data),
-                   let models = response["models"] {
-                    await MainActor.run {
-                        self.lmStudioModels = models
-                    }
-                }
-            } catch {
-                print("Failed to fetch LM Studio models: \(error)")
-            }
-        }
-    }
-
-
     private var statusNote: some View {
         Group {
             if selectedProvider == "lmstudio" {
-                Label("LM Studio active on port 1234", systemImage: "bolt.fill")
+                Label(lmStudioViewModel.isOnline ? "LM Studio active on port 1234" : "LM Studio not reachable", systemImage: lmStudioViewModel.isOnline ? "bolt.fill" : "bolt.slash.fill")
                     .font(.caption2)
-                    .foregroundColor(.blue)
+                    .foregroundColor(lmStudioViewModel.isOnline ? .stitchNeonCyan : .red)
             } else if selectedProvider == "mlx" {
                 Label("Hardware accelerated via Apple GPU", systemImage: "sparkles")
                     .font(.caption2)
-                    .foregroundColor(.purple)
+                    .foregroundColor(.stitchNeonPurple)
             }
         }
     }
@@ -195,7 +212,7 @@ struct AIConfigSection: View {
             Text("Gemma").tag("gemma")
         case "lmstudio":
             Text("Auto-Detect").tag("lmstudio-auto")
-            ForEach(lmStudioModels, id: \.self) { model in
+            ForEach(lmStudioViewModel.availableModels, id: \.self) { model in
                 Text(model).tag(model)
             }
         case "openai":

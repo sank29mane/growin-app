@@ -11,10 +11,15 @@ router = APIRouter()
 
 @router.get("/api/system/status")
 async def get_system_status():
-    """Returns detailed status of all agents and system metrics."""
+    """Returns detailed status of all agents, environment settings, and system metrics."""
+    import os
     return {
         "system": status_manager.get_system_info(),
         "agents": status_manager.get_all_statuses(),
+        "environment": {
+            "trading212": "demo" if os.getenv("TRADING212_USE_DEMO", "true").lower() == "true" else "live",
+            "alpaca": "paper" if os.getenv("ALPACA_USE_PAPER", "true").lower() == "true" else "live",
+        },
         "timestamp": time.time()
     }
 

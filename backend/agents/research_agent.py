@@ -114,6 +114,10 @@ class ResearchAgent(BaseAgent):
             for query_ticker, query_name in queries_to_try:
                 current_articles = []
                 
+                # 0. Regulatory News (SOTA 2026 - High Priority)
+                reg_news = await self._fetch_regulatory_news(query_ticker, query_name)
+                current_articles.extend(reg_news)
+
                 # 1. NewsAPI (Circuit Breaker protected)
                 if self.newsapi_key and query_ticker != "MARKET":
                     chain = provider_manager.get_or_create_chain("newsapi")
@@ -146,10 +150,16 @@ class ResearchAgent(BaseAgent):
             
             # Deduplicate and analyze
             unique_articles = self._deduplicate_articles(articles)
-            sentiments, rich_articles, headlines, sources = self._analyze_sentiment(unique_articles, sentiment_analyzer)
+            sentiments, weights, rich_articles, headlines, sources = self._analyze_sentiment(unique_articles, sentiment_analyzer)
             
-            # Calculate average sentiment
-            avg_sentiment = sum(sentiments) / len(sentiments) if sentiments else 0.0
+            # Calculate weighted average sentiment
+            if sentiments:
+                total_weighted_sentiment = sum(s for s in sentiments) # already multiplied by weight in _analyze
+                total_weight = sum(weights)
+                avg_sentiment = total_weighted_sentiment / total_weight if total_weight > 0 else 0.0
+            else:
+                avg_sentiment = 0.0
+                
             label = self._get_sentiment_label(avg_sentiment)
             
             research_data = ResearchData(
@@ -214,6 +224,68 @@ class ResearchAgent(BaseAgent):
             latency_ms=0,
             error=error
         )
+
+    async def _fetch_regulatory_news(self, ticker: str, company_name: str) -> List[Dict]:
+        """
+        Fetch verified regulatory news (LSE RNS, SEC Filings).
+        Weighted as higher importance in final sentiment calculation.
+        """
+        articles = []
+        try:
+            is_uk = ticker.upper().endswith(".L")
+            
+            # 1. LSE RNS (Regulatory News Service) via NewsData.io
+            if is_uk and self.newsdata_key:
+                import httpx
+                params = {
+                    "apikey": self.newsdata_key,
+                    "q": f"{ticker} RNS",
+                    "country": "gb",
+                    "category": "business"
+                }
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.get("https://newsdata.io/api/1/latest", params=params)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        for art in data.get('results', [])[:5]:
+                            articles.append({
+                                'title': f"[RNS] {art.get('title')}",
+                                'description': art.get('description'),
+                                'source': {'name': 'LSE RNS'},
+                                'url': art.get('link'),
+                                'is_regulatory': True
+                            })
+
+            # 2. SEC Filings / News via Tavily
+            if not is_uk and self.tavily_key:
+                from tavily import TavilyClient
+                tavily = TavilyClient(api_key=self.tavily_key)
+                # Specialized query for SEC filings
+                query = f"latest SEC filings and regulatory announcements for {ticker}"
+                
+                def fetch():
+                    return tavily.search(query=query, search_depth="advanced", max_results=5)
+                
+                response = await asyncio.to_thread(fetch)
+                for r in response.get('results', []):
+                    # Only include if relevant to SEC or regulatory
+                    content = (r.get('title', '') + (r.get('content', '') or '')).upper()
+                    if any(kw in content for kw in ["SEC", "FORM 8-K", "10-Q", "10-K", "FILING", "REGULATORY"]):
+                        articles.append({
+                            'title': f"[SEC] {r.get('title')}",
+                            'description': r.get('content') or r.get('snippet'),
+                            'source': {'name': 'SEC EDGAR / News'},
+                            'url': r.get('url'),
+                            'is_regulatory': True
+                        })
+            
+            if articles:
+                logger.info(f"ResearchAgent: Found {len(articles)} regulatory announcements for {ticker}")
+            
+            return articles
+        except Exception as e:
+            logger.warning(f"Regulatory news fetch failed: {e}")
+            return []
 
     async def _fetch_newsapi(self, ticker: str, company_name: str) -> List[Dict]:
         """Fetch from NewsAPI (traditional news sources)."""
@@ -435,6 +507,7 @@ class ResearchAgent(BaseAgent):
     def _analyze_sentiment(self, articles: List[Dict], analyzer) -> tuple:
         """Analyze sentiment of articles using VADER and create rich NewsArticle objects."""
         sentiments = []
+        weights = []
         rich_articles = []
         headlines = []
         sources = []
@@ -447,7 +520,13 @@ class ResearchAgent(BaseAgent):
             # VADER sentiment analysis
             scores = analyzer.polarity_scores(text)
             compound = scores['compound']
-            sentiments.append(compound)
+            
+            # SOTA 2026: Institutional Weighting
+            is_reg = article.get('is_regulatory', False)
+            weight = 2.0 if is_reg else 1.0
+            
+            sentiments.append(compound * weight)
+            weights.append(weight)
             
             source_name = article.get('source', {}).get('name', 'Unknown')
             
@@ -464,7 +543,7 @@ class ResearchAgent(BaseAgent):
             if source_name not in sources:
                 sources.append(source_name)
         
-        return sentiments, rich_articles, headlines, sources
+        return sentiments, weights, rich_articles, headlines, sources
 
     def _get_sentiment_label(self, score: float) -> str:
         """Convert sentiment score to label."""

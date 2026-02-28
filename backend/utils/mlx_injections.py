@@ -8,7 +8,7 @@ import mlx.core as mx
 MLX_INJECTIONS = {
     "monte_carlo_sim": """
 def monte_carlo_sim(S0, mu, sigma, T, dt, num_sims):
-    """Vectorized Monte Carlo simulation for price paths on NPU."""
+    '''Vectorized Monte Carlo simulation for price paths on NPU.'''
     import mlx.core as mx
     num_steps = int(T / dt)
     # Batch generation of random normals
@@ -28,7 +28,7 @@ def monte_carlo_sim(S0, mu, sigma, T, dt, num_sims):
 
     "black_scholes_tensor": """
 def black_scholes_tensor(S, K, T, r, sigma, option_type='call'):
-    """Tensorized Black-Scholes option pricing on NPU."""
+    '''Tensorized Black-Scholes option pricing on NPU.'''
     import mlx.core as mx
     
     def norm_cdf(x):
@@ -49,7 +49,7 @@ def black_scholes_tensor(S, K, T, r, sigma, option_type='call'):
 
     "technical_indicators_vectorized": """
 def rsi_mlx(prices, period=14):
-    """Vectorized RSI calculation on NPU."""
+    '''Vectorized RSI calculation on NPU.'''
     import mlx.core as mx
     if len(prices) < period + 1:
         return mx.array([])
@@ -73,7 +73,7 @@ def rsi_mlx(prices, period=14):
     return rsi
 
 def sma_mlx(prices, period):
-    """Vectorized Simple Moving Average on NPU."""
+    '''Vectorized Simple Moving Average on NPU.'''
     import mlx.core as mx
     if len(prices) < period:
         return mx.array([])
@@ -85,9 +85,7 @@ def sma_mlx(prices, period):
 
 def get_all_injections() -> str:
     """Returns all injection snippets joined as a single string."""
-    return "
-
-".join(MLX_INJECTIONS.values())
+    return "\n\n".join(MLX_INJECTIONS.values())
 
 def get_injection(name: str) -> str:
     """Returns a specific injection snippet by name."""

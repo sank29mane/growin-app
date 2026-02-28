@@ -46,7 +46,12 @@ class ChatManager:
         try:
             cursor.execute("ALTER TABLE messages ADD COLUMN model_name TEXT")
         except sqlite3.OperationalError:
-            # Column already exists
+            pass
+
+        # Add lm_studio_response_id column if it doesn't exist
+        try:
+            cursor.execute("ALTER TABLE messages ADD COLUMN lm_studio_response_id TEXT")
+        except sqlite3.OperationalError:
             pass
 
         # Portfolio snapshots table
@@ -208,6 +213,7 @@ class ChatManager:
         tool_calls: Optional[List[Dict]] = None,
         agent_name: Optional[str] = None,
         model_name: Optional[str] = None,
+        lm_studio_response_id: Optional[str] = None,
     ) -> str:
         """Save a message to the conversation"""
         message_id = str(uuid.uuid4())
@@ -215,8 +221,8 @@ class ChatManager:
 
         cursor.execute(
             """
-            INSERT INTO messages (id, conversation_id, role, content, tool_calls, agent_name, model_name)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO messages (id, conversation_id, role, content, tool_calls, agent_name, model_name, lm_studio_response_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 message_id,
@@ -226,6 +232,7 @@ class ChatManager:
                 json.dumps(tool_calls) if tool_calls else None,
                 agent_name,
                 model_name,
+                lm_studio_response_id,
             ),
         )
         self.conn.commit()
@@ -237,7 +244,7 @@ class ChatManager:
 
         cursor.execute(
             """
-            SELECT id, role, content, strftime('%Y-%m-%dT%H:%M:%SZ', timestamp) as timestamp, tool_calls, agent_name, model_name
+            SELECT id, role, content, strftime('%Y-%m-%dT%H:%M:%SZ', timestamp) as timestamp, tool_calls, agent_name, model_name, lm_studio_response_id
             FROM messages
             WHERE conversation_id = ?
             ORDER BY timestamp DESC
@@ -259,6 +266,7 @@ class ChatManager:
                     else None,
                     "agent_name": row["agent_name"],
                     "model_name": row["model_name"],
+                    "lm_studio_response_id": row["lm_studio_response_id"],
                 }
             )
 

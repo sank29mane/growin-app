@@ -1,74 +1,22 @@
 # GSD JOURNAL
 
-## Session: 2026-02-25 21:55
+## Session: 2026-02-28 16:45 (Handover)
 
 ### Objective
-Check project progress, summarize recent work, and intelligently route to the next action (Phase 13 planning).
+Resolve LM Studio 0.4.x integration issues and delegate stateful chat finalization.
 
 ### Accomplished
-- **Progress Sync**: Audited `STATE.md` vs `ROADMAP.md` and reconciled status.
-- **Documentation**: Updated `ARCHITECTURE.md` with Phase 12 stability results.
-- **System Hardening**: Mark Phases 11 & 12 as COMPLETED in the roadmap.
-- **LM Studio Verification**: Empirically confirmed local LLM responsiveness and fixed the "chatter" log issue via a new caching layer.
+- **Fixed Model Listing**: Native V1 API response structure (top-level `models` key and `key` field) is now correctly handled.
+- **Fixed Model Loading**: Updated payload to use `loadConfig` with `gpuOffload` and `contextLength` (0.4.x spec).
+- **Auto-Detection Priority**: LLMFactory now prioritizes Nemotron and GPT-OSS 20B.
+- **Stateful Database**: Updated `ChatManager` and SQLite schema to persist `lm_studio_response_id`.
+- **UI Safeguards**: Implemented red banner and input tint for Live Trading mode.
+- **Operational Speed**: Rewrote `start.sh` and `stop.sh` for high-performance parallel execution.
 
-### Verification
-- [x] Phase 12 verified stable.
-- [x] `lms` CLI responsiveness verified.
-- [x] Polling noise reduced.
-- [ ] Phase 13 Implementation Plan drafted.
-
-### Paused Because
-Session end. State preserved for Phase 13 start.
-
-## Session: 2026-02-28 14:35
-
-### Objective
-Implement dynamic environment switching for Alpaca and Trading 212 (Phase 13) and check for GSD updates.
-
-### Accomplished
-- **Environment Switching**: 
-    - Updated `backend/data_engine.py` to use `ALPACA_USE_PAPER` (default: true).
-    - Updated `backend/trading212_mcp_server.py` to log environment status (`TRADING212_USE_DEMO`).
-- **Verification**: Created `test_env_switch.py` to empirically confirm both Paper and Live modes log correctly.
-- **Maintenance**: Identified that GSD version `1.22.0` is available (currently `1.20.5`).
-
-### Verification
-- [x] Alpaca environment switching verified with logs.
-- [x] Trading 212 environment logging added.
-- [x] GSD update path identified.
+### Identified Gaps
+- **UI Flicker**: Race condition in `LMStudioViewModel` causing status to toggle during load.
+- **Stateful Chat**: `DecisionAgent` and `chat_routes.py` need final wiring to pass/store `response_id`.
 
 ### Handoff Notes
-Environment switching is now robust and controlled via standard environment variables. The user can switch to Live mode by setting `ALPACA_USE_PAPER=false` and `TRADING212_USE_DEMO=false`.
-Next step is to provide the user with a guide for secure live credential management.
-Also, recommend running the GSD update (`npx get-shit-done-cc --global`).
-
-## Session: 2026-02-28 15:35
-
-### Objective
-Initiate Phase 14: Dynamic LM Studio Model Management and consolidate project test infrastructure.
-
-### Accomplished
-- **Phase 14 Planning**: Created `SPEC.md` and 3-wave execution plan for dynamic model loading.
-- **Backend Fixes**: 
-    - Updated `LMStudioClient` to track `active_model_id`.
-    - Fixed `LLMFactory` to correctly handle `lmstudio-auto` detection.
-    - Added LM Studio management schemas to `backend/schemas.py`.
-- **Infrastructure**: 
-    - Consolidated all test folders (`backend/tests`, `GrowinTests`, `GrowinUITests`, `tests/unit`) into a unified root `/tests` directory.
-    - Verified backend stability with 13/13 passing tests in the new location.
-- **UI Design**: Generated high-fidelity Preference and Activity Log screens with Stitch.
-
-### Verification
-- [x] Backend 13/13 tests passing.
-- [x] LM Studio auto-detection logic verified.
-- [x] Test structure unified and verified.
-
-### Paused Because
-User requested to pause work.
-
-### Handoff Notes
-The project is in a highly organized and stable state. Phase 14 is fully planned and ready for implementation. The next session should start with implementing the new LM Studio API endpoints in `backend/routes/agent_routes.py`.
-
-
-### Handoff Notes
-The system is in its most stable state yet. The next step is the high-stakes transition from paper/mock to live APIs. Caching in `agent_routes.py` is the most recent code change.
+Phase 14 is conceptually complete but evolved into Phase 15 for stability and stateful logic. All research is documented in `docs/history/01-LM_STUDIO_API_RESEARCH.md`.
+Next agent should run `gsd:plan-phase` for Phase 15.

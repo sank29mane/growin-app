@@ -44,6 +44,12 @@ struct ReasoningTraceView: View {
                                         isActive: event.status == "working"
                                     )
                                     .padding(.horizontal)
+                                    .transition(.move(edge: .leading).combined(with: .opacity))
+                                    .phaseAnimator([0, 1], trigger: event.status) { content, phase in
+                                        content
+                                            .opacity(event.status == "working" ? (phase == 0 ? 0.6 : 1.0) : 1.0)
+                                            .offset(x: event.status == "working" ? (phase == 0 ? -2 : 2) : 0)
+                                    }
                                 }
                             }
                             

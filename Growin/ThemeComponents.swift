@@ -241,13 +241,145 @@ struct PersonaIcon: View {
     }
 }
 
+struct ParsedMessage {
+    let cleanContent: String
+    let thoughts: String?
+
+    init(rawContent: String) {
+        var content = rawContent
+        var extractedThoughts: String? = nil
+
+        // SOTA Regex: Detect <think> blocks
+        let pattern = "<think>(.*?)</think>"
+        if let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators, .caseInsensitive]) {
+            let nsString = content as NSString
+            let results = regex.matches(in: content, options: [], range: NSRange(location: 0, length: nsString.length))
+
+            if let match = results.first {
+                extractedThoughts = nsString.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+                content = regex.stringByReplacingMatches(in: content, options: [], range: NSRange(location: 0, length: nsString.length), withTemplate: "")
+            }
+        }
+
+        self.cleanContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.thoughts = extractedThoughts
+    }
+}
+
 struct MarkdownText: View {
     let content: String
+    @State private var showThoughts = false
+
+    private var parsed: ParsedMessage {
+        ParsedMessage(rawContent: content)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // 1. Intelligence Trace (Progressive Disclosure)
+            if let thoughts = parsed.thoughts {
+                VStack(alignment: .leading, spacing: 8) {
+                    Button(action: { 
+                        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) { 
+                            showThoughts.toggle() 
+                        } 
+                    }, label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "brain.head.profile")
+                                .font(.system(size: 10))
+                            Text("INTELLIGENCE TRACE")
+                                .font(.system(size: 9, weight: .black))
+                                .kerning(0.5)
+                            Spacer()
+                            Image(systemName: showThoughts ? "chevron.up" : "chevron.down")
+                                .font(.system(size: 8))
+                        }
+                        .foregroundStyle(Color.stitchNeonCyan)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(
+                            ZStack {
+                                Color.stitchNeonCyan.opacity(0.05)
+                                BlurView(material: .menu, blendingMode: .withinWindow)
+                            }
+                        )
+                        .cornerRadius(8)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.stitchNeonCyan.opacity(0.2), lineWidth: 0.5)
+                        )
+                        })
+                        .buttonStyle(.plain)
+
+                        if showThoughts {
+                        Text(thoughts)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.5))
+                            .padding(.leading, 12)
+                            .padding(.vertical, 6)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .overlay(
+                                Rectangle()
+                                    .fill(Color.stitchNeonCyan.opacity(0.3))
+                                    .frame(width: 1.5)
+                                , alignment: .leading
+                            )
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                        }
+
+                }
+                .padding(.bottom, 4)
+            }
+
+            // 2. Primary Response (Calm UI)
+            if !parsed.cleanContent.isEmpty {
+                Text(LocalizedStringKey(parsed.cleanContent))
+                    .premiumTypography(.body)
+                    .lineSpacing(6)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
+struct BlurView: NSViewRepresentable {
+    let material: NSVisualEffectView.Material
+    let blendingMode: NSVisualEffectView.BlendingMode
+    
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = material
+        view.blendingMode = blendingMode
+        view.state = .active
+        return view
+    }
+    
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
+        nsView.material = material
+        nsView.blendingMode = blendingMode
+    }
+}
+
+struct StatusLight: View {
+    let color: Color
+    var isAnimated: Bool = false
+    
+    @State private var opacity: Double = 1.0
     
     var body: some View {
-        Text(LocalizedStringKey(content))
-            .premiumTypography(.body)
-            .textSelection(.enabled)
+        Circle()
+            .fill(color)
+            .frame(width: 8, height: 8)
+            .shadow(color: color.opacity(0.8), radius: 4)
+            .opacity(opacity)
+            .onAppear {
+                if isAnimated {
+                    withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) {
+                        opacity = 0.4
+                    }
+                }
+            }
     }
 }
 

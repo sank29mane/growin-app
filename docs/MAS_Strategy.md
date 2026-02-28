@@ -18,54 +18,48 @@ This document serves as the centralized knowledge base for the Growin App's mult
 
 ---
 
-## 2. Best Practices for Financial MAS
+## 2. Architecture & Implementation (Phase 16 Baseline)
 
-### Architecture & Coordination
-- **Specialized Roles**: Maintain clear boundaries (Market Analyst, Sentiment, Risk, Trader, ESG).
-- **Consensus Mechanisms**: Move from simple aggregation to **Debate-based Consensus**. Agents should "review" each other's outputs.
-- **Structured Communication**: Use Pydantic-validated JSON interfaces for all inter-agent messages.
-- **Human-in-the-Loop (HITL)**: Implement explicit confirmation gates for high-stakes actions (trade execution, rebalancing).
+### Flattened Hierarchy (Unified Orchestration)
+As of Phase 16, the system uses a **Unified Orchestrator Agent**. This architecture reduces inter-agent communication overhead by merging routing and reasoning into a single agent lifecycle.
+- **Entry Point**: `OrchestratorAgent.py`
+- **Parallel Swarm**: Specialists (Quant, Research, etc.) execute concurrently via `asyncio.gather`.
+- **Context Injection**: All specialist findings are synthesized into a single `MarketContext`.
 
-### Performance & Security
-- **On-Device Acceleration**: Exclusive use of Metal (MLX/CoreML) for agent inference on Apple Silicon.
-- **Reasoning Sandbox**: Execute agent-generated code exclusively in isolated Docker/WASM environments (Docker MCP).
-- **Audit Logging**: Maintain a structured "Reasoning Trace" (Decision ID -> Agent Hop -> Input/Output -> Rationale).
+### The Critic Pattern (Governance)
+We have implemented a mandatory **Review Stage** using the `RiskAgent`.
+- **Protocol**: No trade recommendation reaches the user without a JSON-validated risk audit.
+- **Safety Gates**: Risk Agent can FLAG or BLOCK suggestions based on exposure, volatility, or compliance rules.
+
+### AG-UI Streaming Protocol
+To maintain user trust, the system streams internal state transitions in real-time.
+- **Messaging**: `AgentMessenger` broadcasts granular lifecycle events (e.g., `swarm_started`, `risk_review_started`).
+- **UX**: SwiftUI `ReasoningTraceView` animates these transitions using `PhaseAnimator`.
 
 ---
 
-## 3. Improvement Roadmap for Growin App
+## 3. Performance & Security (Apple Silicon Optimization)
 
-### 🔴 High Priority (Modularity & Accuracy)
-- **Implement Agentic Debate**: Refactor `DecisionAgent` to allow specialists to refine their answers based on other agents' findings (e.g., `QuantAgent` seeing `ResearchAgent` sentiment).
+- **8-bit AFFINE Quantization**: Enforced for all local LLMs (Orchestrator and Risk models) to optimize M4 Pro unified memory performance.
+- **Hardware Affinity**: Lightweight routing models are offloaded to the Apple Neural Engine (ANE) via MLX/CoreML.
+- **HITL Enforcement**: Trade execution via MCP is protected by HMAC-signed `approval_tokens`, ensuring no autonomous trading without human confirmation.
+
+---
+
+## 4. Future Roadmap
+
+### 🔴 High Priority
+- **Agentic Debate**: Implement multi-turn debate between `QuantAgent` and `RiskAgent` for high-stakes trades.
 - **Financial Precision Layer**: Standardize all calculations using `Decimal` with 2026-standard rounding (ROUND_HALF_UP).
-- **Structured Reasoning Trace**: Implement a telemetry system to record the full multi-agent thought process in a queryable format.
 
-### 🟡 Medium Priority (Scalability & Efficiency)
-- **Actor-Based Distribution**: Move from `asyncio.gather` to a more robust actor-model (e.g., Ray or custom process management) to prevent long-running agents from blocking the event loop.
-- **Quantization Standardization**: Enforce 8-bit AFFINE quantization for all local LLMs to optimize M4 Pro unified memory (24GB+).
-- **Agent Governance Service**: Create a centralized service to manage agent permissions and tool access.
-
-### 🔵 Low Priority (Innovation)
+### 🟡 Medium Priority
 - **Sentiment Swarm**: Implement a swarm of micro-agents for high-frequency sentiment analysis across social platforms.
-- **Negotation Agents**: Agents that can simulate/negotiate trade execution prices against multiple market makers.
+- **Autonomous Goal Rebalancing**: Agents that proactively suggest portfolio adjustments based on long-term goal trajectories.
+
+### 🔵 Low Priority
+- **Negotation Agents**: Agents that simulate/negotiate trade execution prices against multiple market makers.
 
 ---
-
-## 4. Efficiency Gains for Apple Silicon (M4 Pro)
-
-- **MLX-Native Specialists**: Migrate all internal analysis logic (beyond simple regex) to MLX-optimized small models (e.g., Granite-Tiny, Phi-3).
-- **Unified Memory Optimization**: Minimize data copying between the Python bridge and MLX/CoreML runtime by sharing memory buffers.
-- **ANE Load Balancing**: Offload forecasting and signal detection to the Apple Neural Engine (ANE) via CoreML while keeping text reasoning on the GPU (MLX).
-
----
-
-## 5. Future Functionalities (High ROI)
-
-1. **Whale Watch 2.0**: Real-time tracking of institutional "Whale" movements with agent-driven intent analysis.
-2. **Autonomous Goal Rebalancing**: Agents that proactively suggest (or execute with HITL) portfolio adjustments to stay aligned with user-defined investment goals.
-3. **Scenario Simulation meetings**: Allow the user to "eavesdrop" on a debate between a Bullish Analyst and a Bearish Risk Manager regarding a specific ticker.
-
----
-**Status**: Strategic Alignment Complete
+**Status**: Strategic Alignment COMPLETE (March 2026)
 **Author**: Gemini CLI (Senior AI/ML Engineer)
-**Last Updated**: February 22, 2026
+**Last Updated**: March 1, 2026

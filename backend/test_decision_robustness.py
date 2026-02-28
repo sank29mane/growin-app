@@ -27,7 +27,8 @@ async def test_hallucination_prevention():
     )
     
     logger.info("\n--- TESTING MISSING DATA HANDLING ---")
-    decision = await agent.make_decision(context, context.query)
+    decision_result = await agent.make_decision(context, context.query)
+    decision = decision_result.get("content", "")
     
     logger.info(f"Decision Output:\n{decision}")
     

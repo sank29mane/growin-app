@@ -8,6 +8,11 @@ struct ChatView: View {
     @Namespace private var animation
     private let bottomAnchorID = "bottom"
     
+    private var isLiveMode: Bool {
+        let status = BackendStatusViewModel.shared.fullStatus?.environment
+        return status?.trading212 == "live" || status?.alpaca == "live"
+    }
+    
     var body: some View {
         ZStack {
             // Background gradient
@@ -22,6 +27,11 @@ struct ChatView: View {
             .ignoresSafeArea()
             
             VStack(spacing: 0) {
+                if isLiveMode {
+                    LiveTradingBanner()
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+                
                 // Show welcome view when no messages
                 if viewModel.messages.isEmpty && !viewModel.isProcessing {
                     WelcomeView { prompt in
@@ -162,14 +172,14 @@ struct ChatView: View {
                 .padding(.horizontal, 4)
                 
                 HStack(spacing: 12) {
-                    TextField("Ask about your portfolio...", text: $viewModel.inputText, axis: .vertical)
+                    TextField(isLiveMode ? "LIVE TRADING: Ask about your portfolio..." : "Ask about your portfolio...", text: $viewModel.inputText, axis: .vertical)
                         .textFieldStyle(.plain)
                         .padding(12)
-                        .background(Color.white.opacity(0.05))
+                        .background(isLiveMode ? Color.red.opacity(0.1) : Color.white.opacity(0.05))
                         .cornerRadius(12)
                         .overlay(
                             RoundedRectangle(cornerRadius: 12)
-                                .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                                .stroke(isLiveMode ? Color.red.opacity(0.5) : Color.white.opacity(0.1), lineWidth: 1)
                         )
                         .lineLimit(1...5)
                         .onSubmit {
@@ -187,7 +197,7 @@ struct ChatView: View {
                             } else {
                                 Circle()
                                     .fill(LinearGradient(
-                                        colors: [.blue, .blue.opacity(0.8)],
+                                        colors: isLiveMode ? [.red, .red.opacity(0.8)] : [.blue, .blue.opacity(0.8)],
                                         startPoint: .topLeading,
                                         endPoint: .bottomTrailing
                                     ))
@@ -268,9 +278,9 @@ struct ChatBubble: View {
                                     .foregroundStyle(.white.opacity(0.9))
                             }
                             
-                            // Reasoning Trace UI (Wave 2)
+                            // Reasoning Trace UI (SOTA 2026)
                             if let data = message.data {
-                                LegacyReasoningTraceView(data: data)
+                                IntelligenceTraceView(data: data)
                             }
                             
                             // Rich Data Visualization
@@ -332,73 +342,6 @@ struct ChatBubble: View {
     }
 }
 
-struct LegacyReasoningTraceView: View {
-    let data: MarketContextData
-    
-    var body: some View {
-        DisclosureGroup {
-            VStack(alignment: .leading, spacing: 10) {
-                if let quant = data.quant {
-                    ReasoningStepRow(
-                        agent: "QuantAgent",
-                        status: "ANALYZED",
-                        icon: "chart.line.uptrend.xyaxis",
-                        color: Color.Persona.trader,
-                        detail: "Signal: \(quant.signal)"
-                    )
-                }
-                
-                if let forecast = data.forecast {
-                    ReasoningStepRow(
-                        agent: "ForecastingAgent",
-                        status: "PREDICTED",
-                        icon: "brain.head.profile",
-                        color: .green,
-                        detail: "Trend: \(forecast.trend)"
-                    )
-                }
-                
-                if let research = data.research {
-                    ReasoningStepRow(
-                        agent: "ResearchAgent",
-                        status: "SCANNED",
-                        icon: "newspaper.fill",
-                        color: Color.Persona.risk,
-                        detail: "Sentiment: \(research.sentimentLabel)"
-                    )
-                }
-                
-                if let whale = data.whale {
-                    ReasoningStepRow(
-                        agent: "WhaleAgent",
-                        status: "DETECTED",
-                        icon: "water.waves",
-                        color: .indigo,
-                        detail: whale.sentimentImpact
-                    )
-                }
-            }
-            .padding(.vertical, 8)
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "brain.head.profile")
-                    .font(.system(size: 14))
-                Text("Reasoning Chain")
-                    .font(.system(size: 11, weight: .bold))
-                Spacer()
-            }
-            .foregroundStyle(.white.opacity(0.6))
-        }
-        .padding(10)
-        .background(Color.white.opacity(0.03))
-        .cornerRadius(12)
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(Color.white.opacity(0.05), lineWidth: 1)
-        )
-    }
-}
-
 struct ToolExecutionBlock: View {
     let toolCalls: [ToolCall]
     
@@ -439,42 +382,39 @@ struct ToolExecutionBlock: View {
     }
 }
 
-struct ReasoningStepRow: View {
-    let agent: String
-    let status: String
-    let icon: String
-    let color: Color
-    let detail: String
-    
+struct LiveTradingBanner: View {
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: icon)
-                .font(.system(size: 12))
-                .foregroundStyle(color)
-                .frame(width: 24, height: 24)
-                .background(color.opacity(0.1))
-                .clipShape(Circle())
+            Image(systemName: "exclamationmark.shield.fill")
+                .font(.system(size: 18))
+                .foregroundColor(.white)
             
             VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 4) {
-                    Text(agent)
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(.white)
-                    Text(status)
-                        .font(.system(size: 8, weight: .black))
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
-                        .background(color.opacity(0.2))
-                        .foregroundStyle(color)
-                        .cornerRadius(3)
-                }
-                
-                Text(detail)
+                Text("LIVE TRADING MODE")
+                    .font(.system(size: 12, weight: .black))
+                Text("Real capital is at risk. All trades require manual confirmation.")
                     .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
+                    .opacity(0.9)
             }
             
             Spacer()
+            
+            Text("ACTIVE")
+                .font(.system(size: 10, weight: .bold))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.white.opacity(0.2))
+                .cornerRadius(4)
         }
+        .foregroundColor(.white)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(
+            LinearGradient(
+                colors: [.red, Color(red: 0.6, green: 0, blue: 0)],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+        )
     }
 }

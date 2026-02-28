@@ -7,6 +7,7 @@ from app_context import state, T212ConfigRequest
 from utils.mcp_validation import validate_mcp_config
 import logging
 import json
+import os
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -115,10 +116,103 @@ async def update_t212_config(request: T212ConfigRequest):
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
 
-@router.get("/mcp/servers")
-async def get_mcp_servers_list():
-    """Get MCP servers list with status"""
-    return await get_mcp_status()
+from typing import Dict, Any, Optional
+from pydantic import BaseModel
+import uuid
+import hmac
+import hashlib
+import time
+
+# Secret for signing approval tokens (in production, use a secure env var)
+APPROVAL_SECRET = os.getenv("TRADE_APPROVAL_SECRET", "sota-2026-secure-gate-9911")
+
+class ToolCallRequest(BaseModel):
+    server_name: str
+    tool_name: str
+    arguments: Dict[str, Any]
+    approval_token: Optional[str] = None
+
+def verify_approval_token(token: str, tool_name: str, arguments: Dict[str, Any]) -> bool:
+    """Verify that the token matches the tool and arguments (Simplified HMAC)."""
+    try:
+        # Expected format: timestamp:signature
+        parts = token.split(":")
+        if len(parts) != 2:
+            return False
+            
+        timestamp, signature = parts
+        # Check expiry (5 minutes)
+        if time.time() - float(timestamp) > 300:
+            logger.warning("Approval token expired")
+            return False
+            
+        # Recreate signature
+        msg = f"{timestamp}:{tool_name}:{json.dumps(arguments, sort_keys=True)}"
+        expected = hmac.new(
+            APPROVAL_SECRET.encode(),
+            msg.encode(),
+            hashlib.sha256
+        ).hexdigest()
+        
+        return hmac.compare_digest(expected, signature)
+    except Exception as e:
+        logger.error(f"Token verification error: {e}")
+        return False
+
+@router.post("/mcp/tool/call")
+async def call_mcp_tool(request: ToolCallRequest):
+    """
+    Execute an MCP tool with SOTA 2026 Governance Gates.
+    Intersects sensitive actions (trades) to enforce HITL.
+    """
+    sensitive_tools = [
+        "place_market_order", "place_limit_order", 
+        "place_stop_order", "place_stop_limit_order"
+    ]
+    
+    # 1. Check Governance Gate
+    if request.tool_name in sensitive_tools:
+        if not request.approval_token:
+            logger.warning(f"BLOCKED: {request.tool_name} requires approval_token (HITL Gate)")
+            raise HTTPException(
+                status_code=403, 
+                detail={
+                    "error": "APPROVAL_REQUIRED",
+                    "message": f"Human-in-the-Loop approval required for {request.tool_name}",
+                    "tool": request.tool_name,
+                    "arguments": request.arguments
+                }
+            )
+        
+        if not verify_approval_token(request.approval_token, request.tool_name, request.arguments):
+            logger.error(f"BLOCKED: Invalid or expired approval_token for {request.tool_name}")
+            raise HTTPException(status_code=401, detail="Invalid trade approval token")
+
+    # 2. Execute Tool
+    try:
+        if request.server_name not in state.mcp_client.sessions:
+            # Try to connect if not connected
+            servers = state.chat_manager.get_mcp_servers()
+            server_config = next((s for s in servers if s['name'] == request.server_name), None)
+            if server_config:
+                await state.mcp_client.connect_server(server_config)
+            else:
+                raise HTTPException(status_code=404, detail=f"Server {request.server_name} not found")
+
+        # Explicitly route to the correct session
+        session = state.mcp_client.sessions.get(request.server_name)
+        if not session:
+             raise HTTPException(status_code=503, detail=f"Server {request.server_name} not available")
+             
+        # call_tool on MultiMCPManager handles routing if tool name is unique, 
+        # but here we use the specific session for safety
+        from mcp.types import TextContent
+        result = await session.call_tool(request.tool_name, request.arguments)
+        
+        return {"status": "success", "result": result.content}
+    except Exception as e:
+        logger.error(f"Tool execution failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/mcp/servers/add")

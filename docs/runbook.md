@@ -34,6 +34,26 @@ git branch --show-current
 
 ---
 
+## Phase 16: SOTA 2026 Operations
+
+### Hardware Optimization (M4 Pro)
+**Goal:** Verify 8-bit AFFINE quantization is active for local inference.
+
+1.  **Check Backend Logs:**
+    ```bash
+    grep "Applying 8-bit AFFINE" growin_server.log
+    ```
+2.  **Monitor NPU/GPU usage:** Use `Activity Monitor` (macOS) -> `GPU History` to ensure balanced load during Orchestrator execution.
+
+### Critic Pattern & HITL Verification
+**Goal:** Ensure trade suggestions are audited and require manual signatures.
+
+1.  **Trigger Risk Audit:** Query the chat with a reckless trade (e.g. "Buy £1M of TSLA").
+2.  **Verify Risk Warning:** Confirm the response includes `⚠️ RISK WARNING` and `[ACTION_REQUIRED:TRADE_APPROVAL]`.
+3.  **Test Trade Gate:** Attempt to call a trade tool via `/mcp/tool/call` without an `approval_token`. It MUST return `403 Forbidden`.
+
+---
+
 ## System Health & Observability
 
 ### Telemetry Verification

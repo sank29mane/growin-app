@@ -181,27 +181,46 @@ class LLMFactory:
             status_manager.set_status("lmstudio", "ready", f"Model {cached_id} active (cached)")
             return client
 
-        models = await client.list_models()
+        models = await client.list_models(management=True)
         if models:
-            llm_candidates = [
-                m["id"] for m in models
-                if "embed" not in m["id"].lower()
-                and "nomic" not in m["id"].lower()
-                and "bert" not in m["id"].lower()
-            ]
+            llm_candidates = []
+            for m in models:
+                # Handle both 'key' (Native V1) and 'id' (OpenAI)
+                m_id = m.get("key") or m.get("id")
+                if not m_id: continue
+                
+                # SOTA Safety: Do not auto-load behemoths (>30B) to prevent system freeze
+                is_giant = "40b" in m_id.lower() or "70b" in m_id.lower()
+                
+                if "embed" not in m_id.lower() and "nomic" not in m_id.lower() and not is_giant:
+                    llm_candidates.append(m_id)
 
             if llm_candidates:
-                loaded_id = llm_candidates[0]
-                logger.info(f"LM Studio: Auto-detected LLM: {loaded_id}")
+                # SOTA Priority Logic: User Preferred -> Popular Stable -> Others
+                nemotron = [c for c in llm_candidates if "nemotron" in c.lower()]
+                gpt_oss = [c for c in llm_candidates if "gpt-oss" in c.lower() or "oss-20b" in c.lower()]
+                stable = [c for c in llm_candidates if "llama" in c.lower() or "gemma" in c.lower()]
+                
+                if nemotron:
+                    loaded_id = nemotron[0]
+                elif gpt_oss:
+                    loaded_id = gpt_oss[0]
+                elif stable:
+                    loaded_id = stable[0]
+                else:
+                    loaded_id = llm_candidates[0]
+                
+                logger.info(f"LM Studio: Auto-detected priority LLM: {loaded_id}")
                 client.active_model_id = loaded_id
                 status_manager.set_status("lmstudio", "ready", f"Model {loaded_id} active")
                 # Cache for 5 minutes as models don't change frequently
                 cache.set(cache_key, loaded_id, ttl=300)
                 return client
             elif models:
-                logger.warning(f"LM Studio: Only embedding models found. Using first: {models[0]['id']}")
-                client.active_model_id = models[0]["id"]
+                first_id = models[0].get("key") or models[0].get("id") or "unknown"
+                logger.warning(f"LM Studio: Only embedding models found. Using first: {first_id}")
+                client.active_model_id = first_id
                 return client
 
-            status_manager.set_status("lmstudio", "error", "No models available")
-            raise ValueError("No models available in LM Studio")
+        status_manager.set_status("lmstudio", "error", "No models available")
+        raise ValueError("No models available in LM Studio")

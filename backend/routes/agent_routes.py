@@ -7,7 +7,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-from schemas import MLXDownloadRequest
+from schemas import MLXDownloadRequest, LMStudioLoadRequest, LMStudioStatusResponse
 
 
 @router.get("/api/agents/status")
@@ -18,17 +18,23 @@ async def get_agents_status():
     from status_manager import status_manager
     live_statuses = status_manager.get_all_statuses()
     
-    # Enrich with metadata
+    # Core system components
     response = {
         "coordinator": live_statuses.get("coordinator", {"status": "offline"}),
-        "specialists": {
-            "quant_agent": live_statuses.get("quant_agent", {"status": "offline"}),
-            "portfolio_agent": live_statuses.get("portfolio_agent", {"status": "offline"}),
-            "forecasting_agent": live_statuses.get("forecasting_agent", {"status": "offline"}),
-            "research_agent": live_statuses.get("research_agent", {"status": "offline"})
-        },
-        "decision_agent": live_statuses.get("decision_agent", {"status": "offline"})
+        "decision_agent": live_statuses.get("decision_agent", {"status": "offline"}),
+        "specialists": {}
     }
+    
+    # Filter specialists (everything that isn't coordinator or decision_agent)
+    for key, val in live_statuses.items():
+        if key not in ["coordinator", "decision_agent"]:
+            response["specialists"][key] = val
+    
+    # Ensure standard specialists are represented even if offline
+    standard_specs = ["quant_agent", "portfolio_agent", "forecasting_agent", "research_agent", "lmstudio"]
+    for spec in standard_specs:
+        if spec not in response["specialists"]:
+            response["specialists"][spec] = {"status": "offline"}
     
     # Special check for forecasting model loading
     try:
@@ -97,8 +103,8 @@ async def get_available_models():
 @router.get("/api/models/lmstudio")
 async def get_lmstudio_models():
     """
-    Get live list of models from LM Studio V1 API.
-    Allows the UI to see exactly what is downloaded/available locally.
+    Get live list of models from LM Studio using Native V1 Management API.
+    Provides accurate metadata including loading status.
     """
     from lm_studio_client import LMStudioClient
     from cache_manager import cache
@@ -110,20 +116,29 @@ async def get_lmstudio_models():
 
     client = LMStudioClient()
     try:
-        models = await client.list_models()
+        # Use Native V1 API for listing models (management=True)
+        models = await client.list_models(management=True)
+        
         # Filter for LLMs and return simple list of IDs for UI compatibility
-        llm_ids = [
-            m.get("id") for m in models 
-            if m.get("id") and "embed" not in m.get("id", "").lower() 
-            and "nomic" not in m.get("id", "").lower()
-        ]
+        # SOTA: Improved filtering to handle 'id' (OpenAI) and 'key' (Native V1)
+        llm_ids = []
+        for m in models:
+            # Check for both 'key' (Native V1) and 'id' (OpenAI)
+            m_id = m.get("key") or m.get("id")
+            if not m_id: continue
+            
+            # Skip common embedding or utility models
+            is_embed = "embed" in m_id.lower() or "nomic" in m_id.lower()
+            if not is_embed:
+                llm_ids.append(m_id)
+                
         result = {
             "models": llm_ids,
             "count": len(llm_ids),
             "status": "online"
         }
         
-        # Cache for 60 seconds to reduce log noise and polling
+        # Cache for 60 seconds
         cache.set(cache_key, result, ttl=60)
         return result
     except Exception as e:
@@ -134,6 +149,106 @@ async def get_lmstudio_models():
             "status": "offline",
             "error": str(e)
         }
+
+
+@router.post("/api/models/lmstudio/load")
+async def load_lmstudio_model(request: LMStudioLoadRequest):
+    """
+    Trigger LM Studio to load a specific model ID.
+    Implements a clean 'Unload before Load' switcher flow.
+    """
+    from lm_studio_client import LMStudioClient
+    from status_manager import status_manager
+    
+    client = LMStudioClient()
+    model_id = request.model_id
+    
+    logger.info(f"LM Studio: Switch request for {model_id}")
+    status_manager.set_status("lmstudio", "working", f"Switching to {model_id}...")
+    
+    try:
+        # 1. Get currently loaded models
+        loaded_models = await client.list_loaded_models()
+        
+        # 2. If already loaded, just confirm and return
+        if model_id in loaded_models:
+            status_manager.set_status("lmstudio", "ready", f"Model {model_id} active")
+            return {"status": "success", "message": f"Model {model_id} is already loaded"}
+            
+        # 3. Clean Switch: Unload other models first to free VRAM
+        if loaded_models:
+            logger.info(f"LM Studio: Unloading existing models {loaded_models} for clean switch.")
+            status_manager.set_status("lmstudio", "working", "Unloading current model...")
+            
+            # We get full management info to get instance IDs
+            management_models = await client.list_models(management=True)
+            for m in management_models:
+                instances = m.get("loaded_instances", [])
+                for inst in instances:
+                    inst_id = inst.get("id")
+                    if inst_id:
+                        await client.unload_model(inst_id)
+            
+            # Tiny sleep to let VRAM clear
+            await asyncio.sleep(1.0)
+
+        # 4. Load the new model
+        status_manager.set_status("lmstudio", "working", f"Loading {model_id} into VRAM...")
+        success = await client.ensure_model_loaded(
+            model_id, 
+            context_length=request.context_length,
+            gpu=request.gpu_offload
+        )
+        
+        if success:
+            status_manager.set_status("lmstudio", "ready", f"Model {model_id} active")
+            return {"status": "success", "message": f"Model {model_id} loaded successfully"}
+        else:
+            status_manager.set_status("lmstudio", "error", f"Failed to load {model_id}")
+            return {"status": "error", "message": f"Failed to load {model_id}"}
+    except Exception as e:
+        logger.error(f"LM Studio load error: {e}")
+        status_manager.set_status("lmstudio", "error", str(e))
+        return {"status": "error", "message": str(e)}
+
+
+@router.get("/api/models/lmstudio/status", response_model=LMStudioStatusResponse)
+async def get_lmstudio_status():
+    """
+    Detailed health and load status of LM Studio with short-term caching to prevent log spam.
+    """
+    from lm_studio_client import LMStudioClient
+    from cache_manager import cache
+    
+    cache_key = "lmstudio_status_detail"
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
+
+    client = LMStudioClient()
+    try:
+        online = await client.check_connection()
+        if not online:
+            res = LMStudioStatusResponse(status="offline", active=False)
+            cache.set(cache_key, res, ttl=5) # Cache offline status longer
+            return res
+            
+        loaded = await client.list_loaded_models()
+        # In LM Studio v1, usually only one model is loaded at a time
+        current_model = loaded[0] if loaded else None
+        
+        result = LMStudioStatusResponse(
+            status="online",
+            loaded_model=current_model,
+            active=True,
+            memory_usage={} 
+        )
+        # Cache for 5s to bridge the polling interval without spamming LM Studio logs
+        cache.set(cache_key, result, ttl=5)
+        return result
+    except Exception as e:
+        logger.warning(f"Failed to get LM Studio status: {e}")
+        return LMStudioStatusResponse(status="error", active=False)
 
 
 # MLX Models Management (Stub)

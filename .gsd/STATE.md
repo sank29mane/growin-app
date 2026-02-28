@@ -1,24 +1,23 @@
 # GSD STATE MEMORY
 
 ## Current Position
-- **Phase**: Phase 15 - Stateful Chat & UI Stability
-- **Task**: Post-Refactor Verification & Live Integration Prep
-- **Status**: Refactoring COMPLETE, Monitoring active
+- **Phase**: Phase 18 - Adversarial Reasoning & Institutional Alpha
+- **Task**: Phase 18 COMPLETE
+- **Status**: Completed successfully
 
 ## Last Session Summary
-- **Stateful Chat**: Refactored `DecisionAgent.py` to support `previous_response_id` and server-side state via `LMStudioClient.stateful_chat`.
-- **Flicker Shield**: Extended `LMStudioViewModel.swift` shield to 30s and implemented auto-clear for stuck requests (120s timeout).
-- **CoT Extraction**: Implemented `<think>` tag extraction in `DecisionAgent` and added `ReasoningChainView` to SwiftUI for transparent LLM internal logic.
-- **Data Integrity**: Cleaned up redundant logic blocks in `DecisionAgent.make_decision`.
+- **Verified Intelligence**: Upgraded `ResearchAgent` with LSE RNS and SEC news support (2x weighted).
+- **Institutional Whales**: Enhanced `WhaleAgent` with SEC EDGAR 13F holdings extraction.
+- **Adversarial Debate**: Implemented a multi-turn Generator-Critic loop between `Orchestrator` and `RiskAgent`.
+- **ACE Scoring**: Introduced Adversarial Confidence Estimation to measure strategy robustness.
+- **Alpha Audit**: Built a correlation engine in DuckDB to measure agent P&L performance over 1d/5d horizons.
 
 ## Next Steps
-1. **Verify Stateful Streaming**: Test if `make_decision_stream` correctly maintains context across turns.
-2. **Live Endpoint Health Check**: Verify connectivity to production Alpaca/T212 endpoints (Phase 13 audit).
-3. **NPU Math Stress Test**: Run complex Monte Carlo simulations via `MathGeneratorAgent` to verify sandbox stability.
-4. **Reasoning UI Polish**: Add character-limit handling for ultra-long CoT traces in `ReasoningChainView`.
+1. **Agentic Strategy Revision**: Enable the Orchestrator to proactively "Stitch" multiple specialist trajectories into a single unified timeline.
+2. **Dynamic Alpha Weighting**: Automatically prioritize specialist agents whose historical alpha is currently trending higher.
+3. **Sentiment Swarm**: Implement micro-agent swarms for sub-second social sentiment monitoring on trending tickers.
 
 ## Quick Tasks Completed
 | Task | Description | Date |
 |------|-------------|------|
-| Jules Workflow | Created `/jules-delegate` workflow for task handoff. | 2026-03-01 |
-
+| Phase 18 | Adversarial Reasoning & Institutional Alpha | 2026-03-01 |

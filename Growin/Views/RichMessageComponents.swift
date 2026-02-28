@@ -1,5 +1,194 @@
 import SwiftUI
 
+struct IntelligenceTraceView: View {
+    let data: MarketContextData
+    @State private var isExpanded: Bool = false
+    @State private var showFullReasoning: Bool = false
+    
+    private let reasoningLimit = 500 // SOTA: Character limit for collapsed reasoning
+    
+    var body: some View {
+        DisclosureGroup(isExpanded: $isExpanded) {
+            VStack(alignment: .leading, spacing: 12) {
+                // 1. SOTA 2026: Internal Reasoning (CoT)
+                if let reasoning = data.reasoning {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("INTERNAL LOGIC")
+                                .font(.system(size: 9, weight: .black))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            
+                            Button(action: {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(reasoning, forType: .string)
+                            }) {
+                                Label("COPY", systemImage: "doc.on.doc")
+                                    .font(.system(size: 8, weight: .bold))
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.blue)
+                        }
+                        
+                        VStack(alignment: .leading, spacing: 4) {
+                            let truncated = reasoning.count > reasoningLimit && !showFullReasoning
+                            let textToShow = truncated ? String(reasoning.prefix(reasoningLimit)) + "..." : reasoning
+                            
+                            Text(textToShow)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.8))
+                                .lineSpacing(4)
+                            
+                            if reasoning.count > reasoningLimit {
+                                Button(showFullReasoning ? "Show Less" : "Read Full Trace") {
+                                    withAnimation(.spring()) {
+                                        showFullReasoning.toggle()
+                                    }
+                                }
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(.blue)
+                                .padding(.top, 2)
+                            }
+                        }
+                        .padding(10)
+                        .background(Color.black.opacity(0.3))
+                        .cornerRadius(8)
+                    }
+                    .padding(.top, 4)
+                    
+                    Divider()
+                        .background(Color.white.opacity(0.1))
+                }
+
+                // 2. Specialist Agent Steps
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("SWARM EXECUTION")
+                        .font(.system(size: 9, weight: .black))
+                        .foregroundStyle(.secondary)
+                        .padding(.bottom, 2)
+
+                    if let quant = data.quant {
+                        ReasoningStepRow(
+                            agent: "QuantAgent",
+                            status: "ANALYZED",
+                            icon: "chart.line.uptrend.xyaxis",
+                            color: Color.Persona.trader,
+                            detail: "Signal: \(quant.signal)"
+                        )
+                    }
+                    
+                    if let forecast = data.forecast {
+                        ReasoningStepRow(
+                            agent: "ForecastingAgent",
+                            status: "PREDICTED",
+                            icon: "brain.head.profile",
+                            color: .green,
+                            detail: "Trend: \(forecast.trend)"
+                        )
+                    }
+                    
+                    if let research = data.research {
+                        ReasoningStepRow(
+                            agent: "ResearchAgent",
+                            status: "SCANNED",
+                            icon: "newspaper.fill",
+                            color: Color.Persona.risk,
+                            detail: "Sentiment: \(research.sentimentLabel)"
+                        )
+                    }
+                    
+                    if let whale = data.whale {
+                        ReasoningStepRow(
+                            agent: "WhaleAgent",
+                            status: "DETECTED",
+                            icon: "water.waves",
+                            color: .indigo,
+                            detail: whale.sentimentImpact
+                        )
+                    }
+                }
+            }
+            .padding(.vertical, 8)
+        } label: {
+            HStack(spacing: 8) {
+                ZStack {
+                    Circle()
+                        .fill(Color.blue.opacity(0.1))
+                        .frame(width: 20, height: 20)
+                    Image(systemName: "brain.head.profile")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.blue)
+                }
+                
+                Text("INTELLIGENCE TRACE")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.7))
+                
+                Spacer()
+                
+                if let reasoning = data.reasoning {
+                    Text("\(reasoning.count) chars")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.white.opacity(0.05))
+                        .cornerRadius(4)
+                }
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.white.opacity(0.03))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.white.opacity(0.05), lineWidth: 1)
+        )
+    }
+}
+
+struct ReasoningStepRow: View {
+    let agent: String
+    let status: String
+    let icon: String
+    let color: Color
+    let detail: String
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 12))
+                .foregroundStyle(color)
+                .frame(width: 24, height: 24)
+                .background(color.opacity(0.1))
+                .clipShape(Circle())
+            
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 4) {
+                    Text(agent)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.white)
+                    Text(status)
+                        .font(.system(size: 8, weight: .black))
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(color.opacity(0.2))
+                        .foregroundStyle(color)
+                        .cornerRadius(3)
+                }
+                
+                Text(detail)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+            
+            Spacer()
+        }
+    }
+}
+
 struct RichDataView: View {
     let data: MarketContextData
     

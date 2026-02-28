@@ -24,22 +24,28 @@ class StatusManager:
                     "research_agent": {"status": "ready", "detail": "Idle", "model": "NewsAPI", "timestamp": datetime.now().isoformat()},
                     "social_agent": {"status": "ready", "detail": "Monitoring feeds", "model": "Tavily + VADER", "timestamp": datetime.now().isoformat()},
                     "whale_agent": {"status": "ready", "detail": "Monitoring trades", "model": "Alpaca Trades", "timestamp": datetime.now().isoformat()},
+                    "lmstudio": {"status": "ready", "detail": "Idle", "model": "LM Studio v1", "timestamp": datetime.now().isoformat()},
                 }
             return cls._instance
 
     def set_status(self, agent: str, status: str, detail: Optional[str] = None, model: Optional[str] = None):
-        """Update the status of an agent."""
+        """Update the status of an agent or create it if it doesn't exist."""
         with self._lock:
+            existing = self.statuses.get(agent, {})
+            update_data = {
+                "status": status,
+                "detail": detail or existing.get("detail", "Idle"),
+                "timestamp": datetime.now().isoformat()
+            }
+            if model:
+                update_data["model"] = model
+            elif "model" not in existing:
+                update_data["model"] = "Unknown"
+            
             if agent in self.statuses:
-                update_data = {
-                    "status": status,
-                    "detail": detail or self.statuses[agent].get("detail", ""),
-                    "timestamp": datetime.now().isoformat()
-                }
-                if model:
-                    update_data["model"] = model
-                
                 self.statuses[agent].update(update_data)
+            else:
+                self.statuses[agent] = update_data
 
     def get_all_statuses(self) -> Dict:
         """Get all agent statuses."""

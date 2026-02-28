@@ -3,7 +3,8 @@ Whale Alert Agent - Monitors large block trades and institutional flow
 """
 
 import logging
-from typing import Dict, Any
+import asyncio
+from typing import Dict, Any, List
 from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from market_context import WhaleData
 from data_engine import get_alpaca_client
@@ -34,21 +35,49 @@ class WhaleAgent(BaseAgent):
         """
         ticker = context.get("ticker", "MARKET")
         
-        # 1. Handle "MARKET" Ticker Gracefully
+        # 1. Handle "MARKET" Ticker with Bellwether Aggregation
         if ticker == "MARKET":
-            # For broad market, we can't track specific whales easily without a composite index
-            # Return a neutral success response to avoid "FAILED" state
+            bellwethers = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN"]
+            logger.info(f"WhaleAgent: Performing Bellwether Aggregation for broad market...")
+            
+            # Use parallel execution for speed
+            tasks = [self.analyze({"ticker": b}) for b in bellwethers]
+            results = await asyncio.gather(*tasks)
+            
+            valid_results = [r for r in results if r.success and r.data.get("sentiment_impact")]
+            if not valid_results:
+                return AgentResponse(
+                    agent_name=self.config.name,
+                    success=True,
+                    data=WhaleData(ticker="MARKET", summary="Institutional flow data unavailable for market bellwethers.").model_dump(),
+                    latency_ms=0
+                )
+            
+            # Aggregate sentiment
+            bullish_count = sum(1 for r in valid_results if r.data["sentiment_impact"] == "BULLISH")
+            bearish_count = sum(1 for r in valid_results if r.data["sentiment_impact"] == "BEARISH")
+            
+            market_impact = "NEUTRAL"
+            if bullish_count > bearish_count: market_impact = "BULLISH"
+            elif bearish_count > bullish_count: market_impact = "BEARISH"
+            
+            summary = f"Broad Market Whale Index: {market_impact}. (Aggregated from {len(valid_results)} bellwethers: {bullish_count} Bullish, {bearish_count} Bearish)."
+            
             return AgentResponse(
                 agent_name=self.config.name,
                 success=True,
                 data=WhaleData(
                     ticker="MARKET", 
-                    summary="Whale analysis requires specific ticker. Institutional flow for broad market is mixed."
+                    sentiment_impact=market_impact,
+                    summary=summary
                 ).model_dump(),
                 latency_ms=0
             )
 
         try:
+            # SOTA 2026: Institutional Alpha (13F Filings)
+            institutional_holdings = await self._fetch_institutional_holdings(ticker)
+            
             from utils.financial_math import create_decimal, safe_div
             # 2. Fetch recent trades (last 500)
             logger.info(f"WhaleAgent: Fetching trades for {ticker}...")
@@ -117,10 +146,29 @@ class WhaleAgent(BaseAgent):
             whale_data = WhaleData(
                 ticker=ticker,
                 large_trades=large_trades,
+                institutional_holdings=institutional_holdings,
                 unusual_volume=unusual_activity,
                 sentiment_impact=impact,
                 summary=summary
             )
+            
+            # SOTA 2026: Intelligent Signal Broadcast
+            if impact in ["BULLISH", "BEARISH"] and len(large_trades) >= 2:
+                from .messenger import AgentMessage, get_messenger
+                from app_logging import correlation_id_ctx
+                
+                asyncio.create_task(get_messenger().send_message(AgentMessage(
+                    sender=self.config.name,
+                    recipient="broadcast",
+                    subject="whale_signal",
+                    payload={
+                        "ticker": ticker,
+                        "impact": impact,
+                        "total_value_usd": float(total_whale_volume_usd),
+                        "count": len(large_trades)
+                    },
+                    correlation_id=correlation_id_ctx.get()
+                )))
             
             return AgentResponse(
                 agent_name=self.config.name,
@@ -138,6 +186,55 @@ class WhaleAgent(BaseAgent):
                 error=str(e),
                 latency_ms=0
             )
+
+    async def _fetch_institutional_holdings(self, ticker: str) -> List[Dict]:
+        """Fetch institutional holdings (13F) data for a ticker using Tavily/Search."""
+        try:
+            # We use Tavily here as a robust way to find recent 13F filings summarized on sites like Fintel or WhaleWisdom
+            # This is more resilient than direct EDGAR scraping for a prototype
+            from tavily import TavilyClient
+            import os
+            
+            tavily_key = os.getenv("TAVILY_API_KEY")
+            if not tavily_key:
+                return []
+                
+            tavily = TavilyClient(api_key=tavily_key)
+            query = f"top institutional holders and 13F filing summary for {ticker} 2025 2026"
+            
+            def fetch():
+                return tavily.search(query=query, search_depth="advanced", max_results=5)
+            
+            response = await asyncio.to_thread(fetch)
+            results = response.get('results', [])
+            logger.info(f"WhaleAgent: Search returned {len(results)} results")
+            
+            # Simple heuristic to extract holder info from search snippets
+            holders = []
+            for r in results:
+                content = (r.get('title', '') + " " + (r.get('content', '') or r.get('snippet', ''))).lower()
+                logger.debug(f"WhaleAgent: Analyzing content: {content[:100]}...")
+                # Look for common institutional names (expanded for SOTA coverage)
+                institutions = [
+                    "vanguard", "blackrock", "state street", "fidelity", "geode", 
+                    "morgan stanley", "jpmorgan", "bank of america", "goldman sachs", 
+                    "northern trust", "norges bank", "t. rowe price"
+                ]
+                for inst in institutions:
+                    if inst in content and inst.capitalize() not in [h['name'] for h in holders]:
+                        holders.append({
+                            "name": inst.capitalize() if inst != "jpmorgan" else "JPMorgan",
+                            "type": "Institutional",
+                            "source": r.get('url')
+                        })
+            
+            if holders:
+                logger.info(f"WhaleAgent: Identified {len(holders)} major institutional holders for {ticker}")
+            
+            return holders[:5]
+        except Exception as e:
+            logger.warning(f"13F fetch failed: {e}")
+            return []
 
     async def _analyze_via_volume_anomaly(self, ticker: str) -> AgentResponse:
         """

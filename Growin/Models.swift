@@ -5,7 +5,13 @@
 struct SystemStatusResponse: Codable {
     let system: GSystemStatus
     let agents: [String: GAgentDetailedStatus]
+    let environment: EnvironmentStatus?
     let timestamp: Double
+}
+
+struct EnvironmentStatus: Codable {
+    let trading212: String
+    let alpaca: String
 }
 
 struct GSystemStatus: Codable {
@@ -38,6 +44,40 @@ struct GAgentDetailedStatus: Codable {
     let model: String?
     let detail: String?
     let timestamp: String?
+}
+
+// MARK: - LM Studio Management Models
+
+struct LMStudioModelsResponse: Codable {
+    let models: [String]
+    let count: Int
+    let status: String
+    let error: String?
+}
+
+struct LMStudioLoadRequest: Codable {
+    let modelId: String
+    let contextLength: Int?
+    let gpuOffload: String?
+    
+    enum CodingKeys: String, CodingKey {
+        case modelId = "model_id"
+        case contextLength = "context_length"
+        case gpuOffload = "gpu_offload"
+    }
+}
+
+struct LMStudioStatusResponse: Codable {
+    let status: String
+    let loadedModel: String?
+    let active: Bool
+    let memoryUsage: [String: Double]?
+    
+    enum CodingKeys: String, CodingKey {
+        case status, active
+        case loadedModel = "loaded_model"
+        case memoryUsage = "memory_usage"
+    }
 }
 
 struct GSpecialistAgentsStatus {
@@ -147,6 +187,7 @@ struct MarketContextData: Codable {
     let portfolio: PortfolioData?
     let price: PriceData?
     let whale: WhaleData?
+    let reasoning: String?
 }
 
 struct WhaleData: Codable {

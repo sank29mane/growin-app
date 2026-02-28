@@ -44,10 +44,19 @@ This living document outlines state-of-the-art (SOTA) approaches across key doma
 - Robust fallbacks
   - Ensure None/NaN handling in RSI, MACD, Bollinger bands with explicit guards and unit tests.
 
-## AI-assisted Analytics & Reasoning
-- Local reasoning vs cloud
-  - Prefer LLM-assisted reasoning with privacy-preserving local inferences; consider policy-based tool use to minimize API calls.
-  - Research path: smaller, quantized models or local inference via Core ML for standard tasks; use cloud for heavier tasks only when needed.
+## Multi-Agent System (MAS) Evolution
+- Flattened Orchestration
+  - Why: reduces inter-agent communication overhead and token latency by merging routing and reasoning into a single master agent.
+  - SOTA 2026 Trend: moving away from multi-hop hierarchies (Coordinator -> Specialists -> Decision) toward unified entry points with parallel specialist execution.
+- Parallel Swarm Execution
+  - Approach: use `asyncio.gather` or Actor-based models to trigger specialist data collection simultaneously, minimizing total time-to-response.
+
+## AI Governance & The Critic Pattern
+- The Critic Pattern
+  - Why: provides a mandatory auditing stage for agent-generated strategies, ensuring compliance and safety before user exposure.
+  - SOTA 2026 Trend: "Adversarial Reasoning" where a secondary, conservative model audits the primary creative model's output.
+- Human-in-the-Loop (HITL) Gates
+  - Approach: implementation of signed HMAC tokens for trade execution, ensuring no agent can act on capital without explicit human authorization.
 
 ## Data Engineering & Pipelines
 - Data quality and streaming

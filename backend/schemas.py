@@ -48,6 +48,19 @@ class AnalysisRequest(BaseModel):
 class MLXDownloadRequest(BaseModel):
     repo_id: str = Field(..., description="HuggingFace repository ID")
 
+# --- LM Studio Management Models ---
+
+class LMStudioLoadRequest(BaseModel):
+    model_id: str = Field(..., description="The ID of the model to load in LM Studio")
+    context_length: Optional[int] = Field(8192, description="Context window size")
+    gpu_offload: Optional[str] = Field("max", description="GPU offload strategy")
+
+class LMStudioStatusResponse(BaseModel):
+    status: str = Field(..., description="Server status: online, offline")
+    loaded_model: Optional[str] = Field(None, description="Currently loaded model ID")
+    memory_usage: Optional[Dict[str, float]] = Field(None, description="RAM/VRAM usage stats")
+    active: bool = Field(False, description="Whether LM Studio is currently active")
+
 # --- Math Delegation Models ---
 
 class MathScriptRequest(BaseModel):

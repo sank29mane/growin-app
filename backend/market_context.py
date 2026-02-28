@@ -157,6 +157,7 @@ class WhaleData(BaseModel):
     """Institutional/Large trade activity"""
     ticker: str
     large_trades: List[Dict[str, Any]] = []
+    institutional_holdings: List[Dict[str, Any]] = [] # SOTA 2026: 13F Integration
     unusual_volume: bool = False
     sentiment_impact: str = "NEUTRAL" # BULLISH, BEARISH, NEUTRAL
     summary: str = ""
@@ -232,6 +233,7 @@ class MarketContext(BaseModel):
     
     # Additional Context
     user_context: Dict[str, Any] = {}
+    reasoning: Optional[str] = None  # SOTA 2026: Store extracted Chain of Thought (CoT)
     
     def add_agent_result(self, agent_name: str, success: bool, latency_ms: float, telemetry: Optional[TelemetryData] = None):
         """Track which agents ran and their status with full telemetry"""

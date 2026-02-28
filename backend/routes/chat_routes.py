@@ -102,47 +102,36 @@ async def chat_message(
         # Load history for context
         history = chat_manager.load_history(conversation_id, limit=6)
         
-        # Phase 1: Coordinator orchestrates specialists
-        try:
-            coordinator = CoordinatorAgent(
-                mcp_client=state.mcp_client, 
-                chat_manager=state.chat_manager,
-                model_name=request.coordinator_model or "granite-tiny"
-            )
-            market_context = await coordinator.process_query(
-                query=request.message,
-                ticker=ticker,
-                account_type=request.account_type,  # Pass account context
-                history=history
-            )
-            market_context.user_context["history"] = history
-            
-        except Exception as coord_error:
-            logger.error(f"Coordinator functionality failed: {coord_error}. Proceeding with Degradation Mode.")
-            # Graceful Degradation: Construct minimal context to bypass coordinator failure
-            from market_context import MarketContext
-            market_context = MarketContext(
-                query=request.message,
-                intent="general_chat",
-                ticker=ticker,
-                routing_reason="Coordinator Fallback - Degradation Mode",
-                user_context={"account_type": request.account_type, "history": history}
-            )
-            market_context.agents_failed.append("coordinator_agent")
+        # Unified Orchestration (SOTA 2026 Architecture)
+        from agents.orchestrator_agent import OrchestratorAgent
         
-        # Phase 2: Decision Agent makes final recommendation
-        decision_agent = DecisionAgent(
-            model_name=request.model_name or "native-mlx",
-            api_keys=request.api_keys,
-            mcp_client=state.mcp_client
+        orchestrator = OrchestratorAgent(
+            mcp_client=state.mcp_client,
+            chat_manager=state.chat_manager,
+            model_name=request.model_name or "native-mlx"
         )
-        response = await decision_agent.make_decision(market_context, request.message)
+        
+        # Load history for context
+        history = chat_manager.load_history(conversation_id, limit=6)
+        
+        # Execute unified lifecycle
+        result = await orchestrator.run(
+            query=request.message,
+            conversation_id=conversation_id,
+            history=history,
+            ticker=ticker,
+            account_type=request.account_type
+        )
+        
+        response = result.get("content", "")
+        new_response_id = result.get("response_id")
+        market_context = result.get("context")
 
         # Generate timestamp and ensure ISO format
         from datetime import timezone
         timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
-        # Save assistant reply
+        # Save assistant reply with response_id for stateful continuation
         chat_manager.save_message(
             conversation_id=conversation_id,
             role="assistant",
@@ -150,6 +139,7 @@ async def chat_message(
             tool_calls=[],
             agent_name="DecisionAgent",
             model_name=request.model_name,
+            lm_studio_response_id=new_response_id
         )
 
         # Index in RAG for semantic retrieval
@@ -219,35 +209,28 @@ async def stream_chat_generator(request: ChatMessage):
             })
         }
 
-        # Background task to process the query
+        # Background task to process the query via Orchestrator
         async def process_query():
             try:
                 # Extract ticker
                 ticker = extract_ticker_from_text(request.message)
                 history = chat_manager.load_history(conversation_id, limit=6)
                 
-                # Phase 1: Coordinator
-                coordinator = CoordinatorAgent(
-                    mcp_client=state.mcp_client, 
+                from agents.orchestrator_agent import OrchestratorAgent
+                orchestrator = OrchestratorAgent(
+                    mcp_client=state.mcp_client,
                     chat_manager=state.chat_manager,
-                    model_name=request.coordinator_model or "granite-tiny"
-                )
-                market_context = await coordinator.process_query(
-                    query=request.message,
-                    ticker=ticker,
-                    account_type=request.account_type,
-                    history=history
-                )
-                
-                # Phase 2: Decision
-                decision_agent = DecisionAgent(
-                    model_name=request.model_name or "native-mlx",
-                    api_keys=request.api_keys,
-                    mcp_client=state.mcp_client
+                    model_name=request.model_name or "native-mlx"
                 )
                 
                 full_response = ""
-                async for chunk in decision_agent.make_decision_stream(market_context, request.message):
+                async for chunk in orchestrator.run_stream(
+                    query=request.message,
+                    conversation_id=conversation_id,
+                    history=history,
+                    ticker=ticker,
+                    account_type=request.account_type
+                ):
                     full_response += chunk
                     await queue.put({"type": "token", "content": chunk})
                     
@@ -256,7 +239,7 @@ async def stream_chat_generator(request: ChatMessage):
                     conversation_id=conversation_id,
                     role="assistant",
                     content=full_response,
-                    agent_name="DecisionAgent",
+                    agent_name="OrchestratorAgent",
                     model_name=request.model_name
                 )
                 
@@ -360,8 +343,7 @@ async def analyze_portfolio(request: AnalyzeRequest):
         raise HTTPException(status_code=503, detail="MCP Server not connected")
 
     try:
-        from agents.coordinator_agent import CoordinatorAgent
-        from agents.decision_agent import DecisionAgent
+        from agents.orchestrator_agent import OrchestratorAgent
         
         # Extract ticker from query (simple approach)
         ticker = None
@@ -372,27 +354,19 @@ async def analyze_portfolio(request: AnalyzeRequest):
                     ticker = word
                     break
         
-        # 1. Coordinate: Gather data from specialists
-        coordinator = CoordinatorAgent(
-            mcp_client=state.mcp_client, 
+        orchestrator = OrchestratorAgent(
+            mcp_client=state.mcp_client,
             chat_manager=state.chat_manager,
-            model_name=request.coordinator_model or "granite-tiny"
+            model_name=request.model_name or "native-mlx"
         )
-        market_context = await coordinator.process_query(
+        
+        result = await orchestrator.run(
             query=request.query,
             ticker=ticker,
-            account_type=request.account_type  # Pass account context
+            account_type=request.account_type
         )
         
-        # 2. Decide: Generate final recommendation
-        decision_agent = DecisionAgent(
-            model_name=request.model_name or "native-mlx",
-            api_keys=request.api_keys,
-            mcp_client=state.mcp_client
-        )
-        result = await decision_agent.make_decision(market_context, request.query)
-        
-        return {"messages": [], "final_answer": result}
+        return {"messages": [], "final_answer": result.get("content", "")}
     except Exception as e:
         logger.error(f"Analysis failed: {e}")
         # Sentinel: Sanitized error message
@@ -555,30 +529,3 @@ async def ingest_knowledge(request: IngestRequest):
     except Exception as e:
         logger.error(f"Ingestion failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal Server Error")
-
-@router.get("/api/models/lmstudio")
-async def list_lmstudio_models():
-    """List available models from LM Studio."""
-    try:
-        from app_context import state
-        from lm_studio_client import LMStudioClient
-        
-        client = state.lm_studio_client or LMStudioClient()
-        
-        # Check connection first
-        if not await client.check_connection():
-            return {"models": [], "error": "LM Studio not running"}
-            
-        # Get models (filtering out embeddings)
-        models = await client.list_models()
-        llm_models = [
-            m["id"] for m in models 
-            if "embed" not in m["id"].lower() 
-            and "nomic" not in m["id"].lower()
-            and "bert" not in m["id"].lower()
-        ]
-        
-        return {"models": llm_models}
-    except Exception as e:
-        logger.error(f"Failed to list LM Studio models: {e}", exc_info=True)
-        return {"models": [], "error": "Internal Server Error"}

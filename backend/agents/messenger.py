@@ -56,12 +56,20 @@ class AgentMessenger:
                 pass
 
     async def send_message(self, message: AgentMessage):
-        """Route a message to its recipient."""
+        """Route a message to its recipient and persist to analytics."""
         async with self._lock:
             self._message_history.append(message)
-            # Limit history
+            # Limit memory history
             if len(self._message_history) > 1000:
                 self._message_history.pop(0)
+        
+        # SOTA 2026: Automatic Persistence
+        try:
+            from analytics_db import get_analytics_db
+            db = get_analytics_db()
+            db.log_agent_message(message.model_dump())
+        except Exception as e:
+            logger.error(f"Messenger persistence failed: {e}")
 
         # Notify trace subscribers first
         if message.correlation_id and message.correlation_id in self._trace_subscribers:

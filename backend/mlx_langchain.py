@@ -72,10 +72,13 @@ class ChatMLX(BaseChatModel):
         target_path = self._resolve_model_path(self.model_name)
         current_path = getattr(engine, 'current_model_path', None)
         
+        # SOTA hardware optimization: Detect if we need 8-bit affine
+        quantize_8bit = "8bit" in target_path.lower() or "8-bit" in target_path.lower()
+        
         if not engine.is_loaded() or current_path != target_path:
-            logger.info(f"Switching MLX model to {target_path}...")
+            logger.info(f"Switching MLX model to {target_path} (8-bit: {quantize_8bit})...")
             # load_model is sync and IO bound
-            if not engine.load_model(target_path):
+            if not engine.load_model(target_path, quantize_8bit=quantize_8bit):
                 return f"Error: Failed to load MLX model {target_path}."
         
         return None
