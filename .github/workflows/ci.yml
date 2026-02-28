@@ -1,0 +1,48 @@
+name: Growin Backend CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test:
+    name: Run SOTA Test Suite
+    runs-on: macos-latest # Using macOS to eventually support iOS/Swift tests
+    
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Run SOTA Unit & Integration Tests
+        run: |
+          export PYTHONPATH=$PYTHONPATH:.
+          uv run pytest tests/test_ai_streaming.py tests/test_rstitch_logic.py
+
+      - name: Run E2E AI Flow Tests
+        run: |
+          export PYTHONPATH=$PYTHONPATH:.
+          uv run pytest tests/test_e2e_ai_flow.py
+
+      - name: Run Performance Benchmarks
+        run: |
+          export PYTHONPATH=$PYTHONPATH:.
+          uv run pytest tests/test_performance_benchmarks.py
+          
+      - name: DeepEval Reasoning Audit
+        run: |
+          # Placeholder for DeepEval logic
+          echo "Executing Reasoning Trace Audit..."

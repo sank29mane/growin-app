@@ -12,11 +12,11 @@ actor PortfolioDataService {
     
     // MARK: - Public API
     
-    func fetchPortfolio(accountType: String) async throws -> PortfolioSnapshot {
+    nonisolated func fetchPortfolio(accountType: String) async throws -> PortfolioSnapshot {
         try await get(endpoint: "/portfolio/live", query: [("account_type", accountType)])
     }
     
-    func fetchHistory(days: Int, accountType: String) async throws -> [PortfolioHistoryPoint] {
+    nonisolated func fetchHistory(days: Int, accountType: String) async throws -> [PortfolioHistoryPoint] {
         try await get(endpoint: "/portfolio/history", query: [
             ("days", String(days)),
             ("account_type", accountType)

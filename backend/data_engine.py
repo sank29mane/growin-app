@@ -20,7 +20,15 @@ finnhub_circuit = CircuitBreaker(failure_threshold=5, recovery_timeout=60)
 # --- Configuration ---
 API_KEY = os.getenv("ALPACA_API_KEY")
 API_SECRET = os.getenv("ALPACA_SECRET_KEY")
-BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")  # Default to paper
+
+# Dynamic Environment Switching
+USE_PAPER = (os.getenv("ALPACA_USE_PAPER", "true")).lower() == "true"
+if USE_PAPER:
+    BASE_URL = "https://paper-api.alpaca.markets"
+    logger.info("Alpaca: Using PAPER environment.")
+else:
+    BASE_URL = "https://api.alpaca.markets"
+    logger.info("Alpaca: Using LIVE environment. EXERCISE CAUTION.")
 
 # Finnhub Configuration
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
@@ -71,9 +79,10 @@ class AlpacaClient:
                 from alpaca.trading.client import TradingClient
                 from alpaca.data.historical import StockHistoricalDataClient
 
-                self.trading_client = TradingClient(API_KEY, API_SECRET, paper="paper" in BASE_URL)
+                # Explicit paper flag based on configuration
+                self.trading_client = TradingClient(API_KEY, API_SECRET, paper=USE_PAPER)
                 self.data_client = StockHistoricalDataClient(API_KEY, API_SECRET)
-                logger.info("AlpacaClient: Successfully connected to Alpaca API.")
+                logger.info(f"AlpacaClient: Successfully connected to Alpaca API ({'Paper' if USE_PAPER else 'Live'}).")
             except Exception as e:
                 logger.error(f"AlpacaClient: Failed to initialize Alpaca SDK: {e}")
         else:

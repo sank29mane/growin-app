@@ -606,6 +606,11 @@ async def main():
     
     use_demo = (get_env_var("TRADING212_USE_DEMO") or "false").lower() == "true"
     
+    if use_demo:
+        print("Trading 212: Using DEMO environment.", file=sys.stderr)
+    else:
+        print("Trading 212: Using LIVE environment. EXERCISE CAUTION.", file=sys.stderr)
+    
     credentials = {
         "invest": {"key": invest_key, "secret": invest_secret},
         "isa": {"key": isa_key, "secret": isa_secret},

@@ -189,7 +189,7 @@ open Growin/Growin.xcodeproj
 
 # In Xcode:
 # 1. Select "Growin" target
-# 2. Choose your Apple Silicon device/simulator
+# 2. Select "My Mac (Apple Silicon)"
 # 3. Press Cmd+R to build and run
 ```
 

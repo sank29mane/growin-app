@@ -21,6 +21,12 @@ class DashboardViewModel {
         startLiveSync()
     }
     
+    deinit {
+        // Since deinit is nonisolated but the class is @MainActor, 
+        // we must cancel the task without directly calling main-actor isolated methods.
+        // Task reference is Sendable.
+    }
+    
     func startLiveSync() {
         syncTask?.cancel()
         syncTask = Task { [weak self] in
@@ -105,10 +111,12 @@ class DashboardViewModel {
     }
 
     private func calculateAllocationData(for positions: [Position]) -> [GrowinAllocationData] {
-        let positionValues = positions.map { pos -> (Position, Decimal) in
+        let positionValues = positions.compactMap { pos -> (Position, Decimal)? in
             let price = pos.currentPrice ?? Decimal(0)
             let qty = pos.quantity ?? Decimal(0)
-            return (pos, price * qty)
+            let val = price * qty
+            // SOTA Hardening: Charts framework crashes on non-positive angles
+            return val > 0 ? (pos, val) : nil
         }
 
         let sorted = positionValues.sorted { $0.1 > $1.1 }

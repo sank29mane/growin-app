@@ -57,20 +57,20 @@ enum WSMessageResult: Sendable {
     case unknown
 }
 
-private struct WSMessageEnvelope: Codable {
+private struct WSMessageEnvelope: Codable, Sendable {
     let type: String
 }
 
-private struct WSChartInitMessage: Codable {
+private struct WSChartInitMessage: Codable, Sendable {
     let data: [ChartDataPoint]
 }
 
-private struct WSChartTickMessage: Codable {
+private struct WSChartTickMessage: Codable, Sendable {
     let tick: ChartDataPoint
 }
 
-private struct WSRealtimeQuoteMessage: Codable {
-    struct QuoteData: Codable {
+private struct WSRealtimeQuoteMessage: Codable, Sendable {
+    struct QuoteData: Codable, Sendable {
         let current_price: Decimal?
         let change: Decimal?
         let change_percent: Decimal?
@@ -78,7 +78,7 @@ private struct WSRealtimeQuoteMessage: Codable {
     let data: QuoteData
 }
 
-private struct WSErrorMessage: Codable {
+private struct WSErrorMessage: Codable, Sendable {
     let message: String
 }
 

@@ -428,3 +428,237 @@ extension View {
         self.background(shape.fill(style.material))
     }
 }
+
+// MARK: - New Components from Stitch Designs
+
+enum ConfidenceLevel {
+    case high, medium, low
+    
+    var color: Color {
+        switch self {
+        case .high: return .stitchNeonGreen
+        case .medium: return .stitchNeonYellow
+        case .low: return .growinRed
+        }
+    }
+    
+    var label: String {
+        switch self {
+        case .high: return "High"
+        case .medium: return "Fair"
+        case .low: return "Speculative"
+        }
+    }
+}
+
+struct ConfidenceIndicator: View {
+    let score: Double // 0.0 to 1.0
+    
+    var level: ConfidenceLevel {
+        if score >= 0.9 { return .high }
+        if score >= 0.7 { return .medium }
+        return .low
+    }
+    
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(level.label.uppercased())
+                .premiumTypography(.overline)
+                .foregroundStyle(level.color)
+            
+            Text(String(format: "%.0f%%", score * 100))
+                .premiumTypography(.caption)
+                .foregroundStyle(.white)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(
+            Capsule()
+                .fill(level.color.opacity(0.1))
+        )
+        .overlay(
+            Capsule()
+                .stroke(
+                    level.color.opacity(0.4),
+                    style: StrokeStyle(
+                        lineWidth: 1,
+                        dash: level == .low ? [4] : []
+                    )
+                )
+        )
+    }
+}
+
+struct ReasoningChip: View {
+    let agent: String
+    let action: String
+    let isActive: Bool
+    
+    var body: some View {
+        HStack(spacing: 8) {
+            if isActive {
+                ProgressView()
+                    .controlSize(.mini)
+                    .tint(Color.stitchNeonIndigo)
+            } else {
+                PersonaIcon(name: agent)
+                    .scaleEffect(0.8)
+            }
+            
+            VStack(alignment: .leading, spacing: 0) {
+                Text(agent.uppercased())
+                    .premiumTypography(.overline)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                Text(action)
+                    .premiumTypography(.caption)
+                    .foregroundStyle(.white)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            GlassCard(cornerRadius: 10) { EmptyView() }
+                .opacity(isActive ? 1 : 0.6)
+        )
+    }
+}
+
+struct LogicTreeItem: View {
+    let title: String
+    let content: String
+    let isExpanded: Bool
+    let onToggle: () -> Void
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button(action: onToggle) {
+                HStack {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(Color.growinPrimary)
+                    
+                    Text(title)
+                        .premiumTypography(.title)
+                        .font(.system(size: 14))
+                    
+                    Spacer()
+                }
+            }
+            .buttonStyle(.plain)
+            
+            if isExpanded {
+                Text(content)
+                    .premiumTypography(.body)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.textSecondary)
+                    .padding(.leading, 20)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .padding(12)
+        .background(Color.white.opacity(0.02))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+struct AgentStatusBadge: View {
+    let status: String
+    let confidence: Double? // 0.0 to 1.0
+    
+    var body: some View {
+        HStack(spacing: 6) {
+            if status == "analyzing" || status == "working" {
+                Circle()
+                    .stroke(statusColor.opacity(0.3), lineWidth: 2)
+                    .frame(width: 8, height: 8)
+                    .overlay(
+                        Circle()
+                            .trim(from: 0, to: 0.7)
+                            .stroke(statusColor, lineWidth: 2)
+                            .rotationEffect(.degrees(360))
+                    )
+            } else {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 8, height: 8)
+            }
+            
+            Text(status.uppercased())
+                .premiumTypography(.overline)
+                .foregroundStyle(statusColor)
+            
+            if let confidence = confidence {
+                Text("|")
+                    .foregroundStyle(.white.opacity(0.1))
+                Text(String(format: "%.0f%%", confidence * 100))
+                    .premiumTypography(.caption)
+                    .foregroundStyle(.white.opacity(0.8))
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(
+            Capsule()
+                .fill(statusColor.opacity(0.1))
+        )
+        .overlay(
+            Capsule()
+                .stroke(statusColor.opacity(0.3), lineWidth: 0.5)
+        )
+    }
+    
+    private var statusColor: Color {
+        switch status.lowercased() {
+        case "working", "analyzing": return .orange
+        case "ready", "stable": return .stitchNeonGreen
+        case "error", "alert": return .growinRed
+        case "processing": return .stitchNeonCyan
+        default: return .gray
+        }
+    }
+}
+
+struct FinancialMetricView: View {
+    let title: String
+    let value: String
+    let change: String?
+    let changePositive: Bool?
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title.uppercased())
+                .premiumTypography(.overline)
+                .foregroundStyle(Color.textSecondary)
+            
+            Text(value)
+                .font(.system(size: 22, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+                .minimumScaleFactor(0.8)
+            
+            if let change = change, let changePositive = changePositive {
+                HStack(spacing: 4) {
+                    Image(systemName: changePositive ? "arrow.up.right" : "arrow.down.right")
+                    Text(change)
+                }
+                .premiumTypography(.caption)
+                .foregroundStyle(changePositive ? Color.stitchNeonGreen : Color.growinRed)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background((changePositive ? Color.stitchNeonGreen : Color.growinRed).opacity(0.1))
+                .clipShape(Capsule())
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            ZStack {
+                RoundedRectangle(cornerRadius: 20)
+                    .fill(Color.growinSurface.opacity(0.4))
+                
+                RoundedRectangle(cornerRadius: 20)
+                    .stroke(Color.white.opacity(0.05), lineWidth: 1)
+            }
+        )
+    }
+}

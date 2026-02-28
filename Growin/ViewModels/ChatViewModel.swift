@@ -88,46 +88,38 @@ class ChatViewModel {
 
         var accumulatedContent = ""
         
-        do {
-            let stream = agentClient.streamMessage(
-                query: message,
-                conversationId: selectedConversationId,
-                model: effectiveModelName
-            )
-            
-            for await event in stream {
-                switch event {
-                case .token(let token):
-                    accumulatedContent += token
-                    updateAssistantMessage(id: assistantMessageId, content: accumulatedContent)
-                case .status(let status):
-                    streamingStatus = status
-                case .telemetry(let telemetry):
-                    handleTelemetry(telemetry)
-                case .meta(let meta):
-                    if let convId = meta["conversation_id"]?.value as? String {
-                        if selectedConversationId == nil {
-                            selectedConversationId = convId
-                            defaults.set(convId, forKey: "currentConversationId")
-                        }
+        let stream = agentClient.streamMessage(
+            query: message,
+            conversationId: selectedConversationId,
+            model: effectiveModelName
+        )
+        
+        for await event in stream {
+            switch event {
+            case .token(let token):
+                accumulatedContent += token
+                updateAssistantMessage(id: assistantMessageId, content: accumulatedContent)
+            case .status(let status):
+                streamingStatus = status
+            case .telemetry(let telemetry):
+                handleTelemetry(telemetry)
+            case .meta(let meta):
+                if let convId = meta["conversation_id"]?.value as? String {
+                    if selectedConversationId == nil {
+                        selectedConversationId = convId
+                        defaults.set(convId, forKey: "currentConversationId")
                     }
-                case .error(let error):
-                    errorMessage = error
-                case .done:
-                    isProcessing = false
-                    streamingStatus = nil
                 }
+            case .error(let error):
+                errorMessage = error
+            case .done:
+                isProcessing = false
+                streamingStatus = nil
             }
-            
-            if messages.count >= 2 && messages.count <= 4, let convId = selectedConversationId {
-                await generateTitle(for: convId)
-            }
-
-        } catch {
-            errorMessage = "Failed to send message: \(error.localizedDescription)"
-            isProcessing = false
-            streamingStatus = nil
-            inputText = message
+        }
+        
+        if messages.count >= 2 && messages.count <= 4, let convId = selectedConversationId {
+            await generateTitle(for: convId)
         }
     }
 

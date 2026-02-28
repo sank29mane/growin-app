@@ -60,3 +60,28 @@ class MathScriptResponse(BaseModel):
     explanation: str = Field(..., description="Human-readable explanation of the math strategy")
     engine_requirement: str = Field("npu", description="Hardware requirement for execution")
 
+# --- SOTA AI & Strategy Models ---
+
+class ReasoningStep(BaseModel):
+    agent: str = Field(..., description="Name of the agent performing the step")
+    action: str = Field(..., description="Description of the action/thought")
+    content: Optional[str] = Field(None, description="Detailed reasoning or data findings")
+    timestamp: float = Field(default_factory=lambda: 0.0)
+
+class AgentEvent(BaseModel):
+    event_type: str = Field(..., description="Type of event: status_update, reasoning_step, final_result")
+    agent: str
+    status: str
+    step: Optional[ReasoningStep] = None
+    timestamp: float = Field(default_factory=lambda: 0.0)
+
+class AIStrategyResponse(BaseModel):
+    strategy_id: str
+    title: str
+    summary: str
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    reasoning_trace: List[ReasoningStep]
+    instruments: List[InstrumentWeight]
+    risk_assessment: str
+    last_updated: float
+

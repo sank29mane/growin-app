@@ -205,7 +205,7 @@ app.add_middleware(SecurityHeadersMiddleware)
 
 # Include specialized routers
 # Include specialized routers
-from routes import chat_routes, agent_routes, market_routes, mcp_routes, chart_routes, status_routes
+from routes import chat_routes, agent_routes, market_routes, mcp_routes, chart_routes, status_routes, ai_routes
 
 app.include_router(chat_routes.router)
 app.include_router(agent_routes.router)
@@ -213,6 +213,7 @@ app.include_router(market_routes.router)
 app.include_router(mcp_routes.router)
 app.include_router(status_routes.router) # Detailed health & agent status
 app.include_router(chart_routes.router)  # Chart data and visualization
+app.include_router(ai_routes.router)     # SOTA 2026 AI Strategy & Reasoning
 
 # --------------------------------------------------------------------------- #
 # Root Endpoints

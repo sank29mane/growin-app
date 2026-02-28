@@ -51,9 +51,10 @@ struct CashBalance: Codable, Sendable {
 
 struct Position: Codable, Identifiable, Sendable {
     var id: String { 
-        let t = ticker ?? UUID().uuidString
-        let a = accountType ?? ""
-        return "\(t)-\(a)"
+        if let ticker = ticker, let accountType = accountType {
+            return "\(ticker)-\(accountType)"
+        }
+        return ticker ?? accountType ?? UUID().uuidString
     }
     let ticker: String?
     let name: String?
@@ -61,13 +62,15 @@ struct Position: Codable, Identifiable, Sendable {
     let currentPrice: Decimal?
     let averagePrice: Decimal?
     let ppl: Decimal?
+    let fxPpl: Decimal?
     let accountType: String?
     
     enum CodingKeys: String, CodingKey {
         case ticker, name, quantity
-        case currentPrice = "currentPrice"
-        case averagePrice = "averagePrice"
+        case currentPrice = "current_price"
+        case averagePrice = "average_price"
         case ppl
+        case fxPpl = "fx_ppl"
         case accountType = "account_type"
     }
 }
@@ -200,9 +203,62 @@ struct GrowinAllocationData: Identifiable, Sendable, Equatable {
     let label: String
     let value: Decimal
     
+    var doubleValue: Double {
+        NSDecimalNumber(decimal: value).doubleValue
+    }
+    
     init(id: UUID = UUID(), label: String, value: Decimal) {
         self.id = id
         self.label = label
         self.value = value
     }
+}
+
+// MARK: - SOTA AI Models
+
+struct ReasoningStep: Codable, Sendable, Identifiable {
+    var id: Double { timestamp }
+    let agent: String
+    let action: String
+    let content: String?
+    let timestamp: Double
+}
+
+struct AgentEvent: Codable, Sendable {
+    let eventType: String
+    let agent: String
+    let status: String
+    let step: ReasoningStep?
+    let timestamp: Double
+    
+    enum CodingKeys: String, CodingKey {
+        case eventType = "event_type"
+        case agent, status, step, timestamp
+    }
+}
+
+struct AIStrategy: Codable, Sendable, Identifiable {
+    var id: String { strategyId }
+    let strategyId: String
+    let title: String
+    let summary: String
+    let confidence: Double
+    let reasoningTrace: [ReasoningStep]
+    let instruments: [InstrumentWeightMapping]
+    let riskAssessment: String
+    let lastUpdated: Double
+    
+    enum CodingKeys: String, CodingKey {
+        case strategyId = "strategy_id"
+        case title, summary, confidence
+        case reasoningTrace = "reasoning_trace"
+        case instruments
+        case riskAssessment = "risk_assessment"
+        case lastUpdated = "last_updated"
+    }
+}
+
+struct InstrumentWeightMapping: Codable, Sendable {
+    let ticker: String
+    let weight: Double
 }

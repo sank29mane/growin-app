@@ -102,16 +102,13 @@ class LMStudioClient:
         """List IDs of currently loaded models."""
         # In V1, we check the 'loaded' property if available, or just fetch the list
         models = await self.list_models()
-        return [m.get("id") for m in models if m.get("loaded", True)]
+        loaded_ids = [m.get("id") for m in models if m.get("loaded") is True]
+        logger.info(f"LM Studio: Detected {len(loaded_ids)} loaded models via v1 API.")
+        return loaded_ids
 
     async def load_model(self, model_id: str, context_length: int = 8192, gpu_offload: str = "max") -> Dict[str, Any]:
         """
         Load a model into memory via V1 API.
-
-        Args:
-            model_id: The specific model ID/path
-            context_length: Max context window
-            gpu_offload: 'max', 'off', or number of layers
         """
         payload = {
             "modelId": model_id,
@@ -120,7 +117,7 @@ class LMStudioClient:
                 "gpuOffload": gpu_offload
             }
         }
-        logger.info(f"LM Studio V1: Loading model {model_id}...")
+        logger.info(f"LM Studio V1: Attempting to load model {model_id}...")
         return await self._request("POST", "/api/v1/models/load", json=payload)
 
     async def unload_model(self, model_id: str) -> Dict[str, Any]:
@@ -325,8 +322,10 @@ class LMStudioClient:
             # 1. Check loaded models
             loaded = await self.list_loaded_models()
             if model_id in loaded:
+                logger.info(f"LM Studio: Model {model_id} is already loaded.")
                 return True
 
+            logger.info(f"LM Studio: Model {model_id} not loaded. Triggering load...")
             await self.load_model(model_id)
             return True
         except Exception as e:

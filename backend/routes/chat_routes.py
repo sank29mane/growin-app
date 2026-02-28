@@ -345,7 +345,7 @@ async def analyze_portfolio(request: AnalyzeRequest):
     Analyze query using Coordinator + Decision Agent architecture.
     
     This endpoint orchestrates specialist agents and provides a final recommendation.
-    Used by the iOS app for ad-hoc queries without full conversation context.
+    Used by the macOS app for ad-hoc queries without full conversation context.
     
     Args:
         request: AnalyzeRequest with query string and optional model_name

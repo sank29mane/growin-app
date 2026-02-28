@@ -50,7 +50,7 @@ class ForecastData(BaseModel):
     raw_series: List[TimeSeriesItem] = [] # Full forecast series for charts
     auxiliary_forecasts: Optional[List[Dict[str, Any]]] = None # Secondary model predictions for comparison
 
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class QuantData(BaseModel):
@@ -63,7 +63,7 @@ class QuantData(BaseModel):
     support_level: Optional[Decimal] = None
     resistance_level: Optional[Decimal] = None
 
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class PortfolioData(BaseModel):
@@ -119,7 +119,7 @@ class PortfolioData(BaseModel):
         data["snapshot"] = self.snapshot
         return data
 
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class NewsArticle(BaseModel):
@@ -150,7 +150,7 @@ class SocialData(BaseModel):
     top_discussions: List[str] = []
     platforms: List[str] = []
 
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class WhaleData(BaseModel):
@@ -161,7 +161,7 @@ class WhaleData(BaseModel):
     sentiment_impact: str = "NEUTRAL" # BULLISH, BEARISH, NEUTRAL
     summary: str = ""
 
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class GoalData(BaseModel):
@@ -182,7 +182,7 @@ class GoalData(BaseModel):
     rebalancing_strategy: Optional[Dict[str, Any]] = None
     implementation: Optional[Dict[str, Any]] = None
 
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class PriceData(BaseModel):
@@ -195,7 +195,7 @@ class PriceData(BaseModel):
     validated: bool = False
     history_series: List[TimeSeriesItem] = [] # Historical series for charts
 
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True)
 
 
 from agents.base_agent import TelemetryData
@@ -279,7 +279,7 @@ class MarketContext(BaseModel):
         
         return " | ".join(parts) if parts else "No data available"
     
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True)
 
     @field_serializer('timestamp')
     def serialize_dt(self, dt: datetime, _info):

@@ -30,24 +30,30 @@ struct SettingsOverlay: View {
                     Divider().background(Color.secondary.opacity(0.2))
                     
                     // Main View
-                    ScrollView {
-                        VStack(spacing: 24) {
-                            if selectedTab == 0 {
-                                AIConfigSection()
-                                HFModelHubSection()
-                                AgentPersonasSection()
-                            } else if selectedTab == 1 {
-                                TradingConfigSection()
-                                AccountStatusSection()
-                            } else {
-                                IntelligentConsoleView()
+                    Group {
+                        if selectedTab == 2 {
+                            // Activity Log has its own ScrollView inside IntelligentConsoleView
+                            IntelligentConsoleView()
+                        } else {
+                            ScrollView {
+                                VStack(spacing: 24) {
+                                    if selectedTab == 0 {
+                                        AIConfigSection()
+                                        HFModelHubSection()
+                                        AgentPersonasSection()
+                                    } else if selectedTab == 1 {
+                                        TradingConfigSection()
+                                        AccountStatusSection()
+                                    }
+                                }
+                                .padding(24)
                             }
                         }
-                        .padding(24)
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
-            .frame(width: 550, height: 750)
+            .frame(width: 800, height: 850)
             .background(.ultraThinMaterial)
             .cornerRadius(32)
             .overlay(

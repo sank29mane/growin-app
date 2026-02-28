@@ -5,6 +5,11 @@ struct DashboardView: View {
     @Bindable var viewModel: DashboardViewModel
     @State private var selectedPosition: Position?
     
+    // Define GridItems for a flexible Bento-like layout
+    private var bentoGridItems: [GridItem] {
+        [GridItem(.flexible()), GridItem(.flexible())]
+    }
+
     var body: some View {
         ZStack {
             MeshBackground()
@@ -27,12 +32,77 @@ struct DashboardView: View {
                     )
                     .padding(.horizontal)
                     
-                    // Portfolio Summary Grid
-                    MetricGrid(summary: viewModel.portfolioData?.summary)
+                    // SOTA Intelligence Preview (New)
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("AGENT INTELLIGENCE")
+                            .premiumTypography(.overline)
+                            .padding(.horizontal)
+                        
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 12) {
+                                ReasoningChip(agent: "Portfolio Analyst", action: "Scanning ISA Exposure", isActive: true)
+                                ReasoningChip(agent: "Risk Manager", action: "Stable", isActive: false)
+                                ReasoningChip(agent: "Technical Trader", action: "Awaiting Confirmation", isActive: false)
+                                
+                                ConfidenceIndicator(score: 0.94)
+                                ConfidenceIndicator(score: 0.72)
+                                ConfidenceIndicator(score: 0.45)
+                            }
+                            .padding(.horizontal)
+                        }
+                    }
                     
-                    // Charts Section
-                    HStack(spacing: 16) {
-                        // Allocation Pie Chart
+                    // Bento Grid for Key Metrics and Charts
+                    LazyVGrid(columns: bentoGridItems, spacing: 16) {
+                        // Portfolio Summary Metrics (using FinancialMetricView)
+                        Group {
+                            if let summary = viewModel.portfolioData?.summary {
+                                let totalCap = (summary.currentValue ?? Decimal(0)) + (summary.cashBalance?.free ?? Decimal(0))
+                                FinancialMetricView(
+                                    title: "TOTAL CAPITAL",
+                                    value: "£\(totalCap.formatted(.number.precision(.fractionLength(2))))",
+                                    change: nil, changePositive: nil
+                                )
+                                
+                                let equity = summary.currentValue ?? Decimal(0)
+                                FinancialMetricView(
+                                    title: "EQUITY",
+                                    value: "£\(equity.formatted(.number.precision(.fractionLength(2))))",
+                                    change: nil, changePositive: nil
+                                )
+                                
+                                let pnl = summary.totalPnl ?? Decimal(0)
+                                let pnlPercent = summary.totalPnlPercent ?? 0.0
+                                FinancialMetricView(
+                                    title: "NET PROFIT",
+                                    value: "£\(pnl.formatted(.number.precision(.fractionLength(2))))",
+                                    change: "\(pnl >= 0 ? "+" : "")\(pnlPercent.formatted(.number.precision(.fractionLength(2))))%",
+                                    changePositive: pnl >= 0
+                                )
+                                
+                                let cash = summary.cashBalance?.free ?? Decimal(0)
+                                FinancialMetricView(
+                                    title: "CASH BALANCE",
+                                    value: "£\(cash.formatted(.number.precision(.fractionLength(2))))",
+                                    change: nil, changePositive: nil
+                                )
+                            } else {
+                                ForEach(0..<4) { _ in
+                                    GlassCard {
+                                        VStack(alignment: .leading) {
+                                            Text("Loading...")
+                                                .premiumTypography(.caption)
+                                            ProgressView()
+                                        }
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding()
+                                    }
+                                    .frame(minHeight: 100)
+                                }
+                            }
+                        }
+                        
+                        // Allocation Pie Chart (within a GlassCard to fit Bento grid)
                         GlassCard {
                             VStack(alignment: .leading, spacing: 12) {
                                 Text("ALLOCATION VECTORS")
@@ -40,13 +110,15 @@ struct DashboardView: View {
                                 
                                 if !viewModel.allocationData.isEmpty {
                                     Chart(viewModel.allocationData) { item in
-                                        SectorMark(
-                                            angle: .value("Value", Double(truncating: item.value as NSNumber)),
-                                            innerRadius: .ratio(0.618),
-                                            angularInset: 1.5
-                                        )
-                                        .cornerRadius(5)
-                                        .foregroundStyle(by: .value("Name", item.label))
+                                        if item.doubleValue > 0 {
+                                            SectorMark(
+                                                angle: .value("Value", item.doubleValue),
+                                                innerRadius: .ratio(0.618),
+                                                angularInset: 1.5
+                                            )
+                                            .cornerRadius(5)
+                                            .foregroundStyle(by: .value("Name", item.label))
+                                        }
                                     }
                                     .frame(height: 150)
                                     .chartLegend(.hidden)
@@ -58,9 +130,11 @@ struct DashboardView: View {
                                         .scaleEffect(0.5)
                                 }
                             }
+                            .padding() // Padding inside GlassCard for content
                         }
+                        .frame(minHeight: 200) // Adjust size for Bento
                         
-                        // Performance Info
+                        // Performance Delta (within a GlassCard to fit Bento grid)
                         GlassCard {
                             VStack(alignment: .leading, spacing: 12) {
                                 Text("PERFORMANCE DELTA")
@@ -88,12 +162,13 @@ struct DashboardView: View {
                                         .scaleEffect(0.5)
                                 }
                             }
+                            .padding() // Padding inside GlassCard for content
                         }
+                        .frame(minHeight: 200) // Adjust size for Bento
                     }
-                    .frame(height: 200)
                     .padding(.horizontal)
                     
-                    // Account Sections
+                    // Account Sections (still in HStack for now, will integrate into Bento later)
                     HStack(spacing: 16) {
                         // INVEST Account Section
                         AccountSectionView(
@@ -167,27 +242,25 @@ struct AccountSectionView: View {
                     .padding(.horizontal)
 
                 if let data = accountData {
-                    // Mini metrics for this account
+                    // Mini metrics for this account, now using FinancialMetricView
                     VStack(spacing: 8) {
                         HStack(spacing: 8) {
                             let val = data.summary.currentValue ?? Decimal(0)
-                            MiniMetricCard(
+                            FinancialMetricView(
                                 title: "EQUITY",
                                 value: "£\(val.formatted(.number.precision(.fractionLength(0))))",
-                                icon: "chart.bar.fill",
-                                color: Color.stitchNeonIndigo
+                                change: nil, changePositive: nil
                             )
                             
                             let pnl = data.summary.totalPnl ?? Decimal(0)
-                            MiniMetricCard(
+                            FinancialMetricView(
                                 title: "DELTA",
                                 value: "\(pnl >= 0 ? "+" : "")£\(pnl.formatted(.number.precision(.fractionLength(0))))",
-                                icon: "arrow.up.right.circle.fill",
-                                color: pnl >= 0 ? Color.stitchNeonGreen : .growinRed
+                                change: nil, changePositive: nil
                             )
                         }
                         HStack(spacing: 8) {
-                            MiniMetricCard(
+                            FinancialMetricView(
                                 title: "ALPHA",
                                 value: {
                                     if let pnl = data.summary.totalPnl, let invested = data.summary.totalInvested, invested > 0 {
@@ -197,16 +270,14 @@ struct AccountSectionView: View {
                                         return "N/A"
                                     }
                                 }(),
-                                icon: "percent",
-                                color: Color.stitchNeonPurple
+                                change: nil, changePositive: nil
                             )
                             
                             let cash = data.summary.cashBalance?.free ?? Decimal(0)
-                            MiniMetricCard(
+                            FinancialMetricView(
                                 title: "LIQUIDITY",
                                 value: "£\(cash.formatted(.number.precision(.fractionLength(0))))",
-                                icon: "sterlingsign.circle.fill",
-                                color: Color.stitchNeonYellow
+                                change: nil, changePositive: nil
                             )
                         }
                     }
@@ -220,13 +291,15 @@ struct AccountSectionView: View {
                                     .premiumTypography(.overline)
 
                                 Chart(data.allocationData) { item in
-                                    SectorMark(
-                                        angle: .value("Value", Double(truncating: item.value as NSNumber)),
-                                        innerRadius: .ratio(0.618),
-                                        angularInset: 1.5
-                                    )
-                                    .cornerRadius(5)
-                                    .foregroundStyle(by: .value("Name", item.label))
+                                    if item.doubleValue > 0 {
+                                        SectorMark(
+                                            angle: .value("Value", item.doubleValue),
+                                            innerRadius: .ratio(0.618),
+                                            angularInset: 1.5
+                                        )
+                                        .cornerRadius(5)
+                                        .foregroundStyle(by: .value("Name", item.label))
+                                    }
                                 }
                                 .frame(height: 120)
                                 .chartLegend(position: .bottom)

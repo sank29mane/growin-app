@@ -109,7 +109,7 @@ struct ChatView: View {
             }
             .onChange(of: viewModel.selectedConversationId) { _, newId in
                 Task {
-                    if let id = newId {
+                    if newId != nil {
                         await viewModel.loadConversationHistory()
                     } else {
                         viewModel.startNewConversation()
@@ -270,7 +270,7 @@ struct ChatBubble: View {
                             
                             // Reasoning Trace UI (Wave 2)
                             if let data = message.data {
-                                ReasoningTraceView(data: data)
+                                LegacyReasoningTraceView(data: data)
                             }
                             
                             // Rich Data Visualization
@@ -332,7 +332,7 @@ struct ChatBubble: View {
     }
 }
 
-struct ReasoningTraceView: View {
+struct LegacyReasoningTraceView: View {
     let data: MarketContextData
     
     var body: some View {

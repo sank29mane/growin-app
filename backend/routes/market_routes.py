@@ -180,6 +180,10 @@ async def get_live_portfolio(account_type: Optional[str] = None):
             
             # Save snapshot using ChatManager
             if data:
+                # SOTA: Return the specific snapshot structure expected by the Swift client
+                # which contains { 'summary': ..., 'positions': [...] }
+                snapshot = data.get("snapshot", data)
+                
                 summary = data.get("summary", {})
                 state.chat_manager.save_portfolio_snapshot(
                     total_value=summary.get("current_value", 0),
@@ -189,7 +193,8 @@ async def get_live_portfolio(account_type: Optional[str] = None):
                 )
 
                 # Update cache (60 seconds TTL) with account-specific key
-                cache.set(cache_key, data, ttl=60)
+                cache.set(cache_key, snapshot, ttl=60)
+                return sanitize_nan(snapshot)
 
             return sanitize_nan(data)
             
