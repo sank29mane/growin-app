@@ -272,6 +272,8 @@ Query: "{clean_query}"
                      logger.info(f"Ticker normalized: {original_ticker} -> {ticker}")
             except ImportError:
                 logger.warning("Could not import normalize_ticker from trading212_mcp_server")
+            except Exception as e:
+                logger.error(f"Error during ticker normalization: {e}")
 
         # 2. CENTRALIZED DATA FABRICATION
         status_manager.set_status("coordinator", "working", "Fabricating Market Context...")
@@ -621,8 +623,15 @@ Query: "{clean_query}"
                     found_ticker = best_match["ticker"]
                     
                     # Normalize the found ticker (SOTA rule path)
-                    from trading212_mcp_server import normalize_ticker
-                    normalized = normalize_ticker(found_ticker)
+                    try:
+                        from trading212_mcp_server import normalize_ticker
+                        normalized = normalize_ticker(found_ticker)
+                    except ImportError:
+                        logger.warning("Could not import normalize_ticker from trading212_mcp_server")
+                        normalized = found_ticker
+                    except Exception as e:
+                        logger.error(f"Error during ticker normalization in search fallback: {e}")
+                        normalized = found_ticker
                     
                     logger.info(f"Coordinator Tier 2: Found best match '{best_match['name']}' ({found_ticker}) score={highest_score:.2f} -> {normalized}")
                     return normalized
