@@ -18,23 +18,23 @@ This document serves as the centralized knowledge base for the Growin App's mult
 
 ---
 
-## 2. Architecture & Implementation (Phase 16 Baseline)
+## 2. Architecture & Implementation (Phase 20 Baseline)
 
 ### Flattened Hierarchy (Unified Orchestration)
-As of Phase 16, the system uses a **Unified Orchestrator Agent**. This architecture reduces inter-agent communication overhead by merging routing and reasoning into a single agent lifecycle.
+As of Phase 20, the system uses a **Unified Orchestrator Agent**. This architecture reduces inter-agent communication overhead by merging routing and reasoning into a single agent lifecycle.
 - **Entry Point**: `OrchestratorAgent.py`
-- **Parallel Swarm**: Specialists (Quant, Research, etc.) execute concurrently via `asyncio.gather`.
-- **Context Injection**: All specialist findings are synthesized into a single `MarketContext`.
+- **Parallel Swarm**: Specialists (Quant, Research, Portfolio, Social) execute concurrently via `asyncio.gather`.
+- **Trajectory Stitching**: All specialist findings are synthesized into a single cohesive chronological timeline before reasoning.
 
-### The Critic Pattern (Governance)
+### The Critic Pattern & ACE (Governance)
 We have implemented a mandatory **Review Stage** using the `RiskAgent`.
-- **Protocol**: No trade recommendation reaches the user without a JSON-validated risk audit.
-- **Safety Gates**: Risk Agent can FLAG or BLOCK suggestions based on exposure, volatility, or compliance rules.
+- **Adversarial Debate**: Risk Agent acts as 'The Contrarian', forcing the Orchestrator to defend or revise its thesis.
+- **ACE Scoring**: An `ACEEvaluator` calculates the robustness of the strategy (0.0 to 1.0) based on debate outcomes.
+- **Safety Gates**: Risk Agent can FLAG or BLOCK suggestions based on exposure, volatility, wash-sale rules, or compliance.
 
-### AG-UI Streaming Protocol
-To maintain user trust, the system streams internal state transitions in real-time.
-- **Messaging**: `AgentMessenger` broadcasts granular lifecycle events (e.g., `swarm_started`, `risk_review_started`).
-- **UX**: SwiftUI `ReasoningTraceView` animates these transitions using `PhaseAnimator`.
+### Jules Swarm Engine (Asynchronous Delegation)
+- **Containerized Workers**: Heavy-lifting tasks (integration tests, security audits, micro-agent implementation) are dispatched to the `jules` CLI worker.
+- **Safety Guardrails**: Strict local-remote alignment checks prevent context-drift regressions from stale remote branches.
 
 ---
 
@@ -49,15 +49,14 @@ To maintain user trust, the system streams internal state transitions in real-ti
 ## 4. Future Roadmap
 
 ### 🔴 High Priority
-- **Agentic Debate**: Implement multi-turn debate between `QuantAgent` and `RiskAgent` for high-stakes trades.
-- **Financial Precision Layer**: Standardize all calculations using `Decimal` with 2026-standard rounding (ROUND_HALF_UP).
+- **AI-Driven Dividend Optimization**: Agents focused on maximizing passive income yield while maintaining capital preservation (Phase 21).
+- **Macro-Economic Agents**: Integration of Geopolitical Risk (GPR) indices into the baseline context.
 
 ### 🟡 Medium Priority
-- **Sentiment Swarm**: Implement a swarm of micro-agents for high-frequency sentiment analysis across social platforms.
 - **Autonomous Goal Rebalancing**: Agents that proactively suggest portfolio adjustments based on long-term goal trajectories.
 
 ### 🔵 Low Priority
-- **Negotation Agents**: Agents that simulate/negotiate trade execution prices against multiple market makers.
+- **Negotiation Agents**: Agents that simulate/negotiate trade execution prices against multiple market makers.
 
 ---
 **Status**: Strategic Alignment COMPLETE (March 2026)

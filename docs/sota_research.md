@@ -51,6 +51,14 @@ This living document outlines state-of-the-art (SOTA) approaches across key doma
 - Parallel Swarm Execution
   - Approach: use `asyncio.gather` or Actor-based models to trigger specialist data collection simultaneously, minimizing total time-to-response.
 
+## Multi-Account Synergy & Tax-Loss Harvesting
+- Holistic Portfolio Aggregation
+  - Why: modern users hold assets across multiple wrappers (e.g., Trading 212 ISA, Invest, CFD). Treating these as isolated silos leads to incorrect global weighting and missed opportunities.
+  - SOTA 2026 Trend: algorithmically merging identical tickers across distinct accounts to provide a single, unified risk profile.
+- Algorithmic Tax-Loss Harvesting (TLH)
+  - Approach: automated scanning of taxable accounts to identify positions with significant unrealized losses that can be sold to offset capital gains.
+  - Wash-Sale Protection: mandatory safety gates that prevent the repurchase of harvested assets within a 30-day window to comply with UK/US tax regulations.
+
 ## AI Governance & The Critic Pattern
 - The Critic Pattern
   - Why: provides a mandatory auditing stage for agent-generated strategies, ensuring compliance and safety before user exposure.

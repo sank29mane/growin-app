@@ -32,9 +32,46 @@ git log --oneline -10
 git branch --show-current
 ```
 
+## Phase 19-20: SOTA 2026 Operations
+
+### Unified Test Suite Execution
+**Goal:** Run the consolidated SOTA integration tests safely.
+```bash
+# Run all backend tests from the project root
+export PYTHONPATH=$PYTHONPATH:backend
+uv run --project backend pytest tests/backend/
+
+# Run specific Phase 19 Integration Logic
+uv run --project backend pytest tests/integration/agent_revision/
+```
+
+### Alpha Audit Verification
+**Goal:** Verify that DuckDB is correctly correlating agent reasoning with forward returns.
+1. Run a test session via the app or curl.
+2. Check DuckDB records:
+```bash
+uv run python -c "from backend.analytics_db import get_analytics_db; print(get_analytics_db().get_agent_alpha_metrics())"
+```
+
+### Jules Swarm Synchronization
+**Goal:** Safely poll and apply background tasks from the Jules worker.
+1. Check active remote sessions:
+```bash
+jules remote list --session
+```
+2. **Safety Audit (Mandatory):** Pull patch locally before applying.
+```bash
+jules remote pull --session <ID> > audit.patch
+cat audit.patch # Review diff for stale logic
+```
+3. Apply approved patch:
+```bash
+patch -p1 < audit.patch
+```
+
 ---
 
-## Phase 16: SOTA 2026 Operations
+## Phase 16: Hardware Optimization
 
 ### Hardware Optimization (M4 Pro)
 **Goal:** Verify 8-bit AFFINE quantization is active for local inference.

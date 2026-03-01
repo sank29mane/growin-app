@@ -1,7 +1,7 @@
 # Growin App Multi-Agent System: Architecture Evolution (SOTA 2026)
 
 ## 1. Executive Summary
-As of Phase 16, the Growin App has transitioned from a hierarchical, multi-hop Multi-Agent System (MAS) to a flattened, high-performance architecture. This evolution eliminates redundant LLM reasoning stages, implements strict risk governance via the **Critic Pattern**, and leverages **8-bit AFFINE hardware acceleration** for Apple Silicon M4 Pro.
+As of Phase 20, the Growin App has transitioned from a hierarchical, multi-hop Multi-Agent System (MAS) to a flattened, high-performance architecture. This evolution eliminates redundant LLM reasoning stages, implements strict risk governance via the **Critic Pattern and ACE Scoring**, introduces **Multi-Account Synergy** with **Tax-Loss Harvesting (TLH)**, and leverages **8-bit AFFINE hardware acceleration** for Apple Silicon M4 Pro.
 
 ## 2. Evolution: From Hierarchical to Flattened
 
@@ -14,13 +14,13 @@ As of Phase 16, the Growin App has transitioned from a hierarchical, multi-hop M
 6. **Decision Agent** -> **User** (Final Response)
 *Latency: High (~3-5s overhead per hop)*
 
-### Current SOTA 2026 Architecture (Phase 16+)
+### Current SOTA 2026 Architecture (Phase 16-20)
 1. **User** -> **Orchestrator Agent**: Unified entry point for intent classification and final reasoning.
 2. **Orchestrator** -> **Specialist Swarm**: Parallel execution of Quant, Research, Portfolio, etc.
 3. **Specialist Swarm** -> **Orchestrator**: Raw data injection into MarketContext.
-4. **Orchestrator** -> **Risk Agent (Critic)**: Mandatory audit of the proposed strategy.
+4. **Orchestrator** -> **Risk Agent (Critic)**: Mandatory audit of the proposed strategy using a multi-turn Adversarial Confidence Estimation (ACE) loop.
 5. **Risk Agent** -> **Orchestrator**: Compliance approval or risk flagging.
-6. **Orchestrator** -> **User**: Unified response with real-time AG-UI streaming.
+6. **Orchestrator** -> **User**: Unified stitched response with real-time AG-UI streaming.
 *Latency: Optimized (<500ms routing overhead)*
 
 ## 3. Core SOTA Components
@@ -29,20 +29,26 @@ As of Phase 16, the Growin App has transitioned from a hierarchical, multi-hop M
 Merges the functions of the previous Decision and Coordinator agents. It manages the full lifecycle:
 - **Intent Classification**: Uses lightweight models (Granite-Tiny) for sub-100ms routing.
 - **Data Fabrication**: Orchestrates the Specialist Swarm via `asyncio.gather`.
-- **Reasoning**: Performs final synthesis and strategy generation.
+- **Trajectory Stitching**: Dynamically merges disparate specialist signals into a coherent narrative.
+- **Dynamic Weighting**: Biases the synthesis prompt based on historical alpha metrics retrieved from DuckDB.
 
-### B. The Critic Pattern (`risk_agent.py`)
+### B. The Critic Pattern & ACE (`risk_agent.py` & `ace_evaluator.py`)
 Implements mandatory governance. Every strategy synthesized by the Orchestrator must pass through the Risk Agent for:
 - **Exposure Auditing**: Checking portfolio concentration limits.
-- **Compliance Validation**: Ensuring ISA/Invest rules are respected.
-- **Volatility Analysis**: Flagging trades during extreme market conditions.
+- **Adversarial Debate**: Risk Agent acts as 'The Contrarian', forcing the Orchestrator to defend or revise its thesis.
+- **ACE Scoring**: Quantifies the robustness of the strategy based on the outcome of the debate.
 
-### C. 8-bit AFFINE Hardware Optimization
+### C. Multi-Account Synergy & TLH (`portfolio_agent.py` & `tlh_scanner.py`)
+- **Consolidation**: Merges holdings across Invest, ISA, and CFD accounts for global weighting.
+- **Tax-Loss Harvesting (TLH)**: Automatically flags losing positions in taxable accounts for potential offset strategies.
+- **Wash-Sale Gate**: Risk Agent blocks repurchasing of harvested assets within a 30-day window.
+
+### D. 8-bit AFFINE Hardware Optimization
 Optimized for Apple Silicon M4 Pro (NPU/GPU):
 - **AFFINE Quantization**: Implemented in `mlx_engine.py` to maximize throughput while maintaining reasoning precision.
 - **NPU Affinity**: Routing models are pinned to the ANE (Apple Neural Engine) to free the GPU for large-model reasoning.
 
-### D. AG-UI Streaming Protocol
+### E. AG-UI Streaming Protocol
 Real-time transparency via `AgentMessenger`:
 - **Granular Telemetry**: Broadcasts `intent_classified`, `swarm_started`, and `risk_review_started` events.
 - **SwiftUI Integration**: Live reasoning traces using `PhaseAnimator` for fluid, transparent AI thought visualization.

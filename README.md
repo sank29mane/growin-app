@@ -11,14 +11,16 @@
 
 Growin implements a **Flattened Multi-Agent Architecture** optimized for low-latency reasoning and strict financial governance.
 
-### Key SOTA Features (Phase 16)
+### Key SOTA Features (Phases 16-20)
 - **🚀 Unified Orchestration**: Replaces multi-hop hierarchies with a single-lifecycle `OrchestratorAgent` for sub-500ms routing and synthesis.
-- **🛡️ The Critic Pattern**: Mandatory risk and compliance auditing via a dedicated `RiskAgent` (The Critic) before any trade recommendation reaches the user.
+- **🧵 Trajectory Stitching**: Dynamically merges disparate specialist signals (Quant, News, Forecast) into a coherent, chronological narrative before final synthesis.
+- **🛡️ The Critic Pattern (ACE)**: Mandatory risk and compliance auditing via `RiskAgent`. Employs a multi-turn Adversarial Confidence Estimation (ACE) loop before any recommendation reaches the user.
+- **🗂️ Multi-Account Synergy**: Consolidated global portfolio tracking across Invest, ISA, and CFD accounts for true holistic weighting.
+- **💸 Tax-Loss Harvesting (TLH)**: Automated scanning of taxable accounts to identify loss-harvesting opportunities, protected by strict Wash-Sale safety gates.
 - **⚡ 8-bit AFFINE Optimization**: Hardware-level quantization for MLX models, specifically tuned for the M4 Pro NPU and Unified Memory.
-- **📡 AG-UI Streaming Protocol**: Real-time transparency via `AgentMessenger`, streaming granular lifecycle events (e.g., `swarm_started`, `risk_review_started`) directly to SwiftUI.
+- **📡 AG-UI Streaming Protocol**: Real-time transparency via `AgentMessenger`, streaming granular lifecycle events directly to SwiftUI (`ReasoningTraceView`).
 - **💎 Financial Precision Layer**: String-initialized `Decimal` arithmetic for 100% accurate P&L and balance tracking.
 - **🔒 HITL Trade Gates**: Backend enforcement of Human-in-the-Loop signatures (HMAC) for any automated trade execution via MCP.
-- **🧠 Stateful AI Conversation**: Server-side context persistence with internal Chain of Thought (CoT) extraction for reasoning-optimized models.
 
 ### High-Level System Overview
 ```mermaid
@@ -90,10 +92,10 @@ open Growin/Growin.xcodeproj
 ```
 
 ### 🧪 Verification Suite
-Verify the Phase 16 Architecture:
+Verify the Phase 20 Architecture:
 ```bash
-# Run performance and critic pattern tests
-PYTHONPATH=backend uv run pytest backend/tests/test_orchestrator_perf.py backend/tests/verify_phase_16.py
+# Run the unified SOTA backend test suite
+uv run --project backend pytest tests/backend/
 ```
 
 ## 📜 Documentation

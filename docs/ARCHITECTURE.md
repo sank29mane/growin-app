@@ -29,11 +29,12 @@ graph TB
         API[FastAPI Backend<br/>API Gateway]
         CACHE[In-memory Cache<br/>Response Caching]
         DB[SQLite<br/>Chat History]
+        ANALYTICS[DuckDB<br/>Telemetry & Alpha]
     end
 
     subgraph "AI Processing Layer (MAS - SOTA 2026)"
         ORCH[Orchestrator Agent<br/>Unified Entry & Synthesis]
-        SWARM[Specialist Swarm<br/>Quant, Research, Portfolio]
+        SWARM[Specialist Swarm<br/>Quant, Research, Portfolio, Social Swarm]
         RISK[Risk Agent<br/>The Critic / Governance]
     end
 
@@ -41,6 +42,7 @@ graph TB
     API --> CACHE
     API --> DB
     API --> ORCH
+    ORCH --> ANALYTICS
     ORCH --> SWARM
     SWARM --> ORCH
     ORCH --> RISK
@@ -63,19 +65,28 @@ graph TB
 
 ---
 
-## 2. Flattened MAS Architecture (Phase 16)
-As of Phase 16, Growin has migrated to a flattened hierarchy to reduce latency and improve reasoning coherence.
+## 2. Flattened MAS Architecture (Phases 16-20)
+As of Phase 20, Growin has migrated to a flattened hierarchy to reduce latency, improve reasoning coherence, and integrate advanced tax-aware logic.
 
 ### The Unified Orchestrator
 The `OrchestratorAgent` replaces the previous multi-hop "Coordinator + Decision" model.
 - **Single Hop**: Natural language is directly classified and dispatched by the Orchestrator.
-- **Parallel Swarm**: Specialists (Quant, Research, Portfolio, Whale, Social) execute concurrently via `asyncio.gather`.
+- **Parallel Swarm**: Specialists (Quant, Research, Portfolio, Whale, Social Swarm) execute concurrently via `asyncio.gather`.
+- **Trajectory Stitching**: The `TrajectoryStitcher` merges disparate signals into a coherent chronological narrative.
+- **Dynamic Weighting**: The synthesis prompt is biased using historical alpha metrics fetched from `AnalyticsDB`.
 - **Integrated Reasoning**: The Orchestrator performs final synthesis using 2026 SOTA local models (e.g., LFM 2.5, Granite 4.0).
 
-### The Critic Pattern (Risk Governance)
+### The Critic Pattern & ACE (Risk Governance)
 Mandatory auditing is performed by the `RiskAgent` before any suggestion reaches the user.
 - **Audit Stage**: Every proposed strategy is audited for exposure, compliance, and volatility risks.
+- **Adversarial Debate**: 'The Contrarian' persona challenges the Orchestrator's thesis, forcing up to 2 rounds of rebuttal.
+- **ACE Scoring**: `ACEEvaluator` calculates an Adversarial Confidence Estimation score based on debate robustness.
 - **Safety Gates**: Risk Agent appends warnings or blocks suggestions that exceed safety thresholds.
+
+### Multi-Account Synergy & TLH
+- **Consolidation**: `PortfolioAgent` aggregates positions across Invest, ISA, and CFD accounts for global weighting.
+- **Tax-Loss Harvesting**: `TLHScanner` identifies losing positions in taxable accounts for tax optimization.
+- **Wash-Sale Gate**: `RiskAgent` blocks the repurchasing of harvested assets within a 30-day window.
 
 ---
 
