@@ -403,9 +403,21 @@ class DecisionAgent:
                                 return f"[ACTION_REQUIRED:{tool_name}] Parameters: {tool_args_str}. Unauthorized for autonomous execution. Requires UI confirmation."
 
                             logger.info(f"DecisionAgent: Executing Tool {tool_name}")
-                            result = await mcp.call_tool(tool_name, tool_args)
+
+                            if hasattr(asyncio, 'timeout'):
+                                async with asyncio.timeout(15.0):
+                                    result = await mcp.call_tool(tool_name, tool_args)
+                            else:
+                                result = await asyncio.wait_for(
+                                    mcp.call_tool(tool_name, tool_args),
+                                    timeout=15.0
+                                )
+
                             result_text = result.content[0].text if hasattr(result, 'content') else str(result)
                             return f"[TOOL_RESULT:{tool_name}] {result_text}"
+                        except asyncio.TimeoutError:
+                            logger.warning(f"Tool execution timed out: {tool_name}")
+                            return f"[TOOL_RESULT:{tool_name}] Error: Execution timed out after 15 seconds"
                         except Exception as e:
                             logger.warning(f"Tool execution failed in loop: {e}")
                             return f"[TOOL_RESULT:{tool_name}] Error: {str(e)}"
