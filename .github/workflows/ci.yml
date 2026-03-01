@@ -9,7 +9,7 @@ on:
 jobs:
   test:
     name: Run SOTA Test Suite
-    runs-on: macos-latest # Using macOS to eventually support iOS/Swift tests
+    runs-on: macos-latest # Using macOS to support native SwiftUI/AppKit tests
     
     steps:
       - uses: actions/checkout@v4

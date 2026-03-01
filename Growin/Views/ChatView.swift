@@ -211,6 +211,8 @@ struct ChatView: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(viewModel.inputText.isEmpty && !viewModel.isProcessing)
+                    .accessibilityLabel(viewModel.isProcessing ? "Stop generating" : "Send message")
+                    .accessibilityHint(viewModel.isProcessing ? "Stops the current response generation" : "Sends your question to the AI assistant")
                 }
             }
             .padding()

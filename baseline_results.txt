@@ -1,8 +1,0 @@
-2026-02-25 15:01:29,652 - INFO - Starting heartbeat monitor...
-2026-02-25 15:01:29,753 - WARNING - TTM-R2 Bridge components not found at /app/backend/venv_forecast/bin/python. Using Statistical Fallback.
-2026-02-25 15:01:29,753 - INFO - 📊 Forecaster initialized (TTM-R2 Available: False)
-2026-02-25 15:01:29,755 - INFO - Starting forecast...
-2026-02-25 15:01:30,295 - WARNING - ⚠️ Event loop blocked! Heartbeat delayed by 0.5430s
-2026-02-25 15:01:30,912 - INFO - Forecast completed in 1.1576s
-2026-02-25 15:01:30,913 - INFO - Heartbeat stopped. Max delay observed: 0.5430s
-MAX_DELAY_OBSERVED=0.5430
