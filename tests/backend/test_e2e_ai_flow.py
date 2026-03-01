@@ -38,7 +38,7 @@ async def test_full_ai_strategy_revision_trajectory():
 
     if has_error:
         # In a mock environment without MLX, the stream might fail. This is acceptable for CI.
-        return
+        pytest.skip("Missing MLX hardware in CI environment")
 
     strategy_id = events[-1]["data"]["strategy_id"]
     

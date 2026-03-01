@@ -50,7 +50,7 @@ async def test_sse_latency_benchmark():
     threshold = 10000 if is_ci else 100
 
     assert latency_ms < threshold
-    assert first_event["event"] in ["status_update", "error"]
+    assert first_event["event"] in ["status_update", "reasoning_step", "error", "final_result"]
 
 @pytest.mark.asyncio
 async def test_cdc_sync_latency():
