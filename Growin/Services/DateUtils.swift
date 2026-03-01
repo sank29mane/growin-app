@@ -32,14 +32,15 @@ struct DateUtils: Sendable {
     ]
 
     static func parse(_ dateString: String) -> Date {
-        // 1. Try ISO8601 (Fast, Thread-safe)
-        if let date = isoFractional.date(from: dateString) { return date }
-        if let date = isoStandard.date(from: dateString) { return date }
-        
-        // 2. Efficient Double/Timestamp check (very common)
-        if let interval = Double(dateString) {
+        // 1. Fast path: Check if it's purely numerical (Unix timestamp) first since it's very common
+        // and Double() parsing avoids full string scanning and date formatter overhead.
+        if let interval = Double(dateString), !dateString.contains("-") {
             return Date(timeIntervalSince1970: interval > 10000000000 ? interval / 1000 : interval)
         }
+        
+        // 2. Try ISO8601 (Fast, Thread-safe)
+        if let date = isoFractional.date(from: dateString) { return date }
+        if let date = isoStandard.date(from: dateString) { return date }
         
         // 3. Fallback to legacy formats (Create formatter locally to ensure thread safety)
         // This is slower but safe. Ideally backend returns ISO.

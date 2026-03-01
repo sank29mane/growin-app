@@ -31,3 +31,5 @@ Delegated background tasks:
 |------|-------------|------|
 | Social Swarm Sync | Merged micro-agent swarm for Reddit/Twitter sentiment. | 2026-03-01 |
 | Phase 20 Logic | Multi-account, TLH, and Wash Sale implemented. | 2026-03-01 |
+| Swarm Integration | Wired Jules CLI into GSD core. | 2026-03-01 |
+| Phase 19 (W1 & W2) | Implemented Stitching, Alpha Weighting, and ACE Evaluator. | 2026-03-01 |
