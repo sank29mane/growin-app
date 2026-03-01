@@ -52,21 +52,45 @@ class PortfolioAgent(BaseAgent):
         self.logger.info(f"Analyzing portfolio for account type: {requested_account}")
         
         try:
-            # Call MCP tool
             from status_manager import status_manager
             status_manager.set_status("portfolio_agent", "running", f"Syncing {requested_account} holdings...")
             
-            result = await self.mcp_client.call_tool(
-                "analyze_portfolio", 
-                arguments={"account_type": requested_account}
-            )
+            # Use a local timeout to prevent hanging.
+            try:
+                # Fallback to wait_for for compatibility with < Python 3.11
+                if hasattr(asyncio, 'timeout'):
+                    async with asyncio.timeout(15.0):
+                        result = await self.mcp_client.call_tool(
+                            "analyze_portfolio",
+                            arguments={"account_type": requested_account}
+                        )
+                else:
+                    result = await asyncio.wait_for(
+                        self.mcp_client.call_tool(
+                            "analyze_portfolio",
+                            arguments={"account_type": requested_account}
+                        ),
+                        timeout=15.0
+                    )
+            except asyncio.TimeoutError:
+                raise ValueError("MCP tool call timed out")
+            except Exception as e:
+                # Pass through the error string logic from earlier or standard RPC errors
+                if "Unauthorized" in str(e) or "401" in str(e):
+                     raise ValueError(f"Unauthorized: {e}")
+                raise ValueError(f"MCP tool call failed: {e}")
             
             # The result is a list of TextContent objects
             # We assume the first one contains the JSON data
-            if not result.content:
+            if not result or not hasattr(result, 'content') or not result.content:
                  raise ValueError("Empty response from MCP tool")
 
-            content = result.content[0].text
+            # Check if content is empty or the first item lacks 'text'
+            first_content = result.content[0]
+            if not hasattr(first_content, 'text') or not first_content.text:
+                 raise ValueError("Invalid or empty text content from MCP tool")
+
+            content = first_content.text
             try:
                 data = json.loads(content)
             except json.JSONDecodeError as decode_err:

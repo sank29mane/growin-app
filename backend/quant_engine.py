@@ -355,7 +355,20 @@ class QuantEngine:
 
         for symbol in all_symbols:
             current_pct = current_parsed.get(symbol, Decimal(0))
-            target_pct = create_decimal(target_allocation.get(symbol, 0))
+            raw_target = target_allocation.get(symbol, 0)
+            try:
+                t_str = str(raw_target).strip()
+                is_pct_str = t_str.endswith('%')
+                t_str = t_str.replace('%', '')
+                target_pct = create_decimal(t_str)
+                # If it had a % sign, it's definitely a percentage that needs dividing by 100
+                if is_pct_str:
+                    target_pct = target_pct / 100
+                # If it didn't have a % sign but is > 1, assume it's a whole percentage number (e.g. 50 for 50%)
+                elif target_pct > 1:
+                    target_pct = target_pct / 100
+            except Exception:
+                target_pct = Decimal(0)
             deviation = target_pct - current_pct
             deviations[symbol] = deviation
 
