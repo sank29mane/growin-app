@@ -1,30 +1,33 @@
 # GSD STATE MEMORY
 
 ## Current Position
-- **Phase**: Phase 19 - Agentic Strategy Revision & Dynamic Weighting
-- **Task**: Phase 19 COMPLETE
-- **Status**: Completed successfully
+- **Phase**: Phase 20 - Multi-Account Rebalancing & Tax-Loss Harvesting
+- **Task**: Wave 1 & 2 COMPLETE, Wave 3 Orchestration COMPLETE, Jules Testing Delegated
+- **Status**: Synchronizing with Swarm
 
 ## Last Session Summary
-- **Jules Swarm Sync**: Successfully pulled and applied background patches from the Jules swarm.
-    - **Stability Audit**: Applied memory leak fixes for Core ML and improved MLX memory cache clearing.
-    - **SwiftUI Optimization**: Applied 120Hz ProMotion rendering optimizations, including `Equatable` view conformance and pre-parsed date metrics.
-    - **Social Sentiment Swarm**: Pulled and verified the sub-second polling architecture utilizing `RedditMicroAgent` and `TwitterMicroAgent`.
-- **Phase 19 Core**: Completed all Waves (ACEEvaluator, Trajectory Stitching, Dynamic Weighting, and Social Swarm Integration).
-- **Integration Tests**: Manually implemented and verified Phase 19 integration tests to ensure SOTA 2026 logic wasn't compromised by stale remote branches.
+- **Multi-Account Aggregation**: Updated `PortfolioAgent` to consolidated holdings across Invest and ISA accounts.
+- **Tax-Loss Harvesting**: Implemented `TLHScanner` to identify offset opportunities in taxable accounts.
+- **Safety Gates**: Added a Wash Sale prevention layer to `RiskAgent` to block repurchasing losing positions within 30 days.
+- **Orchestration**: Integrated TLH and rebalancing signals into the `OrchestratorAgent` synthesis loop.
+- **Swarm Sync**: Pushed local SOTA to `jules-worker` and delegated exhaustive tax-math tests to Jules (ID: 17172562717954773362).
 
 ## Next Steps
-1. **Phase 20 Planning**: Shift focus to **Multi-Account Rebalancing & Tax-Loss Harvesting** agents.
-2. **Sync Best Practices**: Ensure any future Jules delegations strictly happen from the newly established `jules-worker` sync branch.
+1. **Sync Tax Tests**: Run `/jules-sync` to pull and verify the tax-logic test suite.
+2. **UAT (Multi-Account)**: Verify the consolidated portfolio view in the SwiftUI dashboard.
+3. **Phase 21 Planning**: Shift focus to **AI-Driven Dividend Optimization & Passive Income Tracking**.
 
 ## Active Jules Swarm
 Delegated background tasks:
+
 | ID | Task | Status |
 |----|------|--------|
-| None | All Swarm tasks resolved/synced | N/A |
+| 17172562717954773362 | Phase 20 Tax-Math & Safety Tests | Executing |
+| 15819632067385598879 | Security Audit (Phase 17) | Executing |
 
 ## Quick Tasks Completed
 | Task | Description | Date |
 |------|-------------|------|
-| Swarm Sync | Applied Jules patches for Stability, SwiftUI Performance, and Social Swarm. | 2026-03-01 |
-| Phase 19 | Agentic Strategy Revision & Dynamic Weighting | 2026-03-01 |
+| Multi-Account | Implemented aggregation and consolidation in PortfolioAgent. | 2026-03-01 |
+| TLH Scanner | Built core tax-loss harvesting logic. | 2026-03-01 |
+| Wash Sale Gate | Integrated wash-sale protection in RiskAgent. | 2026-03-01 |
