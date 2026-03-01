@@ -182,6 +182,7 @@ class MLXInferenceEngine:
             raise RuntimeError("No model loaded. Call load_model() first.")
         
         try:
+            import asyncio
             from mlx_lm import generate
             from mlx_lm.sample_utils import make_sampler
             
@@ -190,7 +191,9 @@ class MLXInferenceEngine:
             if sampler is None:
                 sampler = make_sampler(temp=temperature, top_p=top_p)
             
-            response = generate(
+            # Wrap the blocking generate call in asyncio.to_thread to prevent event loop blocking
+            response = await asyncio.to_thread(
+                generate,
                 self.model,
                 self.tokenizer,
                 prompt=prompt,

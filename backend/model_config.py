@@ -67,7 +67,7 @@ DECISION_MODELS = {
 COORDINATOR_MODELS = {
     "granite-tiny": {
         "provider": "mlx",
-        "model_path": str(BACKEND_DIR / "models/mlx/granite-4.0-h-tiny-MLX-8bit"),
+        "model_path": str(BACKEND_DIR / "models/mlx/lmstudio-community--LFM2.5-1.2B-Instruct-MLX-8bit"),
         "description": "Granite 4.0 Tiny - Ultra-lightweight coordinator",
         "temperature": 0,
         "max_tokens": 512,
