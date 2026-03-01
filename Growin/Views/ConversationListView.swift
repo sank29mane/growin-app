@@ -275,6 +275,10 @@ struct ConversationCard: View {
             }
         }
         .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(conversation.title ?? "Untitled Conversation")
+        .accessibilityHint("Double tap to \(isEditing ? "select" : "open") conversation")
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
     }
 
     private func formatDate(_ dateString: String) -> String {

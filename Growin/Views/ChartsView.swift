@@ -71,6 +71,8 @@ struct ChartsView: View {
                         .foregroundColor(.secondary)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Clear search")
+                .accessibilityHint("Clears the current search text")
             }
         }
         .padding(12)
@@ -118,6 +120,9 @@ struct ChartsView: View {
                 .padding(.vertical, 4)
             }
             .buttonStyle(.plain)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("\(result.name), Ticker \(result.ticker)")
+            .accessibilityHint("Double tap to select this symbol")
         }
         .listStyle(.plain)
     }
