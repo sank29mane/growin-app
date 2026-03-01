@@ -5,6 +5,9 @@ Integration with Tavily (searching Reddit, Twitter/X, etc.)
 
 from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from market_context import SocialData
+from .social_swarm import RedditMicroAgent, TwitterMicroAgent
+from utils.financial_math import create_decimal
+from decimal import Decimal
 from typing import Dict, Any
 import logging
 import os
@@ -33,6 +36,11 @@ class SocialAgent(BaseAgent):
         
         if not self.tavily_key:
             logger.warning("TAVILY_API_KEY not found. SocialAgent will be disabled.")
+            
+        self.swarm = [
+            RedditMicroAgent(tavily_key=self.tavily_key),
+            TwitterMicroAgent(tavily_key=self.tavily_key)
+        ]
 
     async def execute(self, context: Dict[str, Any]) -> AgentResponse:
         """Override execute to handle logic"""
@@ -40,7 +48,7 @@ class SocialAgent(BaseAgent):
 
     async def analyze(self, context: Dict[str, Any]) -> AgentResponse:
         """
-        Fetch social discussions and analyze sentiment.
+        Orchestrate the social micro-agent swarm to fetch discussions and analyze sentiment.
         """
         ticker = context.get("ticker", "MARKET")
         company_name = context.get("company_name", ticker)
@@ -49,93 +57,63 @@ class SocialAgent(BaseAgent):
             return self._neutral_response(ticker, error="Tavily API key missing")
             
         try:
-            from tavily import TavilyClient
-            from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-            from resilience import retry_with_backoff
+            # Sub-second polling architecture: Execute swarm concurrently
+            fetch_tasks = [
+                agent.fetch_data(ticker, company_name)
+                for agent in self.swarm
+            ]
             
-            tavily = TavilyClient(api_key=self.tavily_key)
-            sentiment_analyzer = SentimentIntensityAnalyzer()
+            swarm_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
             
-            # --- Query Strategy with Fallback ---
-            # 1. Ticker Query
-            # 2. Company Query (if no results for ticker)
+            valid_results = []
+            platforms = set()
+            total_sentiment = create_decimal("0.0")
+            total_volume = 0
+            all_discussions = []
             
-            results = []
-            
-            @retry_with_backoff(max_retries=2, base_delay=1.0)
-            async def fetch_with_query(q):
-                # Tavily client is sync, so offload to thread here
-                return await asyncio.to_thread(
-                    tavily.search,
-                    query=q,
-                    search_depth="advanced",
-                    include_domains=["reddit.com", "x.com", "twitter.com", "stocktwits.com"],
-                    max_results=7
-                )
+            for res in swarm_results:
+                if isinstance(res, Exception):
+                    logger.error(f"Swarm agent failed with exception: {res}")
+                    continue
+                if not res.success:
+                    logger.warning(f"Swarm agent {res.source} failed: {res.error}")
+                    continue
+                
+                valid_results.append(res)
+                platforms.add(res.source)
+                if res.mention_volume > 0:
+                    # Weight by volume if applicable or simply average
+                    total_sentiment += res.sentiment_score * create_decimal(str(res.mention_volume))
+                    total_volume += res.mention_volume
+                all_discussions.extend(res.top_discussions)
 
-            # Strategy 1: Ticker Search
-            if ticker == "MARKET":
-                query = "retail investor sentiment reddit stockmarket wallstreetbets"
-            else:
-                query = f"${ticker} stock discussion reddit twitter"
-            
-            response = await fetch_with_query(query)
-            results = response.get('results', [])
-            
-            # Strategy 2: Company Name Fallback (if specific ticker yields nothing)
-            if not results and ticker != "MARKET" and company_name and company_name != ticker:
-                logger.info(f"SocialAgent: No results for ${ticker}. Retrying with '{company_name}'...")
-                query = f"{company_name} stock sentiment discussion"
-                response = await fetch_with_query(query)
-                results = response.get('results', [])
-
-            if not results:
+            if not valid_results or total_volume == 0:
                 # FAIL SOFT: Return success with neutral data
                 return self._neutral_response(ticker, error=None, success=True, msg="No social discussions found.")
                 
-            sentiments = []
-            discussions = []
-            platforms = set()
+            avg_sentiment = total_sentiment / create_decimal(str(total_volume))
             
-            for res in results:
-                content = res.get('content', '')
-                title = res.get('title', '')
-                url = res.get('url', '')
-                
-                # Identify platform
-                if "reddit" in url:
-                    platforms.add("Reddit")
-                elif "twitter" in url or "x.com" in url:
-                    platforms.add("X (Twitter)")
-                elif "stocktwits" in url:
-                    platforms.add("StockTwits")
-                
-                # Sentiment
-                text = f"{title}. {content}"
-                scores = sentiment_analyzer.polarity_scores(text)
-                sentiments.append(scores['compound'])
-                
-                discussions.append(title)
-            
-            avg_sentiment = sum(sentiments) / len(sentiments) if sentiments else 0.0
-            
-            if avg_sentiment >= 0.15:
+            if avg_sentiment >= create_decimal("0.15"):
                 label = "BULLISH"
-            elif avg_sentiment <= -0.15:
+            elif avg_sentiment <= create_decimal("-0.15"):
                 label = "BEARISH"
             else:
                 label = "NEUTRAL"
             
             # Infer volume/hype (heuristic based on result count/relevance)
-            # This is a weak proxy but better than nothing
-            volume = "MEDIUM" if len(results) >= 5 else "LOW"
+            if total_volume >= 10:
+                volume_label = "HIGH"
+            elif total_volume >= 5:
+                volume_label = "MEDIUM"
+            else:
+                volume_label = "LOW"
 
             social_data = SocialData(
                 ticker=ticker,
                 sentiment_score=avg_sentiment,
                 sentiment_label=label,
-                mention_volume=volume,
-                top_discussions=discussions[:5],
+                mention_volume=volume_label,
+                top_discussions=all_discussions[:5],
                 platforms=list(platforms)
             )
             

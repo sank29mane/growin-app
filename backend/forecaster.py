@@ -82,7 +82,8 @@ class TTMForecaster:
             
             # Check minimum data requirements (XGB needs ~50 bars)
             if len(ohlcv_data) >= 50:
-                xgb_preds = xgb_forecaster.train_and_predict(ohlcv_data, prediction_steps)
+                loop = asyncio.get_running_loop()
+                xgb_preds = await loop.run_in_executor(None, xgb_forecaster.train_and_predict, ohlcv_data, prediction_steps)
                 
                 if xgb_preds:
                     last_val = float(xgb_preds[-1])

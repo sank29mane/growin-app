@@ -294,21 +294,20 @@ class PortfolioAgent(BaseAgent):
         )
 
     async def _fetch_portfolio_history(self, p_data: PortfolioData, days: int = 30) -> list:
-        """Synthetic history generator using current holdings and yfinance"""
+        """Synthetic history generator using consolidated holdings."""
         positions = p_data.positions
-        free_cash = float(p_data.cash_balance.get("free", 0.0)) if isinstance(p_data.cash_balance, dict) else 0.0
-        # Convert free_cash to float for pandas calc
+        free_cash = float(p_data.cash_balance.get("free", 0.0))
         
         if not positions:
             return []
 
-        # Map ticker to quantity
+        # Map ticker to total quantity across all accounts
         holdings = {}
         for p in positions:
             t = normalize_ticker(p.get("ticker", ""))
-            q = p.get("quantity", 0)
+            q = float(p.get("quantity", 0))
             if t and q > 0:
-                holdings[t] = holdings.get(t, 0) + q
+                holdings[t] = holdings.get(t, 0.0) + q
         
         if not holdings:
             return []

@@ -11,6 +11,7 @@ from datetime import datetime
 
 from market_context import MarketContext, PriceData, TimeSeriesItem, ResearchData, NewsArticle, SocialData, WhaleData
 from data_engine import get_alpaca_client, get_finnhub_client
+from utils.news_client import NewsDataIOClient
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +24,7 @@ class DataFabricator:
     def __init__(self):
         self.alpaca = get_alpaca_client()
         self.finnhub = get_finnhub_client()
-        # Initialize other clients as needed (News API, Social API) if we move them here
-        # For now, we will use mock/stub logic for News/Social until we migrate the actual API calls
+        self.news_client = NewsDataIOClient()
         
     async def fabricate_context(self, intent: str, ticker: Optional[str], account_type: Optional[str], user_settings: Optional[Dict[str, Any]] = None) -> MarketContext:
         """
@@ -237,28 +237,45 @@ class DataFabricator:
             return None
 
     async def _fetch_news_data(self, ticker: str) -> Optional[ResearchData]:
-        """Fetch news using existing logic."""
+        """Fetch news using NewsDataIOClient."""
         from status_manager import status_manager
         status_manager.set_status("research_agent", "working", f"Searching news for {ticker}...")
         try:
-            # Placeholder: In a real refactor, we'd move the NewsDataIOClient usage here.
-            # Using a basic stub that would be populated by the actual API
-            # For Phase 1, we might return None and let the ResearchAgent fallback run?
-            # No, the goal is centralized fetching.
+            # 1. Fetch from NewsData.io (centralized)
+            articles = await self.news_client.fetch_latest_news(ticker)
             
-            # TODO: Import NewsDataIOClient here when migrated
+            if not articles:
+                return ResearchData(ticker=ticker, sentiment_score=0.0, sentiment_label="NEUTRAL", articles=[])
+
+            # 2. Simple sentiment synthesis (Logic move from ResearchAgent)
+            from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+            analyzer = SentimentIntensityAnalyzer()
+            
+            sentiments = []
+            rich_articles = []
+            for art in articles[:5]:
+                text = f"{art['title']}. {art.get('description', '')}"
+                score = analyzer.polarity_scores(text)['compound']
+                sentiments.append(score)
+                rich_articles.append(NewsArticle(
+                    title=art['title'],
+                    description=art.get('description', ''),
+                    source=art['source']['name'],
+                    sentiment=score,
+                    url=art.get('url')
+                ))
+            
+            avg_sentiment = sum(sentiments) / len(sentiments) if sentiments else 0.0
+            
+            label = "NEUTRAL"
+            if avg_sentiment >= 0.05: label = "BULLISH"
+            elif avg_sentiment <= -0.05: label = "BEARISH"
+
             return ResearchData(
                 ticker=ticker,
-                sentiment_score=0.1,
-                sentiment_label="NEUTRAL",
-                articles=[
-                    NewsArticle(
-                        title=f"Market analysis for {ticker}",
-                        description="General market commentary suggests neutral trading conditions.",
-                        source="MarketAnalyst",
-                        sentiment=0.0
-                    )
-                ]
+                sentiment_score=avg_sentiment,
+                sentiment_label=label,
+                articles=rich_articles
             ) 
             
         except Exception as e:
