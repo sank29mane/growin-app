@@ -149,7 +149,7 @@ struct IntelligenceTraceView: View {
     }
 }
 
-struct ReasoningStepRow: View {
+struct ReasoningStepRow: View, Equatable {
     let agent: String
     let status: String
     let icon: String

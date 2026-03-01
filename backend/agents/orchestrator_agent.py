@@ -204,11 +204,15 @@ Query: "{clean_query}"
         needs = intent_info["needs"]
         tasks = []
         
+        # Dynamic Weighting: Adjust specialist priority based on alpha
+        # (Agents with higher historical alpha are executed first or given more resource)
+        # This is a logical prioritization; execution remains parallel
+        
         await self.messenger.send_message(AgentMessage(
             sender="OrchestratorAgent",
             recipient="broadcast",
             subject="swarm_started",
-            payload={"agents": needs},
+            payload={"agents": needs, "alpha_context": historical_alpha.get("specialists", {})},
             correlation_id=c_id
         ))
         
@@ -250,14 +254,33 @@ Query: "{clean_query}"
             correlation_id=c_id
         ))
         
-        # Initial Thesis
-        decision_result = await self.decision_engine.make_decision(context, query)
+        # SOTA 2026: Trajectory Stitching
+        from utils.trajectory_stitcher import TrajectoryStitcher
+        stitched_narrative = TrajectoryStitcher.stitch(context)
+        
+        # SOTA 2026: Tax-Loss Harvesting Intelligence
+        from utils.tlh_scanner import TLHScanner
+        tlh_candidates = []
+        if context.portfolio:
+            tlh_candidates = TLHScanner().scan(context.portfolio.model_dump())
+            context.user_context["tlh_opportunities"] = tlh_candidates
+
+        # Initial Thesis (Weighted by Alpha)
+        # We pass the alpha metrics directly into the prompt to bias the LLM synthesis
+        alpha_prompt = f"\n[HISTORICAL ALPHA CONTEXT]\n{json.dumps(historical_alpha.get('specialists', {}))}\n"
+        tlh_prompt = f"\n[TAX-LOSS HARVESTING OPPORTUNITIES]\n{json.dumps(tlh_candidates)}\n"
+        full_query = query + alpha_prompt + tlh_prompt + f"\n[STITCHED NARRATIVE]\n{stitched_narrative}\n"
+        
+        decision_result = await self.decision_engine.make_decision(context, full_query)
         recommendation = decision_result.get("content", "")
         
         # --- SOTA 2026: ADVERSARIAL DEBATE LOOP ---
         debate_trace = []
         max_debate_turns = 1 # One rebuttal allowed
-        ace_score = 1.0 # Start perfect
+        
+        # ACE Evaluator
+        from .ace_evaluator import ACEEvaluator
+        ace_evaluator = ACEEvaluator()
         
         for turn in range(max_debate_turns + 1):
             status_manager.set_status("orchestrator", "working", f"Risk Review (Turn {turn+1})...")
@@ -274,11 +297,6 @@ Query: "{clean_query}"
             debate_trace.append({"turn": turn, "status": risk_review.get("status"), "refutation": risk_review.get("debate_refutation")})
             
             if risk_review.get("status") == "APPROVED" or turn >= max_debate_turns:
-                # Final turn or approved - break loop
-                if risk_review.get("status") != "APPROVED":
-                    ace_score = float(risk_review.get("confidence_score", 0.5)) * 0.7 # Penalty for failing to resolve
-                else:
-                    ace_score = float(risk_review.get("confidence_score", 0.9))
                 break
             
             # If FLAGGED/BLOCKED and we have turns left - REBUTTAL
@@ -288,20 +306,23 @@ Query: "{clean_query}"
             "{risk_review.get('debate_refutation')}"
             
             Provide a refined strategy that addresses this critique or provide evidence why the critique is invalid.
-            Original Recommendation: {recommendation}
+            Stitched Context: {stitched_narrative}
             """
             # Use decision engine to generate rebuttal
             rebuttal_result = await self.decision_engine.generate_response(rebuttal_prompt)
             recommendation = rebuttal_result
-            # Ace score takes a small hit for needing a rebuttal
-            ace_score *= 0.9
+
+        # Calculate final ACE Score using dedicated component
+        ace_score = ace_evaluator.calculate_score(debate_trace, risk_review.get("status"))
+        robustness_label = ace_evaluator.get_robustness_label(ace_score)
 
         context.user_context["risk_review"] = risk_review
         context.user_context["debate_trace"] = debate_trace
         context.user_context["ace_score"] = ace_score
+        context.user_context["robustness_label"] = robustness_label
         
         # SOTA 2026: Final Output Formatting
-        header = f"### Strategic Recommendation (ACE Robustness: {ace_score:.2f})\n"
+        header = f"### Strategic Recommendation (ACE: {ace_score:.2f} - {robustness_label})\n"
         if risk_review.get("status") in ["FLAGGED", "BLOCKED"]:
             warning = f"\n\n⚠️ **ADVERSARIAL WARNING**: {risk_review.get('risk_assessment')}"
             if risk_review.get("requires_hitl"):
@@ -321,8 +342,7 @@ Query: "{clean_query}"
             correlation_id=c_id
         ))
         
-        # SOTA 2026: Async Alpha Audit (Delayed to allow market data to catch up if needed)
-        # In a real system, this would be a scheduled worker task.
+        # SOTA 2026: Async Alpha Audit
         async def delayed_alpha():
             await asyncio.sleep(2) # Brief delay
             db.calculate_agent_alpha(c_id)

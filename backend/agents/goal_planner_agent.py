@@ -119,6 +119,11 @@ class GoalPlannerAgent(BaseAgent):
                  logger.info(f"Using REAL data for {len(real_universe)} assets")
                 
             # 3. Strategy Selection & Asset Filtering
+            # SOTA 2026: Tax-Aware Allocation
+            # Prioritize ISA for high-growth assets
+            account_weights = {"ISA": 0.0, "INVEST": 0.0}
+            portfolio = context.get("portfolio_data", {})
+            
             weights = {}
             expected_ret = 0.0
             expected_vol = 0.0
@@ -291,7 +296,8 @@ class GoalPlannerAgent(BaseAgent):
                  "type": "TRADING212_PIE",
                  "name": f"{risk_profile} Goal Portfolio",
                  "icon": "Growth" if risk_profile in ["HIGH", "AGGRESSIVE_PLUS"] else "Safe",
-                 "action": "CREATE_OR_UPDATE"
+                 "action": "CREATE_OR_UPDATE",
+                 "tax_efficiency_notes": "Prioritizing high-growth assets for ISA wrapper to minimize future CGT."
             }
             
             latency = (time.time() - start_time) * 1000

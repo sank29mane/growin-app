@@ -44,11 +44,25 @@ This document outlines the high-level phases for the GSD integration and ongoing
 - **Status**: COMPLETED (2026-02-25)
 
 ## Phase 13: Live System Integration
-- **Goal:** Transition from paper-trading/mock data to live production APIs (Alpaca Live, T212 Live) with full security and monitoring.
 - **Status**: COMPLETED (2026-02-28)
-- **Requirements**: [LIVE-01, LIVE-02, LIVE-03]
 
 ## Phase 14: Dynamic LM Studio Model Management
-- **Goal:** Enable users to dynamically list, select, and load models from LM Studio via the Preferences UI with real-time status tracking.
 - **Status**: COMPLETED (2026-02-28)
-- **Requirements:** [LMS-01, LMS-02, LMS-03, LMS-04, LMS-05, LMS-06]
+
+## Phase 15: Stateful Chat & UI Stability
+- **Status**: COMPLETED (2026-03-01)
+
+## Phase 16: Architecture Evolution & Flattening (SOTA 2026)
+- **Status**: COMPLETED (2026-03-01)
+
+## Phase 17: Operational Verification & Intelligence Deepening
+- **Status**: COMPLETED (2026-03-01)
+
+## Phase 18: Adversarial Reasoning & Institutional Alpha
+- **Status**: COMPLETED (2026-03-01)
+
+## Phase 19: Agentic Strategy Revision & Dynamic Weighting
+- **Status**: COMPLETED (2026-03-01)
+
+## Phase 20: Multi-Account Rebalancing & Tax-Loss Harvesting
+- **Status**: 🔄 IN PROGRESS

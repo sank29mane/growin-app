@@ -180,7 +180,7 @@ struct GoalImplementation: Codable {
 
 // MARK: - Chat Models
 
-struct MarketContextData: Codable {
+struct MarketContextData: Codable, Equatable {
     let forecast: ForecastData?
     let quant: QuantData?
     let research: ResearchData?
@@ -190,7 +190,7 @@ struct MarketContextData: Codable {
     let reasoning: String?
 }
 
-struct WhaleData: Codable {
+struct WhaleData: Codable, Equatable {
     let ticker: String
     let largeTrades: [WhaleTrade]?
     let unusualVolume: Bool
@@ -204,7 +204,7 @@ struct WhaleData: Codable {
         case sentimentImpact = "sentiment_impact"
     }
 }
-struct WhaleTrade: Codable, Identifiable {
+struct WhaleTrade: Codable, Identifiable, Equatable {
     var id: Double { Double(timestamp) }
     let price: Decimal
     let size: Decimal
@@ -219,7 +219,7 @@ struct WhaleTrade: Codable, Identifiable {
     }
 }
 
-struct ForecastData: Codable {
+struct ForecastData: Codable, Equatable {
     let ticker: String
     let forecast24h: Decimal
     let forecast48h: Decimal?
@@ -241,7 +241,7 @@ struct ForecastData: Codable {
     }
 }
 
-struct QuantData: Codable {
+struct QuantData: Codable, Equatable {
     let ticker: String
     let signal: String
     let rsi: Decimal?
@@ -258,7 +258,7 @@ struct QuantData: Codable {
     }
 }
 
-struct ResearchData: Codable {
+struct ResearchData: Codable, Equatable {
     let ticker: String
     let sentimentScore: Decimal
     let sentimentLabel: String
@@ -272,7 +272,7 @@ struct ResearchData: Codable {
     }
 }
 
-struct PriceData: Codable {
+struct PriceData: Codable, Equatable {
     let ticker: String
     let currentPrice: Decimal?
     let currency: String?
@@ -287,7 +287,7 @@ struct PriceData: Codable {
     }
 }
 
-struct PortfolioData: Codable {
+struct PortfolioData: Codable, Equatable {
     let totalValue: Decimal?
     let totalPnL: Decimal?
     let pnlPercent: Double?

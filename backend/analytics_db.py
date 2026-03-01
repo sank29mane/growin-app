@@ -457,36 +457,70 @@ class AnalyticsDB:
             return 'neutral'
     
     def get_agent_alpha_metrics(self, ticker: Optional[str] = None) -> Dict[str, Any]:
-        """Summarize agent performance metrics."""
+        """
+        Summarize agent performance metrics.
+        Returns a breakdown per ticker and per specialist agent.
+        """
         try:
-            query = "SELECT ticker, AVG(return_1d) as avg_1d, AVG(return_5d) as avg_5d, COUNT(*) as count FROM agent_performance"
+            # 1. Ticker level metrics (from agent_performance table)
+            ticker_query = "SELECT ticker, AVG(return_1d) as avg_1d, AVG(return_5d) as avg_5d, COUNT(*) as count FROM agent_performance"
             params = []
             if ticker:
-                query += " WHERE ticker = ? GROUP BY ticker"
+                ticker_query += " WHERE ticker = ? GROUP BY ticker"
                 params.append(ticker)
             else:
-                query += " GROUP BY ticker"
+                ticker_query += " GROUP BY ticker"
                 
-            res = self.conn.execute(query, params).fetchdf()
-            if res.empty:
-                return {"avg_1d": 0.0, "avg_5d": 0.0, "total_sessions": 0}
+            ticker_res = self.conn.execute(ticker_query, params).fetchdf()
+            
+            # 2. Specialist level metrics (correlation between specialist completion and future returns)
+            # We join performance with telemetry to see which agents were active during successful/unsuccessful sessions
+            specialist_query = """
+                SELECT 
+                    t.agent_name,
+                    AVG(p.return_1d) as avg_1d,
+                    AVG(p.return_5d) as avg_5d,
+                    COUNT(*) as count
+                FROM agent_telemetry t
+                JOIN agent_performance p ON t.correlation_id = p.correlation_id
+                WHERE t.subject = 'agent_complete' AND t.agent_name != 'OrchestratorAgent'
+            """
+            if ticker:
+                specialist_query += " AND p.ticker = ? GROUP BY t.agent_name"
+                specialist_res = self.conn.execute(specialist_query, [ticker]).fetchdf()
+            else:
+                specialist_query += " GROUP BY t.agent_name"
+                specialist_res = self.conn.execute(specialist_query).fetchdf()
+
+            # Format result
+            specialists = {}
+            for _, row in specialist_res.iterrows():
+                specialists[row['agent_name']] = {
+                    "avg_1d": float(row['avg_1d']) if not pd.isna(row['avg_1d']) else 0.0,
+                    "avg_5d": float(row['avg_5d']) if not pd.isna(row['avg_5d']) else 0.0,
+                    "total_sessions": int(row['count'])
+                }
+
+            if ticker_res.empty:
+                return {"avg_1d": 0.0, "avg_5d": 0.0, "total_sessions": 0, "specialists": specialists}
                 
             if ticker:
                 return {
-                    "avg_1d": float(res.iloc[0]['avg_1d']) if not pd.isna(res.iloc[0]['avg_1d']) else 0.0,
-                    "avg_5d": float(res.iloc[0]['avg_5d']) if not pd.isna(res.iloc[0]['avg_5d']) else 0.0,
-                    "total_sessions": int(res.iloc[0]['count'])
+                    "avg_1d": float(ticker_res.iloc[0]['avg_1d']) if not pd.isna(ticker_res.iloc[0]['avg_1d']) else 0.0,
+                    "avg_5d": float(ticker_res.iloc[0]['avg_5d']) if not pd.isna(ticker_res.iloc[0]['avg_5d']) else 0.0,
+                    "total_sessions": int(ticker_res.iloc[0]['count']),
+                    "specialists": specialists
                 }
             else:
-                # Overall average across all tickers
                 return {
-                    "avg_1d": float(res['avg_1d'].mean()),
-                    "avg_5d": float(res['avg_5d'].mean()),
-                    "total_sessions": int(res['count'].sum())
+                    "avg_1d": float(ticker_res['avg_1d'].mean()),
+                    "avg_5d": float(ticker_res['avg_5d'].mean()),
+                    "total_sessions": int(ticker_res['count'].sum()),
+                    "specialists": specialists
                 }
         except Exception as e:
             logger.error(f"Failed to fetch alpha metrics: {e}")
-            return {"avg_1d": 0.0, "avg_5d": 0.0, "total_sessions": 0}
+            return {"avg_1d": 0.0, "avg_5d": 0.0, "total_sessions": 0, "specialists": {}}
 
 
 # --- Utility Functions ---

@@ -30,6 +30,14 @@ updated: [ISO timestamp]
 2. {Following action}
 3. {Third action if known}
 
+## Active Jules Swarm
+
+Delegated background tasks:
+
+| ID | Task | Status |
+|----|------|--------|
+| {ID} | {Task name} | {Planning\|Awaiting Approval\|Completed} |
+
 ## Active Decisions
 
 Decisions made that affect current work:

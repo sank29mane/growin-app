@@ -1,6 +1,12 @@
 import SwiftUI
 
-struct ReasoningTraceView: View {
+struct ReasoningTraceView: View, Equatable {
+    static func == (lhs: ReasoningTraceView, rhs: ReasoningTraceView) -> Bool {
+        // Simple equatable implementation for view optimization
+        return lhs.viewModel.strategy?.strategy_id == rhs.viewModel.strategy?.strategy_id &&
+               lhs.viewModel.isStreaming == rhs.viewModel.isStreaming &&
+               lhs.viewModel.streamingEvents.count == rhs.viewModel.streamingEvents.count
+    }
     @Bindable var viewModel: AIStrategyViewModel
     @Environment(\.dismiss) private var dismiss
     
