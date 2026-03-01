@@ -31,11 +31,12 @@ class RStitchEngine:
         
         start_time = time.time()
         
+        import asyncio
         if is_high_entropy:
             # Delegate to LLM (Slower but more accurate)
             model_used = self.llm_model
             # Simulate LLM latency
-            # await asyncio.sleep(0.5) 
+            await asyncio.sleep(0.01)
             response = f"LLM-augmented reasoning for: {prompt[:30]}..."
         else:
             # Stay on SLM (Fast)
