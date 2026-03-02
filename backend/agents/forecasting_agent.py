@@ -8,6 +8,7 @@ import logging
 from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from market_context import ForecastData
 from forecaster import get_forecaster
+from error_resilience import CircuitBreaker
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,8 @@ class ForecastingAgent(BaseAgent):
             )
         super().__init__(config)
         self.forecaster = get_forecaster()  # Singleton
+
+        self.circuit_breaker = CircuitBreaker("forecaster", failure_threshold=3, recovery_timeout=60)
 
     async def analyze(self, context: Dict[str, Any]) -> AgentResponse:
         """
@@ -122,6 +125,16 @@ class ForecastingAgent(BaseAgent):
                 logger.warning(f"ForecastingAgent sanitization error: {ex}")
         # ---------------------------------------------
             
+        if not self.circuit_breaker.can_proceed():
+            logger.error(f"Forecast skipped: circuit breaker {self.circuit_breaker.name} is OPEN")
+            return AgentResponse(
+                agent_name=self.config.name,
+                success=False,
+                data={},
+                error="Forecasting failed or circuit breaker is OPEN",
+                latency_ms=0
+            )
+
         try:
             # Generate forecast using TTM
             result = await self.forecaster.forecast(
@@ -129,6 +142,8 @@ class ForecastingAgent(BaseAgent):
                 prediction_steps=steps,
                 timeframe=timeframe
             )
+
+            self.circuit_breaker.record_success()
 
             if "error" in result:
                 return AgentResponse(
@@ -193,6 +208,7 @@ class ForecastingAgent(BaseAgent):
             )
 
         except Exception as e:
+            self.circuit_breaker.record_failure()
             logger.error(f"Forecast failed: {e}")
             return AgentResponse(
                 agent_name=self.config.name,

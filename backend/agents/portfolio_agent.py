@@ -17,6 +17,7 @@ import numpy as np
 import yfinance as yf
 from decimal import Decimal
 from utils.financial_math import create_decimal
+from error_resilience import CircuitBreaker
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,8 @@ class PortfolioAgent(BaseAgent):
         # Use global MCP client
         self.mcp_client = state.mcp_client
         
+        self.circuit_breaker = CircuitBreaker("mcp_portfolio", failure_threshold=3, recovery_timeout=30)
+
     async def analyze(self, context: Dict[str, Any]) -> AgentResponse:
         """
         Fetch portfolio data.
@@ -56,6 +59,9 @@ class PortfolioAgent(BaseAgent):
             status_manager.set_status("portfolio_agent", "running", f"Syncing {requested_account} holdings...")
             
             # Use a local timeout to prevent hanging.
+            if not self.circuit_breaker.can_proceed():
+                raise ValueError("MCP tool call failed or circuit breaker is OPEN")
+
             try:
                 # Fallback to wait_for for compatibility with < Python 3.11
                 if hasattr(asyncio, 'timeout'):
@@ -72,9 +78,12 @@ class PortfolioAgent(BaseAgent):
                         ),
                         timeout=15.0
                     )
+                self.circuit_breaker.record_success()
             except asyncio.TimeoutError:
+                self.circuit_breaker.record_failure()
                 raise ValueError("MCP tool call timed out")
             except Exception as e:
+                self.circuit_breaker.record_failure()
                 # Pass through the error string logic from earlier or standard RPC errors
                 if "Unauthorized" in str(e) or "401" in str(e):
                      raise ValueError(f"Unauthorized: {e}")
