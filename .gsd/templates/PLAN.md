@@ -75,6 +75,7 @@ After all tasks complete, verify:
 | Type | Use For | Behavior |
 |------|---------|----------|
 | `auto` | Everything Claude can do independently | Fully autonomous |
+| `jules` | Heavy lifting, boilerplate, deep audits | Delegated to Jules CLI |
 | `checkpoint:human-verify` | Visual/functional verification | Pauses for user |
 | `checkpoint:decision` | Implementation choices | Pauses for user |
 

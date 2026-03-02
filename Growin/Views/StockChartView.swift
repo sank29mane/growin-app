@@ -125,6 +125,7 @@ struct StockChartView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Share Intelligence Report")
+                    .accessibilityHint("Shares the current stock intelligence report and price")
                 }
             }
         }
@@ -180,6 +181,9 @@ struct StockChartView: View {
                         )
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Timeframe \(tfShort(tf))")
+                .accessibilityHint("Switches the chart view to \(tfShort(tf)) timeframe")
+                .accessibilityAddTraits(viewModel.selectedTimeframe == tf ? [.isSelected] : [])
             }
         }
         .padding(.horizontal)

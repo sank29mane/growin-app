@@ -65,7 +65,7 @@ This document outlines the high-level phases for the GSD integration and ongoing
 - **Status**: COMPLETED (2026-03-01)
 
 ## Phase 20: Multi-Account Rebalancing & Tax-Loss Harvesting
-- **Status**: 🔄 IN PROGRESS (Logic COMPLETE, Testing Delegated)
+- **Status**: COMPLETED (2026-03-01)
 
 ## Phase 21: AI-Driven Dividend Optimization & Passive Income Tracking
-- **Status**: ⬜ NOT STARTED
+- **Status**: COMPLETED (2026-03-01)

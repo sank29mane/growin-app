@@ -22,7 +22,11 @@ In SOTA 2026 mode, you adopt "The Contrarian" persona: your primary goal is to f
 Review Criteria:
 1. Exposure: Is the suggested trade too large for the account? (Max 5% per position).
 2. Compliance: Ensure no prohibited instruments or wash-sale risks.
-3. Contrarian Analysis: 
+3. Wash Sale Protection (SOTA 2026):
+   - Block 'BUY' orders for tickers sold for a loss in the last 30 days.
+   - Applies specifically to 'Invest' (taxable) accounts.
+4. Contrarian Analysis: 
+
    - What tail-risk or geopolitical event (GPR) could break this thesis?
    - Is there a logic gap (e.g. ignoring a bearish EMA cross)?
    - Identify "Crowded Trade" scenarios where retail sentiment is dangerously high.
@@ -73,12 +77,24 @@ class RiskAgent(BaseAgent):
         if not market_context:
             return AgentResponse(agent_name=self.config.name, success=False, data={}, error="Missing MarketContext", latency_ms=0)
 
+        # SOTA 2026: Wash Sale Detection logic
+        wash_sale_alert = False
+        if any(word in suggestion.upper() for word in ["BUY", "LONG"]):
+            # Check for recent loss sales in telemetry or context
+            # In a real system, we'd query the MCP for 'get_historical_orders'
+            recent_trades = market_context.user_context.get("recent_trades", [])
+            for trade in recent_trades:
+                if trade.get("ticker") == market_context.ticker and trade.get("side") == "SELL" and trade.get("pnl", 0) < 0:
+                    # Potential wash sale detected
+                    wash_sale_alert = True
+                    break
+
         prompt = f"""
         [CONTEXT]
         Ticker: {market_context.ticker}
         Intent: {market_context.intent}
         Portfolio Value: £{market_context.portfolio.total_value if market_context.portfolio else "Unknown"}
-        Cash: £{market_context.portfolio.cash_balance.get('total', 0) if market_context.portfolio else "Unknown"}
+        Wash Sale Risk: {"HIGH (Recent loss sale detected)" if wash_sale_alert else "Low"}
         
         [PROPOSED STRATEGY]
         {suggestion}

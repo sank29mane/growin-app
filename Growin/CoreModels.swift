@@ -147,9 +147,31 @@ struct ChartDataPoint: Codable, Identifiable, Equatable, Sendable {
     let low: Decimal?
     let open: Decimal?
     let volume: Int?
+    let date: Date
     
-    var date: Date {
-        DateUtils.parse(timestamp)
+    init(timestamp: String, close: Decimal, high: Decimal? = nil, low: Decimal? = nil, open: Decimal? = nil, volume: Int? = nil) {
+        self.timestamp = timestamp
+        self.close = close
+        self.high = high
+        self.low = low
+        self.open = open
+        self.volume = volume
+        self.date = DateUtils.parse(timestamp)
+    }
+    
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.timestamp = try container.decode(String.self, forKey: .timestamp)
+        self.close = try container.decode(Decimal.self, forKey: .close)
+        self.high = try container.decodeIfPresent(Decimal.self, forKey: .high)
+        self.low = try container.decodeIfPresent(Decimal.self, forKey: .low)
+        self.open = try container.decodeIfPresent(Decimal.self, forKey: .open)
+        self.volume = try container.decodeIfPresent(Int.self, forKey: .volume)
+        self.date = DateUtils.parse(self.timestamp)
+    }
+    
+    enum CodingKeys: String, CodingKey {
+        case timestamp, close, high, low, open, volume
     }
 }
 

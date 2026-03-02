@@ -265,7 +265,7 @@ class MLXInferenceEngine:
             self.current_model_path = None
             
             # Clear MLX memory cache
-            mx.clear_cache()
+            mx.metal.clear_cache()
             logger.info("MLX model unloaded and cache cleared")
     
     def is_loaded(self) -> bool:

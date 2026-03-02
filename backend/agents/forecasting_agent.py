@@ -144,9 +144,8 @@ class ForecastingAgent(BaseAgent):
                 timeframe=timeframe
             )
 
-            self.circuit_breaker.record_success()
-
             if "error" in result:
+                self.circuit_breaker.record_failure()
                 return AgentResponse(
                     agent_name=self.config.name,
                     success=False,
@@ -154,6 +153,8 @@ class ForecastingAgent(BaseAgent):
                     error=result["error"],
                     latency_ms=0
                 )
+
+            self.circuit_breaker.record_success()
 
             # Extract predictions
             forecast_bars = result.get("forecast", [])

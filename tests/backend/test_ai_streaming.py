@@ -58,9 +58,10 @@ async def test_strategy_stream_events():
         
         events = []
         # Increase timeout or ensure we don't block
+        # the generator now yields an initial status_update before the task starts, so we need to collect at least 3 events to see the reasoning_step
         async for event in strategy_event_generator("test-session", "AAPL"):
             events.append(event)
-            if len(events) >= 2:
+            if len(events) >= 3:
                 break
                 
         assert any(e["event"] == "status_update" for e in events)
