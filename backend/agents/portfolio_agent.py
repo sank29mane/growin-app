@@ -17,9 +17,12 @@ import numpy as np
 import yfinance as yf
 from decimal import Decimal
 from utils.financial_math import create_decimal
+from error_resilience import CircuitBreaker
 
 logger = logging.getLogger(__name__)
 
+# Module-level circuit breaker to persist state across agent instantiations
+portfolio_circuit_breaker = CircuitBreaker("mcp_portfolio", failure_threshold=3, recovery_timeout=30)
 
 class PortfolioAgent(BaseAgent):
     """
@@ -38,6 +41,7 @@ class PortfolioAgent(BaseAgent):
         super().__init__(config)
         # Use global MCP client
         self.mcp_client = state.mcp_client
+        self.circuit_breaker = portfolio_circuit_breaker
         
     async def analyze(self, context: Dict[str, Any]) -> AgentResponse:
         """
@@ -55,8 +59,19 @@ class PortfolioAgent(BaseAgent):
             from status_manager import status_manager
             status_manager.set_status("portfolio_agent", "running", f"Syncing {requested_account} holdings...")
             
-            # Use a local timeout to prevent hanging.
+            # Check circuit breaker before making external calls
+            if not self.circuit_breaker.can_proceed():
+                logger.error(f"Portfolio sync skipped: circuit breaker {self.circuit_breaker.name} is OPEN")
+                return AgentResponse(
+                    agent_name=self.config.name,
+                    success=False,
+                    data={},
+                    error="MCP tool call failed or circuit breaker is OPEN",
+                    latency_ms=0
+                )
+
             try:
+                # Use a local timeout to prevent hanging.
                 # Fallback to wait_for for compatibility with < Python 3.11
                 if hasattr(asyncio, 'timeout'):
                     async with asyncio.timeout(15.0):
@@ -72,9 +87,12 @@ class PortfolioAgent(BaseAgent):
                         ),
                         timeout=15.0
                     )
+                self.circuit_breaker.record_success()
             except asyncio.TimeoutError:
+                self.circuit_breaker.record_failure()
                 raise ValueError("MCP tool call timed out")
             except Exception as e:
+                self.circuit_breaker.record_failure()
                 # Pass through the error string logic from earlier or standard RPC errors
                 if "Unauthorized" in str(e) or "401" in str(e):
                      raise ValueError(f"Unauthorized: {e}")
