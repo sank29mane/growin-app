@@ -21,6 +21,8 @@ from error_resilience import CircuitBreaker
 
 logger = logging.getLogger(__name__)
 
+# Module-level circuit breaker to persist state across agent instantiations
+portfolio_circuit_breaker = CircuitBreaker("mcp_portfolio", failure_threshold=3, recovery_timeout=30)
 
 class PortfolioAgent(BaseAgent):
     """
@@ -39,9 +41,8 @@ class PortfolioAgent(BaseAgent):
         super().__init__(config)
         # Use global MCP client
         self.mcp_client = state.mcp_client
+        self.circuit_breaker = portfolio_circuit_breaker
         
-        self.circuit_breaker = CircuitBreaker("mcp_portfolio", failure_threshold=3, recovery_timeout=30)
-
     async def analyze(self, context: Dict[str, Any]) -> AgentResponse:
         """
         Fetch portfolio data.
@@ -60,7 +61,7 @@ class PortfolioAgent(BaseAgent):
             
             # Check circuit breaker before making external calls
             if not self.circuit_breaker.can_proceed():
-                self.logger.error(f"Portfolio sync skipped: circuit breaker {self.circuit_breaker.name} is OPEN")
+                logger.error(f"Portfolio sync skipped: circuit breaker {self.circuit_breaker.name} is OPEN")
                 return AgentResponse(
                     agent_name=self.config.name,
                     success=False,

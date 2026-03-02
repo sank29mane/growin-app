@@ -12,6 +12,8 @@ from error_resilience import CircuitBreaker
 
 logger = logging.getLogger(__name__)
 
+# Module-level circuit breaker to persist state across agent instantiations
+forecasting_circuit_breaker = CircuitBreaker("forecaster", failure_threshold=3, recovery_timeout=60)
 
 class ForecastingAgent(BaseAgent):
     """
@@ -31,8 +33,7 @@ class ForecastingAgent(BaseAgent):
             )
         super().__init__(config)
         self.forecaster = get_forecaster()  # Singleton
-
-        self.circuit_breaker = CircuitBreaker("forecaster", failure_threshold=3, recovery_timeout=60)
+        self.circuit_breaker = forecasting_circuit_breaker
 
     async def analyze(self, context: Dict[str, Any]) -> AgentResponse:
         """
