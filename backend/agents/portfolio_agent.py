@@ -58,11 +58,19 @@ class PortfolioAgent(BaseAgent):
             from status_manager import status_manager
             status_manager.set_status("portfolio_agent", "running", f"Syncing {requested_account} holdings...")
             
-            # Use a local timeout to prevent hanging.
+            # Check circuit breaker before making external calls
             if not self.circuit_breaker.can_proceed():
-                raise ValueError("MCP tool call failed or circuit breaker is OPEN")
+                self.logger.error(f"Portfolio sync skipped: circuit breaker {self.circuit_breaker.name} is OPEN")
+                return AgentResponse(
+                    agent_name=self.config.name,
+                    success=False,
+                    data={},
+                    error="MCP tool call failed or circuit breaker is OPEN",
+                    latency_ms=0
+                )
 
             try:
+                # Use a local timeout to prevent hanging.
                 # Fallback to wait_for for compatibility with < Python 3.11
                 if hasattr(asyncio, 'timeout'):
                     async with asyncio.timeout(15.0):

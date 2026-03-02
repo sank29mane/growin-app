@@ -29,12 +29,11 @@ async def test_full_ai_strategy_revision_trajectory():
             elif line_str.startswith("data: "):
                 data_str = line_str.replace("data: ", "").strip()
                 events.append({"event": current_event, "data": json.loads(data_str)})
-                if current_event == "final_result":
+                if current_event == "final_result" or current_event == "error":
                     break
                     
     if any(e["event"] == "error" for e in events):
-        # Allow graceful exit for test environment without MLX model
-        return
+        pytest.skip("Skipping SOTA flow test due to missing MLX model initialization in CI environment")
 
     assert any(e["event"] == "final_result" for e in events)
     strategy_id = events[-1]["data"]["strategy_id"]
@@ -56,13 +55,9 @@ async def test_full_ai_strategy_revision_trajectory():
     with client.stream("GET", f"/api/ai/strategy/stream?session_id={new_session_id}") as rev_response:
         assert rev_response.status_code == 200
         # Just verify it starts streaming
-        try:
-            first_line = next(rev_response.iter_lines())
-            line_str = first_line if isinstance(first_line, str) else first_line.decode()
-            if "event: error" not in line_str:
-                assert "status_update" in line_str
-        except StopIteration:
-            pass # Stream ended prematurely
+        first_line = next(rev_response.iter_lines())
+        line_str = first_line if isinstance(first_line, str) else first_line.decode()
+        assert "status_update" in line_str
 
 @pytest.mark.asyncio
 async def test_concurrent_strategy_challenges():
