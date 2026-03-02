@@ -1,5 +1,6 @@
 import time
 import random
+import asyncio
 from typing import Dict, Any, Optional
 
 class RStitchEngine:
@@ -35,11 +36,13 @@ class RStitchEngine:
             # Delegate to LLM (Slower but more accurate)
             model_used = self.llm_model
             # Simulate LLM latency
-            # await asyncio.sleep(0.5) 
+            await asyncio.sleep(0.1)
             response = f"LLM-augmented reasoning for: {prompt[:30]}..."
         else:
             # Stay on SLM (Fast)
             model_used = self.slm_model
+            # Make sure SLM is fundamentally faster
+            await asyncio.sleep(0.001)
             response = f"SLM fast-path for: {prompt[:30]}..."
             
         latency = (time.time() - start_time) * 1000 # ms

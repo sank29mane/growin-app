@@ -574,7 +574,14 @@ Query: "{clean_query}"
             logger.info(f"Coordinator Tier 2: Searching for correct ticker matching '{term}'")
             
             # Call search_instruments tool
-            search_result = await self.mcp_client.call_tool("search_instruments", {"query": term})
+            if hasattr(asyncio, 'timeout'):
+                async with asyncio.timeout(10.0):
+                    search_result = await self.mcp_client.call_tool("search_instruments", {"query": term})
+            else:
+                search_result = await asyncio.wait_for(
+                    self.mcp_client.call_tool("search_instruments", {"query": term}),
+                    timeout=10.0
+                )
             
             # Check if search_result is wrapped in TextContent or JSON string
             if hasattr(search_result, 'content'):
@@ -629,6 +636,8 @@ Query: "{clean_query}"
                 else:
                     logger.warning(f"Coordinator Tier 2: No match exceeded similarity threshold (max={highest_score:.2f})")
                     
+        except asyncio.TimeoutError:
+            logger.warning(f"Ticker search discovery timed out for {term}")
         except Exception as e:
             logger.warning(f"Ticker search discovery failed for {term}: {e}")
         
@@ -677,7 +686,14 @@ Query: "{clean_query}"
                     try:
                         # Call docker_run_python tool
                         # We assume the tool is registered in the MCP client available to the coordinator
-                        result = await self.mcp_client.call_tool("docker_run_python", {"script": python_code})
+                        if hasattr(asyncio, 'timeout'):
+                            async with asyncio.timeout(30.0):
+                                result = await self.mcp_client.call_tool("docker_run_python", {"script": python_code})
+                        else:
+                            result = await asyncio.wait_for(
+                                self.mcp_client.call_tool("docker_run_python", {"script": python_code}),
+                                timeout=30.0
+                            )
                         
                         # Parse the output from the tool
                         if result and result.content:
@@ -694,6 +710,8 @@ Query: "{clean_query}"
                                 return await agent.execute(new_context)
                             else:
                                 logger.warning(f"Docker execution failed: {exec_res}")
+                    except asyncio.TimeoutError:
+                        logger.error(f"Docker execution fix timed out")
                     except Exception as e:
                         logger.error(f"Failed to execute Docker fix: {e}")
                         
