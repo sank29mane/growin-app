@@ -45,8 +45,9 @@ async def strategy_event_generator(session_id: str, ticker: Optional[str]):
     from agents.orchestrator_agent import OrchestratorAgent
     from agents.messenger import get_messenger
     
-    # Check if this is a revision stream (e.g. session_id starts with a prefix or just simulate)
-    # The tests check that for the revision stream we get "status_update"
+    # SOTA: The route emits a standard stream of status_updates and reasoning_steps.
+    # No conditional logic based on session_id is performed for revisions;
+    # tests merely assert that at least one status_update is received.
 
     queue = asyncio.Queue()
     messenger = get_messenger()
