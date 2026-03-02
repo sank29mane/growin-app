@@ -1,5 +1,6 @@
 from decimal import Decimal
 from typing import Optional, List
+from datetime import date
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 
 class PriceData(BaseModel):
@@ -67,3 +68,31 @@ class PortfolioData(BaseModel):
         if v is None:
             return Decimal('0.0')
         return Decimal(str(v))
+
+class DividendData(BaseModel):
+    """
+    Unified dividend record supporting Trading 212 and Alpaca formats.
+    """
+    ticker: str
+    amount: Decimal
+    ex_date: date = Field(..., alias="ex_date") # Standard for both internally
+    payment_date: Optional[date] = Field(None, alias="payment_date")
+    record_date: Optional[date] = Field(None, alias="record_date")
+    status: str = "CONFIRMED"
+    frequency: str = "QUARTERLY"
+    currency: str = "USD"
+    
+    # AI/ML Preprocessed Metrics
+    iqr_scaled_amount: Optional[float] = None
+    sempo_filtered_signal: Optional[float] = None
+    
+    model_config = ConfigDict(populate_by_name=True)
+
+    @field_validator('amount', mode='before')
+    @classmethod
+    def to_decimal(cls, v):
+        if v is None:
+            return Decimal('0.0')
+        if isinstance(v, (float, int, str)):
+            return Decimal(str(v))
+        return v

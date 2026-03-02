@@ -2,7 +2,7 @@
 Portfolio Agent - Fetches portfolio data via MCP
 """
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import logging
 import json
 
@@ -46,8 +46,6 @@ class PortfolioAgent(BaseAgent):
         Context should include:
         - account_type: "invest" (default), "isa", or "all"
         """
-        # Get requested account type (default to invest if not specified)
-        # The Coordinator should pass this from the initial request
         requested_account = context.get("account_type", "invest")
         self.logger.info(f"Analyzing portfolio for account type: {requested_account}")
         
@@ -55,50 +53,52 @@ class PortfolioAgent(BaseAgent):
             from status_manager import status_manager
             status_manager.set_status("portfolio_agent", "running", f"Syncing {requested_account} holdings...")
             
-            # Use a local timeout to prevent hanging.
-            try:
-                # Fallback to wait_for for compatibility with < Python 3.11
-                if hasattr(asyncio, 'timeout'):
+            # SOTA 2026: Consolidated Multi-Account Fetch with Enhanced Timeouts
+            if requested_account == "all":
+                # Parallel fetch for ISA and Invest
+                try:
+                    async with asyncio.timeout(15.0):
+                        tasks = [
+                            self.mcp_client.call_tool("analyze_portfolio", arguments={"account_type": "invest"}),
+                            self.mcp_client.call_tool("analyze_portfolio", arguments={"account_type": "isa"})
+                        ]
+                        results = await asyncio.gather(*tasks, return_exceptions=True)
+                except asyncio.TimeoutError:
+                    raise ValueError("Multi-account fetch timed out")
+                
+                raw_data_list = []
+                for res in results:
+                    if isinstance(res, Exception):
+                        self.logger.error(f"Account fetch failed: {res}")
+                        continue
+                    if res and hasattr(res, 'content') and res.content:
+                        raw_data_list.append(json.loads(res.content[0].text))
+                
+                if not raw_data_list:
+                    raise ValueError("Failed to fetch data from any accounts")
+                
+                # Consolidate raw data
+                consolidated_data = self._consolidate_accounts(raw_data_list)
+                portfolio_data = self._process_portfolio_data(consolidated_data)
+            else:
+                # Single account fetch with timeout
+                try:
                     async with asyncio.timeout(15.0):
                         result = await self.mcp_client.call_tool(
-                            "analyze_portfolio",
+                            "analyze_portfolio", 
                             arguments={"account_type": requested_account}
                         )
-                else:
-                    result = await asyncio.wait_for(
-                        self.mcp_client.call_tool(
-                            "analyze_portfolio",
-                            arguments={"account_type": requested_account}
-                        ),
-                        timeout=15.0
-                    )
-            except asyncio.TimeoutError:
-                raise ValueError("MCP tool call timed out")
-            except Exception as e:
-                # Pass through the error string logic from earlier or standard RPC errors
-                if "Unauthorized" in str(e) or "401" in str(e):
-                     raise ValueError(f"Unauthorized: {e}")
-                raise ValueError(f"MCP tool call failed: {e}")
-            
-            # The result is a list of TextContent objects
-            # We assume the first one contains the JSON data
-            if not result or not hasattr(result, 'content') or not result.content:
-                 raise ValueError("Empty response from MCP tool")
+                except asyncio.TimeoutError:
+                    raise ValueError(f"Portfolio fetch for {requested_account} timed out")
 
-            # Check if content is empty or the first item lacks 'text'
-            first_content = result.content[0]
-            if not hasattr(first_content, 'text') or not first_content.text:
-                 raise ValueError("Invalid or empty text content from MCP tool")
+                if not result or not hasattr(result, 'content') or not result.content:
+                     raise ValueError("Empty response from MCP tool")
+                
+                data = json.loads(result.content[0].text)
+                portfolio_data = self._process_portfolio_data(data)
 
-            content = first_content.text
-            try:
-                data = json.loads(content)
-            except json.JSONDecodeError as decode_err:
-                self.logger.error(f"Failed to parse portfolio JSON. Raw content: {content[:200]}")
-                raise ValueError(f"Invalid JSON response from portfolio tool: {decode_err}")
-            
             # Check for error in tool response
-            if "error" in data:
+            if "data" in locals() and "error" in data:
                 self.logger.warning(f"Portfolio tool returned error: {data['error']}")
                 return AgentResponse(
                     agent_name=self.config.name,
@@ -107,26 +107,6 @@ class PortfolioAgent(BaseAgent):
                     error=data["error"],
                     latency_ms=0
                 )
-
-            # Check for partial errors in account summaries (e.g. 429 on all accounts)
-            summary = data.get("summary", {})
-            accounts = summary.get("accounts", {})
-            if accounts:
-                failed_accounts = [k for k, v in accounts.items() if v.get("status") == "error"]
-                # If we tried to fetch accounts and ALL of them failed
-                if len(failed_accounts) == len(accounts) and len(accounts) > 0:
-                     first_error = accounts[failed_accounts[0]].get("error", "Unknown error")
-                     self.logger.error(f"Portfolio analysis failed for all accounts: {first_error}")
-                     return AgentResponse(
-                        agent_name=self.config.name,
-                        success=False,
-                        data=data,
-                        error=f"All accounts failed: {first_error}",
-                        latency_ms=0
-                     )
-            
-            # Process and validate data structure
-            portfolio_data = self._process_portfolio_data(data)
 
             # --- CACHE UPDATE: Store as "current_portfolio" ---
             try:
@@ -140,14 +120,11 @@ class PortfolioAgent(BaseAgent):
             
             # Fetch history for context (default 30 days) - TIMEOUT PROTECTED
             try:
-                # Wrap history fetching in 5s timeout to prevent blocking core data delivery
-                # History is "nice to have", positions/value are critical.
                 async with asyncio.timeout(5.0):
                    history = await self._fetch_portfolio_history(portfolio_data)
                    portfolio_data.portfolio_history = history
             except asyncio.TimeoutError:
                 self.logger.warning("Portfolio history fetch timed out (5s). Skipping history, returning core data.")
-                # We do NOT fail the request; we just yield data without history
             except Exception as e:
                 self.logger.warning(f"Failed to fetch portfolio history: {e}")
 
@@ -283,6 +260,70 @@ class PortfolioAgent(BaseAgent):
 
         except Exception as e:
             self.logger.error(f"Failed to iteratively update portfolio: {e}")
+
+    def _consolidate_accounts(self, data_list: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Merge multiple account data dictionaries into a single consolidated view."""
+        consolidated = {
+            "summary": {
+                "total_positions": 0,
+                "total_invested": 0.0,
+                "current_value": 0.0,
+                "total_pnl": 0.0,
+                "total_pnl_percent": 0.0,
+                "net_deposits": 0.0,
+                "cash_balance": {"total": 0.0, "free": 0.0},
+                "accounts": {}
+            },
+            "positions": []
+        }
+        
+        pos_map = {} # Ticker -> Position
+        
+        for data in data_list:
+            acc_summary = data.get("summary", {})
+            acc_name = acc_summary.get("account_type", "unknown")
+            
+            # Update summary totals
+            consolidated["summary"]["total_invested"] += float(acc_summary.get("total_invested", 0))
+            consolidated["summary"]["current_value"] += float(acc_summary.get("current_value", 0))
+            consolidated["summary"]["total_pnl"] += float(acc_summary.get("total_pnl", 0))
+            consolidated["summary"]["net_deposits"] += float(acc_summary.get("net_deposits", 0))
+            consolidated["summary"]["cash_balance"]["total"] += float(acc_summary.get("cash_balance", {}).get("total", 0))
+            consolidated["summary"]["cash_balance"]["free"] += float(acc_summary.get("cash_balance", {}).get("free", 0))
+            
+            # Record individual account status
+            consolidated["summary"]["accounts"][acc_name] = acc_summary
+            
+            # Merge positions
+            for pos in data.get("positions", []):
+                ticker = pos.get("ticker")
+                if ticker in pos_map:
+                    # Merge existing position
+                    existing = pos_map[ticker]
+                    # Update quantity and calculate new weighted average price
+                    q1 = float(existing.get("quantity", 0))
+                    p1 = float(existing.get("averagePrice", 0))
+                    q2 = float(pos.get("quantity", 0))
+                    p2 = float(pos.get("averagePrice", 0))
+                    
+                    new_q = q1 + q2
+                    if new_q > 0:
+                        new_avg = ((q1 * p1) + (q2 * p2)) / new_q
+                        existing["averagePrice"] = new_avg
+                        existing["quantity"] = new_q
+                        existing["value"] = float(existing.get("value", 0)) + float(pos.get("value", 0))
+                        existing["ppl"] = float(existing.get("ppl", 0)) + float(pos.get("ppl", 0))
+                else:
+                    pos_map[ticker] = pos.copy()
+        
+        consolidated["positions"] = list(pos_map.values())
+        consolidated["summary"]["total_positions"] = len(consolidated["positions"])
+        
+        # Calculate overall PnL percent
+        if consolidated["summary"]["total_invested"] > 0:
+            consolidated["summary"]["total_pnl_percent"] = (consolidated["summary"]["total_pnl"] / consolidated["summary"]["total_invested"])
+            
+        return consolidated
 
     def _process_portfolio_data(self, data: Dict[str, Any]) -> PortfolioData:
         """Convert raw dictionary to PortfolioData object"""
