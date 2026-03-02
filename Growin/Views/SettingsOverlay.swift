@@ -82,6 +82,8 @@ struct SettingsOverlay: View {
                     .background(Circle().fill(Color.secondary.opacity(0.1)))
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Close Preferences")
+            .accessibilityHint("Dismisses the settings overlay")
         }
         .padding(24)
     }
@@ -108,6 +110,9 @@ struct SettingsOverlay: View {
             }
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityHint("Switches to \(title) settings tab")
+        .accessibilityAddTraits(selectedTab == index ? [.isSelected] : [])
     }
 }
 

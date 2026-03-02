@@ -28,6 +28,8 @@ struct IntelligenceTraceView: View {
                             }
                             .buttonStyle(.plain)
                             .foregroundStyle(.blue)
+                            .accessibilityLabel("Copy internal logic")
+                            .accessibilityHint("Copies the reasoning text to clipboard")
                         }
                         
                         VStack(alignment: .leading, spacing: 4) {

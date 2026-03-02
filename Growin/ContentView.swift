@@ -138,6 +138,9 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .help("System Settings & Console")
+        .accessibilityLabel("System Settings")
+        .accessibilityHint("Opens system settings and intelligent console")
+        .accessibilityValue(backendStatus.isOnline ? "Backend is online" : "Backend is offline")
     }
 }
 
