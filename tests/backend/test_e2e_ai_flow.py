@@ -59,11 +59,19 @@ async def test_full_ai_strategy_revision_trajectory():
     with client.stream("GET", f"/api/ai/strategy/stream?session_id={new_session_id}") as rev_response:
         assert rev_response.status_code == 200
         # Just verify it starts streaming
-        first_line = next(rev_response.iter_lines())
-        line_str = first_line if isinstance(first_line, str) else first_line.decode()
+        first_relevant_line = None
+        for raw_line in rev_response.iter_lines():
+            if not raw_line:
+                continue
+            line_str = raw_line if isinstance(raw_line, str) else raw_line.decode()
+            if line_str.startswith("event: "):
+                first_relevant_line = line_str
+                break
 
+        assert first_relevant_line is not None
         # SOTA: the generator might yield 'event: error' due to missing MLX, or 'event: final_result' or 'event: status_update'
-        assert "event:" in line_str
+        event_name = first_relevant_line.replace("event: ", "").strip()
+        assert event_name in ("status_update", "error", "final_result")
 
 @pytest.mark.asyncio
 async def test_concurrent_strategy_challenges():
