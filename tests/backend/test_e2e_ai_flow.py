@@ -37,8 +37,13 @@ async def test_full_ai_strategy_revision_trajectory():
     assert has_final or has_error
 
     if has_error:
-        # In a mock environment without MLX, the stream might fail. This is acceptable for CI.
-        pytest.skip("Missing MLX hardware in CI environment")
+        # Check if the error is specifically due to missing MLX hardware
+        error_event = next(e for e in events if e["event"] == "error")
+        error_msg = error_event["data"].get("error", "") or error_event["data"].get("message", "")
+        if "MLX" in error_msg or "hardware" in error_msg:
+            pytest.skip(f"Missing MLX hardware in CI environment: {error_msg}")
+        else:
+            pytest.fail(f"Real regression detected in AI stream: {error_msg}")
 
     strategy_id = events[-1]["data"]["strategy_id"]
     
