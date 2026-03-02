@@ -36,6 +36,26 @@ class CoreMLRunner:
         try:
             # Run inference on ANE when available
             prediction = self._model.predict(features)
+            
+            # Extract results to avoid leaking Core ML dictionary wrappers
+            if isinstance(prediction, dict):
+                import numpy as np
+                import gc
+                clean_prediction = {}
+                for k, v in prediction.items():
+                    # If it's a numpy array or CoreML multiarray wrapper, copy to pure python/numpy space
+                    if hasattr(v, 'copy'):
+                        clean_prediction[k] = v.copy()
+                    elif isinstance(v, (list, tuple)):
+                        clean_prediction[k] = list(v)
+                    else:
+                        clean_prediction[k] = v
+                
+                # Force cleanup of Core ML returned proxies to prevent ANE/Metal memory leaks
+                del prediction
+                gc.collect()
+                return clean_prediction
+                
             return prediction
         except Exception as e:
             raise RuntimeError(f"Core ML prediction failed: {e}")

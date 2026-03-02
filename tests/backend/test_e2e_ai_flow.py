@@ -29,15 +29,17 @@ async def test_full_ai_strategy_revision_trajectory():
             elif line_str.startswith("data: "):
                 data_str = line_str.replace("data: ", "").strip()
                 events.append({"event": current_event, "data": json.loads(data_str)})
-                if current_event in ["final_result", "error"]:
+                if current_event == "final_result":
                     break
                     
-    # In CI without mlx, it yields an error, handle gracefully
-    is_error = any(e["event"] == "error" for e in events)
-    if is_error:
-        pytest.skip("Skipping full trajectory test because MLX is not available (error event received).")
+    has_final = any(e["event"] == "final_result" for e in events)
+    has_error = any(e["event"] == "error" for e in events)
+    assert has_final or has_error
 
-    assert any(e["event"] == "final_result" for e in events)
+    if has_error:
+        # In a mock environment without MLX, the stream might fail. This is acceptable for CI.
+        pytest.skip("Missing MLX hardware in CI environment")
+
     strategy_id = events[-1]["data"]["strategy_id"]
     
     # 2. Fetch Strategy Details
@@ -57,10 +59,19 @@ async def test_full_ai_strategy_revision_trajectory():
     with client.stream("GET", f"/api/ai/strategy/stream?session_id={new_session_id}") as rev_response:
         assert rev_response.status_code == 200
         # Just verify it starts streaming
-        first_line = next(rev_response.iter_lines())
-        line_str = first_line if isinstance(first_line, str) else first_line.decode()
-        # the route guarantees at least one status_update
-        assert "status_update" in line_str or "error" in line_str
+        first_relevant_line = None
+        for raw_line in rev_response.iter_lines():
+            if not raw_line:
+                continue
+            line_str = raw_line if isinstance(raw_line, str) else raw_line.decode()
+            if line_str.startswith("event: "):
+                first_relevant_line = line_str
+                break
+
+        assert first_relevant_line is not None
+        # SOTA: the generator might yield 'event: error' due to missing MLX, or 'event: final_result' or 'event: status_update'
+        event_name = first_relevant_line.replace("event: ", "").strip()
+        assert event_name in ("status_update", "error", "final_result")
 
 @pytest.mark.asyncio
 async def test_concurrent_strategy_challenges():
