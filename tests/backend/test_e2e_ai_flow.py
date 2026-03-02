@@ -1,22 +1,25 @@
-import pytest
 import json
-import asyncio
+import pytest
 from fastapi.testclient import TestClient
 from server import app
+import asyncio
 
 client = TestClient(app)
 
 @pytest.mark.asyncio
-async def test_full_ai_strategy_revision_trajectory():
+async def test_e2e_ai_flow():
     """
-    SOTA E2E: Verify Full Trajectory
-    Stream -> Final -> Challenge -> Revision Stream
+    SOTA 2026: End-to-End AI Flow Test.
+    1. Generate Strategy (Streaming)
+    2. Fetch Details
+    3. Challenge Strategy
+    4. Observe Revision Stream
     """
-    # 1. Start Stream
+    # 1. Generate Strategy
     session_id = "e2e-test-session"
     with client.stream("GET", f"/api/ai/strategy/stream?session_id={session_id}&ticker=TSLA") as response:
         assert response.status_code == 200
-        
+
         # Collect events from stream
         events = []
         current_event = None
@@ -29,7 +32,7 @@ async def test_full_ai_strategy_revision_trajectory():
             elif line_str.startswith("data: "):
                 data_str = line_str.replace("data: ", "").strip()
                 events.append({"event": current_event, "data": json.loads(data_str)})
-                if current_event == "final_result":
+                if current_event in ("final_result", "error"):
                     break
                     
     has_final = any(e["event"] == "final_result" for e in events)
@@ -52,14 +55,14 @@ async def test_full_ai_strategy_revision_trajectory():
     assert resp.status_code == 200
     strategy_data = resp.json()
     assert strategy_data["strategy_id"] == strategy_id
-    
+
     # 3. Challenge Strategy (Triggers Revision)
     challenge_resp = client.post(f"/api/ai/strategy/{strategy_id}/challenge?challenge=Test Challenge")
     assert challenge_resp.status_code == 200
     challenge_data = challenge_resp.json()
     assert challenge_data["status"] == "revision_triggered"
     new_session_id = challenge_data["new_session_id"]
-    
+
     # 4. Observe Revision Stream
     with client.stream("GET", f"/api/ai/strategy/stream?session_id={new_session_id}") as rev_response:
         assert rev_response.status_code == 200
@@ -85,16 +88,16 @@ async def test_concurrent_strategy_challenges():
     # Seed mock for test
     from routes.ai_routes import STRATEGIES_MOCK
     STRATEGIES_MOCK[strategy_id] = {"strategy_id": strategy_id}
-    
+
     async def post_challenge(i):
         # Use asyncio.to_thread for synchronous TestClient
         return await asyncio.to_thread(
             client.post, f"/api/ai/strategy/{strategy_id}/challenge?challenge=Concurrent {i}"
         )
-        
+
     tasks = [post_challenge(i) for i in range(5)]
     results = await asyncio.gather(*tasks)
-    
+
     for r in results:
         assert r.status_code == 200
         assert r.json()["status"] == "revision_triggered"

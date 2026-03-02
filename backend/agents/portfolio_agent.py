@@ -17,9 +17,12 @@ import numpy as np
 import yfinance as yf
 from decimal import Decimal
 from utils.financial_math import create_decimal
+from error_resilience import CircuitBreaker
 
 logger = logging.getLogger(__name__)
 
+# Module-level circuit breaker to persist state across agent instantiations
+portfolio_circuit_breaker = CircuitBreaker("mcp_portfolio", failure_threshold=3, recovery_timeout=30)
 
 class PortfolioAgent(BaseAgent):
     """
@@ -38,6 +41,7 @@ class PortfolioAgent(BaseAgent):
         super().__init__(config)
         # Use global MCP client
         self.mcp_client = state.mcp_client
+        self.circuit_breaker = portfolio_circuit_breaker
         
     async def analyze(self, context: Dict[str, Any]) -> AgentResponse:
         """
@@ -53,7 +57,18 @@ class PortfolioAgent(BaseAgent):
             from status_manager import status_manager
             status_manager.set_status("portfolio_agent", "running", f"Syncing {requested_account} holdings...")
             
-            # SOTA 2026: Consolidated Multi-Account Fetch with Enhanced Timeouts
+            # Check circuit breaker before making external calls
+            if not self.circuit_breaker.can_proceed():
+                logger.error(f"Portfolio sync skipped: circuit breaker {self.circuit_breaker.name} is OPEN")
+                return AgentResponse(
+                    agent_name=self.config.name,
+                    success=False,
+                    data={},
+                    error="MCP tool call failed or circuit breaker is OPEN",
+                    latency_ms=0
+                )
+
+            # SOTA 2026: Consolidated Multi-Account Fetch with Enhanced Timeouts and Circuit Breaker
             if requested_account == "all":
                 # Parallel fetch for ISA and Invest
                 try:
@@ -63,8 +78,25 @@ class PortfolioAgent(BaseAgent):
                             self.mcp_client.call_tool("analyze_portfolio", arguments={"account_type": "isa"})
                         ]
                         results = await asyncio.gather(*tasks, return_exceptions=True)
-                except asyncio.TimeoutError:
-                    raise ValueError("Multi-account fetch timed out")
+                        
+                        # Check results for any success/failure to update circuit breaker
+                        any_success = False
+                        for res in results:
+                            if not isinstance(res, Exception):
+                                any_success = True
+                                break
+                        
+                        if any_success:
+                            self.circuit_breaker.record_success()
+                        else:
+                            self.circuit_breaker.record_failure()
+                            
+                except asyncio.TimeoutError as e:
+                    self.circuit_breaker.record_failure()
+                    raise ValueError("Multi-account fetch timed out") from e
+                except Exception as e:
+                    self.circuit_breaker.record_failure()
+                    raise ValueError(f"Multi-account fetch failed: {e}") from e
                 
                 raw_data_list = []
                 for res in results:
@@ -88,8 +120,15 @@ class PortfolioAgent(BaseAgent):
                             "analyze_portfolio", 
                             arguments={"account_type": requested_account}
                         )
-                except asyncio.TimeoutError:
-                    raise ValueError(f"Portfolio fetch for {requested_account} timed out")
+                    self.circuit_breaker.record_success()
+                except asyncio.TimeoutError as e:
+                    self.circuit_breaker.record_failure()
+                    raise ValueError(f"Portfolio fetch for {requested_account} timed out") from e
+                except Exception as e:
+                    self.circuit_breaker.record_failure()
+                    if "Unauthorized" in str(e) or "401" in str(e):
+                        raise ValueError(f"Unauthorized: {e}") from e
+                    raise ValueError(f"Portfolio fetch failed: {e}") from e
 
                 if not result or not hasattr(result, 'content') or not result.content:
                      raise ValueError("Empty response from MCP tool")
