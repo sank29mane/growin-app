@@ -424,7 +424,7 @@ Query: "{clean_query}"
         from .messenger import AgentMessage, get_messenger
         from app_logging import correlation_id_ctx
         
-        agent_key = agent.config.name.lower().replace("agent", "_agent")
+        agent_key = (agent.config.name or "").lower().replace("agent", "_agent")
         c_id = correlation_id_ctx.get()
         messenger = get_messenger()
         

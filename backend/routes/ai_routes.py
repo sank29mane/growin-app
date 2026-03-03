@@ -155,7 +155,7 @@ async def strategy_event_generator(session_id: str, ticker: Optional[str]):
         }
 
     except Exception as e:
-        logger.error(f"Strategy streaming error: {e}")
+        logger.error(f"Strategy streaming error: {e}", exc_info=True)
         yield { "event": "error", "data": json.dumps({"message": str(e)}) }
     finally:
         messenger.unsubscribe_from_trace(correlation_id, messenger_handler)
