@@ -43,10 +43,11 @@ async def test_e2e_ai_flow():
         # Check if the error is specifically due to missing MLX hardware
         error_event = next(e for e in events if e["event"] == "error")
         error_msg = error_event["data"].get("error", "") or error_event["data"].get("message", "")
-        if "MLX" in error_msg or "hardware" in error_msg or "mlx" in error_msg.lower():
-            pytest.skip(f"Missing MLX hardware in CI environment: {error_msg}")
+        error_msg_str = str(error_msg)
+        if "MLX" in error_msg_str or "hardware" in error_msg_str or "mlx" in error_msg_str.lower():
+            pytest.skip(f"Missing MLX hardware in CI environment: {error_msg_str}")
         else:
-            pytest.fail(f"Real regression detected in AI stream: {error_msg}")
+            pytest.fail(f"Real regression detected in AI stream: {error_msg_str}")
 
     strategy_id = events[-1]["data"]["strategy_id"]
     

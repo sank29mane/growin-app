@@ -163,7 +163,7 @@ async def get_live_portfolio(account_type: Optional[str] = None):
             response = await agent.analyze({"account_type": account_type})
             
             if not response.success:
-                error_msg = response.error or "Unknown Error"
+                error_msg = str(response.error or "Unknown Error")
                 
                 # SOTA: Map Agent errors to HTTP Status Codes for UI handling
                 if "Invalid API Credential" in error_msg or "401" in error_msg:
@@ -652,7 +652,7 @@ def _generate_ai_analysis_text(quant_data: dict, forecast_data: dict, bars: list
                     
                     # Ignore if the primary is the same as this aux
                     # (e.g. if TTM failed and we fell back to XGBoost/Holt-Winters)
-                    if model_name.split(" ")[0].lower() in algorithm.lower():
+                    if model_name.split(" ")[0].lower() in (algorithm or "").lower():
                          continue
                          
                     pct = a.get("prediction_pct", 0)

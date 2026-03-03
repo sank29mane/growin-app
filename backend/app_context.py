@@ -41,14 +41,15 @@ class AccountContext:
         return self._active_account
 
     def set_active_account(self, account_type: str):
-        if account_type.lower() not in ["invest", "isa"]:
+        acc_type = account_type.lower() if account_type else "invest"
+        if acc_type not in ["invest", "isa"]:
             # 'all' is valid for querying but not for setting active viewing state in some contexts,
             # but usually we want to switch between specific accounts. 
             # If the UI allows "All", we should permit it, but typically T212 is one or the other.
             # Allowing "all" for flexibility if needed, but primary use is Invest/ISA.
-            if account_type.lower() != "all":
+            if acc_type != "all":
                 raise ValueError(f"Invalid account type: {account_type}. Must be 'invest' or 'isa'.")
-        self._active_account = account_type.lower()
+        self._active_account = acc_type
         
     def get_account_or_default(self, requested_account: Optional[str]) -> str:
         """
