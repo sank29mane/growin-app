@@ -1,6 +1,13 @@
 
-import mlx.core as mx
+import pytest
+try:
+    import mlx.core as mx
+except ImportError:
+    mx = None
+
 from backend.utils.mlx_injections import MLX_INJECTIONS
+
+@pytest.mark.skipif(mx is None, reason="MLX is not installed or available")
 
 def test_injections():
     # Load injections into local namespace

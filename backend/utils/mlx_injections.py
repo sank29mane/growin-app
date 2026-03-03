@@ -3,7 +3,10 @@ NPU Injections Library: Optimized MLX snippets for financial math.
 These snippets are injected into the sandbox before executing generated scripts.
 """
 
-import mlx.core as mx
+try:
+    import mlx.core as mx
+except ImportError:
+    mx = None
 
 MLX_INJECTIONS = {
     "monte_carlo_sim": """

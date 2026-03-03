@@ -117,8 +117,8 @@ Query: "{clean_query}"
             intent_match = re.search(r'INTENT:\s*(\w+)', content, re.IGNORECASE)
             ticker_match = re.search(r'TICKER:\s*([A-Z0-9.]+)', content, re.IGNORECASE)
             
-            intent_type = intent_match.group(1).lower() if intent_match else "market_analysis"
-            ticker = ticker_match.group(1).upper() if ticker_match and "NONE" not in ticker_match.group(1).upper() else None
+            intent_type = intent_match.group(1).lower() if (intent_match and intent_match.group(1)) else "market_analysis"
+            ticker = ticker_match.group(1).upper() if ticker_match and ticker_match.group(1) and "NONE" not in ticker_match.group(1).upper() else None
             
             needs_map = {
                 "price_check": ["quant"],
