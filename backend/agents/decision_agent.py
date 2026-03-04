@@ -85,7 +85,7 @@ class DecisionAgent:
         prompt = self._inject_context_layers(prompt, query)
 
         # 3. Math Delegation Workflow (NPU Accelerated)
-        if any(k in query.lower() for k in ["simulate", "calculate", "math", "model", "monte carlo", "forecast"]):
+        if query and any(k in query.lower() for k in ["simulate", "calculate", "math", "model", "monte carlo", "forecast"]):
             logger.info("DecisionAgent: Math query detected. Enforcing NPU-Accelerated Sandbox.")
             try:
                 from .math_generator_agent import MathGeneratorAgent
@@ -170,7 +170,7 @@ class DecisionAgent:
             status_manager.set_status("decision_agent", "ready", "Decision delivered", model=self.model_name)
 
             # Interactive Actions
-            if (context.intent == "goal_planning" or "plan" in query.lower()) and "CREATE_GOAL_PLAN" not in recommendation:
+            if (context.intent == "goal_planning" or (query and "plan" in query.lower())) and "CREATE_GOAL_PLAN" not in recommendation:
                 recommendation += "\n\n[ACTION:CREATE_GOAL_PLAN]"
 
             # Audit Log
@@ -529,7 +529,7 @@ class DecisionAgent:
             
             # Abstract Query Detection
             is_abstract = False
-            q_lower = query.lower()
+            q_lower = query.lower() if query else ""
             if any(w in q_lower for w in ["portfolio", "market", "why", "trend", "economy", "inflation"]):
                 # Simple check: no obvious standalone uppercase ticker symbols (e.g. AAPL)
                 if not re.search(r'\b[A-Z]{2,5}\b', query):
@@ -682,7 +682,7 @@ class DecisionAgent:
         return None
 
     def _detect_account_mentions(self, query: str) -> str:
-        q = query.lower()
+        q = query.lower() if query else ""
         has_invest = any(w in q for w in ["invest", "investment", "brokerage", "trading"])
         has_isa = any(w in q for w in ["isa", "tax-free"])
         has_both = any(w in q for w in ["both", "all", "compare", "portfolio"])
