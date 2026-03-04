@@ -1,22 +1,20 @@
 # GSD JOURNAL
 
-## Session: 2026-02-28 16:45 (Handover)
+## Session: 2026-03-04 10:30 (Milestone Completion)
 
 ### Objective
-Resolve LM Studio 0.4.x integration issues and delegate stateful chat finalization.
+Complete and archive the "SOTA Intelligence & Financial Autonomy (2026)" milestone (Phases 4-23).
 
 ### Accomplished
-- **Fixed Model Listing**: Native V1 API response structure (top-level `models` key and `key` field) is now correctly handled.
-- **Fixed Model Loading**: Updated payload to use `loadConfig` with `gpuOffload` and `contextLength` (0.4.x spec).
-- **Auto-Detection Priority**: LLMFactory now prioritizes Nemotron and GPT-OSS 20B.
-- **Stateful Database**: Updated `ChatManager` and SQLite schema to persist `lm_studio_response_id`.
-- **UI Safeguards**: Implemented red banner and input tint for Live Trading mode.
-- **Operational Speed**: Rewrote `start.sh` and `stop.sh` for high-performance parallel execution.
+- **Verified Work**: Successfully ran 34+ integration tests for Unified Intelligence (Ticker Resolution, Financial Math) and Dividend Capture (Neural ODE).
+- **Archived Milestone**: Created `SOTA-INTELLIGENCE-SUMMARY.md` and moved all phase plans (4-23) to `.gsd/milestones/SOTA-INTELLIGENCE-2026/`.
+- **Reset Roadmap**: Updated `.gsd/ROADMAP.md` and `.planning/ROADMAP.md` for the next milestone (Autonomous Experience & Production Scaling).
+- **Updated State**: Initialized Phase 24 "Frontend Reasoning Trace & User Experience Polish" in `STATE.md`.
 
 ### Identified Gaps
-- **UI Flicker**: Race condition in `LMStudioViewModel` causing status to toggle during load.
-- **Stateful Chat**: `DecisionAgent` and `chat_routes.py` need final wiring to pass/store `response_id`.
+- **120Hz Smoothness**: `LMStudioViewModel` still has a race condition causing status flickering.
+- **Accessibility**: FE-02 audit is pending.
+- **Reasoning Trace**: Backend logic exists, but SwiftUI frontend binding for real-time trace display is not yet implemented.
 
 ### Handoff Notes
-Phase 14 is conceptually complete but evolved into Phase 15 for stability and stateful logic. All research is documented in `docs/history/01-LM_STUDIO_API_RESEARCH.md`.
-Next agent should run `gsd:plan-phase` for Phase 15.
+Milestone complete. All Phase 22/23 code is ready for final commit. Next agent should begin Phase 24 planning and implementation of the Reasoning Trace UI.

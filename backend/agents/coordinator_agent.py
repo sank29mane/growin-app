@@ -7,6 +7,7 @@ from .base_agent import BaseAgent, AgentResponse
 from market_context import MarketContext
 from . import QuantAgent, PortfolioAgent, ForecastingAgent, ResearchAgent, SocialAgent, WhaleAgent, GoalPlannerAgent
 from .decision_agent import DecisionAgent
+from utils.ticker_utils import TickerResolver
 from data_fabricator import DataFabricator
 from typing import Dict, Any, List, Optional
 import asyncio
@@ -176,8 +177,8 @@ Query: "{clean_query}"
             intent_match = re.search(r'INTENT:\s*(\w+)', content, re.IGNORECASE)
             ticker_match = re.search(r'TICKER:\s*([A-Z0-9.]+)', content, re.IGNORECASE)
             
-            intent_type = intent_match.group(1).lower() if intent_match else "market_analysis"
-            ticker = ticker_match.group(1).upper() if ticker_match and "NONE" not in ticker_match.group(1).upper() else None
+            intent_type = intent_match.group(1).lower() if (intent_match and intent_match.group(1)) else "market_analysis"
+            ticker = ticker_match.group(1).upper() if ticker_match and ticker_match.group(1) and "NONE" not in ticker_match.group(1).upper() else None
             
             # Map intents to needs (Hardcoded logic is safer than LLM predicting list)
             needs_map = {
@@ -241,17 +242,19 @@ Query: "{clean_query}"
         intent = await self._classify_intent(query)
         logger.info(f"Coordinator Intent: {intent['type']} - Needs: {intent.get('needs', [])}")
 
-        # 1a. Ticker Extraction fallback
+        # 1a. Ticker Extraction fallback via TickerResolver
+        resolver = TickerResolver()
         if not ticker:
             ticker = intent.get("primary_ticker")
             
-            # Tier 3: Regex Fallback (if LLM failed to extract)
+            # Tier 3: Centralized Resolver Fallback
             if not ticker:
-                from utils import extract_ticker_from_text
-                ticker = extract_ticker_from_text(query)
+                extracted = resolver.extract(query)
+                if extracted:
+                    ticker = extracted[0]
 
             if ticker:
-                logger.info(f"Coordinator extracted ticker (Fallback): {ticker}")
+                logger.info(f"Coordinator extracted ticker (Resolver): {ticker}")
         
         # 1b. Account Detection
         detected_account = account_type
@@ -262,16 +265,12 @@ Query: "{clean_query}"
             elif detected_account != "all":
                  account_type = detected_account
 
-        # COORDINATOR FIX: Robust normalization via T212 rules (fast & deterministic)
+        # COORDINATOR FIX: Robust normalization via Resolver
         if ticker:
-            try:
-                from trading212_mcp_server import normalize_ticker
-                original_ticker = ticker
-                ticker = normalize_ticker(ticker)
-                if ticker != original_ticker:
-                     logger.info(f"Ticker normalized: {original_ticker} -> {ticker}")
-            except ImportError:
-                logger.warning("Could not import normalize_ticker from trading212_mcp_server")
+            original_ticker = ticker
+            ticker = resolver.normalize(ticker)
+            if ticker != original_ticker:
+                 logger.info(f"Ticker normalized (Resolver): {original_ticker} -> {ticker}")
 
         # 2. CENTRALIZED DATA FABRICATION
         status_manager.set_status("coordinator", "working", "Fabricating Market Context...")
@@ -425,7 +424,7 @@ Query: "{clean_query}"
         from .messenger import AgentMessage, get_messenger
         from app_logging import correlation_id_ctx
         
-        agent_key = agent.config.name.lower().replace("agent", "_agent")
+        agent_key = (agent.config.name or "").lower().replace("agent", "_agent")
         c_id = correlation_id_ctx.get()
         messenger = get_messenger()
         
@@ -448,7 +447,7 @@ Query: "{clean_query}"
                 
                 # COORDINATOR SELF-CORRECTION: Try to fix if it's a known data issue
                 if not result.success and result.error:
-                    error_msg = str(result.error).lower()
+                    error_msg = result.error.lower() if isinstance(result.error, str) else str(result.error).lower()
                     
                     # Trigger resolution if ticker not found or delisted (Tier 2 Escalation)
                     if any(x in error_msg for x in ["not found", "ticker", "delisted", "no data", "404"]):
@@ -627,9 +626,8 @@ Query: "{clean_query}"
                 if best_match and highest_score > 0.6:
                     found_ticker = best_match["ticker"]
                     
-                    # Normalize the found ticker (SOTA rule path)
-                    from trading212_mcp_server import normalize_ticker
-                    normalized = normalize_ticker(found_ticker)
+                    # Normalize the found ticker via Resolver
+                    normalized = TickerResolver().normalize(found_ticker)
                     
                     logger.info(f"Coordinator Tier 2: Found best match '{best_match['name']}' ({found_ticker}) score={highest_score:.2f} -> {normalized}")
                     return normalized
@@ -819,15 +817,14 @@ Query: "{clean_query}"
 
 
     def _resolve_ticker_from_history(self, history: List[Dict]) -> Optional[str]:
-        """Attempt to find last discussed ticker in history"""
-        # history is passed in chronological order. history[-1] is the most recent.
-        from utils import extract_ticker_from_text
+        """Attempt to find last discussed ticker in history using TickerResolver"""
+        resolver = TickerResolver()
         for msg in reversed(history):
             content = msg.get("content", "")
             if not content:
                 continue
-            found = extract_ticker_from_text(content, find_last=False)
-            if found:
-                return found
+            extracted = resolver.extract(content)
+            if extracted:
+                return extracted[0]
                 
         return None

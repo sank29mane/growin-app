@@ -85,7 +85,7 @@ class DecisionAgent:
         prompt = self._inject_context_layers(prompt, query)
 
         # 3. Math Delegation Workflow (NPU Accelerated)
-        if query and any(k in query.lower() for k in ["simulate", "calculate", "math", "model", "monte carlo", "forecast"]):
+        if any(k in (query or "").lower() for k in ["simulate", "calculate", "math", "model", "monte carlo", "forecast"]):
             logger.info("DecisionAgent: Math query detected. Enforcing NPU-Accelerated Sandbox.")
             try:
                 from .math_generator_agent import MathGeneratorAgent
@@ -170,7 +170,7 @@ class DecisionAgent:
             status_manager.set_status("decision_agent", "ready", "Decision delivered", model=self.model_name)
 
             # Interactive Actions
-            if (context.intent == "goal_planning" or (query and "plan" in query.lower())) and "CREATE_GOAL_PLAN" not in recommendation:
+            if (context.intent == "goal_planning" or "plan" in (query or "").lower()) and "CREATE_GOAL_PLAN" not in recommendation:
                 recommendation += "\n\n[ACTION:CREATE_GOAL_PLAN]"
 
             # Audit Log
@@ -510,7 +510,7 @@ class DecisionAgent:
     def _inject_context_layers(self, prompt: str, query: str) -> str:
         """Inject RAG and Skills into prompt."""
         # Detect small model for aggressive optimization
-        is_small_model = any(k in self.model_name.lower() for k in ["nano", "mobile", "phi", "tiny", "gemma-2b"])
+        is_small_model = any(k in (self.model_name or "").lower() for k in ["nano", "mobile", "phi", "tiny", "gemma-2b"])
 
         # Skills (Limit length for small models)
         from utils.skill_loader import get_skill_loader
@@ -529,7 +529,11 @@ class DecisionAgent:
             
             # Abstract Query Detection
             is_abstract = False
+<<<<<<< HEAD
+            q_lower = (query or "").lower()
+=======
             q_lower = query.lower() if query else ""
+>>>>>>> origin/main
             if any(w in q_lower for w in ["portfolio", "market", "why", "trend", "economy", "inflation"]):
                 # Simple check: no obvious standalone uppercase ticker symbols (e.g. AAPL)
                 if not re.search(r'\b[A-Z]{2,5}\b', query):
@@ -563,7 +567,7 @@ class DecisionAgent:
     def _get_system_persona(self, intent: str) -> str:
         """Return the appropriate system prompt based on intent."""
         # Simplified persona for small models to reduce cognitive load
-        if any(k in self.model_name.lower() for k in ["nano", "mobile", "phi", "tiny", "gemma-2b"]):
+        if any(k in (self.model_name or "").lower() for k in ["nano", "mobile", "phi", "tiny", "gemma-2b"]):
             return "**Lead Financial Trader (Nano)**\nYou are a senior, profit‑maximising Lead Financial Trader. You consult your Coordinator Agent for data and provide high-probability trade suggestions based on SMA, RSI, MACD, and Sentiment."
 
         base_persona = """You are the Lead Financial Trader and the primary interface for the client. 
@@ -682,7 +686,7 @@ class DecisionAgent:
         return None
 
     def _detect_account_mentions(self, query: str) -> str:
-        q = query.lower() if query else ""
+        q = (query or "").lower()
         has_invest = any(w in q for w in ["invest", "investment", "brokerage", "trading"])
         has_isa = any(w in q for w in ["isa", "tax-free"])
         has_both = any(w in q for w in ["both", "all", "compare", "portfolio"])

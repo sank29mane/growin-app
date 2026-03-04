@@ -28,10 +28,10 @@ class LLMFactory:
 
         from model_config import get_model_info
         info = get_model_info(model_name)
-        provider = info.get("provider", "").lower()
+        provider = (info.get("provider") or "").lower()
 
         # Normalization and Provider Detection
-        model_lower = model_name.lower()
+        model_lower = (model_name or "").lower()
         
         try:
             llm_instance = None
@@ -189,17 +189,18 @@ class LLMFactory:
                 m_id = m.get("key") or m.get("id")
                 if not m_id: continue
                 
+                m_id_str = str(m_id).lower()
                 # SOTA Safety: Do not auto-load behemoths (>30B) to prevent system freeze
-                is_giant = "40b" in m_id.lower() or "70b" in m_id.lower()
+                is_giant = "40b" in m_id_str or "70b" in m_id_str
                 
-                if "embed" not in m_id.lower() and "nomic" not in m_id.lower() and not is_giant:
+                if "embed" not in m_id_str and "nomic" not in m_id_str and not is_giant:
                     llm_candidates.append(m_id)
 
             if llm_candidates:
                 # SOTA Priority Logic: User Preferred -> Popular Stable -> Others
-                nemotron = [c for c in llm_candidates if "nemotron" in c.lower()]
-                gpt_oss = [c for c in llm_candidates if "gpt-oss" in c.lower() or "oss-20b" in c.lower()]
-                stable = [c for c in llm_candidates if "llama" in c.lower() or "gemma" in c.lower()]
+                nemotron = [c for c in llm_candidates if "nemotron" in str(c).lower()]
+                gpt_oss = [c for c in llm_candidates if "gpt-oss" in str(c).lower() or "oss-20b" in str(c).lower()]
+                stable = [c for c in llm_candidates if "llama" in str(c).lower() or "gemma" in str(c).lower()]
                 
                 if nemotron:
                     loaded_id = nemotron[0]

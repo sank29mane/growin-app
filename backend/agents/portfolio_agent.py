@@ -17,6 +17,7 @@ import numpy as np
 import yfinance as yf
 from decimal import Decimal
 from utils.financial_math import create_decimal
+from utils.portfolio_analyzer import PortfolioAnalyzer
 from error_resilience import CircuitBreaker
 
 logger = logging.getLogger(__name__)
@@ -415,14 +416,14 @@ class PortfolioAgent(BaseAgent):
         )
 
     async def _fetch_portfolio_history(self, p_data: PortfolioData, days: int = 30) -> list:
-        """Synthetic history generator using consolidated holdings."""
+        """Synthetic history generator using consolidated holdings via PortfolioAnalyzer."""
         positions = p_data.positions
         free_cash = float(p_data.cash_balance.get("free", 0.0))
         
         if not positions:
             return []
 
-        # Map ticker to total quantity across all accounts
+        # Map ticker to total quantity
         holdings = {}
         for p in positions:
             t = normalize_ticker(p.get("ticker", ""))
@@ -441,74 +442,53 @@ class PortfolioAgent(BaseAgent):
             loop = asyncio.get_running_loop()
             tickers_str = " ".join(tickers)
             
-            # Check cache first
-            cache_key = f"portfolio_history_{tickers_str}_{period}"
-            cached_data = cache.get(cache_key)
+            # 1. Fetch historical prices
+            cache_key = f"market_prices_{tickers_str}_{period}"
+            cached_prices = cache.get(cache_key)
             
-            if cached_data is not None:
-                self.logger.info(f"Cache hit for portfolio history: {cache_key}")
-                df = cached_data
+            if cached_prices:
+                market_prices_df = cached_prices
             else:
-                self.logger.info(f"Cache miss for portfolio history. Fetching from yfinance: {tickers_str}")
-                # Download historical prices
-                df = await loop.run_in_executor(None, lambda: yf.download(tickers_str, period=period, progress=False)['Close'])
-                
-                if not df.empty:
-                    # Cache the result (TTL 1 hour)
-                    cache.set(cache_key, df, ttl=3600)
-            
-            if df.empty:
+                market_prices_df = await loop.run_in_executor(None, lambda: yf.download(tickers_str, period=period, progress=False)['Close'])
+                if not market_prices_df.empty:
+                    cache.set(cache_key, market_prices_df, ttl=3600)
+
+            if market_prices_df.empty:
                 return []
-            
-            df = df.ffill().bfill()
-            
-            # Vectorized implementation
-            if isinstance(df, pd.Series):
-                ticker = list(holdings.keys())[0]
-                df = df.to_frame(name=ticker)
 
-            valid_holdings = {k: v for k, v in holdings.items() if k in df.columns}
-
-            if not valid_holdings:
-                 # Return free cash for all timestamps if no valid holdings match
-                 portfolio_val = pd.Series(free_cash, index=df.index)
+            # 2. Format for PortfolioAnalyzer
+            # market_data dict: {ticker: [{'t': timestamp, 'c': price}, ...]}
+            market_data = {}
+            if isinstance(market_prices_df, pd.Series):
+                # Single ticker case
+                t = tickers[0]
+                market_data[t] = [{"t": ts.value // 10**6, "c": val} for ts, val in market_prices_df.items()]
             else:
-                quantities = pd.Series(valid_holdings)
+                for t in tickers:
+                    if t in market_prices_df.columns:
+                        market_data[t] = [{"t": ts.value // 10**6, "c": val} for ts, val in market_prices_df[t].items()]
 
-                # Align df to quantities and ensure we work on a copy
-                df_subset = df[quantities.index].copy()
+            # 3. Generate Backcast History
+            analyzer = PortfolioAnalyzer()
+            backcast_positions = [{"ticker": t, "qty": q} for t, q in holdings.items()]
+            history_df = analyzer.generate_backcast_history(backcast_positions, market_data)
+            
+            if history_df.empty:
+                return []
+                
+            # Add free cash
+            history_df["total_value"] += free_cash
 
-                # Apply Pence conversion
-                # Find columns ending with .L
-                uk_tickers = [t for t in df_subset.columns if t.endswith(".L")]
-
-                for t in uk_tickers:
-                    try:
-                        # Ensure numeric comparison - yfinance can return strings
-                        series = pd.to_numeric(df_subset[t], errors='coerce')
-                        mask = series > 500
-                        # Apply transformation only where mask is true using numpy.where
-                        df_subset[t] = np.where(mask, series / 100.0, series)
-                    except Exception as e:
-                        self.logger.warning(f"Currency conversion failed for {t}: {e}")
-
-                # Calculate weighted sum
-                portfolio_val = df_subset.dot(quantities)
-                portfolio_val = portfolio_val + free_cash
-
-            # Handle Nan/Inf
-            portfolio_val = portfolio_val.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-
-            # Create result list
+            # 4. Format for response
             history_points = [
                 {
                     "timestamp": ts.isoformat(),
                     "total_value": round(float(v), 2)
                 }
-                for ts, v in zip(portfolio_val.index, portfolio_val.values)
+                for ts, v in zip(history_df.index, history_df["total_value"].values)
             ]
             
             return history_points
         except Exception as e:
-            self.logger.error(f"Error fetching synthetic history: {e}")
+            self.logger.error(f"Error fetching synthetic history via analyzer: {e}")
             return []
