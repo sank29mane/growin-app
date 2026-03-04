@@ -4,6 +4,7 @@ Shared logic for resolving ticker discrepancies between T212, Yahoo Finance, and
 """
 
 import re
+from typing import Optional
 
 # Bolt Optimization: Import optional dependencies at module level to avoid repeated ImportErrors (PR #48)
 try:
@@ -81,78 +82,134 @@ def normalize_ticker(ticker: str) -> str:
     """
     SOTA Ticker Normalization: Resolves discrepancies between Trading212, 
     Yahoo Finance, Alpaca, and Finnhub via Rust-optimized core.
+    
+    Now a wrapper for TickerResolver.normalize for backward compatibility.
     """
-    # Dynamic check for growin_core to support test mocking
-    import sys
-    g_core = sys.modules.get("growin_core")
-    if g_core and hasattr(g_core, "normalize_ticker"):
-        try:
-            return g_core.normalize_ticker(ticker)
-        except Exception:
-            pass
+    return TickerResolver().normalize(ticker)
 
-    # Fallback to robust Python logic if Rust fails or is missing
-    if not ticker:
-        return ""
+class TickerResolver:
+    """
+    Unified Service for Ticker Normalization, Extraction, and Validation.
+    Centralizes US/UK/Leveraged logic and tiered resolution.
+    """
     
+    def __init__(self):
+        self.special_mappings = SPECIAL_MAPPINGS
+        self.us_exclusions = US_EXCLUSIONS
+        self.uk_stems = UK_COMMON_STEMS
+        self._cache = {} # Simple in-memory cache for this instance
 
+    def normalize(self, ticker: str) -> str:
+        """
+        Normalizes a ticker symbol to a standard format (e.g., adding .L for UK stocks).
+        Preferentially uses the Rust core implementation if available.
+        """
+        if not ticker:
+            return ""
 
-    # 1. Basic Cleaning
-    ticker = ticker.upper().strip().replace("$", "")
-    
-    # 2. Already Normalized (contains dot)
-    if "." in ticker:
+        # 1. Dynamic check for growin_core
+        import sys
+        g_core = sys.modules.get("growin_core")
+        if g_core and hasattr(g_core, "normalize_ticker"):
+            try:
+                return g_core.normalize_ticker(ticker)
+            except Exception:
+                pass
+
+        # 2. Basic Cleaning
+        ticker = ticker.upper().strip().replace("$", "")
+        
+        # 3. Already Normalized (contains dot)
+        if "." in ticker:
+            return ticker
+
+        # 4. Handle Platform-Specific Artifacts
+        original = ticker
+        # Strip T212 suffixes (handles multiple like _US_EQ)
+        ticker = re.sub(r'(_EQ|_US|_BE|_DE|_GB|_FR|_NL|_ES|_IT)+$', '', ticker)
+        ticker = ticker.replace("_", "") # Fallback for messy underscores
+        
+        # 5. SPECIAL MAPPINGS
+        if ticker in self.special_mappings:
+            ticker = self.special_mappings[ticker]
+
+        # 6. Suffix Protection for Leveraged Products
+        is_leveraged_etp = ticker.endswith("1") and len(ticker) > 3
+        if is_leveraged_etp:
+            if ticker.startswith(self.uk_stems):
+                ticker = ticker[:-1]
+                
+        # 7. Global Exchange Logic (UK vs US)
+        is_explicit_uk = "_EQ" in original and "_US" not in original
+        
+        is_likely_uk = (len(ticker) <= 3 or (len(ticker) <= 5 and ticker.endswith("L"))) and ticker not in self.us_exclusions
+        
+        if len(ticker) == 4 and not ticker.endswith("L"):
+            is_likely_uk = False
+
+        if ticker.startswith(self.uk_stems):
+            is_likely_uk = True
+
+        if is_likely_uk and ticker.endswith("L") and len(ticker) > 3 and ticker not in self.us_exclusions:
+            ticker = ticker[:-1]
+
+        is_leveraged = (bool(re.search(r'^[357][A-Z]+', ticker)) or \
+                        bool(re.search(r'^[A-Z]+[2357]$', ticker))) and len(ticker) <= 5
+
+        if (is_explicit_uk or is_likely_uk or is_leveraged) and ticker not in self.us_exclusions:
+            if not ticker.endswith(".L") and "." not in ticker:
+                return f"{ticker}.L"
+
         return ticker
 
-    # 3. Handle Platform-Specific Artifacts
-    original = ticker
-    # Strip T212 suffixes (handles multiple like _US_EQ)
-    ticker = re.sub(r'(_EQ|_US|_BE|_DE|_GB|_FR|_NL|_ES|_IT)+$', '', ticker)
-    ticker = ticker.replace("_", "") # Fallback for messy underscores
-    
-    # 4. SPECIAL MAPPINGS (SOTA curated list for T212 -> YFinance)
-    if ticker in SPECIAL_MAPPINGS:
-        ticker = SPECIAL_MAPPINGS[ticker]
+    def extract(self, text: str) -> list[str]:
+        """
+        NLP-lite ticker extraction from natural language strings.
+        Supports common patterns like "Compare AAPL and MSFT" or "Check Tesla (TSLA)".
+        """
+        # Patterns: 
+        # 1. Standard UPPERCASE tickers (2-5 chars)
+        # 2. Tickers in parentheses: (AAPL)
+        # 3. Alphanumeric tickers: 3GLD, 5QQQ
+        
+        # Basic regex for potential tickers
+        # Excludes common words that match the pattern if necessary
+        potential_tickers = re.findall(r'\b[A-Z0-9]{1,5}(?:\.[A-L])?\b', text)
+        
+        # Filter and normalize
+        results = []
+        for t in potential_tickers:
+            norm = self.normalize(t)
+            if norm and norm not in results:
+                # Basic heuristic: ignore if it's a very short common word
+                if len(t) == 1 and t not in ["F", "T", "C", "V", "Z", "O", "D", "R", "K", "X", "S", "M", "A", "G"]:
+                    continue
+                results.append(norm)
+                
+        return results
 
-    # 5. Suffix Protection for Leveraged Products & Extra 'L' Handling
-    # Many UK tickers arrive with an extra 'L' (e.g., BARCL, SHELL, GSKL).
-    # If len > 3 and ends in 'L', it's likely a suffix we should strip.
-    is_leveraged_etp = ticker.endswith("1") and len(ticker) > 3
-    
-    # Check against common UK stock stems for "1" suffix
-    if is_leveraged_etp:
-        if ticker.startswith(UK_COMMON_STEMS):
-            ticker = ticker[:-1]
+    async def resolve(self, query: str) -> Optional[str]:
+        """
+        Tiered Resolution: 
+        1. Exact Match Cache
+        2. Normalize & Validate
+        3. Provider Search (Stub for now)
+        """
+        # 1. Quick normalization
+        ticker = self.normalize(query)
+        if not ticker:
+            return None
             
-    # 6. Global Exchange Logic (UK vs US)
-    is_explicit_uk = "_EQ" in original and "_US" not in original
-    
-    # Improved Likelihood check:
-    # 1. Must NOT be in US Exclusions
-    # 2. Must either be short (<= 3 chars) OR end in L (with reasonable length)
-    is_likely_uk = (len(ticker) <= 3 or (len(ticker) <= 5 and ticker.endswith("L"))) and ticker not in US_EXCLUSIONS
-    
-    # SOTA Fix: SMCI and other 4-char US tickers should NOT be likely UK
-    if len(ticker) == 4 and not ticker.endswith("L"):
-        is_likely_uk = False
-
-    # Force likelihood for known UK stems (LLOY, BARC, TSCO, etc)
-    if ticker.startswith(UK_COMMON_STEMS):
-        is_likely_uk = True
-
-    # Heuristic for stripping extra 'L' (e.g. BARCL -> BARC)
-    if is_likely_uk and ticker.endswith("L") and len(ticker) > 3 and ticker not in US_EXCLUSIONS:
-        # Safe heuristic: Strip L if it's likely a UK suffix artifact
-        ticker = ticker[:-1]
-
-    # Leveraged ETPs (Granular detection - must have a digit and be short)
-    is_leveraged = (bool(re.search(r'^[357][A-Z]+', ticker)) or \
-                    bool(re.search(r'^[A-Z]+[2357]$', ticker))) and len(ticker) <= 5
-
-    # FINAL DECISION: Should we add .L?
-    if (is_explicit_uk or is_likely_uk or is_leveraged) and ticker not in US_EXCLUSIONS:
-        # Ensure it doesn't already have .L (redundant check)
-        if not ticker.endswith(".L") and "." not in ticker:
-            return f"{ticker}.L"
-
-    return ticker
+        # 2. Check Cache
+        if ticker in self._cache:
+            return self._cache[ticker]
+            
+        # 3. Extraction if query is a sentence
+        if " " in query:
+            extracted = self.extract(query)
+            if extracted:
+                return extracted[0] # Return first match
+                
+        # 4. Provider Validation (Future: call Alpaca/Finnhub search)
+        
+        return ticker

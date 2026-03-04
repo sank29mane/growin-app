@@ -50,6 +50,7 @@ dependencies = [
     "redis>=5.0.0",
     "sse-starlette>=3.0.3",
     "canonicaljson>=2.0.0",
+    "torchdiffeq>=0.2.5",
 ]
 
 [tool.uv.sources]

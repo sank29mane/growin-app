@@ -1,5 +1,7 @@
 import torch
 import torch.nn as nn
+from typing import Optional
+from torchdiffeq import odeint_adjoint as odeint
 
 class ODEFunction(nn.Module):
     """
@@ -14,12 +16,14 @@ class ODEFunction(nn.Module):
         )
 
     def forward(self, t, h):
+        # Time-agnostic derivative in this simple model, 
+        # but t is required by torchdiffeq
         return self.net(h)
 
-class RecoveryODE(nn.Module):
+class RecoveryVelocityNODE(nn.Module):
     """
     Neural ODE model for predicting post-dividend price recovery velocity.
-    Models the continuous-time evolution of price features.
+    Uses Adjoint Sensitivity Method for O(1) memory cost during training.
     """
     def __init__(self, input_dim: int = 16, hidden_dim: int = 32):
         super().__init__()
@@ -27,33 +31,37 @@ class RecoveryODE(nn.Module):
         self.ode_func = ODEFunction(hidden_dim)
         self.output_proj = nn.Linear(hidden_dim, 1) # Recovery Velocity output
 
-    def forward(self, x: torch.Tensor, steps: int = 10, dt: float = 0.1):
+    def forward(self, x: torch.Tensor, t: Optional[torch.Tensor] = None):
         """
-        Forward pass using Euler integration for the ODE.
+        Forward pass using torchdiffeq solver.
         
         Args:
             x: Input tensor of shape (batch_size, input_dim)
-            steps: Number of integration steps
-            dt: Time step size
+            t: Time points for integration (defaults to [0, 1])
             
         Returns:
-            Predicted recovery velocity (scalar per sample)
+            Predicted recovery velocity at end of integration
         """
-        # Map input to hidden space (h0)
-        h = self.input_proj(x)
-        
-        # ODE Integration: h(t+dt) = h(t) + dt * f(h(t), t)
-        for i in range(steps):
-            t = i * dt
-            h = h + dt * self.ode_func(t, h)
+        if t is None:
+            t = torch.tensor([0.0, 1.0]).to(x.device)
             
+        # Map input to hidden space (h0)
+        h0 = self.input_proj(x)
+        
+        # ODE Integration: h(t) = h0 + integral f(h(tau), tau) dtau
+        # Use adjoint method for memory efficiency
+        h_trajectory = odeint(self.ode_func, h0, t, rtol=1e-3, atol=1e-4)
+        
+        # Take the final hidden state
+        h_final = h_trajectory[-1]
+        
         # Map back to prediction space
-        velocity = self.output_proj(h)
+        velocity = self.output_proj(h_final)
         return velocity
 
 if __name__ == "__main__":
     # Quick test for Task 1 verification
-    model = RecoveryODE(input_dim=10, hidden_dim=20)
+    model = RecoveryVelocityNODE(input_dim=10, hidden_dim=20)
     dummy_input = torch.randn(5, 10)
     output = model(dummy_input)
     print(f"Output shape: {output.shape}")

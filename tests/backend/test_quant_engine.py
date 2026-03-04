@@ -1,5 +1,6 @@
 import sys
 import os
+from decimal import Decimal
 
 # Ensure we can import modules from the current directory
 sys.path.append(os.getcwd())
@@ -39,9 +40,9 @@ def test_quant_engine():
         print(f"Portfolio Return: {metrics.get('portfolio_return')}")
 
         # Simple verification
-        assert metrics.get('total_value') == 3000.0, f"Expected total value 3000.0, got {metrics.get('total_value')}"
-        assert metrics.get('total_cost') == 2800.0, f"Expected total cost 2800.0, got {metrics.get('total_cost')}"
-        assert abs(metrics.get('portfolio_return') - (200/2800)) < 1e-6, "Portfolio return calculation incorrect"
+        assert metrics.get('total_value') == Decimal("3000.0"), f"Expected total value 3000.0, got {metrics.get('total_value')}"
+        assert metrics.get('total_cost') == Decimal("2800.0"), f"Expected total cost 2800.0, got {metrics.get('total_cost')}"
+        assert abs(metrics.get('portfolio_return') - Decimal(str(200/2800))) < Decimal("1e-6"), "Portfolio return calculation incorrect"
         print("Verification passed.")
 
 if __name__ == "__main__":

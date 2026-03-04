@@ -4,68 +4,31 @@ This document outlines the high-level phases for the GSD integration and ongoing
 
 ---
 
-## Phase 0: GSD Orchestration Setup
-- **Status**: COMPLETED (2026-02-23)
+## 🏛 ARCHIVE: Milestone: Foundation & Precision Alpha
+- **Completed**: 2026-02-23
+- **Phases**: 0, 1, 3
+- **Archive**: `.gsd/milestones/FOUNDATION-PRECISION-SUMMARY.md`
 
-## Phase 1: Swarm AI Architecture Alignment
-- **Status**: COMPLETED (2026-02-25)
+## 🏛 ARCHIVE: Milestone: SOTA Intelligence & Financial Autonomy (2026)
+- **Completed**: 2026-03-04
+- **Phases**: 4 - 23
+- **Archive**: `.gsd/milestones/SOTA-INTELLIGENCE-SUMMARY.md`
 
-## Phase 2: Frontend & Telemetry Integration
-- **Status**: COMPLETED (2026-02-23)
+---
 
-## Phase 3: Financial Precision Validation
-- **Status**: COMPLETED (2026-02-23)
+## 🚀 MILESTONE: Autonomous Experience & Production Scaling
 
-## Phase 4: Final E2E Verification & Test Suite Hardening
-- **Status**: COMPLETED (2026-02-25)
+## Phase 24: Frontend Reasoning Trace & User Experience Polish
+- **Goal**: Implement a visual "Thinking" trace for agentic reasoning in the SwiftUI dashboard and finalize 120Hz/Accessibility polish.
+- **Status**: PLANNING (2026-03-04)
+- **Requirements**: [UI-TRACE-01, UI-TRACE-02, FE-01, FE-02]
 
-## Phase 5: Decision Model Persona & Knowledge Expansion
-- **Status**: COMPLETED (2026-02-25)
+## Phase 25: Production Hardening & Multi-Platform Deployment
+- **Goal**: Stress test Neural ODE recovery models (2020-2024 data) and verify cross-platform parity (macOS/Linux).
+- **Status**: NOT STARTED
+- **Requirements**: [STRESS-01, STRESS-02, PLAT-01]
 
-## Phase 6: Interactive Python Sandbox (Live Research & Modeling)
-- **Status**: COMPLETED (2026-02-25)
-
-## Phase 7: Codebase Cleanup
-- **Status**: COMPLETED
-
-## Phase 8: System Professionalization & Observability
-- **Status**: COMPLETED
-
-## Phase 9: Frontend Performance & Design Foundation
-- **Status**: COMPLETED (2026-02-25)
-
-## Phase 10: Frontend Implementation: Stitch Integration & Dynamic UI Generation
-- **Status**: COMPLETED (2026-02-25)
-
-## Phase 11: SOTA Verification & Hardening
-- **Status**: COMPLETED (2026-02-25)
-
-## Phase 12: Stability Hardening & Crash Resolution
-- **Status**: COMPLETED (2026-02-25)
-
-## Phase 13: Live System Integration
-- **Status**: COMPLETED (2026-02-28)
-
-## Phase 14: Dynamic LM Studio Model Management
-- **Status**: COMPLETED (2026-02-28)
-
-## Phase 15: Stateful Chat & UI Stability
-- **Status**: COMPLETED (2026-03-01)
-
-## Phase 16: Architecture Evolution & Flattening (SOTA 2026)
-- **Status**: COMPLETED (2026-03-01)
-
-## Phase 17: Operational Verification & Intelligence Deepening
-- **Status**: COMPLETED (2026-03-01)
-
-## Phase 18: Adversarial Reasoning & Institutional Alpha
-- **Status**: COMPLETED (2026-03-01)
-
-## Phase 19: Agentic Strategy Revision & Dynamic Weighting
-- **Status**: COMPLETED (2026-03-01)
-
-## Phase 20: Multi-Account Rebalancing & Tax-Loss Harvesting
-- **Status**: COMPLETED (2026-03-01)
-
-## Phase 21: AI-Driven Dividend Optimization & Passive Income Tracking
-- **Status**: COMPLETED (2026-03-01)
+## Phase 26: Adaptive Risk Governance (Institutional Baseline)
+- **Goal**: Integrate real-time liquidity constraints and institutional risk-off triggers.
+- **Status**: NOT STARTED
+- **Requirements**: [RISK-INST-01, RISK-INST-02]
