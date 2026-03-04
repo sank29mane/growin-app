@@ -25,8 +25,8 @@ Delegated background tasks:
 
 | ID | Task | Status |
 |----|------|--------|
-| 17172562717954773362 | Phase 20 Tax-Math & Safety Tests | Executing |
-| 15819632067385598879 | Security Audit (Phase 17) | Executing |
+| 17172562717954773362 | Phase 20 Tax-Math & Safety Tests | Stalled (No Diff) |
+| 15819632067385598879 | Security Audit (Phase 17) | Stalled (No Diff) |
 
 ## Quick Tasks Completed
 | Task | Description | Date |
