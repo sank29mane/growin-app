@@ -20,7 +20,7 @@ struct GSystemStatus: Codable {
     let activeThreads: Int?
     let mcp: GMCPStatus?
     let status: String?
-    
+
     enum CodingKeys: String, CodingKey {
         case uptime
         case memoryMb = "memory_mb"
@@ -32,7 +32,7 @@ struct GSystemStatus: Codable {
 struct GMCPStatus: Codable {
     let connected: Bool?
     let serversCount: Int?
-    
+
     enum CodingKeys: String, CodingKey {
         case connected
         case serversCount = "servers_count"
@@ -59,7 +59,7 @@ struct LMStudioLoadRequest: Codable {
     let modelId: String
     let contextLength: Int?
     let gpuOffload: String?
-    
+
     enum CodingKeys: String, CodingKey {
         case modelId = "model_id"
         case contextLength = "context_length"
@@ -72,7 +72,7 @@ struct LMStudioStatusResponse: Codable {
     let loadedModel: String?
     let active: Bool
     let memoryUsage: [String: Double]?
-    
+
     enum CodingKeys: String, CodingKey {
         case status, active
         case loadedModel = "loaded_model"
@@ -122,7 +122,7 @@ struct GoalPlan: Codable {
     let simulatedGrowthPath: [GrowthPoint]?
     let rebalancingStrategy: RebalancingStrategy?
     let implementation: GoalImplementation?
-    
+
     enum CodingKeys: String, CodingKey {
         case targetReturnsPercent = "target_returns_percent"
         case durationYears = "duration_years"
@@ -156,7 +156,7 @@ struct SuggestedInstrument: Codable, Identifiable {
     let weight: Decimal
     let expectedReturn: Decimal
     let category: String
-    
+
     enum CodingKeys: String, CodingKey {
         case ticker, name, weight
         case expectedReturn = "expected_return"
@@ -196,7 +196,7 @@ struct WhaleData: Codable, Equatable {
     let unusualVolume: Bool
     let sentimentImpact: String
     let summary: String
-    
+
     enum CodingKeys: String, CodingKey {
         case ticker, summary
         case largeTrades = "large_trades"
@@ -211,7 +211,7 @@ struct WhaleTrade: Codable, Identifiable, Equatable {
     let valueUsd: Decimal
     let timestamp: Int
     let isWhale: Bool
-    
+
     enum CodingKeys: String, CodingKey {
         case price, size, timestamp
         case valueUsd = "value_usd"
@@ -249,7 +249,7 @@ struct QuantData: Codable, Equatable {
     let bollingerBands: [String: Decimal]?
     let supportLevel: Decimal?
     let resistanceLevel: Decimal?
-    
+
     enum CodingKeys: String, CodingKey {
         case ticker, signal, rsi, macd
         case bollingerBands = "bollinger_bands"
@@ -263,7 +263,7 @@ struct ResearchData: Codable, Equatable {
     let sentimentScore: Decimal
     let sentimentLabel: String
     let topHeadlines: [String]?
-    
+
     enum CodingKeys: String, CodingKey {
         case ticker
         case sentimentScore = "sentiment_score"
@@ -279,7 +279,7 @@ struct PriceData: Codable, Equatable {
     let source: String?
     let validated: Bool?
     let historySeries: [TimeSeriesItem]?
-    
+
     enum CodingKeys: String, CodingKey {
         case ticker, currency, source, validated
         case currentPrice = "current_price"
@@ -294,7 +294,7 @@ struct PortfolioData: Codable, Equatable {
     let netDeposits: Decimal?
     let cashBalance: [String: Decimal]?
     let snapshot: PortfolioSnapshot?
-    
+
     enum CodingKeys: String, CodingKey {
         case totalValue = "total_value"
         case totalPnL = "total_pnl"
@@ -316,6 +316,7 @@ struct ChatMessageModel: Codable, Identifiable {
     let agentName: String?
     let modelName: String?
     let data: MarketContextData?
+    let reasoningSteps: [ReasoningStep]?
 
     enum CodingKeys: String, CodingKey {
         case messageId = "message_id"
@@ -325,13 +326,16 @@ struct ChatMessageModel: Codable, Identifiable {
         case agentName = "agent_name"
         case modelName = "model_name"
         case data
+        case reasoningSteps = "reasoning_steps"
     }
-    
+        case reasoningSteps = "reasoning_steps"
+    }
+
     var isUser: Bool { role == "user" }
     var displayName: String {
         isUser ? "You" : (agentName ?? "AI Assistant")
     }
-    
+
     var date: Date {
         DateUtils.parse(timestamp)
     }
@@ -365,7 +369,8 @@ struct AnyCodable: Codable {
         } else if let dictValue = try? container.decode([String: AnyCodable].self) {
             value = dictValue.mapValues { $0.value }
         } else {
-            throw DecodingError.dataCorruptedError(in: container, debugDescription: "AnyCodable value cannot be decoded")
+            throw DecodingError.dataCorruptedError(
+                in: container, debugDescription: "AnyCodable value cannot be decoded")
         }
     }
 
@@ -385,7 +390,11 @@ struct AnyCodable: Codable {
         case let dictValue as [String: Any]:
             try container.encode(dictValue.mapValues { AnyCodable($0) })
         default:
-            throw EncodingError.invalidValue(value, EncodingError.Context(codingPath: container.codingPath, debugDescription: "AnyCodable value cannot be encoded"))
+            throw EncodingError.invalidValue(
+                value,
+                EncodingError.Context(
+                    codingPath: container.codingPath,
+                    debugDescription: "AnyCodable value cannot be encoded"))
         }
     }
 }
@@ -420,7 +429,7 @@ struct GrowinChatMessage: Codable {
     let coordinatorModel: String?
     let apiKeys: [String: String]?
     let accountType: String?
-    
+
     enum CodingKeys: String, CodingKey {
         case message
         case conversationId = "conversation_id"
@@ -438,7 +447,7 @@ struct ChatResponse: Codable {
     let timestamp: String
     let toolCalls: [ToolCall]?
     let data: MarketContextData?
-    
+
     enum CodingKeys: String, CodingKey {
         case response
         case conversationId = "conversation_id"

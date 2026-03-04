@@ -20,7 +20,7 @@ class ChatViewModel {
     private let config = AppConfig.shared
     private let agentClient = AgentClient()
     private let defaults = UserDefaults.standard
-    
+
     init() {
         self.selectedConversationId = defaults.string(forKey: "currentConversationId")
     }
@@ -61,7 +61,7 @@ class ChatViewModel {
         errorMessage = nil
         streamingStatus = "Planning..."
         activeReasoningSteps = []
-        
+
         let userModel = ChatMessageModel(
             messageId: UUID().uuidString,
             role: "user",
@@ -71,7 +71,8 @@ class ChatViewModel {
             toolCallId: nil,
             agentName: nil,
             modelName: nil,
-            data: nil
+            data: nil,
+            reasoningSteps: nil
         )
         messages.append(userModel)
 
@@ -86,18 +87,19 @@ class ChatViewModel {
             toolCallId: nil,
             agentName: "DecisionAgent",
             modelName: effectiveModelName,
-            data: nil
+            data: nil,
+            reasoningSteps: nil
         )
         messages.append(assistantModel)
 
         var accumulatedContent = ""
-        
+
         let stream = agentClient.streamMessage(
             query: message,
             conversationId: selectedConversationId,
             model: effectiveModelName
         )
-        
+
         for await event in stream {
             switch event {
             case .token(let token):
@@ -119,9 +121,13 @@ class ChatViewModel {
             case .done:
                 isProcessing = false
                 streamingStatus = nil
+                updateAssistantMessage(
+                    id: assistantMessageId, content: accumulatedContent,
+                    reasoningSteps: activeReasoningSteps)
+                activeReasoningSteps = []
             }
         }
-        
+
         if messages.count >= 2 && messages.count <= 4, let convId = selectedConversationId {
             await generateTitle(for: convId)
         }
@@ -131,49 +137,62 @@ class ChatViewModel {
         let sender = telemetry["sender"]?.value as? String ?? "Agent"
         let subject = telemetry["subject"]?.value as? String ?? ""
         let payload = telemetry["payload"]?.value as? [String: Any] ?? [:]
-        
+
         let timestamp = Date().timeIntervalSince1970
 
         if subject == "agent_started" {
             let agent = payload["agent"] as? String ?? sender
             streamingStatus = "Agent \(agent) starting..."
-            let step = ReasoningStep(agent: agent, action: "Started", content: nil, timestamp: timestamp)
+            let step = ReasoningStep(
+                agent: agent, action: "Started", content: nil, timestamp: timestamp)
             activeReasoningSteps.append(step)
         } else if subject == "agent_complete" {
             let agent = payload["agent"] as? String ?? sender
             let success = payload["success"] as? Bool ?? true
             if success {
                 streamingStatus = "Agent \(agent) finished."
-                let step = ReasoningStep(agent: agent, action: "Finished successfully", content: nil, timestamp: timestamp)
+                let step = ReasoningStep(
+                    agent: agent, action: "Finished successfully", content: nil,
+                    timestamp: timestamp)
                 activeReasoningSteps.append(step)
             } else {
                 streamingStatus = "Agent \(agent) failed."
-                let step = ReasoningStep(agent: agent, action: "Failed", content: nil, timestamp: timestamp)
+                let step = ReasoningStep(
+                    agent: agent, action: "Failed", content: nil, timestamp: timestamp)
                 activeReasoningSteps.append(step)
             }
         } else if subject == "intent_classified" {
-            if let intent = payload["intent"] as? [String: Any], let type = intent["type"] as? String {
+            if let intent = payload["intent"] as? [String: Any],
+                let type = intent["type"] as? String
+            {
                 streamingStatus = "Intent: \(type)"
-                let step = ReasoningStep(agent: sender, action: "Classified Intent: \(type)", content: nil, timestamp: timestamp)
+                let step = ReasoningStep(
+                    agent: sender, action: "Classified Intent: \(type)", content: nil,
+                    timestamp: timestamp)
                 activeReasoningSteps.append(step)
             }
         } else if subject == "tool_call" {
             let tool = payload["tool"] as? String ?? "Unknown Tool"
             streamingStatus = "Executing \(tool)..."
-            let step = ReasoningStep(agent: sender, action: "Calling \(tool)", content: nil, timestamp: timestamp)
+            let step = ReasoningStep(
+                agent: sender, action: "Calling \(tool)", content: nil, timestamp: timestamp)
             activeReasoningSteps.append(step)
         } else if subject == "reasoning" || subject == "thought" {
             let thought = payload["content"] as? String ?? "Processing..."
-            let step = ReasoningStep(agent: sender, action: "Thinking", content: thought, timestamp: timestamp)
+            let step = ReasoningStep(
+                agent: sender, action: "Thinking", content: thought, timestamp: timestamp)
             activeReasoningSteps.append(step)
         } else if subject == "debate" {
             let turn = payload["content"] as? String ?? ""
-            let step = ReasoningStep(agent: sender, action: "Debating", content: turn, timestamp: timestamp)
+            let step = ReasoningStep(
+                agent: sender, action: "Debating", content: turn, timestamp: timestamp)
             activeReasoningSteps.append(step)
         }
     }
 
-    private func updateAssistantMessage(id: String, content: String) {
+    private func updateAssistantMessage(
+        id: String, content: String, reasoningSteps: [ReasoningStep]? = nil
+    ) {
         if let index = messages.firstIndex(where: { $0.messageId == id }) {
             let old = messages[index]
             messages[index] = ChatMessageModel(
@@ -185,7 +204,8 @@ class ChatViewModel {
                 toolCallId: old.toolCallId,
                 agentName: old.agentName,
                 modelName: old.modelName,
-                data: old.data
+                data: old.data,
+                reasoningSteps: reasoningSteps ?? old.reasoningSteps
             )
         }
     }
@@ -213,7 +233,8 @@ class ChatViewModel {
     }
 
     func generateTitle(for conversationId: String) async {
-        var components = URLComponents(string: "\(config.baseURL)/conversations/\(conversationId)/generate-title")
+        var components = URLComponents(
+            string: "\(config.baseURL)/conversations/\(conversationId)/generate-title")
         components?.queryItems = [URLQueryItem(name: "model_name", value: effectiveModelName)]
 
         guard let url = components?.url else { return }
@@ -221,6 +242,7 @@ class ChatViewModel {
         request.httpMethod = "POST"
 
         _ = try? await URLSession.shared.data(for: request)
-        NotificationCenter.default.post(name: NSNotification.Name("RefreshConversations"), object: nil)
+        NotificationCenter.default.post(
+            name: NSNotification.Name("RefreshConversations"), object: nil)
     }
 }
