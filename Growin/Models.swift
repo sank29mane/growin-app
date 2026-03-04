@@ -305,7 +305,19 @@ struct PortfolioData: Codable, Equatable {
     }
 }
 
-struct ChatMessageModel: Codable, Identifiable {
+struct ChatMessageModel: Codable, Identifiable, Equatable {
+    static func == (lhs: ChatMessageModel, rhs: ChatMessageModel) -> Bool {
+        lhs.messageId == rhs.messageId &&
+        lhs.role == rhs.role &&
+        lhs.content == rhs.content &&
+        lhs.timestamp == rhs.timestamp &&
+        lhs.toolCalls == rhs.toolCalls &&
+        lhs.toolCallId == rhs.toolCallId &&
+        lhs.agentName == rhs.agentName &&
+        lhs.modelName == rhs.modelName &&
+        lhs.data == rhs.data
+    }
+
     var id: String { messageId }
     let messageId: String
     let role: String
@@ -337,13 +349,41 @@ struct ChatMessageModel: Codable, Identifiable {
     }
 }
 
-struct ToolCall: Codable {
+struct ToolCall: Codable, Equatable {
     let id: String
     let type: String
     let function: ToolFunction
 }
 
-struct AnyCodable: Codable {
+struct AnyCodable: Codable, Equatable {
+    static func == (lhs: AnyCodable, rhs: AnyCodable) -> Bool {
+        switch (lhs.value, rhs.value) {
+        case (let l as Int, let r as Int): return l == r
+        case (let l as Double, let r as Double): return l == r
+        case (let l as Bool, let r as Bool): return l == r
+        case (let l as String, let r as String): return l == r
+        case (let l as [AnyCodable], let r as [AnyCodable]): return l == r
+        case (let l as [String: AnyCodable], let r as [String: AnyCodable]): return l == r
+        case (let l as [Any], let r as [Any]):
+            guard l.count == r.count else { return false }
+            for (i, v) in l.enumerated() {
+                if AnyCodable(v) != AnyCodable(r[i]) { return false }
+            }
+            return true
+        case (let l as [String: Any], let r as [String: Any]):
+            guard l.count == r.count else { return false }
+            for (k, v) in l {
+                if let rv = r[k] {
+                    if AnyCodable(v) != AnyCodable(rv) { return false }
+                } else {
+                    return false
+                }
+            }
+            return true
+        default: return false
+        }
+    }
+
     let value: Any
 
     init(_ value: Any) {
@@ -390,7 +430,7 @@ struct AnyCodable: Codable {
     }
 }
 
-struct ToolFunction: Codable {
+struct ToolFunction: Codable, Equatable {
     let name: String
     let arguments: [String: AnyCodable]
 }

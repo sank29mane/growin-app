@@ -87,6 +87,7 @@ struct ChatView: View {
                             viewModel.inputText = prompt
                             viewModel.sendMessage()
                         })
+                            .equatable()
                             .id(message.id)
                             .transition(.asymmetric(
                                 insertion: .opacity.combined(with: .move(edge: .bottom)),
@@ -231,7 +232,11 @@ struct ChatView: View {
     }
 }
 
-struct ChatBubble: View {
+struct ChatBubble: View, Equatable {
+    static func == (lhs: ChatBubble, rhs: ChatBubble) -> Bool {
+        return lhs.message == rhs.message
+    }
+
     let message: ChatMessageModel
     var onQuickAction: ((String) -> Void)? = nil
     
@@ -273,25 +278,24 @@ struct ChatBubble: View {
                         .foregroundStyle(.white)
                         .cornerRadius(18, corners: [.topLeft, .topRight, .bottomLeft])
                 } else {
-                    GlassCard(cornerRadius: 16) {
-                        VStack(alignment: .leading, spacing: 12) {
-                            if !message.content.isEmpty {
-                                MarkdownText(content: message.content)
-                                    .foregroundStyle(.white.opacity(0.9))
-                            }
+                    VStack(alignment: .leading, spacing: 12) {
+                        if !message.content.isEmpty {
+                            MarkdownText(content: message.content)
+                                .foregroundStyle(.white.opacity(0.9))
+                        }
                             
                             // Reasoning Trace UI (SOTA 2026)
                             if let data = message.data {
-                                IntelligenceTraceView(data: data)
+                                IntelligenceTraceView(data: data).equatable()
                             }
                             
                             // Rich Data Visualization
                             if let data = message.data {
-                                RichDataView(data: data)
+                                RichDataView(data: data).equatable()
                             }
                             
                             if let toolCalls = message.toolCalls, !toolCalls.isEmpty {
-                                ToolExecutionBlock(toolCalls: toolCalls)
+                                ToolExecutionBlock(toolCalls: toolCalls).equatable()
                             }
                             
                             if !message.content.contains("Quick Actions") && !message.content.isEmpty {
@@ -299,8 +303,9 @@ struct ChatBubble: View {
                                     onQuickAction?(prompt)
                                 }
                             }
-                        }
                     }
+                    .padding()
+                    .glassEffect(.thin, in: .rect(cornerRadius: 16))
                 }
                 
                 Text(formatTimestamp(message.timestamp))
@@ -344,7 +349,11 @@ struct ChatBubble: View {
     }
 }
 
-struct ToolExecutionBlock: View {
+struct ToolExecutionBlock: View, Equatable {
+    static func == (lhs: ToolExecutionBlock, rhs: ToolExecutionBlock) -> Bool {
+        return lhs.toolCalls == rhs.toolCalls
+    }
+
     let toolCalls: [ToolCall]
     
     var body: some View {

@@ -1,0 +1,11 @@
+                            )
+                        )
+                        .foregroundStyle(.white)
+                        .cornerRadius(18, corners: [.topLeft, .topRight, .bottomLeft])
+                } else {
+                    GlassCard(cornerRadius: 16) {
+                        VStack(alignment: .leading, spacing: 12) {
+                            if !message.content.isEmpty {
+                                MarkdownText(content: message.content)
+                                    .foregroundStyle(.white.opacity(0.9))
+                            }

@@ -5,12 +5,12 @@ import Foundation
 
 // MARK: - Portfolio Models
 
-struct PortfolioSnapshot: Codable, Sendable {
+struct PortfolioSnapshot: Codable, Equatable, Sendable {
     let summary: PortfolioSummary?
     let positions: [Position]?
 }
 
-struct PortfolioSummary: Codable, Sendable {
+struct PortfolioSummary: Codable, Equatable, Sendable {
     let totalPositions: Int?
     let totalInvested: Decimal?
     let currentValue: Decimal?
@@ -30,7 +30,7 @@ struct PortfolioSummary: Codable, Sendable {
     }
 }
 
-struct AccountSummary: Codable, Sendable {
+struct AccountSummary: Codable, Equatable, Sendable {
     let totalInvested: Decimal?
     let currentValue: Decimal?
     let totalPnl: Decimal?
@@ -44,12 +44,12 @@ struct AccountSummary: Codable, Sendable {
     }
 }
 
-struct CashBalance: Codable, Sendable {
+struct CashBalance: Codable, Equatable, Sendable {
     let total: Decimal?
     let free: Decimal?
 }
 
-struct Position: Codable, Identifiable, Sendable {
+struct Position: Codable, Identifiable, Equatable, Sendable {
     var id: String { 
         if let ticker = ticker, let accountType = accountType {
             return "\(ticker)-\(accountType)"
