@@ -529,11 +529,7 @@ class DecisionAgent:
             
             # Abstract Query Detection
             is_abstract = False
-<<<<<<< HEAD
             q_lower = (query or "").lower()
-=======
-            q_lower = query.lower() if query else ""
->>>>>>> origin/main
             if any(w in q_lower for w in ["portfolio", "market", "why", "trend", "economy", "inflation"]):
                 # Simple check: no obvious standalone uppercase ticker symbols (e.g. AAPL)
                 if not re.search(r'\b[A-Z]{2,5}\b', query):
