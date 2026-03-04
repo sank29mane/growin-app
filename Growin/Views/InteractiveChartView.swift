@@ -2,7 +2,14 @@ import SwiftUI
 import Charts
 import Foundation
 
-struct InteractiveChartView: View {
+struct InteractiveChartView: View, Equatable {
+    static func == (lhs: InteractiveChartView, rhs: InteractiveChartView) -> Bool {
+        return lhs.ticker == rhs.ticker &&
+               lhs.history == rhs.history &&
+               lhs.forecast == rhs.forecast &&
+               lhs.showTTMIndicator == rhs.showTTMIndicator
+    }
+
     let history: [TimeSeriesItem]
     let forecast: [TimeSeriesItem]
     let ticker: String

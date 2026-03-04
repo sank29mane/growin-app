@@ -14,6 +14,7 @@ class LMStudioViewModel {
     // SOTA: State Machine for Model Switching
     var requestedModelId: String?
     private var lastLoadTriggered: Date?
+    private var isLocalLoading: Bool = false
     
     var isLoaded: Bool {
         guard let current = currentModel, !current.isEmpty else { return false }
@@ -47,6 +48,7 @@ class LMStudioViewModel {
     
     func refreshStatus() async {
         guard !isPollingStatus else { return }
+        guard !isLocalLoading else { return } // Do not poll while actively requesting a load
         guard let url = URL(string: "\(config.baseURL)/api/models/lmstudio/status") else { return }
         
         isPollingStatus = true
@@ -135,6 +137,7 @@ class LMStudioViewModel {
         guard !isLoadingModel, currentModel != modelId else { return }
         
         isLoadingModel = true
+        isLocalLoading = true
         requestedModelId = modelId
         lastLoadTriggered = Date()
         loadingStatus = "Requesting \(modelId)..."
@@ -142,6 +145,7 @@ class LMStudioViewModel {
         Task {
             guard let url = URL(string: "\(config.baseURL)/api/models/lmstudio/load") else {
                 isLoadingModel = false
+                isLocalLoading = false
                 requestedModelId = nil
                 return
             }
@@ -179,6 +183,7 @@ class LMStudioViewModel {
                 isLoadingModel = false
                 requestedModelId = nil
             }
+            isLocalLoading = false
         }
     }
 }

@@ -87,6 +87,7 @@ struct ChatView: View {
                             viewModel.inputText = prompt
                             viewModel.sendMessage()
                         })
+                            .equatable()
                             .id(message.id)
                             .transition(.asymmetric(
                                 insertion: .opacity.combined(with: .move(edge: .bottom)),
@@ -247,7 +248,11 @@ struct ChatView: View {
     }
 }
 
-struct ChatBubble: View {
+struct ChatBubble: View, Equatable {
+    static func == (lhs: ChatBubble, rhs: ChatBubble) -> Bool {
+        return lhs.message == rhs.message
+    }
+
     let message: ChatMessageModel
     var onQuickAction: ((String) -> Void)? = nil
     

@@ -1,6 +1,10 @@
 import SwiftUI
 
-struct IntelligenceTraceView: View {
+struct IntelligenceTraceView: View, Equatable {
+    static func == (lhs: IntelligenceTraceView, rhs: IntelligenceTraceView) -> Bool {
+        return lhs.data == rhs.data
+    }
+
     let data: MarketContextData
     @State private var isExpanded: Bool = false
     @State private var showFullReasoning: Bool = false
@@ -189,7 +193,11 @@ struct ReasoningStepRow: View, Equatable {
     }
 }
 
-struct RichDataView: View {
+struct RichDataView: View, Equatable {
+    static func == (lhs: RichDataView, rhs: RichDataView) -> Bool {
+        return lhs.data == rhs.data
+    }
+
     let data: MarketContextData
     
     var body: some View {
@@ -209,7 +217,7 @@ struct RichDataView: View {
             if let history = data.price?.historySeries, 
                let forecast = data.forecast?.rawSeries,
                let ticker = data.price?.ticker {
-                InteractiveChartView(history: history, forecast: forecast, ticker: ticker)
+                InteractiveChartView(history: history, forecast: forecast, ticker: ticker).equatable()
             }
             
             // 3. Forecast Summary
@@ -236,7 +244,11 @@ struct RichDataView: View {
     }
 }
 
-struct WhaleCard: View {
+struct WhaleCard: View, Equatable {
+    static func == (lhs: WhaleCard, rhs: WhaleCard) -> Bool {
+        return lhs.whale == rhs.whale
+    }
+
     let whale: WhaleData
     
     var impactColor: Color {
@@ -302,7 +314,11 @@ struct WhaleCard: View {
     }
 }
 
-struct PriceCard: View {
+struct PriceCard: View, Equatable {
+    static func == (lhs: PriceCard, rhs: PriceCard) -> Bool {
+        return lhs.price == rhs.price
+    }
+
     let price: PriceData
     
     var body: some View {
@@ -325,7 +341,11 @@ struct PriceCard: View {
     }
 }
 
-struct SentimentCard: View {
+struct SentimentCard: View, Equatable {
+    static func == (lhs: SentimentCard, rhs: SentimentCard) -> Bool {
+        return lhs.research == rhs.research
+    }
+
     let research: ResearchData
     
     var color: Color {
@@ -358,7 +378,11 @@ struct SentimentCard: View {
     }
 }
 
-struct ForecastCard: View {
+struct ForecastCard: View, Equatable {
+    static func == (lhs: ForecastCard, rhs: ForecastCard) -> Bool {
+        return lhs.forecast == rhs.forecast
+    }
+
     let forecast: ForecastData
     
     var body: some View {
@@ -390,7 +414,11 @@ struct ForecastCard: View {
     }
 }
 
-struct TechnicalCard: View {
+struct TechnicalCard: View, Equatable {
+    static func == (lhs: TechnicalCard, rhs: TechnicalCard) -> Bool {
+        return lhs.quant == rhs.quant
+    }
+
     let quant: QuantData
     
     var body: some View {
@@ -419,7 +447,11 @@ struct TechnicalCard: View {
     }
 }
 
-struct PortfolioSnapshotCard: View {
+struct PortfolioSnapshotCard: View, Equatable {
+    static func == (lhs: PortfolioSnapshotCard, rhs: PortfolioSnapshotCard) -> Bool {
+        return lhs.portfolio == rhs.portfolio
+    }
+
     let portfolio: PortfolioData
     
     var body: some View {
