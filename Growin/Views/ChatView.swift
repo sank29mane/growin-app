@@ -101,6 +101,17 @@ struct ChatView: View {
                             .padding(.horizontal, 8)
                     }
                     
+                    // Live Reasoning Trace UI
+                    if !viewModel.activeReasoningSteps.isEmpty {
+                        ChatReasoningTraceView(
+                            steps: viewModel.activeReasoningSteps,
+                            isProcessing: viewModel.isProcessing
+                        )
+                        .id("reasoning-trace")
+                        .padding(.vertical, 8)
+                        .transition(.opacity.combined(with: .move(edge: .bottom)))
+                    }
+
                     Color.clear
                         .frame(height: 1)
                         .id(bottomAnchorID)
@@ -108,6 +119,11 @@ struct ChatView: View {
                 .padding()
             }
             .onChange(of: viewModel.messages.last?.content) { _, _ in
+                if !isUserScrolling {
+                    scrollToBottom(proxy: proxy)
+                }
+            }
+            .onChange(of: viewModel.activeReasoningSteps.count) { _, _ in
                 if !isUserScrolling {
                     scrollToBottom(proxy: proxy)
                 }
@@ -280,7 +296,7 @@ struct ChatBubble: View {
                                     .foregroundStyle(.white.opacity(0.9))
                             }
                             
-                            // Reasoning Trace UI (SOTA 2026)
+                            // Historical Reasoning Trace UI
                             if let data = message.data {
                                 IntelligenceTraceView(data: data)
                             }

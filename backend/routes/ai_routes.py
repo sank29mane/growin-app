@@ -137,7 +137,7 @@ async def strategy_event_generator(session_id: str, ticker: Optional[str]):
                 for t in context.telemetry_trace
             ] if context else [],
             "instruments": [], # Map from context if needed
-            "risk_assessment": context.user_context.get("risk_review", {}).get("risk_assessment", "Standard Risk"),
+            "risk_assessment": context.user_context.get("risk_review", {}).get("risk_assessment", "Standard Risk") if context else "Standard Risk",
             "last_updated": datetime.now().timestamp()
         }
         

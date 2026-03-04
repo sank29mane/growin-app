@@ -14,6 +14,9 @@ class ChatViewModel {
     var showConfigPrompt = false
     var missingConfigProvider: String?
 
+    // Active reasoning tracing for current message
+    var activeReasoningSteps: [ReasoningStep] = []
+
     private let config = AppConfig.shared
     private let agentClient = AgentClient()
     private let defaults = UserDefaults.standard
@@ -57,6 +60,7 @@ class ChatViewModel {
         isProcessing = true
         errorMessage = nil
         streamingStatus = "Planning..."
+        activeReasoningSteps = []
         
         let userModel = ChatMessageModel(
             messageId: UUID().uuidString,
@@ -128,21 +132,44 @@ class ChatViewModel {
         let subject = telemetry["subject"]?.value as? String ?? ""
         let payload = telemetry["payload"]?.value as? [String: Any] ?? [:]
         
+        let timestamp = Date().timeIntervalSince1970
+
         if subject == "agent_started" {
             let agent = payload["agent"] as? String ?? sender
             streamingStatus = "Agent \(agent) starting..."
+            let step = ReasoningStep(agent: agent, action: "Started", content: nil, timestamp: timestamp)
+            activeReasoningSteps.append(step)
         } else if subject == "agent_complete" {
             let agent = payload["agent"] as? String ?? sender
             let success = payload["success"] as? Bool ?? true
             if success {
                 streamingStatus = "Agent \(agent) finished."
+                let step = ReasoningStep(agent: agent, action: "Finished successfully", content: nil, timestamp: timestamp)
+                activeReasoningSteps.append(step)
             } else {
                 streamingStatus = "Agent \(agent) failed."
+                let step = ReasoningStep(agent: agent, action: "Failed", content: nil, timestamp: timestamp)
+                activeReasoningSteps.append(step)
             }
         } else if subject == "intent_classified" {
             if let intent = payload["intent"] as? [String: Any], let type = intent["type"] as? String {
                 streamingStatus = "Intent: \(type)"
+                let step = ReasoningStep(agent: sender, action: "Classified Intent: \(type)", content: nil, timestamp: timestamp)
+                activeReasoningSteps.append(step)
             }
+        } else if subject == "tool_call" {
+            let tool = payload["tool"] as? String ?? "Unknown Tool"
+            streamingStatus = "Executing \(tool)..."
+            let step = ReasoningStep(agent: sender, action: "Calling \(tool)", content: nil, timestamp: timestamp)
+            activeReasoningSteps.append(step)
+        } else if subject == "reasoning" || subject == "thought" {
+            let thought = payload["content"] as? String ?? "Processing..."
+            let step = ReasoningStep(agent: sender, action: "Thinking", content: thought, timestamp: timestamp)
+            activeReasoningSteps.append(step)
+        } else if subject == "debate" {
+            let turn = payload["content"] as? String ?? ""
+            let step = ReasoningStep(agent: sender, action: "Debating", content: turn, timestamp: timestamp)
+            activeReasoningSteps.append(step)
         }
     }
 
