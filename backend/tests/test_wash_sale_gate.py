@@ -3,11 +3,14 @@ import asyncio
 from backend.agents.risk_agent import RiskAgent
 from backend.market_context import MarketContext, PriceData, PortfolioData
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 @pytest.mark.asyncio
 async def test_wash_sale_blocking():
     """Verify that RiskAgent blocks a BUY order if a recent loss sale exists."""
+    from backend.app_logging import correlation_id_ctx
+    correlation_id_ctx.set("test-correlation-id")
+
     agent = RiskAgent()
     agent._initialize = AsyncMock()
     agent._llm = AsyncMock()

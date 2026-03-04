@@ -120,8 +120,14 @@ class BaseAgent(ABC):
             )
         
         start = time.time()
-        c_id = correlation_id_ctx.get() if correlation_id_ctx else None
-        
+        try:
+            c_id = correlation_id_ctx.get() if correlation_id_ctx else None
+            # If mocking contextvars, sometimes .get() returns a Mock which fails Pydantic validation
+            if not isinstance(c_id, str):
+                c_id = None
+        except Exception:
+            c_id = None
+
         from .messenger import AgentMessage, get_messenger
         messenger = get_messenger()
 
