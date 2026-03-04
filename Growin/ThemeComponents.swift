@@ -111,9 +111,9 @@ struct GlassCard<Content: View>: View {
                 .stroke(
                     LinearGradient(
                         colors: [
-                            .white.opacity(0.15),
-                            .white.opacity(0.02),
-                            .white.opacity(0.15)
+                            Color.glassBorder,
+                            Color.glassShine,
+                            Color.glassBorder
                         ],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
@@ -126,7 +126,7 @@ struct GlassCard<Content: View>: View {
                 .stroke(Color.stitchNeonIndigo.opacity(isHovered ? 0.3 : 0), lineWidth: 2)
                 .blur(radius: isHovered ? 4 : 0)
         )
-        .shadow(color: .black.opacity(0.4), radius: 20, x: 0, y: 15)
+        .shadow(color: Color.growinDarkBg.opacity(0.4), radius: 20, x: 0, y: 15)
         .scaleEffect(isHovered ? 1.015 : 1.0)
         .onHover { hovering in
             withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
@@ -146,7 +146,7 @@ struct AppHeader: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
                     .premiumTypography(.heading)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Color.textPrimary)
                 Text(subtitle)
                     .premiumTypography(.body)
                     .foregroundStyle(Color.textSecondary)
@@ -154,7 +154,7 @@ struct AppHeader: View {
             Spacer()
             
             if let icon = icon {
-                GlassCard(cornerRadius: 12) {
+                GlassCard(cornerRadius: 16) {
                     Image(systemName: icon)
                         .font(.system(size: 18, weight: .semibold))
                         .foregroundStyle(Color.growinPrimary)
@@ -187,14 +187,14 @@ struct PremiumButton: View {
             .padding(.vertical, 14)
             .background(
                 ZStack {
-                    RoundedRectangle(cornerRadius: 14)
+                    RoundedRectangle(cornerRadius: 16)
                         .fill(color)
                     
-                    RoundedRectangle(cornerRadius: 14)
-                        .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color.glassBorder, lineWidth: 1)
                 }
             )
-            .foregroundStyle(.white)
+            .foregroundStyle(Color.textPrimary)
             .shadow(color: color.opacity(0.4), radius: 15, x: 0, y: 8)
             .scaleEffect(isPressed ? 0.96 : 1.0)
         }
@@ -314,7 +314,7 @@ struct MarkdownText: View {
                         if showThoughts {
                         Text(thoughts)
                             .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.white.opacity(0.5))
+                            .foregroundStyle(Color.textSecondary.opacity(0.8))
                             .padding(.leading, 12)
                             .padding(.vertical, 6)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -455,12 +455,12 @@ struct SlideToConfirm: View {
         ZStack {
             // Track
             Capsule()
-                .fill(Color.white.opacity(0.05))
+                .fill(Color.glassShine)
                 .frame(width: trackWidth, height: handleSize)
                 .overlay(
                     Text(title)
                         .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.3))
+                        .foregroundStyle(Color.textTertiary)
                 )
             
             // Progress Fill
@@ -476,7 +476,7 @@ struct SlideToConfirm: View {
             HStack {
                 ZStack {
                     Circle()
-                        .fill(.white)
+                        .fill(Color.textPrimary)
                         .frame(width: handleSize - 8, height: handleSize - 8)
                         .shadow(radius: 5)
                     
@@ -600,7 +600,7 @@ struct ConfidenceIndicator: View {
             
             Text(String(format: "%.0f%%", score * 100))
                 .premiumTypography(.caption)
-                .foregroundStyle(.white)
+                .foregroundStyle(Color.textPrimary)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
@@ -644,7 +644,7 @@ struct ReasoningChip: View {
                     .foregroundStyle(.secondary)
                 Text(action)
                     .premiumTypography(.caption)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Color.textPrimary)
             }
         }
         .padding(.horizontal, 10)
@@ -689,8 +689,8 @@ struct LogicTreeItem: View {
             }
         }
         .padding(12)
-        .background(Color.white.opacity(0.02))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .background(Color.glassShine)
+        .clipShape(RoundedRectangle(cornerRadius: 16))
     }
 }
 
@@ -722,10 +722,10 @@ struct AgentStatusBadge: View {
             
             if let confidence = confidence {
                 Text("|")
-                    .foregroundStyle(.white.opacity(0.1))
+                    .foregroundStyle(Color.glassBorder)
                 Text(String(format: "%.0f%%", confidence * 100))
                     .premiumTypography(.caption)
-                    .foregroundStyle(.white.opacity(0.8))
+                    .foregroundStyle(Color.textPrimary.opacity(0.8))
             }
         }
         .padding(.horizontal, 10)
@@ -765,7 +765,7 @@ struct FinancialMetricView: View {
             
             Text(value)
                 .font(.system(size: 22, weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
+                .foregroundStyle(Color.textPrimary)
                 .minimumScaleFactor(0.8)
             
             if let change = change, let changePositive = changePositive {
@@ -789,7 +789,7 @@ struct FinancialMetricView: View {
                     .fill(Color.growinSurface.opacity(0.4))
                 
                 RoundedRectangle(cornerRadius: 20)
-                    .stroke(Color.white.opacity(0.05), lineWidth: 1)
+                    .stroke(Color.glassShine, lineWidth: 1)
             }
         )
     }
