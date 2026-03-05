@@ -1,22 +1,62 @@
 from decimal import Decimal
-from typing import Optional, List
-from datetime import date
+from typing import Optional, List, Dict, Union
+from datetime import date, datetime
+from enum import Enum
 from pydantic import BaseModel, Field, field_validator, ConfigDict
+
+class AssetType(str, Enum):
+    EQUITY = "EQUITY"
+    OPTION = "OPTION"
+    FX = "FX"
+    CRYPTO = "CRYPTO"
+
+class OptionGreeks(BaseModel):
+    delta: Optional[Decimal] = None
+    gamma: Optional[Decimal] = None
+    theta: Optional[Decimal] = None
+    vega: Optional[Decimal] = None
+    rho: Optional[Decimal] = None
+
+class OptionData(BaseModel):
+    underlying_ticker: str
+    strike_price: Decimal
+    expiration_date: date
+    option_type: str # 'call' or 'put'
+    contract_size: int = 100
+    open_interest: Optional[int] = None
+    greeks: Optional[OptionGreeks] = None
+
+class FXData(BaseModel):
+    base_currency: str
+    quote_currency: str
+    lot_size: int = 100000
+
+class CryptoData(BaseModel):
+    base_asset: str
+    quote_asset: str = "USD"
+    blockchain: Optional[str] = None
 
 class PriceData(BaseModel):
     """
     Represents a single price point or candle using Decimal for precision.
+    Supports Multi-Asset types.
     """
     ticker: str
+    asset_type: AssetType = AssetType.EQUITY
     timestamp: str  # ISO 8601
     t: Optional[int] = None # Unix timestamp in milliseconds
     open: Decimal
     high: Decimal
     low: Decimal
     close: Decimal
-    volume: int
+    volume: Decimal = Decimal('0')
     
-    @field_validator('open', 'high', 'low', 'close', mode='before')
+    # Metadata for specific asset types
+    option_details: Optional[OptionData] = None
+    fx_details: Optional[FXData] = None
+    crypto_details: Optional[CryptoData] = None
+    
+    @field_validator('open', 'high', 'low', 'close', 'volume', mode='before')
     @classmethod
     def convert_to_decimal(cls, v):
         if v is None:
@@ -28,8 +68,10 @@ class PriceData(BaseModel):
 class Position(BaseModel):
     """
     Represents a portfolio position with safe monetary types.
+    Supports Multi-Asset types.
     """
     ticker: str
+    asset_type: AssetType = AssetType.EQUITY
     quantity: Decimal
     average_price: Decimal = Field(..., alias="averagePrice")
     current_price: Decimal = Field(..., alias="currentPrice")
@@ -41,6 +83,9 @@ class Position(BaseModel):
     # Optional display fields
     current_price_display: Optional[str] = Field(None, alias="currentPriceDisplay")
     average_price_display: Optional[str] = Field(None, alias="averagePriceDisplay")
+    
+    # Metadata for specific asset types
+    option_details: Optional[OptionData] = None
     
     model_config = ConfigDict(populate_by_name=True)
         

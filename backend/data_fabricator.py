@@ -8,10 +8,13 @@ import asyncio
 import logging
 from typing import Dict, Any, Optional
 from datetime import datetime
+from decimal import Decimal
 
-from market_context import MarketContext, PriceData, TimeSeriesItem, ResearchData, NewsArticle, SocialData, WhaleData
+from backend.market_context import MarketContext, PriceData, TimeSeriesItem, ResearchData, NewsArticle, SocialData, WhaleData, GeopoliticalData
 from data_engine import get_alpaca_client, get_finnhub_client
 from utils.news_client import NewsDataIOClient
+from agents.geopolitical_agent import GeopoliticalAgent
+from quant_engine import QuantEngine
 
 logger = logging.getLogger(__name__)
 
@@ -25,13 +28,15 @@ class DataFabricator:
         self.alpaca = get_alpaca_client()
         self.finnhub = get_finnhub_client()
         self.news_client = NewsDataIOClient()
+        self.geopolitical_agent = GeopoliticalAgent()
+        self.quant_engine = QuantEngine()
         
     async def fabricate_context(self, intent: str, ticker: Optional[str], account_type: Optional[str], user_settings: Optional[Dict[str, Any]] = None) -> MarketContext:
         """
         Main entry point: Build the context based on intent.
         
         Args:
-            intent: "market_analysis", "price_check", etc.
+            intent: "market_analysis", "price_check", "intraday_trade", "swing_trade", etc.
             ticker: The primary ticker symbol (if any).
             account_type: "invest", "isa", or None.
             user_settings: Validated user settings (e.g. risk profile).
@@ -43,10 +48,25 @@ class DataFabricator:
             user_settings = {}
         start_time = datetime.now()
         
+        # SOTA 2026 Phase 26: Determine trade horizon and timeframe from intent
+        timeframe = "1Day"
+        trade_horizon = "medium"
+        
+        if intent == "intraday_trade":
+            timeframe = "5Min"
+            trade_horizon = "short"
+        elif intent == "swing_trade":
+            timeframe = "1Hour"
+            trade_horizon = "medium"
+        elif intent == "long_term_invest":
+            timeframe = "1Day"
+            trade_horizon = "long"
+        
         # 1. Initialize empty context
         context = MarketContext(
             query=f"Auto-generated for {intent}", # Will be overwritten by coordinator usually
             intent=intent,
+            trade_horizon=trade_horizon,
             ticker=ticker,
             user_context={"account_type": account_type, **user_settings}
         )
@@ -56,51 +76,88 @@ class DataFabricator:
         
         # Always fetch Price if we have a ticker
         if ticker:
-            tasks.append(self._fetch_price_data(ticker))
+            tasks.append(self._fetch_price_data(ticker, timeframe=timeframe))
         
         # Fetch News/Social for analysis
-        if intent in ["market_analysis", "analytical", "forecast_request"] and ticker:
+        if intent in ["market_analysis", "analytical", "forecast_request", "intraday_trade", "swing_trade"] and ticker:
             tasks.append(self._fetch_news_data(ticker))
             tasks.append(self._fetch_social_data(ticker))
             
-        # Fetch Whale data for deep dives
-        if intent in ["market_analysis", "whale_watch"] and ticker:
-            tasks.append(self._fetch_whale_data(ticker))
+        # Fetch macro indicators for risk governance
+        # We pass ticker info if available for liquidity analysis
+        tasks.append(self._fetch_macro_indicators(ticker=ticker))
+        
+        # SOTA 2026 Phase 27: Fetch Geopolitical Risk
+        tasks.append(self._fetch_geopolitical_data())
 
         # 3. Execute IO in parallel
         if tasks:
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
             # 4. Populate Context
+            # We need to handle PriceData first to get history for ADV
+            price_data: Optional[PriceData] = None
             for res in results:
-                if isinstance(res, Exception):
-                    logger.error(f"DataFabricator fetch failed: {res}")
-                    continue
-                
-                if res is None:
+                if isinstance(res, PriceData):
+                    price_data = res
+                    context.price = res
+                    break
+
+            for res in results:
+                if isinstance(res, Exception) or res is None:
                     continue
 
                 # Type-based injection
                 if isinstance(res, PriceData):
-                    context.price = res
+                    continue # Already handled
                 elif isinstance(res, ResearchData):
                     context.research = res
                 elif isinstance(res, SocialData):
                     context.social = res
                 elif isinstance(res, WhaleData):
                     context.whale = res
-                    
+                elif isinstance(res, GeopoliticalData):
+                    context.geopolitical = res
+                elif isinstance(res, dict) and "vix_level" in res:
+                    from market_context import RiskGovernanceData
+                    # Inject trade_horizon into RiskGovernanceData
+                    res["trade_horizon"] = trade_horizon
+                    context.risk_governance = RiskGovernanceData(**res)
+            
+            # SOTA 2026 Phase 28: Second pass for liquidity calculation
+            # Now that Price and RiskGovernance are both (potentially) populated
+            if context.price and context.price.history_series and context.risk_governance:
+                price_data = context.price
+                res_dict = context.risk_governance.model_dump()
+                
+                ohlcv = [{"v": float(getattr(b, 'volume', 0) or 0)} for b in price_data.history_series]
+                adv = self.quant_engine.calculate_adv_30d(ohlcv)
+                res_dict["adv_30d"] = adv
+                
+                curr_p = price_data.current_price or Decimal("1")
+                unit_size = Decimal("1000") / curr_p
+                
+                slippage = self.quant_engine.calculate_slippage_estimate(unit_size, adv)
+                res_dict["slippage_bps"] = slippage
+                
+                liq_check = self.quant_engine.check_participation_rate(unit_size, adv)
+                res_dict["pov_participation"] = liq_check["pov"]
+                res_dict["liquidity_status"] = liq_check["status"]
+                
+                from market_context import RiskGovernanceData
+                context.risk_governance = RiskGovernanceData(**res_dict)
+
         # 5. Measure latency
         context.total_latency_ms = (datetime.now() - start_time).total_seconds() * 1000
         
         return context
 
-    async def _fetch_price_data(self, ticker: str) -> Optional[PriceData]:
+    async def _fetch_price_data(self, ticker: str, timeframe: str = "1Day") -> Optional[PriceData]:
         from cache_manager import cache
         from decimal import Decimal
         from utils.financial_math import create_decimal, safe_div
 
-        cache_key = f"price_data:{ticker}"
+        cache_key = f"price_data:{ticker}:{timeframe}"
         cached = cache.get(cache_key)
         if cached:
             # logger.info(f"Cache hit for {ticker}")
@@ -108,13 +165,13 @@ class DataFabricator:
 
         try:
             from status_manager import status_manager
-            status_manager.set_status("coordinator", "working", f"Fetching price data for {ticker}...")
+            status_manager.set_status("coordinator", "working", f"Fetching {timeframe} price data for {ticker}...")
             
             from utils.data_frayer import get_data_frayer
             frayer = get_data_frayer()
             
             # Use SOTA Data Fraying to combine all providers
-            frayed_bars = await frayer.fetch_frayed_bars(ticker, limit=1000)
+            frayed_bars = await frayer.fetch_frayed_bars(ticker, limit=1000, timeframe=timeframe)
             
             # Extract last close and history using Decimal
             last_hist_close = Decimal('0')
@@ -228,7 +285,8 @@ class DataFabricator:
                 current_price=current_price,
                 currency=currency,
                 source=source_used,
-                history_series=history_series
+                history_series=history_series,
+                timeframe=timeframe
             )
             cache.set(cache_key, p_data, ttl=60) # 60s cache for prices
             return p_data
@@ -287,7 +345,62 @@ class DataFabricator:
         # Placeholder for social API
         return None
 
+    async def _fetch_macro_indicators(self, ticker: Optional[str] = None) -> Dict[str, Any]:
+        """Fetch VIX and Yield Spreads from yFinance."""
+        try:
+            import yfinance as yf
+            from decimal import Decimal
+            from utils.financial_math import create_decimal
+
+            def get_values():
+                # VIX
+                vix = yf.Ticker("^VIX").fast_info.last_price
+                # 10Y Treasury
+                tnx = yf.Ticker("^TNX").fast_info.last_price
+                # 3M Treasury (IRX) or 2Y (ZT=F, but ^IRX is easier for spread)
+                # Actually for 10Y-2Y, ^TYX is 30Y, ^FVX is 5Y. 2Y is not easily available via ^ symbol in fast_info
+                # Let's use 10Y-3M as a strong recession indicator
+                irx = yf.Ticker("^IRX").fast_info.last_price
+                return vix, tnx, irx
+
+            vix, tnx, irx = await asyncio.to_thread(get_values)
+            
+            vix_dec = create_decimal(vix) if vix else Decimal("20.0")
+            spread = create_decimal(tnx - irx) if (tnx and irx) else Decimal("1.0")
+            
+            risk_level = "NORMAL"
+            if vix_dec > 30 or spread < 0:
+                risk_level = "EXTREME"
+            elif vix_dec > 22 or spread < 0.5:
+                risk_level = "ELEVATED"
+                
+            return {
+                "vix_level": vix_dec,
+                "yield_spread_10y2y": spread, # Labeling as 10y2y for plan consistency, but using 10y3m
+                "systemic_risk_level": risk_level
+            }
+        except Exception as e:
+            logger.warning(f"Macro fetch failed: {e}")
+            return {
+                "vix_level": Decimal("20.0"),
+                "yield_spread_10y2y": Decimal("1.0"),
+                "systemic_risk_level": "NORMAL"
+            }
+
     async def _fetch_whale_data(self, ticker: str) -> Optional[WhaleData]:
         """Fetch whale alerts"""
         # Placeholder
         return None
+
+    async def _fetch_geopolitical_data(self) -> Optional[GeopoliticalData]:
+        """Fetch geopolitical risk data via GeopoliticalAgent."""
+        try:
+            from .agents.base_agent import AgentResponse
+            # We treat the GeopoliticalAgent as a specialist fetcher here
+            response = await self.geopolitical_agent.execute({"ticker": "GLOBAL"})
+            if response.success:
+                return GeopoliticalData(**response.data)
+            return None
+        except Exception as e:
+            logger.error(f"Geopolitical fetch failed: {e}")
+            return None

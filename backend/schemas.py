@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Dict, Any, Optional
 from decimal import Decimal
+from data_models import AssetType
 
 # --- Goal Planning Models ---
 
@@ -16,6 +17,7 @@ class GoalPlanContext(BaseModel):
 class InstrumentWeight(BaseModel):
     ticker: str
     weight: float
+    asset_type: AssetType = AssetType.EQUITY
 
 class GoalExecutionImplementation(BaseModel):
     type: str = Field(..., description="Implementation type, e.g., TRADING212_PIE")

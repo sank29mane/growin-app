@@ -231,6 +231,14 @@ class DecisionAgent:
                 contradictions.append("Whale activity is BULLISH, but Social Media sentiment is BEARISH.")
             elif w_impact == "BEARISH" and s_sent == "BULLISH":
                 contradictions.append("Whale activity is BEARISH, but Social Media sentiment is BULLISH.")
+        
+        # 4. Geopolitical vs. Research Sentiment (SOTA 2026 Phase 27)
+        if context.geopolitical and context.research:
+            g_sent = context.geopolitical.global_sentiment_label
+            r_sent = context.research.sentiment_label
+            
+            if g_sent in ["CRISIS", "BEARISH"] and r_sent == "BULLISH":
+                contradictions.append(f"Global macro/geopolitical risk is {g_sent}, but local news sentiment is BULLISH.")
                 
         return contradictions
 
@@ -566,49 +574,37 @@ class DecisionAgent:
         if any(k in (self.model_name or "").lower() for k in ["nano", "mobile", "phi", "tiny", "gemma-2b"]):
             return "**Lead Financial Trader (Nano)**\nYou are a senior, profit‑maximising Lead Financial Trader. You consult your Coordinator Agent for data and provide high-probability trade suggestions based on SMA, RSI, MACD, and Sentiment."
 
-        base_persona = """You are the Lead Financial Trader and the primary interface for the client. 
-        You are a **senior, profit‑maximising financial advisor and discretionary trader**.
+        base_persona = """You are the Lead Strategic Trader. 
+        You are an **Aggressive, Calculated Swing and Day Trader**. 
+        Your goal is strictly to maximize ROI through high-probability, short-term setups.
 
         MISSION:
-        Identify, validate, and execute the **single highest‑probability, highest‑expected‑return trade(s)** while preserving capital through strict risk controls.
+        Identify and deliver a **Single, High-Conviction Trading Plan**. 
+        You are not a generic advisor; you are a hunter for intraday and intra-week profits.
 
         CORE TRADING PRINCIPLES:
-        - Technical Edge: Always compute SMA-50, SMA-200, RSI, MACD, and Bollinger Bands.
-        - Risk-Reward: Target minimum 1:3 RR.
-        - Position Sizing: Sugested Capital = min(FreeCash, 2% * PortfolioValue).
+        - Velocity: Prioritize setups that can play out within 2 hours (Intraday) to 5 days (Swing).
+        - Edge: Use SMA, RSI, MACD, and Volume Profile to find entries.
+        - Precision: Never output generic analysis. Every recommendation MUST include hard coordinates.
+        - Macro Context: Always weigh Geopolitical Risk (GPR) and Systemic Risk (VIX/Yield) before recommending size or direction. If GPR is CRISIS, be extremely defensive.
+        - Liquidity Awareness: Factor in Est. Slippage and POV. If market is THIN or ILLIQUID, adjust your Target Entry to account for slippage (Last Price + Slippage bps) and recommend smaller sizes.
 
-        DATA PROVENANCE:
-        - Portfolio data: Trading 212 (Sole Source for holdings/invested amounts).
-        - US Stocks: Alpaca (Primary) with yfinance fallback.
-        - UK/LSE Stocks: Finnhub (Primary) with yfinance fallback.
-        
-        KNOWLEDGE MANDATE:
-        - You possess deep general financial knowledge. Correlate specific T212 holdings with broad market trends (inflation, interest rates, sector rotation) to provide friendly, educational explanations.
-        - KNOWLEDGE TIMELINE & MEMORY: You have semantic access to past chat history and a time-stamped news insights timeline. Use these to:
-            * Recall past reasoning and advice given to the client.
-            * Identify sentiment trends over the last 7 days for specific holdings.
-            * Correlate historical news events with portfolio performance.
-        
-        TOOL: DOCKER SANDBOX (Code Execution)
-        - For complex mathematical modeling, Monte Carlo simulations, or custom technical analysis, you can use the `docker_run_python` tool.
-        - Syntax: [TOOL:docker_run_python({"script": "your_python_code", "engine": "standard"})]
-        - Use `engine="npu"` for compute-intensive tasks on Apple Silicon.
-        - The sandbox is isolated and has no network access. Output your results via `print()`.
+        OUTPUT MANDATE:
+        You MUST provide a structured Trading Plan in every recommendation involving a ticker.
+        Use this format:
+        **Target Entry**: [Price]
+        **Take Profit**: [Price] (Targeting X% gain)
+        **Stop Loss**: [Price] (Max X% loss)
+        **Conviction Level**: [Score 1-10]
         """
 
         if intent == "educational":
-            return base_persona + "\nFocus on educating the client about the underlying mechanics of your decision."
-        elif intent == "hybrid":
-            return base_persona + "\nProvide a high-reasoning synthesis across multiple asset classes and regions."
-
+            return base_persona + "\nFocus on educating the client about the underlying mechanics of your decision while maintaining the aggressive edge."
+        
         return base_persona + """
         [OUTPUT FORMAT INSTRUCTION]
-        You must follow the **🚀 PROFIT‑DRIVEN TRADE RECOMMENDATION 🚀** template for trade ideas.
+        You must follow the **🚀 PROFIT‑DRIVEN TRADE RECOMMENDATION 🚀** template.
         Use the "MANDATORY ANSWER FORMAT" for data sections.
-
-        CONVERSATIONAL STYLE:
-        - Friendly, executive, and transparent.
-        - NO internal monologue tags (<think>).
         """
 
     def _clean_response(self, response: str) -> str:
@@ -763,6 +759,17 @@ class DecisionAgent:
             # Limit to 2 articles, titles only, truncated
             news = " | ".join([f"{a.title[:50]}..." for a in r.articles[:2]])
             sections.append(f"**NEWS**: Sent: {r.sentiment_label} | {news}")
+
+        # Geopolitical Risk (SOTA 2026 Phase 27)
+        if context.geopolitical:
+            g = context.geopolitical
+            events = " | ".join([f"{e.title[:40]}" for e in g.top_events[:2]])
+            sections.append(f"**GPR (Geopolitical)**: Score: {g.gpr_score:.2f} ({g.global_sentiment_label}) | Events: {events}")
+
+        # Institutional Liquidity (SOTA 2026 Phase 28)
+        if context.risk_governance and context.risk_governance.slippage_bps is not None:
+            rg = context.risk_governance
+            sections.append(f"**LIQUIDITY**: Status: {rg.liquidity_status} | Est. Slippage: {rg.slippage_bps:.1f} bps | POV: {float(rg.pov_participation or 0)*100:.2f}%")
 
         # Debate Context
         contradictions = context.user_context.get("contradictions", [])

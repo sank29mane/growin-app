@@ -5,6 +5,41 @@ import Foundation
 
 // MARK: - Portfolio Models
 
+enum AssetType: String, Codable, Sendable {
+    case equity = "EQUITY"
+    case option = "OPTION"
+    case fx = "FX"
+    case crypto = "CRYPTO"
+}
+
+struct OptionGreeks: Codable, Sendable, Equatable {
+    let delta: Decimal?
+    let gamma: Decimal?
+    let theta: Decimal?
+    let vega: Decimal?
+    let rho: Decimal?
+}
+
+struct OptionData: Codable, Sendable, Equatable {
+    let underlyingTicker: String
+    let strikePrice: Decimal
+    let expirationDate: String # ISO 8601 Date
+    let optionType: String # 'call' or 'put'
+    let contractSize: Int
+    let openInterest: Int?
+    let greeks: OptionGreeks?
+    
+    enum CodingKeys: String, CodingKey {
+        case underlyingTicker = "underlying_ticker"
+        case strikePrice = "strike_price"
+        case expirationDate = "expiration_date"
+        case optionType = "option_type"
+        case contractSize = "contract_size"
+        case openInterest = "open_interest"
+        case greeks
+    }
+}
+
 struct PortfolioSnapshot: Codable, Sendable {
     let summary: PortfolioSummary?
     let positions: [Position]?
@@ -52,11 +87,13 @@ struct CashBalance: Codable, Sendable {
 struct Position: Codable, Identifiable, Sendable {
     var id: String { 
         if let ticker = ticker, let accountType = accountType {
-            return "\(ticker)-\(accountType)"
+            let assetSuffix = assetType?.rawValue ?? "EQUITY"
+            return "\(ticker)-\(accountType)-\(assetSuffix)"
         }
         return ticker ?? accountType ?? UUID().uuidString
     }
     let ticker: String?
+    let assetType: AssetType?
     let name: String?
     let quantity: Decimal?
     let currentPrice: Decimal?
@@ -65,13 +102,18 @@ struct Position: Codable, Identifiable, Sendable {
     let fxPpl: Decimal?
     let accountType: String?
     
+    // Multi-Asset Metadata
+    let optionDetails: OptionData?
+    
     enum CodingKeys: String, CodingKey {
         case ticker, name, quantity
+        case assetType = "asset_type"
         case currentPrice = "current_price"
         case averagePrice = "average_price"
         case ppl
         case fxPpl = "fx_ppl"
         case accountType = "account_type"
+        case optionDetails = "option_details"
     }
 }
 
@@ -283,4 +325,10 @@ struct AIStrategy: Codable, Sendable, Identifiable {
 struct InstrumentWeightMapping: Codable, Sendable {
     let ticker: String
     let weight: Double
+    let assetType: AssetType?
+    
+    enum CodingKeys: String, CodingKey {
+        case ticker, weight
+        case assetType = "asset_type"
+    }
 }

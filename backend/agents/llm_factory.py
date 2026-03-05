@@ -159,6 +159,11 @@ class LLMFactory:
             logger.info(f"LM Studio: Ensuring model loaded: {target_model_id}")
             try:
                 await client.ensure_model_loaded(target_model_id)
+                # SOTA: Hardening - wait for initialization to complete
+                is_ready = await client.wait_until_ready(target_model_id, timeout=30)
+                if not is_ready:
+                    logger.warning(f"LM Studio: Model {target_model_id} failed to initialize in time.")
+                
                 # Explicitly set the active model ID on the client wrapper
                 client.active_model_id = target_model_id 
                 status_manager.set_status("lmstudio", "ready", f"Model {target_model_id} active")

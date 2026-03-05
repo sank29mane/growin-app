@@ -104,6 +104,8 @@ Intents:
 - market_analysis (needs quant, forecast, research, social)
 - portfolio_query (needs portfolio)
 - goal_planning (needs goal_planner)
+- intraday_trade (needs quant, forecast, research; implies 5min bars)
+- swing_trade (needs quant, forecast, research; implies 1hour bars)
 
 Query: "{clean_query}"
 """
@@ -123,6 +125,8 @@ Query: "{clean_query}"
             needs_map = {
                 "price_check": ["quant"],
                 "market_analysis": ["quant", "forecast", "research", "social", "whale", "portfolio"],
+                "intraday_trade": ["quant", "forecast", "research", "social"],
+                "swing_trade": ["quant", "forecast", "research", "social"],
                 "portfolio_query": ["portfolio", "quant", "forecast"],
                 "goal_planning": ["goal_planner", "portfolio"],
                 "educational": []
@@ -202,6 +206,20 @@ Query: "{clean_query}"
 
         # 4. Parallel Specialist Execution (The Swarm)
         needs = intent_info["needs"]
+        
+        # SOTA 2026 Phase 25: Liquidity Calculation
+        if ticker and context.price and context.price.history_series:
+            # Re-fetch or reuse history to calculate ADV
+            ohlcv_raw = [{
+                't': b.timestamp, 'o': b.open, 'h': b.high, 'l': b.low, 'c': b.close, 'v': b.volume
+            } for b in context.price.history_series]
+            adv = self.quant_agent.engine.calculate_adv_30d(ohlcv_raw)
+            if context.risk_governance:
+                context.risk_governance.adv_30d = adv
+            else:
+                from market_context import RiskGovernanceData
+                context.risk_governance = RiskGovernanceData(adv_30d=adv)
+
         tasks = []
         
         # Dynamic Weighting: Adjust specialist priority based on alpha
@@ -313,7 +331,7 @@ Query: "{clean_query}"
             recommendation = rebuttal_result
 
         # Calculate final ACE Score using dedicated component
-        ace_score = ace_evaluator.calculate_score(debate_trace, risk_review.get("status"))
+        ace_score = ace_evaluator.calculate_score(debate_trace, risk_review.get("status"), context.risk_governance)
         robustness_label = ace_evaluator.get_robustness_label(ace_score)
 
         context.user_context["risk_review"] = risk_review

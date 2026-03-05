@@ -21,7 +21,19 @@ In SOTA 2026 mode, you adopt "The Contrarian" persona: your primary goal is to f
 
 Review Criteria:
 1. Exposure: Is the suggested trade too large for the account? (Max 5% per position).
-2. Compliance: Ensure no prohibited instruments or wash-sale risks.
+2. Liquidity (Institutional SOTA 2026):
+   - Flag orders > 1% of 30-day Average Daily Volume (ADV).
+   - High Market Impact leads to "FLAGGED" status.
+3. Institutional Macro Triggers (REFINED Phase 26):
+   - High VIX (>30) or Inverted Yield Spread (<0) should NOT block short-term volatility plays (like shorting or inverse ETFs). 
+   - These environments are high-ROI for active traders but dangerous for long-only investors. 
+   - Distinction: "BLOCKED" for long-only medium/long horizon; "APPROVED with Warning" for short-term setups.
+4. Trade Horizon Calibration:
+   - Adjust exposure checks based on horizon: 
+     - Short (Intraday): Higher tolerance for volatility, smaller size relative to ADV.
+     - Medium (Swing): 1:3 RR mandate.
+     - Long (Invest): Focus on fundamental stability.
+5. Compliance: Ensure no prohibited instruments or wash-sale risks.
 3. Wash Sale Protection (SOTA 2026):
    - Block 'BUY' orders for tickers sold for a loss in the last 30 days.
    - Applies specifically to 'Invest' (taxable) accounts.
@@ -77,6 +89,24 @@ class RiskAgent(BaseAgent):
         if not market_context:
             return AgentResponse(agent_name=self.config.name, success=False, data={}, error="Missing MarketContext", latency_ms=0)
 
+        # SOTA 2026: Institutional Risk Logic
+        risk_governance = market_context.risk_governance
+        vix = risk_governance.vix_level if (risk_governance and risk_governance.vix_level is not None) else Decimal("20")
+        spread = risk_governance.yield_spread_10y2y if (risk_governance and risk_governance.yield_spread_10y2y is not None) else Decimal("1.0")
+        adv = risk_governance.adv_30d if (risk_governance and risk_governance.adv_30d is not None) else Decimal("0")
+        
+        # Heuristic to extract order size from suggestion (e.g. "Buy 100 shares")
+        order_size = Decimal("0")
+        size_match = re.search(r'(BUY|SELL|ORDER)\s+(\d+)', suggestion, re.IGNORECASE)
+        if size_match:
+            order_size = create_decimal(size_match.group(2))
+            
+        liq_impact = Decimal("0")
+        if adv > 0 and order_size > 0:
+            liq_impact = (order_size / adv) * 100 # Percentage of ADV
+            if risk_governance:
+                risk_governance.liquidity_impact = liq_impact
+
         # SOTA 2026: Wash Sale Detection logic
         wash_sale_alert = False
         if any(word in suggestion.upper() for word in ["BUY", "LONG"]):
@@ -92,14 +122,22 @@ class RiskAgent(BaseAgent):
         prompt = f"""
         [CONTEXT]
         Ticker: {market_context.ticker}
-        Intent: {market_context.intent}
         Portfolio Value: £{market_context.portfolio.total_value if market_context.portfolio else "Unknown"}
-        Wash Sale Risk: {"HIGH (Recent loss sale detected)" if wash_sale_alert else "Low"}
+        Trade Horizon: {market_context.trade_horizon} (SOTA 2026 Phase 26 Calibration)
+        
+        [MACRO RISK]
+        VIX: {vix}
+        Yield Spread (10Y-3M): {spread}
+        ADV (30d): {adv}
+        Est. Liquidity Impact: {liq_impact:.4f}% of ADV
+        Est. Slippage: {risk_governance.slippage_bps if risk_governance else 0} bps
+        Liquidity Status: {risk_governance.liquidity_status if risk_governance else "UNKNOWN"}
+        Systemic Risk Level: {risk_governance.systemic_risk_level if risk_governance else "NORMAL"}
         
         [PROPOSED STRATEGY]
         {suggestion}
         
-        Audit this strategy against our risk protocols.
+        Audit this strategy against our risk protocols. If VIX > 30 or Spread < 0, you MUST allow short-term volatility plays but be extremely skeptical of long-only medium/long term entries. Block trades where estimated slippage > 1% (100 bps).
         """
         
         try:

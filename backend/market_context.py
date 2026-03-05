@@ -186,6 +186,42 @@ class GoalData(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class RiskGovernanceData(BaseModel):
+    """Institutional risk metrics (SOTA 2026 Phase 25)"""
+    vix_level: Optional[Decimal] = None
+    yield_spread_10y2y: Optional[Decimal] = None
+    adv_30d: Optional[Decimal] = None
+    liquidity_impact: Optional[Decimal] = None  # (order_size / adv_30d)
+    systemic_risk_level: str = "NORMAL"  # NORMAL, ELEVATED, EXTREME
+    trade_horizon: str = "medium" # short (intraday), medium (swing), long (invest)
+    
+    # SOTA 2026 Phase 28: Liquidity Deep-Dive
+    slippage_bps: Optional[Decimal] = None
+    pov_participation: Optional[Decimal] = None
+    liquidity_status: str = "LIQUID" # LIQUID, THIN, ILLIQUID
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class GeopoliticalEvent(BaseModel):
+    """Specific geopolitical event metadata"""
+    title: str
+    impact: str  # HIGH, MEDIUM, LOW
+    region: str
+    description: Optional[str] = None
+    url: Optional[str] = None
+
+
+class GeopoliticalData(BaseModel):
+    """Geopolitical Risk (GPR) and global event data"""
+    gpr_score: Decimal = Decimal('0.5')  # 0 to 1 (0.5 is neutral/baseline)
+    global_sentiment_label: str = "NEUTRAL"  # BULLISH, BEARISH, VOLATILE, CRISIS
+    top_events: List[GeopoliticalEvent] = []
+    summary: str = ""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class PriceData(BaseModel):
     """Current price information"""
     ticker: str
@@ -195,6 +231,7 @@ class PriceData(BaseModel):
     variance: Optional[float] = None  # From PriceValidator
     validated: bool = False
     history_series: List[TimeSeriesItem] = [] # Historical series for charts
+    timeframe: str = "1Day" # SOTA 2026 Phase 26
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -211,6 +248,7 @@ class MarketContext(BaseModel):
     # Metadata
     query: str
     intent: str = "analytical"
+    trade_horizon: str = "medium" # SOTA 2026 Phase 26: short, medium, long
     routing_reason: Optional[str] = None
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     ticker: Optional[str] = None
@@ -224,6 +262,8 @@ class MarketContext(BaseModel):
     social: Optional[SocialData] = None
     whale: Optional[WhaleData] = None
     goal: Optional[GoalData] = None
+    risk_governance: Optional[RiskGovernanceData] = None
+    geopolitical: Optional[GeopoliticalData] = None
     
     # Agent Status & Telemetry
     agents_executed: List[str] = []
@@ -278,6 +318,12 @@ class MarketContext(BaseModel):
 
         if self.whale:
             parts.append(f"Whales: {self.whale.sentiment_impact}")
+
+        if self.geopolitical:
+            parts.append(f"GPR: {self.geopolitical.global_sentiment_label}")
+        
+        if self.risk_governance and self.risk_governance.slippage_bps:
+            parts.append(f"Est. Slippage: {self.risk_governance.slippage_bps:.1f} bps")
         
         return " | ".join(parts) if parts else "No data available"
     
@@ -287,7 +333,7 @@ class MarketContext(BaseModel):
     def serialize_dt(self, dt: datetime, _info):
         return dt.isoformat()
 
-    @field_serializer('price', 'forecast', 'quant', 'portfolio', 'research', 'social', 'whale', 'goal', check_fields=False)
+    @field_serializer('price', 'forecast', 'quant', 'portfolio', 'research', 'social', 'whale', 'goal', 'risk_governance', check_fields=False)
     def serialize_nested(self, v, _info):
         if v is None:
             return None

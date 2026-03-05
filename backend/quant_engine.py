@@ -278,6 +278,62 @@ class QuantEngine:
             
         return self._recovery_model.predict_recovery_trajectory(features)
 
+    def calculate_adv_30d(self, ohlcv_data: List[Dict[str, Any]]) -> Decimal:
+        """Calculates 30-day Average Daily Volume (ADV)"""
+        if not ohlcv_data:
+            return Decimal('0')
+        
+        # Take last 30 daily bars if available, otherwise use all available
+        volumes = [create_decimal(d.get('v', d.get('volume', 0))) for d in ohlcv_data[-30:]]
+        if not volumes:
+            return Decimal('0')
+            
+        total_vol = sum(volumes)
+        return safe_div(total_vol, Decimal(len(volumes)))
+
+    def estimate_liquidity_impact(self, order_size: Decimal, adv_30d: Decimal) -> Decimal:
+        """Estimates liquidity impact as a ratio of ADV"""
+        return safe_div(order_size, adv_30d) if adv_30d > 0 else Decimal('0')
+
+    def calculate_slippage_estimate(self, order_size: Decimal, adv_30d: Decimal, volatility_daily: Decimal = Decimal('0.02')) -> Decimal:
+        """
+        Estimates slippage in basis points (bps) using Square-Root Impact Model.
+        Slippage (bps) = σ * Y * sqrt(Size / ADV) * 10000
+        σ: daily volatility (default 2%)
+        Y: Impact coefficient (default 0.1)
+        """
+        if adv_30d <= 0 or order_size <= 0:
+            return Decimal('0')
+            
+        import math
+        order_fraction = float(order_size / adv_30d)
+        impact_coeff = 0.1
+        
+        # impact = sigma * Y * sqrt(fraction)
+        impact_pct = float(volatility_daily) * impact_coeff * math.sqrt(order_fraction)
+        
+        # Convert to bps
+        return Decimal(str(impact_pct * 10000)).quantize(PRECISION_CURRENCY)
+
+    def check_participation_rate(self, order_size: Decimal, adv_30d: Decimal, max_pov: Decimal = Decimal('0.10')) -> Dict[str, Any]:
+        """
+        Checks if the order exceeds the maximum participation rate (Percentage of Volume).
+        Default max_pov is 10% of ADV.
+        """
+        if adv_30d <= 0:
+            return {"status": "UNKNOWN", "pov": Decimal('0')}
+            
+        pov = order_size / adv_30d
+        status = "SAFE" if pov <= max_pov else "FLAGGED"
+        if pov > Decimal('0.30'):
+            status = "ILLIQUID" # Extremely high impact
+            
+        return {
+            "status": status,
+            "pov": pov,
+            "is_liquid": pov <= max_pov
+        }
+
     def calculate_technical_indicators(self, ohlcv_data: List[Dict[str, Any]]) -> Union[AnalysisResult, Dict[str, str]]:
         """
         Calculate technical indicators from OHLCV data using optimized backends.

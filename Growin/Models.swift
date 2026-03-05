@@ -272,18 +272,52 @@ struct ResearchData: Codable, Equatable {
     }
 }
 
+struct FXData: Codable, Equatable {
+    let baseCurrency: String
+    let quoteCurrency: String
+    let lotSize: Int
+
+    enum CodingKeys: String, CodingKey {
+        case baseCurrency = "base_currency"
+        case quoteCurrency = "quote_currency"
+        case lotSize = "lot_size"
+    }
+}
+
+struct CryptoData: Codable, Equatable {
+    let baseAsset: String
+    let quoteAsset: String
+    let blockchain: String?
+
+    enum CodingKeys: String, CodingKey {
+        case baseAsset = "base_asset"
+        case quoteAsset = "quote_asset"
+        case blockchain
+    }
+}
+
 struct PriceData: Codable, Equatable {
     let ticker: String
+    let assetType: AssetType?
     let currentPrice: Decimal?
     let currency: String?
     let source: String?
     let validated: Bool?
     let historySeries: [TimeSeriesItem]?
+    
+    // Multi-Asset Metadata
+    let optionDetails: OptionData?
+    let fxDetails: FXData?
+    let cryptoDetails: CryptoData?
 
     enum CodingKeys: String, CodingKey {
         case ticker, currency, source, validated
+        case assetType = "asset_type"
         case currentPrice = "current_price"
         case historySeries = "history_series"
+        case optionDetails = "option_details"
+        case fxDetails = "fx_details"
+        case cryptoDetails = "crypto_details"
     }
 }
 

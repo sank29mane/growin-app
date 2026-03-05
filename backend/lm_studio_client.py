@@ -29,10 +29,11 @@ class LMStudioClient:
 
     BASE_URL = "http://127.0.0.1:1234"
 
-    def __init__(self, base_url: str = None, api_token: str = None):
+    def __init__(self, base_url: str = None, api_token: str = None, dry_run: bool = False):
         self.base_url = base_url or os.getenv("LM_STUDIO_URL", self.BASE_URL)
         self.api_token = api_token or os.getenv("LM_API_TOKEN")
         self.active_model_id: Optional[str] = None
+        self.dry_run = dry_run
 
         self.headers = {
             "Content-Type": "application/json"
@@ -163,7 +164,7 @@ class LMStudioClient:
         """
         # SOTA: Auto-detect active model if not provided
         model_id = model_id or self.active_model_id
-        if not model_id:
+        if not model_id and not self.dry_run:
              raise ValueError("No model_id provided or active_model_id set on client.")
 
         if not messages:
@@ -172,6 +173,21 @@ class LMStudioClient:
                 messages.append({"role": "system", "content": system_prompt})
             if input_text:
                 messages.append({"role": "user", "content": input_text})
+
+        # SOTA: Handle dry_run for edge-case testing
+        if self.dry_run:
+            prompt_content = messages[-1]["content"] if messages else ""
+            if not prompt_content:
+                return {"content": "", "role": "assistant", "sessionId": session_id}
+            if "OVERFLOW-TOKENS" in prompt_content:
+                return {"error": "context_window_exceeded", "content": ""}
+            if "MALFORMED-TOOL" in prompt_content:
+                return {
+                    "content": "I will call a tool.",
+                    "role": "assistant",
+                    "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "test_tool", "arguments": "{"}}]
+                }
+            return {"content": "Dry run response", "role": "assistant", "sessionId": session_id}
 
         # OpenAI compatible payload with 0.4.0+ specialized fields
         # SOTA: cache_prompt=True enables Content-Based Prefix Caching for TTFT reduction
@@ -390,6 +406,22 @@ class LMStudioClient:
         """
         tasks = [self.chat(model_id=model_id, **req) for req in requests]
         return await asyncio.gather(*tasks)
+
+    async def wait_until_ready(self, model_id: str, timeout: int = 30) -> bool:
+        """
+        Poll the models API until the specified model is fully loaded and ready.
+        """
+        start_time = asyncio.get_event_loop().time()
+        while (asyncio.get_event_loop().time() - start_time) < timeout:
+            loaded_models = await self.list_loaded_models()
+            if model_id in loaded_models:
+                logger.info(f"LM Studio: Model {model_id} is ready.")
+                return True
+            logger.info(f"LM Studio: Waiting for {model_id} to initialize...")
+            await asyncio.sleep(2.0)
+        
+        logger.warning(f"LM Studio: Timeout waiting for {model_id} to be ready.")
+        return False
 
     async def ensure_model_loaded(self, model_id: str, context_length: int = 8192, gpu: str = "max") -> bool:
         """

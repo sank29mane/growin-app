@@ -1,23 +1,27 @@
 # GSD STATE MEMORY
 
 ## Current Position
-- **Phase**: Phase 25 - Adaptive Risk Governance (Institutional Baseline)
-- **Task**: Initial Research into Liquidity Constraints & Risk-Off Triggers
-- **Status**: PLANNING
+- **Phase**: Phase 29 - Multi-Asset Bridge (Options & FX)
+- **Task**: Step 2 - Integrate Alpaca Crypto/Options clients in DataEngine
+- **Status**: IN PROGRESS
 
 ## Last Milestone Summary
-- **Milestone**: Autonomous Experience & Production Scaling (In Progress)
-- **Completed**: Phase 24 (Frontend Reasoning Trace)
+- **Milestone**: Autonomous Experience & Production Scaling (COMPLETED)
+- **Completed**: Phase 24, Phase 25, Phase 26, Phase 27, Phase 28
 - **Highlights**:
+    - **Phase 29 (Multi-Asset)**: Defined unified data models for Options, FX, and Crypto in Python and Swift.
+    - **Phase 28 (Liquidity)**: Implemented Square-Root Impact model for slippage estimation.
+    - **Phase 27 (Geopolitical)**: Built specialized agent fetching global risks via NewsData.io and Tavily.
+    - **Phase 26 (Profit Audit)**: Calibrated agents for aggressive intraday trading with explicit coordinates.
+    - **Geopolitical RAG**: Added specialized timeline indexing for global events in ChromaDB.
+    - **Risk Weighting**: Updated DecisionAgent to weigh macro CRISIS events against local ticker signals.
+    - **LM Studio Audit**: Implemented reliability test suite with crash recovery (V1 Recovery path).
     - **Reasoning UI**: Built expandable grid trace with kinetic slot transitions.
-    - **NPU Glow**: Metal-accelerated reasoning chips with `.colorEffect`.
-    - **120Hz & A11y**: `.equatable()` constraints, tuned spring physics, and `.accessibilityLiveRegion(.polite)` integrated.
-- **Verification**: Zero dropped frames observed in simulated burst trace streaming.
 
 ## Next Steps
-1. **Phase 25 CONTEXT**: Discuss institutional risk parameters and liquidity modeling.
-2. **Phase 25 RESEARCH**: Identify suitable data feeds for real-time liquidity constraints.
-3. **Phase 25 PLAN**: Outline integration of risk-off triggers into the trading engine.
+1. **Phase 29 EXECUTE**: Integrate Alpaca Crypto/Options clients in `DataEngine`.
+2. **Phase 29 EXECUTE**: Update `AlpacaClient` to handle `AssetType` routing for Options and Crypto.
+
 
 ## Active Jules Swarm
 Delegated background tasks:
@@ -31,7 +35,7 @@ Delegated background tasks:
 | Task | Description | Date |
 |------|-------------|------|
 | Memory Guard | Created sysctl-based Memory Guard with 60%/4GB hard-gates. | 2026-03-05 |
+| Phase File Org | Organized all .planning/phases/ files into dedicated sub-folders. | 2026-03-05 |
 | PR Merge (#109-112) | Merged Reasoning Trace UI, Palette Standardization, and A11y. | 2026-03-04 |
 | 120Hz Perf Fix | Implemented `.equatable()` across rich components to fix stutters. | 2026-03-04 |
 | Metal NPU Glow | Implemented shader-driven UI aura for agentic trace chips. | 2026-03-04 |
-| Phase 24 Audit | Completed rendering and accessibility compliance checks. | 2026-03-04 |

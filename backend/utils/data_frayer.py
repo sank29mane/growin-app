@@ -119,8 +119,20 @@ class MarketDataFrayer:
             import yfinance as yf
             
             # Map timeframe
-            period_map = {"1Day": "5y", "1Hour": "730d", "15Min": "60d"}
-            interval_map = {"1Day": "1d", "1Hour": "1h", "15Min": "15m"}
+            period_map = {
+                "1Day": "5y",
+                "1Hour": "730d",
+                "15Min": "60d",
+                "5Min": "60d",
+                "1Min": "7d"
+            }
+            interval_map = {
+                "1Day": "1d",
+                "1Hour": "1h",
+                "15Min": "15m",
+                "5Min": "5m",
+                "1Min": "1m"
+            }
             
             period = period_map.get(timeframe, "2y")
             interval = interval_map.get(timeframe, "1d")
