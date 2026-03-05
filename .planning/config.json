@@ -1,8 +1,8 @@
 {
-  "model_profile": "balanced",
+  "model_profile": "high-precision",
   "commit_docs": true,
   "search_gitignored": false,
-  "branching_strategy": "none",
+  "branching_strategy": "phase-based",
   "phase_branch_template": "gsd/phase-{phase}-{slug}",
   "milestone_branch_template": "gsd/{milestone}-{slug}",
   "workflow": {
@@ -12,5 +12,8 @@
     "nyquist_validation": true
   },
   "parallelization": true,
-  "brave_search": false
+  "brave_search": false,
+  "granularity": "radical",
+  "strategy": "aggressive",
+  "mode": "yolo"
 }

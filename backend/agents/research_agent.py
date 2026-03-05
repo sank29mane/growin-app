@@ -89,6 +89,25 @@ class ResearchAgent(BaseAgent):
             AgentResponse with ResearchData containing sentiment and headlines
         """
         ticker = context.get("ticker", "MARKET")
+        
+        # --- Multi-Asset Bridge (Phase 29) ---
+        import re
+        is_crypto = "/" in ticker and ("BTC" in ticker or "ETH" in ticker or ticker.endswith("/USD"))
+        is_fx = ("=" in ticker or "OANDA" in ticker) or ("/" in ticker and not is_crypto)
+        
+        # Extract underlying if it's an OCC option string
+        option_match = re.match(r'^([A-Z]{1,6})\d{6}[CP]\d{8}$', ticker)
+        if option_match:
+            ticker = option_match.group(1)
+            logger.info(f"ResearchAgent: Detected Option. Using underlying '{ticker}' for news search.")
+
+        asset_keyword = "stock"
+        if is_crypto:
+            asset_keyword = "crypto"
+            ticker = ticker.split("/")[0] if "/" in ticker else ticker
+        elif is_fx:
+            asset_keyword = "forex"
+
         company_name = context.get("company_name", ticker)
         
         if not any([self.newsapi_key, self.tavily_key, self.newsdata_key]):
@@ -120,20 +139,17 @@ class ResearchAgent(BaseAgent):
 
                 # 1. NewsAPI (Circuit Breaker protected)
                 if self.newsapi_key and query_ticker != "MARKET":
-                    chain = provider_manager.get_or_create_chain("newsapi")
-                    # Register dynamically if not exists (simplified for now, usually done in init)
-                    # For now we just use safe direct call with CB logic manually or via helper
-                    news_res = await self._fetch_newsapi(query_ticker, query_name)
+                    news_res = await self._fetch_newsapi(query_ticker, query_name, asset_keyword)
                     current_articles.extend(news_res)
 
                 # 2. Tavily (Circuit Breaker protected)
                 if self.tavily_key:
-                    tavily_res = await self._fetch_tavily(query_ticker, query_name)
+                    tavily_res = await self._fetch_tavily(query_ticker, query_name, asset_keyword)
                     current_articles.extend(tavily_res)
                 
                 # 3. NewsData.io (Circuit Breaker protected)
                 if self.newsdata_key:
-                    newsdata_res = await self._fetch_newsdata(query_ticker, query_name)
+                    newsdata_res = await self._fetch_newsdata(query_ticker, query_name, asset_keyword)
                     current_articles.extend(newsdata_res)
                 
                 if current_articles:
@@ -287,7 +303,7 @@ class ResearchAgent(BaseAgent):
             logger.warning(f"Regulatory news fetch failed: {e}")
             return []
 
-    async def _fetch_newsapi(self, ticker: str, company_name: str) -> List[Dict]:
+    async def _fetch_newsapi(self, ticker: str, company_name: str, asset_keyword: str = "stock") -> List[Dict]:
         """Fetch from NewsAPI (traditional news sources)."""
         try:
             from newsapi import NewsApiClient
@@ -298,7 +314,7 @@ class ResearchAgent(BaseAgent):
             
             def fetch():
                 return newsapi.get_everything(
-                    q=f"{company_name} stock OR {ticker}",
+                    q=f"{company_name} {asset_keyword} OR {ticker}",
                     from_param=from_date,
                     language='en',
                     sort_by='relevancy',
@@ -311,7 +327,7 @@ class ResearchAgent(BaseAgent):
             logger.warning(f"NewsAPI failed: {e}")
             return []
 
-    async def _fetch_tavily(self, ticker: str, company_name: str) -> List[Dict]:
+    async def _fetch_tavily(self, ticker: str, company_name: str, asset_keyword: str = "stock") -> List[Dict]:
         """Fetch from Tavily (AI-powered search)."""
         try:
             from tavily import TavilyClient
@@ -323,7 +339,7 @@ class ResearchAgent(BaseAgent):
                 query = "latest stock market outlook for LSE (UK), NSE (India), and US markets"
             else:
                 region = "LSE UK" if is_uk else "US"
-                query = f"latest financial news for {company_name} ({ticker}) stock on {region} market"
+                query = f"latest financial news for {company_name} ({ticker}) {asset_keyword} on {region} market"
             
             def fetch():
                 return tavily.search(
@@ -348,7 +364,7 @@ class ResearchAgent(BaseAgent):
             logger.warning(f"Tavily failed: {e}")
             return []
 
-    async def _fetch_newsdata(self, ticker: str, company_name: str) -> List[Dict]:
+    async def _fetch_newsdata(self, ticker: str, company_name: str, asset_keyword: str = "stock") -> List[Dict]:
         """
         Fetch from NewsData.io (business/economy focus).
         
@@ -373,7 +389,7 @@ class ResearchAgent(BaseAgent):
                  # However, if the LLM suggests strict market logic, we follow.
                  # Let's try /latest for flexibility with smart 'q'.
             else:
-                 user_prompt = f"News for {company_name} ({ticker})"
+                 user_prompt = f"News for {company_name} ({ticker}) {asset_keyword}"
                  params = await self._generate_smart_query(user_prompt)
                  url = "https://newsdata.io/api/1/latest"
 
@@ -390,7 +406,7 @@ class ResearchAgent(BaseAgent):
                      params.update({"removeduplicate": 0})
                  else:
                      url = "https://newsdata.io/api/1/latest"
-                     q = f"{company_name} OR {ticker} stock" if company_name else f"{ticker} stock"
+                     q = f"{company_name} OR {ticker} {asset_keyword}" if company_name else f"{ticker} {asset_keyword}"
                      params["q"] = q
                      is_uk = ticker.upper().endswith(".L")
                      params["country"] = "gb" if is_uk else "us"

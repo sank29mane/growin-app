@@ -10,7 +10,7 @@ from typing import Dict, Any, Optional
 from datetime import datetime
 from decimal import Decimal
 
-from backend.market_context import MarketContext, PriceData, TimeSeriesItem, ResearchData, NewsArticle, SocialData, WhaleData, GeopoliticalData
+from market_context import MarketContext, PriceData, TimeSeriesItem, ResearchData, NewsArticle, SocialData, WhaleData, GeopoliticalData
 from data_engine import get_alpaca_client, get_finnhub_client
 from utils.news_client import NewsDataIOClient
 from agents.geopolitical_agent import GeopoliticalAgent
@@ -170,23 +170,44 @@ class DataFabricator:
             from utils.data_frayer import get_data_frayer
             frayer = get_data_frayer()
             
-            # Use SOTA Data Fraying to combine all providers
-            frayed_bars = await frayer.fetch_frayed_bars(ticker, limit=1000, timeframe=timeframe)
+            # Identify Asset Class from Ticker Format
+            is_crypto = "/" in ticker and ("BTC" in ticker or "ETH" in ticker or ticker.endswith("/USD"))
+            is_option = len(ticker) > 10 and (ticker[-9] in ["C", "P"]) and ticker[-8:].isdigit()
+            is_fx = ("=" in ticker or "OANDA" in ticker) or ("/" in ticker and not is_crypto)
+            is_uk = ticker.upper().endswith(".L")
+
+            frayed_bars = []
+            
+            if is_crypto:
+                logger.info(f"Routing {ticker} as CRYPTO")
+                res = await self.alpaca.get_crypto_bars(ticker, limit=1000, timeframe=timeframe)
+                if res and "bars" in res: frayed_bars = res["bars"]
+            elif is_option:
+                logger.info(f"Routing {ticker} as OPTION")
+                res = await self.alpaca.get_option_bars(ticker, limit=1000, timeframe=timeframe)
+                if res and "bars" in res: frayed_bars = res["bars"]
+            elif is_fx:
+                logger.info(f"Routing {ticker} as FX")
+                res = await self.finnhub.get_fx_rates(ticker, limit=1000, timeframe=timeframe)
+                if res and "bars" in res: frayed_bars = res["bars"]
+            else:
+                # Use SOTA Data Fraying to combine all providers for EQUITIES
+                frayed_bars = await frayer.fetch_frayed_bars(ticker, limit=1000, timeframe=timeframe)
             
             # Extract last close and history using Decimal
             last_hist_close = Decimal('0')
             history_series = []
             
             if frayed_bars:
-                last_hist_close = create_decimal(frayed_bars[-1]["c"])
+                last_hist_close = create_decimal(frayed_bars[-1].get("c", frayed_bars[-1].get("close", 0)))
                 history_series = [
                     TimeSeriesItem(
                         timestamp=int(b['t']),
-                        open=create_decimal(b['o']),
-                        high=create_decimal(b['h']),
-                        low=create_decimal(b['l']),
-                        close=create_decimal(b['c']),
-                        volume=create_decimal(b['v'])
+                        open=create_decimal(b.get('o', b.get('open'))),
+                        high=create_decimal(b.get('h', b.get('high'))),
+                        low=create_decimal(b.get('l', b.get('low'))),
+                        close=create_decimal(b.get('c', b.get('close'))),
+                        volume=create_decimal(b.get('v', b.get('volume', 0)))
                     ) for b in frayed_bars
                 ]
 
@@ -194,11 +215,15 @@ class DataFabricator:
             current_price = Decimal('0')
             currency = "USD"
             source_used = "Unknown"
-            is_uk = ticker.upper().endswith(".L")
 
             async def fetch_primary_quote():
                 nonlocal current_price, currency, source_used
-                if not is_uk:
+                if is_crypto or is_option:
+                    # No real-time quote needed or supported in basic quote API, fallback to history or specific logic
+                    return False
+                elif is_fx:
+                    return False # Handled by fallback to history for now
+                elif not is_uk:
                     # US Primary: Alpaca
                     quote_result = await self.alpaca.get_real_time_quote(ticker)
                     if quote_result and "current_price" in quote_result and quote_result["current_price"] > 0:

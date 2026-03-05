@@ -34,10 +34,14 @@ Review Criteria:
      - Medium (Swing): 1:3 RR mandate.
      - Long (Invest): Focus on fundamental stability.
 5. Compliance: Ensure no prohibited instruments or wash-sale risks.
-3. Wash Sale Protection (SOTA 2026):
+6. Multi-Asset Risk Considerations (Phase 29):
+   - CRYPTO: Extremely high volatility. Adjust position sizing drastically down. Flag any exposure > 2% of portfolio.
+   - OPTIONS: Time decay (Theta) and leveraged exposure. Ensure the trade horizon matches the option expiry. Block naked options.
+   - FX: High leverage. Verify that stop-losses are explicitly defined to prevent catastrophic margin calls.
+7. Wash Sale Protection (SOTA 2026):
    - Block 'BUY' orders for tickers sold for a loss in the last 30 days.
    - Applies specifically to 'Invest' (taxable) accounts.
-4. Contrarian Analysis: 
+8. Contrarian Analysis: 
 
    - What tail-risk or geopolitical event (GPR) could break this thesis?
    - Is there a logic gap (e.g. ignoring a bearish EMA cross)?
@@ -122,6 +126,7 @@ class RiskAgent(BaseAgent):
         prompt = f"""
         [CONTEXT]
         Ticker: {market_context.ticker}
+        Asset Type: {market_context.price.asset_type.value if market_context.price and hasattr(market_context.price, 'asset_type') and hasattr(market_context.price.asset_type, 'value') else "EQUITY"}
         Portfolio Value: £{market_context.portfolio.total_value if market_context.portfolio else "Unknown"}
         Trade Horizon: {market_context.trade_horizon} (SOTA 2026 Phase 26 Calibration)
         

@@ -2,8 +2,16 @@
 
 ## Current Position
 - **Phase**: Phase 29 - Multi-Asset Bridge (Options & FX)
-- **Task**: Step 2 - Integrate Alpaca Crypto/Options clients in DataEngine
-- **Status**: IN PROGRESS
+- **Task**: Multi-Asset routing, API integrations, and Specialist Agents testing
+- **Status**: COMPLETED
+
+## Summary
+- Integrated `CryptoHistoricalDataClient` and `OptionHistoricalDataClient` into `AlpacaClient`.
+- Implemented `get_crypto_bars`, `get_option_bars`, and `get_fx_rates` (Finnhub fallback to yfinance).
+- Updated `DataFabricator` to perform multi-asset routing based on ticker format heuristics (OCC strings, Crypto pairs, FX pairs).
+- Enhanced `ResearchAgent` to derive the underlying asset for options when searching for news and adapt search queries for crypto/forex.
+- Enhanced `RiskAgent` (The Critic) to include multi-asset risk criteria in its analysis prompt.
+- Added comprehensive unit tests in `tests/backend/test_multi_asset_bridge.py` verifying the data fabricator routing and agent processing logic. All tests passed.
 
 ## Last Milestone Summary
 - **Milestone**: Autonomous Experience & Production Scaling (COMPLETED)
