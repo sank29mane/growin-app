@@ -30,6 +30,7 @@ Delegated background tasks:
 ## Quick Tasks Completed
 | Task | Description | Date |
 |------|-------------|------|
+| Memory Guard | Created sysctl-based Memory Guard with 60%/4GB hard-gates. | 2026-03-05 |
 | PR Merge (#109-112) | Merged Reasoning Trace UI, Palette Standardization, and A11y. | 2026-03-04 |
 | 120Hz Perf Fix | Implemented `.equatable()` across rich components to fix stutters. | 2026-03-04 |
 | Metal NPU Glow | Implemented shader-driven UI aura for agentic trace chips. | 2026-03-04 |

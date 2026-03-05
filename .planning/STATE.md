@@ -1,22 +1,18 @@
 # Growin App - Project State
 
-**Current Phase:** 25
-**Current Phase Name:** Adaptive Risk Governance (Institutional Baseline)
-**Total Phases:** 25
-**Current Plan:** 00
-**Total Plans in Phase:** 0
-**Status**: Planning
-**Progress:** [░░░░░░░░░░] 0%
-**Last Activity:** 2026-03-04
-**Last Activity Description:** Completed Phase 24 (Frontend Reasoning Trace) and renumbered Phase 26 (Risk Governance) to Phase 25 after deleting the unstarted Production Hardening phase.
+**Current Phase:** 27
+**Current Phase Name:** Geopolitical Intelligence Integration (Global Monitor Bridge)
+**Total Phases:** 27
+**Current Plan:** 01
+**Total Plans in Phase:** 1
+**Status**: In Progress
+**Progress:** [▓░░░░░░░░░] 10%
+**Last Activity:** 2026-03-05
+**Last Activity Description:** Implemented Step 1: sysctl-based Memory Guard with 60%/4GB hard-gates.
 
 ## Accumulated Context
-
-### Pending Todos
-- [x] Implement 24-01-PLAN.md (Reasoning Trace UI & Binding)
-- [x] Implement Metal-accelerated NPU glow for chips
-- [x] Implement VoiceOver live regions for streaming
-- [x] Optimize rendering for 120Hz smoothness (Remaining edge cases)
+- [x] Step 1: Create sysctl-based Memory Guard in `backend/memory_guard.py`
+- [ ] Step 2: Integrate Geopolitical News Feeds (Phase 27)
 
 ## Decisions Made
 | Phase | Summary | Rationale |
