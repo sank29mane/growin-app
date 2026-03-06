@@ -96,8 +96,8 @@ class TestCoordinatorFixes(unittest.IsolatedAsyncioTestCase):
                     
                     await self.coordinator.process_query("Price of VOD")
                     
-                    # Verify normalization was called
-                    mock_norm.assert_called()
+                    # Verify normalization was NOT called because VOD.L is considered valid now
+                    mock_norm.assert_not_called()
 
 if __name__ == '__main__':
     unittest.main()

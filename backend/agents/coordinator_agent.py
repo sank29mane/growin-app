@@ -296,7 +296,8 @@ Query: "{clean_query}"
         # -----------------------
         
         # COORDINATOR FIX: Ticker normalization
-        if context.ticker and (not context.ticker.isalpha() or len(context.ticker) < 2):
+        # Allow alphanumeric tickers and those with a single internal dot (like 'VOD.L')
+        if context.ticker and not (context.ticker.isalnum() or ("." in context.ticker and context.ticker.count(".") == 1 and context.ticker.replace(".", "").isalnum())):
             context.ticker = await self._attempt_ticker_fix(context.ticker)
 
         # 3. PARALLEL AGENT_EXECUTION (Pure Processors)
@@ -557,7 +558,7 @@ Query: "{clean_query}"
         # If the result is a clean ticker (e.g. "AAPL."), strip trailing dot
         clean = clean.strip('.')
 
-        if len(clean) >= 2:
+        if len(clean) >= 1:
             return clean
 
         # 3. Fallback to search if really broken or too short
