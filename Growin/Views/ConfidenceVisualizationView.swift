@@ -117,6 +117,8 @@ struct ConfidenceVisualizationView: View {
                             .premiumTypography(.caption)
                             .foregroundStyle(.secondary)
                             .buttonStyle(.plain)
+                            .accessibilityLabel("Cancel Order")
+                            .accessibilityHint("Cancels the pending trade order")
                     }
                     .padding(.top, 8)
                 } else {
