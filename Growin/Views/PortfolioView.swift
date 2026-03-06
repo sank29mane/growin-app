@@ -326,6 +326,8 @@ struct IntelligenceOfflineView: View {
                     .foregroundStyle(.white)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Retry Fetch Portfolio")
+                .accessibilityHint("Attempts to fetch your portfolio data again")
             }
             .padding(40)
         }
