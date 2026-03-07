@@ -1,34 +1,24 @@
 # GSD STATE MEMORY
 
 ## Current Position
-- **Phase**: Phase 29 - Multi-Asset Bridge (Options & FX)
-- **Task**: Multi-Asset routing, API integrations, and Specialist Agents testing
-- **Status**: COMPLETED
+- **Phase**: Phase 28 - Institutional Liquidity Deep-Dive
+- **Task**: Finalized Gap Closure
+- **Status**: COMPLETED (Gap Closure Verified)
 
 ## Summary
-- Integrated `CryptoHistoricalDataClient` and `OptionHistoricalDataClient` into `AlpacaClient`.
-- Implemented `get_crypto_bars`, `get_option_bars`, and `get_fx_rates` (Finnhub fallback to yfinance).
-- Updated `DataFabricator` to perform multi-asset routing based on ticker format heuristics (OCC strings, Crypto pairs, FX pairs).
-- Enhanced `ResearchAgent` to derive the underlying asset for options when searching for news and adapt search queries for crypto/forex.
-- Enhanced `RiskAgent` (The Critic) to include multi-asset risk criteria in its analysis prompt.
-- Added comprehensive unit tests in `tests/backend/test_multi_asset_bridge.py` verifying the data fabricator routing and agent processing logic. All tests passed.
+- Implemented the Square-Root Impact model for slippage estimation in `quant_engine.py`.
+- Integrated real-time liquidity constraints into the `DataFabricator` and `RiskAgent`.
+- Resolved Swift build blockers in `Growin/Models.swift` (braces, types).
+- Added `RiskGovernanceData` and `GeopoliticalData` to frontend `Models.swift`.
+- Verified 1% (100 bps) hard-gate protocol for slippage protection.
+- Updated `TrajectoryStitcher` to include liquidity narrative in the reasoning trace.
 
 ## Last Milestone Summary
 - **Milestone**: Autonomous Experience & Production Scaling (COMPLETED)
 - **Completed**: Phase 24, Phase 25, Phase 26, Phase 27, Phase 28
-- **Highlights**:
-    - **Phase 29 (Multi-Asset)**: Defined unified data models for Options, FX, and Crypto in Python and Swift.
-    - **Phase 28 (Liquidity)**: Implemented Square-Root Impact model for slippage estimation.
-    - **Phase 27 (Geopolitical)**: Built specialized agent fetching global risks via NewsData.io and Tavily.
-    - **Phase 26 (Profit Audit)**: Calibrated agents for aggressive intraday trading with explicit coordinates.
-    - **Geopolitical RAG**: Added specialized timeline indexing for global events in ChromaDB.
-    - **Risk Weighting**: Updated DecisionAgent to weigh macro CRISIS events against local ticker signals.
-    - **LM Studio Audit**: Implemented reliability test suite with crash recovery (V1 Recovery path).
-    - **Reasoning UI**: Built expandable grid trace with kinetic slot transitions.
-
 ## Next Steps
-1. **Phase 29 EXECUTE**: Integrate Alpaca Crypto/Options clients in `DataEngine`.
-2. **Phase 29 EXECUTE**: Update `AlpacaClient` to handle `AssetType` routing for Options and Crypto.
+1. **Milestone Completion**: Run `/gsd:complete-milestone` to archive.
+2. **Next Milestone Planning**: Research "Institutional Portfolio Optimization" (Mean-Variance).
 
 
 ## Active Jules Swarm
@@ -47,3 +37,4 @@ Delegated background tasks:
 | PR Merge (#109-112) | Merged Reasoning Trace UI, Palette Standardization, and A11y. | 2026-03-04 |
 | 120Hz Perf Fix | Implemented `.equatable()` across rich components to fix stutters. | 2026-03-04 |
 | Metal NPU Glow | Implemented shader-driven UI aura for agentic trace chips. | 2026-03-04 |
+| RAG Intelligence Test | Fixed tests/backend/test_rag.py and verified Intelligence Harvesting layer. | 2026-03-07 |

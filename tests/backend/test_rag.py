@@ -3,10 +3,10 @@ import sys
 import os
 import shutil
 
-# Add backend to path
-sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+# Add project root to path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from rag_manager import RAGManager
+from backend.rag_manager import RAGManager
 import logging
 
 # Configure logging
@@ -51,7 +51,33 @@ def test_rag():
     assert "Apple" in results[0]['content']
     assert results[0]['metadata']['symbol'] == "AAPL"
     
-    print("✅ RAGManager Test Passed")
+    # 3. Test Chat History
+    print("3. Testing chat history...")
+    rag.add_chat_message(role="user", content="What is the stock price of AAPL?", conversation_id="conv123")
+    rag.add_chat_message(role="assistant", content="AAPL is currently trading at $150.", conversation_id="conv123")
+    
+    chat_results = rag.query("AAPL price", where={"conversation_id": "conv123"})
+    assert len(chat_results) > 0
+    assert "150" in chat_results[0]['content']
+    print("   Chat history retrieval passed")
+
+    # 4. Test News Timeline
+    print("4. Testing news timeline...")
+    rag.add_news_article(
+        ticker="TSLA", 
+        title="Tesla Sales Surge", 
+        summary="Tesla saw a 20% increase in sales this quarter.", 
+        sentiment=0.8, 
+        source="Reuters"
+    )
+    
+    timeline = rag.get_news_timeline(ticker="TSLA", days=1)
+    assert len(timeline) >= 1
+    assert timeline[0]['sentiment'] == 0.8
+    assert "Reuters" in timeline[0]['content']
+    print("   News timeline passed")
+    
+    print("✅ RAGManager Comprehensive Test Passed")
     
     # Cleanup
     if os.path.exists(test_db_path):
