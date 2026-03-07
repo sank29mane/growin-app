@@ -14,8 +14,11 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from .llm_factory import LLMFactory
 from utils.audit_log import log_audit
 from app_logging import correlation_id_ctx
+from error_resilience import CircuitBreaker
 
 logger = logging.getLogger(__name__)
+
+decision_circuit_breaker = CircuitBreaker("decision_mcp", failure_threshold=3, recovery_timeout=30)
 
 
 class DecisionAgent:
@@ -404,6 +407,9 @@ class DecisionAgent:
 
                             logger.info(f"DecisionAgent: Executing Tool {tool_name}")
 
+                            if not decision_circuit_breaker.can_proceed():
+                                return f"[TOOL_RESULT:{tool_name}] Error: Circuit breaker {decision_circuit_breaker.name} is OPEN. Tool execution skipped."
+
                             if hasattr(asyncio, 'timeout'):
                                 async with asyncio.timeout(15.0):
                                     result = await mcp.call_tool(tool_name, tool_args)
@@ -413,12 +419,16 @@ class DecisionAgent:
                                     timeout=15.0
                                 )
 
+                            decision_circuit_breaker.record_success()
+
                             result_text = result.content[0].text if hasattr(result, 'content') else str(result)
                             return f"[TOOL_RESULT:{tool_name}] {result_text}"
                         except asyncio.TimeoutError:
+                            decision_circuit_breaker.record_failure()
                             logger.warning(f"Tool execution timed out: {tool_name}")
                             return f"[TOOL_RESULT:{tool_name}] Error: Execution timed out after 15 seconds"
                         except Exception as e:
+                            decision_circuit_breaker.record_failure()
                             logger.warning(f"Tool execution failed in loop: {e}")
                             return f"[TOOL_RESULT:{tool_name}] Error: {str(e)}"
 
@@ -529,11 +539,7 @@ class DecisionAgent:
             
             # Abstract Query Detection
             is_abstract = False
-<<<<<<< HEAD
             q_lower = (query or "").lower()
-=======
-            q_lower = query.lower() if query else ""
->>>>>>> origin/main
             if any(w in q_lower for w in ["portfolio", "market", "why", "trend", "economy", "inflation"]):
                 # Simple check: no obvious standalone uppercase ticker symbols (e.g. AAPL)
                 if not re.search(r'\b[A-Z]{2,5}\b', query):
