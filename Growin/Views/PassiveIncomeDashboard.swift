@@ -192,6 +192,9 @@ struct QuickActionHITLCard: View {
                             .foregroundStyle(Color.stitchNeonGreen)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Approve \(action.action)")
+                    .accessibilityHint("Approves the pending action")
+                    .accessibilityAddTraits(.isButton)
                     
                     Button(action: { viewModel.abortAction(action) }) {
                         Text("REJECT")
@@ -203,6 +206,9 @@ struct QuickActionHITLCard: View {
                             .foregroundStyle(.white.opacity(0.8))
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Reject \(action.action)")
+                    .accessibilityHint("Rejects the pending action")
+                    .accessibilityAddTraits(.isButton)
                 }
             }
         }
