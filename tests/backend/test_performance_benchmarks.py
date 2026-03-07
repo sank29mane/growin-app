@@ -20,7 +20,7 @@ async def test_rstitch_speedup_benchmark():
     start_stitch = time.time()
     # 4 SLM steps, 1 LLM step
     for _ in range(4):
-        await engine.generate_step("Low risk summary", {})
+        await engine.generate_step("Simple summary", {})
     await engine.generate_step("High risk analysis", {})
     end_stitch = time.time()
     stitch_total = end_stitch - start_stitch
