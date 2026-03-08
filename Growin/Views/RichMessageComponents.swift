@@ -31,6 +31,8 @@ struct IntelligenceTraceView: View, Equatable {
                                     .font(.system(size: 8, weight: .bold))
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel("Copy internal logic")
+                            .accessibilityHint("Copies the AI's internal reasoning logic to the clipboard")
                             .foregroundStyle(.blue)
                         }
                         
