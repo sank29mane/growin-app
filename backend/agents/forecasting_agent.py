@@ -8,12 +8,12 @@ import logging
 from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from market_context import ForecastData
 from forecaster import get_forecaster
-from error_resilience import CircuitBreaker
+from utils.error_resilience import CircuitBreaker
 
 logger = logging.getLogger(__name__)
 
 # Module-level circuit breaker to persist state across agent instantiations
-forecasting_circuit_breaker = CircuitBreaker("forecaster", failure_threshold=3, recovery_timeout=60)
+forecasting_circuit_breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=60)
 
 class ForecastingAgent(BaseAgent):
     """
@@ -126,8 +126,8 @@ class ForecastingAgent(BaseAgent):
                 logger.warning(f"ForecastingAgent sanitization error: {ex}")
         # ---------------------------------------------
             
-        if not self.circuit_breaker.can_proceed():
-            logger.error(f"Forecast skipped: circuit breaker {self.circuit_breaker.name} is OPEN")
+        if self.circuit_breaker.state == "OPEN":
+            logger.error(f"Forecast skipped: circuit breaker is OPEN")
             return AgentResponse(
                 agent_name=self.config.name,
                 success=False,
@@ -137,24 +137,18 @@ class ForecastingAgent(BaseAgent):
             )
 
         try:
-            # Generate forecast using TTM
-            result = await self.forecaster.forecast(
-                ohlcv_data,
-                prediction_steps=steps,
-                timeframe=timeframe
-            )
-
-            if "error" in result:
-                self.circuit_breaker.record_failure()
-                return AgentResponse(
-                    agent_name=self.config.name,
-                    success=False,
-                    data={},
-                    error=result["error"],
-                    latency_ms=0
+            async def generate_forecast():
+                # Generate forecast using TTM
+                res = await self.forecaster.forecast(
+                    ohlcv_data,
+                    prediction_steps=steps,
+                    timeframe=timeframe
                 )
+                if "error" in res:
+                    raise ValueError(res["error"])
+                return res
 
-            self.circuit_breaker.record_success()
+            result = await self.circuit_breaker.call(generate_forecast)
 
             # Extract predictions
             forecast_bars = result.get("forecast", [])
@@ -210,7 +204,6 @@ class ForecastingAgent(BaseAgent):
             )
 
         except Exception as e:
-            self.circuit_breaker.record_failure()
             logger.error(f"Forecast failed: {e}")
             return AgentResponse(
                 agent_name=self.config.name,
