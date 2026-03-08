@@ -14,16 +14,20 @@ This document outlines the high-level phases for the GSD integration and ongoing
 - **Phases**: 4 - 23
 - **Archive**: `.gsd/milestones/SOTA-INTELLIGENCE-SUMMARY.md`
 
+## 🏛 ARCHIVE: Milestone: Autonomous Experience & Production Scaling
+- **Completed**: 2026-03-07
+- **Phases**: 24 - 28
+- **Archive**: `.gsd/milestones/AUTONOMOUS-EXPERIENCE-SUMMARY.md`
+
 ---
 
-## 🚀 MILESTONE: Autonomous Experience & Production Scaling
+## 🚀 MILESTONE: Institutional Portfolio Optimization (Mean-Variance)
 
-## Phase 24: Frontend Reasoning Trace & User Experience Polish
-- **Goal**: Implement a visual "Thinking" trace for agentic reasoning in the SwiftUI dashboard and finalize 120Hz/Accessibility polish.
-- **Status**: COMPLETED (2026-03-04)
-- **Requirements**: [UI-TRACE-01, UI-TRACE-02, FE-01, FE-02]
+## Phase 29: Institutional Portfolio Optimization (Mean-Variance)
+- **Goal**: Implement Modern Portfolio Theory (MPT) via mean-variance optimization and efficient frontier calculations.
+- **Status**: IN_PROGRESS
+- **Requirements**: [OPT-01, OPT-02, OPT-03]
 
-## Phase 25: Adaptive Risk Governance (Institutional Baseline)
-- **Goal**: Integrate real-time liquidity constraints and institutional risk-off triggers.
-- **Status**: NOT STARTED
-- **Requirements**: [RISK-INST-01, RISK-INST-02]
+## Phase 30: Multi-Asset Portfolio Bridge
+- **Goal**: Extend optimization to include multi-asset classes (Crypto, Commodities, Bonds) and cross-asset correlation modeling.
+- **Status**: PLANNED
