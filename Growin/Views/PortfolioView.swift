@@ -258,7 +258,7 @@ extension PortfolioView {
                 .buttonStyle(.plain)
                 .accessibilityLabel(accessibilityRangeTitle(for: range))
                 .accessibilityHint("Shows performance history for this period")
-                .accessibilityAddTraits(viewModel.selectedTimeRange == range ? [.isSelected] : [])
+                .accessibilityAddTraits(viewModel.selectedTimeRange == range ? [.isSelected, .isButton] : [.isButton])
             }
         }
     }
@@ -444,7 +444,7 @@ extension PortfolioView {
                     .buttonStyle(.plain)
                     .accessibilityLabel(type == "invest" ? "General Account" : "ISA Account")
                     .accessibilityHint("Switches portfolio view to \(type == "invest" ? "General" : "ISA") account")
-                    .accessibilityAddTraits(defaults.string(forKey: "t212AccountType") == type ? [.isSelected] : [])
+                    .accessibilityAddTraits(defaults.string(forKey: "t212AccountType") == type ? [.isSelected, .isButton] : [.isButton])
                 }
             }
             .background(Color.white.opacity(0.05))

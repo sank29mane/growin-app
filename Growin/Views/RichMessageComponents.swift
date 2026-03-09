@@ -31,6 +31,12 @@ struct IntelligenceTraceView: View, Equatable {
                                     .font(.system(size: 8, weight: .bold))
                             }
                             .buttonStyle(.plain)
+<<<<<<< HEAD
+=======
+                            .accessibilityLabel("Copy internal logic")
+                            .accessibilityHint("Copies the AI's internal reasoning logic to the clipboard")
+                            .accessibilityAddTraits(.isButton)
+>>>>>>> ca51ddd (🎨 Palette: Add accessibility traits to plain style buttons)
                             .foregroundStyle(.blue)
                         }
                         

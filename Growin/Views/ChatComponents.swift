@@ -187,6 +187,7 @@ struct SuggestionChip: View {
         .buttonStyle(.plain)
         .accessibilityLabel(item.title)
         .accessibilityHint("Asks: \(item.prompt)")
+        .accessibilityAddTraits(.isButton)
         .onHover { hovering in
             withAnimation(.easeOut(duration: 0.15)) {
                 isHovered = hovering
@@ -264,7 +265,7 @@ private struct AccountPickerButton: View {
         .buttonStyle(.plain)
         .accessibilityLabel(displayName)
         .accessibilityHint("Filters chat context to \(displayName)")
-        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+        .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : [.isButton])
     }
     
     @ViewBuilder
@@ -330,6 +331,7 @@ struct QuickActionButtons: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel(action.label)
                     .accessibilityHint("Asks: \(action.prompt)")
+                    .accessibilityAddTraits(.isButton)
                 }
             }
         }
