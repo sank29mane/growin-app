@@ -180,13 +180,6 @@ Query: "{clean_query}"
             intent_type = intent_match.group(1).lower() if (intent_match and intent_match.group(1)) else "market_analysis"
             ticker = ticker_match.group(1).upper() if ticker_match and ticker_match.group(1) and "NONE" not in ticker_match.group(1).upper() else None
             
-            # Hard overrides to protect against LLM misclassification
-            q_lower = query.lower()
-            if "portfolio" in q_lower:
-                intent_type = "portfolio_query"
-                if ticker in ["ISA", "INVEST", "MY"]:
-                    ticker = None
-            
             # Map intents to needs (Hardcoded logic is safer than LLM predicting list)
             needs_map = {
                 "price_check": ["quant"],
@@ -303,8 +296,7 @@ Query: "{clean_query}"
         # -----------------------
         
         # COORDINATOR FIX: Ticker normalization
-        # Allow alphanumeric tickers and those with a single internal dot (like 'VOD.L')
-        if context.ticker and not (context.ticker.isalnum() or ("." in context.ticker and context.ticker.count(".") == 1 and context.ticker.replace(".", "").isalnum())):
+        if context.ticker and (not context.ticker.isalpha() or len(context.ticker) < 2):
             context.ticker = await self._attempt_ticker_fix(context.ticker)
 
         # 3. PARALLEL AGENT_EXECUTION (Pure Processors)
@@ -565,7 +557,7 @@ Query: "{clean_query}"
         # If the result is a clean ticker (e.g. "AAPL."), strip trailing dot
         clean = clean.strip('.')
 
-        if len(clean) >= 1:
+        if len(clean) >= 2:
             return clean
 
         # 3. Fallback to search if really broken or too short

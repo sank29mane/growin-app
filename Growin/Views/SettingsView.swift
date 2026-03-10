@@ -388,8 +388,6 @@ struct TradingConfigSection: View {
                     .clipShape(.rect(cornerRadius: 12))
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Update Architecture")
-                .accessibilityHint("Updates the Trading 212 configuration")
             }
         }
     }

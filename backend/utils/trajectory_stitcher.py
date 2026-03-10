@@ -47,15 +47,7 @@ class TrajectoryStitcher:
             f = context.forecast
             segments.append(f"Predictive modeling projects a {f.trend} trajectory over the next 24h, targeting ${f.forecast_24h:.2f} with {f.confidence} confidence.")
             
-        # 5. Risk & Liquidity (SOTA 2026 Phase 28)
-        if context.risk_governance:
-            rg = context.risk_governance
-            if rg.vix_level:
-                segments.append(f"Macro volatility (VIX: {rg.vix_level:.1f}) and systemic risk ({rg.systemic_risk_level}) establish the risk baseline.")
-            if rg.slippage_bps:
-                segments.append(f"Execution liquidity is {rg.liquidity_status}, with estimated slippage impact of {rg.slippage_bps:.1f} bps.")
-
-        # 6. Synthesis
+        # 5. Synthesis
         if not segments:
             return "No specialist signals available for stitching."
             

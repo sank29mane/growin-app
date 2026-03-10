@@ -1,7 +1,6 @@
 from decimal import Decimal
-from typing import Optional, List, Dict, Union
-from datetime import date, datetime
-from enum import Enum
+from typing import Optional, List
+from datetime import date
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 
 class PriceData(BaseModel):
@@ -15,9 +14,9 @@ class PriceData(BaseModel):
     high: Decimal
     low: Decimal
     close: Decimal
-    volume: Decimal = Decimal('0')
+    volume: int
     
-    @field_validator('open', 'high', 'low', 'close', 'volume', mode='before')
+    @field_validator('open', 'high', 'low', 'close', mode='before')
     @classmethod
     def convert_to_decimal(cls, v):
         if v is None:

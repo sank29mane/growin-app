@@ -335,9 +335,8 @@ struct MarkdownText: View {
             if !parsed.cleanContent.isEmpty {
                 Text(LocalizedStringKey(parsed.cleanContent))
                     .premiumTypography(.body)
-                    .lineSpacing(4)
+                    .lineSpacing(6)
                     .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }

@@ -199,38 +199,6 @@ class RAGManager:
             logger.error(f"Failed to generate news timeline: {e}")
             return []
 
-    def get_geopolitical_timeline(self, days: int = 30) -> List[Dict[str, Any]]:
-        """Retrieve a timeline of global geopolitical events."""
-        from datetime import datetime, timedelta, timezone
-        start_ts = (datetime.now(timezone.utc) - timedelta(days=days)).timestamp()
-        
-        try:
-            # Query for geopolitical events
-            results = self._collection.get(
-                where={"$and": [
-                    {"type": "geopolitical_event"},
-                    {"timestamp": {"$gte": start_ts}}
-                ]}
-            )
-            
-            timeline = []
-            if results['documents']:
-                for i in range(len(results['documents'])):
-                    meta = results['metadatas'][i]
-                    timeline.append({
-                        "timestamp": meta.get('timestamp'),
-                        "content": results['documents'][i],
-                        "impact": meta.get('impact'),
-                        "region": meta.get('region'),
-                        "gpr_score": meta.get('gpr_score')
-                    })
-            
-            timeline.sort(key=lambda x: x.get('timestamp', 0))
-            return timeline
-        except Exception as e:
-            logger.error(f"Failed to generate geopolitical timeline: {e}")
-            return []
-
     def count(self) -> int:
         """Return number of documents in collection"""
         if self._collection:

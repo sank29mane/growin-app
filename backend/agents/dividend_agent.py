@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime, timedelta
-from backend.models.neural_ode import RecoveryVelocityNODE
+from backend.models.neural_ode import RecoveryODE
 
 class DividendOptimizationAgent:
     """
@@ -23,7 +23,7 @@ class DividendOptimizationAgent:
         
         # Neural ODE for recovery modeling
         # Input features might include technical indicators, sector volatility, etc.
-        self.recovery_model = RecoveryVelocityNODE(input_dim=16, hidden_dim=32)
+        self.recovery_model = RecoveryODE(input_dim=16, hidden_dim=32)
         
     def calculate_consensus(self, model_outputs: Dict[str, float]) -> float:
         """

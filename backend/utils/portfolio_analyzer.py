@@ -1,123 +1,184 @@
 import numpy as np
-import mlx.core as mx
-from scipy.optimize import minimize
+import pandas as pd
+from typing import List, Dict, Any, Optional, Union
 from decimal import Decimal
-from typing import Dict, List, Optional, Union, Any
-from backend.utils.jmce_model import NeuralJMCE
-from backend.utils.risk_engine import RiskEngine
-from backend.utils.financial_math import create_decimal
-from backend.app_logging import setup_logging
-
-logger = setup_logging("portfolio_analyzer")
+from datetime import datetime, timedelta
+from utils.financial_math import create_decimal, safe_div
 
 class PortfolioAnalyzer:
     """
-    Institutional-grade portfolio optimizer using Neural JMCE and SLSQP.
-    Implements 10% Position Cap and Dynamic Alpha Hurdle.
+    Institutional-grade Portfolio Analytics Engine.
+    Calculates time-series risk metrics (Sharpe, Beta, Volatility) from daily returns.
     """
-    
-    def __init__(self, model: Optional[NeuralJMCE] = None, n_assets: int = 50):
-        self.model = model or NeuralJMCE(n_assets=n_assets)
-        self.risk_engine = RiskEngine()
 
-    async def optimize_weights(
-        self, 
-        returns_history: np.ndarray, 
-        macro_signals: Dict[str, Any], 
-        persona: str = 'aggressive',
-        rf_rate: float = 0.04
-    ) -> List[Decimal]:
+    @staticmethod
+    def generate_backcast_history(positions: List[Dict[str, Any]], 
+                                 market_data: Dict[str, List[Dict[str, Any]]],
+                                 period_days: int = 365) -> pd.DataFrame:
         """
-        Optimizes portfolio weights based on regime-aware JMCE estimates.
+        Generates synthetic historical portfolio value by back-calculating 
+        current positions against historical prices.
         
         Args:
-            returns_history: (seq_len, n_assets) array of historical returns.
-            macro_signals: Dict from RegimeFetcher.
-            persona: 'aggressive' (Max Sharpe) or 'defensive' (Min Vol).
-            rf_rate: Annual risk-free rate.
+            positions: List of current holdings with 'ticker', 'qty', and optional 'entry_date'.
+            market_data: Dict mapping ticker to OHLCV list.
+            period_days: How far back to cast.
             
         Returns:
-            List[Decimal]: Optimal weights for each asset.
+            DataFrame with 'timestamp' and 'total_value'.
         """
-        n_assets = returns_history.shape[1]
-        seq_len = returns_history.shape[0]
-        
-        try:
-            # 1. Forward Pass on NPU (MLX)
-            # Reshape for batch size 1: (1, seq_len, n_assets)
-            x = mx.array(returns_history[np.newaxis, :, :].astype(np.float32))
+        # 1. Align all tickers to a common timeline
+        all_series = {}
+        for pos in positions:
+            ticker = pos['ticker']
+            qty = float(pos.get('qty', pos.get('quantity', 0)))
+            entry_date = pos.get('entry_date')
+            if isinstance(entry_date, str):
+                entry_date = pd.to_datetime(entry_date)
             
-            # Use to_thread or similar if needed, but MLX is usually fast
-            mu_mx, L_mx = self.model(x)
-            sigma_mx = self.model.get_covariance(L_mx)
-            
-            # Convert to numpy for SciPy
-            mu = np.array(mu_mx[0])
-            sigma = np.array(sigma_mx[0])
-            
-            # 2. Dynamic Hurdle (75 bps + Friction)
-            # In a real scenario, friction would be asset-specific (e.g. T212 spreads/FX)
-            # Here we apply a global hurdle as per SPEC
-            hurdle = 0.0075 / 252 # Daily hurdle from 75bps annual
-            mu_adj = mu - hurdle
-            
-            # Daily risk-free rate
-            rf_daily = rf_rate / 252
-            
-            # 3. Objective Functions
-            def objective(w):
-                port_return = np.dot(w, mu_adj)
-                # Portfolio variance: w^T * Sigma * w
-                port_var = np.dot(w.T, np.dot(sigma, w))
-                port_vol = np.sqrt(max(port_var, 1e-12))
+            if ticker in market_data:
+                df = pd.DataFrame(market_data[ticker])
+                # Handle different timestamp keys
+                ts_key = 't' if 't' in df.columns else 'timestamp'
+                df['dt'] = pd.to_datetime(df[ts_key], unit='ms' if df[ts_key].dtype != 'object' else None)
+                df.set_index('dt', inplace=True)
                 
-                if persona == 'aggressive':
-                    # Maximize Sharpe = Minimize -Sharpe
-                    sharpe = (port_return - rf_daily) / (port_vol + 1e-9)
-                    return -float(sharpe)
-                else:
-                    # Minimize Volatility
-                    return float(port_vol)
+                # Close price
+                close_key = 'c' if 'c' in df.columns else 'close'
+                close_series = df[close_key]
+                
+                # Apply entry date filter: value is 0 before entry_date
+                if entry_date:
+                    close_series = close_series.copy()
+                    close_series.loc[close_series.index < entry_date] = 0.0
+                
+                all_series[ticker] = close_series * qty
 
-            # 4. Constraints & Bounds
-            # Constraint: Weights must sum to 1.0
-            constraints = [
-                {'type': 'eq', 'fun': lambda w: np.sum(w) - 1.0}
-            ]
+        if not all_series:
+            return pd.DataFrame(columns=['total_value'])
+
+        # 2. Combine into single Portfolio Value series
+        combined_df = pd.concat(all_series.values(), axis=1).fillna(0.0)
+        portfolio_value = combined_df.sum(axis=1)
+        
+        res = pd.DataFrame(portfolio_value, columns=['total_value'])
+        res.index.name = 'timestamp'
+        return res.sort_index()
+
+    @staticmethod
+    def calculate_daily_returns(prices: Union[List[float], np.ndarray], method: str = 'log') -> np.ndarray:
+        """
+        Calculates daily returns from price history.
+        'log' returns are preferred for mathematical properties in time-series.
+        """
+        arr = np.array(prices)
+        if len(arr) < 2:
+            return np.array([0.0])
             
-            # Hard 10% Position Cap as per SPEC
-            bounds = [(0.0, 0.10) for _ in range(n_assets)]
+        if method == 'log':
+            return np.diff(np.log(arr))
+        else:
+            return np.diff(arr) / arr[:-1]
+
+    @staticmethod
+    def calculate_volatility(returns: np.ndarray, annualize: bool = True) -> float:
+        """
+        Calculates standard deviation of daily returns.
+        Annualized by multiplying by sqrt(252).
+        """
+        if len(returns) < 2:
+            return 0.0
             
-            # 5. Optimization (SLSQP)
-            # Initial guess: equal weights (capped at 10%)
-            # If more than 10 assets, equal weights will be < 10%
-            init_w = np.array([1.0 / n_assets] * n_assets)
+        vol = np.std(returns)
+        if annualize:
+            vol *= np.sqrt(252)
             
-            # Run optimizer
-            res = minimize(
-                objective, 
-                init_w, 
-                method='SLSQP', 
-                bounds=bounds, 
-                constraints=constraints,
-                options={'maxiter': 100, 'ftol': 1e-6}
-            )
+        return float(vol)
+
+    @staticmethod
+    def calculate_sharpe_ratio(returns: np.ndarray, risk_free_rate: float = 0.04) -> float:
+        """
+        Calculates Annualized Sharpe Ratio.
+        Sharpe = (Annualized Return - Risk Free Rate) / Annualized Volatility
+        """
+        if len(returns) < 2:
+            return 0.0
             
-            if not res.success:
-                logger.warning(f"Optimization did not converge: {res.message}. Using equal weights.")
-                # Ensure equal weights don't violate bounds if n_assets < 10
-                # But for optimization, we usually have many assets.
-                # If we have 5 assets, equal weights = 0.20 (violates 0.10 cap)
-                # In that case, we can't sum to 1.0 with 0.10 cap.
-                # The SPEC implies we have enough assets or allow cash.
-                # For now, we assume n_assets >= 10 or weights sum to max possible.
-                return [create_decimal(w) for w in init_w]
+        avg_daily_return = np.mean(returns)
+        annualized_return = avg_daily_return * 252
+        
+        vol = PortfolioAnalyzer.calculate_volatility(returns, annualize=True)
+        if vol == 0:
+            return 0.0
             
-            final_weights = [create_decimal(w) for w in res.x]
-            logger.info(f"Optimization successful ({persona}). Max weight: {max(res.x):.4f}")
-            return final_weights
+        return float((annualized_return - risk_free_rate) / vol)
+
+    @staticmethod
+    def calculate_sortino_ratio(returns: np.ndarray, risk_free_rate: float = 0.04) -> float:
+        """
+        Calculates Annualized Sortino Ratio (uses only downside deviation).
+        """
+        if len(returns) < 2:
+            return 0.0
             
-        except Exception as e:
-            logger.error(f"Portfolio optimization failed: {e}", exc_info=True)
-            # Fallback to equal weights
-            return [create_decimal(1.0 / n_assets) for _ in range(n_assets)]
+        avg_daily_return = np.mean(returns)
+        annualized_return = avg_daily_return * 252
+        
+        # Downside deviation
+        downside_returns = returns[returns < 0]
+        if len(downside_returns) < 2:
+            # Fallback to standard vol or 0 if no downside
+            downside_vol = np.std(returns) * np.sqrt(252)
+        else:
+            downside_vol = np.std(downside_returns) * np.sqrt(252)
+            
+        if downside_vol == 0:
+            return 0.0
+            
+        return float((annualized_return - risk_free_rate) / downside_vol)
+
+    @staticmethod
+    def calculate_beta(asset_returns: np.ndarray, benchmark_returns: np.ndarray) -> float:
+        """
+        Calculates Beta against a benchmark using linear regression.
+        Beta = Cov(Asset, Benchmark) / Var(Benchmark)
+        """
+        # Ensure lengths match
+        min_len = min(len(asset_returns), len(benchmark_returns))
+        if min_len < 2:
+            return 1.0 # Default to market beta
+            
+        a = asset_returns[-min_len:]
+        b = benchmark_returns[-min_len:]
+        
+        covariance = np.cov(a, b)[0, 1]
+        variance = np.var(b)
+        
+        if variance == 0:
+            return 1.0
+            
+        return float(covariance / variance)
+
+    def analyze_performance(self, price_history: List[float], benchmark_history: Optional[List[float]] = None) -> Dict[str, Any]:
+        """
+        Comprehensive performance analysis report.
+        """
+        returns = self.calculate_daily_returns(price_history)
+        
+        vol = self.calculate_volatility(returns)
+        sharpe = self.calculate_sharpe_ratio(returns)
+        sortino = self.calculate_sortino_ratio(returns)
+        
+        result = {
+            "volatility": vol,
+            "sharpe_ratio": sharpe,
+            "sortino_ratio": sortino,
+            "daily_returns_mean": float(np.mean(returns)) if len(returns) > 0 else 0.0
+        }
+        
+        if benchmark_history:
+            bench_returns = self.calculate_daily_returns(benchmark_history)
+            beta = self.calculate_beta(returns, bench_returns)
+            result["beta"] = beta
+            
+        return result

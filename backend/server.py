@@ -163,8 +163,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         logger.info("Shutting down...")
-        if not os.environ.get("PYTEST_CURRENT_TEST"):
-            state.chat_manager.close()
+        state.chat_manager.close()
 
 
 app = FastAPI(title="Growin API", version="2.0.0", lifespan=lifespan, default_response_class=ORJSONResponse)

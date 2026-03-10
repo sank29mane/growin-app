@@ -72,7 +72,7 @@ struct AgentClient {
     private let config = AppConfig.shared
     
     /// SOTA: Implementing robust SSE streaming with AsyncStream
-    func streamMessage(query: String, conversationId: String? = nil, model: String? = nil, accountType: String? = nil) -> AsyncStream<AgentStreamEvent> {
+    func streamMessage(query: String, conversationId: String? = nil, model: String? = nil) -> AsyncStream<AgentStreamEvent> {
         AsyncStream { continuation in
             let url = URL(string: "\(config.baseURL)/api/chat/message")!
             var request = URLRequest(url: url)
@@ -87,7 +87,7 @@ struct AgentClient {
                 "conversation_id": conversationId as Any,
                 "model_name": model ?? "native-mlx",
                 "coordinator_model": defaults.string(forKey: "selectedCoordinatorModel") ?? "granite-tiny",
-                "account_type": accountType ?? defaults.string(forKey: "t212AccountType") ?? "invest"
+                "account_type": defaults.string(forKey: "t212AccountType") ?? "invest"
             ]
             
             do {

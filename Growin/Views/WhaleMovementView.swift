@@ -1,5 +1,14 @@
 import SwiftUI
 
+struct WhaleTrade: Codable, Identifiable {
+    let id = UUID()
+    let price: Double
+    let size: Double
+    let value_usd: Double
+    let timestamp: String
+    let is_whale: Bool
+}
+
 struct WhaleMovementView: View {
     let ticker: String
     let trades: [WhaleTrade]
@@ -94,12 +103,12 @@ struct SentimentPill: View {
 }
 
 struct WhaleBar: View {
-    let trade: Swift.Double // Using valueUsd for height
+    let trade: Swift.Double // Using value_usd for height
     let tradeObj: WhaleTrade
     
     init(trade: WhaleTrade) {
         self.tradeObj = trade
-        self.trade = trade.valueUsd
+        self.trade = trade.value_usd
     }
     
     var body: some View {
@@ -108,17 +117,10 @@ struct WhaleBar: View {
                 .fill(LinearGradient(colors: [Color.stitchNeonCyan, Color.stitchNeonIndigo], startPoint: .top, endPoint: .bottom))
                 .frame(width: 20, height: normalizedHeight)
             
-            Text("\(currencySymbol)\(Int(tradeObj.valueUsd / 1000))k")
+            Text("$\(Int(tradeObj.value_usd / 1000))k")
                 .font(.system(size: 8, weight: .bold, design: .monospaced))
                 .foregroundStyle(.secondary)
         }
-    }
-    
-    private var currencySymbol: String {
-        if let curr = tradeObj.currency, curr.uppercased() == "GBP" {
-            return "£"
-        }
-        return "$"
     }
     
     private var normalizedHeight: CGFloat {
@@ -133,9 +135,9 @@ struct WhaleBar: View {
         WhaleMovementView(
             ticker: "NVDA",
             trades: [
-                WhaleTrade(price: 145.2, size: 1000, valueUsd: 145200, timestamp: "2026-02-28", currency: "USD", isWhale: true),
-                WhaleTrade(price: 145.5, size: 2500, valueUsd: 363750, timestamp: "2026-02-28", currency: "USD", isWhale: true),
-                WhaleTrade(price: 145.1, size: 1200, valueUsd: 174120, timestamp: "2026-02-28", currency: "USD", isWhale: true)
+                WhaleTrade(price: 145.2, size: 1000, value_usd: 145200, timestamp: "2026-02-28", is_whale: true),
+                WhaleTrade(price: 145.5, size: 2500, value_usd: 363750, timestamp: "2026-02-28", is_whale: true),
+                WhaleTrade(price: 145.1, size: 1200, value_usd: 174120, timestamp: "2026-02-28", is_whale: true)
             ],
             sentiment: "BULLISH",
             summary: "Detected 3 large block trades totaling $0.68M. Activity suggests institutional accumulation."

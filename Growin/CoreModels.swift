@@ -5,19 +5,18 @@ import Foundation
 
 // MARK: - Portfolio Models
 
-struct PortfolioSnapshot: Codable, Sendable, Equatable {
+struct PortfolioSnapshot: Codable, Sendable {
     let summary: PortfolioSummary?
     let positions: [Position]?
 }
 
-struct PortfolioSummary: Codable, Sendable, Equatable {
+struct PortfolioSummary: Codable, Sendable {
     let totalPositions: Int?
     let totalInvested: Decimal?
     let currentValue: Decimal?
     let totalPnl: Decimal?
     let totalPnlPercent: Double?
     let cashBalance: CashBalance?
-    let cvar95: Decimal?
     let accounts: [String: AccountSummary]?
     
     enum CodingKeys: String, CodingKey {
@@ -27,12 +26,11 @@ struct PortfolioSummary: Codable, Sendable, Equatable {
         case totalPnl = "total_pnl"
         case totalPnlPercent = "total_pnl_percent"
         case cashBalance = "cash_balance"
-        case cvar95 = "cvar_95"
         case accounts
     }
 }
 
-struct AccountSummary: Codable, Sendable, Equatable {
+struct AccountSummary: Codable, Sendable {
     let totalInvested: Decimal?
     let currentValue: Decimal?
     let totalPnl: Decimal?
@@ -46,11 +44,12 @@ struct AccountSummary: Codable, Sendable, Equatable {
     }
 }
 
-struct CashBalance: Codable, Sendable, Equatable {
+struct CashBalance: Codable, Sendable {
     let total: Decimal?
     let free: Decimal?
 }
-struct Position: Codable, Identifiable, Sendable, Equatable {
+
+struct Position: Codable, Identifiable, Sendable {
     var id: String { 
         if let ticker = ticker, let accountType = accountType {
             return "\(ticker)-\(accountType)"
@@ -65,7 +64,7 @@ struct Position: Codable, Identifiable, Sendable, Equatable {
     let ppl: Decimal?
     let fxPpl: Decimal?
     let accountType: String?
-
+    
     enum CodingKeys: String, CodingKey {
         case ticker, name, quantity
         case currentPrice = "current_price"
@@ -239,7 +238,7 @@ struct GrowinAllocationData: Identifiable, Sendable, Equatable {
 
 // MARK: - SOTA AI Models
 
-struct ReasoningStep: Codable, Sendable, Identifiable, Equatable {
+struct ReasoningStep: Codable, Sendable, Identifiable {
     var id: Double { timestamp }
     let agent: String
     let action: String
@@ -284,9 +283,4 @@ struct AIStrategy: Codable, Sendable, Identifiable {
 struct InstrumentWeightMapping: Codable, Sendable {
     let ticker: String
     let weight: Double
-
-    enum CodingKeys: String, CodingKey {
-        case ticker, weight
-    }
 }
-

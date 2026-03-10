@@ -45,7 +45,7 @@ from utils.financial_math import create_decimal, safe_div, PRECISION_CURRENCY, T
 from utils.portfolio_analyzer import PortfolioAnalyzer
 from utils.ticker_utils import TickerResolver
 
-class TechnicalIndicatorsDict(TypedDict, total=False):
+class TechnicalIndicators(TypedDict, total=False):
     rsi: Optional[Decimal]
     macd: Optional[Decimal]
     macd_signal: Optional[Decimal]
@@ -58,7 +58,7 @@ class TechnicalIndicatorsDict(TypedDict, total=False):
     volume_sma: Optional[Decimal]
 
 class AnalysisResult(TypedDict):
-    indicators: TechnicalIndicatorsDict
+    indicators: TechnicalIndicators
     signals: Dict[str, str]
     current_price: Decimal
     data_points: int
@@ -278,62 +278,6 @@ class QuantEngine:
             
         return self._recovery_model.predict_recovery_trajectory(features)
 
-    def calculate_adv_30d(self, ohlcv_data: List[Dict[str, Any]]) -> Decimal:
-        """Calculates 30-day Average Daily Volume (ADV)"""
-        if not ohlcv_data:
-            return Decimal('0')
-        
-        # Take last 30 daily bars if available, otherwise use all available
-        volumes = [create_decimal(d.get('v', d.get('volume', 0))) for d in ohlcv_data[-30:]]
-        if not volumes:
-            return Decimal('0')
-            
-        total_vol = sum(volumes)
-        return safe_div(total_vol, Decimal(len(volumes)))
-
-    def estimate_liquidity_impact(self, order_size: Decimal, adv_30d: Decimal) -> Decimal:
-        """Estimates liquidity impact as a ratio of ADV"""
-        return safe_div(order_size, adv_30d) if adv_30d > 0 else Decimal('0')
-
-    def calculate_slippage_estimate(self, order_size: Decimal, adv_30d: Decimal, volatility_daily: Decimal = Decimal('0.02')) -> Decimal:
-        """
-        Estimates slippage in basis points (bps) using Square-Root Impact Model.
-        Slippage (bps) = σ * Y * sqrt(Size / ADV) * 10000
-        σ: daily volatility (default 2%)
-        Y: Impact coefficient (default 0.1)
-        """
-        if adv_30d <= 0 or order_size <= 0:
-            return Decimal('0')
-            
-        import math
-        order_fraction = float(order_size / adv_30d)
-        impact_coeff = 0.1
-        
-        # impact = sigma * Y * sqrt(fraction)
-        impact_pct = float(volatility_daily) * impact_coeff * math.sqrt(order_fraction)
-        
-        # Convert to bps
-        return Decimal(str(impact_pct * 10000)).quantize(PRECISION_CURRENCY)
-
-    def check_participation_rate(self, order_size: Decimal, adv_30d: Decimal, max_pov: Decimal = Decimal('0.10')) -> Dict[str, Any]:
-        """
-        Checks if the order exceeds the maximum participation rate (Percentage of Volume).
-        Default max_pov is 10% of ADV.
-        """
-        if adv_30d <= 0:
-            return {"status": "UNKNOWN", "pov": Decimal('0')}
-            
-        pov = order_size / adv_30d
-        status = "SAFE" if pov <= max_pov else "FLAGGED"
-        if pov > Decimal('0.30'):
-            status = "ILLIQUID" # Extremely high impact
-            
-        return {
-            "status": status,
-            "pov": pov,
-            "is_liquid": pov <= max_pov
-        }
-
     def calculate_technical_indicators(self, ohlcv_data: List[Dict[str, Any]]) -> Union[AnalysisResult, Dict[str, str]]:
         """
         Calculate technical indicators from OHLCV data using optimized backends.
@@ -460,90 +404,6 @@ class QuantEngine:
             total_cost += qty * avg_cost
         total_pnl = total_value - total_cost
         return {"total_value": total_value, "total_cost": total_cost, "total_pnl": total_pnl, "portfolio_return": safe_div(total_pnl, total_cost), "position_count": len(positions)}
-
-    async def optimize_portfolio(self, context: Any, persona: str = 'aggressive') -> Dict[str, Any]:
-        """
-        Institutional-grade portfolio optimization entry point.
-        Bridges MarketContext (with portfolio_prices) to PortfolioAnalyzer.
-        """
-        if not context.portfolio_prices:
-            return {"error": "No portfolio prices available in context for optimization"}
-            
-        try:
-            # 1. Prepare Returns Matrix (seq_len, n_assets)
-            tickers = sorted(context.portfolio_prices.keys())
-            n_assets = len(tickers)
-            
-            # Align all tickers to the same timestamp sequence
-            # Use the first ticker's timestamps as reference
-            ref_ticker = tickers[0]
-            ref_series = context.portfolio_prices[ref_ticker].history_series
-            ref_timestamps = [item.timestamp for item in ref_series]
-            seq_len = len(ref_timestamps)
-            
-            # Matrix of returns: (seq_len - 1, n_assets)
-            returns_matrix = np.zeros((seq_len - 1, n_assets))
-            
-            for j, ticker in enumerate(tickers):
-                series = context.portfolio_prices[ticker].history_series
-                
-                # Simple alignment: assume same length and timestamps for now
-                # In production, we'd use a more robust outer-join and interpolation
-                closes = np.array([float(item.close) for item in series])
-                
-                if len(closes) < seq_len:
-                    # Pad if necessary or truncate
-                    logger.warning(f"Ticker {ticker} has insufficient history ({len(closes)} vs {seq_len})")
-                    padded = np.zeros(seq_len)
-                    padded[-len(closes):] = closes
-                    closes = padded
-                elif len(closes) > seq_len:
-                    closes = closes[-seq_len:]
-                
-                # Calculate daily returns: (P[t] - P[t-1]) / P[t-1]
-                # Avoid division by zero
-                denom = closes[:-1]
-                denom[denom == 0] = 1.0
-                rets = (closes[1:] - closes[:-1]) / denom
-                returns_matrix[:, j] = rets
-
-            # 2. Prepare Macro Signals
-            vix = 20.0
-            tnx = 4.2
-            if context.risk_governance:
-                vix = float(context.risk_governance.vix_level or 20.0)
-                tnx = float(context.risk_governance.yield_spread_10y2y or 4.2)
-            
-            signals = {"vix": vix, "tnx": tnx}
-            
-            # 3. Call PortfolioAnalyzer
-            analyzer = PortfolioAnalyzer(n_assets=n_assets)
-            weights = await analyzer.optimize_weights(
-                returns_matrix, 
-                signals, 
-                persona=persona
-            )
-            
-            # 4. Calculate Portfolio CVaR for the optimized portfolio
-            # Portfolio returns = ReturnsMatrix * weights
-            w_arr = np.array([float(w) for w in weights])
-            portfolio_returns = np.dot(returns_matrix, w_arr)
-            
-            from backend.utils.risk_engine import RiskEngine
-            cvar_95 = RiskEngine.calculate_cvar_95(portfolio_returns)
-            
-            # 5. Return results
-            return {
-                "tickers": tickers,
-                "weights": {t: w for t, w in zip(tickers, weights)},
-                "cvar_95": cvar_95,
-                "persona": persona,
-                "timestamp": datetime.now().isoformat()
-            }
-            
-        except Exception as e:
-            logger.error(f"QuantEngine.optimize_portfolio failed: {e}", exc_info=True)
-            return {"error": f"Optimization failed: {str(e)}"}
 
     def calculate_delta_neutral_overlay(self, ticker: str, quantity: Decimal, current_price: Decimal, volatility: float) -> Dict[str, Any]:
         """

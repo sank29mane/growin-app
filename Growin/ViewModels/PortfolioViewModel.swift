@@ -11,13 +11,6 @@ class PortfolioViewModel {
     var selectedTimeRange: TimeRange = .week
     var selectedPosition: Position?
     var isSwitchingAccount = false
-    var strategyPersona: String {
-        get { defaults.string(forKey: "strategyPersona") ?? "aggressive" }
-        set { 
-            defaults.set(newValue, forKey: "strategyPersona")
-            // In a real app, this might trigger a re-optimization check
-        }
-    }
     
     private let dataService = PortfolioDataService()
     private let defaults = UserDefaults.standard

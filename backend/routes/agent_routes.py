@@ -4,7 +4,6 @@ Agent status and health check endpoints
 
 from fastapi import APIRouter
 import logging
-import asyncio
 
 logger = logging.getLogger(__name__)
 router = APIRouter()

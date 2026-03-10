@@ -6,15 +6,6 @@ from utils.secret_masker import SecretMasker
 from contextvars import ContextVar
 import uuid
 
-# Python 3.13 fix for scipy spec issue during tests
-try:
-    import scipy
-    if not hasattr(scipy, "__spec__") or scipy.__spec__ is None:
-        import importlib.util
-        scipy.__spec__ = importlib.util.find_spec("scipy")
-except ImportError:
-    pass
-
 # Global context for correlation IDs
 correlation_id_ctx: ContextVar[str] = ContextVar("correlation_id", default="-")
 
