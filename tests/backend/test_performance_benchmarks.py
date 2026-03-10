@@ -22,7 +22,7 @@ async def test_rstitch_speedup_benchmark():
     start_stitch = time.time()
     # 4 SLM steps (no sleep), 1 LLM step (0.01s sleep)
     for _ in range(4):
-        await engine.generate_step("Low risk summary", {})
+        await engine.generate_step("Simple summary", {})
     
     await asyncio.sleep(0.01)
     await engine.generate_step("High risk analysis", {})
