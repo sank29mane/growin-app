@@ -8,104 +8,11 @@ import asyncio
 import functools
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, TypeVar
-from enum import Enum
+from utils.error_resilience import CircuitBreaker, CircuitBreakerOpenException
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar('T')
-
-
-class CircuitState(Enum):
-    """Circuit breaker states"""
-    CLOSED = "closed"  # Normal operation
-    OPEN = "open"      # Failing, reject requests
-    HALF_OPEN = "half_open"  # Testing if service recovered
-
-
-class CircuitBreaker:
-    """
-    Circuit breaker pattern to prevent cascading failures.
-    Opens circuit after failure_threshold failures, closes after success in HALF_OPEN.
-    """
-    
-    def __init__(
-        self,
-        name: str,
-        failure_threshold: int = 5,
-        recovery_timeout: int = 60,
-        half_open_requests: int = 3
-    ):
-        self.name = name
-        self.failure_threshold = failure_threshold
-        self.recovery_timeout = recovery_timeout
-        self.half_open_requests = half_open_requests
-        
-        self.state = CircuitState.CLOSED
-        self.failures = 0
-        self.successes = 0
-        self.last_failure_time: Optional[datetime] = None
-        self.half_open_attempts = 0
-    
-    def record_success(self):
-        """Record successful call"""
-        if self.state == CircuitState.HALF_OPEN:
-            self.successes += 1
-            if self.successes >= self.half_open_requests:
-                self.close()
-        elif self.state == CircuitState.CLOSED:
-            self.failures = 0  # Reset failure count on success
-    
-    def record_failure(self):
-        """Record failed call"""
-        self.failures += 1
-        self.last_failure_time = datetime.now()
-        
-        if self.state == CircuitState.HALF_OPEN:
-            self.open()
-        elif self.failures >= self.failure_threshold:
-            self.open()
-    
-    def open(self):
-        """Open circuit (reject requests)"""
-        if self.state != CircuitState.OPEN:
-            logger.warning(f"Circuit breaker '{self.name}' OPENED after {self.failures} failures")
-            self.state = CircuitState.OPEN
-            self.half_open_attempts = 0
-    
-    def close(self):
-        """Close circuit (allow requests)"""
-        if self.state != CircuitState.CLOSED:
-            logger.info(f"Circuit breaker '{self.name}' CLOSED after recovery")
-            self.state = CircuitState.CLOSED
-            self.failures = 0
-            self.successes = 0
-    
-    def half_open(self):
-        """Test if service recovered"""
-        if self.state != CircuitState.HALF_OPEN:
-            logger.info(f"Circuit breaker '{self.name}' entering HALF_OPEN state for testing")
-            self.state = CircuitState.HALF_OPEN
-            self.successes = 0
-    
-    def can_proceed(self) -> bool:
-        """Check if request should be allowed"""
-        if self.state == CircuitState.CLOSED:
-            return True
-        
-        if self.state == CircuitState.OPEN:
-            # Check if recovery timeout has elapsed
-            if self.last_failure_time:
-                elapsed = (datetime.now() - self.last_failure_time).total_seconds()
-                if elapsed >= self.recovery_timeout:
-                    self.half_open()
-                    return True
-            return False
-        
-        # HALF_OPEN: allow limited requests
-        if self.half_open_attempts < self.half_open_requests:
-            self.half_open_attempts += 1
-            return True
-        return False
 
 
 class FallbackChain:
@@ -141,7 +48,6 @@ class FallbackChain:
             circuit_breaker_config = {}
         
         self.circuit_breakers[name] = CircuitBreaker(
-            name=f"{self.name}:{name}",
             **circuit_breaker_config
         )
     
@@ -157,27 +63,24 @@ class FallbackChain:
             provider_func = provider["func"]
             circuit_breaker = self.circuit_breakers[provider_name]
             
-            # Check circuit breaker
-            if not circuit_breaker.can_proceed():
-                logger.debug(f"Circuit breaker {provider_name} is OPEN, skipping")
-                continue
-            
             try:
                 logger.debug(f"Trying provider: {provider_name}")
-                result = await provider_func(*args, **kwargs)
+                result = await circuit_breaker.call(provider_func, *args, **kwargs)
                 
                 # Check if result is valid (not None, not empty)
                 if result is not None:
-                    circuit_breaker.record_success()
                     logger.info(f"✓ Provider '{provider_name}' succeeded")
                     return result
                 else:
                     logger.debug(f"Provider '{provider_name}' returned None/empty")
-                    circuit_breaker.record_failure()
+                    # If empty but didn't throw, we don't necessarily want to open the circuit.
+                    # We'll just continue to the next provider.
                     
+            except CircuitBreakerOpenException:
+                logger.debug(f"Circuit breaker {provider_name} is OPEN, skipping")
+                continue
             except Exception as e:
                 logger.warning(f"Provider '{provider_name}' failed: {e}")
-                circuit_breaker.record_failure()
                 last_error = e
         
         # All providers failed
@@ -285,10 +188,16 @@ class DataProviderManager:
         for chain_name, chain in self.chains.items():
             status[chain_name] = {}
             for provider_name, breaker in chain.circuit_breakers.items():
+                # For `utils.error_resilience.CircuitBreaker`, last_failure_time is a float timestamp
+                import datetime
+                last_fail_iso = None
+                if breaker.last_failure_time > 0:
+                     last_fail_iso = datetime.datetime.fromtimestamp(breaker.last_failure_time).isoformat()
+
                 status[chain_name][provider_name] = {
-                    "state": breaker.state.value,
-                    "failures": breaker.failures,
-                    "last_failure": breaker.last_failure_time.isoformat() if breaker.last_failure_time else None
+                    "state": breaker.state,
+                    "failures": breaker.failure_count,
+                    "last_failure": last_fail_iso
                 }
         return status
 
