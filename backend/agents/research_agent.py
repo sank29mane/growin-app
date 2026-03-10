@@ -115,7 +115,7 @@ class ResearchAgent(BaseAgent):
         
         try:
             from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-            from error_resilience import provider_manager, normalize_response_format
+            from utils.error_resilience import provider_manager, normalize_response_format
             
             sentiment_analyzer = SentimentIntensityAnalyzer()
             articles = []

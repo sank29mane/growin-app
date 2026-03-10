@@ -14,8 +14,12 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from .llm_factory import LLMFactory
 from utils.audit_log import log_audit
 from app_logging import correlation_id_ctx
+from utils.error_resilience import CircuitBreaker, CircuitBreakerOpenException
 
 logger = logging.getLogger(__name__)
+
+mcp_circuit_breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=60)
+
 
 
 class DecisionAgent:
@@ -402,27 +406,36 @@ class DecisionAgent:
                     async def execute_tool(match):
                         tool_name = match.group(1)
                         tool_args_str = match.group(2)
+
                         try:
                             tool_args = json.loads(tool_args_str) if tool_args_str.strip() else {}
+                        except Exception as e:
+                            return f"[TOOL_RESULT:{tool_name}] Error: Invalid JSON arguments - {str(e)}"
                             
-                            # Security Interception
-                            if tool_name in self.INTERCEPTED_TOOLS:
-                                logger.info(f"DecisionAgent: INTERCEPTING sensitive tool {tool_name}")
-                                return f"[ACTION_REQUIRED:{tool_name}] Parameters: {tool_args_str}. Unauthorized for autonomous execution. Requires UI confirmation."
+                        # Security Interception
+                        if tool_name in self.INTERCEPTED_TOOLS:
+                            logger.info(f"DecisionAgent: INTERCEPTING sensitive tool {tool_name}")
+                            return f"[ACTION_REQUIRED:{tool_name}] Parameters: {tool_args_str}. Unauthorized for autonomous execution. Requires UI confirmation."
 
-                            logger.info(f"DecisionAgent: Executing Tool {tool_name}")
+                        logger.info(f"DecisionAgent: Executing Tool {tool_name}")
 
+                        async def _call_mcp_tool():
                             if hasattr(asyncio, 'timeout'):
                                 async with asyncio.timeout(15.0):
-                                    result = await mcp.call_tool(tool_name, tool_args)
+                                    return await mcp.call_tool(tool_name, tool_args)
                             else:
-                                result = await asyncio.wait_for(
+                                return await asyncio.wait_for(
                                     mcp.call_tool(tool_name, tool_args),
                                     timeout=15.0
                                 )
 
+                        try:
+                            result = await mcp_circuit_breaker.call(_call_mcp_tool)
                             result_text = result.content[0].text if hasattr(result, 'content') else str(result)
                             return f"[TOOL_RESULT:{tool_name}] {result_text}"
+                        except CircuitBreakerOpenException:
+                            logger.warning(f"Tool execution skipped: {tool_name} (Circuit OPEN)")
+                            return f"[TOOL_RESULT:{tool_name}] Error: Circuit breaker is OPEN"
                         except asyncio.TimeoutError:
                             logger.warning(f"Tool execution timed out: {tool_name}")
                             return f"[TOOL_RESULT:{tool_name}] Error: Execution timed out after 15 seconds"

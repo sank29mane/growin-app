@@ -18,7 +18,7 @@ import yfinance as yf
 from decimal import Decimal
 from utils.financial_math import create_decimal
 from utils.portfolio_analyzer import PortfolioAnalyzer
-from error_resilience import CircuitBreaker
+from utils.error_resilience import CircuitBreaker, CircuitBreakerOpenException
 
 logger = logging.getLogger(__name__)
 
@@ -58,52 +58,47 @@ class PortfolioAgent(BaseAgent):
             from status_manager import status_manager
             status_manager.set_status("portfolio_agent", "running", f"Syncing {requested_account} holdings...")
             
-            # Check circuit breaker before making external calls
-            if not self.circuit_breaker.can_proceed():
-                logger.error(f"Portfolio sync skipped: circuit breaker {self.circuit_breaker.name} is OPEN")
-                return AgentResponse(
-                    agent_name=self.config.name,
-                    success=False,
-                    data={},
-                    error="MCP tool call failed or circuit breaker is OPEN",
-                    latency_ms=0
-                )
-
             # SOTA 2026: Consolidated Multi-Account Fetch with Enhanced Timeouts and Circuit Breaker
             if requested_account == "all":
                 # Parallel fetch for ISA and Invest
-                try:
+                async def _fetch_all():
                     if hasattr(asyncio, 'timeout'):
                         async with asyncio.timeout(15.0):
                             tasks = [
                                 self.mcp_client.call_tool("analyze_portfolio", arguments={"account_type": "invest"}),
                                 self.mcp_client.call_tool("analyze_portfolio", arguments={"account_type": "isa"})
                             ]
-                            results = await asyncio.gather(*tasks, return_exceptions=True)
+                            res = await asyncio.gather(*tasks, return_exceptions=True)
                     else:
                         tasks = [
                             self.mcp_client.call_tool("analyze_portfolio", arguments={"account_type": "invest"}),
                             self.mcp_client.call_tool("analyze_portfolio", arguments={"account_type": "isa"})
                         ]
-                        results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=15.0)
+                        res = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=15.0)
                         
-                        # Check results for any success/failure to update circuit breaker
-                        any_success = False
-                        for res in results:
-                            if not isinstance(res, Exception):
-                                any_success = True
-                                break
-                        
-                        if any_success:
-                            self.circuit_breaker.record_success()
-                        else:
-                            self.circuit_breaker.record_failure()
-                            
+                    any_success = False
+                    for r in res:
+                        if not isinstance(r, Exception):
+                            any_success = True
+                            break
+                    if not any_success:
+                        raise ValueError("Failed to fetch data from any accounts")
+                    return res
+
+                try:
+                    results = await self.circuit_breaker.call(_fetch_all)
                 except asyncio.TimeoutError as e:
-                    self.circuit_breaker.record_failure()
                     raise ValueError("Multi-account fetch timed out") from e
+                except CircuitBreakerOpenException as e:
+                    logger.error(f"Portfolio sync skipped: circuit breaker {self.circuit_breaker.name} is OPEN")
+                    return AgentResponse(
+                        agent_name=self.config.name,
+                        success=False,
+                        data={},
+                        error="MCP tool call failed or circuit breaker is OPEN",
+                        latency_ms=0
+                    )
                 except Exception as e:
-                    self.circuit_breaker.record_failure()
                     raise ValueError(f"Multi-account fetch failed: {e}") from e
                 
                 raw_data_list = []
@@ -122,24 +117,34 @@ class PortfolioAgent(BaseAgent):
                 portfolio_data = self._process_portfolio_data(consolidated_data)
             else:
                 # Single account fetch with timeout
-                try:
+                async def _fetch_single():
                     if hasattr(asyncio, 'timeout'):
                         async with asyncio.timeout(15.0):
-                            result = await self.mcp_client.call_tool(
+                            res = await self.mcp_client.call_tool(
                                 "analyze_portfolio",
                                 arguments={"account_type": requested_account}
                             )
                     else:
-                        result = await asyncio.wait_for(self.mcp_client.call_tool(
+                        res = await asyncio.wait_for(self.mcp_client.call_tool(
                             "analyze_portfolio", 
                             arguments={"account_type": requested_account}
                         ), timeout=15.0)
-                    self.circuit_breaker.record_success()
+                    return res
+
+                try:
+                    result = await self.circuit_breaker.call(_fetch_single)
                 except asyncio.TimeoutError as e:
-                    self.circuit_breaker.record_failure()
                     raise ValueError(f"Portfolio fetch for {requested_account} timed out") from e
+                except CircuitBreakerOpenException as e:
+                    logger.error(f"Portfolio sync skipped: circuit breaker {self.circuit_breaker.name} is OPEN")
+                    return AgentResponse(
+                        agent_name=self.config.name,
+                        success=False,
+                        data={},
+                        error="MCP tool call failed or circuit breaker is OPEN",
+                        latency_ms=0
+                    )
                 except Exception as e:
-                    self.circuit_breaker.record_failure()
                     if "Unauthorized" in str(e) or "401" in str(e):
                         raise ValueError(f"Unauthorized: {e}") from e
                     raise ValueError(f"Portfolio fetch failed: {e}") from e

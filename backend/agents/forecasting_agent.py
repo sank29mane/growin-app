@@ -8,7 +8,7 @@ import logging
 from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from market_context import ForecastData
 from forecaster import get_forecaster
-from error_resilience import CircuitBreaker
+from utils.error_resilience import CircuitBreaker, CircuitBreakerOpenException
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +126,20 @@ class ForecastingAgent(BaseAgent):
                 logger.warning(f"ForecastingAgent sanitization error: {ex}")
         # ---------------------------------------------
             
-        if not self.circuit_breaker.can_proceed():
+        async def _do_forecast():
+            # Generate forecast using TTM
+            res = await self.forecaster.forecast(
+                ohlcv_data,
+                prediction_steps=steps,
+                timeframe=timeframe
+            )
+            if "error" in res:
+                raise ValueError(res["error"])
+            return res
+
+        try:
+            result = await self.circuit_breaker.call(_do_forecast)
+        except CircuitBreakerOpenException:
             logger.error(f"Forecast skipped: circuit breaker {self.circuit_breaker.name} is OPEN")
             return AgentResponse(
                 agent_name=self.config.name,
@@ -135,26 +148,17 @@ class ForecastingAgent(BaseAgent):
                 error="Forecasting failed or circuit breaker is OPEN",
                 latency_ms=0
             )
-
-        try:
-            # Generate forecast using TTM
-            result = await self.forecaster.forecast(
-                ohlcv_data,
-                prediction_steps=steps,
-                timeframe=timeframe
+        except Exception as e:
+            # Re-raised from inner wrapper
+            return AgentResponse(
+                agent_name=self.config.name,
+                success=False,
+                data={},
+                error=str(e),
+                latency_ms=0
             )
 
-            if "error" in result:
-                self.circuit_breaker.record_failure()
-                return AgentResponse(
-                    agent_name=self.config.name,
-                    success=False,
-                    data={},
-                    error=result["error"],
-                    latency_ms=0
-                )
-
-            self.circuit_breaker.record_success()
+        try:
 
             # Extract predictions
             forecast_bars = result.get("forecast", [])
@@ -210,7 +214,6 @@ class ForecastingAgent(BaseAgent):
             )
 
         except Exception as e:
-            self.circuit_breaker.record_failure()
             logger.error(f"Forecast failed: {e}")
             return AgentResponse(
                 agent_name=self.config.name,
