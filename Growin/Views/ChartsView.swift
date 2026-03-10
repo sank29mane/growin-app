@@ -123,6 +123,7 @@ struct ChartsView: View {
             .accessibilityElement(children: .combine)
             .accessibilityLabel("\(result.name), Ticker \(result.ticker)")
             .accessibilityHint("Double tap to select this symbol")
+            .accessibilityAddTraits(.isButton)
         }
         .listStyle(.plain)
     }

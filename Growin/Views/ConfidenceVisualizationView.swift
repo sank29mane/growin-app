@@ -117,6 +117,8 @@ struct ConfidenceVisualizationView: View {
                             .premiumTypography(.caption)
                             .foregroundStyle(.secondary)
                             .buttonStyle(.plain)
+                            .accessibilityLabel("Cancel Order")
+                            .accessibilityAddTraits(.isButton)
                     }
                     .padding(.top, 8)
                 } else {

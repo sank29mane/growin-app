@@ -131,7 +131,13 @@ struct ConversationListView: View {
                         VStack(spacing: 16) {
                             Image(systemName: "wifi.exclamationmark").font(.largeTitle).foregroundStyle(.red)
                             Text(error).font(.system(size: 13, design: .monospaced)).multilineTextAlignment(.center).padding(.horizontal)
-                            Button("Retry Connection") { Task { await viewModel.fetchConversations() } }.buttonStyle(.plain).padding(10).background(Color.white.opacity(0.1)).clipShape(Capsule())
+                            Button("Retry Connection") { Task { await viewModel.fetchConversations() } }
+                                .buttonStyle(.plain)
+                                .padding(10)
+                                .background(Color.white.opacity(0.1))
+                                .clipShape(Capsule())
+                                .accessibilityLabel("Retry Connection")
+                                .accessibilityAddTraits(.isButton)
                         }
                         .frame(maxHeight: .infinity)
                     } else if viewModel.conversations.isEmpty {
