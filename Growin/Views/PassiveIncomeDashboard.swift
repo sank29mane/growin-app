@@ -33,6 +33,13 @@ struct PassiveIncomeDashboard: View {
                             change: "Forecast",
                             changePositive: nil
                         )
+                        
+                        FinancialMetricView(
+                            title: "CVaR (95%)",
+                            value: String(format: "%.2f%%", viewModel.cvar95),
+                            change: "Tail Risk",
+                            changePositive: viewModel.cvar95 < 15.0
+                        )
                     }
                     .padding(.horizontal)
                     
@@ -139,11 +146,15 @@ struct ProbabilityCloudChart: View {
                 }
             }
             .chartXAxis {
-                AxisMarks(values: .stride(by: .month)) { _ in
+                AxisMarks(values: .stride(by: .month)) { value in
                     AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
                         .foregroundStyle(.white.opacity(0.05))
-                    AxisValueLabel(format: .dateTime.month(.abbreviated))
-                        .premiumTypography(.caption)
+                    AxisValueLabel() {
+                        if let date = value.as(Date.self) {
+                            Text(date, format: .dateTime.month(.abbreviated))
+                                .premiumTypography(.caption)
+                        }
+                    }
                 }
             }
         }
@@ -263,9 +274,13 @@ struct IncomeFlowChart: View {
                 }
             }
             .chartXAxis {
-                AxisMarks(values: .stride(by: .month)) { _ in
-                    AxisValueLabel(format: .dateTime.month(.abbreviated))
-                        .premiumTypography(.caption)
+                AxisMarks(values: .stride(by: .month)) { value in
+                    AxisValueLabel() {
+                        if let date = value.as(Date.self) {
+                            Text(date, format: .dateTime.month(.abbreviated))
+                                .premiumTypography(.caption)
+                        }
+                    }
                 }
             }
         }

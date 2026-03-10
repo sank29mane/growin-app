@@ -71,9 +71,15 @@ private struct WSChartTickMessage: Codable, Sendable {
 
 private struct WSRealtimeQuoteMessage: Codable, Sendable {
     struct QuoteData: Codable, Sendable {
-        let current_price: Decimal?
+        let currentPrice: Decimal?
         let change: Decimal?
-        let change_percent: Decimal?
+        let changePercent: Decimal?
+        
+        enum CodingKeys: String, CodingKey {
+            case currentPrice = "current_price"
+            case change
+            case changePercent = "change_percent"
+        }
     }
     let data: QuoteData
 }
@@ -261,9 +267,9 @@ class StockChartViewModel {
                     return .chartTick(msg.tick)
                 case "realtime_quote":
                     let msg = try decoder.decode(WSRealtimeQuoteMessage.self, from: data)
-                    return .realtimeQuote(price: msg.data.current_price,
+                    return .realtimeQuote(price: msg.data.currentPrice,
                                         change: msg.data.change,
-                                        percent: msg.data.change_percent)
+                                        percent: msg.data.changePercent)
                 case "error":
                     let msg = try decoder.decode(WSErrorMessage.self, from: data)
                     return .error(msg.message)

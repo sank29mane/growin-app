@@ -89,6 +89,10 @@ class ResearchAgent(BaseAgent):
             AgentResponse with ResearchData containing sentiment and headlines
         """
         ticker = context.get("ticker", "MARKET")
+<<<<<<< HEAD
+=======
+        asset_keyword = "stock"
+>>>>>>> b069b4b (feat(phase-29): implement institutional portfolio optimization (Mean-Variance) via MLX NPU)
         company_name = context.get("company_name", ticker)
         
         if not any([self.newsapi_key, self.tavily_key, self.newsdata_key]):

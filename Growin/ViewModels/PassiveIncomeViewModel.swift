@@ -44,6 +44,7 @@ class PassiveIncomeViewModel: ObservableObject {
     
     @Published var totalSettled: Double = 0.0
     @Published var totalPredicted: Double = 0.0
+    @Published var cvar95: Double = 0.0 // SOTA 2026 Phase 29: Conditional Value at Risk
     
     private var cancellables = Set<AnyCancellable>()
     
@@ -93,6 +94,7 @@ class PassiveIncomeViewModel: ObservableObject {
         self.incomePoints = mockPoints
         self.totalSettled = settledTotal
         self.totalPredicted = predictedTotal
+        self.cvar95 = 12.45 // 12.45% tail risk
         
         // Mock Probability Cloud
         var mockCloud: [ProbabilityRange] = []

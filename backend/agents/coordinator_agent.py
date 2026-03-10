@@ -180,6 +180,13 @@ Query: "{clean_query}"
             intent_type = intent_match.group(1).lower() if (intent_match and intent_match.group(1)) else "market_analysis"
             ticker = ticker_match.group(1).upper() if ticker_match and ticker_match.group(1) and "NONE" not in ticker_match.group(1).upper() else None
             
+            # Hard overrides to protect against LLM misclassification
+            q_lower = query.lower()
+            if "portfolio" in q_lower:
+                intent_type = "portfolio_query"
+                if ticker in ["ISA", "INVEST", "MY"]:
+                    ticker = None
+            
             # Map intents to needs (Hardcoded logic is safer than LLM predicting list)
             needs_map = {
                 "price_check": ["quant"],

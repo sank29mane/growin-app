@@ -10,7 +10,7 @@ class ChatViewModel {
     var errorMessage: String?
     var inputText: String = ""
     var selectedConversationId: String? = nil
-    var selectedAccountType: String = "all"
+    var selectedAccountType: String = "isa"
     var showConfigPrompt = false
     var missingConfigProvider: String?
 
@@ -95,7 +95,8 @@ class ChatViewModel {
         let stream = agentClient.streamMessage(
             query: message,
             conversationId: selectedConversationId,
-            model: effectiveModelName
+            model: effectiveModelName,
+            accountType: selectedAccountType
         )
         
         for await event in stream {
@@ -128,6 +129,7 @@ class ChatViewModel {
     }
 
     private func handleTelemetry(_ telemetry: [String: AnySendable]) {
+<<<<<<< HEAD
         let sender = telemetry["sender"]?.value as? String ?? "Agent"
         let subject = telemetry["subject"]?.value as? String ?? ""
         let payload = telemetry["payload"]?.value as? [String: Any] ?? [:]
@@ -170,6 +172,56 @@ class ChatViewModel {
             let turn = payload["content"] as? String ?? ""
             let step = ReasoningStep(agent: sender, action: "Debating", content: turn, timestamp: timestamp)
             activeReasoningSteps.append(step)
+=======
+        // Architecture Resilience: Ensure all telemetry parsing and UI updates 
+        // are serialized on the MainActor to prevent 'AccessSet::insert' data races.
+        Task { @MainActor in
+            let sender = telemetry["sender"]?.value as? String ?? "Agent"
+            let subject = telemetry["subject"]?.value as? String ?? ""
+            let payload = telemetry["payload"]?.value as? [String: Any] ?? [:]
+
+            let timestamp = Date().timeIntervalSince1970
+            var newStep: ReasoningStep? = nil
+
+            if subject == "agent_started" {
+                let agent = payload["agent"] as? String ?? sender
+                streamingStatus = "Agent \(agent) starting..."
+                newStep = ReasoningStep(agent: agent, action: "Started", content: nil, timestamp: timestamp)
+            } else if subject == "agent_complete" {
+                let agent = payload["agent"] as? String ?? sender
+                let success = payload["success"] as? Bool ?? true
+                if success {
+                    streamingStatus = "Agent \(agent) finished."
+                    newStep = ReasoningStep(agent: agent, action: "Finished successfully", content: nil, timestamp: timestamp)
+                } else {
+                    streamingStatus = "Agent \(agent) failed."
+                    newStep = ReasoningStep(agent: agent, action: "Failed", content: nil, timestamp: timestamp)
+                }
+            } else if subject == "intent_classified" {
+                if let intent = payload["intent"] as? [String: Any],
+                    let type = intent["type"] as? String {
+                    streamingStatus = "Intent: \(type)"
+                    newStep = ReasoningStep(agent: sender, action: "Classified Intent: \(type)", content: nil, timestamp: timestamp)
+                }
+            } else if subject == "tool_call" {
+                let tool = payload["tool"] as? String ?? "Unknown Tool"
+                streamingStatus = "Executing \(tool)..."
+                newStep = ReasoningStep(agent: sender, action: "Calling \(tool)", content: nil, timestamp: timestamp)
+            } else if subject == "reasoning" || subject == "thought" {
+                let thought = payload["content"] as? String ?? "Processing..."
+                newStep = ReasoningStep(agent: sender, action: "Thinking", content: thought, timestamp: timestamp)
+            } else if subject == "debate" {
+                let turn = payload["content"] as? String ?? ""
+                newStep = ReasoningStep(agent: sender, action: "Debating", content: turn, timestamp: timestamp)
+            }
+            
+            if let step = newStep {
+                // SOTA: Use withAnimation to provide kinetic feedback while keeping access serialized
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                    activeReasoningSteps.append(step)
+                }
+            }
+>>>>>>> b069b4b (feat(phase-29): implement institutional portfolio optimization (Mean-Variance) via MLX NPU)
         }
     }
 

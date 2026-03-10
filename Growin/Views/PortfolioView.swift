@@ -426,6 +426,30 @@ extension PortfolioView {
             
             Spacer()
             
+            // SOTA 2026 Phase 29: Strategy Persona Toggle
+            HStack(spacing: 0) {
+                ForEach(["defensive", "aggressive"], id: \.self) { persona in
+                    Button(action: {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                            viewModel.strategyPersona = persona
+                        }
+                    }) {
+                        Image(systemName: persona == "defensive" ? "shield.fill" : "bolt.fill")
+                            .font(.system(size: 10))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(viewModel.strategyPersona == persona ? Color.white.opacity(0.1) : Color.clear)
+                            .foregroundStyle(viewModel.strategyPersona == persona ? (persona == "defensive" ? .stitchNeonGreen : .stitchNeonIndigo) : .secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help(persona.capitalized)
+                }
+            }
+            .background(Color.white.opacity(0.05))
+            .clipShape(Capsule())
+            .overlay(Capsule().stroke(Color.white.opacity(0.1), lineWidth: 0.5))
+            .padding(.trailing, 8)
+
             // Premium Account Toggle
             HStack(spacing: 0) {
                 let defaults = UserDefaults.standard

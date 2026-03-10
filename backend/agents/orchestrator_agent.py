@@ -104,6 +104,12 @@ Intents:
 - market_analysis (needs quant, forecast, research, social)
 - portfolio_query (needs portfolio)
 - goal_planning (needs goal_planner)
+<<<<<<< HEAD
+=======
+- intraday_trade (needs quant, forecast, research; implies 5min bars)
+- swing_trade (needs quant, forecast, research; implies 1hour bars)
+- conversational (general financial questions, definitions, greetings, or abstract strategy)
+>>>>>>> b069b4b (feat(phase-29): implement institutional portfolio optimization (Mean-Variance) via MLX NPU)
 
 Query: "{clean_query}"
 """
@@ -120,11 +126,29 @@ Query: "{clean_query}"
             intent_type = intent_match.group(1).lower() if (intent_match and intent_match.group(1)) else "market_analysis"
             ticker = ticker_match.group(1).upper() if ticker_match and ticker_match.group(1) and "NONE" not in ticker_match.group(1).upper() else None
             
+            # Hard overrides to protect against LLM misclassification
+            q_lower = query.lower()
+            if "portfolio" in q_lower:
+                intent_type = "portfolio_query"
+            
+            # Conversational/Educational triggers
+            if any(w in q_lower for w in ["what is", "how does", "tell me about", "hello", "hi", "how are you", "who are you"]):
+                intent_type = "conversational"
+                
+            if ticker in ["ISA", "INVEST", "MY", "DEEP", "DIVE", "MORE", "SOME", "RSI", "MACD"]:
+                ticker = None
+            
+            # If it's a "how is it doing" question without a ticker, we might be talking about a portfolio
+            if "how is it doing" in q_lower or "performance" in q_lower:
+                if not ticker:
+                    intent_type = "portfolio_query"
+                    
             needs_map = {
                 "price_check": ["quant"],
                 "market_analysis": ["quant", "forecast", "research", "social", "whale", "portfolio"],
                 "portfolio_query": ["portfolio", "quant", "forecast"],
                 "goal_planning": ["goal_planner", "portfolio"],
+                "conversational": [],
                 "educational": []
             }
             
@@ -163,9 +187,23 @@ Query: "{clean_query}"
         # 2. Routing Phase
         status_manager.set_status("orchestrator", "working", "Classifying Intent...")
         intent_info = await self._classify_intent(query)
-        if not ticker:
-            ticker = intent_info.get("primary_ticker")
-            
+        # Context bridging for "Deep Dive" or follow-ups without explicit tickers
+        if not ticker and history:
+            from utils import extract_ticker_from_text
+            for msg in reversed(history):
+                # SOTA 2026: Only inherit context from User Messages to avoid hallucinating tickers from AI headers (e.g. ACE)
+                if msg.get("role") != "user":
+                    continue
+                    
+                content = msg.get("content", "")
+                found = extract_ticker_from_text(content)
+                if found and found not in ["ISA", "INVEST", "MY", "DEEP", "DIVE", "MORE", "SOME", "RSI"]:
+                    ticker = found
+                    break
+                elif "portfolio" in content.lower():
+                    intent_info["type"] = "portfolio_query"
+                    break
+                    
         await self.messenger.send_message(AgentMessage(
             sender="OrchestratorAgent",
             recipient="broadcast",
@@ -182,10 +220,15 @@ Query: "{clean_query}"
         db = get_analytics_db()
         historical_alpha = db.get_agent_alpha_metrics(ticker)
         
+        from agents.decision_agent import DecisionAgent
+        detected_account = account_type
+        if not detected_account or detected_account == "all":
+            detected_account = DecisionAgent()._detect_account_mentions(query)
+            
         context = await self.data_fabricator.fabricate_context(
             intent=intent_info["type"],
             ticker=ticker,
-            account_type=account_type or "all",
+            account_type=detected_account,
             user_settings={}
         )
         context.routing_reason = intent_info["reason"]
@@ -217,23 +260,27 @@ Query: "{clean_query}"
         ))
         
         # Preparation for parallel tasks
-        if "quant" in needs and context.price:
-            ohlcv = [{
-                't': b.timestamp, 'o': b.open, 'h': b.high, 'l': b.low, 'c': b.close, 'v': b.volume
-            } for b in context.price.history_series]
+        if "quant" in needs and context.ticker:
+            ohlcv = []
+            if context.price and context.price.history_series:
+                ohlcv = [{
+                    't': b.timestamp, 'o': b.open, 'h': b.high, 'l': b.low, 'c': b.close, 'v': b.volume
+                } for b in context.price.history_series]
             tasks.append(self._run_specialist(self.quant_agent, {"ticker": context.ticker, "ohlcv_data": ohlcv}))
             
-        if "forecast" in needs and context.price:
-            ohlcv = [{
-                't': b.timestamp, 'o': b.open, 'h': b.high, 'l': b.low, 'c': b.close, 'v': b.volume
-            } for b in context.price.history_series]
+        if "forecast" in needs and context.ticker:
+            ohlcv = []
+            if context.price and context.price.history_series:
+                ohlcv = [{
+                    't': b.timestamp, 'o': b.open, 'h': b.high, 'l': b.low, 'c': b.close, 'v': b.volume
+                } for b in context.price.history_series]
             tasks.append(self._run_specialist(self.forecasting_agent, {"ticker": context.ticker, "ohlcv_data": ohlcv, "days": 5}))
             
         if "research" in needs:
             tasks.append(self._run_specialist(self.research_agent, {"ticker": context.ticker}))
             
         if "portfolio" in needs:
-            tasks.append(self._run_specialist(self.portfolio_agent, {"account_type": account_type or "all"}))
+            tasks.append(self._run_specialist(self.portfolio_agent, {"account_type": detected_account}))
 
         if tasks:
             status_manager.set_status("orchestrator", "working", f"Executing Swarm ({len(tasks)} agents)...")
@@ -275,12 +322,20 @@ Query: "{clean_query}"
         recommendation = decision_result.get("content", "")
         
         # --- SOTA 2026: ADVERSARIAL DEBATE LOOP ---
+        if context.intent in ["conversational", "educational"]:
+            return {"content": recommendation, "response_id": decision_result.get("response_id"), "context": context}
+
+        import os
         debate_trace = []
-        max_debate_turns = 1 # One rebuttal allowed
+        max_debate_turns = 0 if os.getenv("USE_SHADOW_LLM") == "1" else 1 # Skip rebuttal in shadow mode definition
         
         # ACE Evaluator
         from .ace_evaluator import ACEEvaluator
         ace_evaluator = ACEEvaluator()
+        
+        # We skip the rest of the debate logic if conversational intent (logic above handles it)
+        # Note: I am inserting the bypass BEFORE max_debate_turns is calculated.
+        # Actually I already did that in the replacement content.
         
         for turn in range(max_debate_turns + 1):
             status_manager.set_status("orchestrator", "working", f"Risk Review (Turn {turn+1})...")
@@ -355,29 +410,31 @@ Query: "{clean_query}"
             "context": context
         }
 
-    async def _run_specialist(self, agent: BaseAgent, input_data: Dict[str, Any]) -> AgentResponse:
+    async def _run_specialist(self, agent: BaseAgent, input_data: Dict[str, Any], suppress_events: bool = False) -> AgentResponse:
         """Run a specialist with unified telemetry"""
         c_id = correlation_id_ctx.get()
         agent_name = agent.config.name
         
-        await self.messenger.send_message(AgentMessage(
-            sender="OrchestratorAgent",
-            recipient=agent_name,
-            subject="agent_started",
-            payload={"agent": agent_name, "ticker": input_data.get("ticker")},
-            correlation_id=c_id
-        ))
+        if not suppress_events:
+            await self.messenger.send_message(AgentMessage(
+                sender="OrchestratorAgent",
+                recipient="broadcast",
+                subject="agent_started",
+                payload={"agent": agent_name, "ticker": input_data.get("ticker")},
+                correlation_id=c_id
+            ))
         
         try:
             result = await agent.execute(input_data)
             
-            await self.messenger.send_message(AgentMessage(
-                sender=agent_name,
-                recipient="OrchestratorAgent",
-                subject="agent_complete",
-                payload={"agent": agent_name, "success": result.success, "latency": result.latency_ms},
-                correlation_id=c_id
-            ))
+            if not suppress_events:
+                await self.messenger.send_message(AgentMessage(
+                    sender="OrchestratorAgent",
+                    recipient="broadcast",
+                    subject="agent_complete",
+                    payload={"agent": agent_name, "success": result.success, "latency": result.latency_ms},
+                    correlation_id=c_id
+                ))
             return result
         except Exception as e:
             logger.error(f"Orchestrator specialist failed ({agent_name}): {e}")
@@ -385,7 +442,7 @@ Query: "{clean_query}"
 
     async def _merge_result(self, context: MarketContext, result: AgentResponse):
         """Merge specialist data into context"""
-        from market_context import ForecastData, QuantData, PortfolioData, ResearchData
+        from market_context import ForecastData, QuantData, PortfolioData, ResearchData, SocialData, WhaleData
         data = result.data
         name = result.agent_name
         
@@ -393,6 +450,8 @@ Query: "{clean_query}"
         elif name == "ForecastingAgent": context.forecast = ForecastData(**data)
         elif name == "PortfolioAgent": context.portfolio = PortfolioData(**data)
         elif name == "ResearchAgent": context.research = ResearchData(**data)
+        elif name == "SocialAgent": context.social = SocialData(**data)
+        elif name == "WhaleAgent": context.whale = WhaleData(**data)
 
     async def run_stream(self, query: str, conversation_id: Optional[str] = None, history: List[Dict] = [], ticker: Optional[str] = None, account_type: Optional[str] = None):
         """Streaming variant of Orchestrator lifecycle"""
@@ -402,36 +461,70 @@ Query: "{clean_query}"
         
         # 1. Routing & Context (Fast)
         intent_info = await self._classify_intent(query)
-        if not ticker: ticker = intent_info.get("primary_ticker")
+        if not ticker: 
+            ticker = intent_info.get("primary_ticker")
+            
+        # Context bridging for "Deep Dive" or follow-ups without explicit tickers
+        if not ticker and history:
+            from utils import extract_ticker_from_text
+            for msg in reversed(history):
+                # SOTA 2026: Only inherit context from User Messages to avoid hallucinating tickers from AI headers (e.g. ACE)
+                if msg.get("role") != "user":
+                    continue
+                    
+                content = msg.get("content", "")
+                found = extract_ticker_from_text(content)
+                if found and found not in ["ISA", "INVEST", "MY", "DEEP", "DIVE", "MORE", "SOME", "RSI"]:
+                    ticker = found
+                    break
+                elif "portfolio" in content.lower():
+                    intent_info["type"] = "portfolio_query"
+                    break
         
+        from agents.decision_agent import DecisionAgent
+        detected_account = account_type
+        if not detected_account or detected_account == "all":
+            detected_account = DecisionAgent()._detect_account_mentions(query)
+            
         context = await self.data_fabricator.fabricate_context(
             intent=intent_info["type"],
             ticker=ticker,
-            account_type=account_type or "all"
+            account_type=detected_account
         )
         context.user_context["history"] = history
         
         # 2. Parallel Collection (The Swarm)
         needs = intent_info["needs"]
-        tasks = []
         
-        if "quant" in needs and context.price:
-            ohlcv = [{
-                't': b.timestamp, 'o': b.open, 'h': b.high, 'l': b.low, 'c': b.close, 'v': b.volume
-            } for b in context.price.history_series]
-            tasks.append(self._run_specialist(self.quant_agent, {"ticker": context.ticker, "ohlcv_data": ohlcv}))
-            
-        if "forecast" in needs and context.price:
-            ohlcv = [{
-                't': b.timestamp, 'o': b.open, 'h': b.high, 'l': b.low, 'c': b.close, 'v': b.volume
-            } for b in context.price.history_series]
-            tasks.append(self._run_specialist(self.forecasting_agent, {"ticker": context.ticker, "ohlcv_data": ohlcv, "days": 5}))
+        # SOTA: Hardening - Give DataFabricator a moment if the stream is starting very fast
+        if ticker:
+            await asyncio.sleep(0.5)
+
+        tasks = []
+
+        if "quant" in needs and ticker:
+            ohlcv = []
+            if context.price and context.price.history_series:
+                ohlcv = [{
+                    't': b.timestamp, 'o': b.open, 'h': b.high, 'l': b.low, 'c': b.close, 'v': b.volume
+                } for b in context.price.history_series]
+            # Resilient Trigger: QuantAgent will now try its own resolve if ohlcv is empty
+            tasks.append(self._run_specialist(self.quant_agent, {"ticker": ticker, "ohlcv_data": ohlcv}))
+
+        if "forecast" in needs and ticker:
+            ohlcv = []
+            if context.price and context.price.history_series:
+                ohlcv = [{
+                    't': b.timestamp, 'o': b.open, 'h': b.high, 'l': b.low, 'c': b.close, 'v': b.volume
+                } for b in context.price.history_series]
+            tasks.append(self._run_specialist(self.forecasting_agent, {"ticker": ticker, "ohlcv_data": ohlcv, "days": 5}))
+
             
         if "research" in needs:
             tasks.append(self._run_specialist(self.research_agent, {"ticker": context.ticker}))
             
         if "portfolio" in needs:
-            tasks.append(self._run_specialist(self.portfolio_agent, {"account_type": account_type or "all"}))
+            tasks.append(self._run_specialist(self.portfolio_agent, {"account_type": detected_account}))
         
         if "social" in needs:
             tasks.append(self._run_specialist(self.social_agent, {"ticker": context.ticker}))
@@ -448,6 +541,18 @@ Query: "{clean_query}"
             for res in results:
                 if isinstance(res, AgentResponse) and res.success:
                     await self._merge_result(context, res)
+
+        # SOTA 2026 Phase 25: Liquidity Calculation (Post-Specialist)
+        if ticker and context.price and context.price.history_series:
+            ohlcv_raw = [{
+                't': b.timestamp, 'o': b.open, 'h': b.high, 'l': b.low, 'c': b.close, 'v': b.volume
+            } for b in context.price.history_series]
+            adv = self.quant_agent.engine.calculate_adv_30d(ohlcv_raw)
+            if context.risk_governance:
+                context.risk_governance.adv_30d = adv
+            else:
+                from market_context import RiskGovernanceData
+                context.risk_governance = RiskGovernanceData(adv_30d=adv)
         
         # 3. Stream Reasoning
         full_response = ""
@@ -456,6 +561,15 @@ Query: "{clean_query}"
             yield chunk
 
         # 4. Governance Phase (Risk Review)
+        if context.intent in ["conversational", "educational"]:
+             # Yield final context for route handler metadata
+             from pydantic import BaseModel
+             class FinalEvent(BaseModel):
+                 market_context: MarketContext
+             
+             yield FinalEvent(market_context=context)
+             return
+
         status_manager.set_status("orchestrator", "working", "Performing Risk Review (Critic Pattern)...")
         risk_review = await self.risk_agent.review(context, full_response)
         context.user_context["risk_review"] = risk_review
@@ -466,3 +580,10 @@ Query: "{clean_query}"
             if risk_review.get("requires_hitl"):
                 warning += "\n\n[ACTION_REQUIRED:TRADE_APPROVAL]"
             yield warning
+
+        # Yield final context for route handler metadata
+        from pydantic import BaseModel
+        class FinalEvent(BaseModel):
+            market_context: MarketContext
+        
+        yield FinalEvent(market_context=context)

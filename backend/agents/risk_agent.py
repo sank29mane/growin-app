@@ -92,7 +92,10 @@ class RiskAgent(BaseAgent):
         prompt = f"""
         [CONTEXT]
         Ticker: {market_context.ticker}
+<<<<<<< HEAD
         Intent: {market_context.intent}
+=======
+>>>>>>> b069b4b (feat(phase-29): implement institutional portfolio optimization (Mean-Variance) via MLX NPU)
         Portfolio Value: £{market_context.portfolio.total_value if market_context.portfolio else "Unknown"}
         Wash Sale Risk: {"HIGH (Recent loss sale detected)" if wash_sale_alert else "Low"}
         
@@ -103,30 +106,64 @@ class RiskAgent(BaseAgent):
         """
         
         try:
-            from langchain_core.messages import SystemMessage, HumanMessage
-            response = await self._llm.ainvoke([
-                SystemMessage(content=RISK_SYSTEM_PROMPT),
-                HumanMessage(content=prompt)
-            ])
-            
-            content = response.content if hasattr(response, 'content') else str(response)
-            
-            # Extract JSON
-            match = re.search(r'\{.*\}', content, re.DOTALL)
-            if match:
-                data = json.loads(match.group())
-                # Enforce HITL for any trade-related suggestion
-                if any(word in suggestion.upper() for word in ["BUY", "SELL", "ORDER", "TRADE"]):
-                    data["requires_hitl"] = True
-                
-                return AgentResponse(
-                    agent_name=self.config.name,
-                    success=True,
-                    data=data,
-                    latency_ms=0 # Will be updated by BaseAgent.execute
-                )
+            if hasattr(self._llm, "ainvoke"):
+                from langchain_core.messages import SystemMessage, HumanMessage
+                response = await self._llm.ainvoke([
+                    SystemMessage(content=RISK_SYSTEM_PROMPT),
+                    HumanMessage(content=prompt)
+                ])
+                content = response.content if hasattr(response, 'content') else str(response)
+            elif hasattr(self._llm, "chat"):
+                # Direct LM Studio Client
+                messages = [
+                    {"role": "system", "content": RISK_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt}
+                ]
+                resp = await self._llm.chat(model_id=self.model_name, messages=messages, temperature=0.1)
+                content = resp.get("content", "")
             else:
-                return AgentResponse(agent_name=self.config.name, success=False, data={}, error="Failed to parse Risk Agent output", latency_ms=0)
+                raise AttributeError("LLM client has no 'ainvoke' or 'chat' method")
+            
+            # Extract JSON (Multi-Stage Resilience)
+            data = None
+            
+            # 1. Direct Load
+            try:
+                data = json.loads(content.strip())
+            except json.JSONDecodeError:
+                # 2. Extract block between first { and last }
+                first_brace = content.find('{')
+                last_brace = content.rfind('}')
+                if first_brace != -1 and last_brace != -1:
+                    try:
+                        json_str = content[first_brace:last_brace+1]
+                        data = json.loads(json_str)
+                    except json.JSONDecodeError:
+                        # 3. Last Ditch: try fixing unclosed strings or common artifacts
+                        # (Regex based extraction of known fields)
+                        match = re.search(r'(\{.*\})', content, re.DOTALL)
+                        if match:
+                            try:
+                                data = json.loads(match.group(1))
+                            except Exception:
+                                pass
+            
+            if not data:
+                return AgentResponse(agent_name=self.config.name, success=False, data={}, error="JSON Syntax Error", latency_ms=0)
+                
+            # Enforce HITL for any trade-related suggestion
+            if any(word in suggestion.upper() for word in ["BUY", "SELL", "ORDER", "TRADE"]):
+                data["requires_hitl"] = True
+            else:
+                if "requires_hitl" not in data:
+                    data["requires_hitl"] = False
+                
+            return AgentResponse(
+                agent_name=self.config.name,
+                success=True,
+                data=data,
+                latency_ms=0 # Will be updated by BaseAgent.execute
+            )
                 
         except Exception as e:
             logger.error(f"RiskAgent failed: {e}")

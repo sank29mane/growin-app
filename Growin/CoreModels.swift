@@ -5,18 +5,23 @@ import Foundation
 
 // MARK: - Portfolio Models
 
+<<<<<<< HEAD
 struct PortfolioSnapshot: Codable, Sendable {
+=======
+struct PortfolioSnapshot: Codable, Sendable, Equatable {
+>>>>>>> b069b4b (feat(phase-29): implement institutional portfolio optimization (Mean-Variance) via MLX NPU)
     let summary: PortfolioSummary?
     let positions: [Position]?
 }
 
-struct PortfolioSummary: Codable, Sendable {
+struct PortfolioSummary: Codable, Sendable, Equatable {
     let totalPositions: Int?
     let totalInvested: Decimal?
     let currentValue: Decimal?
     let totalPnl: Decimal?
     let totalPnlPercent: Double?
     let cashBalance: CashBalance?
+    let cvar95: Decimal?
     let accounts: [String: AccountSummary]?
     
     enum CodingKeys: String, CodingKey {
@@ -26,11 +31,12 @@ struct PortfolioSummary: Codable, Sendable {
         case totalPnl = "total_pnl"
         case totalPnlPercent = "total_pnl_percent"
         case cashBalance = "cash_balance"
+        case cvar95 = "cvar_95"
         case accounts
     }
 }
 
-struct AccountSummary: Codable, Sendable {
+struct AccountSummary: Codable, Sendable, Equatable {
     let totalInvested: Decimal?
     let currentValue: Decimal?
     let totalPnl: Decimal?
@@ -44,12 +50,11 @@ struct AccountSummary: Codable, Sendable {
     }
 }
 
-struct CashBalance: Codable, Sendable {
+struct CashBalance: Codable, Sendable, Equatable {
     let total: Decimal?
     let free: Decimal?
 }
-
-struct Position: Codable, Identifiable, Sendable {
+struct Position: Codable, Identifiable, Sendable, Equatable {
     var id: String { 
         if let ticker = ticker, let accountType = accountType {
             return "\(ticker)-\(accountType)"
@@ -64,7 +69,11 @@ struct Position: Codable, Identifiable, Sendable {
     let ppl: Decimal?
     let fxPpl: Decimal?
     let accountType: String?
+<<<<<<< HEAD
     
+=======
+
+>>>>>>> b069b4b (feat(phase-29): implement institutional portfolio optimization (Mean-Variance) via MLX NPU)
     enum CodingKeys: String, CodingKey {
         case ticker, name, quantity
         case currentPrice = "current_price"
@@ -238,7 +247,7 @@ struct GrowinAllocationData: Identifiable, Sendable, Equatable {
 
 // MARK: - SOTA AI Models
 
-struct ReasoningStep: Codable, Sendable, Identifiable {
+struct ReasoningStep: Codable, Sendable, Identifiable, Equatable {
     var id: Double { timestamp }
     let agent: String
     let action: String
@@ -283,4 +292,12 @@ struct AIStrategy: Codable, Sendable, Identifiable {
 struct InstrumentWeightMapping: Codable, Sendable {
     let ticker: String
     let weight: Double
+<<<<<<< HEAD
+=======
+
+    enum CodingKeys: String, CodingKey {
+        case ticker, weight
+    }
+>>>>>>> b069b4b (feat(phase-29): implement institutional portfolio optimization (Mean-Variance) via MLX NPU)
 }
+

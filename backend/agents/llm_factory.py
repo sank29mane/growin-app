@@ -16,14 +16,16 @@ class LLMFactory:
     async def create_llm(model_name: str, api_keys: Dict[str, str] = None):
         """
         Initialize and return an LLM instance.
-
-        Args:
-            model_name: Name/ID of the model.
-            api_keys: Dictionary of API keys.
-
-        Returns:
-            LangChain compatible LLM or custom client.
         """
+        # Python 3.13 fix for scipy spec issue in some environments
+        try:
+            import scipy
+            if not hasattr(scipy, "__spec__") or scipy.__spec__ is None:
+                import importlib.util
+                scipy.__spec__ = importlib.util.find_spec("scipy")
+        except ImportError:
+            pass
+
         api_keys = api_keys or {}
 
         from model_config import get_model_info
@@ -155,13 +157,28 @@ class LLMFactory:
             raise ConnectionError("LM Studio server not reachable")
 
         if target_model_id:
-            status_manager.set_status("lmstudio", "working", f"Loading {target_model_id}...")
             logger.info(f"LM Studio: Ensuring model loaded: {target_model_id}")
             try:
+                # 1. Start loading but don't set 'ready' yet
+                status_manager.set_status("lmstudio", "working", f"Loading {target_model_id}...")
                 await client.ensure_model_loaded(target_model_id)
+<<<<<<< HEAD
                 # Explicitly set the active model ID on the client wrapper
                 client.active_model_id = target_model_id 
                 status_manager.set_status("lmstudio", "ready", f"Model {target_model_id} active")
+=======
+                
+                # 2. SOTA: Hardening - wait for initialization to complete
+                is_ready = await client.wait_until_ready(target_model_id, timeout=30)
+                if not is_ready:
+                    logger.warning(f"LM Studio: Model {target_model_id} failed to initialize in time.")
+                    status_manager.set_status("lmstudio", "error", f"Model {target_model_id} timeout")
+                else:
+                    # 3. Only set ready once confirmed
+                    client.active_model_id = target_model_id 
+                    status_manager.set_status("lmstudio", "ready", f"Model {target_model_id} active")
+                
+>>>>>>> b069b4b (feat(phase-29): implement institutional portfolio optimization (Mean-Variance) via MLX NPU)
                 return client
             except Exception as e:
                 logger.warning(f"Failed to load requested model {target_model_id}: {e}")

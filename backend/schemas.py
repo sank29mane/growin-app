@@ -1,7 +1,10 @@
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Dict, Any, Optional
 from decimal import Decimal
+<<<<<<< HEAD
 
+=======
+>>>>>>> b069b4b (feat(phase-29): implement institutional portfolio optimization (Mean-Variance) via MLX NPU)
 # --- Goal Planning Models ---
 
 class GoalPlanContext(BaseModel):
@@ -89,7 +92,7 @@ class AgentEvent(BaseModel):
     timestamp: float = Field(default_factory=lambda: 0.0)
 
 class AIStrategyResponse(BaseModel):
-    strategy_id: str
+    strategyId: str = Field(..., alias="strategy_id")
     title: str
     summary: str
     confidence: float = Field(..., ge=0.0, le=1.0)
@@ -97,4 +100,6 @@ class AIStrategyResponse(BaseModel):
     instruments: List[InstrumentWeight]
     risk_assessment: str
     last_updated: float
+    
+    model_config = ConfigDict(populate_by_name=True)
 

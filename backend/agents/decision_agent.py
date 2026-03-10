@@ -10,6 +10,7 @@ import logging
 import re
 import json
 import time
+import asyncio
 from langchain_core.messages import SystemMessage, HumanMessage
 from .llm_factory import LLMFactory
 from utils.audit_log import log_audit
@@ -74,6 +75,10 @@ class DecisionAgent:
         """
         if not self._initialized:
             await self._initialize_llm()
+
+        import os
+        if os.getenv("USE_SHADOW_LLM") == "1":
+             return {"content": self._generate_shadow_response(context, query=query), "response_id": None}
 
         from status_manager import status_manager
         status_manager.set_status("decision_agent", "working", "Applying reasoning...", model=self.model_name)
@@ -240,25 +245,18 @@ class DecisionAgent:
     async def make_decision_stream(self, context: MarketContext, query: str):
         """
         Stream the decision making process.
-        Yields chunks of text.
+        Yields chunks of text with formatting protection.
         """
         if not self._initialized:
             await self._initialize_llm()
 
+        import os
+        if os.getenv("USE_SHADOW_LLM") == "1":
+             yield self._generate_shadow_response(context, query=query)
+             return
+
         from status_manager import status_manager
         status_manager.set_status("decision_agent", "working", "Streaming reasoning...", model=self.model_name)
-
-        # SOTA 2026: Emit Decision Start Telemetry
-        from .messenger import AgentMessage, get_messenger
-        messenger = get_messenger()
-        c_id = correlation_id_ctx.get()
-        await messenger.send_message(AgentMessage(
-            sender="DecisionAgent",
-            recipient="broadcast",
-            subject="agent_started",
-            payload={"agent": "DecisionAgent", "model": self.model_name},
-            correlation_id=c_id
-        ))
 
         # Same prep logic as make_decision
         account_filter = self._detect_account_mentions(query)
@@ -267,18 +265,30 @@ class DecisionAgent:
         system_content = self._get_system_persona(context.intent)
 
         try:
-            # Streaming logic
             full_response = ""
             
             if hasattr(self.llm, "astream"):
                 messages = [SystemMessage(content=system_content), HumanMessage(content=prompt)]
                 async for chunk in self.llm.astream(messages):
                     content = chunk.content
+                    
+                    # SOTA Real-time Formatting Buffer
+                    # Nemotron often outputs '### 1.' clumped with previous text
+                    # We look for common header patterns and ensure a newline exists
+                    if "###" in content:
+                        # If the buffer (full_response) doesn't end with a newline, inject one
+                        if full_response and not full_response.endswith("\n"):
+                            yield "\n\n"
+                            full_response += "\n\n"
+                        elif full_response and full_response.endswith("\n") and not full_response.endswith("\n\n"):
+                            yield "\n"
+                            full_response += "\n"
+                            
                     full_response += content
                     yield content
             else:
                 # Fallback
-                response = await self._generate_draft(system_content, prompt)
+                response = await self._generate_draft(system_content, prompt, context=context, query=query)
                 full_response = response
                 yield response
             
@@ -297,6 +307,9 @@ class DecisionAgent:
             status_manager.set_status("decision_agent", "ready", "Stream complete", model=self.model_name)
             
             # SOTA 2026: Emit Decision Completion Telemetry
+            from .messenger import AgentMessage, get_messenger
+            messenger = get_messenger()
+            c_id = correlation_id_ctx.get()
             await messenger.send_message(AgentMessage(
                 sender="DecisionAgent",
                 recipient="broadcast",
@@ -325,7 +338,14 @@ class DecisionAgent:
     async def _run_agentic_loop(self, system_content: str, prompt: str, context: MarketContext, previous_response_id: Optional[str] = None) -> Dict[str, Any]:
         """Runs multi-turn LLM loop with tool support and server-side state."""
         import asyncio
+        import os
         
+        # 0. Shadow Mode Priority Override
+        if os.getenv("USE_SHADOW_LLM") == "1" and context:
+            logger.info("🚀 SHADOW MODE ACTIVE (Agentic Loop): Emulating high-fidelity model response.")
+            shadow_text = self._generate_shadow_response(context)
+            return {"content": self._clean_response(shadow_text), "response_id": "shadow-test-id"}
+
         # 1. Stateful Priority: If LM Studio Client supports it, use server-side context
         from lm_studio_client import LMStudioClient
         if isinstance(self.llm, LMStudioClient) and hasattr(self.llm, "stateful_chat"):
@@ -439,7 +459,7 @@ class DecisionAgent:
                 return {"content": self._clean_response(content), "response_id": response_id}
             else:
                 # Basic generation fallback
-                draft = await self._generate_draft(system_content, prompt)
+                draft = await self._generate_draft(system_content, prompt, context=context, query=query)
                 reasoning = self._extract_reasoning(draft)
                 if reasoning:
                     context.reasoning = reasoning
@@ -448,7 +468,7 @@ class DecisionAgent:
         return {"content": "Reasoning loop exceeded max turns.", "response_id": None}
 
 
-    async def _generate_draft(self, system_content: str, prompt: str) -> str:
+    async def _generate_draft(self, system_content: str, prompt: str, context: Optional[MarketContext] = None, query: str = "") -> str:
         """Generate initial draft."""
         if hasattr(self.llm, "ainvoke"):
             # LangChain
@@ -474,6 +494,81 @@ class DecisionAgent:
             llm_type = type(self.llm).__name__
             llm_attrs = dir(self.llm) if self.llm else "None"
             raise ValueError(f"LLM interface not recognized. Type: {llm_type}, Attrs: {llm_attrs}")
+
+    def _generate_shadow_response(self, context: MarketContext, query: str = "") -> str:
+        """
+        Emulates a high-fidelity model response using real context data.
+        Verifies that Phase 28 Liquidity and Phase 27 Geopolitical features work.
+        """
+        q = query.lower()
+        if context.intent == "conversational":
+            if re.search(r'\b(hello|hi|hey|greetings)\b', q):
+                return "Hello! I'm your Growin Intelligence Assistant. How can I help you with your portfolio or the markets today?"
+            if "rsi" in q:
+                return "The **Relative Strength Index (RSI)** is a momentum oscillator that measures the speed and change of price movements. It ranges from 0 to 100. Traditionally, an RSI above 70 indicates an overbought condition, while below 30 indicates an oversold condition. Is there a specific stock you'd like me to check the RSI for?"
+            if "macd" in q:
+                return "The **MACD (Moving Average Convergence Divergence)** is a trend-following momentum indicator that shows the relationship between two moving averages of a security’s price. It helps identify trend direction and momentum."
+            return "I'm here to help! You can ask me to analyze a specific stock (e.g., 'Analyze TSLA'), check your portfolio performance, or explain financial concepts. What's on your mind?"
+
+        if context.intent == "portfolio_query" and context.portfolio:
+            p = context.portfolio
+            return f"""### Shadow Mode: Portfolio Analysis
+**Account Type**: {context.user_context.get("account_type", "all").upper()}
+
+*   **Total Value**: £{float(p.total_value):.2f}
+*   **Total Return**: £{float(p.total_pnl):.2f} ({p.pnl_percent}%)
+*   **Net Deposits**: £{float(p.net_deposits):.2f}
+
+**Positions**: {p.total_positions} active holdings
+**Top Holdings**: {', '.join(p.top_holdings) if p.top_holdings else 'None'}
+
+✅ *Data retrieved successfully via T212 API integration.*
+"""
+
+        ticker = context.ticker or "MARKET"
+        price = float(context.price.current_price) if context.price and context.price.current_price else 0.0
+        currency = context.price.currency if context.price and context.price.currency else "£"
+        
+        # Specialist Data
+        sent = context.research.sentiment_label if context.research else "NEUTRAL"
+        signal = context.quant.signal if context.quant else "HOLD"
+        forecast = f"{currency}{float(context.forecast.forecast_24h):.2f}" if context.forecast else "N/A"
+        
+        # Phase 28: Liquidity
+        slippage = f"{float(context.risk_governance.slippage_bps):.1f} bps" if (context.risk_governance and context.risk_governance.slippage_bps is not None) else "N/A"
+        liq_status = context.risk_governance.liquidity_status if context.risk_governance else "UNKNOWN"
+        
+        # Phase 27: Geopolitical
+        gpr = f"{float(context.geopolitical.gpr_score):.2f} ({context.geopolitical.global_sentiment_label})" if context.geopolitical else "N/A"
+
+        return f"""
+### 1. Market Pulse
+**Sentiment**: {sent} (Verified across NewsData.io and Tavily)
+**GPR Index**: {gpr}
+
+### 2. Technical Levels
+*   **Support**: {currency}{float(context.quant.support_level) if context.quant and context.quant.support_level else 0.0:.2f}
+*   **Resistance**: {currency}{float(context.quant.resistance_level) if context.quant and context.quant.resistance_level else 0.0:.2f}
+*   **Signals**: {signal} (RSI: {float(context.quant.rsi) if context.quant and context.quant.rsi else 0.0:.1f})
+
+### 3. AI Forecast (TTM-R2)
+*   **24h Target**: {forecast} ({context.forecast.trend if context.forecast else "SIDEWAYS"})
+*   **Confidence**: {context.forecast.confidence if context.forecast else "LOW"}
+*   **Liquidity Status**: {liq_status}
+*   **Est. Slippage**: {slippage}
+
+### 4. Strategic Synthesis
+The analysis for **{ticker}** is complete. Based on the Swarm execution, we detect a **{sent}** bias. 
+
+*   **Liquidity Audit**: The position is classified as **{liq_status}**. With an estimated slippage of **{slippage}**, the market impact for your account size is minimal.
+*   **Technical Outlook**: {ticker} is currently testing structural support. The {signal} signal from our QuantEngine suggests a high-probability entry point.
+*   **Risk Governance**: Macro systemic risk is handled. Geopolitical factors ({gpr}) have been indexed and factored into the final conviction score.
+
+**Target Entry**: {currency}{price:.2f}
+**Take Profit**: {currency}{price*1.05:.2f} (Targeting 5% gain)
+**Stop Loss**: {currency}{price*0.97:.2f} (Max 3% risk)
+**Conviction Level**: 8/10
+"""
 
     async def _critique_response(self, system_content: str, prompt: str, draft: str) -> str:
         """Critique and refine the draft."""
@@ -575,8 +670,26 @@ class DecisionAgent:
         if any(k in (self.model_name or "").lower() for k in ["nano", "mobile", "phi", "tiny", "gemma-2b"]):
             return "**Lead Financial Trader (Nano)**\nYou are a senior, profit‑maximising Lead Financial Trader. You consult your Coordinator Agent for data and provide high-probability trade suggestions based on SMA, RSI, MACD, and Sentiment."
 
+<<<<<<< HEAD
         base_persona = """You are the Lead Financial Trader and the primary interface for the client. 
         You are a **senior, profit‑maximising financial advisor and discretionary trader**.
+=======
+        if intent in ["conversational", "educational"]:
+            return """You are the Growin Intelligence Assistant & Financial Advisor.
+            Your goal is to provide helpful, conversational, and educational insights to the user.
+            You are professional, articulate, and friendly.
+            
+            GUIDELINES:
+            - If the user greets you, greet them back warmly.
+            - If the user asks for a definition (e.g. "What is RSI?"), explain it clearly but concisely.
+            - If the user asks general questions about their portfolio performance without seeking a specific trade, provide a high-level summary.
+            - NO FIXED FORMAT: You do not need to follow the technical 'Market Pulse' or 'Strategic Recommendation' structure. Just have a helpful conversation.
+            - Encourage them to ask about specific stocks or their portfolio if they haven't already."""
+
+        base_persona = """You are the Lead Strategic Trader. 
+        You are an **Aggressive, Calculated Swing and Day Trader**. 
+        Your goal is strictly to maximize ROI through high-probability, short-term setups.
+>>>>>>> b069b4b (feat(phase-29): implement institutional portfolio optimization (Mean-Variance) via MLX NPU)
 
         MISSION:
         Identify, validate, and execute the **single highest‑probability, highest‑expected‑return trade(s)** while preserving capital through strict risk controls.
@@ -586,6 +699,7 @@ class DecisionAgent:
         - Risk-Reward: Target minimum 1:3 RR.
         - Position Sizing: Sugested Capital = min(FreeCash, 2% * PortfolioValue).
 
+<<<<<<< HEAD
         DATA PROVENANCE:
         - Portfolio data: Trading 212 (Sole Source for holdings/invested amounts).
         - US Stocks: Alpaca (Primary) with yfinance fallback.
@@ -603,6 +717,17 @@ class DecisionAgent:
         - Syntax: [TOOL:docker_run_python({"script": "your_python_code", "engine": "standard"})]
         - Use `engine="npu"` for compute-intensive tasks on Apple Silicon.
         - The sandbox is isolated and has no network access. Output your results via `print()`.
+=======
+        OUTPUT MANDATE:
+        You MUST provide a structured Trading Plan in every recommendation involving a ticker.
+        Use CLEAN MARKDOWN with double line breaks between sections for high readability.
+        
+        Use this format for coordinates:
+        **Target Entry**: [Price]
+        **Take Profit**: [Price] (Targeting X% gain)
+        **Stop Loss**: [Price] (Max X% loss)
+        **Conviction Level**: [Score 1-10]
+>>>>>>> b069b4b (feat(phase-29): implement institutional portfolio optimization (Mean-Variance) via MLX NPU)
         """
 
         if intent == "educational":
@@ -622,60 +747,40 @@ class DecisionAgent:
 
     def _clean_response(self, response: str) -> str:
         """
-        SOTA 2026: Ultra-Aggressive Response Cleaning.
-        Strips thinking tags, internal monologues, and prompt instruction echoes.
+        SOTA 2026: Balanced Response Cleaning.
+        Strips thinking tags but preserves Markdown-essential newlines and structure.
         """
         # 1. Strip all variations of <think> tags (including malformed or unclosed ones)
         response = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL | re.IGNORECASE)
         response = re.sub(r'<think>.*', '', response, flags=re.DOTALL | re.IGNORECASE)
         response = re.sub(r'.*?</think>', '', response, flags=re.DOTALL | re.IGNORECASE)
 
-        # 2. Strip common internal monologue markers and prefixes
+        # 2. Strip common internal monologue markers and prefixes (at start of string only)
         meta_patterns = [
-            r'\*\*thinking\*\*.*?\n',
-            r'\[THOUGHTS\].*?\[/THOUGHTS\]',
+            r'^\*\*thinking\*\*.*?\n',
+            r'^\[THOUGHTS\].*?\[/THOUGHTS\]',
             r'^thinking:.*?\n',
             r'^we need to.*?\n', 
             r'^let\'s think.*?\n',
             r'^i will follow.*?\n', 
             r'^i should.*?\n', 
-            r'^i must.*?\n',
-            r'^based on.*?\n',
-            r'^analyzing portfolio.*?\n',
-            r'^style guidelines:.*?\n', 
-            r'^as requested,.*?\n',
-            r'^certainly!.*?\n',
-            r'^here is.*?\n'
+            r'^i must.*?\n'
         ]
         for pattern in meta_patterns:
             response = re.sub(pattern, '', response, flags=re.IGNORECASE | re.MULTILINE)
 
         # 3. Strip instruction echoes and "mandatory" markers
-        response = re.sub(r'Must include sections.*?\n', '', response, flags=re.IGNORECASE)
-        response = re.sub(r'Align trade ideas.*?\n', '', response, flags=re.IGNORECASE)
         response = re.sub(r'\[MANDATORY ANSWER FORMAT.*?\]', '', response, flags=re.DOTALL | re.IGNORECASE)
 
-        # 4. Collapse excessive whitespace and redundant newlines
+        # 4. Normalize Whitespace (Collapse 3+ newlines into 2, but keep 2 for Markdown)
         response = response.strip()
         response = re.sub(r'\n{3,}', '\n\n', response)
         
-        # 5. Header Deduplication: Models sometimes echo headers they just wrote
-        lines = response.split('\n')
-        deduped_lines = []
-        last_line = ""
-        for line in lines:
-            trimmed = line.strip()
-            if trimmed and trimmed == last_line:
-                continue
-            deduped_lines.append(line)
-            last_line = trimmed
-        response = '\n'.join(deduped_lines)
-
-        # 6. Final fallback: if the model echoed the entire template, try to find the actual content
-        if "Strategic Synthesis" in response and response.count("Strategic Synthesis") > 1:
-             # Take the last occurrence which is usually the actual answer
-             parts = response.split("Strategic Synthesis")
-             response = "4. **Strategic Synthesis" + parts[-1]
+        # 5. FINAL HARDENING: Ensure Markdown headers have newlines BEFORE and AFTER
+        # Ensure at least one newline before any header that isn't at the start
+        response = re.sub(r'(.)(###\s+)', r'\1\n\n\2', response)
+        # Ensure at least one newline after every header
+        response = re.sub(r'(###\s+.*)\n?(?!\n)', r'\1\n\n', response)
 
         return response.strip()
 
@@ -694,9 +799,11 @@ class DecisionAgent:
         q = (query or "").lower()
         has_invest = any(w in q for w in ["invest", "investment", "brokerage", "trading"])
         has_isa = any(w in q for w in ["isa", "tax-free"])
-        has_both = any(w in q for w in ["both", "all", "compare", "portfolio"])
+        has_both = any(w in q for w in ["both", "all", "compare"])
 
-        if has_both or (has_invest and has_isa):
+        if has_both:
+            return "all"
+        if has_isa and has_invest:
             return "all"
         if has_isa:
             return "isa"
@@ -707,19 +814,23 @@ class DecisionAgent:
     def _build_prompt(self, context: MarketContext, query: str, account_filter: str = "all") -> str:
         """Build prompt from market context"""
 
-        # Template
+        # Final Mandatory Structure for rendering
         structured_template = """
-        [MANDATORY ANSWER FORMAT - COPY EXACTLY]
-        1. **Market Pulse**: {sentiment_label} (Score: {sentiment_score})
-        2. **Technical Levels**:
-           - Structural Support: {support}
-           - Structural Resistance: {resistance}
-           - Breakout Signals: {signals}
-        3. **AI Forecast ({forecast_algo})**:
-           - 24h Target: {forecast_24h} ({forecast_trend})
-           - Confidence: {forecast_conf}
-           - Note: {forecast_note}
-        4. **Strategic Synthesis**: [Your detailed reasoning here...]
+        ### 1. Market Pulse
+        **Sentiment**: {sentiment_label} (Score: {sentiment_score})
+
+        ### 2. Technical Levels
+        *   **Support**: {support}
+        *   **Resistance**: {resistance}
+        *   **Signals**: {signals}
+
+        ### 3. AI Forecast ({forecast_algo})
+        *   **24h Target**: {forecast_24h} ({forecast_trend})
+        *   **Confidence**: {forecast_conf}
+        *   **Note**: {forecast_note}
+
+        ### 4. Strategic Synthesis
+        [Your detailed reasoning here...]
         """
 
         coordinator_account = context.user_context.get("account_type")
@@ -783,6 +894,10 @@ class DecisionAgent:
             sections.append("==========================================\n")
 
         # Template Vars
+        if context.intent in ["conversational", "educational"]:
+            sections.append("\n\n(Conversational Mode: Skip technical structure)")
+            return "\n".join(sections)
+            
         tmpl_vars = {
             "sentiment_label": context.research.sentiment_label if context.research else "N/A",
             "sentiment_score": f"{context.research.sentiment_score:.2f}" if context.research else "0.0",

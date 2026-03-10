@@ -389,4 +389,8 @@ class ChatManager:
 
     def close(self):
         """Close database connection"""
-        self.conn.close()
+        try:
+            if self.conn:
+                self.conn.close()
+        except (sqlite3.ProgrammingError, AttributeError):
+            pass

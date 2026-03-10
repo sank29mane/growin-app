@@ -20,15 +20,14 @@ This document outlines the high-level phases for the GSD integration and ongoing
 
 ## Phase 24: Frontend Reasoning Trace & User Experience Polish
 - **Goal**: Implement a visual "Thinking" trace for agentic reasoning in the SwiftUI dashboard and finalize 120Hz/Accessibility polish.
-- **Status**: PLANNING (2026-03-04)
+- **Status**: COMPLETED
 - **Requirements**: [UI-TRACE-01, UI-TRACE-02, FE-01, FE-02]
 
-## Phase 25: Production Hardening & Multi-Platform Deployment
-- **Goal**: Stress test Neural ODE recovery models (2020-2024 data) and verify cross-platform parity (macOS/Linux).
-- **Status**: NOT STARTED
-- **Requirements**: [STRESS-01, STRESS-02, PLAT-01]
+## Phase 29: Institutional Portfolio Optimization (Mean-Variance)
+- **Goal**: Implement Modern Portfolio Theory (MPT) via mean-variance optimization and efficient frontier calculations.
+- **Status**: COMPLETED
+- **Requirements**: [OPT-01, OPT-02, OPT-03]
 
-## Phase 26: Adaptive Risk Governance (Institutional Baseline)
-- **Goal**: Integrate real-time liquidity constraints and institutional risk-off triggers.
-- **Status**: NOT STARTED
-- **Requirements**: [RISK-INST-01, RISK-INST-02]
+## Phase 30: Multi-Asset Portfolio Bridge (Commodities & Fixed Income)
+- **Goal**: Extend optimization to include non-equity asset classes (Commodities, Bonds) and cross-asset correlation modeling.
+- **Status**: PLANNED
