@@ -25,7 +25,6 @@ struct StockChartView: View {
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel("Dismiss notification")
-                        .accessibilityAddTraits(.isButton)
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 10)

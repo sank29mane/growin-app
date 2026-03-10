@@ -11,7 +11,7 @@ TICKER_STOP_WORDS = {
     "HELP", "LIST", "TYPE", "CODE", "READ", "FILE", "VIEW", "EDIT", "TOOL", "CALL",
     "NAME", "ARGS", "INFO", "API", "LOAD", "SAVE", "BEST", "GOOD", "TIME", "YEAR",
     "MONTH", "WEEK", "DAY", "HOUR", "MIN", "SEC", "ALL", "NONE", "NULL", "TRUE", "FALSE",
-    "YOU", "THINK", "COMPARE", "VERSUS", "BETWEEN", "DEEP", "DIVE", "MORE", "SOME", "ANY"
+    "YOU", "THINK", "COMPARE", "VERSUS", "BETWEEN"
 }
 
 def extract_ticker_from_text(text: str, find_last: bool = False) -> Optional[str]:

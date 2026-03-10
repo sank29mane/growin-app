@@ -239,14 +239,7 @@ class TTMForecaster:
                 stderr=subprocess.PIPE
             )
             
-            import decimal
-            class DecimalEncoder(json.JSONEncoder):
-                def default(self, obj):
-                    if isinstance(obj, decimal.Decimal):
-                        return float(obj)
-                    return super(DecimalEncoder, self).default(obj)
-            
-            stdout, stderr = await process.communicate(input=json.dumps(payload, cls=DecimalEncoder).encode())
+            stdout, stderr = await process.communicate(input=json.dumps(payload).encode())
             
             if process.returncode != 0:
                 error_msg = stderr.decode().strip()
@@ -334,7 +327,7 @@ class TTMForecaster:
                 logger.warning(f"SOTA ML Fallback failed, reverting to baseline: {e}")
 
         # --- 2. Baseline Fallback (Holt-Winters) ---
-        closes = np.array([float(d['c']) for d in ohlcv_data])
+        closes = np.array([d['c'] for d in ohlcv_data])
         last_price = closes[-1]
         
         # 1. Initialize Double Exponential Smoothing (Holt's Method)

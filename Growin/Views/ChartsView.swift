@@ -47,7 +47,7 @@ struct ChartsView: View {
             Image(systemName: "magnifyingglass")
                 .foregroundColor(.secondary)
             
-            TextField("Search Ticker (e.g. VOD.L, TSLA)", text: $searchText)
+            TextField("Search Ticker (e.g. VOD.L, TSLA, BTC/USD)", text: $searchText)
                 .textFieldStyle(.plain)
                 .focused($isSearchFocused)
                 .onSubmit {
@@ -73,7 +73,6 @@ struct ChartsView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Clear search")
                 .accessibilityHint("Clears the current search text")
-                .accessibilityAddTraits(.isButton)
             }
         }
         .padding(12)
