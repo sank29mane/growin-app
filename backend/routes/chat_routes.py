@@ -224,15 +224,21 @@ async def stream_chat_generator(request: ChatMessage):
                 )
                 
                 full_response = ""
-                async for chunk in orchestrator.run_stream(
+                final_context = None
+                
+                async for event in orchestrator.run_stream(
                     query=request.message,
                     conversation_id=conversation_id,
                     history=history,
                     ticker=ticker,
                     account_type=request.account_type
                 ):
-                    full_response += chunk
-                    await queue.put({"type": "token", "content": chunk})
+                    if isinstance(event, str):
+                        full_response += event
+                        await queue.put({"type": "token", "content": event})
+                    elif hasattr(event, "market_context"):
+                        # Capture context from final event
+                        final_context = event.market_context
                     
                 # Save final message
                 chat_manager.save_message(
@@ -248,12 +254,14 @@ async def stream_chat_generator(request: ChatMessage):
                     state.rag_manager.add_chat_message("assistant", full_response, conversation_id)
                 
                 # SOTA 2026: Include metadata in done event
+                metadata = {}
+                if final_context:
+                    metadata["agents_executed"] = list(final_context.agents_executed)
+                    
                 await queue.put({
                     "type": "done", 
                     "content": "[DONE]", 
-                    "metadata": {
-                        "agents_executed": list(market_context.agents_executed)
-                    }
+                    "metadata": metadata
                 })
                 
                 # Async title update

@@ -73,20 +73,15 @@ class AlpacaClient:
     def __init__(self) -> None:
         self.trading_client = None
         self.data_client = None
-        self.crypto_client = None
-        self.option_client = None
 
         if API_KEY and API_SECRET:
             try:
                 from alpaca.trading.client import TradingClient
                 from alpaca.data.historical import StockHistoricalDataClient
-                from alpaca.data.historical import CryptoHistoricalDataClient, OptionHistoricalDataClient
 
                 # Explicit paper flag based on configuration
                 self.trading_client = TradingClient(API_KEY, API_SECRET, paper=USE_PAPER)
                 self.data_client = StockHistoricalDataClient(API_KEY, API_SECRET)
-                self.crypto_client = CryptoHistoricalDataClient(API_KEY, API_SECRET)
-                self.option_client = OptionHistoricalDataClient(API_KEY, API_SECRET)
                 logger.info(f"AlpacaClient: Successfully connected to Alpaca API ({'Paper' if USE_PAPER else 'Live'}).")
             except Exception as e:
                 logger.error(f"AlpacaClient: Failed to initialize Alpaca SDK: {e}")
@@ -286,148 +281,6 @@ class AlpacaClient:
             cache.set(cache_key, result, ttl=300)
             return result
 
-        return None
-
-    @circuit_breaker(alpaca_circuit)
-    async def get_crypto_bars(self, ticker: str, timeframe="1Day", limit: int = 512) -> Optional[BarDataDict]:
-        """Fetch historical bars for Crypto using Alpaca API."""
-        from cache_manager import cache # type: ignore
-        cache_key = f"crypto_bars_{ticker}_{timeframe}_{limit}"
-        cached_data = cache.get(cache_key)
-        if cached_data:
-            return cached_data
-
-        if not hasattr(self, 'crypto_client') or not self.crypto_client:
-            return None
-
-        try:
-            from alpaca.data.requests import CryptoBarsRequest
-            from alpaca.data.timeframe import TimeFrame
-
-            tf_map = {
-                "1Min": TimeFrame.Minute,
-                "5Min": TimeFrame.Minute,
-                "15Min": TimeFrame.Minute,
-                "1Hour": TimeFrame.Hour,
-                "1Day": TimeFrame.Day,
-                "1Week": TimeFrame.Week,
-                "1Month": TimeFrame.Month,
-            }
-            tf = tf_map.get(timeframe, TimeFrame.Day)
-
-            now = datetime.now(timezone.utc)
-            delta_map = {
-                "1Min": timedelta(minutes=limit * 5),
-                "5Min": timedelta(minutes=limit * 10),
-                "15Min": timedelta(minutes=limit * 30),
-                "1Hour": timedelta(hours=limit * 5),
-                "1Day": timedelta(days=limit * 1.6 + 100),
-                "1Week": timedelta(weeks=limit * 1.1 + 10),
-                "1Month": timedelta(days=limit * 32 + 30)
-            }
-            start_time = now - delta_map.get(timeframe, timedelta(days=365))
-
-            request_params = CryptoBarsRequest(
-                symbol_or_symbols=ticker,
-                timeframe=tf,
-                limit=limit,
-                start=start_time
-            )
-
-            bars_response_obj = await asyncio.to_thread(self.crypto_client.get_crypto_bars, request_params)
-            
-            if ticker in bars_response_obj.data:
-                alpaca_bars = bars_response_obj.data[ticker]
-                bar_list = []
-                for bar in alpaca_bars:
-                    bar_list.append(PriceData(
-                        ticker=ticker,
-                        timestamp=bar.timestamp.isoformat(),
-                        t=int(bar.timestamp.timestamp() * 1000),
-                        open=Decimal(str(bar.open)),
-                        high=Decimal(str(bar.high)),
-                        low=Decimal(str(bar.low)),
-                        close=Decimal(str(bar.close)),
-                        volume=int(bar.volume)
-                    ).model_dump())
-
-                result = {"ticker": ticker, "bars": bar_list, "timeframe": timeframe}
-                cache.set(cache_key, result, ttl=300)
-                return result
-        except Exception as e:
-            logger.warning(f"Alpaca crypto fetch failed for {ticker}: {e}")
-        
-        return None
-
-    @circuit_breaker(alpaca_circuit)
-    async def get_option_bars(self, ticker: str, timeframe="1Day", limit: int = 512) -> Optional[BarDataDict]:
-        """Fetch historical bars for Options using Alpaca API."""
-        from cache_manager import cache # type: ignore
-        cache_key = f"option_bars_{ticker}_{timeframe}_{limit}"
-        cached_data = cache.get(cache_key)
-        if cached_data:
-            return cached_data
-
-        if not hasattr(self, 'option_client') or not self.option_client:
-            return None
-
-        try:
-            from alpaca.data.requests import OptionBarsRequest
-            from alpaca.data.timeframe import TimeFrame
-
-            tf_map = {
-                "1Min": TimeFrame.Minute,
-                "5Min": TimeFrame.Minute,
-                "15Min": TimeFrame.Minute,
-                "1Hour": TimeFrame.Hour,
-                "1Day": TimeFrame.Day,
-                "1Week": TimeFrame.Week,
-                "1Month": TimeFrame.Month,
-            }
-            tf = tf_map.get(timeframe, TimeFrame.Day)
-
-            now = datetime.now(timezone.utc)
-            delta_map = {
-                "1Min": timedelta(minutes=limit * 5),
-                "5Min": timedelta(minutes=limit * 10),
-                "15Min": timedelta(minutes=limit * 30),
-                "1Hour": timedelta(hours=limit * 5),
-                "1Day": timedelta(days=limit * 1.6 + 100),
-                "1Week": timedelta(weeks=limit * 1.1 + 10),
-                "1Month": timedelta(days=limit * 32 + 30)
-            }
-            start_time = now - delta_map.get(timeframe, timedelta(days=365))
-
-            request_params = OptionBarsRequest(
-                symbol_or_symbols=ticker,
-                timeframe=tf,
-                limit=limit,
-                start=start_time
-            )
-
-            bars_response_obj = await asyncio.to_thread(self.option_client.get_option_bars, request_params)
-            
-            if ticker in bars_response_obj.data:
-                alpaca_bars = bars_response_obj.data[ticker]
-                bar_list = []
-                for bar in alpaca_bars:
-                    bar_list.append(PriceData(
-                        ticker=ticker,
-                        timestamp=bar.timestamp.isoformat(),
-                        t=int(bar.timestamp.timestamp() * 1000),
-                        open=Decimal(str(bar.open)),
-                        high=Decimal(str(bar.high)),
-                        low=Decimal(str(bar.low)),
-                        close=Decimal(str(bar.close)),
-                        volume=int(bar.volume)
-                    ).model_dump())
-
-                result = {"ticker": ticker, "bars": bar_list, "timeframe": timeframe}
-                cache.set(cache_key, result, ttl=300)
-                return result
-        except Exception as e:
-            logger.warning(f"Alpaca option fetch failed for {ticker}: {e}")
-        
         return None
 
     async def get_batch_bars(self, tickers: List[str], timeframe="1Day", limit: int = 512) -> Dict[str, Any]:
@@ -830,84 +683,6 @@ class FinnhubClient:
             # Log other errors
             logger.error(f"FinnhubClient: Error fetching bars from Finnhub: {e}")
             return None
-
-    @circuit_breaker(finnhub_circuit)
-    async def get_fx_rates(self, symbol: str, timeframe="1Day", limit: int = 512) -> Optional[BarDataDict]:
-        """Fetch historical FX rates using Finnhub."""
-        if not self.client:
-            yfinance_symbol = symbol.split(':')[-1].replace('_', '') + '=X' if ':' in symbol else symbol
-            return await asyncio.to_thread(AlpacaClient()._fetch_from_yfinance, symbol, yfinance_symbol, timeframe, limit)
-
-        try:
-            # symbol like "OANDA:EUR_USD" or "OANDA:GBP_USD"
-            # Finnhub resolution mapping
-            resolution_map = {
-                "1Min": "1",
-                "5Min": "5",
-                "15Min": "15",
-                "1Hour": "60",
-                "1Day": "D",
-                "1Week": "W",
-                "1Month": "M"
-            }
-            resolution = resolution_map.get(timeframe, "D")
-
-            from datetime import datetime, timedelta
-            to_time = datetime.now(timezone.utc)
-            
-            if timeframe == "1Day":
-                from_time = to_time - timedelta(days=limit + 30)
-            elif timeframe == "1Week":
-                from_time = to_time - timedelta(weeks=limit + 4)
-            elif timeframe == "1Month":
-                from_time = to_time - timedelta(days=(limit * 30) + 60)
-            elif timeframe == "1Hour":
-                from_time = to_time - timedelta(hours=limit)
-            elif timeframe in ["1Min", "5Min", "15Min"]:
-                res_val = int(resolution) if resolution.isdigit() else 1
-                from_time = to_time - timedelta(minutes=limit * res_val)
-            else:
-                 from_time = to_time - timedelta(days=365)
-
-            # Finnhub forex candles
-            candles = await asyncio.to_thread(
-                self.client.forex_candles,
-                symbol,
-                resolution,
-                int(from_time.timestamp()),
-                int(to_time.timestamp())
-            )
-
-            if candles['s'] != 'ok' or not candles.get('c'):
-                return None
-
-            bar_list = []
-            for i in range(len(candles['c'])):
-                o = Decimal(str(candles['o'][i]))
-                h = Decimal(str(candles['h'][i]))
-                l = Decimal(str(candles['l'][i]))
-                c = Decimal(str(candles['c'][i]))
-                v = candles['v'][i] if i < len(candles.get('v', [])) and candles.get('v') else 0
-
-                ts_iso = datetime.fromtimestamp(candles['t'][i]).isoformat()
-
-                bar_list.append(PriceData(
-                    ticker=symbol,
-                    timestamp=ts_iso,
-                    t=int(candles['t'][i] * 1000),
-                    open=o,
-                    high=h,
-                    low=l,
-                    close=c,
-                    volume=int(v)
-                ).model_dump())
-
-            result: BarDataDict = {"ticker": symbol, "bars": bar_list[-limit:], "timeframe": timeframe}
-            return result
-        except Exception as e:
-            logger.warning(f"Finnhub FX fetch failed for {symbol}: {e}")
-            yfinance_symbol = symbol.split(':')[-1].replace('_', '') + '=X' if ':' in symbol else symbol
-            return await asyncio.to_thread(AlpacaClient()._fetch_from_yfinance, symbol, yfinance_symbol, timeframe, limit)
 
     async def get_real_time_quote(self, ticker: str) -> Optional[RealTimeQuoteDict]:
         """Get real-time quote for a ticker."""

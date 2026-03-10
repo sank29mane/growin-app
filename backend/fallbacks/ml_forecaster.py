@@ -26,6 +26,11 @@ class MLIntradayForecaster:
         rename_map = {'t': 'timestamp', 'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close', 'v': 'volume'}
         df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
         
+        # Cast to float to avoid Decimal vs float operation errors in Pandas
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            if col in df.columns:
+                df[col] = df[col].astype(float)
+        
         # Add technical indicators
         df = add_intraday_features(df)
         

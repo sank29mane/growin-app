@@ -106,6 +106,52 @@ struct GSpecialistAgentsStatus {
 
 // MARK: - Goal Planning Models
 
+struct RiskGovernanceData: Codable, Equatable {
+    let vixLevel: Decimal?
+    let yieldSpread10y2y: Decimal?
+    let adv30d: Decimal?
+    let liquidityImpact: Decimal?
+    let systemicRiskLevel: String
+    let tradeHorizon: String
+    let slippageBps: Decimal?
+    let povParticipation: Decimal?
+    let liquidityStatus: String
+
+    enum CodingKeys: String, CodingKey {
+        case vixLevel = "vix_level"
+        case yieldSpread10y2y = "yield_spread_10y2y"
+        case adv30d = "adv_30d"
+        case liquidityImpact = "liquidity_impact"
+        case systemicRiskLevel = "systemic_risk_level"
+        case tradeHorizon = "trade_horizon"
+        case slippageBps = "slippage_bps"
+        case povParticipation = "pov_participation"
+        case liquidityStatus = "liquidity_status"
+    }
+}
+
+struct GeopoliticalData: Codable, Equatable {
+    let gprScore: Decimal
+    let globalSentimentLabel: String
+    let topEvents: [GeopoliticalEvent]
+    let summary: String
+
+    enum CodingKeys: String, CodingKey {
+        case gprScore = "gpr_score"
+        case globalSentimentLabel = "global_sentiment_label"
+        case topEvents = "top_events"
+        case summary
+    }
+}
+
+struct GeopoliticalEvent: Codable, Equatable {
+    let title: String
+    let impact: String
+    let region: String
+    let description: String?
+    let url: String?
+}
+
 struct GoalPlan: Codable {
     let targetReturnsPercent: Decimal
     let durationYears: Decimal
@@ -187,7 +233,15 @@ struct MarketContextData: Codable, Equatable {
     let portfolio: PortfolioData?
     let price: PriceData?
     let whale: WhaleData?
+    let riskGovernance: RiskGovernanceData?
+    let geopolitical: GeopoliticalData?
     let reasoning: String?
+
+    enum CodingKeys: String, CodingKey {
+        case forecast, quant, research, portfolio, price, whale, reasoning
+        case riskGovernance = "risk_governance"
+        case geopolitical
+    }
 }
 
 struct WhaleData: Codable, Equatable {
@@ -204,16 +258,18 @@ struct WhaleData: Codable, Equatable {
         case sentimentImpact = "sentiment_impact"
     }
 }
+
 struct WhaleTrade: Codable, Identifiable, Equatable {
-    var id: Double { Double(timestamp) }
-    let price: Decimal
-    let size: Decimal
-    let valueUsd: Decimal
-    let timestamp: Int
+    var id: String { timestamp + "\(price)" + "\(size)" }
+    let price: Double
+    let size: Double
+    let valueUsd: Double
+    let timestamp: String
+    let currency: String?
     let isWhale: Bool
 
     enum CodingKeys: String, CodingKey {
-        case price, size, timestamp
+        case price, size, timestamp, currency
         case valueUsd = "value_usd"
         case isWhale = "is_whale"
     }
@@ -272,54 +328,21 @@ struct ResearchData: Codable, Equatable {
     }
 }
 
-struct FXData: Codable, Equatable {
-    let baseCurrency: String
-    let quoteCurrency: String
-    let lotSize: Int
-
-    enum CodingKeys: String, CodingKey {
-        case baseCurrency = "base_currency"
-        case quoteCurrency = "quote_currency"
-        case lotSize = "lot_size"
-    }
-}
-
-struct CryptoData: Codable, Equatable {
-    let baseAsset: String
-    let quoteAsset: String
-    let blockchain: String?
-
-    enum CodingKeys: String, CodingKey {
-        case baseAsset = "base_asset"
-        case quoteAsset = "quote_asset"
-        case blockchain
-    }
-}
-
 struct PriceData: Codable, Equatable {
     let ticker: String
-    let assetType: AssetType?
     let currentPrice: Decimal?
     let currency: String?
     let source: String?
     let validated: Bool?
     let historySeries: [TimeSeriesItem]?
-    
-    // Multi-Asset Metadata
-    let optionDetails: OptionData?
-    let fxDetails: FXData?
-    let cryptoDetails: CryptoData?
 
     enum CodingKeys: String, CodingKey {
         case ticker, currency, source, validated
-        case assetType = "asset_type"
         case currentPrice = "current_price"
         case historySeries = "history_series"
-        case optionDetails = "option_details"
-        case fxDetails = "fx_details"
-        case cryptoDetails = "crypto_details"
     }
 }
+
 
 struct PortfolioData: Codable, Equatable {
     let totalValue: Decimal?
@@ -339,7 +362,7 @@ struct PortfolioData: Codable, Equatable {
     }
 }
 
-struct ChatMessageModel: Codable, Identifiable {
+struct ChatMessageModel: Codable, Identifiable, Equatable {
     var id: String { messageId }
     let messageId: String
     let role: String
@@ -362,8 +385,6 @@ struct ChatMessageModel: Codable, Identifiable {
         case data
         case reasoningSteps = "reasoning_steps"
     }
-        case reasoningSteps = "reasoning_steps"
-    }
 
     var isUser: Bool { role == "user" }
     var displayName: String {
@@ -375,17 +396,31 @@ struct ChatMessageModel: Codable, Identifiable {
     }
 }
 
-struct ToolCall: Codable {
+struct ToolCall: Codable, Equatable {
     let id: String
     let type: String
     let function: ToolFunction
 }
 
-struct AnyCodable: Codable {
+struct AnyCodable: Codable, Equatable {
     let value: Any
 
     init(_ value: Any) {
         self.value = value
+    }
+
+    static func == (lhs: AnyCodable, rhs: AnyCodable) -> Bool {
+        switch (lhs.value, rhs.value) {
+        case let (lhs as Int, rhs as Int): return lhs == rhs
+        case let (lhs as Double, rhs as Double): return lhs == rhs
+        case let (lhs as Bool, rhs as Bool): return lhs == rhs
+        case let (lhs as String, rhs as String): return lhs == rhs
+        case let (lhs as [AnyCodable], rhs as [AnyCodable]): return lhs == rhs
+        case let (lhs as [String: AnyCodable], rhs as [String: AnyCodable]): return lhs == rhs
+        default:
+            // Fallback for complex types: use string representation or just return false
+            return "\(lhs.value)" == "\(rhs.value)"
+        }
     }
 
     init(from decoder: Decoder) throws {
@@ -433,7 +468,7 @@ struct AnyCodable: Codable {
     }
 }
 
-struct ToolFunction: Codable {
+struct ToolFunction: Codable, Equatable {
     let name: String
     let arguments: [String: AnyCodable]
 }

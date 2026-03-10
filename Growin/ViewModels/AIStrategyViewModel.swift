@@ -24,21 +24,11 @@ class AIStrategyViewModel {
             let stream = try await aiService.streamStrategyEvents(ticker: ticker)
             
             for try await event in stream {
-                withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-                    streamingEvents.append(event)
-                    
-                    if event.eventType == "final_result", let _ = event.step?.content {
-                        // In my mock, strategy_id is passed in content or similar
-                        // Let's assume for now we need a follow up fetch or the event has it
+                let currentEvent = event // Capture for task
+                Task { @MainActor in
+                    withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                        streamingEvents.append(currentEvent)
                     }
-                    
-                    // Specific handling for final_result if we want to fetch it immediately
-                }
-                
-                // Hack: if it's a mock and we know the strategy_id is coming in status or something
-                if event.eventType == "final_result" {
-                    // Extract strategy_id and fetch
-                    // For now, let's just wait for the stream to end and fetch a default or similar
                 }
             }
             

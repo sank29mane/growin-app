@@ -28,6 +28,6 @@ This document outlines the high-level phases for the GSD integration and ongoing
 - **Status**: IN_PROGRESS
 - **Requirements**: [OPT-01, OPT-02, OPT-03]
 
-## Phase 30: Multi-Asset Portfolio Bridge
-- **Goal**: Extend optimization to include multi-asset classes (Crypto, Commodities, Bonds) and cross-asset correlation modeling.
+## Phase 30: Multi-Asset Portfolio Bridge (Commodities & Fixed Income)
+- **Goal**: Extend optimization to include non-equity asset classes (Commodities, Bonds) and cross-asset correlation modeling.
 - **Status**: PLANNED

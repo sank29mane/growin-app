@@ -89,25 +89,7 @@ class ResearchAgent(BaseAgent):
             AgentResponse with ResearchData containing sentiment and headlines
         """
         ticker = context.get("ticker", "MARKET")
-        
-        # --- Multi-Asset Bridge (Phase 29) ---
-        import re
-        is_crypto = "/" in ticker and ("BTC" in ticker or "ETH" in ticker or ticker.endswith("/USD"))
-        is_fx = ("=" in ticker or "OANDA" in ticker) or ("/" in ticker and not is_crypto)
-        
-        # Extract underlying if it's an OCC option string
-        option_match = re.match(r'^([A-Z]{1,6})\d{6}[CP]\d{8}$', ticker)
-        if option_match:
-            ticker = option_match.group(1)
-            logger.info(f"ResearchAgent: Detected Option. Using underlying '{ticker}' for news search.")
-
         asset_keyword = "stock"
-        if is_crypto:
-            asset_keyword = "crypto"
-            ticker = ticker.split("/")[0] if "/" in ticker else ticker
-        elif is_fx:
-            asset_keyword = "forex"
-
         company_name = context.get("company_name", ticker)
         
         if not any([self.newsapi_key, self.tavily_key, self.newsdata_key]):

@@ -47,7 +47,7 @@ struct ChartsView: View {
             Image(systemName: "magnifyingglass")
                 .foregroundColor(.secondary)
             
-            TextField("Search Ticker (e.g. VOD.L, TSLA, BTC/USD)", text: $searchText)
+            TextField("Search Ticker (e.g. VOD.L, TSLA)", text: $searchText)
                 .textFieldStyle(.plain)
                 .focused($isSearchFocused)
                 .onSubmit {

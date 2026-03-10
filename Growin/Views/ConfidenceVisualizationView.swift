@@ -2,11 +2,20 @@ import SwiftUI
 
 struct RiskAssessmentData: Codable {
     let status: String
-    let confidence_score: Double
-    let risk_assessment: String
-    let compliance_notes: String
-    let recommendation_adjustment: String?
-    let requires_hitl: Bool
+    let confidenceScore: Double
+    let riskAssessment: String
+    let complianceNotes: String
+    let recommendationAdjustment: String?
+    let requiresHitl: Bool
+    
+    enum CodingKeys: String, CodingKey {
+        case status
+        case confidenceScore = "confidence_score"
+        case riskAssessment = "risk_assessment"
+        case complianceNotes = "compliance_notes"
+        case recommendationAdjustment = "recommendation_adjustment"
+        case requiresHitl = "requires_hitl"
+    }
 }
 
 struct ConfidenceVisualizationView: View {
@@ -33,7 +42,7 @@ struct ConfidenceVisualizationView: View {
                     
                     Spacer()
                     
-                    ConfidenceIndicator(score: riskData.confidence_score)
+                    ConfidenceIndicator(score: riskData.confidenceScore)
                 }
                 
                 Divider().background(statusColor.opacity(0.2))
@@ -49,7 +58,7 @@ struct ConfidenceVisualizationView: View {
                             .foregroundStyle(statusColor)
                     }
                     
-                    Text(riskData.risk_assessment)
+                    Text(riskData.riskAssessment)
                         .premiumTypography(.body)
                         .foregroundStyle(.white.opacity(0.9))
                         .lineSpacing(4)
@@ -57,14 +66,14 @@ struct ConfidenceVisualizationView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 
                 // Compliance Notes
-                if !riskData.compliance_notes.isEmpty {
+                if !riskData.complianceNotes.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("COMPLIANCE NOTES")
                             .premiumTypography(.overline)
                             .font(.system(size: 9))
                             .foregroundStyle(.secondary)
                         
-                        Text(riskData.compliance_notes)
+                        Text(riskData.complianceNotes)
                             .premiumTypography(.caption)
                             .foregroundStyle(statusColor.opacity(0.8))
                             .padding(10)
@@ -79,7 +88,7 @@ struct ConfidenceVisualizationView: View {
                 }
                 
                 // Recommendation Adjustment
-                if let adjustment = riskData.recommendation_adjustment {
+                if let adjustment = riskData.recommendationAdjustment {
                     HStack(spacing: 12) {
                         Image(systemName: "arrow.triangle.2.circlepath")
                             .foregroundStyle(Color.stitchNeonCyan)
@@ -100,7 +109,7 @@ struct ConfidenceVisualizationView: View {
                 }
                 
                 // HITL Action Gate
-                if riskData.requires_hitl {
+                if riskData.requiresHitl {
                     VStack(spacing: 16) {
                         HStack {
                             Image(systemName: "hand.tap.fill")
@@ -144,11 +153,11 @@ struct ConfidenceVisualizationView: View {
         ConfidenceVisualizationView(
             riskData: RiskAssessmentData(
                 status: "FLAGGED",
-                confidence_score: 0.72,
-                risk_assessment: "Ticker concentration exceeds 5% of portfolio. High volatility detected in tech sector.",
-                compliance_notes: "ISA compliance: No prohibited fractional shares detected.",
-                recommendation_adjustment: "Reduce position size by 50% to maintain diversification.",
-                requires_hitl: true
+                confidenceScore: 0.72,
+                riskAssessment: "Ticker concentration exceeds 5% of portfolio. High volatility detected in tech sector.",
+                complianceNotes: "ISA compliance: No prohibited fractional shares detected.",
+                recommendationAdjustment: "Reduce position size by 50% to maintain diversification.",
+                requiresHitl: true
             ),
             onConfirm: {},
             onReject: {}

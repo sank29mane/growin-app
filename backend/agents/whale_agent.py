@@ -96,9 +96,13 @@ class WhaleAgent(BaseAgent):
                 logger.info(f"WhaleAgent: No trades found for {ticker}. Attempting Volume Anomaly Detection...")
                 return await self._analyze_via_volume_anomaly(ticker)
             
+            from utils.currency_utils import DataSourceNormalizer
+            ticker_currency = DataSourceNormalizer.get_currency_for_ticker(ticker)
+            currency_symbol = "£" if ticker_currency == "GBP" else "$"
+
             # 3. Identify Large Trades
             large_trades = []
-            total_whale_volume_usd = create_decimal(0)
+            total_whale_volume = create_decimal(0)
             
             for t in trades:
                 p = create_decimal(t['p'])
@@ -108,11 +112,12 @@ class WhaleAgent(BaseAgent):
                     large_trades.append({
                         "price": float(p),
                         "size": float(s),
-                        "value_usd": float(value),
-                        "timestamp": t['t'],
+                        "value_usd": float(value), # Frontend property is valueUsd but mapping handles it
+                        "timestamp": str(t['t']),
+                        "currency": ticker_currency,
                         "is_whale": True
                     })
-                    total_whale_volume_usd += value
+                    total_whale_volume += value
             
             # 4. Analyze Unusual Volume
             # (In a real app, we would compare to 20-day avg volume)
@@ -133,7 +138,7 @@ class WhaleAgent(BaseAgent):
             
             # 6. Build Summary
             if len(large_trades) > 0:
-                summary = f"Detected {len(large_trades)} large block trades (Whales) totaling ${float(total_whale_volume_usd)/1e6:.2f}M in the last hour. "
+                summary = f"Detected {len(large_trades)} large block trades (Whales) totaling {currency_symbol}{float(total_whale_volume)/1e6:.2f}M in the last hour. "
                 if impact == "BULLISH":
                     summary += "Activity suggests institutional accumulation."
                 elif impact == "BEARISH":
@@ -164,7 +169,8 @@ class WhaleAgent(BaseAgent):
                     payload={
                         "ticker": ticker,
                         "impact": impact,
-                        "total_value_usd": float(total_whale_volume_usd),
+                        "total_value": float(total_whale_volume),
+                        "currency": ticker_currency,
                         "count": len(large_trades)
                     },
                     correlation_id=correlation_id_ctx.get()

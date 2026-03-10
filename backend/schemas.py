@@ -1,8 +1,6 @@
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Dict, Any, Optional
 from decimal import Decimal
-from data_models import AssetType
-
 # --- Goal Planning Models ---
 
 class GoalPlanContext(BaseModel):
@@ -17,7 +15,6 @@ class GoalPlanContext(BaseModel):
 class InstrumentWeight(BaseModel):
     ticker: str
     weight: float
-    asset_type: AssetType = AssetType.EQUITY
 
 class GoalExecutionImplementation(BaseModel):
     type: str = Field(..., description="Implementation type, e.g., TRADING212_PIE")
@@ -91,7 +88,7 @@ class AgentEvent(BaseModel):
     timestamp: float = Field(default_factory=lambda: 0.0)
 
 class AIStrategyResponse(BaseModel):
-    strategy_id: str
+    strategyId: str = Field(..., alias="strategy_id")
     title: str
     summary: str
     confidence: float = Field(..., ge=0.0, le=1.0)
@@ -99,4 +96,6 @@ class AIStrategyResponse(BaseModel):
     instruments: List[InstrumentWeight]
     risk_assessment: str
     last_updated: float
+    
+    model_config = ConfigDict(populate_by_name=True)
 

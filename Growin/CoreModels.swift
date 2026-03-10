@@ -5,53 +5,19 @@ import Foundation
 
 // MARK: - Portfolio Models
 
-enum AssetType: String, Codable, Sendable {
-    case equity = "EQUITY"
-    case option = "OPTION"
-    case fx = "FX"
-    case crypto = "CRYPTO"
-}
-
-struct OptionGreeks: Codable, Sendable, Equatable {
-    let delta: Decimal?
-    let gamma: Decimal?
-    let theta: Decimal?
-    let vega: Decimal?
-    let rho: Decimal?
-}
-
-struct OptionData: Codable, Sendable, Equatable {
-    let underlyingTicker: String
-    let strikePrice: Decimal
-    let expirationDate: String # ISO 8601 Date
-    let optionType: String # 'call' or 'put'
-    let contractSize: Int
-    let openInterest: Int?
-    let greeks: OptionGreeks?
-    
-    enum CodingKeys: String, CodingKey {
-        case underlyingTicker = "underlying_ticker"
-        case strikePrice = "strike_price"
-        case expirationDate = "expiration_date"
-        case optionType = "option_type"
-        case contractSize = "contract_size"
-        case openInterest = "open_interest"
-        case greeks
-    }
-}
-
-struct PortfolioSnapshot: Codable, Sendable {
+struct PortfolioSnapshot: Codable, Sendable, Equatable {
     let summary: PortfolioSummary?
     let positions: [Position]?
 }
 
-struct PortfolioSummary: Codable, Sendable {
+struct PortfolioSummary: Codable, Sendable, Equatable {
     let totalPositions: Int?
     let totalInvested: Decimal?
     let currentValue: Decimal?
     let totalPnl: Decimal?
     let totalPnlPercent: Double?
     let cashBalance: CashBalance?
+    let cvar95: Decimal?
     let accounts: [String: AccountSummary]?
     
     enum CodingKeys: String, CodingKey {
@@ -61,11 +27,12 @@ struct PortfolioSummary: Codable, Sendable {
         case totalPnl = "total_pnl"
         case totalPnlPercent = "total_pnl_percent"
         case cashBalance = "cash_balance"
+        case cvar95 = "cvar_95"
         case accounts
     }
 }
 
-struct AccountSummary: Codable, Sendable {
+struct AccountSummary: Codable, Sendable, Equatable {
     let totalInvested: Decimal?
     let currentValue: Decimal?
     let totalPnl: Decimal?
@@ -79,21 +46,18 @@ struct AccountSummary: Codable, Sendable {
     }
 }
 
-struct CashBalance: Codable, Sendable {
+struct CashBalance: Codable, Sendable, Equatable {
     let total: Decimal?
     let free: Decimal?
 }
-
-struct Position: Codable, Identifiable, Sendable {
+struct Position: Codable, Identifiable, Sendable, Equatable {
     var id: String { 
         if let ticker = ticker, let accountType = accountType {
-            let assetSuffix = assetType?.rawValue ?? "EQUITY"
-            return "\(ticker)-\(accountType)-\(assetSuffix)"
+            return "\(ticker)-\(accountType)"
         }
         return ticker ?? accountType ?? UUID().uuidString
     }
     let ticker: String?
-    let assetType: AssetType?
     let name: String?
     let quantity: Decimal?
     let currentPrice: Decimal?
@@ -101,19 +65,14 @@ struct Position: Codable, Identifiable, Sendable {
     let ppl: Decimal?
     let fxPpl: Decimal?
     let accountType: String?
-    
-    // Multi-Asset Metadata
-    let optionDetails: OptionData?
-    
+
     enum CodingKeys: String, CodingKey {
         case ticker, name, quantity
-        case assetType = "asset_type"
         case currentPrice = "current_price"
         case averagePrice = "average_price"
         case ppl
         case fxPpl = "fx_ppl"
         case accountType = "account_type"
-        case optionDetails = "option_details"
     }
 }
 
@@ -280,7 +239,7 @@ struct GrowinAllocationData: Identifiable, Sendable, Equatable {
 
 // MARK: - SOTA AI Models
 
-struct ReasoningStep: Codable, Sendable, Identifiable {
+struct ReasoningStep: Codable, Sendable, Identifiable, Equatable {
     var id: Double { timestamp }
     let agent: String
     let action: String
@@ -325,10 +284,9 @@ struct AIStrategy: Codable, Sendable, Identifiable {
 struct InstrumentWeightMapping: Codable, Sendable {
     let ticker: String
     let weight: Double
-    let assetType: AssetType?
-    
+
     enum CodingKeys: String, CodingKey {
         case ticker, weight
-        case assetType = "asset_type"
     }
 }
+

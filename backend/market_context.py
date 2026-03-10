@@ -255,6 +255,7 @@ class MarketContext(BaseModel):
     
     # Specialist Agent Data
     price: Optional[PriceData] = None
+    portfolio_prices: Dict[str, PriceData] = {} # For portfolio-wide optimization
     forecast: Optional[ForecastData] = None
     quant: Optional[QuantData] = None
     portfolio: Optional[PortfolioData] = None

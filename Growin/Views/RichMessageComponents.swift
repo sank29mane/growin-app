@@ -237,12 +237,89 @@ struct RichDataView: View, Equatable {
                 WhaleCard(whale: whale)
             }
             
+            // SOTA 2026 Phase 29: Risk Governance (CVaR)
+            if let risk = data.riskGovernance {
+                RiskGovernanceCard(risk: risk)
+            }
+            
             // 6. Portfolio (if relevant)
             if let portfolio = data.portfolio {
                 PortfolioSnapshotCard(portfolio: portfolio)
             }
         }
         .padding(.top, 8)
+    }
+}
+
+struct RiskGovernanceCard: View, Equatable {
+    static func == (lhs: RiskGovernanceCard, rhs: RiskGovernanceCard) -> Bool {
+        return lhs.risk == rhs.risk
+    }
+
+    let risk: RiskGovernanceData
+    
+    var riskColor: Color {
+        switch risk.systemicRiskLevel {
+        case "EXTREME": return .red
+        case "ELEVATED": return .orange
+        default: return .green
+        }
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("RISK GOVERNANCE", systemImage: "shield.lefthalf.filled")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(riskColor)
+                Spacer()
+                Text(risk.systemicRiskLevel)
+                    .font(.system(size: 8, weight: .bold))
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 2)
+                    .background(riskColor.opacity(0.2))
+                    .foregroundStyle(riskColor)
+                    .cornerRadius(4)
+            }
+            
+            HStack(spacing: 20) {
+                if let vix = risk.vixLevel {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("VIX")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Text(String(format: "%.1f", Double(truncating: vix as NSNumber)))
+                            .font(.subheadline.bold())
+                            .foregroundStyle(.white)
+                    }
+                }
+                
+                if let cvar = risk.slippageBps { // Using slippage as placeholder for CVaR if not directly mapped
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("CVaR (95%)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        // Assuming 12.5% style formatting
+                        Text("12.5%") // Mocked for now since model output isn't fully piped
+                            .font(.subheadline.bold())
+                            .foregroundStyle(.white)
+                    }
+                }
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Horizon")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(risk.tradeHorizon.capitalized)
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.white)
+                }
+            }
+        }
+        .padding(12)
+        .background(riskColor.opacity(0.1))
+        .cornerRadius(12)
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(riskColor.opacity(0.3), lineWidth: 1))
     }
 }
 

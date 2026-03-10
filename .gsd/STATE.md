@@ -1,22 +1,25 @@
 # GSD STATE MEMORY
 
 ## Current Position
-- **Phase**: Phase 29 - Institutional Portfolio Optimization (Mean-Variance)
-- **Task**: Initial Implementation & Math Models
-- **Status**: IN_PROGRESS
+- **Phase**: Phase 30 - Cross-Asset Intelligence (Crypto & Commodities)
+- **Task**: Discovery & Research
+- **Status**: PENDING
 
 ## Summary
-- Completed Milestone: Autonomous Experience & Production Scaling (Phases 24-28).
-- Researched and drafted the architectural plan for Mean-Variance Optimization.
-- Identified `backend/utils/portfolio_analyzer.py` as the core math module.
-- Planned integration with `QuantEngine` and `DataFabricator`.
+- Completed Milestone: Institutional Portfolio Optimization (Phase 29).
+- Implemented Neural JMCE using MLX on Apple Silicon M4 NPU.
+- Integrated SciPy SLSQP optimizer with 10% position caps and 75bps alpha hurdle.
+- Created `RegimeFetcher` for macro-aware data fabrication.
+- Updated `QuantEngine` and `DataFabricator` to support portfolio-wide optimization intents.
+- Implemented background `OptimizationMonitor` using `arq`.
+- Enhanced SwiftUI frontend with Strategy Persona (Aggressive/Defensive) and CVaR risk rendering.
 
 ## Last Milestone Summary
-- **Milestone**: Autonomous Experience & Production Scaling (COMPLETED 2026-03-07)
-- **Completed**: Phase 24, Phase 25, Phase 26, Phase 27, Phase 28
+- **Milestone**: Institutional Portfolio Optimization (COMPLETED 2026-03-08)
+- **Completed**: Phase 29
 ## Next Steps
-1. **Implementation**: Build `backend/utils/portfolio_analyzer.py` with `scipy` optimization logic.
-2. **Integration**: Connect optimization to `QuantEngine.optimize_portfolio`.
+1. **Research**: Analyze Coinbase and Binance API for Cross-Asset Bridge.
+2. **Strategy**: Design the commodity pricing adapter for Gold/Oil integration.
 
 
 ## Active Jules Swarm

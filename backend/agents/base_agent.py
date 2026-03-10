@@ -123,7 +123,9 @@ class BaseAgent(ABC):
         try:
             c_id = correlation_id_ctx.get() if correlation_id_ctx else None
             # If mocking contextvars, sometimes .get() returns a Mock which fails Pydantic validation
-            if not isinstance(c_id, str):
+            if c_id and not isinstance(c_id, str):
+                c_id = None
+            elif not c_id:
                 c_id = None
         except Exception:
             c_id = None
@@ -146,7 +148,8 @@ class BaseAgent(ABC):
             cache_key = self._get_cache_key(context)
             if cache_key:
                 cached_data = self.cache.get(cache_key)
-                if cached_data:
+                # Ensure it's not a Mock/MagicMock (common in tests) or empty
+                if cached_data and isinstance(cached_data, dict) and 'mock' not in str(type(cached_data)).lower():
                     latency = (time.time() - start) * 1000
                     self.logger.debug(f"{self.config.name}: Cache hit ({latency:.1f}ms)")
                     

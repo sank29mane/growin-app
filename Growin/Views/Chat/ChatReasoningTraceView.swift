@@ -72,7 +72,6 @@ struct ChatReasoningTraceView: View, Equatable {
         .padding(.horizontal)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(isProcessing ? "AI Reasoning Trace: Thinking" : "AI Reasoning Trace: Verified")
-        .accessibilityLiveRegion(.polite)
         .accessibilityAddTraits(.updatesFrequently)
     }
 }

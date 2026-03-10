@@ -1,46 +1,33 @@
-# Roadmap
+# GSD ROADMAP
 
-## Phase 24: Frontend Reasoning Trace & User Experience Polish
-**Goal:** Implement a visual "Thinking" trace for agentic reasoning in the SwiftUI dashboard and finalize 120Hz/Accessibility polish.
-**Status**: COMPLETED
-**Requirements**: [UI-TRACE-01, UI-TRACE-02, FE-01, FE-02]
+This document outlines the high-level phases for the GSD integration and ongoing Growin App development.
 
-## Phase 25: Adaptive Risk Governance (Institutional Baseline)
-**Goal:** Integrate real-time liquidity constraints and institutional risk-off triggers.
-**Status**: COMPLETED
-**Requirements**: [RISK-INST-01, RISK-INST-02]
+---
 
-## Phase 26: Core Functionality Audit (Profit Maximization)
-**Goal:** Audit and re-calibrate the MAS pipeline to ensure it actively generates actionable, profit-maximizing intraday and intra-week trading plans.
-**Status**: COMPLETED
-**Requirements**: [PROFIT-01, PROFIT-02, PROFIT-03, PROFIT-04, PROFIT-05]
+## 🏛 ARCHIVE: Milestone: Foundation & Precision Alpha
+- **Completed**: 2026-02-23
+- **Phases**: 0, 1, 3
+- **Archive**: `.gsd/milestones/FOUNDATION-PRECISION-SUMMARY.md`
 
-**Plans**: 3 plans
-- [x] 24-01-PLAN.md — Reasoning Trace UI Design & State Binding.
-- [x] 24-02-PLAN.md — Metal-Accelerated UI Polish & 120Hz Rendering Optimization.
-- [x] 26-01-PLAN.md — Core Profitability Audit & Agent Calibration.
+## 🏛 ARCHIVE: Milestone: SOTA Intelligence & Financial Autonomy (2026)
+- **Completed**: 2026-03-04
+- **Phases**: 4 - 23
+- **Archive**: `.gsd/milestones/SOTA-INTELLIGENCE-SUMMARY.md`
 
-## Phase 27: Geopolitical Intelligence Integration (Global Monitor Bridge)
-**Goal:** Ingest real-time geopolitical context and synthesized risk scores from Global Monitor into the MAS decision loop and News RAG.
-**Status**: COMPLETED
-**Requirements**: [GEOPOL-01, GEOPOL-02, GEOPOL-03, GEOPOL-04]
+## 🏛 ARCHIVE: Milestone: Autonomous Experience & Production Scaling
+- **Completed**: 2026-03-07
+- **Phases**: 24 - 28
+- **Archive**: `.gsd/milestones/AUTONOMOUS-EXPERIENCE-SUMMARY.md`
 
-**Plans**:
-- [x] 27-01-PLAN.md — Geopolitical News RAG & Semantic Timestamping.
-- [x] 27-02-PLAN.md — Global Monitor Bridge & Geopolitical NewsRAG.
+---
 
-## Phase 28: Institutional Liquidity Deep-Dive
-**Goal:** Implement slippage modeling and liquidity-aware order routing for large-cap execution.
-**Status**: COMPLETED
-**Requirements**: [LIQ-01, LIQ-02, LIQ-03]
+## 🚀 MILESTONE: Institutional Portfolio Optimization (Mean-Variance)
 
-**Plans**:
-- [x] 28-01-PLAN.md — Institutional Liquidity & Slippage Modeling.
+## Phase 29: Institutional Portfolio Optimization (Mean-Variance)
+- **Goal**: Implement Modern Portfolio Theory (MPT) via mean-variance optimization and efficient frontier calculations.
+- **Status**: IN_PROGRESS
+- **Requirements**: [OPT-01, OPT-02, OPT-03]
 
-## Phase 29: Multi-Asset Bridge (Options & FX)
-**Goal:** Expand the Growin App MAS beyond equities into Options, Crypto, and Foreign Exchange (FX).
-**Status**: IN PROGRESS
-**Requirements**: [ASSET-01, ASSET-02, ASSET-03]
-
-**Plans**:
-- [ ] 29-01-PLAN.md — Multi-Asset Bridge (Options & FX).
+## Phase 30: Multi-Asset Portfolio Bridge
+- **Goal**: Extend optimization to include multi-asset classes (Crypto, Commodities, Bonds) and cross-asset correlation modeling.
+- **Status**: PLANNED

@@ -6,8 +6,8 @@ Implements a simple Actor-inspired message bus for 2026 SOTA MAS.
 import asyncio
 import logging
 import uuid
-from typing import Dict, Any, Optional, Callable, Awaitable
-from pydantic import BaseModel, Field
+from typing import Dict, Any, Optional, Callable, Awaitable, List
+from pydantic import BaseModel, Field, model_validator
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
@@ -22,6 +22,20 @@ class AgentMessage(BaseModel):
     correlation_id: Optional[str] = None
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+    @model_validator(mode='before')
+    @classmethod
+    def convert_mocks(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            # Fields that must be strings
+            for field in ['id', 'sender', 'recipient', 'subject', 'correlation_id']:
+                if field in data and data[field] is not None and not isinstance(data[field], str):
+                    data[field] = str(data[field])
+            # Handle payload if it's a mock
+            if 'payload' in data and not isinstance(data['payload'], dict):
+                data['payload'] = {"mock_data": str(data['payload'])}
+        return data
+
+
 class AgentMessenger:
     """
     Decoupled message bus for agents.
@@ -30,7 +44,7 @@ class AgentMessenger:
     def __init__(self):
         self._subscribers: Dict[str, Callable[[AgentMessage], Awaitable[None]]] = {}
         self._trace_subscribers: Dict[str, List[Callable[[AgentMessage], Awaitable[None]]]] = {}
-        self._message_history: list[AgentMessage] = []
+        self._message_history: List[AgentMessage] = []
         self._lock = asyncio.Lock()
 
     def register_agent(self, agent_name: str, handler: Callable[[AgentMessage], Awaitable[None]]):

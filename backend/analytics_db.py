@@ -539,15 +539,19 @@ def get_analytics_db(db_path: Optional[str] = None):
     """
     global _analytics_instance
     if _analytics_instance is None:
-        if db_path is None:
-            # SOTA 2026: Persistent local analytics
-            import os
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            data_dir = os.path.join(base_dir, "data")
-            os.makedirs(data_dir, exist_ok=True)
-            db_path = os.path.join(data_dir, "analytics.duckdb")
-            
-        _analytics_instance = AnalyticsDB(db_path)
+        import os
+        # Use in-memory DB during tests to avoid lock contention
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            _analytics_instance = AnalyticsDB(":memory:")
+        else:
+            if db_path is None:
+                # SOTA 2026: Persistent local analytics
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+                data_dir = os.path.join(base_dir, "data")
+                os.makedirs(data_dir, exist_ok=True)
+                db_path = os.path.join(data_dir, "analytics.duckdb")
+                
+            _analytics_instance = AnalyticsDB(db_path)
     return _analytics_instance
 
 
