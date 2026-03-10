@@ -18,12 +18,12 @@ import yfinance as yf
 from decimal import Decimal
 from utils.financial_math import create_decimal
 from utils.portfolio_analyzer import PortfolioAnalyzer
-from error_resilience import CircuitBreaker
+from utils.error_resilience import CircuitBreaker
 
 logger = logging.getLogger(__name__)
 
 # Module-level circuit breaker to persist state across agent instantiations
-portfolio_circuit_breaker = CircuitBreaker("mcp_portfolio", failure_threshold=3, recovery_timeout=30)
+portfolio_circuit_breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=30)
 
 class PortfolioAgent(BaseAgent):
     """
@@ -59,8 +59,8 @@ class PortfolioAgent(BaseAgent):
             status_manager.set_status("portfolio_agent", "running", f"Syncing {requested_account} holdings...")
             
             # Check circuit breaker before making external calls
-            if not self.circuit_breaker.can_proceed():
-                logger.error(f"Portfolio sync skipped: circuit breaker {self.circuit_breaker.name} is OPEN")
+            if self.circuit_breaker.state == "OPEN":
+                logger.error(f"Portfolio sync skipped: circuit breaker is OPEN")
                 return AgentResponse(
                     agent_name=self.config.name,
                     success=False,
@@ -70,9 +70,9 @@ class PortfolioAgent(BaseAgent):
                 )
 
             # SOTA 2026: Consolidated Multi-Account Fetch with Enhanced Timeouts and Circuit Breaker
-            if requested_account == "all":
-                # Parallel fetch for ISA and Invest
-                try:
+            async def fetch_portfolio():
+                if requested_account == "all":
+                    # Parallel fetch for ISA and Invest
                     if hasattr(asyncio, 'timeout'):
                         async with asyncio.timeout(15.0):
                             tasks = [
@@ -86,43 +86,23 @@ class PortfolioAgent(BaseAgent):
                             self.mcp_client.call_tool("analyze_portfolio", arguments={"account_type": "isa"})
                         ]
                         results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=15.0)
-                        
-                        # Check results for any success/failure to update circuit breaker
-                        any_success = False
-                        for res in results:
-                            if not isinstance(res, Exception):
-                                any_success = True
-                                break
-                        
-                        if any_success:
-                            self.circuit_breaker.record_success()
-                        else:
-                            self.circuit_breaker.record_failure()
                             
-                except asyncio.TimeoutError as e:
-                    self.circuit_breaker.record_failure()
-                    raise ValueError("Multi-account fetch timed out") from e
-                except Exception as e:
-                    self.circuit_breaker.record_failure()
-                    raise ValueError(f"Multi-account fetch failed: {e}") from e
-                
-                raw_data_list = []
-                for res in results:
-                    if isinstance(res, Exception):
-                        self.logger.error(f"Account fetch failed: {res}")
-                        continue
-                    if res and hasattr(res, 'content') and res.content:
-                        raw_data_list.append(json.loads(res.content[0].text))
-                
-                if not raw_data_list:
-                    raise ValueError("Failed to fetch data from any accounts")
-                
-                # Consolidate raw data
-                consolidated_data = self._consolidate_accounts(raw_data_list)
-                portfolio_data = self._process_portfolio_data(consolidated_data)
-            else:
-                # Single account fetch with timeout
-                try:
+                    raw_data_list = []
+                    any_success = False
+                    for res in results:
+                        if isinstance(res, Exception):
+                            self.logger.error(f"Account fetch failed: {res}")
+                            continue
+                        if res and hasattr(res, 'content') and res.content:
+                            any_success = True
+                            raw_data_list.append(json.loads(res.content[0].text))
+
+                    if not any_success:
+                        raise ValueError("Failed to fetch data from any accounts")
+
+                    return self._process_portfolio_data(self._consolidate_accounts(raw_data_list))
+                else:
+                    # Single account fetch with timeout
                     if hasattr(asyncio, 'timeout'):
                         async with asyncio.timeout(15.0):
                             result = await self.mcp_client.call_tool(
@@ -134,32 +114,19 @@ class PortfolioAgent(BaseAgent):
                             "analyze_portfolio", 
                             arguments={"account_type": requested_account}
                         ), timeout=15.0)
-                    self.circuit_breaker.record_success()
-                except asyncio.TimeoutError as e:
-                    self.circuit_breaker.record_failure()
-                    raise ValueError(f"Portfolio fetch for {requested_account} timed out") from e
-                except Exception as e:
-                    self.circuit_breaker.record_failure()
-                    if "Unauthorized" in str(e) or "401" in str(e):
-                        raise ValueError(f"Unauthorized: {e}") from e
-                    raise ValueError(f"Portfolio fetch failed: {e}") from e
 
-                if not result or not hasattr(result, 'content') or not result.content:
-                     raise ValueError("Empty response from MCP tool")
-                
-                data = json.loads(result.content[0].text)
-                portfolio_data = self._process_portfolio_data(data)
+                    if not result or not hasattr(result, 'content') or not result.content:
+                        raise ValueError("Empty response from MCP tool")
 
-            # Check for error in tool response
-            if "data" in locals() and "error" in data:
-                self.logger.warning(f"Portfolio tool returned error: {data['error']}")
-                return AgentResponse(
-                    agent_name=self.config.name,
-                    success=False, 
-                    data=data,
-                    error=data["error"],
-                    latency_ms=0
-                )
+                    data = json.loads(result.content[0].text)
+
+                    if "error" in data:
+                        raise ValueError(f"Portfolio tool returned error: {data['error']}")
+
+                    return self._process_portfolio_data(data)
+
+            portfolio_data = await self.circuit_breaker.call(fetch_portfolio)
+
 
             # --- CACHE UPDATE: Store as "current_portfolio" ---
             try:

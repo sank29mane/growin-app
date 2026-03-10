@@ -77,7 +77,11 @@ async def test_decision_agent_agentic_loop_tool_execution():
             
             result = await agent.make_decision(mock_context, "Calc 2+2")
             
-            assert "4" in result
+            # The result could be a dictionary with 'content', or a string.
+            if isinstance(result, dict) and 'content' in result:
+                assert "4" in result['content']
+            else:
+                assert "4" in result
             assert mock_tool.call_count == 1
             # Verify it used the NPU engine as instructed in persona
             name, args = mock_tool.call_args[0]
