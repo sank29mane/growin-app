@@ -188,10 +188,11 @@ async def get_chart_data(symbol: str, timeframe: str = "1Day", limit: int = 500)
         ticker = f"{ticker}.L"
 
     # 1. Persistent Cache Check (AnalyticsDB)
+    import asyncio
     analytics = get_analytics_db()
     if timeframe in ["1Year", "Max", "3Month"]:
         try:
-            db_data = analytics.get_recent_ohlcv(ticker, limit=limit)
+            db_data = await asyncio.to_thread(analytics.get_recent_ohlcv, ticker, limit)
             if db_data is not None and not db_data.empty:
                 db_data["timestamp"] = db_data["timestamp"].apply(lambda x: x.isoformat())
                 points = db_data[["timestamp", "close", "high", "low", "open", "volume"]].to_dict("records")
@@ -261,7 +262,7 @@ async def get_chart_data(symbol: str, timeframe: str = "1Day", limit: int = 500)
     try:
         if provider not in ["AnalyticsDB", "Cache"]:
             analytics_data = [{"t": p["timestamp"], "o": p["open"], "h": p["high"], "l": p["low"], "c": p["close"], "v": p["volume"]} for p in data]
-            analytics.bulk_insert_ohlcv(ticker, analytics_data)
+            await asyncio.to_thread(analytics.bulk_insert_ohlcv, ticker, analytics_data)
     except Exception as e:
         logger.warning(f"Failed to cache to AnalyticsDB: {e}")
 
