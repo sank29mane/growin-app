@@ -126,6 +126,10 @@ import time
 # Secret for signing approval tokens (in production, use a secure env var)
 APPROVAL_SECRET = os.getenv("TRADE_APPROVAL_SECRET", "sota-2026-secure-gate-9911")
 
+# Store used tokens to prevent replay attacks
+# In a distributed production env, use Redis for this
+_used_tokens: Dict[str, float] = {}
+
 class ToolCallRequest(BaseModel):
     server_name: str
     tool_name: str
@@ -140,21 +144,48 @@ def verify_approval_token(token: str, tool_name: str, arguments: Dict[str, Any])
         if len(parts) != 2:
             return False
             
-        timestamp, signature = parts
+        timestamp_str, signature = parts
+        timestamp = float(timestamp_str)
+        now = time.time()
+
         # Check expiry (5 minutes)
-        if time.time() - float(timestamp) > 300:
+        if now - timestamp > 300:
             logger.warning("Approval token expired")
             return False
             
+        # Check for future timestamps (allow small 5s drift)
+        if timestamp > now + 5:
+            logger.warning("Approval token from the future")
+            return False
+
         # Recreate signature
-        msg = f"{timestamp}:{tool_name}:{json.dumps(arguments, sort_keys=True)}"
+        msg = f"{timestamp_str}:{tool_name}:{json.dumps(arguments, sort_keys=True)}"
         expected = hmac.new(
             APPROVAL_SECRET.encode(),
             msg.encode(),
             hashlib.sha256
         ).hexdigest()
         
-        return hmac.compare_digest(expected, signature)
+        is_valid = hmac.compare_digest(expected, signature)
+
+        if is_valid:
+            # Prevent replay attacks
+            if signature in _used_tokens:
+                logger.warning("Replay attack detected: token already used")
+                return False
+
+            # Mark token as used
+            _used_tokens[signature] = timestamp
+
+            # Clean up old tokens periodically
+            if len(_used_tokens) > 1000:
+                expired = [k for k, v in _used_tokens.items() if now - v > 300]
+                for k in expired:
+                    del _used_tokens[k]
+
+            return True
+
+        return False
     except Exception as e:
         logger.error(f"Token verification error: {e}")
         return False
@@ -167,7 +198,10 @@ async def call_mcp_tool(request: ToolCallRequest):
     """
     sensitive_tools = [
         "place_market_order", "place_limit_order", 
-        "place_stop_order", "place_stop_limit_order"
+        "place_stop_order", "place_stop_limit_order",
+        "cancel_order", "create_investment_pie",
+        "update_investment_pie", "delete_investment_pie",
+        "update_pie"
     ]
     
     # 1. Check Governance Gate
