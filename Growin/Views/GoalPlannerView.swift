@@ -408,6 +408,8 @@ struct RiskButton: View {
             )
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(title.replacingOccurrences(of: "_", with: " "))
+        .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : [.isButton])
     }
 }
 
