@@ -104,12 +104,9 @@ Intents:
 - market_analysis (needs quant, forecast, research, social)
 - portfolio_query (needs portfolio)
 - goal_planning (needs goal_planner)
-<<<<<<< HEAD
-=======
 - intraday_trade (needs quant, forecast, research; implies 5min bars)
 - swing_trade (needs quant, forecast, research; implies 1hour bars)
 - conversational (general financial questions, definitions, greetings, or abstract strategy)
->>>>>>> b069b4b (feat(phase-29): implement institutional portfolio optimization (Mean-Variance) via MLX NPU)
 
 Query: "{clean_query}"
 """
@@ -332,10 +329,6 @@ Query: "{clean_query}"
         # ACE Evaluator
         from .ace_evaluator import ACEEvaluator
         ace_evaluator = ACEEvaluator()
-        
-        # We skip the rest of the debate logic if conversational intent (logic above handles it)
-        # Note: I am inserting the bypass BEFORE max_debate_turns is calculated.
-        # Actually I already did that in the replacement content.
         
         for turn in range(max_debate_turns + 1):
             status_manager.set_status("orchestrator", "working", f"Risk Review (Turn {turn+1})...")

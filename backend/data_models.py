@@ -16,11 +16,7 @@ class PriceData(BaseModel):
     close: Decimal
     volume: int
     
-<<<<<<< HEAD
-    @field_validator('open', 'high', 'low', 'close', mode='before')
-=======
     @field_validator('open', 'high', 'low', 'close', 'volume', mode='before')
->>>>>>> b069b4b (feat(phase-29): implement institutional portfolio optimization (Mean-Variance) via MLX NPU)
     @classmethod
     def convert_to_decimal(cls, v):
         if v is None:

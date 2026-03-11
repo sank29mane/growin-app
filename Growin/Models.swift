@@ -352,11 +352,7 @@ struct PriceData: Codable, Equatable {
     let source: String?
     let validated: Bool?
     let historySeries: [TimeSeriesItem]?
-<<<<<<< HEAD
-    
-=======
 
->>>>>>> b069b4b (feat(phase-29): implement institutional portfolio optimization (Mean-Variance) via MLX NPU)
     enum CodingKeys: String, CodingKey {
         case ticker, currency, source, validated
         case currentPrice = "current_price"
@@ -404,11 +400,7 @@ struct ChatMessageModel: Codable, Identifiable, Equatable {
         case modelName = "model_name"
         case data
     }
-<<<<<<< HEAD
-    
-=======
 
->>>>>>> b069b4b (feat(phase-29): implement institutional portfolio optimization (Mean-Variance) via MLX NPU)
     var isUser: Bool { role == "user" }
     var displayName: String {
         isUser ? "You" : (agentName ?? "AI Assistant")

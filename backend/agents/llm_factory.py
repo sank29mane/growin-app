@@ -162,11 +162,6 @@ class LLMFactory:
                 # 1. Start loading but don't set 'ready' yet
                 status_manager.set_status("lmstudio", "working", f"Loading {target_model_id}...")
                 await client.ensure_model_loaded(target_model_id)
-<<<<<<< HEAD
-                # Explicitly set the active model ID on the client wrapper
-                client.active_model_id = target_model_id 
-                status_manager.set_status("lmstudio", "ready", f"Model {target_model_id} active")
-=======
                 
                 # 2. SOTA: Hardening - wait for initialization to complete
                 is_ready = await client.wait_until_ready(target_model_id, timeout=30)
@@ -178,7 +173,6 @@ class LLMFactory:
                     client.active_model_id = target_model_id 
                     status_manager.set_status("lmstudio", "ready", f"Model {target_model_id} active")
                 
->>>>>>> b069b4b (feat(phase-29): implement institutional portfolio optimization (Mean-Variance) via MLX NPU)
                 return client
             except Exception as e:
                 logger.warning(f"Failed to load requested model {target_model_id}: {e}")

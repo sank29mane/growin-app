@@ -186,6 +186,40 @@ class GoalData(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class RiskGovernanceData(BaseModel):
+    """SOTA 2026 Phase 28: Systemic and Liquidity Risk metrics"""
+    vix_level: Optional[Decimal] = None
+    yield_spread_10y2y: Optional[Decimal] = None
+    adv_30d: Optional[Decimal] = None # Average Daily Volume
+    liquidity_impact: Optional[Decimal] = None
+    systemic_risk_level: str = "LOW" # LOW, ELEVATED, EXTREME
+    trade_horizon: str = "medium" # short, medium, long
+    slippage_bps: Optional[Decimal] = None
+    pov_participation: Optional[Decimal] = None
+    liquidity_status: str = "STABLE" # STABLE, THIN, ILLIQUID
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class GeopoliticalEvent(BaseModel):
+    """SOTA 2026 Phase 27: Geopolitical Event record"""
+    title: str
+    impact: str # HIGH, MEDIUM, LOW
+    region: str
+    description: Optional[str] = None
+    url: Optional[str] = None
+
+
+class GeopoliticalData(BaseModel):
+    """SOTA 2026 Phase 27: Geopolitical Risk context"""
+    gpr_score: Decimal = Decimal(0) # Geopolitical Risk score
+    global_sentiment_label: str = "STABLE" # STABLE, TENSE, CRISIS, BEARISH
+    top_events: List[GeopoliticalEvent] = []
+    summary: str = ""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class PriceData(BaseModel):
     """Current price information"""
     ticker: str
@@ -225,6 +259,8 @@ class MarketContext(BaseModel):
     social: Optional[SocialData] = None
     whale: Optional[WhaleData] = None
     goal: Optional[GoalData] = None
+    risk_governance: Optional[RiskGovernanceData] = None
+    geopolitical: Optional[GeopoliticalData] = None
     
     # Agent Status & Telemetry
     agents_executed: List[str] = []
@@ -288,7 +324,7 @@ class MarketContext(BaseModel):
     def serialize_dt(self, dt: datetime, _info):
         return dt.isoformat()
 
-    @field_serializer('price', 'forecast', 'quant', 'portfolio', 'research', 'social', 'whale', 'goal', check_fields=False)
+    @field_serializer('price', 'forecast', 'quant', 'portfolio', 'research', 'social', 'whale', 'goal', 'risk_governance', 'geopolitical', check_fields=False)
     def serialize_nested(self, v, _info):
         if v is None:
             return None

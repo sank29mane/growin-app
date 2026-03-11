@@ -8,11 +8,7 @@ import logging
 from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from market_context import ForecastData
 from forecaster import get_forecaster
-<<<<<<< HEAD
-from utils.error_resilience import CircuitBreaker
-=======
 from utils.error_resilience import CircuitBreaker, CircuitBreakerOpenException
->>>>>>> a1afdec (Refactor CircuitBreaker implementations to prevent cascading failures)
 
 logger = logging.getLogger(__name__)
 
@@ -129,45 +125,21 @@ class ForecastingAgent(BaseAgent):
             except Exception as ex:
                 logger.warning(f"ForecastingAgent sanitization error: {ex}")
         # ---------------------------------------------
-<<<<<<< HEAD
-            
-        if self.circuit_breaker.state == "OPEN":
-            logger.error(f"Forecast skipped: circuit breaker is OPEN")
-            return AgentResponse(
-                agent_name=self.config.name,
-                success=False,
-                data={},
-                error="Forecasting failed or circuit breaker is OPEN",
-                latency_ms=0
-            )
-
-        try:
-            async def generate_forecast():
-                # Generate forecast using TTM
-=======
 
         try:
             # Generate forecast using TTM via Circuit Breaker
             async def execute_forecast():
->>>>>>> a1afdec (Refactor CircuitBreaker implementations to prevent cascading failures)
                 res = await self.forecaster.forecast(
                     ohlcv_data,
                     prediction_steps=steps,
                     timeframe=timeframe
                 )
                 if "error" in res:
-<<<<<<< HEAD
-                    raise ValueError(res["error"])
-                return res
-
-            result = await self.circuit_breaker.call(generate_forecast)
-=======
                     # Raise exception to trigger the circuit breaker on logical errors
                     raise ValueError(res["error"])
                 return res
 
             result = await self.circuit_breaker.call(execute_forecast)
->>>>>>> a1afdec (Refactor CircuitBreaker implementations to prevent cascading failures)
 
             # Extract predictions
             forecast_bars = result.get("forecast", [])
@@ -222,7 +194,7 @@ class ForecastingAgent(BaseAgent):
                 latency_ms=0
             )
 
-        except CircuitBreakerOpenException as ce:
+        except CircuitBreakerOpenException:
             logger.error(f"Forecast skipped: circuit breaker is OPEN")
             return AgentResponse(
                 agent_name=self.config.name,

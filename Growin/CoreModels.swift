@@ -5,11 +5,7 @@ import Foundation
 
 // MARK: - Portfolio Models
 
-<<<<<<< HEAD
-struct PortfolioSnapshot: Codable, Sendable {
-=======
 struct PortfolioSnapshot: Codable, Sendable, Equatable {
->>>>>>> b069b4b (feat(phase-29): implement institutional portfolio optimization (Mean-Variance) via MLX NPU)
     let summary: PortfolioSummary?
     let positions: [Position]?
 }
@@ -69,11 +65,7 @@ struct Position: Codable, Identifiable, Sendable, Equatable {
     let ppl: Decimal?
     let fxPpl: Decimal?
     let accountType: String?
-<<<<<<< HEAD
-    
-=======
 
->>>>>>> b069b4b (feat(phase-29): implement institutional portfolio optimization (Mean-Variance) via MLX NPU)
     enum CodingKeys: String, CodingKey {
         case ticker, name, quantity
         case currentPrice = "current_price"
@@ -292,12 +284,8 @@ struct AIStrategy: Codable, Sendable, Identifiable {
 struct InstrumentWeightMapping: Codable, Sendable {
     let ticker: String
     let weight: Double
-<<<<<<< HEAD
-=======
 
     enum CodingKeys: String, CodingKey {
         case ticker, weight
     }
->>>>>>> b069b4b (feat(phase-29): implement institutional portfolio optimization (Mean-Variance) via MLX NPU)
 }
-

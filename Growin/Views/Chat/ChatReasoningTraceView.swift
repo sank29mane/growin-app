@@ -41,12 +41,9 @@ struct ChatReasoningTraceView: View {
             }
         }
         .padding(.horizontal)
-<<<<<<< HEAD
-=======
         .accessibilityElement(children: .contain)
         .accessibilityLabel(isProcessing ? "AI Reasoning Trace: Thinking" : "AI Reasoning Trace: Verified")
         .accessibilityAddTraits(.updatesFrequently)
->>>>>>> b069b4b (feat(phase-29): implement institutional portfolio optimization (Mean-Variance) via MLX NPU)
     }
 }
 

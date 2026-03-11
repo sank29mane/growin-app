@@ -6,10 +6,11 @@ Prevents "God Object" Coordinator by isolating IO logic here.
 
 import asyncio
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from datetime import datetime
+from decimal import Decimal
 
-from market_context import MarketContext, PriceData, TimeSeriesItem, ResearchData, NewsArticle, SocialData, WhaleData
+from market_context import MarketContext, PriceData, TimeSeriesItem, ResearchData, NewsArticle, SocialData, WhaleData, GeopoliticalData
 from data_engine import get_alpaca_client, get_finnhub_client
 from utils.news_client import NewsDataIOClient
 
@@ -43,8 +44,6 @@ class DataFabricator:
             user_settings = {}
         start_time = datetime.now()
         
-<<<<<<< HEAD
-=======
         # SOTA 2026 Phase 26: Determine trade horizon and timeframe from intent
         timeframe = "1Day"
         trade_horizon = "medium"
@@ -62,7 +61,6 @@ class DataFabricator:
             timeframe = "1Day"
             trade_horizon = "long"
         
->>>>>>> b069b4b (feat(phase-29): implement institutional portfolio optimization (Mean-Variance) via MLX NPU)
         # 1. Initialize empty context
         context = MarketContext(
             query=f"Auto-generated for {intent}", # Will be overwritten by coordinator usually
@@ -74,11 +72,6 @@ class DataFabricator:
         # 2. Determine what to fetch based on Intent
         tasks = []
         
-<<<<<<< HEAD
-        # Always fetch Price if we have a ticker
-        if ticker:
-            tasks.append(self._fetch_price_data(ticker))
-=======
         # SOTA 2026 Phase 29: Portfolio Optimization
         if intent == "portfolio_optimization":
             portfolio_tickers = user_settings.get("portfolio_tickers", [])
@@ -93,7 +86,6 @@ class DataFabricator:
         # Always fetch Price if we have a ticker and not already handled by portfolio_optimization
         elif ticker:
             tasks.append(self._fetch_price_data(ticker, timeframe=timeframe))
->>>>>>> b069b4b (feat(phase-29): implement institutional portfolio optimization (Mean-Variance) via MLX NPU)
         
         # Fetch News/Social for analysis
         if intent in ["market_analysis", "analytical", "forecast_request"] and ticker:
@@ -109,39 +101,25 @@ class DataFabricator:
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
             # 4. Populate Context
+            # First pass: PriceData for portfolio_optimization
             for res in results:
-<<<<<<< HEAD
-                if isinstance(res, Exception):
-                    logger.error(f"DataFabricator fetch failed: {res}")
-                    continue
-                
-                if res is None:
-=======
                 if isinstance(res, PriceData):
                     if intent == "portfolio_optimization":
                         context.portfolio_prices[res.ticker] = res
-                    else:
-                        price_data = res
+                    elif res.ticker == ticker:
                         context.price = res
-                        break
 
             for res in results:
                 if isinstance(res, Exception) or res is None:
->>>>>>> b069b4b (feat(phase-29): implement institutional portfolio optimization (Mean-Variance) via MLX NPU)
                     continue
 
                 # Type-based injection
-                if isinstance(res, PriceData):
-                    context.price = res
-                elif isinstance(res, ResearchData):
+                if isinstance(res, ResearchData):
                     context.research = res
                 elif isinstance(res, SocialData):
                     context.social = res
                 elif isinstance(res, WhaleData):
                     context.whale = res
-<<<<<<< HEAD
-                    
-=======
                 elif isinstance(res, GeopoliticalData):
                     context.geopolitical = res
                 elif isinstance(res, dict) and ("vix_level" in res or "vix" in res):
@@ -158,51 +136,43 @@ class DataFabricator:
                     context.risk_governance = RiskGovernanceData(**res)
             
             # SOTA 2026 Phase 28: Second pass for liquidity calculation
-            # Now that Price and RiskGovernance are both (potentially) populated
             if context.price and context.price.history_series and context.risk_governance:
-                price_data = context.price
-                res_dict = context.risk_governance.model_dump()
+                from agents.quant_agent import QuantAgent
+                quant_agent = QuantAgent()
                 
-                ohlcv = [{"v": float(getattr(b, 'volume', 0) or 0)} for b in price_data.history_series]
-                adv = self.quant_engine.calculate_adv_30d(ohlcv)
-                res_dict["adv_30d"] = adv
+                ohlcv = [{"v": float(b.volume or 0)} for b in context.price.history_series]
+                adv = quant_agent.engine.calculate_adv_30d(ohlcv)
                 
-                curr_p = price_data.current_price or Decimal("1")
+                # Update RiskGovernanceData
+                rg_dict = context.risk_governance.model_dump()
+                rg_dict["adv_30d"] = Decimal(str(adv))
+                
+                curr_p = context.price.current_price or Decimal("1")
                 unit_size = Decimal("1000") / curr_p
                 
-                slippage = self.quant_engine.calculate_slippage_estimate(unit_size, adv)
-                res_dict["slippage_bps"] = slippage
+                slippage = quant_agent.engine.calculate_slippage_estimate(unit_size, adv)
+                rg_dict["slippage_bps"] = Decimal(str(slippage))
                 
-                liq_check = self.quant_engine.check_participation_rate(unit_size, adv)
-                res_dict["pov_participation"] = liq_check["pov"]
-                res_dict["liquidity_status"] = liq_check["status"]
+                liq_check = quant_agent.engine.check_participation_rate(unit_size, adv)
+                rg_dict["pov_participation"] = Decimal(str(liq_check["pov"]))
+                rg_dict["liquidity_status"] = liq_check["status"]
                 
                 from market_context import RiskGovernanceData
-                context.risk_governance = RiskGovernanceData(**res_dict)
+                context.risk_governance = RiskGovernanceData(**rg_dict)
 
->>>>>>> b069b4b (feat(phase-29): implement institutional portfolio optimization (Mean-Variance) via MLX NPU)
         # 5. Measure latency
         context.total_latency_ms = (datetime.now() - start_time).total_seconds() * 1000
         
         return context
 
-<<<<<<< HEAD
-    async def _fetch_price_data(self, ticker: str) -> Optional[PriceData]:
-=======
     async def _fetch_price_data(self, ticker: str, timeframe: str = "1Day", limit: int = 1000) -> Optional[PriceData]:
->>>>>>> b069b4b (feat(phase-29): implement institutional portfolio optimization (Mean-Variance) via MLX NPU)
         from cache_manager import cache
         from decimal import Decimal
         from utils.financial_math import create_decimal, safe_div
 
-<<<<<<< HEAD
-        cache_key = f"price_data:{ticker}"
-=======
         cache_key = f"price_data:{ticker}:{timeframe}:{limit}"
->>>>>>> b069b4b (feat(phase-29): implement institutional portfolio optimization (Mean-Variance) via MLX NPU)
         cached = cache.get(cache_key)
         if cached:
-            # logger.info(f"Cache hit for {ticker}")
             return cached
 
         try:
@@ -212,13 +182,8 @@ class DataFabricator:
             from utils.data_frayer import get_data_frayer
             frayer = get_data_frayer()
             
-<<<<<<< HEAD
-            # Use SOTA Data Fraying to combine all providers
-            frayed_bars = await frayer.fetch_frayed_bars(ticker, limit=1000)
-=======
             # Use SOTA Data Fraying to combine all providers for EQUITIES
             frayed_bars = await frayer.fetch_frayed_bars(ticker, limit=limit, timeframe=timeframe)
->>>>>>> b069b4b (feat(phase-29): implement institutional portfolio optimization (Mean-Variance) via MLX NPU)
             
             # Extract last close and history using Decimal
             last_hist_close = Decimal('0')
@@ -241,12 +206,8 @@ class DataFabricator:
             current_price = Decimal('0')
             currency = "USD"
             source_used = "Unknown"
-<<<<<<< HEAD
-            is_uk = ticker.upper().endswith(".L")
-=======
             symbols = frayer._resolve_tickers(ticker)
             is_uk = symbols.get("yfinance", "").endswith(".L") or ticker.upper().endswith(".L")
->>>>>>> b069b4b (feat(phase-29): implement institutional portfolio optimization (Mean-Variance) via MLX NPU)
 
             async def fetch_primary_quote():
                 nonlocal current_price, currency, source_used
@@ -322,23 +283,15 @@ class DataFabricator:
 
             # --- SOTA DATA VALIDATION LOGIC ---
             if last_hist_close > 0 and current_price > 0:
-                # Check for Pence/Pound mismatch (approx 100x factor)
-                # Ratio of 100 means current is GBX, history is GBP
                 if Decimal('80') < (current_price / last_hist_close) < Decimal('120'):
-                    logger.warning(f"Data Mismatch (GBX/GBP): History={last_hist_close}, Curr={current_price}. Treating as GBX->GBP adjustment.")
                     current_price = current_price / Decimal('100')
-                    
-                # Ratio of 0.01 means current is GBP, history is GBX
                 elif Decimal('0.008') < (current_price / last_hist_close) < Decimal('0.012'):
-                     logger.warning(f"Data Mismatch (GBP/GBX): History={last_hist_close}, Curr={current_price}. Treating as GBP->GBX adjustment.")
                      current_price = current_price * Decimal('100')
             
-            # Final Safety: If still 0, use history
             if current_price <= 0 and last_hist_close > 0:
                  current_price = last_hist_close
                  source_used = "History"
 
-            # CHECK FOR VALID DATA - Trigger Fallback if empty
             if not history_series or current_price <= 0:
                 raise ValueError("Insufficient data retrieved from providers")
 
@@ -349,7 +302,7 @@ class DataFabricator:
                 source=source_used,
                 history_series=history_series
             )
-            cache.set(cache_key, p_data, ttl=60) # 60s cache for prices
+            cache.set(cache_key, p_data, ttl=60)
             return p_data
         except Exception as e:
             logger.error(f"Price fetch failed for {ticker}: {e}")
@@ -360,13 +313,10 @@ class DataFabricator:
         from status_manager import status_manager
         status_manager.set_status("research_agent", "working", f"Searching news for {ticker}...")
         try:
-            # 1. Fetch from NewsData.io (centralized)
             articles = await self.news_client.fetch_latest_news(ticker)
-            
             if not articles:
                 return ResearchData(ticker=ticker, sentiment_score=0.0, sentiment_label="NEUTRAL", articles=[])
 
-            # 2. Simple sentiment synthesis (Logic move from ResearchAgent)
             from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
             analyzer = SentimentIntensityAnalyzer()
             
@@ -402,27 +352,7 @@ class DataFabricator:
             return None
 
     async def _fetch_social_data(self, ticker: str) -> Optional[SocialData]:
-        """Fetch social sentiment"""
-        # Placeholder for social API
         return None
 
     async def _fetch_whale_data(self, ticker: str) -> Optional[WhaleData]:
-        """Fetch whale alerts"""
-        # Placeholder
         return None
-<<<<<<< HEAD
-=======
-
-    async def _fetch_geopolitical_data(self) -> Optional[GeopoliticalData]:
-        """Fetch geopolitical risk data via GeopoliticalAgent."""
-        try:
-            from agents.base_agent import AgentResponse
-            # We treat the GeopoliticalAgent as a specialist fetcher here
-            response = await self.geopolitical_agent.execute({"ticker": "GLOBAL"})
-            if response.success:
-                return GeopoliticalData(**response.data)
-            return None
-        except Exception as e:
-            logger.error(f"Geopolitical fetch failed: {e}")
-            return None
->>>>>>> b069b4b (feat(phase-29): implement institutional portfolio optimization (Mean-Variance) via MLX NPU)

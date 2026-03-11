@@ -27,17 +27,12 @@ jobs:
 
       - name: Run SOTA Unit & Integration Tests
         run: |
-          export PYTHONPATH=$PYTHONPATH:backend
-          uv run --project backend pytest tests/backend/test_ai_streaming.py tests/backend/test_rstitch_logic.py
-
-      - name: Run E2E AI Flow Tests
-        run: |
-          export PYTHONPATH=$PYTHONPATH:backend
-          uv run --project backend pytest tests/backend/test_e2e_ai_flow.py
+          export PYTHONPATH=.:backend
+          uv run --project backend pytest tests/backend/
 
       - name: Run Performance Benchmarks
         run: |
-          export PYTHONPATH=$PYTHONPATH:backend
+          export PYTHONPATH=.:backend
           uv run --project backend pytest tests/backend/test_performance_benchmarks.py
           
       - name: DeepEval Reasoning Audit

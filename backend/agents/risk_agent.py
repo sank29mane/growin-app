@@ -92,10 +92,7 @@ class RiskAgent(BaseAgent):
         prompt = f"""
         [CONTEXT]
         Ticker: {market_context.ticker}
-<<<<<<< HEAD
         Intent: {market_context.intent}
-=======
->>>>>>> b069b4b (feat(phase-29): implement institutional portfolio optimization (Mean-Variance) via MLX NPU)
         Portfolio Value: £{market_context.portfolio.total_value if market_context.portfolio else "Unknown"}
         Wash Sale Risk: {"HIGH (Recent loss sale detected)" if wash_sale_alert else "Low"}
         
