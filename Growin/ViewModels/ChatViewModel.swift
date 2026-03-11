@@ -169,6 +169,50 @@ class ChatViewModel {
             } else if subject == "debate" {
                 let turn = payload["content"] as? String ?? ""
                 newStep = ReasoningStep(agent: sender, action: "Debating", content: turn, timestamp: timestamp)
+            } else if subject == "rebalance_proposal" {
+                // SOTA 2026: Inject the trade proposal card into the message data
+                streamingStatus = "Trade Proposal Ready"
+                if let lastIndex = messages.indices.last {
+                    var lastMsg = messages[lastIndex]
+                    if let proposalDict = payload as? [String: Any] {
+                        let proposal = TradeProposalData(
+                            proposalId: proposalDict["proposal_id"] as? String ?? UUID().uuidString,
+                            ticker: proposalDict["ticker"] as? String ?? "",
+                            action: proposalDict["action"] as? String ?? "REBALANCE",
+                            quantity: Decimal(string: "\(proposalDict["quantity"] ?? 1.0)") ?? 1.0,
+                            reasoning: proposalDict["reasoning"] as? String,
+                            status: "PENDING"
+                        )
+                        
+                        // Update context data
+                        let oldData = lastMsg.data ?? MarketContextData(forecast: nil, quant: nil, research: nil, portfolio: nil, price: nil, whale: nil, riskGovernance: nil, geopolitical: nil, tradeProposal: nil, reasoning: nil)
+                        
+                        let newData = MarketContextData(
+                            forecast: oldData.forecast,
+                            quant: oldData.quant,
+                            research: oldData.research,
+                            portfolio: oldData.portfolio,
+                            price: oldData.price,
+                            whale: oldData.whale,
+                            riskGovernance: oldData.riskGovernance,
+                            geopolitical: oldData.geopolitical,
+                            tradeProposal: proposal,
+                            reasoning: oldData.reasoning
+                        )
+                        
+                        messages[lastIndex] = ChatMessageModel(
+                            messageId: lastMsg.messageId,
+                            role: lastMsg.role,
+                            content: lastMsg.content,
+                            timestamp: lastMsg.timestamp,
+                            toolCalls: lastMsg.toolCalls,
+                            toolCallId: lastMsg.toolCallId,
+                            agentName: lastMsg.agentName,
+                            modelName: lastMsg.modelName,
+                            data: newData
+                        )
+                    }
+                }
             }
             
             if let step = newStep {

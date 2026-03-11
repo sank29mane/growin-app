@@ -23,6 +23,7 @@ from mcp.server.stdio import stdio_server
 from mcp.types import Resource, TextContent, Tool
 from utils import sanitize_nan
 from utils.process_guard import start_parent_watchdog
+from utils.rate_limiter import get_t212_budgeter, PRIORITY_EXECUTION, PRIORITY_SYNC, PRIORITY_POLLING
 
 # Start watchdog immediately to ensure cleanup if parent dies
 start_parent_watchdog()
@@ -186,9 +187,21 @@ class Trading212Client:
         url = f"{self.base_url}/{endpoint}"
         max_retries = 3
         base_delay = 1.0
+        
+        # SOTA 2026: Determine request priority for the Budgeter
+        priority = PRIORITY_POLLING
+        if method.upper() in ["POST", "DELETE"]:
+            priority = PRIORITY_EXECUTION
+        elif "account" in endpoint or "portfolio" in endpoint or "history" in endpoint:
+            priority = PRIORITY_SYNC
+            
+        budgeter = get_t212_budgeter()
 
         for attempt in range(max_retries + 1):
             try:
+                # Acquire token before sending request
+                await budgeter.acquire(priority=priority)
+                
                 response = await self.client.request(method, url, **kwargs)
                 response.raise_for_status()
                 if response.content:
@@ -197,6 +210,7 @@ class Trading212Client:
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 429 and attempt < max_retries:
                     delay = base_delay * (2**attempt)
+                    logger.warning(f"T212 API 429: Throttled by broker. Manual backoff: {delay}s")
                     await asyncio.sleep(delay)
                     continue
                 raise

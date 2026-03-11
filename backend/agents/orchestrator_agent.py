@@ -318,6 +318,19 @@ Query: "{clean_query}"
         decision_result = await self.decision_engine.make_decision(context, full_query)
         recommendation = decision_result.get("content", "")
         
+        # SOTA 2026 Phase 30: Emit Rebalance Proposal for HITL UI
+        if "pending_proposal" in context.user_context:
+            proposal = context.user_context["pending_proposal"]
+            await self.messenger.send_message(AgentMessage(
+                sender="OrchestratorAgent",
+                recipient="broadcast",
+                subject="rebalance_proposal",
+                payload=proposal,
+                correlation_id=c_id
+            ))
+            # Also append manual approval tag to text
+            recommendation += f"\n\n[ACTION_REQUIRED:APPROVE_TRADE({proposal.get('proposal_id')})]"
+
         # --- SOTA 2026: ADVERSARIAL DEBATE LOOP ---
         if context.intent in ["conversational", "educational"]:
             return {"content": recommendation, "response_id": decision_result.get("response_id"), "context": context}

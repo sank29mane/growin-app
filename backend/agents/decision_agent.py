@@ -175,6 +175,12 @@ class DecisionAgent:
             # Price validation
             recommendation = await self._validate_prices(recommendation, context.ticker)
 
+            # SOTA 2026 Phase 30: Detect and extract Trade Proposals for HITL
+            trade_proposal = self._extract_trade_proposal(recommendation, context)
+            if trade_proposal:
+                context.user_context["pending_proposal"] = trade_proposal
+                logger.info(f"DecisionAgent: Detected trade proposal for {trade_proposal.get('ticker')}. Routing to HITL gate.")
+
             status_manager.set_status("decision_agent", "ready", "Decision delivered", model=self.model_name)
 
             # Interactive Actions
@@ -909,3 +915,49 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
         if not self._initialized:
             await self._initialize_llm()
         return await self._generate_draft("You are a helpful assistant.", prompt)
+
+    def _extract_trade_proposal(self, text: str, context: MarketContext) -> Optional[Dict[str, Any]]:
+        """
+        SOTA 2026: Extracts structured trade proposals from LLM text for HITL.
+        Looks for BUY/SELL/REBALANCE keywords and coordinates.
+        """
+        # Look for explicit [ACTION:TRADE_APPROVAL] or keywords
+        if not any(word in text.upper() for word in ["BUY", "SELL", "REBALANCE"]):
+            return None
+            
+        try:
+            # 1. Ticker (from context or text)
+            ticker = context.ticker
+            if not ticker:
+                ticker_match = re.search(r'\b[A-Z]{2,5}\b', text)
+                if ticker_match: ticker = ticker_match.group(0)
+            
+            if not ticker: return None
+
+            # 2. Action
+            action = "REBALANCE"
+            if "BUY" in text.upper(): action = "BUY"
+            elif "SELL" in text.upper(): action = "SELL"
+
+            # 3. Quantity (Heuristic for now, or extracted from coordinates)
+            quantity = 1.0
+            qty_match = re.search(r'([0-9.]+)\s*shares', text, re.IGNORECASE)
+            if qty_match:
+                quantity = float(qty_match.group(1))
+            
+            # 4. Reasoning (Snippet from Strategic Synthesis)
+            reasoning = "NPU-detected Alpha opportunity."
+            if "Strategic Synthesis" in text:
+                reasoning = text.split("Strategic Synthesis")[1].split("\n\n")[1].strip()[:150] + "..."
+
+            return {
+                "proposal_id": str(uuid.uuid4()),
+                "ticker": ticker,
+                "action": action,
+                "quantity": quantity,
+                "reasoning": reasoning,
+                "status": "PENDING"
+            }
+        except Exception as e:
+            logger.warning(f"Failed to extract trade proposal: {e}")
+            return None

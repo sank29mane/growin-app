@@ -205,6 +205,21 @@ struct RichDataView: View, Equatable {
     
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            // SOTA 2026 Phase 30: High-Velocity Trade Proposal (HITL)
+            if let proposal = data.tradeProposal {
+                TradeProposalCard(
+                    proposal: proposal,
+                    onApprove: { id in
+                        print("Trade \(id) APPROVED")
+                        // Logic to send approval to backend via socket/API
+                    },
+                    onReject: { id in
+                        print("Trade \(id) REJECTED")
+                    }
+                )
+                .transition(.asymmetric(insertion: .push(from: .top), removal: .opacity))
+            }
+
             // 1. Top Level Metrics (Price & Sentiment)
             HStack(spacing: 8) {
                 if let price = data.price {
