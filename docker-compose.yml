@@ -32,6 +32,17 @@ services:
       timeout: 5s
       retries: 5
 
+  jules-mcp:
+    build:
+      context: /Users/sanketmane/Codes/Jules_MCP
+      dockerfile: Dockerfile
+    stdin_open: true
+    tty: true
+    env_file:
+      - /Users/sanketmane/Codes/Jules_MCP/.env
+    networks:
+      - growin-network
+
 networks:
   growin-network:
     driver: bridge

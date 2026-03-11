@@ -91,7 +91,25 @@ class AnalyticsDB:
             ON agent_performance(ticker)
         """)
         
-        logger.info("Analytics schema initialized (including agent_telemetry and agent_performance)")
+                # Pending Actions table for Human-In-The-Loop (HITL)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS pending_actions (
+                id VARCHAR PRIMARY KEY,
+                correlation_id VARCHAR,
+                action_type VARCHAR,
+                status VARCHAR, -- pending, approved, rejected, executed
+                payload JSON,
+                ticker VARCHAR,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_pending_status
+            ON pending_actions(status)
+        """)
+
+        logger.info("Analytics schema initialized (including agent_telemetry, agent_performance, and pending_actions)")
 
     def log_agent_message(self, message_data: Dict[str, Any]):
         """Persist an agent message to the telemetry table."""
@@ -110,6 +128,41 @@ class AnalyticsDB:
             ))
         except Exception as e:
             logger.error(f"Failed to log agent message: {e}")
+
+    def add_pending_action(self, action_data: Dict[str, Any]):
+        """Store a trade proposal or rebalance waiting for human approval."""
+        try:
+            self.conn.execute("""
+                INSERT INTO pending_actions (id, correlation_id, action_type, status, payload, ticker, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                action_data.get('id'),
+                action_data.get('correlation_id'),
+                action_data.get('action_type'),
+                action_data.get('status', 'pending'),
+                json.dumps(action_data.get('payload')),
+                action_data.get('ticker'),
+                action_data.get('timestamp')
+            ))
+        except Exception as e:
+            logger.error(f"Failed to add pending action: {e}")
+
+    def update_action_status(self, action_id: str, status: str):
+        """Update the status of a pending action."""
+        try:
+            self.conn.execute("UPDATE pending_actions SET status = ? WHERE id = ?", (status, action_id))
+        except Exception as e:
+            logger.error(f"Failed to update action status: {e}")
+
+    def get_pending_actions(self, status: str = "pending") -> List[Dict[str, Any]]:
+        """Fetch all pending actions by status."""
+        try:
+            # Convert to list of dicts from DuckDB result
+            res = self.conn.execute("SELECT * FROM pending_actions WHERE status = ?", (status,)).fetchdf()
+            return res.to_dict("records")
+        except Exception as e:
+            logger.error(f"Failed to fetch pending actions: {e}")
+            return []
 
     def calculate_agent_alpha(self, correlation_id: str):
         """

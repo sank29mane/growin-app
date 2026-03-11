@@ -28,6 +28,6 @@ This document outlines the high-level phases for the GSD integration and ongoing
 - **Status**: COMPLETED
 - **Requirements**: [OPT-01, OPT-02, OPT-03]
 
-## Phase 30: Multi-Asset Portfolio Bridge (Commodities & Fixed Income)
-- **Goal**: Extend optimization to include non-equity asset classes (Commodities, Bonds) and cross-asset correlation modeling.
+## Phase 30: High-Velocity Intra-day Trading (LETFs)
+- **Goal**: Maximize daily profits using Leveraged ETFs (TQQQ/SQQQ) with 5-15 minute rebalancing triggers, backed by Human-In-The-Loop approval.
 - **Status**: PLANNED

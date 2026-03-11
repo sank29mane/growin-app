@@ -226,6 +226,21 @@ struct GoalImplementation: Codable {
 
 // MARK: - Chat Models
 
+struct TradeProposalData: Codable, Equatable, Identifiable {
+    var id: String { proposalId }
+    let proposalId: String
+    let ticker: String
+    let action: String // BUY, SELL, REBALANCE
+    let quantity: Decimal
+    let reasoning: String?
+    let status: String? // "PENDING", "APPROVED", "REJECTED"
+
+    enum CodingKeys: String, CodingKey {
+        case proposalId = "proposal_id"
+        case ticker, action, quantity, reasoning, status
+    }
+}
+
 struct MarketContextData: Codable, Equatable {
     let forecast: ForecastData?
     let quant: QuantData?
@@ -235,12 +250,14 @@ struct MarketContextData: Codable, Equatable {
     let whale: WhaleData?
     let riskGovernance: RiskGovernanceData?
     let geopolitical: GeopoliticalData?
+    let tradeProposal: TradeProposalData?
     let reasoning: String?
 
     enum CodingKeys: String, CodingKey {
         case forecast, quant, research, portfolio, price, whale, reasoning
         case riskGovernance = "risk_governance"
         case geopolitical
+        case tradeProposal = "trade_proposal"
     }
 }
 

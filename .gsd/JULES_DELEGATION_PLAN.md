@@ -55,9 +55,15 @@ Because Jules halts at `AWAITING_APPROVAL`, it acts safely.
 
 To make this a reality for our day-to-day workflow:
 
-1.  **Create Custom Slash Commands**: I will create `.agent/workflows/jules-audit.md` allowing you to type `/jules-audit security` to instantly kick off a delegation pipeline.
-2.  **Prompt Engineering for Jules**: I will draft standard templates that I will pass to Jules via `create_session`. Jules needs strict constraints (e.g., "Do not modify the `rust_core` unless explicitly asked").
-3.  **Authentication Fix**: Currently, the `list_sources` tool returns a `401 Unauthorized`. We need to ensure the `JULES_API_KEY` provided in your `Jules_MCP/.env` is active and correctly scoped before we can initiate sessions.
+1.  **Docker-Native MCP**: We have deprecated `jules_wrapper.py` in favor of a direct Docker-based MCP server. 
+    - **Service**: `jules-mcp` defined in `docker-compose.yml`.
+    - **Activation**: Use the following command to add to your AI assistant:
+      ```bash
+      docker run -i --rm --env-file /Users/sanketmane/Codes/Jules_MCP/.env jules-mcp
+      ```
+2.  **Create Custom Slash Commands**: I will create `.agent/workflows/jules-audit.md` allowing you to type `/jules-audit security` to instantly kick off a delegation pipeline.
+3.  **Prompt Engineering for Jules**: I will draft standard templates that I will pass to Jules via `create_session`. Jules needs strict constraints (e.g., "Do not modify the `rust_core` unless explicitly asked").
+4.  **Authentication**: Ensure the `JULES_API_KEY` provided in your `Jules_MCP/.env` is active.
 
 ---
 

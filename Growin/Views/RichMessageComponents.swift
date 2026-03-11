@@ -620,3 +620,162 @@ struct MetricItem: View {
         }
     }
 }
+
+struct TradeProposalCard: View, Equatable {
+    static func == (lhs: TradeProposalCard, rhs: TradeProposalCard) -> Bool {
+        return lhs.proposal == rhs.proposal
+    }
+
+    let proposal: TradeProposalData
+    let onApprove: (String) -> Void
+    let onReject: (String) -> Void
+    
+    var actionColor: Color {
+        switch proposal.action.uppercased() {
+        case "BUY": return .green
+        case "SELL": return .red
+        case "REBALANCE": return .blue
+        default: return .orange
+        }
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // Header with NPU Glow
+            HStack {
+                HStack(spacing: 6) {
+                    Image(systemName: "bolt.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.white)
+                    Text("NPU TRADE PROPOSAL")
+                        .font(.system(size: 10, weight: .black))
+                        .foregroundStyle(.white)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    Capsule()
+                        .fill(LinearGradient(colors: [actionColor, actionColor.opacity(0.6)], startPoint: .leading, endPoint: .trailing))
+                )
+                .shadow(color: actionColor.opacity(0.5), radius: 10, x: 0, y: 0)
+                
+                Spacer()
+                
+                Text(proposal.status ?? "PENDING")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.white.opacity(0.05))
+                    .cornerRadius(4)
+            }
+            
+            // Trade Details
+            HStack(alignment: .center, spacing: 16) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("TICKER")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary)
+                    Text(proposal.ticker)
+                        .font(.system(size: 20, weight: .black))
+                        .foregroundStyle(.white)
+                }
+                
+                Divider()
+                    .frame(height: 30)
+                    .background(Color.white.opacity(0.1))
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("ACTION")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary)
+                    Text(proposal.action.uppercased())
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(actionColor)
+                }
+                
+                Divider()
+                    .frame(height: 30)
+                    .background(Color.white.opacity(0.1))
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("QUANTITY")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary)
+                    Text("\(proposal.quantity.formatted())")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(.white)
+                }
+            }
+            .padding(12)
+            .background(Color.white.opacity(0.05))
+            .cornerRadius(10)
+            
+            // Reasoning Snippet
+            if let reasoning = proposal.reasoning {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("REASONING")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary)
+                    Text(reasoning)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.8))
+                        .lineLimit(2)
+                }
+                .padding(.horizontal, 4)
+            }
+            
+            // Approve/Reject Buttons
+            HStack(spacing: 12) {
+                Button(action: { onApprove(proposal.proposalId) }) {
+                    HStack {
+                        Image(systemName: "checkmark.circle.fill")
+                        Text("APPROVE")
+                    }
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(Color.green.opacity(0.15))
+                    .foregroundStyle(.green)
+                    .cornerRadius(8)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.green.opacity(0.3), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Approve Trade Proposal")
+                
+                Button(action: { onReject(proposal.proposalId) }) {
+                    HStack {
+                        Image(systemName: "xmark.circle.fill")
+                        Text("REJECT")
+                    }
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(Color.red.opacity(0.15))
+                    .foregroundStyle(.red)
+                    .cornerRadius(8)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.red.opacity(0.3), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Reject Trade Proposal")
+            }
+        }
+        .padding(14)
+        .background(
+            ZStack {
+                Color.black.opacity(0.4)
+                RoundedRectangle(cornerRadius: 16)
+                    .stroke(
+                        LinearGradient(
+                            colors: [actionColor.opacity(0.5), .clear, actionColor.opacity(0.3)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 1
+                    )
+            }
+        )
+        .cornerRadius(16)
+        .shadow(color: actionColor.opacity(0.1), radius: 20, x: 0, y: 10)
+    }
+}
