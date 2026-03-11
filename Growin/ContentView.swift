@@ -137,6 +137,10 @@ struct ContentView: View {
             )
         }
         .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("System Settings")
+        .accessibilityHint("Opens the system preferences and console overlay")
+        .accessibilityAddTraits(.isButton)
         .help("System Settings & Console")
     }
 }
