@@ -1,12 +1,15 @@
 import numpy as np
-import mlx.core as mx
+try:
+    import mlx.core as mx
+except ImportError:
+    mx = None
 from scipy.optimize import minimize
 from decimal import Decimal
 from typing import Dict, List, Optional, Union, Any
-from backend.utils.jmce_model import NeuralJMCE
-from backend.utils.risk_engine import RiskEngine
-from backend.utils.financial_math import create_decimal
-from backend.app_logging import setup_logging
+from utils.jmce_model import NeuralJMCE
+from utils.risk_engine import RiskEngine
+from utils.financial_math import create_decimal
+from app_logging import setup_logging
 
 logger = setup_logging("portfolio_analyzer")
 
