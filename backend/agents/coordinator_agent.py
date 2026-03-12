@@ -181,7 +181,7 @@ Query: "{clean_query}"
             ticker = ticker_match.group(1).upper() if ticker_match and ticker_match.group(1) and "NONE" not in ticker_match.group(1).upper() else None
             
             # Hard overrides to protect against LLM misclassification
-            q_lower = query.lower()
+            q_lower = (query or "").lower()
             if "portfolio" in q_lower:
                 intent_type = "portfolio_query"
                 if ticker in ["ISA", "INVEST", "MY"]:
@@ -454,7 +454,7 @@ Query: "{clean_query}"
                 
                 # COORDINATOR SELF-CORRECTION: Try to fix if it's a known data issue
                 if not result.success and result.error:
-                    error_msg = result.error.lower() if isinstance(result.error, str) else str(result.error).lower()
+                    error_msg = str(result.error).lower()
                     
                     # Trigger resolution if ticker not found or delisted (Tier 2 Escalation)
                     if any(x in error_msg for x in ["not found", "ticker", "delisted", "no data", "404"]):
@@ -609,7 +609,7 @@ Query: "{clean_query}"
                             "ticker": ticker,
                             "name": name,
                             "search_score": difflib.SequenceMatcher(None, term.upper(), ticker.upper()).ratio(),
-                            "name_score": difflib.SequenceMatcher(None, term.lower(), name.lower()).ratio()
+                            "name_score": difflib.SequenceMatcher(None, str(term).lower(), str(name).lower()).ratio()
                         })
                 
                 # 2. Find best match based on similarity

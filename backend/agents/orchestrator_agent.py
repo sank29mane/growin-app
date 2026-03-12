@@ -124,7 +124,7 @@ Query: "{clean_query}"
             ticker = ticker_match.group(1).upper() if ticker_match and ticker_match.group(1) and "NONE" not in ticker_match.group(1).upper() else None
             
             # Hard overrides to protect against LLM misclassification
-            q_lower = query.lower()
+            q_lower = (query or "").lower()
             if "portfolio" in q_lower:
                 intent_type = "portfolio_query"
             
@@ -197,7 +197,7 @@ Query: "{clean_query}"
                 if found and found not in ["ISA", "INVEST", "MY", "DEEP", "DIVE", "MORE", "SOME", "RSI"]:
                     ticker = found
                     break
-                elif "portfolio" in content.lower():
+                elif "portfolio" in (content or "").lower():
                     intent_info["type"] = "portfolio_query"
                     break
                     
@@ -470,7 +470,7 @@ Query: "{clean_query}"
                 if found and found not in ["ISA", "INVEST", "MY", "DEEP", "DIVE", "MORE", "SOME", "RSI"]:
                     ticker = found
                     break
-                elif "portfolio" in content.lower():
+                elif "portfolio" in (content or "").lower():
                     intent_info["type"] = "portfolio_query"
                     break
         
