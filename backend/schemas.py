@@ -99,3 +99,20 @@ class AIStrategyResponse(BaseModel):
     last_updated: float
     
     model_config = ConfigDict(populate_by_name=True)
+
+# --- Phase 30: High-Velocity Trade HITL Models ---
+
+class TradeProposalData(BaseModel):
+    proposal_id: str
+    ticker: str
+    action: str  # BUY, SELL, REBALANCE
+    quantity: Decimal
+    reasoning: Optional[str] = None
+    status: Optional[str] = "PENDING"
+    timestamp: float = Field(default_factory=lambda: datetime.now().timestamp())
+
+class TradeApprovalRequest(BaseModel):
+    proposal_id: str
+    decision: str  # APPROVED, REJECTED
+    notes: Optional[str] = None
+    signature: Optional[str] = None # For future HMAC/Security validation

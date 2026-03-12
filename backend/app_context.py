@@ -28,6 +28,8 @@ class AppState:
         self.start_time = time.time()
         # On-device ANE configuration (default off; auto-detect on startup)
         self.ane_config = ANEConfig()
+        # Phase 30: High-Velocity Trade Proposals (HITL)
+        self.trade_proposals: Dict[str, Any] = {}
 
 class AccountContext:
     """

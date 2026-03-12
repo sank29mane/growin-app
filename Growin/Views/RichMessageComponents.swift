@@ -202,6 +202,7 @@ struct RichDataView: View, Equatable {
     }
 
     let data: MarketContextData
+    var viewModel: ChatViewModel? = nil
     
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -210,11 +211,10 @@ struct RichDataView: View, Equatable {
                 TradeProposalCard(
                     proposal: proposal,
                     onApprove: { id in
-                        print("Trade \(id) APPROVED")
-                        // Logic to send approval to backend via socket/API
+                        viewModel?.approveTrade(id: id)
                     },
                     onReject: { id in
-                        print("Trade \(id) REJECTED")
+                        viewModel?.rejectTrade(id: id)
                     }
                 )
                 .transition(.asymmetric(insertion: .push(from: .top), removal: .opacity))
@@ -651,6 +651,10 @@ struct TradeProposalCard: View, Equatable {
         }
     }
     
+    var isPending: Bool {
+        proposal.status == "PENDING" || proposal.status == nil
+    }
+    
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             // Header with NPU Glow
@@ -738,38 +742,55 @@ struct TradeProposalCard: View, Equatable {
             }
             
             // Approve/Reject Buttons
-            HStack(spacing: 12) {
-                Button(action: { onApprove(proposal.proposalId) }) {
-                    HStack {
-                        Image(systemName: "checkmark.circle.fill")
-                        Text("APPROVE")
+            if isPending {
+                HStack(spacing: 12) {
+                    Button(action: { onApprove(proposal.proposalId) }) {
+                        HStack {
+                            Image(systemName: "checkmark.circle.fill")
+                            Text("APPROVE")
+                        }
+                        .font(.system(size: 12, weight: .bold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(Color.green.opacity(0.15))
+                        .foregroundStyle(.green)
+                        .cornerRadius(8)
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.green.opacity(0.3), lineWidth: 1))
                     }
-                    .font(.system(size: 12, weight: .bold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(Color.green.opacity(0.15))
-                    .foregroundStyle(.green)
-                    .cornerRadius(8)
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.green.opacity(0.3), lineWidth: 1))
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Approve Trade Proposal")
-                
-                Button(action: { onReject(proposal.proposalId) }) {
-                    HStack {
-                        Image(systemName: "xmark.circle.fill")
-                        Text("REJECT")
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Approve Trade Proposal")
+                    
+                    Button(action: { onReject(proposal.proposalId) }) {
+                        HStack {
+                            Image(systemName: "xmark.circle.fill")
+                            Text("REJECT")
+                        }
+                        .font(.system(size: 12, weight: .bold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(Color.red.opacity(0.15))
+                        .foregroundStyle(.red)
+                        .cornerRadius(8)
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.red.opacity(0.3), lineWidth: 1))
                     }
-                    .font(.system(size: 12, weight: .bold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(Color.red.opacity(0.15))
-                    .foregroundStyle(.red)
-                    .cornerRadius(8)
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.red.opacity(0.3), lineWidth: 1))
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Reject Trade Proposal")
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Reject Trade Proposal")
+            } else {
+                HStack {
+                    Spacer()
+                    HStack(spacing: 6) {
+                        Image(systemName: proposal.status == "APPROVED" ? "checkmark.seal.fill" : "xmark.seal.fill")
+                        Text("PROPOSAL \(proposal.status ?? "")")
+                    }
+                    .font(.system(size: 12, weight: .black))
+                    .foregroundStyle(proposal.status == "APPROVED" ? .green : .red)
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 16)
+                    .background(Color.white.opacity(0.05))
+                    .cornerRadius(8)
+                    Spacer()
+                }
             }
         }
         .padding(14)

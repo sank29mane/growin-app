@@ -3,6 +3,14 @@ import mlx.nn as nn
 import numpy as np
 from typing import Tuple, Optional
 
+from enum import Enum
+from typing import Tuple, Optional, Dict, Any
+
+class TimeResolution(Enum):
+    DAILY = "daily"
+    INTRADAY_5MIN = "5min"
+    INTRADAY_1MIN = "1min"
+
 class NeuralJMCE(nn.Module):
     """
     Joint Mean-Covariance Estimator (JMCE) using a Transformer backbone.
@@ -10,6 +18,8 @@ class NeuralJMCE(nn.Module):
     
     Predicts expected returns (mu) and the Cholesky factor (L) of the covariance matrix
     to ensure the resulting covariance is always Positive Definite.
+    
+    SOTA 2026 Phase 30: Added High-Velocity Intraday (1Min/5Min) resolution support.
     """
     def __init__(
         self,
@@ -17,18 +27,29 @@ class NeuralJMCE(nn.Module):
         d_model: int = 128,
         n_layers: int = 3,
         n_heads: int = 4,
-        seq_len: int = 180
+        seq_len: int = 180,
+        resolution: TimeResolution = TimeResolution.DAILY
     ):
         super().__init__()
         self.n_assets = n_assets
         self.d_model = d_model
+        self.resolution = resolution
         self.cholesky_size = (n_assets * (n_assets + 1)) // 2
         
+        # SOTA 2026: Resolution-aware sequence padding/slicing
+        # Daily: 180 days, 5Min: 78 intervals (1 day), 1Min: 390 intervals (1 day)
+        self.target_seq_len = seq_len
+        if resolution == TimeResolution.INTRADAY_5MIN:
+            self.target_seq_len = max(seq_len, 78)
+        elif resolution == TimeResolution.INTRADAY_1MIN:
+            self.target_seq_len = max(seq_len, 390)
+
         # Input projection: daily returns for all assets -> d_model latent space
         self.input_proj = nn.Linear(n_assets, d_model)
         
         # Positional encoding for sequence length (learned)
-        self.pos_emb = mx.random.normal((seq_len, d_model)) * 0.02
+        # We use the target_seq_len to ensure we can handle full intraday days
+        self.pos_emb = mx.random.normal((self.target_seq_len, d_model)) * 0.02
         
         # Transformer Backbone for sequence processing
         # Captures regime-aware dependencies and correlations over time
@@ -44,6 +65,10 @@ class NeuralJMCE(nn.Module):
         
         # Head for Cholesky factor (L_flat)
         self.cholesky_head = nn.Linear(d_model, self.cholesky_size)
+        
+        # SOTA Phase 30: Velocity Head for Tick Covariance Shift Detection
+        # Predicts the rate of change of the Cholesky factor
+        self.velocity_head = nn.Linear(d_model, self.cholesky_size)
         
         # Precompute indexing logic for Cholesky reconstruction
         self._init_cholesky_logic(n_assets)
@@ -70,25 +95,22 @@ class NeuralJMCE(nn.Module):
         idx_map[idx_map == -1] = self.cholesky_size
         self.idx_map_mx = mx.array(idx_map)
 
-    def __call__(self, x: mx.array) -> Tuple[mx.array, mx.array]:
+    def __call__(self, x: mx.array, return_velocity: bool = False) -> Tuple[mx.array, mx.array, Optional[mx.array]]:
         """
         Forward pass.
         Args:
             x: Return sequences of shape (batch, seq_len, n_assets)
+            return_velocity: Whether to return covariance velocity (Phase 30)
         Returns:
             mu: Expected returns (batch, n_assets)
             L: Cholesky factor (batch, n_assets, n_assets)
+            V: Optional Covariance Velocity (batch, n_assets, n_assets)
         """
         B, S, N = x.shape
-        if N != self.n_assets:
-            # Handle mismatch or padding if necessary. 
-            # For now, we enforce consistency or expect the user to slice.
-            pass
-            
         # 1. Project to latent space
         x = self.input_proj(x)
         
-        # 2. Add Positional Embedding
+        # 2. Add Positional Embedding (clipped to actual sequence length)
         x = x + self.pos_emb[:S]
         
         # 3. Backbone processing
@@ -104,7 +126,13 @@ class NeuralJMCE(nn.Module):
         # 6. Reconstruct valid Cholesky factor
         L = self._build_cholesky(L_flat)
         
-        return mu, L
+        # 7. SOTA Phase 30: Velocity extraction
+        V = None
+        if return_velocity:
+            V_flat = self.velocity_head(x_final)
+            V = self._build_cholesky(V_flat) # Re-use building logic
+            
+        return mu, L, V
 
     def _build_cholesky(self, L_flat: mx.array) -> mx.array:
         """
@@ -126,3 +154,61 @@ class NeuralJMCE(nn.Module):
     def get_covariance(self, L: mx.array) -> mx.array:
         """Computes the covariance matrix Sigma = LL^T."""
         return mx.matmul(L, L.transpose(0, 2, 1))
+
+class CoreMLJMCE:
+    """
+    Core ML wrapper for NeuralJMCE to utilize the ANE (Neural Engine).
+    Bridges the high-velocity intraday requirements to dedicated NPU hardware.
+    """
+    def __init__(self, model_path: str, n_assets: int = 50):
+        from backend.coreml_inference import CoreMLRunner
+        self.runner = CoreMLRunner(model_path)
+        self.n_assets = n_assets
+        self._initialized = self.runner.load(model_path)
+        
+    def __call__(self, x: np.ndarray, return_velocity: bool = False) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
+        """
+        Forward pass on ANE.
+        Args:
+            x: Return sequences (seq_len, n_assets)
+        """
+        if not self._initialized:
+            raise RuntimeError("CoreML JMCE model not initialized or ANE unavailable")
+            
+        # CoreML model expects specific input keys
+        # We assume the model was exported with 'returns' as input
+        # and 'mu', 'L', 'V' as outputs
+        inputs = {"returns": x.astype(np.float32)}
+        outputs = self.runner.predict(inputs)
+        
+        mu = outputs.get("mu")
+        L = outputs.get("L")
+        V = outputs.get("V") if return_velocity else None
+        
+        return mu, L, V
+
+def get_jmce_model(
+    n_assets: int = 50, 
+    use_ane: bool = True, 
+    resolution: TimeResolution = TimeResolution.DAILY
+) -> Any:
+    """
+    Factory to retrieve the best available JMCE implementation.
+    Prioritizes ANE (CoreML) > GPU (MLX).
+    """
+    if use_ane:
+        import os
+        # Check for pre-compiled CoreML model
+        model_name = f"jmce_{n_assets}_{resolution.value}.mlmodel"
+        model_path = os.path.join("models", "coreml", model_name)
+        
+        if os.path.exists(model_path):
+            try:
+                return CoreMLJMCE(model_path, n_assets=n_assets)
+            except Exception as e:
+                from backend.app_logging import setup_logging
+                logger = setup_logging("jmce_factory")
+                logger.warning(f"Failed to load ANE model, falling back to MLX: {e}")
+    
+    # Default to MLX (GPU)
+    return NeuralJMCE(n_assets=n_assets, resolution=resolution)

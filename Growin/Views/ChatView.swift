@@ -83,7 +83,7 @@ struct ChatView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 20) {
                     ForEach(viewModel.messages) { message in
-                        ChatBubble(message: message, onQuickAction: { prompt in
+                        ChatBubble(message: message, viewModel: viewModel, onQuickAction: { prompt in
                             viewModel.inputText = prompt
                             viewModel.sendMessage()
                         })
@@ -254,6 +254,7 @@ struct ChatBubble: View, Equatable {
     }
 
     let message: ChatMessageModel
+    let viewModel: ChatViewModel
     var onQuickAction: ((String) -> Void)? = nil
     
     var body: some View {
@@ -308,7 +309,7 @@ struct ChatBubble: View, Equatable {
                             
                             // Rich Data Visualization
                             if let data = message.data {
-                                RichDataView(data: data)
+                                RichDataView(data: data, viewModel: viewModel)
                             }
                             
                             if let toolCalls = message.toolCalls, !toolCalls.isEmpty {

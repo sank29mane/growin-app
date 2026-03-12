@@ -7,23 +7,21 @@
 
 ## Summary
 - Completed Milestone: Institutional Portfolio Optimization (Phase 29).
-- Implemented Neural JMCE using MLX on Apple Silicon M4 NPU.
-- Integrated SciPy SLSQP optimizer with 10% position caps and 75bps alpha hurdle.
-- Created `RegimeFetcher` for macro-aware data fabrication.
-- Updated `QuantEngine` and `DataFabricator` to support portfolio-wide optimization intents.
-- Implemented background `OptimizationMonitor` using `arq`.
-- Enhanced SwiftUI frontend with Strategy Persona (Aggressive/Defensive) and CVaR risk rendering.
-- Pivoted away from Commodities/Crypto to focus solely on high-velocity intraday LETF trading.
-- Implemented a T212 Request Budgeter to avoid API rate limits.
-- Added HITL UI components for safe, manual execution of AI-proposed trades.
+- Implemented Neural JMCE using MLX on Apple Silicon M4 NPU with **High-Velocity Intraday support**.
+- Added `TimeResolution` support (1Min/5Min) and **Covariance Velocity** tracking to NeuralJMCE.
+- Implemented `ORBDetector` for TQQQ/SQQQ Opening Range Breakout signals with volume confirmation.
+- Integrated full HITL Trade Approval Handshake (Frontend -> Backend -> T212 MCP).
+- Added `trade/approve` and `trade/reject` endpoints in `ai_routes.py`.
+- Integrated `TradeProposalCard` with `ChatViewModel` for real-time execution.
+- Verified HITL and NeuralJMCE intraday capabilities with comprehensive regression tests.
 
 ## Last Milestone Summary
 - **Milestone**: Institutional Portfolio Optimization (COMPLETED 2026-03-08)
 - **Completed**: Phase 29
 
 ## Next Steps
-1. **Research**: Define ORB (Opening Range Breakout) triggers for TQQQ/SQQQ.
-2. **Strategy**: Adapt the MLX Neural JMCE for 5-15 minute tick analysis.
+1. **Decision Logic**: Update `DecisionAgent` to trigger ORB signals for LETFs.
+2. **Backtest**: Run high-velocity simulation for TQQQ/SQQQ using the new NPU-accelerated JMCE.
 
 ## Quick Tasks Completed
 | Task | Description | Date |

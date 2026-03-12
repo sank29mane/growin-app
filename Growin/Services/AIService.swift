@@ -94,4 +94,49 @@ class AIService {
             response?["message"] as? String ?? ""
         )
     }
+
+    // MARK: - Phase 30: Trade HITL Approval
+
+    func approveTrade(id: String) async throws -> String {
+        let url = URL(string: "\(baseURL)/api/ai/trade/approve")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        let body = ["proposal_id": id, "decision": "APPROVED"]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        
+        let (data, response) = try await URLSession.shared.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+            let errorMsg = String(data: data, encoding: .utf8) ?? "Unknown Error"
+            throw NSError(domain: "AIService", code: 2, userInfo: [NSLocalizedDescriptionKey: "Approval failed: \(errorMsg)"])
+        }
+        
+        let result = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        return result?["message"] as? String ?? "Trade execution started."
+    }
+
+    func rejectTrade(id: String, notes: String? = nil) async throws -> String {
+        let url = URL(string: "\(baseURL)/api/ai/trade/reject")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        var body: [String: Any] = ["proposal_id": id, "decision": "REJECTED"]
+        if let notes = notes {
+            body["notes"] = notes
+        }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        
+        let (data, response) = try await URLSession.shared.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+            let errorMsg = String(data: data, encoding: .utf8) ?? "Unknown Error"
+            throw NSError(domain: "AIService", code: 3, userInfo: [NSLocalizedDescriptionKey: "Rejection failed: \(errorMsg)"])
+        }
+        
+        let result = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        return result?["message"] as? String ?? "Trade proposal rejected."
+    }
 }

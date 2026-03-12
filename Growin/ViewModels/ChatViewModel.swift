@@ -19,10 +19,83 @@ class ChatViewModel {
 
     private let config = AppConfig.shared
     private let agentClient = AgentClient()
+    private let aiService = AIService()
     private let defaults = UserDefaults.standard
     
     init() {
         self.selectedConversationId = defaults.string(forKey: "currentConversationId")
+    }
+
+    // MARK: - Phase 30: Trade HITL Actions
+
+    func approveTrade(id: String) {
+        Task {
+            isProcessing = true
+            streamingStatus = "Executing trade..."
+            do {
+                let message = try await aiService.approveTrade(id: id)
+                streamingStatus = message
+                // Update local state for the proposal status if found
+                updateProposalStatus(id: id, status: "APPROVED")
+            } catch {
+                errorMessage = error.localizedDescription
+                updateProposalStatus(id: id, status: "FAILED")
+            }
+            isProcessing = false
+        }
+    }
+
+    func rejectTrade(id: String) {
+        Task {
+            do {
+                _ = try await aiService.rejectTrade(id: id)
+                updateProposalStatus(id: id, status: "REJECTED")
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func updateProposalStatus(id: String, status: String) {
+        for i in messages.indices {
+            if var data = messages[i].data, let proposal = data.tradeProposal, proposal.proposalId == id {
+                let updatedProposal = TradeProposalData(
+                    proposalId: proposal.proposalId,
+                    ticker: proposal.ticker,
+                    action: proposal.action,
+                    quantity: proposal.quantity,
+                    reasoning: proposal.reasoning,
+                    status: status
+                )
+                
+                let newData = MarketContextData(
+                    forecast: data.forecast,
+                    quant: data.quant,
+                    research: data.research,
+                    portfolio: data.portfolio,
+                    price: data.price,
+                    whale: data.whale,
+                    riskGovernance: data.riskGovernance,
+                    geopolitical: data.geopolitical,
+                    tradeProposal: updatedProposal,
+                    reasoning: data.reasoning
+                )
+                
+                let old = messages[i]
+                messages[i] = ChatMessageModel(
+                    messageId: old.messageId,
+                    role: old.role,
+                    content: old.content,
+                    timestamp: old.timestamp,
+                    toolCalls: old.toolCalls,
+                    toolCallId: old.toolCallId,
+                    agentName: old.agentName,
+                    modelName: old.modelName,
+                    data: newData
+                )
+                break
+            }
+        }
     }
 
     private var effectiveModelName: String {

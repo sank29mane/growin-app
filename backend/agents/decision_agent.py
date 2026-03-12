@@ -178,8 +178,11 @@ class DecisionAgent:
             # SOTA 2026 Phase 30: Detect and extract Trade Proposals for HITL
             trade_proposal = self._extract_trade_proposal(recommendation, context)
             if trade_proposal:
+                from app_context import state
+                proposal_id = trade_proposal.get("proposal_id")
+                state.trade_proposals[proposal_id] = trade_proposal
                 context.user_context["pending_proposal"] = trade_proposal
-                logger.info(f"DecisionAgent: Detected trade proposal for {trade_proposal.get('ticker')}. Routing to HITL gate.")
+                logger.info(f"DecisionAgent: Detected trade proposal for {trade_proposal.get('ticker')} ({proposal_id}). Routing to HITL gate.")
 
             status_manager.set_status("decision_agent", "ready", "Decision delivered", model=self.model_name)
 
@@ -940,15 +943,25 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
             elif "SELL" in text.upper(): action = "SELL"
 
             # 3. Quantity (Heuristic for now, or extracted from coordinates)
-            quantity = 1.0
+            quantity = Decimal("1.0")
+            # Look for "X shares" or "qty: X"
             qty_match = re.search(r'([0-9.]+)\s*shares', text, re.IGNORECASE)
+            if not qty_match:
+                qty_match = re.search(r'qty:\s*([0-9.]+)', text, re.IGNORECASE)
+
             if qty_match:
-                quantity = float(qty_match.group(1))
-            
+                try:
+                    quantity = Decimal(qty_match.group(1))
+                except Exception:
+                    pass
+
             # 4. Reasoning (Snippet from Strategic Synthesis)
             reasoning = "NPU-detected Alpha opportunity."
             if "Strategic Synthesis" in text:
-                reasoning = text.split("Strategic Synthesis")[1].split("\n\n")[1].strip()[:150] + "..."
+                try:
+                    reasoning = text.split("Strategic Synthesis")[1].split("\n\n")[1].strip()[:150] + "..."
+                except Exception:
+                    pass
 
             return {
                 "proposal_id": str(uuid.uuid4()),
@@ -956,7 +969,8 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
                 "action": action,
                 "quantity": quantity,
                 "reasoning": reasoning,
-                "status": "PENDING"
+                "status": "PENDING",
+                "timestamp": datetime.now().timestamp()
             }
         except Exception as e:
             logger.warning(f"Failed to extract trade proposal: {e}")

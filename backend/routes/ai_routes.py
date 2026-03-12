@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException, Query
 from sse_starlette.sse import EventSourceResponse
 
 from app_context import state
-from schemas import AIStrategyResponse, AgentEvent, ReasoningStep, InstrumentWeight
+from schemas import AIStrategyResponse, AgentEvent, ReasoningStep, InstrumentWeight, TradeProposalData, TradeApprovalRequest
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/ai", tags=["AI Intelligence"])
@@ -21,6 +21,87 @@ router = APIRouter(prefix="/api/ai", tags=["AI Intelligence"])
 # Mock database for strategies (in-memory for demo/SOTA phase)
 # In production, this would be in the analytical database
 STRATEGIES_MOCK = {}
+
+# --- HITL Trade Approval Endpoints ---
+
+@router.post("/trade/approve")
+async def approve_trade(request: TradeApprovalRequest):
+    """
+    SOTA 2026 Phase 30: HITL Trade Approval.
+    Validates the proposal and executes the trade via Trading 212 MCP.
+    """
+    proposal_id = request.proposal_id
+    
+    if proposal_id not in state.trade_proposals:
+        # Fallback for mock/demo purposes if needed
+        # In a real session, proposals are stored in AppState
+        raise HTTPException(status_code=404, detail=f"Trade proposal {proposal_id} not found")
+    
+    proposal = state.trade_proposals[proposal_id]
+    
+    if proposal.get("status") != "PENDING":
+        raise HTTPException(status_code=400, detail=f"Trade proposal {proposal_id} is already {proposal.get('status')}")
+
+    try:
+        logger.info(f"🚀 Executing APPROVED trade: {proposal['action']} {proposal['quantity']} {proposal['ticker']}")
+        
+        # Execute trade via MCP Trading 212
+        # T212 tool expects: ticker, action (BUY/SELL), quantity
+        # Note: action might need mapping if it's not exactly BUY/SELL
+        t212_action = proposal["action"].upper()
+        if t212_action not in ["BUY", "SELL"]:
+             raise HTTPException(status_code=400, detail=f"Invalid trade action for execution: {t212_action}")
+             
+        # Call Trading 212 MCP Tool
+        # We use call_tool from state.mcp_client
+        result = await state.mcp_client.call_tool(
+            "place_market_order",
+            {
+                "ticker": proposal["ticker"],
+                "action": t212_action,
+                "quantity": float(proposal["quantity"])
+            }
+        )
+        
+        # Update proposal status
+        proposal["status"] = "APPROVED"
+        proposal["executed_at"] = datetime.now().timestamp()
+        proposal["execution_result"] = str(result)
+        
+        return {
+            "status": "success",
+            "message": f"Trade for {proposal['ticker']} executed successfully.",
+            "execution_details": result
+        }
+        
+    except Exception as e:
+        logger.error(f"Trade execution failed for {proposal_id}: {e}")
+        proposal["status"] = "FAILED"
+        proposal["error"] = str(e)
+        raise HTTPException(status_code=500, detail=f"Trade execution failed: {str(e)}")
+
+@router.post("/trade/reject")
+async def reject_trade(request: TradeApprovalRequest):
+    """
+    SOTA 2026 Phase 30: HITL Trade Rejection.
+    Marks the proposal as rejected and stops execution.
+    """
+    proposal_id = request.proposal_id
+    
+    if proposal_id not in state.trade_proposals:
+        raise HTTPException(status_code=404, detail=f"Trade proposal {proposal_id} not found")
+        
+    proposal = state.trade_proposals[proposal_id]
+    proposal["status"] = "REJECTED"
+    proposal["rejected_at"] = datetime.now().timestamp()
+    proposal["rejection_notes"] = request.notes
+    
+    logger.info(f"🚫 Trade {proposal_id} REJECTED by user: {request.notes}")
+    
+    return {
+        "status": "rejected",
+        "message": f"Trade proposal for {proposal['ticker']} has been rejected."
+    }
 
 @router.get("/strategy/stream")
 async def stream_strategy_events(

@@ -3,10 +3,11 @@ import mlx.core as mx
 from scipy.optimize import minimize
 from decimal import Decimal
 from typing import Dict, List, Optional, Union, Any
-from backend.utils.jmce_model import NeuralJMCE
+from backend.utils.jmce_model import NeuralJMCE, get_jmce_model, TimeResolution
 from backend.utils.risk_engine import RiskEngine
 from backend.utils.financial_math import create_decimal
 from backend.app_logging import setup_logging
+from backend.app_context import state
 
 logger = setup_logging("portfolio_analyzer")
 
@@ -14,10 +15,14 @@ class PortfolioAnalyzer:
     """
     Institutional-grade portfolio optimizer using Neural JMCE and SLSQP.
     Implements 10% Position Cap and Dynamic Alpha Hurdle.
+    
+    SOTA 2026: Dynamically utilizes ANE (CoreML) or GPU (MLX) for NPU acceleration.
     """
     
-    def __init__(self, model: Optional[NeuralJMCE] = None, n_assets: int = 50):
-        self.model = model or NeuralJMCE(n_assets=n_assets)
+    def __init__(self, model: Optional[Any] = None, n_assets: int = 50, resolution: TimeResolution = TimeResolution.DAILY):
+        # Use state.ane_config to decide if we should use ANE
+        use_ane = getattr(state.ane_config, 'enabled', True)
+        self.model = model or get_jmce_model(n_assets=n_assets, use_ane=use_ane, resolution=resolution)
         self.risk_engine = RiskEngine()
 
     async def optimize_weights(
@@ -43,17 +48,36 @@ class PortfolioAnalyzer:
         seq_len = returns_history.shape[0]
         
         try:
-            # 1. Forward Pass on NPU (MLX)
-            # Reshape for batch size 1: (1, seq_len, n_assets)
-            x = mx.array(returns_history[np.newaxis, :, :].astype(np.float32))
+            # 1. Forward Pass on NPU (ANE or GPU)
+            # SOTA 2026: NeuralJMCE returns (mu, L, V)
+            # Input shape: (seq_len, n_assets) or (1, seq_len, n_assets)
             
-            # Use to_thread or similar if needed, but MLX is usually fast
-            mu_mx, L_mx = self.model(x)
-            sigma_mx = self.model.get_covariance(L_mx)
-            
-            # Convert to numpy for SciPy
-            mu = np.array(mu_mx[0])
-            sigma = np.array(sigma_mx[0])
+            if hasattr(self.model, "__call__"):
+                if isinstance(self.model, NeuralJMCE):
+                    # MLX Path (GPU)
+                    x = mx.array(returns_history[np.newaxis, :, :].astype(np.float32))
+                    mu_mx, L_mx, _ = self.model(x)
+                    sigma_mx = self.model.get_covariance(L_mx)
+                    
+                    # Convert to numpy for SciPy
+                    mu = np.array(mu_mx[0])
+                    sigma = np.array(sigma_mx[0])
+                else:
+                    # CoreML Path (ANE) - Using duck typing for CoreMLJMCE
+                    # Expects (seq_len, n_assets)
+                    mu, L, _ = self.model(returns_history.astype(np.float32))
+                    
+                    # CoreML outputs are already numpy arrays
+                    # We need to compute sigma = L * L^T if L is Cholesky
+                    if mu is None or L is None:
+                        raise RuntimeError("CoreML model returned None for mu or L")
+                        
+                    if L.ndim == 3: L = L[0] # remove batch if present
+                    if mu.ndim == 2: mu = mu[0]
+                    
+                    sigma = np.matmul(L, L.T)
+            else:
+                raise RuntimeError("Invalid JMCE model loaded")
             
             # 2. Dynamic Hurdle (75 bps + Friction)
             # In a real scenario, friction would be asset-specific (e.g. T212 spreads/FX)
