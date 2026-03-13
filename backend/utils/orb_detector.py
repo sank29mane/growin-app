@@ -37,24 +37,30 @@ class ORBDetector:
         Returns:
             Dict containing signal details.
         """
-        if len(ohlcv_5m) < (self.range_minutes // 5) + 1:
+        if len(ohlcv_5m) < (self.range_minutes // 5):
             return {"signal": "WAIT", "reason": "Insufficient data for Opening Range"}
             
+        # SOTA: Resilient key resolution for different data providers (Alpaca vs yfinance vs T212)
+        def get_val(bar, *keys):
+            for k in keys:
+                if k in bar: return bar[k]
+            raise KeyError(f"None of {keys} found in bar {bar.keys()}")
+
         # 1. Extract Opening Range (First 6 bars for 30 min)
         bars_in_range = self.range_minutes // 5
         or_bars = ohlcv_5m[:bars_in_range]
         
-        or_high = max(float(b['h']) for b in or_bars)
-        or_low = min(float(b['l']) for b in or_bars)
+        or_high = max(float(get_val(b, 'h', 'high', 'High')) for b in or_bars)
+        or_low = min(float(get_val(b, 'l', 'low', 'Low')) for b in or_bars)
         
         # 2. Analyze Current State (Latest bar)
         current_bar = ohlcv_5m[-1]
-        current_close = float(current_bar['c'])
-        current_volume = float(current_bar['v'])
+        current_close = float(get_val(current_bar, 'c', 'close', 'Close'))
+        current_volume = float(get_val(current_bar, 'v', 'volume', 'Volume'))
         
         # 3. Volume Confirmation
         # Calculate 20-period volume SMA
-        volumes = [float(b['v']) for b in ohlcv_5m]
+        volumes = [float(get_val(b, 'v', 'volume', 'Volume')) for b in ohlcv_5m]
         vol_sma = np.mean(volumes[-20:]) if len(volumes) >= 20 else np.mean(volumes)
         volume_confirmed = current_volume > (vol_sma * 1.5)
         

@@ -11,11 +11,11 @@ from data_models import PriceData
 # Set up logging
 logger = logging.getLogger(__name__)
 
-from utils.error_resilience import CircuitBreaker, circuit_breaker
+from resilience import get_circuit_breaker
 
-# Circuit Breakers for External Services
-alpaca_circuit = CircuitBreaker(failure_threshold=5, recovery_timeout=60)
-finnhub_circuit = CircuitBreaker(failure_threshold=5, recovery_timeout=60)
+# Circuit Breakers for External Services (SOTA 2026 Resilience API)
+alpaca_circuit = get_circuit_breaker("alpaca", failure_threshold=5, recovery_timeout=60.0)
+finnhub_circuit = get_circuit_breaker("finnhub", failure_threshold=5, recovery_timeout=60.0)
 
 # --- Configuration ---
 API_KEY = os.getenv("ALPACA_API_KEY")
@@ -188,7 +188,7 @@ class AlpacaClient:
             # Do NOT return mock data for invalid tickers. This causes AI hallucinations.
             return None
 
-    @circuit_breaker(alpaca_circuit)
+    @alpaca_circuit.protect
     async def get_historical_bars(self, ticker: str, timeframe="1Day", limit: int = 512) -> Optional[BarDataDict]:
         """
         Architecture Resilience:
@@ -588,7 +588,7 @@ class FinnhubClient:
         else:
             logger.info("FinnhubClient: API key not set. Running in offline/mock mode.")
 
-    @circuit_breaker(finnhub_circuit)
+    @finnhub_circuit.protect
     async def get_historical_bars(self, ticker: str, timeframe="1Day", limit: int = 512) -> Optional[BarDataDict]:
         """Fetch historical bars using Finnhub API for UK stocks."""
         if not self.client:

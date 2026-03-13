@@ -12,7 +12,7 @@ from utils import sanitize_nan
 
 from app_context import state
 from cache_manager import cache
-from trading212_mcp_server import normalize_ticker
+from utils.ticker_utils import normalize_ticker
 from data_engine import get_alpaca_client
 from schemas import GoalPlanContext, GoalExecutionRequest, SetActiveAccountRequest
 

@@ -96,7 +96,6 @@ class ResearchAgent(BaseAgent):
         
         try:
             from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-            from error_resilience import provider_manager, normalize_response_format
             
             sentiment_analyzer = SentimentIntensityAnalyzer()
             articles = []
@@ -118,11 +117,8 @@ class ResearchAgent(BaseAgent):
                 reg_news = await self._fetch_regulatory_news(query_ticker, query_name)
                 current_articles.extend(reg_news)
 
-                # 1. NewsAPI (Circuit Breaker protected)
+                # 1. NewsAPI (Circuit Breaker protected via direct fetch logic)
                 if self.newsapi_key and query_ticker != "MARKET":
-                    chain = provider_manager.get_or_create_chain("newsapi")
-                    # Register dynamically if not exists (simplified for now, usually done in init)
-                    # For now we just use safe direct call with CB logic manually or via helper
                     news_res = await self._fetch_newsapi(query_ticker, query_name)
                     current_articles.extend(news_res)
 

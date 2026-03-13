@@ -67,7 +67,8 @@ import sys
 async def lifespan(app: FastAPI):
     """Lifecycle events - MCP connection and model initialization"""
     # Startup
-    logger.info("Starting Growin Server (SOTA 2026 Mode)...")
+    logger.info(f"Starting Growin Server (SOTA 2026 Mode)...")
+    logger.info(f"📍 Platform: {sys.platform} | Python: {sys.version.split()[0]}")
     
     # Check Active Components for Observability
     try:
@@ -76,7 +77,13 @@ async def lifespan(app: FastAPI):
     except ImportError:
         logger.info("⚠️  Rust Core: Disabled (Fallback Mode)")
         
-    logger.info(f"🧠 ANE Acceleration: {'Enabled' if _ane_enabled else 'Disabled'}")
+    # ANE Diagnostic
+    if _ane_enabled:
+        logger.info(f"🧠 ANE Acceleration: ENABLED (Target: {state.ane_config.compute_units})")
+        if sys.platform != "darwin":
+            logger.warning("⚠️  ANE is enabled but platform is NOT darwin (Docker/Linux?). NPU will NOT be utilized.")
+    else:
+        logger.info("🧠 ANE Acceleration: DISABLED (Falling back to GPU/CPU)")
     
     # 1. Ensure default MCP servers are configured
     def is_docker_available():

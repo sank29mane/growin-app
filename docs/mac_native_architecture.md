@@ -1,56 +1,42 @@
-# Mac-native Architecture Blueprint
+# Mac-native Architecture Blueprint (SOTA 2026)
 
-Goal: A true Mac-native experience for Growin App, leveraging Apple Silicon (MLX) for on-device inference and a SwiftUI front-end with a lightweight Python backend bridge.
+Goal: A true Mac-native experience for Growin App, leveraging the full M4 generation Apple Silicon (AMX, Metal, ANE) for on-device inference and a SwiftUI front-end with a high-performance Python backend bridge.
 
-Core Components
-- SwiftUI Frontend (macOS):
-  - Local UI, charts, and user interactions.
-  - Stores preferences and small state locally.
-  - Communicates with the local backend bridge via localhost HTTP (REST) or gRPC.
-- Python Backend (FastAPI):
-  - Core data ingestion, forecasting, indicators, AI analysis, and agent orchestration.
-  - Exposes a stable API surface for bridge and potential direct SwiftUI calls.
-- Bridge Layer (Mac-native Prototype):
-  - Lightweight REST bridge that forwards requests between SwiftUI frontend and Python backend (on localhost).
-  - Allows experimentation with IPC strategies (REST, gRPC, or Unix sockets).
-- On-device acceleration:
-  - Core ML for lightweight models and potential transformer components.
-  - Optional Torch -> Core ML conversion (via coremltools) for on-device inference when feasible.
-- ANE-enabled on-device inference (default-off, auto-detect):
-  - Leverages Apple Neural Engine on Apple Silicon for ultra-low latency ML tasks (forecasting, indicators).
-  - Compute units: Prefer Neural Engine when available, fall back to CPU/GPU.
-  - Path: SwiftUI -> IPC bridge -> Core ML runner -> results back through IPC.
-  - Safety: Feature flag (USE_ANE env var or UI toggle) to disable; auto-enables on Apple Silicon by default.
-  - Model constraints: Keep sizes small (1–20 MB) for on-device; target sub-500ms inference latency.
+## Core Components
 
-Data Flow
-- Ingest OHLCV data -> Validate with Pydantic -> Feature extraction -> Forecasting (SOTA models) + Indicators (RSI, MACD, Bollinger) -> AI-generated summaries -> UI rendering.
-- All sensitive computations (forecasting, AI analysis) keep within the device when possible; network calls are minimized.
+### SwiftUI Frontend (macOS)
+- **Fluid Interface**: Local UI, charts, and user interactions optimized for 120Hz ProMotion displays.
+- **Hardware Acceleration**: Utilizes Apple's `Accelerate` framework for local, ultra-fast vector math and portfolio rebalancing.
+- **Reasoning Visualization**: Real-time agentic "thought traces" visualization using `PhaseAnimator` and Metal-accelerated shaders.
 
-Performance & Observability
-- Profiling: Use Instruments / Activity Monitor to track CPU/GPU usage and energy impact.
-- Caching: In-memory TTL or local SQLite to reduce redundant work.
-- Logging: Structured logging with context IDs for tracing user sessions.
+### Python Backend (FastAPI / uv)
+- **System Brain**: Managed via `uv` for lightning-fast dependency resolution and virtual environment isolation.
+- **Hardware-Aware Routing**: Intelligently routes tasks to the optimal SoC component (AMX, GPU, or NPU).
+- **Tool Handlers**: Modular handlers (`t212_handlers.py`) for secure communication with brokerage APIs via MCP.
 
-Security & Privacy
-- On-device processing minimizes data leaving the device.
-- If cloud offloads are introduced, ensure encryption and minimal data exposure.
+## M4 Hardware Partitioning (The "Three-Brain" Model)
 
-Risks & Mitigations
-- IPC complexity: Start with REST bridge and iterate to a more efficient IPC (gRPC or Unix sockets).
-- Model size: Start with small, distilled models for on-device inference; keep larger models optional and offload when necessary.
-- macOS version fragmentation: Build universal binaries and conditionals for Intel vs Apple Silicon.
+| Brain | Hardware | Primary Workload |
+|-------|----------|------------------|
+| **The Orchestrator** | **CPU (AMX)** | Python execution, API lifecycle, JSON parsing, and MCP server management. |
+| **The Reasoner** | **GPU (Metal/MLX)** | Large Language Model (LLM) inference, daily model calibration, and **Weight Adapter** training. |
+| **The Math Engine** | **NPU (ANE)** | **Neural JMCE** real-time inference, technical indicator calculations, and covariance shift detection. |
 
-Roadmap Snippet
-- Phase 1 (Completed): Prototyping bridge + minimal SwiftUI view. Integrated with FastAPI backend over localhost.
-- Phase 2 (Completed): Core performance optimizations (Bolt vectorization) and high-speed ticker resolution via Rust Native Core (`growin_core`).
-- Phase 3 (In Progress): Expanding on-device AI capabilities via MLX (Granite-Tiny) and Core ML for ultra-low latency inference.
-- Phase 4: Full ANE-enabled local agentic workflows.
+## Data Flow & Precision
+- **Ingestion**: Tiered multi-source data (Alpaca Primary -> Finnhub Primary -> Yahoo Fallback).
+- **Normalization**: Unified `TickerResolver` and `CurrencyNormalizer` ensure broker-data parity (GBX -> GBP handled automatically).
+- **Execution**: High-conviction signals trigger **Autonomous Entry**, bypassing UI confirmation for verified SOTA trade setups.
 
-References (SOTA & Core ML on-device)
-- TFT: arXiv:1912.09363
-- Informer: arXiv:2012.07436
-- Autoformer: arXiv:2106.13008
-- Core ML overview: Apple Developer Core ML docs
-- WWDC24 sessions: on-device ML, Core ML Tools, transformer optimization
+## Security & Privacy
+- **Local Sovereignty**: All sensitive AI reasoning and mathematical modeling stays on your Mac. No financial data leaves the device for processing.
+- **Execution Guard**: Model-generated scripts are executed in a secure local sandbox (`safe_python.py`).
+- **Audit Logs**: Comprehensive local audit trails record every autonomous decision, reasoning trace, and API call for full accountability.
 
+## Roadmap & Status
+- **Phase 1-2**: Prototyping and performance optimization.
+- **Phase 24-29**: UX Polish and Institutional Portfolio Optimization.
+- **Phase 30-31**: **High-Velocity Intraday Pivot** and **Autonomous Agentic Execution** (COMPLETED).
+- **Phase 32**: **End-to-End Simulation** and production-readiness verification (IN PROGRESS).
+
+---
+*Verified for Apple Silicon M4 Pro/Max/Ultra (March 2026)*

@@ -116,6 +116,25 @@ class CacheManager:
                      self._redis.setex(key, ttl, data)
             except Exception as e:
                 logger.warning(f"L2 Cache set failed: {e}")
+
+    def set_nx_ex(self, key: str, value: str, ttl: int) -> bool:
+        """Atomic SET with NX (not exists) and EX (expiry). Returns True if set, False if exists."""
+        if self._redis:
+            try:
+                # Returns True if set, None/False if not set
+                result = self._redis.set(key, value, ex=ttl, nx=True)
+                return bool(result)
+            except Exception as e:
+                logger.warning(f"L2 set_nx_ex failed: {e}")
+        
+        # L1 Fallback (not atomic but better than nothing if Redis is down)
+        with self._lock:
+            if key in self._cache:
+                expire_at = self._expiry.get(key, 0)
+                if time.time() < expire_at:
+                    return False
+            self.set(key, value, ttl=ttl)
+            return True
     
     def _delete_l1_unsafe(self, key: str):
         self._cache.pop(key, None)

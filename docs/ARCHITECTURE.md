@@ -2,10 +2,10 @@
 
 ## Executive Summary
 
-**Growin** is a sophisticated financial intelligence platform that combines advanced artificial intelligence with real-time market data to provide intelligent portfolio analysis, automated trading insights, and conversational financial advice. In 2026, it adheres to SOTA best practices for **Agentic Autonomy**, **Financial Precision**, and **Local Inference**.
+**Growin** is a sophisticated financial intelligence platform that combines advanced artificial intelligence with real-time market data to provide intelligent portfolio analysis, automated trading insights, and conversational financial advice. In 2026, it adheres to SOTA best practices for **Agentic Autonomy**, **Financial Precision**, and **Hardware-Aware Local Inference**.
 
 ### System Vision
-To democratize sophisticated financial analysis by providing retail investors with institutional-grade portfolio intelligence through an intuitive, AI-powered macOS application optimized for Apple Silicon hardware.
+To democratize sophisticated financial analysis by providing retail investors with institutional-grade portfolio intelligence through an intuitive, AI-powered macOS application optimized for Apple Silicon (M4 generation) hardware.
 
 ---
 
@@ -15,151 +15,101 @@ To democratize sophisticated financial analysis by providing retail investors wi
 ```mermaid
 graph TB
     subgraph "External Environment"
-        T212[Trading 212<br/>Portfolio API]
+        T212[Trading 212<br/>MCP Server]
         ALP[Alpaca Markets<br/>Real-time Data]
-        YF[yFinance<br/>Historical Data]
-        OPENAI[OpenAI API<br/>GPT Models]
-        GEMINI[Google Gemini<br/>AI Models]
+        YF[yFinance<br/>Universal Fallback]
+        LMSTUDIO[LM Studio<br/>Local LLM API]
         NEWS[NewsAPI<br/>Market News]
-        TAVILY[TAVILY<br/>Web Search]
     end
 
-    subgraph "Growin Platform"
+    subgraph "Growin Platform (macOS Native)"
         UI[macOS SwiftUI<br/>Frontend]
-        API[FastAPI Backend<br/>API Gateway]
-        CACHE[In-memory Cache<br/>Response Caching]
-        DB[SQLite<br/>Chat History]
-        ANALYTICS[DuckDB<br/>Telemetry & Alpha]
+        API[FastAPI Backend<br/>uv Virtual Env]
+        CACHE[In-memory TTL<br/>Response Caching]
+        AUDIT[Audit Log<br/>Autonomous History]
     end
 
-    subgraph "AI Processing Layer (MAS - SOTA 2026)"
-        ORCH[Orchestrator Agent<br/>Unified Entry & Synthesis]
-        SWARM[Specialist Swarm<br/>Quant, Research, Portfolio, Social Swarm]
-        RISK[Risk Agent<br/>The Critic / Governance]
+    subgraph "AI Processing Layer (MAS - SOTA 2026 Phase 32)"
+        COORD[Coordinator Agent<br/>Router & Classifier]
+        SWARM[Specialist Swarm<br/>Quant, Forecast, Research, Risk]
+        MATH[MathGenerator Agent<br/>NPU Sandbox Scripting]
+        DECISION[Decision Agent<br/>Final Synthesis & Autonomous Entry]
     end
 
     UI --> API
-    API --> CACHE
-    API --> DB
-    API --> ORCH
-    ORCH --> ANALYTICS
-    ORCH --> SWARM
-    SWARM --> ORCH
-    ORCH --> RISK
-    RISK --> ORCH
-    ORCH --> UI
+    API --> COORD
+    COORD --> SWARM
+    COORD --> MATH
+    SWARM --> DECISION
+    MATH --> DECISION
+    DECISION --> API
+    DECISION --> UI
 
     SWARM --> T212
     SWARM --> ALP
     SWARM --> YF
-    SWARM --> NEWS
-    SWARM --> TAVILY
-    ORCH --> OPENAI
-    ORCH --> GEMINI
+    DECISION --> T212
 
     style UI fill:#e1f5fe
     style API fill:#f3e5f5
-    style ORCH fill:#e8f5e8
-    style RISK fill:#fff3e0
+    style DECISION fill:#e8f5e8
+    style COORD fill:#fff3e0
 ```
 
 ---
 
-## 2. Flattened MAS Architecture (Phases 16-20)
-As of Phase 20, Growin has migrated to a flattened hierarchy to reduce latency, improve reasoning coherence, and integrate advanced tax-aware logic.
+## 2. Agentic Swarm & Autonomous Execution (Phases 30-32)
+As of Phase 31, Growin has transitioned from Human-in-the-Loop (HITL) only to a hybrid **Autonomous Agentic** model.
 
-### The Unified Orchestrator
-The `OrchestratorAgent` replaces the previous multi-hop "Coordinator + Decision" model.
-- **Single Hop**: Natural language is directly classified and dispatched by the Orchestrator.
-- **Parallel Swarm**: Specialists (Quant, Research, Portfolio, Whale, Social Swarm) execute concurrently via `asyncio.gather`.
-- **Trajectory Stitching**: The `TrajectoryStitcher` merges disparate signals into a coherent chronological narrative.
-- **Dynamic Weighting**: The synthesis prompt is biased using historical alpha metrics fetched from `AnalyticsDB`.
-- **Integrated Reasoning**: The Orchestrator performs final synthesis using 2026 SOTA local models (e.g., LFM 2.5, Granite 4.0).
+### Multi-Agent Orchestration (Hybrid Tiered)
+- **CoordinatorAgent**: Performs sub-100ms intent classification and delegates to specialists.
+- **Specialist Swarm**:
+    - **QuantAgent**: High-frequency indicators and statistical arbitrage.
+    - **ForecasterAgent**: ML-driven price prediction.
+    - **ResearchAgent**: RAG-enhanced market news analysis.
+    - **RiskAgent**: Exposure auditing and volatility regime detection.
+- **DecisionAgent (The Synthesis Brain)**:
+    - Synthesizes all specialist signals into a final verdict.
+    - **Autonomous Bypass**: If `CONVICTION LEVEL: 10` is detected, it autonomously executes trades on Trading 212, bypassing the UI confirmation gate.
 
-### The Critic Pattern & ACE (Risk Governance)
-Mandatory auditing is performed by the `RiskAgent` before any suggestion reaches the user.
-- **Audit Stage**: Every proposed strategy is audited for exposure, compliance, and volatility risks.
-- **Adversarial Debate**: 'The Contrarian' persona challenges the Orchestrator's thesis, forcing up to 2 rounds of rebuttal.
-- **ACE Scoring**: `ACEEvaluator` calculates an Adversarial Confidence Estimation score based on debate robustness.
-- **Safety Gates**: Risk Agent appends warnings or blocks suggestions that exceed safety thresholds.
-
-### Multi-Account Synergy & TLH
-- **Consolidation**: `PortfolioAgent` aggregates positions across Invest, ISA, and CFD accounts for global weighting.
-- **Tax-Loss Harvesting**: `TLHScanner` identifies losing positions in taxable accounts for tax optimization.
-- **Wash-Sale Gate**: `RiskAgent` blocks the repurchasing of harvested assets within a 30-day window.
+### Neural JMCE (Joint Mean-Covariance Estimator)
+- **Regime-Aware Math**: Predicts returns and covariance shifts simultaneously.
+- **Covariance Velocity**: Detects early-stage regime shifts (e.g., market panic) to boost ORB signal confidence.
+- **Hardware Integration**: Runs on the Apple Neural Engine (ANE) via CoreML for <10ms inference.
 
 ---
 
-## 3. Financial Precision & Hardware Optimization
-To maximize performance on Apple Silicon M4 Pro, the system leverages hardware-level optimizations.
+## 3. Hardware-Aware Partitioning (M4 Optimized)
+Growin maximizes the M4 Ultra/Pro architecture by intelligently routing workloads:
 
-- **8-bit AFFINE Quantization**: Implemented in `mlx_engine.py` to maximize NPU/GPU throughput while maintaining Decimal-level reasoning precision.
-- **Precision Layer**: All monetary calculations use Python `decimal.Decimal` with string-only initialization and `ROUND_HALF_UP` standards.
-- **Validation**: Every price fetch is verified across multiple sources with a `0.5%` variance threshold.
+| Component | Hardware | Role |
+|-----------|----------|------|
+| **CPU (AMX)** | Apple Silicon CPU | Vectorized math, API routing, and system orchestration. |
+| **GPU (Metal/MLX)** | Apple Silicon GPU | Local LLM inference, daily model re-training, and Weight Adapters. |
+| **NPU (ANE)** | Apple Neural Engine | Real-time Neural JMCE inference and indicator forecasting. |
 
----
-
-## 4. AG-UI Streaming & Telemetry
-Transparency is achieved via real-time logic traces.
-
-- **AgentMessenger**: A decoupled message bus that broadcasts granular lifecycle events (e.g., `intent_classified`, `swarm_started`, `risk_review_started`).
-- **Reasoning Trace UI**: SwiftUI `ReasoningTraceView` uses `PhaseAnimator` to visualize live agent state changes from the SSE stream.
-- **HITL Verification**: High-stakes actions require a signed HMAC `approval_token` generated by the UI after user confirmation.
+### Local Re-training (Weight Adapters)
+- Implemented via `MLX` to perform daily calibration.
+- Adjusts model weights on-the-fly based on prediction error vs. actual market feedback.
 
 ---
 
-## 5. Local LLM Strategy & Model Management (Phase 14/15)
-To maximize privacy and performance, Growin prioritizes local inference while maintaining a flexible, multi-provider backend.
-
-### Dynamic Model Management (Phase 14)
-Growin implements a dynamic management layer for local LLMs, specifically optimized for LM Studio 0.4.x.
-- **On-Demand Loading**: Models are loaded/unloaded dynamically via the Preferences UI, preventing VRAM over-allocation.
-- **VRAM Guard**: Implements a "60% RAM Rule" for Apple Silicon (M4 Pro/Max) to ensure LLM memory bandwidth doesn't starve the OS or the SwiftUI Metal pipeline.
-
-### Stateful Chat Architecture (Phase 15)
-The conversational engine transitioned from stateless history injection to a **Server-Side Stateful** model.
-- **Context Preservation**: Uses LM Studio's Native V1 `/api/v1/chat` with `response_id` linking.
-- **Thinking Extraction (CoT)**: Automatically extracts `<think>` tags from reasoning models and stores them in `MarketContext.reasoning`.
+## 4. Data Fidelity & Normalization
+- **TickerResolver**: Centralized engine in `utils/ticker_utils.py` that maps Trading 212 internal IDs (e.g., `VODl_EQ`) to market standards (`VOD.L`).
+- **Currency Normalization**: Automatic GBX (pence) to GBP (£) conversion for LSE assets to ensure calculation accuracy.
+- **Tiered Data Feed**: Alpaca (US Primary) -> Finnhub (UK Primary) -> Yahoo Finance (Fallback).
 
 ---
 
-## 6. Security Enclave & Agent Sandboxing
-As AI agents move toward autonomy, the **Sentinel Security Layer** provides robust guardrails.
-
-### Safe Code Execution
-- **Docker-based Isolation**: Migration to Docker MCP for 2026 SOTA agent safety. Model-generated code is executed in isolated containers.
-- **Trade Approval Gate**: Backend HITL enforcement prevents any autonomous trade execution without a valid UI-generated signature.
+## 5. Security & Autonomy
+- **Decision Sandbox**: The `MathGeneratorAgent` executes generated MLX scripts in a secure local sandbox (`safe_python.py`).
+- **Audit Trail**: Every autonomous execution is logged with full reasoning context in the system audit logs.
+- **Circuit Breakers**: MCP-level circuit breakers prevent cascade failures during high-volatility events.
 
 ---
 
-## 7. Application Structure (SwiftUI Frontend)
-```mermaid
-graph TD
-    A[GrowinApp.swift<br/>App Entry Point] --> B[ContentView.swift<br/>Main Tab Controller]
-
-    B --> C[ChatView<br/>AI Conversation]
-    B --> D[PortfolioView<br/>Live Holdings]
-    B --> E[DashboardView<br/>Multi-Account Overview]
-    B --> F[SettingsView<br/>Configuration]
-    B --> G[ReasoningTraceView<br/>AI Logic Trace]
-
-    C --> H[ChatViewModel<br/>Message Management]
-    D --> I[PortfolioViewModel<br/>Data Aggregation]
-    E --> J[DashboardViewModel<br/>Cross-Account Analysis]
-    F --> K[SettingsViewModel<br/>Configuration State]
-    G --> H
-
-    H --> L[AgentClient<br/>Backend Communication]
-    I --> L
-    J --> L
-    K --> L
-
-    L --> M[HTTP/REST API<br/>localhost:8002]
-
-    style A fill:#e3f2fd
-    style B fill:#f3e5f5
-    style C fill:#e8f5e8
-    style D fill:#fff3e0
-    style H fill:#fce4ec
-    style M fill:#efebe9
-```
+## 6. Application Structure (SwiftUI Frontend)
+The frontend is a lightweight command center that visualizes the backend's reasoning.
+- **SSE Streaming**: Real-time agent thought traces streamed via Server-Sent Events.
+- **Accelerate Integration**: Uses Apple's `Accelerate` framework for local portfolio rebalancing calculations.
+- **Native Polish**: 120Hz fluid animations and deep macOS accessibility support.

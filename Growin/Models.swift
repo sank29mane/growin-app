@@ -316,18 +316,20 @@ struct ForecastData: Codable, Equatable {
 
 struct QuantData: Codable, Equatable {
     let ticker: String
-    let signal: String
     let rsi: Decimal?
     let macd: [String: Decimal]?
     let bollingerBands: [String: Decimal]?
+    let signal: String
     let supportLevel: Decimal?
     let resistanceLevel: Decimal?
-    
+    let orbSignal: [String: AnySendable]?
+
     enum CodingKeys: String, CodingKey {
-        case ticker, signal, rsi, macd
+        case ticker, rsi, macd, signal
         case bollingerBands = "bollinger_bands"
         case supportLevel = "support_level"
         case resistanceLevel = "resistance_level"
+        case orbSignal = "orb_signal"
     }
 }
 

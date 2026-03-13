@@ -8,12 +8,12 @@ import asyncio
 import logging
 import httpx
 from typing import List, Dict, Any, Optional
-from utils.error_resilience import circuit_breaker, CircuitBreaker
+from resilience import get_circuit_breaker
 
 logger = logging.getLogger(__name__)
 
-# Dedicated Circuit Breaker for NewsData.io
-newsdata_circuit = CircuitBreaker(failure_threshold=3, recovery_timeout=30)
+# Dedicated Circuit Breaker for NewsData.io (SOTA 2026 Resilience API)
+newsdata_circuit = get_circuit_breaker("newsdata", failure_threshold=3, recovery_timeout=30.0)
 
 class NewsDataIOClient:
     """
@@ -25,7 +25,7 @@ class NewsDataIOClient:
         self.api_key = api_key or os.getenv("NEWSDATA_API_KEY")
         self.base_url = "https://newsdata.io/api/1/latest"
         
-    @circuit_breaker(newsdata_circuit)
+    @newsdata_circuit.protect
     async def fetch_latest_news(self, query: str, country: str = "gb", category: str = "business") -> List[Dict[str, Any]]:
         """
         Fetch the latest news articles for a given query.

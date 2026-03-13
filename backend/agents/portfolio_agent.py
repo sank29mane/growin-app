@@ -18,12 +18,12 @@ import yfinance as yf
 from decimal import Decimal
 from utils.financial_math import create_decimal
 from utils.portfolio_analyzer import PortfolioAnalyzer
-from utils.error_resilience import CircuitBreaker, CircuitBreakerOpenException
+from resilience import get_circuit_breaker, CircuitBreakerOpenError
 
 logger = logging.getLogger(__name__)
 
-# Module-level circuit breaker to persist state across agent instantiations
-portfolio_circuit_breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=30)
+# Module-level circuit breaker to persist state across agent instantiations (SOTA 2026 Resilience API)
+portfolio_circuit_breaker = get_circuit_breaker("portfolio", failure_threshold=3, recovery_timeout=30.0)
 
 class PortfolioAgent(BaseAgent):
     """

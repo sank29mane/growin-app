@@ -30,7 +30,7 @@ class PriceValidator:
         UK -> Finnhub (Primary) -> yfinance (Fallback)
         """
         from data_engine import get_alpaca_client, get_finnhub_client
-        from trading212_mcp_server import normalize_ticker
+        from utils.ticker_utils import normalize_ticker
 
         results = {
             "trading212": None,

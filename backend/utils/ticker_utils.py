@@ -26,6 +26,7 @@ SPECIAL_MAPPINGS = {
     "MAG5": "MAG5", "MAG5L": "MAG5",
     "MAG7": "MAG7", "MAG7L": "MAG7",
     "GLD3": "GLD3",
+    "3GLDL": "3GLD", "3GLDL_EQ": "3GLD",
     "3UKL": "3UKL",
     "5QQQ": "5QQQ",
     "TSL3": "TSL3",
@@ -39,6 +40,12 @@ SPECIAL_MAPPINGS = {
     "AAL": "AAL",  # Anglo American (AAL.L) - Keep as is
     "RBL": "RKT",  # Reckitt Benckiser
     "MICCL": "MICC", # Midwich Group (MICC.L)
+    "PHNXL": "PHNX", # Phoenix Group
+    "BT": "BT-A", # BT Group (BT-A.L)
+    "NG": "NG", # National Grid
+    "JII": "JII", # JPMorgan Indian Investment Trust
+    "RBS": "NWG", # NatWest Group
+    "BTL": "BT-A",
 }
 
 US_EXCLUSIONS = {
@@ -46,7 +53,7 @@ US_EXCLUSIONS = {
     "AAPL", "MSFT", "GOOG", "AMZN", "NVDA", "TSLA", "META", "NFLX",
     "AMD", "INTC", "PYPL", "ADBE", "CSCO", "PEP", "COST", "AVGO", "QCOM", "TXN",
     "ORCL", "CRM", "IBM", "UBER", "ABNB", "SNOW", "PLTR", "SQ", "SHOP", "SPOT",
-    "GOOGL", # Explicitly exclude GOOGL
+    "GOOGL", "AU", # Anglogold Ashanti (US)
     # New additions from PR #37
     "SMCI", "MSTR", "COIN", "HOOD", "ARM", "DKNG", "SOFI", "MARA", "RIOT",
     "CRWD", "PANW", "NET", "DDOG", "ZS", "TEAM", "MDB", "OKTA", "DOCU",
@@ -76,7 +83,7 @@ US_EXCLUSIONS = {
     "F", "T", "C", "V", "Z", "O", "D", "R", "K", "X", "S", "M", "A", "G"
 }
 
-UK_COMMON_STEMS = tuple(["LLOY", "BARC", "VOD", "HSBA", "TSCO", "BP", "AZN", "RR", "NG", "SGLN", "SSLN", "GSK", "SHELL", "BATS", "AHT", "NWG", "GLEN"])
+UK_COMMON_STEMS = tuple(["LLOY", "BARC", "VOD", "HSBA", "TSCO", "BP", "AZN", "RR", "NG", "SGLN", "SSLN", "GSK", "SHELL", "BATS", "AHT", "NWG", "GLEN", "PHNX", "BT-A", "JII", "ABF", "SSE", "RIO", "REL", "ULVR", "SHEL"])
 
 def normalize_ticker(ticker: str) -> str:
     """
@@ -125,13 +132,16 @@ class TickerResolver:
 
         # 4. Handle Platform-Specific Artifacts
         original = ticker
-        # Strip T212 suffixes (handles multiple like _US_EQ)
-        ticker = re.sub(r'(_EQ|_US|_BE|_DE|_GB|_FR|_NL|_ES|_IT)+$', '', ticker)
+        # Strip T212 suffixes (handles multiple like _US_EQ) - Case Insensitive
+        ticker = re.sub(r'(_EQ|_US|_BE|_DE|_GB|_FR|_NL|_ES|_IT)+$', '', ticker, flags=re.IGNORECASE)
         ticker = ticker.replace("_", "") # Fallback for messy underscores
         
         # 5. SPECIAL MAPPINGS
-        if ticker in self.special_mappings:
-            ticker = self.special_mappings[ticker]
+        if ticker.upper() in self.special_mappings:
+            ticker = self.special_mappings[ticker.upper()]
+        
+        # Ensure base ticker is uppercase after stripping artifacts but BEFORE mapping/exclusion checks
+        ticker = ticker.upper()
 
         # 6. Suffix Protection for Leveraged Products
         is_leveraged_etp = ticker.endswith("1") and len(ticker) > 3
@@ -140,7 +150,7 @@ class TickerResolver:
                 ticker = ticker[:-1]
                 
         # 7. Global Exchange Logic (UK vs US)
-        is_explicit_uk = "_EQ" in original and "_US" not in original
+        is_explicit_uk = "_EQ" in original.upper() and "_US" not in original.upper()
         
         is_likely_uk = (len(ticker) <= 3 or (len(ticker) <= 5 and ticker.endswith("L"))) and ticker not in self.us_exclusions
         

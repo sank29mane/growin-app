@@ -1,5 +1,18 @@
-import mlx.core as mx
-import mlx.nn as nn
+try:
+    import mlx.core as mx
+    import mlx.nn as nn
+    HAS_MLX = True
+except ImportError:
+    mx = None
+    # Provide a dummy nn.Module for inheritance if MLX is missing
+    class DummyModule:
+        def __init__(self, *args, **kwargs): pass
+        def __call__(self, *args, **kwargs): pass
+    class nn:
+        Module = DummyModule
+        @staticmethod
+        def Linear(*args, **kwargs): return lambda x: x
+    HAS_MLX = False
 import numpy as np
 from typing import Tuple, Optional
 
@@ -45,30 +58,38 @@ class NeuralJMCE(nn.Module):
             self.target_seq_len = max(seq_len, 390)
 
         # Input projection: daily returns for all assets -> d_model latent space
-        self.input_proj = nn.Linear(n_assets, d_model)
-        
-        # Positional encoding for sequence length (learned)
-        # We use the target_seq_len to ensure we can handle full intraday days
-        self.pos_emb = mx.random.normal((self.target_seq_len, d_model)) * 0.02
-        
-        # Transformer Backbone for sequence processing
-        # Captures regime-aware dependencies and correlations over time
-        self.transformer = nn.TransformerEncoder(
-            num_layers=n_layers,
-            dims=d_model,
-            num_heads=n_heads,
-            mlp_dims=d_model * 4
-        )
-        
-        # Head for Expected Returns (mu)
-        self.mu_head = nn.Linear(d_model, n_assets)
-        
-        # Head for Cholesky factor (L_flat)
-        self.cholesky_head = nn.Linear(d_model, self.cholesky_size)
-        
-        # SOTA Phase 30: Velocity Head for Tick Covariance Shift Detection
-        # Predicts the rate of change of the Cholesky factor
-        self.velocity_head = nn.Linear(d_model, self.cholesky_size)
+        if HAS_MLX:
+            self.input_proj = nn.Linear(n_assets, d_model)
+            
+            # Positional encoding for sequence length (learned)
+            # We use the target_seq_len to ensure we can handle full intraday days
+            self.pos_emb = mx.random.normal((self.target_seq_len, d_model)) * 0.02
+            
+            # Transformer Backbone for sequence processing
+            # Captures regime-aware dependencies and correlations over time
+            self.transformer = nn.TransformerEncoder(
+                num_layers=n_layers,
+                dims=d_model,
+                num_heads=n_heads,
+                mlp_dims=d_model * 4
+            )
+            
+            # Head for Expected Returns (mu)
+            self.mu_head = nn.Linear(d_model, n_assets)
+            
+            # Head for Cholesky factor (L_flat)
+            self.cholesky_head = nn.Linear(d_model, self.cholesky_size)
+            
+            # SOTA Phase 30: Velocity Head for Tick Covariance Shift Detection
+            # Predicts the rate of change of the Cholesky factor
+            self.velocity_head = nn.Linear(d_model, self.cholesky_size)
+        else:
+            self.input_proj = None
+            self.pos_emb = None
+            self.transformer = None
+            self.mu_head = None
+            self.cholesky_head = None
+            self.velocity_head = None
         
         # Precompute indexing logic for Cholesky reconstruction
         self._init_cholesky_logic(n_assets)
@@ -93,7 +114,7 @@ class NeuralJMCE(nn.Module):
         # Index map for gathering flat values into (N, N) matrix
         # Upper triangle will point to a 'zero' padding element
         idx_map[idx_map == -1] = self.cholesky_size
-        self.idx_map_mx = mx.array(idx_map)
+        self.idx_map_mx = mx.array(idx_map, dtype=mx.uint32)
 
     def __call__(self, x: mx.array, return_velocity: bool = False) -> Tuple[mx.array, mx.array, Optional[mx.array]]:
         """
@@ -147,8 +168,11 @@ class NeuralJMCE(nn.Module):
         zeros = mx.zeros((B, 1))
         L_flat_padded = mx.concatenate([L_flat, zeros], axis=1)
         
-        # Gather into (B, N, N) matrix
-        L = L_flat_padded[:, self.idx_map_mx]
+        # SOTA: Explicitly cast indices to int32 before take() to satisfy Metal kernels
+        indices = self.idx_map_mx.astype(mx.int32)
+        
+        # Gather into (B, N, N) matrix using mx.take for safe indexing
+        L = mx.take(L_flat_padded, indices, axis=1)
         return L
 
     def get_covariance(self, L: mx.array) -> mx.array:
@@ -196,19 +220,29 @@ def get_jmce_model(
     Factory to retrieve the best available JMCE implementation.
     Prioritizes ANE (CoreML) > GPU (MLX).
     """
+    from backend.app_logging import setup_logging
+    logger = setup_logging("jmce_factory")
+
     if use_ane:
         import os
-        # Check for pre-compiled CoreML model
+        # Check multiple possible locations for pre-compiled CoreML models
         model_name = f"jmce_{n_assets}_{resolution.value}.mlmodel"
-        model_path = os.path.join("models", "coreml", model_name)
+        possible_paths = [
+            os.path.join("models", "coreml", model_name),
+            os.path.join("backend", "models", "coreml", model_name),
+            os.path.join("..", "models", "coreml", model_name)
+        ]
         
-        if os.path.exists(model_path):
-            try:
-                return CoreMLJMCE(model_path, n_assets=n_assets)
-            except Exception as e:
-                from backend.app_logging import setup_logging
-                logger = setup_logging("jmce_factory")
-                logger.warning(f"Failed to load ANE model, falling back to MLX: {e}")
+        for model_path in possible_paths:
+            if os.path.exists(model_path) and os.path.getsize(model_path) > 0:
+                try:
+                    logger.info(f"🚀 Loading JMCE on ANE (NPU) via {model_path}")
+                    return CoreMLJMCE(model_path, n_assets=n_assets)
+                except Exception as e:
+                    logger.warning(f"Failed to load ANE model at {model_path}, trying next location: {e}")
+        
+        logger.warning(f"No valid CoreML model found for {model_name}. NPU acceleration (ANE) will not be used for JMCE.")
     
     # Default to MLX (GPU)
+    logger.info(f"⚡ Loading NeuralJMCE on GPU (MLX) [Resolution: {resolution.value}]")
     return NeuralJMCE(n_assets=n_assets, resolution=resolution)

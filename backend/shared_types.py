@@ -54,3 +54,16 @@ class AvailableModelsResponse(BaseModel):
 
 class MLXModelsResponse(BaseModel):
     models: List[MLXModel]
+
+# SOTA 2026: Shared list of tools requiring HITL approval
+SENSITIVE_TOOLS = [
+    "place_market_order", 
+    "place_limit_order", 
+    "place_stop_order", 
+    "place_stop_limit_order",
+    "cancel_order",
+    "update_pie",
+    "create_investment_pie",
+    "update_investment_pie",
+    "delete_investment_pie"
+]

@@ -57,44 +57,92 @@ struct MetricGrid: View {
     var body: some View {
         VStack(spacing: 16) {
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 16) {
-                let totalCap = (summary?.currentValue ?? Decimal(0)) + (summary?.cashBalance?.free ?? Decimal(0))
-                MiniMetricCard(title: "Total Capital", value: "£\(totalCap.formatted(.number.precision(.fractionLength(2))))", icon: "banknote.fill", color: .stitchNeonPurple)
+                MiniMetricCard(
+                    title: "Total Capital",
+                    value: "£\(totalCapital.formatted(.number.precision(.fractionLength(2))))",
+                    icon: "banknote.fill",
+                    color: .stitchNeonPurple
+                )
                 
-                let equity = summary?.currentValue ?? Decimal(0)
-                MiniMetricCard(title: "Equity", value: "£\(equity.formatted(.number.precision(.fractionLength(2))))", icon: "chart.bar.fill", color: .stitchNeonIndigo)
+                MiniMetricCard(
+                    title: "Equity",
+                    value: "£\(equity.formatted(.number.precision(.fractionLength(2))))",
+                    icon: "chart.bar.fill",
+                    color: .stitchNeonIndigo
+                )
                 
-                let pnl = summary?.totalPnl ?? Decimal(0)
-                MiniMetricCard(title: "Net Profit", value: "£\(pnl.formatted(.number.precision(.fractionLength(2))))", icon: "waveform.path.ecg", color: pnl >= 0 ? .stitchNeonGreen : .growinRed)
+                MiniMetricCard(
+                    title: "Net Profit",
+                    value: "£\(netProfit.formatted(.number.precision(.fractionLength(2))))",
+                    icon: "waveform.path.ecg",
+                    color: netProfit >= 0 ? .stitchNeonGreen : .growinRed
+                )
                 
-                let roi = summary?.totalPnlPercent ?? 0.0
-                MiniMetricCard(title: "ROI", value: "\(roi.formatted(.number.precision(.fractionLength(2))))%", icon: "percent", color: .white)
+                MiniMetricCard(
+                    title: "ROI",
+                    value: "\(roi.formatted(.number.precision(.fractionLength(2))))%",
+                    icon: "percent",
+                    color: .white
+                )
                 
-                let cash = summary?.cashBalance?.free ?? Decimal(0)
-                MiniMetricCard(title: "Cash", value: "£\(cash.formatted(.number.precision(.fractionLength(2))))", icon: "pouch.fill", color: .stitchNeonYellow)
+                MiniMetricCard(
+                    title: "Cash",
+                    value: "£\(cash.formatted(.number.precision(.fractionLength(2))))",
+                    icon: "pouch.fill",
+                    color: .stitchNeonYellow
+                )
             }
             
-            if let accounts = summary?.accounts, accounts.count > 1 {
-                HStack(spacing: 8) {
-                    ForEach(Array(accounts.keys).sorted(), id: \.self) { key in
-                        if let acc = accounts[key] {
-                            HStack(spacing: 4) {
-                                Text(key.uppercased())
-                                    .premiumTypography(.overline)
-                                let val = acc.currentValue ?? Decimal(0)
-                                Text("£\(val.formatted(.number.precision(.fractionLength(2))))")
-                                    .premiumTypography(.body)
-                                    .fontWeight(.bold)
-                            }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(Color.white.opacity(0.05))
-                            .clipShape(Capsule())
-                            .overlay(Capsule().stroke(Color.white.opacity(0.1), lineWidth: 0.5))
-                        }
+            accountsView
+        }
+    }
+    
+    private var totalCapital: Decimal {
+        (summary?.currentValue ?? Decimal(0)) + (summary?.cashBalance?.free ?? Decimal(0))
+    }
+    
+    private var equity: Decimal {
+        summary?.currentValue ?? Decimal(0)
+    }
+    
+    private var netProfit: Decimal {
+        summary?.totalPnl ?? Decimal(0)
+    }
+    
+    private var roi: Double {
+        summary?.totalPnlPercent ?? 0.0
+    }
+    
+    private var cash: Decimal {
+        summary?.cashBalance?.free ?? Decimal(0)
+    }
+    
+    @ViewBuilder
+    private var accountsView: some View {
+        if let accounts = summary?.accounts, accounts.count > 1 {
+            HStack(spacing: 8) {
+                ForEach(Array(accounts.keys).sorted(), id: \.self) { key in
+                    if let acc = accounts[key] {
+                        accountCapsule(name: key, value: acc.currentValue ?? Decimal(0))
                     }
                 }
             }
         }
+    }
+    
+    private func accountCapsule(name: String, value: Decimal) -> some View {
+        HStack(spacing: 4) {
+            Text(name.uppercased())
+                .premiumTypography(.overline)
+            Text("£\(value.formatted(.number.precision(.fractionLength(2))))")
+                .premiumTypography(.body)
+                .fontWeight(.bold)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(Color.white.opacity(0.05))
+        .clipShape(Capsule())
+        .overlay(Capsule().stroke(Color.white.opacity(0.1), lineWidth: 0.5))
     }
 }
 
@@ -412,85 +460,108 @@ extension PortfolioView {
     
     private var headerView: some View {
         HStack(alignment: .bottom) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Portfolio")
-                    .font(.caption)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(.secondary)
-                
-                Text("Overview")
-                    .font(.title)
-                    .fontWeight(.bold)
-                    .foregroundStyle(.primary)
-            }
+            headerTitleView
             
             Spacer()
             
-            // SOTA 2026 Phase 29: Strategy Persona Toggle
-            HStack(spacing: 0) {
-                ForEach(["defensive", "aggressive"], id: \.self) { persona in
-                    Button(action: {
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                            viewModel.strategyPersona = persona
-                        }
-                    }) {
-                        Image(systemName: persona == "defensive" ? "shield.fill" : "bolt.fill")
-                            .font(.system(size: 10))
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                            .background(viewModel.strategyPersona == persona ? Color.white.opacity(0.1) : Color.clear)
-                            .foregroundStyle(viewModel.strategyPersona == persona ? (persona == "defensive" ? .stitchNeonGreen : .stitchNeonIndigo) : .secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .help(persona.capitalized)
-                }
-            }
-            .background(Color.white.opacity(0.05))
-            .clipShape(Capsule())
-            .overlay(Capsule().stroke(Color.white.opacity(0.1), lineWidth: 0.5))
-            .padding(.trailing, 8)
+            personaToggle
+                .padding(.trailing, 8)
 
-            // Premium Account Toggle
-            HStack(spacing: 0) {
-                let defaults = UserDefaults.standard
-                ForEach(["invest", "isa"], id: \.self) { type in
-                    Button(action: {
-                        Task { await viewModel.switchAccount(newType: type) }
-                    }) {
-                        Text(type == "invest" ? "General" : "ISA")
-                            .font(.caption)
-                            .fontWeight(.semibold)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 8)
-                            .background(defaults.string(forKey: "t212AccountType") == type ? Color.white.opacity(0.1) : Color.clear)
-                            .foregroundStyle(defaults.string(forKey: "t212AccountType") == type ? .primary : .secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(type == "invest" ? "General Account" : "ISA Account")
-                    .accessibilityHint("Switches portfolio view to \(type == "invest" ? "General" : "ISA") account")
-                    .accessibilityAddTraits(defaults.string(forKey: "t212AccountType") == type ? [.isSelected, .isButton] : [.isButton])
-                }
-            }
-            .background(Color.white.opacity(0.05))
-            .clipShape(Capsule())
-            .overlay(Capsule().stroke(Color.white.opacity(0.1), lineWidth: 0.5))
-            .disabled(viewModel.isSwitchingAccount)
+            accountTypeToggle
             
-            Button(action: { Task { await viewModel.fetchPortfolio() } }) {
-                Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 12, weight: .bold))
-                    .frame(width: 32, height: 32)
-                    .background(Color.white.opacity(0.05))
-                    .clipShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .opacity(viewModel.isLoading ? 0.5 : 1)
-            .accessibilityLabel("Refresh Portfolio")
-            .accessibilityHint("Refreshes portfolio data from the server")
-            .disabled(viewModel.isLoading)
+            refreshButton
         }
         .padding(.horizontal)
         .padding(.top, 24)
+    }
+
+    private var headerTitleView: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Portfolio")
+                .font(.caption)
+                .fontWeight(.semibold)
+                .foregroundStyle(.secondary)
+            
+            Text("Overview")
+                .font(.title)
+                .fontWeight(.bold)
+                .foregroundStyle(.primary)
+        }
+    }
+
+    private var personaToggle: some View {
+        // SOTA 2026 Phase 29: Strategy Persona Toggle
+        HStack(spacing: 0) {
+            ForEach(["defensive", "aggressive"], id: \.self) { persona in
+                Button(action: {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                        viewModel.strategyPersona = persona
+                    }
+                }) {
+                    let isSelected = viewModel.strategyPersona == persona
+                    let color = isSelected ? (persona == "defensive" ? Color.stitchNeonGreen : Color.stitchNeonIndigo) : Color.secondary
+                    
+                    Image(systemName: persona == "defensive" ? "shield.fill" : "bolt.fill")
+                        .font(.system(size: 10))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(isSelected ? Color.white.opacity(0.1) : Color.clear)
+                        .foregroundStyle(color)
+                }
+                .buttonStyle(.plain)
+                .help(persona.capitalized)
+            }
+        }
+        .background(Color.white.opacity(0.05))
+        .clipShape(Capsule())
+        .overlay(Capsule().stroke(Color.white.opacity(0.1), lineWidth: 0.5))
+    }
+
+    private var accountTypeToggle: some View {
+        // Premium Account Toggle
+        HStack(spacing: 0) {
+            let defaults = UserDefaults.standard
+            let currentType = defaults.string(forKey: "t212AccountType") ?? "invest"
+            
+            ForEach(["invest", "isa"], id: \.self) { type in
+                Button(action: {
+                    Task { await viewModel.switchAccount(newType: type) }
+                }) {
+                    let isSelected = currentType == type
+                    
+                    Text(type == "invest" ? "General" : "ISA")
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(isSelected ? Color.white.opacity(0.1) : Color.clear)
+                        .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(type == "invest" ? "General Account" : "ISA Account")
+                .accessibilityHint("Switches portfolio view to \(type == "invest" ? "General" : "ISA") account")
+                .accessibilityAddTraits(currentType == type ? [.isSelected, .isButton] : [.isButton])
+            }
+        }
+        .background(Color.white.opacity(0.05))
+        .clipShape(Capsule())
+        .overlay(Capsule().stroke(Color.white.opacity(0.1), lineWidth: 0.5))
+        .disabled(viewModel.isSwitchingAccount)
+    }
+
+    private var refreshButton: some View {
+        Button(action: { Task { await viewModel.fetchPortfolio() } }) {
+            Image(systemName: "arrow.clockwise")
+                .font(.system(size: 12, weight: .bold))
+                .frame(width: 32, height: 32)
+                .background(Color.white.opacity(0.05))
+                .clipShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .opacity(viewModel.isLoading ? 0.5 : 1)
+        .accessibilityLabel("Refresh Portfolio")
+        .accessibilityHint("Refreshes portfolio data from the server")
+        .disabled(viewModel.isLoading)
     }
 
     private func analyticsSection(snapshot: PortfolioSnapshot) -> some View {
@@ -499,45 +570,55 @@ extension PortfolioView {
             MetricGrid(summary: snapshot.summary)
             
             HStack(spacing: 20) {
-                // Performance Perspective
-                if !viewModel.portfolioHistory.isEmpty {
-                    GlassCard(cornerRadius: 24) {
-                        VStack(alignment: .leading, spacing: 16) {
-                            HStack {
-                                Label("Performance", systemImage: "waveform.path.ecg")
-                                    .font(.caption)
-                                    .fontWeight(.semibold)
-                                    .foregroundStyle(.secondary)
-                                
-                                Spacer()
-                                
-                                timeRangePicker
-                            }
-                            
-                            PerformanceLineChart(history: viewModel.portfolioHistory, timeRange: viewModel.selectedTimeRange)
-                                .frame(height: 200)
-                        }
-                    }
-                }
+                performanceCard
                 
-                // Allocation Vectors
-                if let positions = snapshot.positions, !positions.isEmpty {
-                    GlassCard(cornerRadius: 24) {
-                        VStack(alignment: .leading, spacing: 16) {
-                            Label("Allocation", systemImage: "chart.pie.fill")
+                allocationCard(positions: snapshot.positions)
+            }
+        }
+        .padding(.horizontal)
+    }
+
+    private var performanceCard: some View {
+        Group {
+            if !viewModel.portfolioHistory.isEmpty {
+                GlassCard(cornerRadius: 24) {
+                    VStack(alignment: .leading, spacing: 16) {
+                        HStack {
+                            Label("Performance", systemImage: "waveform.path.ecg")
                                 .font(.caption)
                                 .fontWeight(.semibold)
                                 .foregroundStyle(.secondary)
                             
-                            AllocationDonutChart(positions: positions)
-                                .frame(height: 200)
+                            Spacer()
+                            
+                            timeRangePicker
                         }
+                        
+                        PerformanceLineChart(history: viewModel.portfolioHistory, timeRange: viewModel.selectedTimeRange)
+                            .frame(height: 200)
                     }
-                    .frame(width: 320)
                 }
             }
         }
-        .padding(.horizontal)
+    }
+
+    private func allocationCard(positions: [Position]?) -> some View {
+        Group {
+            if let positions = positions, !positions.isEmpty {
+                GlassCard(cornerRadius: 24) {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Label("Allocation", systemImage: "chart.pie.fill")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(.secondary)
+                        
+                        AllocationDonutChart(positions: positions)
+                            .frame(height: 200)
+                    }
+                }
+                .frame(width: 320)
+            }
+        }
     }
 
     private func holdingsSection(snapshot: PortfolioSnapshot) -> some View {

@@ -24,11 +24,22 @@ struct AgentResponse: Codable, Sendable {
     }
 }
 
-struct AnySendable: @unchecked Sendable, Codable {
+struct AnySendable: @unchecked Sendable, Codable, Equatable {
     let value: Any
     
     init(_ value: Any) {
         self.value = value
+    }
+
+    static func == (lhs: AnySendable, rhs: AnySendable) -> Bool {
+        switch (lhs.value, rhs.value) {
+        case let (lhs as Int, rhs as Int): return lhs == rhs
+        case let (lhs as Double, rhs as Double): return lhs == rhs
+        case let (lhs as Bool, rhs as Bool): return lhs == rhs
+        case let (lhs as String, rhs as String): return lhs == rhs
+        default:
+            return "\(lhs.value)" == "\(rhs.value)"
+        }
     }
     
     init(from decoder: Decoder) throws {

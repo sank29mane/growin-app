@@ -1,5 +1,8 @@
 import numpy as np
-import mlx.core as mx
+try:
+    import mlx.core as mx
+except ImportError:
+    mx = None
 from scipy.optimize import minimize
 from decimal import Decimal
 from typing import Dict, List, Optional, Union, Any
@@ -145,3 +148,33 @@ class PortfolioAnalyzer:
             logger.error(f"Portfolio optimization failed: {e}", exc_info=True)
             # Fallback to equal weights
             return [create_decimal(1.0 / n_assets) for _ in range(n_assets)]
+
+    async def get_covariance_velocity(self, returns_history: np.ndarray) -> Optional[float]:
+        """
+        SOTA 2026 Phase 30: Extract covariance velocity for high-velocity shifts.
+        Uses M4 NPU (MLX/ANE) to detect rapid correlation changes.
+        """
+        try:
+            if hasattr(self.model, "__call__"):
+                if isinstance(self.model, NeuralJMCE):
+                    x = mx.array(returns_history[np.newaxis, :, :].astype(np.float32))
+                    _, _, V_mx = self.model(x, return_velocity=True)
+                    if V_mx is not None:
+                        # For single asset (N=1), V is (1, 1, 1). Return the scalar.
+                        # For multiple assets, return Frobenius norm as a shift indicator.
+                        if V_mx.shape[1] == 1:
+                            return float(V_mx[0, 0, 0])
+                        else:
+                            # Use mx.linalg.norm if available, or manual Fro norm
+                            v_np = np.array(V_mx[0])
+                            return float(np.linalg.norm(v_np))
+                else:
+                    # CoreML Path (ANE)
+                    _, _, V = self.model(returns_history.astype(np.float32), return_velocity=True)
+                    if V is not None:
+                        if V.ndim == 3: V = V[0]
+                        return float(np.linalg.norm(V))
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to extract covariance velocity: {e}")
+            return None

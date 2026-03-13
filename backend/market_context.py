@@ -62,6 +62,9 @@ class QuantData(BaseModel):
     signal: Signal = Signal.NEUTRAL
     support_level: Optional[Decimal] = None
     resistance_level: Optional[Decimal] = None
+    
+    # SOTA 2026 Phase 30: Intraday ORB Signal
+    orb_signal: Optional[Dict[str, Any]] = None
 
     model_config = ConfigDict(populate_by_name=True)
 

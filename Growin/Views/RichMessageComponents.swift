@@ -518,9 +518,21 @@ struct TechnicalCard: View, Equatable {
     
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("TECHNICALS")
-                .font(.system(size: 10, weight: .bold))
-                .foregroundStyle(.secondary)
+            HStack {
+                Text("TECHNICALS")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if quant.orbSignal != nil {
+                    Text("5MIN NPU")
+                        .font(.system(size: 8, weight: .black))
+                        .foregroundStyle(.orange)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Color.orange.opacity(0.2))
+                        .cornerRadius(3)
+                }
+            }
             
             HStack(spacing: 16) {
                 MetricItem(label: "Signal", value: quant.signal)
@@ -533,6 +545,24 @@ struct TechnicalCard: View, Equatable {
                 if let support = quant.supportLevel {
                     let supportVal = Double(truncating: support as NSNumber)
                     MetricItem(label: "Support", value: String(format: "%.1f", supportVal))
+                }
+            }
+            
+            // SOTA 2026 Phase 30: ORB Signal Display
+            if let orb = quant.orbSignal, let signal = orb["signal"]?.value as? String, signal != "WAIT" {
+                Divider().background(Color.white.opacity(0.1))
+                HStack {
+                    Label("ORB", systemImage: "bolt.horizontal.fill")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.orange)
+                    Spacer()
+                    Text(signal.replacingOccurrences(of: "_BREAKOUT", with: ""))
+                        .font(.system(size: 9, weight: .black))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(signal.contains("BULLISH") ? Color.green : Color.red)
+                        .cornerRadius(4)
                 }
             }
         }

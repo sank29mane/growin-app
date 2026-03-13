@@ -41,16 +41,18 @@ class QuantAgent(BaseAgent):
         Context should include:
         - ohlcv_data: List of bars with o, h, l, c, v keys
         - ticker: Stock symbol
+        - intent: (SOTA 30) High-velocity intent to trigger ORB
         """
         ticker = context.get("ticker", "UNKNOWN")
         ohlcv_data = context.get("ohlcv_data", [])
+        intent = context.get("intent", "analytical")
 
-        if not ohlcv_data or len(ohlcv_data) < 50:
+        if not ohlcv_data or len(ohlcv_data) < 20: # SOTA: Relax limit to 20 for early ORB
             return AgentResponse(
                 agent_name=self.config.name,
                 success=False,
                 data={},
-                error="Insufficient data for technical analysis (need 50+ bars)",
+                error="Insufficient data for technical analysis (need 20+ bars)",
                 latency_ms=0
             )
 
@@ -74,7 +76,39 @@ class QuantAgent(BaseAgent):
             # 2. Calculate Support/Resistance
             sr_levels = self.engine.calculate_pivot_levels(ohlcv_data)
 
-            # 3. Map to QuantData model
+            # 3. SOTA 2026 Phase 30: Opening Range Breakout (ORB) Detection
+            orb_signal = None
+            if intent == "intraday_trade" or len(ohlcv_data) < 100: # Heuristic for intraday
+                try:
+                    from utils.orb_detector import ORBDetector
+                    detector = ORBDetector(range_minutes=30)
+                    
+                    # SOTA 2026: Covariance Shift from NeuralJMCE (NPU Accelerated)
+                    cov_velocity = None
+                    if len(ohlcv_data) >= 5: # Need at least a few bars for velocity
+                         try:
+                             from utils.portfolio_analyzer import PortfolioAnalyzer, TimeResolution
+                             analyzer = PortfolioAnalyzer(n_assets=1, resolution=TimeResolution.INTRADAY_5MIN)
+                             
+                             # Calculate log returns for JMCE
+                             closes = np.array([float(b['c']) for b in ohlcv_data], dtype=np.float32)
+                             # Prevent zero division
+                             closes[closes == 0] = 1.0
+                             rets = np.diff(np.log(closes))
+                             rets = rets[:, np.newaxis] # Shape (seq_len, 1)
+                             
+                             cov_velocity = await analyzer.get_covariance_velocity(rets)
+                             if cov_velocity:
+                                 logger.info(f"QuantAgent: NPU Covariance Velocity extracted: {cov_velocity:.4f}")
+                         except Exception as jmce_e:
+                             logger.warning(f"QuantAgent: JMCE Velocity extraction failed: {jmce_e}")
+                    
+                    orb_signal = detector.detect_breakout(ohlcv_data, covariance_velocity=cov_velocity)
+                    logger.info(f"QuantAgent: ORB detection complete for {ticker}: {orb_signal['signal']}")
+                except Exception as orb_e:
+                    logger.warning(f"QuantAgent: ORB detection failed: {orb_e}")
+
+            # 4. Map to QuantData model
             from market_context import QuantData, Signal
             
             # Map string overall_signal to Signal enum
@@ -85,6 +119,12 @@ class QuantAgent(BaseAgent):
                 "neutral": Signal.NEUTRAL
             }
             overall_signal = signals.get("overall_signal", "neutral")
+            
+            # ORB Overlay: If ORB is BULLISH/BEARISH, it can override or boost technical signals
+            if orb_signal and "BREAKOUT" in orb_signal["signal"]:
+                if "BULLISH" in orb_signal["signal"]: overall_signal = "buy"
+                elif "BEARISH" in orb_signal["signal"]: overall_signal = "sell"
+
             signal = signal_map.get(overall_signal, Signal.NEUTRAL)
 
             quant_data = QuantData(
@@ -102,11 +142,12 @@ class QuantAgent(BaseAgent):
                 },
                 signal=signal,
                 support_level=create_decimal(sr_levels["support"]),
-                resistance_level=create_decimal(sr_levels["resistance"])
+                resistance_level=create_decimal(sr_levels["resistance"]),
+                orb_signal=orb_signal
             )
 
             from status_manager import status_manager
-            status_manager.set_status("quant_agent", "ready", f"Signal: {quant_data.signal}")
+            status_manager.set_status("quant_agent", "ready", f"Signal: {quant_data.signal} (ORB: {orb_signal['signal'] if orb_signal else 'N/A'})")
 
             return AgentResponse(
                 agent_name=self.config.name,

@@ -122,6 +122,8 @@ import uuid
 import hmac
 import hashlib
 import time
+from shared_types import SENSITIVE_TOOLS
+from cache_manager import cache
 
 # Secret for signing approval tokens (in production, use a secure env var)
 APPROVAL_SECRET = os.getenv("TRADE_APPROVAL_SECRET", "sota-2026-secure-gate-9911")
@@ -132,8 +134,8 @@ class ToolCallRequest(BaseModel):
     arguments: Dict[str, Any]
     approval_token: Optional[str] = None
 
-def verify_approval_token(token: str, tool_name: str, arguments: Dict[str, Any]) -> bool:
-    """Verify that the token matches the tool and arguments (Simplified HMAC)."""
+def verify_approval_token(token: str, server_name: str, tool_name: str, arguments: Dict[str, Any]) -> bool:
+    """Verify that the token matches the tool and arguments (SOTA 2026 Replay Protected)."""
     try:
         # Expected format: timestamp:signature
         parts = token.split(":")
@@ -141,13 +143,21 @@ def verify_approval_token(token: str, tool_name: str, arguments: Dict[str, Any])
             return False
             
         timestamp, signature = parts
-        # Check expiry (5 minutes)
+        
+        # 1. Check Expiry (5 minutes)
         if time.time() - float(timestamp) > 300:
             logger.warning("Approval token expired")
             return False
             
-        # Recreate signature
-        msg = f"{timestamp}:{tool_name}:{json.dumps(arguments, sort_keys=True)}"
+        # 2. Replay Protection (One-time use)
+        # Use Redis to store used signatures for 5 minutes
+        is_new = cache.set_nx_ex(f"approval_used:{signature}", "1", 300)
+        if not is_new:
+            logger.warning(f"REPLAY DETECTED: Approval token signature {signature[:8]} already used.")
+            return False
+
+        # 3. Signature Verification (Bound to server_name to prevent cross-server replay)
+        msg = f"{timestamp}:{server_name}:{tool_name}:{json.dumps(arguments, sort_keys=True)}"
         expected = hmac.new(
             APPROVAL_SECRET.encode(),
             msg.encode(),
@@ -165,13 +175,8 @@ async def call_mcp_tool(request: ToolCallRequest):
     Execute an MCP tool with SOTA 2026 Governance Gates.
     Intersects sensitive actions (trades) to enforce HITL.
     """
-    sensitive_tools = [
-        "place_market_order", "place_limit_order", 
-        "place_stop_order", "place_stop_limit_order"
-    ]
-    
     # 1. Check Governance Gate
-    if request.tool_name in sensitive_tools:
+    if request.tool_name in SENSITIVE_TOOLS:
         if not request.approval_token:
             logger.warning(f"BLOCKED: {request.tool_name} requires approval_token (HITL Gate)")
             raise HTTPException(
@@ -184,9 +189,9 @@ async def call_mcp_tool(request: ToolCallRequest):
                 }
             )
         
-        if not verify_approval_token(request.approval_token, request.tool_name, request.arguments):
-            logger.error(f"BLOCKED: Invalid or expired approval_token for {request.tool_name}")
-            raise HTTPException(status_code=401, detail="Invalid trade approval token")
+        if not verify_approval_token(request.approval_token, request.server_name, request.tool_name, request.arguments):
+            logger.error(f"BLOCKED: Invalid, replayed, or expired approval_token for {request.tool_name}")
+            raise HTTPException(status_code=401, detail="Invalid or replayed trade approval token")
 
     # 2. Execute Tool
     try:

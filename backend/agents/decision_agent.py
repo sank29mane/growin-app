@@ -15,11 +15,12 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from .llm_factory import LLMFactory
 from utils.audit_log import log_audit
 from app_logging import correlation_id_ctx
-from utils.error_resilience import CircuitBreaker, CircuitBreakerOpenException
+from resilience import get_circuit_breaker, CircuitBreakerOpenError
+from shared_types import SENSITIVE_TOOLS
 
 logger = logging.getLogger(__name__)
 
-decision_circuit_breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=30)
+decision_circuit_breaker = get_circuit_breaker("decision", failure_threshold=3, recovery_timeout=30.0)
 
 
 class DecisionAgent:
@@ -31,16 +32,7 @@ class DecisionAgent:
     Performance: 5-8s (LLM reasoning time)
     """
 
-    INTERCEPTED_TOOLS = [
-        "place_market_order",
-        "place_limit_order",
-        "place_stop_order",
-        "place_stop_limit_order",
-        "cancel_order",
-        "create_investment_pie",
-        "update_investment_pie",
-        "delete_investment_pie"
-    ]
+    INTERCEPTED_TOOLS = SENSITIVE_TOOLS
 
     def __init__(self, model_name: str = "gpt-4o", api_keys: Optional[Dict[str, str]] = None, mcp_client=None):
         self.model_name = model_name
@@ -429,10 +421,15 @@ class DecisionAgent:
                         try:
                             tool_args = json.loads(tool_args_str) if tool_args_str.strip() else {}
                             
-                            # Security Interception
-                            if tool_name in self.INTERCEPTED_TOOLS:
+                            # Security Interception (SOTA 2026 Phase 31: Autonomous Bypass for High Conviction)
+                            is_high_conviction = "HIGH CONVICTION" in (context.reasoning or "").upper() or "CONVICTION LEVEL: 10" in content.upper()
+                            
+                            if tool_name in self.INTERCEPTED_TOOLS and not is_high_conviction:
                                 logger.info(f"DecisionAgent: INTERCEPTING sensitive tool {tool_name}")
                                 return f"[ACTION_REQUIRED:{tool_name}] Parameters: {tool_args_str}. Unauthorized for autonomous execution. Requires UI confirmation."
+
+                            if is_high_conviction and tool_name in self.INTERCEPTED_TOOLS:
+                                logger.info(f"DecisionAgent: AUTONOMOUS BYPASS for sensitive tool {tool_name} (High Conviction Detected)")
 
                             logger.info(f"DecisionAgent: Executing Tool {tool_name}")
 
@@ -625,6 +622,7 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
         # Detect small model for aggressive optimization
         is_small_model = any(k in (self.model_name or "").lower() for k in ["nano", "mobile", "phi", "tiny", "gemma-2b"])
 
+
         # Skills (Limit length for small models)
         from utils.skill_loader import get_skill_loader
         skills_text = get_skill_loader().get_relevant_skills(query)
@@ -677,6 +675,7 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
         """Return the appropriate system prompt based on intent."""
         # Simplified persona for small models to reduce cognitive load
         if any(k in (self.model_name or "").lower() for k in ["nano", "mobile", "phi", "tiny", "gemma-2b"]):
+
             return "**Lead Financial Trader (Nano)**\nYou are a senior, profit‑maximising Lead Financial Trader. You consult your Coordinator Agent for data and provide high-probability trade suggestions based on SMA, RSI, MACD, and Sentiment."
 
         if intent in ["conversational", "educational"]:
@@ -851,7 +850,10 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
         if context.quant:
             q = context.quant
             source = context.price.source if context.price else "Mandated Provider"
-            sections.append(f"**TECH ({source})**: {q.ticker} | RSI: {q.rsi:.1f} | Signal: {q.signal}")
+            orb_text = ""
+            if q.orb_signal and q.orb_signal.get("signal") != "WAIT":
+                orb_text = f" | ORB: {q.orb_signal['signal']}"
+            sections.append(f"**TECH ({source})**: {q.ticker} | RSI: {q.rsi:.1f} | Signal: {q.signal}{orb_text}")
 
         # Forecast (Compacted)
         if context.forecast:
@@ -895,7 +897,7 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
             "sentiment_score": f"{context.research.sentiment_score:.2f}" if context.research else "0.0",
             "support": f"£{context.quant.support_level:.2f}" if context.quant and context.quant.support_level else "N/A",
             "resistance": f"£{context.quant.resistance_level:.2f}" if context.quant and context.quant.resistance_level else "N/A",
-            "signals": context.quant.signal if context.quant else "N/A",
+            "signals": f"{context.quant.signal}{' (ORB: ' + context.quant.orb_signal['signal'] + ')' if context.quant.orb_signal and context.quant.orb_signal.get('signal') != 'WAIT' else ''}" if context.quant else "N/A",
             "forecast_algo": context.forecast.algorithm if context.forecast else "Unavailable",
             "forecast_24h": f"£{context.forecast.forecast_24h:.2f}" if context.forecast else "N/A",
             "forecast_trend": context.forecast.trend if context.forecast else "N/A",
@@ -970,6 +972,7 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
                 "quantity": quantity,
                 "reasoning": reasoning,
                 "status": "PENDING",
+                "bypass_confirmation": "HIGH CONVICTION" in (context.reasoning or "").upper() or "CONVICTION LEVEL: 10" in text.upper(),
                 "timestamp": datetime.now().timestamp()
             }
         except Exception as e:

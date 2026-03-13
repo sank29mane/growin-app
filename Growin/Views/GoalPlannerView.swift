@@ -387,13 +387,14 @@ struct RiskButton: View {
     let action: () -> Void
     
     var body: some View {
+        let formattedTitle = title.replacingOccurrences(of: "_", with: " ")
         Button(action: action) {
             VStack(spacing: 8) {
                 Image(systemName: icon)
                     .font(.system(size: 22))
                     .foregroundStyle(isSelected ? Color.stitchNeonIndigo : Color.textSecondary)
                 
-                Text(title.replacingOccurrences(of: "_", with: " "))
+                Text(formattedTitle)
                     .premiumTypography(.overline)
                     .font(.system(size: 8))
                     .foregroundStyle(isSelected ? .white : Color.textSecondary)
@@ -408,6 +409,10 @@ struct RiskButton: View {
             )
         }
         .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(formattedTitle) Risk Level")
+        .accessibilityHint("Selects \(formattedTitle) as your risk tolerance")
+        .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : [.isButton])
     }
 }
 

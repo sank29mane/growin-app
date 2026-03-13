@@ -145,6 +145,8 @@ Query: "{clean_query}"
                 "market_analysis": ["quant", "forecast", "research", "social", "whale", "portfolio"],
                 "portfolio_query": ["portfolio", "quant", "forecast"],
                 "goal_planning": ["goal_planner", "portfolio"],
+                "intraday_trade": ["quant", "forecast", "research", "whale"],
+                "swing_trade": ["quant", "forecast", "research", "whale"],
                 "conversational": [],
                 "educational": []
             }
@@ -263,7 +265,7 @@ Query: "{clean_query}"
                 ohlcv = [{
                     't': b.timestamp, 'o': b.open, 'h': b.high, 'l': b.low, 'c': b.close, 'v': b.volume
                 } for b in context.price.history_series]
-            tasks.append(self._run_specialist(self.quant_agent, {"ticker": context.ticker, "ohlcv_data": ohlcv}))
+            tasks.append(self._run_specialist(self.quant_agent, {"ticker": context.ticker, "ohlcv_data": ohlcv, "intent": intent_info["type"]}))
             
         if "forecast" in needs and context.ticker:
             ohlcv = []
@@ -515,7 +517,7 @@ Query: "{clean_query}"
                     't': b.timestamp, 'o': b.open, 'h': b.high, 'l': b.low, 'c': b.close, 'v': b.volume
                 } for b in context.price.history_series]
             # Resilient Trigger: QuantAgent will now try its own resolve if ohlcv is empty
-            tasks.append(self._run_specialist(self.quant_agent, {"ticker": ticker, "ohlcv_data": ohlcv}))
+            tasks.append(self._run_specialist(self.quant_agent, {"ticker": ticker, "ohlcv_data": ohlcv, "intent": intent_info["type"]}))
 
         if "forecast" in needs and ticker:
             ohlcv = []

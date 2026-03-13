@@ -29,6 +29,8 @@ export PH_OPT_OUT=1
 
 # === 4. Fast Backend Start ===
 cd backend || exit 1
+# SOTA 2026: Ensure root is in PYTHONPATH for cross-module imports
+export PYTHONPATH=$PYTHONPATH:..
 # Using nohup and redirecting to log to ensure it persists correctly
 uv run python -m uvicorn server:app --host $HOST --port $PORT --loop uvloop > ../startup.log 2>&1 &
 echo $! > "../$PID_FILE"

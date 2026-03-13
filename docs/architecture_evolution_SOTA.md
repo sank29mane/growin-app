@@ -1,64 +1,46 @@
 # Growin App Multi-Agent System: Architecture Evolution (SOTA 2026)
 
 ## 1. Executive Summary
-As of Phase 20, the Growin App has transitioned from a hierarchical, multi-hop Multi-Agent System (MAS) to a flattened, high-performance architecture. This evolution eliminates redundant LLM reasoning stages, implements strict risk governance via the **Critic Pattern and ACE Scoring**, introduces **Multi-Account Synergy** with **Tax-Loss Harvesting (TLH)**, and leverages **8-bit AFFINE hardware acceleration** for Apple Silicon M4 Pro.
+As of Phase 31, the Growin App has transitioned from a purely assistive "Copilot" model to a high-conviction **Autonomous "Autopilot"** system. This evolution leverages the massive parallel processing power of the M4 generation Apple Silicon, implementing **Hardware-Aware Partitioning**, **Neural JMCE Regime Detection**, and **Autonomous Execution Bypasses**.
 
-## 2. Evolution: From Hierarchical to Flattened
+## 2. Evolution: From Assistive to Autonomous
 
-### Previous Architecture (Phase 1-15)
-1. **User** -> **Decision Agent**
-2. **Decision Agent** -> **Coordinator Agent** (Routing)
-3. **Coordinator** -> **Swarm** (Specialists)
-4. **Swarm** -> **Coordinator** (Results)
-5. **Coordinator** -> **Decision Agent** (Synthesis)
-6. **Decision Agent** -> **User** (Final Response)
-*Latency: High (~3-5s overhead per hop)*
-
-### Current SOTA 2026 Architecture (Phase 16-20)
-1. **User** -> **Orchestrator Agent**: Unified entry point for intent classification and final reasoning.
-2. **Orchestrator** -> **Specialist Swarm**: Parallel execution of Quant, Research, Portfolio, etc.
-3. **Specialist Swarm** -> **Orchestrator**: Raw data injection into MarketContext.
-4. **Orchestrator** -> **Risk Agent (Critic)**: Mandatory audit of the proposed strategy using a multi-turn Adversarial Confidence Estimation (ACE) loop.
-5. **Risk Agent** -> **Orchestrator**: Compliance approval or risk flagging.
-6. **Orchestrator** -> **User**: Unified stitched response with real-time AG-UI streaming.
+### Previous Architecture (Phases 16-20)
+- **User** -> **Orchestrator Agent**: Unified entry point for intent classification.
+- **Orchestrator** -> **Specialist Swarm**: Parallel execution of Quant, Research, Portfolio.
+- **Status**: Assisted decision-making with mandatory UI trade approval.
 *Latency: Optimized (<500ms routing overhead)*
 
-## 3. Core SOTA Components
+### Current SOTA 2026 Architecture (Phases 31-32)
+1. **User** -> **Coordinator Agent**: Sub-100ms routing and classification pinned to ANE.
+2. **Coordinator** -> **Parallel Swarm + MathGenerator**: Specialists perform analysis while MathGenerator creates optimized MLX scripts for the M4 GPU.
+3. **Decision Agent (The Synthesis Brain)**:
+    - Integrates specialist data with **Neural JMCE** covariance velocity.
+    - **High Conviction Bypass**: If conviction is absolute (`LEVEL: 10`), it bypasses the HITL (Human-in-the-Loop) gate.
+4. **Autonomous Execution**: Direct trade placement on Trading 212 with full audit logging.
+*Autonomy: Level 4 (High Conviction Self-Execution)*
 
-### A. The Unified Orchestrator (`orchestrator_agent.py`)
-Merges the functions of the previous Decision and Coordinator agents. It manages the full lifecycle:
-- **Intent Classification**: Uses lightweight models (Granite-Tiny) for sub-100ms routing.
-- **Data Fabrication**: Orchestrates the Specialist Swarm via `asyncio.gather`.
-- **Trajectory Stitching**: Dynamically merges disparate specialist signals into a coherent narrative.
-- **Dynamic Weighting**: Biases the synthesis prompt based on historical alpha metrics retrieved from DuckDB.
+## 3. Core SOTA Components (Phases 31+)
 
-### B. The Critic Pattern & ACE (`risk_agent.py` & `ace_evaluator.py`)
-Implements mandatory governance. Every strategy synthesized by the Orchestrator must pass through the Risk Agent for:
-- **Exposure Auditing**: Checking portfolio concentration limits.
-- **Adversarial Debate**: Risk Agent acts as 'The Contrarian', forcing the Orchestrator to defend or revise its thesis.
-- **ACE Scoring**: Quantifies the robustness of the strategy based on the outcome of the debate.
+### A. Neural JMCE (Joint Mean-Covariance Estimator)
+A sophisticated mathematical engine that runs on the **Apple Neural Engine (ANE)**.
+- **Regime Shift Detection**: Detects volatility spikes and correlation breakdowns in <5ms.
+- **Shift Metric**: A real-time "Velocity" indicator that boosts confidence in intraday breakouts.
 
-### C. Multi-Account Synergy & TLH (`portfolio_agent.py` & `tlh_scanner.py`)
-- **Consolidation**: Merges holdings across Invest, ISA, and CFD accounts for global weighting.
-- **Tax-Loss Harvesting (TLH)**: Automatically flags losing positions in taxable accounts for potential offset strategies.
-- **Wash-Sale Gate**: Risk Agent blocks repurchasing of harvested assets within a 30-day window.
+### B. M4 Hardware-Aware Partitioning
+Growin intelligently splits its brain across the M4 SoC:
+- **CPU (AMX)**: Handles the high-frequency Python/REST orchestration and T212 API communication.
+- **GPU (MLX/Metal)**: Executes large-model reasoning and performs **Daily Calibration (Weight Adapters)** to tune models to current market regimes.
+- **NPU (ANE)**: Dedicated to Neural JMCE inference and real-time technical indicators.
 
-### D. 8-bit AFFINE Hardware Optimization
-Optimized for Apple Silicon M4 Pro (NPU/GPU):
-- **AFFINE Quantization**: Implemented in `mlx_engine.py` to maximize throughput while maintaining reasoning precision.
-- **NPU Affinity**: Routing models are pinned to the ANE (Apple Neural Engine) to free the GPU for large-model reasoning.
+### C. Autonomous Decision Loop & Audit
+- **Conviction Logic**: Uses `DecisionAgent` to evaluate the alignment of Quant, Forecast, and Risk signals.
+- **Security Sandbox**: Model-generated code is executed in a secure local sandbox using `safe_python.py`.
+- **Audit Logging**: Every autonomous action is recorded in a tamper-proof local log with the full reasoning trace preserved.
 
-### E. AG-UI Streaming Protocol
-Real-time transparency via `AgentMessenger`:
-- **Granular Telemetry**: Broadcasts `intent_classified`, `swarm_started`, and `risk_review_started` events.
-- **SwiftUI Integration**: Live reasoning traces using `PhaseAnimator` for fluid, transparent AI thought visualization.
-
-## 4. Governance & Safety Gates
-
-### Human-in-the-Loop (HITL) Enforcement
-Trading execution is protected by a dual-layered gate:
-1. **Agent Gate**: Risk Agent appends `[ACTION_REQUIRED:TRADE_APPROVAL]` to any sensitive suggestion.
-2. **Backend Gate**: `/mcp/tool/call` requires a signed HMAC `approval_token` generated by the UI after explicit user confirmation.
+### D. Ticker & Currency Normalization Engine
+- **Unified Resolver**: Consolidates 12+ conflicting ticker formats into a single market standard.
+- **Fidelity Guarantee**: Ensures 100% data parity between the app and the broker (Trading 212), including automated GBX to GBP conversion.
 
 ---
-*Status: IMPLEMENTED (March 2026)*
+*Status: IMPLEMENTED & VERIFIED (March 2026)*

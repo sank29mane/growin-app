@@ -129,6 +129,10 @@ class AnalyticsDB:
         except Exception as e:
             logger.error(f"Failed to log agent message: {e}")
 
+    async def log_agent_message_async(self, message_data: Dict[str, Any]):
+        """Async version of log_agent_message."""
+        return await asyncio.to_thread(self.log_agent_message, message_data)
+
     def add_pending_action(self, action_data: Dict[str, Any]):
         """Store a trade proposal or rebalance waiting for human approval."""
         try:
@@ -146,6 +150,10 @@ class AnalyticsDB:
             ))
         except Exception as e:
             logger.error(f"Failed to add pending action: {e}")
+
+    async def add_pending_action_async(self, action_data: Dict[str, Any]):
+        """Async version of add_pending_action."""
+        return await asyncio.to_thread(self.add_pending_action, action_data)
 
     def update_action_status(self, action_id: str, status: str):
         """Update the status of a pending action."""

@@ -1,5 +1,8 @@
 version: '3.8'
 
+# ⚠️ SOTA 2026 NOTE: Docker is restricted to Linux Virtualization and CANNOT access the ANE (NPU).
+# For High-Velocity Intraday (Phase 30+), use native macOS execution: ./start.sh
+
 services:
   backend:
     build:

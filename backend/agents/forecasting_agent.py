@@ -8,12 +8,12 @@ import logging
 from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from market_context import ForecastData
 from forecaster import get_forecaster
-from utils.error_resilience import CircuitBreaker, CircuitBreakerOpenException
+from resilience import get_circuit_breaker, CircuitBreakerOpenError
 
 logger = logging.getLogger(__name__)
 
-# Module-level circuit breaker to persist state across agent instantiations
-forecasting_circuit_breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=60)
+# Module-level circuit breaker to persist state across agent instantiations (SOTA 2026 Resilience API)
+forecasting_circuit_breaker = get_circuit_breaker("forecasting", failure_threshold=3, recovery_timeout=60.0)
 
 class ForecastingAgent(BaseAgent):
     """

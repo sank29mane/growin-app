@@ -454,7 +454,7 @@ Query: "{clean_query}"
                 
                 # COORDINATOR SELF-CORRECTION: Try to fix if it's a known data issue
                 if not result.success and result.error:
-                    error_msg = result.error.lower() if isinstance(result.error, str) else str(result.error).lower()
+                    error_msg = (result.error or "").lower()
                     
                     # Trigger resolution if ticker not found or delisted (Tier 2 Escalation)
                     if any(x in error_msg for x in ["not found", "ticker", "delisted", "no data", "404"]):

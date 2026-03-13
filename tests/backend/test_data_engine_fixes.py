@@ -33,13 +33,13 @@ sys.modules['data_models'] = mock_data_models
 
 # Mock circuit breaker
 mock_resilience = MagicMock()
-def mock_circuit_breaker(*args, **kwargs):
-    def decorator(func):
-        return func
-    return decorator
-mock_resilience.circuit_breaker = mock_circuit_breaker
-mock_resilience.CircuitBreaker = MagicMock()
-sys.modules['utils.error_resilience'] = mock_resilience
+mock_resilience.get_circuit_breaker = MagicMock()
+# get_circuit_breaker returns an object with a .protect decorator
+mock_cb = MagicMock()
+def mock_protect(func): return func
+mock_cb.protect = mock_protect
+mock_resilience.get_circuit_breaker.return_value = mock_cb
+sys.modules['resilience'] = mock_resilience
 
 # Mock cache_manager
 sys.modules['cache_manager'] = MagicMock()

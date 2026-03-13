@@ -2,19 +2,19 @@ import pytest
 import asyncio
 import time
 from unittest.mock import AsyncMock
-from utils.error_resilience import CircuitBreaker, CircuitBreakerOpenException, circuit_breaker
+from resilience import CircuitBreaker, CircuitBreakerOpenError, CircuitState
 
 @pytest.mark.asyncio
 async def test_circuit_breaker_states():
     # Setup
     # Create a circuit that fails after 2 attempts and recovers in 2 seconds
-    circuit = CircuitBreaker(failure_threshold=2, recovery_timeout=2)
+    circuit = CircuitBreaker(name="test", failure_threshold=2, recovery_timeout=2.0)
     
     # Mock function that fails
     mock_func = AsyncMock(side_effect=ValueError("Failed!"))
     
     # 1. Verify CLOSED state (initial)
-    assert circuit.state == "CLOSED"
+    assert circuit.state == CircuitState.CLOSED
     
     # 2. Trigger failures to OPEN the circuit
     with pytest.raises(ValueError):
@@ -24,42 +24,39 @@ async def test_circuit_breaker_states():
         await circuit.call(mock_func) # Failure 2 -> Threshold reached
         
     # Check if state transitioned to OPEN
-    assert circuit.state == "OPEN"
+    assert circuit.state == CircuitState.OPEN
     
     # 3. Verify Fail Fast (Circuit Open Exception)
-    # The next call should fail immediately with CircuitBreakerOpenException *without* calling mock_func
-    with pytest.raises(CircuitBreakerOpenException):
+    # The next call should fail immediately with CircuitBreakerOpenError *without* calling mock_func
+    with pytest.raises(CircuitBreakerOpenError):
         await circuit.call(mock_func)
         
     # 4. Wait for Recovery Timeout (Simulate time passing)
-    # We can't really control time.time() easily without mocking time
-    # But for a 2s timeout, we can sleep or mock time.
-    # Let's mock time just for the circuit breaker instance if possible, or sleep.
-    # 2s is short enough for a test.
     await asyncio.sleep(2.1)
     
-    # 5. Verify HALF-OPEN
-    # Next call should be allowed through.
-    # Let's make the mock function succeed this time.
+    # 5. Verify HALF-OPEN transition via state access
+    assert circuit.state == CircuitState.HALF_OPEN
+    
+    # 6. Verify success in HALF-OPEN closes circuit
     mock_func.side_effect = None
     mock_func.return_value = "Success"
     
     result = await circuit.call(mock_func)
     assert result == "Success"
     
-    # 6. Verify CLOSED (Recovery)
-    assert circuit.state == "CLOSED"
-    assert circuit.failure_count == 0
+    # 7. Verify CLOSED (Recovery)
+    assert circuit.state == CircuitState.CLOSED
+    assert circuit._failure_count == 0
 
 @pytest.mark.asyncio
 async def test_decorator_usage():
-    circuit = CircuitBreaker(failure_threshold=1, recovery_timeout=1)
+    circuit = CircuitBreaker(name="decorator_test", failure_threshold=1, recovery_timeout=1.0)
     
-    @circuit_breaker(circuit)
+    @circuit.protect
     async def successful_func():
         return "OK"
         
-    @circuit_breaker(circuit)
+    @circuit.protect
     async def failing_func():
         raise ValueError("Error")
         
@@ -68,4 +65,4 @@ async def test_decorator_usage():
     with pytest.raises(ValueError):
         await failing_func()
         
-    assert circuit.state == "OPEN"
+    assert circuit.state == CircuitState.OPEN

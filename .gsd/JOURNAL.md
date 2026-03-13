@@ -1,20 +1,22 @@
 # GSD JOURNAL
 
-## Session: 2026-03-04 10:30 (Milestone Completion)
+## Session: 2026-03-12 13:00 (Phase 30 Completion & NPU Transition)
 
 ### Objective
-Complete and archive the "SOTA Intelligence & Financial Autonomy (2026)" milestone (Phases 4-23).
+Establish the high-velocity intraday foundation using M4 NPU/GPU acceleration and transition the architecture to Native Swift for sub-millisecond optimization.
 
 ### Accomplished
-- **Verified Work**: Successfully ran 34+ integration tests for Unified Intelligence (Ticker Resolution, Financial Math) and Dividend Capture (Neural ODE).
-- **Archived Milestone**: Created `SOTA-INTELLIGENCE-SUMMARY.md` and moved all phase plans (4-23) to `.gsd/milestones/SOTA-INTELLIGENCE-2026/`.
-- **Reset Roadmap**: Updated `.gsd/ROADMAP.md` and `.planning/ROADMAP.md` for the next milestone (Autonomous Experience & Production Scaling).
-- **Updated State**: Initialized Phase 24 "Frontend Reasoning Trace & User Experience Polish" in `STATE.md`.
+- **M4 Architecture Partitioning**: Formalized the use of ANE for inference, AMX for optimization, and GPU for training. This eliminates resource contention.
+- **Swift-Native Port**: Successfully ported the portfolio optimizer from Python/SciPy to Swift/Accelerate. Empirically verified <1ms optimization latency.
+- **ANE Model Brain**: Trained the `NeuralJMCE` model on the M4 GPU and exported it to a real `.mlpackage`. The "Brain" is now ready for NPU execution.
+- **Intraday Intelligence**: Integrated `ORBDetector` with NPU-accelerated covariance shift detection. Confirmed strategy effectiveness via live backtests on TQQQ, SQQQ, and LSE assets.
+- **Multi-Account Verification**: Successfully scanned both Invest and ISA accounts using direct API key queries, providing accurate risk/opportunity reports.
+- **Build Hygiene**: Resolved critical Swift compiler timeouts and protocol conformance issues in `PortfolioView.swift` and `Models.swift`.
 
 ### Identified Gaps
-- **120Hz Smoothness**: `LMStudioViewModel` still has a race condition causing status flickering.
-- **Accessibility**: FE-02 audit is pending.
-- **Reasoning Trace**: Backend logic exists, but SwiftUI frontend binding for real-time trace display is not yet implemented.
+- **Ticker Mapping Chaos**: Each provider (Alpaca, Finnhub, T212, yfinance) requires slightly different symbol formats for LSE assets. A unified `TickerNormalizationEngine` is required.
+- **Autonomous Execution**: The loop is currently "Proposal-only". Phase 31 must enable the `autonomous_entry` flag for high-conviction setups.
+- **Weight Adapters**: Local fine-tuning logic is architected but not yet implemented.
 
 ### Handoff Notes
-Milestone complete. All Phase 22/23 code is ready for final commit. Next agent should begin Phase 24 planning and implementation of the Reasoning Trace UI.
+Phase 30 is complete. The system is now hardware-optimized for the M4 Pro. The next agent should focus on the Ticker Normalization Engine and the implementation of the Autonomous Loop in the Decision Agent.

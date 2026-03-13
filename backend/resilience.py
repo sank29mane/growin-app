@@ -115,10 +115,30 @@ class CircuitBreaker:
         
         return wrapper
 
+    async def call(self, func: Callable, *args, **kwargs) -> Any:
+        """Execute the function with circuit breaker protection (legacy API)."""
+        if not self.allow_request():
+            raise CircuitBreakerOpenError(f"CircuitBreaker[{self.name}] is OPEN")
+        
+        try:
+            result = await func(*args, **kwargs)
+            self.record_success()
+            return result
+        except Exception as e:
+            self.record_failure(e)
+            raise
+
 
 class CircuitBreakerOpenError(Exception):
     """Raised when circuit breaker is open and blocks the request."""
     pass
+
+# Compatibility Aliases for SOTA 2026 Transition
+CircuitBreakerOpenException = CircuitBreakerOpenError
+
+def circuit_breaker(circuit: CircuitBreaker):
+    """Legacy decorator to apply a specific circuit breaker instance."""
+    return circuit.protect
 
 
 def retry_with_backoff(

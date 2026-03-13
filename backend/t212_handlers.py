@@ -13,13 +13,16 @@ import yfinance as yf
 from mcp.types import TextContent
 
 from utils import sanitize_nan
-from utils.currency_utils import normalize_all_positions, calculate_portfolio_value
+from utils.currency_utils import normalize_all_positions, calculate_portfolio_value, CurrencyNormalizer
 from utils.ticker_utils import normalize_ticker
 
 # Type checking import
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     pass
+
+import logging
+logger = logging.getLogger(__name__)
 
 async def handle_analyze_portfolio(
     arguments: Dict[str, Any],
@@ -301,8 +304,20 @@ async def handle_get_price_history(
         "Volume": quote.get("volume", [])
     })
 
-    # Forward fill missing values then dropna, similar to yf behavior
-    df = df.ffill().dropna()
+    # SOTA 2026: Normalize Currency for UK Stocks (GBX -> GBP)
+    meta = res.get("meta", {})
+    currency = meta.get("currency", "").upper()
+    is_uk = ticker.endswith(".L") or currency in ["GBX", "GBP", "GBP"] or CurrencyNormalizer.is_pence_ticker(ticker)
+    
+    if is_uk:
+        # Fill NaN before normalization to avoid apply errors on None
+        df = df.ffill().bfill()
+        for col in ["Open", "High", "Low", "Close"]:
+            df[col] = df[col].apply(lambda x: float(CurrencyNormalizer.pence_to_pounds(x)) if x is not None and not pd.isna(x) else x)
+
+    # Forward fill missing values then dropna (only if ALL price columns are NaN)
+    df = df.ffill()
+    df = df.dropna(subset=["Open", "High", "Low", "Close"], how="all")
 
     if df.empty:
         return [TextContent(type="text", text=f"No valid historical data points found for {ticker}")]
@@ -361,19 +376,14 @@ async def handle_get_price_history(
     first_day = hist_copy.iloc[0]
     last_day = hist_copy.iloc[-1]
 
-    # Limit daily data to first 5, last 5, and any significant days
+    # Limit daily data
     total_days = len(hist_copy)
-    if total_days > 20:
-        # Show first 5, last 5, plus high/low days
-        first_5 = hist_copy.head(5)
-        last_5 = hist_copy.tail(5)
-        price_data_sample = pd.concat([first_5, last_5]).drop_duplicates()
-        price_data_note = f"Showing first 5 and last 5 days. Full dataset has {total_days} days."
-    else:
-        price_data_sample = hist_copy
-        price_data_note = f"Complete dataset with {total_days} days."
+    # Complete dataset without dropping first row due to NaN Daily_Change
+    price_data_sample = hist_copy
+    price_data_note = f"Complete dataset with {total_days} rows."
 
     result = {
+
         "ticker": ticker,
         "period": {
             "start_date": first_day["Date"],
@@ -420,7 +430,7 @@ async def handle_get_price_history(
             else None,
         },
         "price_data_info": price_data_note,
-        "price_data": price_data_sample[
+        "price_data": price_data_sample.reset_index()[
             [
                 "Date",
                 "Open",
@@ -462,6 +472,14 @@ async def handle_get_current_price(arguments: Dict[str, Any]) -> List[TextConten
         meta = res.get("meta", {})
 
         current_price = meta.get("regularMarketPrice")
+        currency = meta.get("currency", "USD").upper()
+        
+        # SOTA 2026: Normalize Price (GBX -> GBP)
+        if current_price is not None:
+            is_uk = ticker.endswith(".L") or currency in ["GBX", "GBP", "GBP"] or CurrencyNormalizer.is_pence_ticker(ticker)
+            if is_uk:
+                current_price = float(CurrencyNormalizer.pence_to_pounds(current_price))
+
         if current_price is None:
             # Fallback to last close in quote
             quote = res.get("indicators", {}).get("quote", [{}])[0]
