@@ -1,0 +1,7 @@
+# 🚀 Future Strategic Improvements
+
+| Date       | Component            | Suggestion                               | Rationale                                                              | Status  |
+|------------|----------------------|------------------------------------------|------------------------------------------------------------------------|---------|
+| 2024-05-24 | `CoordinatorAgent` | Migrate to a redis-backed async queue. | The current architecture runs multiple specialist agents in parallel via `asyncio.gather`. While this works, long-running LLM inferences in specialists can block the coordinator's flow or hit memory/timeout constraints. Moving to a persistent message queue will decouple the routing logic from specialist execution and prevent 15s timeout losses. | Proposed |
+| 2024-05-24 | `CurrencyNormalizer` | Add metadata caching service. | `CurrencyNormalizer.normalize_position` fetches metadata locally, but cross-referencing live or cached exchange data via a structured redis cache would make GBP/USD/GBX normalization far more robust across all handlers. | Proposed |
+| 2024-05-24 | Apple MLX backend | Ensure robust environment isolation. | Since `mlx` is only available on Apple Silicon, any code leveraging it (e.g. Neural ODEs or JMCE models) must be heavily isolated or wrapped behind feature flags to ensure backend developers on Linux/Windows machines don't face ModuleNotFoundErrors. | Proposed |
