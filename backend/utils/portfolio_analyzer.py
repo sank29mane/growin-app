@@ -1,9 +1,15 @@
 import numpy as np
-import mlx.core as mx
+try:
+    import mlx.core as mx
+except ImportError:
+    mx = None
 from scipy.optimize import minimize
 from decimal import Decimal
 from typing import Dict, List, Optional, Union, Any
-from backend.utils.jmce_model import NeuralJMCE
+try:
+    from backend.utils.jmce_model import NeuralJMCE
+except ImportError:
+    NeuralJMCE = None
 from backend.utils.risk_engine import RiskEngine
 from backend.utils.financial_math import create_decimal
 from backend.app_logging import setup_logging
@@ -16,8 +22,11 @@ class PortfolioAnalyzer:
     Implements 10% Position Cap and Dynamic Alpha Hurdle.
     """
     
-    def __init__(self, model: Optional[NeuralJMCE] = None, n_assets: int = 50):
-        self.model = model or NeuralJMCE(n_assets=n_assets)
+    def __init__(self, model: Optional[Any] = None, n_assets: int = 50):
+        if model is None and NeuralJMCE is not None:
+            self.model = NeuralJMCE(n_assets=n_assets)
+        else:
+            self.model = model
         self.risk_engine = RiskEngine()
 
     async def optimize_weights(
@@ -43,6 +52,9 @@ class PortfolioAnalyzer:
         seq_len = returns_history.shape[0]
         
         try:
+            if mx is None or self.model is None:
+                raise RuntimeError("MLX or NeuralJMCE is not available")
+
             # 1. Forward Pass on NPU (MLX)
             # Reshape for batch size 1: (1, seq_len, n_assets)
             x = mx.array(returns_history[np.newaxis, :, :].astype(np.float32))
