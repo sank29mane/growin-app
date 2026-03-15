@@ -15,6 +15,7 @@ import logging
 import re
 import json
 import difflib
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -447,8 +448,18 @@ Query: "{clean_query}"
         )
         await messenger.send_message(start_msg)
         
-        async def execute_with_fallbacks():
-            result = await agent.execute(context)
+        async def execute_with_fallbacks(local_context):
+            try:
+                result = await agent.execute(local_context)
+            except Exception as e:
+                logger.error(f"Specialist {agent.config.name} execution crashed: {e}")
+                result = AgentResponse(
+                    agent_name=agent.config.name,
+                    success=False,
+                    data={},
+                    error=str(e),
+                    latency_ms=0
+                )
 
             # COORDINATOR SELF-CORRECTION: Try to fix if it's a known data issue
             if not result.success and result.error:
@@ -459,8 +470,8 @@ Query: "{clean_query}"
                     logger.info(f"Coordinator: Escalating Ticker Resolution to Tier 2 (Search) for {agent.config.name}: {result.error}")
                     status_manager.set_status(agent_key, "working", "Escalating Ticker Resolution (Tier 2)...")
                     
-                    if "ticker" in context:
-                        ticker = context["ticker"]
+                    if "ticker" in local_context:
+                        ticker = local_context["ticker"]
                         status_manager.set_status(agent_key, "working", f"Searching for correct ticker for '{ticker}'...")
                         
                         new_ticker = await self._resolve_ticker_via_search(ticker)
@@ -469,10 +480,20 @@ Query: "{clean_query}"
                             logger.info(f"Coordinator Tier 2: Success! Resolved {ticker} -> {new_ticker}")
                             status_manager.set_status(agent_key, "working", f"Retrying with resolved ticker: {new_ticker}")
                             
-                            new_context = context.copy()
-                            new_context["ticker"] = new_ticker
+                            local_context = local_context.copy()
+                            local_context["ticker"] = new_ticker
                             # Retry with new ticker
-                            retry_result = await agent.execute(new_context)
+                            try:
+                                retry_result = await agent.execute(local_context)
+                            except Exception as e:
+                                retry_result = AgentResponse(
+                                    agent_name=agent.config.name,
+                                    success=False,
+                                    data={},
+                                    error=str(e),
+                                    latency_ms=0
+                                )
+
                             if retry_result.success:
                                 status_manager.set_status(agent_key, "ready", "Resolved via Tier 2")
                                 result = retry_result
@@ -484,44 +505,28 @@ Query: "{clean_query}"
                         logger.info(f"Coordinator: Escalating Ticker Resolution to Tier 3 (LLM) for {agent.config.name}")
                         status_manager.set_status(agent_key, "working", "Attempting LLM self-healing (Tier 3)...")
 
-                        fixed_result = await self._handle_specialist_error(agent, context, result.error)
+                        # Propagate updated context (with corrected ticker from T2) to T3
+                        fixed_result = await self._handle_specialist_error(agent, local_context, result.error)
                         if fixed_result:
                             logger.info(f"Coordinator Tier 3: Successfully healed error for {agent.config.name}")
                             status_manager.set_status(agent_key, "ready", "Fixed via Coordinator Self-Healing")
                             result = fixed_result
 
-            status_manager.set_status(agent_key, "ready", "Task complete")
-
-            # Emit telemetry: Success/Complete
-            complete_msg = AgentMessage(
-                sender=agent.config.name,
-                recipient="CoordinatorAgent",
-                subject="agent_complete",
-                payload={
-                    "agent": agent.config.name,
-                    "success": result.success,
-                    "latency_ms": result.latency_ms,
-                    "ticker": context.get("ticker"),
-                    "error": result.error if not result.success else None
-                },
-                correlation_id=c_id
-            )
-            await messenger.send_message(complete_msg)
-
             return result
 
+        result = None
+        start_time = time.time()
         try:
             # 15s timeout per specialist to prevent hanging
             if hasattr(asyncio, 'timeout'):
                 async with asyncio.timeout(15.0):
-                    return await execute_with_fallbacks()
+                    result = await execute_with_fallbacks(context)
             else:
-                return await asyncio.wait_for(execute_with_fallbacks(), timeout=15.0)
+                result = await asyncio.wait_for(execute_with_fallbacks(context), timeout=15.0)
         except asyncio.TimeoutError:
             error_msg = "Timout after 15s"
             logger.warning(f"Specialist {agent.config.name} timed out")
-            status_manager.set_status(agent_key, "error", "Timed out")
-            return AgentResponse(
+            result = AgentResponse(
                 agent_name=agent.config.name,
                 success=False,
                 data={},
@@ -530,23 +535,36 @@ Query: "{clean_query}"
             )
         except Exception as e:
             logger.error(f"Specialist {agent.config.name} failed: {e}")
-            
-            # COORDINATOR SELF-CORRECTION: Try to fix if it's a known data issue
-            if any(x in str(e).lower() for x in ["not found", "ticker", "delisted"]):
-                status_manager.set_status(agent_key, "working", "Attempting self-correction...")
-                fixed_result = await self._handle_specialist_error(agent, context, str(e))
-                if fixed_result:
-                    status_manager.set_status(agent_key, "ready", "Fixed via Coordinator")
-                    return fixed_result
-
-            status_manager.set_status(agent_key, "error", f"Failed: {str(e)}")
-            return AgentResponse(
+            result = AgentResponse(
                 agent_name=agent.config.name,
                 success=False,
                 data={},
                 error=str(e),
                 latency_ms=0
             )
+        
+        # --- FINAL TELEMETRY AND STATUS (Ensures it runs even on timeout/exception) ---
+        status_label = "ready" if result.success else "error"
+        status_desc = "Task complete" if result.success else f"Failed: {result.error}"
+        status_manager.set_status(agent_key, status_label, status_desc)
+        
+        # Emit telemetry: Success/Complete
+        complete_msg = AgentMessage(
+            sender=agent.config.name,
+            recipient="CoordinatorAgent",
+            subject="agent_complete",
+            payload={
+                "agent": agent.config.name,
+                "success": result.success,
+                "latency_ms": result.latency_ms or int((time.time() - start_time) * 1000),
+                "ticker": context.get("ticker"),
+                "error": result.error if not result.success else None
+            },
+            correlation_id=c_id
+        )
+        await messenger.send_message(complete_msg)
+        
+        return result
 
     async def _attempt_ticker_fix(self, ticker: str) -> Optional[str]:
         """
