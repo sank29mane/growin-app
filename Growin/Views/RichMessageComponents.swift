@@ -738,7 +738,9 @@ struct TradeProposalCard: View, Equatable {
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.green.opacity(0.3), lineWidth: 1))
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Approve Trade Proposal")
+                .accessibilityLabel("Approve \(proposal.action) for \(proposal.ticker)")
+                .accessibilityHint("Approves the pending trade proposal")
+                .accessibilityAddTraits(.isButton)
                 
                 Button(action: { onReject(proposal.proposalId) }) {
                     HStack {
@@ -754,7 +756,9 @@ struct TradeProposalCard: View, Equatable {
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.red.opacity(0.3), lineWidth: 1))
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Reject Trade Proposal")
+                .accessibilityLabel("Reject \(proposal.action) for \(proposal.ticker)")
+                .accessibilityHint("Rejects the pending trade proposal")
+                .accessibilityAddTraits(.isButton)
             }
         }
         .padding(14)
