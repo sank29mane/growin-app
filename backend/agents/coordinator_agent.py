@@ -447,70 +447,76 @@ Query: "{clean_query}"
         )
         await messenger.send_message(start_msg)
         
+        async def execute_with_fallbacks():
+            result = await agent.execute(context)
+
+            # COORDINATOR SELF-CORRECTION: Try to fix if it's a known data issue
+            if not result.success and result.error:
+                error_msg = result.error.lower() if isinstance(result.error, str) else str(result.error).lower()
+                
+                # Trigger resolution if ticker not found or delisted (Tier 2 Escalation)
+                if any(x in error_msg for x in ["not found", "ticker", "delisted", "no data", "404"]):
+                    logger.info(f"Coordinator: Escalating Ticker Resolution to Tier 2 (Search) for {agent.config.name}: {result.error}")
+                    status_manager.set_status(agent_key, "working", "Escalating Ticker Resolution (Tier 2)...")
+                    
+                    if "ticker" in context:
+                        ticker = context["ticker"]
+                        status_manager.set_status(agent_key, "working", f"Searching for correct ticker for '{ticker}'...")
+                        
+                        new_ticker = await self._resolve_ticker_via_search(ticker)
+
+                        if new_ticker and new_ticker != ticker:
+                            logger.info(f"Coordinator Tier 2: Success! Resolved {ticker} -> {new_ticker}")
+                            status_manager.set_status(agent_key, "working", f"Retrying with resolved ticker: {new_ticker}")
+                            
+                            new_context = context.copy()
+                            new_context["ticker"] = new_ticker
+                            # Retry with new ticker
+                            retry_result = await agent.execute(new_context)
+                            if retry_result.success:
+                                status_manager.set_status(agent_key, "ready", "Resolved via Tier 2")
+                                result = retry_result
+                            else:
+                                result = retry_result # Update original result for Tier 3 fallthrough
+
+                    if not result.success:
+                        # Tier 3: LLM Self-Correction fallback (Reasoning)
+                        logger.info(f"Coordinator: Escalating Ticker Resolution to Tier 3 (LLM) for {agent.config.name}")
+                        status_manager.set_status(agent_key, "working", "Attempting LLM self-healing (Tier 3)...")
+
+                        fixed_result = await self._handle_specialist_error(agent, context, result.error)
+                        if fixed_result:
+                            logger.info(f"Coordinator Tier 3: Successfully healed error for {agent.config.name}")
+                            status_manager.set_status(agent_key, "ready", "Fixed via Coordinator Self-Healing")
+                            result = fixed_result
+
+            status_manager.set_status(agent_key, "ready", "Task complete")
+
+            # Emit telemetry: Success/Complete
+            complete_msg = AgentMessage(
+                sender=agent.config.name,
+                recipient="CoordinatorAgent",
+                subject="agent_complete",
+                payload={
+                    "agent": agent.config.name,
+                    "success": result.success,
+                    "latency_ms": result.latency_ms,
+                    "ticker": context.get("ticker"),
+                    "error": result.error if not result.success else None
+                },
+                correlation_id=c_id
+            )
+            await messenger.send_message(complete_msg)
+
+            return result
+
         try:
             # 15s timeout per specialist to prevent hanging
-            async with asyncio.timeout(15.0):
-                result = await agent.execute(context)
-                
-                # COORDINATOR SELF-CORRECTION: Try to fix if it's a known data issue
-                if not result.success and result.error:
-                    error_msg = result.error.lower() if isinstance(result.error, str) else str(result.error).lower()
-                    
-                    # Trigger resolution if ticker not found or delisted (Tier 2 Escalation)
-                    if any(x in error_msg for x in ["not found", "ticker", "delisted", "no data", "404"]):
-                        logger.info(f"Coordinator: Escalating Ticker Resolution to Tier 2 (Search) for {agent.config.name}: {result.error}")
-                        status_manager.set_status(agent_key, "working", "Escalating Ticker Resolution (Tier 2)...")
-                        
-                        if "ticker" in context:
-                            ticker = context["ticker"]
-                            status_manager.set_status(agent_key, "working", f"Searching for correct ticker for '{ticker}'...")
-                            
-                            new_ticker = await self._resolve_ticker_via_search(ticker)
-                            
-                            if new_ticker and new_ticker != ticker:
-                                logger.info(f"Coordinator Tier 2: Success! Resolved {ticker} -> {new_ticker}")
-                                status_manager.set_status(agent_key, "working", f"Retrying with resolved ticker: {new_ticker}")
-                                
-                                new_context = context.copy()
-                                new_context["ticker"] = new_ticker
-                                # Retry with new ticker
-                                retry_result = await agent.execute(new_context)
-                                if retry_result.success:
-                                    status_manager.set_status(agent_key, "ready", "Resolved via Tier 2")
-                                    result = retry_result
-                                else:
-                                    result = retry_result # Update original result for Tier 3 fallthrough
-
-                        if not result.success:
-                            # Tier 3: LLM Self-Correction fallback (Reasoning)
-                            logger.info(f"Coordinator: Escalating Ticker Resolution to Tier 3 (LLM) for {agent.config.name}")
-                            status_manager.set_status(agent_key, "working", "Attempting LLM self-healing (Tier 3)...")
-                            
-                            fixed_result = await self._handle_specialist_error(agent, context, result.error)
-                            if fixed_result:
-                                logger.info(f"Coordinator Tier 3: Successfully healed error for {agent.config.name}")
-                                status_manager.set_status(agent_key, "ready", "Fixed via Coordinator Self-Healing")
-                                result = fixed_result
-                
-                status_manager.set_status(agent_key, "ready", "Task complete")
-                
-                # Emit telemetry: Success/Complete
-                complete_msg = AgentMessage(
-                    sender=agent.config.name,
-                    recipient="CoordinatorAgent",
-                    subject="agent_complete",
-                    payload={
-                        "agent": agent.config.name, 
-                        "success": result.success,
-                        "latency_ms": result.latency_ms,
-                        "ticker": context.get("ticker"),
-                        "error": result.error if not result.success else None
-                    },
-                    correlation_id=c_id
-                )
-                await messenger.send_message(complete_msg)
-                
-                return result
+            if hasattr(asyncio, 'timeout'):
+                async with asyncio.timeout(15.0):
+                    return await execute_with_fallbacks()
+            else:
+                return await asyncio.wait_for(execute_with_fallbacks(), timeout=15.0)
         except asyncio.TimeoutError:
             error_msg = "Timout after 15s"
             logger.warning(f"Specialist {agent.config.name} timed out")
