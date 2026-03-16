@@ -2,6 +2,7 @@ import numpy as np
 try:
     import mlx.core as mx
 <<<<<<< HEAD
+<<<<<<< HEAD
     MLX_AVAILABLE = True
 except ImportError:
     mx = None
@@ -28,6 +29,17 @@ from backend.utils.risk_engine import RiskEngine
 from backend.utils.financial_math import create_decimal
 from backend.app_logging import setup_logging
 >>>>>>> origin/fix/coordinator-normalization-and-suggestions-7316720179958987230
+=======
+except ImportError:
+    mx = None
+from scipy.optimize import minimize
+from decimal import Decimal
+from typing import Dict, List, Optional, Union, Any
+from utils.jmce_model import NeuralJMCE
+from utils.risk_engine import RiskEngine
+from utils.financial_math import create_decimal
+from app_logging import setup_logging
+>>>>>>> origin/fix-mcp-replay-attack-1935419374204470437
 
 logger = setup_logging("portfolio_analyzer")
 
