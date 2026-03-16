@@ -10,6 +10,7 @@ import logging
 import re
 import json
 import time
+import os
 import asyncio
 from pydantic import BaseModel, Field
 from magentic import prompt as mag_prompt
@@ -97,6 +98,15 @@ class DecisionAgent:
         contradictions = self._identify_contradictions(context)
         if contradictions:
             context.user_context["contradictions"] = contradictions
+
+        # 1a. SOTA 2026: Calculate Hybrid Conviction Multiplier (Phase 36 Wave 2)
+        conviction_multiplier = 1.0
+        if context.vision and context.vision.patterns:
+            high_conf_patterns = [p for p in context.vision.patterns if p.confidence >= 0.85]
+            if high_conf_patterns:
+                conviction_multiplier = 1.2
+                logger.info(f"DecisionAgent: High-confidence visual patterns detected. Applying 1.2x Conviction Multiplier.")
+                context.user_context["conviction_multiplier"] = conviction_multiplier
 
         # 2. Build optimized prompt
         prompt = self._build_prompt(context, query)
@@ -193,6 +203,9 @@ class DecisionAgent:
             recommendation = loop_result.get("content", "")
             response_id = loop_result.get("response_id")
             
+            # 5. SOTA 2026: Reasoning Trace Export (Task 2.2)
+            await self._export_reasoning_trace(context, recommendation, query)
+
             # Price validation
             recommendation = await self._validate_prices(recommendation, context.ticker)
 
@@ -222,7 +235,8 @@ class DecisionAgent:
                     "correlation_id": correlation_id_ctx.get(),
                     "recommendation_snippet": recommendation[:200],
                     "response_id": response_id,
-                    "contradictions_count": len(contradictions) if contradictions else 0
+                    "contradictions_count": len(contradictions) if contradictions else 0,
+                    "conviction_multiplier": conviction_multiplier
                 }
             )
 
@@ -235,6 +249,44 @@ class DecisionAgent:
             logger.error(f"Decision making failed: {e}")
             status_manager.set_status("decision_agent", "error", f"Error: {str(e)}", model=self.model_name)
             return {"content": f"Error generating recommendation: {str(e)}", "response_id": None}
+
+    async def _export_reasoning_trace(self, context: MarketContext, recommendation: str, query: str):
+        """SOTA 2026: Export detailed reasoning trace as JSON for auditing and UAT."""
+        try:
+            from datetime import datetime, timezone
+            trace = {
+                "correlation_id": correlation_id_ctx.get(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "query": query,
+                "inputs": {
+                    "ticker": context.ticker,
+                    "intent": context.intent,
+                    "agents_executed": context.agents_executed,
+                    "hybrid_weighting": {
+                        "quant": 0.4,
+                        "forecast": 0.3,
+                        "visual": 0.3
+                    },
+                    "conviction_multiplier": context.user_context.get("conviction_multiplier", 1.0)
+                },
+                "agent_thoughts": {
+                    "chain_of_thought": context.reasoning,
+                    "contradictions": context.user_context.get("contradictions", [])
+                },
+                "final_consensus": {
+                    "recommendation_summary": recommendation[:500] + "..." if len(recommendation) > 500 else recommendation,
+                    "model": self.model_name
+                }
+            }
+            
+            # Save to a dedicated trace file (overwritten per request in UAT, or unique ID in prod)
+            trace_path = os.path.join(os.getcwd(), "reasoning_trace.json")
+            with open(trace_path, "w") as f:
+                json.dump(trace, f, indent=2)
+            
+            logger.info(f"✅ Reasoning trace exported to {trace_path}")
+        except Exception as e:
+            logger.warning(f"Failed to export reasoning trace: {e}")
 
     def _identify_contradictions(self, context: MarketContext) -> List[str]:
         """Identify conflicting signals between agents for the debate phase."""
@@ -837,7 +889,7 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
         return "all"
 
     def _build_prompt(self, context: MarketContext, query: str, account_filter: str = "all") -> str:
-        """Build prompt from market context"""
+        """Build prompt from market context with SOTA 2026 30/30/40 Hybrid Fusion."""
 
         # Final Mandatory Structure for rendering
         structured_template = """
@@ -857,6 +909,17 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
         ### 4. Strategic Synthesis
         [Your detailed reasoning here...]
         """
+        
+        # SOTA 2026: Infuse Hybrid Weighting Instructions
+        weighting_instruction = """
+        [HYBRID FUSION MANDATE]
+        Apply the following weighting to your synthesis:
+        - 40% QUANT/TECHNICALS (Indicators & ORB)
+        - 30% FORECASTING (TTM-R2 Predictive Stability)
+        - 30% VISUAL/SENTIMENT (VLM Patterns & News)
+        
+        If a Conviction Multiplier is active (Visual Patterns > 0.85), escalate your sizing and confidence accordingly.
+        """
 
         coordinator_account = context.user_context.get("account_type")
         if coordinator_account:
@@ -865,7 +928,8 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
         sections = [
             f"**User Query**: {query}",
             f"**System Intent**: {context.intent}",
-            f"**Routing Logic**: {context.routing_reason or 'Direct Analysis'}\n"
+            f"**Routing Logic**: {context.routing_reason or 'Direct Analysis'}\n",
+            weighting_instruction
         ]
 
         # Specialist Execution Summary

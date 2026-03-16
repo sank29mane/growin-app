@@ -2,29 +2,27 @@
 
 ## Current Position
 - **Phase**: Phase 36 - UAT & Production Hardening
-- **Task**: Wave 1: Core Engine & Agent Hardening
+- **Task**: Wave 2: Decision Fusion & Traceability
 - **Status**: COMPLETED
 
 ## Summary
+- **Phase 36 Wave 2 COMPLETED**: Successfully implemented SOTA 2026 decision fusion and reasoning traceability.
+    - **Hybrid Fusion (30/30/40)**: Updated `DecisionAgent` to weight signals: 40% Quant, 30% Forecast, 30% Visual/Sentiment.
+    - **Conviction Multiplier**: Implemented a 1.2x conviction multiplier for high-confidence (>0.85) visual patterns.
+    - **Reasoning Trace Export**: Added automatic export of `reasoning_trace.json` for every decision, mapping inputs, thoughts, and consensus.
+    - **Validation Verified**: Verified via `tests/test_decision_fusion.py` covering multiplier logic and trace export.
 - **Phase 36 Wave 1 COMPLETED**: Successfully hardened the VLM inference engine and VisionAgent.
-    - **Memory & Cache Optimization**: Implemented `mlx.core.set_cache_limit` (80% cap) and enabled content-based prefix caching for 28x vision speedup.
-    - **Model Residency (TTL)**: Added a 10-minute "Keep-Alive" TTL for model unloading to manage memory on M4 Pro/Max.
-    - **Integrity Guards**: Implemented `.safetensors` checksum verification on engine initialization.
-    - **Security Guardrails**: Added visual prompt injection detection to `VisionAgent` with specific rejection logic.
-    - **Validation Verified**: All tasks verified via `scripts/validate_mlx_limits.py` and `tests/test_vision_guardrails.py`.
 - **Phase 35 HIGH-FIDELITY COMPLETED**: Successfully integrated local vision models (via MLX) for multi-modal context infusion.
 - **Phase 34 HIGH-FIDELITY COMPLETED**: Successfully implemented the "Hybrid Magentic Architecture" for structured agent outputs.
 - **Phase 33 HIGH-FIDELITY COMPLETED**: Successfully implemented the "Three-Brain" architecture.
-- **Phase 32 BASELINE VERIFIED**: Confirmed stable performance for LSE LETFs with high-fidelity corrections.
 
 ## Recent Quick Tasks
 | Task | Description | Date |
 |------|-------------|------|
+| Wave 2 Fusion | Hybrid weighting, conviction multiplier, and trace export implemented. | 2026-03-16 |
 | Wave 1 Hardening | Memory guards, prefix caching, checksums, and injection guards implemented. | 2026-03-16 |
 | Magentic Multi-Agent Sweep | Refactored RiskAgent and PortfolioAgent to use structured Pydantic outputs via magentic. | 2026-03-14 |
-| DecisionAgent Magentic | Refactored tool-calling logic to use structured Pydantic models via magentic. | 2026-03-14 |
 
 ## Next Steps
-1. **Phase 36 Wave 2: Decision Fusion & Traceability**: Implement 30/30/40 weighting, conviction multiplier, and JSON reasoning trace.
-2. **Phase 36 Wave 3: Shadow Mode Infrastructure**: Set up interceptor and 14-day benchmark harness.
-3. **Phase 36 Wave 4: Live UAT Trace**: Final benchmarking against real T212 data.
+1. **Phase 36 Wave 3: Shadow Mode Infrastructure**: Set up interceptor and 14-day benchmark harness.
+2. **Phase 36 Wave 4: Live UAT Trace**: Final benchmarking against real T212 data.
