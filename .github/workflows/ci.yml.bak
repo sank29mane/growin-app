@@ -11,7 +11,7 @@ jobs:
     name: Run SOTA Test Suite
     runs-on: macos-latest
     timeout-minutes: 20
-    
+
     env:
       CI: "true"
       PYTHONPATH: ".:backend"
@@ -23,7 +23,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-          cache-dependency-glob: "backend/uv.lock"
+          cache-dependency-path: backend/uv.lock
 
       - name: Set up Python
         run: uv python install 3.11
@@ -58,7 +58,7 @@ jobs:
         timeout-minutes: 5
         run: |
           uv run --project backend pytest tests/backend/test_performance_benchmarks.py
-          
+
       - name: DeepEval Reasoning Audit
         run: |
           # Placeholder for DeepEval logic
