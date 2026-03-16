@@ -166,7 +166,9 @@ class AnalyticsDB:
         """Fetch all pending actions by status."""
         try:
             # Convert to list of dicts from DuckDB result
-            res = self.conn.execute("SELECT * FROM pending_actions WHERE status = ?", (status,)).fetchdf()
+            rows = self.conn.execute("SELECT * FROM pending_actions WHERE status = ?", (status,)).fetchall()
+            cols = ['id', 'correlation_id', 'action_type', 'status', 'payload', 'ticker', 'timestamp']
+            res = pd.DataFrame(rows, columns=cols)
             return res.to_dict("records")
         except Exception as e:
             logger.error(f"Failed to fetch pending actions: {e}")
@@ -364,8 +366,14 @@ class AnalyticsDB:
             DataFrame with aggregated statistics
         """
         try:
+            import pandas as pd
+            from datetime import datetime, timedelta
+            
+            # Pre-calculate timestamp to simplify DuckDB query and avoid INTERVAL issues
+            limit_ts = (datetime.now() - timedelta(days=int(window_days))).isoformat()
+
             # Sentinel: Use parameterized query for interval to prevent SQL injection
-            result = self.conn.execute("""
+            rows = self.conn.execute("""
                 SELECT 
                     ticker,
                     COUNT(*) as data_points,
@@ -376,14 +384,22 @@ class AnalyticsDB:
                     MAX(high) - MIN(low) as price_range,
                     SUM(volume) as total_volume,
                     AVG(volume) as avg_volume,
-                    (MAX(close) - MIN(close)) / MIN(close) * 100 as price_change_pct
+                    (MAX(close) - MIN(close)) / NULLIF(MIN(close), 0) * 100 as price_change_pct
                 FROM ohlcv_history
                 WHERE ticker = ? 
-                  AND timestamp >= CURRENT_TIMESTAMP - (INTERVAL 1 DAY * ?)
+                  AND timestamp >= ?
                 GROUP BY ticker
-            """, (ticker, int(window_days))).fetchdf()
+            """, (ticker, limit_ts)).fetchall()
             
-            return result if not result.empty else None
+            if not rows:
+                return None
+                
+            cols = [
+                'ticker', 'data_points', 'avg_price', 'volatility', 
+                'min_price', 'max_price', 'price_range', 
+                'total_volume', 'avg_volume', 'price_change_pct'
+            ]
+            return pd.DataFrame(rows, columns=cols)
             
         except Exception as e:
             logger.error(f"Aggregation query failed: {e}")
@@ -405,7 +421,7 @@ class AnalyticsDB:
             DataFrame with OHLCV data
         """
         try:
-            result = self.conn.execute("""
+            rows = self.conn.execute("""
                 SELECT 
                     timestamp,
                     open,
@@ -417,7 +433,10 @@ class AnalyticsDB:
                 WHERE ticker = ?
                 ORDER BY timestamp DESC
                 LIMIT ?
-            """, (ticker, limit)).fetchdf()
+            """, (ticker, limit)).fetchall()
+            
+            cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
+            result = pd.DataFrame(rows, columns=cols)
             
             return result if not result.empty else None
             
@@ -532,7 +551,9 @@ class AnalyticsDB:
             else:
                 ticker_query += " GROUP BY ticker"
                 
-            ticker_res = self.conn.execute(ticker_query, params).fetchdf()
+            rows = self.conn.execute(ticker_query, params).fetchall()
+            cols = ['ticker', 'avg_1d', 'avg_5d', 'count']
+            ticker_res = pd.DataFrame(rows, columns=cols)
             
             # 2. Specialist level metrics (correlation between specialist completion and future returns)
             # We join performance with telemetry to see which agents were active during successful/unsuccessful sessions
@@ -546,12 +567,16 @@ class AnalyticsDB:
                 JOIN agent_performance p ON t.correlation_id = p.correlation_id
                 WHERE t.subject = 'agent_complete' AND t.agent_name != 'OrchestratorAgent'
             """
+            
+            spec_cols = ['agent_name', 'avg_1d', 'avg_5d', 'count']
             if ticker:
                 specialist_query += " AND p.ticker = ? GROUP BY t.agent_name"
-                specialist_res = self.conn.execute(specialist_query, [ticker]).fetchdf()
+                spec_rows = self.conn.execute(specialist_query, [ticker]).fetchall()
             else:
                 specialist_query += " GROUP BY t.agent_name"
-                specialist_res = self.conn.execute(specialist_query).fetchdf()
+                spec_rows = self.conn.execute(specialist_query).fetchall()
+            
+            specialist_res = pd.DataFrame(spec_rows, columns=spec_cols)
 
             # Format result
             specialists = {}

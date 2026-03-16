@@ -62,6 +62,13 @@ MOCK_MODULES = [
     'docker'  # CRITICAL: Prevent Docker daemon connection attempts in CI
 ]
 
+def make_async(mock):
+    """Helper to add awaitable capability to mocked objects, simulating AsyncMock."""
+    if hasattr(mock, '__call__') and not isinstance(mock, AsyncMock):
+        # Only override side_effect if it's not already an AsyncMock to prevent overriding AsyncMocks
+        mock.side_effect = AsyncMock()
+    return mock
+
 for module in MOCK_MODULES:
     try:
         if module not in sys.modules:

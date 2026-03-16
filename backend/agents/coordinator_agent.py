@@ -456,10 +456,13 @@ Query: "{clean_query}"
         
         try:
             # 15s timeout per specialist to prevent hanging
-            async with asyncio.timeout(15.0):
-                result = await agent.execute(context)
+            if hasattr(asyncio, 'timeout'):
+                async with asyncio.timeout(15.0):
+                    result = await agent.execute(context)
+            else:
+                result = await asyncio.wait_for(agent.execute(context), timeout=15.0)
                 
-                # COORDINATOR SELF-CORRECTION: Try to fix if it's a known data issue
+            # COORDINATOR SELF-CORRECTION: Try to fix if it's a known data issue
                 if not result.success and result.error:
                     error_msg = (result.error or "").lower()
                     

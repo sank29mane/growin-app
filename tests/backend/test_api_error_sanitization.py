@@ -91,12 +91,30 @@ def test_market_forecast_sanitization():
     with TestClient(app) as client:
         # Import the router to patch the agent
         from routes.market_routes import forecast_agent
+        import data_engine
+        
+        from unittest.mock import AsyncMock
+        
+        async def mock_analyze(*args, **kwargs):
+            raise Exception("FORECAST_MODEL_PATH_LEAK")
+            
+        with patch.object(forecast_agent, 'analyze', new=mock_analyze), \
+             patch('routes.market_routes.get_alpaca_client') as mock_get_alpaca:
+            mock_alpaca_instance = MagicMock()
+            
+            async def mock_get_bars(*args, **kwargs):
+                return {"bars": [{"close": 100, "timestamp": "2024-01-01T00:00:00Z"}] * 512}
+                
+            mock_alpaca_instance.get_historical_bars = mock_get_bars
+            mock_get_alpaca.return_value = mock_alpaca_instance
 
-        with patch.object(forecast_agent, 'analyze', side_effect=Exception("FORECAST_MODEL_PATH_LEAK")):
+            # Test specific error sanitization
             response = client.get("/api/forecast/AAPL")
 
             # This endpoint returns 200 with error key
             assert response.status_code == 200
             error_msg = response.json().get("error")
-            assert error_msg == "Internal Server Error"
+            # We want to make sure the internal error doesn't leak
             assert "FORECAST_MODEL_PATH_LEAK" not in str(response.content)
+            # The actual message is "Internal Server Error"
+            assert error_msg == "Internal Server Error"

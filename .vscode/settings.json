@@ -9,5 +9,6 @@
             "name": "ANTHROPIC_AUTH_TOKEN",
             "value": "lmstudio"
         }
-    ]
+    ],
+    "geminicodeassist.outlines.automaticOutlineGeneration": true
 }
