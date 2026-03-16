@@ -1,6 +1,13 @@
-import mlx.core as mx
+import pytest
 import numpy as np
 from backend.utils.jmce_model import NeuralJMCE
+
+try:
+    import mlx.core as mx
+except ImportError:
+    mx = None
+
+pytestmark = pytest.mark.skipif(mx is None, reason="mlx not available")
 
 def test_jmce_forward():
     """
