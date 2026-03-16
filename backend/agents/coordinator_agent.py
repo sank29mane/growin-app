@@ -456,11 +456,16 @@ Query: "{clean_query}"
         
         try:
             # 15s timeout per specialist to prevent hanging
+<<<<<<< HEAD
             if hasattr(asyncio, 'timeout'):
                 async with asyncio.timeout(15.0):
                     result = await agent.execute(context)
             else:
                 result = await asyncio.wait_for(agent.execute(context), timeout=15.0)
+=======
+            async def execute_with_fallbacks():
+                result = await agent.execute(context)
+>>>>>>> origin/fix-coordinator-asyncio-timeout-compat-7578135025378994688
                 
             # COORDINATOR SELF-CORRECTION: Try to fix if it's a known data issue
                 if not result.success and result.error:
@@ -521,6 +526,13 @@ Query: "{clean_query}"
                 await messenger.send_message(complete_msg)
                 
                 return result
+
+            if hasattr(asyncio, 'timeout'):
+                async with asyncio.timeout(15.0):
+                    return await execute_with_fallbacks()
+            else:
+                return await asyncio.wait_for(execute_with_fallbacks(), timeout=15.0)
+
         except asyncio.TimeoutError:
             error_msg = "Timout after 15s"
             logger.warning(f"Specialist {agent.config.name} timed out")
@@ -559,6 +571,14 @@ Query: "{clean_query}"
         """
         if not ticker:
             return None
+
+        try:
+            from trading212_mcp_server import normalize_ticker
+            normalized = normalize_ticker(ticker)
+            if normalized and len(normalized) >= 1:
+                ticker = normalized
+        except Exception:
+            pass
 
         # Strip trailing dots first
         ticker = ticker.strip('.')

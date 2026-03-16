@@ -1,8 +1,10 @@
 import numpy as np
 try:
     import mlx.core as mx
+    MLX_AVAILABLE = True
 except ImportError:
     mx = None
+    MLX_AVAILABLE = False
 from scipy.optimize import minimize
 from decimal import Decimal
 from typing import Dict, List, Optional, Union, Any
