@@ -1,3 +1,4 @@
+from __future__ import annotations
 try:
     import mlx.core as mx
     import mlx.nn as nn
@@ -84,7 +85,7 @@ class NeuralJMCE(nn.Module):
         idx_map[idx_map == -1] = self.cholesky_size
         self.idx_map_mx = mx.array(idx_map, dtype=mx.uint32)
 
-    def _apply_fourier_shift(self, mu: mx.array) -> mx.array:
+    def _apply_fourier_shift(self, mu: 'mx.array') -> 'mx.array':
         shift = self.fourier_phase_shift
         sin_phi = mx.tanh(shift[:, 0]) * 0.1
         cos_phi = mx.sqrt(1.0 - sin_phi**2)
@@ -92,10 +93,10 @@ class NeuralJMCE(nn.Module):
 
     def __call__(
         self, 
-        x: mx.array, 
-        error_vector: Optional[mx.array] = None,
+        x: 'mx.array',
+        error_vector: Optional['mx.array'] = None,
         return_velocity: bool = False
-    ) -> Tuple[mx.array, mx.array, Optional[mx.array]]:
+    ) -> Tuple['mx.array', 'mx.array', Optional['mx.array']]:
         B, S, N = x.shape
         x_lat = self.input_proj(x)
         if error_vector is not None:
@@ -117,7 +118,7 @@ class NeuralJMCE(nn.Module):
             V = self._build_cholesky(V_flat)
         return mu, L, V
 
-    def _build_cholesky(self, L_flat: mx.array) -> mx.array:
+    def _build_cholesky(self, L_flat: 'mx.array') -> 'mx.array':
         L_flat = L_flat * (1.0 - self.diag_mask) + mx.exp(L_flat) * self.diag_mask
         B = L_flat.shape[0]
         zeros = mx.zeros((B, 1))
@@ -126,7 +127,7 @@ class NeuralJMCE(nn.Module):
         L = mx.take(L_flat_padded, indices, axis=1)
         return L
 
-    def get_covariance(self, L: mx.array) -> mx.array:
+    def get_covariance(self, L: 'mx.array') -> 'mx.array':
         return mx.matmul(L, L.transpose(0, 2, 1))
 
 class CoreMLJMCE:
