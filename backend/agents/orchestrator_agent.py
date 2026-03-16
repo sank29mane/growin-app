@@ -129,10 +129,10 @@ Query: "{clean_query}"
                 intent_type = "portfolio_query"
             
             # Conversational/Educational triggers
-            if any(w in q_lower for w in ["what is", "how does", "tell me about", "hello", "hi", "how are you", "who are you"]):
+            if any(w in q_lower for w in ("what is", "how does", "tell me about", "hello", "hi", "how are you", "who are you")):
                 intent_type = "conversational"
                 
-            if ticker in ["ISA", "INVEST", "MY", "DEEP", "DIVE", "MORE", "SOME", "RSI", "MACD"]:
+            if ticker in {"ISA", "INVEST", "MY", "DEEP", "DIVE", "MORE", "SOME", "RSI", "MACD"}:
                 ticker = None
             
             # If it's a "how is it doing" question without a ticker, we might be talking about a portfolio
@@ -196,7 +196,7 @@ Query: "{clean_query}"
                     
                 content = msg.get("content", "")
                 found = extract_ticker_from_text(content)
-                if found and found not in ["ISA", "INVEST", "MY", "DEEP", "DIVE", "MORE", "SOME", "RSI"]:
+                if found and found not in {"ISA", "INVEST", "MY", "DEEP", "DIVE", "MORE", "SOME", "RSI"}:
                     ticker = found
                     break
                 elif "portfolio" in content.lower():
@@ -482,7 +482,7 @@ Query: "{clean_query}"
                     
                 content = msg.get("content", "")
                 found = extract_ticker_from_text(content)
-                if found and found not in ["ISA", "INVEST", "MY", "DEEP", "DIVE", "MORE", "SOME", "RSI"]:
+                if found and found not in {"ISA", "INVEST", "MY", "DEEP", "DIVE", "MORE", "SOME", "RSI"}:
                     ticker = found
                     break
                 elif "portfolio" in content.lower():
