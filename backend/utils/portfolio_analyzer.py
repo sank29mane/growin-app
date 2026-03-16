@@ -1,6 +1,7 @@
 import numpy as np
 try:
     import mlx.core as mx
+<<<<<<< HEAD
     MLX_AVAILABLE = True
 except ImportError:
     mx = None
@@ -13,6 +14,20 @@ from utils.risk_engine import RiskEngine
 from utils.financial_math import create_decimal
 from app_logging import setup_logging
 from app_context import state
+=======
+except ImportError:
+    mx = None
+from scipy.optimize import minimize
+from decimal import Decimal
+from typing import Dict, List, Optional, Union, Any
+try:
+    from backend.utils.jmce_model import NeuralJMCE
+except ImportError:
+    NeuralJMCE = None
+from backend.utils.risk_engine import RiskEngine
+from backend.utils.financial_math import create_decimal
+from backend.app_logging import setup_logging
+>>>>>>> origin/fix/coordinator-normalization-and-suggestions-7316720179958987230
 
 logger = setup_logging("portfolio_analyzer")
 
@@ -24,10 +39,18 @@ class PortfolioAnalyzer:
     SOTA 2026: Dynamically utilizes ANE (CoreML) or GPU (MLX) for NPU acceleration.
     """
     
+<<<<<<< HEAD
     def __init__(self, model: Optional[Any] = None, n_assets: int = 50, resolution: TimeResolution = TimeResolution.DAILY):
         # Use state.ane_config to decide if we should use ANE
         use_ane = getattr(state.ane_config, 'enabled', True)
         self.model = model or get_jmce_model(n_assets=n_assets, use_ane=use_ane, resolution=resolution)
+=======
+    def __init__(self, model: Optional[Any] = None, n_assets: int = 50):
+        if model is None and NeuralJMCE is not None:
+            self.model = NeuralJMCE(n_assets=n_assets)
+        else:
+            self.model = model
+>>>>>>> origin/fix/coordinator-normalization-and-suggestions-7316720179958987230
         self.risk_engine = RiskEngine()
 
     async def optimize_weights(
@@ -53,9 +76,18 @@ class PortfolioAnalyzer:
         seq_len = returns_history.shape[0]
         
         try:
+<<<<<<< HEAD
             # 1. Forward Pass on NPU (ANE or GPU)
             # SOTA 2026: NeuralJMCE returns (mu, L, V)
             # Input shape: (seq_len, n_assets) or (1, seq_len, n_assets)
+=======
+            if mx is None or self.model is None:
+                raise RuntimeError("MLX or NeuralJMCE is not available")
+
+            # 1. Forward Pass on NPU (MLX)
+            # Reshape for batch size 1: (1, seq_len, n_assets)
+            x = mx.array(returns_history[np.newaxis, :, :].astype(np.float32))
+>>>>>>> origin/fix/coordinator-normalization-and-suggestions-7316720179958987230
             
             if hasattr(self.model, "__call__"):
                 if isinstance(self.model, NeuralJMCE):
