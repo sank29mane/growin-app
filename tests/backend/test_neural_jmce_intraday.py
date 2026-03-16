@@ -1,5 +1,13 @@
 import pytest
-import mlx.core as mx
+try:
+    import mlx.core as mx
+    import mlx.nn as nn
+    HAS_MLX = True
+except ImportError:
+    mx = None
+    HAS_MLX = False
+
+pytestmark = pytest.mark.skipif(not HAS_MLX, reason="Apple MLX library is not available in this environment")
 import numpy as np
 from backend.utils.jmce_model import NeuralJMCE, TimeResolution
 
