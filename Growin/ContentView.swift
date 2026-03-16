@@ -138,7 +138,11 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .accessibilityElement(children: .combine)
+<<<<<<< HEAD
         .accessibilityLabel("System Settings, backend \(backendStatus.isOnline ? "online" : "offline")")
+=======
+        .accessibilityLabel("System Settings")
+>>>>>>> origin/palette/contentview-settingsbutton-a11y-7343748744931053220
         .accessibilityHint("Opens the system preferences and console overlay")
         .accessibilityAddTraits(.isButton)
         .help("System Settings & Console")
