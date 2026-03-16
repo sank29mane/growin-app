@@ -150,38 +150,36 @@ class ChatManager:
             sanitize: If True, mask sensitive environment variables (keys).
         """
         cursor = self.conn.cursor()
-        query = "SELECT * FROM mcp_servers"
+        query = """
+        SELECT json_group_array(
+            json_object(
+                'name', name,
+                'type', type,
+                'command', command,
+                'args', CASE WHEN args IS NOT NULL AND args != '' THEN json(args) ELSE NULL END,
+                'env', CASE WHEN env IS NOT NULL AND env != '' THEN json(env) ELSE NULL END,
+                'url', url,
+                'active', active
+            )
+        ) FROM mcp_servers
+        """
         if active_only:
             query += " WHERE active = 1"
         cursor.execute(query)
 
-        servers = []
-        for row in cursor:
-            env = json.loads(row["env"]) if row["env"] else None
+        res = cursor.fetchone()[0]
+        servers = json.loads(res) if res != '[]' and res is not None else []
 
-            # Sanitize environment variables if requested
+        for server in servers:
+            if 'active' in server:
+                server['active'] = bool(server['active'])
+
+            env = server.get('env')
             if sanitize and env:
                 # Mask all values in env to prevent leakage
                 # If value is present (non-empty), mask it. If empty, keep empty.
-                sanitized_env = {}
-                for k, v in env.items():
-                    if v:
-                        sanitized_env[k] = "********"
-                    else:
-                        sanitized_env[k] = v
-                env = sanitized_env
+                server['env'] = {k: "********" if v else v for k, v in env.items()}
 
-            servers.append(
-                {
-                    "name": row["name"],
-                    "type": row["type"],
-                    "command": row["command"],
-                    "args": json.loads(row["args"]) if row["args"] else None,
-                    "env": env,
-                    "url": row["url"],
-                    "active": bool(row["active"]),
-                }
-            )
         return servers
 
     def delete_mcp_server(self, name: str):
