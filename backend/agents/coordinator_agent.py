@@ -279,7 +279,12 @@ Query: "{clean_query}"
         # COORDINATOR FIX: Robust normalization via Resolver
         if ticker:
             original_ticker = ticker
-            ticker = resolver.normalize(ticker)
+            try:
+                from trading212_mcp_server import normalize_ticker
+                ticker = normalize_ticker(ticker)
+            except Exception:
+                ticker = resolver.normalize(ticker)
+
             if ticker != original_ticker:
                  logger.info(f"Ticker normalized (Resolver): {original_ticker} -> {ticker}")
 
@@ -307,8 +312,17 @@ Query: "{clean_query}"
         # -----------------------
         
         # COORDINATOR FIX: Ticker normalization
-        if context.ticker and (not context.ticker.isalpha() or len(context.ticker) < 2):
-            context.ticker = await self._attempt_ticker_fix(context.ticker)
+        if context.ticker:
+            is_valid = False
+            # Allow pure alphanumeric (e.g., AAPL, 3GLD, A)
+            if context.ticker.isalnum():
+                is_valid = True
+            # Allow a single internal dot (e.g., VOD.L)
+            elif context.ticker.count('.') == 1 and context.ticker.replace('.', '').isalnum():
+                is_valid = True
+
+            if not is_valid:
+                context.ticker = await self._attempt_ticker_fix(context.ticker)
 
         # 3. PARALLEL AGENT_EXECUTION (Pure Processors)
         needs = intent.get("needs", [])
@@ -571,7 +585,7 @@ Query: "{clean_query}"
         # If the result is a clean ticker (e.g. "AAPL."), strip trailing dot
         clean = clean.strip('.')
 
-        if len(clean) >= 2:
+        if len(clean) >= 1:
             return clean
 
         # 3. Fallback to search if really broken or too short
