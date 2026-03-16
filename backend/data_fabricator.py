@@ -80,7 +80,7 @@ class DataFabricator:
                 tasks.append(self._fetch_price_data(pt, timeframe=timeframe, limit=180))
             
             # Fetch macro signals via RegimeFetcher
-            from backend.utils.regime_fetcher import RegimeFetcher
+            from utils.regime_fetcher import RegimeFetcher
             tasks.append(RegimeFetcher().fetch_signals())
 
         # Always fetch Price if we have a ticker and not already handled by portfolio_optimization

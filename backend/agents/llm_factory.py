@@ -43,7 +43,7 @@ class LLMFactory:
             # Using standard provider logic below.
             
             if not llm_instance:
-                is_lmstudio_hint = "lmstudio" in model_lower
+                is_lmstudio_hint = "lmstudio" in model_lower or "nemotron" in model_lower
                 if provider == "lmstudio" or (not provider and is_lmstudio_hint):
                     try:
                         llm_instance = await LLMFactory._create_lmstudio(model_name)

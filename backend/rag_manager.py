@@ -45,9 +45,9 @@ class RAGManager:
             except Exception as e2:
                 logger.error(f"Critical RAG failure: {e2}")
 
-            # Auto-seed abstract context if empty
-            if self._collection and self._collection.count() == 0:
-                self.seed_abstract_context()
+        # Auto-seed abstract context if empty
+        if self._collection and self._collection.count() == 0:
+            self.seed_abstract_context()
 
     def seed_abstract_context(self):
         """Seed the database with broad macroeconomic and portfolio theory concepts."""

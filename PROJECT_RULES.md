@@ -38,6 +38,18 @@ Every change requires verification evidence:
 
 ---
 
+## Resource Lifecycle Mandate (CRITICAL)
+
+**Rule:** Every asynchronous task, subprocess, or database connection MUST have an explicit shutdown mechanism.
+
+1. **Explicit Teardown**: Call `.stop()` or `.close()` in test teardowns and lifespan `finally` blocks.
+2. **Lazy Init**: Do not start background services on module import.
+3. **Mocking**: Global mocks for Docker and External APIs in unit tests.
+
+See [docs/LIFECYCLE_MANDATES.md](docs/LIFECYCLE_MANDATES.md) for full specs.
+
+---
+
 ## Search-First Discipline
 
 **Before reading any file completely:**

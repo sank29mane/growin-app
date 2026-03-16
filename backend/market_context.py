@@ -49,6 +49,9 @@ class ForecastData(BaseModel):
     note: Optional[str] = None  # Reason for fallback or extra info
     raw_series: List[TimeSeriesItem] = [] # Full forecast series for charts
     auxiliary_forecasts: Optional[List[Dict[str, Any]]] = None # Secondary model predictions for comparison
+    
+    # SOTA 2026: JMCE Residual Correction Metadata
+    jmce_uncertainty: Optional[List[float]] = None # Covariance diagonal/eigenvalues proxy
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -223,6 +226,25 @@ class GeopoliticalData(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class VisualPattern(BaseModel):
+    """SOTA 2026 Phase 35: Visual pattern identified by VLM"""
+    name: str
+    confidence: float
+    bbox_2d: Optional[List[float]] = None # [ymin, xmin, ymax, xmax]
+    reasoning: Optional[str] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class VisionData(BaseModel):
+    """SOTA 2026 Phase 35: Multi-modal vision analysis"""
+    patterns: List[VisualPattern] = []
+    raw_description: str
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class PriceData(BaseModel):
     """Current price information"""
     ticker: str
@@ -264,6 +286,7 @@ class MarketContext(BaseModel):
     goal: Optional[GoalData] = None
     risk_governance: Optional[RiskGovernanceData] = None
     geopolitical: Optional[GeopoliticalData] = None
+    vision: Optional[VisionData] = None
     
     # Agent Status & Telemetry
     agents_executed: List[str] = []
@@ -327,7 +350,7 @@ class MarketContext(BaseModel):
     def serialize_dt(self, dt: datetime, _info):
         return dt.isoformat()
 
-    @field_serializer('price', 'forecast', 'quant', 'portfolio', 'research', 'social', 'whale', 'goal', 'risk_governance', 'geopolitical', check_fields=False)
+    @field_serializer('price', 'forecast', 'quant', 'portfolio', 'research', 'social', 'whale', 'goal', 'risk_governance', 'geopolitical', 'vision', check_fields=False)
     def serialize_nested(self, v, _info):
         if v is None:
             return None

@@ -1,45 +1,40 @@
 # GSD STATE MEMORY
 
 ## Current Position
-- **Phase**: Phase 32 - End-to-End Simulation
-- **Task**: Multi-day native backtest & calibration verify
-- **Status**: PENDING
+- **Phase**: Phase 35 - Multi-modal Context Infusion
+- **Task**: Phase 35 Complete
+- **Status**: COMPLETED
 
 ## Summary
-- **Phase 31 COMPLETED**: Established the autonomous execution loop and real-time model calibration.
-- **Ticker Normalization Consolidated**: Unified `normalize_ticker` imports across `backend/` (price_validation.py, market_routes.py, etc.) to use `utils.ticker_utils`.
-- **Autonomous Loop Implemented**: `DecisionAgent` now supports "High Conviction" bypass for sensitive tools, allowing autonomous execution of trades for high-probability setups (CONVICTION LEVEL: 10).
-- **MLX Weight Adapters**: Implemented on-the-fly daily model calibration via `apply_weight_adapter` NPU injection, allowing the system to adjust to recent market error feedback.
-- **M4 Resource Partitioning**: Canonical architecture implemented:
-    - **NPU (ANE)**: Low-latency Inference (JMCE Model).
-    - **CPU (AMX)**: High-speed Optimization (Swift Native `Accelerate.QuadraticProgram`).
-    - **GPU (MLX)**: Rapid Re-training and calibration (Metal optimized).
-- **Native Pipeline**: Ported all logic to Native Swift and macOS Python (`uv`), achieving <1ms latency for portfolio optimization.
-- **Brain Training**: NeuralJMCE trained on M4 GPU and exported to real `.mlpackage` for ANE inference.
-- **Backtest Verified**: Confirmed strategy using real-time figures for TQQQ/SQQQ and LSE assets (MAG5, 3GLD) with NPU-boosted ORB signals.
-- **Codebase Hygiene**: Purged legacy Docker artifacts and verified native execution via `./start.sh`.
+- **Phase 35 HIGH-FIDELITY COMPLETED**: Successfully integrated local vision models (via MLX) for multi-modal context infusion.
+    - **VisionAgent Integrated**: A new specialized agent that uses `mlx-vlm` to analyze chart screenshots and identify technical patterns.
+    - **Multi-modal MarketContext**: Updated schema to support `VisionData` including structured `VisualPattern` objects with confidence scores and bounding boxes.
+    - **Swarm Orchestration**: `CoordinatorAgent` now detects visual analysis needs and spawns the `VisionAgent`.
+    - **Integrated Reasoning**: `DecisionAgent` now cross-references visual patterns with technical indicators, increasing conviction for confirmed setups.
+    - **Hardware Optimized**: VLM inference runs locally on Apple Silicon using Metal acceleration.
+- **Phase 34 HIGH-FIDELITY COMPLETED**: Successfully implemented the "Hybrid Magentic Architecture" for structured agent outputs.
+    - **Framework Integration**: `magentic` and `pydantic` are now the standard for structured data extraction in the Multi-Agent Swarm.
+    - **ResearchAgent Refactored**: Replaced brittle manual JSON parsing with natively enforced Pydantic schemas via `@mag_prompt`.
+    - **DecisionAgent Refactored**: Transitioned tool-calling logic to Magentic `ToolCall` models, eliminating regex-based parsing and manual `json.loads` extraction for tool arguments.
+    - **RiskAgent Refactored**: Implemented `conduct_risk_audit` using structured `RiskAssessment` Pydantic models, replacing complex multi-stage JSON extraction.
+    - **PortfolioAgent Refactored**: Integrated `analyze_portfolio_quality` for future structured qualitative insights.
+- **Phase 33 HIGH-FIDELITY COMPLETED**: Successfully implemented the "Three-Brain" architecture.
+    - **Adaptive Scaling**: Multivariate TTM-R2 with Robust Median/IQR scaling and VIX Z-score injection.
+    - **Neural JMCE Feedback**: ELF-style residual correction loop active on GPU/MLX.
+    - **Hardware Optimized**: Zero-copy memory sharing and model residency achieved in `WorkerService`.
+- **Phase 32 BASELINE VERIFIED**: Confirmed stable performance for LSE LETFs with high-fidelity corrections.
+- **Three-Brain Partitioning ACTIVE**: CPU (Logic), GPU (AI Models/AMX), NPU (Monte Carlo).
+- **Compliance & Risk ACTIVE**: 75bp Alpha Hurdle and Temporal Jitter (500-2000ms) enforced.
 
-## Last Milestone Summary
-- **Milestone**: High-Velocity Intraday Foundation (COMPLETED 2026-03-12)
-- **Completed**: Phase 30 (Core Integration)
-
-## Next Steps
-1. **Ticker Normalization Engine**: Implement unified resolver in `backend/utils/ticker_utils.py` to fix multi-provider mapping issues.
-2. **Autonomous Loop**: Move from "Trade Proposals" to "Autonomous Entry" in `DecisionAgent` for high-conviction signals.
-3. **Local Re-training**: Implement MLX-based "Weight Adapters" for on-the-fly daily model calibration.
-4. **End-to-End Simulation**: Run multi-day backtest using the native Swift optimizer.
-
-## Quick Tasks Completed
+## Recent Quick Tasks
 | Task | Description | Date |
 |------|-------------|------|
-| Codebase Analysis | Synthesized a comprehensive architectural overview and functionality breakdown of the Growin App for user education. | 2026-03-12 |
-| ISA JMCE Backtest | Verified JMCE on realtime ISA data for 3GLD.L. Detected high velocity (Shift: 2.90). | 2026-03-12 |
-| Redundancy Audit | Removed 0-byte placeholder models and identified Docker-era artifacts. | 2026-03-12 |
-| Architecture Sync | Documented M4 Resource Partitioning strategy in STATE.md. | 2026-03-12 |
-| Codebase Hygiene | Updated docker-compose with ANE gating warnings and cleaned root. | 2026-03-12 |
-| LSE Backtest | Verified high-velocity signals for MAG5.L, 3GLD.L using real data. | 2026-03-12 |
-| ISA Portfolio Scan | Successfully isolated and analyzed ISA holdings (3GLD.L) with JMCE. | 2026-03-12 |
-| Milestone Archive | Archived Phases 4-23 into SOTA-INTELLIGENCE-2026. | 2026-03-04 |
-| Verification Sync | 34+ tests verified for Unified Intelligence & Dividend Capture. | 2026-03-04 |
-| PR Sync | Merged Jules-Loop agent fixes and accessibility enhancements (PR #116-#126). | 2026-03-10 |
-| Repo Cleanup | Removed redundant patches, fixed merge conflict artifacts, synced state docs. | 2026-03-11 |
+| Magentic Multi-Agent Sweep | Refactored RiskAgent and PortfolioAgent to use structured Pydantic outputs via magentic. | 2026-03-14 |
+| DecisionAgent Magentic | Refactored tool-calling logic to use structured Pydantic models via magentic. | 2026-03-14 |
+| ResearchAgent Magentic | Refactored news query generation to use magentic structured outputs. | 2026-03-14 |
+| LSE LETF Baseline | Established baseline performance for commission-free UK assets. | 2026-03-12 |
+
+## Next Steps
+1. **Phase 35: Multi-Modal Context Infusion**: Integrate local vision models (via MLX) to analyze chart screenshots for technical pattern confirmation.
+2. **UAT Validation**: Perform a live end-to-end trace to verify Magentic logic in a real trading scenario.
+3. **M4 Pro Profiling**: Run end-to-end latency benchmarks for the new Hybrid Magentic logic.

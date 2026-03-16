@@ -1,22 +1,25 @@
 # GSD JOURNAL
 
-## Session: 2026-03-12 13:00 (Phase 30 Completion & NPU Transition)
+## Session: 2026-03-14 10:00 (Phase 33 Completion & Phase 34 Initiation)
 
 ### Objective
-Establish the high-velocity intraday foundation using M4 NPU/GPU acceleration and transition the architecture to Native Swift for sub-millisecond optimization.
+Finalize the M4 Pro hardware optimization (Phase 33) and initiate the Hybrid Magentic Architecture (Phase 34) for structured agent outputs.
 
 ### Accomplished
-- **M4 Architecture Partitioning**: Formalized the use of ANE for inference, AMX for optimization, and GPU for training. This eliminates resource contention.
-- **Swift-Native Port**: Successfully ported the portfolio optimizer from Python/SciPy to Swift/Accelerate. Empirically verified <1ms optimization latency.
-- **ANE Model Brain**: Trained the `NeuralJMCE` model on the M4 GPU and exported it to a real `.mlpackage`. The "Brain" is now ready for NPU execution.
-- **Intraday Intelligence**: Integrated `ORBDetector` with NPU-accelerated covariance shift detection. Confirmed strategy effectiveness via live backtests on TQQQ, SQQQ, and LSE assets.
-- **Multi-Account Verification**: Successfully scanned both Invest and ISA accounts using direct API key queries, providing accurate risk/opportunity reports.
-- **Build Hygiene**: Resolved critical Swift compiler timeouts and protocol conformance issues in `PortfolioView.swift` and `Models.swift`.
+- **Phase 31 & 32**: Successfully verified the autonomous execution loop and established the multi-day baseline simulation for LSE-based LETFs.
+- **M4 Pro Resource Exploitation (Phase 33)**:
+    - **Model Residency**: Implemented `worker_service.py` to keep TTM-R2 and JMCE models resident in 48GB Unified Memory.
+    - **AMX Acceleration**: Refactored `indicator_engine.py` to utilize Apple's Accelerate framework.
+- **Hybrid Magentic Architecture (Phase 34)**:
+    - **Framework Integration**: Added `magentic` and `pydantic` to the stack.
+    - **ResearchAgent Refactor (MAG-02)**: Replaced manual JSON parsing for news queries with Magentic `@prompt`.
+    - **DecisionAgent Refactor (MAG-03)**: Transitioned tool-calling logic to Magentic `ToolCall` models.
+    - **Consistency Sweep (MAG-04)**: Refactored `RiskAgent` and `PortfolioAgent` to utilize Pydantic-enforced structured outputs, completely eliminating manual JSON parsing in core logic.
+    - **UAT Verified**: Coordination between Magentic-powered agents was successfully verified via local execution trace.
 
 ### Identified Gaps
-- **Ticker Mapping Chaos**: Each provider (Alpaca, Finnhub, T212, yfinance) requires slightly different symbol formats for LSE assets. A unified `TickerNormalizationEngine` is required.
-- **Autonomous Execution**: The loop is currently "Proposal-only". Phase 31 must enable the `autonomous_entry` flag for high-conviction setups.
-- **Weight Adapters**: Local fine-tuning logic is architected but not yet implemented.
+- **Vision Integration**: Chart visual confirmation is still manual.
+- **Latency Audit**: Need to measure the overhead of Magentic wrappers on M4 Pro.
 
 ### Handoff Notes
-Phase 30 is complete. The system is now hardware-optimized for the M4 Pro. The next agent should focus on the Ticker Normalization Engine and the implementation of the Autonomous Loop in the Decision Agent.
+Phase 34 is COMPLETED. The architecture is now strictly typed and agentic reasoning is robust. Phase 35 (Multi-Modal) is the next milestone.

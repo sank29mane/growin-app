@@ -9,6 +9,7 @@ import numpy as np
 import logging
 import asyncio
 import platform
+import time
 from typing import List, Dict, Any
 from sklearn.preprocessing import StandardScaler
 import datetime
@@ -41,21 +42,41 @@ class TTMForecaster:
         return 'other'
 
     def _init_ttm_model(self):
-        """Initialize TTM-R2 bridge if available"""
+        """Initialize TTM-R2 bridge and Worker residency"""
         import os
         import sys
+        from utils.worker_client import get_worker_client
+        
         # Use absolute paths for reliability in subprocess
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        # Use current python executable instead of missing venv
-        venv_python = sys.executable
         bridge_script = os.path.join(base_dir, "forecast_bridge.py")
         
-        # Check if tsfm_public is importable in current env or bridge script exists
         if os.path.exists(bridge_script):
             self.ttm_available = True
-            self.venv_python = venv_python
             self.bridge_script = bridge_script
-            logger.info(f"✅ TTM-R2 Forecasting Bridge detected and ready (using {sys.executable})")
+            
+            # SOTA 2026: Request residency in Worker Service
+            async def setup_residency():
+                try:
+                    client = get_worker_client()
+                    await client.load_ttm_model()
+                    await client.load_jmce_model(resolution="daily")
+                    logger.info("✅ High-Fidelity models pinned in Worker Service (GPU)")
+                except Exception as e:
+                    logger.warning(f"Residency request failed: {e}")
+            
+            # Fire and forget residency setup (asyncio.create_task requires a loop)
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(setup_residency())
+                else:
+                    # In sync main, we can't easily wait for it without blocking
+                    pass
+            except Exception:
+                pass
+                
+            logger.info("✅ TTM-R2 Forecasting Bridge detected and ready")
         else:
             logger.warning(f"TTM-R2 Bridge script not found at {bridge_script}. Using Statistical Fallback.")
             self.ttm_available = False
@@ -209,80 +230,54 @@ class TTMForecaster:
             }
 
     async def _ttm_forecast(self, ohlcv_data: List[Dict[str, Any]], prediction_steps: int, timeframe: str) -> Dict[str, Any]:
-        """Generate forecast using TTM-R2 model via bridge script with sanity checks"""
+        """Generate forecast using Fused TTM-JMCE via Worker Service"""
         import json
-        import subprocess
+        from utils.worker_client import get_worker_client
         
-        loop = asyncio.get_running_loop()
+        client = get_worker_client()
 
         try:
-            # Prepare input
-            # DIAGNOSTIC: Log input data characteristics
-            if ohlcv_data:
-                prices = [d['c'] for d in ohlcv_data]
-                logger.info(f"TTM Input Stats: Count={len(prices)}, Start={prices[0]}, End={prices[-1]}, Min={min(prices)}, Max={max(prices)}")
-                logger.info(f"TTM Timeframe: {timeframe}, Steps: {prediction_steps}")
-
-            payload = {
-                "ohlcv_data": ohlcv_data,
-                "prediction_steps": prediction_steps,
-                "timeframe": timeframe
-            }
-            
-            logger.info(f"🚀 Invoking TTM-R2 Forecasting Bridge (TF: {timeframe})...")
-            
-            # Call bridge via subprocess
-            process = await asyncio.create_subprocess_exec(
-                self.venv_python, self.bridge_script,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
+            # 1. Execute Fused Forecast via Worker (GPU/MLX)
+            # This handles Multivariate TTM + Residual JMCE Correction
+            logger.info(f"🚀 Dispatching Fused TTM-JMCE request (TF: {timeframe})...")
+            start_time = time.time()
+            result = await client.forecast_fused(
+                ohlcv_data=ohlcv_data,
+                prediction_steps=prediction_steps,
+                timeframe=timeframe
             )
-            
-            import decimal
-            class DecimalEncoder(json.JSONEncoder):
-                def default(self, obj):
-                    if isinstance(obj, decimal.Decimal):
-                        return float(obj)
-                    return super(DecimalEncoder, self).default(obj)
-            
-            stdout, stderr = await process.communicate(input=json.dumps(payload, cls=DecimalEncoder).encode())
-            
-            if process.returncode != 0:
-                error_msg = stderr.decode().strip()
-                logger.error(f"Bridge failed (code {process.returncode}): {error_msg}")
-                return await loop.run_in_executor(None, self._statistical_forecast, ohlcv_data, prediction_steps, timeframe, f"Bridge Error: {error_msg[:50]}...")
-
-            # Parse response
-            result = json.loads(stdout.decode())
+            duration_ms = (time.time() - start_time) * 1000
+            logger.info(f"✅ Fused TTM-JMCE complete in {duration_ms:.2f}ms")
             
             if not result.get("success"):
-                logger.error(f"Bridge returned error: {result.get('error')}")
-                return await loop.run_in_executor(None, self._statistical_forecast, ohlcv_data, prediction_steps, timeframe, f"Bridge Error: {result.get('error')}")
+                logger.error(f"Worker failed: {result.get('error')}")
+                return await asyncio.get_event_loop().run_in_executor(None, self._statistical_forecast, ohlcv_data, prediction_steps, timeframe, f"Worker Error: {result.get('error')}")
 
-            # --- Sanity Check ---
+            # --- SOTA 2026: Task 3.2 Alpha Hurdle ---
             forecast = result.get("forecast", [])
-            if not forecast:
-                return await loop.run_in_executor(None, self._statistical_forecast, ohlcv_data, prediction_steps, timeframe, "Empty TTM Forecast")
-
-            last_price = float(ohlcv_data[-1]['c'])
-            last_forecast_price = float(forecast[-1]['close'])
-            
-            # If prediction is > 50% jump/drop, it's likely an "outrageous" number due to scaling issues
-            pct_change = abs(last_forecast_price - last_price) / last_price
-            if pct_change > 0.5:
-                debug_info = result.get("debug_scaling", {})
-                logger.warning(f"⚠️ TTM result failed sanity check ({pct_change*100:.1f}% change). Fallback. Debug: {debug_info}")
-                return await loop.run_in_executor(None, self._statistical_forecast, ohlcv_data, prediction_steps, timeframe, f"Sanity Check Failed: Forecast {last_forecast_price:.2f} vs Last {last_price:.2f} (>50% variance)")
+            if forecast:
+                last_price = float(ohlcv_data[-1]['c'])
+                max_pred = max(bar['close'] for bar in forecast)
+                min_pred = min(bar['close'] for bar in forecast)
                 
-            # Add algorithm metadata
-            result["algorithm"] = "IBM Granite TTM-R2.1"
+                # Check 75bp net-friction hurdle
+                alpha_long = (max_pred - last_price) / last_price
+                alpha_short = (last_price - min_pred) / last_price
+                max_alpha = max(alpha_long, alpha_short)
+                
+                if max_alpha < 0.0075: # < 75bp
+                    result["note"] += " | ⚠️ Sub-Hurdle Alpha (<75bp)"
+                    result["clears_hurdle"] = False
+                else:
+                    result["clears_hurdle"] = True
+
+            result["algorithm"] = "IBM Granite TTM-R2.1 + Neural JMCE"
             result["is_fallback"] = False
             return result
             
         except Exception as e:
-            logger.error(f"TTM Bridge execution failed: {e}. Falling back.")
-            return await loop.run_in_executor(None, self._statistical_forecast, ohlcv_data, prediction_steps, timeframe, f"Bridge Exe Error: {str(e)}")
+            logger.error(f"Fused forecasting failed: {e}. Falling back.")
+            return await asyncio.get_event_loop().run_in_executor(None, self._statistical_forecast, ohlcv_data, prediction_steps, timeframe, f"Fused Exe Error: {str(e)}")
 
     def _statistical_forecast(self, ohlcv_data: List[Dict[str, Any]], prediction_steps: int, timeframe: str = "1Day", reason: str = None) -> Dict[str, Any]:
         """

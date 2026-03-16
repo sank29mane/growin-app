@@ -11,6 +11,8 @@ import re
 import json
 import time
 import asyncio
+from pydantic import BaseModel, Field
+from magentic import prompt as mag_prompt
 from langchain_core.messages import SystemMessage, HumanMessage
 from .llm_factory import LLMFactory
 from utils.audit_log import log_audit
@@ -22,6 +24,22 @@ logger = logging.getLogger(__name__)
 
 decision_circuit_breaker = get_circuit_breaker("decision", failure_threshold=3, recovery_timeout=30.0)
 
+class ToolCall(BaseModel):
+    """Structured tool call extracted from agent reasoning."""
+    tool_name: str = Field(..., description="Name of the tool to execute")
+    arguments: Dict[str, Any] = Field(default_factory=dict, description="Arguments for the tool call")
+    conviction_level: int = Field(default=5, ge=1, le=10, description="Confidence in this decision (1-10)")
+    is_high_conviction: bool = Field(default=False, description="Explicitly marked as high conviction setup")
+
+@mag_prompt(
+    "Extract all tool calls from the following LLM response.\n"
+    "Response: {content}\n"
+    "Reasoning: {reasoning}\n"
+    "Context: Looking for tool calls in the format [TOOL:name(args)].\n"
+    "Return a list of ToolCall objects."
+)
+def extract_tool_calls(content: str, reasoning: str) -> List[ToolCall]:
+    ...
 
 class DecisionAgent:
     """
@@ -83,6 +101,17 @@ class DecisionAgent:
         # 2. Build optimized prompt
         prompt = self._build_prompt(context, query)
         prompt = self._inject_context_layers(prompt, query)
+
+        # 2.5 SOTA 2026: JMCE Uncertainty Gating
+        uncertainty_warning = ""
+        if context.forecast and context.forecast.jmce_uncertainty:
+            # We treat the mean of the diagonal covariance as the uncertainty score
+            # Institutional standard: If score > 0.05 (5% residual variance), block auto-execution
+            u_score = sum(context.forecast.jmce_uncertainty) / len(context.forecast.jmce_uncertainty)
+            if u_score > 0.05:
+                logger.warning(f"JMCE Uncertainty Spike: {u_score:.4f}. Enforcing Risk Gate.")
+                uncertainty_warning = f"\n\n⚠️ **JMCE RISK GATE ACTIVE**: High residual variance detected ({u_score:.2%}). Predictive stability is COMPROMISED. Final Strategic Synthesis MUST prioritize capital preservation."
+                prompt += uncertainty_warning
 
         # 3. Math Delegation Workflow (NPU Accelerated)
         if any(k in (query or "").lower() for k in ["simulate", "calculate", "math", "model", "monte carlo", "forecast"]):
@@ -240,6 +269,16 @@ class DecisionAgent:
                 contradictions.append("Whale activity is BULLISH, but Social Media sentiment is BEARISH.")
             elif w_impact == "BEARISH" and s_sent == "BULLISH":
                 contradictions.append("Whale activity is BEARISH, but Social Media sentiment is BULLISH.")
+                
+        # 4. Vision vs. Technicals (SOTA 2026 Phase 35)
+        if context.vision and context.quant:
+            v_patterns = [p.name.lower() for p in context.vision.patterns]
+            q_signal = context.quant.signal
+            
+            if q_signal == "BUY" and any(p in v_patterns for p in ["double top", "head and shoulders", "bear flag"]):
+                 contradictions.append("Technical signal is BUY, but VisionAgent detected BEARISH reversal patterns.")
+            elif q_signal == "SELL" and any(p in v_patterns for p in ["double bottom", "inverse head and shoulders", "bull flag"]):
+                 contradictions.append("Technical signal is SELL, but VisionAgent detected BULLISH reversal patterns.")
                 
         return contradictions
 
@@ -407,26 +446,25 @@ class DecisionAgent:
 
                 response_id = resp.get("sessionId") or resp.get("response_id")
                 
-                tool_matches = list(re.finditer(r'\[TOOL:(\w+)\((.*?)\)\]', content, re.DOTALL))
+                # SOTA 2026: Agentic Tool Extraction via Magentic
+                tool_calls = await asyncio.to_thread(extract_tool_calls, content, reasoning)
                 
-                if tool_matches:
+                if tool_calls:
                     from status_manager import status_manager
-                    if len(tool_matches) > 1:
-                        logger.info(f"DecisionAgent: Executing {len(tool_matches)} Parallel Consultations")
-                        status_manager.set_status("decision_agent", "working", f"Executing {len(tool_matches)} parallel consultations...", model=self.model_name)
+                    if len(tool_calls) > 1:
+                        logger.info(f"DecisionAgent: Executing {len(tool_calls)} Parallel Consultations")
+                        status_manager.set_status("decision_agent", "working", f"Executing {len(tool_calls)} parallel consultations...", model=self.model_name)
                     
-                    async def execute_tool(match):
-                        tool_name = match.group(1)
-                        tool_args_str = match.group(2)
+                    async def execute_tool(t_call: ToolCall):
+                        tool_name = t_call.tool_name
+                        tool_args = t_call.arguments
                         try:
-                            tool_args = json.loads(tool_args_str) if tool_args_str.strip() else {}
-                            
                             # Security Interception (SOTA 2026 Phase 31: Autonomous Bypass for High Conviction)
-                            is_high_conviction = "HIGH CONVICTION" in (context.reasoning or "").upper() or "CONVICTION LEVEL: 10" in content.upper()
+                            is_high_conviction = t_call.is_high_conviction or t_call.conviction_level == 10
                             
                             if tool_name in self.INTERCEPTED_TOOLS and not is_high_conviction:
                                 logger.info(f"DecisionAgent: INTERCEPTING sensitive tool {tool_name}")
-                                return f"[ACTION_REQUIRED:{tool_name}] Parameters: {tool_args_str}. Unauthorized for autonomous execution. Requires UI confirmation."
+                                return f"[ACTION_REQUIRED:{tool_name}] Parameters: {json.dumps(tool_args)}. Unauthorized for autonomous execution. Requires UI confirmation."
 
                             if is_high_conviction and tool_name in self.INTERCEPTED_TOOLS:
                                 logger.info(f"DecisionAgent: AUTONOMOUS BYPASS for sensitive tool {tool_name} (High Conviction Detected)")
@@ -457,7 +495,7 @@ class DecisionAgent:
                             logger.warning(f"Tool execution failed in loop: {e}")
                             return f"[TOOL_RESULT:{tool_name}] Error: {str(e)}"
 
-                    tool_results = await asyncio.gather(*(execute_tool(m) for m in tool_matches))
+                    tool_results = await asyncio.gather(*(execute_tool(t) for t in tool_calls))
                     messages.append({"role": "assistant", "content": content})
                     messages.append({"role": "user", "content": "\n".join(tool_results)})
                     continue
@@ -547,10 +585,16 @@ class DecisionAgent:
         # Phase 27: Geopolitical
         gpr = f"{float(context.geopolitical.gpr_score):.2f} ({context.geopolitical.global_sentiment_label})" if context.geopolitical else "N/A"
 
+        # Phase 35: Vision
+        vision_info = ""
+        if context.vision:
+            patterns = " | ".join([f"{p.name} ({p.confidence*100:.0f}%)" for p in context.vision.patterns])
+            vision_info = f"\n**Vision Signals**: {patterns if patterns else 'No specific patterns detected'}"
+
         return f"""
 ### 1. Market Pulse
 **Sentiment**: {sent} (Verified across NewsData.io and Tavily)
-**GPR Index**: {gpr}
+**GPR Index**: {gpr}{vision_info}
 
 ### 2. Technical Levels
 *   **Support**: {currency}{float(context.quant.support_level) if context.quant and context.quant.support_level else 0.0:.2f}
@@ -703,6 +747,7 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
         - Edge: Use SMA, RSI, MACD, and Volume Profile to find entries.
         - Precision: Never output generic analysis. Every recommendation MUST include hard coordinates.
         - Macro Context: Always weigh Geopolitical Risk (GPR) and Systemic Risk (VIX/Yield) before recommending size or direction. If GPR is CRISIS, be extremely defensive.
+        - Visual Confirmation: Cross-reference Quant signals with VisionAgent findings. If both confirm a pattern (e.g., Bull Flag + RSI breakout), increase conviction score.
         - Liquidity Awareness: Factor in Est. Slippage and POV. If market is THIN or ILLIQUID, adjust your Target Entry to account for slippage (Last Price + Slippage bps) and recommend smaller sizes.
 
         OUTPUT MANDATE:
@@ -877,6 +922,12 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
         if context.risk_governance and context.risk_governance.slippage_bps is not None:
             rg = context.risk_governance
             sections.append(f"**LIQUIDITY**: Status: {rg.liquidity_status} | Est. Slippage: {rg.slippage_bps:.1f} bps | POV: {float(rg.pov_participation or 0)*100:.2f}%")
+
+        # Vision Data (SOTA 2026 Phase 35)
+        if context.vision:
+            v = context.vision
+            patterns = " | ".join([f"{p.name} ({p.confidence*100:.0f}%)" for p in v.patterns[:3]])
+            sections.append(f"**VISION (VLM)**: Patterns: {patterns if patterns else 'No specific patterns detected'} | Description: {v.raw_description[:100]}...")
 
         # Debate Context
         contradictions = context.user_context.get("contradictions", [])

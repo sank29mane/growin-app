@@ -38,8 +38,22 @@ This document outlines the high-level phases for the GSD integration and ongoing
 
 ## Phase 32: End-to-End Simulation
 - **Goal**: Multi-day native backtest & calibration verification.
-- **Status**: IN_PROGRESS
+- **Status**: COMPLETED
 
 ## Phase 33: High-Fidelity Forecasting Optimization
 - **Goal**: Implement multivariate TTM-R2, adaptive scaling, and Neural JMCE feedback loop.
+- **Status**: COMPLETED
+
+## Phase 34: Hybrid Magentic Architecture
+- **Goal**: Integrate `magentic` for structured Pydantic outputs across all agents to replace manual JSON parsing.
+- **Status**: COMPLETED
+- **Requirements**: [MAG-01, MAG-02, MAG-03]
+
+## Phase 35: Multi-Modal Context Infusion
+- **Goal**: Integrate local vision models (via MLX) to analyze chart screenshots for technical pattern confirmation.
+- **Status**: COMPLETED
+- **Requirements**: [VLM-01, VLM-02, VLM-03]
+
+## Phase 36: UAT & Production Hardening
+- **Goal**: Perform a live end-to-end trace to verify Magentic and Vision logic in a real trading scenario.
 - **Status**: PLANNED

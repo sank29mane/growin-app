@@ -19,17 +19,43 @@ class ANEConfig(BaseModel):
     compute_units: str = "ALL"  # CPU_ONLY | CPU_GPU | ALL
 
 class AppState:
-    """Manages global application state"""
+    """Manages global application state with lazy initialization for heavy components"""
     def __init__(self):
-        self.chat_manager = ChatManager()
-        self.rag_manager = RAGManager()
-        self.mcp_client = Trading212MCPClient()
+        self._chat_manager = None
+        self._rag_manager = None
+        self._mcp_client = None
         self.lm_studio_client = None  # Lazy init to avoid startup blocking
         self.start_time = time.time()
         # On-device ANE configuration (default off; auto-detect on startup)
         self.ane_config = ANEConfig()
         # Phase 30: High-Velocity Trade Proposals (HITL)
         self.trade_proposals: Dict[str, Any] = {}
+
+    @property
+    def chat_manager(self) -> ChatManager:
+        if self._chat_manager is None:
+            self._chat_manager = ChatManager()
+        return self._chat_manager
+
+    @chat_manager.setter
+    def chat_manager(self, value):
+        self._chat_manager = value
+
+    @property
+    def rag_manager(self) -> RAGManager:
+        if self._rag_manager is None:
+            self._rag_manager = RAGManager()
+        return self._rag_manager
+
+    @property
+    def mcp_client(self) -> Trading212MCPClient:
+        if self._mcp_client is None:
+            self._mcp_client = Trading212MCPClient()
+        return self._mcp_client
+
+    @mcp_client.setter
+    def mcp_client(self, value):
+        self._mcp_client = value
 
 class AccountContext:
     """

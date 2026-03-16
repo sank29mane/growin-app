@@ -54,6 +54,8 @@ dependencies = [
     "scipy>=1.17.0",
     "arq>=0.27.0",
     "coremltools>=9.0",
+    "magentic>=0.41.0",
+    "mlx-vlm>=0.0.7",
 ]
 
 [tool.uv.sources]

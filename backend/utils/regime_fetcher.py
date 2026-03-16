@@ -1,7 +1,7 @@
 import yfinance as yf
 import asyncio
 from typing import Dict, Optional
-from backend.app_logging import setup_logging
+from app_logging import setup_logging
 
 logger = setup_logging("regime_fetcher")
 
@@ -19,39 +19,51 @@ class RegimeFetcher:
 
     async def fetch_signals(self) -> Dict[str, Optional[float]]:
         """
-        Fetches current levels for VIX and 10Y Yield.
-        Returns a dictionary with signal names and their latest values.
+        Fetches macro-regime signals (VIX, 10Y Yield).
+        VIX is log-transformed and 20-day standardized for SOTA 2026 injection.
         """
+        import numpy as np
+        import pandas as pd
         signals = {}
         
-        # Run yfinance calls in a thread pool to avoid blocking the event loop
-        loop = asyncio.get_event_loop()
-        
         try:
-            for key, symbol in self.tickers.items():
-                logger.info(f"Fetching macro signal: {symbol}")
-                try:
-                    # Using to_thread for simpler syntax in Python 3.9+ (backend uses 3.13)
-                    data = await asyncio.to_thread(lambda s=symbol: yf.Ticker(s).history(period="1d"))
-                    
-                    if not data.empty:
-                        latest_val = data['Close'].iloc[-1]
-                        signals[key] = float(latest_val)
-                        logger.info(f"Successfully fetched {key}: {latest_val}")
-                    else:
-                        raise ValueError(f"No data returned for {symbol}")
-                except Exception as inner_e:
-                    logger.warning(f"Fetch failed for {symbol}, using 2026 defaults: {inner_e}")
-                    if key == "vix":
-                        signals[key] = 18.5  # Typical 2026 baseline
-                    elif key == "tnx":
-                        signals[key] = 4.2   # Typical 2026 10Y baseline
+            # 1. Fetch TNX (Latest only)
+            tnx_ticker = self.tickers["tnx"]
+            tnx_data = await asyncio.to_thread(lambda: yf.Ticker(tnx_ticker).history(period="1d"))
+            if not tnx_data.empty:
+                signals["tnx"] = float(tnx_data['Close'].iloc[-1])
+            else:
+                signals["tnx"] = 4.2 # 2026 Default
+
+            # 2. Fetch VIX (30d for rolling Z-score)
+            vix_ticker = self.tickers["vix"]
+            vix_hist = await asyncio.to_thread(lambda: yf.Ticker(vix_ticker).history(period="1mo"))
+            
+            if not vix_hist.empty and len(vix_hist) >= 20:
+                closes = vix_hist['Close'].astype(float)
+                # SOTA 2026 Transform: log -> rolling z-score
+                log_vix = np.log(closes)
+                
+                # Use last 20 days for Z-score
+                window = log_vix.tail(20)
+                mean = window.mean()
+                std = window.std()
+                
+                current_log = log_vix.iloc[-1]
+                z_score = (current_log - mean) / (std if std > 1e-6 else 1.0)
+                
+                signals["vix"] = float(closes.iloc[-1]) # Raw for display
+                signals["vix_zscore"] = float(z_score) # For TTM injection
+                logger.info(f"VIX Regime: Raw={signals['vix']:.2f}, Z-Score={z_score:.4f}")
+            else:
+                logger.warning("Insufficient VIX history, using baseline")
+                signals["vix"] = 18.5
+                signals["vix_zscore"] = 0.0 # Neutral regime
                     
         except Exception as e:
             logger.error(f"Error fetching macro signals: {str(e)}", exc_info=True)
-            # Ensure we return the keys even if values are None
-            for key in self.tickers:
-                if key not in signals:
-                    signals[key] = None
+            signals["tnx"] = signals.get("tnx", 4.2)
+            signals["vix"] = signals.get("vix", 18.5)
+            signals["vix_zscore"] = signals.get("vix_zscore", 0.0)
                     
         return signals

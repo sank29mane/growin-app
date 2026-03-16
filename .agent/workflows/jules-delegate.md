@@ -43,6 +43,7 @@ Leverage Jules CLI to offload system optimization, bug hunting, and security aud
    - "Analyze [component] on branch 'jules-worker'."
    - "Do not modify [restricted_files] unless explicitly asked."
    - "Follow style guidelines in docs/GSD-STYLE.md."
+   - "CRITICAL: Ensure any new async components or subprocesses follow docs/LIFECYCLE_MANDATES.md (explicit teardown)."
 
 2. **Create Session:**
    ```bash

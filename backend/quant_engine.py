@@ -85,7 +85,7 @@ class NeuralODERecovery:
     Integrates with backend/models/neural_ode.py.
     """
     def __init__(self, input_dim: int = 16, hidden_dim: int = 32):
-        from backend.models.neural_ode import RecoveryVelocityNODE
+        from models.neural_ode import RecoveryVelocityNODE
         self.model = RecoveryVelocityNODE(input_dim, hidden_dim)
         self.is_trained = False
         
@@ -473,7 +473,7 @@ class QuantEngine:
             w_arr = np.array([float(w) for w in weights])
             portfolio_returns = np.dot(returns_matrix, w_arr)
             
-            from backend.utils.risk_engine import RiskEngine
+            from utils.risk_engine import RiskEngine
             cvar_95 = RiskEngine.calculate_cvar_95(portfolio_returns)
             
             # 5. Return results

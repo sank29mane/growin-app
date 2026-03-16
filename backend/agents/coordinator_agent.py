@@ -5,11 +5,11 @@ Static SOTA model that routes queries and aggregates results
 
 from .base_agent import BaseAgent, AgentResponse
 from market_context import MarketContext
-from . import QuantAgent, PortfolioAgent, ForecastingAgent, ResearchAgent, SocialAgent, WhaleAgent, GoalPlannerAgent
+from . import QuantAgent, PortfolioAgent, ForecastingAgent, ResearchAgent, SocialAgent, WhaleAgent, GoalPlannerAgent, VisionAgent
 from .decision_agent import DecisionAgent
 from utils.ticker_utils import TickerResolver
 from data_fabricator import DataFabricator
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Union
 import asyncio
 import logging
 import re
@@ -30,14 +30,16 @@ Specialist Agents:
 - PortfolioAgent: Portfolio data, holdings, P&L ("portfolio")
 - WhaleAgent: Large holder activity ("whale")
 - GoalPlannerAgent: Create/plan investment goals ("goal_planner")
+- VisionAgent: Technical analysis of chart screenshots/images ("vision")
 
 Intents:
 1. "price_check": Simple price lookup (needs "quant" for simple data)
-2. "market_analysis": Deep dive (needs "quant", "forecast", "research", "social")
+2. "market_analysis": Deep dive (needs "quant", "forecast", "research", "social", "vision" if image provided)
 3. "portfolio_query": User asking about their holdings (needs "portfolio")
 4. "forecast_request": Specific prediction request (needs "forecast", "quant")
 5. "educational": General questions not requiring live data (needs [])
 6. "goal_planning": Creating a new investment plan (needs "goal_planner")
+7. "visual_analysis": Specifically asking to analyze a chart image (needs "vision")
 
 Goal Planning Extraction:
 If intent is "goal_planning", extract:
@@ -86,6 +88,7 @@ class CoordinatorAgent:
         self.social_agent = SocialAgent()
         self.whale_agent = WhaleAgent()
         self.goal_planner_agent = GoalPlannerAgent()
+        self.vision_agent = VisionAgent()
         
         self.llm = None
         # Initialize LLM will be called on first process_query if not already done
@@ -193,6 +196,7 @@ Query: "{clean_query}"
                 "market_analysis": ["quant", "forecast", "research", "social", "whale", "portfolio"],
                 "portfolio_query": ["portfolio", "quant", "forecast"],
                 "goal_planning": ["goal_planner", "portfolio"],
+                "visual_analysis": ["vision", "quant"],
                 "educational": []
             }
             
@@ -211,7 +215,7 @@ Query: "{clean_query}"
         # Default safety fallback
         return {"type": "analytical", "needs": ["portfolio", "quant", "forecast"]}
 
-    async def process_query(self, query: str, ticker: Optional[str] = None, account_type: Optional[str] = None, history: List[Dict] = []) -> MarketContext:
+    async def process_query(self, query: str, ticker: Optional[str] = None, account_type: Optional[str] = None, history: List[Dict] = [], image: Optional[Any] = None) -> MarketContext:
         """
         Process user query and coordinate specialist agents based on intent.
         """
@@ -372,6 +376,9 @@ Query: "{clean_query}"
             
         if "whale" in needs:
             specialist_tasks.append(run_agent(self.whale_agent, {"ticker": context.ticker}))
+            
+        if "vision" in (needs or []) or image:
+            specialist_tasks.append(run_agent(self.vision_agent, {"ticker": context.ticker, "image": image}))
 
         if "portfolio" in needs:
             # Ensure account type is passed from context or analysis
@@ -744,6 +751,9 @@ Query: "{clean_query}"
             context.social = SocialData(**data)
         elif agent_name == "WhaleAgent":
             context.whale = WhaleData(**data)
+        elif agent_name == "VisionAgent":
+            from market_context import VisionData
+            context.vision = VisionData(**data)
         elif agent_name == "GoalPlannerAgent":
             # Note: GoalData must be imported if not already in context, but dynamic import ok
             from market_context import GoalData

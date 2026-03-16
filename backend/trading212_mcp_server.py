@@ -239,24 +239,35 @@ class Trading212Client:
     async def get_order_by_id(self, order_id: str) -> dict:
         return await self._request("GET", f"equity/orders/{order_id}")
 
+    async def _apply_temporal_jitter(self):
+        """SOTA 2026: Randomized execution delay to avoid 'velocity clustering' flags."""
+        import random
+        jitter = random.uniform(0.5, 2.0) # 500ms to 2000ms
+        logger.info(f"Applying Temporal Jitter: {jitter:.2f}s delay before dispatch...")
+        await asyncio.sleep(jitter)
+
     async def place_market_order(self, ticker: str, quantity: float, order_type: str = "BUY") -> dict:
+        await self._apply_temporal_jitter()
         adjusted_quantity = quantity if order_type.upper() == "BUY" else -abs(quantity)
         payload = {"ticker": ticker, "quantity": adjusted_quantity}
         return await self._request("POST", "equity/orders/market", json=payload)
 
     async def place_limit_order(self, ticker: str, quantity: float, limit_price: float, order_type: str = "BUY", time_validity: str = "DAY") -> dict:
+        await self._apply_temporal_jitter()
         adjusted_quantity = quantity if order_type.upper() == "BUY" else -abs(quantity)
         api_time_validity = "GOOD_TILL_CANCEL" if time_validity.upper() == "GTC" else time_validity
         payload = {"ticker": ticker, "quantity": adjusted_quantity, "limitPrice": limit_price, "timeValidity": api_time_validity}
         return await self._request("POST", "equity/orders/limit", json=payload)
 
     async def place_stop_order(self, ticker: str, quantity: float, stop_price: float, order_type: str = "BUY", time_validity: str = "DAY") -> dict:
+        await self._apply_temporal_jitter()
         adjusted_quantity = quantity if order_type.upper() == "BUY" else -abs(quantity)
         api_time_validity = "GOOD_TILL_CANCEL" if time_validity.upper() == "GTC" else time_validity
         payload = {"ticker": ticker, "quantity": adjusted_quantity, "stopPrice": stop_price, "timeValidity": api_time_validity}
         return await self._request("POST", "equity/orders/stop", json=payload)
 
     async def place_stop_limit_order(self, ticker: str, quantity: float, limit_price: float, stop_price: float, order_type: str = "BUY", time_validity: str = "DAY") -> dict:
+        await self._apply_temporal_jitter()
         adjusted_quantity = quantity if order_type.upper() == "BUY" else -abs(quantity)
         api_time_validity = "GOOD_TILL_CANCEL" if time_validity.upper() == "GTC" else time_validity
         payload = {"ticker": ticker, "quantity": adjusted_quantity, "limitPrice": limit_price, "stopPrice": stop_price, "timeValidity": api_time_validity}

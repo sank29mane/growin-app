@@ -9,16 +9,40 @@ on:
 jobs:
   test:
     name: Run SOTA Test Suite
-    runs-on: macos-latest # Using macOS to support native SwiftUI/AppKit tests
+    runs-on: macos-latest
+    timeout-minutes: 20
     
+    env:
+      CI: "true"
+      PYTHONPATH: ".:backend"
+
     steps:
       - uses: actions/checkout@v4
 
       - name: Install uv
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-path: backend/uv.lock
 
       - name: Set up Python
         run: uv python install 3.11
+
+      - name: Cache HuggingFace Models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: ${{ runner.os }}-hf-${{ hashFiles('backend/forecaster.py') }}
+          restore-keys: |
+            ${{ runner.os }}-hf-
+
+      - name: Cache ChromaDB
+        uses: actions/cache@v4
+        with:
+          path: ./data/chroma_db
+          key: ${{ runner.os }}-chroma-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-chroma-
 
       - name: Install dependencies
         run: |
@@ -26,13 +50,13 @@ jobs:
           uv sync
 
       - name: Run SOTA Unit & Integration Tests
+        timeout-minutes: 10
         run: |
-          export PYTHONPATH=.:backend
           uv run --project backend pytest tests/backend/
 
       - name: Run Performance Benchmarks
+        timeout-minutes: 5
         run: |
-          export PYTHONPATH=.:backend
           uv run --project backend pytest tests/backend/test_performance_benchmarks.py
           
       - name: DeepEval Reasoning Audit

@@ -83,7 +83,7 @@ US_EXCLUSIONS = {
     "F", "T", "C", "V", "Z", "O", "D", "R", "K", "X", "S", "M", "A", "G"
 }
 
-UK_COMMON_STEMS = tuple(["LLOY", "BARC", "VOD", "HSBA", "TSCO", "BP", "AZN", "RR", "NG", "SGLN", "SSLN", "GSK", "SHELL", "BATS", "AHT", "NWG", "GLEN", "PHNX", "BT-A", "JII", "ABF", "SSE", "RIO", "REL", "ULVR", "SHEL"])
+UK_COMMON_STEMS = tuple(["LLOY", "BARC", "VOD", "HSBA", "TSCO", "BP", "AZN", "RR", "NG", "SGLN", "SSLN", "GSK", "SHELL", "BATS", "AHT", "NWG", "GLEN", "PHNX", "BT-A", "JII", "ABF", "SSE", "RIO", "REL", "ULVR", "SHEL", "LQQ3", "3QQQ", "3LUS", "3SPY", "LQQS", "3ULS"])
 
 def normalize_ticker(ticker: str) -> str:
     """

@@ -410,3 +410,18 @@ class LMStudioClient:
             logger.error(f"Failed to ensure model {model_id} is loaded: {e}")
             return False
 
+    async def wait_until_ready(self, model_id: str, timeout: int = 60) -> bool:
+        """
+        Poll the Native V1 API until the model appears in loaded_models.
+        """
+        start_time = asyncio.get_event_loop().time()
+        while asyncio.get_event_loop().time() - start_time < timeout:
+            loaded = await self.list_loaded_models()
+            if model_id in loaded:
+                logger.info(f"LM Studio: Model {model_id} is now ready.")
+                return True
+            await asyncio.sleep(2)
+        
+        logger.warning(f"LM Studio: Timeout waiting for {model_id} to be ready.")
+        return False
+

@@ -6,14 +6,43 @@ SOTA 2026: Implements the "Critic Pattern" to review and validate trade suggesti
 import logging
 import json
 import re
-from typing import Dict, Any, List, Optional
+import asyncio
+from typing import Dict, Any, List, Optional, Literal
 from decimal import Decimal
+from pydantic import BaseModel, Field
+from magentic import prompt as mag_prompt
 
 from .base_agent import BaseAgent, AgentResponse, AgentConfig
 from market_context import MarketContext
 from utils.financial_math import create_decimal
 
 logger = logging.getLogger(__name__)
+
+class RiskAssessment(BaseModel):
+    """Structured risk audit output from the Critic."""
+    status: Literal["APPROVED", "FLAGGED", "BLOCKED"] = Field(..., description="Overall risk status")
+    confidence_score: float = Field(..., ge=0, le=1, description="Confidence in the risk assessment (0.0 to 1.0)")
+    risk_assessment: str = Field(..., description="Short summary of identified risks")
+    compliance_notes: str = Field(..., description="Specific regulatory or rule-based notes (e.g., Wash Sale)")
+    recommendation_adjustment: str = Field(..., description="Suggested change if FLAGGED or BLOCKED")
+    debate_refutation: str = Field(..., description="A sharp, adversarial argument challenging the core logic of the suggestion")
+    requires_hitl: bool = Field(default=False, description="Whether human-in-the-loop approval is mandatory")
+
+@mag_prompt(
+    "Perform a professional financial risk audit as 'The Critic'.\n"
+    "Market Context:\n"
+    "- Ticker: {ticker}\n"
+    "- Intent: {intent}\n"
+    "- Portfolio Value: £{portfolio_value}\n"
+    "- Wash Sale Risk Alert: {wash_sale_alert}\n\n"
+    "Proposed Strategy/Action:\n"
+    "{suggestion}\n\n"
+    "Risk Protocols:\n"
+    "{protocols}\n\n"
+    "Audit this strategy and return a structured RiskAssessment."
+)
+def conduct_risk_audit(ticker: str, intent: str, portfolio_value: str, wash_sale_alert: bool, suggestion: str, protocols: str) -> RiskAssessment:
+    ...
 
 RISK_SYSTEM_PROMPT = """
 You are the Risk Agent (The Critic). Your job is to audit trade recommendations for risk, compliance, and suitability.
@@ -26,7 +55,6 @@ Review Criteria:
    - Block 'BUY' orders for tickers sold for a loss in the last 30 days.
    - Applies specifically to 'Invest' (taxable) accounts.
 4. Contrarian Analysis: 
-
    - What tail-risk or geopolitical event (GPR) could break this thesis?
    - Is there a logic gap (e.g. ignoring a bearish EMA cross)?
    - Identify "Crowded Trade" scenarios where retail sentiment is dangerously high.
@@ -46,30 +74,19 @@ Output Format (JSON ONLY):
 class RiskAgent(BaseAgent):
     """
     Critic Agent that reviews Orchestrator suggestions before they reach the user.
-    Uses high-precision models (e.g. Claude or 8-bit AFFINE Granite) to ensure safety.
+    Uses high-precision models and magentic for structured Pydantic outputs.
     """
     
     def __init__(self, model_name: str = "granite-tiny"):
         config = AgentConfig(name="RiskAgent", timeout=15.0)
         super().__init__(config)
         self.model_name = model_name
-        self._llm = None
-
-    async def _initialize(self):
-        if self._llm:
-            return
-        from .llm_factory import LLMFactory
-        self._llm = await LLMFactory.create_llm(self.model_name)
 
     async def analyze(self, context_dict: Dict[str, Any]) -> AgentResponse:
         """
         Main analysis method required by BaseAgent.
-        context_dict should contain:
-        - context: MarketContext
-        - suggestion: str (the Orchestrator's response)
+        SOTA 2026: Agentic Risk Audit via Magentic.
         """
-        await self._initialize()
-        
         # In this context, 'context' is the MarketContext object
         market_context: MarketContext = context_dict.get("context")
         suggestion: str = context_dict.get("suggestion", "")
@@ -80,90 +97,44 @@ class RiskAgent(BaseAgent):
         # SOTA 2026: Wash Sale Detection logic
         wash_sale_alert = False
         if any(word in suggestion.upper() for word in ["BUY", "LONG"]):
-            # Check for recent loss sales in telemetry or context
-            # In a real system, we'd query the MCP for 'get_historical_orders'
             recent_trades = market_context.user_context.get("recent_trades", [])
             for trade in recent_trades:
                 if trade.get("ticker") == market_context.ticker and trade.get("side") == "SELL" and trade.get("pnl", 0) < 0:
-                    # Potential wash sale detected
                     wash_sale_alert = True
                     break
 
-        prompt = f"""
-        [CONTEXT]
-        Ticker: {market_context.ticker}
-        Intent: {market_context.intent}
-        Portfolio Value: £{market_context.portfolio.total_value if market_context.portfolio else "Unknown"}
-        Wash Sale Risk: {"HIGH (Recent loss sale detected)" if wash_sale_alert else "Low"}
-        
-        [PROPOSED STRATEGY]
-        {suggestion}
-        
-        Audit this strategy against our risk protocols.
-        """
-        
         try:
-            if hasattr(self._llm, "ainvoke"):
-                from langchain_core.messages import SystemMessage, HumanMessage
-                response = await self._llm.ainvoke([
-                    SystemMessage(content=RISK_SYSTEM_PROMPT),
-                    HumanMessage(content=prompt)
-                ])
-                content = response.content if hasattr(response, 'content') else str(response)
-            elif hasattr(self._llm, "chat"):
-                # Direct LM Studio Client
-                messages = [
-                    {"role": "system", "content": RISK_SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt}
-                ]
-                resp = await self._llm.chat(model_id=self.model_name, messages=messages, temperature=0.1)
-                content = resp.get("content", "")
-            else:
-                raise AttributeError("LLM client has no 'ainvoke' or 'chat' method")
+            # Execute structured audit via Magentic
+            portfolio_val = market_context.portfolio.total_value if market_context.portfolio else "Unknown"
             
-            # Extract JSON (Multi-Stage Resilience)
-            data = None
+            audit_result = await asyncio.to_thread(
+                conduct_risk_audit,
+                market_context.ticker,
+                market_context.intent,
+                str(portfolio_val),
+                wash_sale_alert,
+                suggestion,
+                RISK_SYSTEM_PROMPT
+            )
             
-            # 1. Direct Load
-            try:
-                data = json.loads(content.strip())
-            except json.JSONDecodeError:
-                # 2. Extract block between first { and last }
-                first_brace = content.find('{')
-                last_brace = content.rfind('}')
-                if first_brace != -1 and last_brace != -1:
-                    try:
-                        json_str = content[first_brace:last_brace+1]
-                        data = json.loads(json_str)
-                    except json.JSONDecodeError:
-                        # 3. Last Ditch: try fixing unclosed strings or common artifacts
-                        # (Regex based extraction of known fields)
-                        match = re.search(r'(\{.*\})', content, re.DOTALL)
-                        if match:
-                            try:
-                                data = json.loads(match.group(1))
-                            except Exception:
-                                pass
-            
-            if not data:
-                return AgentResponse(agent_name=self.config.name, success=False, data={}, error="JSON Syntax Error", latency_ms=0)
+            data = audit_result.model_dump()
                 
             # Enforce HITL for any trade-related suggestion
             if any(word in suggestion.upper() for word in ["BUY", "SELL", "ORDER", "TRADE"]):
                 data["requires_hitl"] = True
             else:
-                if "requires_hitl" not in data:
-                    data["requires_hitl"] = False
+                # If not a trade, use the LLM's assessment of HITL need
+                pass
                 
             return AgentResponse(
                 agent_name=self.config.name,
                 success=True,
                 data=data,
-                latency_ms=0 # Will be updated by BaseAgent.execute
+                latency_ms=0 # Managed by execution loop
             )
                 
         except Exception as e:
-            logger.error(f"RiskAgent failed: {e}")
+            logger.error(f"RiskAgent (Magentic) failed: {e}")
             return AgentResponse(agent_name=self.config.name, success=False, data={}, error=str(e), latency_ms=0)
 
     async def review(self, context: MarketContext, suggestion: str) -> Dict[str, Any]:

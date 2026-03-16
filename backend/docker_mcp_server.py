@@ -10,6 +10,11 @@ import logging
 import asyncio
 import json
 from typing import Dict, Any, Optional, List
+from utils.process_guard import start_parent_watchdog
+
+# Start watchdog early to prevent zombie processes
+start_parent_watchdog()
+
 from mcp.server import Server
 from mcp.types import Tool, TextContent
 

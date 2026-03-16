@@ -21,9 +21,32 @@ import logging
 import os
 import asyncio
 import re
+from pydantic import BaseModel, Field
+from magentic import prompt as mag_prompt
 
 logger = logging.getLogger(__name__)
 
+class NewsDataQueryParams(BaseModel):
+    """Structured parameters for NewsData.io API query."""
+    q: str = Field(..., description="The primary search query or keywords")
+    qInTitle: Optional[str] = Field(None, description="Keywords to search in the article title")
+    country: Optional[str] = Field(None, description="Country codes (e.g. 'gb,us,in')")
+    category: Optional[str] = Field(None, description="News category (e.g. 'business,technology,politics')")
+    domain: Optional[str] = Field(None, description="Specific domains to include (e.g. 'reuters.com,bloomberg.com')")
+
+@mag_prompt(
+    "Generate optimal NewsData.io API query parameters for a professional financial research agent.\n"
+    "Context: Researching news for {ticker} (Company: {company_name}).\n"
+    "Goal: High-relevance financial and market-moving news only.\n"
+    "Market Context: {market_context}\n"
+    "Requirements:\n"
+    "1. Query 'q' should be concise and optimized for news search.\n"
+    "2. If it's a specific company, include its name.\n"
+    "3. Focus on recent business, economy, or technology categories if applicable.\n"
+    "4. Exclude irrelevant buzzwords."
+)
+def generate_news_query(ticker: str, company_name: str, market_context: str) -> NewsDataQueryParams:
+    ...
 
 class ResearchAgent(BaseAgent):
     """
@@ -416,71 +439,37 @@ class ResearchAgent(BaseAgent):
             return []
 
     async def _generate_smart_query(self, user_query: str) -> Optional[Dict]:
-        """Use LLM to generate optimized NewsData.io query parameters."""
+        """
+        SOTA 2026: Agentic News Query Generation via Magentic.
+        Uses structured output via Pydantic to ensure valid API parameters.
+        """
         try:
-            from .llm_factory import LLMFactory
+            # Context for the LLM
+            market_context = f"Analyzing {user_query} for market-moving events."
             
-            # 1. Initialize LLM (defaults to granite-tiny for fast routing/query gen)
-            model_name = os.getenv("COORDINATOR_MODEL", "granite-tiny")
-            llm = await LLMFactory.create_llm(model_name)
+            # Execute magentic prompt (async execution)
+            # This is significantly more robust than manual string parsing.
+            params_obj = await asyncio.to_thread(generate_news_query, user_query, user_query, market_context)
             
-            if not llm:
-                return None
-
-            # 2. Read prompt (Cached + Async)
-            if not self._prompt_template:
-                prompt_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "prompts", "news_query.md")
-                if not os.path.exists(prompt_path):
-                    logger.warning(f"Prompt file missing: {prompt_path}")
-                    return None
-
-                def read_template():
-                    with open(prompt_path, "r") as f:
-                        return f.read()
-                
-                self._prompt_template = await asyncio.to_thread(read_template)
-            
-            prompt = self._prompt_template.replace("{{query}}", user_query)
-            
-            # 3. Invoke LLM
-            content = ""
-            if hasattr(llm, "ainvoke"):
-                from langchain_core.messages import HumanMessage
-                response = await llm.ainvoke([HumanMessage(content=prompt)])
-                content = response.content if hasattr(response, 'content') else str(response)
-            elif hasattr(llm, "chat"):
-                resp = await llm.chat(model_id=model_name, input_text=prompt, temperature=0)
-                content = resp.get("content", "")
-            
-            if not content:
-                return None
-
-            # Extract JSON
-            import json
-            # Handle potential markdown fence
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0].strip()
-            elif "```" in content:
-                content = content.split("```")[1].split("```")[0].strip()
-            
-            try:    
-                params = json.loads(content)
-            except json.JSONDecodeError:
-                # Try simple regex if JSON fails
-                logger.warning(f"JSON decode failed for content: {content}")
-                return None
+            # Convert Pydantic object to dict for the API client
+            params = params_obj.model_dump(exclude_none=True)
             
             # Ensure API key and other required fields are present
             params["apikey"] = self.newsdata_key
             params["language"] = "en"
             params["excludefield"] = "ai_summary"
             
-            logger.info(f"Smart Query Generated: {params}")
+            logger.info(f"Smart Query Generated (Magentic): {params}")
             return params
             
         except Exception as e:
-            logger.warning(f"Smart query generation failed: {e}")
-            return None
+            logger.warning(f"Magentic smart query generation failed: {e}. Falling back to basic query.")
+            # Fail-soft: Return a basic query if the structured generation fails
+            return {
+                "q": f"{user_query} stock market news",
+                "apikey": self.newsdata_key,
+                "language": "en"
+            }
 
     def _deduplicate_articles(self, articles: List[Dict]) -> List[Dict]:
         """Remove duplicate articles based on normalized title or URL."""

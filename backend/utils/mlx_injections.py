@@ -73,8 +73,9 @@ def rsi_mlx(prices, period=14):
     # Avoid division by zero
     rs = avg_gain / mx.maximum(avg_loss, 1e-9)
     rsi = 100.0 - (100.0 / (1.0 + rs))
-    "sma_mlx(prices, period)": """
-    def sma_mlx(prices, period):
+    return rsi
+
+def sma_mlx(prices, period):
     '''Vectorized Simple Moving Average on NPU.'''
     import mlx.core as mx
     if len(prices) < period:
@@ -82,10 +83,10 @@ def rsi_mlx(prices, period=14):
     cs = mx.cumsum(prices)
     res = (cs[period:] - cs[:-period]) / period
     return mx.concatenate([mx.full((period,), 0.0), res])
-    """,
+""",
 
     "weight_adapter_calibration": """
-    def apply_weight_adapter(predictions, actuals, learning_rate=0.01):
+def apply_weight_adapter(predictions, actuals, learning_rate=0.01):
     '''
     On-the-fly model calibration (SOTA 2026 Weight Adapters).
     Adjusts model predictions based on recent error feedback.
@@ -108,8 +109,7 @@ def rsi_mlx(prices, period=14):
     calibrated = predictions + (learning_rate * adapter_shift)
 
     return calibrated, adapter_shift
-    """
-    }
+"""
 }
 
 def get_all_injections() -> str:

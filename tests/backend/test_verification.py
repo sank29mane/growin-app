@@ -1,9 +1,11 @@
 import asyncio
+import pytest
 from agents.coordinator_agent import CoordinatorAgent
 from mcp_client import Trading212MCPClient
 from dotenv import load_dotenv
 
-async def test():
+@pytest.mark.asyncio
+async def test_coordinator_account_detection():
     load_dotenv()
     c = CoordinatorAgent(Trading212MCPClient())
     # Test ISA detection

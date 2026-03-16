@@ -16,6 +16,33 @@ importlib.util.find_spec = patched_find_spec
 # Ensure backend is in path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# --- Global Resource Lifecycle Management ---
+@pytest.fixture(scope="session", autouse=True)
+async def cleanup_resources():
+    """Ensure all background processes are killed after the test session."""
+    yield
+    
+    print("\n🧹 Cleaning up test resources...")
+    
+    # 1. Stop Worker Service (MLX/TTM)
+    try:
+        from utils.worker_client import get_worker_client
+        client = get_worker_client()
+        await client.stop()
+        print("✅ Worker Service stopped")
+    except Exception as e:
+        print(f"⚠️ Failed to stop Worker Service: {e}")
+
+    # 2. Stop MCP Clients
+    try:
+        from app_context import state
+        # Access internal _mcp_client to avoid re-triggering lazy init if it wasn't used
+        if hasattr(state, '_mcp_client') and state._mcp_client is not None:
+            await state._mcp_client._exit_stack.aclose()
+            print("✅ MCP Sessions closed")
+    except Exception as e:
+        print(f"⚠️ Failed to close MCP sessions: {e}")
+
 @pytest.fixture(autouse=True)
 def clear_cache():
     """Clear the global cache before every test."""
@@ -26,24 +53,13 @@ def clear_cache():
         pass
     yield
 
-# --- Async Helper ---
-def make_async(obj):
-    """Wrap a mock to be awaitable."""
-    if not isinstance(obj, (AsyncMock, MagicMock)):
-        return obj
-    
-    async def side_effect(*args, **kwargs):
-        return obj.return_value
-    
-    obj.side_effect = side_effect
-    return obj
-
-# Mock heavy dependencies
+# --- Mock heavy dependencies ---
 MOCK_MODULES = [
     'alpaca.data.historical',
     'alpaca.trading.client',
     'trading212.client',
-    'yfinance'
+    'yfinance',
+    'docker'  # CRITICAL: Prevent Docker daemon connection attempts in CI
 ]
 
 for module in MOCK_MODULES:
@@ -53,6 +69,11 @@ for module in MOCK_MODULES:
             if 'client' in module:
                 mock.get_account = AsyncMock(return_value=MagicMock())
                 mock.get_orders = AsyncMock(return_value=[])
+            
+            if module == 'docker':
+                # Mock docker.from_env() and basic methods
+                mock.from_env.return_value = MagicMock()
+                mock.from_env.return_value.ping.return_value = True
             
             make_async(mock)
             make_async(mock.return_value)

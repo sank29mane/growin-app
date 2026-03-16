@@ -38,8 +38,13 @@ This document outlines the high-level phases for the GSD integration and ongoing
 
 ## Phase 32: End-to-End Simulation
 - **Goal**: Multi-day native backtest & calibration verification.
-- **Status**: IN_PROGRESS
+- **Status**: COMPLETED
 
 ## Phase 33: High-Fidelity Forecasting Optimization
 - **Goal**: Implement multivariate TTM-R2, adaptive scaling, and Neural JMCE feedback loop.
+- **Status**: COMPLETED
+
+## Phase 34: Hybrid Magentic Architecture (Agent Structured Outputs)
+- **Goal**: Integrate the `magentic` framework for robust Pydantic-based structured outputs across NLP Agents, significantly reducing string-parsing boilerplate while maintaining hardware-accelerated MLX fallback.
 - **Status**: PLANNED
+- **Requirements**: [MAG-01, MAG-02]

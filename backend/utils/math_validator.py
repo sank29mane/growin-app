@@ -3,7 +3,7 @@ import json
 import logging
 import asyncio
 from typing import Dict, Any, Optional, Tuple
-from backend.docker_mcp_server import DockerMCPServer
+from docker_mcp_server import DockerMCPServer
 
 logger = logging.getLogger("math_validator")
 
