@@ -596,7 +596,7 @@ class DecisionAgent:
         Emulates a high-fidelity model response using real context data.
         Verifies that Phase 28 Liquidity and Phase 27 Geopolitical features work.
         """
-        q = query.lower()
+        q = (query or "").lower()
         if context.intent == "conversational":
             if re.search(r'\b(hello|hi|hey|greetings)\b', q):
                 return "Hello! I'm your Growin Intelligence Assistant. How can I help you with your portfolio or the markets today?"
