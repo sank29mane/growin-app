@@ -3,7 +3,7 @@ import numpy as np
 from datetime import date
 from decimal import Decimal
 from data_models import DividendData, PriceData
-from backend.dividend_bridge import LeveragedDividendEngine
+from dividend_bridge import LeveragedDividendEngine
 from quant_engine import QuantEngine
 
 def test_leveraged_dividend_engine_leverage():

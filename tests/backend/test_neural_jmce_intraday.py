@@ -1,5 +1,8 @@
 import pytest
-import mlx.core as mx
+try:
+    import mlx.core as mx
+except ImportError:
+    mx = None
 import numpy as np
 from utils.jmce_model import NeuralJMCE, TimeResolution
 

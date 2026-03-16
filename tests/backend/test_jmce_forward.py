@@ -1,7 +1,16 @@
-import mlx.core as mx
+try:
+    import mlx.core as mx
+except ImportError:
+    mx = None
+import pytest
 import numpy as np
-from utils.jmce_model import NeuralJMCE
 
+try:
+    from utils.jmce_model import NeuralJMCE
+except ImportError:
+    NeuralJMCE = None
+
+@pytest.mark.skipif(mx is None, reason="mlx is not available")
 def test_jmce_forward():
     """
     Verifies the NeuralJMCE forward pass, output shapes, and the 
@@ -69,8 +78,9 @@ def test_jmce_forward():
     print("Verification passed for shapes, triangularity, symmetry, and Positive Definiteness.")
 
 if __name__ == "__main__":
-    try:
-        test_jmce_forward()
-    except Exception as e:
-        print(f"\n❌ Test Failed: {str(e)}")
-        exit(1)
+    if mx is not None:
+        try:
+            test_jmce_forward()
+        except Exception as e:
+            print(f"\n❌ Test Failed: {str(e)}")
+            exit(1)

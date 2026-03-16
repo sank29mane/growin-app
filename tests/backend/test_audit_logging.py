@@ -3,7 +3,7 @@ import logging
 import json
 import os
 import uuid
-from backend.app_logging import setup_logging, correlation_id_ctx, CorrelationIdFilter
+from app_logging import setup_logging, correlation_id_ctx, CorrelationIdFilter
 from utils.audit_log import AuditLogger, AuditEntry
 
 @pytest.fixture

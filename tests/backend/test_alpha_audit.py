@@ -2,7 +2,7 @@ import pytest
 import asyncio
 import pandas as pd
 from datetime import datetime, timedelta
-from backend.analytics_db import get_analytics_db
+from analytics_db import get_analytics_db
 from agents.orchestrator_agent import OrchestratorAgent
 from unittest.mock import AsyncMock, patch, MagicMock
 
