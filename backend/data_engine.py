@@ -633,7 +633,10 @@ class FinnhubClient:
                  from_time = to_time - timedelta(days=365)
 
             # Fetch candle data
-            candles = self.client.stock_candles(
+            # Use asyncio.to_thread to prevent blocking the event loop
+            import asyncio
+            candles = await asyncio.to_thread(
+                self.client.stock_candles,
                 symbol=normalized_ticker,
                 resolution=resolution,
                 _from=int(from_time.timestamp()),
@@ -693,7 +696,8 @@ class FinnhubClient:
 
         try:
             from utils.currency_utils import CurrencyNormalizer
-            quote = self.client.quote(normalized_ticker)
+            import asyncio
+            quote = await asyncio.to_thread(self.client.quote, normalized_ticker)
             
             # Helper to safely get values from quote dict
             def get_val(key):

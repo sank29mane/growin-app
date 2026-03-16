@@ -216,8 +216,9 @@ Query: "{clean_query}"
         
         # SOTA 2026: Historical Alpha Context
         from analytics_db import get_analytics_db
+        import asyncio
         db = get_analytics_db()
-        historical_alpha = db.get_agent_alpha_metrics(ticker)
+        historical_alpha = await asyncio.to_thread(db.get_agent_alpha_metrics, ticker)
         
         from agents.decision_agent import DecisionAgent
         detected_account = account_type
