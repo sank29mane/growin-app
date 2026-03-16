@@ -410,8 +410,13 @@ struct RiskButton: View {
         }
         .buttonStyle(.plain)
         .accessibilityElement(children: .combine)
+<<<<<<< HEAD
         .accessibilityLabel("\(formattedTitle) Risk Level")
         .accessibilityHint("Selects \(formattedTitle) as your risk tolerance")
+=======
+        .accessibilityLabel("\(title.replacingOccurrences(of: "_", with: " ")) Risk Level")
+        .accessibilityHint("Selects \(title.replacingOccurrences(of: "_", with: " ")) as your risk tolerance")
+>>>>>>> origin/palette-a11y-goal-planner-risk-button-5473075713753130963
         .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : [.isButton])
     }
 }
