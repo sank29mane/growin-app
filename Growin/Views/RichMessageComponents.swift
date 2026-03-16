@@ -336,6 +336,7 @@ struct RiskGovernanceCard: View, Equatable {
         .background(riskColor.opacity(0.1))
         .cornerRadius(12)
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(riskColor.opacity(0.3), lineWidth: 1))
+        .shadow(color: riskColor.opacity(0.15), radius: 10, x: 0, y: 5)
     }
 }
 
@@ -406,6 +407,7 @@ struct WhaleCard: View, Equatable {
         .background(Color.indigo.opacity(0.1))
         .cornerRadius(12)
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.indigo.opacity(0.3), lineWidth: 1))
+        .shadow(color: Color.indigo.opacity(0.15), radius: 10, x: 0, y: 5)
     }
 }
 
@@ -433,6 +435,7 @@ struct PriceCard: View, Equatable {
         .padding(10)
         .background(Color.white.opacity(0.05))
         .cornerRadius(12)
+        .shadow(color: Color.white.opacity(0.05), radius: 10, x: 0, y: 5)
     }
 }
 
@@ -470,6 +473,7 @@ struct SentimentCard: View, Equatable {
         .padding(10)
         .background(Color.white.opacity(0.05))
         .cornerRadius(12)
+        .shadow(color: color.opacity(0.15), radius: 10, x: 0, y: 5)
     }
 }
 
@@ -506,6 +510,7 @@ struct ForecastCard: View, Equatable {
         .background(Color.blue.opacity(0.1))
         .cornerRadius(12)
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.blue.opacity(0.3), lineWidth: 1))
+        .shadow(color: Color.blue.opacity(0.15), radius: 10, x: 0, y: 5)
     }
 }
 
@@ -569,6 +574,7 @@ struct TechnicalCard: View, Equatable {
         .padding(12)
         .background(Color.white.opacity(0.05))
         .cornerRadius(12)
+        .shadow(color: Color.white.opacity(0.05), radius: 10, x: 0, y: 5)
     }
 }
 
@@ -644,6 +650,7 @@ struct PortfolioSnapshotCard: View, Equatable {
                 .stroke(Color.blue.opacity(0.3), lineWidth: 1)
         )
         .cornerRadius(14)
+        .shadow(color: Color.blue.opacity(0.2), radius: 12, x: 0, y: 6)
     }
 }
 
@@ -788,7 +795,9 @@ struct TradeProposalCard: View, Equatable {
                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.green.opacity(0.3), lineWidth: 1))
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Approve Trade Proposal")
+                    .accessibilityLabel("Approve \(proposal.action) for \(proposal.ticker)")
+                    .accessibilityHint("Approves the NPU trade proposal and executes the order")
+                    .accessibilityAddTraits(.isButton)
                     
                     Button(action: { onReject(proposal.proposalId) }) {
                         HStack {
@@ -804,7 +813,9 @@ struct TradeProposalCard: View, Equatable {
                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.red.opacity(0.3), lineWidth: 1))
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Reject Trade Proposal")
+                    .accessibilityLabel("Reject \(proposal.action) for \(proposal.ticker)")
+                    .accessibilityHint("Rejects the NPU trade proposal and discards the order")
+                    .accessibilityAddTraits(.isButton)
                 }
             } else {
                 HStack {
@@ -839,6 +850,6 @@ struct TradeProposalCard: View, Equatable {
             }
         )
         .cornerRadius(16)
-        .shadow(color: actionColor.opacity(0.1), radius: 20, x: 0, y: 10)
+        .shadow(color: actionColor.opacity(0.15), radius: 20, x: 0, y: 10)
     }
 }

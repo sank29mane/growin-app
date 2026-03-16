@@ -374,6 +374,9 @@ struct IntelligenceOfflineView: View {
                     .foregroundStyle(.white)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Retry")
+                .accessibilityHint("Attempts to load the portfolio data again")
+                .accessibilityAddTraits(.isButton)
             }
             .padding(40)
         }
@@ -509,6 +512,9 @@ extension PortfolioView {
                         .foregroundStyle(color)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("\(persona.capitalized) Strategy")
+                .accessibilityHint("Switches to \(persona) portfolio strategy")
+                .accessibilityAddTraits(viewModel.strategyPersona == persona ? [.isSelected, .isButton] : [.isButton])
                 .help(persona.capitalized)
             }
         }
@@ -648,7 +654,9 @@ extension PortfolioView {
                             .glassEffect(.thin.interactive(), in: .rect(cornerRadius: 14))
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("View \(position.ticker ?? "Position") Details")
                     .accessibilityHint("Double tap to view detailed analysis")
+                    .accessibilityAddTraits(.isButton)
                 }
             }
             .padding(.horizontal)
