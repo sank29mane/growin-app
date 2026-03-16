@@ -507,7 +507,7 @@ class AlpacaClient:
                 # Check if it's acting like a dict (defensive)
                 if isinstance(acct, dict):
                      return {
-                        "cash_balance": {"total": Decimal(str(acct.get("cash"))), "currency": acct.get("currency", "GBP")}, 
+                        "cash_balance": {"total": str(acct.get("cash", "0")), "currency": str(acct.get("currency", "GBP"))},
                         "portfolio_value": Decimal(str(acct.get("portfolio_value"))),
                         # ... other fields
                         "unrealized_pnl": Decimal(str(acct.get("equity", 0))) - Decimal(str(acct.get("last_equity", 0))),
@@ -516,7 +516,7 @@ class AlpacaClient:
                      }
                 
                 return {
-                    "cash_balance": {"total": Decimal(str(acct.cash)), "currency": str(acct.currency)}, # Fix dict-item (str expected)
+                    "cash_balance": {"total": str(acct.cash), "currency": str(acct.currency)},
 
                     "portfolio_value": Decimal(str(acct.portfolio_value)),
                     "unrealized_pnl": Decimal(str(acct.equity)) - Decimal(str(acct.last_equity)), # Approx
