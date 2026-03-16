@@ -1,7 +1,7 @@
 import pytest
 import mlx.core as mx
 import numpy as np
-from backend.utils.jmce_model import NeuralJMCE, TimeResolution
+from utils.jmce_model import NeuralJMCE, TimeResolution
 
 def test_neural_jmce_intraday_shapes():
     """Verify NeuralJMCE works with intraday resolutions and correct output shapes."""

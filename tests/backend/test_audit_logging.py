@@ -4,7 +4,7 @@ import json
 import os
 import uuid
 from backend.app_logging import setup_logging, correlation_id_ctx, CorrelationIdFilter
-from backend.utils.audit_log import AuditLogger, AuditEntry
+from utils.audit_log import AuditLogger, AuditEntry
 
 @pytest.fixture
 def audit_logger(tmp_path):

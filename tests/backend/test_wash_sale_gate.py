@@ -1,7 +1,7 @@
 import pytest
 import asyncio
-from backend.agents.risk_agent import RiskAgent
-from backend.market_context import MarketContext, PriceData, PortfolioData
+from agents.risk_agent import RiskAgent
+from market_context import MarketContext, PriceData, PortfolioData
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 

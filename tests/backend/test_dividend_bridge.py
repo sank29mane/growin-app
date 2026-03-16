@@ -2,7 +2,7 @@ import pytest
 import numpy as np
 from datetime import date
 from decimal import Decimal
-from backend.data_models import DividendData
+from data_models import DividendData
 from backend.dividend_bridge import DividendBridge
 
 @pytest.fixture

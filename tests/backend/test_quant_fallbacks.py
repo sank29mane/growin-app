@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 import numpy as np
 import pandas as pd
-from backend.quant_engine import QuantEngine
+from quant_engine import QuantEngine
 
 class TestQuantFallbacks(unittest.TestCase):
     def test_pure_pandas_fallback(self):

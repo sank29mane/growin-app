@@ -1,6 +1,6 @@
 import mlx.core as mx
 import numpy as np
-from backend.utils.jmce_model import NeuralJMCE
+from utils.jmce_model import NeuralJMCE
 
 def test_jmce_forward():
     """
