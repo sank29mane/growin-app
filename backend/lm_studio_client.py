@@ -329,7 +329,7 @@ class LMStudioClient:
             "tool_calls": tool_calls
         })
 
-        for tool_call in tool_calls:
+        async def process_tool(tool_call: Dict) -> Dict:
             function_name = tool_call["function"]["name"]
             arguments = json.loads(tool_call["function"]["arguments"])
 
@@ -339,12 +339,20 @@ class LMStudioClient:
             # For this integration, we link it to the AppState's MCP client or similar
             result = await self._execute_mcp_tool(function_name, arguments)
 
-            messages.append({
+            # Offload JSON serialization of potentially large payloads to a thread
+            # to prevent blocking the async event loop.
+            content = await asyncio.to_thread(json.dumps, result)
+
+            return {
                 "role": "tool",
                 "tool_call_id": tool_call["id"],
                 "name": function_name,
-                "content": json.dumps(result)
-            })
+                "content": content
+            }
+
+        # Process all tool calls concurrently
+        tool_results = await asyncio.gather(*(process_tool(tc) for tc in tool_calls))
+        messages.extend(tool_results)
 
         # Resubmit with tool results
         return await self.chat(
