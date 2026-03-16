@@ -1,9 +1,15 @@
-import mlx.core as mx
-import mlx.nn as nn
 import numpy as np
+try:
+    import mlx.core as mx
+    import mlx.nn as nn
+    MLX_AVAILABLE = True
+except ImportError:
+    mx = None
+    nn = None
+    MLX_AVAILABLE = False
 from typing import Tuple, Optional
 
-class NeuralJMCE(nn.Module):
+class NeuralJMCE(nn.Module if nn is not None else object):
     """
     Joint Mean-Covariance Estimator (JMCE) using a Transformer backbone.
     Optimized for Apple Silicon NPU via MLX.
@@ -70,7 +76,7 @@ class NeuralJMCE(nn.Module):
         idx_map[idx_map == -1] = self.cholesky_size
         self.idx_map_mx = mx.array(idx_map)
 
-    def __call__(self, x: mx.array) -> Tuple[mx.array, mx.array]:
+    def __call__(self, x: 'mx.array') -> Tuple['mx.array', 'mx.array']:
         """
         Forward pass.
         Args:
@@ -106,7 +112,7 @@ class NeuralJMCE(nn.Module):
         
         return mu, L
 
-    def _build_cholesky(self, L_flat: mx.array) -> mx.array:
+    def _build_cholesky(self, L_flat: 'mx.array') -> 'mx.array':
         """
         Reconstructs the lower-triangular L matrix and ensures the diagonal is positive.
         Sigma = L * L^T is guaranteed to be Positive Definite.
@@ -123,6 +129,6 @@ class NeuralJMCE(nn.Module):
         L = L_flat_padded[:, self.idx_map_mx]
         return L
 
-    def get_covariance(self, L: mx.array) -> mx.array:
+    def get_covariance(self, L: 'mx.array') -> 'mx.array':
         """Computes the covariance matrix Sigma = LL^T."""
         return mx.matmul(L, L.transpose(0, 2, 1))
