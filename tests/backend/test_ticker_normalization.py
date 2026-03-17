@@ -9,7 +9,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 # We rely on conftest.py for basic mocking.
 # To test Python fallback, we patch growin_core availability in ticker_utils.
 
-from trading212_mcp_server import normalize_ticker
+from backend.utils.ticker_utils import normalize_ticker
 
 class TestTickerNormalization(unittest.TestCase):
     def test_us_tickers(self):
