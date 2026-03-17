@@ -213,9 +213,7 @@ async def test_weekend_skip():
     forecaster = TTMForecaster()
     
     # 1. Create a dataset ending on a Friday
-    # Friday Jan 24, 2026 is a Saturday in real life?
-    # Let's fix a known date.
-    # Friday, Jan 5, 2024
+    # Let's fix a known date: Friday, Jan 5, 2024
     friday_ts = 1704456000000 # Fri Jan 05 2024 12:00:00 GMT
     
     data = []
