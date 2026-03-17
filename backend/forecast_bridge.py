@@ -138,6 +138,33 @@ def run_forecast(ohlcv_data: List[Dict[str, Any]], prediction_steps: int, timefr
         # CLEANUP & ROBUSTNESS: 
         # 1. Convert to DF first for easy cleaning
         # 2. Handle NaNs and Zeros (Forward Fill) preventing scaling corruption
+        # --- PRE-DATAFRAME SANITIZATION (Unit Mismatch Fix) ---
+        # Detect if the last point (often real-time) is disjointed from history due to GBX/GBP mismatch.
+        if len(ohlcv_data) > 2:
+            last = ohlcv_data[-1]
+            prev = ohlcv_data[-2]
+
+            try:
+                last_c = float(last.get('c', 0))
+                prev_c = float(prev.get('c', 0))
+
+                if last_c > 0 and prev_c > 0:
+                    ratio = last_c / prev_c
+                    if ratio > 50: # Probably GBP history, GBX last
+                        last['o'] = float(last['o']) / 100
+                        last['h'] = float(last['h']) / 100
+                        last['l'] = float(last['l']) / 100
+                        last['c'] = float(last['c']) / 100
+                        logger.info("Fixed GBX mismatch (Last point divided by 100)")
+                    elif ratio < 0.02: # Probably GBX history, GBP last
+                        last['o'] = float(last['o']) * 100
+                        last['h'] = float(last['h']) * 100
+                        last['l'] = float(last['l']) * 100
+                        last['c'] = float(last['c']) * 100
+                        logger.info("Fixed GBP mismatch (Last point multiplied by 100)")
+            except (ValueError, TypeError):
+                pass
+
         df_raw = pd.DataFrame(ohlcv_data)
         
         # ensure numeric
