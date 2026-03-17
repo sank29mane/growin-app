@@ -25,8 +25,6 @@ from utils import sanitize_nan
 from utils.process_guard import start_parent_watchdog
 from utils.rate_limiter import get_t212_budgeter, PRIORITY_EXECUTION, PRIORITY_SYNC, PRIORITY_POLLING
 
-# Start watchdog immediately to ensure cleanup if parent dies
-start_parent_watchdog()
 
 # Constants
 LIVE_API_BASE = "https://live.trading212.com/api/v0"
@@ -685,4 +683,6 @@ async def main():
         await app.run(read_stream, write_stream, app.create_initialization_options())
 
 if __name__ == "__main__":
+    # Start watchdog immediately to ensure cleanup if parent dies
+    start_parent_watchdog()
     asyncio.run(main())
