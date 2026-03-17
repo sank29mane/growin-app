@@ -38,8 +38,6 @@ async def test_get_historical_bars_yfinance_fallback(mock_logger):
         MockTicker.return_value = mock_ticker_instance
 
         client = AlpacaClient()
-        # Ensure we are not using the global mock from conftest
-        client.data_client = None 
 
         ticker = "TEST.L"
         result = await client.get_historical_bars(ticker, timeframe="1Day", limit=5)
@@ -60,7 +58,6 @@ async def test_get_batch_bars(mock_logger):
         mock_single_fetch.side_effect = side_effect
 
         client = AlpacaClient()
-        client.data_client = None
 
         tickers = ["AAPL", "LLOY.L"]
         results = await client.get_batch_bars(tickers)

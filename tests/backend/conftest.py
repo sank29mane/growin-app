@@ -38,10 +38,19 @@ async def cleanup_resources():
         from app_context import state
         # Access internal _mcp_client to avoid re-triggering lazy init if it wasn't used
         if hasattr(state, '_mcp_client') and state._mcp_client is not None:
-            await state._mcp_client._exit_stack.aclose()
+            await state._mcp_client.stop()
             print("✅ MCP Sessions closed")
     except Exception as e:
         print(f"⚠️ Failed to close MCP sessions: {e}")
+
+    # 3. Close AnalyticsDB
+    try:
+        from analytics_db import get_analytics_db
+        db = get_analytics_db()
+        db.close()
+        print("✅ AnalyticsDB closed")
+    except Exception as e:
+        print(f"⚠️ Failed to close AnalyticsDB: {e}")
 
 @pytest.fixture(autouse=True)
 def clear_cache():
@@ -81,9 +90,8 @@ for module in MOCK_MODULES:
                 # Mock docker.from_env() and basic methods
                 mock.from_env.return_value = MagicMock()
                 mock.from_env.return_value.ping.return_value = True
-            
-            make_async(mock)
-            make_async(mock.return_value)
+
             sys.modules[module] = mock
+
     except Exception:
         pass

@@ -2,6 +2,7 @@ import duckdb
 import pandas as pd
 import logging
 import json
+import asyncio
 from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)

@@ -89,18 +89,13 @@ class NeuralJMCE(nn.Module):
                 k += 1
         self.diag_mask = np.zeros(self.cholesky_size, dtype=np.float32)
         self.diag_mask[diag_indices] = 1.0
+        
+        idx_map[idx_map == -1] = self.cholesky_size
         if HAS_MLX:
             self.diag_mask = mx.array(self.diag_mask)
-<<<<<<< HEAD
-            idx_map[idx_map == -1] = self.cholesky_size
             self.idx_map_mx = mx.array(idx_map, dtype=mx.uint32)
         else:
             self.idx_map_mx = None
-=======
-        idx_map[idx_map == -1] = self.cholesky_size
-        if HAS_MLX:
-            self.idx_map_mx = mx.array(idx_map, dtype=mx.uint32)
->>>>>>> origin/jules-test-fix-ttm-4592077065475434006
 
     def _apply_fourier_shift(self, mu: 'mx.array') -> 'mx.array':
         shift = self.fourier_phase_shift
@@ -110,7 +105,6 @@ class NeuralJMCE(nn.Module):
 
     def __call__(
         self, 
-<<<<<<< HEAD
         x: 'mx.array', 
         error_vector: Optional['mx.array'] = None,
         return_velocity: bool = False
@@ -126,12 +120,6 @@ class NeuralJMCE(nn.Module):
             L: Cholesky factor (batch, n_assets, n_assets)
             V: Optional covariance velocity
         """
-=======
-        x: 'mx.array',
-        error_vector: Optional['mx.array'] = None,
-        return_velocity: bool = False
-    ) -> Tuple['mx.array', 'mx.array', Optional['mx.array']]:
->>>>>>> origin/jules-test-fix-ttm-4592077065475434006
         B, S, N = x.shape
         x_lat = self.input_proj(x)
         if error_vector is not None:
@@ -154,14 +142,11 @@ class NeuralJMCE(nn.Module):
         return mu, L, V
 
     def _build_cholesky(self, L_flat: 'mx.array') -> 'mx.array':
-<<<<<<< HEAD
         """
         Reconstructs the lower-triangular L matrix and ensures the diagonal is positive.
         Sigma = L * L^T is guaranteed to be Positive Definite.
         """
         # Ensure diagonal elements are positive to guarantee PD covariance
-=======
->>>>>>> origin/jules-test-fix-ttm-4592077065475434006
         L_flat = L_flat * (1.0 - self.diag_mask) + mx.exp(L_flat) * self.diag_mask
         B = L_flat.shape[0]
         zeros = mx.zeros((B, 1))
@@ -171,10 +156,7 @@ class NeuralJMCE(nn.Module):
         return L
 
     def get_covariance(self, L: 'mx.array') -> 'mx.array':
-<<<<<<< HEAD
         """Computes the covariance matrix Sigma = LL^T."""
-=======
->>>>>>> origin/jules-test-fix-ttm-4592077065475434006
         return mx.matmul(L, L.transpose(0, 2, 1))
 
 class CoreMLJMCE:
