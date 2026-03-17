@@ -1,5 +1,12 @@
+import os
+import sys
 import pytest
 import numpy as np
+
+# Add backend directory to PYTHONPATH explicitly for these tests
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../backend')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+
 from backend.utils.jmce_model import NeuralJMCE, TimeResolution
 
 try:
