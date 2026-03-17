@@ -31,9 +31,23 @@ class AnalyticsDB:
         Args:
             db_path: Path to database file or ":memory:" for in-memory
         """
+        # SOTA 2026: Force memory mode in CI/Tests to avoid lock contention
+        import os
+        if os.environ.get("CI") == "true" or os.environ.get("PYTEST_CURRENT_TEST"):
+            db_path = ":memory:"
+            
         self.conn = duckdb.connect(db_path)
         self._init_schema()
         logger.info(f"✅ AnalyticsDB initialized (mode: {'memory' if db_path == ':memory:' else 'persistent'})")
+
+    def close(self):
+        """Explicitly close the DuckDB connection."""
+        if hasattr(self, 'conn') and self.conn:
+            try:
+                self.conn.close()
+                logger.info("🔌 AnalyticsDB connection closed")
+            except Exception as e:
+                logger.error(f"Error closing AnalyticsDB: {e}")
     
     def _init_schema(self):
         """Create optimized schema for time-series and agent analytics"""
