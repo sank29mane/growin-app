@@ -797,7 +797,10 @@ struct TradeProposalCard: View, Equatable {
 <<<<<<< HEAD
                     .buttonStyle(.plain)
                     .accessibilityLabel("Approve \(proposal.action) for \(proposal.ticker)")
+<<<<<<< HEAD
                     .accessibilityHint("Approves the NPU trade proposal and executes the order")
+=======
+>>>>>>> origin/palette/trade-proposal-a11y-5167335984159609109
                     .accessibilityAddTraits(.isButton)
                     
                     Button(action: { onReject(proposal.proposalId) }) {
@@ -839,7 +842,10 @@ struct TradeProposalCard: View, Equatable {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Reject \(proposal.action) for \(proposal.ticker)")
+<<<<<<< HEAD
                     .accessibilityHint("Rejects the NPU trade proposal and discards the order")
+=======
+>>>>>>> origin/palette/trade-proposal-a11y-5167335984159609109
                     .accessibilityAddTraits(.isButton)
                 }
             } else {
