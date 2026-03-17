@@ -11,6 +11,16 @@ from app_context import state
 
 def test_chat_error_handling_sanitization():
     """Test that chat endpoint sanitizes exception details."""
+    # Ensure DB is open (fix for shared state issues)
+    from app_context import state
+    import sqlite3
+    try:
+        state.chat_manager.conn.cursor()
+    except (sqlite3.ProgrammingError, AttributeError):
+        # Re-initialize if closed
+        from chat_manager import ChatManager
+        state.chat_manager = ChatManager()
+
     # Use context manager to ensure startup/shutdown
     with TestClient(app) as client:
         with patch("agents.coordinator_agent.CoordinatorAgent") as mock_coordinator:

@@ -16,6 +16,13 @@ importlib.util.find_spec = patched_find_spec
 # Ensure backend is in path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# --- Helpers ---
+def make_async(mock):
+    """Helper to add awaitable capability to mocked objects, simulating AsyncMock."""
+    if hasattr(mock, '__call__') and not isinstance(mock, AsyncMock):
+        mock.side_effect = AsyncMock()
+    return mock
+
 # --- Global Resource Lifecycle Management ---
 @pytest.fixture(scope="session", autouse=True)
 async def cleanup_resources():
@@ -38,19 +45,13 @@ async def cleanup_resources():
         from app_context import state
         # Access internal _mcp_client to avoid re-triggering lazy init if it wasn't used
         if hasattr(state, '_mcp_client') and state._mcp_client is not None:
-            await state._mcp_client.stop()
+            await state._mcp_client._exit_stack.aclose()
             print("✅ MCP Sessions closed")
+        
+        # DO NOT close state.chat_manager here if it's shared across tests, 
+        # as it closes the underlying sqlite connection.
     except Exception as e:
         print(f"⚠️ Failed to close MCP sessions: {e}")
-
-    # 3. Close AnalyticsDB
-    try:
-        from analytics_db import get_analytics_db
-        db = get_analytics_db()
-        db.close()
-        print("✅ AnalyticsDB closed")
-    except Exception as e:
-        print(f"⚠️ Failed to close AnalyticsDB: {e}")
 
 @pytest.fixture(autouse=True)
 def clear_cache():
@@ -71,12 +72,13 @@ MOCK_MODULES = [
     'docker'  # CRITICAL: Prevent Docker daemon connection attempts in CI
 ]
 
-def make_async(mock):
-    """Helper to add awaitable capability to mocked objects, simulating AsyncMock."""
-    if hasattr(mock, '__call__') and not isinstance(mock, AsyncMock):
-        # Only override side_effect if it's not already an AsyncMock to prevent overriding AsyncMocks
-        mock.side_effect = AsyncMock()
-    return mock
+# Patch MultiMCPManager to prevent real server connections during tests
+@pytest.fixture(autouse=True)
+def mock_mcp_connection():
+    with patch("mcp_client.MultiMCPManager.connect_all") as mock_connect:
+        # Create an async context manager mock
+        mock_connect.return_value.__aenter__.return_value = MagicMock()
+        yield mock_connect
 
 for module in MOCK_MODULES:
     try:
@@ -90,8 +92,7 @@ for module in MOCK_MODULES:
                 # Mock docker.from_env() and basic methods
                 mock.from_env.return_value = MagicMock()
                 mock.from_env.return_value.ping.return_value = True
-
+            
             sys.modules[module] = mock
-
     except Exception:
         pass

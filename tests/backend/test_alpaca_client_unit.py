@@ -19,8 +19,10 @@ def mock_logger():
 @pytest.mark.asyncio
 async def test_get_historical_bars_yfinance_fallback(mock_logger):
     """Test US stock: Alpaca (Primary) fails, yfinance (Fallback) succeeds"""
-    # Mock yfinance
-    with patch('yfinance.Ticker') as MockTicker:
+    # Mock yfinance and cache to prevent conftest interference
+    with patch('yfinance.Ticker') as MockTicker, \
+         patch('cache_manager.cache.get', return_value=None), \
+         patch('cache_manager.cache.set'):
         # Setup mock data
         dates = pd.date_range(start='2023-01-01', periods=5, freq='D')
         mock_data = pd.DataFrame({
@@ -52,7 +54,8 @@ async def test_get_historical_bars_yfinance_fallback(mock_logger):
 @pytest.mark.asyncio
 async def test_get_batch_bars(mock_logger):
     """Test batch bar fetching with mocked internal method"""
-    with patch('data_engine.AlpacaClient.get_historical_bars') as mock_single_fetch:
+    with patch('data_engine.AlpacaClient.get_historical_bars') as mock_single_fetch, \
+         patch('cache_manager.cache.get', return_value=None):
         async def side_effect(ticker, timeframe, limit):
             return {"ticker": ticker, "bars": [], "source": "single"}
         mock_single_fetch.side_effect = side_effect
