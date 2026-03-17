@@ -93,6 +93,8 @@ class NeuralJMCE(nn.Module):
             self.diag_mask = mx.array(self.diag_mask)
             idx_map[idx_map == -1] = self.cholesky_size
             self.idx_map_mx = mx.array(idx_map, dtype=mx.uint32)
+        else:
+            self.idx_map_mx = None
 
     def _apply_fourier_shift(self, mu: 'mx.array') -> 'mx.array':
         shift = self.fourier_phase_shift
