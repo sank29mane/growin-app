@@ -45,7 +45,7 @@ sys.modules['resilience'] = mock_resilience
 sys.modules['cache_manager'] = MagicMock()
 
 # --- IMPORT MODULE UNDER TEST ---
-from backend.data_engine import AlpacaClient, FinnhubClient
+from data_engine import AlpacaClient, FinnhubClient
 
 class TestDataEngineFixes(unittest.TestCase):
 

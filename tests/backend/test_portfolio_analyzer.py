@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 import pandas as pd
-from backend.utils.portfolio_analyzer import PortfolioAnalyzer
+from utils.portfolio_analyzer import PortfolioAnalyzer
 
 @pytest.fixture
 def price_history():

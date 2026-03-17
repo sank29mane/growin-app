@@ -8,7 +8,7 @@ import numpy as np
 # Add repo root to path so we can import backend
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
-from backend.forecast_bridge import _process_forecast_data
+from forecast_bridge import _process_forecast_data
 
 def original_logic(forecast_df, timeframe, last_real_ts, avg_delta, robust_std, robust_mean, last_vol, ohlcv_data, anchor_bias=0.0):
     forecast = []
