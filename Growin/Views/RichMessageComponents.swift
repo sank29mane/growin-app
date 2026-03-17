@@ -822,8 +822,13 @@ struct TradeProposalCard: View, Equatable {
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.green.opacity(0.3), lineWidth: 1))
                 }
                 .buttonStyle(.plain)
+<<<<<<< HEAD
                 .accessibilityLabel("Approve \(proposal.action.capitalized) \(proposal.ticker)")
                 .accessibilityHint("Approves the \(proposal.action.lowercased()) action for \(proposal.ticker)")
+=======
+                .accessibilityLabel("Approve \(proposal.action) for \(proposal.ticker)")
+                .accessibilityHint("Approves the pending trade proposal")
+>>>>>>> origin/ux/accessibility-trade-proposal-3827433325384296160
                 .accessibilityAddTraits(.isButton)
                 
                 Button(action: { onReject(proposal.proposalId) }) {
@@ -855,10 +860,16 @@ struct TradeProposalCard: View, Equatable {
 <<<<<<< HEAD
 =======
                 .buttonStyle(.plain)
+<<<<<<< HEAD
                 .accessibilityLabel("Reject \(proposal.action.capitalized) \(proposal.ticker)")
                 .accessibilityHint("Rejects the \(proposal.action.lowercased()) action for \(proposal.ticker)")
                 .accessibilityAddTraits(.isButton)
 >>>>>>> origin/palette-trade-proposal-card-a11y-15809855608792339669
+=======
+                .accessibilityLabel("Reject \(proposal.action) for \(proposal.ticker)")
+                .accessibilityHint("Rejects the pending trade proposal")
+                .accessibilityAddTraits(.isButton)
+>>>>>>> origin/ux/accessibility-trade-proposal-3827433325384296160
             }
         }
         .padding(14)
