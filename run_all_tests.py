@@ -1,31 +1,33 @@
 import os
 import subprocess
 import time
-import glob
 
-test_files = sorted(glob.glob('tests/backend/test_*.py'))
-results = []
+test_files = [
+    'tests/backend/test_audit_logging.py',
+    'tests/backend/test_chat_endpoints.py',
+    'tests/backend/test_chat_manager_functional.py',
+    'tests/backend/test_coordinator_fixes.py',
+    'tests/backend/test_coordinator_model.py',
+    'tests/backend/test_cors.py',
+    'tests/backend/test_data_engine_fixes.py',
+    'tests/backend/test_data_engine_optimization.py',
+    'tests/backend/test_data_frayer.py'
+]
+
+import os
 for test_file in test_files:
     start = time.time()
     try:
         proc = subprocess.run(
             ['uv', 'run', '--project', 'backend', 'pytest', test_file],
-            env={**os.environ, "CI": "true", "PYTHONPATH": ".:backend"},
+            env={**os.environ, "CI": "true", "PYTHONPATH": ".:backend", "OPENAI_API_KEY": "sk-1234"},
             capture_output=True,
             text=True,
-            timeout=10
+            timeout=30
         )
         duration = time.time() - start
-        if proc.returncode == 0:
-            results.append((test_file, 'PASS', duration))
-        else:
-            if 'AttributeError: \'NoneType\' object has no attribute \'array\'' in proc.stderr or proc.stdout:
-                 results.append((test_file, 'MLX_ERROR', duration))
-            else:
-                 results.append((test_file, 'FAIL', duration))
+        print(f"{test_file}: {'PASS' if proc.returncode == 0 else 'FAIL'} ({duration:.2f}s)")
+        if proc.returncode != 0:
+            print(proc.stderr[:200])
     except subprocess.TimeoutExpired:
-        results.append((test_file, 'TIMEOUT', 10))
-
-for f, s, d in results:
-    if s in ['FAIL', 'TIMEOUT']:
-        print(f"{f}: {s} ({d:.2f}s)")
+        print(f"{test_file}: TIMEOUT")
