@@ -8,7 +8,7 @@ import logging
 from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from market_context import ForecastData
 from forecaster import get_forecaster
-from resilience import get_circuit_breaker, CircuitBreakerOpenError
+from resilience import get_circuit_breaker, CircuitBreakerOpenError, CircuitBreakerOpenException
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +141,8 @@ class ForecastingAgent(BaseAgent):
 
             result = await self.circuit_breaker.call(execute_forecast)
 
+            self.circuit_breaker.record_success()
+
             # Extract predictions
             forecast_bars = result.get("forecast", [])
 
@@ -204,6 +206,7 @@ class ForecastingAgent(BaseAgent):
                 latency_ms=0
             )
         except Exception as e:
+            self.circuit_breaker.record_failure()
             logger.error(f"Forecast failed: {e}")
             return AgentResponse(
                 agent_name=self.config.name,
