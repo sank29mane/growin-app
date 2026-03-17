@@ -12,13 +12,16 @@ import json
 import time
 import os
 import asyncio
+import uuid
+from datetime import datetime
+from decimal import Decimal
 from pydantic import BaseModel, Field
 from magentic import prompt as mag_prompt
 from langchain_core.messages import SystemMessage, HumanMessage
 from .llm_factory import LLMFactory
 from utils.audit_log import log_audit
 from app_logging import correlation_id_ctx
-from resilience import get_circuit_breaker, CircuitBreakerOpenError
+from resilience import get_circuit_breaker, CircuitBreakerOpenError, CircuitBreakerOpenException
 from shared_types import SENSITIVE_TOOLS
 
 logger = logging.getLogger(__name__)
@@ -261,7 +264,7 @@ class DecisionAgent:
                 "inputs": {
                     "ticker": context.ticker,
                     "intent": context.intent,
-                    "agents_executed": context.agents_executed,
+                    "agents_executed": list(context.agents_executed),
                     "hybrid_weighting": {
                         "quant": 0.4,
                         "forecast": 0.3,
@@ -833,7 +836,7 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
         response = re.sub(r'.*?</think>', '', response, flags=re.DOTALL | re.IGNORECASE)
 
         # 2. Strip common internal monologue markers and prefixes (at start of string only)
-        meta_patterns = [
+ meta_patterns = [
             r'^\*\*thinking\*\*.*?\n',
             r'^\[THOUGHTS\].*?\[/THOUGHTS\]',
             r'^thinking:.*?\n',

@@ -12,11 +12,13 @@ from data_fabricator import DataFabricator
 from status_manager import status_manager
 from app_logging import correlation_id_ctx
 from utils.audit_log import log_audit
+from app_context import state
 import asyncio
 import logging
 import re
 import time
 import json
+import difflib
 from typing import Dict, List, Any, Optional, Tuple
 import os
 
@@ -61,6 +63,7 @@ class CoordinatorAgent(BaseAgent):
         self.model_name = model_name
         self.api_keys = api_keys or {}
         self.data_fabricator = DataFabricator()
+        self.mcp_client = state.mcp_client
         
         # Specialist registry
         self.quant_agent = QuantAgent()
@@ -461,68 +464,129 @@ class CoordinatorAgent(BaseAgent):
     async def _resolve_ticker_via_search(self, term: str) -> Optional[str]:
         """Tier 2: Use TickerResolver search to find correct ticker for a name/term"""
         try:
-            resolver = TickerResolver()
-            results = await resolver.search(term)
-            
-            if results:
-                # Institutional Standard: Check exact match first
-                for res in results:
-                    if res["ticker"].upper() == term.upper():
-                        return res["ticker"]
-                
-                # Use difflib for fuzzy match score if no exact match
-                import difflib
-                scored_results = []
-                for res in results:
-                    ticker = res["ticker"]
-                    name = res["name"]
-                    scored_results.append({
-                        "ticker": ticker,
-                        "name": name,
-                        "search_score": difflib.SequenceMatcher(None, term.upper(), ticker.upper()).ratio(),
-                        "name_score": difflib.SequenceMatcher(None, term.lower(), name.lower()).ratio()
-                    })
+            # SOTA 2026: Try MCP search if available, fallback to Resolver
+            search_result = []
+            if self.mcp_client:
+                try:
+                    if hasattr(asyncio, 'timeout'):
+                        async with asyncio.timeout(10.0):
+                            search_result = await self.mcp_client.call_tool("search_instruments", {"query": term})
+                    else:
+                        search_result = await asyncio.wait_for(
+                            self.mcp_client.call_tool("search_instruments", {"query": term}),
+                            timeout=10.0
+                        )
+                    
+                    if hasattr(search_result, 'content'):
+                        content = search_result.content
+                        if isinstance(content, list) and len(content) > 0:
+                            text = content[0].text if hasattr(content[0], 'text') else str(content[0])
+                            search_result = json.loads(text)
+                    elif isinstance(search_result, str):
+                        search_result = json.loads(search_result)
+                except Exception as e:
+                    logger.warning(f"MCP search failed, falling back to local resolver: {e}")
+                    resolver = TickerResolver()
+                    search_result = await resolver.search(term)
+            else:
+                resolver = TickerResolver()
+                search_result = await resolver.search(term)
+
+            if search_result and isinstance(search_result, list) and len(search_result) > 0:
+                # 1. Normalize candidates and prepare for comparison
+                candidates = []
+                for res in search_result:
+                    ticker = res.get("ticker", "")
+                    name = res.get("name", "")
+                    if ticker:
+                        candidates.append({
+                            "ticker": ticker,
+                            "name": name,
+                            "search_score": difflib.SequenceMatcher(None, term.upper(), ticker.upper()).ratio(),
+                            "name_score": difflib.SequenceMatcher(None, term.lower(), name.lower()).ratio()
+                        })
                 
                 # 2. Find best match based on similarity
-                # We prioritize ticker matches slightly more
-                best_match = max(scored_results, key=lambda x: max(x["search_score"], x["name_score"]))
+                best_match = max(candidates, key=lambda x: max(x["search_score"], x["name_score"]))
                 highest_score = max(best_match["search_score"], best_match["name_score"])
                 
                 if highest_score > 0.6: # Confidence threshold
                     found_ticker = best_match["ticker"]
-                    
-                    # Normalize the found ticker via Resolver
                     normalized = TickerResolver().normalize(found_ticker)
-                    
                     logger.info(f"Coordinator Tier 2: Found best match '{best_match['name']}' ({found_ticker}) score={highest_score:.2f} -> {normalized}")
                     return normalized
                     
-            return None
+        except asyncio.TimeoutError:
+            logger.warning(f"Ticker search discovery timed out for {term}")
         except Exception as e:
             logger.warning(f"Coordinator Tier 2 search failed for '{term}': {e}")
-            return None
+            
+        return None
 
     async def _handle_specialist_error(self, agent: BaseAgent, context: Dict[str, Any], error: str) -> Optional[AgentResponse]:
-        """Tier 3: Attempt to resolve errors using reasoning"""
+        """Tier 3: Attempt to resolve errors using reasoning + Docker Sandbox execution"""
         await self._initialize_llm()
         from langchain_core.messages import HumanMessage
         
         prompt = f"""Specialist {agent.config.name} failed with error: "{error}"
-Input context: {context}
-
-Suggest a fix. If it's a ticker issue, provide the correct ticker.
-If fixed, reply exactly: FIXED_TICKER: [symbol]
-Otherwise, reply: UNABLE_TO_FIX
-"""
-        response = await self._llm.ainvoke([HumanMessage(content=prompt)])
-        content = response.content if hasattr(response, 'content') else str(response)
+        Input Context: {json.dumps(context)}
         
-        if "FIXED_TICKER:" in content:
-            new_ticker = content.split("FIXED_TICKER:")[1].strip().split()[0].upper()
-            logger.info(f"Coordinator Tier 3: Attempting retry with agent-suggested ticker: {new_ticker}")
-            context["ticker"] = new_ticker
-            try:
-                return await agent.execute(context)
-            except:
+        Suggest a fix. If it's a ticker issue, provide the correct ticker.
+        Return ONLY a JSON block with the fix:
+        {{
+          "reasoning": "Explain the fix",
+          "fixed_ticker": "SYMBOL",
+          "code": "import json\\n# ... fix logic if needed ...\\nprint(json.dumps(new_context))"
+        }}
+        
+        If fixed via ticker only, set "fixed_ticker". If complex context fix needed, provide "code" for Docker Sandbox.
+        """
+        try:
+            response = await self._llm.ainvoke([HumanMessage(content=prompt)])
+            content = response.content if hasattr(response, 'content') else str(response)
+            
+            match = re.search(r'\{.*\}', content, re.DOTALL)
+            if not match:
                 return None
+                
+            fix_data = json.loads(match.group(), strict=False)
+            
+            # Simple Ticker Fix
+            if fix_data.get("fixed_ticker"):
+                new_ticker = fix_data["fixed_ticker"].upper()
+                logger.info(f"Coordinator Tier 3: Retrying with agent-suggested ticker: {new_ticker}")
+                context_copy = context.copy()
+                context_copy["ticker"] = new_ticker
+                return await agent.execute(context_copy)
+            
+            # Complex Docker Sandbox Fix
+            python_code = fix_data.get("code")
+            if python_code and self.mcp_client:
+                logger.info(f"Coordinator Tier 3: Delegating context fix to Docker Sandbox...")
+                try:
+                    if hasattr(asyncio, 'timeout'):
+                        async with asyncio.timeout(30.0):
+                            exec_result = await self.mcp_client.call_tool("docker_run_python", {"script": python_code})
+                    else:
+                        exec_result = await asyncio.wait_for(
+                            self.mcp_client.call_tool("docker_run_python", {"script": python_code}),
+                            timeout=30.0
+                        )
+                    
+                    if exec_result and hasattr(exec_result, 'content'):
+                        output_text = exec_result.content[0].text
+                        import ast
+                        exec_res_dict = ast.literal_eval(output_text)
+                        
+                        if exec_res_dict.get("exit_code") == 0:
+                            stdout = exec_res_dict.get("stdout", "")
+                            new_context = json.loads(stdout)
+                            logger.info(f"Coordinator Tier 3: Retry with fixed context from sandbox: {new_context}")
+                            return await agent.execute(new_context)
+                except Exception as e:
+                    logger.error(f"Docker Sandbox fix failed: {e}")
+                        
+        except Exception as e:
+            logger.warning(f"Tier 3 self-correction failed: {e}")
+            
         return None
