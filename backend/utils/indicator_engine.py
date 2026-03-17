@@ -35,7 +35,7 @@ class IndicatorEngine:
         self.backend = force_backend or ("mlx" if MLX_AVAILABLE else "rust" if RUST_AVAILABLE else "numpy")
         logger.debug(f"IndicatorEngine initialized with backend: {self.backend}")
 
-    def _to_mlx(self, data: Union[List[float], np.ndarray, pd.Series]) -> mx.array:
+    def _to_mlx(self, data: Union[List[float], np.ndarray, pd.Series]) -> 'mx.array':
         """Convert input to MLX array (float32 for AMX compatibility)."""
         if isinstance(data, pd.Series):
             data = data.values
