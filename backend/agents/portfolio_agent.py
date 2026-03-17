@@ -22,6 +22,7 @@ from cache_manager import cache # Import global cache
 from utils.financial_math import create_decimal
 from utils.portfolio_analyzer import PortfolioAnalyzer
 from resilience import get_circuit_breaker, CircuitBreakerOpenError, CircuitBreakerOpenException
+from utils.async_utils import run_with_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -81,19 +82,11 @@ class PortfolioAgent(BaseAgent):
             if requested_account == "all":
                 # Parallel fetch for ISA and Invest
                 async def fetch_all():
-                    if hasattr(asyncio, 'timeout'):
-                        async with asyncio.timeout(15.0):
-                            tasks = [
-                                self.mcp_client.call_tool("analyze_portfolio", arguments={"account_type": "invest"}),
-                                self.mcp_client.call_tool("analyze_portfolio", arguments={"account_type": "isa"})
-                            ]
-                            res = await asyncio.gather(*tasks, return_exceptions=True)
-                    else:
-                        tasks = [
-                            self.mcp_client.call_tool("analyze_portfolio", arguments={"account_type": "invest"}),
-                            self.mcp_client.call_tool("analyze_portfolio", arguments={"account_type": "isa"})
-                        ]
-                        res = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=15.0)
+                    tasks = [
+                        self.mcp_client.call_tool("analyze_portfolio", arguments={"account_type": "invest"}),
+                        self.mcp_client.call_tool("analyze_portfolio", arguments={"account_type": "isa"})
+                    ]
+                    res = await run_with_timeout(asyncio.gather(*tasks, return_exceptions=True), timeout=15.0)
 
                     # Ensure CircuitBreaker records failure if both fetches fail
                     any_success = any(not isinstance(r, Exception) for r in res)
@@ -136,17 +129,13 @@ class PortfolioAgent(BaseAgent):
             else:
                 # Single account fetch with timeout
                 async def fetch_single():
-                    if hasattr(asyncio, 'timeout'):
-                        async with asyncio.timeout(15.0):
-                            return await self.mcp_client.call_tool(
-                                "analyze_portfolio",
-                                arguments={"account_type": requested_account}
-                            )
-                    else:
-                        return await asyncio.wait_for(self.mcp_client.call_tool(
+                    return await run_with_timeout(
+                        self.mcp_client.call_tool(
                             "analyze_portfolio", 
                             arguments={"account_type": requested_account}
-                        ), timeout=15.0)
+                        ),
+                        timeout=15.0
+                    )
 
                 try:
                     result = await self.circuit_breaker.call(fetch_single)
@@ -189,13 +178,8 @@ class PortfolioAgent(BaseAgent):
             
             # Fetch history for context (default 30 days) - TIMEOUT PROTECTED
             try:
-                if hasattr(asyncio, 'timeout'):
-                    async with asyncio.timeout(5.0):
-                       history = await self._fetch_portfolio_history(portfolio_data)
-                       portfolio_data.portfolio_history = history
-                else:
-                    history = await asyncio.wait_for(self._fetch_portfolio_history(portfolio_data), timeout=5.0)
-                    portfolio_data.portfolio_history = history
+                history = await run_with_timeout(self._fetch_portfolio_history(portfolio_data), timeout=5.0)
+                portfolio_data.portfolio_history = history
             except asyncio.TimeoutError:
                 self.logger.warning("Portfolio history fetch timed out (5s). Skipping history, returning core data.")
             except Exception as e:
