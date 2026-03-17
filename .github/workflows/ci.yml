@@ -10,11 +10,11 @@ jobs:
   test:
     name: Run SOTA Test Suite
     runs-on: macos-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     
     env:
       CI: "true"
-      PYTHONPATH: ".:backend"
+      PYTHONPATH: "backend"
 
     steps:
       - uses: actions/checkout@v4
@@ -44,13 +44,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-chroma-
 
-      - name: Install dependencies
-        run: |
-          cd backend
-          uv sync
-
       - name: Run SOTA Unit & Integration Tests
-        timeout-minutes: 30
+        timeout-minutes: 10
         run: |
           uv run --project backend pytest tests/backend/
 
