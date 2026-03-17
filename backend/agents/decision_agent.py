@@ -836,7 +836,7 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
         response = re.sub(r'.*?</think>', '', response, flags=re.DOTALL | re.IGNORECASE)
 
         # 2. Strip common internal monologue markers and prefixes (at start of string only)
- meta_patterns = [
+        meta_patterns = [
             r'^\*\*thinking\*\*.*?\n',
             r'^\[THOUGHTS\].*?\[/THOUGHTS\]',
             r'^thinking:.*?\n',
