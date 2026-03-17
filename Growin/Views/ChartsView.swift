@@ -73,7 +73,6 @@ struct ChartsView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Clear search")
                 .accessibilityHint("Clears the current search text")
-                .accessibilityAddTraits(.isButton)
             }
         }
         .padding(12)
