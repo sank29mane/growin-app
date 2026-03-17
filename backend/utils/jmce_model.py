@@ -91,12 +91,7 @@ class NeuralJMCE(nn.Module):
         self.diag_mask[diag_indices] = 1.0
         if HAS_MLX:
             self.diag_mask = mx.array(self.diag_mask)
-<<<<<<< HEAD
             idx_map[idx_map == -1] = self.cholesky_size
-=======
-        idx_map[idx_map == -1] = self.cholesky_size
-        if HAS_MLX:
->>>>>>> origin/palette/trade-proposal-a11y-5167335984159609109
             self.idx_map_mx = mx.array(idx_map, dtype=mx.uint32)
 
     def _apply_fourier_shift(self, mu: 'mx.array') -> 'mx.array':
@@ -107,7 +102,6 @@ class NeuralJMCE(nn.Module):
 
     def __call__(
         self, 
-<<<<<<< HEAD
         x: 'mx.array', 
         error_vector: Optional['mx.array'] = None,
         return_velocity: bool = False
@@ -123,12 +117,6 @@ class NeuralJMCE(nn.Module):
             L: Cholesky factor (batch, n_assets, n_assets)
             V: Optional covariance velocity
         """
-=======
-        x: 'mx.array',
-        error_vector: Optional['mx.array'] = None,
-        return_velocity: bool = False
-    ) -> Tuple['mx.array', 'mx.array', Optional['mx.array']]:
->>>>>>> origin/palette/trade-proposal-a11y-5167335984159609109
         B, S, N = x.shape
         x_lat = self.input_proj(x)
         if error_vector is not None:
@@ -151,14 +139,11 @@ class NeuralJMCE(nn.Module):
         return mu, L, V
 
     def _build_cholesky(self, L_flat: 'mx.array') -> 'mx.array':
-<<<<<<< HEAD
         """
         Reconstructs the lower-triangular L matrix and ensures the diagonal is positive.
         Sigma = L * L^T is guaranteed to be Positive Definite.
         """
         # Ensure diagonal elements are positive to guarantee PD covariance
-=======
->>>>>>> origin/palette/trade-proposal-a11y-5167335984159609109
         L_flat = L_flat * (1.0 - self.diag_mask) + mx.exp(L_flat) * self.diag_mask
         B = L_flat.shape[0]
         zeros = mx.zeros((B, 1))
@@ -168,10 +153,7 @@ class NeuralJMCE(nn.Module):
         return L
 
     def get_covariance(self, L: 'mx.array') -> 'mx.array':
-<<<<<<< HEAD
         """Computes the covariance matrix Sigma = LL^T."""
-=======
->>>>>>> origin/palette/trade-proposal-a11y-5167335984159609109
         return mx.matmul(L, L.transpose(0, 2, 1))
 
 class CoreMLJMCE:
