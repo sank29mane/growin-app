@@ -7,6 +7,7 @@ from .social_agent import SocialAgent
 from .whale_agent import WhaleAgent
 from .goal_planner_agent import GoalPlannerAgent
 from .vision_agent import VisionAgent
+from .calibration_agent import CalibrationAgent
 
 __all__ = [
     "QuantAgent",
@@ -16,5 +17,9 @@ __all__ = [
     "SocialAgent",
     "WhaleAgent",
     "GoalPlannerAgent",
-    "VisionAgent"
+    "VisionAgent",
+    "CalibrationAgent",
+    "RLPolicy",
+    "create_policy"
 ]
+from .rl_policy import RLPolicy, create_policy

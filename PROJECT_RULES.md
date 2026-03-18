@@ -268,3 +268,18 @@ Before "Done"    → Empirical proof captured
 
 *GSD Methodology — Model-Agnostic Edition*
 *Reference implementation for multi-LLM environments*
+
+---
+
+## IDE-CLI Synchronization Protocol (Dual-Agent Operations)
+
+When operating simultaneously with the Gemini CLI (GSD) and the Antigravity IDE agent, the following handoff protocol is **MANDATORY** to prevent state corruption and context waste:
+
+### 1. Domain Split Hybrid Architecture
+- **Gemini CLI (Master Orchestrator):** Exclusively handles `/gsd:plan-phase`, git operations, backend Python (`backend/`), MLX configurations, structural shell scripts (`scripts/`), and comprehensive testing.
+- **Antigravity IDE Agent (The Executor):** Exclusively handles heavy, multi-file code execution, SwiftUI implementation (`Growin/`), and real-time syntax fixing within complex files.
+
+### 2. The Synchronous Handoff Protocol
+- **CLI Agents:** If executing a plan requires massive UI code rewrites or touches more than 5 complex Swift files, **STOP execution**. Update `.gsd/STATE.md` with instructions for the IDE agent and prompt the user to execute the change in Antigravity IDE.
+- **IDE Agents:** Before writing ANY code, you MUST read `.gsd/STATE.md` to understand the current phase constraints. You DO NOT modify planning files (`ROADMAP.md`, `SPEC.md`, `STATE.md`) directly unless strictly instructed.
+- **Verification Loop:** When the IDE agent completes an implementation step, return to the Gemini CLI terminal to formally verify the work via `/gsd:verify-work` or test runners before committing.

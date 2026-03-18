@@ -3,6 +3,7 @@ Decision Agent - High-reasoning LLM for final trade decisions
 User-selectable model with price validation integration
 """
 
+import numpy as np
 from market_context import MarketContext
 from price_validation import PriceValidator
 from typing import Dict, Optional, List, Any
@@ -19,6 +20,8 @@ from pydantic import BaseModel, Field
 from magentic import prompt as mag_prompt
 from langchain_core.messages import SystemMessage, HumanMessage
 from .llm_factory import LLMFactory
+from .regime_agent import RegimeAgent
+from .rl_state import RLStateFabricator
 from utils.audit_log import log_audit
 from app_logging import correlation_id_ctx
 from resilience import get_circuit_breaker, CircuitBreakerOpenError, CircuitBreakerOpenException
@@ -64,6 +67,10 @@ class DecisionAgent:
         self.llm = None
         self._lm_studio_client = None # Deprecated, kept for compat if needed, but Factory handles it
         self._initialized = False
+        
+        # SOTA 2026: Profit-First Intelligence
+        self.regime_agent = RegimeAgent()
+        self.rl_state_fabricator = RLStateFabricator()
 
     async def _initialize_llm(self):
         """Initialize the LLM using the Factory"""
@@ -90,19 +97,29 @@ class DecisionAgent:
         if not self._initialized:
             await self._initialize_llm()
 
-        import os
-        if os.getenv("USE_SHADOW_LLM") == "1":
-             return {"content": self._generate_shadow_response(context, query=query), "response_id": None}
-
-        from status_manager import status_manager
-        status_manager.set_status("decision_agent", "working", "Applying reasoning...", model=self.model_name)
-
         # 1. Identify Cross-Agent Contradictions
         contradictions = self._identify_contradictions(context)
         if contradictions:
             context.user_context["contradictions"] = contradictions
 
-        # 1a. SOTA 2026: Calculate Hybrid Conviction Multiplier (Phase 36 Wave 2)
+        # 1a. SOTA 2026: Regime Detection & RL State (Phase 37)
+        regime = None
+        if context.price and context.price.history_series:
+            closes = [float(item.close) for item in context.price.history_series]
+            if len(closes) > 1:
+                # Filter out zero/neg prices before log
+                valid_closes = [c for c in closes if c > 0]
+                if len(valid_closes) > 1:
+                    returns = np.diff(np.log(valid_closes))
+                    regime = self.regime_agent.detect_regime(returns)
+                    context.user_context["market_regime"] = regime.model_dump()
+                    logger.info(f"DecisionAgent: Detected Market Regime: {regime.label}")
+
+        import os
+        if os.getenv("USE_SHADOW_LLM") == "1":
+             return {"content": self._generate_shadow_response(context, query=query), "response_id": None}
+
+        # 1b. SOTA 2026: Calculate Hybrid Conviction Multiplier
         conviction_multiplier = 1.0
         if context.vision and context.vision.patterns:
             high_conf_patterns = [p for p in context.vision.patterns if p.confidence >= 0.85]
@@ -984,6 +1001,13 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
             g = context.geopolitical
             events = " | ".join([f"{e.title[:40]}" for e in g.top_events[:2]])
             sections.append(f"**GPR (Geopolitical)**: Score: {g.gpr_score:.2f} ({g.global_sentiment_label}) | Events: {events}")
+
+        # Market Regime (SOTA 2026 Phase 37)
+        regime = context.user_context.get("market_regime")
+        if regime:
+            sections.append(f"**MARKET REGIME**: {regime['label']} (Volatility Z-Score: {regime['z_score']:.2f})")
+            if regime['label'] == "EXTREME_VOL":
+                sections.append("⚠️ **RL GATE ACTIVE**: Market is in EXTREME VOLATILITY regime. Prioritize CAPITAL PRESERVATION over aggressive ROI.")
 
         # Institutional Liquidity (SOTA 2026 Phase 28)
         if context.risk_governance and context.risk_governance.slippage_bps is not None:

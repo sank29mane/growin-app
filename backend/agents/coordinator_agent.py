@@ -3,7 +3,7 @@ Coordinator Agent - Orchestrates all specialist agents
 Static SOTA model that routes queries and aggregates results
 """
 
-from .base_agent import BaseAgent, AgentResponse
+from .base_agent import BaseAgent, AgentResponse, AgentConfig
 from market_context import MarketContext
 from . import QuantAgent, PortfolioAgent, ForecastingAgent, ResearchAgent, SocialAgent, WhaleAgent, GoalPlannerAgent, VisionAgent
 from .decision_agent import DecisionAgent
@@ -58,8 +58,15 @@ class CoordinatorAgent(BaseAgent):
     Static SOTA model that routes queries and aggregates results.
     """
     
-    def __init__(self, config: Optional[Any] = None, model_name: str = "native-mlx", api_keys: Optional[Dict[str, str]] = None):
-        super().__init__(config or BaseAgent.default_config("CoordinatorAgent"))
+    def __init__(self, config: Optional[AgentConfig] = None, model_name: str = "native-mlx", api_keys: Optional[Dict[str, str]] = None):
+        if config is None:
+            config = AgentConfig(
+                name="CoordinatorAgent",
+                enabled=True,
+                timeout=30.0,  # Coordinator needs more time for swarm
+                cache_ttl=0    # Don't cache coordinator orchestration itself
+            )
+        super().__init__(config)
         self.model_name = model_name
         self.api_keys = api_keys or {}
         self.data_fabricator = DataFabricator()
@@ -129,6 +136,25 @@ class CoordinatorAgent(BaseAgent):
             "needs": needs_map.get(intent_type, ["quant", "forecast"]),
             "reason": reason_match.group(1) if reason_match else "Direct Routing"
         }
+
+    async def analyze(self, context: Dict[str, Any]) -> AgentResponse:
+        """
+        Implementation of abstract base method.
+        Delegates to process_query for swarm orchestration.
+        """
+        query = context.get("query", "")
+        ticker = context.get("ticker")
+        history = context.get("history", [])
+        account_type = context.get("account_type")
+        
+        market_context = await self.process_query(query, history, ticker, account_type)
+        
+        return AgentResponse(
+            agent_name=self.config.name,
+            success=True,
+            data=market_context.model_dump(),
+            latency_ms=0
+        )
 
     async def process_query(self, query: str, history: List[Dict] = [], ticker: Optional[str] = None, account_type: Optional[str] = None) -> MarketContext:
         """

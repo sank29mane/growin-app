@@ -1,50 +1,46 @@
-# GSD ROADMAP
+# GSD ROADMAP - SOTA Profit Extraction Edition
 
-This document outlines the high-level phases for the GSD integration and ongoing Growin App development.
-
----
-
-## 🏛 ARCHIVE: Milestone: Foundation & Precision Alpha
-- **Completed**: 2026-02-23
-- **Phases**: 0, 1, 3
-- **Archive**: `.gsd/milestones/FOUNDATION-PRECISION-SUMMARY.md`
-
-## 🏛 ARCHIVE: Milestone: SOTA Intelligence & Financial Autonomy (2026)
-- **Completed**: 2026-03-04
-- **Phases**: 4 - 23
-- **Archive**: `.gsd/milestones/SOTA-INTELLIGENCE-SUMMARY.md`
+This document outlines the high-level phases for the Growin App, specifically optimized for M4 Pro (48GB RAM) and Local Profit extraction via LSE Leveraged ETFs.
 
 ---
 
-## 🚀 MILESTONE: Autonomous Experience & Production Scaling
+## 🏛 ARCHIVE: Milestone: Foundation & Precision Alpha (Completed 2026-02-23)
+## 🏛 ARCHIVE: Milestone: SOTA Intelligence & Financial Autonomy (Completed 2026-03-04)
 
-## Phase 24: Frontend Reasoning Trace & User Experience Polish
-- **Goal**: Implement a visual "Thinking" trace for agentic reasoning in the SwiftUI dashboard and finalize 120Hz/Accessibility polish.
-- **Status**: COMPLETED
-- **Requirements**: [UI-TRACE-01, UI-TRACE-02, FE-01, FE-02]
+---
 
-## Phase 29: Institutional Portfolio Optimization (Mean-Variance)
-- **Goal**: Implement Modern Portfolio Theory (MPT) via mean-variance optimization and efficient frontier calculations.
-- **Status**: COMPLETED
-- **Requirements**: [OPT-01, OPT-02, OPT-03]
+## 🚀 MILESTONE: Local Profit Extraction & RL Hardening (M4 Pro)
+**Goal**: Transform into a self-correcting trading weapon for LSE Leveraged ETFs.
 
-## Phase 30: High-Velocity Intra-day Trading (LETFs)
-- **Goal**: Maximize daily profits using Leveraged ETFs (TQQQ/SQQQ) with 5-15 minute rebalancing triggers, backed by Human-In-The-Loop approval.
-- **Status**: COMPLETED
-
-## Phase 31: Autonomous Agentic Execution
-- **Goal**: Establish the autonomous execution loop and real-time model calibration.
-- **Status**: COMPLETED
-
-## Phase 32: End-to-End Simulation
-- **Goal**: Multi-day native backtest & calibration verification.
-- **Status**: COMPLETED
-
-## Phase 33: High-Fidelity Forecasting Optimization
-- **Goal**: Implement multivariate TTM-R2, adaptive scaling, and Neural JMCE feedback loop.
-- **Status**: COMPLETED
-
-## Phase 34: Hybrid Magentic Architecture (Agent Structured Outputs)
-- **Goal**: Integrate the `magentic` framework for robust Pydantic-based structured outputs across NLP Agents, significantly reducing string-parsing boilerplate while maintaining hardware-accelerated MLX fallback.
+### Phase 37: RL Regime & Backtest Lab
+- **Goal**: Implement RL-driven rebalancing using JMCE + TTM-R2 fused state.
+- **Inference Engine**: Native `vllm-mlx` with PagedAttention (replacing LM Studio API).
 - **Status**: PLANNED
-- **Requirements**: [MAG-01, MAG-02]
+- **Wave 1: vllm-mlx & Data Fusion**
+    - [ ] **Engine Setup**: Deploy `vllm-mlx` native server for Nemotron-3-Nano (30B MoE).
+    - [ ] **RLStateFabricator**: Fuse JMCE Mu/Sigma + TTM-R2 trends + 2PM GMT Window.
+    - [ ] **ETF Scraper**: Harvest active LSE Leveraged ETPs (NVD3, 3QQQ, 5LUK) in GBX.
+- **Wave 2: Regime Agent (Market Character)**
+    - [ ] **Volatility Clustering**: Implement `RegimeAgent` using JMCE Eigenvalues to detect regime shifts.
+    - [ ] **Continuous Calibration**: Nightly "Prompt Calibration" based on day's Alpha vs. Predictions.
+- **Wave 3: PPO Action Head & NPU Backtest**
+    - [ ] **Policy Implementation**: Build a lightweight PPO head in MLX for rebalance actions.
+    - [ ] **Mass-Parallel Backtest**: 1000x simulations on ANE/GPU to optimize the "Volatility Tax" threshold.
+
+### Phase 38: SwiftUI Profit Command Center (High-Fidelity)
+- **Goal**: 120Hz dashboard for real-time Alpha tracking and Fast-HITL.
+- **Tasks**:
+    - [ ] **Alpha Chart**: Real-time line chart showing Growin Portfolio vs. FTSE 100.
+    - [ ] **Regime Indicator**: Visual display of detected market state.
+    - [ ] **Fast-HITL Notifications**: Local macOS toasts for >0.95 conviction rebalances.
+
+### Phase 39: Code Purity & Jules Maintenance
+- **Goal**: Unified imports and cleanup legacy debt.
+- **Status**: IN_PROGRESS (Delegated to Jules - Session 17444431987523978288)
+
+---
+
+## 📋 BACKLOG (POST-WEEKEND)
+- [ ] Multi-User Supabase Migration.
+- [ ] Options Greeks Agent.
+- [ ] Real-time Order Book Heatmaps.
