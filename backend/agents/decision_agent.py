@@ -526,15 +526,10 @@ class DecisionAgent:
 
                             logger.info(f"DecisionAgent: Executing Tool {tool_name}")
 
+                            from utils.async_utils import run_with_timeout
+
                             async def execute_mcp_tool():
-                                if hasattr(asyncio, 'timeout'):
-                                    async with asyncio.timeout(15.0):
-                                        return await mcp.call_tool(tool_name, tool_args)
-                                else:
-                                    return await asyncio.wait_for(
-                                        mcp.call_tool(tool_name, tool_args),
-                                        timeout=15.0
-                                    )
+                                return await run_with_timeout(mcp.call_tool(tool_name, tool_args), timeout=15.0)
 
                             result = await decision_circuit_breaker.call(execute_mcp_tool)
 

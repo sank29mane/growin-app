@@ -282,10 +282,17 @@ class ResearchAgent(BaseAgent):
                 # Specialized query for SEC filings
                 query = f"latest SEC filings and regulatory announcements for {ticker}"
                 
-                def fetch():
-                    return tavily.search(query=query, search_depth="advanced", max_results=5)
+                import httpx
+                payload = {
+                    "api_key": self.tavily_key,
+                    "query": query,
+                    "search_depth": "advanced",
+                    "max_results": 5
+                }
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.post("https://api.tavily.com/search", json=payload)
+                    response = resp.json() if resp.status_code == 200 else {}
                 
-                response = await asyncio.to_thread(fetch)
                 for r in response.get('results', []):
                     # Only include if relevant to SEC or regulatory
                     content = (r.get('title', '') + (r.get('content', '') or '')).upper()
@@ -315,17 +322,23 @@ class ResearchAgent(BaseAgent):
             newsapi = NewsApiClient(api_key=self.newsapi_key)
             from_date = (datetime.now() - timedelta(days=7)).isoformat()
             
-            def fetch():
-                return newsapi.get_everything(
-                    q=f"{company_name} stock OR {ticker}",
-                    from_param=from_date,
-                    language='en',
-                    sort_by='relevancy',
-                    page_size=5
-                )
+            import httpx
             
-            response = await asyncio.to_thread(fetch)
-            return response.get('articles', [])
+            params = {
+                "apiKey": self.newsapi_key,
+                "q": f"{company_name} stock OR {ticker}",
+                "from": from_date,
+                "language": "en",
+                "sortBy": "relevancy",
+                "pageSize": 5
+            }
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get("https://newsapi.org/v2/everything", params=params)
+                if resp.status_code == 200:
+                    return resp.json().get('articles', [])
+                else:
+                    logger.warning(f"NewsAPI returned status {resp.status_code}")
+                    return []
         except Exception as e:
             logger.warning(f"NewsAPI failed: {e}")
             return []
@@ -344,14 +357,16 @@ class ResearchAgent(BaseAgent):
                 region = "LSE UK" if is_uk else "US"
                 query = f"latest financial news for {company_name} ({ticker}) stock on {region} market"
             
-            def fetch():
-                return tavily.search(
-                    query=query,
-                    search_depth="advanced",
-                    max_results=8
-                )
-            
-            response = await asyncio.to_thread(fetch)
+            import httpx
+            payload = {
+                "api_key": self.tavily_key,
+                "query": query,
+                "search_depth": "advanced",
+                "max_results": 8
+            }
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post("https://api.tavily.com/search", json=payload)
+                response = resp.json() if resp.status_code == 200 else {}
             
             # Normalize to common format
             return [

@@ -328,12 +328,9 @@ class CoordinatorAgent(BaseAgent):
         result = None
         start_time = time.time()
         try:
+            from utils.async_utils import run_with_timeout
             # 15s timeout per specialist to prevent hanging
-            if hasattr(asyncio, 'timeout'):
-                async with asyncio.timeout(15.0):
-                    result = await agent.execute(context)
-            else:
-                result = await asyncio.wait_for(agent.execute(context), timeout=15.0)
+            result = await run_with_timeout(agent.execute(context), timeout=15.0)
                 
             # COORDINATOR SELF-CORRECTION: Try to fix if it's a known data issue
             if not result.success and result.error:
@@ -468,14 +465,11 @@ class CoordinatorAgent(BaseAgent):
             search_result = []
             if self.mcp_client:
                 try:
-                    if hasattr(asyncio, 'timeout'):
-                        async with asyncio.timeout(10.0):
-                            search_result = await self.mcp_client.call_tool("search_instruments", {"query": term})
-                    else:
-                        search_result = await asyncio.wait_for(
-                            self.mcp_client.call_tool("search_instruments", {"query": term}),
-                            timeout=10.0
-                        )
+                    from utils.async_utils import run_with_timeout
+                    search_result = await run_with_timeout(
+                        self.mcp_client.call_tool("search_instruments", {"query": term}),
+                        timeout=10.0
+                    )
                     
                     if hasattr(search_result, 'content'):
                         content = search_result.content
@@ -564,14 +558,11 @@ class CoordinatorAgent(BaseAgent):
             if python_code and self.mcp_client:
                 logger.info(f"Coordinator Tier 3: Delegating context fix to Docker Sandbox...")
                 try:
-                    if hasattr(asyncio, 'timeout'):
-                        async with asyncio.timeout(30.0):
-                            exec_result = await self.mcp_client.call_tool("docker_run_python", {"script": python_code})
-                    else:
-                        exec_result = await asyncio.wait_for(
-                            self.mcp_client.call_tool("docker_run_python", {"script": python_code}),
-                            timeout=30.0
-                        )
+                    from utils.async_utils import run_with_timeout
+                    exec_result = await run_with_timeout(
+                        self.mcp_client.call_tool("docker_run_python", {"script": python_code}),
+                        timeout=30.0
+                    )
                     
                     if exec_result and hasattr(exec_result, 'content'):
                         output_text = exec_result.content[0].text

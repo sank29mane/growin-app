@@ -9,6 +9,15 @@ sys.modules["mlx_vlm.utils"] = MagicMock()
 
 import pytest
 from PIL import Image
+
+try:
+    import mlx.core as mx
+except ImportError:
+    mx = None
+
+if mx is None:
+    pytest.skip("MLX not available, skipping VLM tests", allow_module_level=True)
+
 from backend.mlx_vlm_engine import MLXVLMInferenceEngine
 
 @pytest.fixture

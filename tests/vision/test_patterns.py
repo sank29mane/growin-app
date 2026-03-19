@@ -1,6 +1,16 @@
 import pytest
 import os
 from PIL import Image
+
+try:
+    import mlx.core as mx
+except ImportError:
+    mx = None
+
+import pytest
+if mx is None:
+    pytest.skip("MLX not available, skipping VLM tests", allow_module_level=True)
+
 from agents.vision_agent import VisionAgent, VisionAnalysis
 from market_context import VisualPattern
 from utils.image_proc import prepare_vlm_image

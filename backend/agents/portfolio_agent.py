@@ -78,22 +78,16 @@ class PortfolioAgent(BaseAgent):
             status_manager.set_status("portfolio_agent", "running", f"Syncing {requested_account} holdings...")
 
             # SOTA 2026: Consolidated Multi-Account Fetch with Enhanced Timeouts and Circuit Breaker
+            from utils.async_utils import run_with_timeout
+
             if requested_account == "all":
                 # Parallel fetch for ISA and Invest
-                async def fetch_all():
-                    if hasattr(asyncio, 'timeout'):
-                        async with asyncio.timeout(15.0):
-                            tasks = [
-                                self.mcp_client.call_tool("analyze_portfolio", arguments={"account_type": "invest"}),
-                                self.mcp_client.call_tool("analyze_portfolio", arguments={"account_type": "isa"})
-                            ]
-                            res = await asyncio.gather(*tasks, return_exceptions=True)
-                    else:
-                        tasks = [
-                            self.mcp_client.call_tool("analyze_portfolio", arguments={"account_type": "invest"}),
-                            self.mcp_client.call_tool("analyze_portfolio", arguments={"account_type": "isa"})
-                        ]
-                        res = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=15.0)
+                async def execute_fetch_all():
+                    tasks = [
+                        self.mcp_client.call_tool("analyze_portfolio", arguments={"account_type": "invest"}),
+                        self.mcp_client.call_tool("analyze_portfolio", arguments={"account_type": "isa"})
+                    ]
+                    res = await asyncio.gather(*tasks, return_exceptions=True)
 
                     # Ensure CircuitBreaker records failure if both fetches fail
                     any_success = any(not isinstance(r, Exception) for r in res)
@@ -101,6 +95,9 @@ class PortfolioAgent(BaseAgent):
                         raise ValueError(f"All account fetches failed: {res[0]}")
 
                     return res
+
+                async def fetch_all():
+                    return await run_with_timeout(execute_fetch_all(), timeout=15.0)
                         
                 try:
                     results = await self.circuit_breaker.call(fetch_all)
@@ -135,18 +132,14 @@ class PortfolioAgent(BaseAgent):
                 portfolio_data = self._process_portfolio_data(consolidated_data)
             else:
                 # Single account fetch with timeout
+                async def execute_fetch_single():
+                    return await self.mcp_client.call_tool(
+                        "analyze_portfolio",
+                        arguments={"account_type": requested_account}
+                    )
+
                 async def fetch_single():
-                    if hasattr(asyncio, 'timeout'):
-                        async with asyncio.timeout(15.0):
-                            return await self.mcp_client.call_tool(
-                                "analyze_portfolio",
-                                arguments={"account_type": requested_account}
-                            )
-                    else:
-                        return await asyncio.wait_for(self.mcp_client.call_tool(
-                            "analyze_portfolio", 
-                            arguments={"account_type": requested_account}
-                        ), timeout=15.0)
+                    return await run_with_timeout(execute_fetch_single(), timeout=15.0)
 
                 try:
                     result = await self.circuit_breaker.call(fetch_single)
@@ -189,13 +182,8 @@ class PortfolioAgent(BaseAgent):
             
             # Fetch history for context (default 30 days) - TIMEOUT PROTECTED
             try:
-                if hasattr(asyncio, 'timeout'):
-                    async with asyncio.timeout(5.0):
-                       history = await self._fetch_portfolio_history(portfolio_data)
-                       portfolio_data.portfolio_history = history
-                else:
-                    history = await asyncio.wait_for(self._fetch_portfolio_history(portfolio_data), timeout=5.0)
-                    portfolio_data.portfolio_history = history
+                history = await run_with_timeout(self._fetch_portfolio_history(portfolio_data), timeout=5.0)
+                portfolio_data.portfolio_history = history
             except asyncio.TimeoutError:
                 self.logger.warning("Portfolio history fetch timed out (5s). Skipping history, returning core data.")
             except Exception as e:
