@@ -25,3 +25,6 @@
 ## 2025-03-19 - [Merge Conflict Resolution & Legend A11y]
 **Learning:** Resolving multiple Git merge conflicts manually across SwiftUI files is critical before making UX changes. Adding explicit `.accessibilityElement(children: .combine)` to custom composite views (like LegendItem containing shapes and text) significantly improves VoiceOver coherence.
 **Action:** Always verify for and resolve Git conflict markers before attempting to implement new accessibility features to prevent compilation errors and ensure valid syntax.
+## 2025-03-19 - [FastAPI Exception Handling for Tests]
+**Learning:** Returning un-sanitized `str(e)` in FastAPI 500 exceptions breaks security sanitization checks in `test_security_error_handling.py` and causes the test suite to silently abort with `Fatal Python error: Aborted` (due to testclient constraints or security middleware handling exceptions aggressively).
+**Action:** Always replace broad exception strings with a generic `detail="Internal Server Error"` when propagating 500 errors to clients in routes.
