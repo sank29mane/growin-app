@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import time
 import logging
-from backend.utils.indicator_engine import IndicatorEngine
+from utils.indicator_engine import IndicatorEngine
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("VerifyAMX")

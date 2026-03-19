@@ -3,7 +3,7 @@ import os
 from fastapi.testclient import TestClient
 
 # Add backend to path so we can import server
-sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../backend')))
 
 from server import app
 
