@@ -39,25 +39,33 @@ class TwitterMicroAgent(BaseMicroAgent):
             # Non-blocking thread execution
             query = f"${ticker} stock discussion twitter x.com" if ticker != "MARKET" else "retail investor sentiment twitter x.com stockmarket"
             
-            response = await asyncio.to_thread(
-                tavily.search,
-                query=query,
-                search_depth="advanced",
-                include_domains=["x.com", "twitter.com", "stocktwits.com"],
-                max_results=5
-            )
+            import httpx
+
+            payload = {
+                "api_key": self.tavily_key,
+                "query": query,
+                "search_depth": "advanced",
+                "include_domains": ["x.com", "twitter.com", "stocktwits.com"],
+                "max_results": 5
+            }
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post("https://api.tavily.com/search", json=payload)
+                response = resp.json() if resp.status_code == 200 else {}
             
             results = response.get('results', [])
             
             if not results and ticker != "MARKET" and company_name and company_name != ticker:
                 query = f"{company_name} stock sentiment discussion twitter"
-                response = await asyncio.to_thread(
-                    tavily.search,
-                    query=query,
-                    search_depth="advanced",
-                    include_domains=["x.com", "twitter.com", "stocktwits.com"],
-                    max_results=5
-                )
+                payload = {
+                    "api_key": self.tavily_key,
+                    "query": query,
+                    "search_depth": "advanced",
+                    "include_domains": ["x.com", "twitter.com", "stocktwits.com"],
+                    "max_results": 5
+                }
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.post("https://api.tavily.com/search", json=payload)
+                    response = resp.json() if resp.status_code == 200 else {}
                 results = response.get('results', [])
 
             if not results:

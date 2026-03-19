@@ -1,5 +1,14 @@
 import pytest
 from unittest.mock import MagicMock, patch, AsyncMock
+try:
+    import mlx.core as mx
+except ImportError:
+    mx = None
+
+import pytest
+if mx is None:
+    pytest.skip("MLX not available, skipping VLM tests", allow_module_level=True)
+
 from agents.vision_agent import VisionAgent, VisionAnalysis
 from market_context import VisualPattern, VisionData
 from datetime import datetime, timezone
