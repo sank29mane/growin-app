@@ -27,12 +27,16 @@ This document outlines the high-level phases for the Growin App, specifically op
     - [ ] **Policy Implementation**: Build a lightweight PPO head in MLX for rebalance actions.
     - [ ] **Mass-Parallel Backtest**: 1000x simulations on ANE/GPU to optimize the "Volatility Tax" threshold.
 
-### Phase 38: SwiftUI Profit Command Center (High-Fidelity)
-- **Goal**: 120Hz dashboard for real-time Alpha tracking and Fast-HITL.
-- **Tasks**:
-    - [ ] **Alpha Chart**: Real-time line chart showing Growin Portfolio vs. FTSE 100.
-    - [ ] **Regime Indicator**: Visual display of detected market state.
-    - [ ] **Fast-HITL Notifications**: Local macOS toasts for >0.95 conviction rebalances.
+### Phase 38: SwiftUI Profit Command Center & RL Training Integration
+- **Goal**: 120Hz dashboard for real-time Alpha tracking and hardened RL training loop.
+- **Plans**: 3 plans
+- **Status**: PLANNED
+- **Wave 1: Control & Data Backbone**
+    - [ ] **38-01-PLAN.md**: WebSocket Alpha-Stream, Smart Money DST, Split-Brain.
+- **Wave 2: Command Center Implementation**
+    - [ ] **38-02-PLAN.md**: 120Hz Canvas Dashboard, Regime Indicator, Fast-HITL.
+- **Wave 3: RL Training & Hardening**
+    - [ ] **38-03-PLAN.md**: PPO Training Loop, GAE, Financial Reward.
 
 ### Phase 39: Code Purity & Jules Maintenance
 - **Goal**: Unified imports and cleanup legacy debt.
