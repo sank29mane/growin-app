@@ -22,3 +22,6 @@
 ## 2026-03-16 - Trade Proposal Accessibility Labels
 **Learning:** When using `.buttonStyle(.plain)` in HITL action cards, static labels like 'Approve Trade Proposal' are insufficient for VoiceOver users who need context on *what* they are approving.
 **Action:** Use dynamic accessibility labels (e.g., `Approve \(proposal.action) for \(proposal.ticker)`) and explicitly add the `.isButton` trait.
+## 2025-03-19 - [Merge Conflict Resolution & Legend A11y]
+**Learning:** Resolving multiple Git merge conflicts manually across SwiftUI files is critical before making UX changes. Adding explicit `.accessibilityElement(children: .combine)` to custom composite views (like LegendItem containing shapes and text) significantly improves VoiceOver coherence.
+**Action:** Always verify for and resolve Git conflict markers before attempting to implement new accessibility features to prevent compilation errors and ensure valid syntax.
