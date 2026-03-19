@@ -133,3 +133,71 @@ class CurrencyNormalizer:
             return (d_price, "€")
         else:
             return (d_price, currency_code)
+
+class DataSourceNormalizer:
+    """
+    Legacy wrapper for CI and price validation compatibility.
+    SOTA 2026: Use CurrencyNormalizer directly for new code.
+    """
+    @staticmethod
+    def get_currency_for_ticker(ticker: str) -> str:
+        return "GBP" if CurrencyNormalizer.is_pence_ticker(ticker) else "USD"
+
+    @staticmethod
+    def normalize_alpaca_price(price: Union[float, Decimal], ticker: str) -> Decimal:
+        return CurrencyNormalizer.normalize_price(price, ticker, currency="USD")
+
+    @staticmethod
+    def normalize_yfinance_price(price: Union[float, Decimal], ticker: str) -> Decimal:
+        return CurrencyNormalizer.normalize_price(price, ticker)
+
+def calculate_portfolio_value(positions: List[Any]) -> Decimal:
+    """
+    Sum the market value of all positions.
+    Works with both Position objects and dicts.
+    """
+    total = Decimal("0.0")
+    for pos in positions:
+        if hasattr(pos, 'market_value'):
+            total += pos.market_value
+        elif isinstance(pos, dict):
+            # Try to get marketValue or market_value
+            mv = pos.get("marketValue") or pos.get("market_value") or 0
+            total += Decimal(str(mv))
+    return total
+
+def normalize_all_positions(positions: List[Dict], metadata_cache: Dict) -> List[Any]:
+    """
+    Legacy helper for Trading212 positions normalization.
+    Returns a list of Position models from data_models.py.
+    """
+    from data_models import Position
+    normalized_list = []
+    for pos in positions:
+        ticker = pos.get("ticker")
+        meta = metadata_cache.get(ticker, {})
+        
+        raw_avg = pos.get("averagePrice")
+        raw_curr = pos.get("currentPrice")
+        qty = Decimal(str(pos.get("quantity", 0)))
+        
+        norm_avg = CurrencyNormalizer.normalize_price(raw_avg, ticker, metadata=meta)
+        norm_curr = CurrencyNormalizer.normalize_price(raw_curr, ticker, metadata=meta)
+        
+        market_value = (norm_curr * qty).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        invested = (norm_avg * qty).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        unrealized_pnl = market_value - invested
+        pnl_percent = (unrealized_pnl / invested * 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) if invested > 0 else Decimal(0)
+        
+        p = Position(
+            ticker=ticker,
+            quantity=qty,
+            averagePrice=norm_avg,
+            currentPrice=norm_curr,
+            marketValue=market_value,
+            unrealizedPnl=unrealized_pnl,
+            unrealizedPnlPercent=pnl_percent,
+            currency=meta.get("currency", "USD")
+        )
+        normalized_list.append(p)
+    return normalized_list

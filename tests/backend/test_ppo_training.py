@@ -1,8 +1,8 @@
 import pytest
 import mlx.core as mx
 import numpy as np
-from ppo_agent import PPOAgent
-from rl_utils import financial_reward
+from agents.ppo_agent import PPOAgent
+from agents.rl_utils import financial_reward
 
 def test_ppo_agent_initialization():
     agent = PPOAgent(n_assets=10, state_dim=64)
