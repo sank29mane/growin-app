@@ -35,7 +35,12 @@ struct AlphaDashboardView: View {
                         Canvas { context, size in
                             let points = viewModel.displayPoints
                             guard points.count >= 2 else {
-                                context.draw(Text("AWAITING ALPHA STREAM...").premiumTypography(.caption), at: CGPoint(x: size.width/2, y: size.height/2))
+                                context.draw(
+                                    Text("AWAITING ALPHA STREAM...")
+                                        .font(.system(size: 13, weight: .regular, design: .rounded))
+                                        .foregroundColor(.white.opacity(0.4)),
+                                    at: CGPoint(x: size.width/2, y: size.height/2)
+                                )
                                 return
                             }
                             
