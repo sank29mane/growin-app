@@ -40,14 +40,15 @@ This document outlines the high-level phases for the Growin App, specifically op
 
 ### Phase 39: Strategy Hardening & Code Purity
 - **Goal**: Unified imports, legacy adapter removal, and PPO hyperparameter optimization for LSE ETPs.
-- **Plans**: 3 plans
+- **Plans**: 4 plans
 - **Status**: PLANNED
 - **Wave 1: Code Purity & Modernization**
-    - [ ] **39-01-PLAN.md**: Absolute imports, legacy removal, MLX type safety.
-- **Wave 2: RL Strategy & Data**
+    - [ ] **39-01-PLAN.md**: Absolute imports (Core), legacy removal, MLX type safety & memory stability.
+- **Wave 2: RL Strategy & Data / Swarm Modernization**
     - [ ] **39-02-PLAN.md**: PPO Grid Search, Reward Calibration, LSE ETP Mappings.
+    - [ ] **39-04-PLAN.md**: Absolute imports (Swarm/Secondary Agents).
 - **Wave 3: Real-time Stability Monitoring**
-    - [ ] **39-03-PLAN.md**: WebSocket Training Stream, Brain Stability Metric.
+    - [ ] **39-03-PLAN.md**: WebSocket Training Stream, Brain Stability Metric, Graceful Disconnects.
 
 ---
 
