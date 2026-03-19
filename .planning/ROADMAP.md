@@ -38,9 +38,16 @@ This document outlines the high-level phases for the Growin App, specifically op
 - **Wave 3: RL Training & Hardening**
     - [ ] **38-03-PLAN.md**: PPO Training Loop, GAE, Financial Reward.
 
-### Phase 39: Code Purity & Jules Maintenance
-- **Goal**: Unified imports and cleanup legacy debt.
-- **Status**: IN_PROGRESS (Delegated to Jules - Session 17444431987523978288)
+### Phase 39: Strategy Hardening & Code Purity
+- **Goal**: Unified imports, legacy adapter removal, and PPO hyperparameter optimization for LSE ETPs.
+- **Plans**: 3 plans
+- **Status**: PLANNED
+- **Wave 1: Code Purity & Modernization**
+    - [ ] **39-01-PLAN.md**: Absolute imports, legacy removal, MLX type safety.
+- **Wave 2: RL Strategy & Data**
+    - [ ] **39-02-PLAN.md**: PPO Grid Search, Reward Calibration, LSE ETP Mappings.
+- **Wave 3: Real-time Stability Monitoring**
+    - [ ] **39-03-PLAN.md**: WebSocket Training Stream, Brain Stability Metric.
 
 ---
 
