@@ -573,10 +573,10 @@ Query: "{clean_query}"
         if context.intent in ["conversational", "educational"]:
              # Yield final context for route handler metadata
              from pydantic import BaseModel
-             class FinalEvent(BaseModel):
+             class OrchestratorFinalEvent(BaseModel):
                  market_context: MarketContext
              
-             yield FinalEvent(market_context=context)
+             yield OrchestratorFinalEvent(market_context=context)
              return
 
         status_manager.set_status("orchestrator", "working", "Performing Risk Review (Critic Pattern)...")
@@ -592,7 +592,7 @@ Query: "{clean_query}"
 
         # Yield final context for route handler metadata
         from pydantic import BaseModel
-        class FinalEvent(BaseModel):
+        class SecondaryOrchestratorFinalEvent(BaseModel):
             market_context: MarketContext
         
-        yield FinalEvent(market_context=context)
+        yield SecondaryOrchestratorFinalEvent(market_context=context)

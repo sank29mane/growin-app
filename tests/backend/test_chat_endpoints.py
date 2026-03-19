@@ -6,7 +6,7 @@ import os
 from datetime import datetime
 
 # Add backend to sys.path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../backend')))
 
 from app_context import state, ChatMessage
 from chat_manager import ChatManager

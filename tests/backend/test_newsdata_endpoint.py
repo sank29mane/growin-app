@@ -5,8 +5,11 @@ from dotenv import load_dotenv
 
 load_dotenv("backend/.env")
 
+import pytest
+
 api_key = os.getenv("NEWSDATA_API_KEY")
 
+@pytest.mark.skipif(not api_key, reason="NEWSDATA_API_KEY not found in env")
 def test_market_endpoint():
     print(f"Testing NewsData.io 'market' endpoint with key: {api_key[:5]}...")
     
