@@ -3,7 +3,8 @@ RL State Fabricator - SOTA 2026 Edition
 Fuses outputs from JMCE (Mu/Sigma) and TTM-R2 (Trends) into a normalized 
 observation tensor for the RL Action Head.
 
-Includes Institutional Rebalance detection (2:00 PM GMT Play) and Volatility Tax sensors.
+Includes Institutional Rebalance detection (2:00 PM GMT Play), 
+Volatility Tax sensors, and Semantic Fusion via CLaRa.
 """
 
 import numpy as np
@@ -19,18 +20,28 @@ except ImportError:
     mx = None
     HAS_MLX = False
 
+# Import ClaraAgent for semantic fusion
+try:
+    from .clara_agent import ClaraAgent
+except ImportError:
+    # Handle direct execution
+    from clara_agent import ClaraAgent
+
 logger = logging.getLogger(__name__)
 
 class RLStateFabricator:
     """
     Constructs the 'Global State' vector for the Reinforcement Learning policy.
     Optimized for LSE Leveraged ETFs (3x/5x).
+    
+    Updated for Semantic Fusion (Wave 2): 96-dim (64 quant + 32 semantic).
     """
     
-    def __init__(self, n_assets: int = 10, state_dim: int = 64):
+    def __init__(self, n_assets: int = 10, state_dim: int = 96):
         self.n_assets = n_assets
         self.state_dim = state_dim
         self.history_buffer = [] # For temporal features
+        self.clara_agent = ClaraAgent() # Lazy-loaded during first context call
         
     def fabricator_state(
         self, 
@@ -38,10 +49,11 @@ class RLStateFabricator:
         jmce_L: np.ndarray, 
         ttm_forecast: Dict[str, Any],
         portfolio_state: Dict[str, Any],
-        market_metadata: Dict[str, Any]
+        market_metadata: Dict[str, Any],
+        semantic_text: Optional[str] = None
     ) -> Union[np.ndarray, Any]:
         """
-        Creates a normalized state vector.
+        Creates a normalized 96-dim state vector with fused semantic signal.
         
         State Space Mapping:
         - [0:N] Expected Returns (Mu)
@@ -49,8 +61,11 @@ class RLStateFabricator:
         - [2N:3N] TTM Trend Confidence
         - [3N:3N+4] Portfolio Delta (Current vs Target)
         - [3N+4:3N+8] Time Features (Sine/Cosine of day, 2PM Indicator, Weekday)
-        - [3N+8:StateDim] Volatility Clustering (Regime)
+        - [3N+8:64] Volatility Clustering (Regime)
+        - [64:96] Semantic Fusion (CLaRa 32-dim Context)
         """
+        # --- QUANT BLOCK (64-dim) ---
+        
         # 1. Expected Returns (Mu) - Normalized and Padded
         mu_norm = np.clip(jmce_mu, -0.05, 0.05) * 20.0
         mu_feat = np.zeros(self.n_assets)
@@ -122,8 +137,8 @@ class RLStateFabricator:
             
         vol_regime = np.array([z_score, vol_score])
         
-        # 7. Build the final vector
-        state_vec = np.concatenate([
+        # Build quant vector (target 64-dim)
+        quant_vec = np.concatenate([
             mu_feat.flatten(),      # N
             var_feat.flatten(),     # N
             trend_feat.flatten(),   # N
@@ -132,19 +147,46 @@ class RLStateFabricator:
             vol_regime              # 2
         ])
         
-        # Padding or Clipping to match state_dim (64)
+        # Pad/Clip quant block to exactly 64
+        if len(quant_vec) < 64:
+            quant_vec = np.pad(quant_vec, (0, 64 - len(quant_vec)))
+        else:
+            quant_vec = quant_vec[:64]
+
+        # --- SEMANTIC BLOCK (32-dim) ---
+        
+        # 7. Semantic Fusion via CLaRa
+        if semantic_text:
+            # get_context_vector returns a 32-dim MLX array or NumPy array
+            semantic_context = self.clara_agent.get_context_vector(semantic_text)
+            if HAS_MLX and isinstance(semantic_context, mx.array):
+                semantic_feat = np.array(semantic_context).flatten()
+            else:
+                semantic_feat = semantic_context.flatten()
+        else:
+            # Fallback to zero vector if no text provided
+            semantic_feat = np.zeros(32, dtype=np.float32)
+
+        # Ensure semantic feature is exactly 32
+        if len(semantic_feat) < 32:
+            semantic_feat = np.pad(semantic_feat, (0, 32 - len(semantic_feat)))
+        else:
+            semantic_feat = semantic_feat[:32]
+
+        # --- FINAL FUSION (96-dim) ---
+        state_vec = np.concatenate([quant_vec, semantic_feat]).astype(np.float32)
+        
+        # Ensure total state_dim is met
         if len(state_vec) < self.state_dim:
             state_vec = np.pad(state_vec, (0, self.state_dim - len(state_vec)))
         else:
             state_vec = state_vec[:self.state_dim]
             
-        state_vec = state_vec.astype(np.float32)
-        
         # 8. SOTA: MLX Normalization for Numerical Stability
         if HAS_MLX:
             mx_state = mx.array(state_vec)
             # Use mx.norm (L2) for stability
-            norm_val = mx.norm(mx_state)
+            norm_val = mx.linalg.norm(mx_state)
             if norm_val > 1e-8:
                 mx_state = mx_state / norm_val
             return mx_state

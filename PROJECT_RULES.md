@@ -77,6 +77,10 @@ Plans are grouped into **waves** based on dependencies:
 | 2 | Depends on Wave 1 | Wait for Wave 1, then parallel |
 | 3 | Depends on Wave 2 | Wait for Wave 2, then parallel |
 
+**Task Tagging**: All tasks in `PLAN.md` MUST be explicitly tagged as either `[AG]` (Antigravity Specialist Agent) or `[CLI]` (Direct CLI execution).
+- `[AG]` — Complex, multi-file, or research-intensive tasks.
+- `[CLI]` — Sequential, surgical, or environment-setup tasks.
+
 **Wave Completion Protocol:**
 1. All tasks in wave verified
 2. State snapshot created

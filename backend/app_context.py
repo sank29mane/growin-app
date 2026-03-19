@@ -10,9 +10,17 @@ from mcp_client import Trading212MCPClient
 
 import time
 
-
-
-
+class SplitBrainController:
+    """
+    Routes tasks to optimal hardware backends based on workload.
+    - Heavy operations -> GPU (VLLMMXEngine)
+    - Lighter operations -> CPU (Ollama)
+    """
+    def route_task(self, task_type: str) -> str:
+        task = task_type.upper()
+        if task in ['REASONING', 'TRAINING', 'POLICY']:
+            return 'VLLMMXEngine'
+        return 'Ollama'
 
 class ANEConfig(BaseModel):
     enabled: bool = False
@@ -28,8 +36,16 @@ class AppState:
         self.start_time = time.time()
         # On-device ANE configuration (default off; auto-detect on startup)
         self.ane_config = ANEConfig()
-        # Phase 30: High-Velocity Trade Proposals (HITL)
+        # High-Velocity Trade Proposals (HITL)
         self.trade_proposals: Dict[str, Any] = {}
+        # Hardware context routing
+        self._split_brain_controller = None
+
+    @property
+    def split_brain_controller(self) -> SplitBrainController:
+        if self._split_brain_controller is None:
+            self._split_brain_controller = SplitBrainController()
+        return self._split_brain_controller
 
     @property
     def chat_manager(self) -> ChatManager:

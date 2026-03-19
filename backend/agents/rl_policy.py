@@ -56,13 +56,26 @@ class RLPolicy(nn.Module):
         self.actor = PPOActor(state_dim, hidden_dim, n_assets)
         self.critic = PPOCritic(state_dim, hidden_dim)
         self.n_assets = n_assets
+        self.log_std = mx.zeros((n_assets,))
         
+    def scale_for_gbx(self, weights: mx.array, capital_gbp: float, ticker_prices_gbx: mx.array) -> mx.array:
+        """
+        Scales policy weights for LSE Leveraged ETFs (GBX precision).
+        Converts GBX (pence) to GBP (pounds) internally for correct fractional share routing.
+        """
+        capital_gbp_array = mx.array([capital_gbp])
+        allocations_gbp = weights * capital_gbp_array
+        prices_gbp = ticker_prices_gbx / 100.0
+        shares = allocations_gbp / prices_gbp
+        return shares
+
     def __call__(self, state: mx.array) -> Tuple[mx.array, mx.array]:
         """
         Forward pass for both Actor and Critic.
         Returns (weights, value).
         """
-        weights = self.actor(state)
+        raw_weights = self.actor(state)
+        weights = mx.clip(raw_weights, 0.0, 1.0) # Clip weights to valid long-only range [0, 1]
         value = self.critic(state)
         return weights, value
 
@@ -108,7 +121,7 @@ class RLPolicy(nn.Module):
         Fast inference for production/backtesting.
         Optimized for GPU execution.
         """
-        return self.actor(state)
+        return mx.clip(self.actor(state), 0.0, 1.0)
 
 def create_policy(n_assets: int = 10) -> RLPolicy:
     """Factory function for Phase 37 integration."""
