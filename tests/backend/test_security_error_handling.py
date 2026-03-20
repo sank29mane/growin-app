@@ -11,18 +11,8 @@ from app_context import state
 
 def test_chat_error_handling_sanitization():
     """Test that chat endpoint sanitizes exception details."""
-    # Ensure DB is open (fix for shared state issues)
-    from app_context import state
-    import sqlite3
-    try:
-        state.chat_manager.conn.cursor()
-    except (sqlite3.ProgrammingError, AttributeError):
-        # Re-initialize if closed
-        from chat_manager import ChatManager
-        state.chat_manager = ChatManager()
-
     # Use context manager to ensure startup/shutdown
-    with TestClient(app) as client:
+    with patch("rag_manager.RAGManager"), TestClient(app) as client:
         with patch("agents.coordinator_agent.CoordinatorAgent") as mock_coordinator:
             mock_instance = MagicMock()
             mock_instance.process_query.side_effect = Exception("SENSITIVE_DB_INFO_LEAKED_CHAT")
@@ -42,7 +32,7 @@ def test_chat_error_handling_sanitization():
 
 def test_analyze_error_handling_sanitization():
     """Test that analyze endpoint sanitizes exception details."""
-    with TestClient(app) as client:
+    with patch("rag_manager.RAGManager"), TestClient(app) as client:
         # Mock MCP session AFTER startup
         state.mcp_client.primary_session_name = "mock"
         state.mcp_client.sessions = {"mock": MagicMock()}
@@ -65,7 +55,7 @@ def test_analyze_error_handling_sanitization():
 
 def test_market_goal_error_handling_sanitization():
     """Test that market goal endpoint sanitizes exception details."""
-    with TestClient(app) as client:
+    with patch("rag_manager.RAGManager"), TestClient(app) as client:
         # Mock MCP session just in case
         state.mcp_client.sessions = {"mock": MagicMock()}
 

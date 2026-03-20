@@ -15,7 +15,7 @@ Update GSD for Antigravity to the latest version from GitHub.
 **PowerShell:**
 ```powershell
 if (Test-Path "CHANGELOG.md") {
-    $version = Select-String -Path "CHANGELOG.md" -Pattern "## \[(\d+\.\d+\.\d+)\]" | 
+    $version = Select-String -Path "CHANGELOG.md" -Pattern "## \[(\d+\.\d+\.\d+)\]" |
         Select-Object -First 1
     Write-Output "Current version: $($version.Matches.Groups[1].Value)"
 }
@@ -44,7 +44,7 @@ git clone --depth 1 https://github.com/toonight/get-shit-done-for-antigravity.gi
 
 **PowerShell:**
 ```powershell
-$remoteVersion = Select-String -Path ".gsd-update-temp/CHANGELOG.md" -Pattern "## \[(\d+\.\d+\.\d+)\]" | 
+$remoteVersion = Select-String -Path ".gsd-update-temp/CHANGELOG.md" -Pattern "## \[(\d+\.\d+\.\d+)\]" |
     Select-Object -First 1
 
 Write-Output "Remote version: $($remoteVersion.Matches.Groups[1].Value)"

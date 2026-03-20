@@ -80,10 +80,8 @@ class AgentMessenger:
         # SOTA 2026: Automatic Persistence
         try:
             from analytics_db import get_analytics_db
-            import asyncio
             db = get_analytics_db()
-            # Non-blocking write to AnalyticsDB
-            asyncio.create_task(asyncio.to_thread(db.log_agent_message, message.model_dump()))
+            db.log_agent_message(message.model_dump())
         except Exception as e:
             logger.error(f"Messenger persistence failed: {e}")
 

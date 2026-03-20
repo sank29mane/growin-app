@@ -124,15 +124,15 @@ Query: "{clean_query}"
             ticker = ticker_match.group(1).upper() if ticker_match and ticker_match.group(1) and "NONE" not in ticker_match.group(1).upper() else None
             
             # Hard overrides to protect against LLM misclassification
-            q_lower = (query or "").lower()
+            q_lower = query.lower()
             if "portfolio" in q_lower:
                 intent_type = "portfolio_query"
             
             # Conversational/Educational triggers
-            if any(w in q_lower for w in frozenset(["what is", "how does", "tell me about", "hello", "hi", "how are you", "who are you"])):
+            if any(w in q_lower for w in ["what is", "how does", "tell me about", "hello", "hi", "how are you", "who are you"]):
                 intent_type = "conversational"
                 
-            if ticker in frozenset({"ISA", "INVEST", "MY", "DEEP", "DIVE", "MORE", "SOME", "RSI", "MACD"}):
+            if ticker in ["ISA", "INVEST", "MY", "DEEP", "DIVE", "MORE", "SOME", "RSI", "MACD"]:
                 ticker = None
             
             # If it's a "how is it doing" question without a ticker, we might be talking about a portfolio
@@ -196,10 +196,10 @@ Query: "{clean_query}"
                     
                 content = msg.get("content", "")
                 found = extract_ticker_from_text(content)
-                if found and found not in frozenset({"ISA", "INVEST", "MY", "DEEP", "DIVE", "MORE", "SOME", "RSI"}):
+                if found and found not in ["ISA", "INVEST", "MY", "DEEP", "DIVE", "MORE", "SOME", "RSI"]:
                     ticker = found
                     break
-                elif "portfolio" in (content or "").lower():
+                elif "portfolio" in content.lower():
                     intent_info["type"] = "portfolio_query"
                     break
                     
@@ -216,9 +216,8 @@ Query: "{clean_query}"
         
         # SOTA 2026: Historical Alpha Context
         from analytics_db import get_analytics_db
-        import asyncio
         db = get_analytics_db()
-        historical_alpha = await asyncio.to_thread(db.get_agent_alpha_metrics, ticker)
+        historical_alpha = db.get_agent_alpha_metrics(ticker)
         
         from agents.decision_agent import DecisionAgent
         detected_account = account_type
@@ -483,10 +482,10 @@ Query: "{clean_query}"
                     
                 content = msg.get("content", "")
                 found = extract_ticker_from_text(content)
-                if found and found not in frozenset({"ISA", "INVEST", "MY", "DEEP", "DIVE", "MORE", "SOME", "RSI"}):
+                if found and found not in ["ISA", "INVEST", "MY", "DEEP", "DIVE", "MORE", "SOME", "RSI"]:
                     ticker = found
                     break
-                elif "portfolio" in (content or "").lower():
+                elif "portfolio" in content.lower():
                     intent_info["type"] = "portfolio_query"
                     break
         

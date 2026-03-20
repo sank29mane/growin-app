@@ -21,7 +21,7 @@ from utils.ticker_utils import normalize_ticker
 from cache_manager import cache # Import global cache
 from utils.financial_math import create_decimal
 from utils.portfolio_analyzer import PortfolioAnalyzer
-from resilience import get_circuit_breaker, CircuitBreakerOpenError, CircuitBreakerOpenException
+from resilience import get_circuit_breaker, CircuitBreakerOpenError
 
 logger = logging.getLogger(__name__)
 

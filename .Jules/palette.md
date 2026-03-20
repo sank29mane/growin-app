@@ -19,6 +19,3 @@
 ## 2026-03-10 - SwiftUI Dynamic Accessibility Labels with `.buttonStyle(.plain)`
 **Learning:** For collapsible UI components (like `ChatReasoningTraceView`), buttons using `.buttonStyle(.plain)` require dynamic `.accessibilityLabel`s that reflect the current state (e.g., 'Expand...' vs 'Collapse...') along with `.accessibilityAddTraits(.isButton)` and `.accessibilityHint` to maintain full VoiceOver support.
 **Action:** Ensure dynamic state bindings (like `isExpanded`) are integrated into the `.accessibilityLabel` strings when the visual state changes.
-## 2026-03-16 - Trade Proposal Accessibility Labels
-**Learning:** When using `.buttonStyle(.plain)` in HITL action cards, static labels like 'Approve Trade Proposal' are insufficient for VoiceOver users who need context on *what* they are approving.
-**Action:** Use dynamic accessibility labels (e.g., `Approve \(proposal.action) for \(proposal.ticker)`) and explicitly add the `.isButton` trait.
