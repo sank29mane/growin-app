@@ -138,7 +138,7 @@ class AnalyticsDB:
                 message_data.get('correlation_id'),
                 message_data.get('sender'),
                 message_data.get('subject'),
-                json.dumps(message_data.get('payload')),
+                json.dumps(message_data.get('payload'), default=str),
                 message_data.get('timestamp')
             ))
         except Exception as e:
@@ -159,7 +159,7 @@ class AnalyticsDB:
                 action_data.get('correlation_id'),
                 action_data.get('action_type'),
                 action_data.get('status', 'pending'),
-                json.dumps(action_data.get('payload')),
+                json.dumps(action_data.get('payload'), default=str),
                 action_data.get('ticker'),
                 action_data.get('timestamp')
             ))
