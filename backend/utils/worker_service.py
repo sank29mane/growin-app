@@ -141,7 +141,8 @@ class ModelWorker:
         ohlcv = request.get("ohlcv_data", [])
         steps = request.get("prediction_steps", 96)
         timeframe = request.get("timeframe", "1Hour")
-        return run_forecast(ohlcv, steps, timeframe=timeframe)
+        ticker = request.get("ticker")
+        return run_forecast(ohlcv, steps, timeframe=timeframe, ticker=ticker)
 
     def _forecast_fused(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """
