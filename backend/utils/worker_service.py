@@ -15,8 +15,8 @@ from pathlib import Path
 # Add parent directory to path to allow imports from backend
 sys.path.append(str(Path(__file__).parent.parent.absolute()))
 
-from utils.process_guard import start_parent_watchdog
-from utils.memory_profiler import MemoryProfiler
+from backend.utils.process_guard import start_parent_watchdog
+from backend.utils.memory_profiler import MemoryProfiler
 
 # Configure logging to stderr
 logging.basicConfig(
@@ -43,7 +43,7 @@ class ModelWorker:
         
     def _get_mlx_engine(self):
         if self.mlx_engine is None:
-            from mlx_engine import get_mlx_engine
+            from backend.mlx_engine import get_mlx_engine
             self.mlx_engine = get_mlx_engine()
         return self.mlx_engine
 
@@ -91,7 +91,7 @@ class ModelWorker:
             return {"status": "error", "message": "Failed to load MLX model"}
 
     def _load_jmce(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        from utils.jmce_model import get_jmce_model, TimeResolution
+        from backend.utils.jmce_model import get_jmce_model, TimeResolution
         
         n_assets = request.get("n_assets", 50)
         res_str = request.get("resolution", "daily")
@@ -137,7 +137,7 @@ class ModelWorker:
         return {"status": "success", "response": response}
 
     def _forecast_ttm(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        from forecast_bridge import run_forecast
+        from backend.forecast_bridge import run_forecast
         ohlcv = request.get("ohlcv_data", [])
         steps = request.get("prediction_steps", 96)
         timeframe = request.get("timeframe", "1Hour")

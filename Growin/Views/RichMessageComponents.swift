@@ -55,6 +55,10 @@ struct IntelligenceTraceView: View, Equatable {
                                 .font(.system(size: 10, weight: .bold))
                                 .foregroundStyle(.blue)
                                 .padding(.top, 2)
+                                .buttonStyle(.plain)
+                                .accessibilityLabel(showFullReasoning ? "Collapse internal logic" : "Expand internal logic")
+                                .accessibilityHint(showFullReasoning ? "Hides the full text of the internal reasoning" : "Reveals the full text of the internal reasoning")
+                                .accessibilityAddTraits(.isButton)
                             }
                         }
                         .padding(10)
@@ -710,7 +714,7 @@ struct TradeProposalCard: View, Equatable {
                     Capsule()
                         .fill(LinearGradient(colors: [actionColor, actionColor.opacity(0.6)], startPoint: .leading, endPoint: .trailing))
                 )
-                .shadow(color: actionColor.opacity(0.5), radius: 10, x: 0, y: 0)
+                .shadow(color: actionColor.opacity(0.15), radius: 10, x: 0, y: 0)
                 
                 Spacer()
                 
@@ -796,7 +800,11 @@ struct TradeProposalCard: View, Equatable {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Approve \(proposal.action.capitalized) \(proposal.ticker)")
+<<<<<<< HEAD
                     .accessibilityHint("Approves the NPU trade proposal and executes the order")
+=======
+                    .accessibilityHint("Approves the \(proposal.action.lowercased()) action for \(proposal.ticker)")
+>>>>>>> feature/optimize-mcp-db-retrieval-13922736839544958811
                     .accessibilityAddTraits(.isButton)
                     
                     Button(action: { onReject(proposal.proposalId) }) {
@@ -814,7 +822,11 @@ struct TradeProposalCard: View, Equatable {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Reject \(proposal.action.capitalized) \(proposal.ticker)")
+<<<<<<< HEAD
                     .accessibilityHint("Rejects the NPU trade proposal and discards the order")
+=======
+                    .accessibilityHint("Rejects the \(proposal.action.lowercased()) action for \(proposal.ticker)")
+>>>>>>> feature/optimize-mcp-db-retrieval-13922736839544958811
                     .accessibilityAddTraits(.isButton)
                 }
             } else {

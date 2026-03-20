@@ -1,7 +1,7 @@
 import pytest
 import time
 import asyncio
-from utils.rstitch_engine import RStitchEngine
+from backend.utils.rstitch_engine import RStitchEngine
 
 @pytest.mark.asyncio
 async def test_rstitch_speedup_benchmark():
@@ -38,7 +38,7 @@ async def test_rstitch_speedup_benchmark():
 @pytest.mark.asyncio
 async def test_sse_latency_benchmark():
     """Verify SSE time-to-first-token."""
-    from routes.ai_routes import strategy_event_generator
+    from backend.routes.ai_routes import strategy_event_generator
     import os
     
     start_time = time.time()

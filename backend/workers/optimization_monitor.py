@@ -8,10 +8,10 @@ from typing import Dict, List, Any, Optional
 from arq import create_pool
 from arq.connections import RedisSettings
 
-from app_logging import setup_logging
-from data_fabricator import DataFabricator
-from quant_engine import get_quant_engine
-from utils.financial_math import create_decimal
+from backend.app_logging import setup_logging
+from backend.data_fabricator import DataFabricator
+from backend.quant_engine import get_quant_engine
+from backend.utils.financial_math import create_decimal
 
 logger = setup_logging("optimization_monitor")
 

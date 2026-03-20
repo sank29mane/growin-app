@@ -161,7 +161,7 @@ class NeuralJMCE(nn.Module):
 
 class CoreMLJMCE:
     def __init__(self, model_path: str, n_assets: int = 50):
-        from coreml_inference import CoreMLRunner
+        from backend.coreml_inference import CoreMLRunner
         self.runner = CoreMLRunner(model_path)
         self.n_assets = n_assets
         self._initialized = self.runner.load(model_path)
@@ -178,7 +178,7 @@ class CoreMLJMCE:
         return mu, L, V
 
 def get_jmce_model(n_assets: int = 50, use_ane: bool = True, resolution: TimeResolution = TimeResolution.DAILY) -> Any:
-    from app_logging import setup_logging
+    from backend.app_logging import setup_logging
     logger = setup_logging('jmce_factory')
     if use_ane:
         import os

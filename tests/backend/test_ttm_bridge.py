@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import time
-from forecaster import TTMForecaster
+from backend.forecaster import TTMForecaster
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("TestTTM")
@@ -246,9 +246,12 @@ async def test_weekend_skip():
     else:
         print("❌ No forecast generated")
 
+async def main():
+    await test_ttm_scaling()
+    await test_apple_anchoring()
+    await test_crash_anchoring()
+    await test_lse_etf_anchoring()
+    await test_weekend_skip()
+
 if __name__ == "__main__":
-    asyncio.run(test_ttm_scaling())
-    asyncio.run(test_apple_anchoring())
-    asyncio.run(test_crash_anchoring())
-    asyncio.run(test_lse_etf_anchoring())
-    asyncio.run(test_weekend_skip())
+    asyncio.run(main())

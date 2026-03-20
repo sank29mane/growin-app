@@ -6,9 +6,9 @@ import os
 # Add backend to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from forecaster import get_forecaster
-from agents.forecasting_agent import ForecastingAgent
-from market_context import ForecastData
+from backend.forecaster import get_forecaster
+from backend.agents.forecasting_agent import ForecastingAgent
+from backend.market_context import ForecastData
 
 @pytest.mark.asyncio
 async def test_forecaster_initialization():

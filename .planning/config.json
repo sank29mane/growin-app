@@ -1,5 +1,16 @@
 {
+  "mode": "yolo",
+  "granularity": "granular",
+  "parallelization": true,
+  "commit_docs": true,
+  "model_profile": "powerfully-balanced",
   "workflow": {
-    "_auto_chain_active": false
+    "research": "comprehensive-notebooklm",
+    "research_notebook_id": "7bcfaf55-e1ab-4e55-9a96-991af9d2921e",
+    "plan_check": true,
+    "verifier": true,
+    "nyquist_validation": true,
+    "auto_advance": true,
+    "branching": true
   }
 }
