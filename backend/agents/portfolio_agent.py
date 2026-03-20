@@ -107,9 +107,6 @@ class PortfolioAgent(BaseAgent):
                 except Exception as e:
                     raise ValueError(f"Multi-account fetch failed: {e}") from e
                 
-                if isinstance(result, Exception):
-                    raise ValueError(f"Account fetch failed: {result}")
-
                 if not (result and hasattr(result, 'content') and result.content):
                     raise ValueError("Failed to fetch data from any accounts")
 
