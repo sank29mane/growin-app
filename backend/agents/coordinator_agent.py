@@ -21,7 +21,7 @@ import json
 import difflib
 from typing import Dict, List, Any, Optional, Tuple
 import os
-from utils.async_utils import run_with_timeout
+from backend.utils.async_utils import run_with_timeout
 
 logger = logging.getLogger(__name__)
 

@@ -150,6 +150,11 @@ async def lifespan(app: FastAPI):
         servers = []
 
     # 3. Connect to MCP servers with graceful degradation
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        logger.info("🧪 Test mode: Skipping real MCP connections and model init")
+        yield
+        return
+
     try:
         async with state.mcp_client.connect_all(servers):
             logger.info(f"✅ Connected to {len(state.mcp_client.sessions)} MCP servers")

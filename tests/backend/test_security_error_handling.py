@@ -3,9 +3,6 @@ import os
 from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
-# Adjust path to include backend root
-sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'backend'))
-
 from backend.server import app
 from backend.app_context import state
 
@@ -21,7 +18,10 @@ def test_chat_error_handling_sanitization():
         from backend.chat_manager import ChatManager
         state.chat_manager = ChatManager()
 
+    # Disable lifespan to avoid slow startup
     with TestClient(app) as client:
+        # Import submodule explicitly before patching to avoid AttributeError in some environments
+        import backend.agents.coordinator_agent
         with patch("backend.agents.coordinator_agent.CoordinatorAgent") as mock_coordinator:
             mock_instance = MagicMock()
             mock_instance.process_query.side_effect = Exception("SENSITIVE_DB_INFO_LEAKED_CHAT")
@@ -45,6 +45,7 @@ def test_analyze_error_handling_sanitization():
         state.mcp_client.primary_session_name = "mock"
         state.mcp_client.sessions = {"mock": MagicMock()}
 
+        import backend.agents.coordinator_agent
         with patch("backend.agents.coordinator_agent.CoordinatorAgent") as mock_coordinator:
             mock_instance = MagicMock()
             mock_instance.process_query.side_effect = Exception("SENSITIVE_INFO_LEAKED_ANALYZE")
@@ -67,6 +68,7 @@ def test_market_goal_error_handling_sanitization():
         # Mock MCP session just in case
         state.mcp_client.sessions = {"mock": MagicMock()}
 
+        import backend.agents.goal_planner_agent
         with patch("backend.agents.goal_planner_agent.GoalPlannerAgent") as mock_planner:
             mock_instance = MagicMock()
             mock_instance.analyze.side_effect = Exception("SENSITIVE_INFO_LEAKED_GOAL")
