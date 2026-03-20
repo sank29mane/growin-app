@@ -46,9 +46,13 @@ class TrajectoryBuffer:
 
 class PPOAgent:
     def __init__(self, n_assets: int = 10, state_dim: int = 64, lr: float = 3e-4, gamma: float = 0.99, lam: float = 0.95, clip_epsilon: float = 0.2, entropy_coef: float = 0.01, value_coef: float = 0.5, max_grad_norm: float = 0.5, reward_scaling: float = 1.0, metrics_queue: Optional[asyncio.Queue] = None):
-        # Force GPU if available
-        if mx.metal.is_available():
-            mx.set_default_device(mx.gpu)
+        # Force GPU if available AND not in CI (VMs often crash on Metal access)
+        if mx.metal.is_available() and os.getenv("CI") != "true":
+            try:
+                mx.set_default_device(mx.gpu)
+            except Exception:
+                # Fallback to CPU if GPU initialization fails
+                mx.set_default_device(mx.cpu)
             
         self.policy = RLPolicy(n_assets=n_assets, state_dim=state_dim)
         self.optimizer = optim.Adam(learning_rate=lr)
