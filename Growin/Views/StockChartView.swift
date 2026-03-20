@@ -25,10 +25,8 @@ struct StockChartView: View {
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel("Dismiss notification")
-<<<<<<< HEAD
-=======
+
                         .accessibilityHint("Dismisses the provider notification message")
->>>>>>> origin/swiftui-accessibility-npu-glow-13715321445853796863
                         .accessibilityAddTraits(.isButton)
                     }
                     .padding(.horizontal, 16)

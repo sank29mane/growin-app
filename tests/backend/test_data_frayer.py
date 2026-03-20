@@ -6,7 +6,7 @@ import asyncio
 import sys
 
 # Imports are handled by conftest.py or pytest automatic path discovery
-from utils.data_frayer import MarketDataFrayer
+from backend.utils.data_frayer import MarketDataFrayer
 
 @pytest.mark.asyncio
 async def test_fetch_yfinance_fallback_correctness():

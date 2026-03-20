@@ -4,11 +4,11 @@ import sys
 import os
 
 # Add parent directory to path to import backend modules
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), 'backend')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../backend')))
 
-from backend.agents.decision_agent import DecisionAgent
-from backend.market_context import MarketContext
-from backend.app_context import state
+from agents.decision_agent import DecisionAgent
+from market_context import MarketContext
+from app_context import state
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)

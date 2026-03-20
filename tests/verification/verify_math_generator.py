@@ -1,17 +1,15 @@
-
 import asyncio
 import json
 import unittest
 from unittest.mock import MagicMock, patch, AsyncMock
-from backend.agents.math_generator_agent import MathGeneratorAgent
-from backend.schemas import MathScriptRequest
+from agents.math_generator_agent import MathGeneratorAgent
+from schemas import MathScriptRequest
 
 class TestMathGeneratorAgent(unittest.IsolatedAsyncioTestCase):
     async def test_analyze_success(self):
         # Mocking the LLM response
         mock_content = json.dumps({
-            "script": "import mlx.core as mx
-def calculate(): return mx.array([1, 2, 3])",
+            "script": "import mlx.core as mx\ndef calculate(): return mx.array([1, 2, 3])",
             "explanation": "Test script using MLX"
         })
         

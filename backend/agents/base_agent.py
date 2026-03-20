@@ -60,12 +60,12 @@ class BaseAgent(ABC):
     def __init__(self, config: AgentConfig):
         self.config = config
         self.logger = logging.getLogger(f"agents.{config.name}")
-        from cache_manager import cache
+        from backend.cache_manager import cache
         self.cache = cache
         self.model_version = "v1.0.0" # Default, override in specialists
         
         # Register with Messenger
-        from .messenger import get_messenger
+        from backend.agents.messenger import get_messenger
         get_messenger().register_agent(self.config.name, self.handle_message)
     
     @abstractmethod
@@ -91,8 +91,8 @@ class BaseAgent(ABC):
 
     async def publish_result(self, result: AgentResponse, correlation_id: Optional[str] = None):
         """Publish analysis results to the agent bus."""
-        from .messenger import AgentMessage
-        from .governance import get_governance
+        from backend.agents.messenger import AgentMessage
+        from backend.agents.governance import get_governance
         
         message = AgentMessage(
             sender=self.config.name,
@@ -108,7 +108,7 @@ class BaseAgent(ABC):
         Wrapper that handles errors, caching, and timing.
         """
         import time
-        from app_logging import correlation_id_ctx
+        from backend.app_logging import correlation_id_ctx
         
         if not self.config.enabled:
             return AgentResponse(
@@ -130,7 +130,7 @@ class BaseAgent(ABC):
         except Exception:
             c_id = None
 
-        from .messenger import AgentMessage, get_messenger
+        from backend.agents.messenger import AgentMessage, get_messenger
         messenger = get_messenger()
 
         # Emit Start Event
@@ -169,7 +169,7 @@ class BaseAgent(ABC):
                         cached=True
                     )
                     
-                    from telemetry_store import record_trace
+                    from backend.telemetry_store import record_trace
                     record_trace(response.telemetry)
                     
                     # Emit Cache Hit Event
@@ -207,7 +207,7 @@ class BaseAgent(ABC):
                 f"({latency:.1f}ms)"
             )
             
-            from telemetry_store import record_trace
+            from backend.telemetry_store import record_trace
             record_trace(response.telemetry)
             
             # Emit Success Event
@@ -247,7 +247,7 @@ class BaseAgent(ABC):
                 cached=False
             )
             
-            from telemetry_store import record_trace
+            from backend.telemetry_store import record_trace
             record_trace(response.telemetry)
             
             # Emit Failure Event

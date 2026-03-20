@@ -45,7 +45,7 @@ class TTMForecaster:
         """Initialize TTM-R2 bridge and Worker residency"""
         import os
         import sys
-        from utils.worker_client import get_worker_client
+        from backend.utils.worker_client import get_worker_client
         
         # Use absolute paths for reliability in subprocess
         base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -101,7 +101,7 @@ class TTMForecaster:
         
         # --- 1. SOTA: XGBoost (Peer & Fallback Candidate) ---
         try:
-            from fallbacks.ml_forecaster import MLIntradayForecaster
+            from backend.fallbacks.ml_forecaster import MLIntradayForecaster
             xgb_forecaster = MLIntradayForecaster(model_type="xgboost")
             
             # Check minimum data requirements (XGB needs ~50 bars)
@@ -232,7 +232,7 @@ class TTMForecaster:
     async def _ttm_forecast(self, ohlcv_data: List[Dict[str, Any]], prediction_steps: int, timeframe: str) -> Dict[str, Any]:
         """Generate forecast using Fused TTM-JMCE via Worker Service"""
         import json
-        from utils.worker_client import get_worker_client
+        from backend.utils.worker_client import get_worker_client
         
         client = get_worker_client()
 
@@ -294,7 +294,7 @@ class TTMForecaster:
         
         if should_use_sota: 
             try:
-                from fallbacks.ml_forecaster import MLIntradayForecaster
+                from backend.fallbacks.ml_forecaster import MLIntradayForecaster
                 ml_f = MLIntradayForecaster()
                 ml_preds = ml_f.train_and_predict(ohlcv_data, prediction_steps)
                 

@@ -12,8 +12,8 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Query
 from sse_starlette.sse import EventSourceResponse
 
-from app_context import state
-from schemas import AIStrategyResponse, AgentEvent, ReasoningStep, InstrumentWeight, TradeProposalData, TradeApprovalRequest
+from backend.app_context import state
+from backend.schemas import AIStrategyResponse, AgentEvent, ReasoningStep, InstrumentWeight, TradeProposalData, TradeApprovalRequest
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/ai", tags=["AI Intelligence"])
@@ -123,8 +123,8 @@ async def stream_strategy_events(
 
 async def strategy_event_generator(session_id: str, ticker: Optional[str]):
     """Generator for strategy events using real Orchestrator and Messenger telemetry."""
-    from agents.orchestrator_agent import OrchestratorAgent
-    from agents.messenger import get_messenger
+    from backend.agents.orchestrator_agent import OrchestratorAgent
+    from backend.agents.messenger import get_messenger
     
     # SOTA: The route emits a standard stream of status_updates and reasoning_steps.
     # No conditional logic based on session_id is performed for revisions;

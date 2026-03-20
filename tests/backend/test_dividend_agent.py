@@ -1,7 +1,7 @@
 import pytest
 from datetime import datetime, timedelta
 import torch
-from agents.dividend_agent import DividendOptimizationAgent
+from backend.agents.dividend_agent import DividendOptimizationAgent
 
 def test_dividend_agent_consensus():
     agent = DividendOptimizationAgent()

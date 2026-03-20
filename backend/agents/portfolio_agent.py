@@ -14,14 +14,14 @@ from decimal import Decimal
 from pydantic import BaseModel, Field
 from magentic import prompt as mag_prompt
 
-from .base_agent import BaseAgent, AgentConfig, AgentResponse
-from market_context import PortfolioData
-from app_context import state # Access global state
-from utils.ticker_utils import normalize_ticker
-from cache_manager import cache # Import global cache
-from utils.financial_math import create_decimal
-from utils.portfolio_analyzer import PortfolioAnalyzer
-from resilience import get_circuit_breaker, CircuitBreakerOpenError, CircuitBreakerOpenException
+from backend.agents.base_agent import BaseAgent, AgentConfig, AgentResponse
+from backend.market_context import PortfolioData
+from backend.app_context import state # Access global state
+from backend.utils.ticker_utils import normalize_ticker
+from backend.cache_manager import cache # Import global cache
+from backend.utils.financial_math import create_decimal
+from backend.utils.portfolio_analyzer import PortfolioAnalyzer
+from backend.resilience import get_circuit_breaker, CircuitBreakerOpenError, CircuitBreakerOpenException
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +74,7 @@ class PortfolioAgent(BaseAgent):
         self.logger.info(f"Analyzing portfolio for account type: {requested_account}")
         
         try:
-            from status_manager import status_manager
+            from backend.status_manager import status_manager
             status_manager.set_status("portfolio_agent", "running", f"Syncing {requested_account} holdings...")
 
             # SOTA 2026: Consolidated Multi-Account Fetch with Enhanced Timeouts and Circuit Breaker
@@ -203,7 +203,7 @@ class PortfolioAgent(BaseAgent):
 
             # --- RAG INTEGRATION: Store Portfolio Snapshot ---
             try:
-                from app_context import state
+                from backend.app_context import state
                 from datetime import datetime
                 if state.rag_manager:
                     # Create a qualitative snapshot
@@ -233,7 +233,7 @@ class PortfolioAgent(BaseAgent):
                 self.logger.warning(f"PortfolioAgent: Failed to store RAG snapshot: {e}")
             # -------------------------------------------------
             
-            from status_manager import status_manager
+            from backend.status_manager import status_manager
             status_manager.set_status("portfolio_agent", "ready", f"Value: £{portfolio_data.total_value:,.0f}")
             return AgentResponse(
                 agent_name=self.config.name,

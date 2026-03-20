@@ -8,20 +8,20 @@ import logging
 import asyncio
 import json
 import numpy as np
-from utils import sanitize_nan
+from backend.utils import sanitize_nan
 
-from app_context import state
-from cache_manager import cache
-from utils.ticker_utils import normalize_ticker
-from data_engine import get_alpaca_client
-from schemas import GoalPlanContext, GoalExecutionRequest, SetActiveAccountRequest
+from backend.app_context import state
+from backend.cache_manager import cache
+from backend.utils.ticker_utils import normalize_ticker
+from backend.data_engine import get_alpaca_client
+from backend.schemas import GoalPlanContext, GoalExecutionRequest, SetActiveAccountRequest
 
 
 
 # Specialist Agent Imports
-from agents.quant_agent import QuantAgent
-from agents.forecasting_agent import ForecastingAgent
-from agents.base_agent import AgentResponse
+from backend.agents.quant_agent import QuantAgent
+from backend.agents.forecasting_agent import ForecastingAgent
+from backend.agents.base_agent import AgentResponse
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -44,7 +44,7 @@ async def create_goal_plan(context: GoalPlanContext):
     Returns:
         Expert investment plan with asset allocation, strategy, and Trading 212 Pie implementation details.
     """
-    from agents.goal_planner_agent import GoalPlannerAgent
+    from backend.agents.goal_planner_agent import GoalPlannerAgent
     
     try:
         # Create ad-hoc specialist
@@ -75,7 +75,7 @@ async def execute_goal_plan(plan: GoalExecutionRequest):
         Status of the Pie execution.
     """
     try:
-        from app_context import state
+        from backend.app_context import state
         
         # Validation
         if not state.mcp_client.session:
@@ -136,7 +136,7 @@ async def get_live_portfolio(account_type: Optional[str] = None):
     Raises:
         HTTPException: If portfolio fetch fails or MCP not connected
     """
-    from app_context import account_context
+    from backend.app_context import account_context
     account_type = account_context.get_account_or_default(account_type)
     
     cache_key = f"portfolio_live_{account_type}"
@@ -154,7 +154,7 @@ async def get_live_portfolio(account_type: Optional[str] = None):
             return cached_data
 
         try:
-            from agents import PortfolioAgent
+            from backend.agents import PortfolioAgent
             
             # SOTA: Use specialized PortfolioAgent directly
             agent = PortfolioAgent()
@@ -216,7 +216,7 @@ async def get_portfolio_history(days: int = 30, account_type: Optional[str] = No
     
     Returns historical portfolio values for charting.
     """
-    from app_context import account_context
+    from backend.app_context import account_context
     account_type = account_context.get_account_or_default(account_type)
     try:
         # 1. Get current portfolio positions for the specified account
@@ -403,7 +403,7 @@ async def search_symbols(query: str):
 @router.get("/account/active")
 async def get_active_account():
     """Get the currently active account type."""
-    from app_context import account_context
+    from backend.app_context import account_context
     return {"account_type": account_context.get_active_account()}
 
 @router.post("/account/active")
@@ -412,7 +412,7 @@ async def set_active_account(request: SetActiveAccountRequest):
     Set the active account type.
     Called automatically when user switches accounts in portfolio view.
     """
-    from app_context import account_context
+    from backend.app_context import account_context
     account_type = request.account_type
     
     if not account_type:
@@ -444,7 +444,7 @@ async def get_logs(limit: int = 50):
     """
     Get recent backend logs for TTM debugging.
     """
-    from app_logging import get_recent_logs
+    from backend.app_logging import get_recent_logs
     logs = get_recent_logs()
     return {"logs": logs[-limit:]}
 
@@ -453,7 +453,7 @@ async def get_ttm_status():
     """
     Check TTM model availability and bridge status.
     """
-    from forecaster import get_forecaster
+    from backend.forecaster import get_forecaster
     forecaster = get_forecaster()
     return {
         "ttm_available": forecaster.ttm_available,
@@ -476,7 +476,7 @@ async def get_technical_analysis(ticker: str, timeframe: str = "1Month"):
         return cached
     
     try:
-        from data_engine import get_alpaca_client
+        from backend.data_engine import get_alpaca_client
         
         # 1. Fetch OHLCV data using Alpaca
         alpaca = get_alpaca_client()
@@ -611,7 +611,7 @@ def _generate_ai_analysis_text(quant_data: dict, forecast_data: dict, bars: list
         is_fallback = forecast_data.get("is_fallback", False)
         
         # Normalize forecast if needed
-        from utils.currency_utils import CurrencyNormalizer
+        from backend.utils.currency_utils import CurrencyNormalizer
         
         # Heuristic for forecast normalization (using same logic as rest of app)
         # If the current price is in pounds (small number) but forecast is in pence (large number), normalize.

@@ -12,9 +12,9 @@ import pandas as pd
 import yfinance as yf
 from mcp.types import TextContent
 
-from utils import sanitize_nan
-from utils.currency_utils import normalize_all_positions, calculate_portfolio_value, CurrencyNormalizer
-from utils.ticker_utils import normalize_ticker
+from backend.utils import sanitize_nan
+from backend.utils.currency_utils import normalize_all_positions, calculate_portfolio_value, CurrencyNormalizer
+from backend.utils.ticker_utils import normalize_ticker
 
 # Type checking import
 from typing import TYPE_CHECKING
@@ -218,7 +218,7 @@ async def handle_market_order(
     """Handle place_market_order with price validation."""
     # --- Price Validation ---
     try:
-        from price_validation import PriceValidator
+        from backend.price_validation import PriceValidator
         validation = await PriceValidator.validate_trade_price(arguments["ticker"])
         if validation["action"] == "block":
                 return [
