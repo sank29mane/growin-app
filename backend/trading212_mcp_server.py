@@ -425,8 +425,12 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         
         # Log to a dedicated file for the UAT harness to consume
         shadow_log_path = "shadow_trades.log"
-        with open(shadow_log_path, "a") as f:
-            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {name} | {json.dumps(arguments)}\n")
+
+        def write_shadow_log():
+            with open(shadow_log_path, "a") as f:
+                f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {name} | {json.dumps(arguments)}\n")
+
+        await asyncio.to_thread(write_shadow_log)
             
         return [TextContent(type="text", text=f"[SHADOW_SUCCESS] {name} intercepted successfully. No capital committed.")]
 
