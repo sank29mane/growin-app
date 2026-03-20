@@ -58,6 +58,9 @@ US_EXCLUSIONS = {
     "SMCI", "MSTR", "COIN", "HOOD", "ARM", "DKNG", "SOFI", "MARA", "RIOT",
     "CRWD", "PANW", "NET", "DDOG", "ZS", "TEAM", "MDB", "OKTA", "DOCU",
 
+    # 4-char ending in L
+    "DELL", "INTL", "POOL", "UHAL",
+
     # Financials
     "JPM", "BAC", "WFC", "C", "GS", "MS", "BLK", "AXP", "V", "MA", "COF", "USB",
 
@@ -149,11 +152,8 @@ class TickerResolver:
         # Improved Likelihood check (from PR #146):
         # 1. Must NOT be in US Exclusions
         # 2. Must either be short (<= 3 chars) OR end in L (with reasonable length)
-        is_likely_uk = (len(ticker) <= 3 or (len(ticker) <= 5 and ticker.endswith("L"))) and ticker not in self.us_exclusions
-        
-        # SOTA Fix: SMCI and other 4-char US tickers should NOT be likely UK
-        if len(ticker) == 4 and not ticker.endswith("L"):
-            is_likely_uk = False
+        # SOTA Fix: SMCI and other 4-char US tickers should NOT be likely UK (length == 4 and not ending in L)
+        is_likely_uk = (len(ticker) <= 3 or (len(ticker) <= 5 and ticker.endswith("L"))) and ticker not in self.us_exclusions and not (len(ticker) == 4 and not ticker.endswith("L"))
 
         # Force likelihood for known UK stems (LLOY, BARC, TSCO, etc)
         if any(ticker == stem or ticker == f"{stem}1" or ticker == f"{stem}L" for stem in self.uk_stems):
