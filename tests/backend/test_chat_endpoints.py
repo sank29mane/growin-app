@@ -126,6 +126,6 @@ class TestChatEndpoints(unittest.IsolatedAsyncioTestCase):
             await chat_message(request, accept="application/json")
     
         self.assertEqual(cm.exception.status_code, 500)
-        self.assertIn(err_msg, cm.exception.detail)
+        self.assertEqual(cm.exception.detail, "Internal Server Error")
 if __name__ == '__main__':
     unittest.main()
