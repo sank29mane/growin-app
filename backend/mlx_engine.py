@@ -1,7 +1,13 @@
 """MLX-powered inference engine for Apple Silicon optimized models"""
 import logging
 from typing import Optional, AsyncIterator, Any, Dict
-import mlx.core as mx
+
+try:
+    import mlx.core as mx
+    HAS_MLX = True
+except ImportError:
+    mx = None
+    HAS_MLX = False
 
 logger = logging.getLogger(__name__)
 
@@ -265,7 +271,8 @@ class MLXInferenceEngine:
             self.current_model_path = None
             
             # Clear MLX memory cache
-            mx.metal.clear_cache()
+            if HAS_MLX and hasattr(mx, 'metal'):
+                mx.metal.clear_cache()
             logger.info("MLX model unloaded and cache cleared")
     
     def is_loaded(self) -> bool:

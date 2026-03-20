@@ -5,7 +5,13 @@ import time
 import os
 import hashlib
 from typing import Optional, Any, Dict, List, Tuple, Union
-import mlx.core as mx
+try:
+    import mlx.core as mx
+    HAS_MLX = True
+except ImportError:
+    mx = None
+    HAS_MLX = False
+
 from PIL import Image
 
 from mlx_engine import get_memory_info, MEMORY_WARNING_THRESHOLD
@@ -37,7 +43,8 @@ class MLXVLMInferenceEngine:
         self._cleanup_task: Optional[asyncio.Task] = None
         
         # SOTA 2026: Set unified memory cache limit (80% default for MLX)
-        mx.metal.set_cache_limit(int(get_memory_info()["total_bytes"] * 0.8)) if "total_bytes" in get_memory_info() else None
+        if HAS_MLX and hasattr(mx, 'metal'):
+            mx.metal.set_cache_limit(int(get_memory_info()["total_bytes"] * 0.8)) if "total_bytes" in get_memory_info() else None
 
     def _verify_checksum(self, model_path: str) -> bool:
         """SOTA 2026: Verify .safetensors checksums for model integrity."""
@@ -119,6 +126,8 @@ class MLXVLMInferenceEngine:
 
     def _warmup(self):
         """Warm up the model parameters using async_eval."""
+        if not HAS_MLX:
+            return
         try:
             logger.info("🔥 Warming up VLM parameters...")
             mx.async_eval(self.model.parameters())
@@ -210,7 +219,8 @@ class MLXVLMInferenceEngine:
             self.model = None
             self.processor = None
             self.current_model_path = None
-            mx.metal.clear_cache()
+            if HAS_MLX and hasattr(mx, 'metal'):
+                mx.metal.clear_cache()
             logger.info("❄️ VLM unloaded. Metal cache cleared.")
 
     def is_loaded(self) -> bool:

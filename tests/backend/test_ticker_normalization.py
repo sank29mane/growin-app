@@ -4,6 +4,8 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 # Add backend to path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../backend')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # We rely on conftest.py for basic mocking.
