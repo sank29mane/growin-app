@@ -192,6 +192,7 @@ struct ConversationListView: View {
                     Button(action: { dismiss() }) {
                         Image(systemName: "xmark.circle.fill").foregroundStyle(.gray.opacity(0.8))
                     }
+                    .accessibilityLabel("Close")
                 }
 
                 ToolbarItem {
@@ -200,7 +201,9 @@ struct ConversationListView: View {
                     } else {
                         HStack {
                             Button(action: { Task { await viewModel.fetchConversations() } }) { Image(systemName: "arrow.clockwise") }
+                                .accessibilityLabel("Refresh conversations")
                             Button(action: { selectedConversationId = nil; dismiss() }) { Image(systemName: "plus") }
+                                .accessibilityLabel("New conversation")
                         }
                     }
                 }
@@ -284,7 +287,7 @@ struct ConversationCard: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(conversation.title ?? "Untitled Conversation")
         .accessibilityHint("Double tap to \(isEditing ? "select" : "open") conversation")
-        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+        .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : [.isButton])
     }
 
     private func formatDate(_ dateString: String) -> String {
