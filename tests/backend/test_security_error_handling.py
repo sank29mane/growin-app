@@ -15,18 +15,24 @@ def test_chat_error_handling_sanitization():
     from app_context import state
     import sqlite3
     try:
-        state.chat_manager.conn.cursor()
-    except (sqlite3.ProgrammingError, AttributeError):
-        # Re-initialize if closed
+        # FastAPI TestClient triggers lifespan which might close the DB on exit.
+        # Ensure we have a fresh DB connection for the test.
         from chat_manager import ChatManager
         state.chat_manager = ChatManager()
+        state.chat_manager.conn.cursor()
+    except Exception:
+        pass
 
     # Use context manager to ensure startup/shutdown
     with TestClient(app) as client:
-        with patch("agents.coordinator_agent.CoordinatorAgent") as mock_coordinator:
+        with patch("agents.coordinator_agent.CoordinatorAgent") as mock_coordinator,              patch("agents.orchestrator_agent.OrchestratorAgent") as mock_orchestrator:
             mock_instance = MagicMock()
             mock_instance.process_query.side_effect = Exception("SENSITIVE_DB_INFO_LEAKED_CHAT")
             mock_coordinator.return_value = mock_instance
+
+            mock_orch_instance = MagicMock()
+            mock_orch_instance.run.side_effect = Exception("SENSITIVE_DB_INFO_LEAKED_CHAT")
+            mock_orchestrator.return_value = mock_orch_instance
 
             response = client.post("/api/chat/message", json={"message": "Hello", "conversation_id": "test_conv"})
 
@@ -44,6 +50,8 @@ def test_analyze_error_handling_sanitization():
     """Test that analyze endpoint sanitizes exception details."""
     with TestClient(app) as client:
         # Mock MCP session AFTER startup
+        from chat_manager import ChatManager
+        state.chat_manager = ChatManager()
         state.mcp_client.primary_session_name = "mock"
         state.mcp_client.sessions = {"mock": MagicMock()}
 
@@ -67,6 +75,8 @@ def test_market_goal_error_handling_sanitization():
     """Test that market goal endpoint sanitizes exception details."""
     with TestClient(app) as client:
         # Mock MCP session just in case
+        from chat_manager import ChatManager
+        state.chat_manager = ChatManager()
         state.mcp_client.sessions = {"mock": MagicMock()}
 
         with patch("agents.goal_planner_agent.GoalPlannerAgent") as mock_planner:
