@@ -126,6 +126,12 @@ class TickerResolver:
         # 2. Basic Cleaning
         ticker = ticker.upper().strip().replace("$", "")
         
+        # Strip trailing dots and extract alphanumeric part to handle malformed tickers (e.g. AAPL...)
+        ticker = ticker.strip('.')
+        match = re.search(r'([A-Z0-9.]+)', ticker)
+        if match:
+            ticker = match.group(1)
+
         # 3. Already Normalized (contains dot)
         if "." in ticker:
             return ticker
