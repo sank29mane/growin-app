@@ -2,7 +2,7 @@ import asyncio
 import logging
 from decimal import Decimal
 from typing import Optional
-from .base_micro import BaseMicroAgent, MicroAgentResponse
+from backend.agents.social_swarm.base_micro import BaseMicroAgent, MicroAgentResponse
 from utils.financial_math import create_decimal
 
 logger = logging.getLogger(__name__)
