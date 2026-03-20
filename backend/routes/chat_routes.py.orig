@@ -59,7 +59,7 @@ async def update_conversation_title_if_needed(conversation_id: str, model_name: 
 
 @router.post("/api/chat/message")
 async def chat_message(
-    request: ChatMessage, 
+    request: ChatMessage,
     accept: str = Header(default="application/json"),
     _: Any = Depends(default_limiter.check)
 ):
@@ -69,7 +69,7 @@ async def chat_message(
     # Set Request Correlation ID
     request_id = str(uuid.uuid4())
     token = correlation_id_ctx.set(request_id)
-    
+
     # Check for SSE request
     if "text/event-stream" in accept:
         from sse_starlette.sse import EventSourceResponse
@@ -85,7 +85,7 @@ async def chat_message(
     try:
         from agents.coordinator_agent import CoordinatorAgent
         from agents.decision_agent import DecisionAgent
-        
+
         chat_manager = state.chat_manager
         conversation_id = request.conversation_id or chat_manager.create_conversation()
 
@@ -98,22 +98,22 @@ async def chat_message(
 
         # Extract ticker from message
         ticker = extract_ticker_from_text(request.message)
-        
+
         # Load history for context
         history = chat_manager.load_history(conversation_id, limit=6)
-        
+
         # Unified Orchestration (SOTA 2026 Architecture)
         from agents.orchestrator_agent import OrchestratorAgent
-        
+
         orchestrator = OrchestratorAgent(
             mcp_client=state.mcp_client,
             chat_manager=state.chat_manager,
             model_name=request.model_name or "native-mlx"
         )
-        
+
         # Load history for context
         history = chat_manager.load_history(conversation_id, limit=6)
-        
+
         # Execute unified lifecycle
         result = await orchestrator.run(
             query=request.message,
@@ -122,7 +122,7 @@ async def chat_message(
             ticker=ticker,
             account_type=request.account_type
         )
-        
+
         response = result.get("content", "")
         new_response_id = result.get("response_id")
         market_context = result.get("context")
@@ -162,23 +162,23 @@ async def chat_message(
     except Exception as e:
         logger.error(f"Chat error: {str(e)}\n{traceback.format_exc()}")
         raise HTTPException(
-            status_code=500, 
-            detail="Internal Server Error"
+            status_code=500,
+            detail=str(e)
         )
 
 async def stream_chat_generator(request: ChatMessage):
     """Generator for SSE streaming responses with SOTA 2026 telemetry."""
     queue = asyncio.Queue()
-    
+
     async def telemetry_handler(msg):
         await queue.put(msg)
-        
+
     try:
         from agents.coordinator_agent import CoordinatorAgent
         from agents.decision_agent import DecisionAgent
         from agents.messenger import get_messenger
         import json
-        
+
         chat_manager = state.chat_manager
         conversation_id = request.conversation_id or chat_manager.create_conversation()
         messenger = get_messenger()
@@ -186,7 +186,7 @@ async def stream_chat_generator(request: ChatMessage):
         # Set Correlation ID for this trace
         request_id = str(uuid.uuid4())
         correlation_id_ctx.set(request_id)
-        
+
         # Subscribe to telemetry for this request
         messenger.subscribe_to_trace(request_id, telemetry_handler)
 
@@ -196,14 +196,14 @@ async def stream_chat_generator(request: ChatMessage):
             role="user",
             content=request.message,
         )
-        
+
         # RUN_STARTED Event
         yield {
             "event": "meta",
             "data": json.dumps({
                 "type": "RUN_STARTED",
-                "conversation_id": conversation_id, 
-                "request_id": request_id, 
+                "conversation_id": conversation_id,
+                "request_id": request_id,
                 "timestamp": datetime.now().isoformat(),
                 "status": "planning"
             })
@@ -215,17 +215,17 @@ async def stream_chat_generator(request: ChatMessage):
                 # Extract ticker
                 ticker = extract_ticker_from_text(request.message)
                 history = chat_manager.load_history(conversation_id, limit=6)
-                
+
                 from agents.orchestrator_agent import OrchestratorAgent
                 orchestrator = OrchestratorAgent(
                     mcp_client=state.mcp_client,
                     chat_manager=state.chat_manager,
                     model_name=request.model_name or "native-mlx"
                 )
-                
+
                 full_response = ""
                 final_context = None
-                
+
                 async for event in orchestrator.run_stream(
                     query=request.message,
                     conversation_id=conversation_id,
@@ -239,7 +239,7 @@ async def stream_chat_generator(request: ChatMessage):
                     elif hasattr(event, "market_context"):
                         # Capture context from final event
                         final_context = event.market_context
-                    
+
                 # Save final message
                 chat_manager.save_message(
                     conversation_id=conversation_id,
@@ -248,31 +248,31 @@ async def stream_chat_generator(request: ChatMessage):
                     agent_name="OrchestratorAgent",
                     model_name=request.model_name
                 )
-                
+
                 # Index in RAG
                 if state.rag_manager:
                     state.rag_manager.add_chat_message("assistant", full_response, conversation_id)
-                
+
                 # SOTA 2026: Include metadata in done event
                 metadata = {}
                 if final_context:
                     metadata["agents_executed"] = list(final_context.agents_executed)
-                    
+
                 await queue.put({
-                    "type": "done", 
-                    "content": "[DONE]", 
+                    "type": "done",
+                    "content": "[DONE]",
                     "metadata": metadata
                 })
-                
+
                 # Async title update
                 await update_conversation_title_if_needed(conversation_id, request.model_name)
-                
+
             except Exception as e:
                 logger.error(f"Processing error: {e}")
                 # SOTA 2026: Distinguish recoverable errors
                 recoverable = any(x in str(e).lower() for x in ["timeout", "rate limit", "connection"])
                 await queue.put({
-                    "type": "error", 
+                    "type": "error",
                     "content": str(e),
                     "recoverable": recoverable,
                     "retryAfterMs": 2000 if recoverable else 0
@@ -280,11 +280,11 @@ async def stream_chat_generator(request: ChatMessage):
 
         # Start processing in background
         process_task = asyncio.create_task(process_query())
-        
+
         # Consume from queue and yield to SSE
         while True:
             item = await queue.get()
-            
+
             if isinstance(item, dict):
                 # Manual events (token, done, error)
                 if item["type"] == "token":
@@ -296,14 +296,14 @@ async def stream_chat_generator(request: ChatMessage):
                     }
                     break
                 elif item["type"] == "error":
-                    yield { 
-                        "event": "error", 
+                    yield {
+                        "event": "error",
                         "data": json.dumps({
                             "type": "RUN_ERROR",
                             "message": item["content"],
                             "recoverable": item.get("recoverable", False),
                             "retryAfterMs": item.get("retryAfterMs", 0)
-                        }) 
+                        })
                     }
                     break
             else:
@@ -319,10 +319,10 @@ async def stream_chat_generator(request: ChatMessage):
                         "timestamp": item.timestamp.isoformat()
                     })
                 }
-                
+
         # Wait for task to be fully done
         await process_task
-        
+
     except Exception as e:
         logger.error(f"Streaming error: {e}")
         yield { "event": "error", "data": str(e) }
@@ -334,16 +334,16 @@ async def stream_chat_generator(request: ChatMessage):
 async def analyze_portfolio(request: AnalyzeRequest):
     """
     Analyze query using Coordinator + Decision Agent architecture.
-    
+
     This endpoint orchestrates specialist agents and provides a final recommendation.
     Used by the macOS app for ad-hoc queries without full conversation context.
-    
+
     Args:
         request: AnalyzeRequest with query string and optional model_name
-        
+
     Returns:
         AgentResponse with final_answer and messages list
-        
+
     Raises:
         HTTPException: If MCP not connected or analysis fails
     """
@@ -352,7 +352,7 @@ async def analyze_portfolio(request: AnalyzeRequest):
 
     try:
         from agents.orchestrator_agent import OrchestratorAgent
-        
+
         # Extract ticker from query (simple approach)
         ticker = None
         if request.query:
@@ -361,19 +361,19 @@ async def analyze_portfolio(request: AnalyzeRequest):
                 if len(word) >= 3 and len(word) <= 5 and word.isalpha():
                     ticker = word
                     break
-        
+
         orchestrator = OrchestratorAgent(
             mcp_client=state.mcp_client,
             chat_manager=state.chat_manager,
             model_name=request.model_name or "native-mlx"
         )
-        
+
         result = await orchestrator.run(
             query=request.query,
             ticker=ticker,
             account_type=request.account_type
         )
-        
+
         return {"messages": [], "final_answer": result.get("content", "")}
     except Exception as e:
         logger.error(f"Analysis failed: {e}")
@@ -385,10 +385,10 @@ async def analyze_portfolio(request: AnalyzeRequest):
 async def list_conversations():
     """
     List all conversations for the current user.
-    
+
     Returns:
         List of conversation objects with id, title, and timestamps
-        
+
     Raises:
         HTTPException: If database query fails
     """
@@ -403,13 +403,13 @@ async def list_conversations():
 async def get_conversation_history(conversation_id: str):
     """
     Get message history for a specific conversation.
-    
+
     Args:
         conversation_id: UUID of the conversation
-        
+
     Returns:
         List of messages with role, content, and timestamps
-        
+
     Raises:
         HTTPException: If conversation not found or query fails
     """
@@ -424,13 +424,13 @@ async def get_conversation_history(conversation_id: str):
 async def delete_conversation(conversation_id: str):
     """
     Permanently delete a conversation and all its messages.
-    
+
     Args:
         conversation_id: UUID of the conversation to delete
-        
+
     Returns:
         Success status
-        
+
     Raises:
         HTTPException: If deletion fails
     """
@@ -446,13 +446,13 @@ async def delete_conversation(conversation_id: str):
 async def clear_conversation(conversation_id: str):
     """
     Clear all messages from a conversation but keep the conversation.
-    
+
     Args:
         conversation_id: UUID of the conversation to clear
-        
+
     Returns:
         Success status
-        
+
     Raises:
         HTTPException: If clear operation fails
     """
@@ -470,7 +470,7 @@ async def generate_conversation_title(conversation_id: str, model_name: Optional
     """
     try:
         from utils.text_processing import extract_title_from_text
-        
+
         chat_manager = state.chat_manager
         history = chat_manager.get_conversation_history(conversation_id)
         if not history:
@@ -525,14 +525,14 @@ async def ingest_knowledge(request: IngestRequest):
         from app_context import state
         if not state.rag_manager:
             raise HTTPException(status_code=503, detail="RAG system not initialized")
-            
+
         # Enforce metadata defaults
         meta = request.metadata
         meta["type"] = meta.get("type", "manual_entry")
         meta["timestamp"] = datetime.now().isoformat()
-        
+
         state.rag_manager.add_document(content=request.content, metadata=meta)
-        
+
         return {"status": "success", "message": "Knowledge ingested successfully"}
     except Exception as e:
         logger.error(f"Ingestion failed: {e}", exc_info=True)
