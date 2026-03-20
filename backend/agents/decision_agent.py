@@ -27,6 +27,7 @@ from backend.app_logging import correlation_id_ctx
 from backend.resilience import get_circuit_breaker, CircuitBreakerOpenError, CircuitBreakerOpenException
 from backend.shared_types import SENSITIVE_TOOLS
 from backend.status_manager import status_manager
+from backend.utils.async_utils import run_with_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -513,14 +514,10 @@ class DecisionAgent:
                             logger.info(f"DecisionAgent: Executing Tool {tool_name}")
 
                             async def execute_mcp_tool():
-                                if hasattr(asyncio, 'timeout'):
-                                    async with asyncio.timeout(15.0):
-                                        return await mcp.call_tool(tool_name, tool_args)
-                                else:
-                                    return await asyncio.wait_for(
-                                        mcp.call_tool(tool_name, tool_args),
-                                        timeout=15.0
-                                    )
+                                return await run_with_timeout(
+                                    mcp.call_tool(tool_name, tool_args),
+                                    timeout=15.0
+                                )
 
                             result = await decision_circuit_breaker.call(execute_mcp_tool)
 
