@@ -66,6 +66,10 @@ class AppState:
             self._rag_manager = RAGManager()
         return self._rag_manager
 
+    @rag_manager.setter
+    def rag_manager(self, value):
+        self._rag_manager = value
+
     @property
     def mcp_client(self) -> Trading212MCPClient:
         if self._mcp_client is None:
