@@ -22,10 +22,10 @@ def test_chat_error_handling_sanitization():
         state.chat_manager = ChatManager()
 
     with TestClient(app) as client:
-        with patch("backend.agents.coordinator_agent.CoordinatorAgent") as mock_orchestrator:
+        with patch("backend.agents.coordinator_agent.CoordinatorAgent") as mock_coordinator:
             mock_instance = MagicMock()
-            mock_instance.run.side_effect = Exception("SENSITIVE_DB_INFO_LEAKED_CHAT")
-            mock_orchestrator.return_value = mock_instance
+            mock_instance.process_query.side_effect = Exception("SENSITIVE_DB_INFO_LEAKED_CHAT")
+            mock_coordinator.return_value = mock_instance
 
             response = client.post("/api/chat/message", json={"message": "Hello", "conversation_id": "test_conv"})
 
@@ -45,10 +45,10 @@ def test_analyze_error_handling_sanitization():
         state.mcp_client.primary_session_name = "mock"
         state.mcp_client.sessions = {"mock": MagicMock()}
 
-        with patch("backend.agents.coordinator_agent.CoordinatorAgent") as mock_orchestrator:
+        with patch("backend.agents.coordinator_agent.CoordinatorAgent") as mock_coordinator:
             mock_instance = MagicMock()
-            mock_instance.run.side_effect = Exception("SENSITIVE_INFO_LEAKED_ANALYZE")
-            mock_orchestrator.return_value = mock_instance
+            mock_instance.process_query.side_effect = Exception("SENSITIVE_INFO_LEAKED_ANALYZE")
+            mock_coordinator.return_value = mock_instance
 
             response = client.post("/agent/analyze", json={"query": "Analyze AAPL"})
 
