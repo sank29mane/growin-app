@@ -36,15 +36,22 @@ This document outlines the high-level phases for the Growin App, specifically op
 
 ### Phase 39: Strategy Hardening & Code Purity
 - **Goal**: Unified imports, legacy adapter removal, and PPO hyperparameter optimization for LSE ETPs.
-- **Plans**: 4 plans
+- **Status**: COMPLETED (Merged to main 2026-03-20)
+- **Results**: 100% absolute imports, 150/150 tests passing on M4 Pro, Brain Stability WebSocket stream active.
+
+## 🚀 MILESTONE: SOTA Profit Extraction & Strategy Calibration
+**Goal**: Finalize the autonomous trading weapon with high-fidelity calibration.
+
+### Phase 40: Sovereign Alpha Command Center
+- **Goal**: Implement the high-end Sovereign Ledger aesthetic into the final 120Hz Alpha Dashboard, replacing legacy "Liquid Glass" style with brutal editorial precision.
 - **Status**: PLANNED
-- **Wave 1: Code Purity & Modernization**
-    - [ ] **39-01-PLAN.md**: Absolute imports (Core), legacy removal, MLX type safety & memory stability.
-- **Wave 2: RL Strategy & Data / Swarm Modernization**
-    - [ ] **39-02-PLAN.md**: PPO Grid Search, Reward Calibration, LSE ETP Mappings.
-    - [ ] **39-04-PLAN.md**: Absolute imports (Swarm/Secondary Agents).
-- **Wave 3: Real-time Stability Monitoring**
-    - [ ] **39-03-PLAN.md**: WebSocket Training Stream, Brain Stability Metric, Graceful Disconnects.
+- **Plans**: 3 plans
+- **Wave 1: Sovereign Foundation (Core Primitives)**
+    - [ ] **40-01-PLAN.md**: Implement SovereignTheme and 0px SovereignPrimitives.
+- **Wave 2: Alpha Command Dashboard (120Hz)**
+    - [ ] **40-02-PLAN.md**: 120Hz Alpha-Stream Tracker and Brutalist Technical Ledger.
+- **Wave 3: Narrative Depth & Strategy Calibration**
+    - [ ] **40-03-PLAN.md**: Agent Reasoning Console and Strategy Calibration Lab.
 
 ---
 
