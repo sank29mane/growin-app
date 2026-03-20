@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime, timedelta
-from models.neural_ode import RecoveryVelocityNODE
+from backend.models.neural_ode import RecoveryVelocityNODE
 
 class DividendOptimizationAgent:
     """

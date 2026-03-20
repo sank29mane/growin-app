@@ -16,8 +16,8 @@ from langchain_core.messages import (
 )
 from langchain_core.outputs import ChatGeneration, ChatResult
 
-from mlx_engine import get_mlx_engine
-from model_config import DECISION_MODELS, COORDINATOR_MODELS
+from backend.mlx_engine import get_mlx_engine
+from backend.model_config import DECISION_MODELS, COORDINATOR_MODELS
 
 logger = logging.getLogger(__name__)
 

@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 from decimal import Decimal
-from utils.risk_engine import RiskEngine
+from backend.utils.risk_engine import RiskEngine
 
 def test_calculate_cvar_95_simple():
     # Simple returns with a fat tail at the end

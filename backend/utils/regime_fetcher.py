@@ -1,7 +1,7 @@
 import yfinance as yf
 import asyncio
 from typing import Dict, Optional
-from app_logging import setup_logging
+from backend.app_logging import setup_logging
 
 logger = setup_logging("regime_fetcher")
 

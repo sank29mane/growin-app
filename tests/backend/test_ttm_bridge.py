@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import time
-from forecaster import TTMForecaster
+from backend.forecaster import TTMForecaster
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("TestTTM")

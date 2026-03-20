@@ -1,50 +1,54 @@
-# GSD ROADMAP
+# GSD ROADMAP - SOTA Profit Extraction Edition
 
-This document outlines the high-level phases for the GSD integration and ongoing Growin App development.
-
----
-
-## 🏛 ARCHIVE: Milestone: Foundation & Precision Alpha
-- **Completed**: 2026-02-23
-- **Phases**: 0, 1, 3
-- **Archive**: `.gsd/milestones/FOUNDATION-PRECISION-SUMMARY.md`
-
-## 🏛 ARCHIVE: Milestone: SOTA Intelligence & Financial Autonomy (2026)
-- **Completed**: 2026-03-04
-- **Phases**: 4 - 23
-- **Archive**: `.gsd/milestones/SOTA-INTELLIGENCE-SUMMARY.md`
+This document outlines the high-level phases for the Growin App, specifically optimized for M4 Pro (48GB RAM) and Local Profit extraction via LSE Leveraged ETFs.
 
 ---
 
-## 🚀 MILESTONE: Autonomous Experience & Production Scaling
+## 🏛 ARCHIVE: Milestone: Foundation & Precision Alpha (Completed 2026-02-23)
+## 🏛 ARCHIVE: Milestone: SOTA Intelligence & Financial Autonomy (Completed 2026-03-04)
 
-## Phase 24: Frontend Reasoning Trace & User Experience Polish
-- **Goal**: Implement a visual "Thinking" trace for agentic reasoning in the SwiftUI dashboard and finalize 120Hz/Accessibility polish.
-- **Status**: COMPLETED
-- **Requirements**: [UI-TRACE-01, UI-TRACE-02, FE-01, FE-02]
+---
 
-## Phase 29: Institutional Portfolio Optimization (Mean-Variance)
-- **Goal**: Implement Modern Portfolio Theory (MPT) via mean-variance optimization and efficient frontier calculations.
-- **Status**: COMPLETED
-- **Requirements**: [OPT-01, OPT-02, OPT-03]
+## 🚀 MILESTONE: Local Profit Extraction & RL Hardening (M4 Pro)
+**Goal**: Transform into a self-correcting trading weapon for LSE Leveraged ETFs.
 
-## Phase 30: High-Velocity Intra-day Trading (LETFs)
-- **Goal**: Maximize daily profits using Leveraged ETFs (TQQQ/SQQQ) with 5-15 minute rebalancing triggers, backed by Human-In-The-Loop approval.
-- **Status**: COMPLETED
-
-## Phase 31: Autonomous Agentic Execution
-- **Goal**: Establish the autonomous execution loop and real-time model calibration.
-- **Status**: COMPLETED
-
-## Phase 32: End-to-End Simulation
-- **Goal**: Multi-day native backtest & calibration verification.
-- **Status**: COMPLETED
-
-## Phase 33: High-Fidelity Forecasting Optimization
-- **Goal**: Implement multivariate TTM-R2, adaptive scaling, and Neural JMCE feedback loop.
-- **Status**: COMPLETED
-
-## Phase 34: Hybrid Magentic Architecture (Agent Structured Outputs)
-- **Goal**: Integrate the `magentic` framework for robust Pydantic-based structured outputs across NLP Agents, significantly reducing string-parsing boilerplate while maintaining hardware-accelerated MLX fallback.
+### Phase 37: RL Regime & Backtest Lab
+- **Goal**: Implement RL-driven rebalancing using JMCE + TTM-R2 fused state.
+- **Inference Engine**: Native `vllm-mlx` with PagedAttention (replacing LM Studio API).
 - **Status**: PLANNED
-- **Requirements**: [MAG-01, MAG-02]
+- **Wave 1: vllm-mlx & Data Fusion**
+    - [ ] **37-01-PLAN.md**: Deploy `vllm-mlx` native server & RL State fusion.
+- **Wave 2: Regime Agent (Market Character)**
+    - [ ] **37-02-PLAN.md**: JMCE Eigenvalue regime detection & LoRA calibration.
+- **Wave 3: PPO Action Head & NPU Backtest**
+    - [ ] **37-03-PLAN.md**: PPO Actor-Critic policy & parallel GPU backtester.
+
+### Phase 38: SwiftUI Profit Command Center & RL Training Integration
+- **Goal**: 120Hz dashboard for real-time Alpha tracking and hardened RL training loop.
+- **Plans**: 3 plans
+- **Status**: PLANNED
+- **Wave 1: Control & Data Backbone**
+    - [ ] **38-01-PLAN.md**: WebSocket Alpha-Stream, Smart Money DST, Split-Brain.
+- **Wave 2: Command Center Implementation**
+    - [ ] **38-02-PLAN.md**: 120Hz Canvas Dashboard, Regime Indicator, Fast-HITL.
+- **Wave 3: RL Training & Hardening**
+    - [ ] **38-03-PLAN.md**: PPO Training Loop, GAE, Financial Reward.
+
+### Phase 39: Strategy Hardening & Code Purity
+- **Goal**: Unified imports, legacy adapter removal, and PPO hyperparameter optimization for LSE ETPs.
+- **Plans**: 4 plans
+- **Status**: PLANNED
+- **Wave 1: Code Purity & Modernization**
+    - [ ] **39-01-PLAN.md**: Absolute imports (Core), legacy removal, MLX type safety & memory stability.
+- **Wave 2: RL Strategy & Data / Swarm Modernization**
+    - [ ] **39-02-PLAN.md**: PPO Grid Search, Reward Calibration, LSE ETP Mappings.
+    - [ ] **39-04-PLAN.md**: Absolute imports (Swarm/Secondary Agents).
+- **Wave 3: Real-time Stability Monitoring**
+    - [ ] **39-03-PLAN.md**: WebSocket Training Stream, Brain Stability Metric, Graceful Disconnects.
+
+---
+
+## 📋 BACKLOG (POST-WEEKEND)
+- [ ] Multi-User Supabase Migration.
+- [ ] Options Greeks Agent.
+- [ ] Real-time Order Book Heatmaps.

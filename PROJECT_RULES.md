@@ -77,6 +77,10 @@ Plans are grouped into **waves** based on dependencies:
 | 2 | Depends on Wave 1 | Wait for Wave 1, then parallel |
 | 3 | Depends on Wave 2 | Wait for Wave 2, then parallel |
 
+**Task Tagging**: All tasks in `PLAN.md` MUST be explicitly tagged as either `[AG]` (Antigravity Specialist Agent) or `[CLI]` (Direct CLI execution).
+- `[AG]` — Complex, multi-file, or research-intensive tasks, UI, Web scraping, visualization tasks.
+- `[CLI]` — Sequential, coding heavy, surgical, or environment-setup tasks.
+
 **Wave Completion Protocol:**
 1. All tasks in wave verified
 2. State snapshot created
@@ -268,3 +272,57 @@ Before "Done"    → Empirical proof captured
 
 *GSD Methodology — Model-Agnostic Edition*
 *Reference implementation for multi-LLM environments*
+
+---
+
+## 🧠 Unified GSD Execution Protocol (CLI & IDE Symbiosis)
+
+Because the Antigravity IDE natively supports GSD commands, we operate a seamless, unified workflow. The Gemini CLI acts as the Master Planner and Structural Executor, while the Antigravity IDE acts as the Visual/Creation Executor. Both environments utilize the exact same `/gsd` command structure.
+
+### 1. Mandatory Task Tagging Syntax
+When the Gemini CLI (`/gsd:plan-phase`) generates or updates a `PLAN.md`, **every task** MUST be explicitly tagged with its Execution Context and Required Skill. This ensures that when `/gsd:execute` is run, the system automatically loads the correct domain expertise.
+
+**Required Format:**
+```markdown
+- [ ] Task 1: Initialize Database Schema
+      - **Context:** `CLI`
+      - **Skill:** `ag-database-architect`
+      - **Instruction:** Create the backend migration files and update STATE.md.
+
+- [ ] Task 2: Build SwiftUI Onboarding View
+      - **Context:** `IDE`
+      - **Skill:** `ag-frontend-specialist`
+      - **Instruction:** Implement the visual layout based on SPEC.md.
+```
+
+### 2. The Division of Execution (`Context`)
+- **`Context: CLI`**: Backend coding, DB migrations, state updates, test running, and git operations. The Gemini CLI executes these automatically during its own `/gsd:execute-phase` loop.
+- **`Context: IDE`**: UI/UX development, greenfield features, and complex multi-file refactoring. The Gemini CLI MUST hand these off.
+
+### 3. The Command-Based Handoff Loop
+During phase execution (`/gsd:execute-phase`) in the Gemini CLI terminal:
+1. **If Context is `CLI`**: The CLI autonomously executes the task, tests it, and commits.
+2. **If Context is `IDE`**: The CLI MUST hard-pause. It updates `.gsd/STATE.md` and outputs: 
+   *"Handoff Required: Please open the Antigravity IDE Agent panel and run `/gsd:execute task [Task ID]`. Type 'done' here when finished."*
+3. **IDE Execution**: The user runs the command in the IDE. The IDE's GSD integration automatically reads the `Skill` tag (e.g., `ag-frontend-specialist`), loads the persona, and completes the work.
+4. **Verification**: Upon the user's return to the CLI, the CLI runs native verification (`pytest`, `xcodebuild`, etc.) before moving to the next task.
+
+
+---
+
+## 🛰️ Smart Skill Planning & Routing Protocol (OPTIMIZED)
+
+To maximize performance and token efficiency, the following protocol must be followed during any **Plan** or **Research** phase:
+
+1. **Required Skill Analysis:** Every phase plan created by '/gsd:plan-phase' MUST include a metadata block at the top:
+   ```yaml
+   Phase: [PHASE_NAME]
+   Required_Skills:
+     - [SKILL_NAME] (Source: Global/Local/Archive)
+   ```
+2. **Proactive Activation:** Before starting any sub-task, the agent MUST check if a 'Required_Skill' exists and invoke 'activate_skill'.
+3. **Hierarchy of Skills:** 
+   - 1. **Local:** '.agents/skills/' (Project-specific expert).
+   - 2. **Global:** '~/.agents/skills/' (Current stable library).
+   - 3. **Archive:** '~/.agents/skills-archive/' (Niche/Deep expertise).
+4. **No Manual Memory Save:** Never use 'save_memory' for Growin App facts. Instead, append new persistent knowledge to '.agents/MEMORIES.md'.

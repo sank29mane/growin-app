@@ -2,8 +2,8 @@
 Vision Agent - Technical chart analysis using local VLMs (MLX)
 """
 
-from .base_agent import BaseAgent, AgentConfig, AgentResponse
-from market_context import VisionData, VisualPattern
+from backend.agents.base_agent import BaseAgent, AgentConfig, AgentResponse
+from backend.market_context import VisionData, VisualPattern
 from typing import Dict, Any, List, Optional
 import logging
 import os
@@ -51,7 +51,7 @@ class VisionAgent(BaseAgent):
     @property
     def engine(self):
         if self._engine is None:
-            from mlx_vlm_engine import get_vlm_engine
+            from backend.mlx_vlm_engine import get_vlm_engine
             self._engine = get_vlm_engine()
             # Note: load_model is now managed by the engine's lazy load/TTL logic
         return self._engine

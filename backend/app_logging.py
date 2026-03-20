@@ -1,7 +1,7 @@
 import logging
 import sys
 from collections import deque
-from utils.secret_masker import SecretMasker
+from backend.utils.secret_masker import SecretMasker
 
 from contextvars import ContextVar
 import uuid
@@ -101,6 +101,6 @@ def get_recent_logs():
     return list(log_buffer)
 
 # --- Audit Logging Facade ---
-from utils.audit_log import log_audit, AuditLogger
+from backend.utils.audit_log import log_audit, AuditLogger
 
 __all__ = ["setup_logging", "get_recent_logs", "log_audit", "AuditLogger"]
