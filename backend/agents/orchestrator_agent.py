@@ -409,7 +409,7 @@ Query: "{clean_query}"
         # SOTA 2026: Async Alpha Audit
         async def delayed_alpha():
             await asyncio.sleep(2) # Brief delay
-            db.calculate_agent_alpha(c_id)
+            await asyncio.to_thread(db.calculate_agent_alpha, c_id)
         
         asyncio.create_task(delayed_alpha())
         
