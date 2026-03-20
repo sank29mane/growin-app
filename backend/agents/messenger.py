@@ -79,7 +79,7 @@ class AgentMessenger:
         
         # SOTA 2026: Automatic Persistence
         try:
-            from analytics_db import get_analytics_db
+            from backend.analytics_db import get_analytics_db
             import asyncio
             db = get_analytics_db()
             # Non-blocking write to AnalyticsDB

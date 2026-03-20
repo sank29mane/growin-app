@@ -6,8 +6,8 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 import logging
 import asyncio
 from datetime import datetime, timezone
-from utils.ticker_utils import normalize_ticker
-from utils.currency_utils import CurrencyNormalizer
+from backend.utils.ticker_utils import normalize_ticker
+from backend.utils.currency_utils import CurrencyNormalizer
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -46,8 +46,8 @@ def detect_market(ticker: str) -> str:
 
 async def get_alpaca_chart_data(ticker: str, timeframe: str, limit: int, cache_key: str):
     """Fetch chart data using Alpaca API."""
-    from cache_manager import cache
-    from data_engine import get_alpaca_client
+    from backend.cache_manager import cache
+    from backend.data_engine import get_alpaca_client
 
     try:
         alpaca = get_alpaca_client()
@@ -103,7 +103,7 @@ async def get_alpaca_chart_data(ticker: str, timeframe: str, limit: int, cache_k
 
 async def get_yfinance_chart_data(ticker: str, timeframe: str, limit: int, cache_key: str):
     """Fallback chart data using yfinance."""
-    from cache_manager import cache
+    from backend.cache_manager import cache
     import yfinance as yf
 
     timeframe_normalized = timeframe.lower()
@@ -177,8 +177,8 @@ async def get_chart_data(symbol: str, timeframe: str = "1Day", limit: int = 500)
     Unified Chart Data Endpoint.
     Routes between Cache, Alpaca, yfinance, and AnalyticsDB.
     """
-    from cache_manager import cache
-    from analytics_db import get_analytics_db
+    from backend.cache_manager import cache
+    from backend.analytics_db import get_analytics_db
 
     ticker = normalize_ticker(symbol)
     market = detect_market(ticker)
@@ -218,7 +218,7 @@ async def get_chart_data(symbol: str, timeframe: str = "1Day", limit: int = 500)
     try:
         if market == 'UK':
             # UK Stocks: Primary Finnhub
-            from data_engine import get_finnhub_client
+            from backend.data_engine import get_finnhub_client
             finnhub = get_finnhub_client()
             if finnhub and finnhub.client:
                 try:
@@ -305,7 +305,7 @@ def _convert_bars_to_chart_format(bars: list, ticker: str) -> list:
 @router.websocket("/ws/chart/{symbol}")
 async def websocket_chart_data(websocket: WebSocket, symbol: str):
     """WebSocket for high-frequency real-time price ticks (10s refresh)"""
-    from data_engine import get_alpaca_client, get_finnhub_client
+    from backend.data_engine import get_alpaca_client, get_finnhub_client
 
     await websocket.accept()
     ticker = normalize_ticker(symbol)

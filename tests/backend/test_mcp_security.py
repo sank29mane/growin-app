@@ -3,12 +3,12 @@ import os
 import sys
 
 # Add backend to path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'backend'))
 
 from fastapi.testclient import TestClient
-from app_context import state
-from chat_manager import ChatManager
-from server import app
+from backend.app_context import state
+from backend.chat_manager import ChatManager
+from backend.server import app
 
 client = TestClient(app)
 

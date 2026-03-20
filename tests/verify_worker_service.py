@@ -10,10 +10,11 @@ import logging
 from pathlib import Path
 
 # Add project root to path
-sys.path.append(str(Path(__file__).parent.parent.absolute()))
+sys.path.append(str(Path(__file__).parent.parent.absolute() / 'backend'))
+sys.path.append(str(Path(__file__).parent.parent.absolute() / "backend"))
 
-from backend.utils.worker_client import get_worker_client
-from backend.model_config import DECISION_MODELS
+from utils.worker_client import get_worker_client
+from model_config import DECISION_MODELS
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("VerifyWorker")

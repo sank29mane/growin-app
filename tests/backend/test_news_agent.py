@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 # Add backend to path
 sys.path.append(os.path.abspath("backend"))
 
-from agents.research_agent import ResearchAgent
+from backend.agents.research_agent import ResearchAgent
 
 load_dotenv()
 

@@ -3,12 +3,12 @@ import sys
 import os
 
 # Add backend to path
-sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../backend')))
 
 def test_mlx_import():
     print("Testing MLX Engine Import...")
     try:
-        from mlx_engine import MLXInferenceEngine
+        from backend.mlx_engine import MLXInferenceEngine
         print("✅ MLXInferenceEngine imported successfully")
         
         # Optional: Check if mlx is available
