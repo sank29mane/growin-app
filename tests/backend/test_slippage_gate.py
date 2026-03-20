@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 # Add backend to path
 sys.path.append(os.path.join(os.getcwd(), 'backend'))
 
-from market_context import MarketContext, RiskGovernanceData, PriceData
-from agents.risk_agent import RiskAgent
+from backend.market_context import MarketContext, RiskGovernanceData, PriceData
+from backend.agents.risk_agent import RiskAgent
 
 async def test_risk_gate():
     print("Testing Risk Agent Slippage Hard-Gate...")

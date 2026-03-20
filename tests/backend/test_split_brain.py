@@ -6,8 +6,8 @@ import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../backend')))
 
-from app_context import SplitBrainController
-from agents.rl_policy import create_policy
+from backend.app_context import SplitBrainController
+from backend.agents.rl_policy import create_policy
 
 def test_split_brain_heavy_routing():
     """Verify reasoning tasks route to the GPU context engine"""

@@ -548,11 +548,11 @@ class CoordinatorAgent(BaseAgent):
             logger.warning(f"Coordinator Tier 2 search failed for '{term}': {e}")
             
         return None
-async def _handle_specialist_error(self, agent: BaseAgent, context: Dict[str, Any], error: str) -> Optional[AgentResponse]:
-    """Tier 3: Attempt to resolve errors using reasoning + Docker Sandbox execution"""
-    await self._initialize_llm()
-    from backend.agents.llm_factory import LLMFactory
-    from langchain_core.messages import HumanMessage
+    async def _handle_specialist_error(self, agent: BaseAgent, context: Dict[str, Any], error: str) -> Optional[AgentResponse]:
+        """Tier 3: Attempt to resolve errors using reasoning + Docker Sandbox execution"""
+        await self._initialize_llm()
+        from backend.agents.llm_factory import LLMFactory
+        from langchain_core.messages import HumanMessage
         
         prompt = f"""Specialist {agent.config.name} failed with error: "{error}"
         Input Context: {json.dumps(context)}

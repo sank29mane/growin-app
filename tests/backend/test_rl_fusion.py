@@ -1,8 +1,8 @@
 
 import pytest
 import numpy as np
-from agents.decision_agent import DecisionAgent
-from market_context import MarketContext, PriceData, TimeSeriesItem, ForecastData
+from backend.agents.decision_agent import DecisionAgent
+from backend.market_context import MarketContext, PriceData, TimeSeriesItem, ForecastData
 from decimal import Decimal
 
 @pytest.mark.asyncio

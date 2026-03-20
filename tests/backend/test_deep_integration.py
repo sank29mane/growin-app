@@ -7,8 +7,8 @@ from unittest.mock import MagicMock, patch, AsyncMock
 # Add backend to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../backend')))
 
-from agents.research_agent import ResearchAgent
-from app_context import state
+from backend.agents.research_agent import ResearchAgent
+from backend.app_context import state
 
 async def test_deep_integration():
     print("Testing ResearchAgent -> RAG Integration...")

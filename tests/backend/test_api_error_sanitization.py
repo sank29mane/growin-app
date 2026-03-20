@@ -7,8 +7,8 @@ import httpx
 # Adjust path to include backend root
 sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'backend'))
 
-from server import app
-from app_context import state
+from backend.server import app
+from backend.app_context import state
 
 def test_list_conversations_sanitization():
     """Test that listing conversations sanitizes database errors."""
@@ -90,8 +90,8 @@ def test_market_forecast_sanitization():
     """Test that market forecast sanitizes errors."""
     with TestClient(app) as client:
         # Import the router to patch the agent
-        from routes.market_routes import forecast_agent
-        import data_engine
+        from backend.routes.market_routes import forecast_agent
+        import backend.data_engine
         
         from unittest.mock import AsyncMock
         
@@ -99,7 +99,7 @@ def test_market_forecast_sanitization():
             raise Exception("FORECAST_MODEL_PATH_LEAK")
             
         with patch.object(forecast_agent, 'analyze', new=mock_analyze), \
-             patch('routes.market_routes.get_alpaca_client') as mock_get_alpaca:
+             patch('backend.routes.market_routes.get_alpaca_client') as mock_get_alpaca:
             mock_alpaca_instance = MagicMock()
             
             async def mock_get_bars(*args, **kwargs):

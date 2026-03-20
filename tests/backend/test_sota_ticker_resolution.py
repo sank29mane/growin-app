@@ -4,8 +4,8 @@ import os
 os.environ["OPENAI_API_KEY"] = "sk-fake-key-for-testing"
 import json
 from unittest.mock import AsyncMock, MagicMock
-from agents.coordinator_agent import CoordinatorAgent
-from agents.base_agent import BaseAgent, AgentResponse
+from backend.agents.coordinator_agent import CoordinatorAgent
+from backend.agents.base_agent import BaseAgent, AgentResponse
 
 async def test_escalation_path():
     print("=== Testing Coordinator Escalation Path ===")

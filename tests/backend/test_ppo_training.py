@@ -1,8 +1,8 @@
 import pytest
 import mlx.core as mx
 import numpy as np
-from agents.ppo_agent import PPOAgent
-from agents.rl_utils import financial_reward
+from backend.agents.ppo_agent import PPOAgent
+from backend.agents.rl_utils import financial_reward
 
 def test_ppo_agent_initialization():
     agent = PPOAgent(n_assets=10, state_dim=64)
@@ -33,9 +33,8 @@ def test_ppo_training_loop_synthetic():
             
         next_state = mx.random.normal((1, state_dim))
         _, _, next_value = agent.select_action(next_state)
-        loss = agent.train_on_batch(mx.squeeze(next_value), batch_size=16, epochs=5)
-        print(f"Epoch {epoch}, Loss: {loss.item()}")
-    
+        metrics = agent.train_on_batch(mx.squeeze(next_value), batch_size=16, epochs=5)
+        print(f"Epoch {epoch}, Loss: {metrics['loss']}")
     # Sample after training
     state = mx.random.normal((1, state_dim))
     action, _, _ = agent.select_action(state)

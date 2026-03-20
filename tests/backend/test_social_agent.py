@@ -1,5 +1,5 @@
 import asyncio
-from agents.social_agent import SocialAgent
+from backend.agents.social_agent import SocialAgent
 
 async def test():
     agent = SocialAgent()

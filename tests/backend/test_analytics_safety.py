@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 # Add backend to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../backend')))
 
-from analytics_db import AnalyticsDB
+from backend.analytics_db import AnalyticsDB
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)

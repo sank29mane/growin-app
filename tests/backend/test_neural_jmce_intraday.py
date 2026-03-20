@@ -1,6 +1,6 @@
 import pytest
 import numpy as np
-from utils.jmce_model import NeuralJMCE, TimeResolution
+from backend.utils.jmce_model import NeuralJMCE, TimeResolution
 
 try:
     import mlx.core as mx

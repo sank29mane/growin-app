@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
-from agents.quant_agent import QuantAgent
-from agents.base_agent import AgentConfig
+from backend.agents.quant_agent import QuantAgent
+from backend.agents.base_agent import AgentConfig
 import numpy as np
 
 @pytest.mark.asyncio

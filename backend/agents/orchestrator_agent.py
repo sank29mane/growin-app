@@ -24,8 +24,13 @@ from backend.utils.audit_log import log_audit
 from backend.agents.llm_factory import LLMFactory
 from backend.price_validation import PriceValidator
 
-# Import specialist agents (as used in CoordinatorAgent)
-from backend.agents. import QuantAgent, PortfolioAgent, ForecastingAgent, ResearchAgent, SocialAgent, WhaleAgent, GoalPlannerAgent
+from backend.agents.quant_agent import QuantAgent
+from backend.agents.portfolio_agent import PortfolioAgent
+from backend.agents.forecasting_agent import ForecastingAgent
+from backend.agents.research_agent import ResearchAgent
+from backend.agents.social_agent import SocialAgent
+from backend.agents.whale_agent import WhaleAgent
+from backend.agents.goal_planner_agent import GoalPlannerAgent
 
 logger = logging.getLogger(__name__)
 
