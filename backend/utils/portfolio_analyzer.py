@@ -8,11 +8,11 @@ except ImportError:
 from scipy.optimize import minimize
 from decimal import Decimal
 from typing import Dict, List, Optional, Union, Any
-from utils.jmce_model import NeuralJMCE, get_jmce_model, TimeResolution
-from utils.risk_engine import RiskEngine
-from utils.financial_math import create_decimal
-from app_logging import setup_logging
-from app_context import state
+from backend.utils.jmce_model import NeuralJMCE, get_jmce_model, TimeResolution
+from backend.utils.risk_engine import RiskEngine
+from backend.utils.financial_math import create_decimal
+from backend.app_logging import setup_logging
+from backend.app_context import state
 
 logger = setup_logging("portfolio_analyzer")
 

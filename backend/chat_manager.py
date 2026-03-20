@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import sys
 import uuid
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -103,7 +104,7 @@ class ChatManager:
                 (
                     "Trading 212",
                     "stdio",
-                    "python",
+                    sys.executable,
                     json.dumps(["trading212_mcp_server.py"]),
                     json.dumps({}),
                 ),
@@ -117,9 +118,9 @@ class ChatManager:
                 WHERE name = 'Trading 212' AND (command IS NULL OR command != ? OR args IS NULL OR args != ?)
             """,
                 (
-                    "python",
+                    sys.executable,
                     json.dumps(["trading212_mcp_server.py"]),
-                    "python",
+                    sys.executable,
                     json.dumps(["trading212_mcp_server.py"]),
                 ),
             )

@@ -2,7 +2,7 @@ import pandas as pd
 import json
 import logging
 from typing import List, Dict, Any, Optional
-from analytics_db import get_analytics_db
+from backend.analytics_db import get_analytics_db
 
 logger = logging.getLogger(__name__)
 

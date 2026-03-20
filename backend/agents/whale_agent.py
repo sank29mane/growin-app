@@ -5,9 +5,9 @@ Whale Alert Agent - Monitors large block trades and institutional flow
 import logging
 import asyncio
 from typing import Dict, Any, List
-from .base_agent import BaseAgent, AgentConfig, AgentResponse
-from market_context import WhaleData
-from data_engine import get_alpaca_client
+from backend.agents.base_agent import BaseAgent, AgentConfig, AgentResponse
+from backend.market_context import WhaleData
+from backend.data_engine import get_alpaca_client
 
 logger = logging.getLogger(__name__)
 
@@ -78,12 +78,12 @@ class WhaleAgent(BaseAgent):
             # SOTA 2026: Institutional Alpha (13F Filings)
             institutional_holdings = await self._fetch_institutional_holdings(ticker)
             
-            from utils.financial_math import create_decimal, safe_div
+            from backend.utils.financial_math import create_decimal, safe_div
             # 2. Fetch recent trades (last 500)
             logger.info(f"WhaleAgent: Fetching trades for {ticker}...")
             
             # Use resilience pattern for API call
-            from resilience import retry_with_backoff
+            from backend.resilience import retry_with_backoff
             
             @retry_with_backoff(max_retries=2, base_delay=0.5)
             async def fetch_trades():
@@ -96,7 +96,7 @@ class WhaleAgent(BaseAgent):
                 logger.info(f"WhaleAgent: No trades found for {ticker}. Attempting Volume Anomaly Detection...")
                 return await self._analyze_via_volume_anomaly(ticker)
             
-            from utils.currency_utils import DataSourceNormalizer
+            from backend.utils.currency_utils import DataSourceNormalizer
             ticker_currency = DataSourceNormalizer.get_currency_for_ticker(ticker)
             currency_symbol = "£" if ticker_currency == "GBP" else "$"
 
@@ -159,8 +159,8 @@ class WhaleAgent(BaseAgent):
             
             # SOTA 2026: Intelligent Signal Broadcast
             if impact in ["BULLISH", "BEARISH"] and len(large_trades) >= 2:
-                from .messenger import AgentMessage, get_messenger
-                from app_logging import correlation_id_ctx
+                from backend.agents.messenger import AgentMessage, get_messenger
+                from backend.app_logging import correlation_id_ctx
                 
                 asyncio.create_task(get_messenger().send_message(AgentMessage(
                     sender=self.config.name,
@@ -248,7 +248,7 @@ class WhaleAgent(BaseAgent):
         Useful when granular trade data is unavailable (e.g. some LSE stocks or free tier).
         """
         try:
-            from utils.financial_math import create_decimal
+            from backend.utils.financial_math import create_decimal
             # Fetch daily bars
             bars_resp = await self.alpaca.get_historical_bars(ticker, limit=25, timeframe="1Day")
             if not bars_resp or "bars" not in bars_resp or len(bars_resp["bars"]) < 20:

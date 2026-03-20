@@ -1,6 +1,12 @@
 import pytest
 import numpy as np
-from backend.utils.jmce_model import NeuralJMCE, TimeResolution
+import sys
+import os
+
+# Add backend to sys.path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../backend')))
+
+from utils.jmce_model import NeuralJMCE, TimeResolution
 
 try:
     import mlx.core as mx

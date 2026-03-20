@@ -6,7 +6,7 @@ import unittest
 # Add backend to sys.path
 sys.path.append(os.path.join(os.getcwd(), 'backend'))
 
-from utils.safe_python import get_safe_executor
+from backend.utils.safe_python import get_safe_executor
 
 class TestSafePython(unittest.TestCase):
     def setUp(self):

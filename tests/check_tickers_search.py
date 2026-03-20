@@ -2,7 +2,7 @@ import asyncio
 import json
 import os
 import sys
-from backend.mcp_client import Trading212MCPClient
+from mcp_client import Trading212MCPClient
 
 async def check_symbols():
     mcp = Trading212MCPClient()
