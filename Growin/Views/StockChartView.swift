@@ -25,7 +25,6 @@ struct StockChartView: View {
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel("Dismiss notification")
-
                         .accessibilityHint("Dismisses the provider notification message")
                         .accessibilityAddTraits(.isButton)
                     }

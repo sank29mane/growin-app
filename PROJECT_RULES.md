@@ -326,3 +326,16 @@ To maximize performance and token efficiency, the following protocol must be fol
    - 2. **Global:** '~/.agents/skills/' (Current stable library).
    - 3. **Archive:** '~/.agents/skills-archive/' (Niche/Deep expertise).
 4. **No Manual Memory Save:** Never use 'save_memory' for Growin App facts. Instead, append new persistent knowledge to '.agents/MEMORIES.md'.
+
+---
+
+## 🏎️ Performance & Hardware Mandate (SOTA 2026)
+- **MacBook Pro Optimization**: All core ML and RL logic (JMCE, PPO, TTM) MUST be optimized for Apple Silicon (M4 Pro). 
+- **GPU/ANE Priority**: Aggressively leverage `mlx` and `CoreML`. Do not compromise performance for the sake of CI compatibility.
+- **Local Truth**: Local test success on the target hardware is the absolute requirement for "Verified" status. 
+- **CI Strategy**: CI (GitHub Actions) is maintained for general logic and "Jules" suggestive improvements. Hardware-specific tests should be skipped in CI (using `os.getenv("CI")`) rather than being compromised.
+
+## 🏗️ Architectural Standards
+- **100% Absolute Imports**: Always use `from backend.xxx` format. No relative imports in `backend/` or `tests/`.
+- **DuckDB Thread-Safety**: Use thread-local connections (`threading.local()`) to prevent resource contention and SIGABRT crashes.
+- **Detailed Errors**: In development/testing, preserve and expose specific error messages rather than generic 500s.

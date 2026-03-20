@@ -714,7 +714,7 @@ struct TradeProposalCard: View, Equatable {
                     Capsule()
                         .fill(LinearGradient(colors: [actionColor, actionColor.opacity(0.6)], startPoint: .leading, endPoint: .trailing))
                 )
-                .shadow(color: actionColor.opacity(0.5), radius: 10, x: 0, y: 0)
+                .shadow(color: actionColor.opacity(0.15), radius: 10, x: 0, y: 0)
                 
                 Spacer()
                 
@@ -799,8 +799,8 @@ struct TradeProposalCard: View, Equatable {
                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.green.opacity(0.3), lineWidth: 1))
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Approve \(proposal.action) for \(proposal.ticker)")
-                    .accessibilityHint("Approves the NPU trade proposal and executes the order")
+                    .accessibilityLabel("Approve \(proposal.action.capitalized) \(proposal.ticker)")
+                    .accessibilityHint("Approves the \(proposal.action.lowercased()) action for \(proposal.ticker)")
                     .accessibilityAddTraits(.isButton)
                     
                     Button(action: { onReject(proposal.proposalId) }) {
@@ -817,8 +817,8 @@ struct TradeProposalCard: View, Equatable {
                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.red.opacity(0.3), lineWidth: 1))
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Reject \(proposal.action) for \(proposal.ticker)")
-                    .accessibilityHint("Rejects the NPU trade proposal and discards the order")
+                    .accessibilityLabel("Reject \(proposal.action.capitalized) \(proposal.ticker)")
+                    .accessibilityHint("Rejects the \(proposal.action.lowercased()) action for \(proposal.ticker)")
                     .accessibilityAddTraits(.isButton)
                 }
             } else {
