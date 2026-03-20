@@ -11,6 +11,9 @@ client = TestClient(app)
 
 def test_security_headers_middleware():
     """Verify that security headers are added to responses."""
+    # We need to make sure state is initialized or mocked
+    from backend.app_context import state
+    
     response = client.get("/health")
     assert response.status_code == 200
 

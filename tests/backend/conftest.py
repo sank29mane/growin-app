@@ -27,11 +27,6 @@ def patched_find_spec(name, package=None):
         return None
 importlib.util.find_spec = patched_find_spec
 
-# Ensure project root is in path for absolute imports (from backend.xxx)
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if project_root not in sys.path:
-    sys.path.append(project_root)
-
 # --- Helpers ---
 def make_async(mock):
     """Helper to add awaitable capability to mocked objects, simulating AsyncMock."""
