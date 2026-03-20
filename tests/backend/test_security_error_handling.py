@@ -23,9 +23,9 @@ def test_chat_error_handling_sanitization():
 
     # Use context manager to ensure startup/shutdown
     with TestClient(app) as client:
-        with patch("agents.coordinator_agent.CoordinatorAgent") as mock_coordinator:
+        with patch("agents.orchestrator_agent.OrchestratorAgent") as mock_coordinator:
             mock_instance = MagicMock()
-            mock_instance.process_query.side_effect = Exception("SENSITIVE_DB_INFO_LEAKED_CHAT")
+            mock_instance.run.side_effect = Exception("SENSITIVE_DB_INFO_LEAKED_CHAT")
             mock_coordinator.return_value = mock_instance
 
             response = client.post("/api/chat/message", json={"message": "Hello", "conversation_id": "test_conv"})
@@ -47,9 +47,9 @@ def test_analyze_error_handling_sanitization():
         state.mcp_client.primary_session_name = "mock"
         state.mcp_client.sessions = {"mock": MagicMock()}
 
-        with patch("agents.coordinator_agent.CoordinatorAgent") as mock_coordinator:
+        with patch("agents.orchestrator_agent.OrchestratorAgent") as mock_coordinator:
             mock_instance = MagicMock()
-            mock_instance.process_query.side_effect = Exception("SENSITIVE_INFO_LEAKED_ANALYZE")
+            mock_instance.run.side_effect = Exception("SENSITIVE_INFO_LEAKED_ANALYZE")
             mock_coordinator.return_value = mock_instance
 
             response = client.post("/agent/analyze", json={"query": "Analyze AAPL"})

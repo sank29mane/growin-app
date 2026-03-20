@@ -1,5 +1,10 @@
 import pytest
 import numpy as np
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../backend')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+
 from backend.utils.jmce_model import NeuralJMCE, TimeResolution
 
 try:
