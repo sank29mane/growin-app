@@ -3,10 +3,10 @@ Social Sentiment Agent - Analyzes social media and community sentiment
 Integration with Tavily (searching Reddit, Twitter/X, etc.)
 """
 
-from .base_agent import BaseAgent, AgentConfig, AgentResponse
-from market_context import SocialData
-from .social_swarm import RedditMicroAgent, TwitterMicroAgent
-from utils.financial_math import create_decimal
+from backend.agents.base_agent import BaseAgent, AgentConfig, AgentResponse
+from backend.market_context import SocialData
+from backend.agents.social_swarm import RedditMicroAgent, TwitterMicroAgent
+from backend.utils.financial_math import create_decimal
 from decimal import Decimal
 from typing import Dict, Any
 import logging

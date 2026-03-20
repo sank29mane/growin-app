@@ -5,10 +5,10 @@ Forecasting Agent - Wrapper around TTM for standardized interface
 from typing import Dict, Any
 import logging
 
-from .base_agent import BaseAgent, AgentConfig, AgentResponse
-from market_context import ForecastData
-from forecaster import get_forecaster
-from resilience import get_circuit_breaker, CircuitBreakerOpenError, CircuitBreakerOpenException
+from backend.agents.base_agent import BaseAgent, AgentConfig, AgentResponse
+from backend.market_context import ForecastData
+from backend.forecaster import get_forecaster
+from backend.resilience import get_circuit_breaker, CircuitBreakerOpenError, CircuitBreakerOpenException
 
 logger = logging.getLogger(__name__)
 
@@ -187,7 +187,7 @@ class ForecastingAgent(BaseAgent):
                 auxiliary_forecasts=result.get("auxiliary_forecasts")
             )
 
-            from status_manager import status_manager
+            from backend.status_manager import status_manager
             status_manager.set_status("forecasting_agent", "ready", f"Trend: {forecast_data.trend}")
             return AgentResponse(
                 agent_name=self.config.name,

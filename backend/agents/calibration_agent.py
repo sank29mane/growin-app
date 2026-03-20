@@ -21,15 +21,10 @@ except ImportError:
         class Module: pass
     class optim: pass
 
-from .base_agent import BaseAgent, AgentConfig, AgentResponse
-try:
-    from data_models import PriceData as DBPriceData
-    from market_context import MarketContext, ForecastData, TimeSeriesItem
-    from analytics_db import get_analytics_db
-except ImportError:
-    from ..data_models import PriceData as DBPriceData
-    from ..market_context import MarketContext, ForecastData, TimeSeriesItem
-    from ..analytics_db import get_analytics_db
+from backend.agents.base_agent import BaseAgent, AgentConfig, AgentResponse
+from backend.data_models import PriceData as DBPriceData
+from backend.market_context import MarketContext, ForecastData, TimeSeriesItem
+from backend.analytics_db import get_analytics_db
 
 logger = logging.getLogger(__name__)
 
