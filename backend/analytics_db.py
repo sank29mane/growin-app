@@ -23,17 +23,27 @@ class AnalyticsDB:
         if os.environ.get("CI") == "true" or os.environ.get("PYTEST_CURRENT_TEST"):
             db_path = ":memory:"
             
-        self.conn = duckdb.connect(db_path)
+        self.db_path = db_path
+        self._local = threading.local()
         self.lock = threading.Lock()
         self._init_schema()
         logger.info(f"✅ AnalyticsDB initialized (mode: {'memory' if db_path == ':memory:' else 'persistent'})")
 
+    @property
+    def conn(self):
+        """Thread-local connection accessor."""
+        if not hasattr(self._local, "conn"):
+            # Each thread gets its own connection to avoid SIGABRT/Deadlock
+            self._local.conn = duckdb.connect(self.db_path)
+        return self._local.conn
+
     def close(self):
-        """Explicitly close the DuckDB connection."""
-        if hasattr(self, 'conn') and self.conn:
+        """Explicitly close the DuckDB connection for current thread."""
+        if hasattr(self._local, 'conn') and self._local.conn:
             try:
-                self.conn.close()
-                logger.info("🔌 AnalyticsDB connection closed")
+                self._local.conn.close()
+                del self._local.conn
+                logger.info("🔌 AnalyticsDB connection closed for current thread")
             except Exception as e:
                 logger.error(f"Error closing AnalyticsDB: {e}")
     
