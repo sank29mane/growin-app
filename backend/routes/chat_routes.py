@@ -163,7 +163,7 @@ async def chat_message(
         logger.error(f"Chat error: {str(e)}\n{traceback.format_exc()}")
         raise HTTPException(
             status_code=500, 
-            detail=str(e)
+            detail="Internal Server Error"
         )
 
 async def stream_chat_generator(request: ChatMessage):
