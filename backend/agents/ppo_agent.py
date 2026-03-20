@@ -5,6 +5,7 @@ import mlx.utils as utils
 import numpy as np
 import time
 import asyncio
+import os
 from typing import List, Tuple, Dict, Any, Optional
 from backend.agents.rl_policy import RLPolicy
 from backend.agents.rl_utils import compute_gae
