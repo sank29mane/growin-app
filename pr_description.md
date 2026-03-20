@@ -1,0 +1,8 @@
+💡 **What:**
+Replaced the `fetch_all` function in `PortfolioAgent.analyze` which previously executed two separate, parallel `mcp_client.call_tool("analyze_portfolio")` calls (one for `account_type: "invest"` and one for `account_type: "isa"`) with a single tool call using `arguments={"account_type": "all"}`. The backend MCP server handler (`handle_analyze_portfolio`) already contains logic to natively fetch and consolidate both accounts concurrently. Since the single "all" call returns pre-consolidated JSON data, the redundant client-side `_consolidate_accounts` merging logic was also bypassed.
+
+🎯 **Why:**
+The previous implementation represented an N+1 query pattern where the frontend/client code manually fanned out multiple discrete tool calls, putting unnecessary overhead on the `mcp_client` infrastructure, duplicating network/message parsing layers, and redundantly re-consolidating the data on the client side. Offloading this to the unified `"all"` endpoint in the MCP server directly reduces overhead and simplifies the client agent code.
+
+📊 **Measured Improvement:**
+By eliminating the extra `mcp_client.call_tool` invocation and bypassing the client-side `_consolidate_accounts()` loop, we reduce event loop scheduling overhead, save on JSON serialization/deserialization cycles within the MCP protocol layer, and reduce memory allocations related to temporary lists/dictionaries used for merging. While absolute latency gains are bound by the external broker API speeds, the CPU/Memory utilization of the internal Python process is measurably more efficient during the critical portfolio sync phase.

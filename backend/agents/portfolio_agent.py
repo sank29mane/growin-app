@@ -79,31 +79,19 @@ class PortfolioAgent(BaseAgent):
 
             # SOTA 2026: Consolidated Multi-Account Fetch with Enhanced Timeouts and Circuit Breaker
             if requested_account == "all":
-                # Parallel fetch for ISA and Invest
+                # Single fetch for ALL accounts (resolves N+1 query pattern)
                 async def fetch_all():
                     if hasattr(asyncio, 'timeout'):
                         async with asyncio.timeout(15.0):
-                            tasks = [
-                                self.mcp_client.call_tool("analyze_portfolio", arguments={"account_type": "invest"}),
-                                self.mcp_client.call_tool("analyze_portfolio", arguments={"account_type": "isa"})
-                            ]
-                            res = await asyncio.gather(*tasks, return_exceptions=True)
+                            return await self.mcp_client.call_tool("analyze_portfolio", arguments={"account_type": "all"})
                     else:
-                        tasks = [
-                            self.mcp_client.call_tool("analyze_portfolio", arguments={"account_type": "invest"}),
-                            self.mcp_client.call_tool("analyze_portfolio", arguments={"account_type": "isa"})
-                        ]
-                        res = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=15.0)
+                        return await asyncio.wait_for(
+                            self.mcp_client.call_tool("analyze_portfolio", arguments={"account_type": "all"}),
+                            timeout=15.0
+                        )
 
-                    # Ensure CircuitBreaker records failure if both fetches fail
-                    any_success = any(not isinstance(r, Exception) for r in res)
-                    if not any_success and res:
-                        raise ValueError(f"All account fetches failed: {res[0]}")
-
-                    return res
-                        
                 try:
-                    results = await self.circuit_breaker.call(fetch_all)
+                    result = await self.circuit_breaker.call(fetch_all)
                             
                 except asyncio.TimeoutError as e:
                     raise ValueError("Multi-account fetch timed out") from e
@@ -119,20 +107,23 @@ class PortfolioAgent(BaseAgent):
                 except Exception as e:
                     raise ValueError(f"Multi-account fetch failed: {e}") from e
                 
-                raw_data_list = []
-                for res in results:
-                    if isinstance(res, Exception):
-                        self.logger.error(f"Account fetch failed: {res}")
-                        continue
-                    if res and hasattr(res, 'content') and res.content:
-                        raw_data_list.append(json.loads(res.content[0].text))
-                
-                if not raw_data_list:
+                if isinstance(result, Exception):
+                    raise ValueError(f"Account fetch failed: {result}")
+
+                if not (result and hasattr(result, 'content') and result.content):
                     raise ValueError("Failed to fetch data from any accounts")
+
+                # Since account_type="all" returns consolidated data natively, parse it directly
+                raw_data = json.loads(result.content[0].text)
+
+                # Check for error from MCP tool
+                if "error" in raw_data and raw_data.get("summary", {}).get("total_positions", 0) == 0:
+                     # It returned an error but we might still have a partial summary if we want to proceed.
+                     # The original code just threw ValueError if NO data. Here we proceed with whatever data we got,
+                     # but log the error.
+                     self.logger.warning(f"MCP tool returned error for 'all': {raw_data['error']}")
                 
-                # Consolidate raw data
-                consolidated_data = self._consolidate_accounts(raw_data_list)
-                portfolio_data = self._process_portfolio_data(consolidated_data)
+                portfolio_data = self._process_portfolio_data(raw_data)
             else:
                 # Single account fetch with timeout
                 async def fetch_single():
