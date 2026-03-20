@@ -21,11 +21,7 @@ except ImportError:
     HAS_MLX = False
 
 # Import ClaraAgent for semantic fusion
-try:
-    from .clara_agent import ClaraAgent
-except ImportError:
-    # Handle direct execution
-    from clara_agent import ClaraAgent
+from backend.agents.clara_agent import ClaraAgent
 
 logger = logging.getLogger(__name__)
 

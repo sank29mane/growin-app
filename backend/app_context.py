@@ -4,11 +4,12 @@ Shared application state and models to avoid circular imports.
 
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
-from chat_manager import ChatManager
-from rag_manager import RAGManager
-from mcp_client import Trading212MCPClient
+from backend.chat_manager import ChatManager
+from backend.rag_manager import RAGManager
+from backend.mcp_client import Trading212MCPClient
 
 import time
+import asyncio
 
 class SplitBrainController:
     """
@@ -40,6 +41,8 @@ class AppState:
         self.trade_proposals: Dict[str, Any] = {}
         # Hardware context routing
         self._split_brain_controller = None
+        # Real-time RL training monitoring
+        self.training_metrics_queue = asyncio.Queue(maxsize=100)
 
     @property
     def split_brain_controller(self) -> SplitBrainController:

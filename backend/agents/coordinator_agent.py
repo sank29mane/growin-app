@@ -3,16 +3,16 @@ Coordinator Agent - Orchestrates all specialist agents
 Static SOTA model that routes queries and aggregates results
 """
 
-from .base_agent import BaseAgent, AgentResponse, AgentConfig
-from market_context import MarketContext
-from . import QuantAgent, PortfolioAgent, ForecastingAgent, ResearchAgent, SocialAgent, WhaleAgent, GoalPlannerAgent, VisionAgent
-from .decision_agent import DecisionAgent
-from utils.ticker_utils import TickerResolver
-from data_fabricator import DataFabricator
-from status_manager import status_manager
-from app_logging import correlation_id_ctx
-from utils.audit_log import log_audit
-from app_context import state
+from backend.agents.base_agent import BaseAgent, AgentResponse, AgentConfig
+from backend.market_context import MarketContext
+from backend.agents import QuantAgent, PortfolioAgent, ForecastingAgent, ResearchAgent, SocialAgent, WhaleAgent, GoalPlannerAgent, VisionAgent
+from backend.agents.decision_agent import DecisionAgent
+from backend.utils.ticker_utils import TickerResolver
+from backend.data_fabricator import DataFabricator
+from backend.status_manager import status_manager
+from backend.app_logging import correlation_id_ctx
+from backend.utils.audit_log import log_audit
+from backend.app_context import state
 import asyncio
 import logging
 import re
@@ -87,7 +87,7 @@ class CoordinatorAgent(BaseAgent):
 
     async def _initialize_llm(self):
         if self._initialized: return
-        from .llm_factory import LLMFactory
+        from backend.agents.llm_factory import LLMFactory
         # We use a fast model for coordination
         self._llm = await LLMFactory.create_llm("granite-tiny")
         self._initialized = True
@@ -217,7 +217,7 @@ class CoordinatorAgent(BaseAgent):
 
         # --- SKILL INJECTION ---
         # Coordinator also benefits from skills (e.g. knowing 'tax' queries need different handling)
-        from utils.skill_loader import get_skill_loader
+        from backend.utils.skill_loader import get_skill_loader
         skills_text = get_skill_loader().get_relevant_skills(query)
         if skills_text:
              context.user_context["expert_skills"] = skills_text
@@ -241,9 +241,9 @@ class CoordinatorAgent(BaseAgent):
         specialist_tasks = []
         
         # Broadcast intent to the agent bus (SOTA Decentralized Path)
-        from .messenger import AgentMessage
-        from .governance import get_governance
-        from app_logging import correlation_id_ctx
+        from backend.agents.messenger import AgentMessage
+        from backend.agents.governance import get_governance
+        from backend.app_logging import correlation_id_ctx
         
         c_id = correlation_id_ctx.get()
         broadcast_msg = AgentMessage(
@@ -331,9 +331,9 @@ class CoordinatorAgent(BaseAgent):
 
     async def _run_specialist(self, agent: BaseAgent, context: Dict[str, Any]) -> AgentResponse:
         """Run a specialist agent with error handling and timeout"""
-        from status_manager import status_manager
-        from .messenger import AgentMessage, get_messenger
-        from app_logging import correlation_id_ctx
+        from backend.status_manager import status_manager
+        from backend.agents.messenger import AgentMessage, get_messenger
+        from backend.app_logging import correlation_id_ctx
         
         agent_key = (agent.config.name or "").lower().replace("agent", "_agent")
         c_id = correlation_id_ctx.get()
@@ -457,7 +457,7 @@ class CoordinatorAgent(BaseAgent):
 
     def _merge_result(self, context: MarketContext, result: AgentResponse):
         """Aggregate specialist results into unified context"""
-        from market_context import ForecastData, QuantData, PortfolioData, ResearchData, SocialData, WhaleData, GoalData, VisionData
+        from backend.market_context import ForecastData, QuantData, PortfolioData, ResearchData, SocialData, WhaleData, GoalData, VisionData
         data = result.data
         name = result.agent_name
         
@@ -548,11 +548,11 @@ class CoordinatorAgent(BaseAgent):
             logger.warning(f"Coordinator Tier 2 search failed for '{term}': {e}")
             
         return None
-
-    async def _handle_specialist_error(self, agent: BaseAgent, context: Dict[str, Any], error: str) -> Optional[AgentResponse]:
-        """Tier 3: Attempt to resolve errors using reasoning + Docker Sandbox execution"""
-        await self._initialize_llm()
-        from langchain_core.messages import HumanMessage
+async def _handle_specialist_error(self, agent: BaseAgent, context: Dict[str, Any], error: str) -> Optional[AgentResponse]:
+    """Tier 3: Attempt to resolve errors using reasoning + Docker Sandbox execution"""
+    await self._initialize_llm()
+    from backend.agents.llm_factory import LLMFactory
+    from langchain_core.messages import HumanMessage
         
         prompt = f"""Specialist {agent.config.name} failed with error: "{error}"
         Input Context: {json.dumps(context)}

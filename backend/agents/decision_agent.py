@@ -4,8 +4,8 @@ User-selectable model with price validation integration
 """
 
 import numpy as np
-from market_context import MarketContext
-from price_validation import PriceValidator
+from backend.market_context import MarketContext
+from backend.price_validation import PriceValidator
 from typing import Dict, Optional, List, Any
 import logging
 import re
@@ -19,13 +19,13 @@ from decimal import Decimal
 from pydantic import BaseModel, Field
 from magentic import prompt as mag_prompt
 from langchain_core.messages import SystemMessage, HumanMessage
-from .llm_factory import LLMFactory
-from .regime_agent import RegimeAgent
-from .rl_state import RLStateFabricator
-from utils.audit_log import log_audit
-from app_logging import correlation_id_ctx
-from resilience import get_circuit_breaker, CircuitBreakerOpenError, CircuitBreakerOpenException
-from shared_types import SENSITIVE_TOOLS
+from backend.agents.llm_factory import LLMFactory
+from backend.agents.regime_agent import RegimeAgent
+from backend.agents.rl_state import RLStateFabricator
+from backend.utils.audit_log import log_audit
+from backend.app_logging import correlation_id_ctx
+from backend.resilience import get_circuit_breaker, CircuitBreakerOpenError, CircuitBreakerOpenException
+from backend.shared_types import SENSITIVE_TOOLS
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,7 @@ class DecisionAgent:
     def __init__(self, model_name: str = "gpt-4o", api_keys: Optional[Dict[str, str]] = None, mcp_client=None):
         self.model_name = model_name
         self.api_keys = api_keys or {}
-        from app_context import state
+        from backend.app_context import state
         self.mcp_client = mcp_client or state.mcp_client
         self.llm = None
         self._lm_studio_client = None # Deprecated, kept for compat if needed, but Factory handles it
@@ -147,8 +147,8 @@ class DecisionAgent:
         if any(k in (query or "").lower() for k in ["simulate", "calculate", "math", "model", "monte carlo", "forecast"]):
             logger.info("DecisionAgent: Math query detected. Enforcing NPU-Accelerated Sandbox.")
             try:
-                from .math_generator_agent import MathGeneratorAgent
-                from utils.math_validator import MathValidator
+                from backend.agents.math_generator_agent import MathGeneratorAgent
+                from backend.utils.math_validator import MathValidator
                 
                 # Prepare context for math agent
                 math_input = {
@@ -179,7 +179,7 @@ class DecisionAgent:
                     
                     # Integrate Math Telemetry
                     try:
-                        from telemetry_store import record_math_metric
+                        from backend.telemetry_store import record_math_metric
                         # Utilization proxy: if successful, assume 45% for NPU baseline
                         util_proxy = 45.0 if exec_result.get("status") == "success" else 0.0
                         
@@ -232,7 +232,7 @@ class DecisionAgent:
             # SOTA 2026 Phase 30: Detect and extract Trade Proposals for HITL
             trade_proposal = self._extract_trade_proposal(recommendation, context)
             if trade_proposal:
-                from app_context import state
+                from backend.app_context import state
                 proposal_id = trade_proposal.get("proposal_id")
                 state.trade_proposals[proposal_id] = trade_proposal
                 context.user_context["pending_proposal"] = trade_proposal
@@ -367,7 +367,7 @@ class DecisionAgent:
              yield self._generate_shadow_response(context, query=query)
              return
 
-        from status_manager import status_manager
+        from backend.status_manager import status_manager
         status_manager.set_status("decision_agent", "working", "Streaming reasoning...", model=self.model_name)
 
         # Same prep logic as make_decision
@@ -419,7 +419,7 @@ class DecisionAgent:
             status_manager.set_status("decision_agent", "ready", "Stream complete", model=self.model_name)
             
             # SOTA 2026: Emit Decision Completion Telemetry
-            from .messenger import AgentMessage, get_messenger
+            from backend.agents.messenger import AgentMessage, get_messenger
             messenger = get_messenger()
             c_id = correlation_id_ctx.get()
             await messenger.send_message(AgentMessage(
@@ -522,7 +522,7 @@ class DecisionAgent:
                 tool_calls = await asyncio.to_thread(extract_tool_calls, content, reasoning)
                 
                 if tool_calls:
-                    from status_manager import status_manager
+                    from backend.status_manager import status_manager
                     if len(tool_calls) > 1:
                         logger.info(f"DecisionAgent: Executing {len(tool_calls)} Parallel Consultations")
                         status_manager.set_status("decision_agent", "working", f"Executing {len(tool_calls)} parallel consultations...", model=self.model_name)
@@ -705,7 +705,7 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
         If perfect, repeat exactly. If flaws found, rewrite the "Strategic Synthesis".
         """
 
-        from status_manager import status_manager
+        from backend.status_manager import status_manager
         status_manager.set_status("decision_agent", "working", "Refining strategy...", model=self.model_name)
 
         if hasattr(self.llm, "ainvoke"):
@@ -722,7 +722,7 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
     async def _validate_prices(self, text: str, ticker: Optional[str]) -> str:
         """Run price validation if trade detected."""
         if any(word in text.upper() for word in ["BUY", "SELL"]) and ticker:
-            from status_manager import status_manager
+            from backend.status_manager import status_manager
             status_manager.set_status("decision_agent", "working", f"Validating price for {ticker}...", model=self.model_name)
             validation = await PriceValidator.validate_trade_price(ticker)
 
@@ -740,7 +740,7 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
 
 
         # Skills (Limit length for small models)
-        from utils.skill_loader import get_skill_loader
+        from backend.utils.skill_loader import get_skill_loader
         skills_text = get_skill_loader().get_relevant_skills(query)
         if skills_text:
             if is_small_model:
@@ -749,7 +749,7 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
             prompt += f"\n\n=== RELEVANT EXPERT GUIDELINES ===\n{skills_text}\n=================================="
 
         # RAG
-        from app_context import state
+        from backend.app_context import state
         if state.rag_manager:
             # Fetch fewer docs for small models
             n_results = 1 if is_small_model else 3

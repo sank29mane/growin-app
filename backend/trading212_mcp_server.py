@@ -21,9 +21,9 @@ from dotenv import load_dotenv
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Resource, TextContent, Tool
-from utils import sanitize_nan
-from utils.process_guard import start_parent_watchdog
-from utils.rate_limiter import get_t212_budgeter, PRIORITY_EXECUTION, PRIORITY_SYNC, PRIORITY_POLLING
+from backend.utils import sanitize_nan
+from backend.utils.process_guard import start_parent_watchdog
+from backend.utils.rate_limiter import get_t212_budgeter, PRIORITY_EXECUTION, PRIORITY_SYNC, PRIORITY_POLLING
 
 
 # Constants
@@ -50,9 +50,9 @@ def _save_state(filepath: str, data: Dict[str, Any]):
         pass
 
 # Import centralized currency normalization
-from utils.currency_utils import normalize_all_positions
-from utils.ticker_utils import normalize_ticker
-from t212_handlers import (
+from backend.utils.currency_utils import normalize_all_positions
+from backend.utils.ticker_utils import normalize_ticker
+from backend.t212_handlers import (
     handle_analyze_portfolio,
     handle_market_order,
     handle_get_price_history,

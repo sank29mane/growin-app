@@ -2,6 +2,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 import asyncio
 import time
 import logging
+from backend.app_context import state
 
 router = APIRouter()
 logger = logging.getLogger("alpha_stream")
@@ -50,3 +51,30 @@ async def alpha_stream(websocket: WebSocket):
     finally:
         if websocket in active_connections:
             active_connections.remove(websocket)
+
+@router.websocket("/training-stream")
+async def training_stream(websocket: WebSocket):
+    """
+    WebSocket endpoint for real-time RL training metrics.
+    Broadcasts loss, entropy, reward, and stability_score.
+    """
+    await websocket.accept()
+    logger.info("Training stream client connected.")
+    
+    try:
+        while True:
+            # Wait for metrics to arrive in the queue
+            try:
+                # Use a short timeout to allow checking for disconnects even if no training is happening
+                metrics = await asyncio.wait_for(state.training_metrics_queue.get(), timeout=1.0)
+                await websocket.send_json(metrics)
+                state.training_metrics_queue.task_done()
+            except asyncio.TimeoutError:
+                # Connection heartbeat/check
+                # Check if client is still connected by sending a ping or just waiting
+                continue
+                
+    except WebSocketDisconnect:
+        logger.info("Training stream client disconnected.")
+    except Exception as e:
+        logger.error(f"Training stream error: {e}")

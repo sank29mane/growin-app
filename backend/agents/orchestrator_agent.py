@@ -12,20 +12,20 @@ import time
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
 
-from .base_agent import BaseAgent, AgentResponse
-from .coordinator_agent import COORDINATOR_SYSTEM_PROMPT
-from .decision_agent import DecisionAgent
-from .messenger import AgentMessage, get_messenger
-from market_context import MarketContext
-from data_fabricator import DataFabricator
-from status_manager import status_manager
-from app_logging import correlation_id_ctx
-from utils.audit_log import log_audit
-from .llm_factory import LLMFactory
-from price_validation import PriceValidator
+from backend.agents.base_agent import BaseAgent, AgentResponse
+from backend.agents.coordinator_agent import COORDINATOR_SYSTEM_PROMPT
+from backend.agents.decision_agent import DecisionAgent
+from backend.agents.messenger import AgentMessage, get_messenger
+from backend.market_context import MarketContext
+from backend.data_fabricator import DataFabricator
+from backend.status_manager import status_manager
+from backend.app_logging import correlation_id_ctx
+from backend.utils.audit_log import log_audit
+from backend.agents.llm_factory import LLMFactory
+from backend.price_validation import PriceValidator
 
 # Import specialist agents (as used in CoordinatorAgent)
-from . import QuantAgent, PortfolioAgent, ForecastingAgent, ResearchAgent, SocialAgent, WhaleAgent, GoalPlannerAgent
+from backend.agents. import QuantAgent, PortfolioAgent, ForecastingAgent, ResearchAgent, SocialAgent, WhaleAgent, GoalPlannerAgent
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ class OrchestratorAgent:
     """
     
     def __init__(self, mcp_client=None, chat_manager=None, model_name: str = "native-mlx", api_keys: Optional[Dict[str, str]] = None):
-        from app_context import state
+        from backend.app_context import state
         self.model_name = model_name
         self.mcp_client = mcp_client or state.mcp_client
         self.chat_manager = chat_manager or state.chat_manager
@@ -61,7 +61,7 @@ class OrchestratorAgent:
         self.goal_planner_agent = GoalPlannerAgent()
 
         # Risk Agent (Critic)
-        from .risk_agent import RiskAgent
+        from backend.agents.risk_agent import RiskAgent
         self.risk_agent = RiskAgent(model_name=model_name)
 
         # Decision logic container (reusing DecisionAgent's internal logic)
@@ -188,7 +188,7 @@ Query: "{clean_query}"
         intent_info = await self._classify_intent(query)
         # Context bridging for "Deep Dive" or follow-ups without explicit tickers
         if not ticker and history:
-            from utils import extract_ticker_from_text
+            from backend.utils import extract_ticker_from_text
             for msg in reversed(history):
                 # SOTA 2026: Only inherit context from User Messages to avoid hallucinating tickers from AI headers (e.g. ACE)
                 if msg.get("role") != "user":
@@ -215,12 +215,12 @@ Query: "{clean_query}"
         status_manager.set_status("orchestrator", "working", "Fabricating Context...")
         
         # SOTA 2026: Historical Alpha Context
-        from analytics_db import get_analytics_db
+        from backend.analytics_db import get_analytics_db
         import asyncio
         db = get_analytics_db()
         historical_alpha = await asyncio.to_thread(db.get_agent_alpha_metrics, ticker)
         
-        from agents.decision_agent import DecisionAgent
+        from backend.agents.decision_agent import DecisionAgent
         detected_account = account_type
         if not detected_account or detected_account == "all":
             detected_account = DecisionAgent()._detect_account_mentions(query)
@@ -302,11 +302,11 @@ Query: "{clean_query}"
         ))
         
         # SOTA 2026: Trajectory Stitching
-        from utils.trajectory_stitcher import TrajectoryStitcher
+        from backend.utils.trajectory_stitcher import TrajectoryStitcher
         stitched_narrative = TrajectoryStitcher.stitch(context)
         
         # SOTA 2026: Tax-Loss Harvesting Intelligence
-        from utils.tlh_scanner import TLHScanner
+        from backend.utils.tlh_scanner import TLHScanner
         tlh_candidates = []
         if context.portfolio:
             tlh_candidates = TLHScanner().scan(context.portfolio.model_dump())
@@ -343,7 +343,7 @@ Query: "{clean_query}"
         max_debate_turns = 0 if os.getenv("USE_SHADOW_LLM") == "1" else 1 # Skip rebuttal in shadow mode definition
         
         # ACE Evaluator
-        from .ace_evaluator import ACEEvaluator
+        from backend.agents.ace_evaluator import ACEEvaluator
         ace_evaluator = ACEEvaluator()
         
         for turn in range(max_debate_turns + 1):
@@ -451,7 +451,7 @@ Query: "{clean_query}"
 
     async def _merge_result(self, context: MarketContext, result: AgentResponse):
         """Merge specialist data into context"""
-        from market_context import ForecastData, QuantData, PortfolioData, ResearchData, SocialData, WhaleData
+        from backend.market_context import ForecastData, QuantData, PortfolioData, ResearchData, SocialData, WhaleData
         data = result.data
         name = result.agent_name
         
@@ -475,7 +475,7 @@ Query: "{clean_query}"
             
         # Context bridging for "Deep Dive" or follow-ups without explicit tickers
         if not ticker and history:
-            from utils import extract_ticker_from_text
+            from backend.utils import extract_ticker_from_text
             for msg in reversed(history):
                 # SOTA 2026: Only inherit context from User Messages to avoid hallucinating tickers from AI headers (e.g. ACE)
                 if msg.get("role") != "user":
@@ -490,7 +490,7 @@ Query: "{clean_query}"
                     intent_info["type"] = "portfolio_query"
                     break
         
-        from agents.decision_agent import DecisionAgent
+        from backend.agents.decision_agent import DecisionAgent
         detected_account = account_type
         if not detected_account or detected_account == "all":
             detected_account = DecisionAgent()._detect_account_mentions(query)
@@ -560,7 +560,7 @@ Query: "{clean_query}"
             if context.risk_governance:
                 context.risk_governance.adv_30d = adv
             else:
-                from market_context import RiskGovernanceData
+                from backend.market_context import RiskGovernanceData
                 context.risk_governance = RiskGovernanceData(adv_30d=adv)
         
         # 3. Stream Reasoning

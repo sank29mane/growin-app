@@ -17,15 +17,11 @@ This document outlines the high-level phases for the Growin App, specifically op
 - **Inference Engine**: Native `vllm-mlx` with PagedAttention (replacing LM Studio API).
 - **Status**: PLANNED
 - **Wave 1: vllm-mlx & Data Fusion**
-    - [ ] **Engine Setup**: Deploy `vllm-mlx` native server for Nemotron-3-Nano (30B MoE).
-    - [ ] **RLStateFabricator**: Fuse JMCE Mu/Sigma + TTM-R2 trends + 2PM GMT Window.
-    - [ ] **ETF Scraper**: Harvest active LSE Leveraged ETPs (NVD3, 3QQQ, 5LUK) in GBX.
+    - [ ] **37-01-PLAN.md**: Deploy `vllm-mlx` native server & RL State fusion.
 - **Wave 2: Regime Agent (Market Character)**
-    - [ ] **Volatility Clustering**: Implement `RegimeAgent` using JMCE Eigenvalues to detect regime shifts.
-    - [ ] **Continuous Calibration**: Nightly "Prompt Calibration" based on day's Alpha vs. Predictions.
+    - [ ] **37-02-PLAN.md**: JMCE Eigenvalue regime detection & LoRA calibration.
 - **Wave 3: PPO Action Head & NPU Backtest**
-    - [ ] **Policy Implementation**: Build a lightweight PPO head in MLX for rebalance actions.
-    - [ ] **Mass-Parallel Backtest**: 1000x simulations on ANE/GPU to optimize the "Volatility Tax" threshold.
+    - [ ] **37-03-PLAN.md**: PPO Actor-Critic policy & parallel GPU backtester.
 
 ### Phase 38: SwiftUI Profit Command Center & RL Training Integration
 - **Goal**: 120Hz dashboard for real-time Alpha tracking and hardened RL training loop.

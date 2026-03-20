@@ -5,7 +5,7 @@ Ensures price consistency before executing trades.
 
 from typing import Dict, Optional, Any
 from decimal import Decimal
-from utils.currency_utils import DataSourceNormalizer
+from backend.utils.currency_utils import DataSourceNormalizer
 import asyncio
 import logging
 
@@ -29,8 +29,8 @@ class PriceValidator:
         US -> Alpaca (Primary) -> yfinance (Fallback)
         UK -> Finnhub (Primary) -> yfinance (Fallback)
         """
-        from data_engine import get_alpaca_client, get_finnhub_client
-        from utils.ticker_utils import normalize_ticker
+        from backend.data_engine import get_alpaca_client, get_finnhub_client
+        from backend.utils.ticker_utils import normalize_ticker
 
         results = {
             "trading212": None,

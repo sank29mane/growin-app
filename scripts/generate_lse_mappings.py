@@ -7,6 +7,8 @@ import os
 import json
 import logging
 import yfinance as yf
+import re
+import requests
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
@@ -34,16 +36,29 @@ def generate_mappings():
             info = t.info
             long_name = info.get("longName", ticker)
             
-            # Simple leverage detection based on name/ticker
+            # Enhanced leverage detection
             leverage = 1.0
-            if "3x" in long_name.lower() or ticker.startswith("3"):
-                leverage = 3.0
-            elif "2x" in long_name.lower() or ticker.startswith("2"):
-                leverage = 2.0
-            elif "5x" in long_name.lower() or ticker.startswith("5"):
-                leverage = 5.0
-            elif "inverse" in long_name.lower() or "short" in long_name.lower():
-                leverage = -1.0
+            
+            # Check for 'short' or 'inverse' first to set sign
+            is_inverse = any(word in long_name.lower() for word in ["inverse", "short", "bear"])
+            is_inverse = is_inverse or ticker.endswith("S.L") or "LQQS" in ticker
+            
+            # Extract number (e.g., 3x, 5x, or leading digit)
+            num_match = re.search(r'([235])x', long_name.lower())
+            if not num_match:
+                # Fallback to leading digit if name is sparse
+                num_match = re.match(r'^([235])', ticker)
+            
+            if num_match:
+                leverage = float(num_match.group(1))
+            
+            if is_inverse:
+                leverage = -abs(leverage)
+            
+            # Special case for known tickers if detection fails
+            if "NVD3" in ticker: leverage = 3.0
+            if "NVDS" in ticker: leverage = -1.0
+            if "5LUK" in ticker: leverage = 5.0
             
             mappings[ticker] = {
                 "name": long_name,
@@ -51,11 +66,26 @@ def generate_mappings():
                 "currency": info.get("currency", "GBX"),
                 "base_asset": info.get("underlyingSymbol", ticker.split(".")[0])
             }
-        except Exception as e:
-            logger.warning(f"Failed to fetch info for {ticker}: {e}")
+        except (Exception, requests.exceptions.ConnectionError) as e:
+            logger.warning(f"Failed to fetch info for {ticker} (using fallback): {e}")
+            
+            # Smart Fallback for LSE Tickers
+            leverage = 1.0
+            is_inverse = ticker.endswith("S.L") or "LQQS" in ticker or "NVDS" in ticker
+            
+            num_match = re.match(r'^([235])', ticker)
+            if num_match:
+                leverage = float(num_match.group(1))
+            
+            if "NVD3" in ticker: leverage = 3.0
+            if "5LUK" in ticker: leverage = 5.0
+            
+            if is_inverse:
+                leverage = -abs(leverage)
+                
             mappings[ticker] = {
                 "name": ticker,
-                "leverage": 1.0,
+                "leverage": leverage,
                 "currency": "GBX",
                 "base_asset": ticker.split(".")[0]
             }

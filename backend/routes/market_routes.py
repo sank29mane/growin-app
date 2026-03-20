@@ -8,7 +8,7 @@ import logging
 import asyncio
 import json
 import numpy as np
-from utils import sanitize_nan
+from backend.utils import sanitize_nan
 
 from app_context import state
 from cache_manager import cache
@@ -154,7 +154,7 @@ async def get_live_portfolio(account_type: Optional[str] = None):
             return cached_data
 
         try:
-            from agents import PortfolioAgent
+            from backend.agents import PortfolioAgent
             
             # SOTA: Use specialized PortfolioAgent directly
             agent = PortfolioAgent()

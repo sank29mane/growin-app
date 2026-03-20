@@ -17,7 +17,7 @@ except ImportError:
     nn = None
     HAS_MLX = False
 
-from utils.clara_codec import ClaraCodec
+from backend.utils.clara_codec import ClaraCodec
 
 logger = logging.getLogger(__name__)
 

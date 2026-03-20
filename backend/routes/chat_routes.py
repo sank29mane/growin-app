@@ -7,7 +7,7 @@ from typing import Optional, Dict, Any
 from pydantic import BaseModel
 from app_context import state, ChatMessage, AnalyzeRequest, AgentResponse
 from rate_limiter import default_limiter
-from utils import extract_ticker_from_text, sanitize_nan
+from backend.utils import extract_ticker_from_text, sanitize_nan
 import logging
 import traceback
 import asyncio

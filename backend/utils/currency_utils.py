@@ -169,9 +169,9 @@ def calculate_portfolio_value(positions: List[Any]) -> Decimal:
 def normalize_all_positions(positions: List[Dict], metadata_cache: Dict) -> List[Any]:
     """
     Legacy helper for Trading212 positions normalization.
-    Returns a list of Position models from data_models.py.
+    Returns a list of Position models from backend.data_models.py.
     """
-    from data_models import Position
+    from backend.data_models import Position
     normalized_list = []
     for pos in positions:
         ticker = pos.get("ticker")

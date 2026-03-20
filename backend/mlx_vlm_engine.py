@@ -12,7 +12,7 @@ except ImportError:
 
 from PIL import Image
 
-from mlx_engine import get_memory_info, MEMORY_WARNING_THRESHOLD
+from backend.mlx_engine import get_memory_info, MEMORY_WARNING_THRESHOLD
 
 logger = logging.getLogger(__name__)
 
