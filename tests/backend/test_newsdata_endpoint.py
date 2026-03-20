@@ -9,8 +9,8 @@ api_key = os.getenv("NEWSDATA_API_KEY")
 
 @pytest.mark.skipif(not api_key, reason="NEWSDATA_API_KEY not found in environment")
 def test_market_endpoint():
-    api_key_str = api_key or ""
-    print(f"Testing NewsData.io 'market' endpoint with key: {api_key_str[:5] if api_key_str else 'NONE'}...")
+    key_snippet = api_key[:5] if api_key else "None"
+    print(f"Testing NewsData.io 'market' endpoint with key: {key_snippet}...")
     
     # User suggested URL structure
     url = "https://newsdata.io/api/1/market"

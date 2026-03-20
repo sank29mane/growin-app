@@ -303,8 +303,12 @@ class DecisionAgent:
             
             # Save to a dedicated trace file (overwritten per request in UAT, or unique ID in prod)
             trace_path = os.path.join(os.getcwd(), "reasoning_trace.json")
-            with open(trace_path, "w") as f:
-                json.dump(trace, f, indent=2)
+
+            def save_trace():
+                with open(trace_path, "w") as f:
+                    json.dump(trace, f, indent=2)
+
+            await asyncio.to_thread(save_trace)
             
             logger.info(f"✅ Reasoning trace exported to {trace_path}")
         except Exception as e:
