@@ -120,7 +120,7 @@ class AlpacaClient:
             df = data.copy()
 
             # Check if UK stock once (CurrencyNormalizer logic)
-            is_uk = CurrencyNormalizer.is_uk_stock(normalized_ticker)
+            is_uk = CurrencyNormalizer.is_pence_ticker(normalized_ticker)
 
             if is_uk:
                  # Vectorized division for UK stocks (GBX -> GBP)

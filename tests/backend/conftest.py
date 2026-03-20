@@ -1,8 +1,22 @@
 import sys
 import os
 import importlib.util
+import asyncio
 from unittest.mock import MagicMock, AsyncMock, patch
 import pytest
+
+# Ensure project root is in path for absolute imports (from backend.xxx)
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
+# --- Asyncio Scope Fix ---
+@pytest.fixture(scope="session")
+def event_loop():
+    """Create an instance of the default event loop for each test session."""
+    loop = asyncio.get_event_loop_policy().new_event_loop()
+    yield loop
+    loop.close()
 
 # --- Python 3.13 Fixes ---
 orig_find_spec = importlib.util.find_spec

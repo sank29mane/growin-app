@@ -3,8 +3,8 @@ MCP Routes - Server management and tool execution
 """
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks
-from app_context import state, T212ConfigRequest
-from utils.mcp_validation import validate_mcp_config
+from backend.app_context import state, T212ConfigRequest
+from backend.utils.mcp_validation import validate_mcp_config
 import logging
 import json
 import os
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # Security: Block potentially dangerous shell commands
-# BLOCKED_COMMANDS and validate_mcp_config are imported from utils.mcp_validation
+# BLOCKED_COMMANDS and validate_mcp_config are imported from backend.utils.mcp_validation
 
 
 @router.get("/mcp/status")
@@ -122,8 +122,8 @@ import uuid
 import hmac
 import hashlib
 import time
-from shared_types import SENSITIVE_TOOLS
-from cache_manager import cache
+from backend.shared_types import SENSITIVE_TOOLS
+from backend.cache_manager import cache
 
 # Secret for signing approval tokens (in production, use a secure env var)
 APPROVAL_SECRET = os.getenv("TRADE_APPROVAL_SECRET", "sota-2026-secure-gate-9911")

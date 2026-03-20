@@ -26,6 +26,7 @@ from backend.utils.audit_log import log_audit
 from backend.app_logging import correlation_id_ctx
 from backend.resilience import get_circuit_breaker, CircuitBreakerOpenError, CircuitBreakerOpenException
 from backend.shared_types import SENSITIVE_TOOLS
+from backend.status_manager import status_manager
 
 logger = logging.getLogger(__name__)
 
@@ -458,39 +459,7 @@ class DecisionAgent:
             shadow_text = self._generate_shadow_response(context)
             return {"content": self._clean_response(shadow_text), "response_id": "shadow-test-id"}
 
-        # 1. Stateful Priority: If LM Studio Client supports it, use server-side context
-        from lm_studio_client import LMStudioClient
-        if isinstance(self.llm, LMStudioClient) and hasattr(self.llm, "stateful_chat"):
-            try:
-                logger.info(f"DecisionAgent: Initiating stateful chat turn (Prev ID: {previous_response_id})")
-                stateful_resp = await self.llm.stateful_chat(
-                    model_id=self.model_name,
-                    input_text=prompt,
-                    previous_response_id=previous_response_id,
-                    system_prompt=system_content,
-                    temperature=0.1
-                )
-                if "error" not in stateful_resp:
-                    content = stateful_resp.get("content", "")
-                    reasoning = stateful_resp.get("reasoning", "")
-                    
-                    # Capture reasoning if not provided by client directly
-                    if not reasoning:
-                         reasoning = self._extract_reasoning(content)
-                    
-                    if reasoning:
-                         context.reasoning = reasoning
-
-                    return {
-                        "content": self._clean_response(content),
-                        "response_id": stateful_resp.get("response_id")
-                    }
-                else:
-                    logger.warning(f"Stateful chat failed: {stateful_resp['error']}. Falling back to stateless loop.")
-            except Exception as se:
-                logger.error(f"Stateful transition error: {se}. Falling back.")
-
-        # 2. Stateless Fallback: Standard Agentic Loop
+        # 1. Standard Agentic Loop (Stateless)
         messages = [
             {"role": "system", "content": system_content},
             {"role": "user", "content": prompt}

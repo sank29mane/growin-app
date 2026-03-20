@@ -30,7 +30,7 @@ class QuantAgent(BaseAgent):
         super().__init__(config)
 
         # Use centralized QuantEngine
-        from quant_engine import get_quant_engine
+        from backend.quant_engine import get_quant_engine
         self.engine = get_quant_engine()
         logger.info("QuantAgent initialized using QuantEngine")
 

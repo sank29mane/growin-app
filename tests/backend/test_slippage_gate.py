@@ -23,12 +23,10 @@ async def test_risk_gate():
             liquidity_status="LIQUID"
         )
     )
-    
     agent = RiskAgent(model_name="mistral")
-    await agent._initialize()
     res_normal = await agent.review(context_normal, "Suggest buying 100 shares of AAPL.")
-    print(f"\n[NORMAL CASE (10 bps)]\nSuccess: {res_normal.get('decision', 'N/A')}\nContent: {res_normal.get('feedback', '')[:200]}...")
-    
+    print(f"\n[NORMAL CASE (10 bps)]\nSuccess: {res_normal.get('status', 'N/A')}\nContent: {res_normal.get('risk_assessment', '')[:200]}...")
+
     # 2. High Slippage Case (150 bps slippage)
     context_high = MarketContext(
         query="Buy 1,000,000 shares of ILLIQ",
@@ -39,13 +37,14 @@ async def test_risk_gate():
             liquidity_status="ILLIQUID"
         )
     )
-    
+
     res_high = await agent.review(context_high, "Suggest buying 1,000,000 shares of ILLIQ.")
-    print(f"\n[HIGH SLIPPAGE CASE (150 bps)]\nSuccess: {res_high.get('decision', 'N/A')}\nContent: {res_high.get('feedback', '')}")
+    print(f"\n[HIGH SLIPPAGE CASE (150 bps)]\nSuccess: {res_high.get('status', 'N/A')}\nContent: {res_high.get('risk_assessment', '')[:200]}...")
+
     
     # Verify if blocked or flagged
-    feedback = res_high.get('feedback', '').lower()
-    if res_high.get('decision') == "BLOCK" or "slippage" in feedback:
+    feedback = res_high.get('risk_assessment', '').lower()
+    if res_high.get('status') == "BLOCKED" or "slippage" in feedback:
          print("\n✅ Risk Agent correctly identified and flagged/blocked high slippage.")
     else:
          print("\n❌ Risk Agent FAILED to flag/block high slippage.")

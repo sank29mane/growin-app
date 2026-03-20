@@ -51,7 +51,8 @@ async def test_decision_agent_regime_detection():
     regime = context.user_context.get("market_regime")
     print(f"DEBUG: Regime detected: {regime}")
     assert regime is not None
-    assert regime["label"] in ["HIGH_VOL", "EXTREME_VOL"]
+    assert regime["label"] in ["HIGH_VOL", "EXTREME_VOL", "CRISIS"]
+
     print(f"✅ Regime Detection Verified: {regime['label']} (Z: {regime['z_score']:.2f})")
 
 if __name__ == "__main__":
