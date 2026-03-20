@@ -81,7 +81,7 @@ class TTMForecaster:
             logger.warning(f"TTM-R2 Bridge script not found at {bridge_script}. Using Statistical Fallback.")
             self.ttm_available = False
 
-    async def forecast(self, ohlcv_data: List[Dict[str, Any]], prediction_steps: int = 96, timeframe: str = "1Day") -> Dict[str, Any]:
+    async def forecast(self, ohlcv_data: List[Dict[str, Any]], prediction_steps: int = 96, timeframe: str = "1Day", ticker: str = None) -> Dict[str, Any]:
         """
         Generate forecast using TTM-R2 with auxiliary ML comparisons.
         Priority:
@@ -163,7 +163,7 @@ class TTMForecaster:
             # --- PRIMARY: TTM-R2 ---
             ttm_success = False
             if self.ttm_available and len(ohlcv_data) >= 512:
-                result = await self._ttm_forecast(ohlcv_data, prediction_steps, timeframe)
+                result = await self._ttm_forecast(ohlcv_data, prediction_steps, timeframe, ticker=ticker)
                 if result and not result.get("is_fallback", False) and result.get("forecast"):
                     ttm_success = True
                 
@@ -229,7 +229,7 @@ class TTMForecaster:
                 "confidence": 0.0
             }
 
-    async def _ttm_forecast(self, ohlcv_data: List[Dict[str, Any]], prediction_steps: int, timeframe: str) -> Dict[str, Any]:
+    async def _ttm_forecast(self, ohlcv_data: List[Dict[str, Any]], prediction_steps: int, timeframe: str, ticker: str = None) -> Dict[str, Any]:
         """Generate forecast using Fused TTM-JMCE via Worker Service"""
         import json
         from utils.worker_client import get_worker_client
@@ -244,7 +244,8 @@ class TTMForecaster:
             result = await client.forecast_fused(
                 ohlcv_data=ohlcv_data,
                 prediction_steps=prediction_steps,
-                timeframe=timeframe
+                timeframe=timeframe,
+                ticker=ticker
             )
             duration_ms = (time.time() - start_time) * 1000
             logger.info(f"✅ Fused TTM-JMCE complete in {duration_ms:.2f}ms")
