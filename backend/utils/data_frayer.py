@@ -4,7 +4,7 @@ import logging
 import pandas as pd
 import numpy as np
 from typing import List, Dict, Any
-from backend.data_engine import get_alpaca_client, get_finnhub_client
+from data_engine import get_alpaca_client, get_finnhub_client
 
 logger = logging.getLogger(__name__)
 

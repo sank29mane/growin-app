@@ -3,8 +3,8 @@ Status Routes - System health and agent monitoring
 """
 
 from fastapi import APIRouter, HTTPException
-from backend.status_manager import status_manager
-from backend.agents.messenger import get_messenger
+from status_manager import status_manager
+from agents.messenger import get_messenger
 import time
 
 router = APIRouter()

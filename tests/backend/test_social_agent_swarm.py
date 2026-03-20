@@ -47,15 +47,15 @@ sys.modules['mcp.client.stdio'] = mock_mcp.client.stdio
 sys.modules['mcp.client.sse'] = mock_mcp.client.sse
 sys.modules['yfinance'] = MagicMock()
 
-from backend.agents.social_agent import SocialAgent
-from backend.agents.social_swarm import RedditMicroAgent, TwitterMicroAgent
-from backend.agents.social_swarm.base_micro import MicroAgentResponse
+from agents.social_agent import SocialAgent
+from agents.social_swarm import RedditMicroAgent, TwitterMicroAgent
+from agents.social_swarm.base_micro import MicroAgentResponse
 from decimal import Decimal
 import asyncio
 
 class TestSocialAgentSwarm(unittest.IsolatedAsyncioTestCase):
     
-    @patch('backend.agents.social_agent.os.getenv')
+    @patch('agents.social_agent.os.getenv')
     async def test_social_agent_no_key(self, mock_getenv):
         mock_getenv.return_value = None
         agent = SocialAgent()
@@ -65,7 +65,7 @@ class TestSocialAgentSwarm(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res.data['ticker'], "AAPL")
         self.assertEqual(res.error, "Tavily API key missing")
 
-    @patch('backend.agents.social_agent.os.getenv')
+    @patch('agents.social_agent.os.getenv')
     async def test_social_agent_with_data(self, mock_getenv):
         mock_getenv.return_value = "fake_key"
         agent = SocialAgent()

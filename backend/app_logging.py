@@ -1,7 +1,7 @@
 import logging
 import sys
 from collections import deque
-from backend.utils.secret_masker import SecretMasker
+from utils.secret_masker import SecretMasker
 
 from contextvars import ContextVar
 import uuid
@@ -9,13 +9,9 @@ import uuid
 # Python 3.13 fix for scipy spec issue during tests
 try:
     import scipy
-    if getattr(scipy, "__spec__", None) is None:
+    if not hasattr(scipy, "__spec__") or scipy.__spec__ is None:
         import importlib.util
-        try:
-            scipy.__spec__ = importlib.util.find_spec("scipy")
-        except ValueError:
-            import importlib.machinery
-            scipy.__spec__ = importlib.machinery.ModuleSpec("scipy", None)
+        scipy.__spec__ = importlib.util.find_spec("scipy")
 except ImportError:
     pass
 
@@ -101,6 +97,6 @@ def get_recent_logs():
     return list(log_buffer)
 
 # --- Audit Logging Facade ---
-from backend.utils.audit_log import log_audit, AuditLogger
+from utils.audit_log import log_audit, AuditLogger
 
 __all__ = ["setup_logging", "get_recent_logs", "log_audit", "AuditLogger"]

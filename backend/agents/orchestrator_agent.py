@@ -12,25 +12,20 @@ import time
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
 
-from backend.agents.base_agent import BaseAgent, AgentResponse
-from backend.agents.coordinator_agent import COORDINATOR_SYSTEM_PROMPT
-from backend.agents.decision_agent import DecisionAgent
-from backend.agents.messenger import AgentMessage, get_messenger
-from backend.market_context import MarketContext
-from backend.data_fabricator import DataFabricator
-from backend.status_manager import status_manager
-from backend.app_logging import correlation_id_ctx
-from backend.utils.audit_log import log_audit
-from backend.agents.llm_factory import LLMFactory
-from backend.price_validation import PriceValidator
+from .base_agent import BaseAgent, AgentResponse
+from .coordinator_agent import COORDINATOR_SYSTEM_PROMPT
+from .decision_agent import DecisionAgent
+from .messenger import AgentMessage, get_messenger
+from market_context import MarketContext
+from data_fabricator import DataFabricator
+from status_manager import status_manager
+from app_logging import correlation_id_ctx
+from utils.audit_log import log_audit
+from .llm_factory import LLMFactory
+from price_validation import PriceValidator
 
-from backend.agents.quant_agent import QuantAgent
-from backend.agents.portfolio_agent import PortfolioAgent
-from backend.agents.forecasting_agent import ForecastingAgent
-from backend.agents.research_agent import ResearchAgent
-from backend.agents.social_agent import SocialAgent
-from backend.agents.whale_agent import WhaleAgent
-from backend.agents.goal_planner_agent import GoalPlannerAgent
+# Import specialist agents (as used in CoordinatorAgent)
+from . import QuantAgent, PortfolioAgent, ForecastingAgent, ResearchAgent, SocialAgent, WhaleAgent, GoalPlannerAgent
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +41,7 @@ class OrchestratorAgent:
     """
     
     def __init__(self, mcp_client=None, chat_manager=None, model_name: str = "native-mlx", api_keys: Optional[Dict[str, str]] = None):
-        from backend.app_context import state
+        from app_context import state
         self.model_name = model_name
         self.mcp_client = mcp_client or state.mcp_client
         self.chat_manager = chat_manager or state.chat_manager
@@ -66,7 +61,7 @@ class OrchestratorAgent:
         self.goal_planner_agent = GoalPlannerAgent()
 
         # Risk Agent (Critic)
-        from backend.agents.risk_agent import RiskAgent
+        from .risk_agent import RiskAgent
         self.risk_agent = RiskAgent(model_name=model_name)
 
         # Decision logic container (reusing DecisionAgent's internal logic)
@@ -129,15 +124,15 @@ Query: "{clean_query}"
             ticker = ticker_match.group(1).upper() if ticker_match and ticker_match.group(1) and "NONE" not in ticker_match.group(1).upper() else None
             
             # Hard overrides to protect against LLM misclassification
-            q_lower = (query or "").lower()
+            q_lower = query.lower()
             if "portfolio" in q_lower:
                 intent_type = "portfolio_query"
             
             # Conversational/Educational triggers
-            if any(w in q_lower for w in frozenset(["what is", "how does", "tell me about", "hello", "hi", "how are you", "who are you"])):
+            if any(w in q_lower for w in ["what is", "how does", "tell me about", "hello", "hi", "how are you", "who are you"]):
                 intent_type = "conversational"
                 
-            if ticker in frozenset({"ISA", "INVEST", "MY", "DEEP", "DIVE", "MORE", "SOME", "RSI", "MACD"}):
+            if ticker in ["ISA", "INVEST", "MY", "DEEP", "DIVE", "MORE", "SOME", "RSI", "MACD"]:
                 ticker = None
             
             # If it's a "how is it doing" question without a ticker, we might be talking about a portfolio
@@ -193,7 +188,7 @@ Query: "{clean_query}"
         intent_info = await self._classify_intent(query)
         # Context bridging for "Deep Dive" or follow-ups without explicit tickers
         if not ticker and history:
-            from backend.utils import extract_ticker_from_text
+            from utils import extract_ticker_from_text
             for msg in reversed(history):
                 # SOTA 2026: Only inherit context from User Messages to avoid hallucinating tickers from AI headers (e.g. ACE)
                 if msg.get("role") != "user":
@@ -201,10 +196,10 @@ Query: "{clean_query}"
                     
                 content = msg.get("content", "")
                 found = extract_ticker_from_text(content)
-                if found and found not in frozenset({"ISA", "INVEST", "MY", "DEEP", "DIVE", "MORE", "SOME", "RSI"}):
+                if found and found not in ["ISA", "INVEST", "MY", "DEEP", "DIVE", "MORE", "SOME", "RSI"]:
                     ticker = found
                     break
-                elif "portfolio" in (content or "").lower():
+                elif "portfolio" in content.lower():
                     intent_info["type"] = "portfolio_query"
                     break
                     
@@ -220,12 +215,11 @@ Query: "{clean_query}"
         status_manager.set_status("orchestrator", "working", "Fabricating Context...")
         
         # SOTA 2026: Historical Alpha Context
-        from backend.analytics_db import get_analytics_db
-        import asyncio
+        from analytics_db import get_analytics_db
         db = get_analytics_db()
-        historical_alpha = await asyncio.to_thread(db.get_agent_alpha_metrics, ticker)
+        historical_alpha = db.get_agent_alpha_metrics(ticker)
         
-        from backend.agents.decision_agent import DecisionAgent
+        from agents.decision_agent import DecisionAgent
         detected_account = account_type
         if not detected_account or detected_account == "all":
             detected_account = DecisionAgent()._detect_account_mentions(query)
@@ -307,11 +301,11 @@ Query: "{clean_query}"
         ))
         
         # SOTA 2026: Trajectory Stitching
-        from backend.utils.trajectory_stitcher import TrajectoryStitcher
+        from utils.trajectory_stitcher import TrajectoryStitcher
         stitched_narrative = TrajectoryStitcher.stitch(context)
         
         # SOTA 2026: Tax-Loss Harvesting Intelligence
-        from backend.utils.tlh_scanner import TLHScanner
+        from utils.tlh_scanner import TLHScanner
         tlh_candidates = []
         if context.portfolio:
             tlh_candidates = TLHScanner().scan(context.portfolio.model_dump())
@@ -348,7 +342,7 @@ Query: "{clean_query}"
         max_debate_turns = 0 if os.getenv("USE_SHADOW_LLM") == "1" else 1 # Skip rebuttal in shadow mode definition
         
         # ACE Evaluator
-        from backend.agents.ace_evaluator import ACEEvaluator
+        from .ace_evaluator import ACEEvaluator
         ace_evaluator = ACEEvaluator()
         
         for turn in range(max_debate_turns + 1):
@@ -456,7 +450,7 @@ Query: "{clean_query}"
 
     async def _merge_result(self, context: MarketContext, result: AgentResponse):
         """Merge specialist data into context"""
-        from backend.market_context import ForecastData, QuantData, PortfolioData, ResearchData, SocialData, WhaleData
+        from market_context import ForecastData, QuantData, PortfolioData, ResearchData, SocialData, WhaleData
         data = result.data
         name = result.agent_name
         
@@ -480,7 +474,7 @@ Query: "{clean_query}"
             
         # Context bridging for "Deep Dive" or follow-ups without explicit tickers
         if not ticker and history:
-            from backend.utils import extract_ticker_from_text
+            from utils import extract_ticker_from_text
             for msg in reversed(history):
                 # SOTA 2026: Only inherit context from User Messages to avoid hallucinating tickers from AI headers (e.g. ACE)
                 if msg.get("role") != "user":
@@ -488,14 +482,14 @@ Query: "{clean_query}"
                     
                 content = msg.get("content", "")
                 found = extract_ticker_from_text(content)
-                if found and found not in frozenset({"ISA", "INVEST", "MY", "DEEP", "DIVE", "MORE", "SOME", "RSI"}):
+                if found and found not in ["ISA", "INVEST", "MY", "DEEP", "DIVE", "MORE", "SOME", "RSI"]:
                     ticker = found
                     break
-                elif "portfolio" in (content or "").lower():
+                elif "portfolio" in content.lower():
                     intent_info["type"] = "portfolio_query"
                     break
         
-        from backend.agents.decision_agent import DecisionAgent
+        from agents.decision_agent import DecisionAgent
         detected_account = account_type
         if not detected_account or detected_account == "all":
             detected_account = DecisionAgent()._detect_account_mentions(query)
@@ -565,7 +559,7 @@ Query: "{clean_query}"
             if context.risk_governance:
                 context.risk_governance.adv_30d = adv
             else:
-                from backend.market_context import RiskGovernanceData
+                from market_context import RiskGovernanceData
                 context.risk_governance = RiskGovernanceData(adv_30d=adv)
         
         # 3. Stream Reasoning
@@ -578,10 +572,10 @@ Query: "{clean_query}"
         if context.intent in ["conversational", "educational"]:
              # Yield final context for route handler metadata
              from pydantic import BaseModel
-             class OrchestratorFinalEvent(BaseModel):
+             class FinalEvent(BaseModel):
                  market_context: MarketContext
              
-             yield OrchestratorFinalEvent(market_context=context)
+             yield FinalEvent(market_context=context)
              return
 
         status_manager.set_status("orchestrator", "working", "Performing Risk Review (Critic Pattern)...")
@@ -597,7 +591,7 @@ Query: "{clean_query}"
 
         # Yield final context for route handler metadata
         from pydantic import BaseModel
-        class SecondaryOrchestratorFinalEvent(BaseModel):
+        class FinalEvent(BaseModel):
             market_context: MarketContext
         
-        yield SecondaryOrchestratorFinalEvent(market_context=context)
+        yield FinalEvent(market_context=context)

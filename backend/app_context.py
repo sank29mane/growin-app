@@ -4,24 +4,15 @@ Shared application state and models to avoid circular imports.
 
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
-from backend.chat_manager import ChatManager
-from backend.rag_manager import RAGManager
-from backend.mcp_client import Trading212MCPClient
+from chat_manager import ChatManager
+from rag_manager import RAGManager
+from mcp_client import Trading212MCPClient
 
 import time
-import asyncio
 
-class SplitBrainController:
-    """
-    Routes tasks to optimal hardware backends based on workload.
-    - Heavy operations -> GPU (VLLMMXEngine)
-    - Lighter operations -> CPU (Ollama)
-    """
-    def route_task(self, task_type: str) -> str:
-        task = task_type.upper()
-        if task in ['REASONING', 'TRAINING', 'POLICY']:
-            return 'VLLMMXEngine'
-        return 'Ollama'
+
+
+
 
 class ANEConfig(BaseModel):
     enabled: bool = False
@@ -37,18 +28,8 @@ class AppState:
         self.start_time = time.time()
         # On-device ANE configuration (default off; auto-detect on startup)
         self.ane_config = ANEConfig()
-        # High-Velocity Trade Proposals (HITL)
+        # Phase 30: High-Velocity Trade Proposals (HITL)
         self.trade_proposals: Dict[str, Any] = {}
-        # Hardware context routing
-        self._split_brain_controller = None
-        # Real-time RL training monitoring
-        self.training_metrics_queue = asyncio.Queue(maxsize=100)
-
-    @property
-    def split_brain_controller(self) -> SplitBrainController:
-        if self._split_brain_controller is None:
-            self._split_brain_controller = SplitBrainController()
-        return self._split_brain_controller
 
     @property
     def chat_manager(self) -> ChatManager:
@@ -65,10 +46,6 @@ class AppState:
         if self._rag_manager is None:
             self._rag_manager = RAGManager()
         return self._rag_manager
-
-    @rag_manager.setter
-    def rag_manager(self, value):
-        self._rag_manager = value
 
     @property
     def mcp_client(self) -> Trading212MCPClient:

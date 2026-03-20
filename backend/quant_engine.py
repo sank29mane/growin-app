@@ -41,9 +41,9 @@ from typing import Dict, List, Any, Optional, TypedDict, Union
 from enum import Enum
 from datetime import datetime
 from decimal import Decimal
-from backend.utils.financial_math import create_decimal, safe_div, PRECISION_CURRENCY, TechnicalIndicators
-from backend.utils.portfolio_analyzer import PortfolioAnalyzer
-from backend.utils.ticker_utils import TickerResolver
+from utils.financial_math import create_decimal, safe_div, PRECISION_CURRENCY, TechnicalIndicators
+from utils.portfolio_analyzer import PortfolioAnalyzer
+from utils.ticker_utils import TickerResolver
 
 class TechnicalIndicatorsDict(TypedDict, total=False):
     rsi: Optional[Decimal]
@@ -85,7 +85,7 @@ class NeuralODERecovery:
     Integrates with backend/models/neural_ode.py.
     """
     def __init__(self, input_dim: int = 16, hidden_dim: int = 32):
-        from backend.models.neural_ode import RecoveryVelocityNODE
+        from models.neural_ode import RecoveryVelocityNODE
         self.model = RecoveryVelocityNODE(input_dim, hidden_dim)
         self.is_trained = False
         
@@ -473,7 +473,7 @@ class QuantEngine:
             w_arr = np.array([float(w) for w in weights])
             portfolio_returns = np.dot(returns_matrix, w_arr)
             
-            from backend.utils.risk_engine import RiskEngine
+            from utils.risk_engine import RiskEngine
             cvar_95 = RiskEngine.calculate_cvar_95(portfolio_returns)
             
             # 5. Return results

@@ -25,17 +25,12 @@ struct DashboardView: View {
                     }
 
                     // Header
-                    
                     AppHeader(
                         title: "Market Intelligence",
                         subtitle: "Real-time portfolio pulse",
                         icon: "chart.bar.fill"
                     )
                     .padding(.horizontal)
-                    
-                    // Phase 38: Alpha Dashboard
-                    AlphaDashboardView()
-                        .padding(.horizontal)
                     
                     // SOTA Intelligence Preview (New)
                     VStack(alignment: .leading, spacing: 12) {

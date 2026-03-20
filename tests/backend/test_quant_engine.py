@@ -3,7 +3,7 @@ import os
 from decimal import Decimal
 
 # Ensure we can import modules from the current directory
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../backend')))
+sys.path.append(os.getcwd())
 
 from quant_engine import get_quant_engine
 

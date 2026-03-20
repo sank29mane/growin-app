@@ -9,20 +9,18 @@ import os
 # Ensure backend is in path
 sys.path.append(os.path.join(os.getcwd(), 'backend'))
 
-from backend.data_engine import AlpacaClient
+from data_engine import AlpacaClient
 
 @pytest.fixture
 def mock_logger():
-    with patch('backend.data_engine.logger') as mock:
+    with patch('data_engine.logger') as mock:
         yield mock
 
 @pytest.mark.asyncio
 async def test_get_historical_bars_yfinance_fallback(mock_logger):
     """Test US stock: Alpaca (Primary) fails, yfinance (Fallback) succeeds"""
-    # Mock yfinance and cache to prevent conftest interference
-    with patch('yfinance.Ticker') as MockTicker, \
-         patch('backend.cache_manager.cache.get', return_value=None), \
-         patch('backend.cache_manager.cache.set'):
+    # Mock yfinance
+    with patch('yfinance.Ticker') as MockTicker:
         # Setup mock data
         dates = pd.date_range(start='2023-01-01', periods=5, freq='D')
         mock_data = pd.DataFrame({
@@ -40,6 +38,8 @@ async def test_get_historical_bars_yfinance_fallback(mock_logger):
         MockTicker.return_value = mock_ticker_instance
 
         client = AlpacaClient()
+        # Ensure we are not using the global mock from conftest
+        client.data_client = None
 
         ticker = "TEST.L"
         result = await client.get_historical_bars(ticker, timeframe="1Day", limit=5)
@@ -54,13 +54,13 @@ async def test_get_historical_bars_yfinance_fallback(mock_logger):
 @pytest.mark.asyncio
 async def test_get_batch_bars(mock_logger):
     """Test batch bar fetching with mocked internal method"""
-    with patch('backend.data_engine.AlpacaClient.get_historical_bars') as mock_single_fetch, \
-         patch('backend.cache_manager.cache.get', return_value=None):
+    with patch('data_engine.AlpacaClient.get_historical_bars') as mock_single_fetch:
         async def side_effect(ticker, timeframe, limit):
             return {"ticker": ticker, "bars": [], "source": "single"}
         mock_single_fetch.side_effect = side_effect
 
         client = AlpacaClient()
+        client.data_client = None
 
         tickers = ["AAPL", "LLOY.L"]
         results = await client.get_batch_bars(tickers)

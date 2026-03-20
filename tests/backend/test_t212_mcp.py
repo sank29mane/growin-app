@@ -1,7 +1,7 @@
 
 import asyncio
 import json
-from backend.mcp_client import Trading212MCPClient
+from mcp_client import Trading212MCPClient
 
 async def test_t212_mcp():
     client = Trading212MCPClient()

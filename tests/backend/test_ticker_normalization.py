@@ -4,12 +4,12 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 # Add backend to path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../backend')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # We rely on conftest.py for basic mocking.
 # To test Python fallback, we patch growin_core availability in ticker_utils.
 
-from utils.ticker_utils import normalize_ticker
+from trading212_mcp_server import normalize_ticker
 
 class TestTickerNormalization(unittest.TestCase):
     def test_us_tickers(self):

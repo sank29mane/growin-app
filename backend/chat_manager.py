@@ -109,29 +109,14 @@ class ChatManager:
                 ),
             )
         else:
-            # Update to fix bad data if it exists without overwriting user's env configuration
+            # Update to fix bad data if it exists
             cursor.execute(
                 """
                 UPDATE mcp_servers
-                SET command = ?, args = ?
-                WHERE name = 'Trading 212' AND (command IS NULL OR command != ? OR args IS NULL OR args != ?)
+                SET args = ?, env = ?
+                WHERE name = 'Trading 212'
             """,
-                (
-                    "python",
-                    json.dumps(["trading212_mcp_server.py"]),
-                    "python",
-                    json.dumps(["trading212_mcp_server.py"]),
-                ),
-            )
-
-            # Only fix env if it's explicitly null or empty, to preserve user settings
-            cursor.execute(
-                """
-                UPDATE mcp_servers
-                SET env = ?
-                WHERE name = 'Trading 212' AND (env IS NULL OR env = 'null' OR env = '')
-            """,
-                (json.dumps({}),)
+                (json.dumps(["trading212_mcp_server.py"]), json.dumps({})),
             )
 
         self.conn.commit()

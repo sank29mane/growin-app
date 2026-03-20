@@ -6,9 +6,9 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 
 # Add backend to path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../backend')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from quant_engine import QuantEngine
+from backend.quant_engine import QuantEngine
 
 class TestQuantEngineMLX(unittest.TestCase):
     def setUp(self):
@@ -41,7 +41,7 @@ class TestQuantEngineMLX(unittest.TestCase):
     def test_mlx_import_logic(self):
         """Test that MLX availability flag is respected"""
         # This test just confirms the module loaded successfully and set the flag
-        import quant_engine as qe
+        import backend.quant_engine as qe
         print(f"MLX Available: {qe.MLX_AVAILABLE}")
         # We don't assert True/False because it depends on the environment
         # But we assert that the attribute exists

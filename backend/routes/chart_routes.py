@@ -6,8 +6,8 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 import logging
 import asyncio
 from datetime import datetime, timezone
-from backend.utils.ticker_utils import normalize_ticker
-from backend.utils.currency_utils import CurrencyNormalizer
+from utils.ticker_utils import normalize_ticker
+from utils.currency_utils import CurrencyNormalizer
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -46,8 +46,8 @@ def detect_market(ticker: str) -> str:
 
 async def get_alpaca_chart_data(ticker: str, timeframe: str, limit: int, cache_key: str):
     """Fetch chart data using Alpaca API."""
-    from backend.cache_manager import cache
-    from backend.data_engine import get_alpaca_client
+    from cache_manager import cache
+    from data_engine import get_alpaca_client
 
     try:
         alpaca = get_alpaca_client()
@@ -103,7 +103,7 @@ async def get_alpaca_chart_data(ticker: str, timeframe: str, limit: int, cache_k
 
 async def get_yfinance_chart_data(ticker: str, timeframe: str, limit: int, cache_key: str):
     """Fallback chart data using yfinance."""
-    from backend.cache_manager import cache
+    from cache_manager import cache
     import yfinance as yf
 
     timeframe_normalized = timeframe.lower()
@@ -177,8 +177,8 @@ async def get_chart_data(symbol: str, timeframe: str = "1Day", limit: int = 500)
     Unified Chart Data Endpoint.
     Routes between Cache, Alpaca, yfinance, and AnalyticsDB.
     """
-    from backend.cache_manager import cache
-    from backend.analytics_db import get_analytics_db
+    from cache_manager import cache
+    from analytics_db import get_analytics_db
 
     ticker = normalize_ticker(symbol)
     market = detect_market(ticker)
@@ -188,11 +188,10 @@ async def get_chart_data(symbol: str, timeframe: str = "1Day", limit: int = 500)
         ticker = f"{ticker}.L"
 
     # 1. Persistent Cache Check (AnalyticsDB)
-    import asyncio
     analytics = get_analytics_db()
     if timeframe in ["1Year", "Max", "3Month"]:
         try:
-            db_data = await asyncio.to_thread(analytics.get_recent_ohlcv, ticker, limit)
+            db_data = analytics.get_recent_ohlcv(ticker, limit=limit)
             if db_data is not None and not db_data.empty:
                 db_data["timestamp"] = db_data["timestamp"].apply(lambda x: x.isoformat())
                 points = db_data[["timestamp", "close", "high", "low", "open", "volume"]].to_dict("records")
@@ -218,7 +217,7 @@ async def get_chart_data(symbol: str, timeframe: str = "1Day", limit: int = 500)
     try:
         if market == 'UK':
             # UK Stocks: Primary Finnhub
-            from backend.data_engine import get_finnhub_client
+            from data_engine import get_finnhub_client
             finnhub = get_finnhub_client()
             if finnhub and finnhub.client:
                 try:
@@ -262,7 +261,7 @@ async def get_chart_data(symbol: str, timeframe: str = "1Day", limit: int = 500)
     try:
         if provider not in ["AnalyticsDB", "Cache"]:
             analytics_data = [{"t": p["timestamp"], "o": p["open"], "h": p["high"], "l": p["low"], "c": p["close"], "v": p["volume"]} for p in data]
-            await asyncio.to_thread(analytics.bulk_insert_ohlcv, ticker, analytics_data)
+            analytics.bulk_insert_ohlcv(ticker, analytics_data)
     except Exception as e:
         logger.warning(f"Failed to cache to AnalyticsDB: {e}")
 
@@ -305,7 +304,7 @@ def _convert_bars_to_chart_format(bars: list, ticker: str) -> list:
 @router.websocket("/ws/chart/{symbol}")
 async def websocket_chart_data(websocket: WebSocket, symbol: str):
     """WebSocket for high-frequency real-time price ticks (10s refresh)"""
-    from backend.data_engine import get_alpaca_client, get_finnhub_client
+    from data_engine import get_alpaca_client, get_finnhub_client
 
     await websocket.accept()
     ticker = normalize_ticker(symbol)

@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 # Ensure backend is in path
 sys.path.append(os.path.join(os.getcwd(), 'backend'))
 
-from backend.data_engine import FinnhubClient
+from data_engine import FinnhubClient
 
 class TestFinnhubLogic(unittest.IsolatedAsyncioTestCase):
     async def test_resolution_map(self):

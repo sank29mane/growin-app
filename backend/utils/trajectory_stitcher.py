@@ -5,7 +5,7 @@ Merges disparate specialist signals into a unified chronological narrative.
 
 import logging
 from typing import List, Dict, Any, Optional
-from backend.market_context import MarketContext
+from market_context import MarketContext
 
 logger = logging.getLogger(__name__)
 

@@ -3,31 +3,22 @@ Decision Agent - High-reasoning LLM for final trade decisions
 User-selectable model with price validation integration
 """
 
-import numpy as np
-from backend.market_context import MarketContext
-from backend.price_validation import PriceValidator
+from market_context import MarketContext
+from price_validation import PriceValidator
 from typing import Dict, Optional, List, Any
 import logging
 import re
 import json
 import time
-import os
 import asyncio
-import uuid
-from datetime import datetime
-from decimal import Decimal
 from pydantic import BaseModel, Field
 from magentic import prompt as mag_prompt
 from langchain_core.messages import SystemMessage, HumanMessage
-from backend.agents.llm_factory import LLMFactory
-from backend.agents.regime_agent import RegimeAgent
-from backend.agents.rl_state import RLStateFabricator
-from backend.utils.audit_log import log_audit
-from backend.app_logging import correlation_id_ctx
-from backend.resilience import get_circuit_breaker, CircuitBreakerOpenError, CircuitBreakerOpenException
-from backend.shared_types import SENSITIVE_TOOLS
-from backend.status_manager import status_manager
-from backend.utils.async_utils import run_with_timeout
+from .llm_factory import LLMFactory
+from utils.audit_log import log_audit
+from app_logging import correlation_id_ctx
+from resilience import get_circuit_breaker, CircuitBreakerOpenError
+from shared_types import SENSITIVE_TOOLS
 
 logger = logging.getLogger(__name__)
 
@@ -64,15 +55,11 @@ class DecisionAgent:
     def __init__(self, model_name: str = "gpt-4o", api_keys: Optional[Dict[str, str]] = None, mcp_client=None):
         self.model_name = model_name
         self.api_keys = api_keys or {}
-        from backend.app_context import state
+        from app_context import state
         self.mcp_client = mcp_client or state.mcp_client
         self.llm = None
         self._lm_studio_client = None # Deprecated, kept for compat if needed, but Factory handles it
         self._initialized = False
-        
-        # SOTA 2026: Profit-First Intelligence
-        self.regime_agent = RegimeAgent()
-        self.rl_state_fabricator = RLStateFabricator()
 
     async def _initialize_llm(self):
         """Initialize the LLM using the Factory"""
@@ -99,36 +86,17 @@ class DecisionAgent:
         if not self._initialized:
             await self._initialize_llm()
 
-        # 1. Identify Cross-Agent Contradictions
-        contradictions = self._identify_contradictions(context)
-        if contradictions:
-            context.user_context["contradictions"] = contradictions
-
-        # 1a. SOTA 2026: Regime Detection & RL State (Phase 37)
-        regime = None
-        if context.price and context.price.history_series:
-            closes = [float(item.close) for item in context.price.history_series]
-            if len(closes) > 1:
-                # Filter out zero/neg prices before log
-                valid_closes = [c for c in closes if c > 0]
-                if len(valid_closes) > 1:
-                    returns = np.diff(np.log(valid_closes))
-                    regime = self.regime_agent.detect_regime(returns)
-                    context.user_context["market_regime"] = regime.model_dump()
-                    logger.info(f"DecisionAgent: Detected Market Regime: {regime.label}")
-
         import os
         if os.getenv("USE_SHADOW_LLM") == "1":
              return {"content": self._generate_shadow_response(context, query=query), "response_id": None}
 
-        # 1b. SOTA 2026: Calculate Hybrid Conviction Multiplier
-        conviction_multiplier = 1.0
-        if context.vision and context.vision.patterns:
-            high_conf_patterns = [p for p in context.vision.patterns if p.confidence >= 0.85]
-            if high_conf_patterns:
-                conviction_multiplier = 1.2
-                logger.info(f"DecisionAgent: High-confidence visual patterns detected. Applying 1.2x Conviction Multiplier.")
-                context.user_context["conviction_multiplier"] = conviction_multiplier
+        from status_manager import status_manager
+        status_manager.set_status("decision_agent", "working", "Applying reasoning...", model=self.model_name)
+
+        # 1. Identify Cross-Agent Contradictions
+        contradictions = self._identify_contradictions(context)
+        if contradictions:
+            context.user_context["contradictions"] = contradictions
 
         # 2. Build optimized prompt
         prompt = self._build_prompt(context, query)
@@ -149,8 +117,8 @@ class DecisionAgent:
         if any(k in (query or "").lower() for k in ["simulate", "calculate", "math", "model", "monte carlo", "forecast"]):
             logger.info("DecisionAgent: Math query detected. Enforcing NPU-Accelerated Sandbox.")
             try:
-                from backend.agents.math_generator_agent import MathGeneratorAgent
-                from backend.utils.math_validator import MathValidator
+                from .math_generator_agent import MathGeneratorAgent
+                from utils.math_validator import MathValidator
                 
                 # Prepare context for math agent
                 math_input = {
@@ -181,7 +149,7 @@ class DecisionAgent:
                     
                     # Integrate Math Telemetry
                     try:
-                        from backend.telemetry_store import record_math_metric
+                        from telemetry_store import record_math_metric
                         # Utilization proxy: if successful, assume 45% for NPU baseline
                         util_proxy = 45.0 if exec_result.get("status") == "success" else 0.0
                         
@@ -225,16 +193,13 @@ class DecisionAgent:
             recommendation = loop_result.get("content", "")
             response_id = loop_result.get("response_id")
             
-            # 5. SOTA 2026: Reasoning Trace Export (Task 2.2)
-            await self._export_reasoning_trace(context, recommendation, query)
-
             # Price validation
             recommendation = await self._validate_prices(recommendation, context.ticker)
 
             # SOTA 2026 Phase 30: Detect and extract Trade Proposals for HITL
             trade_proposal = self._extract_trade_proposal(recommendation, context)
             if trade_proposal:
-                from backend.app_context import state
+                from app_context import state
                 proposal_id = trade_proposal.get("proposal_id")
                 state.trade_proposals[proposal_id] = trade_proposal
                 context.user_context["pending_proposal"] = trade_proposal
@@ -257,8 +222,7 @@ class DecisionAgent:
                     "correlation_id": correlation_id_ctx.get(),
                     "recommendation_snippet": recommendation[:200],
                     "response_id": response_id,
-                    "contradictions_count": len(contradictions) if contradictions else 0,
-                    "conviction_multiplier": conviction_multiplier
+                    "contradictions_count": len(contradictions) if contradictions else 0
                 }
             )
 
@@ -271,48 +235,6 @@ class DecisionAgent:
             logger.error(f"Decision making failed: {e}")
             status_manager.set_status("decision_agent", "error", f"Error: {str(e)}", model=self.model_name)
             return {"content": f"Error generating recommendation: {str(e)}", "response_id": None}
-
-    async def _export_reasoning_trace(self, context: MarketContext, recommendation: str, query: str):
-        """SOTA 2026: Export detailed reasoning trace as JSON for auditing and UAT."""
-        try:
-            from datetime import datetime, timezone
-            trace = {
-                "correlation_id": correlation_id_ctx.get(),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "query": query,
-                "inputs": {
-                    "ticker": context.ticker,
-                    "intent": context.intent,
-                    "agents_executed": list(context.agents_executed),
-                    "hybrid_weighting": {
-                        "quant": 0.4,
-                        "forecast": 0.3,
-                        "visual": 0.3
-                    },
-                    "conviction_multiplier": context.user_context.get("conviction_multiplier", 1.0)
-                },
-                "agent_thoughts": {
-                    "chain_of_thought": context.reasoning,
-                    "contradictions": context.user_context.get("contradictions", [])
-                },
-                "final_consensus": {
-                    "recommendation_summary": recommendation[:500] + "..." if len(recommendation) > 500 else recommendation,
-                    "model": self.model_name
-                }
-            }
-            
-            # Save to a dedicated trace file (overwritten per request in UAT, or unique ID in prod)
-            trace_path = os.path.join(os.getcwd(), "reasoning_trace.json")
-
-            def save_trace():
-                with open(trace_path, "w") as f:
-                    json.dump(trace, f, indent=2)
-
-            await asyncio.to_thread(save_trace)
-            
-            logger.info(f"✅ Reasoning trace exported to {trace_path}")
-        except Exception as e:
-            logger.warning(f"Failed to export reasoning trace: {e}")
 
     def _identify_contradictions(self, context: MarketContext) -> List[str]:
         """Identify conflicting signals between agents for the debate phase."""
@@ -373,7 +295,7 @@ class DecisionAgent:
              yield self._generate_shadow_response(context, query=query)
              return
 
-        from backend.status_manager import status_manager
+        from status_manager import status_manager
         status_manager.set_status("decision_agent", "working", "Streaming reasoning...", model=self.model_name)
 
         # Same prep logic as make_decision
@@ -425,7 +347,7 @@ class DecisionAgent:
             status_manager.set_status("decision_agent", "ready", "Stream complete", model=self.model_name)
             
             # SOTA 2026: Emit Decision Completion Telemetry
-            from backend.agents.messenger import AgentMessage, get_messenger
+            from .messenger import AgentMessage, get_messenger
             messenger = get_messenger()
             c_id = correlation_id_ctx.get()
             await messenger.send_message(AgentMessage(
@@ -464,7 +386,39 @@ class DecisionAgent:
             shadow_text = self._generate_shadow_response(context)
             return {"content": self._clean_response(shadow_text), "response_id": "shadow-test-id"}
 
-        # 1. Standard Agentic Loop (Stateless)
+        # 1. Stateful Priority: If LM Studio Client supports it, use server-side context
+        from lm_studio_client import LMStudioClient
+        if isinstance(self.llm, LMStudioClient) and hasattr(self.llm, "stateful_chat"):
+            try:
+                logger.info(f"DecisionAgent: Initiating stateful chat turn (Prev ID: {previous_response_id})")
+                stateful_resp = await self.llm.stateful_chat(
+                    model_id=self.model_name,
+                    input_text=prompt,
+                    previous_response_id=previous_response_id,
+                    system_prompt=system_content,
+                    temperature=0.1
+                )
+                if "error" not in stateful_resp:
+                    content = stateful_resp.get("content", "")
+                    reasoning = stateful_resp.get("reasoning", "")
+
+                    # Capture reasoning if not provided by client directly
+                    if not reasoning:
+                         reasoning = self._extract_reasoning(content)
+
+                    if reasoning:
+                         context.reasoning = reasoning
+
+                    return {
+                        "content": self._clean_response(content),
+                        "response_id": stateful_resp.get("response_id")
+                    }
+                else:
+                    logger.warning(f"Stateful chat failed: {stateful_resp['error']}. Falling back to stateless loop.")
+            except Exception as se:
+                logger.error(f"Stateful transition error: {se}. Falling back.")
+
+        # 2. Stateless Fallback: Standard Agentic Loop
         messages = [
             {"role": "system", "content": system_content},
             {"role": "user", "content": prompt}
@@ -496,7 +450,7 @@ class DecisionAgent:
                 tool_calls = await asyncio.to_thread(extract_tool_calls, content, reasoning)
                 
                 if tool_calls:
-                    from backend.status_manager import status_manager
+                    from status_manager import status_manager
                     if len(tool_calls) > 1:
                         logger.info(f"DecisionAgent: Executing {len(tool_calls)} Parallel Consultations")
                         status_manager.set_status("decision_agent", "working", f"Executing {len(tool_calls)} parallel consultations...", model=self.model_name)
@@ -518,10 +472,14 @@ class DecisionAgent:
                             logger.info(f"DecisionAgent: Executing Tool {tool_name}")
 
                             async def execute_mcp_tool():
-                                return await run_with_timeout(
-                                    mcp.call_tool(tool_name, tool_args),
-                                    timeout=15.0
-                                )
+                                if hasattr(asyncio, 'timeout'):
+                                    async with asyncio.timeout(15.0):
+                                        return await mcp.call_tool(tool_name, tool_args)
+                                else:
+                                    return await asyncio.wait_for(
+                                        mcp.call_tool(tool_name, tool_args),
+                                        timeout=15.0
+                                    )
 
                             result = await decision_circuit_breaker.call(execute_mcp_tool)
 
@@ -586,7 +544,7 @@ class DecisionAgent:
         Emulates a high-fidelity model response using real context data.
         Verifies that Phase 28 Liquidity and Phase 27 Geopolitical features work.
         """
-        q = (query or "").lower()
+        q = query.lower()
         if context.intent == "conversational":
             if re.search(r'\b(hello|hi|hey|greetings)\b', q):
                 return "Hello! I'm your Growin Intelligence Assistant. How can I help you with your portfolio or the markets today?"
@@ -675,7 +633,7 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
         If perfect, repeat exactly. If flaws found, rewrite the "Strategic Synthesis".
         """
 
-        from backend.status_manager import status_manager
+        from status_manager import status_manager
         status_manager.set_status("decision_agent", "working", "Refining strategy...", model=self.model_name)
 
         if hasattr(self.llm, "ainvoke"):
@@ -692,7 +650,7 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
     async def _validate_prices(self, text: str, ticker: Optional[str]) -> str:
         """Run price validation if trade detected."""
         if any(word in text.upper() for word in ["BUY", "SELL"]) and ticker:
-            from backend.status_manager import status_manager
+            from status_manager import status_manager
             status_manager.set_status("decision_agent", "working", f"Validating price for {ticker}...", model=self.model_name)
             validation = await PriceValidator.validate_trade_price(ticker)
 
@@ -710,7 +668,7 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
 
 
         # Skills (Limit length for small models)
-        from backend.utils.skill_loader import get_skill_loader
+        from utils.skill_loader import get_skill_loader
         skills_text = get_skill_loader().get_relevant_skills(query)
         if skills_text:
             if is_small_model:
@@ -719,7 +677,7 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
             prompt += f"\n\n=== RELEVANT EXPERT GUIDELINES ===\n{skills_text}\n=================================="
 
         # RAG
-        from backend.app_context import state
+        from app_context import state
         if state.rag_manager:
             # Fetch fewer docs for small models
             n_results = 1 if is_small_model else 3
@@ -879,7 +837,7 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
         return "all"
 
     def _build_prompt(self, context: MarketContext, query: str, account_filter: str = "all") -> str:
-        """Build prompt from market context with SOTA 2026 30/30/40 Hybrid Fusion."""
+        """Build prompt from market context"""
 
         # Final Mandatory Structure for rendering
         structured_template = """
@@ -899,17 +857,6 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
         ### 4. Strategic Synthesis
         [Your detailed reasoning here...]
         """
-        
-        # SOTA 2026: Infuse Hybrid Weighting Instructions
-        weighting_instruction = """
-        [HYBRID FUSION MANDATE]
-        Apply the following weighting to your synthesis:
-        - 40% QUANT/TECHNICALS (Indicators & ORB)
-        - 30% FORECASTING (TTM-R2 Predictive Stability)
-        - 30% VISUAL/SENTIMENT (VLM Patterns & News)
-        
-        If a Conviction Multiplier is active (Visual Patterns > 0.85), escalate your sizing and confidence accordingly.
-        """
 
         coordinator_account = context.user_context.get("account_type")
         if coordinator_account:
@@ -918,8 +865,7 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
         sections = [
             f"**User Query**: {query}",
             f"**System Intent**: {context.intent}",
-            f"**Routing Logic**: {context.routing_reason or 'Direct Analysis'}\n",
-            weighting_instruction
+            f"**Routing Logic**: {context.routing_reason or 'Direct Analysis'}\n"
         ]
 
         # Specialist Execution Summary
@@ -971,13 +917,6 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
             g = context.geopolitical
             events = " | ".join([f"{e.title[:40]}" for e in g.top_events[:2]])
             sections.append(f"**GPR (Geopolitical)**: Score: {g.gpr_score:.2f} ({g.global_sentiment_label}) | Events: {events}")
-
-        # Market Regime (SOTA 2026 Phase 37)
-        regime = context.user_context.get("market_regime")
-        if regime:
-            sections.append(f"**MARKET REGIME**: {regime['label']} (Volatility Z-Score: {regime['z_score']:.2f})")
-            if regime['label'] == "EXTREME_VOL":
-                sections.append("⚠️ **RL GATE ACTIVE**: Market is in EXTREME VOLATILITY regime. Prioritize CAPITAL PRESERVATION over aggressive ROI.")
 
         # Institutional Liquidity (SOTA 2026 Phase 28)
         if context.risk_governance and context.risk_governance.slippage_bps is not None:

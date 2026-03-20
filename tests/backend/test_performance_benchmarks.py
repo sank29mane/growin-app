@@ -1,7 +1,7 @@
 import pytest
 import time
 import asyncio
-from backend.utils.rstitch_engine import RStitchEngine
+from utils.rstitch_engine import RStitchEngine
 
 @pytest.mark.asyncio
 async def test_rstitch_speedup_benchmark():
@@ -38,7 +38,7 @@ async def test_rstitch_speedup_benchmark():
 @pytest.mark.asyncio
 async def test_sse_latency_benchmark():
     """Verify SSE time-to-first-token."""
-    from backend.routes.ai_routes import strategy_event_generator
+    from routes.ai_routes import strategy_event_generator
     import os
     
     start_time = time.time()
@@ -51,7 +51,7 @@ async def test_sse_latency_benchmark():
     # SOTA target is <100ms. In CI without MLX, exceptions and slow initializations
     # take seconds. We relax this for CI and also for local cold starts.
     is_ci = os.getenv("CI") == "true" or os.getenv("GITHUB_ACTIONS") == "true"
-    threshold = 10000 if is_ci else 10000
+    threshold = 10000
 
     assert latency_ms < threshold
     assert first_event["event"] in ["status_update", "reasoning_step", "error", "final_result"]

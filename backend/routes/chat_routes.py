@@ -5,16 +5,16 @@ Chat Routes - Conversation and Message Handling
 from fastapi import APIRouter, HTTPException, Depends, Header
 from typing import Optional, Dict, Any
 from pydantic import BaseModel
-from backend.app_context import state, ChatMessage, AnalyzeRequest, AgentResponse
-from backend.rate_limiter import default_limiter
-from backend.utils import extract_ticker_from_text, sanitize_nan
+from app_context import state, ChatMessage, AnalyzeRequest, AgentResponse
+from rate_limiter import default_limiter
+from utils import extract_ticker_from_text, sanitize_nan
 import logging
 import traceback
 import asyncio
 from datetime import datetime
 import uuid
-from backend.app_logging import correlation_id_ctx
-from backend.utils.audit_log import log_audit
+from app_logging import correlation_id_ctx
+from utils.audit_log import log_audit
 
 # Constants
 TITLE_UPDATE_INTERVAL = 6  # Update title every 6 messages
@@ -83,8 +83,8 @@ async def chat_message(
         )
 
     try:
-        from backend.agents.coordinator_agent import CoordinatorAgent
-        from backend.agents.decision_agent import DecisionAgent
+        from agents.coordinator_agent import CoordinatorAgent
+        from agents.decision_agent import DecisionAgent
         
         chat_manager = state.chat_manager
         conversation_id = request.conversation_id or chat_manager.create_conversation()
@@ -103,7 +103,7 @@ async def chat_message(
         history = chat_manager.load_history(conversation_id, limit=6)
         
         # Unified Orchestration (SOTA 2026 Architecture)
-        from backend.agents.orchestrator_agent import OrchestratorAgent
+        from agents.orchestrator_agent import OrchestratorAgent
         
         orchestrator = OrchestratorAgent(
             mcp_client=state.mcp_client,
@@ -174,9 +174,9 @@ async def stream_chat_generator(request: ChatMessage):
         await queue.put(msg)
         
     try:
-        from backend.agents.coordinator_agent import CoordinatorAgent
-        from backend.agents.decision_agent import DecisionAgent
-        from backend.agents.messenger import get_messenger
+        from agents.coordinator_agent import CoordinatorAgent
+        from agents.decision_agent import DecisionAgent
+        from agents.messenger import get_messenger
         import json
         
         chat_manager = state.chat_manager
@@ -216,7 +216,7 @@ async def stream_chat_generator(request: ChatMessage):
                 ticker = extract_ticker_from_text(request.message)
                 history = chat_manager.load_history(conversation_id, limit=6)
                 
-                from backend.agents.orchestrator_agent import OrchestratorAgent
+                from agents.orchestrator_agent import OrchestratorAgent
                 orchestrator = OrchestratorAgent(
                     mcp_client=state.mcp_client,
                     chat_manager=state.chat_manager,
@@ -351,7 +351,7 @@ async def analyze_portfolio(request: AnalyzeRequest):
         raise HTTPException(status_code=503, detail="MCP Server not connected")
 
     try:
-        from backend.agents.orchestrator_agent import OrchestratorAgent
+        from agents.orchestrator_agent import OrchestratorAgent
         
         # Extract ticker from query (simple approach)
         ticker = None
@@ -469,7 +469,7 @@ async def generate_conversation_title(conversation_id: str, model_name: Optional
     Generate a concise AI-powered title for a conversation.
     """
     try:
-        from backend.utils.text_processing import extract_title_from_text
+        from utils.text_processing import extract_title_from_text
         
         chat_manager = state.chat_manager
         history = chat_manager.get_conversation_history(conversation_id)
@@ -493,7 +493,7 @@ async def generate_conversation_title(conversation_id: str, model_name: Optional
             f"Conversation:\n{messages_text}\n\nTitle:"
         )
 
-        from backend.agents.decision_agent import DecisionAgent
+        from agents.decision_agent import DecisionAgent
         agent = DecisionAgent(model_name=model_name or "native-mlx")
         response = await agent.generate_response(prompt)
 
@@ -522,7 +522,7 @@ async def ingest_knowledge(request: IngestRequest):
     Useful for users to save strategy notes, specific news, or goals.
     """
     try:
-        from backend.app_context import state
+        from app_context import state
         if not state.rag_manager:
             raise HTTPException(status_code=503, detail="RAG system not initialized")
             
@@ -535,7 +535,5 @@ async def ingest_knowledge(request: IngestRequest):
         
         return {"status": "success", "message": "Knowledge ingested successfully"}
     except Exception as e:
-        logger.error(f"Chat error: {e}", exc_info=True)
-        # SOTA 2026: Preserve specific error message for test assertions if available
-        raise HTTPException(status_code=500, detail=str(e))
-
+        logger.error(f"Ingestion failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal Server Error")

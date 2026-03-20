@@ -1,5 +1,5 @@
 import pytest
-from backend.utils.rstitch_engine import RStitchEngine
+from utils.rstitch_engine import RStitchEngine
 
 @pytest.mark.asyncio
 async def test_rstitch_delegation_high_entropy():

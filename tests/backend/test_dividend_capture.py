@@ -4,7 +4,7 @@ from datetime import date
 from decimal import Decimal
 from backend.data_models import DividendData, PriceData
 from backend.dividend_bridge import LeveragedDividendEngine
-from quant_engine import QuantEngine
+from backend.quant_engine import QuantEngine
 
 def test_leveraged_dividend_engine_leverage():
     engine = LeveragedDividendEngine()

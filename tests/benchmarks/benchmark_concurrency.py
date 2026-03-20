@@ -5,7 +5,7 @@ import sys
 import os
 
 # Add backend to path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../backend')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from app_context import state, ChatMessage
 from routes.chat_routes import chat_message

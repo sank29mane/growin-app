@@ -4,10 +4,10 @@ Growin Backend Server - Main Application Entry Point
 
 from datetime import datetime
 
-from backend.app_logging import setup_logging
+from app_logging import setup_logging
 
-# Import shared state and models from backend.app_context (single source of truth)
-from backend.app_context import state
+# Import shared state and models from app_context (single source of truth)
+from app_context import state
 
 # Initialize Logging
 logger = setup_logging("growin_server")
@@ -27,7 +27,7 @@ if os.name == 'posix':  # macOS/Linux
 
 # ANE auto-detection and config (macOS Apple Silicon)
 try:
-    from backend.utils.ane_detection import detect_ane_available
+    from utils.ane_detection import detect_ane_available
     _ane_available = detect_ane_available()
 except Exception as e:
     logger.debug(f"ANE detection failed (safe to ignore on non-Apple Silicon): {e}")
@@ -56,7 +56,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
 from contextlib import asynccontextmanager
-from backend.security_middleware import SecurityHeadersMiddleware
+from security_middleware import SecurityHeadersMiddleware
 import os
 import sys
 
@@ -72,7 +72,7 @@ async def lifespan(app: FastAPI):
     
     # Check Active Components for Observability
     try:
-        from backend.growin_core_src import growin_core
+        from growin_core_src import growin_core
         logger.info("✅ Rust Core: Enabled (Performance Mode)")
     except ImportError:
         logger.info("⚠️  Rust Core: Disabled (Fallback Mode)")
@@ -156,7 +156,7 @@ async def lifespan(app: FastAPI):
             
             # 4. Initialize TTM-R2 Model (async, non-blocking)
             try:
-                from backend.forecaster import get_forecaster
+                from forecaster import get_forecaster
                 get_forecaster()
                 logger.info("✅ Forecaster initialized")
             except Exception as e:
@@ -213,7 +213,7 @@ app.add_middleware(SecurityHeadersMiddleware)
 
 # Include specialized routers
 # Include specialized routers
-from backend.routes import chat_routes, agent_routes, market_routes, mcp_routes, chart_routes, status_routes, ai_routes, alpha_routes
+from routes import chat_routes, agent_routes, market_routes, mcp_routes, chart_routes, status_routes, ai_routes
 
 app.include_router(chat_routes.router)
 app.include_router(agent_routes.router)
@@ -222,8 +222,6 @@ app.include_router(mcp_routes.router)
 app.include_router(status_routes.router) # Detailed health & agent status
 app.include_router(chart_routes.router)  # Chart data and visualization
 app.include_router(ai_routes.router)     # SOTA 2026 AI Strategy & Reasoning
-app.include_router(alpha_routes.router, prefix="/api/alpha", tags=["Alpha"])
-
 
 # --------------------------------------------------------------------------- #
 # Root Endpoints

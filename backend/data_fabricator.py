@@ -10,9 +10,9 @@ from typing import Dict, Any, Optional, List
 from datetime import datetime
 from decimal import Decimal
 
-from backend.market_context import MarketContext, PriceData, TimeSeriesItem, ResearchData, NewsArticle, SocialData, WhaleData, GeopoliticalData
-from backend.data_engine import get_alpaca_client, get_finnhub_client
-from backend.utils.news_client import NewsDataIOClient
+from market_context import MarketContext, PriceData, TimeSeriesItem, ResearchData, NewsArticle, SocialData, WhaleData, GeopoliticalData
+from data_engine import get_alpaca_client, get_finnhub_client
+from utils.news_client import NewsDataIOClient
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +80,7 @@ class DataFabricator:
                 tasks.append(self._fetch_price_data(pt, timeframe=timeframe, limit=180))
             
             # Fetch macro signals via RegimeFetcher
-            from backend.utils.regime_fetcher import RegimeFetcher
+            from utils.regime_fetcher import RegimeFetcher
             tasks.append(RegimeFetcher().fetch_signals())
 
         # Always fetch Price if we have a ticker and not already handled by portfolio_optimization
@@ -123,7 +123,7 @@ class DataFabricator:
                 elif isinstance(res, GeopoliticalData):
                     context.geopolitical = res
                 elif isinstance(res, dict) and ("vix_level" in res or "vix" in res):
-                    from backend.market_context import RiskGovernanceData
+                    from market_context import RiskGovernanceData
                     # Inject trade_horizon into RiskGovernanceData
                     res["trade_horizon"] = trade_horizon
                     
@@ -137,7 +137,7 @@ class DataFabricator:
             
             # SOTA 2026 Phase 28: Second pass for liquidity calculation
             if context.price and context.price.history_series and context.risk_governance:
-                from backend.agents.quant_agent import QuantAgent
+                from agents.quant_agent import QuantAgent
                 quant_agent = QuantAgent()
                 
                 ohlcv = [{"v": float(b.volume or 0)} for b in context.price.history_series]
@@ -157,7 +157,7 @@ class DataFabricator:
                 rg_dict["pov_participation"] = Decimal(str(liq_check["pov"]))
                 rg_dict["liquidity_status"] = liq_check["status"]
                 
-                from backend.market_context import RiskGovernanceData
+                from market_context import RiskGovernanceData
                 context.risk_governance = RiskGovernanceData(**rg_dict)
 
         # 5. Measure latency
@@ -166,9 +166,9 @@ class DataFabricator:
         return context
 
     async def _fetch_price_data(self, ticker: str, timeframe: str = "1Day", limit: int = 1000) -> Optional[PriceData]:
-        from backend.cache_manager import cache
+        from cache_manager import cache
         from decimal import Decimal
-        from backend.utils.financial_math import create_decimal, safe_div
+        from utils.financial_math import create_decimal, safe_div
 
         cache_key = f"price_data:{ticker}:{timeframe}:{limit}"
         cached = cache.get(cache_key)
@@ -176,10 +176,10 @@ class DataFabricator:
             return cached
 
         try:
-            from backend.status_manager import status_manager
+            from status_manager import status_manager
             status_manager.set_status("coordinator", "working", f"Fetching price data for {ticker}...")
             
-            from backend.utils.data_frayer import get_data_frayer
+            from utils.data_frayer import get_data_frayer
             frayer = get_data_frayer()
             
             # Use SOTA Data Fraying to combine all providers for EQUITIES
@@ -264,7 +264,7 @@ class DataFabricator:
             # --- T212 PORTFOLIO CHECK (Real-time fallback for owned assets) ---
             if current_price <= 0:
                 try:
-                    from backend.app_context import state
+                    from app_context import state
                     if state.mcp_client:
                          pos_result = await state.mcp_client.call_tool("get_position_details", {"ticker": ticker}, timeout=5.0)
                          if pos_result and hasattr(pos_result, 'content') and pos_result.content:
@@ -310,7 +310,7 @@ class DataFabricator:
 
     async def _fetch_news_data(self, ticker: str) -> Optional[ResearchData]:
         """Fetch news using NewsDataIOClient."""
-        from backend.status_manager import status_manager
+        from status_manager import status_manager
         status_manager.set_status("research_agent", "working", f"Searching news for {ticker}...")
         try:
             articles = await self.news_client.fetch_latest_news(ticker)

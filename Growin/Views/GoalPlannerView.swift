@@ -410,9 +410,8 @@ struct RiskButton: View {
         }
         .buttonStyle(.plain)
         .accessibilityElement(children: .combine)
-
-        .accessibilityLabel("\(title.replacingOccurrences(of: "_", with: " ")) Risk Level")
-        .accessibilityHint("Selects \(title.replacingOccurrences(of: "_", with: " ")) as your risk tolerance")
+        .accessibilityLabel("\(formattedTitle) Risk Level")
+        .accessibilityHint("Selects \(formattedTitle) as your risk tolerance")
         .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : [.isButton])
     }
 }
