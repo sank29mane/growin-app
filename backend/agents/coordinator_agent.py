@@ -199,16 +199,13 @@ class CoordinatorAgent(BaseAgent):
         
         # COORDINATOR FIX: Ticker normalization
         if context.ticker:
-            is_valid = False
-            # Allow pure alphanumeric (e.g., AAPL, 3GLD, A)
-            if context.ticker.isalnum():
-                is_valid = True
-            # Allow a single internal dot (e.g., VOD.L)
-            elif context.ticker.count('.') == 1 and context.ticker.replace('.', '').isalnum():
-                is_valid = True
+            original_ticker = context.ticker
 
-            if not is_valid:
-                context.ticker = await self._attempt_ticker_fix(context.ticker)
+            # Centralized SOTA ticker normalization
+            normalized = TickerResolver().normalize(context.ticker)
+            if normalized and normalized != original_ticker:
+                logger.info(f"Coordinator: Normalized ticker '{original_ticker}' -> '{normalized}'")
+                context.ticker = normalized
 
         # 3. PARALLEL AGENT_EXECUTION (Pure Processors)
         needs = intent.get("needs", [])
@@ -446,20 +443,6 @@ class CoordinatorAgent(BaseAgent):
         
         context.agents_executed.add(name)
 
-    async def _attempt_ticker_fix(self, ticker: str) -> str:
-        """Strip and clean ticker if it's likely a formatting error"""
-        if not ticker: return ticker
-        
-        # Strip trailing dots first
-        ticker = ticker.strip('.')
-        
-        # Extract alphanumeric part
-        match = re.search(r'([A-Z0-9.]+)', ticker.upper())
-        if match:
-            cleaned = match.group(1)
-            logger.info(f"Coordinator: Fixed malformed ticker '{ticker}' -> '{cleaned}'")
-            return cleaned
-        return ticker
 
     async def _resolve_ticker_via_search(self, term: str) -> Optional[str]:
         """Tier 2: Use TickerResolver search to find correct ticker for a name/term"""

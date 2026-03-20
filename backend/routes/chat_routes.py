@@ -161,9 +161,10 @@ async def chat_message(
         }
     except Exception as e:
         logger.error(f"Chat error: {str(e)}\n{traceback.format_exc()}")
+        # Sanitized error for security
         raise HTTPException(
             status_code=500, 
-            detail=str(e)
+            detail="Internal Server Error"
         )
 
 async def stream_chat_generator(request: ChatMessage):
