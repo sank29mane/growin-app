@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 /// AlphaCommandDashboard: The primary 120Hz Alpha tracking dashboard.
 /// Uses SwiftUI.Canvas for high-performance rendering of streaming Alpha data.

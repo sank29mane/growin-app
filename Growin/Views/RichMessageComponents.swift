@@ -795,16 +795,11 @@ struct TradeProposalCard: View, Equatable {
                         .padding(.vertical, 10)
                         .background(Color.green.opacity(0.15))
                         .foregroundStyle(.green)
-                        .cornerRadius(8)
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.green.opacity(0.3), lineWidth: 1))
+                        .border(Color.green.opacity(0.3), width: 1)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Approve \(proposal.action.capitalized) \(proposal.ticker)")
-<<<<<<< HEAD
                     .accessibilityHint("Approves the NPU trade proposal and executes the order")
-=======
-                    .accessibilityHint("Approves the \(proposal.action.lowercased()) action for \(proposal.ticker)")
->>>>>>> feature/optimize-mcp-db-retrieval-13922736839544958811
                     .accessibilityAddTraits(.isButton)
                     
                     Button(action: { onReject(proposal.proposalId) }) {
@@ -817,16 +812,11 @@ struct TradeProposalCard: View, Equatable {
                         .padding(.vertical, 10)
                         .background(Color.red.opacity(0.15))
                         .foregroundStyle(.red)
-                        .cornerRadius(8)
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.red.opacity(0.3), lineWidth: 1))
+                        .border(Color.red.opacity(0.3), width: 1)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Reject \(proposal.action.capitalized) \(proposal.ticker)")
-<<<<<<< HEAD
                     .accessibilityHint("Rejects the NPU trade proposal and discards the order")
-=======
-                    .accessibilityHint("Rejects the \(proposal.action.lowercased()) action for \(proposal.ticker)")
->>>>>>> feature/optimize-mcp-db-retrieval-13922736839544958811
                     .accessibilityAddTraits(.isButton)
                 }
             } else {
