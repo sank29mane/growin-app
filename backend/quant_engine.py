@@ -557,9 +557,13 @@ class QuantEngine:
 
         for symbol, pct_val in current_allocation.items():
             try:
-                val_str = str(pct_val).strip().replace('%', '')
-                val_dec = create_decimal(val_str)
-                if val_dec > 1: val_dec = val_dec / 100
+                val_str = str(pct_val).strip()
+                is_pct = val_str.endswith('%')
+                val_dec = create_decimal(val_str.replace('%', ''))
+                if is_pct:
+                    val_dec = val_dec / 100
+                elif val_dec > 1:
+                    val_dec = val_dec / 100
                 current_parsed[symbol] = val_dec
             except Exception:
                 current_parsed[symbol] = Decimal(0)
