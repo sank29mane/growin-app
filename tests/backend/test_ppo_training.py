@@ -1,5 +1,12 @@
 import pytest
-import mlx.core as mx
+try:
+    import mlx.core as mx
+    HAS_MLX = True
+except ImportError:
+    mx = None
+    HAS_MLX = False
+    pytest.skip("MLX not available", allow_module_level=True)
+
 import numpy as np
 from backend.agents.ppo_agent import PPOAgent
 from backend.agents.rl_utils import financial_reward

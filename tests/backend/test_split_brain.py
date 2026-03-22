@@ -1,6 +1,13 @@
 import pytest
 import numpy as np
-import mlx.core as mx
+
+try:
+    import mlx.core as mx
+    HAS_MLX = True
+except ImportError:
+    mx = None
+    HAS_MLX = False
+    pytest.skip("MLX not available", allow_module_level=True)
 
 import sys
 import os

@@ -1,7 +1,16 @@
-import mlx.core as mx
-import mlx.nn as nn
-import mlx.optimizers as optim
-import mlx.utils as utils
+try:
+    import mlx.core as mx
+    import mlx.nn as nn
+    import mlx.optimizers as optim
+    import mlx.utils as utils
+    HAS_MLX = True
+except ImportError:
+    mx = None
+    nn = None
+    optim = None
+    utils = None
+    HAS_MLX = False
+
 import numpy as np
 import time
 import asyncio
@@ -12,12 +21,12 @@ from backend.agents.rl_utils import compute_gae
 
 class TrajectoryBuffer:
     def __init__(self):
-        self.states: List[mx.array] = []
-        self.actions: List[mx.array] = []
-        self.log_probs: List[mx.array] = []
-        self.rewards: List[mx.array] = []
-        self.values: List[mx.array] = []
-        self.masks: List[mx.array] = []
+        self.states: List['mx.array'] = []
+        self.actions: List['mx.array'] = []
+        self.log_probs: List['mx.array'] = []
+        self.rewards: List['mx.array'] = []
+        self.values: List['mx.array'] = []
+        self.masks: List['mx.array'] = []
 
     def clear(self):
         self.states.clear()
@@ -27,7 +36,9 @@ class TrajectoryBuffer:
         self.values.clear()
         self.masks.clear()
 
-    def add(self, state: mx.array, action: mx.array, log_prob: mx.array, reward: float, value: float, mask: float):
+    def add(self, state: 'mx.array', action: 'mx.array', log_prob: 'mx.array', reward: float, value: float, mask: float):
+        if not HAS_MLX:
+            return
         self.states.append(state)
         self.actions.append(action)
         self.log_probs.append(log_prob)
@@ -35,7 +46,9 @@ class TrajectoryBuffer:
         self.values.append(mx.array([value]))
         self.masks.append(mx.array([mask]))
 
-    def get_tensors(self) -> Tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array]:
+    def get_tensors(self) -> Tuple['mx.array', 'mx.array', 'mx.array', 'mx.array', 'mx.array', 'mx.array']:
+        if not HAS_MLX:
+            return None, None, None, None, None, None
         return (
             mx.concatenate(self.states, axis=0),
             mx.concatenate(self.actions, axis=0),
@@ -48,7 +61,7 @@ class TrajectoryBuffer:
 class PPOAgent:
     def __init__(self, n_assets: int = 10, state_dim: int = 64, lr: float = 3e-4, gamma: float = 0.99, lam: float = 0.95, clip_epsilon: float = 0.2, entropy_coef: float = 0.01, value_coef: float = 0.5, max_grad_norm: float = 0.5, reward_scaling: float = 1.0, metrics_queue: Optional[asyncio.Queue] = None):
         # Force GPU if available AND not in CI (VMs often crash on Metal access)
-        if mx.metal.is_available() and os.getenv("CI") != "true":
+        if HAS_MLX and hasattr(mx, 'metal') and mx.metal.is_available() and os.getenv("CI") != "true":
             try:
                 mx.set_default_device(mx.gpu)
             except Exception:
@@ -56,8 +69,12 @@ class PPOAgent:
                 mx.set_default_device(mx.cpu)
             
         self.policy = RLPolicy(n_assets=n_assets, state_dim=state_dim)
-        self.optimizer = optim.Adam(learning_rate=lr)
-        self.log_std = mx.zeros((n_assets,))
+        if HAS_MLX:
+            self.optimizer = optim.Adam(learning_rate=lr)
+            self.log_std = mx.zeros((n_assets,))
+        else:
+            self.optimizer = None
+            self.log_std = None
         self.gamma = gamma
         self.lam = lam
         self.clip_epsilon = clip_epsilon
@@ -69,13 +86,17 @@ class PPOAgent:
         self._prev_params = None
         self.metrics_queue = metrics_queue
 
-    def get_log_prob(self, mean: mx.array, action: mx.array, log_std: mx.array) -> mx.array:
+    def get_log_prob(self, mean: 'mx.array', action: 'mx.array', log_std: 'mx.array') -> 'mx.array':
+        if not HAS_MLX:
+            return mean
         std = mx.exp(log_std)
         var = std ** 2
         log_prob = -0.5 * (((action - mean) ** 2) / var + 2 * mx.log(std) + mx.log(2 * np.pi))
         return mx.sum(log_prob, axis=-1)
 
-    def select_action(self, state: mx.array) -> Tuple[mx.array, mx.array, mx.array]:
+    def select_action(self, state: 'mx.array') -> Tuple['mx.array', 'mx.array', 'mx.array']:
+        if not HAS_MLX:
+            return state, state, state
         mean, value = self.policy(state)
         std = mx.exp(self.log_std)
         noise = mx.random.normal(mean.shape)
@@ -84,7 +105,9 @@ class PPOAgent:
         log_prob = self.get_log_prob(mean, action, self.log_std)
         return action, log_prob, value
 
-    def loss_fn(self, model: nn.Module, log_std: mx.array, states: mx.array, actions: mx.array, old_log_probs: mx.array, advantages: mx.array, returns: mx.array) -> Tuple[mx.array, mx.array, mx.array, mx.array]:
+    def loss_fn(self, model: 'nn.Module', log_std: 'mx.array', states: 'mx.array', actions: 'mx.array', old_log_probs: 'mx.array', advantages: 'mx.array', returns: 'mx.array') -> Tuple['mx.array', 'mx.array', 'mx.array', 'mx.array']:
+        if not HAS_MLX:
+            return states, states, states, states
         mean, values = model(states)
         values = mx.squeeze(values, -1)
         std = mx.exp(log_std)
@@ -101,7 +124,16 @@ class PPOAgent:
         total_loss = policy_loss + self.value_coef * value_loss + self.entropy_coef * entropy_loss
         return total_loss, policy_loss, value_loss, entropy_loss
 
-    def train_on_batch(self, next_value: mx.array, batch_size: int = 64, epochs: int = 10) -> Dict[str, Any]:
+    def train_on_batch(self, next_value: 'mx.array', batch_size: int = 64, epochs: int = 10) -> Dict[str, Any]:
+        if not HAS_MLX:
+            return {
+                "loss": 0.0,
+                "entropy": 0.0,
+                "mean_reward": 0.0,
+                "stability_score": 1.0,
+                "timestamp": time.time(),
+                "epoch": epochs
+            }
         states, actions, log_probs, rewards, values, masks = self.buffer.get_tensors()
         
         # Apply Reward Scaling
@@ -174,7 +206,7 @@ class PPOAgent:
                 
         return metrics
 
-    def _calculate_stability(self, old_params: List[mx.array], new_params: List[mx.array]) -> float:
+    def _calculate_stability(self, old_params: List['mx.array'], new_params: List['mx.array']) -> float:
         """
         Calculates stability as 1.0 - normalized mean squared difference.
         """

@@ -1,7 +1,15 @@
-import mlx.core as mx
+try:
+    import mlx.core as mx
+    HAS_MLX = True
+except ImportError:
+    mx = None
+    HAS_MLX = False
+
 from typing import Tuple
 
-def compute_gae(rewards: mx.array, values: mx.array, masks: mx.array, next_value: mx.array, gamma: float = 0.99, lam: float = 0.95) -> Tuple[mx.array, mx.array]:
+def compute_gae(rewards: 'mx.array', values: 'mx.array', masks: 'mx.array', next_value: 'mx.array', gamma: float = 0.99, lam: float = 0.95) -> Tuple['mx.array', 'mx.array']:
+    if not HAS_MLX:
+        return rewards, rewards
     T = rewards.shape[0]
     adv_list = []
     current_gae = mx.zeros_like(next_value)

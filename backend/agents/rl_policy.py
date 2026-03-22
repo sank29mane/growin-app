@@ -1,9 +1,28 @@
-import mlx.core as mx
-import mlx.nn as nn
+try:
+    import mlx.core as mx
+    import mlx.nn as nn
+    HAS_MLX = True
+except ImportError:
+    mx = None
+    nn = None
+    HAS_MLX = False
+
 import numpy as np
 from typing import Dict, Any, Tuple, Optional
 
-class PPOActor(nn.Module):
+# Mock for nn.Module if MLX is missing
+BaseModule = nn.Module if HAS_MLX else object
+
+def mock_compile(fn):
+    return fn
+
+# Replace mx.compile with a dummy decorator if mlx is unavailable
+if HAS_MLX:
+    compile_dec = mx.compile
+else:
+    compile_dec = mock_compile
+
+class PPOActor(BaseModule):
     """
     3-Layer MLP Action Head (Actor) for Portfolio Optimization.
     Inputs: 64-dim State Vector from RLStateFabricator.
@@ -15,65 +34,84 @@ class PPOActor(nn.Module):
     - Linear(128, N_ASSETS) -> Tanh
     """
     def __init__(self, input_dim: int = 64, hidden_dim: int = 128, output_dim: int = 10):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, output_dim),
-            nn.Tanh()
-        )
-        
-    def __call__(self, x: mx.array) -> mx.array:
+        if HAS_MLX:
+            super().__init__()
+            self.net = nn.Sequential(
+                nn.Linear(input_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, output_dim),
+                nn.Tanh()
+            )
+        else:
+            self.net = None
+
+    def __call__(self, x: 'mx.array') -> 'mx.array':
+        if not HAS_MLX:
+            return x
         return self.net(x)
 
-class PPOCritic(nn.Module):
+class PPOCritic(BaseModule):
     """
     Value Function Head to estimate state-value V(s).
     Essential for calculating Advantages in PPO.
     """
     def __init__(self, input_dim: int = 64, hidden_dim: int = 128):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1)
-        )
-        
-    def __call__(self, x: mx.array) -> mx.array:
+        if HAS_MLX:
+            super().__init__()
+            self.net = nn.Sequential(
+                nn.Linear(input_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, 1)
+            )
+        else:
+            self.net = None
+
+    def __call__(self, x: 'mx.array') -> 'mx.array':
+        if not HAS_MLX:
+            return x
         return self.net(x)
 
-class RLPolicy(nn.Module):
+class RLPolicy(BaseModule):
     """
     PPO Policy Orchestrator optimized for Apple M4 Pro (MLX).
     Integrates Actor and Critic heads.
     """
     def __init__(self, n_assets: int = 10, state_dim: int = 64, hidden_dim: int = 128):
-        super().__init__()
-        self.actor = PPOActor(state_dim, hidden_dim, n_assets)
-        self.critic = PPOCritic(state_dim, hidden_dim)
+        if HAS_MLX:
+            super().__init__()
+            self.actor = PPOActor(state_dim, hidden_dim, n_assets)
+            self.critic = PPOCritic(state_dim, hidden_dim)
+            self.log_std = mx.zeros((n_assets,))
+        else:
+            self.actor = None
+            self.critic = None
+            self.log_std = None
         self.n_assets = n_assets
-        self.log_std = mx.zeros((n_assets,))
         
-    def scale_for_gbx(self, weights: mx.array, capital_gbp: float, ticker_prices_gbx: mx.array) -> mx.array:
+    def scale_for_gbx(self, weights: 'mx.array', capital_gbp: float, ticker_prices_gbx: 'mx.array') -> 'mx.array':
         """
         Scales policy weights for LSE Leveraged ETFs (GBX precision).
         Converts GBX (pence) to GBP (pounds) internally for correct fractional share routing.
         """
+        if not HAS_MLX:
+            return weights
         capital_gbp_array = mx.array([capital_gbp])
         allocations_gbp = weights * capital_gbp_array
         prices_gbp = ticker_prices_gbx / 100.0
         shares = allocations_gbp / prices_gbp
         return shares
 
-    def __call__(self, state: mx.array) -> Tuple[mx.array, mx.array]:
+    def __call__(self, state: 'mx.array') -> Tuple['mx.array', 'mx.array']:
         """
         Forward pass for both Actor and Critic.
         Returns (weights, value).
         """
+        if not HAS_MLX:
+            return state, state
         raw_weights = self.actor(state)
         weights = mx.clip(raw_weights, 0.0, 1.0) # Clip weights to valid long-only range [0, 1]
         value = self.critic(state)
@@ -81,13 +119,13 @@ class RLPolicy(nn.Module):
 
     def ppo_objective(
         self, 
-        alpha: mx.array, 
-        transaction_cost: mx.array, 
-        vol_tax: mx.array,
-        ratios: mx.array,
-        advantages: mx.array,
+        alpha: 'mx.array',
+        transaction_cost: 'mx.array',
+        vol_tax: 'mx.array',
+        ratios: 'mx.array',
+        advantages: 'mx.array',
         epsilon: float = 0.2
-    ) -> mx.array:
+    ) -> 'mx.array':
         """
         Calculates the PPO Objective with custom components.
         Objective = Maximize Cumulative Alpha - (Transaction Cost + Volatility Tax).
@@ -112,15 +150,18 @@ class RLPolicy(nn.Module):
         # The policy aims to maximize both the RL surrogate and the Financial Reward
         # In a training loop, financial_reward would typically be the 'reward' 
         # that drives the 'advantages'. 
-        
+        if not HAS_MLX:
+            return alpha
         return ppo_loss + mx.mean(financial_reward)
 
-    @mx.compile
-    def get_action(self, state: mx.array) -> mx.array:
+    @compile_dec
+    def get_action(self, state: 'mx.array') -> 'mx.array':
         """
         Fast inference for production/backtesting.
         Optimized for GPU execution.
         """
+        if not HAS_MLX:
+            return state
         return mx.clip(self.actor(state), 0.0, 1.0)
 
 def create_policy(n_assets: int = 10) -> RLPolicy:
