@@ -5,10 +5,15 @@ from backend.agents.decision_agent import DecisionAgent
 from backend.market_context import MarketContext, PriceData, TimeSeriesItem, ForecastData
 from decimal import Decimal
 
+from unittest.mock import patch, AsyncMock
+import backend.agents.llm_factory
+
 @pytest.mark.asyncio
 async def test_decision_agent_regime_detection():
     # 1. Setup mock context with high volatility history
-    agent = DecisionAgent(model_name="mock")
+    with patch("backend.agents.llm_factory.LLMFactory.create_llm", new_callable=AsyncMock) as mock_create_llm:
+        mock_create_llm.return_value = AsyncMock()
+        agent = DecisionAgent(model_name="mock")
     
     # Create high vol returns (alternating +/- 5%)
     history = []
@@ -45,7 +50,9 @@ async def test_decision_agent_regime_detection():
     os.environ["USE_SHADOW_LLM"] = "1"
     
     # 2. Execute
-    result = await agent.make_decision(context, "Should I trade TQQQ?")
+    with patch("backend.agents.llm_factory.LLMFactory.create_llm", new_callable=AsyncMock) as mock_create_llm2:
+        mock_create_llm2.return_value = AsyncMock()
+        result = await agent.make_decision(context, "Should I trade TQQQ?")
     
     # 3. Verify
     regime = context.user_context.get("market_regime")
