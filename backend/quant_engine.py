@@ -550,40 +550,54 @@ class QuantEngine:
         Analyze if portfolio needs rebalancing based on target allocations.
         Now precision-safe using Decimal.
         """
-        current_parsed: Dict[str, Decimal] = {}
         total_value_dec = create_decimal(total_portfolio_value)
         if total_value_dec <= 0:
              return {"error": "Total portfolio value must be positive"}
 
-        for symbol, pct_val in current_allocation.items():
-            try:
-                val_str = str(pct_val).strip().replace('%', '')
-                val_dec = create_decimal(val_str)
-                if val_dec > 1: val_dec = val_dec / 100
-                current_parsed[symbol] = val_dec
-            except Exception:
-                current_parsed[symbol] = Decimal(0)
+        def parse_allocations(allocations: Dict[str, Any]) -> Dict[str, Decimal]:
+            parsed = {}
+            is_percentage = False
+
+            # First pass: determine if the entire dictionary represents percentages
+            for val in allocations.values():
+                val_str = str(val).strip()
+                if val_str.endswith('%'):
+                    is_percentage = True
+                    break
+                try:
+                    if create_decimal(val_str) > Decimal(1):
+                        is_percentage = True
+                        break
+                except Exception:
+                    pass
+
+            # Second pass: normalize to fractions
+            for symbol, val in allocations.items():
+                val_str = str(val).strip()
+                has_pct = val_str.endswith('%')
+                try:
+                    val_dec = create_decimal(val_str.replace('%', ''))
+                except Exception:
+                    val_dec = Decimal(0)
+
+                if is_percentage or has_pct:
+                    parsed[symbol] = val_dec / Decimal(100)
+                else:
+                    parsed[symbol] = val_dec
+
+            return parsed
+
+        current_parsed = parse_allocations(current_allocation)
+        target_parsed = parse_allocations(target_allocation)
 
         deviations = {}
         rebalance_actions = []
-        all_symbols = set(current_parsed.keys()) | set(target_allocation.keys())
+        all_symbols = set(current_parsed.keys()) | set(target_parsed.keys())
 
         for symbol in all_symbols:
             current_pct = current_parsed.get(symbol, Decimal(0))
-            raw_target = target_allocation.get(symbol, 0)
-            try:
-                t_str = str(raw_target).strip()
-                is_pct_str = t_str.endswith('%')
-                t_str = t_str.replace('%', '')
-                target_pct = create_decimal(t_str)
-                # If it had a % sign, it's definitely a percentage that needs dividing by 100
-                if is_pct_str:
-                    target_pct = target_pct / 100
-                # If it didn't have a % sign but is > 1, assume it's a whole percentage number (e.g. 50 for 50%)
-                elif target_pct > 1:
-                    target_pct = target_pct / 100
-            except Exception:
-                target_pct = Decimal(0)
+            target_pct = target_parsed.get(symbol, Decimal(0))
+
             deviation = target_pct - current_pct
             deviations[symbol] = deviation
 
