@@ -199,8 +199,6 @@ struct PremiumButton: View {
             .scaleEffect(isPressed ? 0.96 : 1.0)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(title)
-        .accessibilityAddTraits(.isButton)
         .simultaneousGesture(
             DragGesture(minimumDistance: 0)
                 .onChanged { _ in withAnimation(.easeOut(duration: 0.1)) { isPressed = true } }
