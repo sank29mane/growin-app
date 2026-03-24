@@ -2,14 +2,14 @@ from unittest.mock import MagicMock
 import os
 import sys
 
-# Add backend to path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+# Ensure backend is in path for absolute imports if needed, 
+# but we should rely on PYTHONPATH=.
 from fastapi.testclient import TestClient
-from app_context import state
-from chat_manager import ChatManager
-from server import app
+from backend.app_context import state
+from backend.chat_manager import ChatManager
+from backend.server import app
 
+# Use TestClient (lifespan is triggered on first request if not specified)
 client = TestClient(app)
 
 def test_block_malicious_commands():
@@ -34,8 +34,7 @@ def test_block_malicious_commands():
         response = client.post("/mcp/servers/add", json=payload)
 
         # Should be blocked (400)
-        # If this fails with 200, it means the vulnerability exists
-        assert response.status_code == 400, f"Expected 400 Bad Request, got {response.status_code}. Vulnerability confirmed if 200."
+        assert response.status_code == 400
         assert "not allowed" in response.json().get("detail", "").lower()
 
     finally:
@@ -49,13 +48,18 @@ def test_allow_safe_command():
     # Use in-memory DB for this test
     original_manager = state.chat_manager
     state.chat_manager = ChatManager(":memory:")
+    
+    # Create a dummy safe_script.py so the background connection task doesn't complain
+    safe_script_path = os.path.join(os.getcwd(), "safe_script.py")
+    with open(safe_script_path, "w") as f:
+        f.write("print('safe')")
 
     try:
         # payload with safe command
         payload = {
             "name": "Safe Server",
             "type": "stdio",
-            "command": "python",
+            "command": "python3", # Using python3 for better compatibility
             "args": ["safe_script.py"],
             "env": {},
             "url": None
@@ -67,5 +71,7 @@ def test_allow_safe_command():
         assert response.status_code == 200
 
     finally:
+        if os.path.exists(safe_script_path):
+            os.remove(safe_script_path)
         state.chat_manager.close()
         state.chat_manager = original_manager

@@ -284,7 +284,7 @@ struct ConversationCard: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(conversation.title ?? "Untitled Conversation")
         .accessibilityHint("Double tap to \(isEditing ? "select" : "open") conversation")
-        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+        .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : [.isButton])
     }
 
     private func formatDate(_ dateString: String) -> String {

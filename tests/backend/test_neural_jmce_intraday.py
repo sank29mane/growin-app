@@ -1,20 +1,12 @@
-import os
 import sys
+import os
 import pytest
+import mlx.core as mx
 import numpy as np
-
-# Add backend directory to PYTHONPATH explicitly for these tests
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../backend')))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 from backend.utils.jmce_model import NeuralJMCE, TimeResolution
-
-try:
-    import mlx.core as mx
-except ImportError:
-    mx = None
-
-pytestmark = pytest.mark.skipif(mx is None, reason="mlx not available")
 
 def test_neural_jmce_intraday_shapes():
     """Verify NeuralJMCE works with intraday resolutions and correct output shapes."""

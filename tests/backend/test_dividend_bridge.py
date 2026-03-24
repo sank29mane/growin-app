@@ -2,8 +2,8 @@ import pytest
 import numpy as np
 from datetime import date
 from decimal import Decimal
-from data_models import DividendData
-from dividend_bridge import DividendBridge
+from backend.data_models import DividendData
+from backend.dividend_bridge import DividendBridge
 
 @pytest.fixture
 def mock_dividend_history():

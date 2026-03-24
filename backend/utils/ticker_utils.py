@@ -143,31 +143,29 @@ class TickerResolver:
         # Ensure base ticker is uppercase after stripping artifacts but BEFORE mapping/exclusion checks
         ticker = ticker.upper()
 
-        # 6. Global Exchange Logic (UK vs US)
+        # 6. Suffix Protection for Leveraged Products
+        is_leveraged_etp = ticker.endswith("1") and len(ticker) > 3
+        if is_leveraged_etp:
+            if ticker.startswith(self.uk_stems):
+                ticker = ticker[:-1]
+
+        # 7. Global Exchange Logic (UK vs US)
         is_explicit_uk = "_EQ" in original.upper() and "_US" not in original.upper()
         
-        # Improved Likelihood check (from PR #146):
-        # 1. Must NOT be in US Exclusions
-        # 2. Must either be short (<= 3 chars) OR end in L (with reasonable length)
         is_likely_uk = (len(ticker) <= 3 or (len(ticker) <= 5 and ticker.endswith("L"))) and ticker not in self.us_exclusions
         
-        # SOTA Fix: SMCI and other 4-char US tickers should NOT be likely UK
         if len(ticker) == 4 and not ticker.endswith("L"):
             is_likely_uk = False
 
-        # Force likelihood for known UK stems (LLOY, BARC, TSCO, etc)
-        if any(ticker == stem or ticker == f"{stem}1" or ticker == f"{stem}L" for stem in self.uk_stems):
+        if ticker.startswith(self.uk_stems):
             is_likely_uk = True
 
-        # Heuristic for stripping extra 'L' (e.g. BARCL -> BARC)
         if is_likely_uk and ticker.endswith("L") and len(ticker) > 3 and ticker not in self.us_exclusions:
             ticker = ticker[:-1]
 
-        # Leveraged ETPs (Granular detection - must have a digit and be short)
         is_leveraged = (bool(re.search(r'^[357][A-Z]+', ticker)) or \
                         bool(re.search(r'^[A-Z]+[2357]$', ticker))) and len(ticker) <= 5
 
-        # FINAL DECISION: Should we add .L?
         if (is_explicit_uk or is_likely_uk or is_leveraged) and ticker not in self.us_exclusions:
             if not ticker.endswith(".L") and "." not in ticker:
                 return f"{ticker}.L"
@@ -185,6 +183,7 @@ class TickerResolver:
         # 3. Alphanumeric tickers: 3GLD, 5QQQ
         
         # Basic regex for potential tickers
+        # Excludes common words that match the pattern if necessary
         potential_tickers = re.findall(r'\b[A-Z0-9]{1,5}(?:\.[A-L])?\b', text)
         
         # Filter and normalize
@@ -204,7 +203,7 @@ class TickerResolver:
         Tiered Resolution: 
         1. Exact Match Cache
         2. Normalize & Validate
-        3. Provider Search
+        3. Provider Search (Stub for now)
         """
         # 1. Quick normalization
         ticker = self.normalize(query)
@@ -221,4 +220,6 @@ class TickerResolver:
             if extracted:
                 return extracted[0] # Return first match
                 
+        # 4. Provider Validation (Future: call Alpaca/Finnhub search)
+
         return ticker

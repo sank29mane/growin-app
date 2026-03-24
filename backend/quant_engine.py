@@ -555,11 +555,34 @@ class QuantEngine:
         if total_value_dec <= 0:
              return {"error": "Total portfolio value must be positive"}
 
+        # Helper to determine if a dictionary represents percentages (e.g., values > 1.0 or containing '%')
+        def is_percentage_dict(alloc_dict: Dict[str, Any]) -> bool:
+            for val in alloc_dict.values():
+                val_str = str(val).strip()
+                if '%' in val_str:
+                    return True
+                try:
+                    if float(val_str) > 1.0:
+                        return True
+                except ValueError:
+                    pass
+            return False
+
+        current_is_percentage = is_percentage_dict(current_allocation)
+        target_is_percentage = is_percentage_dict(target_allocation)
+
         for symbol, pct_val in current_allocation.items():
             try:
-                val_str = str(pct_val).strip().replace('%', '')
+                val_str = str(pct_val).strip()
+                is_pct_str = val_str.endswith('%')
+                val_str = val_str.replace('%', '')
                 val_dec = create_decimal(val_str)
-                if val_dec > 1: val_dec = val_dec / 100
+
+                # If the string ends with % OR it's a number > 1 (e.g. "40" meant as 40%)
+                # OR if the whole dictionary was parsed as percentage mode
+                if is_pct_str or (val_dec > 1) or current_is_percentage:
+                    val_dec = val_dec / 100
+
                 current_parsed[symbol] = val_dec
             except Exception:
                 current_parsed[symbol] = Decimal(0)
@@ -576,14 +599,13 @@ class QuantEngine:
                 is_pct_str = t_str.endswith('%')
                 t_str = t_str.replace('%', '')
                 target_pct = create_decimal(t_str)
-                # If it had a % sign, it's definitely a percentage that needs dividing by 100
-                if is_pct_str:
+
+                if is_pct_str or (target_pct > 1) or target_is_percentage:
                     target_pct = target_pct / 100
-                # If it didn't have a % sign but is > 1, assume it's a whole percentage number (e.g. 50 for 50%)
-                elif target_pct > 1:
-                    target_pct = target_pct / 100
+
             except Exception:
                 target_pct = Decimal(0)
+
             deviation = target_pct - current_pct
             deviations[symbol] = deviation
 

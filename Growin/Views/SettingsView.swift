@@ -258,8 +258,6 @@ struct HFModelHubSection: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Search Models")
-                    .accessibilityHint("Searches Hugging Face for models matching the query")
-                    .accessibilityAddTraits(.isButton)
                 }
                 
                 if !hfModels.isEmpty {
@@ -390,9 +388,6 @@ struct TradingConfigSection: View {
                     .clipShape(.rect(cornerRadius: 12))
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Update Architecture")
-                .accessibilityHint("Saves the current settings and updates the system architecture")
-                .accessibilityAddTraits(.isButton)
             }
         }
     }
