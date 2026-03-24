@@ -1,0 +1,140 @@
+diff --git a/Growin/ContentView.swift b/Growin/ContentView.swift
+index 3b1d758..2ba3eef 100644
+--- a/Growin/ContentView.swift
++++ b/Growin/ContentView.swift
+@@ -138,11 +138,8 @@ struct ContentView: View {
+         }
+         .buttonStyle(.plain)
+         .accessibilityElement(children: .combine)
+-<<<<<<< HEAD
+-        .accessibilityLabel("System Settings, backend \(backendStatus.isOnline ? "online" : "offline")")
+-=======
++
+         .accessibilityLabel("System Settings")
+->>>>>>> origin/palette/contentview-settingsbutton-a11y-7343748744931053220
+         .accessibilityHint("Opens the system preferences and console overlay")
+         .accessibilityAddTraits(.isButton)
+         .help("System Settings & Console")
+diff --git a/Growin/Views/GoalPlannerView.swift b/Growin/Views/GoalPlannerView.swift
+index 8ef7c25..1e2e117 100644
+--- a/Growin/Views/GoalPlannerView.swift
++++ b/Growin/Views/GoalPlannerView.swift
+@@ -410,13 +410,9 @@ struct RiskButton: View {
+         }
+         .buttonStyle(.plain)
+         .accessibilityElement(children: .combine)
+-<<<<<<< HEAD
+-        .accessibilityLabel("\(formattedTitle) Risk Level")
+-        .accessibilityHint("Selects \(formattedTitle) as your risk tolerance")
+-=======
++
+         .accessibilityLabel("\(title.replacingOccurrences(of: "_", with: " ")) Risk Level")
+         .accessibilityHint("Selects \(title.replacingOccurrences(of: "_", with: " ")) as your risk tolerance")
+->>>>>>> origin/palette-a11y-goal-planner-risk-button-5473075713753130963
+         .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : [.isButton])
+     }
+ }
+diff --git a/Growin/Views/RichMessageComponents.swift b/Growin/Views/RichMessageComponents.swift
+index 8436a73..d4dc5c6 100644
+--- a/Growin/Views/RichMessageComponents.swift
++++ b/Growin/Views/RichMessageComponents.swift
+@@ -55,6 +55,10 @@ struct IntelligenceTraceView: View, Equatable {
+                                 .font(.system(size: 10, weight: .bold))
+                                 .foregroundStyle(.blue)
+                                 .padding(.top, 2)
++                                .buttonStyle(.plain)
++                                .accessibilityLabel(showFullReasoning ? "Collapse internal logic" : "Expand internal logic")
++                                .accessibilityHint(showFullReasoning ? "Hides the full text of the internal reasoning" : "Reveals the full text of the internal reasoning")
++                                .accessibilityAddTraits(.isButton)
+                             }
+                         }
+                         .padding(10)
+@@ -794,13 +798,9 @@ struct TradeProposalCard: View, Equatable {
+                         .cornerRadius(8)
+                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.green.opacity(0.3), lineWidth: 1))
+                     }
+-<<<<<<< HEAD
+                     .buttonStyle(.plain)
+                     .accessibilityLabel("Approve \(proposal.action) for \(proposal.ticker)")
+-<<<<<<< HEAD
+                     .accessibilityHint("Approves the NPU trade proposal and executes the order")
+-=======
+->>>>>>> origin/palette/trade-proposal-a11y-5167335984159609109
+                     .accessibilityAddTraits(.isButton)
+                     
+                     Button(action: { onReject(proposal.proposalId) }) {
+@@ -815,37 +815,10 @@ struct TradeProposalCard: View, Equatable {
+                         .foregroundStyle(.red)
+                         .cornerRadius(8)
+                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.red.opacity(0.3), lineWidth: 1))
+-=======
+-                    .font(.system(size: 12, weight: .bold))
+-                    .frame(maxWidth: .infinity)
+-                    .padding(.vertical, 10)
+-                    .background(Color.green.opacity(0.15))
+-                    .foregroundStyle(.green)
+-                    .cornerRadius(8)
+-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.green.opacity(0.3), lineWidth: 1))
+-                }
+-                .buttonStyle(.plain)
+-<<<<<<< HEAD
+-                .accessibilityLabel("Approve \(proposal.action.capitalized) \(proposal.ticker)")
+-                .accessibilityHint("Approves the \(proposal.action.lowercased()) action for \(proposal.ticker)")
+-=======
+-                .accessibilityLabel("Approve \(proposal.action) for \(proposal.ticker)")
+-                .accessibilityHint("Approves the pending trade proposal")
+->>>>>>> origin/ux/accessibility-trade-proposal-3827433325384296160
+-                .accessibilityAddTraits(.isButton)
+-                
+-                Button(action: { onReject(proposal.proposalId) }) {
+-                    HStack {
+-                        Image(systemName: "xmark.circle.fill")
+-                        Text("REJECT")
+->>>>>>> origin/palette-trade-proposal-card-a11y-15809855608792339669
+                     }
+                     .buttonStyle(.plain)
+                     .accessibilityLabel("Reject \(proposal.action) for \(proposal.ticker)")
+-<<<<<<< HEAD
+                     .accessibilityHint("Rejects the NPU trade proposal and discards the order")
+-=======
+->>>>>>> origin/palette/trade-proposal-a11y-5167335984159609109
+                     .accessibilityAddTraits(.isButton)
+                 }
+             } else {
+@@ -863,19 +836,6 @@ struct TradeProposalCard: View, Equatable {
+                     .cornerRadius(8)
+                     Spacer()
+                 }
+-<<<<<<< HEAD
+-=======
+-                .buttonStyle(.plain)
+-<<<<<<< HEAD
+-                .accessibilityLabel("Reject \(proposal.action.capitalized) \(proposal.ticker)")
+-                .accessibilityHint("Rejects the \(proposal.action.lowercased()) action for \(proposal.ticker)")
+-                .accessibilityAddTraits(.isButton)
+->>>>>>> origin/palette-trade-proposal-card-a11y-15809855608792339669
+-=======
+-                .accessibilityLabel("Reject \(proposal.action) for \(proposal.ticker)")
+-                .accessibilityHint("Rejects the pending trade proposal")
+-                .accessibilityAddTraits(.isButton)
+->>>>>>> origin/ux/accessibility-trade-proposal-3827433325384296160
+             }
+         }
+         .padding(14)
+diff --git a/Growin/Views/StockChartView.swift b/Growin/Views/StockChartView.swift
+index 203836d..834e719 100644
+--- a/Growin/Views/StockChartView.swift
++++ b/Growin/Views/StockChartView.swift
+@@ -25,10 +25,8 @@ struct StockChartView: View {
+                         }
+                         .buttonStyle(.plain)
+                         .accessibilityLabel("Dismiss notification")
+-<<<<<<< HEAD
+-=======
++
+                         .accessibilityHint("Dismisses the provider notification message")
+->>>>>>> origin/swiftui-accessibility-npu-glow-13715321445853796863
+                         .accessibilityAddTraits(.isButton)
+                     }
+                     .padding(.horizontal, 16)
+

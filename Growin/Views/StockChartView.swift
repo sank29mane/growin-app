@@ -25,6 +25,7 @@ struct StockChartView: View {
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel("Dismiss notification")
+                        .accessibilityHint("Dismisses the provider notification message")
                         .accessibilityAddTraits(.isButton)
                     }
                     .padding(.horizontal, 16)
@@ -127,6 +128,7 @@ struct StockChartView: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel("Share Intelligence Report")
                     .accessibilityHint("Shares the current stock intelligence report and price")
+                    .accessibilityAddTraits(.isButton)
                 }
             }
         }
@@ -184,7 +186,7 @@ struct StockChartView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Timeframe \(tfShort(tf))")
                 .accessibilityHint("Switches the chart view to \(tfShort(tf)) timeframe")
-                .accessibilityAddTraits(viewModel.selectedTimeframe == tf ? [.isSelected] : [])
+                .accessibilityAddTraits(viewModel.selectedTimeframe == tf ? [.isSelected, .isButton] : [.isButton])
             }
         }
         .padding(.horizontal)

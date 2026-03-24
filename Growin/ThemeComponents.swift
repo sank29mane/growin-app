@@ -795,3 +795,79 @@ struct FinancialMetricView: View {
         )
     }
 }
+
+// MARK: - Brutal Editorial System (Stitch Inspired)
+
+struct EditorialTypography: ViewModifier {
+    enum Style {
+        case display, headline, technicalLabel, technicalData
+    }
+    
+    let style: Style
+    
+    func body(content: Content) -> some View {
+        switch style {
+        case .display:
+            content
+                .font(.custom("Georgia", size: 48).italic())
+                .tracking(-1.5)
+                .foregroundStyle(Color.brutalOffWhite)
+        case .headline:
+            content
+                .font(.custom("Georgia", size: 24))
+                .tracking(-0.5)
+                .foregroundStyle(Color.brutalOffWhite)
+        case .technicalLabel:
+            content
+                .font(.custom("Monaco", size: 10))
+                .tracking(2.0)
+                .textCase(.uppercase)
+                .foregroundStyle(Color.textSecondary)
+        case .technicalData:
+            content
+                .font(.custom("Monaco", size: 14))
+                .foregroundStyle(Color.brutalOffWhite)
+        }
+    }
+}
+
+extension View {
+    func editorialTypography(_ style: EditorialTypography.Style) -> some View {
+        modifier(EditorialTypography(style: style))
+    }
+}
+
+struct SovereignBackground: View {
+    var body: some View {
+        Color.brutalCharcoal
+            .ignoresSafeArea()
+    }
+}
+
+struct TechnicalLedgerRow: View {
+    let label: String
+    let value: String
+    let trend: String?
+    let isPositive: Bool?
+    
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label)
+                .editorialTypography(.headline)
+            
+            Spacer()
+            
+            VStack(alignment: .trailing, spacing: 4) {
+                Text(value)
+                    .editorialTypography(.technicalData)
+                
+                if let trend = trend {
+                    Text(trend)
+                        .font(.custom("Monaco", size: 10))
+                        .foregroundStyle(isPositive == true ? Color.brutalChartreuse : Color.growinRed)
+                }
+            }
+        }
+        .padding(.vertical, 16)
+    }
+}

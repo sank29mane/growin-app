@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import sys
 import uuid
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -103,7 +104,7 @@ class ChatManager:
                 (
                     "Trading 212",
                     "stdio",
-                    "python",
+                    sys.executable,
                     json.dumps(["trading212_mcp_server.py"]),
                     json.dumps({}),
                 ),
@@ -113,10 +114,20 @@ class ChatManager:
             cursor.execute(
                 """
                 UPDATE mcp_servers
-                SET args = ?, env = ?
-                WHERE name = 'Trading 212'
+                SET command = ?, args = ?
+                WHERE name = 'Trading 212' AND (command IS NULL OR command = '' OR args IS NULL OR args = '')
             """,
-                (json.dumps(["trading212_mcp_server.py"]), json.dumps({})),
+                (sys.executable, json.dumps(["trading212_mcp_server.py"])),
+            )
+
+            # Only fix env if it's explicitly null or empty, to preserve user settings
+            cursor.execute(
+                """
+                UPDATE mcp_servers
+                SET env = ?
+                WHERE name = 'Trading 212' AND (env IS NULL OR env = 'null' OR env = '' OR env = '{}')
+            """,
+                (json.dumps({}),)
             )
 
         self.conn.commit()

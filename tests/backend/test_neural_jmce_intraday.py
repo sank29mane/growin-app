@@ -1,6 +1,11 @@
+import sys
+import os
 import pytest
 import mlx.core as mx
 import numpy as np
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../backend')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+
 from backend.utils.jmce_model import NeuralJMCE, TimeResolution
 
 def test_neural_jmce_intraday_shapes():
