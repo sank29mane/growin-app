@@ -798,7 +798,7 @@ struct TradeProposalCard: View, Equatable {
                         .border(Color.green.opacity(0.3), width: 1)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Approve \(proposal.action.capitalized) \(proposal.ticker)")
+                    .accessibilityLabel("Approve \(proposal.action) for \(proposal.ticker)")
                     .accessibilityHint("Approves the NPU trade proposal and executes the order")
                     .accessibilityAddTraits(.isButton)
                     
@@ -815,7 +815,7 @@ struct TradeProposalCard: View, Equatable {
                         .border(Color.red.opacity(0.3), width: 1)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Reject \(proposal.action.capitalized) \(proposal.ticker)")
+                    .accessibilityLabel("Reject \(proposal.action) for \(proposal.ticker)")
                     .accessibilityHint("Rejects the NPU trade proposal and discards the order")
                     .accessibilityAddTraits(.isButton)
                 }
