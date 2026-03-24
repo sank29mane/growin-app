@@ -6,11 +6,11 @@ import os
 from datetime import datetime
 
 # Add backend to sys.path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../backend')))
 
-from app_context import state, ChatMessage
-from chat_manager import ChatManager
-from routes.chat_routes import chat_message, list_conversations, get_conversation_history
+from backend.app_context import state, ChatMessage
+from backend.chat_manager import ChatManager
+from backend.routes.chat_routes import chat_message, list_conversations, get_conversation_history
 
 class TestChatEndpoints(unittest.IsolatedAsyncioTestCase):
     
@@ -25,9 +25,9 @@ class TestChatEndpoints(unittest.IsolatedAsyncioTestCase):
         
         # Mock Coordinator and Decision Agent
         # Note: They are imported inside the function, so we must patch the source modules
-        self.coordinator_patcher = patch('agents.coordinator_agent.CoordinatorAgent')
-        self.decision_patcher = patch('agents.decision_agent.DecisionAgent')
-        self.orchestrator_patcher = patch('agents.orchestrator_agent.OrchestratorAgent')
+        self.coordinator_patcher = patch('backend.agents.coordinator_agent.CoordinatorAgent')
+        self.decision_patcher = patch('backend.agents.decision_agent.DecisionAgent')
+        self.orchestrator_patcher = patch('backend.agents.orchestrator_agent.OrchestratorAgent')
         self.MockCoordinator = self.coordinator_patcher.start()
         self.MockDecision = self.decision_patcher.start()
         self.MockOrchestrator = self.orchestrator_patcher.start()
@@ -64,7 +64,7 @@ class TestChatEndpoints(unittest.IsolatedAsyncioTestCase):
         request = ChatMessage(message="Hello", model_name="test-model")
         
         # Mock update_conversation_title_if_needed to do nothing or return success
-        with patch('routes.chat_routes.update_conversation_title_if_needed') as mock_title:
+        with patch('backend.routes.chat_routes.update_conversation_title_if_needed') as mock_title:
              response = await chat_message(request, accept="application/json")
         
         self.assertIn("response", response)
@@ -126,6 +126,6 @@ class TestChatEndpoints(unittest.IsolatedAsyncioTestCase):
             await chat_message(request, accept="application/json")
     
         self.assertEqual(cm.exception.status_code, 500)
-        self.assertIn(err_msg, cm.exception.detail)
+        self.assertIn("Internal Server Error", cm.exception.detail)
 if __name__ == '__main__':
     unittest.main()

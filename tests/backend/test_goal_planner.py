@@ -29,7 +29,7 @@ async def mock_call_tool(name, args):
 
 mock_mcp_client.call_tool = mock_call_tool
 
-from agents.goal_planner_agent import GoalPlannerAgent
+from backend.agents.goal_planner_agent import GoalPlannerAgent
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

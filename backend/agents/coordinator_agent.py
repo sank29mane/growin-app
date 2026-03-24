@@ -3,16 +3,16 @@ Coordinator Agent - Orchestrates all specialist agents
 Static SOTA model that routes queries and aggregates results
 """
 
-from .base_agent import BaseAgent, AgentResponse
-from market_context import MarketContext
-from . import QuantAgent, PortfolioAgent, ForecastingAgent, ResearchAgent, SocialAgent, WhaleAgent, GoalPlannerAgent, VisionAgent
-from .decision_agent import DecisionAgent
-from utils.ticker_utils import TickerResolver
-from data_fabricator import DataFabricator
-from status_manager import status_manager
-from app_logging import correlation_id_ctx
-from utils.audit_log import log_audit
-from app_context import state
+from backend.agents.base_agent import BaseAgent, AgentResponse, AgentConfig
+from backend.market_context import MarketContext
+from backend.agents import QuantAgent, PortfolioAgent, ForecastingAgent, ResearchAgent, SocialAgent, WhaleAgent, GoalPlannerAgent, VisionAgent
+from backend.agents.decision_agent import DecisionAgent
+from backend.utils.ticker_utils import TickerResolver
+from backend.data_fabricator import DataFabricator
+from backend.status_manager import status_manager
+from backend.app_logging import correlation_id_ctx
+from backend.utils.audit_log import log_audit
+from backend.app_context import state
 import asyncio
 import logging
 import re
@@ -21,6 +21,7 @@ import json
 import difflib
 from typing import Dict, List, Any, Optional, Tuple
 import os
+from backend.utils.async_utils import run_with_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +59,15 @@ class CoordinatorAgent(BaseAgent):
     Static SOTA model that routes queries and aggregates results.
     """
     
-    def __init__(self, config: Optional[Any] = None, model_name: str = "native-mlx", api_keys: Optional[Dict[str, str]] = None):
-        super().__init__(config or BaseAgent.default_config("CoordinatorAgent"))
+    def __init__(self, config: Optional[AgentConfig] = None, model_name: str = "native-mlx", api_keys: Optional[Dict[str, str]] = None):
+        if config is None:
+            config = AgentConfig(
+                name="CoordinatorAgent",
+                enabled=True,
+                timeout=30.0,  # Coordinator needs more time for swarm
+                cache_ttl=0    # Don't cache coordinator orchestration itself
+            )
+        super().__init__(config)
         self.model_name = model_name
         self.api_keys = api_keys or {}
         self.data_fabricator = DataFabricator()
@@ -80,7 +88,7 @@ class CoordinatorAgent(BaseAgent):
 
     async def _initialize_llm(self):
         if self._initialized: return
-        from .llm_factory import LLMFactory
+        from backend.agents.llm_factory import LLMFactory
         # We use a fast model for coordination
         self._llm = await LLMFactory.create_llm("granite-tiny")
         self._initialized = True
@@ -129,6 +137,25 @@ class CoordinatorAgent(BaseAgent):
             "needs": needs_map.get(intent_type, ["quant", "forecast"]),
             "reason": reason_match.group(1) if reason_match else "Direct Routing"
         }
+
+    async def analyze(self, context: Dict[str, Any]) -> AgentResponse:
+        """
+        Implementation of abstract base method.
+        Delegates to process_query for swarm orchestration.
+        """
+        query = context.get("query", "")
+        ticker = context.get("ticker")
+        history = context.get("history", [])
+        account_type = context.get("account_type")
+        
+        market_context = await self.process_query(query, history, ticker, account_type)
+        
+        return AgentResponse(
+            agent_name=self.config.name,
+            success=True,
+            data=market_context.model_dump(),
+            latency_ms=0
+        )
 
     async def process_query(self, query: str, history: List[Dict] = [], ticker: Optional[str] = None, account_type: Optional[str] = None) -> MarketContext:
         """
@@ -191,7 +218,7 @@ class CoordinatorAgent(BaseAgent):
 
         # --- SKILL INJECTION ---
         # Coordinator also benefits from skills (e.g. knowing 'tax' queries need different handling)
-        from utils.skill_loader import get_skill_loader
+        from backend.utils.skill_loader import get_skill_loader
         skills_text = get_skill_loader().get_relevant_skills(query)
         if skills_text:
              context.user_context["expert_skills"] = skills_text
@@ -215,9 +242,9 @@ class CoordinatorAgent(BaseAgent):
         specialist_tasks = []
         
         # Broadcast intent to the agent bus (SOTA Decentralized Path)
-        from .messenger import AgentMessage
-        from .governance import get_governance
-        from app_logging import correlation_id_ctx
+        from backend.agents.messenger import AgentMessage
+        from backend.agents.governance import get_governance
+        from backend.app_logging import correlation_id_ctx
         
         c_id = correlation_id_ctx.get()
         broadcast_msg = AgentMessage(
@@ -305,9 +332,9 @@ class CoordinatorAgent(BaseAgent):
 
     async def _run_specialist(self, agent: BaseAgent, context: Dict[str, Any]) -> AgentResponse:
         """Run a specialist agent with error handling and timeout"""
-        from status_manager import status_manager
-        from .messenger import AgentMessage, get_messenger
-        from app_logging import correlation_id_ctx
+        from backend.status_manager import status_manager
+        from backend.agents.messenger import AgentMessage, get_messenger
+        from backend.app_logging import correlation_id_ctx
         
         agent_key = (agent.config.name or "").lower().replace("agent", "_agent")
         c_id = correlation_id_ctx.get()
@@ -329,11 +356,7 @@ class CoordinatorAgent(BaseAgent):
         start_time = time.time()
         try:
             # 15s timeout per specialist to prevent hanging
-            if hasattr(asyncio, 'timeout'):
-                async with asyncio.timeout(15.0):
-                    result = await agent.execute(context)
-            else:
-                result = await asyncio.wait_for(agent.execute(context), timeout=15.0)
+            result = await run_with_timeout(agent.execute(context), timeout=15.0)
                 
             # COORDINATOR SELF-CORRECTION: Try to fix if it's a known data issue
             if not result.success and result.error:
@@ -431,7 +454,7 @@ class CoordinatorAgent(BaseAgent):
 
     def _merge_result(self, context: MarketContext, result: AgentResponse):
         """Aggregate specialist results into unified context"""
-        from market_context import ForecastData, QuantData, PortfolioData, ResearchData, SocialData, WhaleData, GoalData, VisionData
+        from backend.market_context import ForecastData, QuantData, PortfolioData, ResearchData, SocialData, WhaleData, GoalData, VisionData
         data = result.data
         name = result.agent_name
         
@@ -468,14 +491,10 @@ class CoordinatorAgent(BaseAgent):
             search_result = []
             if self.mcp_client:
                 try:
-                    if hasattr(asyncio, 'timeout'):
-                        async with asyncio.timeout(10.0):
-                            search_result = await self.mcp_client.call_tool("search_instruments", {"query": term})
-                    else:
-                        search_result = await asyncio.wait_for(
-                            self.mcp_client.call_tool("search_instruments", {"query": term}),
-                            timeout=10.0
-                        )
+                    search_result = await run_with_timeout(
+                        self.mcp_client.call_tool("search_instruments", {"query": term}),
+                        timeout=10.0
+                    )
                     
                     if hasattr(search_result, 'content'):
                         content = search_result.content
@@ -522,10 +541,10 @@ class CoordinatorAgent(BaseAgent):
             logger.warning(f"Coordinator Tier 2 search failed for '{term}': {e}")
             
         return None
-
     async def _handle_specialist_error(self, agent: BaseAgent, context: Dict[str, Any], error: str) -> Optional[AgentResponse]:
         """Tier 3: Attempt to resolve errors using reasoning + Docker Sandbox execution"""
         await self._initialize_llm()
+        from backend.agents.llm_factory import LLMFactory
         from langchain_core.messages import HumanMessage
         
         prompt = f"""Specialist {agent.config.name} failed with error: "{error}"
@@ -564,14 +583,10 @@ class CoordinatorAgent(BaseAgent):
             if python_code and self.mcp_client:
                 logger.info(f"Coordinator Tier 3: Delegating context fix to Docker Sandbox...")
                 try:
-                    if hasattr(asyncio, 'timeout'):
-                        async with asyncio.timeout(30.0):
-                            exec_result = await self.mcp_client.call_tool("docker_run_python", {"script": python_code})
-                    else:
-                        exec_result = await asyncio.wait_for(
-                            self.mcp_client.call_tool("docker_run_python", {"script": python_code}),
-                            timeout=30.0
-                        )
+                    exec_result = await run_with_timeout(
+                        self.mcp_client.call_tool("docker_run_python", {"script": python_code}),
+                        timeout=30.0
+                    )
                     
                     if exec_result and hasattr(exec_result, 'content'):
                         output_text = exec_result.content[0].text

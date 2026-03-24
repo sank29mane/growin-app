@@ -222,3 +222,15 @@ class TickerResolver:
                 return extracted[0] # Return first match
                 
         return ticker
+
+    async def search(self, query: str) -> list[dict]:
+        """
+        Search for potential tickers matching a query string.
+        Returns a list of matching candidates for the Coordinator Tier 2.
+        """
+        # SOTA 2026: Basic implementation for local fallback.
+        # Real search usually happens via MCP/Finnhub.
+        ticker = await self.resolve(query)
+        if ticker:
+            return [{"ticker": ticker, "name": query}]
+        return []

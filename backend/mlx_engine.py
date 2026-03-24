@@ -1,7 +1,11 @@
 """MLX-powered inference engine for Apple Silicon optimized models"""
 import logging
 from typing import Optional, AsyncIterator, Any, Dict
-import mlx.core as mx
+try:
+    import mlx.core as mx
+except ImportError:
+    mx = None
+
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +139,8 @@ class MLXInferenceEngine:
 
     def _warmup_model(self):
         """Run a dummy generation to compile MLX computation graphs using async_eval."""
+        if mx is None:
+            return
         try:
             logger.info("🔥 Warming up MLX model...")
             from mlx_lm import generate
@@ -156,6 +162,17 @@ class MLXInferenceEngine:
         except Exception as e:
             logger.warning(f"Warmup failed (non-fatal): {e}")
     
+    def check_memory_usage(self) -> Dict[str, float]:
+        """Check MLX-specific memory metrics for zero-copy stability."""
+        if mx is None:
+            return {"peak": 0.0, "active": 0.0}
+        
+        peak = mx.metal.get_peak_memory() / 1024 / 1024  # MB
+        active = mx.metal.get_active_memory() / 1024 / 1024  # MB
+        
+        logger.info(f"MLX Memory: Active: {active:.2f}MB, Peak: {peak:.2f}MB")
+        return {"peak": peak, "active": active}
+
     async def generate(
         self,
         prompt: str,
@@ -186,6 +203,9 @@ class MLXInferenceEngine:
             from mlx_lm import generate
             from mlx_lm.sample_utils import make_sampler
             
+            # Memory Delta Tracking
+            mem_before = self.check_memory_usage()
+            
             logger.info(f"Generating with MLX model, prompt length: {len(prompt)}")
             
             if sampler is None:
@@ -201,6 +221,10 @@ class MLXInferenceEngine:
                 sampler=sampler,
                 verbose=False
             )
+            
+            mem_after = self.check_memory_usage()
+            delta = mem_after["active"] - mem_before["active"]
+            logger.info(f"MLX Inference Memory Delta: {delta:+.2f}MB (Zero-copy stability check)")
             
             return response
             
@@ -265,7 +289,8 @@ class MLXInferenceEngine:
             self.current_model_path = None
             
             # Clear MLX memory cache
-            mx.metal.clear_cache()
+            if mx is not None:
+                mx.metal.clear_cache()
             logger.info("MLX model unloaded and cache cleared")
     
     def is_loaded(self) -> bool:

@@ -1,6 +1,6 @@
 import pytest
 import os
-from chat_manager import ChatManager
+from backend.chat_manager import ChatManager
 
 @pytest.fixture
 def chat_manager():

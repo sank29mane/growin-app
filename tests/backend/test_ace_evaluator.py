@@ -1,5 +1,5 @@
 import pytest
-from agents.ace_evaluator import ACEEvaluator
+from backend.agents.ace_evaluator import ACEEvaluator
 
 def test_ace_scoring_logic():
     evaluator = ACEEvaluator()

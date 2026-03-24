@@ -17,8 +17,8 @@ from mcp.types import (
     Tool,
     TextContent
 )
-from utils import sanitize_nan
-from utils.process_guard import start_parent_watchdog
+from backend.utils import sanitize_nan
+from backend.utils.process_guard import start_parent_watchdog
 
 # Start watchdog immediately
 start_parent_watchdog()
