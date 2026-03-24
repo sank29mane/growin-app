@@ -19,14 +19,14 @@ The Gemini CLI (v0.35.0-preview.5) operates as the **Master Planner & Autonomous
 
 ## 🔄 Iterative Model Adaptation (v0.35.0 Preview)
 
-The agent MUST dynamically adapt its strategy based on the active model (Preview Pro vs. Flash).
+The agent MUST dynamically adapt its strategy based on the active model (Auto-selected: Gemini 3.1 Pro vs. Gemini 3 Flash).
 
-1. **Synthesis Mode (Gemini 1.5 Pro Preview)**
+1. **Synthesis Mode (Gemini 3.1 Pro)**
    - Use for: Planning, architectural mapping, complex refactoring.
-   - Strategy: Broad context reads, multi-file analysis, deep reasoning.
-2. **Surgical Mode (Gemini 1.5 Flash Preview / Local MLX)**
+   - Strategy: Massive context reasoning, multi-file synthesis, deep GSD planning.
+2. **Surgical Mode (Gemini 3 Flash / Local MLX)**
    - Use for: Task implementation, bug fixing, test writing.
-   - Strategy: Strict `grep_search` first. Read files in `<100` line snippets. Minimize context bloat.
+   - Strategy: High-speed execution, strict `grep_search` first. Read files in `<100` line snippets. 
 
 ---
 
@@ -34,7 +34,7 @@ The agent MUST dynamically adapt its strategy based on the active model (Preview
 
 - **Platform**: macOS Native (SwiftUI/AppKit).
 - **Hardware**: Optimized for Apple Silicon (M4 Pro/Max).
-- **Focus**: Local AI integration using **MLX** and **CoreML**. **Gemini Pro/Flash Preview models are strictly for CLI assistance and testing fallbacks.**
+- **Focus**: Local AI integration using **MLX** and **CoreML**. **Gemini 3.1 Pro / 3 Flash models are strictly for CLI assistance and testing fallbacks.**
 - **Organization**: All tests (Swift and Python) must reside in the root `tests/` directory.
 
 ---

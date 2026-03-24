@@ -27,19 +27,19 @@ LOCAL_MLX_MODELS = {
     }
 }
 
-# ASSISTANCE & TESTING: Cloud Models (Latest Preview Versions)
+# ASSISTANCE & TESTING: Cloud Models (Latest 3.x Series)
 # These are utilized by the Gemini CLI and for CI/Testing fallbacks.
 CLOUD_ASSISTANCE_MODELS = {
-    "gemini-1.5-pro-preview": {
+    "gemini-3.1-pro": {
         "provider": "google",
-        "model_id": "gemini-1.5-pro-002",  # Updated to latest stable preview
-        "description": "Gemini 1.5 Pro Preview - Master Planner (CLI/Test Only)",
+        "model_id": "gemini-3.1-pro",
+        "description": "Gemini 3.1 Pro - Master Planner (CLI/Test Only)",
         "requires_key": "GOOGLE_API_KEY"
     },
-    "gemini-1.5-flash-preview": {
+    "gemini-3-flash": {
         "provider": "google",
-        "model_id": "gemini-1.5-flash-002", # Updated to latest stable preview
-        "description": "Gemini 1.5 Flash Preview - Structural Executor (CLI/Test Only)",
+        "model_id": "gemini-3-flash",
+        "description": "Gemini 3 Flash - Structural Executor (CLI/Test Only)",
         "requires_key": "GOOGLE_API_KEY"
     },
     "claude-3.5-sonnet": {
