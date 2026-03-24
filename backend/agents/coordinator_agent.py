@@ -12,6 +12,7 @@ from data_fabricator import DataFabricator
 from typing import Dict, Any, List, Optional, Union
 import asyncio
 import logging
+from utils.async_utils import run_with_timeout
 import re
 import json
 import difflib
@@ -459,8 +460,12 @@ Query: "{clean_query}"
         
         try:
             # 15s timeout per specialist to prevent hanging
+<<<<<<< HEAD
+            result = await run_with_timeout(agent.execute(context), 15.0)
+=======
             async with asyncio.timeout(15.0):
                 result = await agent.execute(context)
+>>>>>>> main
                 
                 # COORDINATOR SELF-CORRECTION: Try to fix if it's a known data issue
                 if not result.success and result.error:
@@ -587,12 +592,35 @@ Query: "{clean_query}"
         to verify the best match for ambiguous symbols or names.
         """
         try:
+<<<<<<< HEAD
+            # SOTA 2026: Try MCP search if available, fallback to Resolver
+            search_result = []
+            if self.mcp_client:
+                try:
+                    search_result = await run_with_timeout(
+                        self.mcp_client.call_tool("search_instruments", {"query": term}),
+                        10.0
+                    )
+                    
+                    if hasattr(search_result, 'content'):
+                        content = search_result.content
+                        if isinstance(content, list) and len(content) > 0:
+                            text = content[0].text if hasattr(content[0], 'text') else str(content[0])
+                            search_result = json.loads(text)
+                    elif isinstance(search_result, str):
+                        search_result = json.loads(search_result)
+                except Exception as e:
+                    logger.warning(f"MCP search failed, falling back to local resolver: {e}")
+                    resolver = TickerResolver()
+                    search_result = await resolver.search(term)
+=======
             logger.info(f"Coordinator Tier 2: Searching for correct ticker matching '{term}'")
 
             # Call search_instruments tool
             if hasattr(asyncio, 'timeout'):
                 async with asyncio.timeout(10.0):
                     search_result = await self.mcp_client.call_tool("search_instruments", {"query": term})
+>>>>>>> main
             else:
                 search_result = await asyncio.wait_for(
                     self.mcp_client.call_tool("search_instruments", {"query": term}),
@@ -689,6 +717,17 @@ Query: "{clean_query}"
             match = re.search(r'\{.*\}', content, re.DOTALL)
             if match:
                 try:
+<<<<<<< HEAD
+                    exec_result = await run_with_timeout(
+                        self.mcp_client.call_tool("docker_run_python", {"script": python_code}),
+                        30.0
+                    )
+                    
+                    if exec_result and hasattr(exec_result, 'content'):
+                        output_text = exec_result.content[0].text
+                        import ast
+                        exec_res_dict = ast.literal_eval(output_text)
+=======
                     fix_data = json.loads(match.group(), strict=False)
                     python_code = fix_data.get("code", "")
                 except json.JSONDecodeError as je:
@@ -709,6 +748,7 @@ Query: "{clean_query}"
                                 self.mcp_client.call_tool("docker_run_python", {"script": python_code}),
                                 timeout=30.0
                             )
+>>>>>>> main
                         
                         # Parse the output from the tool
                         if result and result.content:
