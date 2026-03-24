@@ -130,7 +130,7 @@ class ChatManager:
                 """
                 UPDATE mcp_servers
                 SET env = ?
-                WHERE name = 'Trading 212' AND (env IS NULL OR env = 'null' OR env = '')
+                WHERE name = 'Trading 212' AND (env IS NULL OR env = 'null' OR env = '' OR env = '{}')
             """,
                 (json.dumps({}),)
             )
