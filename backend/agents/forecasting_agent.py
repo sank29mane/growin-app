@@ -194,7 +194,7 @@ class ForecastingAgent(BaseAgent):
                 latency_ms=0
             )
 
-        except CircuitBreakerOpenException:
+        except CircuitBreakerOpenError:
             logger.error(f"Forecast skipped: circuit breaker is OPEN")
             return AgentResponse(
                 agent_name=self.config.name,
