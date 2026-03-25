@@ -124,7 +124,7 @@ class CoordinatorAgent:
             await self._initialize_llm()
             
         if not self.llm:
-            return {"type": "analytical", "needs": ["portfolio", "quant", "forecast"]}
+            return {"type": "analytical", "needs": ["portfolio", "quant", "forecast", "research"]}
             
         clean_query = query.strip()[:500]
         # ... prompt remains same ...
