@@ -390,9 +390,10 @@ struct TradingConfigSection: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityElement(children: .combine)
-                .accessibilityLabel("Update Architecture")
+                .accessibilityLabel(isUpdatingConfig ? "Updating Architecture" : "Update Architecture")
                 .accessibilityHint("Updates the Trading 212 configuration")
                 .accessibilityAddTraits(.isButton)
+                .accessibilityValue(isUpdatingConfig ? "Loading" : "")
             }
         }
     }
