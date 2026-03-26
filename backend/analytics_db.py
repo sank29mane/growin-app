@@ -145,7 +145,7 @@ class AnalyticsDB:
                 message_data.get('correlation_id'),
                 message_data.get('sender'),
                 message_data.get('subject'),
-                json.dumps(message_data.get('payload')),
+                json.dumps(message_data.get('payload'), default=str),
                 message_data.get('timestamp')
             ))
         except Exception as e:
