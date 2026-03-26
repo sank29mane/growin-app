@@ -2,6 +2,7 @@ import duckdb
 import pandas as pd
 import logging
 import json
+import threading
 import asyncio
 from typing import List, Dict, Any, Optional
 
@@ -11,24 +12,19 @@ logger = logging.getLogger(__name__)
 class AnalyticsDB:
     """
     DuckDB-powered analytics engine for high-performance OLAP queries.
-    
-    Use Cases:
-    - Time-series aggregations (20-50x faster than SQLite)
-    - Complex analytical queries on historical OHLCV data
-    - Portfolio performance analytics
-    - Bulk data operations
-    
+
     Architecture:
     - Columnar storage for fast scans
     - Vectorized execution
     - Multi-threaded query processing
     - In-memory or persistent mode
+    - Thread-local connections for stability
     """
     
     def __init__(self, db_path: str = ":memory:"):
         """
         Initialize DuckDB analytics database.
-        
+
         Args:
             db_path: Path to database file or ":memory:" for in-memory
         """
@@ -37,16 +33,27 @@ class AnalyticsDB:
         if os.environ.get("CI") == "true" or os.environ.get("PYTEST_CURRENT_TEST"):
             db_path = ":memory:"
             
-        self.conn = duckdb.connect(db_path)
+        self.db_path = db_path
+        self._local = threading.local()
+        self.lock = threading.Lock()
         self._init_schema()
         logger.info(f"✅ AnalyticsDB initialized (mode: {'memory' if db_path == ':memory:' else 'persistent'})")
 
+    @property
+    def conn(self):
+        """Thread-local connection accessor."""
+        if not hasattr(self._local, "conn"):
+            # Each thread gets its own connection to avoid SIGABRT/Deadlock
+            self._local.conn = duckdb.connect(self.db_path)
+        return self._local.conn
+
     def close(self):
-        """Explicitly close the DuckDB connection."""
-        if hasattr(self, 'conn') and self.conn:
+        """Explicitly close the DuckDB connection for current thread."""
+        if hasattr(self._local, 'conn') and self._local.conn:
             try:
-                self.conn.close()
-                logger.info("🔌 AnalyticsDB connection closed")
+                self._local.conn.close()
+                del self._local.conn
+                logger.info("🔌 AnalyticsDB connection closed for current thread")
             except Exception as e:
                 logger.error(f"Error closing AnalyticsDB: {e}")
     
@@ -65,7 +72,7 @@ class AnalyticsDB:
                 PRIMARY KEY (ticker, timestamp)
             )
         """)
-        
+
         # Agent Telemetry table (SOTA 2026 Reasoning Trace)
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS agent_telemetry (
@@ -77,7 +84,7 @@ class AnalyticsDB:
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
+
         # Agent Performance table (SOTA 2026 Alpha Metrics)
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS agent_performance (
@@ -89,23 +96,23 @@ class AnalyticsDB:
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
+
         # Create indices for fast queries
         self.conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_ticker_time 
+            CREATE INDEX IF NOT EXISTS idx_ticker_time
             ON ohlcv_history(ticker, timestamp DESC)
         """)
-        
+
         self.conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_telemetry_correlation 
+            CREATE INDEX IF NOT EXISTS idx_telemetry_correlation
             ON agent_telemetry(correlation_id)
         """)
-        
+
         self.conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_performance_ticker 
+            CREATE INDEX IF NOT EXISTS idx_performance_ticker
             ON agent_performance(ticker)
         """)
-        
+
                 # Pending Actions table for Human-In-The-Loop (HITL)
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS pending_actions (
@@ -181,9 +188,7 @@ class AnalyticsDB:
         """Fetch all pending actions by status."""
         try:
             # Convert to list of dicts from DuckDB result
-            rows = self.conn.execute("SELECT * FROM pending_actions WHERE status = ?", (status,)).fetchall()
-            cols = ['id', 'correlation_id', 'action_type', 'status', 'payload', 'ticker', 'timestamp']
-            res = pd.DataFrame(rows, columns=cols)
+            res = self.conn.execute("SELECT * FROM pending_actions WHERE status = ?", (status,)).fetchdf()
             return res.to_dict("records")
         except Exception as e:
             logger.error(f"Failed to fetch pending actions: {e}")
@@ -197,27 +202,27 @@ class AnalyticsDB:
         try:
             # 1. Get ticker and timestamp from telemetry
             telemetry = self.conn.execute("""
-                SELECT agent_name, payload, timestamp 
-                FROM agent_telemetry 
+                SELECT agent_name, payload, timestamp
+                FROM agent_telemetry
                 WHERE correlation_id = ? AND subject = 'agent_started' AND agent_name = 'OrchestratorAgent'
                 LIMIT 1
             """, (correlation_id,)).fetchone()
-            
+
             if not telemetry:
                 return
                 
             payload = json.loads(telemetry[1]) if isinstance(telemetry[1], str) else telemetry[1]
             # Need to extract ticker from payload (it's in 'query' or 'ticker' depending on event)
-            # Orchestrator agent_started usually has the query. 
+            # Orchestrator agent_started usually has the query.
             # Better to find 'intent_classified' or 'context_fabricated' which has ticker explicitly.
-            
+
             ticker_info = self.conn.execute("""
-                SELECT payload 
-                FROM agent_telemetry 
+                SELECT payload
+                FROM agent_telemetry
                 WHERE correlation_id = ? AND subject = 'context_fabricated'
                 LIMIT 1
             """, (correlation_id,)).fetchone()
-            
+
             if not ticker_info:
                 return
                 
@@ -227,36 +232,36 @@ class AnalyticsDB:
                 return
                 
             timestamp = telemetry[2]
-            
+
             # 2. Fetch entry price (closest to reasoning timestamp)
             entry_row = self.conn.execute("""
-                SELECT close FROM ohlcv_history 
+                SELECT close FROM ohlcv_history
                 WHERE ticker = ? AND timestamp <= ?
                 ORDER BY timestamp DESC LIMIT 1
             """, (ticker, timestamp)).fetchone()
-            
+
             if not entry_row:
                 return
-            
+
             entry_price = entry_row[0]
-            
+
             # 3. Fetch future prices (1d and 5d forward)
             # DuckDB allows powerful interval arithmetic
             price_1d = self.conn.execute("""
-                SELECT close FROM ohlcv_history 
+                SELECT close FROM ohlcv_history
                 WHERE ticker = ? AND timestamp >= ? + INTERVAL 1 DAY
                 ORDER BY timestamp ASC LIMIT 1
             """, (ticker, timestamp)).fetchone()
-            
+
             price_5d = self.conn.execute("""
-                SELECT close FROM ohlcv_history 
+                SELECT close FROM ohlcv_history
                 WHERE ticker = ? AND timestamp >= ? + INTERVAL 5 DAY
                 ORDER BY timestamp ASC LIMIT 1
             """, (ticker, timestamp)).fetchone()
-            
+
             return_1d = (price_1d[0] - entry_price) / entry_price if price_1d else None
             return_5d = (price_5d[0] - entry_price) / entry_price if price_5d else None
-            
+
             # 4. Store Performance Result
             self.conn.execute("""
                 INSERT INTO agent_performance (correlation_id, ticker, entry_price, return_1d, return_5d, timestamp)
@@ -265,7 +270,7 @@ class AnalyticsDB:
                     return_1d = EXCLUDED.return_1d,
                     return_5d = EXCLUDED.return_5d
             """, (correlation_id, ticker, entry_price, return_1d, return_5d, timestamp))
-            
+
             logger.info(f"Alpha Audit: {ticker} (1d: {return_1d}, 5d: {return_5d})")
             
         except Exception as e:
@@ -342,8 +347,8 @@ class AnalyticsDB:
             try:
                 self.conn.register('df_tmp', df)
                 self.conn.execute("""
-                    INSERT INTO ohlcv_history 
-                    SELECT ticker, timestamp, open, high, low, close, volume 
+                    INSERT INTO ohlcv_history
+                    SELECT ticker, timestamp, open, high, low, close, volume
                     FROM df_tmp
                     ON CONFLICT (ticker, timestamp) DO UPDATE SET
                         open = EXCLUDED.open,
@@ -381,14 +386,8 @@ class AnalyticsDB:
             DataFrame with aggregated statistics
         """
         try:
-            import pandas as pd
-            from datetime import datetime, timedelta
-            
-            # Pre-calculate timestamp to simplify DuckDB query and avoid INTERVAL issues
-            limit_ts = (datetime.now() - timedelta(days=int(window_days))).isoformat()
-
             # Sentinel: Use parameterized query for interval to prevent SQL injection
-            rows = self.conn.execute("""
+            result = self.conn.execute("""
                 SELECT 
                     ticker,
                     COUNT(*) as data_points,
@@ -399,22 +398,14 @@ class AnalyticsDB:
                     MAX(high) - MIN(low) as price_range,
                     SUM(volume) as total_volume,
                     AVG(volume) as avg_volume,
-                    (MAX(close) - MIN(close)) / NULLIF(MIN(close), 0) * 100 as price_change_pct
+                    (MAX(close) - MIN(close)) / MIN(close) * 100 as price_change_pct
                 FROM ohlcv_history
                 WHERE ticker = ? 
-                  AND timestamp >= ?
+                  AND timestamp >= CURRENT_TIMESTAMP - (INTERVAL 1 DAY * ?)
                 GROUP BY ticker
-            """, (ticker, limit_ts)).fetchall()
+            """, (ticker, int(window_days))).fetchdf()
             
-            if not rows:
-                return None
-                
-            cols = [
-                'ticker', 'data_points', 'avg_price', 'volatility', 
-                'min_price', 'max_price', 'price_range', 
-                'total_volume', 'avg_volume', 'price_change_pct'
-            ]
-            return pd.DataFrame(rows, columns=cols)
+            return result if not result.empty else None
             
         except Exception as e:
             logger.error(f"Aggregation query failed: {e}")
@@ -436,7 +427,7 @@ class AnalyticsDB:
             DataFrame with OHLCV data
         """
         try:
-            rows = self.conn.execute("""
+            result = self.conn.execute("""
                 SELECT 
                     timestamp,
                     open,
@@ -448,10 +439,7 @@ class AnalyticsDB:
                 WHERE ticker = ?
                 ORDER BY timestamp DESC
                 LIMIT ?
-            """, (ticker, limit)).fetchall()
-            
-            cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
-            result = pd.DataFrame(rows, columns=cols)
+            """, (ticker, limit)).fetchdf()
             
             return result if not result.empty else None
             
@@ -566,9 +554,7 @@ class AnalyticsDB:
             else:
                 ticker_query += " GROUP BY ticker"
                 
-            rows = self.conn.execute(ticker_query, params).fetchall()
-            cols = ['ticker', 'avg_1d', 'avg_5d', 'count']
-            ticker_res = pd.DataFrame(rows, columns=cols)
+            ticker_res = self.conn.execute(ticker_query, params).fetchdf()
             
             # 2. Specialist level metrics (correlation between specialist completion and future returns)
             # We join performance with telemetry to see which agents were active during successful/unsuccessful sessions
@@ -582,16 +568,12 @@ class AnalyticsDB:
                 JOIN agent_performance p ON t.correlation_id = p.correlation_id
                 WHERE t.subject = 'agent_complete' AND t.agent_name != 'OrchestratorAgent'
             """
-            
-            spec_cols = ['agent_name', 'avg_1d', 'avg_5d', 'count']
             if ticker:
                 specialist_query += " AND p.ticker = ? GROUP BY t.agent_name"
-                spec_rows = self.conn.execute(specialist_query, [ticker]).fetchall()
+                specialist_res = self.conn.execute(specialist_query, [ticker]).fetchdf()
             else:
                 specialist_query += " GROUP BY t.agent_name"
-                spec_rows = self.conn.execute(specialist_query).fetchall()
-            
-            specialist_res = pd.DataFrame(spec_rows, columns=spec_cols)
+                specialist_res = self.conn.execute(specialist_query).fetchdf()
 
             # Format result
             specialists = {}

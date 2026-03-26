@@ -5,7 +5,7 @@ try:
 except ImportError:
     mx = None
 
-from utils.mlx_injections import MLX_INJECTIONS
+from backend.utils.mlx_injections import MLX_INJECTIONS
 
 @pytest.mark.skipif(mx is None, reason="MLX is not installed or available")
 

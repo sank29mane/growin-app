@@ -201,15 +201,6 @@ class MultiMCPManager:
             "total_sessions": len(self.sessions),
         }
 
-    async def stop(self):
-        """Explicitly shutdown all sessions and the exit stack."""
-        try:
-            await self._exit_stack.aclose()
-            self.sessions.clear()
-            logger.info("🛑 MultiMCPManager: All sessions closed")
-        except Exception as e:
-            logger.error(f"MultiMCPManager: Error during shutdown: {e}")
-
 
 # Compatibility alias
 Trading212MCPClient = MultiMCPManager

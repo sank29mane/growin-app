@@ -1,3 +1,4 @@
+import pytest
 import asyncio
 import logging
 from agents.decision_agent import DecisionAgent
@@ -7,6 +8,7 @@ from market_context import MarketContext, PriceData, PortfolioData
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+@pytest.mark.asyncio
 async def test_hallucination_prevention():
     """
     Test that DecisionAgent identifies missing data and doesn't hallucinate numbers.

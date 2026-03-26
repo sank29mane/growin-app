@@ -198,20 +198,28 @@ class WhaleAgent(BaseAgent):
         try:
             # We use Tavily here as a robust way to find recent 13F filings summarized on sites like Fintel or WhaleWisdom
             # This is more resilient than direct EDGAR scraping for a prototype
-            from tavily import TavilyClient
+            import httpx
             import os
             
             tavily_key = os.getenv("TAVILY_API_KEY")
             if not tavily_key:
                 return []
                 
-            tavily = TavilyClient(api_key=tavily_key)
             query = f"top institutional holders and 13F filing summary for {ticker} 2025 2026"
             
-            def fetch():
-                return tavily.search(query=query, search_depth="advanced", max_results=5)
+            url = "https://api.tavily.com/search"
+            headers = {"Content-Type": "application/json"}
+            payload = {
+                "api_key": tavily_key,
+                "query": query,
+                "search_depth": "advanced",
+                "max_results": 5
+            }
             
-            response = await asyncio.to_thread(fetch)
+            async with httpx.AsyncClient() as client:
+                res = await client.post(url, headers=headers, json=payload)
+                res.raise_for_status()
+                response = res.json()
             results = response.get('results', [])
             logger.info(f"WhaleAgent: Search returned {len(results)} results")
             

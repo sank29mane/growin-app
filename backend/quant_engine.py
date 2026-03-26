@@ -550,61 +550,69 @@ class QuantEngine:
         Analyze if portfolio needs rebalancing based on target allocations.
         Now precision-safe using Decimal.
         """
-        current_parsed: Dict[str, Decimal] = {}
         total_value_dec = create_decimal(total_portfolio_value)
         if total_value_dec <= 0:
              return {"error": "Total portfolio value must be positive"}
 
-        for symbol, pct_val in current_allocation.items():
-            try:
-                val_str = str(pct_val).strip().replace('%', '')
-                val_dec = create_decimal(val_str)
-                if val_dec > 1: val_dec = val_dec / 100
-                current_parsed[symbol] = val_dec
-            except Exception:
-                current_parsed[symbol] = Decimal(0)
+        def parse_allocations(allocations: Dict[str, Any]) -> Dict[str, Decimal]:
+            parsed = {}
+            is_percentage = False
+
+            # First pass: determine if the entire dictionary represents percentages
+            for val in allocations.values():
+                val_str = str(val).strip()
+                if val_str.endswith('%'):
+                    is_percentage = True
+                    break
+                try:
+                    if create_decimal(val_str.replace('%', '')) > Decimal("1.0"):
+                        is_percentage = True
+                        break
+                except Exception:
+                    pass
+
+            for symbol, val in allocations.items():
+                try:
+                    val_str = str(val).strip().replace('%', '')
+                    dec_val = create_decimal(val_str)
+                    if is_percentage:
+                        parsed[symbol] = dec_val / Decimal("100")
+                    else:
+                        parsed[symbol] = dec_val
+                except Exception:
+                    parsed[symbol] = Decimal("0")
+            return parsed
+
+        current_parsed = parse_allocations(current_allocation)
+        target_parsed = parse_allocations(target_allocation)
 
         deviations = {}
         rebalance_actions = []
-        all_symbols = set(current_parsed.keys()) | set(target_allocation.keys())
+        all_symbols = set(current_parsed.keys()) | set(target_parsed.keys())
 
         for symbol in all_symbols:
-            current_pct = current_parsed.get(symbol, Decimal(0))
-            raw_target = target_allocation.get(symbol, 0)
-            try:
-                t_str = str(raw_target).strip()
-                is_pct_str = t_str.endswith('%')
-                t_str = t_str.replace('%', '')
-                target_pct = create_decimal(t_str)
-                # If it had a % sign, it's definitely a percentage that needs dividing by 100
-                if is_pct_str:
-                    target_pct = target_pct / 100
-                # If it didn't have a % sign but is > 1, assume it's a whole percentage number (e.g. 50 for 50%)
-                elif target_pct > 1:
-                    target_pct = target_pct / 100
-            except Exception:
-                target_pct = Decimal(0)
+            current_pct = current_parsed.get(symbol, Decimal("0"))
+            target_pct = target_parsed.get(symbol, Decimal("0"))
+            
             deviation = target_pct - current_pct
-            deviations[symbol] = deviation
-
-            if abs(deviation) > Decimal("0.001"):
-                current_val_amt = current_pct * total_value_dec
-                target_val_amt = target_pct * total_value_dec
-                value_change = target_val_amt - current_val_amt
+            
+            if abs(deviation) > Decimal("0.01"):  # 1% threshold
+                action = "BUY" if deviation > 0 else "SELL"
+                amount = abs(deviation) * total_value_dec
+                
                 rebalance_actions.append({
                     "symbol": symbol,
-                    "current_pct": current_pct,
-                    "target_pct": target_pct,
-                    "deviation": deviation,
-                    "action": "buy" if value_change > 0 else "sell",
-                    "value_change": abs(value_change)
+                    "action": action,
+                    "deviation_pct": float(deviation * 100),
+                    "amount": float(amount)
                 })
+                
+            deviations[symbol] = float(deviation * 100)
 
         return {
-            "total_value": total_value_dec,
-            "deviations": deviations,
+            "needs_rebalance": len(rebalance_actions) > 0,
             "rebalance_actions": rebalance_actions,
-            "needs_rebalancing": len(rebalance_actions) > 0
+            "deviations_pct": deviations
         }
 
 def get_quant_engine(): return QuantEngine()
