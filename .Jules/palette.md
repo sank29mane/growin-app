@@ -28,3 +28,7 @@
 ## 2025-03-19 - [FastAPI Exception Handling for Tests]
 **Learning:** Returning un-sanitized `str(e)` in FastAPI 500 exceptions breaks security sanitization checks in `test_security_error_handling.py` and causes the test suite to silently abort with `Fatal Python error: Aborted` (due to testclient constraints or security middleware handling exceptions aggressively).
 **Action:** Always replace broad exception strings with a generic `detail="Internal Server Error"` when propagating 500 errors to clients in routes.
+
+## 2026-03-24 - Trade Proposal and Custom Button Accessibility Modifiers
+**Learning:** For dynamic context buttons like `Approve` or `Reject` inside `TradeProposalCard`, static accessibility labels fail to provide context for VoiceOver users. Additionally, custom shared components like `PremiumButton` that use `.buttonStyle(.plain)` must have `.accessibilityAddTraits(.isButton)` and `.accessibilityLabel` explicitly applied.
+**Action:** Use dynamic accessibility labels (e.g., `Approve \(proposal.action) for \(proposal.ticker)`) for action cards, and ensure shared custom buttons re-add the button traits when using `.plain` style.

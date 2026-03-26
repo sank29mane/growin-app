@@ -1,4 +1,4 @@
-import numpy as np
+from __future__ import annotations
 try:
     import mlx.core as mx
     import mlx.nn as nn
@@ -13,7 +13,7 @@ except ImportError:
         @staticmethod
         def Linear(*args, **kwargs): return lambda x: x
     HAS_MLX = False
-
+import numpy as np
 from typing import Tuple, Optional, Dict, Any, Union
 from enum import Enum
 
@@ -23,13 +23,6 @@ class TimeResolution(Enum):
     INTRADAY_1MIN = '1min'
 
 class NeuralJMCE(nn.Module):
-    """
-    Joint Mean-Covariance Estimator (JMCE) using a Transformer backbone.
-    Optimized for Apple Silicon NPU via MLX.
-    
-    Predicts expected returns (mu) and the Cholesky factor (L) of the covariance matrix
-    to ensure the resulting covariance is always Positive Definite.
-    """
     def __init__(
         self,
         n_assets: int = 50,
@@ -73,7 +66,6 @@ class NeuralJMCE(nn.Module):
             self.mu_head = None
             self.cholesky_head = None
             self.velocity_head = None
-            self.fourier_phase_shift = None
         
         self._init_cholesky_logic(n_assets)
 
@@ -89,13 +81,9 @@ class NeuralJMCE(nn.Module):
                 k += 1
         self.diag_mask = np.zeros(self.cholesky_size, dtype=np.float32)
         self.diag_mask[diag_indices] = 1.0
-        
+        self.diag_mask = mx.array(self.diag_mask)
         idx_map[idx_map == -1] = self.cholesky_size
-        if HAS_MLX:
-            self.diag_mask = mx.array(self.diag_mask)
-            self.idx_map_mx = mx.array(idx_map, dtype=mx.uint32)
-        else:
-            self.idx_map_mx = None
+        self.idx_map_mx = mx.array(idx_map, dtype=mx.uint32)
 
     def _apply_fourier_shift(self, mu: 'mx.array') -> 'mx.array':
         shift = self.fourier_phase_shift
@@ -105,21 +93,10 @@ class NeuralJMCE(nn.Module):
 
     def __call__(
         self, 
-        x: 'mx.array', 
+        x: 'mx.array',
         error_vector: Optional['mx.array'] = None,
         return_velocity: bool = False
     ) -> Tuple['mx.array', 'mx.array', Optional['mx.array']]:
-        """
-        Forward pass.
-        Args:
-            x: Return sequences of shape (batch, seq_len, n_assets)
-            error_vector: Optional error sequences
-            return_velocity: Whether to return covariance velocity
-        Returns:
-            mu: Expected returns (batch, n_assets)
-            L: Cholesky factor (batch, n_assets, n_assets)
-            V: Optional covariance velocity
-        """
         B, S, N = x.shape
         x_lat = self.input_proj(x)
         if error_vector is not None:
@@ -142,11 +119,6 @@ class NeuralJMCE(nn.Module):
         return mu, L, V
 
     def _build_cholesky(self, L_flat: 'mx.array') -> 'mx.array':
-        """
-        Reconstructs the lower-triangular L matrix and ensures the diagonal is positive.
-        Sigma = L * L^T is guaranteed to be Positive Definite.
-        """
-        # Ensure diagonal elements are positive to guarantee PD covariance
         L_flat = L_flat * (1.0 - self.diag_mask) + mx.exp(L_flat) * self.diag_mask
         B = L_flat.shape[0]
         zeros = mx.zeros((B, 1))
@@ -156,12 +128,11 @@ class NeuralJMCE(nn.Module):
         return L
 
     def get_covariance(self, L: 'mx.array') -> 'mx.array':
-        """Computes the covariance matrix Sigma = LL^T."""
         return mx.matmul(L, L.transpose(0, 2, 1))
 
 class CoreMLJMCE:
     def __init__(self, model_path: str, n_assets: int = 50):
-        from backend.coreml_inference import CoreMLRunner
+        from coreml_inference import CoreMLRunner
         self.runner = CoreMLRunner(model_path)
         self.n_assets = n_assets
         self._initialized = self.runner.load(model_path)
@@ -178,7 +149,7 @@ class CoreMLJMCE:
         return mu, L, V
 
 def get_jmce_model(n_assets: int = 50, use_ane: bool = True, resolution: TimeResolution = TimeResolution.DAILY) -> Any:
-    from backend.app_logging import setup_logging
+    from app_logging import setup_logging
     logger = setup_logging('jmce_factory')
     if use_ane:
         import os

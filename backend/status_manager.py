@@ -57,7 +57,7 @@ class StatusManager:
         try:
             import psutil
             import os
-            from backend.app_context import state
+            from app_context import state
             
             process = psutil.Process(os.getpid())
             

@@ -4,9 +4,9 @@ import sys
 import os
 
 # Add backend to path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../backend')))
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
-from backend.app_logging import SecretMaskingFormatter
+from app_logging import SecretMaskingFormatter
 
 class TestLoggingSafety(unittest.TestCase):
     def setUp(self):

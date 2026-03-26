@@ -8,10 +8,10 @@ import sys
 from pathlib import Path
 
 # Add project root to path
-sys.path.append(str(Path(__file__).parent.parent.absolute() / 'backend'))
+sys.path.append(str(Path(__file__).parent.parent.absolute()))
 
-from agents.llm_factory import LLMFactory
-from lm_studio_client import LMStudioClient
+from backend.agents.llm_factory import LLMFactory
+from backend.lm_studio_client import LMStudioClient
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("TestNemotron")

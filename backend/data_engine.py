@@ -4,14 +4,14 @@ import logging
 from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, TypedDict, Union
-from backend.utils.ticker_utils import normalize_ticker
-from backend.utils.currency_utils import CurrencyNormalizer
-from backend.data_models import PriceData
+from utils.ticker_utils import normalize_ticker
+from utils.currency_utils import CurrencyNormalizer
+from data_models import PriceData
 
 # Set up logging
 logger = logging.getLogger(__name__)
 
-from backend.resilience import get_circuit_breaker
+from resilience import get_circuit_breaker
 
 # Circuit Breakers for External Services (SOTA 2026 Resilience API)
 alpaca_circuit = get_circuit_breaker("alpaca", failure_threshold=5, recovery_timeout=60.0)
@@ -94,7 +94,7 @@ class AlpacaClient:
             import yfinance as yf
             import pandas as pd
             import numpy as np
-            from backend.utils.currency_utils import CurrencyNormalizer
+            from utils.currency_utils import CurrencyNormalizer
 
             # Map timeframe to yfinance period/interval
             # OPTIMIZATION: Request max viable history for fallback to ensure TTM context (512+)
@@ -120,7 +120,7 @@ class AlpacaClient:
             df = data.copy()
 
             # Check if UK stock once (CurrencyNormalizer logic)
-            is_uk = CurrencyNormalizer.is_pence_ticker(normalized_ticker)
+            is_uk = CurrencyNormalizer.is_uk_stock(normalized_ticker)
 
             if is_uk:
                  # Vectorized division for UK stocks (GBX -> GBP)
@@ -195,7 +195,7 @@ class AlpacaClient:
         - US Stocks -> Alpaca (Primary) -> yfinance (Fallback)
         - UK Stocks (.L) -> Finnhub (Primary) -> yfinance (Fallback)
         """
-        from backend.cache_manager import cache # type: ignore
+        from cache_manager import cache # type: ignore
         cache_key = f"bars_{ticker}_{timeframe}_{limit}"
         cached_data = cache.get(cache_key)
         if cached_data:
@@ -288,7 +288,7 @@ class AlpacaClient:
         Fetch historical bars for multiple tickers in parallel.
         Optimized to use Alpaca Batch API for compatible symbols.
         """
-        from backend.cache_manager import cache
+        from cache_manager import cache
         from datetime import datetime, timedelta, timezone
         
         results = {}
@@ -507,7 +507,7 @@ class AlpacaClient:
                 # Check if it's acting like a dict (defensive)
                 if isinstance(acct, dict):
                      return {
-                        "cash_balance": {"total": str(acct.get("cash", "0")), "currency": str(acct.get("currency", "GBP"))},
+                        "cash_balance": {"total": Decimal(str(acct.get("cash"))), "currency": acct.get("currency", "GBP")},
                         "portfolio_value": Decimal(str(acct.get("portfolio_value"))),
                         # ... other fields
                         "unrealized_pnl": Decimal(str(acct.get("equity", 0))) - Decimal(str(acct.get("last_equity", 0))),
@@ -516,7 +516,7 @@ class AlpacaClient:
                      }
                 
                 return {
-                    "cash_balance": {"total": str(acct.cash), "currency": str(acct.currency)},
+                    "cash_balance": {"total": Decimal(str(acct.cash)), "currency": str(acct.currency)}, # Fix dict-item (str expected)
 
                     "portfolio_value": Decimal(str(acct.portfolio_value)),
                     "unrealized_pnl": Decimal(str(acct.equity)) - Decimal(str(acct.last_equity)), # Approx
@@ -633,10 +633,7 @@ class FinnhubClient:
                  from_time = to_time - timedelta(days=365)
 
             # Fetch candle data
-            # Use asyncio.to_thread to prevent blocking the event loop
-            import asyncio
-            candles = await asyncio.to_thread(
-                self.client.stock_candles,
+            candles = self.client.stock_candles(
                 symbol=normalized_ticker,
                 resolution=resolution,
                 _from=int(from_time.timestamp()),
@@ -695,9 +692,8 @@ class FinnhubClient:
         normalized_ticker = ticker.replace('.L', '')
 
         try:
-            from backend.utils.currency_utils import CurrencyNormalizer
-            import asyncio
-            quote = await asyncio.to_thread(self.client.quote, normalized_ticker)
+            from utils.currency_utils import CurrencyNormalizer
+            quote = self.client.quote(normalized_ticker)
             
             # Helper to safely get values from quote dict
             def get_val(key):

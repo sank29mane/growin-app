@@ -14,8 +14,8 @@ Rate Limits:
 Supported Markets: UK (LSE), India (NSE), US
 """
 
-from backend.agents.base_agent import BaseAgent, AgentConfig, AgentResponse
-from backend.market_context import ResearchData, NewsArticle
+from .base_agent import BaseAgent, AgentConfig, AgentResponse
+from market_context import ResearchData, NewsArticle
 from typing import Dict, Any, List, Optional
 import logging
 import os
@@ -192,7 +192,7 @@ class ResearchAgent(BaseAgent):
 
             # --- RAG INTEGRATION: Store individual articles for Timeline ---
             try:
-                from backend.app_context import state
+                from app_context import state
                 if state.rag_manager and rich_articles:
                     for art in rich_articles:
                         state.rag_manager.add_news_article(
@@ -277,16 +277,25 @@ class ResearchAgent(BaseAgent):
 
             # 2. SEC Filings / News via Tavily
             if not is_uk and self.tavily_key:
-                from tavily import TavilyClient
-                tavily = TavilyClient(api_key=self.tavily_key)
+                import httpx
                 # Specialized query for SEC filings
                 query = f"latest SEC filings and regulatory announcements for {ticker}"
                 
-                def fetch():
-                    return tavily.search(query=query, search_depth="advanced", max_results=5)
+                url = "https://api.tavily.com/search"
+                headers = {"Content-Type": "application/json"}
+                payload = {
+                    "api_key": self.tavily_key,
+                    "query": query,
+                    "search_depth": "advanced",
+                    "max_results": 5
+                }
+
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(url, headers=headers, json=payload)
+                    response.raise_for_status()
+                    data = response.json()
                 
-                response = await asyncio.to_thread(fetch)
-                for r in response.get('results', []):
+                for r in data.get('results', []):
                     # Only include if relevant to SEC or regulatory
                     content = (r.get('title', '') + (r.get('content', '') or '')).upper()
                     if any(kw in content for kw in ["SEC", "FORM 8-K", "10-Q", "10-K", "FILING", "REGULATORY"]):
@@ -309,23 +318,25 @@ class ResearchAgent(BaseAgent):
     async def _fetch_newsapi(self, ticker: str, company_name: str) -> List[Dict]:
         """Fetch from NewsAPI (traditional news sources)."""
         try:
-            from newsapi import NewsApiClient
+            import httpx
             from datetime import datetime, timedelta
             
-            newsapi = NewsApiClient(api_key=self.newsapi_key)
             from_date = (datetime.now() - timedelta(days=7)).isoformat()
+            url = "https://newsapi.org/v2/everything"
+            params = {
+                "q": f"{company_name} stock OR {ticker}",
+                "from": from_date,
+                "language": "en",
+                "sortBy": "relevancy",
+                "pageSize": 5,
+                "apiKey": self.newsapi_key
+            }
             
-            def fetch():
-                return newsapi.get_everything(
-                    q=f"{company_name} stock OR {ticker}",
-                    from_param=from_date,
-                    language='en',
-                    sort_by='relevancy',
-                    page_size=5
-                )
-            
-            response = await asyncio.to_thread(fetch)
-            return response.get('articles', [])
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url, params=params)
+                response.raise_for_status()
+                data = response.json()
+            return data.get('articles', [])
         except Exception as e:
             logger.warning(f"NewsAPI failed: {e}")
             return []
@@ -333,9 +344,8 @@ class ResearchAgent(BaseAgent):
     async def _fetch_tavily(self, ticker: str, company_name: str) -> List[Dict]:
         """Fetch from Tavily (AI-powered search)."""
         try:
-            from tavily import TavilyClient
+            import httpx
             
-            tavily = TavilyClient(api_key=self.tavily_key)
             is_uk = ticker.upper().endswith(".L")
             
             if ticker == "MARKET":
@@ -344,14 +354,19 @@ class ResearchAgent(BaseAgent):
                 region = "LSE UK" if is_uk else "US"
                 query = f"latest financial news for {company_name} ({ticker}) stock on {region} market"
             
-            def fetch():
-                return tavily.search(
-                    query=query,
-                    search_depth="advanced",
-                    max_results=8
-                )
+            url = "https://api.tavily.com/search"
+            headers = {"Content-Type": "application/json"}
+            payload = {
+                "api_key": self.tavily_key,
+                "query": query,
+                "search_depth": "advanced",
+                "max_results": 8
+            }
             
-            response = await asyncio.to_thread(fetch)
+            async with httpx.AsyncClient() as client:
+                res = await client.post(url, headers=headers, json=payload)
+                res.raise_for_status()
+                response = res.json()
             
             # Normalize to common format
             return [

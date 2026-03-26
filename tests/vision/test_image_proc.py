@@ -2,7 +2,7 @@
 import io
 import pytest
 from PIL import Image
-from utils.image_proc import prepare_vlm_image
+from backend.utils.image_proc import prepare_vlm_image
 
 def create_test_image(width: int, height: int) -> bytes:
     """Create a test image and return as bytes."""

@@ -1,1 +1,0 @@
-/Users/sanketmane/.gemini/get-shit-done/workflows/new-project.md

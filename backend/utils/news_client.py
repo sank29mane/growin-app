@@ -8,7 +8,7 @@ import asyncio
 import logging
 import httpx
 from typing import List, Dict, Any, Optional
-from backend.resilience import get_circuit_breaker
+from resilience import get_circuit_breaker
 
 logger = logging.getLogger(__name__)
 

@@ -1,8 +1,8 @@
 import numpy as np
 from decimal import Decimal
 from typing import List, Union, Optional
-from backend.utils.financial_math import create_decimal
-from backend.app_logging import setup_logging
+from utils.financial_math import create_decimal
+from app_logging import setup_logging
 
 logger = setup_logging("risk_engine")
 

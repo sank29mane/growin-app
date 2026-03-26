@@ -8,8 +8,8 @@ from scipy.optimize import minimize
 from typing import Dict, Any, List, Optional
 import logging
 import time
-from backend.agents.base_agent import BaseAgent, AgentConfig, AgentResponse
-from backend.market_context import GoalData
+from .base_agent import BaseAgent, AgentConfig, AgentResponse
+from market_context import GoalData
 
 logger = logging.getLogger(__name__)
 
@@ -323,7 +323,7 @@ class GoalPlannerAgent(BaseAgent):
         """
         try:
              # Use Alpaca for data fetching as per user request
-            from backend.data_engine import get_alpaca_client
+            from data_engine import get_alpaca_client
             alpaca = get_alpaca_client()
             
             real_universe = {}

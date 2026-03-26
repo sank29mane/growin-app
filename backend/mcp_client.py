@@ -8,7 +8,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.sse import sse_client
 
-from backend.resilience import get_circuit_breaker, CircuitBreakerOpenError
+from resilience import get_circuit_breaker, CircuitBreakerOpenError
 
 logger = logging.getLogger(__name__)
 
@@ -200,15 +200,6 @@ class MultiMCPManager:
             "failed_servers": list(self._failed_servers.keys()),
             "total_sessions": len(self.sessions),
         }
-
-    async def stop(self):
-        """Explicitly shutdown all sessions and the exit stack."""
-        try:
-            await self._exit_stack.aclose()
-            self.sessions.clear()
-            logger.info("🛑 MultiMCPManager: All sessions closed")
-        except Exception as e:
-            logger.error(f"MultiMCPManager: Error during shutdown: {e}")
 
 
 # Compatibility alias

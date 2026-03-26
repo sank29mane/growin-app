@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, ConfigDict, field_serializer
 from datetime import datetime, timezone
 from enum import Enum
 from decimal import Decimal
-from backend.utils.financial_math import create_decimal
+from utils.financial_math import create_decimal
 
 
 class Signal(str, Enum):
@@ -258,7 +258,8 @@ class PriceData(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
-from backend.agents.base_agent import TelemetryData
+from agents.base_agent import TelemetryData
+
 
 class MarketContext(BaseModel):
     """

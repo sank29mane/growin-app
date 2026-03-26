@@ -6,11 +6,11 @@ import os
 from datetime import datetime
 
 # Add backend to sys.path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../backend')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from backend.app_context import state, ChatMessage
-from backend.chat_manager import ChatManager
-from backend.routes.chat_routes import chat_message, list_conversations, get_conversation_history
+from app_context import state, ChatMessage
+from chat_manager import ChatManager
+from routes.chat_routes import chat_message, list_conversations, get_conversation_history
 
 class TestChatEndpoints(unittest.IsolatedAsyncioTestCase):
     
@@ -25,12 +25,10 @@ class TestChatEndpoints(unittest.IsolatedAsyncioTestCase):
         
         # Mock Coordinator and Decision Agent
         # Note: They are imported inside the function, so we must patch the source modules
-        self.coordinator_patcher = patch('backend.agents.coordinator_agent.CoordinatorAgent')
-        self.decision_patcher = patch('backend.agents.decision_agent.DecisionAgent')
-        self.orchestrator_patcher = patch('backend.agents.orchestrator_agent.OrchestratorAgent')
+        self.coordinator_patcher = patch('agents.coordinator_agent.CoordinatorAgent')
+        self.decision_patcher = patch('agents.decision_agent.DecisionAgent')
         self.MockCoordinator = self.coordinator_patcher.start()
         self.MockDecision = self.decision_patcher.start()
-        self.MockOrchestrator = self.orchestrator_patcher.start()
         
         # Setup Mock behaviors
         self.mock_coordinator_instance = self.MockCoordinator.return_value
@@ -46,25 +44,17 @@ class TestChatEndpoints(unittest.IsolatedAsyncioTestCase):
         self.mock_decision_instance.make_decision = AsyncMock(return_value="This is a test response.")
         self.mock_decision_instance.generate_response = AsyncMock(return_value="Test Title")
 
-        self.mock_orchestrator_instance = self.MockOrchestrator.return_value
-        self.mock_orchestrator_instance.run = AsyncMock(return_value={
-            "content": "This is a test response.",
-            "response_id": "test_id",
-            "context": MagicMock()
-        })
-
     def tearDown(self):
         self.chat_manager.close()
         self.coordinator_patcher.stop()
         self.decision_patcher.stop()
-        self.orchestrator_patcher.stop()
 
     async def test_chat_message_success_and_timestamp(self):
         """Test that chat_message returns success and valid ISO timestamp"""
         request = ChatMessage(message="Hello", model_name="test-model")
         
         # Mock update_conversation_title_if_needed to do nothing or return success
-        with patch('backend.routes.chat_routes.update_conversation_title_if_needed') as mock_title:
+        with patch('routes.chat_routes.update_conversation_title_if_needed') as mock_title:
              response = await chat_message(request, accept="application/json")
         
         self.assertIn("response", response)
@@ -117,9 +107,9 @@ class TestChatEndpoints(unittest.IsolatedAsyncioTestCase):
         """Test that specific error messages are raised"""
         request = ChatMessage(message="Crash me", model_name="native-mlx")
         
-        # Make OrchestratorAgent raise an exception mimicking the fallback failure
+        # Make DecisionAgent raise an exception mimicking the fallback failure
         err_msg = "Total failure... native-mlx fallback failed."
-        self.mock_orchestrator_instance.run.side_effect = RuntimeError(err_msg)
+        self.mock_decision_instance.make_decision.side_effect = RuntimeError(err_msg)
         
         from fastapi import HTTPException
         with self.assertRaises(HTTPException) as cm:

@@ -3,7 +3,7 @@ import pandas as pd
 import xgboost as xgb
 from typing import List, Dict, Any
 import logging
-from backend.utils.indicators import add_intraday_features
+from utils.indicators import add_intraday_features
 
 logger = logging.getLogger(__name__)
 

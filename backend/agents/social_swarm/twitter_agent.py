@@ -2,8 +2,8 @@ import asyncio
 import logging
 from decimal import Decimal
 from typing import Optional
-from backend.agents.social_swarm.base_micro import BaseMicroAgent, MicroAgentResponse
-from backend.utils.financial_math import create_decimal
+from .base_micro import BaseMicroAgent, MicroAgentResponse
+from utils.financial_math import create_decimal
 
 logger = logging.getLogger(__name__)
 
@@ -30,34 +30,38 @@ class TwitterMicroAgent(BaseMicroAgent):
             )
 
         try:
-            from tavily import TavilyClient
+            import httpx
             from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
             
-            tavily = TavilyClient(api_key=self.tavily_key)
             sentiment_analyzer = SentimentIntensityAnalyzer()
             
-            # Non-blocking thread execution
+            # Non-blocking async execution
             query = f"${ticker} stock discussion twitter x.com" if ticker != "MARKET" else "retail investor sentiment twitter x.com stockmarket"
             
-            response = await asyncio.to_thread(
-                tavily.search,
-                query=query,
-                search_depth="advanced",
-                include_domains=["x.com", "twitter.com", "stocktwits.com"],
-                max_results=5
-            )
+            url = "https://api.tavily.com/search"
+            headers = {"Content-Type": "application/json"}
+            payload = {
+                "api_key": self.tavily_key,
+                "query": query,
+                "search_depth": "advanced",
+                "include_domains": ["x.com", "twitter.com", "stocktwits.com"],
+                "max_results": 5
+            }
+
+            async with httpx.AsyncClient() as client:
+                res = await client.post(url, headers=headers, json=payload)
+                res.raise_for_status()
+                response = res.json()
             
             results = response.get('results', [])
             
             if not results and ticker != "MARKET" and company_name and company_name != ticker:
                 query = f"{company_name} stock sentiment discussion twitter"
-                response = await asyncio.to_thread(
-                    tavily.search,
-                    query=query,
-                    search_depth="advanced",
-                    include_domains=["x.com", "twitter.com", "stocktwits.com"],
-                    max_results=5
-                )
+                payload["query"] = query
+                async with httpx.AsyncClient() as client:
+                    res = await client.post(url, headers=headers, json=payload)
+                    res.raise_for_status()
+                    response = res.json()
                 results = response.get('results', [])
 
             if not results:

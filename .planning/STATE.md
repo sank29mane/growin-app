@@ -1,26 +1,32 @@
 # GSD STATE MEMORY
 
 ## Current Position
-- **Phase**: Unified Consolidation & Hardening
-- **Task**: Final Verification of Consolidated Branch
-- **Status**: IMPLEMENTED
-- **Branch**: `feature/optimize-mcp-db-retrieval-13922736839544958811` (Unified Foundation)
+- **Phase**: Phase 41 - Sovereign UI - Stitch Generation & UX Refinement
+- **Task**: GSD & Gemini CLI Optimization (v1.28.0 + v0.35.0-preview.5)
+- **Status**: COMPLETED (Infrastructure Updated)
+- **Branch**: `main`
+- **Active Model (CLI)**: `gemini-1.5-pro-preview` (Synthesis Mode)
+- **Active Model (App)**: `native-mlx` (Apple Silicon Optimized)
 
 ## Summary
-- **PR Consolidation**: Merged 11/12 pending PRs into the hardened Phase 39 branch.
-- **Conflict Resolution**: Successfully resolved complex conflicts in `decision_agent.py`, `portfolio_agent.py`, and the SwiftUI layer.
-- **Performance Mandate**: Updated `PROJECT_RULES.md` to prioritize Apple Silicon (M4 Pro) optimization and local verification over CI compatibility.
-- **Verification**: Local test suite (150/150) passed prior to final merge batch. 
+- **Infrastructure Update**: Successfully upgraded GSD (v1.28.0) and Gemini CLI (v0.35.0-preview.5) configurations.
+- **Workflow Model**: Implemented the synchronous, YOLO-optimized handoff protocol between the CLI terminal and Antigravity IDE agent.
+- **Parallel Workstreams**: Initialized `backend-core` (CLI) and `ui-sovereign` (IDE) namespaces.
+- **Iterative Adaptation**: Established the model-aware adaptation layer in `GEMINI.md`. The CLI now autonomously scales its reasoning depth and context usage based on the active model.
+- **Model Registry**: Updated `backend/model_config.py` to prioritize Apple Silicon native models (MLX/CoreML) while gating cloud previews for assistance and testing.
+- **Resilience**: Confirmed DuckDB thread-safety and yfinance regional fallbacks are fully integrated into the architecture.
 
-## Active Tasks
+## Active Tasks (Phase 41)
 | Task | Description | Status |
 |------|-------------|--------|
-| PR Consolidation | Merge all 12 pending PRs into hardened branch | 95% COMPLETE |
-| Conflict Resolution | Fix Agent and UI discrepancies | COMPLETED |
-| Performance Rules | Formalize M4 Pro optimization mandates | COMPLETED |
-| Final Verification | Run full local suite on unified branch | PENDING |
+| GSD Opt | Finalize v1.28.0/v0.35.0 optimization | COMPLETED |
+| 41-01-PLAN | Generate Portfolio Master Ledger (`[IDE]`) | PENDING IDE EXECUTION |
+| 41-02-PLAN | Implement Advanced Watchlist & Sparklines (`[IDE]`) | PENDING IDE EXECUTION |
+| 41-03-PLAN | Implement Execution Panel & Strategy Overlay (`[IDE]`) | PENDING IDE EXECUTION |
+| 41-04-CORE | Refine Backend Strategy Calibration Engine (`[CLI]`) | PLANNED |
 
-## Success Criteria (Phase 39)
-1. 100% absolute imports in `backend/`.
-2. PPO hyperparameter grid search results ranked by financial reward.
-3. Stable WebSocket training stream with Brain Stability metrics.
+## Success Criteria (Phase 41)
+1. Seamless handoff between CLI and IDE via `STATE.md`.
+2. Portfolio Master Ledger implemented with 0px Sovereign DNA.
+3. Backend strategy engine supports parallel multi-model bursts for calibration.
+4. All tasks verified on M4 Pro local hardware.
