@@ -100,7 +100,7 @@ class PortfolioAgent(BaseAgent):
                             
                 except asyncio.TimeoutError as e:
                     raise ValueError("Multi-account fetch timed out") from e
-                except CircuitBreakerOpenException:
+                except CircuitBreakerOpenError:
                     logger.error("Portfolio sync skipped: circuit breaker is OPEN")
                     return AgentResponse(
                         agent_name=self.config.name,
@@ -141,7 +141,7 @@ class PortfolioAgent(BaseAgent):
                     result = await self.circuit_breaker.call(fetch_single)
                 except asyncio.TimeoutError as e:
                     raise ValueError(f"Portfolio fetch for {requested_account} timed out") from e
-                except CircuitBreakerOpenException:
+                except CircuitBreakerOpenError:
                     logger.error("Portfolio sync skipped: circuit breaker is OPEN")
                     return AgentResponse(
                         agent_name=self.config.name,

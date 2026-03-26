@@ -75,9 +75,9 @@ def test_forecast_vectorization_1hour():
         timeframe="1Hour",
         last_real_ts=last_real_ts,
         avg_delta=avg_delta,
-        robust_std=robust_std,
-        robust_mean=robust_mean,
-        last_vol=last_vol,
+                    robust_scale=robust_std,
+            robust_center=robust_mean,
+            last_vol=last_vol,
         fallback_price=ohlcv_data[-1]['c'],
         anchor_bias=anchor_bias
     )
@@ -112,9 +112,9 @@ def test_forecast_vectorization_1day_business_logic():
         timeframe="1Day",
         last_real_ts=last_real_ts,
         avg_delta=avg_delta,
-        robust_std=robust_std,
-        robust_mean=robust_mean,
-        last_vol=last_vol,
+                    robust_scale=robust_std,
+            robust_center=robust_mean,
+            last_vol=last_vol,
         fallback_price=ohlcv_data[-1]['c'],
         anchor_bias=anchor_bias
     )
@@ -152,9 +152,9 @@ def test_performance_benchmark():
         timeframe="1Hour",
         last_real_ts=last_real_ts,
         avg_delta=avg_delta,
-        robust_std=robust_std,
-        robust_mean=robust_mean,
-        last_vol=last_vol,
+                    robust_scale=robust_std,
+            robust_center=robust_mean,
+            last_vol=last_vol,
         fallback_price=ohlcv_data[-1]['c'],
         anchor_bias=anchor_bias
     )

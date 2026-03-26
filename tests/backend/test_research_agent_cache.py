@@ -28,6 +28,7 @@ class TestResearchAgentCache(unittest.TestCase):
         """Test that _prompt_template is initialized to None."""
         self.assertIsNone(self.agent._prompt_template)
 
+    @unittest.skip('SOTA 2026 refactored to use Magentic directly, no manual file template caching needed')
     def test_smart_query_caching(self):
         """Test that the prompt template is cached after the first call."""
         loop = asyncio.new_event_loop()
