@@ -132,7 +132,8 @@ class ForecastingAgent(BaseAgent):
                 res = await self.forecaster.forecast(
                     ohlcv_data,
                     prediction_steps=steps,
-                    timeframe=timeframe
+                    timeframe=timeframe,
+                    ticker=ticker
                 )
                 if "error" in res:
                     # Raise exception to trigger the circuit breaker on logical errors

@@ -103,7 +103,7 @@ def _calculate_ttm_residuals(pipeline, df_scaled, channels) -> np.ndarray:
         logger.warning(f"Failed to calculate residuals: {e}")
         return np.zeros((96, len(channels)))
 
-def run_forecast(ohlcv_data: List[Dict[str, Any]], prediction_steps: int, timeframe: str = "1Hour") -> Dict[str, Any]:
+def run_forecast(ohlcv_data: List[Dict[str, Any]], prediction_steps: int, timeframe: str = "1Hour", ticker: str = None) -> Dict[str, Any]:
     """Execute TTM-R2 forecasting with scaling and frequency awareness"""
     try:
         from tsfm_public.models.tinytimemixer import TinyTimeMixerForPrediction
@@ -123,6 +123,11 @@ def run_forecast(ohlcv_data: List[Dict[str, Any]], prediction_steps: int, timefr
         }
         requested_freq = tf_map.get(timeframe, "H")
         
+        try:
+            from utils.currency_utils import CurrencyNormalizer
+        except ImportError:
+            CurrencyNormalizer = None
+
         # Load model
         # TTM-R2 is a Zero-Shot model by default. We load it in evaluation mode.
         model = TinyTimeMixerForPrediction.from_pretrained(
@@ -138,6 +143,38 @@ def run_forecast(ohlcv_data: List[Dict[str, Any]], prediction_steps: int, timefr
         # CLEANUP & ROBUSTNESS: 
         # 1. Convert to DF first for easy cleaning
         # 2. Handle NaNs and Zeros (Forward Fill) preventing scaling corruption
+        # --- PRE-DATAFRAME SANITIZATION (Unit Mismatch Fix) ---
+        # Detect if the last point (often real-time) is disjointed from history due to GBX/GBP mismatch.
+        # Only apply this unit fix for UK stocks (where pence mismatches occur)
+        is_uk_stock = False
+        if ticker and CurrencyNormalizer is not None:
+            is_uk_stock = CurrencyNormalizer.is_pence_ticker(ticker)
+
+        if is_uk_stock and len(ohlcv_data) > 2:
+            last = ohlcv_data[-1]
+            prev = ohlcv_data[-2]
+
+            try:
+                last_c = float(last.get('c', 0))
+                prev_c = float(prev.get('c', 0))
+
+                if last_c > 0 and prev_c > 0:
+                    ratio = last_c / prev_c
+                    if ratio > 50: # Probably GBP history, GBX last
+                        last['o'] = float(last['o']) / 100
+                        last['h'] = float(last['h']) / 100
+                        last['l'] = float(last['l']) / 100
+                        last['c'] = float(last['c']) / 100
+                        logger.info("Fixed GBX mismatch (Last point divided by 100)")
+                    elif ratio < 0.02: # Probably GBX history, GBP last
+                        last['o'] = float(last['o']) * 100
+                        last['h'] = float(last['h']) * 100
+                        last['l'] = float(last['l']) * 100
+                        last['c'] = float(last['c']) * 100
+                        logger.info("Fixed GBP mismatch (Last point multiplied by 100)")
+            except (ValueError, TypeError):
+                pass
+
         df_raw = pd.DataFrame(ohlcv_data)
         
         # ensure numeric
@@ -302,8 +339,9 @@ if __name__ == "__main__":
         ohlcv = input_data.get("ohlcv_data", [])
         steps = input_data.get("prediction_steps", 96)
         timeframe = input_data.get("timeframe", "1Hour")
+        ticker = input_data.get("ticker")
         
-        result = run_forecast(ohlcv, steps, timeframe=timeframe)
+        result = run_forecast(ohlcv, steps, timeframe=timeframe, ticker=ticker)
         
         # Write result to stdout
         # Inline sanitization to ensure JSON safe output (NaN -> 0.0) without external deps
