@@ -877,9 +877,11 @@ Query: "{clean_query}"
 
 
     def _resolve_ticker_from_history(self, history: List[Dict]) -> Optional[str]:
-        """Attempt to find last discussed ticker in history using TickerResolver"""
+        """Attempt to find last discussed ticker in history using TickerResolver (Depth Limit: 5)"""
         resolver = TickerResolver()
-        for msg in reversed(history):
+        for i, msg in enumerate(reversed(history)):
+            if i >= 5: # Short-circuit after 5 messages to optimize
+                break
             content = msg.get("content", "")
             if not content:
                 continue
