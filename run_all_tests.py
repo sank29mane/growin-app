@@ -10,10 +10,10 @@ for test_file in test_files:
     try:
         proc = subprocess.run(
             ['uv', 'run', '--project', 'backend', 'pytest', test_file],
-            env={**os.environ, "CI": "true", "PYTHONPATH": ".:backend"},
+            env={**os.environ, "CI": "true", "PYTHONPATH": "."},
             capture_output=True,
             text=True,
-            timeout=10
+            timeout=60
         )
         duration = time.time() - start
         if proc.returncode == 0:

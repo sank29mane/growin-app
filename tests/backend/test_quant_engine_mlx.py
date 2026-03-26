@@ -8,7 +8,7 @@ import pandas as pd
 # Add backend to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from quant_engine import QuantEngine
+from backend.quant_engine import QuantEngine
 
 class TestQuantEngineMLX(unittest.TestCase):
     def setUp(self):

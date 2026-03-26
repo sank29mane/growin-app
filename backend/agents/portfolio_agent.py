@@ -7,6 +7,7 @@ import logging
 import json
 
 import asyncio
+from utils.async_utils import run_with_timeout
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -21,7 +22,7 @@ from utils.ticker_utils import normalize_ticker
 from cache_manager import cache # Import global cache
 from utils.financial_math import create_decimal
 from utils.portfolio_analyzer import PortfolioAnalyzer
-from resilience import get_circuit_breaker, CircuitBreakerOpenError, CircuitBreakerOpenException
+from resilience import get_circuit_breaker, CircuitBreakerOpenError
 
 logger = logging.getLogger(__name__)
 
@@ -81,21 +82,17 @@ class PortfolioAgent(BaseAgent):
             if requested_account == "all":
                 # Single fetch for ALL accounts (resolves N+1 query pattern)
                 async def fetch_all():
-                    if hasattr(asyncio, 'timeout'):
-                        async with asyncio.timeout(15.0):
-                            return await self.mcp_client.call_tool("analyze_portfolio", arguments={"account_type": "all"})
-                    else:
-                        return await asyncio.wait_for(
-                            self.mcp_client.call_tool("analyze_portfolio", arguments={"account_type": "all"}),
-                            timeout=15.0
-                        )
+                    return await run_with_timeout(
+                        self.mcp_client.call_tool("analyze_portfolio", arguments={"account_type": "all"}),
+                        15.0
+                    )
 
                 try:
                     result = await self.circuit_breaker.call(fetch_all)
                             
                 except asyncio.TimeoutError as e:
                     raise ValueError("Multi-account fetch timed out") from e
-                except CircuitBreakerOpenException:
+                except CircuitBreakerOpenError:
                     logger.error("Portfolio sync skipped: circuit breaker is OPEN")
                     return AgentResponse(
                         agent_name=self.config.name,
@@ -124,23 +121,19 @@ class PortfolioAgent(BaseAgent):
             else:
                 # Single account fetch with timeout
                 async def fetch_single():
-                    if hasattr(asyncio, 'timeout'):
-                        async with asyncio.timeout(15.0):
-                            return await self.mcp_client.call_tool(
-                                "analyze_portfolio",
-                                arguments={"account_type": requested_account}
-                            )
-                    else:
-                        return await asyncio.wait_for(self.mcp_client.call_tool(
-                            "analyze_portfolio", 
+                    return await run_with_timeout(
+                        self.mcp_client.call_tool(
+                            "analyze_portfolio",
                             arguments={"account_type": requested_account}
-                        ), timeout=15.0)
+                        ),
+                        15.0
+                    )
 
                 try:
                     result = await self.circuit_breaker.call(fetch_single)
                 except asyncio.TimeoutError as e:
                     raise ValueError(f"Portfolio fetch for {requested_account} timed out") from e
-                except CircuitBreakerOpenException:
+                except CircuitBreakerOpenError:
                     logger.error("Portfolio sync skipped: circuit breaker is OPEN")
                     return AgentResponse(
                         agent_name=self.config.name,
@@ -177,13 +170,8 @@ class PortfolioAgent(BaseAgent):
             
             # Fetch history for context (default 30 days) - TIMEOUT PROTECTED
             try:
-                if hasattr(asyncio, 'timeout'):
-                    async with asyncio.timeout(5.0):
-                       history = await self._fetch_portfolio_history(portfolio_data)
-                       portfolio_data.portfolio_history = history
-                else:
-                    history = await asyncio.wait_for(self._fetch_portfolio_history(portfolio_data), timeout=5.0)
-                    portfolio_data.portfolio_history = history
+                history = await run_with_timeout(self._fetch_portfolio_history(portfolio_data), 5.0)
+                portfolio_data.portfolio_history = history
             except asyncio.TimeoutError:
                 self.logger.warning("Portfolio history fetch timed out (5s). Skipping history, returning core data.")
             except Exception as e:

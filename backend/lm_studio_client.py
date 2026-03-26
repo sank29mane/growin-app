@@ -48,18 +48,18 @@ class LMStudioClient:
         Prevents SSD swapping during heavy parallel multi-agent bursts.
         """
         total_ram_gb = psutil.virtual_memory().total / (1024**3)
-        
+
         # Rule: Use only 60% of RAM for LLM tasks to leave room for OS/Apps
         safe_ram_limit = total_ram_gb * 0.6
-        
+
         # Heuristics for M4 Pro optimizations
         # Typical model size (Q4_K_M or Q8) + KV Cache overhead
         estimated_model_size = 8.0  # GB
         kv_cache_per_request = 0.5  # GB (8k context)
-        
+
         concurrency = int((safe_ram_limit - estimated_model_size) / kv_cache_per_request)
         self.max_concurrent_predictions = max(1, min(concurrency, 16)) # Cap at 16 for stability
-        
+
         self.semaphore = asyncio.Semaphore(self.max_concurrent_predictions)
         logger.info(f"LM Studio: Memory Guard active. Total RAM: {total_ram_gb:.1f}GB. Slots: {self.max_concurrent_predictions}")
 
@@ -67,7 +67,7 @@ class LMStudioClient:
         """Internal helper for making requests with error handling."""
         if not path.startswith("/"):
             path = f"/{path}"
-            
+
         url = f"{self.base_url}{path}"
         async with httpx.AsyncClient(timeout=60.0) as client:
             try:
@@ -114,13 +114,13 @@ class LMStudioClient:
         """List IDs of currently loaded models using Native V1 API."""
         # In LM Studio 0.4.x+, a model is loaded if 'loaded_instances' has entries
         models = await self.list_models(management=True)
-        
+
         # SOTA: Use 'key' for Native V1 and fallback to 'id'
         loaded_ids = [
-            (m.get("key") or m.get("id")) for m in models 
+            (m.get("key") or m.get("id")) for m in models
             if m.get("loaded_instances") and len(m.get("loaded_instances", [])) > 0
         ]
-        
+
         logger.info(f"LM Studio: Detected {len(loaded_ids)} loaded models via Native V1 API.")
         return loaded_ids
 
@@ -158,7 +158,7 @@ class LMStudioClient:
         truncate_thinking: bool = True
     ) -> Dict[str, Any]:
         """
-        Send a chat request. 
+        Send a chat request.
         Note: We use the OpenAI-compatible endpoint as it's the most stable across all local versions.
         """
         # SOTA: Auto-detect active model if not provided
@@ -195,11 +195,11 @@ class LMStudioClient:
         async with self.semaphore:
             try:
                 logger.info(f"LM Studio: Sending chat request (Model: {model_id}, Slots: {self.semaphore._value})")
-                
+
                 async with httpx.AsyncClient(headers=self.headers, timeout=300.0) as client:
                     # Use /v1/chat/completions for widest compatibility
                     endpoint = f"{self.base_url}/v1/chat/completions"
-                    
+
                     response = await client.post(endpoint, json=payload)
                     response.raise_for_status()
                     data = response.json()
@@ -215,7 +215,7 @@ class LMStudioClient:
                     # Handle reasoning field (for R1/Reasoning models in LM Studio)
                     content = message.get("content", "")
                     reasoning = message.get("reasoning", "")
-                    
+
                     # If content is empty but reasoning has content, use reasoning
                     if not content and reasoning:
                         content = reasoning
@@ -243,7 +243,7 @@ class LMStudioClient:
                         await self.unload_model(model_id)
                         await asyncio.sleep(2.0)
                         success = await self.ensure_model_loaded(model_id)
-                        
+
                         if success:
                             logger.info("LM Studio: Model reloaded. Retrying V1 chat...")
                             return await self.chat(model_id=model_id, messages=messages, tools=tools)
@@ -280,7 +280,7 @@ class LMStudioClient:
             "store": store,
             "temperature": temperature
         }
-        
+
         if previous_response_id:
             payload["previous_response_id"] = previous_response_id
         if system_prompt:
@@ -292,18 +292,18 @@ class LMStudioClient:
             try:
                 logger.info(f"LM Studio: Stateful Chat (Model: {model_id}, Prev: {previous_response_id})")
                 data = await self._request("POST", "/api/v1/chat", json=payload)
-                
+
                 # Extract results from V1 structured output
                 output_items = data.get("output", [])
                 content = ""
                 reasoning_content = ""
-                
+
                 for item in output_items:
                     if item.get("type") == "message":
                         content += item.get("content", "")
                     elif item.get("type") == "reasoning":
                         reasoning_content += item.get("content", "")
-                
+
                 return {
                     "content": content,
                     "reasoning": reasoning_content,
@@ -329,7 +329,7 @@ class LMStudioClient:
             "tool_calls": tool_calls
         })
 
-        async def process_tool(tool_call: Dict) -> Dict:
+        for tool_call in tool_calls:
             function_name = tool_call["function"]["name"]
             arguments = json.loads(tool_call["function"]["arguments"])
 
@@ -339,20 +339,12 @@ class LMStudioClient:
             # For this integration, we link it to the AppState's MCP client or similar
             result = await self._execute_mcp_tool(function_name, arguments)
 
-            # Offload JSON serialization of potentially large payloads to a thread
-            # to prevent blocking the async event loop.
-            content = await asyncio.to_thread(json.dumps, result)
-
-            return {
+            messages.append({
                 "role": "tool",
                 "tool_call_id": tool_call["id"],
                 "name": function_name,
-                "content": content
-            }
-
-        # Process all tool calls concurrently
-        tool_results = await asyncio.gather(*(process_tool(tc) for tc in tool_calls))
-        messages.extend(tool_results)
+                "content": json.dumps(result)
+            })
 
         # Resubmit with tool results
         return await self.chat(
@@ -429,7 +421,6 @@ class LMStudioClient:
                 logger.info(f"LM Studio: Model {model_id} is now ready.")
                 return True
             await asyncio.sleep(2)
-        
+
         logger.warning(f"LM Studio: Timeout waiting for {model_id} to be ready.")
         return False
-

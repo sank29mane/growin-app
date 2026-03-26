@@ -1,34 +1,32 @@
-# Growin App - Project State
+# GSD STATE MEMORY
 
-**Current Phase:** 32
-**Current Phase Name:** End-to-End Simulation
-**Total Phases:** 32
-**Current Plan:** 01
-**Total Plans in Phase:** 1
-**Status**: IN_PROGRESS
-**Progress:** [░░░░░░░░░░] 0%
-**Last Activity:** 2026-03-12
-**Last Activity Description:** Completed Phase 31 (Autonomous Execution & MLX Adapters) and fixed UK currency normalization bugs.
+## Current Position
+- **Phase**: Phase 41 - Sovereign UI - Stitch Generation & UX Refinement
+- **Task**: GSD & Gemini CLI Optimization (v1.28.0 + v0.35.0-preview.5)
+- **Status**: COMPLETED (Infrastructure Updated)
+- **Branch**: `main`
+- **Active Model (CLI)**: `gemini-1.5-pro-preview` (Synthesis Mode)
+- **Active Model (App)**: `native-mlx` (Apple Silicon Optimized)
 
-## Accumulated Context
-- [x] Step 1: Create sysctl-based Memory Guard & LM Studio Audit (Phase 27)
-- [x] Step 2: Integrate Geopolitical News Feeds & GPR Index (Phase 27)
-- [x] Step 3: Verified Profit-Maximizing Agent Coordinates (Phase 26)
-- [x] Step 4: Implement Square-Root Slippage Model (Phase 28)
-- [x] Step 5: Implement Institutional Portfolio Optimization (Phase 29)
-- [x] Step 6: Ticker Normalization Engine (Phase 31)
-- [x] Step 7: Autonomous Loop & High Conviction Bypass (Phase 31)
-- [x] Step 8: MLX Weight Adapters for Calibration (Phase 31)
+## Summary
+- **Infrastructure Update**: Successfully upgraded GSD (v1.28.0) and Gemini CLI (v0.35.0-preview.5) configurations.
+- **Workflow Model**: Implemented the synchronous, YOLO-optimized handoff protocol between the CLI terminal and Antigravity IDE agent.
+- **Parallel Workstreams**: Initialized `backend-core` (CLI) and `ui-sovereign` (IDE) namespaces.
+- **Iterative Adaptation**: Established the model-aware adaptation layer in `GEMINI.md`. The CLI now autonomously scales its reasoning depth and context usage based on the active model.
+- **Model Registry**: Updated `backend/model_config.py` to prioritize Apple Silicon native models (MLX/CoreML) while gating cloud previews for assistance and testing.
+- **Resilience**: Confirmed DuckDB thread-safety and yfinance regional fallbacks are fully integrated into the architecture.
 
-## Decisions Made
-| Phase | Summary | Rationale |
-|-------|---------|-----------|
-| 23 | Unified Intelligence | Parity between optimized (Rust/MLX) and fallback (NumPy) paths. |
-| 24 | Visual Reasoning Trace | Trust transparency for agentic decision making. |
-| 24 | Equitable Views | Use .equatable() to prevent micro-stutters on 120Hz displays. |
-| 24 | Loading Locks | Local state locks to prevent external polling from causing status flicker. |
-| 24 | Metal-Accelerated Glow | Use .colorEffect with Metal shaders for high-performance agentic auras. |
-| 29 | Equities Only | Reverted Multi-Asset (Crypto/Options/FX) to maintain strict product focus. |
-| 30 | High-Velocity Pivot | Switched from commodities to intra-day LETF trading (TQQQ/SQQQ) to maximize daily profits. |
-| 31 | Autonomous Entry | Enabled "High Conviction" bypass for trades to move from Proposals to Execution. |
-| 31 | MLX Calibration | Used Weight Adapters to adjust model predictions based on daily error feedback. |
+## Active Tasks (Phase 41)
+| Task | Description | Status |
+|------|-------------|--------|
+| GSD Opt | Finalize v1.28.0/v0.35.0 optimization | COMPLETED |
+| 41-01-PLAN | Generate Portfolio Master Ledger (`[IDE]`) | PENDING IDE EXECUTION |
+| 41-02-PLAN | Implement Advanced Watchlist & Sparklines (`[IDE]`) | PENDING IDE EXECUTION |
+| 41-03-PLAN | Implement Execution Panel & Strategy Overlay (`[IDE]`) | PENDING IDE EXECUTION |
+| 41-04-CORE | Refine Backend Strategy Calibration Engine (`[CLI]`) | PLANNED |
+
+## Success Criteria (Phase 41)
+1. Seamless handoff between CLI and IDE via `STATE.md`.
+2. Portfolio Master Ledger implemented with 0px Sovereign DNA.
+3. Backend strategy engine supports parallel multi-model bursts for calibration.
+4. All tasks verified on M4 Pro local hardware.

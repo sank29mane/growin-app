@@ -2,6 +2,7 @@ import pytest
 
 import requests
 import os
+import pytest
 from dotenv import load_dotenv
 
 load_dotenv("backend/.env")
