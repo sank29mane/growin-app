@@ -7,9 +7,13 @@ mock_mlx_vlm = MagicMock()
 sys.modules["mlx_vlm"] = mock_mlx_vlm
 sys.modules["mlx_vlm.utils"] = MagicMock()
 
+import os
+
 import pytest
 from PIL import Image
-from backend.mlx_vlm_engine import MLXVLMInferenceEngine
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../backend')))
+from mlx_vlm_engine import MLXVLMInferenceEngine
 
 @pytest.fixture
 def vlm_engine():
@@ -22,7 +26,8 @@ def test_vlm_engine_initial_state(vlm_engine):
     assert vlm_engine.model is None
     assert vlm_engine.processor is None
 
-def test_vlm_engine_load_model(vlm_engine):
+@pytest.mark.asyncio
+async def test_vlm_engine_load_model(vlm_engine):
     """Test model loading logic."""
     mock_model = MagicMock()
     mock_processor = MagicMock()
