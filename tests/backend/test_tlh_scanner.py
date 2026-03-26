@@ -1,5 +1,5 @@
 import pytest
-from utils.tlh_scanner import TLHScanner
+from backend.utils.tlh_scanner import TLHScanner
 from decimal import Decimal
 
 def test_tlh_scanner_identification():

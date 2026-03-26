@@ -18,23 +18,23 @@ async def test_lm_studio_auto():
     try:
         # This should trigger the auto-detection logic we just fixed
         client = await LLMFactory.create_llm("lmstudio-auto")
-        
+
         if isinstance(client, LMStudioClient):
             print(f"✅ Successfully initialized LM Studio Client")
             print(f"✅ Active Model ID: {client.active_model_id}")
-            
+
             print("\n--- Testing Chat with Auto-Detected Model ---")
             # Test chat without explicit model_id
             response = await client.chat(input_text="Hello, who are you?")
             print(f"Assistant: {response.get('content')}")
-            
+
             if response.get('content'):
                 print("✅ Chat test passed!")
             else:
                 print("❌ Chat response empty or failed")
         else:
             print(f"❌ Expected LMStudioClient, got {type(client)}")
-            
+
     except Exception as e:
         import traceback
         traceback.print_exc()

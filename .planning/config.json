@@ -1,5 +1,34 @@
 {
+  "mode": "yolo",
+  "granularity": "granular",
+  "parallelization": true,
+  "commit_docs": true,
+  "model_profile": "powerfully-balanced",
   "workflow": {
-    "_auto_chain_active": false
+    "research": "comprehensive-notebooklm",
+    "research_notebook_id": "7bcfaf55-e1ab-4e55-9a96-991af9d2921e",
+    "plan_check": true,
+    "verifier": true,
+    "nyquist_validation": true,
+    "auto_advance": "smart",
+    "ui_phase": true,
+    "ui_safety_gate": true,
+    "branching": true,
+    "skip_discuss": true,
+    "discuss_mode": "assumptions",
+    "workstreams": {
+      "active": ["backend-core", "ui-sovereign"],
+      "cli_affinity": "backend-core",
+      "ide_affinity": "ui-sovereign"
+    }
+  },
+  "git": {
+    "branching_strategy": "milestone"
+  },
+  "hooks": {
+    "context_warnings": true,
+    "workflow_guard": true,
+    "research_questions": false,
+    "model_adaptation": true
   }
 }

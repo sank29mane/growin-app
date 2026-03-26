@@ -286,5 +286,7 @@ struct LegendItem: View {
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(.gray)
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(label) Legend item")
     }
 }
