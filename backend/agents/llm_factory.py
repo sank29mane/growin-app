@@ -22,11 +22,7 @@ class LLMFactory:
             import scipy
             if not hasattr(scipy, "__spec__") or scipy.__spec__ is None:
                 import importlib.util
-                try:
-                    scipy.__spec__ = importlib.util.find_spec("scipy")
-                except ValueError:
-                    import importlib.machinery
-                    scipy.__spec__ = importlib.machinery.ModuleSpec("scipy", None)
+                scipy.__spec__ = importlib.util.find_spec("scipy")
         except ImportError:
             pass
 

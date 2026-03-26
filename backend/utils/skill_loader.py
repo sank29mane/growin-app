@@ -54,7 +54,7 @@ class SkillLoader:
         Return content of skills relevant to the query.
         Simple keyword matching for high speed.
         """
-        query_lower = (query or "").lower()
+        query_lower = query.lower()
         relevant_content = []
         
         # Keyword mapping (expand this as needed)
