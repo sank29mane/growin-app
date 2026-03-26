@@ -21,10 +21,12 @@ from dotenv import load_dotenv
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Resource, TextContent, Tool
-from backend.utils import sanitize_nan
-from backend.utils.process_guard import start_parent_watchdog
-from backend.utils.rate_limiter import get_t212_budgeter, PRIORITY_EXECUTION, PRIORITY_SYNC, PRIORITY_POLLING
+from utils import sanitize_nan
+from utils.process_guard import start_parent_watchdog
+from utils.rate_limiter import get_t212_budgeter, PRIORITY_EXECUTION, PRIORITY_SYNC, PRIORITY_POLLING
 
+# Start watchdog immediately to ensure cleanup if parent dies
+start_parent_watchdog()
 
 # Constants
 LIVE_API_BASE = "https://live.trading212.com/api/v0"
@@ -50,9 +52,9 @@ def _save_state(filepath: str, data: Dict[str, Any]):
         pass
 
 # Import centralized currency normalization
-from backend.utils.currency_utils import normalize_all_positions
-from backend.utils.ticker_utils import normalize_ticker
-from backend.t212_handlers import (
+from utils.currency_utils import normalize_all_positions
+from utils.ticker_utils import normalize_ticker
+from t212_handlers import (
     handle_analyze_portfolio,
     handle_market_order,
     handle_get_price_history,
@@ -409,27 +411,6 @@ async def list_tools() -> list[Tool]:
 async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     global active_account_type
     c = get_active_client()
-    
-    # SOTA 2026: Shadow Mode Interceptor (Phase 36 Wave 3)
-    # Block real execution if GROWIN_SHADOW_MODE is 1
-    is_shadow = os.environ.get("GROWIN_SHADOW_MODE", "0") == "1"
-    sensitive_tools = [
-        "place_market_order", "place_limit_order", "place_stop_order", 
-        "place_stop_limit_order", "cancel_order", "create_investment_pie",
-        "update_investment_pie", "delete_investment_pie", "update_pie"
-    ]
-    
-    if is_shadow and name in sensitive_tools:
-        log_msg = f"🕵️ SHADOW MODE INTERCEPT: Tool '{name}' with args {json.dumps(arguments)}"
-        print(log_msg, file=sys.stderr)
-        
-        # Log to a dedicated file for the UAT harness to consume
-        shadow_log_path = "shadow_trades.log"
-        with open(shadow_log_path, "a") as f:
-            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {name} | {json.dumps(arguments)}\n")
-            
-        return [TextContent(type="text", text=f"[SHADOW_SUCCESS] {name} intercepted successfully. No capital committed.")]
-
     try:
         if name == "analyze_portfolio":
             return await handle_analyze_portfolio(arguments, active_account_type, get_clients, clients)
@@ -683,6 +664,4 @@ async def main():
         await app.run(read_stream, write_stream, app.create_initialization_options())
 
 if __name__ == "__main__":
-    # Start watchdog immediately to ensure cleanup if parent dies
-    start_parent_watchdog()
     asyncio.run(main())

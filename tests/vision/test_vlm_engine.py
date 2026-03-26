@@ -9,13 +9,7 @@ sys.modules["mlx_vlm.utils"] = MagicMock()
 
 import pytest
 from PIL import Image
-
-try:
-    from mlx_vlm_engine import MLXVLMInferenceEngine
-except ImportError:
-    MLXVLMInferenceEngine = None
-
-pytestmark = pytest.mark.skipif(MLXVLMInferenceEngine is None, reason="mlx_vlm_engine not available")
+from backend.mlx_vlm_engine import MLXVLMInferenceEngine
 
 @pytest.fixture
 def vlm_engine():

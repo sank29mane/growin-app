@@ -22,17 +22,13 @@ class LLMFactory:
             import scipy
             if not hasattr(scipy, "__spec__") or scipy.__spec__ is None:
                 import importlib.util
-                try:
-                    scipy.__spec__ = importlib.util.find_spec("scipy")
-                except ValueError:
-                    import importlib.machinery
-                    scipy.__spec__ = importlib.machinery.ModuleSpec("scipy", None)
+                scipy.__spec__ = importlib.util.find_spec("scipy")
         except ImportError:
             pass
 
         api_keys = api_keys or {}
 
-        from backend.model_config import get_model_info
+        from model_config import get_model_info
         info = get_model_info(model_name)
         provider = (info.get("provider") or "").lower()
 
@@ -130,7 +126,7 @@ class LLMFactory:
 
     @staticmethod
     def _create_mlx(model_name: str):
-        from backend.mlx_langchain import ChatMLX
+        from mlx_langchain import ChatMLX
         logger.info(f"Initializing Native MLX Model: {model_name}")
         return ChatMLX(model_name=model_name)
 
@@ -142,8 +138,8 @@ class LLMFactory:
     @staticmethod
     async def _create_lmstudio(model_name: str):
         from lm_studio_client import LMStudioClient
-        from backend.model_config import get_model_info
-        from backend.status_manager import status_manager
+        from model_config import get_model_info
+        from status_manager import status_manager
 
         info = get_model_info(model_name)
         client = LMStudioClient()
@@ -186,7 +182,7 @@ class LLMFactory:
         # Auto-detect currently loaded model (filter out embeddings)
         status_manager.set_status("lmstudio", "working", "Auto-detecting loaded model...")
         
-        from backend.cache_manager import cache
+        from cache_manager import cache
         cache_key = "lmstudio_autodetect_id"
         cached_id = cache.get(cache_key)
         

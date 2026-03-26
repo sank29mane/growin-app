@@ -8,7 +8,7 @@ import asyncio
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-from backend.schemas import MLXDownloadRequest, LMStudioLoadRequest, LMStudioStatusResponse
+from schemas import MLXDownloadRequest, LMStudioLoadRequest, LMStudioStatusResponse
 
 
 @router.get("/api/agents/status")
@@ -16,7 +16,7 @@ async def get_agents_status():
     """
     Get current status of all specialist agents from the StatusManager.
     """
-    from backend.status_manager import status_manager
+    from status_manager import status_manager
     live_statuses = status_manager.get_all_statuses()
     
     # Core system components
@@ -39,7 +39,7 @@ async def get_agents_status():
     
     # Special check for forecasting model loading
     try:
-        from backend.forecaster import get_forecaster
+        from forecaster import get_forecaster
         forecaster = get_forecaster()
         if forecaster.loading:
             response["specialists"]["forecasting_agent"]["status"] = "loading"
@@ -61,9 +61,9 @@ async def get_available_models():
     Returns:
         Dict with decision_models and coordinator_models lists
     """
-    from backend.model_config import DECISION_MODELS, COORDINATOR_MODELS
+    from model_config import DECISION_MODELS, COORDINATOR_MODELS
     from lm_studio_client import LMStudioClient
-    from backend.cache_manager import cache
+    from cache_manager import cache
     
     cache_key = "models_available_info"
     cached = cache.get(cache_key)
@@ -108,7 +108,7 @@ async def get_lmstudio_models():
     Provides accurate metadata including loading status.
     """
     from lm_studio_client import LMStudioClient
-    from backend.cache_manager import cache
+    from cache_manager import cache
     
     cache_key = "lmstudio_models_list"
     cached = cache.get(cache_key)
@@ -159,7 +159,7 @@ async def load_lmstudio_model(request: LMStudioLoadRequest):
     Implements a clean 'Unload before Load' switcher flow.
     """
     from lm_studio_client import LMStudioClient
-    from backend.status_manager import status_manager
+    from status_manager import status_manager
     
     client = LMStudioClient()
     model_id = request.model_id
@@ -219,7 +219,7 @@ async def get_lmstudio_status():
     Detailed health and load status of LM Studio with short-term caching to prevent log spam.
     """
     from lm_studio_client import LMStudioClient
-    from backend.cache_manager import cache
+    from cache_manager import cache
     
     cache_key = "lmstudio_status_detail"
     cached = cache.get(cache_key)

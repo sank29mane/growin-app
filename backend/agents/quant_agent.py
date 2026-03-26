@@ -3,10 +3,10 @@ Quant Agent - Technical Analysis using QuantEngine
 Ultra-fast algorithmic technical indicator calculations.
 """
 
-from backend.agents.base_agent import BaseAgent, AgentConfig, AgentResponse
+from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from typing import Dict, Any
 import logging
-from backend.utils.financial_math import create_decimal
+from utils.financial_math import create_decimal
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ class QuantAgent(BaseAgent):
         super().__init__(config)
 
         # Use centralized QuantEngine
-        from backend.quant_engine import get_quant_engine
+        from quant_engine import get_quant_engine
         self.engine = get_quant_engine()
         logger.info("QuantAgent initialized using QuantEngine")
 
@@ -80,14 +80,14 @@ class QuantAgent(BaseAgent):
             orb_signal = None
             if intent == "intraday_trade" or len(ohlcv_data) < 100: # Heuristic for intraday
                 try:
-                    from backend.utils.orb_detector import ORBDetector
+                    from utils.orb_detector import ORBDetector
                     detector = ORBDetector(range_minutes=30)
                     
                     # SOTA 2026: Covariance Shift from NeuralJMCE (NPU Accelerated)
                     cov_velocity = None
                     if len(ohlcv_data) >= 5: # Need at least a few bars for velocity
                          try:
-                             from backend.utils.portfolio_analyzer import PortfolioAnalyzer, TimeResolution
+                             from utils.portfolio_analyzer import PortfolioAnalyzer, TimeResolution
                              analyzer = PortfolioAnalyzer(n_assets=1, resolution=TimeResolution.INTRADAY_5MIN)
                              
                              # Calculate log returns for JMCE
@@ -109,7 +109,7 @@ class QuantAgent(BaseAgent):
                     logger.warning(f"QuantAgent: ORB detection failed: {orb_e}")
 
             # 4. Map to QuantData model
-            from backend.market_context import QuantData, Signal
+            from market_context import QuantData, Signal
             
             # Map string overall_signal to Signal enum
             signal_map = {
@@ -146,7 +146,7 @@ class QuantAgent(BaseAgent):
                 orb_signal=orb_signal
             )
 
-            from backend.status_manager import status_manager
+            from status_manager import status_manager
             status_manager.set_status("quant_agent", "ready", f"Signal: {quant_data.signal} (ORB: {orb_signal['signal'] if orb_signal else 'N/A'})")
 
             return AgentResponse(

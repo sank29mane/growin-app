@@ -3,8 +3,8 @@ MCP Routes - Server management and tool execution
 """
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks
-from backend.app_context import state, T212ConfigRequest
-from backend.utils.mcp_validation import validate_mcp_config
+from app_context import state, T212ConfigRequest
+from utils.mcp_validation import validate_mcp_config
 import logging
 import json
 import os
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # Security: Block potentially dangerous shell commands
-# BLOCKED_COMMANDS and validate_mcp_config are imported from backend.utils.mcp_validation
+# BLOCKED_COMMANDS and validate_mcp_config are imported from utils.mcp_validation
 
 
 @router.get("/mcp/status")
@@ -122,8 +122,8 @@ import uuid
 import hmac
 import hashlib
 import time
-from backend.shared_types import SENSITIVE_TOOLS
-from backend.cache_manager import cache
+from shared_types import SENSITIVE_TOOLS
+from cache_manager import cache
 
 # Secret for signing approval tokens (in production, use a secure env var)
 APPROVAL_SECRET = os.getenv("TRADE_APPROVAL_SECRET", "sota-2026-secure-gate-9911")
@@ -142,20 +142,13 @@ def verify_approval_token(token: str, server_name: str, tool_name: str, argument
         if len(parts) != 2:
             return False
             
-        timestamp_str, signature = parts
-        timestamp = float(timestamp_str)
-        now = time.time()
+        timestamp, signature = parts
         
         # 1. Check Expiry (5 minutes)
-        if now - timestamp > 300:
+        if time.time() - float(timestamp) > 300:
             logger.warning("Approval token expired")
             return False
             
-        # 1b. Check for future timestamps (allow small 5s drift)
-        if timestamp > now + 5:
-            logger.warning("Approval token from the future")
-            return False
-
         # 2. Replay Protection (One-time use)
         # Use Redis to store used signatures for 5 minutes
         is_new = cache.set_nx_ex(f"approval_used:{signature}", "1", 300)
@@ -164,7 +157,7 @@ def verify_approval_token(token: str, server_name: str, tool_name: str, argument
             return False
 
         # 3. Signature Verification (Bound to server_name to prevent cross-server replay)
-        msg = f"{timestamp_str}:{server_name}:{tool_name}:{json.dumps(arguments, sort_keys=True)}"
+        msg = f"{timestamp}:{server_name}:{tool_name}:{json.dumps(arguments, sort_keys=True)}"
         expected = hmac.new(
             APPROVAL_SECRET.encode(),
             msg.encode(),
@@ -172,7 +165,6 @@ def verify_approval_token(token: str, server_name: str, tool_name: str, argument
         ).hexdigest()
         
         return hmac.compare_digest(expected, signature)
-
     except Exception as e:
         logger.error(f"Token verification error: {e}")
         return False

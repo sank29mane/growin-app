@@ -2,12 +2,10 @@
 Vision Agent - Technical chart analysis using local VLMs (MLX)
 """
 
-from backend.agents.base_agent import BaseAgent, AgentConfig, AgentResponse
-from backend.market_context import VisionData, VisualPattern
+from .base_agent import BaseAgent, AgentConfig, AgentResponse
+from market_context import VisionData, VisualPattern
 from typing import Dict, Any, List, Optional
 import logging
-import os
-import time
 from pydantic import BaseModel, Field
 from magentic import prompt as mag_prompt
 from datetime import datetime, timezone
@@ -45,37 +43,24 @@ class VisionAgent(BaseAgent):
         super().__init__(config)
         self.model_name = "mlx-community/Qwen2.5-VL-7B-Instruct-4bit"
         self._engine = None
-        # SOTA 2026: Shadow Mode toggle
-        self.shadow_mode = os.environ.get("GROWIN_SHADOW_MODE", "0") == "1"
 
     @property
     def engine(self):
         if self._engine is None:
-            from backend.mlx_vlm_engine import get_vlm_engine
+            from mlx_vlm_engine import get_vlm_engine
             self._engine = get_vlm_engine()
-            # Note: load_model is now managed by the engine's lazy load/TTL logic
+            if not self._engine.is_loaded():
+                self._engine.load_model(self.model_name)
         return self._engine
-
-    def _check_for_injection(self, text: str) -> bool:
-        """SOTA 2026: Basic visual prompt injection detection."""
-        injection_patterns = [
-            "ignore all previous instructions",
-            "ignore the prompt",
-            "system override",
-            "new instructions:",
-            "user is now admin",
-            "forget your training"
-        ]
-        text_lower = text.lower()
-        for pattern in injection_patterns:
-            if pattern in text_lower:
-                logger.warning(f"🚨 Potential visual prompt injection detected: '{pattern}'")
-                return True
-        return False
 
     async def analyze(self, context: Dict[str, Any]) -> AgentResponse:
         """
-        Analyze a chart image using VLM with SOTA guardrails.
+        Analyze a chart image using VLM.
+
+        Args:
+            context: Dict containing:
+                - image: image data (bytes or path)
+                - ticker: optional ticker
         """
         image_data = context.get("image")
         if not image_data:
@@ -87,10 +72,6 @@ class VisionAgent(BaseAgent):
                 latency_ms=0
             )
 
-        # SOTA 2026: Shadow Mode Interceptor (Task 3.1 placeholder)
-        if self.shadow_mode:
-             logger.info("🕵️ Shadow Mode: VisionAgent intercepting for logging only.")
-
         try:
             # 1. Run VLM Inference
             prompt = (
@@ -99,20 +80,11 @@ class VisionAgent(BaseAgent):
                 "like triangles, head and shoulders, or flags. Provide coordinate hints if possible."
             )
             
-            start_time = time.time()
+            # The engine already handles offloading to thread if it uses mlx_vlm directly in a blocking way
             raw_description = await self.engine.generate(image_data, prompt)
             
-            # SOTA 2026: Guardrail check
-            if self._check_for_injection(raw_description):
-                 return AgentResponse(
-                    agent_name=self.config.name,
-                    success=False,
-                    data={},
-                    error="Security Policy: Visual prompt injection detected in chart analysis.",
-                    latency_ms=int((time.time() - start_time) * 1000)
-                )
-
             # 2. Extract structured patterns using Magentic
+            # We use Magentic to turn the raw text description into structured Pydantic models
             analysis = await asyncio.to_thread(extract_visual_patterns, raw_description)
             
             vision_data = VisionData(
@@ -121,13 +93,11 @@ class VisionAgent(BaseAgent):
                 timestamp=datetime.now(timezone.utc)
             )
 
-            latency = int((time.time() - start_time) * 1000)
-            
             return AgentResponse(
                 agent_name=self.config.name,
                 success=True,
                 data=vision_data.model_dump(),
-                latency_ms=latency
+                latency_ms=0
             )
             
         except Exception as e:

@@ -12,9 +12,9 @@ from decimal import Decimal
 from pydantic import BaseModel, Field
 from magentic import prompt as mag_prompt
 
-from backend.agents.base_agent import BaseAgent, AgentResponse, AgentConfig
-from backend.market_context import MarketContext
-from backend.utils.financial_math import create_decimal
+from .base_agent import BaseAgent, AgentResponse, AgentConfig
+from market_context import MarketContext
+from utils.financial_math import create_decimal
 
 logger = logging.getLogger(__name__)
 

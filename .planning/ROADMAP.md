@@ -25,7 +25,6 @@ This document outlines the high-level phases for the Growin App, specifically op
 
 ### Phase 38: SwiftUI Profit Command Center & RL Training Integration
 - **Goal**: 120Hz dashboard for real-time Alpha tracking and hardened RL training loop.
-- **Plans**: 3 plans
 - **Status**: PLANNED
 - **Wave 1: Control & Data Backbone**
     - [ ] **38-01-PLAN.md**: WebSocket Alpha-Stream, Smart Money DST, Split-Brain.
@@ -36,15 +35,59 @@ This document outlines the high-level phases for the Growin App, specifically op
 
 ### Phase 39: Strategy Hardening & Code Purity
 - **Goal**: Unified imports, legacy adapter removal, and PPO hyperparameter optimization for LSE ETPs.
-- **Plans**: 4 plans
-- **Status**: PLANNED
-- **Wave 1: Code Purity & Modernization**
-    - [ ] **39-01-PLAN.md**: Absolute imports (Core), legacy removal, MLX type safety & memory stability.
-- **Wave 2: RL Strategy & Data / Swarm Modernization**
-    - [ ] **39-02-PLAN.md**: PPO Grid Search, Reward Calibration, LSE ETP Mappings.
-    - [ ] **39-04-PLAN.md**: Absolute imports (Swarm/Secondary Agents).
-- **Wave 3: Real-time Stability Monitoring**
-    - [ ] **39-03-PLAN.md**: WebSocket Training Stream, Brain Stability Metric, Graceful Disconnects.
+- **Status**: COMPLETED (Merged to main 2026-03-20)
+- **Results**: 100% absolute imports, 150/150 tests passing on M4 Pro, Brain Stability WebSocket stream active.
+
+## 🚀 MILESTONE: SOTA Profit Extraction & Strategy Calibration
+**Goal**: Finalize the autonomous trading weapon with high-fidelity calibration.
+
+### Phase 40: Sovereign Alpha Command Center
+**Goal**: Implement the high-end Sovereign Ledger aesthetic into the final 120Hz Alpha Dashboard, replacing legacy "Liquid Glass" style with brutal editorial precision.
+**Status**: COMPLETED (2026-03-21)
+**Requirements**: SOV-UI-BASE
+**Success Criteria**:
+  1. SovereignTheme and 0px SovereignPrimitives implemented.
+  2. 120Hz Alpha-Stream Tracker and Brutalist Technical Ledger active.
+  3. Agent Reasoning Console and Strategy Calibration Lab functional.
+
+### Phase 41: Sovereign UI - Stitch Generation & UX Refinement
+**Goal**: Generate and implement high-density Sovereign Ledger UI using Stitch MCP tools.
+**Status**: PLANNED
+**Requirements**: SOV-UI-01, SOV-UI-02, SOV-UI-03, SOV-UI-04
+**References**: Trading 212 UI, Stitch Design DNA, Sovereign Ledger 0px aesthetic.
+**Success Criteria**:
+  1. User can view their portfolio through a high-density "Master Ledger" interface with 0px corners and tonal layering.
+  2. User can monitor assets via an advanced watchlist with integrated Swift Charts sparklines.
+  3. User can execute trades using a professional panel featuring Slide-to-Confirm.
+  4. User can calibrate agent strategies through the Strategy Calibration Lab with technical sliders.
+  5. User can view deep agent reasoning and logic traces in a Monaco-font console.
+  6. All UI components are generated or refined using Stitch MCP, strictly adhering to the Sovereign Design DNA.
+
+**Waves**:
+- **Wave 1: Main Portfolio Overview Screen**
+    - [ ] **41-01-PLAN.md**: Generate and implement high-density Master Ledger portfolio screen.
+- **Wave 2: Advanced Asset Watchlist & Sparklines**
+    - [ ] **41-02-PLAN.md**: Implement density-first watchlist with Swift Charts sparklines.
+- **Wave 3: Professional Order Execution Panel**
+    - [ ] **41-03-PLAN.md**: Implement professional execution panel with Slide-to-Confirm.
+- **Wave 4: Strategy Calibration Lab**
+    - [ ] **41-04-PLAN.md**: Implement high-density calibration interface for agent hyperparameters.
+- **Wave 5: Agent Reasoning & Logic Trace Console**
+    - [ ] **41-05-PLAN.md**: Implement Monaco-font terminal for live agent logic traces.
+- **Wave 6: Global Navigation & System Integration**
+    - [ ] **41-06-PLAN.md**: Finalize root navigation and global Sovereign background integration.
+
+---
+
+## 📊 PROGRESS SUMMARY
+
+| Phase | Status | Plans | Complete |
+|-------|--------|-------|----------|
+| 37: RL Regime | ⬜ | 0/3 | — |
+| 38: Command Center | ⬜ | 0/3 | — |
+| 39: Hardening | ✅ | 3/3 | 100% |
+| 40: Sovereign Alpha | ✅ | 3/3 | 100% |
+| 41: Sovereign UI | ⬜ | 0/6 | — |
 
 ---
 

@@ -5,7 +5,7 @@ import sys
 import os
 
 # Ensure backend is in path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../backend')))
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 from trading212_mcp_server import normalize_ticker
 

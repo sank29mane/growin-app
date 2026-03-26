@@ -5,7 +5,7 @@ Mediates all inter-agent interactions and enforces security protocols.
 
 import logging
 from typing import Dict, Any, Optional, List
-from backend.agents.messenger import get_messenger, AgentMessage
+from .messenger import get_messenger, AgentMessage
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)

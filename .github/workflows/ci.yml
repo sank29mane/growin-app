@@ -10,11 +10,11 @@ jobs:
   test:
     name: Run SOTA Test Suite
     runs-on: macos-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     
     env:
       CI: "true"
-      PYTHONPATH: "."
+      PYTHONPATH: ".:backend"
 
     steps:
       - uses: actions/checkout@v4
@@ -23,7 +23,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-          cache-dependency-glob: "backend/uv.lock"
+          cache-dependency-path: backend/uv.lock
 
       - name: Set up Python
         run: uv python install 3.11
@@ -43,6 +43,11 @@ jobs:
           key: ${{ runner.os }}-chroma-${{ github.run_id }}
           restore-keys: |
             ${{ runner.os }}-chroma-
+
+      - name: Install dependencies
+        run: |
+          cd backend
+          uv sync
 
       - name: Run SOTA Unit & Integration Tests
         timeout-minutes: 10

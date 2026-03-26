@@ -41,9 +41,9 @@ from typing import Dict, List, Any, Optional, TypedDict, Union
 from enum import Enum
 from datetime import datetime
 from decimal import Decimal
-from backend.utils.financial_math import create_decimal, safe_div, PRECISION_CURRENCY, TechnicalIndicators
-from backend.utils.portfolio_analyzer import PortfolioAnalyzer
-from backend.utils.ticker_utils import TickerResolver
+from utils.financial_math import create_decimal, safe_div, PRECISION_CURRENCY, TechnicalIndicators
+from utils.portfolio_analyzer import PortfolioAnalyzer
+from utils.ticker_utils import TickerResolver
 
 class TechnicalIndicatorsDict(TypedDict, total=False):
     rsi: Optional[Decimal]
@@ -85,7 +85,7 @@ class NeuralODERecovery:
     Integrates with backend/models/neural_ode.py.
     """
     def __init__(self, input_dim: int = 16, hidden_dim: int = 32):
-        from backend.models.neural_ode import RecoveryVelocityNODE
+        from models.neural_ode import RecoveryVelocityNODE
         self.model = RecoveryVelocityNODE(input_dim, hidden_dim)
         self.is_trained = False
         
@@ -473,7 +473,7 @@ class QuantEngine:
             w_arr = np.array([float(w) for w in weights])
             portfolio_returns = np.dot(returns_matrix, w_arr)
             
-            from backend.utils.risk_engine import RiskEngine
+            from utils.risk_engine import RiskEngine
             cvar_95 = RiskEngine.calculate_cvar_95(portfolio_returns)
             
             # 5. Return results
@@ -565,26 +565,22 @@ class QuantEngine:
                     is_percentage = True
                     break
                 try:
-                    if create_decimal(val_str) > Decimal(1):
+                    if create_decimal(val_str.replace('%', '')) > Decimal("1.0"):
                         is_percentage = True
                         break
                 except Exception:
                     pass
 
-            # Second pass: normalize to fractions
             for symbol, val in allocations.items():
-                val_str = str(val).strip()
-                has_pct = val_str.endswith('%')
                 try:
-                    val_dec = create_decimal(val_str.replace('%', ''))
+                    val_str = str(val).strip().replace('%', '')
+                    dec_val = create_decimal(val_str)
+                    if is_percentage:
+                        parsed[symbol] = dec_val / Decimal("100")
+                    else:
+                        parsed[symbol] = dec_val
                 except Exception:
-                    val_dec = Decimal(0)
-
-                if is_percentage or has_pct:
-                    parsed[symbol] = val_dec / Decimal(100)
-                else:
-                    parsed[symbol] = val_dec
-
+                    parsed[symbol] = Decimal("0")
             return parsed
 
         current_parsed = parse_allocations(current_allocation)
@@ -595,30 +591,28 @@ class QuantEngine:
         all_symbols = set(current_parsed.keys()) | set(target_parsed.keys())
 
         for symbol in all_symbols:
-            current_pct = current_parsed.get(symbol, Decimal(0))
-            target_pct = target_parsed.get(symbol, Decimal(0))
-
+            current_pct = current_parsed.get(symbol, Decimal("0"))
+            target_pct = target_parsed.get(symbol, Decimal("0"))
+            
             deviation = target_pct - current_pct
-            deviations[symbol] = deviation
-
-            if abs(deviation) > Decimal("0.001"):
-                current_val_amt = current_pct * total_value_dec
-                target_val_amt = target_pct * total_value_dec
-                value_change = target_val_amt - current_val_amt
+            
+            if abs(deviation) > Decimal("0.01"):  # 1% threshold
+                action = "BUY" if deviation > 0 else "SELL"
+                amount = abs(deviation) * total_value_dec
+                
                 rebalance_actions.append({
                     "symbol": symbol,
-                    "current_pct": current_pct,
-                    "target_pct": target_pct,
-                    "deviation": deviation,
-                    "action": "buy" if value_change > 0 else "sell",
-                    "value_change": abs(value_change)
+                    "action": action,
+                    "deviation_pct": float(deviation * 100),
+                    "amount": float(amount)
                 })
+                
+            deviations[symbol] = float(deviation * 100)
 
         return {
-            "total_value": total_value_dec,
-            "deviations": deviations,
+            "needs_rebalance": len(rebalance_actions) > 0,
             "rebalance_actions": rebalance_actions,
-            "needs_rebalancing": len(rebalance_actions) > 0
+            "deviations_pct": deviations
         }
 
 def get_quant_engine(): return QuantEngine()

@@ -4,9 +4,9 @@ import time
 from typing import Dict, Any, List, Optional
 from langchain_core.messages import SystemMessage, HumanMessage
 
-from backend.agents.base_agent import BaseAgent, AgentConfig, AgentResponse
-from backend.schemas import MathScriptRequest, MathScriptResponse
-from backend.mlx_langchain import ChatMLX
+from .base_agent import BaseAgent, AgentConfig, AgentResponse
+from schemas import MathScriptRequest, MathScriptResponse
+from mlx_langchain import ChatMLX
 
 logger = logging.getLogger(__name__)
 

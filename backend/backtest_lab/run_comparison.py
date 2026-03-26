@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 # Ensure backend path is in sys.path
 sys.path.append(os.path.abspath(os.path.dirname(__file__) + "/.."))
 
-from backend.forecaster import TTMForecaster
+from forecaster import TTMForecaster
 # We will implement the new wrappers here or import them once created.
 # For now, let's include the Prophet/XGBoost logic directly in this lab script
 # to prove the concept before moving to production code.

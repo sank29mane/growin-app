@@ -3,8 +3,8 @@ from typing import List, Optional, Dict, Any, Union
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from scipy import signal, optimize
-from backend.data_models import DividendData, PriceData
-from backend.utils.financial_math import create_decimal, safe_div
+from data_models import DividendData, PriceData
+from utils.financial_math import create_decimal, safe_div
 
 class DividendBridge:
     """

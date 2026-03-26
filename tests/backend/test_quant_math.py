@@ -8,8 +8,8 @@ from decimal import Decimal
 # Add backend to path (parent directory)
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from backend.agents.quant_agent import QuantAgent
-from backend.utils.financial_math import create_decimal
+from agents.quant_agent import QuantAgent
+from utils.financial_math import create_decimal
 
 @pytest.mark.asyncio
 async def test_quant_agent_full_analysis():
@@ -58,7 +58,7 @@ async def test_insufficient_data():
 
 def test_decimal_precision_logic():
     """Test that financial math helpers handle Decimals correctly."""
-    from backend.utils.financial_math import create_decimal, safe_div
+    from utils.financial_math import create_decimal, safe_div
     
     d1 = create_decimal(0.1)
     d2 = create_decimal(0.2)

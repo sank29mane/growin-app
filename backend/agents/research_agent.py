@@ -14,8 +14,8 @@ Rate Limits:
 Supported Markets: UK (LSE), India (NSE), US
 """
 
-from backend.agents.base_agent import BaseAgent, AgentConfig, AgentResponse
-from backend.market_context import ResearchData, NewsArticle
+from .base_agent import BaseAgent, AgentConfig, AgentResponse
+from market_context import ResearchData, NewsArticle
 from typing import Dict, Any, List, Optional
 import logging
 import os
@@ -192,7 +192,7 @@ class ResearchAgent(BaseAgent):
 
             # --- RAG INTEGRATION: Store individual articles for Timeline ---
             try:
-                from backend.app_context import state
+                from app_context import state
                 if state.rag_manager and rich_articles:
                     for art in rich_articles:
                         state.rag_manager.add_news_article(

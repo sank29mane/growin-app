@@ -6,8 +6,8 @@ from datetime import datetime
 from unittest.mock import AsyncMock, patch
 
 # Import the FastAPI app
-from backend.server import app
-from backend.app_context import state
+from server import app
+from app_context import state
 
 @pytest.mark.asyncio
 async def test_approve_trade_success():

@@ -2,18 +2,15 @@ import sys
 import os
 from fastapi.testclient import TestClient
 
-# Add backend to path so we can import backend.server
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../backend')))
+# Add backend to path so we can import server
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
-from backend.server import app
+from server import app
 
 client = TestClient(app)
 
 def test_security_headers_middleware():
     """Verify that security headers are added to responses."""
-    # We need to make sure state is initialized or mocked
-    from backend.app_context import state
-    
     response = client.get("/health")
     assert response.status_code == 200
 
