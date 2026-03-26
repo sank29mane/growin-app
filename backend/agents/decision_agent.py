@@ -488,7 +488,7 @@ class DecisionAgent:
                         except asyncio.TimeoutError:
                             logger.warning(f"Tool execution timed out: {tool_name}")
                             return f"[TOOL_RESULT:{tool_name}] Error: Execution timed out after 15 seconds"
-                        except CircuitBreakerOpenException:
+                        except CircuitBreakerOpenError:
                             logger.warning(f"Tool execution skipped: {tool_name} circuit breaker is OPEN")
                             return f"[TOOL_RESULT:{tool_name}] Error: Execution skipped because circuit breaker is OPEN"
                         except Exception as e:
