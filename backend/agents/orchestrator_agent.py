@@ -189,7 +189,9 @@ Query: "{clean_query}"
         # Context bridging for "Deep Dive" or follow-ups without explicit tickers
         if not ticker and history:
             from utils import extract_ticker_from_text
-            for msg in reversed(history):
+            for i, msg in enumerate(reversed(history)):
+                if i >= 5: # Short-circuit to optimize performance
+                    break
                 # SOTA 2026: Only inherit context from User Messages to avoid hallucinating tickers from AI headers (e.g. ACE)
                 if msg.get("role") != "user":
                     continue
@@ -475,7 +477,9 @@ Query: "{clean_query}"
         # Context bridging for "Deep Dive" or follow-ups without explicit tickers
         if not ticker and history:
             from utils import extract_ticker_from_text
-            for msg in reversed(history):
+            for i, msg in enumerate(reversed(history)):
+                if i >= 5: # Short-circuit to optimize performance
+                    break
                 # SOTA 2026: Only inherit context from User Messages to avoid hallucinating tickers from AI headers (e.g. ACE)
                 if msg.get("role") != "user":
                     continue
