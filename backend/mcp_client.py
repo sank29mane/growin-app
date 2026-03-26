@@ -72,10 +72,12 @@ class MultiMCPManager:
                 command = config["command"]
                 args = list(config["args"] or [])  # Make a copy
                 
-                # Fix for default T212 server relative path
-                if name == "Trading 212" and args and "trading212_mcp_server.py" in args[0]:
+                # Fix for default servers relative path (Trading 212, HuggingFace, Docker Sandbox)
+                if args and not os.path.isabs(args[0]):
                     current_dir = os.path.dirname(os.path.abspath(__file__))
-                    args[0] = os.path.join(current_dir, "trading212_mcp_server.py")
+                    potential_path = os.path.join(current_dir, args[0])
+                    if os.path.exists(potential_path):
+                        args[0] = potential_path
                 
                 # Filter out empty environment variables to allow .env fallbacks
                 custom_env = {k: v for k, v in (config.get("env") or {}).items() if v and str(v).strip()}
@@ -200,15 +202,6 @@ class MultiMCPManager:
             "failed_servers": list(self._failed_servers.keys()),
             "total_sessions": len(self.sessions),
         }
-
-    async def stop(self):
-        """Explicitly shutdown all sessions and the exit stack."""
-        try:
-            await self._exit_stack.aclose()
-            self.sessions.clear()
-            logger.info("🛑 MultiMCPManager: All sessions closed")
-        except Exception as e:
-            logger.error(f"MultiMCPManager: Error during shutdown: {e}")
 
 
 # Compatibility alias

@@ -138,33 +138,6 @@ def run_forecast(ohlcv_data: List[Dict[str, Any]], prediction_steps: int, timefr
         # CLEANUP & ROBUSTNESS: 
         # 1. Convert to DF first for easy cleaning
         # 2. Handle NaNs and Zeros (Forward Fill) preventing scaling corruption
-        # --- PRE-DATAFRAME SANITIZATION (Unit Mismatch Fix) ---
-        # Detect if the last point (often real-time) is disjointed from history due to GBX/GBP mismatch.
-        if len(ohlcv_data) > 2:
-            last = ohlcv_data[-1]
-            prev = ohlcv_data[-2]
-
-            try:
-                last_c = float(last.get('c', 0))
-                prev_c = float(prev.get('c', 0))
-
-                if last_c > 0 and prev_c > 0:
-                    ratio = last_c / prev_c
-                    if ratio > 50: # Probably GBP history, GBX last
-                        last['o'] = float(last['o']) / 100
-                        last['h'] = float(last['h']) / 100
-                        last['l'] = float(last['l']) / 100
-                        last['c'] = float(last['c']) / 100
-                        logger.info("Fixed GBX mismatch (Last point divided by 100)")
-                    elif ratio < 0.02: # Probably GBX history, GBP last
-                        last['o'] = float(last['o']) * 100
-                        last['h'] = float(last['h']) * 100
-                        last['l'] = float(last['l']) * 100
-                        last['c'] = float(last['c']) * 100
-                        logger.info("Fixed GBP mismatch (Last point multiplied by 100)")
-            except (ValueError, TypeError):
-                pass
-
         df_raw = pd.DataFrame(ohlcv_data)
         
         # ensure numeric
@@ -199,56 +172,39 @@ def run_forecast(ohlcv_data: List[Dict[str, Any]], prediction_steps: int, timefr
                 WINDOW_SIZE = 64
                 logger.info(f"High Volatility Regime Detected (ATR: {current_atr:.2f} > 2x Mean). Shortening window to {WINDOW_SIZE}.")
 
+        if len(df_raw) > WINDOW_SIZE:
+             df_target = df_raw.iloc[-WINDOW_SIZE:].copy()
+        else:
+             df_target = df_raw.copy()
+
         # Channels to use for multivariate forecasting
         # SOTA 2026: Include VIX Z-Score as an exogenous channel if provided
         channels = ['c', 'rsi', 'atr', 'v']
-        if 'vix_zscore' in df_raw.columns:
+        if 'vix_zscore' in df_target.columns:
             channels.append('vix_zscore')
             logger.info("Exogenous VIX Z-Score detected. Injecting into TTM pipeline.")
             
         scalers = {} # Store stats for inverse transform of 'c'
         df_scaled = pd.DataFrame()
-        df_scaled['id'] = ['ticker'] * len(df_raw)
+        df_scaled['id'] = ['ticker'] * len(df_target)
         
         for ch in channels:
-            vals_raw = df_raw[ch].values
+            vals = df_target[ch].values
             
-            # Winsorize outliers (clip to 1st/99th percentile) of the raw signal
-            p01 = np.percentile(vals_raw, 1)
-            p99 = np.percentile(vals_raw, 99)
-            vals_clamped = np.clip(vals_raw, p01, p99)
-
-            # Define Local Regime
-            if len(vals_clamped) > WINDOW_SIZE:
-                local_regime = vals_clamped[-WINDOW_SIZE:]
-            else:
-                local_regime = vals_clamped
-
-            # ROBUST SCALING STRATEGY (Windowed):
-            # Calculate mean/std from the "Stable Core" (middle 90%) of data only.
-            # Use only the local_regime to calculate stats!
-            p05 = np.percentile(local_regime, 5)
-            p95 = np.percentile(local_regime, 95)
+            # SOTA 2026: ROBUST SCALING (Median / IQR)
+            # Formula: (x - median) / IQR
+            median = np.median(vals)
+            q75, q25 = np.percentile(vals, [75, 25])
+            iqr = q75 - q25
             
-            # Filter to stable core
-            stable_core = local_regime[(local_regime >= p05) & (local_regime <= p95)]
-            if len(stable_core) == 0:
-                stable_core = local_regime
-
-            robust_mean = np.mean(stable_core)
-            robust_std = np.std(stable_core)
-
-            # Safety: Fallback to Std if robust_std is 0 (constant signal)
-            if robust_std < 1e-6:
-                robust_std = np.std(local_regime)
-            if robust_std < 1e-6:
-                robust_std = 1.0
+            # Safety: Fallback to Std if IQR is 0 (constant signal)
+            if iqr < 1e-6:
+                iqr = np.std(vals)
+            if iqr < 1e-6:
+                iqr = 1.0
                 
-            # Standardize the ENTIRE clamped series using LOCAL stats
-            df_scaled[ch] = (vals_clamped - robust_mean) / robust_std
-
-            # Store stats for inverse transform
-            scalers[ch] = {"center": robust_mean, "scale": robust_std}
+            df_scaled[ch] = (vals - median) / iqr
+            scalers[ch] = {"center": median, "scale": iqr}
 
         # For inverse transform of 'c' (price)
         robust_center = scalers['c']['center']

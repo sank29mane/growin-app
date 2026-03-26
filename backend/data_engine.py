@@ -507,7 +507,7 @@ class AlpacaClient:
                 # Check if it's acting like a dict (defensive)
                 if isinstance(acct, dict):
                      return {
-                        "cash_balance": {"total": str(acct.get("cash", "0")), "currency": str(acct.get("currency", "GBP"))},
+                        "cash_balance": {"total": Decimal(str(acct.get("cash"))), "currency": acct.get("currency", "GBP")},
                         "portfolio_value": Decimal(str(acct.get("portfolio_value"))),
                         # ... other fields
                         "unrealized_pnl": Decimal(str(acct.get("equity", 0))) - Decimal(str(acct.get("last_equity", 0))),
@@ -516,7 +516,7 @@ class AlpacaClient:
                      }
                 
                 return {
-                    "cash_balance": {"total": str(acct.cash), "currency": str(acct.currency)},
+                    "cash_balance": {"total": Decimal(str(acct.cash)), "currency": str(acct.currency)}, # Fix dict-item (str expected)
 
                     "portfolio_value": Decimal(str(acct.portfolio_value)),
                     "unrealized_pnl": Decimal(str(acct.equity)) - Decimal(str(acct.last_equity)), # Approx
@@ -633,10 +633,7 @@ class FinnhubClient:
                  from_time = to_time - timedelta(days=365)
 
             # Fetch candle data
-            # Use asyncio.to_thread to prevent blocking the event loop
-            import asyncio
-            candles = await asyncio.to_thread(
-                self.client.stock_candles,
+            candles = self.client.stock_candles(
                 symbol=normalized_ticker,
                 resolution=resolution,
                 _from=int(from_time.timestamp()),
@@ -696,8 +693,7 @@ class FinnhubClient:
 
         try:
             from utils.currency_utils import CurrencyNormalizer
-            import asyncio
-            quote = await asyncio.to_thread(self.client.quote, normalized_ticker)
+            quote = self.client.quote(normalized_ticker)
             
             # Helper to safely get values from quote dict
             def get_val(key):

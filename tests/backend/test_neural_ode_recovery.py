@@ -2,8 +2,8 @@ import pytest
 import torch
 import numpy as np
 from decimal import Decimal
-from quant_engine import QuantEngine
-from models.neural_ode import RecoveryVelocityNODE
+from backend.quant_engine import QuantEngine
+from backend.models.neural_ode import RecoveryVelocityNODE
 
 def test_neural_ode_model():
     model = RecoveryVelocityNODE(input_dim=10, hidden_dim=20)

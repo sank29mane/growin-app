@@ -2,7 +2,7 @@ import pytest
 import numpy as np
 import time
 from decimal import Decimal
-from quant_engine import QuantEngine, SimulationEngine
+from backend.quant_engine import QuantEngine, SimulationEngine
 
 def test_monte_carlo_path_generation():
     engine = SimulationEngine()

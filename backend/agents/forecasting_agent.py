@@ -8,7 +8,7 @@ import logging
 from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from market_context import ForecastData
 from forecaster import get_forecaster
-from resilience import get_circuit_breaker, CircuitBreakerOpenError, CircuitBreakerOpenException
+from resilience import get_circuit_breaker, CircuitBreakerOpenError
 
 logger = logging.getLogger(__name__)
 
@@ -194,7 +194,7 @@ class ForecastingAgent(BaseAgent):
                 latency_ms=0
             )
 
-        except CircuitBreakerOpenException:
+        except CircuitBreakerOpenError:
             logger.error(f"Forecast skipped: circuit breaker is OPEN")
             return AgentResponse(
                 agent_name=self.config.name,
