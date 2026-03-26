@@ -223,3 +223,11 @@ class TickerResolver:
         # 4. Provider Validation (Future: call Alpaca/Finnhub search)
 
         return ticker
+
+    async def search(self, term: str) -> list[dict]:
+        """
+        SOTA Ticker Search fallback.
+        Provides a basic fallback by normalizing the term and returning it.
+        """
+        normalized = self.normalize(term)
+        return [{"ticker": normalized, "name": term}]
