@@ -213,7 +213,9 @@ async def test_weekend_skip():
     forecaster = TTMForecaster()
     
     # 1. Create a dataset ending on a Friday
-    # Let's fix a known date: Friday, Jan 5, 2024
+    # Friday Jan 24, 2026 is a Saturday in real life?
+    # Let's fix a known date.
+    # Friday, Jan 5, 2024
     friday_ts = 1704456000000 # Fri Jan 05 2024 12:00:00 GMT
     
     data = []
@@ -246,9 +248,12 @@ async def test_weekend_skip():
     else:
         print("❌ No forecast generated")
 
+async def main():
+    await test_ttm_scaling()
+    await test_apple_anchoring()
+    await test_crash_anchoring()
+    await test_lse_etf_anchoring()
+    await test_weekend_skip()
+
 if __name__ == "__main__":
-    asyncio.run(test_ttm_scaling())
-    asyncio.run(test_apple_anchoring())
-    asyncio.run(test_crash_anchoring())
-    asyncio.run(test_lse_etf_anchoring())
-    asyncio.run(test_weekend_skip())
+    asyncio.run(main())

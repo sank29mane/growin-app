@@ -16,13 +16,6 @@ importlib.util.find_spec = patched_find_spec
 # Ensure backend is in path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# --- Helpers ---
-def make_async(mock):
-    """Helper to add awaitable capability to mocked objects, simulating AsyncMock."""
-    if hasattr(mock, '__call__') and not isinstance(mock, AsyncMock):
-        mock.side_effect = AsyncMock()
-    return mock
-
 # --- Global Resource Lifecycle Management ---
 @pytest.fixture(scope="session", autouse=True)
 async def cleanup_resources():
@@ -47,9 +40,6 @@ async def cleanup_resources():
         if hasattr(state, '_mcp_client') and state._mcp_client is not None:
             await state._mcp_client._exit_stack.aclose()
             print("✅ MCP Sessions closed")
-        
-        # DO NOT close state.chat_manager here if it's shared across tests, 
-        # as it closes the underlying sqlite connection.
     except Exception as e:
         print(f"⚠️ Failed to close MCP sessions: {e}")
 
@@ -72,14 +62,6 @@ MOCK_MODULES = [
     'docker'  # CRITICAL: Prevent Docker daemon connection attempts in CI
 ]
 
-# Patch MultiMCPManager to prevent real server connections during tests
-@pytest.fixture(autouse=True)
-def mock_mcp_connection():
-    with patch("mcp_client.MultiMCPManager.connect_all") as mock_connect:
-        # Create an async context manager mock
-        mock_connect.return_value.__aenter__.return_value = MagicMock()
-        yield mock_connect
-
 for module in MOCK_MODULES:
     try:
         if module not in sys.modules:
@@ -93,6 +75,8 @@ for module in MOCK_MODULES:
                 mock.from_env.return_value = MagicMock()
                 mock.from_env.return_value.ping.return_value = True
             
+            make_async(mock)
+            make_async(mock.return_value)
             sys.modules[module] = mock
     except Exception:
         pass

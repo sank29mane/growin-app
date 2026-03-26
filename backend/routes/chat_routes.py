@@ -161,10 +161,7 @@ async def chat_message(
         }
     except Exception as e:
         logger.error(f"Chat error: {str(e)}\n{traceback.format_exc()}")
-        raise HTTPException(
-            status_code=500, 
-            detail="Internal Server Error"
-        )
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 async def stream_chat_generator(request: ChatMessage):
     """Generator for SSE streaming responses with SOTA 2026 telemetry."""
