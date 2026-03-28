@@ -51,15 +51,21 @@ class CoordinatorAgent(BaseAgent):
     Routes queries to specialist agents and aggregates their data.
     """
     
-    def __init__(self, config=None, llm=None, mcp_client=None):
+    def __init__(self, config=None, llm=None, mcp_client=None, **kwargs):
+        # Support cases where mcp_client is passed as the first positional arg instead of config
+        if config is not None and not hasattr(config, 'name') and hasattr(config, 'sessions'):
+            mcp_client = config
+            config = None
+
         from .base_agent import AgentConfig
         config = config or AgentConfig(
             name="CoordinatorAgent",
-            description="Swarm Orchestrator",
-            system_prompt=COORDINATOR_SYSTEM_PROMPT
+            enabled=True,
+            timeout=10.0,
+            cache_ttl=300
         )
         super().__init__(config)
-        self.llm = llm # Note: the base class does not take llm
+        self.llm = llm
         self.mcp_client = mcp_client
         self.specialists: Dict[str, BaseAgent] = {}
         
@@ -451,4 +457,11 @@ class CoordinatorAgent(BaseAgent):
             context.goal = GoalData(**data)
 
     async def analyze(self, context: Dict[str, Any]) -> AgentResponse:
-        pass
+        # Coordinator Agent acts as a router, `execute` is the main entry point.
+        # This satisfies the BaseAgent abstract method requirement.
+        return AgentResponse(
+            agent_name=self.config.name,
+            success=True,
+            data={},
+            latency_ms=0
+        )
