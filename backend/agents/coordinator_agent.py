@@ -66,11 +66,6 @@ class CoordinatorAgent(BaseAgent):
         """Register specialist agents for routing"""
         self.specialists = agents
 
-    async def analyze(self, query: str, **kwargs) -> AgentResponse:
-        # Coordinator primarily acts via execute for orchestration.
-        # This implementation satisfies BaseAgent requirements.
-        return AgentResponse(agent_name=self.config.name, success=True, data={})
-
     async def execute(self, context: Dict[str, Any]) -> AgentResponse:
         """
         1. Classifies the query using LLM
@@ -194,67 +189,72 @@ class CoordinatorAgent(BaseAgent):
         
         try:
             # 15s timeout per specialist to prevent hanging
+<<<<<<< HEAD
             result = await run_with_timeout(agent.execute(context), 15.0)
-
-            # COORDINATOR SELF-CORRECTION: Try to fix if it's a known data issue
-            if not result.success and result.error:
-                error_msg = (result.error or "").lower()
+=======
+            async with asyncio.timeout(15.0):
+                result = await agent.execute(context)
+>>>>>>> main
                 
-                # Trigger resolution if ticker not found or delisted (Tier 2 Escalation)
-                if any(x in error_msg for x in ["not found", "ticker", "delisted", "no data", "404"]):
-                    logger.info(f"Coordinator: Escalating Ticker Resolution to Tier 2 (Search) for {agent.config.name}: {result.error}")
-                    status_manager.set_status(agent_key, "working", "Escalating Ticker Resolution (Tier 2)...")
+                # COORDINATOR SELF-CORRECTION: Try to fix if it's a known data issue
+                if not result.success and result.error:
+                    error_msg = (result.error or "").lower()
                     
-                    if "ticker" in context:
-                        ticker = context["ticker"]
-                        status_manager.set_status(agent_key, "working", f"Searching for correct ticker for '{ticker}'...")
+                    # Trigger resolution if ticker not found or delisted (Tier 2 Escalation)
+                    if any(x in error_msg for x in ["not found", "ticker", "delisted", "no data", "404"]):
+                        logger.info(f"Coordinator: Escalating Ticker Resolution to Tier 2 (Search) for {agent.config.name}: {result.error}")
+                        status_manager.set_status(agent_key, "working", "Escalating Ticker Resolution (Tier 2)...")
 
-                        new_ticker = await self._resolve_ticker_via_search(ticker)
+                        if "ticker" in context:
+                            ticker = context["ticker"]
+                            status_manager.set_status(agent_key, "working", f"Searching for correct ticker for '{ticker}'...")
 
-                        if new_ticker and new_ticker != ticker:
-                            logger.info(f"Coordinator Tier 2: Success! Resolved {ticker} -> {new_ticker}")
-                            status_manager.set_status(agent_key, "working", f"Retrying with resolved ticker: {new_ticker}")
+                            new_ticker = await self._resolve_ticker_via_search(ticker)
 
-                            new_context = context.copy()
-                            new_context["ticker"] = new_ticker
-                            # Retry with new ticker
-                            retry_result = await agent.execute(new_context)
-                            if retry_result.success:
-                                status_manager.set_status(agent_key, "ready", "Resolved via Tier 2")
-                                result = retry_result
-                            else:
-                                result = retry_result # Update original result for Tier 3 fallthrough
+                            if new_ticker and new_ticker != ticker:
+                                logger.info(f"Coordinator Tier 2: Success! Resolved {ticker} -> {new_ticker}")
+                                status_manager.set_status(agent_key, "working", f"Retrying with resolved ticker: {new_ticker}")
 
-                    if not result.success:
-                        # Tier 3: LLM Self-Correction fallback (Reasoning)
-                        logger.info(f"Coordinator: Escalating Ticker Resolution to Tier 3 (LLM) for {agent.config.name}")
-                        status_manager.set_status(agent_key, "working", "Attempting LLM self-healing (Tier 3)...")
+                                new_context = context.copy()
+                                new_context["ticker"] = new_ticker
+                                # Retry with new ticker
+                                retry_result = await agent.execute(new_context)
+                                if retry_result.success:
+                                    status_manager.set_status(agent_key, "ready", "Resolved via Tier 2")
+                                    result = retry_result
+                                else:
+                                    result = retry_result # Update original result for Tier 3 fallthrough
 
-                        fixed_result = await self._handle_specialist_error(agent, context, result.error)
-                        if fixed_result:
-                            logger.info(f"Coordinator Tier 3: Successfully healed error for {agent.config.name}")
-                            status_manager.set_status(agent_key, "ready", "Fixed via Coordinator Self-Healing")
-                            result = fixed_result
+                        if not result.success:
+                            # Tier 3: LLM Self-Correction fallback (Reasoning)
+                            logger.info(f"Coordinator: Escalating Ticker Resolution to Tier 3 (LLM) for {agent.config.name}")
+                            status_manager.set_status(agent_key, "working", "Attempting LLM self-healing (Tier 3)...")
 
-            status_manager.set_status(agent_key, "ready", "Task complete")
+                            fixed_result = await self._handle_specialist_error(agent, context, result.error)
+                            if fixed_result:
+                                logger.info(f"Coordinator Tier 3: Successfully healed error for {agent.config.name}")
+                                status_manager.set_status(agent_key, "ready", "Fixed via Coordinator Self-Healing")
+                                result = fixed_result
 
-            # Emit telemetry: Success/Complete
-            complete_msg = AgentMessage(
-                sender=agent.config.name,
-                recipient="CoordinatorAgent",
-                subject="agent_complete",
-                payload={
-                    "agent": agent.config.name,
-                    "success": result.success,
-                    "latency_ms": result.latency_ms,
-                    "ticker": context.get("ticker"),
-                    "error": result.error if not result.success else None
-                },
-                correlation_id=c_id
-            )
-            await messenger.send_message(complete_msg)
+                status_manager.set_status(agent_key, "ready", "Task complete")
 
-            return result
+                # Emit telemetry: Success/Complete
+                complete_msg = AgentMessage(
+                    sender=agent.config.name,
+                    recipient="CoordinatorAgent",
+                    subject="agent_complete",
+                    payload={
+                        "agent": agent.config.name,
+                        "success": result.success,
+                        "latency_ms": result.latency_ms,
+                        "ticker": context.get("ticker"),
+                        "error": result.error if not result.success else None
+                    },
+                    correlation_id=c_id
+                )
+                await messenger.send_message(complete_msg)
+
+                return result
         except asyncio.TimeoutError:
             error_msg = "Timout after 15s"
             logger.warning(f"Specialist {agent.config.name} timed out")
@@ -280,6 +280,7 @@ class CoordinatorAgent(BaseAgent):
         to verify the best match for ambiguous symbols or names.
         """
         try:
+<<<<<<< HEAD
             # SOTA 2026: Try MCP search if available, fallback to Resolver
             search_result = []
             if self.mcp_client:
@@ -300,6 +301,14 @@ class CoordinatorAgent(BaseAgent):
                     logger.warning(f"MCP search failed, falling back to local resolver: {e}")
                     resolver = TickerResolver()
                     search_result = await resolver.search(term)
+=======
+            logger.info(f"Coordinator Tier 2: Searching for correct ticker matching '{term}'")
+
+            # Call search_instruments tool
+            if hasattr(asyncio, 'timeout'):
+                async with asyncio.timeout(10.0):
+                    search_result = await self.mcp_client.call_tool("search_instruments", {"query": term})
+>>>>>>> main
             else:
                 search_result = await asyncio.wait_for(
                     self.mcp_client.call_tool("search_instruments", {"query": term}),
@@ -396,6 +405,17 @@ class CoordinatorAgent(BaseAgent):
             match = re.search(r'\{.*\}', content, re.DOTALL)
             if match:
                 try:
+<<<<<<< HEAD
+                    exec_result = await run_with_timeout(
+                        self.mcp_client.call_tool("docker_run_python", {"script": python_code}),
+                        30.0
+                    )
+
+                    if exec_result and hasattr(exec_result, 'content'):
+                        output_text = exec_result.content[0].text
+                        import ast
+                        exec_res_dict = ast.literal_eval(output_text)
+=======
                     fix_data = json.loads(match.group(), strict=False)
                     python_code = fix_data.get("code", "")
                 except json.JSONDecodeError as je:
@@ -407,10 +427,16 @@ class CoordinatorAgent(BaseAgent):
                     # SOTA 2026: Use Docker MCP for isolation
                     try:
                         # Call docker_run_python tool
-                        result = await run_with_timeout(
-                            self.mcp_client.call_tool("docker_run_python", {"script": python_code}),
-                            30.0
-                        )
+                        # We assume the tool is registered in the MCP client available to the coordinator
+                        if hasattr(asyncio, 'timeout'):
+                            async with asyncio.timeout(30.0):
+                                result = await self.mcp_client.call_tool("docker_run_python", {"script": python_code})
+                        else:
+                            result = await asyncio.wait_for(
+                                self.mcp_client.call_tool("docker_run_python", {"script": python_code}),
+                                timeout=30.0
+                            )
+>>>>>>> main
                         
                         # Parse the output from the tool
                         if result and result.content:
