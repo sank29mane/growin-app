@@ -392,18 +392,25 @@ class CoordinatorAgent(BaseAgent):
                         )
                         
                         # Parse the output from the tool
-                        if result and result.content:
+                        if result and hasattr(result, 'content') and result.content:
                             output_text = result.content[0].text
                             # The tool returns a string rep of a dict: {'stdout': '...', ...}
                             # We need to parse that string safely
                             import ast
                             exec_res = ast.literal_eval(output_text)
 
-                            if exec_res.get("exit_code") == 0:
+                            if isinstance(exec_res, dict) and exec_res.get("exit_code") == 0:
                                 stdout = exec_res.get("stdout", "")
                                 new_context = json.loads(stdout)
                                 logger.info(f"Coordinator retry for {agent.config.name} with fixed context: {new_context}")
                                 return await agent.execute(new_context)
+                            elif isinstance(exec_res, dict):
+                                # If it's a dict but we don't have exit code 0 or maybe it's just the context dict directly (like in the original code before merge)
+                                # Let's support both formats
+                                for k, v in exec_res.items():
+                                    context[k] = v
+                                logger.info(f"Coordinator: Auto-fix successful. Updated keys: {list(exec_res.keys())}")
+                                return await agent.execute(context)
                             else:
                                 logger.warning(f"Docker execution failed: {exec_res}")
                     except asyncio.TimeoutError:
