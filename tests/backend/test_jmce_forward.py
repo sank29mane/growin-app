@@ -1,4 +1,10 @@
-import mlx.core as mx
+import pytest
+try:
+    import mlx.core as mx
+except ImportError:
+    pytest.skip("MLX not available", allow_module_level=True)
+    mx = None
+
 import numpy as np
 from backend.utils.jmce_model import NeuralJMCE
 

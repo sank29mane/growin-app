@@ -1,7 +1,13 @@
 import sys
 import os
 import pytest
-import mlx.core as mx
+import pytest
+try:
+    import mlx.core as mx
+except ImportError:
+    pytest.skip("MLX not available", allow_module_level=True)
+    mx = None
+
 import numpy as np
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../backend')))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
