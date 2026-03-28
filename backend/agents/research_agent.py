@@ -23,8 +23,13 @@ import asyncio
 import re
 from pydantic import BaseModel, Field
 from magentic import prompt as mag_prompt
+from resilience import get_circuit_breaker, CircuitBreakerOpenError
 
 logger = logging.getLogger(__name__)
+
+newsdata_cb = get_circuit_breaker("newsdata", failure_threshold=3, recovery_timeout=30.0)
+tavily_cb = get_circuit_breaker("tavily", failure_threshold=3, recovery_timeout=30.0)
+newsapi_cb = get_circuit_breaker("newsapi", failure_threshold=3, recovery_timeout=30.0)
 
 class NewsDataQueryParams(BaseModel):
     """Structured parameters for NewsData.io API query."""
@@ -262,18 +267,24 @@ class ResearchAgent(BaseAgent):
                     "country": "gb",
                     "category": "business"
                 }
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    resp = await client.get("https://newsdata.io/api/1/latest", params=params)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        for art in data.get('results', [])[:5]:
-                            articles.append({
-                                'title': f"[RNS] {art.get('title')}",
-                                'description': art.get('description'),
-                                'source': {'name': 'LSE RNS'},
-                                'url': art.get('link'),
-                                'is_regulatory': True
-                            })
+                async def _fetch_newsdata_rns():
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        resp = await client.get("https://newsdata.io/api/1/latest", params=params)
+                        if resp.status_code == 200:
+                            return resp.json()
+                        return {}
+                try:
+                    data = await newsdata_cb.call(_fetch_newsdata_rns)
+                    for art in data.get('results', [])[:5]:
+                        articles.append({
+                            'title': f"[RNS] {art.get('title')}",
+                            'description': art.get('description'),
+                            'source': {'name': 'LSE RNS'},
+                            'url': art.get('link'),
+                            'is_regulatory': True
+                        })
+                except CircuitBreakerOpenError:
+                    logger.warning(f"Regulatory news (NewsData) skipped: circuit breaker is OPEN")
 
             # 2. SEC Filings / News via Tavily
             if not is_uk and self.tavily_key:
@@ -290,22 +301,26 @@ class ResearchAgent(BaseAgent):
                     "max_results": 5
                 }
 
-                async with httpx.AsyncClient() as client:
-                    response = await client.post(url, headers=headers, json=payload)
-                    response.raise_for_status()
-                    data = response.json()
-                
-                for r in data.get('results', []):
-                    # Only include if relevant to SEC or regulatory
-                    content = (r.get('title', '') + (r.get('content', '') or '')).upper()
-                    if any(kw in content for kw in ["SEC", "FORM 8-K", "10-Q", "10-K", "FILING", "REGULATORY"]):
-                        articles.append({
-                            'title': f"[SEC] {r.get('title')}",
-                            'description': r.get('content') or r.get('snippet'),
-                            'source': {'name': 'SEC EDGAR / News'},
-                            'url': r.get('url'),
-                            'is_regulatory': True
-                        })
+                async def _fetch_tavily_sec():
+                    async with httpx.AsyncClient() as client:
+                        response = await client.post(url, headers=headers, json=payload)
+                        response.raise_for_status()
+                        return response.json()
+                try:
+                    data = await tavily_cb.call(_fetch_tavily_sec)
+                    for r in data.get('results', []):
+                        # Only include if relevant to SEC or regulatory
+                        content = (r.get('title', '') + (r.get('content', '') or '')).upper()
+                        if any(kw in content for kw in ["SEC", "FORM 8-K", "10-Q", "10-K", "FILING", "REGULATORY"]):
+                            articles.append({
+                                'title': f"[SEC] {r.get('title')}",
+                                'description': r.get('content') or r.get('snippet'),
+                                'source': {'name': 'SEC EDGAR / News'},
+                                'url': r.get('url'),
+                                'is_regulatory': True
+                            })
+                except CircuitBreakerOpenError:
+                    logger.warning(f"Regulatory news (Tavily) skipped: circuit breaker is OPEN")
             
             if articles:
                 logger.info(f"ResearchAgent: Found {len(articles)} regulatory announcements for {ticker}")
@@ -332,11 +347,16 @@ class ResearchAgent(BaseAgent):
                 "apiKey": self.newsapi_key
             }
             
-            async with httpx.AsyncClient() as client:
-                response = await client.get(url, params=params)
-                response.raise_for_status()
-                data = response.json()
+            async def _do_fetch_newsapi():
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(url, params=params)
+                    response.raise_for_status()
+                    return response.json()
+            data = await newsapi_cb.call(_do_fetch_newsapi)
             return data.get('articles', [])
+        except CircuitBreakerOpenError:
+            logger.warning(f"NewsAPI skipped: circuit breaker is OPEN")
+            return []
         except Exception as e:
             logger.warning(f"NewsAPI failed: {e}")
             return []
@@ -363,10 +383,12 @@ class ResearchAgent(BaseAgent):
                 "max_results": 8
             }
             
-            async with httpx.AsyncClient() as client:
-                res = await client.post(url, headers=headers, json=payload)
-                res.raise_for_status()
-                response = res.json()
+            async def _do_fetch_tavily():
+                async with httpx.AsyncClient() as client:
+                    res = await client.post(url, headers=headers, json=payload)
+                    res.raise_for_status()
+                    return res.json()
+            response = await tavily_cb.call(_do_fetch_tavily)
             
             # Normalize to common format
             return [
@@ -378,6 +400,9 @@ class ResearchAgent(BaseAgent):
                 }
                 for r in response.get('results', [])
             ]
+        except CircuitBreakerOpenError:
+            logger.warning(f"Tavily skipped: circuit breaker is OPEN")
+            return []
         except Exception as e:
             logger.warning(f"Tavily failed: {e}")
             return []
@@ -431,10 +456,13 @@ class ResearchAgent(BaseAgent):
                      # Add 'in' for India support if requested, but architecture mandates US/UK partitioning
                      if "NSE" in ticker.upper(): params["country"] = "in"
 
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(url, params=params)
-                response.raise_for_status()
-                data = response.json()
+            async def _do_fetch_newsdata():
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.get(url, params=params)
+                    response.raise_for_status()
+                    return response.json()
+
+            data = await newsdata_cb.call(_do_fetch_newsdata)
             
             # Normalize to common format
             articles = []
@@ -449,6 +477,9 @@ class ResearchAgent(BaseAgent):
             logger.info(f"NewsData.io returned {len(articles)} articles")
             return articles
             
+        except CircuitBreakerOpenError:
+            logger.warning(f"NewsData.io skipped: circuit breaker is OPEN")
+            return []
         except Exception as e:
             logger.warning(f"NewsData.io failed: {e}")
             return []
