@@ -22,13 +22,7 @@ except ImportError:
     growin_core = None
     RUST_CORE_AVAILABLE = False
 
-try:
-    import mlx.core as mx
-    import mlx.nn as nn
-    MLX_AVAILABLE = True
-except ImportError:
-    mx = None
-    MLX_AVAILABLE = False
+from utils.mlx_loader import mx, nn, HAS_MLX as MLX_AVAILABLE
 
 try:
     import torch

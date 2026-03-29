@@ -2,12 +2,7 @@
 import logging
 from typing import Optional, AsyncIterator, Any, Dict
 
-try:
-    import mlx.core as mx
-    HAS_MLX = True
-except ImportError:
-    mx = None
-    HAS_MLX = False
+from utils.mlx_loader import mx, HAS_MLX
 
 logger = logging.getLogger(__name__)
 

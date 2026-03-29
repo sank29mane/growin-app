@@ -1,18 +1,5 @@
 from __future__ import annotations
-try:
-    import mlx.core as mx
-    import mlx.nn as nn
-    HAS_MLX = True
-except ImportError:
-    mx = None
-    class DummyModule:
-        def __init__(self, *args, **kwargs): pass
-        def __call__(self, *args, **kwargs): pass
-    class nn:
-        Module = DummyModule
-        @staticmethod
-        def Linear(*args, **kwargs): return lambda x: x
-    HAS_MLX = False
+from utils.mlx_loader import mx, nn, HAS_MLX
 import numpy as np
 from typing import Tuple, Optional, Dict, Any, Union
 from enum import Enum

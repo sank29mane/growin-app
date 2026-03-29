@@ -2,12 +2,7 @@
 import logging
 import asyncio
 from typing import Optional, Any, Dict, List, Tuple, Union
-try:
-    import mlx.core as mx
-    HAS_MLX = True
-except ImportError:
-    mx = None
-    HAS_MLX = False
+from utils.mlx_loader import mx, HAS_MLX
 
 from PIL import Image
 
@@ -31,7 +26,7 @@ class MLXVLMInferenceEngine:
         self.current_model_path: Optional[str] = None
         self._loading = False
         
-<<<<<<< HEAD
+
         # SOTA 2026: Set unified memory cache limit (80% default for MLX)
         if HAS_MLX and hasattr(mx, 'metal'):
             mx.metal.set_cache_limit(int(get_memory_info()["total_bytes"] * 0.8)) if "total_bytes" in get_memory_info() else None
@@ -39,6 +34,8 @@ class MLXVLMInferenceEngine:
     def _verify_checksum(self, model_path: str) -> bool:
         """SOTA 2026: Verify .safetensors checksums for model integrity."""
         try:
+            import os
+            import hashlib
             # Look for .safetensors files in the model directory
             safetensors_files = [f for f in os.listdir(model_path) if f.endswith(".safetensors")]
             if not safetensors_files:
@@ -62,8 +59,8 @@ class MLXVLMInferenceEngine:
             logger.error(f"❌ Checksum verification failed: {e}")
             return False
 
-=======
->>>>>>> origin/main
+
+
     def load_model(self, model_path: str = "mlx-community/Qwen2.5-VL-7B-Instruct-4bit") -> bool:
         """
         Load a VLM model using mlx-vlm.
@@ -104,13 +101,11 @@ class MLXVLMInferenceEngine:
             self._loading = False
 
     def _warmup(self):
-<<<<<<< HEAD
+
         """Warm up the model parameters using async_eval."""
         if not HAS_MLX:
             return
-=======
-        """Warm up the model parameters."""
->>>>>>> origin/main
+
         try:
             mx.async_eval(self.model.parameters())
             # For VLM, we might want a simple image + text warmup if possible,
@@ -193,6 +188,4 @@ def get_vlm_engine() -> MLXVLMInferenceEngine:
     global _vlm_engine
     if _vlm_engine is None:
         _vlm_engine = MLXVLMInferenceEngine()
-    return _vlm_engine
-ngine()
     return _vlm_engine
