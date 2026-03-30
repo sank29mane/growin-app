@@ -316,10 +316,14 @@ struct AccountSectionView: View {
                         ScrollView {
                             LazyVStack(spacing: 8) {
                                 ForEach(data.positions) { position in
-                                    PositionDeepCard(position: position)
-                                        .onTapGesture {
-                                            onPositionTap(position)
-                                        }
+                                    Button(action: {
+                                        onPositionTap(position)
+                                    }) {
+                                        PositionDeepCard(position: position)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityAddTraits(.isButton)
+                                    .accessibilityHint("Opens stock chart")
                                 }
                             }
                             .padding(.horizontal)
