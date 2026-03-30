@@ -204,7 +204,7 @@ class CoordinatorAgent(BaseAgent):
                     if any(x in error_msg for x in ["not found", "ticker", "delisted", "no data", "404"]):
                         logger.info(f"Coordinator: Escalating Ticker Resolution to Tier 2 (Search) for {agent.config.name}: {result.error}")
                         status_manager.set_status(agent_key, "working", "Escalating Ticker Resolution (Tier 2)...")
-                        
+
                         if "ticker" in context:
                             ticker = context["ticker"]
                             status_manager.set_status(agent_key, "working", f"Searching for correct ticker for '{ticker}'...")

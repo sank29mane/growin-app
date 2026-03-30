@@ -681,6 +681,9 @@ struct LogicTreeItem: View {
                 }
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("\(isExpanded ? "Collapse" : "Expand") \(title)")
+            .accessibilityHint("Toggles the details for this logic step")
+            .accessibilityAddTraits(.isButton)
             
             if isExpanded {
                 Text(content)
