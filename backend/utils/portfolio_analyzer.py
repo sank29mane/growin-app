@@ -1,9 +1,6 @@
 import pandas as pd
 import numpy as np
-try:
-    import mlx.core as mx
-except ImportError:
-    mx = None
+from utils.mlx_loader import mx
 from scipy.optimize import minimize
 from decimal import Decimal
 from typing import Dict, List, Optional, Union, Any

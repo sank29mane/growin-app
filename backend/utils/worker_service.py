@@ -149,7 +149,7 @@ class ModelWorker:
         SOTA 2026: Fused TTM-JMCE execution.
         Zero-copy memory sharing on GPU via MLX.
         """
-        import mlx.core as mx
+        from utils.mlx_loader import mx
         import numpy as np
         
         # 1. Run standard TTM
