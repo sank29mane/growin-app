@@ -328,31 +328,43 @@ class GoalPlannerAgent(BaseAgent):
             
             real_universe = {}
             
-            # Helper to fetch single ticker via Alpaca
-            async def fetch_ticker(t):
+            # Fetch 1 year history (approx 252 trading days + buffer) for all tickers in parallel
+            batch_results = await alpaca.get_batch_bars(tickers, timeframe="1Day", limit=300)
+
+            for t in tickers:
                 try:
-                    # Fetch 1 year history (approx 252 trading days + buffer)
-                    # We need enough data for robust volatility calc
-                    bars_data = await alpaca.get_historical_bars(t, timeframe="1Day", limit=300)
-                    
+                    bars_data = batch_results.get(t)
                     if not bars_data or "bars" not in bars_data or not bars_data["bars"]:
-                        # warning logged deeper if needed
-                        return t, self.asset_universe.get(t)
+                        real_universe[t] = self.asset_universe.get(t)
+                        continue
                         
                     bars = bars_data["bars"]
                     if len(bars) < 30: # Need at least a month of data
-                         return t, self.asset_universe.get(t)
+                         real_universe[t] = self.asset_universe.get(t)
+                         continue
                     
                     # Calculate Metrics
-                    # 1. Prices
-                    prices = [b['c'] for b in bars]
+                    # 1. Prices (handle both dict and object from batch)
+                    prices = []
+                    for b in bars:
+                        if isinstance(b, dict):
+                            if 'close' in b:
+                                prices.append(float(b['close']))
+                            elif 'c' in b:
+                                prices.append(float(b['c']))
+                        elif hasattr(b, 'close'):
+                            prices.append(float(b.close))
+                        elif hasattr(b, 'c'):
+                            prices.append(float(b.c))
+
+                    if len(prices) < 30:
+                         real_universe[t] = self.asset_universe.get(t)
+                         continue
                     
                     # 2. Daily Returns
                     daily_returns = np.diff(prices) / prices[:-1]
                     
                     # 3. Annual Return (CAGR approx or simple 1y change)
-                    # Simple 1-year change: (End - Start) / Start
-                    # If we have less than 1y, strictly speaking we should annualize, but for now simple change
                     start_price = prices[0]
                     end_price = prices[-1]
                     total_ret = (end_price - start_price) / start_price if start_price > 0 else 0
@@ -373,7 +385,7 @@ class GoalPlannerAgent(BaseAgent):
                     if annual_vol > 0:
                         mom_score = annual_ret / annual_vol
                     
-                    return t, {
+                    real_universe[t] = {
                         "name": self.asset_universe.get(t, {}).get("name", t),
                         "sector": self.asset_universe.get(t, {}).get("sector", "Unknown"),
                         "return": float(annual_ret),
@@ -381,16 +393,8 @@ class GoalPlannerAgent(BaseAgent):
                         "momentum_score": float(mom_score)
                     }
                 except Exception as ex:
-                    logger.warning(f"Failed to fetch data for {t} via Alpaca: {ex}")
-                    return t, self.asset_universe.get(t)
-
-            # Gather all fetches
-            import asyncio
-            results = await asyncio.gather(*[fetch_ticker(t) for t in tickers])
-            
-            for t, data in results:
-                if data:
-                    real_universe[t] = data
+                    logger.warning(f"Failed to process data for {t}: {ex}")
+                    real_universe[t] = self.asset_universe.get(t)
             
             return real_universe
             
