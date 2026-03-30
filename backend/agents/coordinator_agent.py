@@ -186,7 +186,7 @@ class CoordinatorAgent(BaseAgent):
             correlation_id=c_id
         )
         await messenger.send_message(start_msg)
-        
+
         try:
             # 15s timeout per specialist to prevent hanging
             result = await run_with_timeout(agent.execute(context), 15.0)
