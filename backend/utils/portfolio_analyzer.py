@@ -249,7 +249,7 @@ class PortfolioAnalyzer:
         if not dfs:
             return pd.DataFrame()
         combined = pd.concat(dfs, axis=1)
-        combined.fillna(method='ffill', inplace=True)
-        combined.fillna(method='bfill', inplace=True)
+        combined.ffill(inplace=True)
+        combined.bfill(inplace=True)
         combined['total_value'] = combined.sum(axis=1)
         return combined
