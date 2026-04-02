@@ -41,7 +41,7 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['ma_20'] = df['close'].rolling(window=20).mean()
     df['ma_dist'] = df['close'] - df['ma_20']
     
-    return df.fillna(method='bfill').fillna(0)
+    return df.bfill().fillna(0)
 
 def create_features(df: pd.DataFrame, lags: List[int]) -> Tuple[pd.DataFrame, List[str]]:
     df_feat = add_technical_indicators(df)

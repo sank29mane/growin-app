@@ -1,13 +1,14 @@
 import sys
 import os
 import pytest
-import mlx.core as mx
 import numpy as np
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../backend')))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
+from backend.utils.mlx_loader import mx, HAS_MLX
 from backend.utils.jmce_model import NeuralJMCE, TimeResolution
 
+@pytest.mark.skipif(not HAS_MLX, reason="MLX is not installed or available")
 def test_neural_jmce_intraday_shapes():
     """Verify NeuralJMCE works with intraday resolutions and correct output shapes."""
     n_assets = 2 # TQQQ, SQQQ
@@ -38,6 +39,7 @@ def test_neural_jmce_intraday_shapes():
     eigvals = np.linalg.eigvals(sigma_np)
     assert np.all(eigvals > 0)
 
+@pytest.mark.skipif(not HAS_MLX, reason="MLX is not installed or available")
 def test_neural_jmce_resolution_padding():
     """Verify positional embeddings are correctly sized for resolution."""
     model_5m = NeuralJMCE(n_assets=2, resolution=TimeResolution.INTRADAY_5MIN)
