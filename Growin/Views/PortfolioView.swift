@@ -374,6 +374,9 @@ struct IntelligenceOfflineView: View {
                     .foregroundStyle(.white)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Retry Connection")
+                .accessibilityHint("Attempts to reconnect to the server")
+                .accessibilityAddTraits(.isButton)
             }
             .padding(40)
         }
@@ -509,6 +512,9 @@ extension PortfolioView {
                         .foregroundStyle(color)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(persona == "defensive" ? "Defensive Strategy" : "Aggressive Strategy")
+                .accessibilityHint("Switches strategy persona to \(persona)")
+                .accessibilityAddTraits(viewModel.strategyPersona == persona ? [.isSelected, .isButton] : [.isButton])
                 .help(persona.capitalized)
             }
         }
@@ -648,6 +654,8 @@ extension PortfolioView {
                             .glassEffect(.thin.interactive(), in: .rect(cornerRadius: 14))
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Position details for \(position.ticker)")
+                    .accessibilityAddTraits(.isButton)
                     .accessibilityHint("Double tap to view detailed analysis")
                 }
             }
