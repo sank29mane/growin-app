@@ -103,6 +103,14 @@ class CoordinatorAgent(BaseAgent):
         if ticker:
             context["ticker"] = ticker
 
+        # COORDINATOR FIX: Robust normalization via Resolver
+        if ticker:
+            from utils.ticker_utils import TickerResolver
+            original_ticker = ticker
+            ticker = TickerResolver().normalize(ticker)
+            if ticker != original_ticker:
+                logger.info(f"Ticker normalized (Resolver): {original_ticker} -> {ticker}")
+
         # Initialize MarketContext
         market_context = MarketContext(
             query=query,
@@ -111,6 +119,14 @@ class CoordinatorAgent(BaseAgent):
             user_context=context.get("user_context", {}),
             reasoning=routing_decision.get("reasoning")
         )
+        
+        # COORDINATOR FIX: Robust normalization via Resolver
+        if ticker:
+            from utils.ticker_utils import TickerResolver
+            original_ticker = ticker
+            ticker = TickerResolver().normalize(ticker)
+            if ticker != original_ticker:
+                logger.info(f"Ticker normalized (Resolver): {original_ticker} -> {ticker}")
 
         # 2. Parallel Execution of Specialists
         tasks = []
@@ -301,10 +317,12 @@ class CoordinatorAgent(BaseAgent):
                 except Exception as e:
                     logger.warning(f"MCP search failed, falling back to local resolver: {e}")
                     resolver = TickerResolver()
-                    search_result = await resolver.search(term)
+                    resolved = await resolver.resolve(term)
+                    search_result = [{"ticker": resolved, "name": term}] if resolved else []
             else:
                 resolver = TickerResolver()
-                search_result = await resolver.search(term)
+                resolved = await resolver.resolve(term)
+                search_result = [{"ticker": resolved, "name": term}] if resolved else []
 
             # Check if search_result is wrapped in TextContent or JSON string
             if hasattr(search_result, 'content'):
@@ -381,12 +399,12 @@ class CoordinatorAgent(BaseAgent):
         The script will run in an ISOLATED Docker container.
         
         Input Context:
-        {json.dumps(context)}
+        {json.dumps(context, default=str)}
         
         Return ONLY a JSON block with the script:
         {{
           "reasoning": "Explain the fix",
-          "code": "import json\\ncontext = {json.dumps(context)}\\n# ... fix logic ...\\nprint(json.dumps(context))"
+          "code": "import json\\ncontext = {json.dumps(context, default=str)}\\n# ... fix logic ...\\nprint(json.dumps(context, default=str))"
         }}
         """
         try:

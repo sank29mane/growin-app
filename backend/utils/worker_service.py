@@ -239,7 +239,7 @@ def main():
                     return [sanitize(v) for v in obj]
                 return obj
             
-            sys.stdout.write(json.dumps(sanitize(response)) + "\n")
+            sys.stdout.write(json.dumps(sanitize(response), default=str) + "\n")
             sys.stdout.flush()
         except json.JSONDecodeError:
             logger.error("Failed to decode JSON request")
