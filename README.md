@@ -7,17 +7,18 @@
 [![Python](https://img.shields.io/badge/Backend-Python_3.11+-3776AB?style=flat-square&logo=python)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/API-FastAPI-009688?style=flat-square)](https://fastapi.tiangolo.com/)
 
-## 🏗️ System Architecture (SOTA 2026 Phase 32)
+## 🏗️ System Architecture (SOTA 2026 Phase 41)
 
-Growin implements a **Hardware-Aware Multi-Agent Architecture** optimized for Apple Silicon partitioning (CPU/GPU/NPU).
+Growin implements a **Hardware-Aware Multi-Agent Architecture** optimized for Apple Silicon partitioning (CPU/GPU/NPU), paired with a **Sovereign Ledger (Brutal Editorial) UI** generated via Stitch.
 
-### Key SOTA Features (Phases 31-32)
+### Key SOTA Features (Phases 31-41)
+- **🎨 Sovereign UI (Stitch MCP)**: Radical, high-density Trading 212-inspired ledger aesthetics with 0px corner radiuses, tonal layering, and authoritative typography (Noto Serif & Space Grotesk).
 - **⚡ M4 Hardware Partitioning**: Intelligently routes high-frequency orchestration to the CPU (AMX), LLM reasoning to the GPU (MLX), and Neural JMCE inference to the NPU (ANE).
 - **🧠 Neural JMCE**: Joint Mean-Covariance Estimator running natively on the Apple Neural Engine for real-time volatility regime detection and correlation shift analysis.
 - **🚀 Autonomous Autopilot**: Move beyond simple proposals with **High Conviction Bypasses**. If the Swarm detects a 10/10 setup, the system autonomously executes trades on Trading 212 via a secure local sandbox.
 - **🛠️ MLX Weight Adapters**: On-the-fly model calibration. The system performs daily GPU re-training to adjust model weights based on recent market error feedback.
 - **💎 Ticker Fidelity**: Robust `TickerResolver` that maps complex brokerage symbols to global standards, including automated GBX (pence) to GBP (£) normalization.
-- **📡 Reasoning Trace**: Real-time streaming of agent "thoughts" via SSE, visualized in SwiftUI with Metal-accelerated effects.
+- **📡 Reasoning Trace**: Real-time streaming of agent "thoughts" via SSE, visualized in SwiftUI with Metal-accelerated effects in a dedicated Monaco-font logic console.
 
 ### High-Level System Overview
 ```mermaid
