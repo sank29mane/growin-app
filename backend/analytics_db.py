@@ -576,13 +576,10 @@ class AnalyticsDB:
                 specialist_res = self.conn.execute(specialist_query).fetchdf()
 
             # Format result
-            specialists = {}
-            for _, row in specialist_res.iterrows():
-                specialists[row['agent_name']] = {
-                    "avg_1d": float(row['avg_1d']) if not pd.isna(row['avg_1d']) else 0.0,
-                    "avg_5d": float(row['avg_5d']) if not pd.isna(row['avg_5d']) else 0.0,
-                    "total_sessions": int(row['count'])
-                }
+            specialist_res['avg_1d'] = specialist_res['avg_1d'].fillna(0.0).astype(float)
+            specialist_res['avg_5d'] = specialist_res['avg_5d'].fillna(0.0).astype(float)
+            specialist_res['total_sessions'] = specialist_res['count'].astype(int)
+            specialists = specialist_res.set_index('agent_name')[['avg_1d', 'avg_5d', 'total_sessions']].to_dict('index')
 
             if ticker_res.empty:
                 return {"avg_1d": 0.0, "avg_5d": 0.0, "total_sessions": 0, "specialists": specialists}
