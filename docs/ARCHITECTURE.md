@@ -29,7 +29,7 @@ graph TB
         AUDIT[Audit Log<br/>Autonomous History]
     end
 
-    subgraph "AI Processing Layer (MAS - SOTA 2026 Phase 32)"
+    subgraph "AI Processing Layer (MAS - SOTA 2026 Phase 41)"
         COORD[Coordinator Agent<br/>Router & Classifier]
         SWARM[Specialist Swarm<br/>Quant, Forecast, Research, Risk]
         MATH[MathGenerator Agent<br/>NPU Sandbox Scripting]
@@ -48,6 +48,7 @@ graph TB
     SWARM --> T212
     SWARM --> ALP
     SWARM --> YF
+    SWARM --> VLLM[vllm-mlx<br/>Local Inference]
     DECISION --> T212
 
     style UI fill:#e1f5fe
@@ -58,8 +59,8 @@ graph TB
 
 ---
 
-## 2. Agentic Swarm & Autonomous Execution (Phases 30-32)
-As of Phase 31, Growin has transitioned from Human-in-the-Loop (HITL) only to a hybrid **Autonomous Agentic** model.
+## 2. Agentic Swarm & Autonomous Execution (Phases 30-41)
+As of Phase 41, Growin has transitioned from Human-in-the-Loop (HITL) only to a hybrid **Autonomous Agentic** model with radical **Sovereign UI** aesthetics.
 
 ### Multi-Agent Orchestration (Hybrid Tiered)
 - **CoordinatorAgent**: Performs sub-100ms intent classification and delegates to specialists.
@@ -71,6 +72,10 @@ As of Phase 31, Growin has transitioned from Human-in-the-Loop (HITL) only to a 
 - **DecisionAgent (The Synthesis Brain)**:
     - Synthesizes all specialist signals into a final verdict.
     - **Autonomous Bypass**: If `CONVICTION LEVEL: 10` is detected, it autonomously executes trades on Trading 212, bypassing the UI confirmation gate.
+
+### vllm-mlx Inference
+- **Native Serving**: Uses `vllm-mlx` with PagedAttention for high-throughput local inference.
+- **Privacy**: No financial data ever leaves the M4 hardware.
 
 ### Neural JMCE (Joint Mean-Covariance Estimator)
 - **Regime-Aware Math**: Predicts returns and covariance shifts simultaneously.
