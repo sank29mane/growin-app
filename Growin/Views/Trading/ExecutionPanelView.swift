@@ -46,6 +46,8 @@ struct ExecutionPanelView: View {
                         .background(Color.white.opacity(0.1))
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Close panel")
+                .accessibilityAddTraits(.isButton)
             }
             .padding(24)
             .background(Color.black.opacity(0.2))
@@ -126,6 +128,8 @@ struct ExecutionPanelView: View {
                                     .foregroundStyle(Color.brutalChartreuse)
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel("Strategy parameters info")
+                            .accessibilityAddTraits(.isButton)
                         }
                         
                         VStack(spacing: 12) {
@@ -231,6 +235,7 @@ private struct StrategyOverlayView: View {
                     isPresented = false
                 }
                 .buttonStyle(.plain)
+                .accessibilityAddTraits(.isButton)
                 .font(SovereignTheme.Fonts.spaceGrotesk(size: 10, weight: .bold))
                 .padding(.vertical, 8)
                 .frame(maxWidth: .infinity)
