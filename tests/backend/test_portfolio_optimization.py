@@ -1,8 +1,8 @@
 import pytest
 import numpy as np
 from decimal import Decimal
-from backend.utils.portfolio_analyzer import PortfolioAnalyzer
-from backend.utils.jmce_model import NeuralJMCE
+from utils.portfolio_analyzer import PortfolioAnalyzer
+from utils.jmce_model import NeuralJMCE
 
 @pytest.mark.asyncio
 async def test_optimize_weights_caps():
