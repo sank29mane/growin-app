@@ -1,8 +1,8 @@
 import pytest
 import numpy as np
-from backend.utils.financial_math import TechnicalIndicators
-from backend.utils.ticker_utils import TickerResolver
-from backend.utils.portfolio_analyzer import PortfolioAnalyzer
+from utils.financial_math import TechnicalIndicators
+from utils.ticker_utils import TickerResolver
+from utils.portfolio_analyzer import PortfolioAnalyzer
 
 def test_ticker_resolver_python_logic():
     """Verify TickerResolver Python logic for UK tickers."""
