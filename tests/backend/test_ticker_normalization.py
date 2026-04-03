@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 # Rely on pytest.ini and conftest.py for pathing
-from backend.utils.ticker_utils import normalize_ticker
+from utils.ticker_utils import normalize_ticker
 
 class TestTickerNormalization(unittest.TestCase):
     def test_us_tickers(self):

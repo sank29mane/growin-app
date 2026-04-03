@@ -5,8 +5,8 @@ import numpy as np
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../backend')))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
-from backend.utils.mlx_loader import mx, HAS_MLX
-from backend.utils.jmce_model import NeuralJMCE, TimeResolution
+from utils.mlx_loader import mx, HAS_MLX
+from utils.jmce_model import NeuralJMCE, TimeResolution
 
 @pytest.mark.skipif(not HAS_MLX, reason="MLX is not installed or available")
 def test_neural_jmce_intraday_shapes():

@@ -1,6 +1,6 @@
 import pytest
 from decimal import Decimal
-from backend.quant_engine import QuantEngine, PortfolioMarginManager, SimulationEngine
+from quant_engine import QuantEngine, PortfolioMarginManager, SimulationEngine
 
 def test_sa_ccr_margin_calculation():
     sim = SimulationEngine()
