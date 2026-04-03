@@ -14,7 +14,9 @@ def patched_find_spec(name, package=None):
 importlib.util.find_spec = patched_find_spec
 
 # Ensure backend is in path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+backend_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "backend")
+if backend_path not in sys.path:
+    sys.path.insert(0, backend_path)
 
 # --- Global Resource Lifecycle Management ---
 @pytest.fixture(scope="session", autouse=True)

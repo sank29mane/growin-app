@@ -18,7 +18,7 @@ import json
 import difflib
 from typing import Dict, Any, List, Optional, Union, Tuple
 import os
-from backend.utils.async_utils import run_with_timeout
+from utils.async_utils import run_with_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +100,14 @@ class CoordinatorAgent(BaseAgent):
             
         # Update context with routing info
         context["intent"] = intent
+        
+        # COORDINATOR FIX: Robust normalization via Resolver
         if ticker:
+            from utils.ticker_utils import TickerResolver
+            original_ticker = ticker
+            ticker = TickerResolver().normalize(ticker)
+            if ticker != original_ticker:
+                logger.info(f"Ticker normalized (Resolver): {original_ticker} -> {ticker}")
             context["ticker"] = ticker
 
         # Initialize MarketContext
@@ -301,10 +308,12 @@ class CoordinatorAgent(BaseAgent):
                 except Exception as e:
                     logger.warning(f"MCP search failed, falling back to local resolver: {e}")
                     resolver = TickerResolver()
-                    search_result = await resolver.search(term)
+                    resolved = await resolver.resolve(term)
+                    search_result = [{"ticker": resolved, "name": term}] if resolved else []
             else:
                 resolver = TickerResolver()
-                search_result = await resolver.search(term)
+                resolved = await resolver.resolve(term)
+                search_result = [{"ticker": resolved, "name": term}] if resolved else []
 
             # Check if search_result is wrapped in TextContent or JSON string
             if hasattr(search_result, 'content'):
