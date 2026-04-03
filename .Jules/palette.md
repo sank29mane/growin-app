@@ -33,6 +33,6 @@
 **Learning:** For dynamic context buttons like `Approve` or `Reject` inside `TradeProposalCard`, static accessibility labels fail to provide context for VoiceOver users. Additionally, custom shared components like `PremiumButton` that use `.buttonStyle(.plain)` must have `.accessibilityAddTraits(.isButton)` and `.accessibilityLabel` explicitly applied.
 **Action:** Use dynamic accessibility labels (e.g., `Approve \(proposal.action) for \(proposal.ticker)`) for action cards, and ensure shared custom buttons re-add the button traits when using `.plain` style.
 
-## 2025-03-30 - Added ARIA label to "Retry" button in ChatView
+## 2026-03-30 - Added ARIA label to "Retry" button in ChatView
 **Learning:** Found an existing custom SwiftUI component ("Retry" button for failed messages) that lacked VoiceOver hints or plain button styling which standardizes presentation across the repo.
 **Action:** When finding missing `.accessibilityLabel` tags on custom components with `.background(Color)` or `.cornerRadius`, consistently apply `.buttonStyle(.plain)` and `.accessibilityAddTraits(.isButton)` to integrate properly with standard VoiceOver and design parameters.
