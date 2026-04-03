@@ -1,6 +1,6 @@
 import sys
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from server import app
@@ -21,11 +21,11 @@ def test_chat_error_handling_sanitization():
     # Disable lifespan to avoid slow startup
     with TestClient(app) as client:
         # Import submodule explicitly before patching to avoid AttributeError in some environments
-        import agents.coordinator_agent
-        with patch("backend.agents.coordinator_agent.CoordinatorAgent") as mock_coordinator:
+        import agents.orchestrator_agent
+        with patch("agents.orchestrator_agent.OrchestratorAgent") as mock_orchestrator:
             mock_instance = MagicMock()
-            mock_instance.process_query.side_effect = Exception("SENSITIVE_DB_INFO_LEAKED_CHAT")
-            mock_coordinator.return_value = mock_instance
+            mock_instance.run = AsyncMock(side_effect=Exception("SENSITIVE_DB_INFO_LEAKED_CHAT"))
+            mock_orchestrator.return_value = mock_instance
 
             response = client.post("/api/chat/message", json={"message": "Hello", "conversation_id": "test_conv"})
 
@@ -45,11 +45,11 @@ def test_analyze_error_handling_sanitization():
         state.mcp_client.primary_session_name = "mock"
         state.mcp_client.sessions = {"mock": MagicMock()}
 
-        import agents.coordinator_agent
-        with patch("backend.agents.coordinator_agent.CoordinatorAgent") as mock_coordinator:
+        import agents.orchestrator_agent
+        with patch("agents.orchestrator_agent.OrchestratorAgent") as mock_orchestrator:
             mock_instance = MagicMock()
-            mock_instance.process_query.side_effect = Exception("SENSITIVE_INFO_LEAKED_ANALYZE")
-            mock_coordinator.return_value = mock_instance
+            mock_instance.run = AsyncMock(side_effect=Exception("SENSITIVE_INFO_LEAKED_ANALYZE"))
+            mock_orchestrator.return_value = mock_instance
 
             response = client.post("/agent/analyze", json={"query": "Analyze AAPL"})
 
@@ -69,7 +69,7 @@ def test_market_goal_error_handling_sanitization():
         state.mcp_client.sessions = {"mock": MagicMock()}
 
         import agents.goal_planner_agent
-        with patch("backend.agents.goal_planner_agent.GoalPlannerAgent") as mock_planner:
+        with patch("agents.goal_planner_agent.GoalPlannerAgent") as mock_planner:
             mock_instance = MagicMock()
             mock_instance.analyze.side_effect = Exception("SENSITIVE_INFO_LEAKED_GOAL")
             mock_planner.return_value = mock_instance
