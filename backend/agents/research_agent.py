@@ -25,6 +25,9 @@ from pydantic import BaseModel, Field
 from magentic import prompt as mag_prompt
 from resilience import get_circuit_breaker, CircuitBreakerOpenError
 
+# Pre-compiled regex for fast title normalization
+TITLE_CLEAN_PATTERN = re.compile(r'[^a-zA-Z0-9]')
+
 logger = logging.getLogger(__name__)
 
 newsdata_cb = get_circuit_breaker("newsdata", failure_threshold=3, recovery_timeout=30.0)
@@ -526,7 +529,7 @@ class ResearchAgent(BaseAgent):
             title = art.get('title', '').lower().strip()
             url = art.get('url', '')
             # Simple normalization: remove non-alphanumeric for title check
-            clean_title = re.sub(r'[^a-zA-Z0-9]', '', title)
+            clean_title = TITLE_CLEAN_PATTERN.sub('', title)
             
             if clean_title and clean_title not in seen_titles and (not url or url not in seen_urls):
                 seen_titles.add(clean_title)
