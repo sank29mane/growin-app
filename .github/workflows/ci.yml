@@ -14,7 +14,8 @@ jobs:
     
     env:
       CI: "true"
-      PYTHONPATH: ".:backend"
+      PYTHONPATH: "backend"
+      GROWIN_ANALYTICS_ENABLED: "false"
 
     steps:
       - uses: actions/checkout@v4

@@ -146,6 +146,7 @@ struct ContentView: View {
         .buttonStyle(.plain)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("System Settings, backend \(backendStatus.isOnline ? "online" : "offline")")
+        .accessibilityAddTraits(.isButton)
         .help("System Settings & Console")
     }
 }

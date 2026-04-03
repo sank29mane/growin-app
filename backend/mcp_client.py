@@ -125,9 +125,10 @@ class MultiMCPManager:
     async def list_tools(self) -> List[Any]:
         """Aggregate tools from all active sessions"""
         all_tools = []
+        from utils.async_utils import run_with_timeout
         for name, session in self.sessions.items():
             try:
-                tools_result = await asyncio.wait_for(
+                tools_result = await run_with_timeout(
                     session.list_tools(),
                     timeout=10.0
                 )
@@ -160,6 +161,7 @@ class MultiMCPManager:
         """
         errors = []
         
+        from utils.async_utils import run_with_timeout
         for server_name, session in self.sessions.items():
             cb = get_circuit_breaker(f"mcp_{server_name}", failure_threshold=3, recovery_timeout=30.0)
             
@@ -169,7 +171,7 @@ class MultiMCPManager:
                 continue
             
             try:
-                result = await asyncio.wait_for(
+                result = await run_with_timeout(
                     session.call_tool(name, arguments),
                     timeout=timeout
                 )

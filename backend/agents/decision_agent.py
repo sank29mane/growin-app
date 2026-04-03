@@ -11,7 +11,7 @@ import re
 import json
 import time
 import asyncio
-from backend.utils.async_utils import run_with_timeout
+from utils.async_utils import run_with_timeout
 import uuid
 from datetime import datetime
 from decimal import Decimal

@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, AsyncMock, patch
 # Ensure backend path is in sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from backend.utils.ticker_utils import TickerResolver
+from utils.ticker_utils import TickerResolver
 
 class TestTickerResolverSearch(unittest.IsolatedAsyncioTestCase):
 

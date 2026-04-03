@@ -18,7 +18,7 @@ import json
 import difflib
 from typing import Dict, Any, List, Optional, Union, Tuple
 import os
-from backend.utils.async_utils import run_with_timeout
+from utils.async_utils import run_with_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -51,11 +51,19 @@ class CoordinatorAgent(BaseAgent):
     Routes queries to specialist agents and aggregates their data.
     """
     
-    def __init__(self, config=None, llm=None, mcp_client=None):
+    def __init__(self, config=None, llm=None, mcp_client=None, **kwargs):
+        # Support cases where mcp_client is passed as the first positional arg instead of config
+        if config is not None and not hasattr(config, 'name') and hasattr(config, 'sessions'):
+            mcp_client = config
+            config = None
+
         from .base_agent import AgentConfig
         config = config or AgentConfig(
             name="CoordinatorAgent",
-            description="Swarm Orchestrator"
+            description="Swarm Orchestrator",
+            enabled=True,
+            timeout=10.0,
+            cache_ttl=300
         )
         super().__init__(config)
         self.llm = llm
@@ -92,7 +100,14 @@ class CoordinatorAgent(BaseAgent):
             
         # Update context with routing info
         context["intent"] = intent
+        
+        # COORDINATOR FIX: Robust normalization via Resolver
         if ticker:
+            from utils.ticker_utils import TickerResolver
+            original_ticker = ticker
+            ticker = TickerResolver().normalize(ticker)
+            if ticker != original_ticker:
+                logger.info(f"Ticker normalized (Resolver): {original_ticker} -> {ticker}")
             context["ticker"] = ticker
 
         # Initialize MarketContext
@@ -186,11 +201,10 @@ class CoordinatorAgent(BaseAgent):
             correlation_id=c_id
         )
         await messenger.send_message(start_msg)
-        
+
         try:
             # 15s timeout per specialist to prevent hanging
             result = await run_with_timeout(agent.execute(context), 15.0)
-
             # COORDINATOR SELF-CORRECTION: Try to fix if it's a known data issue
             if not result.success and result.error:
                 error_msg = (result.error or "").lower()
@@ -248,7 +262,6 @@ class CoordinatorAgent(BaseAgent):
                 correlation_id=c_id
             )
             await messenger.send_message(complete_msg)
-
             return result
         except asyncio.TimeoutError:
             error_msg = "Timout after 15s"
@@ -275,6 +288,7 @@ class CoordinatorAgent(BaseAgent):
         to verify the best match for ambiguous symbols or names.
         """
         try:
+            logger.info(f"Coordinator Tier 2: Searching for correct ticker matching '{term}'")
             # SOTA 2026: Try MCP search if available, fallback to Resolver
             search_result = []
             if self.mcp_client:
@@ -294,10 +308,12 @@ class CoordinatorAgent(BaseAgent):
                 except Exception as e:
                     logger.warning(f"MCP search failed, falling back to local resolver: {e}")
                     resolver = TickerResolver()
-                    search_result = await resolver.search(term)
+                    resolved = await resolver.resolve(term)
+                    search_result = [{"ticker": resolved, "name": term}] if resolved else []
             else:
                 resolver = TickerResolver()
-                search_result = await resolver.search(term)
+                resolved = await resolver.resolve(term)
+                search_result = [{"ticker": resolved, "name": term}] if resolved else []
 
             # Check if search_result is wrapped in TextContent or JSON string
             if hasattr(search_result, 'content'):
@@ -389,27 +405,49 @@ class CoordinatorAgent(BaseAgent):
             match = re.search(r'\{.*\}', content, re.DOTALL)
             if match:
                 try:
-                    exec_result = await run_with_timeout(
-                        self.mcp_client.call_tool("docker_run_python", {"script": python_code}),
-                        30.0
-                    )
+                    fix_data = json.loads(match.group(), strict=False)
+                    python_code = fix_data.get("code", "")
+                except json.JSONDecodeError as je:
+                    logger.warning(f"Coordinator: JSON decode failed for fix: {je}")
+                    return None
 
-                    if exec_result and hasattr(exec_result, 'content'):
-                        output_text = exec_result.content[0].text
-                        import ast
-                        exec_res_dict = ast.literal_eval(output_text)
+                if python_code:
+                    logger.info(f"Coordinator: Delegating fix to Docker Sandbox...")
+                    # SOTA 2026: Use Docker MCP for isolation
+                    try:
+                        # Call docker_run_python tool
+                        # We assume the tool is registered in the MCP client available to the coordinator
+                        result = await run_with_timeout(
+                            self.mcp_client.call_tool("docker_run_python", {"script": python_code}),
+                            30.0
+                        )
                         
-                        if exec_res_dict.get("exit_code") == 0:
-                            stdout = exec_res_dict.get("stdout", "")
-                            new_context = json.loads(stdout)
-                            logger.info(f"Coordinator retry for {agent.config.name} with fixed context: {new_context}")
-                            return await agent.execute(new_context)
-                        else:
-                            logger.warning(f"Docker execution failed: {exec_res_dict}")
-                except asyncio.TimeoutError:
-                    logger.error(f"Docker execution fix timed out")
-                except Exception as e:
-                    logger.error(f"Failed to execute Docker fix: {e}")
+                        # Parse the output from the tool
+                        if result and hasattr(result, 'content') and result.content:
+                            output_text = result.content[0].text
+                            # The tool returns a string rep of a dict: {'stdout': '...', ...}
+                            # We need to parse that string safely
+                            import ast
+                            exec_res = ast.literal_eval(output_text)
+
+                            if isinstance(exec_res, dict) and exec_res.get("exit_code") == 0:
+                                stdout = exec_res.get("stdout", "")
+                                new_context = json.loads(stdout)
+                                logger.info(f"Coordinator retry for {agent.config.name} with fixed context: {new_context}")
+                                return await agent.execute(new_context)
+                            elif isinstance(exec_res, dict):
+                                # If it's a dict but we don't have exit code 0 or maybe it's just the context dict directly (like in the original code before merge)
+                                # Let's support both formats
+                                for k, v in exec_res.items():
+                                    context[k] = v
+                                logger.info(f"Coordinator: Auto-fix successful. Updated keys: {list(exec_res.keys())}")
+                                return await agent.execute(context)
+                            else:
+                                logger.warning(f"Docker execution failed: {exec_res}")
+                    except asyncio.TimeoutError:
+                        logger.error(f"Docker execution fix timed out")
+                    except Exception as e:
+                        logger.error(f"Failed to execute Docker fix: {e}")
                         
         except Exception as e:
             logger.warning(f"Self-correction failed: {e}")
@@ -442,3 +480,13 @@ class CoordinatorAgent(BaseAgent):
             # Note: GoalData must be imported if not already in context, but dynamic import ok
             from market_context import GoalData
             context.goal = GoalData(**data)
+
+    async def analyze(self, context: Dict[str, Any]) -> AgentResponse:
+        # Coordinator Agent acts as a router, `execute` is the main entry point.
+        # This satisfies the BaseAgent abstract method requirement.
+        return AgentResponse(
+            agent_name=self.config.name,
+            success=True,
+            data={},
+            latency_ms=0
+        )

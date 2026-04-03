@@ -4,8 +4,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../.
 
 import pytest
 from decimal import Decimal
-from backend.quant_engine import QuantEngine
-from backend.utils.financial_math import create_decimal
+from quant_engine import QuantEngine
+from utils.financial_math import create_decimal
 
 def test_portfolio_metrics_precision():
     engine = QuantEngine()

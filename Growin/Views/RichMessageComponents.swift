@@ -197,6 +197,8 @@ struct ReasoningStepRow: View, Equatable {
             
             Spacer()
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(agent) agent: \(status). \(detail)")
     }
 }
 
@@ -671,6 +673,8 @@ struct MetricItem: View {
                 .font(.subheadline.bold())
                 .foregroundStyle(.white)
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(label): \(value)")
     }
 }
 

@@ -256,8 +256,9 @@ def get_circuit_breaker(name: str, **kwargs) -> CircuitBreaker:
 # Utility function for timeout
 async def with_timeout(coro, timeout: float, default: Any = None):
     """Execute coroutine with timeout, returning default on timeout."""
+    from utils.async_utils import run_with_timeout
     try:
-        return await asyncio.wait_for(coro, timeout=timeout)
+        return await run_with_timeout(coro, timeout=timeout)
     except asyncio.TimeoutError:
         logger.warning(f"Operation timed out after {timeout}s")
         return default

@@ -166,12 +166,15 @@ struct ChatView: View {
                         viewModel.errorMessage = nil
                         viewModel.sendMessage()
                     }
+                    .buttonStyle(.plain)
                     .font(.caption.bold())
                     .foregroundStyle(.white)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
                     .background(Color.red)
                     .cornerRadius(8)
+                    .accessibilityLabel("Retry sending message")
+                    .accessibilityAddTraits(.isButton)
                 }
                 .font(.caption)
                 .foregroundStyle(.white)
