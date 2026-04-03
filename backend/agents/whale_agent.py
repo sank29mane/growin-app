@@ -4,7 +4,8 @@ Whale Alert Agent - Monitors large block trades and institutional flow
 
 import logging
 import asyncio
-from typing import Dict, Any, List
+import httpx
+from typing import Dict, Any, List, Optional
 from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from market_context import WhaleData
 from data_engine import get_alpaca_client
@@ -28,6 +29,14 @@ class WhaleAgent(BaseAgent):
         super().__init__(config)
         self.alpaca = get_alpaca_client()
         self.whale_threshold_usd = 50000.0 # Lowered from $250k for paper/IEX data density
+        self._client: Optional[httpx.AsyncClient] = None
+
+    @property
+    def client(self) -> httpx.AsyncClient:
+        """Lazy-initialized persistent HTTP client."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=10.0)
+        return self._client
         
     async def analyze(self, context: Dict[str, Any]) -> AgentResponse:
         """
@@ -41,7 +50,8 @@ class WhaleAgent(BaseAgent):
             logger.info(f"WhaleAgent: Performing Bellwether Aggregation for broad market...")
             
             # Use parallel execution for speed
-            tasks = [self.analyze({"ticker": b}) for b in bellwethers]
+            # Optimization: Skip institutional holdings for bellwethers as it's not used in aggregation
+            tasks = [self.analyze({"ticker": b, "skip_holdings": True}) for b in bellwethers]
             results = await asyncio.gather(*tasks)
             
             valid_results = [r for r in results if r.success and r.data.get("sentiment_impact")]
@@ -76,7 +86,10 @@ class WhaleAgent(BaseAgent):
 
         try:
             # SOTA 2026: Institutional Alpha (13F Filings)
-            institutional_holdings = await self._fetch_institutional_holdings(ticker)
+            skip_holdings = context.get("skip_holdings", False)
+            institutional_holdings = []
+            if not skip_holdings:
+                institutional_holdings = await self._fetch_institutional_holdings(ticker)
             
             from utils.financial_math import create_decimal, safe_div
             # 2. Fetch recent trades (last 500)
@@ -198,7 +211,6 @@ class WhaleAgent(BaseAgent):
         try:
             # We use Tavily here as a robust way to find recent 13F filings summarized on sites like Fintel or WhaleWisdom
             # This is more resilient than direct EDGAR scraping for a prototype
-            import httpx
             import os
             
             tavily_key = os.getenv("TAVILY_API_KEY")
@@ -216,10 +228,9 @@ class WhaleAgent(BaseAgent):
                 "max_results": 5
             }
             
-            async with httpx.AsyncClient() as client:
-                res = await client.post(url, headers=headers, json=payload)
-                res.raise_for_status()
-                response = res.json()
+            res = await self.client.post(url, headers=headers, json=payload)
+            res.raise_for_status()
+            response = res.json()
             results = response.get('results', [])
             logger.info(f"WhaleAgent: Search returned {len(results)} results")
             
