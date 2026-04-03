@@ -301,10 +301,12 @@ class CoordinatorAgent(BaseAgent):
                 except Exception as e:
                     logger.warning(f"MCP search failed, falling back to local resolver: {e}")
                     resolver = TickerResolver()
-                    search_result = await resolver.search(term)
+                    resolved = await resolver.resolve(term)
+                    search_result = [{"ticker": resolved, "name": term}] if resolved else []
             else:
                 resolver = TickerResolver()
-                search_result = await resolver.search(term)
+                resolved = await resolver.resolve(term)
+                search_result = [{"ticker": resolved, "name": term}] if resolved else []
 
             # Check if search_result is wrapped in TextContent or JSON string
             if hasattr(search_result, 'content'):
