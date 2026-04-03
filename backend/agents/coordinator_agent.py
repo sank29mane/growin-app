@@ -198,7 +198,6 @@ class CoordinatorAgent(BaseAgent):
         try:
             # 15s timeout per specialist to prevent hanging
             result = await run_with_timeout(agent.execute(context), 15.0)
-
             # COORDINATOR SELF-CORRECTION: Try to fix if it's a known data issue
             if not result.success and result.error:
                 error_msg = (result.error or "").lower()
