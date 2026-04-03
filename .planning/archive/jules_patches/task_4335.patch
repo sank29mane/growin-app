@@ -1,0 +1,52 @@
+diff --git a/backend/agents/forecasting_agent.py b/backend/agents/forecasting_agent.py
+index 7e5c085..7620a04 100644
+--- a/backend/agents/forecasting_agent.py
++++ b/backend/agents/forecasting_agent.py
+@@ -141,8 +141,6 @@ class ForecastingAgent(BaseAgent):
+ 
+             result = await self.circuit_breaker.call(execute_forecast)
+ 
+-            self.circuit_breaker.record_success()
+-
+             # Extract predictions
+             forecast_bars = result.get("forecast", [])
+ 
+@@ -206,7 +204,6 @@ class ForecastingAgent(BaseAgent):
+                 latency_ms=0
+             )
+         except Exception as e:
+-            self.circuit_breaker.record_failure()
+             logger.error(f"Forecast failed: {e}")
+             return AgentResponse(
+                 agent_name=self.config.name,
+diff --git a/backend/quant_engine.py b/backend/quant_engine.py
+index cc11be8..e60fab3 100644
+--- a/backend/quant_engine.py
++++ b/backend/quant_engine.py
+@@ -557,9 +557,13 @@ class QuantEngine:
+ 
+         for symbol, pct_val in current_allocation.items():
+             try:
+-                val_str = str(pct_val).strip().replace('%', '')
+-                val_dec = create_decimal(val_str)
+-                if val_dec > 1: val_dec = val_dec / 100
++                val_str = str(pct_val).strip()
++                is_pct = val_str.endswith('%')
++                val_dec = create_decimal(val_str.replace('%', ''))
++                if is_pct:
++                    val_dec = val_dec / 100
++                elif val_dec > 1:
++                    val_dec = val_dec / 100
+                 current_parsed[symbol] = val_dec
+             except Exception:
+                 current_parsed[symbol] = Decimal(0)
+diff --git a/future/suggestions.MD b/future/suggestions.MD
+index 3359d48..5491929 100644
+--- a/future/suggestions.MD
++++ b/future/suggestions.MD
+@@ -11,3 +11,4 @@ This document tracks visionary or architectural suggestions identified during co
+ | 003 | Native Asyncio HTTP Clients | Replace threadpool external API calls with native Asyncio HTTP clients. |Bottleneck risk under high concurrency in `research_agent.py`, `social_agent.py`, and `forecaster.py`. Replace `asyncio.to_thread` with `httpx.AsyncClient`. | Proposed |
+ | 004 | Strategy Suggestion Engine | Enhance the Coordinator Agent to provide proactive "Strategic Suggestions" (e.g., diversification tips, tax-loss harvesting alerts) during routine portfolio analysis. | Current analysis is reactive. Proactive suggestions increase the "Alpha" value of the agentic swarm. | Proposed |
+ | 005 | Quant Engine Standardization | `analyze_rebalancing_opportunity` assumes target allocations are given as valid fractions (e.g. 0.5) when users often provide percentages. | Standardize fractional representations inside `analyze_rebalancing_opportunity` to properly divide allocations > 1.0. | Proposed |
++| 006 | Centralize JSON Serialization | Project uses raw `json.dumps()` across multiple background DuckDB threads and API responses, risking `TypeError` on un-serializable objects (like Exceptions or custom Decimals). This can lead to fatal Python aborts inside extension modules. | Create a wrapper (e.g. `safe_json_dumps`) that automatically injects `default=str` and standardizes formatting to prevent crashes in CI and telemetry persistence. | Proposed |
+

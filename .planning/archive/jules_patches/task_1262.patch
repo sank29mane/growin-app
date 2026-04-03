@@ -1,0 +1,169 @@
+diff --git a/backend/agents/coordinator_agent.py b/backend/agents/coordinator_agent.py
+index 8823df7..17a2026 100644
+--- a/backend/agents/coordinator_agent.py
++++ b/backend/agents/coordinator_agent.py
+@@ -189,12 +189,7 @@ class CoordinatorAgent(BaseAgent):
+         
+         try:
+             # 15s timeout per specialist to prevent hanging
+-<<<<<<< HEAD
+             result = await run_with_timeout(agent.execute(context), 15.0)
+-=======
+-            async with asyncio.timeout(15.0):
+-                result = await agent.execute(context)
+->>>>>>> main
+                 
+                 # COORDINATOR SELF-CORRECTION: Try to fix if it's a known data issue
+                 if not result.success and result.error:
+diff --git a/fix_coordinator_syntax.py b/fix_coordinator_syntax.py
+new file mode 100644
+index 0000000..ae5ea20
+--- /dev/null
++++ b/fix_coordinator_syntax.py
+@@ -0,0 +1,35 @@
++import re
++
++with open('backend/agents/coordinator_agent.py', 'r') as f:
++    lines = f.readlines()
++
++new_lines = []
++for line in lines:
++    if "result and result.content:" in line:
++        continue
++    if "output_text = result.content[0].text" in line:
++        continue
++    if "# The tool returns a string rep of a dict: {'stdout': '...', ...}" in line:
++        continue
++    if "# We need to parse that string safely" in line:
++        continue
++    if "exec_res = ast.literal_eval(output_text)" in line:
++        continue
++    if "if exec_res.get(\"exit_code\") == 0:" in line:
++        continue
++    if "stdout = exec_res.get(\"stdout\", \"\")" in line:
++        continue
++    if "new_context = json.loads(stdout)" in line:
++        continue
++    if "logger.info(f\"Coordinator retry for {agent.config.name} with fixed context: {new_context}\")" in line:
++        continue
++    if "return await agent.execute(new_context)" in line:
++        continue
++    if "else:" in line and "logger.warning(f\"Docker execution failed: {exec_res}\")" in lines[lines.index(line)+1] if lines.index(line)+1 < len(lines) else False:
++        continue
++    if "logger.warning(f\"Docker execution failed: {exec_res}\")" in line:
++        continue
++    new_lines.append(line)
++
++with open('backend/agents/coordinator_agent.py', 'w') as f:
++    f.writelines(new_lines)
+diff --git a/patch_coordinator_clean.py b/patch_coordinator_clean.py
+new file mode 100644
+index 0000000..53b46ef
+--- /dev/null
++++ b/patch_coordinator_clean.py
+@@ -0,0 +1,76 @@
++import re
++
++with open('backend/agents/coordinator_agent.py', 'r') as f:
++    content = f.read()
++
++# Fix conflict 1
++content = re.sub(
++    r'<<<<<<< HEAD\n            result = await run_with_timeout\(agent\.execute\(context\), 15\.0\)\n=======\n            async with asyncio\.timeout\(15\.0\):\n                result = await agent\.execute\(context\)\n>>>>>>> main',
++    r'            result = await run_with_timeout(agent.execute(context), 15.0)',
++    content
++)
++
++# Fix conflict 2
++content = re.sub(
++    r'<<<<<<< HEAD\n            # SOTA 2026: Try MCP search if available, fallback to Resolver\n            search_result = \[\]\n            if self\.mcp_client:\n                try:\n                    search_result = await run_with_timeout\(\n                        self\.mcp_client\.call_tool\("search_instruments", \{"query": term\}\),\n                        10\.0\n                    \)\n                    \n                    if hasattr\(search_result, \'content\'\):\n                        content = search_result\.content\n                        if isinstance\(content, list\) and len\(content\) > 0:\n                            text = content\[0\]\.text if hasattr\(content\[0\], \'text\'\) else str\(content\[0\]\)\n                            search_result = json\.loads\(text\)\n                    elif isinstance\(search_result, str\):\n                        search_result = json\.loads\(search_result\)\n                except Exception as e:\n                    logger\.warning\(f"MCP search failed, falling back to local resolver: \{e\}"\)\n                    resolver = TickerResolver\(\)\n                    search_result = await resolver\.search\(term\)\n=======\n            logger\.info\(f"Coordinator Tier 2: Searching for correct ticker matching \'\{term\}\'"\)\n\n            # Call search_instruments tool\n            if hasattr\(asyncio, \'timeout\'\):\n                async with asyncio\.timeout\(10\.0\):\n                    search_result = await self\.mcp_client\.call_tool\("search_instruments", \{"query": term\}\)\n            else:\n                search_result = await asyncio\.wait_for\(\n                    self\.mcp_client\.call_tool\("search_instruments", \{"query": term\}\),\n                    timeout=10\.0\n                \)\n>>>>>>> main',
++    r'''            # SOTA 2026: Try MCP search if available, fallback to Resolver
++            search_result = []
++            if self.mcp_client:
++                try:
++                    search_result = await run_with_timeout(
++                        self.mcp_client.call_tool("search_instruments", {"query": term}),
++                        10.0
++                    )
++                    
++                    if hasattr(search_result, 'content'):
++                        content = search_result.content
++                        if isinstance(content, list) and len(content) > 0:
++                            text = content[0].text if hasattr(content[0], 'text') else str(content[0])
++                            search_result = json.loads(text)
++                    elif isinstance(search_result, str):
++                        search_result = json.loads(search_result)
++                except Exception as e:
++                    logger.warning(f"MCP search failed, falling back to local resolver: {e}")
++                    resolver = TickerResolver()
++                    search_result = await resolver.search(term)''',
++    content
++)
++
++# Fix conflict 3
++content = re.sub(
++    r'<<<<<<< HEAD\n                    exec_result = await run_with_timeout\(\n                        self\.mcp_client\.call_tool\("docker_run_python", \{"script": python_code\}\),\n                        30\.0\n                    \)\n\n                    if exec_result and hasattr\(exec_result, \'content\'\):\n                        output_text = exec_result\.content\[0\]\.text\n                        import ast\n                        exec_res_dict = ast\.literal_eval\(output_text\)\n=======\n                    fix_data = json\.loads\(match\.group\(\), strict=False\)\n                    python_code = fix_data\.get\("code", ""\)\n                except json\.JSONDecodeError as je:\n                    logger\.warning\(f"Coordinator: JSON decode failed for fix: \{je\}"\)\n                    return None\n\n                if python_code:\n                    logger\.info\(f"Coordinator: Delegating fix to Docker Sandbox..."\)\n                    # SOTA 2026: Use Docker MCP for isolation\n                    try:\n                        # Call docker_run_python tool\n                        # We assume the tool is registered in the MCP client available to the coordinator\n                        if hasattr\(asyncio, \'timeout\'\):\n                            async with asyncio\.timeout\(30\.0\):\n                                result = await self\.mcp_client\.call_tool\("docker_run_python", \{"script": python_code\}\)\n                        else:\n                            result = await asyncio\.wait_for\(\n                                self\.mcp_client\.call_tool\("docker_run_python", \{"script": python_code\}\),\n                                timeout=30\.0\n                            \)\n                        \n                        # Parse the output from the tool\n                        if result and result\.content:\n                            output_text = result\.content\[0\]\.text\n                            # The tool returns a string rep of a dict: \{\'stdout\': \'...\', ...\}\n                            # We need to parse that string safely\n                            import ast\n                            exec_res = ast\.literal_eval\(output_text\)\n\n                            if exec_res\.get\("exit_code"\) == 0:\n                                stdout = exec_res\.get\("stdout", ""\)\n                                new_context = json\.loads\(stdout\)\n                                logger\.info\(f"Coordinator retry for \{agent\.config\.name\} with fixed context: \{new_context\}"\)\n                                return await agent\.execute\(new_context\)\n                            else:\n                                logger\.warning\(f"Docker execution failed: \{exec_res\}"\)\n                    except asyncio\.TimeoutError:\n                        logger\.error\(f"Docker execution fix timed out"\)\n                    except Exception as e:\n                        logger\.error\(f"Failed to execute Docker fix: \{e\}"\)\n                        \n>>>>>>> main',
++    r'''                    fix_data = json.loads(match.group(), strict=False)
++                    python_code = fix_data.get("code", "")
++                except json.JSONDecodeError as je:
++                    logger.warning(f"Coordinator: JSON decode failed for fix: {je}")
++                    return None
++
++                if python_code:
++                    logger.info(f"Coordinator: Delegating fix to Docker Sandbox...")
++                    # SOTA 2026: Use Docker MCP for isolation
++                    try:
++                        exec_result = await run_with_timeout(
++                            self.mcp_client.call_tool("docker_run_python", {"script": python_code}),
++                            30.0
++                        )
++
++                        if exec_result and hasattr(exec_result, 'content'):
++                            output_text = exec_result.content[0].text
++                            import ast
++                            exec_res_dict = ast.literal_eval(output_text)
++                            if exec_res_dict.get("exit_code") == 0:
++                                stdout = exec_res_dict.get("stdout", "")
++                                new_context = json.loads(stdout)
++                                logger.info(f"Coordinator retry for {agent.config.name} with fixed context: {new_context}")
++                                return await agent.execute(new_context)
++                            else:
++                                logger.warning(f"Docker execution failed: {exec_res_dict}")
++                    except asyncio.TimeoutError:
++                        logger.error(f"Docker execution fix timed out")
++                    except Exception as e:
++                        logger.error(f"Failed to execute Docker fix: {e}")''',
++    content
++)
++
++with open('backend/agents/coordinator_agent.py', 'w') as f:
++    f.write(content)
+diff --git a/tests/backend/test_jmce_forward.py b/tests/backend/test_jmce_forward.py
+index f34d18f..d7e53aa 100644
+--- a/tests/backend/test_jmce_forward.py
++++ b/tests/backend/test_jmce_forward.py
+@@ -1,3 +1,9 @@
++import pytest
++try:
++    import mlx.core as mx
++except ImportError:
++    pytest.skip("MLX not available", allow_module_level=True)
++
+ import mlx.core as mx
+ import numpy as np
+ from backend.utils.jmce_model import NeuralJMCE
+diff --git a/tests/backend/test_neural_jmce_intraday.py b/tests/backend/test_neural_jmce_intraday.py
+index 24aba63..f025085 100644
+--- a/tests/backend/test_neural_jmce_intraday.py
++++ b/tests/backend/test_neural_jmce_intraday.py
+@@ -1,3 +1,9 @@
++import pytest
++try:
++    import mlx.core as mx
++except ImportError:
++    pytest.skip("MLX not available", allow_module_level=True)
++
+ import sys
+ import os
+ import pytest
+
