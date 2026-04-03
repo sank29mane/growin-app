@@ -4,8 +4,11 @@ from decimal import Decimal
 from typing import Optional
 from .base_micro import BaseMicroAgent, MicroAgentResponse
 from utils.financial_math import create_decimal
+from resilience import get_circuit_breaker, CircuitBreakerOpenError
 
 logger = logging.getLogger(__name__)
+
+tavily_cb = get_circuit_breaker("tavily_reddit", failure_threshold=3, recovery_timeout=30.0)
 
 class RedditMicroAgent(BaseMicroAgent):
     """
@@ -48,21 +51,25 @@ class RedditMicroAgent(BaseMicroAgent):
                 "max_results": 5
             }
 
-            async with httpx.AsyncClient() as client:
-                res = await client.post(url, headers=headers, json=payload)
-                res.raise_for_status()
-                response = res.json()
-            
-            results = response.get('results', [])
-            
-            if not results and ticker != "MARKET" and company_name and company_name != ticker:
-                query = f"{company_name} stock sentiment discussion reddit"
-                payload["query"] = query
+            async def _fetch_reddit_tavily():
                 async with httpx.AsyncClient() as client:
                     res = await client.post(url, headers=headers, json=payload)
                     res.raise_for_status()
                     response = res.json()
+
                 results = response.get('results', [])
+
+                if not results and ticker != "MARKET" and company_name and company_name != ticker:
+                    query = f"{company_name} stock sentiment discussion reddit"
+                    payload["query"] = query
+                    async with httpx.AsyncClient() as client:
+                        res = await client.post(url, headers=headers, json=payload)
+                        res.raise_for_status()
+                        response = res.json()
+                    results = response.get('results', [])
+                return results
+
+            results = await tavily_cb.call(_fetch_reddit_tavily)
 
             if not results:
                 return MicroAgentResponse(
@@ -102,6 +109,15 @@ class RedditMicroAgent(BaseMicroAgent):
                 success=True
             )
 
+        except CircuitBreakerOpenError:
+            self.logger.warning("Reddit analysis skipped: circuit breaker is OPEN")
+            return MicroAgentResponse(
+                source="Reddit",
+                sentiment_score=create_decimal("0.0"),
+                mention_volume=0,
+                top_discussions=["Service temporarily unavailable."],
+                success=True
+            )
         except Exception as e:
             self.logger.error(f"Reddit analysis failed: {e}")
             return MicroAgentResponse(

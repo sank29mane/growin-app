@@ -4,8 +4,11 @@ from decimal import Decimal
 from typing import Optional
 from .base_micro import BaseMicroAgent, MicroAgentResponse
 from utils.financial_math import create_decimal
+from resilience import get_circuit_breaker, CircuitBreakerOpenError
 
 logger = logging.getLogger(__name__)
+
+tavily_cb = get_circuit_breaker("tavily_twitter", failure_threshold=3, recovery_timeout=30.0)
 
 class TwitterMicroAgent(BaseMicroAgent):
     """
@@ -48,21 +51,25 @@ class TwitterMicroAgent(BaseMicroAgent):
                 "max_results": 5
             }
 
-            async with httpx.AsyncClient() as client:
-                res = await client.post(url, headers=headers, json=payload)
-                res.raise_for_status()
-                response = res.json()
-            
-            results = response.get('results', [])
-            
-            if not results and ticker != "MARKET" and company_name and company_name != ticker:
-                query = f"{company_name} stock sentiment discussion twitter"
-                payload["query"] = query
+            async def _fetch_twitter_tavily():
                 async with httpx.AsyncClient() as client:
                     res = await client.post(url, headers=headers, json=payload)
                     res.raise_for_status()
                     response = res.json()
+
                 results = response.get('results', [])
+
+                if not results and ticker != "MARKET" and company_name and company_name != ticker:
+                    query = f"{company_name} stock sentiment discussion twitter"
+                    payload["query"] = query
+                    async with httpx.AsyncClient() as client:
+                        res = await client.post(url, headers=headers, json=payload)
+                        res.raise_for_status()
+                        response = res.json()
+                    results = response.get('results', [])
+                return results
+
+            results = await tavily_cb.call(_fetch_twitter_tavily)
 
             if not results:
                 return MicroAgentResponse(
@@ -101,6 +108,15 @@ class TwitterMicroAgent(BaseMicroAgent):
                 success=True
             )
 
+        except CircuitBreakerOpenError:
+            self.logger.warning("Twitter/X analysis skipped: circuit breaker is OPEN")
+            return MicroAgentResponse(
+                source="Twitter/X",
+                sentiment_score=create_decimal("0.0"),
+                mention_volume=0,
+                top_discussions=["Service temporarily unavailable."],
+                success=True
+            )
         except Exception as e:
             self.logger.error(f"Twitter/X analysis failed: {e}")
             return MicroAgentResponse(
