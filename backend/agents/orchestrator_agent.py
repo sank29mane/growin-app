@@ -226,6 +226,14 @@ Query: "{clean_query}"
         if not detected_account or detected_account == "all":
             detected_account = DecisionAgent()._detect_account_mentions(query)
             
+        # COORDINATOR FIX: Robust normalization via Resolver
+        if ticker:
+            from utils.ticker_utils import TickerResolver
+            original_ticker = ticker
+            ticker = TickerResolver().normalize(ticker)
+            if ticker != original_ticker:
+                logger.info(f"Ticker normalized (Resolver): {original_ticker} -> {ticker}")
+
         context = await self.data_fabricator.fabricate_context(
             intent=intent_info["type"],
             ticker=ticker,
@@ -498,6 +506,14 @@ Query: "{clean_query}"
         if not detected_account or detected_account == "all":
             detected_account = DecisionAgent()._detect_account_mentions(query)
             
+        # COORDINATOR FIX: Robust normalization via Resolver
+        if ticker:
+            from utils.ticker_utils import TickerResolver
+            original_ticker = ticker
+            ticker = TickerResolver().normalize(ticker)
+            if ticker != original_ticker:
+                logger.info(f"Ticker normalized (Resolver): {original_ticker} -> {ticker}")
+
         context = await self.data_fabricator.fabricate_context(
             intent=intent_info["type"],
             ticker=ticker,
