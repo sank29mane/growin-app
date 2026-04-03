@@ -1,6 +1,6 @@
 import numpy as np
-from backend.utils.jmce_model import NeuralJMCE
-from backend.utils.mlx_loader import mx, HAS_MLX
+from utils.jmce_model import NeuralJMCE
+from utils.mlx_loader import mx, HAS_MLX
 
 import pytest
 
