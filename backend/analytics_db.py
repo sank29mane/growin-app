@@ -59,7 +59,7 @@ class AnalyticsDB:
     
     def _init_schema(self):
         """Create optimized schema for time-series and agent analytics"""
-        # OHLCV historical data table
+        # Execute all DDL statements in a single batch
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS ohlcv_history (
                 ticker VARCHAR NOT NULL,
@@ -70,11 +70,8 @@ class AnalyticsDB:
                 close DOUBLE,
                 volume BIGINT,
                 PRIMARY KEY (ticker, timestamp)
-            )
-        """)
+            );
 
-        # Agent Telemetry table (SOTA 2026 Reasoning Trace)
-        self.conn.execute("""
             CREATE TABLE IF NOT EXISTS agent_telemetry (
                 id VARCHAR PRIMARY KEY,
                 correlation_id VARCHAR,
@@ -82,11 +79,8 @@ class AnalyticsDB:
                 subject VARCHAR,
                 payload JSON,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+            );
 
-        # Agent Performance table (SOTA 2026 Alpha Metrics)
-        self.conn.execute("""
             CREATE TABLE IF NOT EXISTS agent_performance (
                 correlation_id VARCHAR PRIMARY KEY,
                 ticker VARCHAR,
@@ -94,27 +88,17 @@ class AnalyticsDB:
                 return_1d DOUBLE,
                 return_5d DOUBLE,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+            );
 
-        # Create indices for fast queries
-        self.conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_ticker_time
-            ON ohlcv_history(ticker, timestamp DESC)
-        """)
+            ON ohlcv_history(ticker, timestamp DESC);
 
-        self.conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_telemetry_correlation
-            ON agent_telemetry(correlation_id)
-        """)
+            ON agent_telemetry(correlation_id);
 
-        self.conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_performance_ticker
-            ON agent_performance(ticker)
-        """)
+            ON agent_performance(ticker);
 
-                # Pending Actions table for Human-In-The-Loop (HITL)
-        self.conn.execute("""
             CREATE TABLE IF NOT EXISTS pending_actions (
                 id VARCHAR PRIMARY KEY,
                 correlation_id VARCHAR,
@@ -123,12 +107,10 @@ class AnalyticsDB:
                 payload JSON,
                 ticker VARCHAR,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+            );
 
-        self.conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_pending_status
-            ON pending_actions(status)
+            ON pending_actions(status);
         """)
 
         logger.info("Analytics schema initialized (including agent_telemetry, agent_performance, and pending_actions)")
