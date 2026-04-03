@@ -102,12 +102,27 @@ class ChatMLX(BaseChatModel):
             from mlx_lm.sample_utils import make_sampler
             sampler = make_sampler(temp=self.temperature)
             
-            # Run async generate in event loop
-            response_text = asyncio.run(engine.generate(
-                prompt=prompt,
-                max_tokens=self.max_tokens,
-                sampler=sampler
-            ))
+            # Since MLX Engine's generate is async and this method is sync,
+            # we must handle the event loop carefully to prevent RuntimeError.
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop and loop.is_running():
+                # We are already inside a running event loop, but a sync method was called.
+                # Since we can't safely call asyncio.run(), we warn and try to schedule it,
+                # though LangChain's sync methods shouldn't be called from async contexts.
+                raise RuntimeError(
+                    "ChatMLX._generate (sync) was called from inside a running event loop. "
+                    "Use ChatMLX._agenerate (async) instead."
+                )
+            else:
+                response_text = asyncio.run(engine.generate(
+                    prompt=prompt,
+                    max_tokens=self.max_tokens,
+                    sampler=sampler
+                ))
             
             return ChatResult(generations=[ChatGeneration(message=AIMessage(content=response_text))])
             
