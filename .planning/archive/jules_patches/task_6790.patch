@@ -1,0 +1,43 @@
+diff --git a/backend/mlx_vlm_engine.py b/backend/mlx_vlm_engine.py
+index 4154330..ae7d732 100644
+--- a/backend/mlx_vlm_engine.py
++++ b/backend/mlx_vlm_engine.py
+@@ -31,11 +31,12 @@ class MLXVLMInferenceEngine:
+         if HAS_MLX and hasattr(mx, 'metal'):
+             mx.metal.set_cache_limit(int(get_memory_info()["total_bytes"] * 0.8)) if "total_bytes" in get_memory_info() else None
+ 
+-    def _verify_checksum(self, model_path: str) -> bool:
++    async def _verify_checksum(self, model_path: str) -> bool:
+         """SOTA 2026: Verify .safetensors checksums for model integrity."""
+         try:
+             import os
+             import hashlib
++            import concurrent.futures
+             # Look for .safetensors files in the model directory
+             safetensors_files = [f for f in os.listdir(model_path) if f.endswith(".safetensors")]
+             if not safetensors_files:
+@@ -46,12 +47,19 @@ class MLXVLMInferenceEngine:
+                 return False
+ 
+             logger.info(f"Verifying checksums for {len(safetensors_files)} files in {model_path}...")
+-            # For UAT, we do a fast check of the first 1MB of each file
+-            for f_name in safetensors_files:
+-                f_path = os.path.join(model_path, f_name)
++            
++            def _hash_file(f_path: str):
+                 with open(f_path, "rb") as f:
+                     chunk = f.read(1024 * 1024)
+-                    _ = hashlib.sha256(chunk).hexdigest()
++                    return hashlib.sha256(chunk).hexdigest()
++
++            loop = asyncio.get_running_loop()
++            with concurrent.futures.ThreadPoolExecutor() as pool:
++                tasks = [
++                    loop.run_in_executor(pool, _hash_file, os.path.join(model_path, f_name))
++                    for f_name in safetensors_files
++                ]
++                await asyncio.gather(*tasks)
+             
+             logger.info("✅ Checksum verification passed.")
+             return True
+
