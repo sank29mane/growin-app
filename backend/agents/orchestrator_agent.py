@@ -186,7 +186,7 @@ Query: "{clean_query}"
         # 2. Routing Phase
         status_manager.set_status("orchestrator", "working", "Classifying Intent...")
         intent_info = await self._classify_intent(query)
-        # Context bridging for "Deep Dive" or follow-ups without explicit tickers
+        # Context bridging for "Deep Dive" or follow-ups without explicit tickers (Depth Limit: 5)
         if not ticker and history:
             from utils import extract_ticker_from_text
             for i, msg in enumerate(reversed(history)):
@@ -474,7 +474,7 @@ Query: "{clean_query}"
         if not ticker: 
             ticker = intent_info.get("primary_ticker")
             
-        # Context bridging for "Deep Dive" or follow-ups without explicit tickers
+        # Context bridging for "Deep Dive" or follow-ups without explicit tickers (Depth Limit: 5)
         if not ticker and history:
             from utils import extract_ticker_from_text
             for i, msg in enumerate(reversed(history)):
