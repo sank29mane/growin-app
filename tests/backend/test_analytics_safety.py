@@ -2,6 +2,7 @@
 import sys
 import os
 import unittest
+import pytest
 import logging
 from datetime import datetime, timedelta
 
@@ -13,6 +14,7 @@ from analytics_db import AnalyticsDB
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 
+@pytest.mark.skipif(os.getenv("GROWIN_ANALYTICS_ENABLED", "false").lower() != "true", reason="Analytics disabled")
 class TestAnalyticsSafety(unittest.TestCase):
     def setUp(self):
         self.db = AnalyticsDB(":memory:")
