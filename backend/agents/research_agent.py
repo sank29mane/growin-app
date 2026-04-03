@@ -77,6 +77,7 @@ class ResearchAgent(BaseAgent):
                 cache_ttl=600  # Cache news for 10 minutes
             )
         super().__init__(config)
+        self._client = None
         
         # Helper to validate keys (not placeholders)
         def is_valid(k):
@@ -103,6 +104,12 @@ class ResearchAgent(BaseAgent):
 
         # Cache for prompt template
         self._prompt_template = None
+
+    def _get_client(self):
+        import httpx
+        if self._client is None:
+            self._client = httpx.AsyncClient()
+        return self._client
 
     async def analyze(self, context: Dict[str, Any]) -> AgentResponse:
         """
@@ -268,11 +275,11 @@ class ResearchAgent(BaseAgent):
                     "category": "business"
                 }
                 async def _fetch_newsdata_rns():
-                    async with httpx.AsyncClient(timeout=10.0) as client:
-                        resp = await client.get("https://newsdata.io/api/1/latest", params=params)
-                        if resp.status_code == 200:
-                            return resp.json()
-                        return {}
+                    client = self._get_client()
+                    resp = await client.get("https://newsdata.io/api/1/latest", params=params, timeout=10.0)
+                    if resp.status_code == 200:
+                        return resp.json()
+                    return {}
                 try:
                     data = await newsdata_cb.call(_fetch_newsdata_rns)
                     for art in data.get('results', [])[:5]:
@@ -302,10 +309,10 @@ class ResearchAgent(BaseAgent):
                 }
 
                 async def _fetch_tavily_sec():
-                    async with httpx.AsyncClient() as client:
-                        response = await client.post(url, headers=headers, json=payload)
-                        response.raise_for_status()
-                        return response.json()
+                    client = self._get_client()
+                    response = await client.post(url, headers=headers, json=payload)
+                    response.raise_for_status()
+                    return response.json()
                 try:
                     data = await tavily_cb.call(_fetch_tavily_sec)
                     for r in data.get('results', []):
@@ -348,10 +355,10 @@ class ResearchAgent(BaseAgent):
             }
             
             async def _do_fetch_newsapi():
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(url, params=params)
-                    response.raise_for_status()
-                    return response.json()
+                client = self._get_client()
+                response = await client.get(url, params=params)
+                response.raise_for_status()
+                return response.json()
             data = await newsapi_cb.call(_do_fetch_newsapi)
             return data.get('articles', [])
         except CircuitBreakerOpenError:
@@ -384,10 +391,10 @@ class ResearchAgent(BaseAgent):
             }
             
             async def _do_fetch_tavily():
-                async with httpx.AsyncClient() as client:
-                    res = await client.post(url, headers=headers, json=payload)
-                    res.raise_for_status()
-                    return res.json()
+                client = self._get_client()
+                res = await client.post(url, headers=headers, json=payload)
+                res.raise_for_status()
+                return res.json()
             response = await tavily_cb.call(_do_fetch_tavily)
             
             # Normalize to common format
@@ -457,10 +464,10 @@ class ResearchAgent(BaseAgent):
                      if "NSE" in ticker.upper(): params["country"] = "in"
 
             async def _do_fetch_newsdata():
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    response = await client.get(url, params=params)
-                    response.raise_for_status()
-                    return response.json()
+                client = self._get_client()
+                response = await client.get(url, params=params, timeout=10.0)
+                response.raise_for_status()
+                return response.json()
 
             data = await newsdata_cb.call(_do_fetch_newsdata)
             

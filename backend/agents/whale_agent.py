@@ -8,6 +8,7 @@ from typing import Dict, Any, List
 from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from market_context import WhaleData
 from data_engine import get_alpaca_client
+from resilience import get_circuit_breaker, CircuitBreakerOpenError
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,14 @@ class WhaleAgent(BaseAgent):
         super().__init__(config)
         self.alpaca = get_alpaca_client()
         self.whale_threshold_usd = 50000.0 # Lowered from $250k for paper/IEX data density
+        self._client = None
+        self._tavily_cb = get_circuit_breaker("tavily_whale", failure_threshold=3, recovery_timeout=30.0)
+
+    def _get_client(self):
+        import httpx
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=10.0)
+        return self._client
         
     async def analyze(self, context: Dict[str, Any]) -> AgentResponse:
         """
@@ -216,10 +225,13 @@ class WhaleAgent(BaseAgent):
                 "max_results": 5
             }
             
-            async with httpx.AsyncClient() as client:
+            async def _do_fetch_tavily():
+                client = self._get_client()
                 res = await client.post(url, headers=headers, json=payload)
                 res.raise_for_status()
-                response = res.json()
+                return res.json()
+
+            response = await self._tavily_cb.call(_do_fetch_tavily)
             results = response.get('results', [])
             logger.info(f"WhaleAgent: Search returned {len(results)} results")
             
@@ -246,6 +258,9 @@ class WhaleAgent(BaseAgent):
                 logger.info(f"WhaleAgent: Identified {len(holders)} major institutional holders for {ticker}")
             
             return holders[:5]
+        except CircuitBreakerOpenError:
+            logger.warning(f"13F fetch skipped: circuit breaker is OPEN")
+            return []
         except Exception as e:
             logger.warning(f"13F fetch failed: {e}")
             return []

@@ -19,6 +19,13 @@ class TwitterMicroAgent(BaseMicroAgent):
     def __init__(self, tavily_key: Optional[str] = None):
         super().__init__("TwitterAgent")
         self.tavily_key = tavily_key
+        self._client = None
+
+    def _get_client(self):
+        import httpx
+        if self._client is None:
+            self._client = httpx.AsyncClient()
+        return self._client
 
     async def fetch_data(self, ticker: str, company_name: str) -> MicroAgentResponse:
         """Fetch Twitter discussions asynchronously."""
@@ -52,20 +59,19 @@ class TwitterMicroAgent(BaseMicroAgent):
             }
 
             async def _fetch_twitter_tavily():
-                async with httpx.AsyncClient() as client:
-                    res = await client.post(url, headers=headers, json=payload)
-                    res.raise_for_status()
-                    response = res.json()
+                client = self._get_client()
+                res = await client.post(url, headers=headers, json=payload)
+                res.raise_for_status()
+                response = res.json()
 
                 results = response.get('results', [])
 
                 if not results and ticker != "MARKET" and company_name and company_name != ticker:
                     query = f"{company_name} stock sentiment discussion twitter"
                     payload["query"] = query
-                    async with httpx.AsyncClient() as client:
-                        res = await client.post(url, headers=headers, json=payload)
-                        res.raise_for_status()
-                        response = res.json()
+                    res = await client.post(url, headers=headers, json=payload)
+                    res.raise_for_status()
+                    response = res.json()
                     results = response.get('results', [])
                 return results
 
