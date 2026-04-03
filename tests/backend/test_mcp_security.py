@@ -5,9 +5,9 @@ import sys
 # Ensure backend is in path for absolute imports if needed, 
 # but we should rely on PYTHONPATH=.
 from fastapi.testclient import TestClient
-from backend.app_context import state
-from backend.chat_manager import ChatManager
-from backend.server import app
+from app_context import state
+from chat_manager import ChatManager
+from server import app
 
 # Use TestClient (lifespan is triggered on first request if not specified)
 client = TestClient(app)

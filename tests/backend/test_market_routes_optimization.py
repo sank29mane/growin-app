@@ -8,7 +8,7 @@ import os
 # Ensure backend is in path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from backend.routes.market_routes import get_portfolio_history
+from routes.market_routes import get_portfolio_history
 
 @pytest.mark.asyncio
 async def test_get_portfolio_history_vectorized_dataframe():
