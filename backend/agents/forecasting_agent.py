@@ -142,6 +142,8 @@ class ForecastingAgent(BaseAgent):
 
             result = await self.circuit_breaker.call(execute_forecast)
 
+            self.circuit_breaker.record_success()
+
             # Extract predictions
             forecast_bars = result.get("forecast", [])
 
@@ -205,6 +207,7 @@ class ForecastingAgent(BaseAgent):
                 latency_ms=0
             )
         except Exception as e:
+            self.circuit_breaker.record_failure()
             logger.error(f"Forecast failed: {e}")
             return AgentResponse(
                 agent_name=self.config.name,
