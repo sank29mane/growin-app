@@ -18,7 +18,7 @@ import json
 import difflib
 from typing import Dict, Any, List, Optional, Union, Tuple
 import os
-from backend.utils.async_utils import run_with_timeout
+from utils.async_utils import run_with_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +100,14 @@ class CoordinatorAgent(BaseAgent):
             
         # Update context with routing info
         context["intent"] = intent
+        
+        # COORDINATOR FIX: Robust normalization via Resolver
         if ticker:
+            from utils.ticker_utils import TickerResolver
+            original_ticker = ticker
+            ticker = TickerResolver().normalize(ticker)
+            if ticker != original_ticker:
+                logger.info(f"Ticker normalized (Resolver): {original_ticker} -> {ticker}")
             context["ticker"] = ticker
 
         # COORDINATOR FIX: Robust normalization via Resolver

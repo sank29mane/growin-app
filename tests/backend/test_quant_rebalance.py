@@ -4,7 +4,7 @@ from decimal import Decimal
 sys.path.append('.')
 sys.path.append('backend')
 
-from backend.quant_engine import get_quant_engine
+from quant_engine import get_quant_engine
 
 class TestQuantEngineRebalance(unittest.TestCase):
     def test_analyze_rebalancing_opportunity(self):
