@@ -590,7 +590,7 @@ class AnalyticsDB:
 
             # Format result
             specialists = {}
-            for _, row in specialist_res.iterrows():
+            for row in specialist_res.to_dict('records'):
                 specialists[row['agent_name']] = {
                     "avg_1d": float(row['avg_1d']) if not pd.isna(row['avg_1d']) else 0.0,
                     "avg_5d": float(row['avg_5d']) if not pd.isna(row['avg_5d']) else 0.0,
