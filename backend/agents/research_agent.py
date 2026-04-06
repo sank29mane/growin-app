@@ -23,7 +23,7 @@ import asyncio
 import re
 from pydantic import BaseModel, Field
 from magentic import prompt as mag_prompt
-from resilience import get_circuit_breaker, CircuitBreakerOpenError
+from resilience import get_circuit_breaker, CircuitBreakerOpenError, execute_with_breaker
 
 # Pre-compiled regex for fast title normalization
 TITLE_CLEAN_PATTERN = re.compile(r'[^a-zA-Z0-9]')
@@ -270,14 +270,11 @@ class ResearchAgent(BaseAgent):
                     "country": "gb",
                     "category": "business"
                 }
-                async def _fetch_newsdata_rns():
-                    async with httpx.AsyncClient(timeout=10.0) as client:
-                        resp = await client.get("https://newsdata.io/api/1/latest", params=params)
-                        if resp.status_code == 200:
-                            return resp.json()
-                        return {}
                 try:
-                    data = await newsdata_cb.call(_fetch_newsdata_rns)
+                    data = await execute_with_breaker(
+                        newsdata_cb, "GET", "https://newsdata.io/api/1/latest",
+                        params=params, timeout=10.0, raise_for_status=False
+                    )
                     for art in data.get('results', [])[:5]:
                         articles.append({
                             'title': f"[RNS] {art.get('title')}",
@@ -304,13 +301,10 @@ class ResearchAgent(BaseAgent):
                     "max_results": 5
                 }
 
-                async def _fetch_tavily_sec():
-                    async with httpx.AsyncClient() as client:
-                        response = await client.post(url, headers=headers, json=payload)
-                        response.raise_for_status()
-                        return response.json()
                 try:
-                    data = await tavily_cb.call(_fetch_tavily_sec)
+                    data = await execute_with_breaker(
+                        tavily_cb, "POST", url, headers=headers, json=payload
+                    )
                     for r in data.get('results', []):
                         # Only include if relevant to SEC or regulatory
                         content = (r.get('title', '') + (r.get('content', '') or '')).upper()
@@ -350,12 +344,7 @@ class ResearchAgent(BaseAgent):
                 "apiKey": self.newsapi_key
             }
             
-            async def _do_fetch_newsapi():
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(url, params=params)
-                    response.raise_for_status()
-                    return response.json()
-            data = await newsapi_cb.call(_do_fetch_newsapi)
+            data = await execute_with_breaker(newsapi_cb, "GET", url, params=params)
             return data.get('articles', [])
         except CircuitBreakerOpenError:
             logger.warning(f"NewsAPI skipped: circuit breaker is OPEN")
@@ -386,12 +375,7 @@ class ResearchAgent(BaseAgent):
                 "max_results": 8
             }
             
-            async def _do_fetch_tavily():
-                async with httpx.AsyncClient() as client:
-                    res = await client.post(url, headers=headers, json=payload)
-                    res.raise_for_status()
-                    return res.json()
-            response = await tavily_cb.call(_do_fetch_tavily)
+            response = await execute_with_breaker(tavily_cb, "POST", url, headers=headers, json=payload)
             
             # Normalize to common format
             return [
@@ -459,13 +443,7 @@ class ResearchAgent(BaseAgent):
                      # Add 'in' for India support if requested, but architecture mandates US/UK partitioning
                      if "NSE" in ticker.upper(): params["country"] = "in"
 
-            async def _do_fetch_newsdata():
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    response = await client.get(url, params=params)
-                    response.raise_for_status()
-                    return response.json()
-
-            data = await newsdata_cb.call(_do_fetch_newsdata)
+            data = await execute_with_breaker(newsdata_cb, "GET", url, params=params, timeout=10.0)
             
             # Normalize to common format
             articles = []

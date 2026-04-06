@@ -242,6 +242,20 @@ def fallback(
     return decorator
 
 
+async def execute_with_breaker(breaker: CircuitBreaker, method: str, url: str, **kwargs) -> Any:
+    """Execute an HTTP request wrapped by a circuit breaker to reduce boilerplate."""
+    import httpx
+    async def _inner():
+        timeout = kwargs.pop('timeout', None)
+        raise_for_status = kwargs.pop('raise_for_status', True)
+        async with httpx.AsyncClient(timeout=timeout) if timeout else httpx.AsyncClient() as client:
+            res = await client.request(method, url, **kwargs)
+            if res.status_code != 200 and not raise_for_status:
+                return {}
+            res.raise_for_status()
+            return res.json()
+    return await breaker.call(_inner)
+
 # Pre-configured circuit breakers for common services
 _circuit_breakers: Dict[str, CircuitBreaker] = {}
 
