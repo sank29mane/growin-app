@@ -262,3 +262,21 @@ async def with_timeout(coro, timeout: float, default: Any = None):
     except asyncio.TimeoutError:
         logger.warning(f"Operation timed out after {timeout}s")
         return default
+
+
+async def execute_with_breaker(breaker: CircuitBreaker, method: str, url: str, **kwargs) -> Any:
+    """
+    Centralized helper function to execute an external HTTP request using httpx.AsyncClient,
+    protected by a circuit breaker.
+    """
+    import httpx
+
+    timeout = kwargs.pop('timeout', 10.0)
+
+    async def _do_request():
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            res = await client.request(method, url, **kwargs)
+            res.raise_for_status()
+            return res.json()
+
+    return await breaker.call(_do_request)
