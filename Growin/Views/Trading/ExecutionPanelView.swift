@@ -46,6 +46,8 @@ struct ExecutionPanelView: View {
                         .background(Color.white.opacity(0.1))
                 }
                 .buttonStyle(.plain)
+                .accessibilityAddTraits(.isButton)
+                .accessibilityLabel("Close execution panel")
             }
             .padding(24)
             .background(Color.black.opacity(0.2))
@@ -74,6 +76,8 @@ struct ExecutionPanelView: View {
                                         .border(SovereignTheme.Colors.technicalBorder, width: 0.5)
                                 }
                                 .buttonStyle(.plain)
+                                .accessibilityAddTraits(orderType == type ? [.isSelected, .isButton] : [.isButton])
+                                .accessibilityLabel("\(type.rawValue) Order Type")
                             }
                         }
                     }
@@ -126,6 +130,8 @@ struct ExecutionPanelView: View {
                                     .foregroundStyle(Color.brutalChartreuse)
                             }
                             .buttonStyle(.plain)
+                            .accessibilityAddTraits(.isButton)
+                            .accessibilityLabel("Strategy parameters info")
                         }
                         
                         VStack(spacing: 12) {
@@ -231,6 +237,8 @@ private struct StrategyOverlayView: View {
                     isPresented = false
                 }
                 .buttonStyle(.plain)
+                .accessibilityAddTraits(.isButton)
+                .accessibilityLabel("Close strategy parameters")
                 .font(SovereignTheme.Fonts.spaceGrotesk(size: 10, weight: .bold))
                 .padding(.vertical, 8)
                 .frame(maxWidth: .infinity)
