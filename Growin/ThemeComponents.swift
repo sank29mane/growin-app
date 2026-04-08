@@ -763,6 +763,15 @@ struct FinancialMetricView: View {
     let change: String?
     let changePositive: Bool?
     
+    private var accessibilityLabelText: String {
+        var label = "\(title): \(value)"
+        if let change = change, let changePositive = changePositive {
+            let direction = changePositive ? "Up" : "Down"
+            label += ", \(direction) \(change)"
+        }
+        return label
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title.uppercased())
@@ -787,6 +796,8 @@ struct FinancialMetricView: View {
                 .clipShape(Capsule())
             }
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityLabelText)
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
