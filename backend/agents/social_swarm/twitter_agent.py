@@ -92,7 +92,15 @@ class TwitterMicroAgent(BaseMicroAgent):
                     discs.append(title)
                 return sents, discs
                 
-            sentiments, discussions = await asyncio.to_thread(analyze_sentiment, results)
+            batch_size = 50
+            batches = [results[i:i + batch_size] for i in range(0, len(results), batch_size)]
+            tasks = [asyncio.to_thread(analyze_sentiment, batch) for batch in batches]
+
+            if tasks:
+                batch_results = await asyncio.gather(*tasks)
+                for s, d in batch_results:
+                    sentiments.extend(s)
+                    discussions.extend(d)
 
             avg_sentiment = sum(sentiments) / len(sentiments) if sentiments else create_decimal("0.0")
 
