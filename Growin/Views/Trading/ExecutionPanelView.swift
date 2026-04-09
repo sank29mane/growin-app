@@ -79,6 +79,7 @@ struct ExecutionPanelView: View {
                                 .buttonStyle(.plain)
                                 .accessibilityLabel("Order Type: \(type.rawValue)")
                                 .accessibilityAddTraits(orderType == type ? [.isSelected, .isButton] : [.isButton])
+                                .accessibilityHint("Selects \(type.rawValue) order type")
 
                             }
                         }
@@ -248,6 +249,7 @@ private struct StrategyOverlayView: View {
                 .frame(maxWidth: .infinity)
                 .background(Color.brutalOffWhite.opacity(0.1))
                 .border(Color.white.opacity(0.2), width: 1)
+                .accessibilityAddTraits(.isButton)
             }
             .padding(24)
             .background(Color.brutalCharcoal)
