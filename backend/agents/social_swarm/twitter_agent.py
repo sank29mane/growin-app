@@ -51,25 +51,15 @@ class TwitterMicroAgent(BaseMicroAgent):
                 "max_results": 5
             }
 
-            async def _fetch_twitter_tavily():
-                async with httpx.AsyncClient() as client:
-                    res = await client.post(url, headers=headers, json=payload)
-                    res.raise_for_status()
-                    response = res.json()
+            from resilience import execute_with_breaker
+            response = await execute_with_breaker(tavily_cb, "POST", url, headers=headers, json=payload)
+            results = response.get('results', [])
 
+            if not results and ticker != "MARKET" and company_name and company_name != ticker:
+                query = f"{company_name} stock sentiment discussion twitter"
+                payload["query"] = query
+                response = await execute_with_breaker(tavily_cb, "POST", url, headers=headers, json=payload)
                 results = response.get('results', [])
-
-                if not results and ticker != "MARKET" and company_name and company_name != ticker:
-                    query = f"{company_name} stock sentiment discussion twitter"
-                    payload["query"] = query
-                    async with httpx.AsyncClient() as client:
-                        res = await client.post(url, headers=headers, json=payload)
-                        res.raise_for_status()
-                        response = res.json()
-                    results = response.get('results', [])
-                return results
-
-            results = await tavily_cb.call(_fetch_twitter_tavily)
 
             if not results:
                 return MicroAgentResponse(
