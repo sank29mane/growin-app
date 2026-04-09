@@ -23,7 +23,7 @@ This document outlines the high-level phases for the Growin App, specifically op
     - Benchmark report on latency, throughput, and reasoning quality.
     - Final model selection for the milestone.
 - **Requirements**: INTEL-01 (Partial), PERF-01 (Partial)
-- **Status**: PLANNED
+- **Status**: ACTIVE
 
 ### Phase 43: Local Intelligence & Serving (Core Engine)
 - **Goal**: Establish stable local inference for the selected model with hardware-aware memory optimizations.
@@ -67,7 +67,7 @@ This document outlines the high-level phases for the Growin App, specifically op
 
 | Phase | Status | Plans | Complete |
 |-------|--------|-------|----------|
-| 42: Model Comparison | ⬜ | 0/1 | 0% |
+| 42: Model Comparison | 🏗 | 1/1 | 0% |
 | 43: Core Engine | ⬜ | 0/3 | 0% |
 | 44: Sovereign UX | ⬜ | 0/3 | 0% |
 | 45: Adaptive Learning | ⬜ | 0/3 | 0% |
