@@ -4,6 +4,7 @@ import logging
 import json
 import threading
 import asyncio
+import os
 from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -34,7 +35,6 @@ class AnalyticsDB:
         global _global_conn
         
         # SOTA 2026: Force memory mode in CI/Tests to avoid lock contention
-        import os
         if os.environ.get("CI") == "true" or os.environ.get("PYTEST_CURRENT_TEST"):
             db_path = ":memory:"
             
@@ -73,19 +73,18 @@ class AnalyticsDB:
 
     def _init_schema_internal(self):
         """Internal schema initialization helper (already under lock)."""
-        # OHLCV historical data table
+        # SOTA 2026: Batch execution of DDL for performance
         _global_conn.execute("""
+            -- OHLCV historical data table
             CREATE TABLE IF NOT EXISTS ohlcv_history (
                 ticker VARCHAR NOT NULL,
                 timestamp TIMESTAMP NOT NULL,
                 open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE,
                 volume BIGINT,
                 PRIMARY KEY (ticker, timestamp)
-            )
-        """)
+            );
 
-        # Agent Telemetry table
-        _global_conn.execute("""
+            -- Agent Telemetry table
             CREATE TABLE IF NOT EXISTS agent_telemetry (
                 id VARCHAR PRIMARY KEY,
                 correlation_id VARCHAR,
@@ -93,11 +92,9 @@ class AnalyticsDB:
                 subject VARCHAR,
                 payload JSON,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+            );
 
-        # Agent Performance table
-        _global_conn.execute("""
+            -- Agent Performance table
             CREATE TABLE IF NOT EXISTS agent_performance (
                 correlation_id VARCHAR PRIMARY KEY,
                 ticker VARCHAR,
@@ -105,16 +102,14 @@ class AnalyticsDB:
                 return_1d DOUBLE,
                 return_5d DOUBLE,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+            );
 
-        # Indices
-        _global_conn.execute("CREATE INDEX IF NOT EXISTS idx_ticker_time ON ohlcv_history(ticker, timestamp DESC)")
-        _global_conn.execute("CREATE INDEX IF NOT EXISTS idx_telemetry_correlation ON agent_telemetry(correlation_id)")
-        _global_conn.execute("CREATE INDEX IF NOT EXISTS idx_performance_ticker ON agent_performance(ticker)")
+            -- Indices
+            CREATE INDEX IF NOT EXISTS idx_ticker_time ON ohlcv_history(ticker, timestamp DESC);
+            CREATE INDEX IF NOT EXISTS idx_telemetry_correlation ON agent_telemetry(correlation_id);
+            CREATE INDEX IF NOT EXISTS idx_performance_ticker ON agent_performance(ticker);
 
-        # Pending Actions table for Human-In-The-Loop (HITL)
-        _global_conn.execute("""
+            -- Pending Actions table for Human-In-The-Loop (HITL)
             CREATE TABLE IF NOT EXISTS pending_actions (
                 id VARCHAR PRIMARY KEY,
                 correlation_id VARCHAR,
@@ -123,9 +118,9 @@ class AnalyticsDB:
                 payload JSON,
                 ticker VARCHAR,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
+            );
+            CREATE INDEX IF NOT EXISTS idx_pending_status ON pending_actions(status);
         """)
-        _global_conn.execute("CREATE INDEX IF NOT EXISTS idx_pending_status ON pending_actions(status)")
 
     def _init_schema(self):
         """Public schema init - ensure lock."""
@@ -178,7 +173,7 @@ class AnalyticsDB:
                 action_data.get('correlation_id'),
                 action_data.get('action_type'),
                 action_data.get('status', 'pending'),
-                json.dumps(action_data.get('payload')),
+                json.dumps(action_data.get('payload'), default=str),
                 action_data.get('ticker'),
                 action_data.get('timestamp')
             ))
@@ -357,9 +352,12 @@ class AnalyticsDB:
             # Bulk insert using DuckDB's fast path
             # SOTA: Registering dataframe explicitly to avoid scope resolution issues
             try:
-                with self.lock:
-                    self._conn.register('df_tmp', df)
-                    self._conn.execute("""
+                global _global_conn
+                with _global_lock:
+                    if _global_conn is None:
+                        _global_conn = duckdb.connect(self.db_path)
+                    _global_conn.register('df_tmp', df)
+                    _global_conn.execute("""
                         INSERT INTO ohlcv_history
                         SELECT ticker, timestamp, open, high, low, close, volume
                         FROM df_tmp
@@ -370,7 +368,7 @@ class AnalyticsDB:
                             close = EXCLUDED.close,
                             volume = EXCLUDED.volume
                     """)
-                    self._conn.unregister('df_tmp')
+                    _global_conn.unregister('df_tmp')
             except Exception as duck_err:
                 logger.error(f"DuckDB execution failed: {duck_err}")
                 raise duck_err
@@ -589,13 +587,11 @@ class AnalyticsDB:
                 specialist_res = self.execute(specialist_query).fetchdf()
 
             # Format result
-            specialists = {}
-            for _, row in specialist_res.iterrows():
-                specialists[row['agent_name']] = {
-                    "avg_1d": float(row['avg_1d']) if not pd.isna(row['avg_1d']) else 0.0,
-                    "avg_5d": float(row['avg_5d']) if not pd.isna(row['avg_5d']) else 0.0,
-                    "total_sessions": int(row['count'])
-                }
+            specialist_res['avg_1d'] = specialist_res['avg_1d'].fillna(0.0).astype(float)
+            specialist_res['avg_5d'] = specialist_res['avg_5d'].fillna(0.0).astype(float)
+            specialist_res['total_sessions'] = specialist_res['count'].astype(int)
+            specialists = specialist_res.set_index('agent_name')[['avg_1d', 'avg_5d', 'total_sessions']].to_dict('index')
+
 
             if ticker_res.empty:
                 return {"avg_1d": 0.0, "avg_5d": 0.0, "total_sessions": 0, "specialists": specialists}

@@ -32,7 +32,7 @@ def get_reasoning_trace(correlation_id: str) -> List[Dict[str, Any]]:
             
         # Convert to list of dicts
         trace = []
-        for _, row in df.iterrows():
+        for row in df.to_dict('records'):
             trace.append({
                 "agent": row["agent_name"],
                 "event": row["subject"],
