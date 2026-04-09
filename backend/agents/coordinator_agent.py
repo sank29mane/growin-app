@@ -158,7 +158,8 @@ class CoordinatorAgent(BaseAgent):
             metadata={
                 "routing": routing_decision,
                 "correlation_id": c_id
-            }
+            },
+            latency_ms=0.0
         )
 
     async def _get_routing_decision(self, query: str) -> Dict[str, Any]:
@@ -481,12 +482,3 @@ class CoordinatorAgent(BaseAgent):
             from market_context import GoalData
             context.goal = GoalData(**data)
 
-    async def analyze(self, context: Dict[str, Any]) -> AgentResponse:
-        # Coordinator Agent acts as a router, `execute` is the main entry point.
-        # This satisfies the BaseAgent abstract method requirement.
-        return AgentResponse(
-            agent_name=self.config.name,
-            success=True,
-            data={},
-            latency_ms=0
-        )
