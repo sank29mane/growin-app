@@ -19,6 +19,13 @@ class RedditMicroAgent(BaseMicroAgent):
     def __init__(self, tavily_key: Optional[str] = None):
         super().__init__("RedditAgent")
         self.tavily_key = tavily_key
+        self._client = None
+
+    def _get_client(self):
+        import httpx
+        if self._client is None:
+            self._client = httpx.AsyncClient()
+        return self._client
 
     async def fetch_data(self, ticker: str, company_name: str) -> MicroAgentResponse:
         """Fetch Reddit discussions asynchronously."""
@@ -52,6 +59,7 @@ class RedditMicroAgent(BaseMicroAgent):
 
             response = await execute_with_breaker(tavily_cb, "POST", url, headers=headers, json=payload)
             results = response.get('results', [])
+
 
             if not results and ticker != "MARKET" and company_name and company_name != ticker:
                 query = f"{company_name} stock sentiment discussion reddit"

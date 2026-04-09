@@ -80,6 +80,7 @@ class ResearchAgent(BaseAgent):
                 cache_ttl=600  # Cache news for 10 minutes
             )
         super().__init__(config)
+        self._client = None
         
         # Helper to validate keys (not placeholders)
         def is_valid(k):
@@ -106,6 +107,12 @@ class ResearchAgent(BaseAgent):
 
         # Cache for prompt template
         self._prompt_template = None
+
+    def _get_client(self):
+        import httpx
+        if self._client is None:
+            self._client = httpx.AsyncClient()
+        return self._client
 
     async def analyze(self, context: Dict[str, Any]) -> AgentResponse:
         """
@@ -344,6 +351,7 @@ class ResearchAgent(BaseAgent):
             }
             
             data = await execute_with_breaker(newsapi_cb, "GET", url, params=params)
+
             return data.get('articles', [])
         except CircuitBreakerOpenError:
             logger.warning(f"NewsAPI skipped: circuit breaker is OPEN")
@@ -373,6 +381,7 @@ class ResearchAgent(BaseAgent):
             }
             
             response = await execute_with_breaker(tavily_cb, "POST", url, headers=headers, json=payload)
+
             
             # Normalize to common format
             return [
@@ -439,6 +448,7 @@ class ResearchAgent(BaseAgent):
                      if "NSE" in ticker.upper(): params["country"] = "in"
 
             data = await execute_with_breaker(newsdata_cb, "GET", url, params=params, timeout=10.0)
+
             
             # Normalize to common format
             articles = []
