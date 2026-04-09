@@ -110,6 +110,14 @@ class CoordinatorAgent(BaseAgent):
                 logger.info(f"Ticker normalized (Resolver): {original_ticker} -> {ticker}")
             context["ticker"] = ticker
 
+        # COORDINATOR FIX: Robust normalization via Resolver
+        if ticker:
+            from utils.ticker_utils import TickerResolver
+            original_ticker = ticker
+            ticker = TickerResolver().normalize(ticker)
+            if ticker != original_ticker:
+                logger.info(f"Ticker normalized (Resolver): {original_ticker} -> {ticker}")
+
         # Initialize MarketContext
         market_context = MarketContext(
             query=query,
@@ -118,6 +126,14 @@ class CoordinatorAgent(BaseAgent):
             user_context=context.get("user_context", {}),
             reasoning=routing_decision.get("reasoning")
         )
+        
+        # COORDINATOR FIX: Robust normalization via Resolver
+        if ticker:
+            from utils.ticker_utils import TickerResolver
+            original_ticker = ticker
+            ticker = TickerResolver().normalize(ticker)
+            if ticker != original_ticker:
+                logger.info(f"Ticker normalized (Resolver): {original_ticker} -> {ticker}")
 
         # 2. Parallel Execution of Specialists
         tasks = []
@@ -390,12 +406,12 @@ class CoordinatorAgent(BaseAgent):
         The script will run in an ISOLATED Docker container.
         
         Input Context:
-        {json.dumps(context)}
+        {json.dumps(context, default=str)}
         
         Return ONLY a JSON block with the script:
         {{
           "reasoning": "Explain the fix",
-          "code": "import json\\ncontext = {json.dumps(context)}\\n# ... fix logic ...\\nprint(json.dumps(context))"
+          "code": "import json\\ncontext = {json.dumps(context, default=str)}\\n# ... fix logic ...\\nprint(json.dumps(context, default=str))"
         }}
         """
         try:
