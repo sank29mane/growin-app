@@ -117,13 +117,23 @@ class WhaleAgent(BaseAgent):
 
             # 3. Identify Large Trades
             large_trades = []
+
+            threshold_float = float(self.whale_threshold_usd)
+            sum_price_float = 0.0
             total_whale_volume = create_decimal(0)
             
             for t in trades:
-                p = create_decimal(t['p'])
-                s = create_decimal(t['s'])
-                value = p * s
-                if value >= create_decimal(self.whale_threshold_usd):
+                p_float = float(t['p'])
+                s_float = float(t['s'])
+                value_float = p_float * s_float
+                sum_price_float += p_float
+
+                if value_float >= threshold_float:
+                    # Convert to decimal only for the matching large trades to preserve precision output
+                    p = create_decimal(t['p'])
+                    s = create_decimal(t['s'])
+                    value = p * s
+
                     large_trades.append({
                         "price": float(p),
                         "size": float(s),
@@ -143,7 +153,7 @@ class WhaleAgent(BaseAgent):
             # If price is at the High of recent trades and we see whales, it might be accumulation
             impact = "NEUTRAL"
             if len(large_trades) > 0:
-                avg_price = sum(create_decimal(t['p']) for t in trades) / len(trades)
+                avg_price = create_decimal(sum_price_float / len(trades))
                 whale_avg_price = sum(create_decimal(w['price']) for w in large_trades) / len(large_trades)
                 
                 if whale_avg_price > avg_price * create_decimal(1.001):
