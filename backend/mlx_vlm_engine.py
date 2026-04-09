@@ -48,6 +48,7 @@ class MLXVLMInferenceEngine:
 
             logger.info(f"Verifying checksums for {len(safetensors_files)} files in {model_path}...")
             
+
             def _hash_file(f_path: str):
                 with open(f_path, "rb") as f:
                     chunk = f.read(1024 * 1024)
