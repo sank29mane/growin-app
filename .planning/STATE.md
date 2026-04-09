@@ -3,7 +3,7 @@ gsd_state_version: 1.0
 milestone: v5.0
 milestone_name: MLX Intelligence & macOS 2026 UX Overhaul
 status: research_and_planning
-last_updated: "2026-04-10T10:30:00.000Z"
+last_updated: "2026-04-10T11:00:00.000Z"
 progress:
   total_phases: 5
   completed_phases: 0
@@ -17,14 +17,13 @@ progress:
 
 Phase: 42 — Model Performance Comparison
 Plan: — (Pending)
-Status: RESEARCHING
-Last activity: 2026-04-10 — Phase 42 Added; Roadmap Renumbered
+Status: READY FOR PLANNING
+Last activity: 2026-04-10 — Phase 42 Context Gathered (Assumptions Mode)
 
 ## Summary
 
-- **Phase 42 Added**: New initial phase for comparing Gemma 4 26B A4B MoE vs NVIDIA Nemotron 3 Nano 4-bit MLX.
-- **Roadmap Renumbered**: Phases 43-46 re-sequenced for Core Engine, Sovereign UX, Adaptive Learning, and Multimodal Intelligence.
-- **Traceability Updated**: Requirements mapped to new phase numbers in `REQUIREMENTS.md`.
+- **Phase 42 Context Captured**: Locked decisions on `VLLMInferenceEngine` implementation, standalone benchmarking script, and 4-bit community model standardization.
+- **Milestone Trajectory**: Roadmap renumbered and finalized for core engine, UX overhaul, and adaptive learning.
 
 ## Milestone Status
 
@@ -39,11 +38,10 @@ Last activity: 2026-04-10 — Phase 42 Added; Roadmap Renumbered
 ## Next Focus
 
 1. **Phase 42 Planning**: Create `42-01-PLAN.md` for benchmarking Gemma 4 vs Nemotron 3.
-2. **Benchmarking Execution**: Run performance tests on M4 Pro (latency, throughput).
+2. **Implementation**: Build `backend/vllm_engine.py` and `scripts/benchmark_vllm_performance.py`.
 
 ## Accumulated Context
 
 - **Tech Stack**: SwiftUI 17+ (Tahoe), Python/FastAPI, DuckDB, MLX, vllm-mlx, Unsloth.
-- **Design DNA**: Sovereign Ledger (0px, Tahoe "Liquid Glass" materials).
-- **Intelligence Focus**: Hardware-optimized MoE reasoning.
 - **Hardware**: Optimized for M4 Pro (48GB RAM).
+- **Decisions**: Modular VLLM engine, 80% memory cache limit, 4-bit quantized weights.
