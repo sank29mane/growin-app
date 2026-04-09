@@ -242,10 +242,10 @@ def fallback(
     return decorator
 
 
-async def execute_with_breaker(breaker: CircuitBreaker, method: str, url: str, **kwargs) -> Any:
+async def execute_with_breaker(breaker: CircuitBreaker, method: str, url: str, client: Optional[Any] = None, **kwargs) -> Any:
     """
     Centralized helper function to execute an external HTTP request using httpx.AsyncClient,
-    protected by a circuit breaker.
+    protected by a circuit breaker. Supports optional persistent client.
     """
     import httpx
     
@@ -253,12 +253,19 @@ async def execute_with_breaker(breaker: CircuitBreaker, method: str, url: str, *
     raise_for_status = kwargs.pop('raise_for_status', True)
 
     async def _do_request():
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        if client:
             res = await client.request(method, url, **kwargs)
             if not raise_for_status and res.status_code >= 400:
                 return {}
             res.raise_for_status()
             return res.json()
+        else:
+            async with httpx.AsyncClient(timeout=timeout) as new_client:
+                res = await new_client.request(method, url, **kwargs)
+                if not raise_for_status and res.status_code >= 400:
+                    return {}
+                res.raise_for_status()
+                return res.json()
 
     return await breaker.call(_do_request)
 
