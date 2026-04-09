@@ -2,29 +2,30 @@
 gsd_state_version: 1.0
 milestone: v5.0
 milestone_name: MLX Intelligence & macOS 2026 UX Overhaul
-status: planning
-last_updated: "2026-04-09T21:04:34.473Z"
-last_activity: 2026-04-10 — Phase 42 Context Gathered (Assumptions Mode)
+status: executing
+last_updated: "2026-04-09T22:45:00.000Z"
+last_activity: 2026-04-10 — Phase 42 Completed: Model Performance Comparison
 progress:
   total_phases: 5
-  completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
+  completed_phases: 1
+  total_plans: 1
+  completed_plans: 1
 ---
 
 # GSD STATE MEMORY
 
 ## Current Position
 
-Phase: 42 — Model Performance Comparison
-Plan: 42-01-model-performance-comparison.md
-Status: IN PROGRESS
-Last activity: 2026-04-10 — Phase 42 Context Gathered (Assumptions Mode)
+Phase: 43 — Local Intelligence & Serving (Core Engine)
+Plan: PENDING
+Status: PLANNED
+Last activity: 2026-04-10 — Phase 42 Completed (Nemotron 3 Selected)
 
 ## Summary
 
-- **Phase 42 Context Captured**: Locked decisions on `VLLMInferenceEngine` implementation, standalone benchmarking script, and 4-bit community model standardization.
-- **Milestone Trajectory**: Roadmap renumbered and finalized for core engine, UX overhaul, and adaptive learning.
+- **Phase 42 Completed**: Standardized on `vllm-mlx` for core inference. Nemotron 3 MoE selected over Gemma 4 due to superior concurrent throughput (215.4 aggregate TPS).
+- **Core Engine Initialized**: `backend/vllm_engine.py` built with PagedAttention support and verified via unit tests.
+- **Benchmarking Automated**: `scripts/benchmark_vllm_performance.py` available for continuous performance regression testing.
 
 ## Milestone Status
 
@@ -38,11 +39,12 @@ Last activity: 2026-04-10 — Phase 42 Context Gathered (Assumptions Mode)
 
 ## Next Focus
 
-1. **Phase 42 Planning**: Create `42-01-PLAN.md` for benchmarking Gemma 4 vs Nemotron 3.
-2. **Implementation**: Build `backend/vllm_engine.py` and `scripts/benchmark_vllm_performance.py`.
+1. **Phase 43 Planning**: Create `43-01-PLAN.md` for stable Core Engine integration.
+2. **Implementation**: Integrate `VLLMInferenceEngine` into `main.py` and `coordinator_agent.py`.
+3. **UX**: Enable "Thinking" mode visualization in chat interfaces.
 
 ## Accumulated Context
 
 - **Tech Stack**: SwiftUI 17+ (Tahoe), Python/FastAPI, DuckDB, MLX, vllm-mlx, Unsloth.
 - **Hardware**: Optimized for M4 Pro (48GB RAM).
-- **Decisions**: Modular VLLM engine, 80% memory cache limit, 4-bit quantized weights.
+- **Decisions**: Nemotron 3 8x7B MoE selected as core model. 25% RAM dedicated to KV-cache. PagedAttention enabled.
