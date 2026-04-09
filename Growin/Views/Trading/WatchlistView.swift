@@ -125,6 +125,8 @@ private struct AnalysisDetailView: View {
                         .border(Color.black, width: 0.5)
                 }
                 .buttonStyle(.plain)
+                .accessibilityAddTraits(.isButton)
+                .accessibilityLabel("Execute trace for \(asset.ticker)")
                 .padding(.leading, 24)
             }
             
