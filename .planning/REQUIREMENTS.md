@@ -51,19 +51,19 @@
 
 | REQ-ID | Phase | Success Criteria | Status |
 |--------|-------|------------------|--------|
-| INTEL-01 | | | ⬜ |
-| INTEL-02 | | | ⬜ |
-| INTEL-03 | | | ⬜ |
-| PERF-01 | | | ⬜ |
-| PERF-02 | | | ⬜ |
-| PERF-03 | | | ⬜ |
-| UX-01 | | | ⬜ |
-| UX-02 | | | ⬜ |
-| UX-03 | | | ⬜ |
-| UX-04 | | | ⬜ |
-| UX-05 | | | ⬜ |
-| LEARN-01 | | | ⬜ |
-| LEARN-02 | | | ⬜ |
-| LEARN-03 | | | ⬜ |
-| TRADE-01 | | | ⬜ |
-| TRADE-02 | | | ⬜ |
+| INTEL-01 | 42, 43 | Final model selection and deployment. | ⬜ |
+| INTEL-02 | 43 | "Thinking" mode visible in chat interface. | ⬜ |
+| INTEL-03 | 46 | Gemma 4 multimodal support active. | ⬜ |
+| PERF-01 | 42, 43 | vllm-mlx with PagedAttention configured. | ⬜ |
+| PERF-02 | 43 | FP8 KV-cache quantization implemented. | ⬜ |
+| PERF-03 | 43 | M4 Pro memory overrides active. | ⬜ |
+| UX-01 | 44 | SwiftUI 17+ Redesign with Tahoe patterns. | ⬜ |
+| UX-02 | 44 | Stage Manager 2.0 integration complete. | ⬜ |
+| UX-03 | 44 | Agentic Sidebar active for context. | ⬜ |
+| UX-04 | 46 | Dynamic Interactive Tiles built. | ⬜ |
+| UX-05 | 44 | 120Hz ProMotion fluid rendering. | ⬜ |
+| LEARN-01 | 45 | Unsloth/mlx-tune pipeline active. | ⬜ |
+| LEARN-02 | 45 | Automated DuckDB alpha extraction. | ⬜ |
+| LEARN-03 | 45 | Dynamic LoRA adapter switching. | ⬜ |
+| TRADE-01 | 44 | Real-time price sync (<16ms). | ⬜ |
+| TRADE-02 | 46 | Deep linking reasoning to Ledger. | ⬜ |

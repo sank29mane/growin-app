@@ -14,22 +14,51 @@ This document outlines the high-level phases for the Growin App, specifically op
 
 ---
 
-## 🚀 CURRENT MILESTONE: Local Profit Extraction & RL Hardening (M4 Pro)
-**Goal**: Integrate the new Sovereign UI with self-correcting RL agents.
+## 🚀 CURRENT MILESTONE: v5.0 MLX Intelligence & macOS 2026 UX Overhaul
+**Goal**: Transform Growin into a SOTA macOS 2026 native experience by integrating fine-tuned Gemma 4 26B A4B MoE intelligence with a complete UI/UX overhaul and hardened RL-driven profit extraction.
 
-### Phase 37: RL Regime & Backtest Lab
-- **Goal**: Implement RL-driven rebalancing using JMCE + TTM-R2 fused state.
-- **Inference Engine**: Native `vllm-mlx` with PagedAttention.
-- **Status**: IN_PROGRESS
-- **Wave 1: vllm-mlx & Data Fusion**
-    - [ ] **37-01-PLAN.md**: Deploy `vllm-mlx` native server & RL State fusion.
-- **Wave 2: Regime Agent (Market Character)**
-    - [ ] **37-02-PLAN.md**: JMCE Eigenvalue regime detection & LoRA calibration.
-- **Wave 3: PPO Action Head & NPU Backtest**
-    - [ ] **37-03-PLAN.md**: PPO Actor-Critic policy & parallel GPU backtester.
+### Phase 42: Model Performance Comparison
+- **Goal**: Compare vllm-mlx output performance for Gemma 4 26B A4B MoE vs NVIDIA Nemotron 3 Nano 4-bit MLX.
+- **Success Criteria**:
+    - Benchmark report on latency, throughput, and reasoning quality.
+    - Final model selection for the milestone.
+- **Requirements**: INTEL-01 (Partial), PERF-01 (Partial)
+- **Status**: PLANNED
 
-### Phase 38: SwiftUI Profit Command Center & RL Training Integration
-- **Goal**: 120Hz dashboard for real-time Alpha tracking and hardened RL training loop.
+### Phase 43: Local Intelligence & Serving (Core Engine)
+- **Goal**: Establish stable local inference for the selected model with hardware-aware memory optimizations.
+- **Success Criteria**:
+    - Selected model served locally via `vllm-mlx` with PagedAttention.
+    - "Thinking" Mode visibility enabled in chat interface.
+    - System-level memory overrides configured (FP8 KV-cache) for M4 Pro (48GB).
+- **Requirements**: INTEL-01, INTEL-02, PERF-01, PERF-02, PERF-03
+- **Status**: PLANNED
+
+### Phase 44: Sovereign UX & macOS 2026 Redesign
+- **Goal**: Complete architectural UI redesign following macOS Tahoe patterns and 120Hz ProMotion standards.
+- **Success Criteria**:
+    - SwiftUI 17+ 0px Ledger UI implemented with Tahoe "Liquid Glass" materials.
+    - Stage Manager 2.0 window sets integrated for trading workflows.
+    - 120Hz ProMotion fluid rendering and <16ms price synchronization.
+- **Requirements**: UX-01, UX-02, UX-03, UX-05, TRADE-01
+- **Status**: PLANNED
+
+### Phase 45: Adaptive Learning & Alpha Engineering (Unsloth)
+- **Goal**: Deploy local LoRA fine-tuning pipeline for regime-specific alpha extraction.
+- **Success Criteria**:
+    - Unsloth/mlx-tune pipeline active for local LoRA fine-tuning on M4 Pro.
+    - Automated alpha feature engineering from DuckDB historical data.
+    - Dynamic LoRA adapter switching based on detected market regimes.
+- **Requirements**: LEARN-01, LEARN-02, LEARN-03
+- **Status**: PLANNED
+
+### Phase 46: Multimodal Intelligence & Deep Integration
+- **Goal**: Infuse vision intelligence into trading workflows and asset-level fast actions.
+- **Success Criteria**:
+    - Gemma 4 multimodal support active for image/chart upload analysis.
+    - Dynamic Interactive Tiles built for real-time asset monitoring.
+    - Deep linking from chat reasoning results to Sovereign Ledger views.
+- **Requirements**: INTEL-03, UX-04, TRADE-02
 - **Status**: PLANNED
 
 ---
@@ -38,13 +67,16 @@ This document outlines the high-level phases for the Growin App, specifically op
 
 | Phase | Status | Plans | Complete |
 |-------|--------|-------|----------|
-| 40: Sovereign Alpha | ✅ | 3/3 | 100% |
-| 41: Sovereign UI | ✅ | 6/6 | 100% |
-| 37: RL Regime | ⬜ | 0/3 | 0% |
+| 42: Model Comparison | ⬜ | 0/1 | 0% |
+| 43: Core Engine | ⬜ | 0/3 | 0% |
+| 44: Sovereign UX | ⬜ | 0/3 | 0% |
+| 45: Adaptive Learning | ⬜ | 0/3 | 0% |
+| 46: Multimodal | ⬜ | 0/3 | 0% |
 
 ---
 
-## 📋 BACKLOG (POST-WEEKEND)
-- [ ] Multi-User Supabase Migration.
-- [ ] Options Greeks Agent.
-- [ ] Real-time Order Book Heatmaps.
+## 📋 BACKLOG (FUTURE REQUIREMENTS)
+- [ ] AUTH-01: Multi-User Supabase Migration.
+- [ ] OPTS-01: Options Greeks Agent.
+- [ ] DATA-01: Real-time Order Book Heatmaps.
+- [ ] XR-01: VisionOS Pro Integration.
