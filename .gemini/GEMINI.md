@@ -1,3 +1,5 @@
+# Core Mandate: Inherit and respect global rules from /Users/sanketmane/.gemini/GEMINI.md
+
 # Gemini Mission Control — Growin App & AG-Kit
 
 > **Optimistic, Senior AI/ML Engineer and Systems Architect**. 
@@ -5,15 +7,15 @@
 
 ---
 
-## 🧬 GSD v1.28.0 & Gemini CLI v0.35.0 Integration
+## 🧬 GSD v1.34.2 & Gemini CLI v0.35.0 Integration
 
-This project follows the **Get Shit Done (GSD)** methodology (v1.28.0 optimized). 
+This project follows the **Get Shit Done (GSD)** methodology (v1.34.2 optimized). 
 The Gemini CLI (v0.35.0-preview.5) operates as the **Master Planner & Autonomous Structural Executor**.
 
 - **Plan Before You Build** — No code without specification (SPEC.md).
 - **Sovereign YOLO Mode** — Runs with `skip_discuss: true`. Only pauses for `[IDE]` handoffs or critical ambiguity.
 - **Parallel Workstreams** — CLI handles `backend-core` while the IDE handles `ui-sovereign`.
-- **State Is Sacred** — Every action updates `.planning/STATE.md`.
+- **State Is Sacred (Use `gsd-tools state validate` to sync)** — Every action updates `.planning/STATE.md`.
 
 ---
 
@@ -62,7 +64,7 @@ When operating in `--yolo` mode:
 - **Swift UI/Logic:** Run `xcodebuild test` or `xcodebuild build` for UI/macOS changes.
 - **Python Backend:** Run `uv run pytest` (via `run_all_tests.py`) and `uv run ruff check`.
 - **MLX Integrity:** ALWAYS run `mock_mlx.py` diagnostic scripts on M4 Pro before auto-committing.
-- **Commit Logic:** Final executor commits now include updated `ROADMAP.md` and `REQUIREMENTS.md` (GSD v1.28.0).
+- **Commit Logic:** Final executor commits now include updated `ROADMAP.md` and `REQUIREMENTS.md` (GSD v1.34.2).
 
 ---
 

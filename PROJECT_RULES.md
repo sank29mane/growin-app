@@ -280,7 +280,7 @@ Before "Done"    → Empirical proof captured
 Because the Antigravity IDE natively supports GSD commands, we operate a seamless, unified workflow. The Gemini CLI acts as the Master Planner and Structural Executor, while the Antigravity IDE acts as the Visual/Creation Executor. Both environments utilize the exact same `/gsd` command structure.
 
 ### 1. Mandatory Task Tagging Syntax
-When the Gemini CLI (`/gsd:plan-phase`) generates or updates a `PLAN.md`, **every task** MUST be explicitly tagged with its Execution Context and Required Skill. This ensures that when `/gsd:execute` is run, the system automatically loads the correct domain expertise.
+When the Gemini CLI (`/gsd-plan-phase`) generates or updates a `PLAN.md`, **every task** MUST be explicitly tagged with its Execution Context and Required Skill. This ensures that when `/gsd-execute` is run, the system automatically loads the correct domain expertise.
 
 **Required Format:**
 ```markdown
@@ -296,14 +296,14 @@ When the Gemini CLI (`/gsd:plan-phase`) generates or updates a `PLAN.md`, **ever
 ```
 
 ### 2. The Division of Execution (`Context`)
-- **`Context: CLI`**: Backend coding, DB migrations, state updates, test running, and git operations. The Gemini CLI executes these automatically during its own `/gsd:execute-phase` loop.
+- **`Context: CLI`**: Backend coding, DB migrations, state updates, test running, and git operations. The Gemini CLI executes these automatically during its own `/gsd-execute-phase` loop.
 - **`Context: IDE`**: UI/UX development, greenfield features, and complex multi-file refactoring. The Gemini CLI MUST hand these off.
 
 ### 3. The Command-Based Handoff Loop
-During phase execution (`/gsd:execute-phase`) in the Gemini CLI terminal:
+During phase execution (`/gsd-execute-phase`) in the Gemini CLI terminal:
 1. **If Context is `CLI`**: The CLI autonomously executes the task, tests it, and commits.
 2. **If Context is `IDE`**: The CLI MUST hard-pause. It updates `.gsd/STATE.md` and outputs: 
-   *"Handoff Required: Please open the Antigravity IDE Agent panel and run `/gsd:execute task [Task ID]`. Type 'done' here when finished."*
+   *"Handoff Required: Please open the Antigravity IDE Agent panel and run `/gsd-execute task [Task ID]`. Type 'done' here when finished."*
 3. **IDE Execution**: The user runs the command in the IDE. The IDE's GSD integration automatically reads the `Skill` tag (e.g., `ag-frontend-specialist`), loads the persona, and completes the work.
 4. **Verification**: Upon the user's return to the CLI, the CLI runs native verification (`pytest`, `xcodebuild`, etc.) before moving to the next task.
 
@@ -314,7 +314,7 @@ During phase execution (`/gsd:execute-phase`) in the Gemini CLI terminal:
 
 To maximize performance and token efficiency, the following protocol must be followed during any **Plan** or **Research** phase:
 
-1. **Required Skill Analysis:** Every phase plan created by '/gsd:plan-phase' MUST include a metadata block at the top:
+1. **Required Skill Analysis:** Every phase plan created by '/gsd-plan-phase' MUST include a metadata block at the top:
    ```yaml
    Phase: [PHASE_NAME]
    Required_Skills:
