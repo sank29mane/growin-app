@@ -270,7 +270,11 @@ class ResearchAgent(BaseAgent):
                     "category": "business"
                 }
                 try:
-                    data = await execute_with_breaker(newsdata_cb, "GET", "https://newsdata.io/api/1/latest", params=params, timeout=10.0)
+                    data = await execute_with_breaker(
+                        newsdata_cb, "GET", "https://newsdata.io/api/1/latest",
+                        params=params, timeout=10.0, raise_for_status=False
+                    )
+
                     for art in data.get('results', [])[:5]:
                         articles.append({
                             'title': f"[RNS] {art.get('title')}",
@@ -297,7 +301,10 @@ class ResearchAgent(BaseAgent):
                 }
 
                 try:
-                    data = await execute_with_breaker(tavily_cb, "POST", url, headers=headers, json=payload)
+                    data = await execute_with_breaker(
+                        tavily_cb, "POST", url, headers=headers, json=payload
+                    )
+
                     for r in data.get('results', []):
                         # Only include if relevant to SEC or regulatory
                         content = (r.get('title', '') + (r.get('content', '') or '')).upper()
