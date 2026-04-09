@@ -40,3 +40,8 @@
 ## 2026-03-31 - SwiftUI Dynamic Accessibility Labels for Metric Groups
 **Learning:** For SwiftUI view components that group text elements to represent a metric (like `FinancialMetricView` grouping title, value, and change percent), VoiceOver naturally reads them as separate, disconnected elements. Adding `.accessibilityElement(children: .combine)` helps, but it still might read them in a clunky manner depending on how the views are nested.
 **Action:** When making custom composite metric views accessible, combine the children (`.accessibilityElement(children: .combine)`) and provide a single, explicitly computed `.accessibilityLabel` string that naturally reads the metric as a cohesive sentence (e.g., 'TOTAL CAPITAL: £100.00, Up 5.0%').
+
+## 2026-03-31 - Sovereign UI plain button accessibility constraints
+**Learning:** High-density desktop layouts in SwiftUI (like Sovereign's `MainTabView`, `ExecutionPanelView`, and `WatchlistView`) frequently rely on `.buttonStyle(.plain)` combined with explicit layout modifications (e.g., custom borders, `.background`, `.contentShape`) to achieve a professional terminal aesthetic. This heavily strips interactive context for VoiceOver, treating structurally critical tabs and data-rich list actions as generic views or text.
+**Action:** Always append `.accessibilityAddTraits(.isButton)` and provide explicit `.accessibilityLabel` descriptions (including dynamic component bindings like `asset.ticker` or `type.rawValue`) to `.plain` buttons to retain their semantic function, specifically updating dynamic traits like `.isSelected` on tab menus.
+

@@ -46,8 +46,9 @@ struct ExecutionPanelView: View {
                         .background(Color.white.opacity(0.1))
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Close Execution Panel")
                 .accessibilityAddTraits(.isButton)
-                .accessibilityLabel("Close execution panel")
+
             }
             .padding(24)
             .background(Color.black.opacity(0.2))
@@ -76,8 +77,9 @@ struct ExecutionPanelView: View {
                                         .border(SovereignTheme.Colors.technicalBorder, width: 0.5)
                                 }
                                 .buttonStyle(.plain)
+                                .accessibilityLabel("Order Type: \(type.rawValue)")
                                 .accessibilityAddTraits(orderType == type ? [.isSelected, .isButton] : [.isButton])
-                                .accessibilityLabel("\(type.rawValue) Order Type")
+
                             }
                         }
                     }
@@ -130,8 +132,9 @@ struct ExecutionPanelView: View {
                                     .foregroundStyle(Color.brutalChartreuse)
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel("Strategy Parameters Info")
                             .accessibilityAddTraits(.isButton)
-                            .accessibilityLabel("Strategy parameters info")
+
                         }
                         
                         VStack(spacing: 12) {
@@ -237,8 +240,9 @@ private struct StrategyOverlayView: View {
                     isPresented = false
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Close Trace Info")
                 .accessibilityAddTraits(.isButton)
-                .accessibilityLabel("Close strategy parameters")
+
                 .font(SovereignTheme.Fonts.spaceGrotesk(size: 10, weight: .bold))
                 .padding(.vertical, 8)
                 .frame(maxWidth: .infinity)

@@ -151,6 +151,8 @@ private struct SidebarButton: View {
             .border(isActive ? Color.white.opacity(0.1) : Color.clear, width: 1) // 0px corners
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .accessibilityAddTraits(isActive ? [.isSelected, .isButton] : [.isButton])
     }
 }
 
