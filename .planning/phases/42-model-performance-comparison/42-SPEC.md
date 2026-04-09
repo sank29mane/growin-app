@@ -4,9 +4,11 @@
 **Requirement IDs:** INTEL-01, PERF-01 (Partial)
 **Date:** 2026-04-10
 
-## 🎯 Goal
+<goal>
 Compare `vllm-mlx` output performance for Gemma 4 26B A4B MoE vs NVIDIA Nemotron 3 Nano 4-bit MLX to select the core reasoning model for Milestone v5.0.
+</goal>
 
+<requirements>
 ## 🏗 Requirements
 
 ### 1. VLLM Inference Engine
@@ -26,18 +28,25 @@ Compare `vllm-mlx` output performance for Gemma 4 26B A4B MoE vs NVIDIA Nemotron
 ### 3. Model Configuration
 - **REQ-08**: Update `backend/model_config.py` with benchmarked model IDs.
 - **REQ-09**: Update `backend/agents/llm_factory.py` to support `vllm` provider.
+</requirements>
 
+<design>
 ## 🧱 Design
 - **Engine Type**: `VLLMInferenceEngine` inheriting (or mirroring) established patterns in `mlx_engine.py`.
 - **Target Models**:
     - `mlx-community/Gemma-4-26B-A4B-MoE-4bit`
     - `mlx-community/Nemotron-3-Nano-30B-A3B-MoE-4bit`
+</design>
 
+<verification>
 ## 🧪 Verification Criteria
 - **V-01**: `VLLMInferenceEngine` successfully loads and generates tokens from both models.
 - **V-02**: `scripts/benchmark_vllm_performance.py` executes successfully and outputs a valid comparison report.
 - **V-03**: `LLMFactory` can instantiate a `vllm` provider without error.
+</verification>
 
+<success>
 ## 📈 Success Criteria
 - Completed benchmark report comparing the two models.
 - Decision record confirming the final model selection for Milestone v5.0.
+</success>
