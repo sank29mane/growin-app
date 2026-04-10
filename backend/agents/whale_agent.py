@@ -118,19 +118,26 @@ class WhaleAgent(BaseAgent):
             # 3. Identify Large Trades
             large_trades = []
             total_whale_volume = create_decimal(0)
+            threshold_dec = create_decimal(self.whale_threshold_usd)
             
-            for t in trades:
-                p = create_decimal(t['p'])
-                s = create_decimal(t['s'])
+            # Pre-parse decimals for performance instead of converting in loop multiple times
+            trade_decimals = [{"p": create_decimal(t['p']), "s": create_decimal(t['s'])} for t in trades]
+
+            for i, t_dec in enumerate(trade_decimals):
+                p = t_dec['p']
+                s = t_dec['s']
                 value = p * s
-                if value >= create_decimal(self.whale_threshold_usd):
+                if value >= threshold_dec:
+                    # Original trade dict is at trades[i]
+                    t = trades[i]
                     large_trades.append({
                         "price": float(p),
                         "size": float(s),
                         "value_usd": float(value), # Frontend property is valueUsd but mapping handles it
                         "timestamp": str(t['t']),
                         "currency": ticker_currency,
-                        "is_whale": True
+                        "is_whale": True,
+                        "_dec_price": p # Keep decimal precision for average calc
                     })
                     total_whale_volume += value
             
@@ -143,13 +150,17 @@ class WhaleAgent(BaseAgent):
             # If price is at the High of recent trades and we see whales, it might be accumulation
             impact = "NEUTRAL"
             if len(large_trades) > 0:
-                avg_price = sum(create_decimal(t['p']) for t in trades) / len(trades)
-                whale_avg_price = sum(create_decimal(w['price']) for w in large_trades) / len(large_trades)
+                avg_price = sum(t_dec['p'] for t_dec in trade_decimals) / len(trade_decimals)
+                whale_avg_price = sum(w['_dec_price'] for w in large_trades) / len(large_trades)
                 
                 if whale_avg_price > avg_price * create_decimal(1.001):
                     impact = "BULLISH"
                 elif whale_avg_price < avg_price * create_decimal(0.999):
                     impact = "BEARISH"
+
+            # Clean up internal keys for frontend response
+            for w in large_trades:
+                w.pop('_dec_price', None)
             
             # 6. Build Summary
             if len(large_trades) > 0:
@@ -300,7 +311,7 @@ class WhaleAgent(BaseAgent):
                 # High volume
                 c = create_decimal(bars[-1]['c'])
                 o = create_decimal(bars[-1]['o'])
-                price_change = float((c - o) / o) if o > 0 else 0.0
+                price_change = float((c - o) / o) if o > create_decimal(0) else 0.0
                 if price_change > 0:
                     impact = "BULLISH"
                     summary += "High volume on up day suggests institutional buying (Accumulation)."
