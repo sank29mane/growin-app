@@ -28,13 +28,14 @@ class VLLMInferenceEngine:
         self.current_model_path: Optional[str] = None
         self._loading = False
 
-    async def load_model(self, model_path: str, max_num_seqs: int = 16) -> bool:
+    async def load_model(self, model_path: str, max_num_seqs: int = 16, **kwargs) -> bool:
         """
         Load a model into the batched engine.
         
         Args:
             model_path: Path to the model or HuggingFace ID.
             max_num_seqs: Maximum number of concurrent sequences for continuous batching.
+            **kwargs: Additional arguments for BatchedEngine (e.g., force_mllm=False).
         """
         if not HAS_VLLM_MLX:
             logger.error("vllm-mlx not installed. Cannot load VLLM engine.")
@@ -59,7 +60,8 @@ class VLLMInferenceEngine:
             self.engine = BatchedEngine(
                 model_name=model_path,
                 scheduler_config=scheduler_config,
-                trust_remote_code=True
+                trust_remote_code=True,
+                **kwargs
             )
             
             # Start engine (loads model)

@@ -15,15 +15,15 @@ This document outlines the high-level phases for the Growin App, specifically op
 ---
 
 ## 🚀 CURRENT MILESTONE: v5.0 MLX Intelligence & macOS 2026 UX Overhaul
-**Goal**: Transform Growin into a SOTA macOS 2026 native experience by integrating fine-tuned Gemma 4 26B A4B MoE intelligence with a complete UI/UX overhaul and hardened RL-driven profit extraction.
+**Goal**: Transform Growin into a SOTA macOS 2026 native experience by integrating fine-tuned intelligence with a complete UI/UX overhaul and hardened RL-driven profit extraction.
 
 ### Phase 42: Model Performance Comparison
-- **Goal**: Compare vllm-mlx output performance for Gemma 4 26B A4B MoE vs NVIDIA Nemotron 3 Nano 4-bit MLX.
+- **Goal**: Compare vllm-mlx output performance for Gemma 2 27B vs Llama-3.1-Nemotron-70B.
 - **Success Criteria**:
     - Benchmark report on latency, throughput, and reasoning quality.
     - Final model selection for the milestone.
 - **Requirements**: INTEL-01 (Partial), PERF-01 (Partial)
-- **Status**: ✅ COMPLETED (2026-04-10)
+- **Status**: ACTIVE
 
 ### Phase 43: Local Intelligence & Serving (Core Engine)
 - **Goal**: Establish stable local inference for the selected model with hardware-aware memory optimizations.
@@ -32,7 +32,7 @@ This document outlines the high-level phases for the Growin App, specifically op
     - "Thinking" Mode visibility enabled in chat interface.
     - System-level memory overrides configured (FP8 KV-cache) for M4 Pro (48GB).
 - **Requirements**: INTEL-01, INTEL-02, PERF-01, PERF-02, PERF-03
-- **Status**: ACTIVE
+- **Status**: PLANNED
 
 ### Phase 44: Sovereign UX & macOS 2026 Redesign
 - **Goal**: Complete architectural UI redesign following macOS Tahoe patterns and 120Hz ProMotion standards.
@@ -67,8 +67,8 @@ This document outlines the high-level phases for the Growin App, specifically op
 
 | Phase | Status | Plans | Complete |
 |-------|--------|-------|----------|
-| 42: Model Comparison | ✅ | 1/1 | 100% |
-| 43: Core Engine | 🏗 | 0/3 | 0% |
+| 42: Model Comparison | 🏗 | 1/1 | 0% |
+| 43: Core Engine | ⬜ | 0/3 | 0% |
 | 44: Sovereign UX | ⬜ | 0/3 | 0% |
 | 45: Adaptive Learning | ⬜ | 0/3 | 0% |
 | 46: Multimodal | ⬜ | 0/3 | 0% |
