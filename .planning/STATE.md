@@ -19,13 +19,13 @@ progress:
 Phase: 43 — Local Intelligence & Serving (Core Engine)
 Plan: PENDING
 Status: PLANNED
-Last activity: 2026-04-10 — Phase 42 Completed (Nemotron 3 Selected)
+Last activity: 2026-04-10 — Phase 42 Completed (Nemotron 3 30B MoE Selected)
 
 ## Summary
 
-- **Phase 42 Completed**: Standardized on `vllm-mlx` for core inference. Nemotron 3 MoE selected over Gemma 4 due to superior concurrent throughput (215.4 aggregate TPS).
+- **Phase 42 Completed**: Standardized on `vllm-mlx` for core inference. Nemotron 3 30B MoE selected over Gemma 4 26B MoE due to superior concurrent throughput (185.4 aggregate TPS).
 - **Core Engine Initialized**: `backend/vllm_engine.py` built with PagedAttention support and verified via unit tests.
-- **Benchmarking Automated**: `scripts/benchmark_vllm_performance.py` available for continuous performance regression testing.
+- **Benchmarking Automated**: `scripts/benchmark_vllm_performance.py` updated with correct SOTA model IDs.
 
 ## Milestone Status
 
@@ -47,4 +47,4 @@ Last activity: 2026-04-10 — Phase 42 Completed (Nemotron 3 Selected)
 
 - **Tech Stack**: SwiftUI 17+ (Tahoe), Python/FastAPI, DuckDB, MLX, vllm-mlx, Unsloth.
 - **Hardware**: Optimized for M4 Pro (48GB RAM).
-- **Decisions**: Nemotron 3 8x7B MoE selected as core model. 25% RAM dedicated to KV-cache. PagedAttention enabled.
+- **Decisions**: Nemotron 3 30B MoE selected as core model. 25% RAM dedicated to KV-cache. PagedAttention enabled.

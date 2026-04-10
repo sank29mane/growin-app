@@ -21,8 +21,8 @@ logger = logging.getLogger("benchmark")
 
 # Models for Phase 42 (HuggingFace MLX community versions)
 MODELS = [
-    "mlx-community/Gemma-4-9B-It-4bit",
-    "mlx-community/Nemotron-3-8x7B-Instruct-4bit"
+    "mlx-community/Gemma-4-26B-A4B-MoE-4bit",
+    "mlx-community/Nemotron-3-Nano-30B-A3B-MoE-4bit"
 ]
 
 # Benchmark prompts for diverse scenarios
