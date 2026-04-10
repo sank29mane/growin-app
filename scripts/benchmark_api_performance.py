@@ -14,8 +14,8 @@ logging.basicConfig(
 logger = logging.getLogger("api-benchmark")
 
 # Configuration
-API_URL = "http://127.0.0.1:8000/v1/chat/completions"
-MODEL_ID = "gemma-4"  # LM Studio often allows any string or uses the currently loaded model
+API_URL = "http://127.0.0.1:8001/v1/chat/completions"
+MODEL_ID = "nvidia-cascade"  # LM Studio often allows any string or uses the currently loaded model
 
 # Benchmark prompts
 PROMPTS = [
@@ -141,7 +141,7 @@ async def main():
     
     if seq_res and conc_res:
         logger.info("\n" + "="*50)
-        logger.info(f"BENCHMARK SUMMARY (LM Studio @ 127.0.0.1:8000)")
+        logger.info(f"BENCHMARK SUMMARY (LM Studio @ 127.0.0.1:8001)")
         logger.info("-" * 50)
         logger.info(f"Avg TTFT:      {seq_res['avg_ttft']:.3f}s")
         logger.info(f"Sequential TPS: {seq_res['avg_tps']:.1f}")

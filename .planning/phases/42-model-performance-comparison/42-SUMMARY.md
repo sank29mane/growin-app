@@ -2,10 +2,10 @@
 
 ## LIVE Server Benchmark Results (M4 Pro 48GB)
 
-- **Server**: http://127.0.0.1:8000/v1/chat/completions
-- **Avg TTFT**: 13.417s
-- **Sequential TPS**: 26.2
-- **Concurrent TPS**: 10.9
+- **Server**: http://127.0.0.1:8001/v1/chat/completions
+- **Avg TTFT**: 29.313s
+- **Sequential TPS**: 0.8
+- **Concurrent TPS**: 2.3
 
 ## Decision
 
