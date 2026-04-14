@@ -17,7 +17,10 @@
     "skip_discuss": true,
     "discuss_mode": "assumptions",
     "workstreams": {
-      "active": ["backend-core", "ui-sovereign"],
+      "active": [
+        "backend-core",
+        "ui-sovereign"
+      ],
       "cli_affinity": "backend-core",
       "ide_affinity": "ui-sovereign"
     }
@@ -30,5 +33,8 @@
     "workflow_guard": true,
     "research_questions": false,
     "model_adaptation": true
+  },
+  "graphify": {
+    "enabled": true
   }
 }
