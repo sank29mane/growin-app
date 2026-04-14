@@ -30,17 +30,16 @@ class RedditMicroAgent(BaseMicroAgent):
             )
 
         try:
-            from tavily import TavilyClient
+            from tavily import AsyncTavilyClient
             from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
             
-            tavily = TavilyClient(api_key=self.tavily_key)
+            tavily = AsyncTavilyClient(api_key=self.tavily_key)
             sentiment_analyzer = SentimentIntensityAnalyzer()
             
             # Non-blocking thread execution
             query = f"${ticker} stock discussion reddit wallstreetbets" if ticker != "MARKET" else "retail investor sentiment reddit wallstreetbets"
             
-            response = await asyncio.to_thread(
-                tavily.search,
+            response = await tavily.search(
                 query=query,
                 search_depth="advanced",
                 include_domains=["reddit.com"],
@@ -51,8 +50,7 @@ class RedditMicroAgent(BaseMicroAgent):
             
             if not results and ticker != "MARKET" and company_name and company_name != ticker:
                 query = f"{company_name} stock sentiment discussion reddit"
-                response = await asyncio.to_thread(
-                    tavily.search,
+                response = await tavily.search(
                     query=query,
                     search_depth="advanced",
                     include_domains=["reddit.com"],
