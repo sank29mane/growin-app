@@ -4,7 +4,8 @@ from decimal import Decimal
 from typing import Optional
 from .base_micro import BaseMicroAgent, MicroAgentResponse
 from utils.financial_math import create_decimal
-from resilience import get_circuit_breaker, CircuitBreakerOpenError, execute_with_breaker
+from resilience import get_circuit_breaker, CircuitBreakerOpenError
+from utils.http_client import agent_http_client
 
 logger = logging.getLogger(__name__)
 
@@ -19,13 +20,6 @@ class RedditMicroAgent(BaseMicroAgent):
     def __init__(self, tavily_key: Optional[str] = None):
         super().__init__("RedditAgent")
         self.tavily_key = tavily_key
-        self._client = None
-
-    def _get_client(self):
-        import httpx
-        if self._client is None:
-            self._client = httpx.AsyncClient()
-        return self._client
 
     async def fetch_data(self, ticker: str, company_name: str) -> MicroAgentResponse:
         """Fetch Reddit discussions asynchronously."""
@@ -57,14 +51,14 @@ class RedditMicroAgent(BaseMicroAgent):
                 "max_results": 5
             }
 
-            response = await execute_with_breaker(tavily_cb, "POST", url, headers=headers, json=payload)
+            response = await agent_http_client.execute_with_breaker(tavily_cb, "POST", url, headers=headers, json=payload)
             results = response.get('results', [])
 
 
             if not results and ticker != "MARKET" and company_name and company_name != ticker:
                 query = f"{company_name} stock sentiment discussion reddit"
                 payload["query"] = query
-                response = await execute_with_breaker(tavily_cb, "POST", url, headers=headers, json=payload)
+                response = await agent_http_client.execute_with_breaker(tavily_cb, "POST", url, headers=headers, json=payload)
                 results = response.get('results', [])
 
             if not results:

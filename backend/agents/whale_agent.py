@@ -10,6 +10,7 @@ from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from market_context import WhaleData
 from data_engine import get_alpaca_client
 from resilience import get_circuit_breaker, CircuitBreakerOpenError
+from utils.http_client import agent_http_client
 
 logger = logging.getLogger(__name__)
 
@@ -30,16 +31,8 @@ class WhaleAgent(BaseAgent):
         super().__init__(config)
         self.alpaca = get_alpaca_client()
         self.whale_threshold_usd = 50000.0 # Lowered from $250k for paper/IEX data density
-        self._client: Optional[httpx.AsyncClient] = None
         self._tavily_cb = get_circuit_breaker("tavily_whale", failure_threshold=3, recovery_timeout=30.0)
 
-    @property
-    def client(self) -> httpx.AsyncClient:
-        """Lazy-initialized persistent HTTP client."""
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=10.0)
-        return self._client
-        
     async def analyze(self, context: Dict[str, Any]) -> AgentResponse:
         """
         Analyze recent trades for a ticker to find large block orders.
@@ -230,8 +223,8 @@ class WhaleAgent(BaseAgent):
                 "max_results": 5
             }
             
-            response = await execute_with_breaker(
-                self._tavily_cb, "POST", url, client=self.client, 
+            response = await agent_http_client.execute_with_breaker(
+                self._tavily_cb, "POST", url,
                 headers=headers, json=payload
             )
 
