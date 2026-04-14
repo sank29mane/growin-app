@@ -25,6 +25,25 @@ def start_parent_watchdog(interval: float = 3.0):
         initial_ppid = os.getppid()
         
         def watchdog_loop():
+            # Attempt to use efficient event-driven wait on Linux 5.3+ / Python 3.9+
+            if hasattr(os, 'pidfd_open'):
+                import select
+                try:
+                    pidfd = os.pidfd_open(initial_ppid, 0)
+                    poll_obj = select.poll()
+                    poll_obj.register(pidfd, select.POLLIN)
+
+                    # Block efficiently until the parent process exits
+                    poll_obj.poll()
+
+                    sys.stderr.write(f"[ProcessGuard] Parent {initial_ppid} exited. Terminating.\n")
+                    os.close(pidfd)
+                    os._exit(0)
+                except Exception as e:
+                    sys.stderr.write(f"[ProcessGuard] pidfd_open failed, falling back to polling: {e}\n")
+                    # Fallthrough to polling loop
+
+            # Fallback to polling loop for systems without pidfd_open
             while True:
                 try:
                     current_ppid = os.getppid()
