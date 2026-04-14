@@ -39,6 +39,7 @@ struct AIChatPanelView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("New Chat")
+                    .accessibilityHint("Starts a new conversation")
                     .accessibilityAddTraits(.isButton)
                     .padding(16)
                 }
@@ -84,6 +85,7 @@ struct AIChatPanelView: View {
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel(filter.rawValue)
+                            .accessibilityHint("Filters chat context to \(filter.rawValue)")
                             .accessibilityAddTraits(selectedFilter == filter ? [.isSelected, .isButton] : [.isButton])
                         }
                         
@@ -119,6 +121,7 @@ struct AIChatPanelView: View {
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel("Send message")
+                        .accessibilityHint("Sends your message to the AI")
                         .accessibilityAddTraits(.isButton)
                         .disabled(chatInput.isEmpty)
                     }
@@ -223,6 +226,7 @@ private struct DiscoveryHomeView: View {
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel(tile.title)
+                        .accessibilityHint("Explores \(tile.title)")
                         .accessibilityAddTraits(.isButton)
                         // Simple hover mechanic simulator
                         .onHover { isHovered in
@@ -325,6 +329,7 @@ private struct InlineActionTile: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(title)
+        .accessibilityHint("Executes \(title) action")
         .accessibilityAddTraits(.isButton)
     }
 }
