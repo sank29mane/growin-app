@@ -101,7 +101,7 @@ class WhaleAgent(BaseAgent):
             
             # --- FALLBACK: Data Maximization via Volume Anomaly ---
             if not trades:
-                logger.info(f"WhaleAgent: No trades found for {ticker}. Attempting Volume Anomaly Detection...")
+                logger.info(f"WhaleAgent: No trades found for {ticker} Attempting Volume Anomaly Detection...")
                 return await self._analyze_via_volume_anomaly(ticker)
             
             from utils.currency_utils import DataSourceNormalizer
