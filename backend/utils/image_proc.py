@@ -3,6 +3,7 @@ import io
 import logging
 from typing import Tuple, Union, Optional
 from PIL import Image
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,25 @@ def prepare_vlm_image(
     except Exception as e:
         logger.error(f"Failed to prepare VLM image: {e}")
         raise
+
+async def prepare_vlm_image_async(
+    image_path_or_bytes: Union[str, bytes],
+    max_size: int = 1024,
+    normalize: bool = True
+) -> Tuple[Image.Image, Tuple[int, int]]:
+    """
+    Load, resize (preserving aspect ratio), and optionally normalize an image for VLM.
+    Offloads CPU/IO blocking operations to a thread pool for use in async web handlers.
+
+    Args:
+        image_path_or_bytes: Path to image file or raw bytes.
+        max_size: Maximum dimension (width or height) to resize to.
+        normalize: Whether to perform normalization (currently returns PIL Image).
+
+    Returns:
+        Tuple of (Processed PIL Image, Original dimensions (width, height))
+    """
+    return await asyncio.to_thread(prepare_vlm_image, image_path_or_bytes, max_size, normalize)
 
 def get_image_bytes(img: Image.Image, format: str = "JPEG") -> bytes:
     """Convert PIL Image to bytes."""
