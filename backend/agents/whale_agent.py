@@ -124,18 +124,20 @@ class WhaleAgent(BaseAgent):
             total_whale_volume = create_decimal(0)
             whale_threshold = create_decimal(self.whale_threshold_usd)
             
-            for t in decimal_trades:
-                p = t['p']
-                s = t['s']
+            for i, t_dec in enumerate(decimal_trades):
+                p = t_dec['p']
+                s = t_dec['s']
                 value = p * s
                 if value >= whale_threshold:
+                    t = trades[i]
                     large_trades.append({
                         "price": float(p),
                         "size": float(s),
                         "value_usd": float(value), # Frontend property is valueUsd but mapping handles it
                         "timestamp": str(t['t']),
                         "currency": ticker_currency,
-                        "is_whale": True
+                        "is_whale": True,
+                        "_dec_price": p # Keep decimal precision for average calc
                     })
                     large_decimal_prices.append(p)
                     total_whale_volume += value
@@ -156,6 +158,10 @@ class WhaleAgent(BaseAgent):
                     impact = "BULLISH"
                 elif whale_avg_price < avg_price * create_decimal(0.999):
                     impact = "BEARISH"
+
+            # Clean up internal keys for frontend response
+            for w in large_trades:
+                w.pop('_dec_price', None)
             
             # 6. Build Summary
             if len(large_trades) > 0:
@@ -310,7 +316,7 @@ class WhaleAgent(BaseAgent):
                 # High volume
                 c = create_decimal(last_bar['c'])
                 o = create_decimal(last_bar['o'])
-                price_change = float((c - o) / o) if o > 0 else 0.0
+                price_change = float((c - o) / o) if o > create_decimal(0) else 0.0
                 if price_change > 0:
                     impact = "BULLISH"
                     summary += "High volume on up day suggests institutional buying (Accumulation)."
