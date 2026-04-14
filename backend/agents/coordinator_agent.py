@@ -110,14 +110,6 @@ class CoordinatorAgent(BaseAgent):
                 logger.info(f"Ticker normalized (Resolver): {original_ticker} -> {ticker}")
             context["ticker"] = ticker
 
-        # COORDINATOR FIX: Robust normalization via Resolver
-        if ticker:
-            from utils.ticker_utils import TickerResolver
-            original_ticker = ticker
-            ticker = TickerResolver().normalize(ticker)
-            if ticker != original_ticker:
-                logger.info(f"Ticker normalized (Resolver): {original_ticker} -> {ticker}")
-
         # Initialize MarketContext
         market_context = MarketContext(
             query=query,
@@ -126,14 +118,6 @@ class CoordinatorAgent(BaseAgent):
             user_context=context.get("user_context", {}),
             reasoning=routing_decision.get("reasoning")
         )
-        
-        # COORDINATOR FIX: Robust normalization via Resolver
-        if ticker:
-            from utils.ticker_utils import TickerResolver
-            original_ticker = ticker
-            ticker = TickerResolver().normalize(ticker)
-            if ticker != original_ticker:
-                logger.info(f"Ticker normalized (Resolver): {original_ticker} -> {ticker}")
 
         # 2. Parallel Execution of Specialists
         tasks = []
@@ -497,12 +481,3 @@ class CoordinatorAgent(BaseAgent):
             from market_context import GoalData
             context.goal = GoalData(**data)
 
-    async def analyze(self, context: Dict[str, Any]) -> AgentResponse:
-        # Coordinator Agent acts as a router, `execute` is the main entry point.
-        # This satisfies the BaseAgent abstract method requirement.
-        return AgentResponse(
-            agent_name=self.config.name,
-            success=True,
-            data={},
-            latency_ms=0
-        )

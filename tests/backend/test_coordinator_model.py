@@ -17,7 +17,7 @@ logger = logging.getLogger("CoordinatorTest")
 async def test_coordinator_guardrails():
     logger.info("--- Testing Coordinator Agent Guardrails ---")
     try:
-        from coordinator_agent import CoordinatorAgent
+        from backend.agents.coordinator_agent import CoordinatorAgent
         
         # Mock MCP client
         class MockMCP:
