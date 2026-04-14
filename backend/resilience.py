@@ -289,3 +289,14 @@ async def with_timeout(coro, timeout: float, default: Any = None):
     except asyncio.TimeoutError:
         logger.warning(f"Operation timed out after {timeout}s")
         return default
+
+async def execute_with_breaker(breaker: CircuitBreaker, method: str, url: str, **kwargs) -> Any:
+    """Helper to execute an HTTP request using httpx through a circuit breaker."""
+    import httpx
+    async def _do_fetch():
+        async with httpx.AsyncClient(timeout=kwargs.pop('timeout', 10.0)) as client:
+            request_method = getattr(client, method.lower())
+            response = await request_method(url, **kwargs)
+            response.raise_for_status()
+            return response.json()
+    return await breaker.call(_do_fetch)

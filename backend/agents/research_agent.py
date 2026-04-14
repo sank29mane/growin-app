@@ -29,9 +29,6 @@ from utils.http_client import agent_http_client
 # Pre-compiled regex for fast title normalization
 TITLE_CLEAN_PATTERN = re.compile(r'[^a-zA-Z0-9]')
 
-# Pre-compiled regex for fast title normalization
-TITLE_CLEAN_PATTERN = re.compile(r'[^a-zA-Z0-9]')
-
 logger = logging.getLogger(__name__)
 
 newsdata_cb = get_circuit_breaker("newsdata", failure_threshold=3, recovery_timeout=30.0)
