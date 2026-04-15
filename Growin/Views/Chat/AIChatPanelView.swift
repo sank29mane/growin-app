@@ -4,25 +4,13 @@ import SwiftUI
 /// Incorporates rounded "Mac-native" bubble aesthetics while retaining the core dark-theme color palette (Brutal Chartreuse, Cyan).
 struct AIChatPanelView: View {
     @State private var chatInput: String = ""
-    @State private var selectedFilter: AccountFilter = .all
+    @State private var selectedAccountType: String = "all"
     
     // State to simulate switching into an active chat view vs the "Home" state
     @State private var hasStartedChat: Bool = false
+    @State private var isThinking: Bool = false
+    @State private var thinkingStatus: String = "Analyzing..."
     @State private var chatMessages: [ChatMessage] = []
-    
-    enum AccountFilter: String, CaseIterable {
-        case all = "All Accounts"
-        case isa = "ISA"
-        case invest = "Invest"
-        
-        var icon: String {
-            switch self {
-            case .all: return "globe.europe.africa.fill"
-            case .isa: return "star.fill"
-            case .invest: return "chart.line.uptrend.xyaxis"
-            }
-        }
-    }
     
     var body: some View {
         ZStack {
@@ -46,11 +34,21 @@ struct AIChatPanelView: View {
                 
                 if hasStartedChat {
                     // Active Chat Interface
-                    ActiveChatView(messages: $chatMessages)
+                    VStack(spacing: 0) {
+                        ActiveChatView(messages: $chatMessages, onSuggestionTap: { prompt in
+                            startChat(with: prompt)
+                        })
+                        
+                        if isThinking {
+                            EnhancedTypingIndicator(statusText: thinkingStatus)
+                                .padding(.horizontal, 24)
+                                .padding(.bottom, 12)
+                        }
+                    }
                 } else {
-                    // Discovery Home Dashboard
+                    // Discovery Home Dashboard (Welcome Screen)
                     Spacer()
-                    DiscoveryHomeView(onTileTap: { prompt in
+                    WelcomeView(onSuggestionTap: { prompt in
                         startChat(with: prompt)
                     })
                     Spacer()
@@ -58,37 +56,9 @@ struct AIChatPanelView: View {
                 
                 // Bottom Input Area
                 VStack(spacing: 12) {
-                    // Account Filter Pills
-                    HStack(spacing: 8) {
-                        ForEach(AccountFilter.allCases, id: \.self) { filter in
-                            Button(action: { selectedFilter = filter }) {
-                                HStack(spacing: 6) {
-                                    if filter == .all {
-                                        Image(systemName: "brain.filled.head.profile")
-                                            .font(.system(size: 10))
-                                    } else {
-                                        Image(systemName: filter.icon)
-                                            .font(.system(size: 10))
-                                    }
-                                    Text(filter.rawValue)
-                                        .font(SovereignTheme.Fonts.spaceGrotesk(size: 11, weight: .bold))
-                                }
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 8)
-                                .background(selectedFilter == filter ? Color.cyan : Color.white.opacity(0.05))
-                                .foregroundStyle(selectedFilter == filter ? Color.black : Color.brutalOffWhite)
-                                .clipShape(Capsule())
-                                .overlay(
-                                    Capsule()
-                                        .stroke(selectedFilter == filter ? Color.clear : Color.white.opacity(0.1), lineWidth: 1)
-                                )
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Filter by \(filter.rawValue)")
-                            .accessibilityHint("Filters chat context to \(filter.rawValue)")
-                            .accessibilityAddTraits(selectedFilter == filter ? [.isSelected, .isButton] : [.isButton])
-                        }
-                        
+                    // Account Picker
+                    HStack {
+                        AccountPicker(selectedAccount: $selectedAccountType)
                         Spacer()
                     }
                     .padding(.horizontal, 24)
@@ -140,102 +110,33 @@ struct AIChatPanelView: View {
     }
     
     private func startChat(with prompt: String) {
+        if prompt.isEmpty { return }
+        
         withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
             hasStartedChat = true
             chatMessages.append(ChatMessage(id: UUID(), text: prompt, isUser: true))
-            
-            // Mock System Response containing dynamic tiles/data
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                withAnimation {
-                    chatMessages.append(ChatMessage(id: UUID(), text: "Analyzing your portfolio strategy. Here's what I found for the selected instrument.", isUser: false, hasDynamicTiles: true))
-                }
-            }
+            isThinking = true
+            thinkingStatus = "Synthesizing strategy..."
         }
-    }
-}
-
-// MARK: - Discovery Home View
-private struct DiscoveryHomeView: View {
-    let onTileTap: (String) -> Void
-    
-    // Dynamic exploration prompts
-    let tiles: [(title: String, icon: String, iconColor: Color)] = [
-        ("Portfolio Overview", "chart.bar.xaxis", .green),
-        ("Tomorrow's Plays", "target", .red),
-        ("ISA Account", "chart.line.uptrend.xyaxis", .green),
-        ("Invest Account", "bag.fill", .yellow),
-        ("Risk Check", "exclamationmark.triangle.fill", .orange),
-        ("Market Outlook", "chart.xyaxis.line", .cyan)
-    ]
-    
-    let columns = [
-        GridItem(.flexible(), spacing: 16),
-        GridItem(.flexible(), spacing: 16)
-    ]
-    
-    var body: some View {
-        VStack(spacing: 40) {
-            // Hero Branding
-            VStack(spacing: 16) {
-                Image(systemName: "brain.head.profile")
-                    .font(.system(size: 56, weight: .light))
-                    .foregroundStyle(Color.cyan)
-                    .shadow(color: Color.cyan.opacity(0.6), radius: 20, x: 0, y: 0) // Glowing effect without purple
-                
-                VStack(spacing: 8) {
-                    Text("Growin AI Trading")
-                        .font(SovereignTheme.Fonts.notoSerif(size: 28, weight: .bold))
-                        .foregroundStyle(Color.brutalOffWhite)
-                    
-                    Text("Your intelligent trading companion")
-                        .font(SovereignTheme.Fonts.spaceGrotesk(size: 14))
-                        .foregroundStyle(Color.brutalOffWhite.opacity(0.5))
-                }
-            }
-            
-            VStack(spacing: 24) {
-                Text("What would you like to explore?")
-                    .font(SovereignTheme.Fonts.spaceGrotesk(size: 12, weight: .bold))
-                    .foregroundStyle(Color.brutalOffWhite.opacity(0.6))
-                
-                LazyVGrid(columns: columns, spacing: 16) {
-                    ForEach(tiles, id: \.title) { tile in
-                        Button(action: { onTileTap(tile.title) }) {
-                            HStack(spacing: 12) {
-                                Image(systemName: tile.icon)
-                                    .font(.system(size: 14))
-                                    .foregroundStyle(tile.iconColor)
-                                
-                                Text(tile.title)
-                                    .font(SovereignTheme.Fonts.spaceGrotesk(size: 14))
-                                    .foregroundStyle(Color.brutalOffWhite)
-                                
-                                Spacer()
-                                
-                                Image(systemName: "arrow.right.circle.fill")
-                                    .foregroundStyle(Color.white.opacity(0.2))
-                            }
-                            .padding(16)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color.white.opacity(0.04))
-                            .clipShape(RoundedRectangle(cornerRadius: 12)) // Mac-native rounded style
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 12)
-                                    .stroke(Color.white.opacity(0.08), lineWidth: 1)
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Explore \(tile.title)")
-                        .accessibilityHint("Starts a conversation about \(tile.title)")
-                        .accessibilityAddTraits(.isButton)
-                        // Simple hover mechanic simulator
-                        .onHover { isHovered in
-                            guard isHovered else { return }
-                            NSCursor.pointingHand.push()
-                        }
-                    }
-                }
-                .frame(maxWidth: 600)
+        
+        // Mock multi-step reasoning
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            thinkingStatus = "Analyzing technical signals..."
+        }
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) {
+            thinkingStatus = "Optimizing risk parameters..."
+        }
+        
+        // Mock System Response containing dynamic tiles/data
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.6) {
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                isThinking = false
+                let mockActions = [
+                    QuickAction(icon: "📊", label: "Position Details", prompt: "Show me position breakdown"),
+                    QuickAction(icon: "📈", label: "Full Analysis", prompt: "Perform deep dive for this asset")
+                ]
+                chatMessages.append(ChatMessage(id: UUID(), text: "Analyzing your portfolio strategy. Here's what I found for the selected instrument.", isUser: false, hasDynamicTiles: true, quickActions: mockActions))
             }
         }
     }
@@ -244,12 +145,13 @@ private struct DiscoveryHomeView: View {
 // MARK: - Active Chat View
 private struct ActiveChatView: View {
     @Binding var messages: [ChatMessage]
+    var onSuggestionTap: (String) -> Void
     
     var body: some View {
         ScrollView {
             LazyVStack(spacing: 24) {
                 ForEach(messages) { message in
-                    ChatMessageRow(message: message)
+                    ChatMessageRow(message: message, onSuggestionTap: onSuggestionTap)
                 }
             }
             .padding(24)
@@ -257,8 +159,10 @@ private struct ActiveChatView: View {
     }
 }
 
+
 private struct ChatMessageRow: View {
     let message: ChatMessage
+    var onSuggestionTap: (String) -> Void
     
     var body: some View {
         HStack(alignment: .bottom, spacing: 12) {
@@ -288,6 +192,10 @@ private struct ChatMessageRow: View {
                         .padding(16)
                         .background(Color.white.opacity(0.06))
                         .clipShape(RoundedCornerShape(radius: 16, corners: [.topRight, .bottomLeft, .bottomRight]))
+                    
+                    if let quickActions = message.quickActions, !quickActions.isEmpty {
+                        QuickActionButtons(actions: quickActions, onTap: onSuggestionTap)
+                    }
                     
                     if message.hasDynamicTiles {
                         // Example dynamic inline tile UI from the agent
@@ -341,6 +249,7 @@ struct ChatMessage: Identifiable {
     let text: String
     let isUser: Bool
     var hasDynamicTiles: Bool = false
+    var quickActions: [QuickAction]? = nil
 }
 
 private struct RoundedCornerShape: Shape {

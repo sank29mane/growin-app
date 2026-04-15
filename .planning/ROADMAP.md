@@ -17,28 +17,32 @@ This document outlines the high-level phases for the Growin App, specifically op
 ## 🚀 CURRENT MILESTONE: v5.0 MLX Intelligence & macOS 2026 UX Overhaul
 **Goal**: Transform Growin into a SOTA macOS 2026 native experience by integrating fine-tuned intelligence with a complete UI/UX overhaul and hardened RL-driven profit extraction.
 
-### Phase 42: Model Performance Comparison
+### Phase 42: Model Performance Comparison (COMPLETED)
 - **Goal**: Compare vllm-mlx output performance for Gemma 2 27B vs Llama-3.1-Nemotron-70B.
 - **Success Criteria**:
     - Benchmark report on latency, throughput, and reasoning quality.
     - Final model selection for the milestone.
 - **Requirements**: INTEL-01 (Partial), PERF-01 (Partial), UX-01, UX-02, UX-05
-- **Status**: ACTIVE
+- **Status**: COMPLETED
 
-**Plans:** 4 plans
+**Plans:** 2/4 plans complete
 - [x] 42-01-PLAN.md — Benchmark Environment Setup
 - [x] 42-02-PLAN.md — Model Quantization & Acquisition
 - [x] 42-03-PLAN.md — Performance Analysis & Selection
-- [ ] 42-04-PLAN.md — SOTA AI Chat Interface Enhancements
+- [x] 42-04-PLAN.md — SOTA AI Chat Interface Enhancements
 
 ### Phase 43: Local Intelligence & Serving (Core Engine)
-- **Goal**: Establish stable local inference for the selected model with hardware-aware memory optimizations.
+- **Goal**: Transition from vllm-mlx to vMLX with hardware-aware memory optimizations for M4 Pro (48GB).
 - **Success Criteria**:
-    - Selected model served locally via `vllm-mlx` with PagedAttention.
-    - "Thinking" Mode visibility enabled in chat interface.
-    - System-level memory overrides configured (FP8 KV-cache) for M4 Pro (48GB).
+    - vMLX server managed by backend with 28GB total memory limit.
+    - "Thinking" Mode visibility enabled via real-time telemetry.
+    - 12GB KV-cache configured via PagedAttention.
 - **Requirements**: INTEL-01, INTEL-02, PERF-01, PERF-02, PERF-03
-- **Status**: PLANNED
+- **Status**: ACTIVE
+
+**Plans:** 0/2 plans complete
+- [ ] 43-01-PLAN.md — Engine & Factory Transition
+- [ ] 43-02-PLAN.md — Telemetry, Thinking & Validation
 
 ### Phase 44: Sovereign UX & macOS 2026 Redesign
 - **Goal**: Complete architectural UI redesign following macOS Tahoe patterns and 120Hz ProMotion standards.
@@ -73,8 +77,8 @@ This document outlines the high-level phases for the Growin App, specifically op
 
 | Phase | Status | Plans | Complete |
 |-------|--------|-------|----------|
-| 42: Model Comparison | 🏗 | 3/4 | 75% |
-| 43: Core Engine | ⬜ | 0/3 | 0% |
+| 42: Model Comparison | ✅ | 4/4 | 100% |
+| 43: Core Engine | 🏗 | 0/2 | 0% |
 | 44: Sovereign UX | ⬜ | 0/3 | 0% |
 | 45: Adaptive Learning | ⬜ | 0/3 | 0% |
 | 46: Multimodal | ⬜ | 0/3 | 0% |

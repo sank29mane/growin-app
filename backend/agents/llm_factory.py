@@ -268,11 +268,20 @@ class LLMFactory:
         """Create a vMLX provider instance using the VMLXProvider factory."""
         from model_config import get_model_info
         from status_manager import status_manager
+        from vmlx_manager import get_vmlx_engine
 
         info = get_model_info(model_name)
         # Default to Nemotron 3 30B MoE if no specific model requested for vmlx
         target_model = info.get("model_id") or "nemotron-3-30b-moe-jang-q4_k_m"
         
+        # SOTA 2026: Auto-start vMLX server if not running
+        engine = get_vmlx_engine()
+        if not await engine.check_health():
+            logger.info(f"LLM Factory: vMLX server not running. Attempting auto-start for {target_model}...")
+            # We don't await the full start here if it takes too long, 
+            # but start_server has its own internal timeout/retry
+            await engine.start_server(model_path=target_model)
+
         url = os.getenv("VMLX_BASE_URL", "http://127.0.0.1:8000/v1")
         
         logger.info(f"LLM Factory: Initializing vMLX provider at {url} for model {target_model}")

@@ -65,6 +65,22 @@ class MLXInferenceEngine:
         self.tokenizer = None
         self.current_model_path: Optional[str] = None
         self._loading = False  # Prevent concurrent loads
+        self._vmlx_url = os.getenv("VMLX_BASE_URL", "http://127.0.0.1:8000/v1")
+        self._use_vmlx = False
+        
+    async def _check_vmlx(self) -> bool:
+        """Check if vMLX server is active and reachable."""
+        import aiohttp
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{self._vmlx_url}/models", timeout=1) as resp:
+                    if resp.status == 200:
+                        self._use_vmlx = True
+                        return True
+        except Exception:
+            pass
+        self._use_vmlx = False
+        return False
         
     def load_model(self, model_path: str, quantize_8bit: bool = False) -> bool:
         """
@@ -167,20 +183,15 @@ class MLXInferenceEngine:
         stream: bool = False
     ) -> str:
         """
-        Generate text using loaded MLX model
-        
-        Args:
-            prompt: Input text prompt
-            max_tokens: Maximum tokens to generate
-            temperature: Sampling temperature (0.0 to 1.0)
-            top_p: Nucleus sampling parameter
-            stream: Whether to stream output (for future use)
-            
-        Returns:
-            Generated text
+        Generate text using loaded MLX model or vMLX backend
         """
+        # Prioritize vMLX for hardware-accelerated batch inference
+        if await self._check_vmlx():
+            logger.info("Using vMLX backend for generation")
+            return await self._generate_vmlx(prompt, max_tokens, temperature)
+
         if self.model is None or self.tokenizer is None:
-            raise RuntimeError("No model loaded. Call load_model() first.")
+            raise RuntimeError("No model loaded and vMLX not available. Call load_model() first.")
         
         try:
             import asyncio
@@ -218,19 +229,16 @@ class MLXInferenceEngine:
         sampler: Optional[Any] = None
     ) -> AsyncIterator[str]:
         """
-        Stream generated text token by token
-        
-        Args:
-            prompt: Input text prompt
-            max_tokens: Maximum tokens to generate
-            temperature: Sampling temperature
-            top_p: Nucleus sampling parameter
-            
-        Yields:
-            Generated text chunks
+        Stream generated text token by token using loaded MLX model or vMLX backend
         """
+        if await self._check_vmlx():
+            logger.info("Using vMLX backend for streaming generation")
+            async for chunk in self._generate_vmlx_stream(prompt, max_tokens, temperature):
+                yield chunk
+            return
+
         if self.model is None or self.tokenizer is None:
-            raise RuntimeError("No model loaded. Call load_model() first.")
+            raise RuntimeError("No model loaded and vMLX not available. Call load_model() first.")
         
         try:
             from mlx_lm import stream_generate
@@ -282,11 +290,67 @@ class MLXInferenceEngine:
         """Get engine status including memory info."""
         mem_info = get_memory_info()
         return {
-            "model_loaded": self.is_loaded(),
-            "current_model": self.current_model_path,
+            "model_loaded": self.is_loaded() or self._use_vmlx,
+            "current_model": self.current_model_path or ("vMLX Active" if self._use_vmlx else None),
             "memory_used_percent": mem_info["used_percent"],
-            "memory_warning": mem_info["warning"]
+            "memory_warning": mem_info["warning"],
+            "backend": "vmlx" if self._use_vmlx else "mlx_lm"
         }
+
+    async def _generate_vmlx(self, prompt: str, max_tokens: int, temperature: float) -> str:
+        """Internal helper for vMLX generation (OpenAI format)."""
+        import aiohttp
+        try:
+            async with aiohttp.ClientSession() as session:
+                payload = {
+                    "model": self.current_model_path or "default",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": max_tokens,
+                    "temperature": temperature
+                }
+                async with session.post(f"{self._vmlx_url}/chat/completions", json=payload) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data["choices"][0]["message"]["content"]
+                    else:
+                        error_text = await resp.text()
+                        logger.error(f"vMLX generation failed: {error_text}")
+                        raise RuntimeError(f"vMLX error: {resp.status}")
+        except Exception as e:
+            logger.error(f"vMLX connection error: {e}")
+            raise
+
+    async def _generate_vmlx_stream(self, prompt: str, max_tokens: int, temperature: float) -> AsyncIterator[str]:
+        """Internal helper for vMLX streaming generation."""
+        import aiohttp
+        import json
+        try:
+            async with aiohttp.ClientSession() as session:
+                payload = {
+                    "model": self.current_model_path or "default",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "stream": True
+                }
+                async with session.post(f"{self._vmlx_url}/chat/completions", json=payload) as resp:
+                    if resp.status != 200:
+                        raise RuntimeError(f"vMLX stream error: {resp.status}")
+                        
+                    async for line in resp.content:
+                        line_text = line.decode('utf-8').strip()
+                        if line_text.startswith("data: "):
+                            if line_text == "data: [DONE]":
+                                break
+                            try:
+                                chunk = json.loads(line_text[6:])
+                                if content := chunk["choices"][0].get("delta", {}).get("content"):
+                                    yield content
+                            except Exception:
+                                continue
+        except Exception as e:
+            logger.error(f"vMLX streaming connection error: {e}")
+            raise
 
 
 # Global singleton instance

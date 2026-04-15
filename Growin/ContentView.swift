@@ -3,6 +3,7 @@ import SwiftUI
 struct ContentView: View {
     @State private var selection: SidebarItem? = .alphaCommand
     @State private var showSettings = false
+    @State private var showChat = true
     @State private var backendStatus = BackendStatusViewModel.shared
     
     // Persistent State Objects (Hoisted)
@@ -10,6 +11,7 @@ struct ContentView: View {
     @State private var portfolioViewModel = PortfolioViewModel()
     @State private var dashboardViewModel = DashboardViewModel()
     @State private var goalPlannerViewModel = GoalPlannerViewModel()
+    @State private var chatViewModel = ChatViewModel()
     
     enum SidebarItem: String, CaseIterable, Identifiable {
         case alphaCommand = "Alpha Command"
@@ -18,6 +20,7 @@ struct ContentView: View {
         case portfolio = "Portfolio"
         case charts = "Charts"
         case goalPlanner = "Goal Planner"
+        case chat = "AI Assistant"
         
         var id: String { rawValue }
         
@@ -29,6 +32,7 @@ struct ContentView: View {
             case .portfolio: return "chart.pie.fill"
             case .charts: return "chart.xyaxis.line"
             case .goalPlanner: return "target"
+            case .chat: return "bubble.left.and.bubble.right.fill"
             }
         }
         
@@ -40,6 +44,7 @@ struct ContentView: View {
             case .portfolio: return .Persona.analyst
             case .charts: return .Persona.trader
             case .goalPlanner: return .Persona.risk
+            case .chat: return .cyan
             }
         }
     }
@@ -63,6 +68,10 @@ struct ContentView: View {
                         SidebarRow(item: .charts, selection: selection)
                         SidebarRow(item: .goalPlanner, selection: selection)
                     }
+                    
+                    Section("Communication") {
+                        SidebarRow(item: .chat, selection: selection)
+                    }
                 }
                 .navigationTitle("GROWIN ALPHA")
                 .listStyle(.sidebar)
@@ -82,15 +91,37 @@ struct ContentView: View {
                 }
                 .toolbar {
                     ToolbarItem(placement: .primaryAction) {
-                        settingsButton
+                        HStack(spacing: 16) {
+                            chatToggleButton
+                            settingsButton
+                        }
                     }
                 }
+                .inspector(isPresented: $showChat) {
+                    ChatView(viewModel: chatViewModel)
+                        .inspectorColumnWidth(min: 300, ideal: 350, max: 450)
+                }
             }
-            .frame(minWidth: 1100, minHeight: 750)
+            .frame(minWidth: 1200, minHeight: 750)
             .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CreateChatFromChart"))) { _ in
                 DispatchQueue.main.async {
                     withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-                        selection = .alphaCommand
+                        showChat = true
+                    }
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("NavigateToTab"))) { notification in
+                if let tab = notification.userInfo?["tab"] as? String {
+                    DispatchQueue.main.async {
+                        withAnimation(.spring()) {
+                            switch tab {
+                            case "portfolio": selection = .portfolio
+                            case "chat": 
+                                selection = .chat
+                                showChat = true
+                            default: break
+                            }
+                        }
                     }
                 }
             }
@@ -122,7 +153,17 @@ struct ContentView: View {
             ChartsView()
         case .goalPlanner:
             GoalPlannerView(viewModel: goalPlannerViewModel)
+        case .chat:
+            ChatView(viewModel: chatViewModel)
         }
+    }
+    
+    private var chatToggleButton: some View {
+        Button(action: { withAnimation(.spring()) { showChat.toggle() } }) {
+            Image(systemName: "sidebar.right")
+                .foregroundStyle(showChat ? Color.brutalChartreuse : Color.brutalOffWhite)
+        }
+        .help("Toggle AI Assistant")
     }
     
     private var settingsButton: some View {

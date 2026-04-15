@@ -381,6 +381,32 @@ struct PortfolioData: Codable, Equatable {
     }
 }
 
+struct QuickAction: Codable, Identifiable, Equatable {
+    let id: UUID
+    let icon: String
+    let label: String
+    let prompt: String
+    
+    init(id: UUID = UUID(), icon: String, label: String, prompt: String) {
+        self.id = id
+        self.icon = icon
+        self.label = label
+        self.prompt = prompt
+    }
+    
+    enum CodingKeys: String, CodingKey {
+        case icon, label, prompt
+    }
+    
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = UUID()
+        self.icon = try container.decode(String.self, forKey: .icon)
+        self.label = try container.decode(String.self, forKey: .label)
+        self.prompt = try container.decode(String.self, forKey: .prompt)
+    }
+}
+
 struct ChatMessageModel: Codable, Identifiable, Equatable {
     var id: String { messageId }
     let messageId: String
@@ -392,6 +418,7 @@ struct ChatMessageModel: Codable, Identifiable, Equatable {
     let agentName: String?
     let modelName: String?
     let data: MarketContextData?
+    let quickActions: [QuickAction]?
 
     enum CodingKeys: String, CodingKey {
         case messageId = "message_id"
@@ -401,6 +428,7 @@ struct ChatMessageModel: Codable, Identifiable, Equatable {
         case agentName = "agent_name"
         case modelName = "model_name"
         case data
+        case quickActions = "quick_actions"
     }
 
     var isUser: Bool { role == "user" }
@@ -528,6 +556,7 @@ struct ChatResponse: Codable {
     let timestamp: String
     let toolCalls: [ToolCall]?
     let data: MarketContextData?
+    let quickActions: [QuickAction]?
     
     enum CodingKeys: String, CodingKey {
         case response
@@ -535,6 +564,7 @@ struct ChatResponse: Codable {
         case agent, timestamp
         case toolCalls = "tool_calls"
         case data
+        case quickActions = "quick_actions"
     }
 }
 

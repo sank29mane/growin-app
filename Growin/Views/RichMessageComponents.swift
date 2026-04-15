@@ -678,6 +678,41 @@ struct MetricItem: View {
     }
 }
 
+struct QuickActionButtons: View {
+    let actions: [QuickAction]
+    let onTap: (String) -> Void
+    
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(actions) { action in
+                    Button(action: { onTap(action.prompt) }) {
+                        HStack(spacing: 6) {
+                            Text(action.icon)
+                                .font(.system(size: 12))
+                            Text(action.label)
+                                .font(SovereignTheme.Fonts.spaceGrotesk(size: 11, weight: .bold))
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(
+                            Capsule()
+                                .fill(Color.cyan.opacity(0.15))
+                        )
+                        .overlay(
+                            Capsule()
+                                .stroke(Color.cyan.opacity(0.3), lineWidth: 1)
+                        )
+                        .foregroundStyle(Color.cyan)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(.top, 8)
+    }
+}
+
 struct TradeProposalCard: View, Equatable {
     static func == (lhs: TradeProposalCard, rhs: TradeProposalCard) -> Bool {
         return lhs.proposal == rhs.proposal

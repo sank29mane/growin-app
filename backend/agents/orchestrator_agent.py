@@ -335,6 +335,7 @@ Query: "{clean_query}"
         
         decision_result = await self.decision_engine.make_decision(context, full_query)
         recommendation = decision_result.get("content", "")
+        quick_actions = decision_result.get("quick_actions", [])
         
         # SOTA 2026 Phase 30: Emit Rebalance Proposal for HITL UI
         if "pending_proposal" in context.user_context:
@@ -351,7 +352,12 @@ Query: "{clean_query}"
 
         # --- SOTA 2026: ADVERSARIAL DEBATE LOOP ---
         if context.intent in ["conversational", "educational"]:
-            return {"content": recommendation, "response_id": decision_result.get("response_id"), "context": context}
+            return {
+                "content": recommendation, 
+                "response_id": decision_result.get("response_id"), 
+                "context": context,
+                "quick_actions": quick_actions
+            }
 
 
         debate_trace = []
@@ -431,7 +437,8 @@ Query: "{clean_query}"
         return {
             "content": recommendation,
             "response_id": decision_result.get("response_id"),
-            "context": context
+            "context": context,
+            "quick_actions": quick_actions
         }
 
     async def _run_specialist(self, agent: BaseAgent, input_data: Dict[str, Any], suppress_events: bool = False) -> AgentResponse:
@@ -619,5 +626,6 @@ Query: "{clean_query}"
         from pydantic import BaseModel
         class FinalEvent(BaseModel):
             market_context: MarketContext
+            quick_actions: List[Dict[str, str]]
         
-        yield FinalEvent(market_context=context)
+        yield FinalEvent(market_context=context, quick_actions=self.decision_engine._get_quick_actions(context))

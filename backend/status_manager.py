@@ -26,6 +26,7 @@ class StatusManager:
                     "whale_agent": {"status": "ready", "detail": "Monitoring trades", "model": "Alpaca Trades", "timestamp": datetime.now().isoformat()},
                     "lmstudio": {"status": "ready", "detail": "Idle", "model": "LM Studio v1", "timestamp": datetime.now().isoformat()},
                 }
+                cls._instance.reasoning_steps = {} # step_id -> {name, content, status}
             return cls._instance
 
     def set_status(self, agent: str, status: str, detail: Optional[str] = None, model: Optional[str] = None):
@@ -46,6 +47,29 @@ class StatusManager:
                 self.statuses[agent].update(update_data)
             else:
                 self.statuses[agent] = update_data
+
+    def add_reasoning_step(self, step_id: str, name: str, status: str = "working", content: str = ""):
+        """Add or update a real-time reasoning step for UI display."""
+        with self._lock:
+            self.reasoning_steps[step_id] = {
+                "name": name,
+                "status": status,
+                "content": content,
+                "timestamp": datetime.now().isoformat()
+            }
+            # SOTA: In a real system, this would trigger an SSE push or WebSocket event
+            logger = logging.getLogger(__name__)
+            logger.debug(f"Reasoning Step [{step_id}]: {name} - {status}")
+
+    def get_reasoning_steps(self) -> Dict:
+        """Get all active reasoning steps."""
+        with self._lock:
+            return self.reasoning_steps.copy()
+
+    def clear_reasoning_steps(self):
+        """Clear the reasoning steps buffer."""
+        with self._lock:
+            self.reasoning_steps = {}
 
     def get_all_statuses(self) -> Dict:
         """Get all agent statuses."""

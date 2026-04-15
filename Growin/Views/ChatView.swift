@@ -320,7 +320,11 @@ struct ChatBubble: View, Equatable {
                                 ToolExecutionBlock(toolCalls: toolCalls)
                             }
                             
-                            if !message.content.contains("Quick Actions") && !message.content.isEmpty {
+                            if let actions = message.quickActions, !actions.isEmpty {
+                                QuickActionButtons(actions: actions) { prompt in
+                                    onQuickAction?(prompt)
+                                }
+                            } else if !message.content.contains("Quick Actions") && !message.content.isEmpty {
                                 QuickActionButtons(actions: defaultQuickActions) { prompt in
                                     onQuickAction?(prompt)
                                 }
