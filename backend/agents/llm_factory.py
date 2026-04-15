@@ -9,6 +9,27 @@ from typing import Dict
 
 logger = logging.getLogger(__name__)
 
+class VMLXProvider:
+    """Helper to configure vMLX specific ChatOpenAI instances."""
+    @staticmethod
+    def create(model_name: str, url: str, **kwargs):
+        from langchain_openai import ChatOpenAI
+        
+        # SOTA: Hardware-aware default headers for vMLX
+        default_headers = {
+            "X-VMLX-Cache-Strategy": "paged",
+            "X-VMLX-KV-Limit": "12GB",
+            "X-VMLX-Precision": "Q4_K_M"
+        }
+        
+        return ChatOpenAI(
+            model=model_name,
+            openai_api_base=url,
+            openai_api_key="vmlx-local-token",
+            default_headers=default_headers,
+            **kwargs
+        )
+
 class LLMFactory:
     """Factory for creating LLM instances based on model name and configuration."""
 
@@ -38,10 +59,15 @@ class LLMFactory:
         try:
             llm_instance = None
             
-            # 2. Native MLX Priority (Apple Silicon NPU/M4 Optimization)
-            # User requested NOT to load LLM on ANE/NPU implicitly.
-            # Using standard provider logic below.
-            
+            # 1. vMLX Priority (High-Performance Apple Silicon Engine)
+            # Use vmlx for 'native-mlx', 'jang' models, or if provider is explicitly 'vmlx'
+            is_vmlx_hint = "native-mlx" in model_lower or "jang" in model_lower
+            if provider == "vmlx" or (not provider and is_vmlx_hint):
+                try:
+                    llm_instance = await LLMFactory._create_vmlx(model_name)
+                except Exception as vmlx_err:
+                    logger.warning(f"LLM Factory: vMLX creation failed for {model_name}: {vmlx_err}")
+
             if not llm_instance:
                 is_lmstudio_hint = "lmstudio" in model_lower or "nemotron" in model_lower
                 if provider == "lmstudio" or (not provider and is_lmstudio_hint):
@@ -236,3 +262,39 @@ class LLMFactory:
 
         status_manager.set_status("lmstudio", "error", "No models available")
         raise ValueError("No models available in LM Studio")
+
+    @staticmethod
+    async def _create_vmlx(model_name: str):
+        """Create a vMLX provider instance using the VMLXProvider factory."""
+        from model_config import get_model_info
+        from status_manager import status_manager
+
+        info = get_model_info(model_name)
+        # Default to Nemotron 3 30B MoE if no specific model requested for vmlx
+        target_model = info.get("model_id") or "nemotron-3-30b-moe-jang-q4_k_m"
+        
+        url = os.getenv("VMLX_BASE_URL", "http://127.0.0.1:8000/v1")
+        
+        logger.info(f"LLM Factory: Initializing vMLX provider at {url} for model {target_model}")
+        
+        # Use our new VMLXProvider to ensure spec compliance
+        client = VMLXProvider.create(
+            model_name=target_model,
+            url=url,
+            temperature=0.1,
+            max_tokens=4096,
+            streaming=True
+        )
+        
+        # Verify connection (vmlx server must be running)
+        import aiohttp
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{url}/models", timeout=2) as resp:
+                    if resp.status == 200:
+                        status_manager.set_status("vmlx", "ready", f"vMLX Active: {target_model}")
+                        return client
+        except Exception:
+            logger.warning("LLM Factory: vMLX server not reachable at heartbeat check")
+            
+        return client
