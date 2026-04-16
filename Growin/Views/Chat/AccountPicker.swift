@@ -40,6 +40,9 @@ struct AccountPicker: View {
                     )
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("\(account) Account")
+                .accessibilityHint("Switches chat context to the \(account) account")
+                .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : [.isButton])
             }
         }
         .padding(.vertical, 8)
