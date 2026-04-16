@@ -84,6 +84,7 @@ struct SettingsOverlay: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Close Preferences")
             .accessibilityHint("Dismisses the preferences overlay")
+            .accessibilityAddTraits(.isButton)
         }
         .padding(24)
     }
@@ -113,7 +114,7 @@ struct SettingsOverlay: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(title)
         .accessibilityHint("Switches preference tab to \(title)")
-        .accessibilityAddTraits(selectedTab == index ? [.isSelected] : [])
+        .accessibilityAddTraits(selectedTab == index ? [.isSelected, .isButton] : [.isButton])
     }
 }
 

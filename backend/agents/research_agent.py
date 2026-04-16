@@ -23,10 +23,8 @@ import asyncio
 import re
 from pydantic import BaseModel, Field
 from magentic import prompt as mag_prompt
-from resilience import get_circuit_breaker, CircuitBreakerOpenError, execute_with_breaker
-
-# Pre-compiled regex for fast title normalization
-TITLE_CLEAN_PATTERN = re.compile(r'[^a-zA-Z0-9]')
+from resilience import get_circuit_breaker, CircuitBreakerOpenError
+from utils.http_client import agent_http_client
 
 # Pre-compiled regex for fast title normalization
 TITLE_CLEAN_PATTERN = re.compile(r'[^a-zA-Z0-9]')
@@ -83,7 +81,6 @@ class ResearchAgent(BaseAgent):
                 cache_ttl=600  # Cache news for 10 minutes
             )
         super().__init__(config)
-        self._client = None
         
         # Helper to validate keys (not placeholders)
         def is_valid(k):
@@ -110,12 +107,6 @@ class ResearchAgent(BaseAgent):
 
         # Cache for prompt template
         self._prompt_template = None
-
-    def _get_client(self):
-        import httpx
-        if self._client is None:
-            self._client = httpx.AsyncClient()
-        return self._client
 
     async def analyze(self, context: Dict[str, Any]) -> AgentResponse:
         """
@@ -187,8 +178,28 @@ class ResearchAgent(BaseAgent):
             
             # Deduplicate and analyze
             unique_articles = self._deduplicate_articles(articles)
-            sentiments, weights, rich_articles, headlines, sources = self._analyze_sentiment(unique_articles, sentiment_analyzer)
             
+            chunk_size = 5
+            chunks = [unique_articles[i:i+chunk_size] for i in range(0, len(unique_articles), chunk_size)]
+
+            chunk_results = await asyncio.gather(*[
+                asyncio.to_thread(self._analyze_sentiment, chunk, sentiment_analyzer)
+                for chunk in chunks
+            ])
+
+            sentiments = []
+            weights = []
+            rich_articles = []
+            headlines = []
+            sources = []
+
+            for s, w, ra, hl, src in chunk_results:
+                sentiments.extend(s)
+                weights.extend(w)
+                rich_articles.extend(ra)
+                headlines.extend(hl)
+                sources.extend(src)
+
             # Calculate weighted average sentiment
             if sentiments:
                 total_weighted_sentiment = sum(s for s in sentiments) # already multiplied by weight in _analyze
@@ -280,7 +291,7 @@ class ResearchAgent(BaseAgent):
                     "category": "business"
                 }
                 try:
-                    data = await execute_with_breaker(
+                    data = await agent_http_client.execute_with_breaker(
                         newsdata_cb, "GET", "https://newsdata.io/api/1/latest",
                         params=params, timeout=10.0, raise_for_status=False
                     )
@@ -311,7 +322,7 @@ class ResearchAgent(BaseAgent):
                 }
 
                 try:
-                    data = await execute_with_breaker(
+                    data = await agent_http_client.execute_with_breaker(
                         tavily_cb, "POST", url, headers=headers, json=payload
                     )
 
@@ -353,7 +364,7 @@ class ResearchAgent(BaseAgent):
                 "apiKey": self.newsapi_key
             }
             
-            data = await execute_with_breaker(newsapi_cb, "GET", url, params=params)
+            data = await agent_http_client.execute_with_breaker(newsapi_cb, "GET", url, params=params)
 
             return data.get('articles', [])
         except CircuitBreakerOpenError:
@@ -383,7 +394,7 @@ class ResearchAgent(BaseAgent):
                 "max_results": 8
             }
             
-            response = await execute_with_breaker(tavily_cb, "POST", url, headers=headers, json=payload)
+            response = await agent_http_client.execute_with_breaker(tavily_cb, "POST", url, headers=headers, json=payload)
 
             
             # Normalize to common format
@@ -450,7 +461,7 @@ class ResearchAgent(BaseAgent):
                      # Add 'in' for India support if requested, but architecture mandates US/UK partitioning
                      if "NSE" in ticker.upper(): params["country"] = "in"
 
-            data = await execute_with_breaker(newsdata_cb, "GET", url, params=params, timeout=10.0)
+            data = await agent_http_client.execute_with_breaker(newsdata_cb, "GET", url, params=params, timeout=10.0)
 
             
             # Normalize to common format

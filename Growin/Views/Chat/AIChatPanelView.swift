@@ -38,6 +38,9 @@ struct AIChatPanelView: View {
                             .foregroundStyle(Color.brutalOffWhite.opacity(0.6))
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("New Chat")
+                    .accessibilityHint("Clears current conversation and starts a new subject")
+                    .accessibilityAddTraits(.isButton)
                     .padding(16)
                 }
                 
@@ -81,6 +84,9 @@ struct AIChatPanelView: View {
                                 )
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel("Filter by \(filter.rawValue)")
+                            .accessibilityHint("Filters chat context to \(filter.rawValue)")
+                            .accessibilityAddTraits(selectedFilter == filter ? [.isSelected, .isButton] : [.isButton])
                         }
                         
                         Spacer()
@@ -114,6 +120,9 @@ struct AIChatPanelView: View {
                                 .clipShape(Circle())
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel("Send Message")
+                        .accessibilityHint("Sends the drafted message to the AI")
+                        .accessibilityAddTraits(.isButton)
                         .disabled(chatInput.isEmpty)
                     }
                     .padding(16)
@@ -216,6 +225,9 @@ private struct DiscoveryHomeView: View {
                             )
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel("Explore \(tile.title)")
+                        .accessibilityHint("Starts a conversation about \(tile.title)")
+                        .accessibilityAddTraits(.isButton)
                         // Simple hover mechanic simulator
                         .onHover { isHovered in
                             guard isHovered else { return }
@@ -316,6 +328,9 @@ private struct InlineActionTile: View {
             )
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("\(title) Action")
+        .accessibilityHint("Executes the \(title) action")
+        .accessibilityAddTraits(.isButton)
     }
 }
 
