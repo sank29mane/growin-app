@@ -48,3 +48,6 @@
 ## 2026-03-31 - Sovereign UI `AIChatPanelView` Button Accessibility
 **Learning:** Found multiple instances of custom styling (e.g., chat message Send button, Discover Tiles) in `AIChatPanelView` that used `.buttonStyle(.plain)` to suppress native visual button chrome. This entirely removed standard accessibility boundaries and traits, rendering them silent or functionally meaningless to VoiceOver users.
 **Action:** Consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to any `Button` configured with `.buttonStyle(.plain)`, including using dynamically injected parameters like `filter.rawValue` or `tile.title` to ensure the context of the button remains available for non-visual navigation.
+## 2026-04-16 - SwiftUI `.buttonStyle(.plain)` Accessiblity Strip
+**Learning:** Found that applying `.buttonStyle(.plain)` strips out standard VoiceOver traits for UI components that act as collapsible elements (like "INTELLIGENCE TRACE") or utility buttons (like "RETRY PROTOCOL").
+**Action:** Consistently explicitly add `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to UI components functioning as custom buttons to ensure proper screen reader announcements as an actionable button.
