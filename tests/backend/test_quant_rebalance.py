@@ -16,7 +16,7 @@ class TestQuantEngineRebalance(unittest.TestCase):
         total = 1000.0
 
         result = engine.analyze_rebalancing_opportunity(current, target, total)
-        self.assertEqual(result["rebalance_actions"][0]["target_pct"], Decimal("0.01"))
+        self.assertEqual(result["deviations_pct"]["AAPL"], 1.0)
 
         # Test Case 2: Target > 1 without % (50 -> 0.5)
         current = {"AAPL": "0%"}
@@ -24,7 +24,7 @@ class TestQuantEngineRebalance(unittest.TestCase):
         total = 1000.0
 
         result = engine.analyze_rebalancing_opportunity(current, target, total)
-        self.assertEqual(result["rebalance_actions"][0]["target_pct"], Decimal("0.5"))
+        self.assertEqual(result["deviations_pct"]["AAPL"], 50.0)
 
         # Test Case 3: Target < 1 without % (0.5 -> 0.5)
         current = {"AAPL": "0%"}
@@ -32,7 +32,7 @@ class TestQuantEngineRebalance(unittest.TestCase):
         total = 1000.0
 
         result = engine.analyze_rebalancing_opportunity(current, target, total)
-        self.assertEqual(result["rebalance_actions"][0]["target_pct"], Decimal("0.5"))
+        self.assertEqual(result["deviations_pct"]["AAPL"], 50.0)
 
 if __name__ == '__main__':
     unittest.main()
