@@ -5,6 +5,7 @@ import json
 import threading
 import asyncio
 import os
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -253,18 +254,21 @@ class AnalyticsDB:
             entry_price = entry_row[0]
 
             # 3. Fetch future prices (1d and 5d forward)
-            # DuckDB allows powerful interval arithmetic
+            dt_timestamp = datetime.fromisoformat(timestamp) if isinstance(timestamp, str) else timestamp
+            target_1d = dt_timestamp + timedelta(days=1)
+            target_5d = dt_timestamp + timedelta(days=5)
+
             price_1d = self.execute("""
                 SELECT close FROM ohlcv_history
-                WHERE ticker = ? AND timestamp >= ? + INTERVAL 1 DAY
+                WHERE ticker = ? AND timestamp >= ?
                 ORDER BY timestamp ASC LIMIT 1
-            """, (ticker, timestamp)).fetchone()
+            """, (ticker, target_1d)).fetchone()
 
             price_5d = self.execute("""
                 SELECT close FROM ohlcv_history
-                WHERE ticker = ? AND timestamp >= ? + INTERVAL 5 DAY
+                WHERE ticker = ? AND timestamp >= ?
                 ORDER BY timestamp ASC LIMIT 1
-            """, (ticker, timestamp)).fetchone()
+            """, (ticker, target_5d)).fetchone()
 
             return_1d = (price_1d[0] - entry_price) / entry_price if price_1d else None
             return_5d = (price_5d[0] - entry_price) / entry_price if price_5d else None
@@ -397,6 +401,7 @@ class AnalyticsDB:
             DataFrame with aggregated statistics
         """
         try:
+            target_date = datetime.now(timezone.utc) - timedelta(days=int(window_days))
             # Sentinel: Use parameterized query for interval to prevent SQL injection
             result = self.execute("""
                 SELECT 
@@ -412,9 +417,9 @@ class AnalyticsDB:
                     (MAX(close) - MIN(close)) / MIN(close) * 100 as price_change_pct
                 FROM ohlcv_history
                 WHERE ticker = ? 
-                  AND timestamp >= CURRENT_TIMESTAMP - (INTERVAL 1 DAY * ?)
+                  AND timestamp >= ?
                 GROUP BY ticker
-            """, (ticker, int(window_days))).fetchdf()
+            """, (ticker, target_date)).fetchdf()
             
             return result if not result.empty else None
             
@@ -474,6 +479,7 @@ class AnalyticsDB:
             Annualized volatility (standard deviation of returns)
         """
         try:
+            target_date = datetime.now(timezone.utc) - timedelta(days=int(window_days))
             # Sentinel: Use parameterized query for interval to prevent SQL injection
             result = self.execute("""
                 WITH daily_returns AS (
@@ -485,14 +491,14 @@ class AnalyticsDB:
                             LAG(close) OVER (ORDER BY timestamp) as daily_return
                     FROM ohlcv_history
                     WHERE ticker = ?
-                      AND timestamp >= CURRENT_TIMESTAMP - (INTERVAL 1 DAY * ?)
+                      AND timestamp >= ?
                     ORDER BY timestamp
                 )
                 SELECT 
                     STDDEV(daily_return) * SQRT(252) as annualized_volatility
                 FROM daily_returns
                 WHERE daily_return IS NOT NULL
-            """, (ticker, int(window_days))).fetchone()
+            """, (ticker, target_date)).fetchone()
             
             return result[0] if result and result[0] is not None else None
             
@@ -516,6 +522,7 @@ class AnalyticsDB:
             Trend description: 'bullish', 'bearish', or 'neutral'
         """
         try:
+            target_date = datetime.now(timezone.utc) - timedelta(days=int(window_days))
             # Sentinel: Use parameterized query for interval to prevent SQL injection
             result = self.execute("""
                 WITH price_data AS (
@@ -525,13 +532,13 @@ class AnalyticsDB:
                         COUNT(*) OVER () as total
                     FROM ohlcv_history
                     WHERE ticker = ?
-                      AND timestamp >= CURRENT_TIMESTAMP - (INTERVAL 1 DAY * ?)
+                      AND timestamp >= ?
                 )
                 SELECT 
                     AVG(CASE WHEN rn <= total/2 THEN close END) as first_half_avg,
                     AVG(CASE WHEN rn > total/2 THEN close END) as second_half_avg
                 FROM price_data
-            """, (ticker, int(window_days))).fetchone()
+            """, (ticker, target_date)).fetchone()
             
             if not result or None in result:
                 return 'neutral'
