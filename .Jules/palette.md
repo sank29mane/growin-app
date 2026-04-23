@@ -48,3 +48,7 @@
 ## 2026-03-31 - Sovereign UI `AIChatPanelView` Button Accessibility
 **Learning:** Found multiple instances of custom styling (e.g., chat message Send button, Discover Tiles) in `AIChatPanelView` that used `.buttonStyle(.plain)` to suppress native visual button chrome. This entirely removed standard accessibility boundaries and traits, rendering them silent or functionally meaningless to VoiceOver users.
 **Action:** Consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to any `Button` configured with `.buttonStyle(.plain)`, including using dynamically injected parameters like `filter.rawValue` or `tile.title` to ensure the context of the button remains available for non-visual navigation.
+
+## 2026-04-23 - Welcome View Suggestion Chips missing accessibility traits
+**Learning:** The `WelcomeView` component creates Suggestion Chips using `Button` views configured with `.buttonStyle(.plain)`, which standardizes presentation but entirely strips standard VoiceOver attributes, leaving the buttons silent or un-actionable for screen readers.
+**Action:** When finding missing accessibility tags on custom styled components using `.buttonStyle(.plain)`, explicitly provide `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` using dynamic, context-aware content (like `item.title` and `item.prompt`).
