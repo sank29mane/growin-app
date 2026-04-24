@@ -312,6 +312,8 @@ struct MarkdownText: View {
                         )
                         })
                         .buttonStyle(.plain)
+                        .accessibilityLabel(showThoughts ? "Collapse Intelligence Trace" : "Expand Intelligence Trace")
+                        .accessibilityAddTraits(.isButton)
 
                         if showThoughts {
                         Text(thoughts)
@@ -422,6 +424,9 @@ struct ErrorCard: View {
                     .foregroundStyle(Color.growinRed)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Retry Protocol")
+                .accessibilityHint("Attempts to recover from the simulation error")
+                .accessibilityAddTraits(.isButton)
             }
         }
         .padding(.horizontal)
