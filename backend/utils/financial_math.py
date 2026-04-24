@@ -78,7 +78,7 @@ class TechnicalIndicators:
         """
         Calculates Relative Strength Index (RSI).
         """
-        data = np.array(prices)
+        data = np.array(prices, dtype=np.float64)
         if len(data) < period:
             return np.full(len(data), 50.0)
 
@@ -118,7 +118,7 @@ class TechnicalIndicators:
         """
         Calculates Simple Moving Average (SMA).
         """
-        arr = np.array(data)
+        arr = np.array(data, dtype=np.float64)
         if len(arr) < period:
             return np.zeros_like(arr)
 
@@ -155,7 +155,7 @@ class TechnicalIndicators:
         Calculates Exponential Moving Average (EMA).
         Uses SMA of first 'period' points for initialization to match Rust core.
         """
-        arr = np.array(data)
+        arr = np.array(data, dtype=np.float64)
         if len(arr) < period:
             return np.zeros_like(arr)
 
@@ -183,7 +183,7 @@ class TechnicalIndicators:
         """
         Calculates MACD Line, Signal Line, and Histogram.
         """
-        arr = np.array(data)
+        arr = np.array(data, dtype=np.float64)
 
         # 1. Rust Path
         if (backend == 'auto' or backend == 'rust') and RUST_CORE_AVAILABLE:
@@ -207,7 +207,7 @@ class TechnicalIndicators:
         """
         Calculates Bollinger Bands (Upper, Middle, Lower).
         """
-        arr = np.array(data)
+        arr = np.array(data, dtype=np.float64)
 
         # 1. MLX Path
         if (backend == 'auto' or backend == 'mlx') and MLX_AVAILABLE and len(arr) >= period:
