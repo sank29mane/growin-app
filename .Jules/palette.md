@@ -48,3 +48,7 @@
 ## 2026-03-31 - Sovereign UI `AIChatPanelView` Button Accessibility
 **Learning:** Found multiple instances of custom styling (e.g., chat message Send button, Discover Tiles) in `AIChatPanelView` that used `.buttonStyle(.plain)` to suppress native visual button chrome. This entirely removed standard accessibility boundaries and traits, rendering them silent or functionally meaningless to VoiceOver users.
 **Action:** Consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to any `Button` configured with `.buttonStyle(.plain)`, including using dynamically injected parameters like `filter.rawValue` or `tile.title` to ensure the context of the button remains available for non-visual navigation.
+
+## 2026-04-25 - Sovereign UI `WelcomeView` Button Accessibility
+**Learning:** The suggestion chips in `WelcomeView` used `.buttonStyle(.plain)` to suppress native visual button chrome, which entirely removed standard accessibility boundaries and traits, rendering them functionally meaningless to VoiceOver users.
+**Action:** Consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to any `Button` configured with `.buttonStyle(.plain)`. Used `item.title` to dynamically inject the context into the label and hint.
