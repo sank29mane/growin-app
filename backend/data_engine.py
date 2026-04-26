@@ -88,6 +88,109 @@ class AlpacaClient:
         else:
             logger.info("AlpacaClient: API keys not set. Running in offline/mock mode.")
 
+    def _fetch_batch_from_yfinance(self, tickers: List[str], timeframe: str, limit: int) -> Dict[str, BarDataDict]:
+        """Synchronous helper to fetch batch bars from yfinance (to be run in thread)."""
+        try:
+            import yfinance as yf
+            import pandas as pd
+            import numpy as np
+            from utils.currency_utils import CurrencyNormalizer
+
+            # Map timeframe to yfinance period/interval
+            period_map = {
+                "1Min": ("5d", "1m"),
+                "5Min": ("60d", "5m"),
+                "15Min": ("60d", "15m"),
+                "1Hour": ("730d", "1h"),
+                "1Day": ("5y", "1d"),
+                "1Week": ("5y", "1wk"),
+                "1Month": ("max", "1mo")
+            }
+            period, interval = period_map.get(timeframe, ("5y", "1d"))
+
+            norm_map = {normalize_ticker(t): t for t in tickers}
+            norm_tickers = list(norm_map.keys())
+
+            data = yf.download(norm_tickers, period=period, interval=interval, progress=False)
+
+            if data.empty:
+                return {}
+
+            results = {}
+            is_multi = isinstance(data.columns, pd.MultiIndex)
+
+            for norm_ticker in norm_tickers:
+                original_ticker = norm_map[norm_ticker]
+
+                if is_multi:
+                    if norm_ticker not in data.columns.get_level_values(1):
+                        continue
+                    df = data.xs(norm_ticker, level=1, axis=1).copy()
+                else:
+                    # With single ticker, the columns are just Open, High, etc.
+                    # Verify it's actually the ticker we requested, if there was only one
+                    if len(norm_tickers) == 1 or norm_ticker == norm_tickers[0]:
+                        df = data.copy()
+                    else:
+                        continue
+
+                df = df.dropna(how='all')
+                if df.empty:
+                    continue
+
+                is_uk = CurrencyNormalizer.is_uk_stock(norm_ticker)
+
+                if is_uk:
+                    cols_to_normalize = ['Open', 'High', 'Low', 'Close']
+                    cols = [c for c in cols_to_normalize if c in df.columns]
+                    df[cols] = df[cols] / 100.0
+
+                df[['Open', 'High', 'Low', 'Close']] = df[['Open', 'High', 'Low', 'Close']].round(2)
+
+                if df.index.tz is None:
+                    market_tz = "Europe/London" if is_uk else "America/New_York"
+                    df.index = df.index.tz_localize(market_tz).tz_convert('UTC')
+                else:
+                    df.index = df.index.tz_convert('UTC')
+
+                df['t'] = df.index.tz_localize(None).astype('datetime64[ms]').astype(np.int64)
+
+                df = df.rename(columns={
+                    'Open': 'o',
+                    'High': 'h',
+                    'Low': 'l',
+                    'Close': 'c',
+                    'Volume': 'v'
+                })
+
+                if 'v' in df.columns:
+                    df['v'] = df['v'].ffill().bfill().fillna(0).astype(int)
+
+                df = df[['t', 'o', 'h', 'l', 'c', 'v']]
+                raw_records = df.to_dict('records')
+
+                bar_list = []
+                for r in raw_records:
+                    ts_iso = datetime.fromtimestamp(r['t'] / 1000.0, tz=timezone.utc).isoformat()
+                    bar_list.append(PriceData(
+                        ticker=original_ticker,
+                        timestamp=ts_iso,
+                        t=int(r['t']),
+                        open=Decimal(str(r['o'])),
+                        high=Decimal(str(r['h'])),
+                        low=Decimal(str(r['l'])),
+                        close=Decimal(str(r['c'])),
+                        volume=int(r['v'])
+                    ).model_dump())
+
+                if bar_list:
+                    results[original_ticker] = {"ticker": original_ticker, "bars": bar_list[-limit:], "timeframe": timeframe}
+
+            return results
+        except Exception as e:
+            logger.error(f"AlpacaClient: Error fetching batch from yfinance: {e}")
+            return {}
+
     def _fetch_from_yfinance(self, ticker: str, normalized_ticker: str, timeframe: str, limit: int) -> Optional[BarDataDict]:
         """Synchronous helper to fetch bars from yfinance (to be run in thread)."""
         try:
@@ -395,13 +498,29 @@ class AlpacaClient:
         still_missing = [t for t in missing_tickers if t not in results]
         
         if still_missing:
-            # Parallelize individual fetches
-            tasks = [self.get_historical_bars(t, timeframe, limit) for t in still_missing]
-            fallback_res = await asyncio.gather(*tasks)
-            
-            for res in fallback_res:
-                if res:
-                    results[res['ticker']] = res
+            # Try Finnhub for UK stocks individually
+            uk_tickers = [t for t in still_missing if normalize_ticker(t).endswith('.L')]
+            if uk_tickers:
+                finnhub = get_finnhub_client()
+                if finnhub:
+                    tasks = [finnhub.get_historical_bars(t, timeframe=timeframe, limit=limit) for t in uk_tickers]
+                    fh_results = await asyncio.gather(*tasks, return_exceptions=True)
+                    for i, res in enumerate(fh_results):
+                        if isinstance(res, dict) and res:
+                            results[uk_tickers[i]] = res
+                            cache.set(f"bars_{uk_tickers[i]}_{timeframe}_{limit}", res, ttl=300)
+
+            # Check what we still miss after Finnhub
+            still_missing = [t for t in still_missing if t not in results]
+
+            if still_missing:
+                # Batch fetch remaining from yfinance
+                logger.info(f"Batch fetching {len(still_missing)} tickers from yfinance fallback.")
+                yf_results = await asyncio.to_thread(self._fetch_batch_from_yfinance, still_missing, timeframe, limit)
+                for ticker, res in yf_results.items():
+                    if res:
+                        results[ticker] = res
+                        cache.set(f"bars_{ticker}_{timeframe}_{limit}", res, ttl=300)
                     
         return results
 

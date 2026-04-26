@@ -16,6 +16,7 @@ def mock_logger():
     with patch('data_engine.logger') as mock:
         yield mock
 
+
 @pytest.mark.asyncio
 async def test_get_historical_bars_yfinance_fallback(mock_logger):
     """Test US stock: Alpaca (Primary) fails, yfinance (Fallback) succeeds"""
@@ -51,22 +52,33 @@ async def test_get_historical_bars_yfinance_fallback(mock_logger):
         # 1000.0 GBX -> 10.00 GBP
         assert bars[0]['open'] == Decimal('10.00')
 
+
 @pytest.mark.asyncio
 async def test_get_batch_bars(mock_logger):
     """Test batch bar fetching with mocked internal method"""
-    with patch('data_engine.AlpacaClient.get_historical_bars') as mock_single_fetch:
-        async def side_effect(ticker, timeframe, limit):
-            return {"ticker": ticker, "bars": [], "source": "single"}
-        mock_single_fetch.side_effect = side_effect
+    with patch('data_engine.get_finnhub_client') as mock_finnhub:
+
+        mock_fh_instance = MagicMock()
+        mock_finnhub.return_value = mock_fh_instance
+        async def fh_side_effect(ticker, timeframe, limit):
+            return {"ticker": ticker, "bars": [], "source": "finnhub"}
+        mock_fh_instance.get_historical_bars.side_effect = fh_side_effect
 
         client = AlpacaClient()
         client.data_client = None
 
-        tickers = ["AAPL", "LLOY.L"]
-        results = await client.get_batch_bars(tickers)
+        with patch.object(client, '_fetch_batch_from_yfinance') as mock_yf:
+            def yf_side_effect(tickers, timeframe, limit):
+                return {t: {"ticker": t, "bars": [], "source": "yfinance"} for t in tickers}
+            mock_yf.side_effect = yf_side_effect
 
-        assert len(results) == 2
-        assert mock_single_fetch.call_count == 2
+            tickers = ["AAPL", "LLOY.L"]
+            results = await client.get_batch_bars(tickers)
+
+            assert len(results) == 2
+            assert mock_fh_instance.get_historical_bars.call_count == 1
+            assert mock_yf.call_count == 1
+
 
 @pytest.mark.asyncio
 async def test_get_portfolio_positions(mock_logger):
