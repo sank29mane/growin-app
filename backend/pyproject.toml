@@ -76,3 +76,6 @@ dev = [
     "deepeval>=3.8.6",
     "pytest-cov>=7.0.0",
 ]
+
+[tool.pyright]
+extraPaths = ["."]

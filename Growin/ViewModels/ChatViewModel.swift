@@ -91,7 +91,8 @@ class ChatViewModel {
                     toolCallId: old.toolCallId,
                     agentName: old.agentName,
                     modelName: old.modelName,
-                    data: newData
+                    data: newData,
+                    quickActions: old.quickActions
                 )
                 break
             }
@@ -144,7 +145,8 @@ class ChatViewModel {
             toolCallId: nil,
             agentName: nil,
             modelName: nil,
-            data: nil
+            data: nil,
+            quickActions: nil
         )
         messages.append(userModel)
 
@@ -159,7 +161,8 @@ class ChatViewModel {
             toolCallId: nil,
             agentName: "DecisionAgent",
             modelName: effectiveModelName,
-            data: nil
+            data: nil,
+            quickActions: nil
         )
         messages.append(assistantModel)
 
@@ -182,6 +185,25 @@ class ChatViewModel {
             case .telemetry(let telemetry):
                 handleTelemetry(telemetry)
             case .meta(let meta):
+                if let type = meta["type"]?.value as? String, type == "RUN_FINISHED" {
+                    if let metadata = meta["metadata"]?.value as? [String: Any],
+                       let actionsDict = metadata["quick_actions"] as? [[String: Any]] {
+                        
+                        // Parse quick actions
+                        var actions: [QuickAction] = []
+                        for dict in actionsDict {
+                            if let icon = dict["icon"] as? String,
+                               let label = dict["label"] as? String,
+                               let prompt = dict["prompt"] as? String {
+                                actions.append(QuickAction(icon: icon, label: label, prompt: prompt))
+                            }
+                        }
+                        
+                        // Update assistant message with quick actions
+                        updateAssistantMessage(id: assistantMessageId, quickActions: actions)
+                    }
+                }
+                
                 if let convId = meta["conversation_id"]?.value as? String {
                     if selectedConversationId == nil {
                         selectedConversationId = convId
@@ -282,7 +304,8 @@ class ChatViewModel {
                             toolCallId: lastMsg.toolCallId,
                             agentName: lastMsg.agentName,
                             modelName: lastMsg.modelName,
-                            data: newData
+                            data: newData,
+                            quickActions: lastMsg.quickActions
                         )
                     }
                 }
@@ -297,19 +320,20 @@ class ChatViewModel {
         }
     }
 
-    private func updateAssistantMessage(id: String, content: String) {
+    private func updateAssistantMessage(id: String, content: String? = nil, quickActions: [QuickAction]? = nil) {
         if let index = messages.firstIndex(where: { $0.messageId == id }) {
             let old = messages[index]
             messages[index] = ChatMessageModel(
                 messageId: old.messageId,
                 role: old.role,
-                content: content,
+                content: content ?? old.content,
                 timestamp: old.timestamp,
                 toolCalls: old.toolCalls,
                 toolCallId: old.toolCallId,
                 agentName: old.agentName,
                 modelName: old.modelName,
-                data: old.data
+                data: old.data,
+                quickActions: quickActions ?? old.quickActions
             )
         }
     }

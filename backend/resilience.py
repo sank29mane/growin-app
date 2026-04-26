@@ -242,6 +242,33 @@ def fallback(
     return decorator
 
 
+async def execute_with_breaker(breaker: CircuitBreaker, method: str, url: str, client: Optional[Any] = None, **kwargs) -> Any:
+    """
+    Centralized helper function to execute an external HTTP request using httpx.AsyncClient,
+    protected by a circuit breaker. Supports optional persistent client.
+    """
+    import httpx
+    
+    timeout = kwargs.pop('timeout', 10.0)
+    raise_for_status = kwargs.pop('raise_for_status', True)
+
+    async def _do_request():
+        if client:
+            res = await client.request(method, url, **kwargs)
+            if not raise_for_status and res.status_code >= 400:
+                return {}
+            res.raise_for_status()
+            return res.json()
+        else:
+            async with httpx.AsyncClient(timeout=timeout) as new_client:
+                res = await new_client.request(method, url, **kwargs)
+                if not raise_for_status and res.status_code >= 400:
+                    return {}
+                res.raise_for_status()
+                return res.json()
+
+    return await breaker.call(_do_request)
+
 # Pre-configured circuit breakers for common services
 _circuit_breakers: Dict[str, CircuitBreaker] = {}
 
@@ -256,8 +283,20 @@ def get_circuit_breaker(name: str, **kwargs) -> CircuitBreaker:
 # Utility function for timeout
 async def with_timeout(coro, timeout: float, default: Any = None):
     """Execute coroutine with timeout, returning default on timeout."""
+    from utils.async_utils import run_with_timeout
     try:
-        return await asyncio.wait_for(coro, timeout=timeout)
+        return await run_with_timeout(coro, timeout=timeout)
     except asyncio.TimeoutError:
         logger.warning(f"Operation timed out after {timeout}s")
         return default
+
+async def execute_with_breaker(breaker: CircuitBreaker, method: str, url: str, **kwargs) -> Any:
+    """Helper to execute an HTTP request using httpx through a circuit breaker."""
+    import httpx
+    async def _do_fetch():
+        async with httpx.AsyncClient(timeout=kwargs.pop('timeout', 10.0)) as client:
+            request_method = getattr(client, method.lower())
+            response = await request_method(url, **kwargs)
+            response.raise_for_status()
+            return response.json()
+    return await breaker.call(_do_fetch)

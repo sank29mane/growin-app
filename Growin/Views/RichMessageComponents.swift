@@ -197,6 +197,8 @@ struct ReasoningStepRow: View, Equatable {
             
             Spacer()
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(agent) agent: \(status). \(detail)")
     }
 }
 
@@ -671,6 +673,43 @@ struct MetricItem: View {
                 .font(.subheadline.bold())
                 .foregroundStyle(.white)
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(label): \(value)")
+    }
+}
+
+struct QuickActionButtons: View {
+    let actions: [QuickAction]
+    let onTap: (String) -> Void
+    
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(actions) { action in
+                    Button(action: { onTap(action.prompt) }) {
+                        HStack(spacing: 6) {
+                            Text(action.icon)
+                                .font(.system(size: 12))
+                            Text(action.label)
+                                .font(SovereignTheme.Fonts.spaceGrotesk(size: 11, weight: .bold))
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(
+                            Capsule()
+                                .fill(Color.cyan.opacity(0.15))
+                        )
+                        .overlay(
+                            Capsule()
+                                .stroke(Color.cyan.opacity(0.3), lineWidth: 1)
+                        )
+                        .foregroundStyle(Color.cyan)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(.top, 8)
     }
 }
 
@@ -798,7 +837,7 @@ struct TradeProposalCard: View, Equatable {
                         .border(Color.green.opacity(0.3), width: 1)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Approve \(proposal.action.capitalized) \(proposal.ticker)")
+                    .accessibilityLabel("Approve \(proposal.action) for \(proposal.ticker)")
                     .accessibilityHint("Approves the NPU trade proposal and executes the order")
                     .accessibilityAddTraits(.isButton)
                     
@@ -815,7 +854,7 @@ struct TradeProposalCard: View, Equatable {
                         .border(Color.red.opacity(0.3), width: 1)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Reject \(proposal.action.capitalized) \(proposal.ticker)")
+                    .accessibilityLabel("Reject \(proposal.action) for \(proposal.ticker)")
                     .accessibilityHint("Rejects the NPU trade proposal and discards the order")
                     .accessibilityAddTraits(.isButton)
                 }

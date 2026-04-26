@@ -17,12 +17,7 @@ except ImportError:
     growin_core = None
     RUST_CORE_AVAILABLE = False
 
-try:
-    import mlx.core as mx
-    MLX_AVAILABLE = True
-except ImportError:
-    mx = None
-    MLX_AVAILABLE = False
+from utils.mlx_loader import mx, HAS_MLX as MLX_AVAILABLE
 
 # Standard Financial Precision (4 decimal places for intermediate, 2 for display)
 PRECISION_INTERNAL = 4

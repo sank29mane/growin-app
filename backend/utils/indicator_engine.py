@@ -9,12 +9,7 @@ import numpy as np
 import pandas as pd
 from typing import Union, List, Tuple, Dict, Any, Optional
 
-try:
-    import mlx.core as mx
-    MLX_AVAILABLE = True
-except ImportError:
-    mx = None
-    MLX_AVAILABLE = False
+from utils.mlx_loader import mx, HAS_MLX as MLX_AVAILABLE
 
 try:
     import growin_core

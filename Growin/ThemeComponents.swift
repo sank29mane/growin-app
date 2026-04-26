@@ -199,6 +199,8 @@ struct PremiumButton: View {
             .scaleEffect(isPressed ? 0.96 : 1.0)
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityAddTraits(.isButton)
         .simultaneousGesture(
             DragGesture(minimumDistance: 0)
                 .onChanged { _ in withAnimation(.easeOut(duration: 0.1)) { isPressed = true } }
@@ -679,6 +681,9 @@ struct LogicTreeItem: View {
                 }
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("\(isExpanded ? "Collapse" : "Expand") \(title)")
+            .accessibilityHint("Toggles the details for this logic step")
+            .accessibilityAddTraits(.isButton)
             
             if isExpanded {
                 Text(content)
@@ -758,6 +763,15 @@ struct FinancialMetricView: View {
     let change: String?
     let changePositive: Bool?
     
+    private var accessibilityLabelText: String {
+        var label = "\(title): \(value)"
+        if let change = change, let changePositive = changePositive {
+            let direction = changePositive ? "Up" : "Down"
+            label += ", \(direction) \(change)"
+        }
+        return label
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title.uppercased())
@@ -782,6 +796,8 @@ struct FinancialMetricView: View {
                 .clipShape(Capsule())
             }
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityLabelText)
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(

@@ -4,78 +4,72 @@ This document outlines the high-level phases for the Growin App, specifically op
 
 ---
 
-## 🏛 ARCHIVE: Milestone: Foundation & Precision Alpha (Completed 2026-02-23)
-## 🏛 ARCHIVE: Milestone: SOTA Intelligence & Financial Autonomy (Completed 2026-03-04)
+## 🏛 ARCHIVE: Completed Milestones
+- **Milestone v1.0: Foundation & Precision Alpha** (Completed 2026-02-23)
+- **Milestone v2.0: SOTA Intelligence & Financial Autonomy** (Completed 2026-03-04)
+- **Milestone v3.0: Autonomous Experience & Production Scaling** (Completed 2026-03-20)
+- **Milestone v4.0: Sovereign UI & Visual DNA** (Completed 2026-04-03)
+    - **Phase 40**: Sovereign Alpha Command Center (0px Primitives)
+    - **Phase 41**: Sovereign UI Stitch Generation (Full Component Suite)
 
 ---
 
-## 🚀 MILESTONE: Local Profit Extraction & RL Hardening (M4 Pro)
-**Goal**: Transform into a self-correcting trading weapon for LSE Leveraged ETFs.
+## 🚀 CURRENT MILESTONE: v5.0 MLX Intelligence & macOS 2026 UX Overhaul
+**Goal**: Transform Growin into a SOTA macOS 2026 native experience by integrating fine-tuned intelligence with a complete UI/UX overhaul and hardened RL-driven profit extraction.
 
-### Phase 37: RL Regime & Backtest Lab
-- **Goal**: Implement RL-driven rebalancing using JMCE + TTM-R2 fused state.
-- **Inference Engine**: Native `vllm-mlx` with PagedAttention (replacing LM Studio API).
+### Phase 42: Model Performance Comparison (COMPLETED)
+- **Goal**: Compare vllm-mlx output performance for Gemma 2 27B vs Llama-3.1-Nemotron-70B.
+- **Success Criteria**:
+    - Benchmark report on latency, throughput, and reasoning quality.
+    - Final model selection for the milestone.
+- **Requirements**: INTEL-01 (Partial), PERF-01 (Partial), UX-01, UX-02, UX-05
+- **Status**: COMPLETED
+
+**Plans:** 2/4 plans complete
+- [x] 42-01-PLAN.md — Benchmark Environment Setup
+- [x] 42-02-PLAN.md — Model Quantization & Acquisition
+- [x] 42-03-PLAN.md — Performance Analysis & Selection
+- [x] 42-04-PLAN.md — SOTA AI Chat Interface Enhancements
+
+### Phase 43: Local Intelligence & Serving (Core Engine)
+- **Goal**: Transition from vllm-mlx to vMLX with hardware-aware memory optimizations for M4 Pro (48GB).
+- **Success Criteria**:
+    - vMLX server managed by backend with 28GB total memory limit.
+    - "Thinking" Mode visibility enabled via real-time telemetry.
+    - 12GB KV-cache configured via PagedAttention.
+- **Requirements**: INTEL-01, INTEL-02, PERF-01, PERF-02, PERF-03
+- **Status**: ACTIVE
+
+**Plans:** 0/2 plans complete
+- [ ] 43-01-PLAN.md — Engine & Factory Transition
+- [ ] 43-02-PLAN.md — Telemetry, Thinking & Validation
+
+### Phase 44: Sovereign UX & macOS 2026 Redesign
+- **Goal**: Complete architectural UI redesign following macOS Tahoe patterns and 120Hz ProMotion standards.
+- **Success Criteria**:
+    - SwiftUI 17+ 0px Ledger UI implemented with Tahoe "Liquid Glass" materials.
+    - Stage Manager 2.0 window sets integrated for trading workflows.
+    - 120Hz ProMotion fluid rendering and <16ms price synchronization.
+- **Requirements**: UX-01, UX-02, UX-03, UX-05, TRADE-01
 - **Status**: PLANNED
-- **Wave 1: vllm-mlx & Data Fusion**
-    - [ ] **37-01-PLAN.md**: Deploy `vllm-mlx` native server & RL State fusion.
-- **Wave 2: Regime Agent (Market Character)**
-    - [ ] **37-02-PLAN.md**: JMCE Eigenvalue regime detection & LoRA calibration.
-- **Wave 3: PPO Action Head & NPU Backtest**
-    - [ ] **37-03-PLAN.md**: PPO Actor-Critic policy & parallel GPU backtester.
 
-### Phase 38: SwiftUI Profit Command Center & RL Training Integration
-- **Goal**: 120Hz dashboard for real-time Alpha tracking and hardened RL training loop.
+### Phase 45: Adaptive Learning & Alpha Engineering (Unsloth)
+- **Goal**: Deploy local LoRA fine-tuning pipeline for regime-specific alpha extraction.
+- **Success Criteria**:
+    - Unsloth/mlx-tune pipeline active for local LoRA fine-tuning on M4 Pro.
+    - Automated alpha feature engineering from DuckDB historical data.
+    - Dynamic LoRA adapter switching based on detected market regimes.
+- **Requirements**: LEARN-01, LEARN-02, LEARN-03
 - **Status**: PLANNED
-- **Wave 1: Control & Data Backbone**
-    - [ ] **38-01-PLAN.md**: WebSocket Alpha-Stream, Smart Money DST, Split-Brain.
-- **Wave 2: Command Center Implementation**
-    - [ ] **38-02-PLAN.md**: 120Hz Canvas Dashboard, Regime Indicator, Fast-HITL.
-- **Wave 3: RL Training & Hardening**
-    - [ ] **38-03-PLAN.md**: PPO Training Loop, GAE, Financial Reward.
 
-### Phase 39: Strategy Hardening & Code Purity
-- **Goal**: Unified imports, legacy adapter removal, and PPO hyperparameter optimization for LSE ETPs.
-- **Status**: COMPLETED (Merged to main 2026-03-20)
-- **Results**: 100% absolute imports, 150/150 tests passing on M4 Pro, Brain Stability WebSocket stream active.
-
-## 🚀 MILESTONE: SOTA Profit Extraction & Strategy Calibration
-**Goal**: Finalize the autonomous trading weapon with high-fidelity calibration.
-
-### Phase 40: Sovereign Alpha Command Center
-**Goal**: Implement the high-end Sovereign Ledger aesthetic into the final 120Hz Alpha Dashboard, replacing legacy "Liquid Glass" style with brutal editorial precision.
-**Status**: COMPLETED (2026-03-21)
-**Requirements**: SOV-UI-BASE
-**Success Criteria**:
-  1. SovereignTheme and 0px SovereignPrimitives implemented.
-  2. 120Hz Alpha-Stream Tracker and Brutalist Technical Ledger active.
-  3. Agent Reasoning Console and Strategy Calibration Lab functional.
-
-### Phase 41: Sovereign UI - Stitch Generation & UX Refinement
-**Goal**: Generate and implement high-density Sovereign Ledger UI using Stitch MCP tools.
-**Status**: PLANNED
-**Requirements**: SOV-UI-01, SOV-UI-02, SOV-UI-03, SOV-UI-04
-**References**: Trading 212 UI, Stitch Design DNA, Sovereign Ledger 0px aesthetic.
-**Success Criteria**:
-  1. User can view their portfolio through a high-density "Master Ledger" interface with 0px corners and tonal layering.
-  2. User can monitor assets via an advanced watchlist with integrated Swift Charts sparklines.
-  3. User can execute trades using a professional panel featuring Slide-to-Confirm.
-  4. User can calibrate agent strategies through the Strategy Calibration Lab with technical sliders.
-  5. User can view deep agent reasoning and logic traces in a Monaco-font console.
-  6. All UI components are generated or refined using Stitch MCP, strictly adhering to the Sovereign Design DNA.
-
-**Waves**:
-- **Wave 1: Main Portfolio Overview Screen**
-    - [ ] **41-01-PLAN.md**: Generate and implement high-density Master Ledger portfolio screen.
-- **Wave 2: Advanced Asset Watchlist & Sparklines**
-    - [ ] **41-02-PLAN.md**: Implement density-first watchlist with Swift Charts sparklines.
-- **Wave 3: Professional Order Execution Panel**
-    - [ ] **41-03-PLAN.md**: Implement professional execution panel with Slide-to-Confirm.
-- **Wave 4: Strategy Calibration Lab**
-    - [ ] **41-04-PLAN.md**: Implement high-density calibration interface for agent hyperparameters.
-- **Wave 5: Agent Reasoning & Logic Trace Console**
-    - [ ] **41-05-PLAN.md**: Implement Monaco-font terminal for live agent logic traces.
-- **Wave 6: Global Navigation & System Integration**
-    - [ ] **41-06-PLAN.md**: Finalize root navigation and global Sovereign background integration.
+### Phase 46: Multimodal Intelligence & Deep Integration
+- **Goal**: Infuse vision intelligence into trading workflows and asset-level fast actions.
+- **Success Criteria**:
+    - Gemma 4 multimodal support active for image/chart upload analysis.
+    - Dynamic Interactive Tiles built for real-time asset monitoring.
+    - Deep linking from chat reasoning results to Sovereign Ledger views.
+- **Requirements**: INTEL-03, UX-04, TRADE-02
+- **Status**: PLANNED
 
 ---
 
@@ -83,15 +77,16 @@ This document outlines the high-level phases for the Growin App, specifically op
 
 | Phase | Status | Plans | Complete |
 |-------|--------|-------|----------|
-| 37: RL Regime | ⬜ | 0/3 | — |
-| 38: Command Center | ⬜ | 0/3 | — |
-| 39: Hardening | ✅ | 3/3 | 100% |
-| 40: Sovereign Alpha | ✅ | 3/3 | 100% |
-| 41: Sovereign UI | ⬜ | 0/6 | — |
+| 42: Model Comparison | ✅ | 4/4 | 100% |
+| 43: Core Engine | 🏗 | 0/2 | 0% |
+| 44: Sovereign UX | ⬜ | 0/3 | 0% |
+| 45: Adaptive Learning | ⬜ | 0/3 | 0% |
+| 46: Multimodal | ⬜ | 0/3 | 0% |
 
 ---
 
-## 📋 BACKLOG (POST-WEEKEND)
-- [ ] Multi-User Supabase Migration.
-- [ ] Options Greeks Agent.
-- [ ] Real-time Order Book Heatmaps.
+## 📋 BACKLOG (FUTURE REQUIREMENTS)
+- [ ] AUTH-01: Multi-User Supabase Migration.
+- [ ] OPTS-01: Options Greeks Agent.
+- [ ] DATA-01: Real-time Order Book Heatmaps.
+- [ ] XR-01: VisionOS Pro Integration.

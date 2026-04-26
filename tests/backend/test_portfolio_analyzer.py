@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 import pandas as pd
-from backend.utils.portfolio_analyzer import PortfolioAnalyzer
+from utils.portfolio_analyzer import PortfolioAnalyzer
 
 @pytest.fixture
 def price_history():
@@ -47,7 +47,7 @@ def test_beta(price_history, benchmark_history):
     assert beta > 0
 
 def test_analyze_performance(price_history, benchmark_history):
-    analyzer = PortfolioAnalyzer()
+    analyzer = PortfolioAnalyzer(model='mock')
     report = analyzer.analyze_performance(price_history, benchmark_history)
 
     assert "volatility" in report

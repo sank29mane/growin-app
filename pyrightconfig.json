@@ -7,5 +7,6 @@
         "**/backend/venv_forecast/**"
     ],
     "venvPath": "backend",
-    "venv": ".venv"
+    "venv": ".venv",
+    "extraPaths": ["backend"]
 }

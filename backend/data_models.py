@@ -3,6 +3,14 @@ from typing import Optional, List
 from datetime import date
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 
+class QuickAction(BaseModel):
+    """
+    Represents a contextual quick action for the UI.
+    """
+    icon: str
+    label: str
+    prompt: str
+
 class PriceData(BaseModel):
     """
     Represents a single price point or candle using Decimal for precision.

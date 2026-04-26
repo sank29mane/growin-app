@@ -131,7 +131,7 @@ class WorkerClient:
         })
         return response.get("status") == "success"
 
-    async def forecast_fused(self, ohlcv_data: List[Dict[str, Any]], prediction_steps: int = 96, timeframe: str = "1Hour", returns_data: Optional[List[List[float]]] = None) -> Dict[str, Any]:
+    async def forecast_fused(self, ohlcv_data: List[Dict[str, Any]], prediction_steps: int = 96, timeframe: str = "1Hour", returns_data: Optional[List[List[float]]] = None, ticker: str = None) -> Dict[str, Any]:
         """Perform Fused TTM-JMCE forecasting via the worker"""
         await self._ensure_worker()
         response = await self._send_request({
@@ -139,7 +139,8 @@ class WorkerClient:
             "ohlcv_data": ohlcv_data,
             "prediction_steps": prediction_steps,
             "timeframe": timeframe,
-            "returns_data": returns_data
+            "returns_data": returns_data,
+            "ticker": ticker
         }, timeout=45.0)
         
         return response

@@ -132,7 +132,8 @@ class ForecastingAgent(BaseAgent):
                 res = await self.forecaster.forecast(
                     ohlcv_data,
                     prediction_steps=steps,
-                    timeframe=timeframe
+                    timeframe=timeframe,
+                    ticker=ticker
                 )
                 if "error" in res:
                     # Raise exception to trigger the circuit breaker on logical errors
@@ -140,6 +141,8 @@ class ForecastingAgent(BaseAgent):
                 return res
 
             result = await self.circuit_breaker.call(execute_forecast)
+
+            self.circuit_breaker.record_success()
 
             # Extract predictions
             forecast_bars = result.get("forecast", [])
@@ -194,7 +197,7 @@ class ForecastingAgent(BaseAgent):
                 latency_ms=0
             )
 
-        except CircuitBreakerOpenException:
+        except CircuitBreakerOpenError:
             logger.error(f"Forecast skipped: circuit breaker is OPEN")
             return AgentResponse(
                 agent_name=self.config.name,
@@ -204,6 +207,7 @@ class ForecastingAgent(BaseAgent):
                 latency_ms=0
             )
         except Exception as e:
+            self.circuit_breaker.record_failure()
             logger.error(f"Forecast failed: {e}")
             return AgentResponse(
                 agent_name=self.config.name,

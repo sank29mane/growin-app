@@ -70,6 +70,8 @@ struct LedgerRow: View {
                 .frame(width: 4, height: 32)
                 .padding(.leading, 16)
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(asset.ticker), \(asset.name). Alpha: \(String(format: "%+.4f", asset.alpha)). Status: \(asset.alpha > 0.1 ? "Active" : "Neutral").")
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         // Tonal shifts: Recessed for base, Charcoal for rows

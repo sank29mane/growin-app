@@ -18,7 +18,7 @@ import json
 import difflib
 from typing import Dict, Any, List, Optional, Union, Tuple
 import os
-from backend.utils.async_utils import run_with_timeout
+from utils.async_utils import run_with_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -28,427 +28,172 @@ Analyze the user's request and return a JSON object with the intent and required
 
 Specialist Agents:
 - QuantAgent: Technical analysis, RSI, MACD, Support/Resistance ("quant")
-- ForecastingAgent: AI price predictions ("forecast")
-- ResearchAgent: News, sentiment, company info ("research")
-- SocialAgent: Social media sentiment ("social" - often paired with research)
-- PortfolioAgent: Portfolio data, holdings, P&L ("portfolio")
-- WhaleAgent: Large holder activity ("whale")
-- GoalPlannerAgent: Create/plan investment goals ("goal_planner")
-- VisionAgent: Technical analysis of chart screenshots/images ("vision")
+- PortfolioAgent: Portfolio holdings, performance, risk ("portfolio")
+- ForecastingAgent: Price predictions, TTM-R2 ("forecast")
+- ResearchAgent: News analysis, sentiment ("research")
+- SocialAgent: Twitter/Reddit sentiment ("social")
+- WhaleAgent: Institutional trade activity ("whale")
+- GoalPlannerAgent: Financial goal implementation ("goal")
+- VisionAgent: Technical chart pattern recognition ("vision")
 
-Intents:
-1. "price_check": Simple price lookup (needs "quant" for simple data)
-2. "market_analysis": Deep dive (needs "quant", "forecast", "research", "social", "vision" if image provided)
-3. "portfolio_query": User asking about their holdings (needs "portfolio")
-4. "forecast_request": Specific prediction request (needs "forecast", "quant")
-5. "educational": General questions not requiring live data (needs [])
-6. "goal_planning": Creating a new investment plan (needs "goal_planner")
-7. "visual_analysis": Specifically asking to analyze a chart image (needs "vision")
-
-Goal Planning Extraction:
-If intent is "goal_planning", extract:
-- "capital": Amount to invest (default 1000)
-- "risk": Risk profile (LOW, MEDIUM, HIGH, AGGRESSIVE_PLUS, GROWTH)
-- "years": Duration in years (default 5)
-
-Entity Extraction:
-Always extract the primary ticker symbol if present (e.g., "AAPL", "Tesla", "Lloyds").
-Normalize company names to tickers if possible (e.g. "Tesla" -> "TSLA").
-
-Output Format (JSON ONLY):
+JSON Output Format:
 {
-  "type": "exact_intent_string",
-  "needs": ["list", "of", "agents"],
-  "reason": "Brief explanation",
-  "primary_ticker": "AAPL",
-  "params": { ...extracted params... }
+  "intent": "analytical" | "actionable",
+  "ticker": "AAPL" | null,
+  "required_agents": ["quant", "forecast"],
+  "reasoning": "Explain why these agents are needed"
 }
 """
 
-class CoordinatorAgent:
+class CoordinatorAgent(BaseAgent):
     """
-    Coordinator Agent orchestrates specialist agents in parallel.
-
-    Model: Static SOTA (Mistral-7B or Gemma-2-9B)
-    Role: Parse query, route to specialists, aggregate results
-    Performance: 2-3s for routing + specialist execution
+    CoordinatorAgent: The brain of the swarm.
+    Routes queries to specialist agents and aggregates their data.
     """
     
-    def __init__(self, mcp_client=None, chat_manager=None, model_name: str = "granite-tiny"):
-        from app_context import state
-        self.model_name = model_name
-        self.mcp_client = mcp_client or state.mcp_client
-        self.chat_manager = chat_manager or state.chat_manager
+    def __init__(self, config=None, llm=None, mcp_client=None, **kwargs):
+        # Support cases where mcp_client is passed as the first positional arg instead of config
+        if config is not None and not hasattr(config, 'name') and hasattr(config, 'sessions'):
+            mcp_client = config
+            config = None
 
-        # Initialize Core Components (Centralized Arch)
-        self.data_fabricator = DataFabricator()
-        self.decision_agent = DecisionAgent(model_name=model_name, mcp_client=self.mcp_client)
+        from .base_agent import AgentConfig
+        config = config or AgentConfig(
+            name="CoordinatorAgent",
+            description="Swarm Orchestrator",
+            enabled=True,
+            timeout=10.0,
+            cache_ttl=300
+        )
+        super().__init__(config)
+        self.llm = llm
+        self.mcp_client = mcp_client
+        self.specialists: Dict[str, BaseAgent] = {}
         
-        # Initialize specialist agents
-        self.quant_agent = QuantAgent()
-        self.portfolio_agent = PortfolioAgent()
-        self.forecasting_agent = ForecastingAgent()
-        self.research_agent = ResearchAgent()
-        self.social_agent = SocialAgent()
-        self.whale_agent = WhaleAgent()
-        self.goal_planner_agent = GoalPlannerAgent()
-        self.vision_agent = VisionAgent()
-        
-        self.llm = None
-        # Initialize LLM will be called on first process_query if not already done
-        
-        # Initialize Safe Python Executor for data cleaning/fixes
-        from utils import get_safe_executor
-        self.python_executor = get_safe_executor()
-        
-        logger.info(f"CoordinatorAgent initialized (Centralized Mode) with model: {model_name}")
+    def register_specialists(self, agents: Dict[str, BaseAgent]):
+        """Register specialist agents for routing"""
+        self.specialists = agents
 
-    async def _initialize_llm(self):
-        """Initialize the routing LLM using the Factory"""
-        try:
-            from .llm_factory import LLMFactory
-            self.llm = await LLMFactory.create_llm(self.model_name)
-
-            # Update local model name if auto-detected
-            if hasattr(self.llm, "active_model_id"):
-                self.model_name = self.llm.active_model_id
-
-        except Exception as e:
-            logger.warning(f"Failed to initialize Coordinator LLM: {e}. Routing will be static.")
-            self.llm = None
-
-    async def _classify_intent(self, query: str) -> Dict[str, Any]:
-        """Classify user intent using Granite-Optimized Few-Shot Prompting"""
-        # Ensure LLM is initialized (async init for LM Studio)
-        if not self.llm:
-            await self._initialize_llm()
-            
-        if not self.llm:
-            return {"type": "analytical", "needs": ["portfolio", "quant", "forecast"]}
-            
-        clean_query = query.strip()[:500]
-        # ... prompt remains same ...
-        prompt = f"""You are the Coordinator Agent.
-Route queries to specialist agents.
-Format your response EXACTLY as:
-INTENT: [intent_name]
-TICKER: [symbol or NONE]
-REASON: [short explanation]
-
-Intents:
-- price_check (needs quant)
-- market_analysis (needs quant, forecast, research, social)
-- portfolio_query (needs portfolio)
-- goal_planning (needs goal_planner)
-
-Examples:
-Query: "Analyze Apple stock"
-INTENT: market_analysis
-TICKER: AAPL
-REASON: User wants deep dive analysis
-
-Query: "How is my portfolio doing?"
-INTENT: portfolio_query
-TICKER: NONE
-REASON: User asking about holdings
-
-Query: "portfolio analysis?"
-INTENT: portfolio_query
-TICKER: NONE
-REASON: User wants holistic review of holdings
-
-Query: "{clean_query}"
-"""
-
-        try:
-            if hasattr(self.llm, "ainvoke"):
-                from langchain_core.messages import HumanMessage
-                response = await self.llm.ainvoke([HumanMessage(content=prompt)])
-                content = response.content if hasattr(response, 'content') else str(response)
-            else:
-                # LMStudioClient
-                from model_config import get_model_info
-                info = get_model_info(self.model_name)
-                model_id = info.get("model_id") or self.model_name
-
-                # Check loaded models to pick one if auto
-                if "auto" in model_id:
-                    models = await self.llm.list_models()
-                    if models:
-                        model_id = models[0]["id"]
-
-                resp = await self.llm.chat(model_id=model_id, input_text=prompt, temperature=0, max_tokens=512)
-                content = resp.get("content", "")
-
-            # PARSE KEY-VALUE OUTPUT (Robust Regex)
-            intent_match = re.search(r'INTENT:\s*(\w+)', content, re.IGNORECASE)
-            ticker_match = re.search(r'TICKER:\s*([A-Z0-9.]+)', content, re.IGNORECASE)
-
-            intent_type = intent_match.group(1).lower() if (intent_match and intent_match.group(1)) else "market_analysis"
-            ticker = ticker_match.group(1).upper() if ticker_match and ticker_match.group(1) and "NONE" not in ticker_match.group(1).upper() else None
-
-            # Hard overrides to protect against LLM misclassification
-            q_lower = query.lower()
-            if "portfolio" in q_lower:
-                intent_type = "portfolio_query"
-                if ticker in ["ISA", "INVEST", "MY"]:
-                    ticker = None
-
-            # Map intents to needs (Hardcoded logic is safer than LLM predicting list)
-            needs_map = {
-                "price_check": ["quant"],
-                "market_analysis": ["quant", "forecast", "research", "social", "whale", "portfolio"],
-                "portfolio_query": ["portfolio", "quant", "forecast"],
-                "goal_planning": ["goal_planner", "portfolio"],
-                "visual_analysis": ["vision", "quant"],
-                "educational": []
-            }
-
-            needs = needs_map.get(intent_type, ["quant", "forecast"])
-
-            return {
-                "type": intent_type,
-                "needs": needs,
-                "primary_ticker": ticker,
-                "reason": "Parsed from KV output"
-            }
-
-        except Exception as e:
-            logger.error(f"Intent classification failed: {e}")
-
-        # Default safety fallback
-        return {"type": "analytical", "needs": ["portfolio", "quant", "forecast"]}
-
-    async def process_query(self, query: str, ticker: Optional[str] = None, account_type: Optional[str] = None, history: List[Dict] = [], image: Optional[Any] = None) -> MarketContext:
+    async def analyze(self, context: Dict[str, Any]) -> AgentResponse:
         """
-        Process user query and coordinate specialist agents based on intent.
+        1. Classifies the query using LLM
+        2. Routes to required specialists
+        3. Aggregates results into MarketContext
         """
-        from status_manager import status_manager
-        import uuid
-        from app_logging import correlation_id_ctx
+        query = context.get("query", "")
+        if not query:
+            return AgentResponse(
+                agent_name=self.config.name,
+                success=False,
+                error="No query provided in context"
+            )
 
-        # Ensure tracking of the decision_id/correlation_id globally for this request
-        c_id = correlation_id_ctx.get() if correlation_id_ctx else None
-        if not c_id or c_id == "-":
-            c_id = str(uuid.uuid4())
-            if correlation_id_ctx:
-                correlation_id_ctx.set(c_id)
-
-        # 0. Resolve Context (Ticker) from History if missing
-        if not ticker and history:
-            ticker = self._resolve_ticker_from_history(history)
-            if ticker:
-                logger.info(f"Resolved ticker from history: {ticker}")
-
-        status_manager.set_status("coordinator", "online", f"Analyzing: '{query}'", model=self.model_name)
+        # 1. Classification & Routing
+        routing_decision = await self._get_routing_decision(query)
+        intent = routing_decision.get("intent", "analytical")
+        ticker = routing_decision.get("ticker")
+        required_agents = routing_decision.get("required_agents", [])
         
-        # SOTA 2026: Emit Coordinator Start Telemetry
-        from .messenger import AgentMessage, get_messenger
-        messenger = get_messenger()
-        await messenger.send_message(AgentMessage(
-            sender="CoordinatorAgent",
-            recipient="broadcast",
-            subject="agent_started",
-            payload={"agent": "CoordinatorAgent", "query_snippet": query[:50]},
-            correlation_id=c_id
-        ))
-
-        # 1. Intent Classification
-        intent = await self._classify_intent(query)
-        logger.info(f"Coordinator Intent: {intent['type']} - Needs: {intent.get('needs', [])}")
-
-        # 1a. Ticker Extraction fallback via TickerResolver
-        resolver = TickerResolver()
-        if not ticker:
-            ticker = intent.get("primary_ticker")
-
-            # Tier 3: Centralized Resolver Fallback
-            if not ticker:
-                extracted = resolver.extract(query)
-                if extracted:
-                    ticker = extracted[0]
-
-            if ticker:
-                logger.info(f"Coordinator extracted ticker (Resolver): {ticker}")
-
-        # 1b. Account Detection
-        detected_account = account_type
-        if not detected_account:
-            detected_account = self.decision_agent._detect_account_mentions(query)
-            if detected_account == "all" and account_type: # keep explicit override if provided
-                 pass
-            elif detected_account != "all":
-                 account_type = detected_account
-
+        # SOTA 2026: Automatic ticker extraction if LLM missed it but it was in context
+        if not ticker and context.get("ticker"):
+            ticker = context.get("ticker")
+            
+        # Update context with routing info
+        context["intent"] = intent
+        
         # COORDINATOR FIX: Robust normalization via Resolver
         if ticker:
+            from utils.ticker_utils import TickerResolver
             original_ticker = ticker
-            ticker = resolver.normalize(ticker)
+            ticker = TickerResolver().normalize(ticker)
             if ticker != original_ticker:
-                 logger.info(f"Ticker normalized (Resolver): {original_ticker} -> {ticker}")
+                logger.info(f"Ticker normalized (Resolver): {original_ticker} -> {ticker}")
+            context["ticker"] = ticker
 
-        # 2. CENTRALIZED DATA FABRICATION
-        status_manager.set_status("coordinator", "working", "Fabricating Market Context...")
-        
-        context = await self.data_fabricator.fabricate_context(
-            intent=intent.get("type", "analytical"),
+        # Initialize MarketContext
+        market_context = MarketContext(
+            query=query,
+            intent=intent,
             ticker=ticker,
-            account_type=account_type,
-            user_settings={}
+            user_context=context.get("user_context", {}),
+            reasoning=routing_decision.get("reasoning")
         )
-        
-        # Inject Intent metadata
-        context.routing_reason = intent.get("reason", "")
-        if account_type:
-            context.user_context["account_type"] = account_type
 
-        # --- SKILL INJECTION ---
-        # Coordinator also benefits from skills (e.g. knowing 'tax' queries need different handling)
-        from utils.skill_loader import get_skill_loader
-        skills_text = get_skill_loader().get_relevant_skills(query)
-        if skills_text:
-             context.user_context["expert_skills"] = skills_text
-        # -----------------------
+        # 2. Parallel Execution of Specialists
+        tasks = []
+        c_id = context.get("correlation_id", "swarm-" + os.urandom(4).hex())
         
-        # COORDINATOR FIX: Ticker normalization
-        if context.ticker and (not context.ticker.isalpha() or len(context.ticker) < 2):
-            context.ticker = await self._attempt_ticker_fix(context.ticker)
+        for agent_id in required_agents:
+            agent = self.specialists.get(agent_id)
+            if agent:
+                agent_context = context.copy()
+                agent_context["correlation_id"] = c_id
+                tasks.append(self._execute_specialist(agent, agent_context))
+            else:
+                logger.warning(f"Coordinator: Requested agent '{agent_id}' not found")
 
-        # 3. PARALLEL AGENT_EXECUTION (Pure Processors)
-        needs = intent.get("needs", [])
-        specialist_tasks = []
-        
-        # Broadcast intent to the agent bus (SOTA Decentralized Path)
-        from .messenger import AgentMessage
-        from .governance import get_governance
-        from app_logging import correlation_id_ctx
-        
-        c_id = correlation_id_ctx.get()
-        broadcast_msg = AgentMessage(
-            sender="CoordinatorAgent",
-            recipient="broadcast",
-            subject="intent_classified",
-            payload={"intent": intent, "ticker": ticker, "context_summary": context.get_summary()},
-            correlation_id=c_id
+        if not tasks:
+            # Default to Research if no agents identified (Safety fallback)
+            research_agent = self.specialists.get("research")
+            if research_agent:
+                tasks.append(self._execute_specialist(research_agent, context))
+
+        results = await asyncio.gather(*tasks)
+
+        # 3. Aggregation
+        for result in results:
+            if result:
+                await self._merge_result_into_context(market_context, result)
+                market_context.add_agent_result(
+                    result.agent_name, 
+                    result.success, 
+                    result.latency_ms,
+                    result.telemetry
+                )
+
+        return AgentResponse(
+            agent_name=self.config.name,
+            success=market_context.is_complete(),
+            data=market_context.model_dump(),
+            metadata={
+                "routing": routing_decision,
+                "correlation_id": c_id
+            },
+            latency_ms=0.0
         )
-        await get_governance().secure_dispatch(broadcast_msg)
 
-        # Helper to wrap agent execution
-        async def run_agent(agent, ctx_data):
-            return await self._run_specialist(agent, ctx_data)
+    async def _get_routing_decision(self, query: str) -> Dict[str, Any]:
+        """Ask LLM to route the query"""
+        if not self.llm:
+            # Fallback for no LLM (Test mode)
+            return {"intent": "analytical", "required_agents": ["research"], "ticker": None}
 
-        # Prepare Tasks
-        # DUPLICATE REMOVED: PortfolioAgent task is handled later with correct context
-
-        if "goal_planner" in needs:
-            params = intent.get("params", {})
-            goal_context = {
-                 "initial_capital": params.get("capital", 1000.0),
-                 "risk_profile": params.get("risk", "MEDIUM"),
-                 "duration_years": params.get("years", 5.0)
-            }
-            specialist_tasks.append(run_agent(self.goal_planner_agent, goal_context))
-
-        # Market Agents using PRE-FETCHED Data
-        if "quant" in needs and context.price:
-            # Map PriceData back to list of dicts for QuantAgent
-            ohlcv_remapped = [{
-                't': b.timestamp, 'o': b.open, 'h': b.high, 'l': b.low, 'c': b.close, 'v': b.volume
-            } for b in context.price.history_series]
-            
-            specialist_tasks.append(run_agent(self.quant_agent, {
-                "ticker": context.ticker,
-                "ohlcv_data": ohlcv_remapped
-            }))
-            
-        if "forecast" in needs and context.price:
-             ohlcv_remapped = [{
-                't': b.timestamp, 'o': b.open, 'h': b.high, 'l': b.low, 'c': b.close, 'v': b.volume
-            } for b in context.price.history_series]
-             specialist_tasks.append(run_agent(self.forecasting_agent, {
-                "ticker": context.ticker,
-                "ohlcv_data": ohlcv_remapped,
-                "days": 5
-            }))
-            
-        if "research" in needs:
-            # Phase 1: ResearchAgent still fetches info if needed, but context is primary
-            specialist_tasks.append(run_agent(self.research_agent, {"ticker": context.ticker}))
-            
-        if "social" in needs:
-            specialist_tasks.append(run_agent(self.social_agent, {"ticker": context.ticker}))
-            
-        if "whale" in needs:
-            specialist_tasks.append(run_agent(self.whale_agent, {"ticker": context.ticker}))
-            
-        if "vision" in (needs or []) or image:
-            specialist_tasks.append(run_agent(self.vision_agent, {"ticker": context.ticker, "image": image}))
-
-        if "portfolio" in needs:
-            # Ensure account type is passed from context or analysis
-            acc_type = context.user_context.get("account_type", "all")
-            specialist_tasks.append(run_agent(self.portfolio_agent, {
-                "account_type": acc_type,
-                "force_refresh": True
-            }))
-
-        # Execute Specialists
-        if specialist_tasks:
-            status_manager.set_status("coordinator", "working", f"Coordinating {len(specialist_tasks)} specialists...")
-            results = await asyncio.gather(*specialist_tasks, return_exceptions=True)
-            
-            for res in results:
-                if isinstance(res, Exception):
-                    logger.error(f"Agent failed: {res}")
-                    continue
-                if isinstance(res, AgentResponse):
-                    # Pass full telemetry to context
-                    context.add_agent_result(
-                        res.agent_name,
-                        res.success,
-                        res.latency_ms,
-                        telemetry=res.telemetry
-                    )
-                    if res.success:
-                        await self._merge_result_into_context(context, res)
-
-        # 4. FINAL SYNTHESIS (Decision Agent)
-        status_manager.set_status("coordinator", "working", "Synthesizing Final Decision...")
-        
         try:
-             final_response = await self.decision_agent.make_decision(context, query)
-             # Attach decision to context for API return
-             context.user_context["final_answer"] = final_response
+            from langchain_core.messages import HumanMessage
+            response = await self.llm.ainvoke([HumanMessage(content=query)])
+            content = response.content if hasattr(response, 'content') else str(response)
+            
+            # Extract JSON
+            match = re.search(r'\{.*\}', content, re.DOTALL)
+            if match:
+                return json.loads(match.group())
         except Exception as e:
-            logger.error(f"Decision synthesis failed: {e}")
-            context.user_context["final_answer"] = f"Analysis complete, but synthesis failed: {e}"
+            logger.error(f"Coordinator routing failed: {e}")
+            
+        return {"intent": "analytical", "required_agents": ["research"], "ticker": None}
 
-        status_manager.set_status("coordinator", "ready", "Task complete")
-        
-        # SOTA 2026: Emit Coordinator Completion Telemetry
-        await messenger.send_message(AgentMessage(
-            sender="CoordinatorAgent",
-            recipient="broadcast",
-            subject="agent_complete",
-            payload={"agent": "CoordinatorAgent", "success": True, "intent": intent.get("type")},
-            correlation_id=c_id
-        ))
-        
-        return context
-
-    async def _run_specialist(self, agent: BaseAgent, context: Dict[str, Any]) -> AgentResponse:
-        """Run a specialist agent with error handling and timeout"""
-        from status_manager import status_manager
+    async def _execute_specialist(self, agent: BaseAgent, context: Dict[str, Any]) -> Optional[AgentResponse]:
+        """Execute a single specialist with status tracking and self-correction"""
+        from .status_manager import status_manager
         from .messenger import AgentMessage, get_messenger
-        from app_logging import correlation_id_ctx
         
-        agent_key = (agent.config.name or "").lower().replace("agent", "_agent")
-        c_id = correlation_id_ctx.get()
+        agent_key = f"{agent.config.name}-{context.get('ticker', 'global')}"
+        status_manager.set_status(agent_key, "working", f"Executing {agent.config.name}...")
+        
         messenger = get_messenger()
+        c_id = context.get("correlation_id")
         
-        status_manager.set_status(agent_key, "working", "Executing task...")
-        
-        # Emit telemetry: Start
+        # Emit telemetry: Started
         start_msg = AgentMessage(
             sender="CoordinatorAgent",
             recipient=agent.config.name,
@@ -457,75 +202,68 @@ Query: "{clean_query}"
             correlation_id=c_id
         )
         await messenger.send_message(start_msg)
-        
+
         try:
             # 15s timeout per specialist to prevent hanging
-<<<<<<< HEAD
             result = await run_with_timeout(agent.execute(context), 15.0)
-=======
-            async with asyncio.timeout(15.0):
-                result = await agent.execute(context)
->>>>>>> main
-                
-                # COORDINATOR SELF-CORRECTION: Try to fix if it's a known data issue
-                if not result.success and result.error:
-                    error_msg = (result.error or "").lower()
-                    
-                    # Trigger resolution if ticker not found or delisted (Tier 2 Escalation)
-                    if any(x in error_msg for x in ["not found", "ticker", "delisted", "no data", "404"]):
-                        logger.info(f"Coordinator: Escalating Ticker Resolution to Tier 2 (Search) for {agent.config.name}: {result.error}")
-                        status_manager.set_status(agent_key, "working", "Escalating Ticker Resolution (Tier 2)...")
-                        
-                        if "ticker" in context:
-                            ticker = context["ticker"]
-                            status_manager.set_status(agent_key, "working", f"Searching for correct ticker for '{ticker}'...")
-                            
-                            new_ticker = await self._resolve_ticker_via_search(ticker)
+            # COORDINATOR SELF-CORRECTION: Try to fix if it's a known data issue
+            if not result.success and result.error:
+                error_msg = (result.error or "").lower()
 
-                            if new_ticker and new_ticker != ticker:
-                                logger.info(f"Coordinator Tier 2: Success! Resolved {ticker} -> {new_ticker}")
-                                status_manager.set_status(agent_key, "working", f"Retrying with resolved ticker: {new_ticker}")
+                # Trigger resolution if ticker not found or delisted (Tier 2 Escalation)
+                if any(x in error_msg for x in ["not found", "ticker", "delisted", "no data", "404"]):
+                    logger.info(f"Coordinator: Escalating Ticker Resolution to Tier 2 (Search) for {agent.config.name}: {result.error}")
+                    status_manager.set_status(agent_key, "working", "Escalating Ticker Resolution (Tier 2)...")
 
-                                new_context = context.copy()
-                                new_context["ticker"] = new_ticker
-                                # Retry with new ticker
-                                retry_result = await agent.execute(new_context)
-                                if retry_result.success:
-                                    status_manager.set_status(agent_key, "ready", "Resolved via Tier 2")
-                                    result = retry_result
-                                else:
-                                    result = retry_result # Update original result for Tier 3 fallthrough
+                    if "ticker" in context:
+                        ticker = context["ticker"]
+                        status_manager.set_status(agent_key, "working", f"Searching for correct ticker for '{ticker}'...")
 
-                        if not result.success:
-                            # Tier 3: LLM Self-Correction fallback (Reasoning)
-                            logger.info(f"Coordinator: Escalating Ticker Resolution to Tier 3 (LLM) for {agent.config.name}")
-                            status_manager.set_status(agent_key, "working", "Attempting LLM self-healing (Tier 3)...")
+                        new_ticker = await self._resolve_ticker_via_search(ticker)
 
-                            fixed_result = await self._handle_specialist_error(agent, context, result.error)
-                            if fixed_result:
-                                logger.info(f"Coordinator Tier 3: Successfully healed error for {agent.config.name}")
-                                status_manager.set_status(agent_key, "ready", "Fixed via Coordinator Self-Healing")
-                                result = fixed_result
+                        if new_ticker and new_ticker != ticker:
+                            logger.info(f"Coordinator Tier 2: Success! Resolved {ticker} -> {new_ticker}")
+                            status_manager.set_status(agent_key, "working", f"Retrying with resolved ticker: {new_ticker}")
 
-                status_manager.set_status(agent_key, "ready", "Task complete")
+                            new_context = context.copy()
+                            new_context["ticker"] = new_ticker
+                            # Retry with new ticker
+                            retry_result = await agent.execute(new_context)
+                            if retry_result.success:
+                                status_manager.set_status(agent_key, "ready", "Resolved via Tier 2")
+                                result = retry_result
+                            else:
+                                result = retry_result # Update original result for Tier 3 fallthrough
 
-                # Emit telemetry: Success/Complete
-                complete_msg = AgentMessage(
-                    sender=agent.config.name,
-                    recipient="CoordinatorAgent",
-                    subject="agent_complete",
-                    payload={
-                        "agent": agent.config.name,
-                        "success": result.success,
-                        "latency_ms": result.latency_ms,
-                        "ticker": context.get("ticker"),
-                        "error": result.error if not result.success else None
-                    },
-                    correlation_id=c_id
-                )
-                await messenger.send_message(complete_msg)
+                if not result.success:
+                    # Tier 3: LLM Self-Correction fallback (Reasoning)
+                    logger.info(f"Coordinator: Escalating Ticker Resolution to Tier 3 (LLM) for {agent.config.name}")
+                    status_manager.set_status(agent_key, "working", "Attempting LLM self-healing (Tier 3)...")
 
-                return result
+                    fixed_result = await self._handle_specialist_error(agent, context, result.error)
+                    if fixed_result:
+                        logger.info(f"Coordinator Tier 3: Successfully healed error for {agent.config.name}")
+                        status_manager.set_status(agent_key, "ready", "Fixed via Coordinator Self-Healing")
+                        result = fixed_result
+
+            status_manager.set_status(agent_key, "ready", "Task complete")
+
+            # Emit telemetry: Success/Complete
+            complete_msg = AgentMessage(
+                sender=agent.config.name,
+                recipient="CoordinatorAgent",
+                subject="agent_complete",
+                payload={
+                    "agent": agent.config.name,
+                    "success": result.success,
+                    "latency_ms": result.latency_ms,
+                    "ticker": context.get("ticker"),
+                    "error": result.error if not result.success else None
+                },
+                correlation_id=c_id
+            )
+            await messenger.send_message(complete_msg)
+            return result
         except asyncio.TimeoutError:
             error_msg = "Timout after 15s"
             logger.warning(f"Specialist {agent.config.name} timed out")
@@ -533,57 +271,16 @@ Query: "{clean_query}"
             return AgentResponse(
                 agent_name=agent.config.name,
                 success=False,
-                data={},
-                error=error_msg,
-                latency_ms=15000
+                error=error_msg
             )
         except Exception as e:
-            logger.error(f"Specialist {agent.config.name} failed: {e}")
-
-            # COORDINATOR SELF-CORRECTION: Try to fix if it's a known data issue
-            if any(x in str(e).lower() for x in ["not found", "ticker", "delisted"]):
-                status_manager.set_status(agent_key, "working", "Attempting self-correction...")
-                fixed_result = await self._handle_specialist_error(agent, context, str(e))
-                if fixed_result:
-                    status_manager.set_status(agent_key, "ready", "Fixed via Coordinator")
-                    return fixed_result
-
-            status_manager.set_status(agent_key, "error", f"Failed: {str(e)}")
+            logger.error(f"Coordinator: Error executing specialist {agent.config.name}: {e}")
+            status_manager.set_status(agent_key, "error", str(e))
             return AgentResponse(
                 agent_name=agent.config.name,
                 success=False,
-                data={},
-                error=str(e),
-                latency_ms=0
+                error=str(e)
             )
-
-    async def _attempt_ticker_fix(self, ticker: str) -> Optional[str]:
-        """
-        Attempt to fix malformed tickers or those containing special characters
-        that might have triggered the validation check (e.g. VOD.L is not alpha).
-        """
-        if not ticker:
-            return None
-
-        # Strip trailing dots first
-        ticker = ticker.strip('.')
-
-        # 1. Allow dot notation for UK/Exchanges (e.g. VOD.L, BRK.B)
-        if "." in ticker and ticker.replace(".", "").isalnum():
-            # It's likely valid if it has 1 dot and rest are alphanum
-            return ticker
-
-        # 2. Strip noise (punctuation other than dot)
-        clean = "".join(c for c in ticker if c.isalnum() or c == '.')
-
-        # If the result is a clean ticker (e.g. "AAPL."), strip trailing dot
-        clean = clean.strip('.')
-
-        if len(clean) >= 2:
-            return clean
-
-        # 3. Fallback to search if really broken or too short
-        return await self._resolve_ticker_via_search(ticker)
 
     async def _resolve_ticker_via_search(self, term: str) -> Optional[str]:
         """
@@ -592,7 +289,7 @@ Query: "{clean_query}"
         to verify the best match for ambiguous symbols or names.
         """
         try:
-<<<<<<< HEAD
+            logger.info(f"Coordinator Tier 2: Searching for correct ticker matching '{term}'")
             # SOTA 2026: Try MCP search if available, fallback to Resolver
             search_result = []
             if self.mcp_client:
@@ -612,20 +309,12 @@ Query: "{clean_query}"
                 except Exception as e:
                     logger.warning(f"MCP search failed, falling back to local resolver: {e}")
                     resolver = TickerResolver()
-                    search_result = await resolver.search(term)
-=======
-            logger.info(f"Coordinator Tier 2: Searching for correct ticker matching '{term}'")
-
-            # Call search_instruments tool
-            if hasattr(asyncio, 'timeout'):
-                async with asyncio.timeout(10.0):
-                    search_result = await self.mcp_client.call_tool("search_instruments", {"query": term})
->>>>>>> main
+                    resolved = await resolver.resolve(term)
+                    search_result = [{"ticker": resolved, "name": term}] if resolved else []
             else:
-                search_result = await asyncio.wait_for(
-                    self.mcp_client.call_tool("search_instruments", {"query": term}),
-                    timeout=10.0
-                )
+                resolver = TickerResolver()
+                resolved = await resolver.resolve(term)
+                search_result = [{"ticker": resolved, "name": term}] if resolved else []
 
             # Check if search_result is wrapped in TextContent or JSON string
             if hasattr(search_result, 'content'):
@@ -702,12 +391,12 @@ Query: "{clean_query}"
         The script will run in an ISOLATED Docker container.
         
         Input Context:
-        {json.dumps(context)}
+        {json.dumps(context, default=str)}
         
         Return ONLY a JSON block with the script:
         {{
           "reasoning": "Explain the fix",
-          "code": "import json\\ncontext = {json.dumps(context)}\\n# ... fix logic ...\\nprint(json.dumps(context))"
+          "code": "import json\\ncontext = {json.dumps(context, default=str)}\\n# ... fix logic ...\\nprint(json.dumps(context, default=str))"
         }}
         """
         try:
@@ -717,17 +406,6 @@ Query: "{clean_query}"
             match = re.search(r'\{.*\}', content, re.DOTALL)
             if match:
                 try:
-<<<<<<< HEAD
-                    exec_result = await run_with_timeout(
-                        self.mcp_client.call_tool("docker_run_python", {"script": python_code}),
-                        30.0
-                    )
-                    
-                    if exec_result and hasattr(exec_result, 'content'):
-                        output_text = exec_result.content[0].text
-                        import ast
-                        exec_res_dict = ast.literal_eval(output_text)
-=======
                     fix_data = json.loads(match.group(), strict=False)
                     python_code = fix_data.get("code", "")
                 except json.JSONDecodeError as je:
@@ -740,29 +418,31 @@ Query: "{clean_query}"
                     try:
                         # Call docker_run_python tool
                         # We assume the tool is registered in the MCP client available to the coordinator
-                        if hasattr(asyncio, 'timeout'):
-                            async with asyncio.timeout(30.0):
-                                result = await self.mcp_client.call_tool("docker_run_python", {"script": python_code})
-                        else:
-                            result = await asyncio.wait_for(
-                                self.mcp_client.call_tool("docker_run_python", {"script": python_code}),
-                                timeout=30.0
-                            )
->>>>>>> main
+                        result = await run_with_timeout(
+                            self.mcp_client.call_tool("docker_run_python", {"script": python_code}),
+                            30.0
+                        )
                         
                         # Parse the output from the tool
-                        if result and result.content:
+                        if result and hasattr(result, 'content') and result.content:
                             output_text = result.content[0].text
                             # The tool returns a string rep of a dict: {'stdout': '...', ...}
                             # We need to parse that string safely
                             import ast
                             exec_res = ast.literal_eval(output_text)
 
-                            if exec_res.get("exit_code") == 0:
+                            if isinstance(exec_res, dict) and exec_res.get("exit_code") == 0:
                                 stdout = exec_res.get("stdout", "")
                                 new_context = json.loads(stdout)
                                 logger.info(f"Coordinator retry for {agent.config.name} with fixed context: {new_context}")
                                 return await agent.execute(new_context)
+                            elif isinstance(exec_res, dict):
+                                # If it's a dict but we don't have exit code 0 or maybe it's just the context dict directly (like in the original code before merge)
+                                # Let's support both formats
+                                for k, v in exec_res.items():
+                                    context[k] = v
+                                logger.info(f"Coordinator: Auto-fix successful. Updated keys: {list(exec_res.keys())}")
+                                return await agent.execute(context)
                             else:
                                 logger.warning(f"Docker execution failed: {exec_res}")
                     except asyncio.TimeoutError:
@@ -802,89 +482,3 @@ Query: "{clean_query}"
             from market_context import GoalData
             context.goal = GoalData(**data)
 
-    async def _prepare_market_data(self, ticker: str, needs_quant: bool, needs_forecast: bool) -> List[Dict]:
-        """Prepare market data including OHLCV fetching and PriceData population."""
-        from status_manager import status_manager
-        ohlcv_data = []
-        if (needs_quant or needs_forecast or ticker) and ticker:
-            status_manager.set_status("coordinator", "online", f"Fetching data for {ticker}...")
-            ohlcv_data = await self._fetch_ohlcv(ticker)
-
-            # Populate PriceData with history for charts
-            if ohlcv_data:
-                from market_context import TimeSeriesItem
-                last_bar = ohlcv_data[-1]
-                history_series = [
-                    TimeSeriesItem(
-                        timestamp=int(d['t']),
-                        open=float(d['o']),
-                        high=float(d['h']),
-                        low=float(d['l']),
-                        close=float(d['c']),
-                        volume=int(d['v'])
-                    ) for d in ohlcv_data[-50:]  # Last 50 bars for chart
-                ]
-                # Add to context (assuming context is passed or use self.context)
-                # For now, just return ohlcv_data
-        return ohlcv_data
-
-    async def _execute_specialists(self, context: MarketContext, ohlcv_data: List[Dict], needs_quant: bool, needs_portfolio: bool, needs_forecast: bool, needs_research: bool, needs_social: bool, needs_whale: bool, account_type: str):
-        """Execute specialist agents in parallel."""
-        from status_manager import status_manager
-        tasks = []
-        if needs_quant and ohlcv_data:
-            tasks.append(("QuantAgent", QuantAgent().execute({"ticker": context.ticker, "ohlcv_data": ohlcv_data})))
-        if needs_portfolio:
-            tasks.append(("PortfolioAgent", PortfolioAgent().execute({"account_type": account_type})))
-        if needs_forecast and ohlcv_data:
-            status_manager.set_status("forecasting_agent", "running", "TTM Price Prediction...")
-            tasks.append(("ForecastingAgent", ForecastingAgent().execute({"ticker": context.ticker, "ohlcv_data": ohlcv_data, "days": 5})))
-        if needs_research:
-            tasks.append(("ResearchAgent", ResearchAgent().execute({"ticker": context.ticker, "company_name": None})))
-        if needs_social:
-            tasks.append(("SocialAgent", SocialAgent().execute({"ticker": context.ticker})))
-        if needs_whale:
-            tasks.append(("WhaleAgent", WhaleAgent().execute({"ticker": context.ticker})))
-
-        # Execute in parallel
-        results = await asyncio.gather(*[task[1] for task in tasks], return_exceptions=True)
-        for (agent_name, _), result in zip(tasks, results):
-            if isinstance(result, Exception):
-                logger.error(f"{agent_name} failed: {result}")
-                continue
-            if result.success:
-                self._populate_context(context, agent_name, result.data)
-            else:
-                logger.warning(f"{agent_name} error: {result.error}")
-
-        status_manager.set_status("coordinator", "ready", f"Completed analysis for {context.ticker or 'general'}")
-
-    async def _fetch_ohlcv(self, ticker: str) -> List[Dict]:
-        """Fetch OHLCV data for technical analysis"""
-        try:
-            from data_engine import get_alpaca_client
-            alpaca = get_alpaca_client()
-
-            result = await alpaca.get_historical_bars(ticker, limit=200)
-
-            if result and "bars" in result:
-                return result["bars"]
-            
-            return []
-        except Exception as e:
-            logger.error(f"Failed to fetch OHLCV for {ticker}: {e}")
-            return []
-
-
-    def _resolve_ticker_from_history(self, history: List[Dict]) -> Optional[str]:
-        """Attempt to find last discussed ticker in history using TickerResolver"""
-        resolver = TickerResolver()
-        for msg in reversed(history):
-            content = msg.get("content", "")
-            if not content:
-                continue
-            extracted = resolver.extract(content)
-            if extracted:
-                return extracted[0]
-
-        return None

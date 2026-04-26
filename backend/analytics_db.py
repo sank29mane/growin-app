@@ -4,10 +4,16 @@ import logging
 import json
 import threading
 import asyncio
+import os
 from typing import List, Dict, Any, Optional
+from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
 
+
+# Global state for DuckDB to ensure complete thread safety across all instances
+_global_conn = None
+_global_lock = threading.Lock()
 
 class AnalyticsDB:
     """
@@ -16,9 +22,8 @@ class AnalyticsDB:
     Architecture:
     - Columnar storage for fast scans
     - Vectorized execution
-    - Multi-threaded query processing
     - In-memory or persistent mode
-    - Thread-local connections for stability
+    - Single global connection with global lock for absolute stability
     """
     
     def __init__(self, db_path: str = ":memory:"):
@@ -28,53 +33,59 @@ class AnalyticsDB:
         Args:
             db_path: Path to database file or ":memory:" for in-memory
         """
+        global _global_conn
+        
         # SOTA 2026: Force memory mode in CI/Tests to avoid lock contention
-        import os
         if os.environ.get("CI") == "true" or os.environ.get("PYTEST_CURRENT_TEST"):
             db_path = ":memory:"
             
         self.db_path = db_path
-        self._local = threading.local()
-        self.lock = threading.Lock()
-        self._init_schema()
-        logger.info(f"✅ AnalyticsDB initialized (mode: {'memory' if db_path == ':memory:' else 'persistent'})")
+        
+        with _global_lock:
+            if _global_conn is None:
+                _global_conn = duckdb.connect(self.db_path)
+                self._init_schema_internal()
+                logger.info(f"✅ AnalyticsDB Global Connection initialized (mode: {'memory' if db_path == ':memory:' else 'persistent'})")
+            else:
+                logger.debug("AnalyticsDB using existing global connection")
 
     @property
     def conn(self):
-        """Thread-local connection accessor."""
-        if not hasattr(self._local, "conn"):
-            # Each thread gets its own connection to avoid SIGABRT/Deadlock
-            self._local.conn = duckdb.connect(self.db_path)
-        return self._local.conn
+        """Global connection accessor."""
+        return _global_conn
+
+    def execute(self, sql: str, params: Any = None):
+        """Thread-safe execution helper using global lock."""
+        global _global_conn
+        with _global_lock:
+            if _global_conn is None:
+                _global_conn = duckdb.connect(self.db_path)
+            
+            if params:
+                return _global_conn.execute(sql, params)
+            return _global_conn.execute(sql)
 
     def close(self):
-        """Explicitly close the DuckDB connection for current thread."""
-        if hasattr(self._local, 'conn') and self._local.conn:
-            try:
-                self._local.conn.close()
-                del self._local.conn
-                logger.info("🔌 AnalyticsDB connection closed for current thread")
-            except Exception as e:
-                logger.error(f"Error closing AnalyticsDB: {e}")
-    
-    def _init_schema(self):
-        """Create optimized schema for time-series and agent analytics"""
-        # OHLCV historical data table
-        self.conn.execute("""
+        """
+        Note: Global connection is not closed on instance close to keep it alive
+        for other threads. Use reset_global_connection for explicit cleanup.
+        """
+        pass
+
+    def _init_schema_internal(self):
+        """Internal schema initialization helper (already under lock)."""
+        # SOTA 2026: Batch execution of DDL for performance
+        _global_conn.execute("""
+            -- OHLCV historical data table
             CREATE TABLE IF NOT EXISTS ohlcv_history (
                 ticker VARCHAR NOT NULL,
                 timestamp TIMESTAMP NOT NULL,
-                open DOUBLE,
-                high DOUBLE,
-                low DOUBLE,
-                close DOUBLE,
+                open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE,
                 volume BIGINT,
                 PRIMARY KEY (ticker, timestamp)
-            )
-        """)
+            );
 
-        # Agent Telemetry table (SOTA 2026 Reasoning Trace)
-        self.conn.execute("""
+            -- Agent Telemetry table
             CREATE TABLE IF NOT EXISTS agent_telemetry (
                 id VARCHAR PRIMARY KEY,
                 correlation_id VARCHAR,
@@ -82,11 +93,9 @@ class AnalyticsDB:
                 subject VARCHAR,
                 payload JSON,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+            );
 
-        # Agent Performance table (SOTA 2026 Alpha Metrics)
-        self.conn.execute("""
+            -- Agent Performance table
             CREATE TABLE IF NOT EXISTS agent_performance (
                 correlation_id VARCHAR PRIMARY KEY,
                 ticker VARCHAR,
@@ -94,27 +103,14 @@ class AnalyticsDB:
                 return_1d DOUBLE,
                 return_5d DOUBLE,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+            );
 
-        # Create indices for fast queries
-        self.conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_ticker_time
-            ON ohlcv_history(ticker, timestamp DESC)
-        """)
+            -- Indices
+            CREATE INDEX IF NOT EXISTS idx_ticker_time ON ohlcv_history(ticker, timestamp DESC);
+            CREATE INDEX IF NOT EXISTS idx_telemetry_correlation ON agent_telemetry(correlation_id);
+            CREATE INDEX IF NOT EXISTS idx_performance_ticker ON agent_performance(ticker);
 
-        self.conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_telemetry_correlation
-            ON agent_telemetry(correlation_id)
-        """)
-
-        self.conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_performance_ticker
-            ON agent_performance(ticker)
-        """)
-
-                # Pending Actions table for Human-In-The-Loop (HITL)
-        self.conn.execute("""
+            -- Pending Actions table for Human-In-The-Loop (HITL)
             CREATE TABLE IF NOT EXISTS pending_actions (
                 id VARCHAR PRIMARY KEY,
                 correlation_id VARCHAR,
@@ -123,21 +119,33 @@ class AnalyticsDB:
                 payload JSON,
                 ticker VARCHAR,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
+            );
+            CREATE INDEX IF NOT EXISTS idx_pending_status ON pending_actions(status);
         """)
 
-        self.conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_pending_status
-            ON pending_actions(status)
-        """)
+    def _init_schema(self):
+        """Public schema init - ensure lock."""
+        with _global_lock:
+            self._init_schema_internal()
 
-        logger.info("Analytics schema initialized (including agent_telemetry, agent_performance, and pending_actions)")
+    @staticmethod
+    def reset_global_connection():
+        """Force close and reset the global connection (useful for tests)."""
+        global _global_conn
+        with _global_lock:
+            if _global_conn:
+                try:
+                    _global_conn.close()
+                except:
+                    pass
+                _global_conn = None
+                logger.info("🔌 AnalyticsDB Global Connection reset")
 
     def log_agent_message(self, message_data: Dict[str, Any]):
         """Persist an agent message to the telemetry table."""
         try:
             # DuckDB handles JSON type directly from dict
-            self.conn.execute("""
+            self.execute("""
                 INSERT INTO agent_telemetry (id, correlation_id, agent_name, subject, payload, timestamp)
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (
@@ -145,7 +153,7 @@ class AnalyticsDB:
                 message_data.get('correlation_id'),
                 message_data.get('sender'),
                 message_data.get('subject'),
-                json.dumps(message_data.get('payload')),
+                json.dumps(message_data.get('payload'), default=str),
                 message_data.get('timestamp')
             ))
         except Exception as e:
@@ -158,7 +166,7 @@ class AnalyticsDB:
     def add_pending_action(self, action_data: Dict[str, Any]):
         """Store a trade proposal or rebalance waiting for human approval."""
         try:
-            self.conn.execute("""
+            self.execute("""
                 INSERT INTO pending_actions (id, correlation_id, action_type, status, payload, ticker, timestamp)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
@@ -166,7 +174,7 @@ class AnalyticsDB:
                 action_data.get('correlation_id'),
                 action_data.get('action_type'),
                 action_data.get('status', 'pending'),
-                json.dumps(action_data.get('payload')),
+                json.dumps(action_data.get('payload'), default=str),
                 action_data.get('ticker'),
                 action_data.get('timestamp')
             ))
@@ -180,7 +188,7 @@ class AnalyticsDB:
     def update_action_status(self, action_id: str, status: str):
         """Update the status of a pending action."""
         try:
-            self.conn.execute("UPDATE pending_actions SET status = ? WHERE id = ?", (status, action_id))
+            self.execute("UPDATE pending_actions SET status = ? WHERE id = ?", (status, action_id))
         except Exception as e:
             logger.error(f"Failed to update action status: {e}")
 
@@ -188,7 +196,7 @@ class AnalyticsDB:
         """Fetch all pending actions by status."""
         try:
             # Convert to list of dicts from DuckDB result
-            res = self.conn.execute("SELECT * FROM pending_actions WHERE status = ?", (status,)).fetchdf()
+            res = self.execute("SELECT * FROM pending_actions WHERE status = ?", (status,)).fetchdf()
             return res.to_dict("records")
         except Exception as e:
             logger.error(f"Failed to fetch pending actions: {e}")
@@ -201,7 +209,7 @@ class AnalyticsDB:
         """
         try:
             # 1. Get ticker and timestamp from telemetry
-            telemetry = self.conn.execute("""
+            telemetry = self.execute("""
                 SELECT agent_name, payload, timestamp
                 FROM agent_telemetry
                 WHERE correlation_id = ? AND subject = 'agent_started' AND agent_name = 'OrchestratorAgent'
@@ -216,7 +224,7 @@ class AnalyticsDB:
             # Orchestrator agent_started usually has the query.
             # Better to find 'intent_classified' or 'context_fabricated' which has ticker explicitly.
 
-            ticker_info = self.conn.execute("""
+            ticker_info = self.execute("""
                 SELECT payload
                 FROM agent_telemetry
                 WHERE correlation_id = ? AND subject = 'context_fabricated'
@@ -234,7 +242,7 @@ class AnalyticsDB:
             timestamp = telemetry[2]
 
             # 2. Fetch entry price (closest to reasoning timestamp)
-            entry_row = self.conn.execute("""
+            entry_row = self.execute("""
                 SELECT close FROM ohlcv_history
                 WHERE ticker = ? AND timestamp <= ?
                 ORDER BY timestamp DESC LIMIT 1
@@ -246,24 +254,27 @@ class AnalyticsDB:
             entry_price = entry_row[0]
 
             # 3. Fetch future prices (1d and 5d forward)
-            # DuckDB allows powerful interval arithmetic
-            price_1d = self.conn.execute("""
-                SELECT close FROM ohlcv_history
-                WHERE ticker = ? AND timestamp >= ? + INTERVAL 1 DAY
-                ORDER BY timestamp ASC LIMIT 1
-            """, (ticker, timestamp)).fetchone()
+            # Use native Python datetime arithmetic for safety
+            target_1d = timestamp + timedelta(days=1)
+            target_5d = timestamp + timedelta(days=5)
 
-            price_5d = self.conn.execute("""
+            price_1d = self.execute("""
                 SELECT close FROM ohlcv_history
-                WHERE ticker = ? AND timestamp >= ? + INTERVAL 5 DAY
+                WHERE ticker = ? AND timestamp >= ?
                 ORDER BY timestamp ASC LIMIT 1
-            """, (ticker, timestamp)).fetchone()
+            """, (ticker, target_1d)).fetchone()
+
+            price_5d = self.execute("""
+                SELECT close FROM ohlcv_history
+                WHERE ticker = ? AND timestamp >= ?
+                ORDER BY timestamp ASC LIMIT 1
+            """, (ticker, target_5d)).fetchone()
 
             return_1d = (price_1d[0] - entry_price) / entry_price if price_1d else None
             return_5d = (price_5d[0] - entry_price) / entry_price if price_5d else None
 
             # 4. Store Performance Result
-            self.conn.execute("""
+            self.execute("""
                 INSERT INTO agent_performance (correlation_id, ticker, entry_price, return_1d, return_5d, timestamp)
                 VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT (correlation_id) DO UPDATE SET
@@ -345,19 +356,23 @@ class AnalyticsDB:
             # Bulk insert using DuckDB's fast path
             # SOTA: Registering dataframe explicitly to avoid scope resolution issues
             try:
-                self.conn.register('df_tmp', df)
-                self.conn.execute("""
-                    INSERT INTO ohlcv_history
-                    SELECT ticker, timestamp, open, high, low, close, volume
-                    FROM df_tmp
-                    ON CONFLICT (ticker, timestamp) DO UPDATE SET
-                        open = EXCLUDED.open,
-                        high = EXCLUDED.high,
-                        low = EXCLUDED.low,
-                        close = EXCLUDED.close,
-                        volume = EXCLUDED.volume
-                """)
-                self.conn.unregister('df_tmp')
+                global _global_conn
+                with _global_lock:
+                    if _global_conn is None:
+                        _global_conn = duckdb.connect(self.db_path)
+                    _global_conn.register('df_tmp', df)
+                    _global_conn.execute("""
+                        INSERT INTO ohlcv_history
+                        SELECT ticker, timestamp, open, high, low, close, volume
+                        FROM df_tmp
+                        ON CONFLICT (ticker, timestamp) DO UPDATE SET
+                            open = EXCLUDED.open,
+                            high = EXCLUDED.high,
+                            low = EXCLUDED.low,
+                            close = EXCLUDED.close,
+                            volume = EXCLUDED.volume
+                    """)
+                    _global_conn.unregister('df_tmp')
             except Exception as duck_err:
                 logger.error(f"DuckDB execution failed: {duck_err}")
                 raise duck_err
@@ -386,8 +401,9 @@ class AnalyticsDB:
             DataFrame with aggregated statistics
         """
         try:
+            threshold = datetime.now(timezone.utc) - timedelta(days=int(window_days))
             # Sentinel: Use parameterized query for interval to prevent SQL injection
-            result = self.conn.execute("""
+            result = self.execute("""
                 SELECT 
                     ticker,
                     COUNT(*) as data_points,
@@ -401,9 +417,9 @@ class AnalyticsDB:
                     (MAX(close) - MIN(close)) / MIN(close) * 100 as price_change_pct
                 FROM ohlcv_history
                 WHERE ticker = ? 
-                  AND timestamp >= CURRENT_TIMESTAMP - (INTERVAL 1 DAY * ?)
+                  AND timestamp >= ?
                 GROUP BY ticker
-            """, (ticker, int(window_days))).fetchdf()
+            """, (ticker, threshold)).fetchdf()
             
             return result if not result.empty else None
             
@@ -427,7 +443,7 @@ class AnalyticsDB:
             DataFrame with OHLCV data
         """
         try:
-            result = self.conn.execute("""
+            result = self.execute("""
                 SELECT 
                     timestamp,
                     open,
@@ -463,8 +479,9 @@ class AnalyticsDB:
             Annualized volatility (standard deviation of returns)
         """
         try:
+            threshold = datetime.now(timezone.utc) - timedelta(days=int(window_days))
             # Sentinel: Use parameterized query for interval to prevent SQL injection
-            result = self.conn.execute("""
+            result = self.execute("""
                 WITH daily_returns AS (
                     SELECT 
                         ticker,
@@ -474,14 +491,14 @@ class AnalyticsDB:
                             LAG(close) OVER (ORDER BY timestamp) as daily_return
                     FROM ohlcv_history
                     WHERE ticker = ?
-                      AND timestamp >= CURRENT_TIMESTAMP - (INTERVAL 1 DAY * ?)
+                      AND timestamp >= ?
                     ORDER BY timestamp
                 )
                 SELECT 
                     STDDEV(daily_return) * SQRT(252) as annualized_volatility
                 FROM daily_returns
                 WHERE daily_return IS NOT NULL
-            """, (ticker, int(window_days))).fetchone()
+            """, (ticker, threshold)).fetchone()
             
             return result[0] if result and result[0] is not None else None
             
@@ -505,8 +522,9 @@ class AnalyticsDB:
             Trend description: 'bullish', 'bearish', or 'neutral'
         """
         try:
+            threshold = datetime.now(timezone.utc) - timedelta(days=int(window_days))
             # Sentinel: Use parameterized query for interval to prevent SQL injection
-            result = self.conn.execute("""
+            result = self.execute("""
                 WITH price_data AS (
                     SELECT 
                         close,
@@ -514,13 +532,13 @@ class AnalyticsDB:
                         COUNT(*) OVER () as total
                     FROM ohlcv_history
                     WHERE ticker = ?
-                      AND timestamp >= CURRENT_TIMESTAMP - (INTERVAL 1 DAY * ?)
+                      AND timestamp >= ?
                 )
                 SELECT 
                     AVG(CASE WHEN rn <= total/2 THEN close END) as first_half_avg,
                     AVG(CASE WHEN rn > total/2 THEN close END) as second_half_avg
                 FROM price_data
-            """, (ticker, int(window_days))).fetchone()
+            """, (ticker, threshold)).fetchone()
             
             if not result or None in result:
                 return 'neutral'
@@ -554,7 +572,7 @@ class AnalyticsDB:
             else:
                 ticker_query += " GROUP BY ticker"
                 
-            ticker_res = self.conn.execute(ticker_query, params).fetchdf()
+            ticker_res = self.execute(ticker_query, params).fetchdf()
             
             # 2. Specialist level metrics (correlation between specialist completion and future returns)
             # We join performance with telemetry to see which agents were active during successful/unsuccessful sessions
@@ -570,19 +588,17 @@ class AnalyticsDB:
             """
             if ticker:
                 specialist_query += " AND p.ticker = ? GROUP BY t.agent_name"
-                specialist_res = self.conn.execute(specialist_query, [ticker]).fetchdf()
+                specialist_res = self.execute(specialist_query, [ticker]).fetchdf()
             else:
                 specialist_query += " GROUP BY t.agent_name"
-                specialist_res = self.conn.execute(specialist_query).fetchdf()
+                specialist_res = self.execute(specialist_query).fetchdf()
 
             # Format result
-            specialists = {}
-            for _, row in specialist_res.iterrows():
-                specialists[row['agent_name']] = {
-                    "avg_1d": float(row['avg_1d']) if not pd.isna(row['avg_1d']) else 0.0,
-                    "avg_5d": float(row['avg_5d']) if not pd.isna(row['avg_5d']) else 0.0,
-                    "total_sessions": int(row['count'])
-                }
+            specialist_res['avg_1d'] = specialist_res['avg_1d'].fillna(0.0).astype(float)
+            specialist_res['avg_5d'] = specialist_res['avg_5d'].fillna(0.0).astype(float)
+            specialist_res['total_sessions'] = specialist_res['count'].astype(int)
+            specialists = specialist_res.set_index('agent_name')[['avg_1d', 'avg_5d', 'total_sessions']].to_dict('index')
+
 
             if ticker_res.empty:
                 return {"avg_1d": 0.0, "avg_5d": 0.0, "total_sessions": 0, "specialists": specialists}

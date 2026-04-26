@@ -115,6 +115,8 @@ private struct EventMetadataView: View {
                 .font(SovereignTheme.Fonts.monacoTechnical(size: 8))
                 .foregroundStyle(Color.brutalOffWhite.opacity(0.3))
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(event.agent), Status: \(event.status), Time: \(formatTime(event.timestamp))")
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 12)
     }
@@ -143,6 +145,7 @@ private struct EventContentView: View {
                     .foregroundStyle(Color.brutalOffWhite.opacity(0.5))
             }
         }
+        .accessibilityElement(children: .combine)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 16)
     }

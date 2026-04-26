@@ -1,4 +1,7 @@
 {
+    "python.analysis.extraPaths": [
+        "./backend"
+    ],
     "claudeCode.disableLoginPrompt": false,
     "claudeCode.environmentVariables": [
         {

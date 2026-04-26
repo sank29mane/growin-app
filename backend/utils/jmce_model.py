@@ -1,18 +1,5 @@
 from __future__ import annotations
-try:
-    import mlx.core as mx
-    import mlx.nn as nn
-    HAS_MLX = True
-except ImportError:
-    mx = None
-    class DummyModule:
-        def __init__(self, *args, **kwargs): pass
-        def __call__(self, *args, **kwargs): pass
-    class nn:
-        Module = DummyModule
-        @staticmethod
-        def Linear(*args, **kwargs): return lambda x: x
-    HAS_MLX = False
+from utils.mlx_loader import mx, nn, HAS_MLX
 import numpy as np
 from typing import Tuple, Optional, Dict, Any, Union
 from enum import Enum
@@ -81,9 +68,12 @@ class NeuralJMCE(nn.Module):
                 k += 1
         self.diag_mask = np.zeros(self.cholesky_size, dtype=np.float32)
         self.diag_mask[diag_indices] = 1.0
-        self.diag_mask = mx.array(self.diag_mask)
         idx_map[idx_map == -1] = self.cholesky_size
-        self.idx_map_mx = mx.array(idx_map, dtype=mx.uint32)
+        if HAS_MLX:
+            self.diag_mask = mx.array(self.diag_mask)
+            self.idx_map_mx = mx.array(idx_map, dtype=mx.uint32)
+        else:
+            self.idx_map_mx = None
 
     def _apply_fourier_shift(self, mu: 'mx.array') -> 'mx.array':
         shift = self.fourier_phase_shift

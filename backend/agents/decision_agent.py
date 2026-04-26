@@ -11,7 +11,7 @@ import re
 import json
 import time
 import asyncio
-from backend.utils.async_utils import run_with_timeout
+from utils.async_utils import run_with_timeout
 import uuid
 from datetime import datetime
 from decimal import Decimal
@@ -45,18 +45,105 @@ class ToolCall(BaseModel):
 def extract_tool_calls(content: str, reasoning: str) -> List[ToolCall]:
     ...
 
+class ThinkingParser:
+    """Helper to extract thinking blocks from a stream of tokens."""
+    def __init__(self):
+        self.buffer = ""
+        self.is_thinking = False
+        self.thinking_buffer = ""
+        self.current_step_id = None
+
+    def process_chunk(self, chunk: str) -> List[Dict[str, Any]]:
+        """Processes a token chunk and returns list of events (token, step_start, step_end)."""
+        events = []
+
+        # Handle dict chunks from vmlx/SOTA 2026 providers that might have reasoning_content
+        if isinstance(chunk, dict):
+            reasoning = chunk.get("reasoning_content")
+            content = chunk.get("content")
+
+            if reasoning:
+                if not self.is_thinking:
+                    self.is_thinking = True
+                    self.current_step_id = str(uuid.uuid4())
+                    events.append({"type": "step_start", "id": self.current_step_id, "name": "Deep Reasoning"})
+
+                self.thinking_buffer += reasoning
+                # We don't yield step_end yet, we wait until reasoning_content stops
+                return events
+
+            if content:
+                if self.is_thinking:
+                    # Reasoning ended, content started
+                    events.append({"type": "step_end", "id": self.current_step_id, "content": self.thinking_buffer})
+                    self.is_thinking = False
+                    self.thinking_buffer = ""
+                    self.current_step_id = None
+
+                events.append({"type": "token", "content": content})
+                return events
+
+        # Standard string chunk processing (with <think> tags)
+        self.buffer += chunk
+
+        # 1. Detect start of thinking
+        if "<think>" in self.buffer.lower() and not self.is_thinking:
+            # Content before <think> is normal token
+            parts = re.split(r'<think>', self.buffer, flags=re.IGNORECASE)
+            if parts[0]:
+                events.append({"type": "token", "content": parts[0]})
+
+            self.is_thinking = True
+            self.current_step_id = str(uuid.uuid4())
+            events.append({"type": "step_start", "id": self.current_step_id, "name": "Deep Reasoning"})
+
+            # Remaining after <think> is thinking content
+            self.buffer = parts[1] if len(parts) > 1 else ""
+
+        # 2. Detect end of thinking
+        if "</think>" in self.buffer.lower() and self.is_thinking:
+            parts = re.split(r'</think>', self.buffer, flags=re.IGNORECASE)
+            # Content within <think>...</think>
+            self.thinking_buffer += parts[0]
+
+            events.append({"type": "step_end", "id": self.current_step_id, "content": self.thinking_buffer})
+
+            self.is_thinking = False
+            self.thinking_buffer = ""
+            self.current_step_id = None
+
+            # Remaining after </think> is normal token
+            self.buffer = parts[1] if len(parts) > 1 else ""
+            if self.buffer:
+                events.append({"type": "token", "content": self.buffer})
+                self.buffer = ""
+
+        # 3. Handle intermediate tokens
+        elif self.is_thinking:
+            # While in thinking mode, buffer the text but don't yield as normal token
+            self.thinking_buffer += self.buffer
+            self.buffer = ""
+        else:
+            # Normal token stream
+            if self.buffer:
+                events.append({"type": "token", "content": self.buffer})
+                self.buffer = ""
+
+        return events
+
 class DecisionAgent:
     """
     The "Brain" - Uses high-reasoning LLM to make final decisions.
 
-    Model: User-selectable (GPT-4o, Claude, Gemma-2-27B, etc.)
+    Model: User-selectable (GPT-4o, Claude, native-mlx, etc.)
     Role: Synthesize all data, validate prices, make recommendations
     Performance: 5-8s (LLM reasoning time)
     """
 
     INTERCEPTED_TOOLS = SENSITIVE_TOOLS
 
-    def __init__(self, model_name: str = "gpt-4o", api_keys: Optional[Dict[str, str]] = None, mcp_client=None):
+    def __init__(self, model_name: str = "native-mlx", api_keys: Optional[Dict[str, str]] = None, mcp_client=None):
+
         self.model_name = model_name
         self.api_keys = api_keys or {}
         from app_context import state
@@ -215,6 +302,9 @@ class DecisionAgent:
             if (context.intent == "goal_planning" or "plan" in (query or "").lower()) and "CREATE_GOAL_PLAN" not in recommendation:
                 recommendation += "\n\n[ACTION:CREATE_GOAL_PLAN]"
 
+            # Quick Actions (Contextual Buttons)
+            quick_actions = self._get_quick_actions(context)
+
             # Audit Log
             log_audit(
                 action="DECISION_MADE",
@@ -226,19 +316,58 @@ class DecisionAgent:
                     "correlation_id": correlation_id_ctx.get(),
                     "recommendation_snippet": recommendation[:200],
                     "response_id": response_id,
-                    "contradictions_count": len(contradictions) if contradictions else 0
+                    "contradictions_count": len(contradictions) if contradictions else 0,
+                    "quick_actions_count": len(quick_actions)
                 }
             )
 
             return {
                 "content": recommendation,
-                "response_id": response_id
+                "response_id": response_id,
+                "quick_actions": quick_actions
             }
 
         except Exception as e:
             logger.error(f"Decision making failed: {e}")
             status_manager.set_status("decision_agent", "error", f"Error: {str(e)}", model=self.model_name)
-            return {"content": f"Error generating recommendation: {str(e)}", "response_id": None}
+            return {"content": f"Error generating recommendation: {str(e)}", "response_id": None, "quick_actions": []}
+
+    def _get_quick_actions(self, context: MarketContext) -> List[Dict[str, str]]:
+        """Generate contextual quick action buttons based on state."""
+        actions = []
+        
+        # 1. Portfolio Context
+        if context.portfolio and context.portfolio.total_positions > 0:
+            actions.append({
+                "icon": "📊", 
+                "label": "Position Details", 
+                "prompt": "Show me a detailed breakdown of my positions"
+            })
+            
+        # 2. Ticker Context
+        if context.ticker:
+            actions.append({
+                "icon": "📈", 
+                "label": f"Deep Dive {context.ticker}", 
+                "prompt": f"Perform a full deep dive analysis of {context.ticker}"
+            })
+            
+        # 3. Market/General Context
+        actions.append({
+            "icon": "🎯", 
+            "label": "Trading Ideas", 
+            "prompt": "What are some high-probability trading ideas for today?"
+        })
+        
+        # 4. Goal Planning
+        if context.intent == "goal_planning":
+            actions.append({
+                "icon": "📝", 
+                "label": "Refine Goal", 
+                "prompt": "Let's refine my investment goal parameters"
+            })
+            
+        return actions[:3] # Max 3 for UI clarity
 
     def _identify_contradictions(self, context: MarketContext) -> List[str]:
         """Identify conflicting signals between agents for the debate phase."""
@@ -289,7 +418,7 @@ class DecisionAgent:
     async def make_decision_stream(self, context: MarketContext, query: str):
         """
         Stream the decision making process.
-        Yields chunks of text with formatting protection.
+        Yields chunks of text with formatting protection and thinking telemetry.
         """
         if not self._initialized:
             await self._initialize_llm()
@@ -301,6 +430,12 @@ class DecisionAgent:
 
         from status_manager import status_manager
         status_manager.set_status("decision_agent", "working", "Streaming reasoning...", model=self.model_name)
+
+        # Telemetry Setup
+        from .messenger import AgentMessage, get_messenger
+        messenger = get_messenger()
+        c_id = correlation_id_ctx.get()
+        parser = ThinkingParser()
 
         # Same prep logic as make_decision
         account_filter = self._detect_account_mentions(query)
@@ -316,30 +451,61 @@ class DecisionAgent:
                 async for chunk in self.llm.astream(messages):
                     content = chunk.content
                     
-                    # SOTA Real-time Formatting Buffer
-                    # Nemotron often outputs '### 1.' clumped with previous text
-                    # We look for common header patterns and ensure a newline exists
-                    if "###" in content:
-                        # If the buffer (full_response) doesn't end with a newline, inject one
-                        if full_response and not full_response.endswith("\n"):
-                            yield "\n\n"
-                            full_response += "\n\n"
-                        elif full_response and full_response.endswith("\n") and not full_response.endswith("\n\n"):
-                            yield "\n"
-                            full_response += "\n"
+                    # Process via Thinking Parser
+                    events = parser.process_chunk(content)
+                    for event in events:
+                        if event["type"] == "step_start":
+                            status_manager.add_reasoning_step(event["id"], event["name"], status="working")
+                        elif event["type"] == "step_end":
+                            status_manager.add_reasoning_step(event["id"], "Deep Reasoning", status="completed", content=event["content"])
+                        
+                        if event["type"] == "token":
+                            # SOTA Real-time Formatting Buffer
+                            token = event["content"]
+                            if "###" in token:
+                                if full_response and not full_response.endswith("\n"):
+                                    yield "\n\n"
+                                    full_response += "\n\n"
+                                elif full_response and full_response.endswith("\n") and not full_response.endswith("\n\n"):
+                                    yield "\n"
+                                    full_response += "\n"
                             
-                    full_response += content
-                    yield content
+                            full_response += token
+                            yield token
+                        
+                        elif event["type"] == "step_start":
+                            await messenger.send_message(AgentMessage(
+                                sender="DecisionAgent",
+                                recipient="broadcast",
+                                subject="agent_started",
+                                payload={"agent": "ReasoningEngine", "step": event["name"]},
+                                correlation_id=c_id
+                            ))
+                            status_manager.set_status("decision_agent", "working", f"Reasoning: {event['name']}...", model=self.model_name)
+                            
+                        elif event["type"] == "step_end":
+                            await messenger.send_message(AgentMessage(
+                                sender="DecisionAgent",
+                                recipient="broadcast",
+                                subject="agent_complete",
+                                payload={"agent": "ReasoningEngine", "success": True, "content": event["content"]},
+                                correlation_id=c_id
+                            ))
+                            # Add extracted reasoning to context
+                            if not context.reasoning:
+                                context.reasoning = ""
+                            context.reasoning += "\n" + event["content"]
             else:
                 # Fallback
                 response = await self._generate_draft(system_content, prompt, context=context, query=query)
                 full_response = response
                 yield response
             
-            # Post-stream processing: Reasoning Extraction
-            reasoning = self._extract_reasoning(full_response)
-            if reasoning:
-                context.reasoning = reasoning
+            # Post-stream processing: Reasoning Extraction (for non-astream fallback)
+            if not context.reasoning:
+                reasoning = self._extract_reasoning(full_response)
+                if reasoning:
+                    context.reasoning = reasoning
                 
             # Post-stream processing (Price Validation)
             validation = await PriceValidator.validate_trade_price(context.ticker)
@@ -351,9 +517,6 @@ class DecisionAgent:
             status_manager.set_status("decision_agent", "ready", "Stream complete", model=self.model_name)
             
             # SOTA 2026: Emit Decision Completion Telemetry
-            from .messenger import AgentMessage, get_messenger
-            messenger = get_messenger()
-            c_id = correlation_id_ctx.get()
             await messenger.send_message(AgentMessage(
                 sender="DecisionAgent",
                 recipient="broadcast",
@@ -488,7 +651,7 @@ class DecisionAgent:
                         except asyncio.TimeoutError:
                             logger.warning(f"Tool execution timed out: {tool_name}")
                             return f"[TOOL_RESULT:{tool_name}] Error: Execution timed out after 15 seconds"
-                        except CircuitBreakerOpenException:
+                        except CircuitBreakerOpenError:
                             logger.warning(f"Tool execution skipped: {tool_name} circuit breaker is OPEN")
                             return f"[TOOL_RESULT:{tool_name}] Error: Execution skipped because circuit breaker is OPEN"
                         except Exception as e:

@@ -3,6 +3,7 @@ Orchestrator Agent - Unified Routing, Coordination, and Decision Making.
 SOTA 2026: Flattened architecture for reduced latency and improved coherence.
 """
 
+import os
 import asyncio
 import logging
 import json
@@ -186,10 +187,12 @@ Query: "{clean_query}"
         # 2. Routing Phase
         status_manager.set_status("orchestrator", "working", "Classifying Intent...")
         intent_info = await self._classify_intent(query)
-        # Context bridging for "Deep Dive" or follow-ups without explicit tickers
+        # Context bridging for "Deep Dive" or follow-ups without explicit tickers (Depth Limit: 5)
         if not ticker and history:
             from utils import extract_ticker_from_text
-            for msg in reversed(history):
+            for i, msg in enumerate(reversed(history)):
+                if i >= 5: # Short-circuit to optimize performance
+                    break
                 # SOTA 2026: Only inherit context from User Messages to avoid hallucinating tickers from AI headers (e.g. ACE)
                 if msg.get("role") != "user":
                     continue
@@ -214,16 +217,29 @@ Query: "{clean_query}"
         # 3. Data Fabrication (Market Context)
         status_manager.set_status("orchestrator", "working", "Fabricating Context...")
         
-        # SOTA 2026: Historical Alpha Context
-        from analytics_db import get_analytics_db
-        db = get_analytics_db()
-        historical_alpha = db.get_agent_alpha_metrics(ticker)
+        # SOTA 2026: Historical Alpha Context (Optional)
+        historical_alpha = {"avg_1d": 0.0, "avg_5d": 0.0, "total_sessions": 0, "specialists": {}}
+        if os.getenv("GROWIN_ANALYTICS_ENABLED", "false").lower() == "true":
+            try:
+                from analytics_db import get_analytics_db
+                db = get_analytics_db()
+                historical_alpha = db.get_agent_alpha_metrics(ticker)
+            except Exception as e:
+                logger.warning(f"Analytics metrics failed: {e}")
         
         from agents.decision_agent import DecisionAgent
         detected_account = account_type
         if not detected_account or detected_account == "all":
             detected_account = DecisionAgent()._detect_account_mentions(query)
             
+        # COORDINATOR FIX: Robust normalization via Resolver
+        if ticker:
+            from utils.ticker_utils import TickerResolver
+            original_ticker = ticker
+            ticker = TickerResolver().normalize(ticker)
+            if ticker != original_ticker:
+                logger.info(f"Ticker normalized (Resolver): {original_ticker} -> {ticker}")
+
         context = await self.data_fabricator.fabricate_context(
             intent=intent_info["type"],
             ticker=ticker,
@@ -319,6 +335,7 @@ Query: "{clean_query}"
         
         decision_result = await self.decision_engine.make_decision(context, full_query)
         recommendation = decision_result.get("content", "")
+        quick_actions = decision_result.get("quick_actions", [])
         
         # SOTA 2026 Phase 30: Emit Rebalance Proposal for HITL UI
         if "pending_proposal" in context.user_context:
@@ -335,9 +352,14 @@ Query: "{clean_query}"
 
         # --- SOTA 2026: ADVERSARIAL DEBATE LOOP ---
         if context.intent in ["conversational", "educational"]:
-            return {"content": recommendation, "response_id": decision_result.get("response_id"), "context": context}
+            return {
+                "content": recommendation, 
+                "response_id": decision_result.get("response_id"), 
+                "context": context,
+                "quick_actions": quick_actions
+            }
 
-        import os
+
         debate_trace = []
         max_debate_turns = 0 if os.getenv("USE_SHADOW_LLM") == "1" else 1 # Skip rebuttal in shadow mode definition
         
@@ -415,7 +437,8 @@ Query: "{clean_query}"
         return {
             "content": recommendation,
             "response_id": decision_result.get("response_id"),
-            "context": context
+            "context": context,
+            "quick_actions": quick_actions
         }
 
     async def _run_specialist(self, agent: BaseAgent, input_data: Dict[str, Any], suppress_events: bool = False) -> AgentResponse:
@@ -472,10 +495,12 @@ Query: "{clean_query}"
         if not ticker: 
             ticker = intent_info.get("primary_ticker")
             
-        # Context bridging for "Deep Dive" or follow-ups without explicit tickers
+        # Context bridging for "Deep Dive" or follow-ups without explicit tickers (Depth Limit: 5)
         if not ticker and history:
             from utils import extract_ticker_from_text
-            for msg in reversed(history):
+            for i, msg in enumerate(reversed(history)):
+                if i >= 5: # Short-circuit to optimize performance
+                    break
                 # SOTA 2026: Only inherit context from User Messages to avoid hallucinating tickers from AI headers (e.g. ACE)
                 if msg.get("role") != "user":
                     continue
@@ -494,6 +519,14 @@ Query: "{clean_query}"
         if not detected_account or detected_account == "all":
             detected_account = DecisionAgent()._detect_account_mentions(query)
             
+        # COORDINATOR FIX: Robust normalization via Resolver
+        if ticker:
+            from utils.ticker_utils import TickerResolver
+            original_ticker = ticker
+            ticker = TickerResolver().normalize(ticker)
+            if ticker != original_ticker:
+                logger.info(f"Ticker normalized (Resolver): {original_ticker} -> {ticker}")
+
         context = await self.data_fabricator.fabricate_context(
             intent=intent_info["type"],
             ticker=ticker,
@@ -593,5 +626,6 @@ Query: "{clean_query}"
         from pydantic import BaseModel
         class FinalEvent(BaseModel):
             market_context: MarketContext
+            quick_actions: List[Dict[str, str]]
         
-        yield FinalEvent(market_context=context)
+        yield FinalEvent(market_context=context, quick_actions=self.decision_engine._get_quick_actions(context))

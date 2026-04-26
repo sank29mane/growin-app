@@ -90,6 +90,8 @@ struct ReasoningStepChip: View {
                 .stroke(Color.white.opacity(0.1), lineWidth: 1)
         )
         .offset(y: appearOffset)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(step.agent) agent: \(step.action). \(step.content ?? "")")
         .onAppear {
             withAnimation(.spring(response: 0.5, dampingFraction: 0.6)) {
                 appearOffset = 0

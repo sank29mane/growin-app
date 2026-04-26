@@ -153,6 +153,7 @@ async def chat_message(
             "conversation_id": conversation_id,
             "agent": "DecisionAgent",
             "response": response,
+            "quick_actions": result.get("quick_actions", []),
             "tool_calls": None, # Explicitly null to prevent frontend from treating it as a tool/search result
             "timestamp": timestamp,
             "model_name": request.model_name,
@@ -161,10 +162,7 @@ async def chat_message(
         }
     except Exception as e:
         logger.error(f"Chat error: {str(e)}\n{traceback.format_exc()}")
-        raise HTTPException(
-            status_code=500, 
-            detail="Internal Server Error"
-        )
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 async def stream_chat_generator(request: ChatMessage):
     """Generator for SSE streaming responses with SOTA 2026 telemetry."""
@@ -225,6 +223,7 @@ async def stream_chat_generator(request: ChatMessage):
                 
                 full_response = ""
                 final_context = None
+                quick_actions = []
                 
                 async for event in orchestrator.run_stream(
                     query=request.message,
@@ -239,6 +238,7 @@ async def stream_chat_generator(request: ChatMessage):
                     elif hasattr(event, "market_context"):
                         # Capture context from final event
                         final_context = event.market_context
+                        quick_actions = getattr(event, "quick_actions", [])
                     
                 # Save final message
                 chat_manager.save_message(
@@ -254,7 +254,7 @@ async def stream_chat_generator(request: ChatMessage):
                     state.rag_manager.add_chat_message("assistant", full_response, conversation_id)
                 
                 # SOTA 2026: Include metadata in done event
-                metadata = {}
+                metadata = {"quick_actions": quick_actions}
                 if final_context:
                     metadata["agents_executed"] = list(final_context.agents_executed)
                     

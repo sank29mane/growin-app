@@ -141,14 +141,15 @@ class ModelWorker:
         ohlcv = request.get("ohlcv_data", [])
         steps = request.get("prediction_steps", 96)
         timeframe = request.get("timeframe", "1Hour")
-        return run_forecast(ohlcv, steps, timeframe=timeframe)
+        ticker = request.get("ticker")
+        return run_forecast(ohlcv, steps, timeframe=timeframe, ticker=ticker)
 
     def _forecast_fused(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """
         SOTA 2026: Fused TTM-JMCE execution.
         Zero-copy memory sharing on GPU via MLX.
         """
-        import mlx.core as mx
+        from utils.mlx_loader import mx
         import numpy as np
         
         # 1. Run standard TTM
@@ -238,7 +239,7 @@ def main():
                     return [sanitize(v) for v in obj]
                 return obj
             
-            sys.stdout.write(json.dumps(sanitize(response)) + "\n")
+            sys.stdout.write(json.dumps(sanitize(response), default=str) + "\n")
             sys.stdout.flush()
         except json.JSONDecodeError:
             logger.error("Failed to decode JSON request")

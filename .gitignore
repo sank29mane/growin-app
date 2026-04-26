@@ -61,3 +61,12 @@ backend/*.pid
 
 # macOS
 .DS_Store
+
+# GSD & Planning (Local Only)
+.planning/
+.gsd/
+.agents/
+.agents.md
+.t212_cache.json
+backend/.t212_cache.json
+

@@ -411,6 +411,31 @@ async def list_tools() -> list[Tool]:
 async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     global active_account_type
     c = get_active_client()
+    
+    # SOTA 2026: Shadow Mode Interceptor (Phase 36 Wave 3)
+    # Block real execution if GROWIN_SHADOW_MODE is 1
+    is_shadow = os.environ.get("GROWIN_SHADOW_MODE", "0") == "1"
+    sensitive_tools = [
+        "place_market_order", "place_limit_order", "place_stop_order", 
+        "place_stop_limit_order", "cancel_order", "create_investment_pie",
+        "update_investment_pie", "delete_investment_pie", "update_pie"
+    ]
+    
+    if is_shadow and name in sensitive_tools:
+        log_msg = f"🕵️ SHADOW MODE INTERCEPT: Tool '{name}' with args {json.dumps(arguments)}"
+        print(log_msg, file=sys.stderr)
+        
+        # Log to a dedicated file for the UAT harness to consume
+        shadow_log_path = "shadow_trades.log"
+
+        def write_shadow_log():
+            with open(shadow_log_path, "a") as f:
+                f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {name} | {json.dumps(arguments)}\n")
+
+        await asyncio.to_thread(write_shadow_log)
+            
+        return [TextContent(type="text", text=f"[SHADOW_SUCCESS] {name} intercepted successfully. No capital committed.")]
+
     try:
         if name == "analyze_portfolio":
             return await handle_analyze_portfolio(arguments, active_account_type, get_clients, clients)

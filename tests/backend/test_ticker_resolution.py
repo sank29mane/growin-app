@@ -1,5 +1,5 @@
 import pytest
-from backend.utils.ticker_utils import TickerResolver
+from utils.ticker_utils import TickerResolver
 
 @pytest.fixture
 def resolver():

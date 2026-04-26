@@ -1,8 +1,6 @@
+import pandas as pd
 import numpy as np
-try:
-    import mlx.core as mx
-except ImportError:
-    mx = None
+from utils.mlx_loader import mx
 from scipy.optimize import minimize
 from decimal import Decimal
 from typing import Dict, List, Optional, Union, Any
@@ -178,3 +176,80 @@ class PortfolioAnalyzer:
         except Exception as e:
             logger.warning(f"Failed to extract covariance velocity: {e}")
             return None
+
+    @staticmethod
+    def calculate_daily_returns(price_history: List[float], method: str='simple') -> np.ndarray:
+        if not price_history or len(price_history) < 2:
+            return np.array([])
+        prices = np.array(price_history)
+        if method == 'log':
+            return np.diff(np.log(prices))
+        return np.diff(prices) / prices[:-1]
+    @staticmethod
+    def calculate_sharpe_ratio(returns: np.ndarray, risk_free_rate: float=0.04) -> float:
+        if len(returns) == 0:
+            return 0.0
+        rf_daily = risk_free_rate / 252
+        excess_returns = returns - rf_daily
+        std = np.std(excess_returns)
+        if std <= 1e-9:
+            return 0.0
+        return float(np.mean(excess_returns) / std * np.sqrt(252))
+
+    @staticmethod
+    def calculate_volatility(returns: np.ndarray, annualize: bool = True) -> float:
+        if len(returns) == 0:
+            return 0.0
+        vol = float(np.std(returns))
+        return vol * np.sqrt(252) if annualize else vol
+
+    @staticmethod
+    def calculate_beta(asset_returns: np.ndarray, bench_returns: np.ndarray) -> float:
+        if len(asset_returns) == 0 or len(bench_returns) == 0:
+            return 1.0
+        cov = np.cov(asset_returns, bench_returns)[0][1]
+        var = np.var(bench_returns)
+        return float(cov / var) if var > 0 else 1.0
+
+    def analyze_performance(self, price_history: List[float], benchmark_history: List[float]) -> Dict[str, float]:
+        returns = self.calculate_daily_returns(price_history)
+        bench_returns = self.calculate_daily_returns(benchmark_history)
+
+        return {
+            "total_return": float((price_history[-1] / price_history[0]) - 1) if price_history else 0.0,
+            "volatility": self.calculate_volatility(returns),
+            "annualized_volatility": self.calculate_volatility(returns),
+            "sharpe_ratio": self.calculate_sharpe_ratio(returns),
+            "beta": self.calculate_beta(returns, bench_returns),
+            "daily_returns_mean": float(np.mean(returns)) if len(returns) > 0 else 0.0,
+            "daily_returns_std": float(np.std(returns)) if len(returns) > 0 else 0.0
+        }
+    @staticmethod
+    def generate_backcast_history(positions: List[Dict[str, Any]], market_data: Dict[str, List[Dict[str, float]]]) -> pd.DataFrame:
+        if not positions or not market_data:
+            return pd.DataFrame()
+        dfs = []
+        for pos in positions:
+            ticker = pos['ticker']
+            qty = pos['qty']
+            entry_date = pos.get('entry_date')
+            if ticker in market_data:
+                data = market_data[ticker]
+                df = pd.DataFrame(data)
+                if df.empty:
+                    continue
+                df['t'] = pd.to_datetime(df['t'], unit='ms')
+                df.set_index('t', inplace=True)
+                df = df.rename(columns={'c': f'{ticker}_price'})
+                if entry_date:
+                    entry_dt = pd.to_datetime(entry_date)
+                    df.loc[df.index < entry_dt, f'{ticker}_price'] = 0.0
+                df[f'{ticker}_val'] = df[f'{ticker}_price'] * qty
+                dfs.append(df[[f'{ticker}_val']])
+        if not dfs:
+            return pd.DataFrame()
+        combined = pd.concat(dfs, axis=1)
+        combined.ffill(inplace=True)
+        combined.bfill(inplace=True)
+        combined['total_value'] = combined.sum(axis=1)
+        return combined

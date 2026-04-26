@@ -1,7 +1,10 @@
-import mlx.core as mx
 import numpy as np
-from backend.utils.jmce_model import NeuralJMCE
+from utils.jmce_model import NeuralJMCE
+from utils.mlx_loader import mx, HAS_MLX
 
+import pytest
+
+@pytest.mark.skipif(not HAS_MLX, reason="MLX is not installed or available")
 def test_jmce_forward():
     """
     Verifies the NeuralJMCE forward pass, output shapes, and the

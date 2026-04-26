@@ -166,12 +166,15 @@ struct ChatView: View {
                         viewModel.errorMessage = nil
                         viewModel.sendMessage()
                     }
+                    .buttonStyle(.plain)
                     .font(.caption.bold())
                     .foregroundStyle(.white)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
                     .background(Color.red)
                     .cornerRadius(8)
+                    .accessibilityLabel("Retry sending message")
+                    .accessibilityAddTraits(.isButton)
                 }
                 .font(.caption)
                 .foregroundStyle(.white)
@@ -317,7 +320,11 @@ struct ChatBubble: View, Equatable {
                                 ToolExecutionBlock(toolCalls: toolCalls)
                             }
                             
-                            if !message.content.contains("Quick Actions") && !message.content.isEmpty {
+                            if let actions = message.quickActions, !actions.isEmpty {
+                                QuickActionButtons(actions: actions) { prompt in
+                                    onQuickAction?(prompt)
+                                }
+                            } else if !message.content.contains("Quick Actions") && !message.content.isEmpty {
                                 QuickActionButtons(actions: defaultQuickActions) { prompt in
                                     onQuickAction?(prompt)
                                 }

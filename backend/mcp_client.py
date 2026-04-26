@@ -72,10 +72,12 @@ class MultiMCPManager:
                 command = config["command"]
                 args = list(config["args"] or [])  # Make a copy
                 
-                # Fix for default T212 server relative path
-                if name == "Trading 212" and args and "trading212_mcp_server.py" in args[0]:
+                # Fix for default servers relative path (Trading 212, HuggingFace, Docker Sandbox)
+                if args and not os.path.isabs(args[0]):
                     current_dir = os.path.dirname(os.path.abspath(__file__))
-                    args[0] = os.path.join(current_dir, "trading212_mcp_server.py")
+                    potential_path = os.path.join(current_dir, args[0])
+                    if os.path.exists(potential_path):
+                        args[0] = potential_path
                 
                 # Filter out empty environment variables to allow .env fallbacks
                 custom_env = {k: v for k, v in (config.get("env") or {}).items() if v and str(v).strip()}
@@ -123,9 +125,10 @@ class MultiMCPManager:
     async def list_tools(self) -> List[Any]:
         """Aggregate tools from all active sessions"""
         all_tools = []
+        from utils.async_utils import run_with_timeout
         for name, session in self.sessions.items():
             try:
-                tools_result = await asyncio.wait_for(
+                tools_result = await run_with_timeout(
                     session.list_tools(),
                     timeout=10.0
                 )
@@ -158,6 +161,7 @@ class MultiMCPManager:
         """
         errors = []
         
+        from utils.async_utils import run_with_timeout
         for server_name, session in self.sessions.items():
             cb = get_circuit_breaker(f"mcp_{server_name}", failure_threshold=3, recovery_timeout=30.0)
             
@@ -167,7 +171,7 @@ class MultiMCPManager:
                 continue
             
             try:
-                result = await asyncio.wait_for(
+                result = await run_with_timeout(
                     session.call_tool(name, arguments),
                     timeout=timeout
                 )
