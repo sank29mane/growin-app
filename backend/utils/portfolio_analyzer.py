@@ -228,28 +228,40 @@ class PortfolioAnalyzer:
     def generate_backcast_history(positions: List[Dict[str, Any]], market_data: Dict[str, List[Dict[str, float]]]) -> pd.DataFrame:
         if not positions or not market_data:
             return pd.DataFrame()
-        dfs = []
+
+        series_dict = {}
+
         for pos in positions:
             ticker = pos['ticker']
             qty = pos['qty']
             entry_date = pos.get('entry_date')
+
             if ticker in market_data:
                 data = market_data[ticker]
-                df = pd.DataFrame(data)
-                if df.empty:
+                if not data:
                     continue
-                df['t'] = pd.to_datetime(df['t'], unit='ms')
-                df.set_index('t', inplace=True)
-                df = df.rename(columns={'c': f'{ticker}_price'})
+
+                timestamps = pd.to_datetime([d['t'] for d in data], unit='ms')
+                prices = [d['c'] for d in data]
+
+                s = pd.Series(prices, index=pd.Index(timestamps, name='t'))
+
                 if entry_date:
                     entry_dt = pd.to_datetime(entry_date)
-                    df.loc[df.index < entry_dt, f'{ticker}_price'] = 0.0
-                df[f'{ticker}_val'] = df[f'{ticker}_price'] * qty
-                dfs.append(df[[f'{ticker}_val']])
-        if not dfs:
+                    s[s.index < entry_dt] = 0.0
+
+                series_dict[f'{ticker}_val'] = s * qty
+
+        if not series_dict:
             return pd.DataFrame()
-        combined = pd.concat(dfs, axis=1)
+
+        combined = pd.DataFrame(series_dict)
         combined.ffill(inplace=True)
         combined.bfill(inplace=True)
+
+        # Avoid PerformanceWarning for highly fragmented DataFrame
+        # by making sure memory layout is consolidated
+        combined = combined.copy()
         combined['total_value'] = combined.sum(axis=1)
+
         return combined
