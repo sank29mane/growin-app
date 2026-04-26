@@ -410,7 +410,8 @@ class ResearchAgent(BaseAgent):
                      is_uk = ticker.upper().endswith(".L")
                      params["country"] = "gb" if is_uk else "us"
                      # Add 'in' for India support if requested, but architecture mandates US/UK partitioning
-                     if "NSE" in ticker.upper(): params["country"] = "in"
+                     if "NSE" in ticker.upper():
+                         params["country"] = "in"
 
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.get(url, params=params)

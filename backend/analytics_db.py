@@ -136,7 +136,7 @@ class AnalyticsDB:
             if _global_conn:
                 try:
                     _global_conn.close()
-                except:
+                except Exception:
                     pass
                 _global_conn = None
                 logger.info("🔌 AnalyticsDB Global Connection reset")
@@ -219,7 +219,7 @@ class AnalyticsDB:
             if not telemetry:
                 return
                 
-            payload = json.loads(telemetry[1]) if isinstance(telemetry[1], str) else telemetry[1]
+            # Extract the raw data from telemetry event
             # Need to extract ticker from payload (it's in 'query' or 'ticker' depending on event)
             # Orchestrator agent_started usually has the query.
             # Better to find 'intent_classified' or 'context_fabricated' which has ticker explicitly.

@@ -1,18 +1,15 @@
-# 🚀 High-Throughput Local AI Swarms on Apple Silicon (M4 Pro)
+# 🚀 Milestone Reached: SOTA Local Intelligence & Serving for Growin App
 
-Just finalized the core inference engine for Growin App v5.0! 
+I'm excited to share that we've successfully integrated the **vMLX** (jjang-ai) serving layer as the primary local inference engine for the Growin App, optimized for the **M4 Pro (48GB)**.
 
-We've standardized on **vllm-mlx** to bring continuous batching and PagedAttention to macOS native intelligence. 
+This integration brings desktop-class LLM performance directly to macOS, with hardware-aware memory management and real-time reasoning visualization.
 
-After benchmarking **Gemma 4 26B** vs **Nemotron 3 30B (MoE)**, the results were clear:
-- **Nemotron 3 MoE** achieved a massive **185.4 aggregate TPS** under concurrency.
-- **PagedAttention** allowed us to dedicated 25% of the M4 Pro's unified memory to KV-cache with zero fragmentation.
+**Key Technical Breakthroughs:**
+- **vMLX Serving Layer**: High-throughput serving with hardware-aware constraints (28GB total memory, 12GB KV-cache).
+- **Real-time Reasoning Telemetry**: Full visibility into the multi-agent CoT process via enhanced `ThinkingParser` and `StatusManager` hooks.
+- **Sovereign Local Operation**: `native-mlx` is now the default engine for core agents, ensuring privacy and ultra-low latency.
+- **M4 Pro Optimization**: Standardized on Q4_K_M quantization to maximize bandwidth utilization (273 GB/s).
 
-Architecture highlights:
-✅ Python/FastAPI backend with a modular `VLLMInferenceEngine`.
-✅ Hardware-aware memory optimization for Apple Silicon.
-✅ Ready for the "AI Swarm" workflow in our upcoming macOS Tahoe redesign.
+This is a major step toward our v5.0 goal: A truly sovereign, AI-native financial terminal for macOS.
 
-Local AI is no longer a toy — it's a production-grade powerhouse.
-
-#AppleSilicon #MLX #vLLM #LLM #macOS #AIArchitecture
+#AppleSilicon #MLX #Inference #FinTech #MacOS #SOTA2026 #GrowinApp
