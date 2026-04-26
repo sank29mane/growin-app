@@ -4,13 +4,10 @@ Whale Alert Agent - Monitors large block trades and institutional flow
 
 import logging
 import asyncio
-import httpx
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from market_context import WhaleData
 from data_engine import get_alpaca_client
-from resilience import get_circuit_breaker, CircuitBreakerOpenError
-from utils.http_client import agent_http_client
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +28,7 @@ class WhaleAgent(BaseAgent):
         super().__init__(config)
         self.alpaca = get_alpaca_client()
         self.whale_threshold_usd = 50000.0 # Lowered from $250k for paper/IEX data density
-        self._tavily_cb = get_circuit_breaker("tavily_whale", failure_threshold=3, recovery_timeout=30.0)
-
+        
     async def analyze(self, context: Dict[str, Any]) -> AgentResponse:
         """
         Analyze recent trades for a ticker to find large block orders.
@@ -45,8 +41,7 @@ class WhaleAgent(BaseAgent):
             logger.info(f"WhaleAgent: Performing Bellwether Aggregation for broad market...")
             
             # Use parallel execution for speed
-            # Optimization: Skip institutional holdings for bellwethers as it's not used in aggregation
-            tasks = [self.analyze({"ticker": b, "skip_holdings": True}) for b in bellwethers]
+            tasks = [self.analyze({"ticker": b}) for b in bellwethers]
             results = await asyncio.gather(*tasks)
             
             valid_results = [r for r in results if r.success and r.data.get("sentiment_impact")]
@@ -81,10 +76,7 @@ class WhaleAgent(BaseAgent):
 
         try:
             # SOTA 2026: Institutional Alpha (13F Filings)
-            skip_holdings = context.get("skip_holdings", False)
-            institutional_holdings = []
-            if not skip_holdings:
-                institutional_holdings = await self._fetch_institutional_holdings(ticker)
+            institutional_holdings = await self._fetch_institutional_holdings(ticker)
             
             from utils.financial_math import create_decimal, safe_div
             # 2. Fetch recent trades (last 500)
@@ -101,45 +93,30 @@ class WhaleAgent(BaseAgent):
             
             # --- FALLBACK: Data Maximization via Volume Anomaly ---
             if not trades:
-                logger.info(f"WhaleAgent: No trades found for {ticker} Attempting Volume Anomaly Detection...")
+                logger.info(f"WhaleAgent: No trades found for {ticker}. Attempting Volume Anomaly Detection...")
                 return await self._analyze_via_volume_anomaly(ticker)
             
             from utils.currency_utils import DataSourceNormalizer
             ticker_currency = DataSourceNormalizer.get_currency_for_ticker(ticker)
             currency_symbol = "£" if ticker_currency == "GBP" else "$"
 
-            # Pre-parse trades to avoid repetitive create_decimal calls
-            decimal_trades = [
-                {
-                    "p": create_decimal(t['p']),
-                    "s": create_decimal(t['s']),
-                    "t": t['t']
-                }
-                for t in trades
-            ]
-
             # 3. Identify Large Trades
             large_trades = []
-            large_decimal_prices = []
             total_whale_volume = create_decimal(0)
-            whale_threshold = create_decimal(self.whale_threshold_usd)
             
-            for i, t_dec in enumerate(decimal_trades):
-                p = t_dec['p']
-                s = t_dec['s']
+            for t in trades:
+                p = create_decimal(t['p'])
+                s = create_decimal(t['s'])
                 value = p * s
-                if value >= whale_threshold:
-                    t = trades[i]
+                if value >= create_decimal(self.whale_threshold_usd):
                     large_trades.append({
                         "price": float(p),
                         "size": float(s),
                         "value_usd": float(value), # Frontend property is valueUsd but mapping handles it
                         "timestamp": str(t['t']),
                         "currency": ticker_currency,
-                        "is_whale": True,
-                        "_dec_price": p # Keep decimal precision for average calc
+                        "is_whale": True
                     })
-                    large_decimal_prices.append(p)
                     total_whale_volume += value
             
             # 4. Analyze Unusual Volume
@@ -151,17 +128,13 @@ class WhaleAgent(BaseAgent):
             # If price is at the High of recent trades and we see whales, it might be accumulation
             impact = "NEUTRAL"
             if len(large_trades) > 0:
-                avg_price = sum(t['p'] for t in decimal_trades) / len(decimal_trades)
-                whale_avg_price = sum(large_decimal_prices) / len(large_decimal_prices)
+                avg_price = sum(create_decimal(t['p']) for t in trades) / len(trades)
+                whale_avg_price = sum(create_decimal(w['price']) for w in large_trades) / len(large_trades)
                 
                 if whale_avg_price > avg_price * create_decimal(1.001):
                     impact = "BULLISH"
                 elif whale_avg_price < avg_price * create_decimal(0.999):
                     impact = "BEARISH"
-
-            # Clean up internal keys for frontend response
-            for w in large_trades:
-                w.pop('_dec_price', None)
             
             # 6. Build Summary
             if len(large_trades) > 0:
@@ -225,28 +198,17 @@ class WhaleAgent(BaseAgent):
         try:
             # We use Tavily here as a robust way to find recent 13F filings summarized on sites like Fintel or WhaleWisdom
             # This is more resilient than direct EDGAR scraping for a prototype
+            from tavily import AsyncTavilyClient
             import os
             
             tavily_key = os.getenv("TAVILY_API_KEY")
             if not tavily_key:
                 return []
                 
+            tavily = AsyncTavilyClient(api_key=tavily_key)
             query = f"top institutional holders and 13F filing summary for {ticker} 2025 2026"
             
-            url = "https://api.tavily.com/search"
-            headers = {"Content-Type": "application/json"}
-            payload = {
-                "api_key": tavily_key,
-                "query": query,
-                "search_depth": "advanced",
-                "max_results": 5
-            }
-            
-            response = await agent_http_client.execute_with_breaker(
-                self._tavily_cb, "POST", url,
-                headers=headers, json=payload
-            )
-
+            response = await tavily.search(query=query, search_depth="advanced", max_results=5)
             results = response.get('results', [])
             logger.info(f"WhaleAgent: Search returned {len(results)} results")
             
@@ -273,9 +235,6 @@ class WhaleAgent(BaseAgent):
                 logger.info(f"WhaleAgent: Identified {len(holders)} major institutional holders for {ticker}")
             
             return holders[:5]
-        except CircuitBreakerOpenError:
-            logger.warning(f"13F fetch skipped: circuit breaker is OPEN")
-            return []
         except Exception as e:
             logger.warning(f"13F fetch failed: {e}")
             return []
@@ -298,14 +257,10 @@ class WhaleAgent(BaseAgent):
                 )
             
             bars = bars_resp["bars"]
-
-            # Only pre-parse the elements we actually need (last 20 + last 1)
-            last_21_bars = bars[-21:] if len(bars) >= 21 else bars
-            prev_vols = [create_decimal(b['v']) for b in last_21_bars[:-1]] if len(last_21_bars) > 1 else []
-            last_bar = bars[-1]
-            current_vol = create_decimal(last_bar['v'])
+            current_vol = create_decimal(bars[-1]['v'])
             
             # Calculate avg volume of previous 20 days
+            prev_vols = [create_decimal(b['v']) for b in bars[:-1][-20:]]
             avg_vol = sum(prev_vols) / len(prev_vols) if prev_vols else create_decimal(1)
             
             ratio = float(current_vol / avg_vol)
@@ -314,9 +269,9 @@ class WhaleAgent(BaseAgent):
             
             if ratio > 1.5:
                 # High volume
-                c = create_decimal(last_bar['c'])
-                o = create_decimal(last_bar['o'])
-                price_change = float((c - o) / o) if o > create_decimal(0) else 0.0
+                c = create_decimal(bars[-1]['c'])
+                o = create_decimal(bars[-1]['o'])
+                price_change = float((c - o) / o) if o > 0 else 0.0
                 if price_change > 0:
                     impact = "BULLISH"
                     summary += "High volume on up day suggests institutional buying (Accumulation)."

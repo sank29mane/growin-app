@@ -1,3 +1,4 @@
+import pytest_asyncio
 import sys
 import os
 import importlib.util
@@ -19,7 +20,7 @@ if backend_path not in sys.path:
     sys.path.insert(0, backend_path)
 
 # --- Global Resource Lifecycle Management ---
-@pytest.fixture(scope="session", autouse=True)
+@pytest_asyncio.fixture(scope="session", autouse=True)
 async def cleanup_resources():
     """Ensure all background processes are killed after the test session."""
     yield

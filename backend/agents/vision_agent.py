@@ -11,6 +11,8 @@ from magentic import prompt as mag_prompt
 from datetime import datetime, timezone
 import asyncio
 
+from utils.image_proc import prepare_vlm_image_async
+
 logger = logging.getLogger(__name__)
 
 class VisionAnalysis(BaseModel):
@@ -73,6 +75,10 @@ class VisionAgent(BaseAgent):
             )
 
         try:
+            # 0. Preprocess Image asynchronously
+            # This offloads blocking I/O and CPU bound tasks to a thread pool
+            processed_img, _ = await prepare_vlm_image_async(image_data)
+
             # 1. Run VLM Inference
             prompt = (
                 "Describe this technical stock chart in detail. "
@@ -81,7 +87,7 @@ class VisionAgent(BaseAgent):
             )
             
             # The engine already handles offloading to thread if it uses mlx_vlm directly in a blocking way
-            raw_description = await self.engine.generate(image_data, prompt)
+            raw_description = await self.engine.generate(processed_img, prompt)
             
             # 2. Extract structured patterns using Magentic
             # We use Magentic to turn the raw text description into structured Pydantic models

@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v5.0
 milestone_name: MLX Intelligence & macOS 2026 UX Overhaul
-status: ACTIVE
-last_updated: "2026-04-15T01:32:43.718Z"
-last_activity: 2026-04-14 — Phase 43 Planning Completed
+status: PLANNED
+last_updated: "2026-04-26T18:37:50.078Z"
+last_activity: 2026-04-16 — Core Infrastructure (44-01) Verified
 progress:
-  total_phases: 5
+  total_phases: 6
   completed_phases: 1
-  total_plans: 6
+  total_plans: 8
   completed_plans: 5
 ---
 
@@ -16,17 +16,15 @@ progress:
 
 ## Current Position
 
-Phase: 43 — Local Intelligence & Serving (Core Engine)
-Plan: 02 — Real-time Reasoning & Calibration
-Status: COMPLETED
-Last activity: 2026-04-15 — Phase 43 Execution Completed
+Phase: 44 — Multi-Agent Strategy & Swarm Optimization
+Plan: 02 — Reasoning Pivot (2-Stage Streaming Logic)
+Status: PLANNED
+Last activity: 2026-04-16 — Core Infrastructure (44-01) Verified
 
 ## Summary
 
-- **Phase 43 Completed**: Transition to `vmlx` (jjang-ai) serving layer successful.
-- **Hardware Optimization**: M4 Pro (48GB) memory constraints (28GB total, 12GB KV) enforced via `vmlx_manager.py`.
-- **Reasoning Visualization**: Real-time CoT extraction and telemetry enabled via `DecisionAgent` and `StatusManager`.
-- **Agent Calibration**: Core agents (`OrchestratorAgent`, `DecisionAgent`) now default to `native-mlx`.
+- **Phase 43 Completed**: All engine transition and hardware calibration tasks verified.
+- **Phase 44-01 Completed**: Core infrastructure (Semaphore, Buffer, Orchestrator Scaffold) implemented.
 
 ## Milestone Status
 
@@ -40,9 +38,9 @@ Last activity: 2026-04-15 — Phase 43 Execution Completed
 
 ## Next Focus
 
-1. **Task 43-01.1**: Update `LLMFactory` for `VMLXProvider` and `model_config.py`.
-2. **Task 43-01.2**: Implement `backend/vmlx_engine.py` with server lifecycle management.
-3. **Task 43-02.1**: Enhance `ThinkingParser` for real-time CoT extraction.
+1. **Task 44-01.1**: Implement `AsyncSwarmOrchestrator` with "Progressive Synthesis" logic.
+2. **Task 44-01.2**: Add dynamic summarization layer for specialist agent outputs.
+3. **Task 44-01.3**: Calibrate concurrent MLX call thresholds to prevent memory contention.
 
 ## Accumulated Context
 

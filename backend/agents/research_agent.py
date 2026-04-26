@@ -23,17 +23,8 @@ import asyncio
 import re
 from pydantic import BaseModel, Field
 from magentic import prompt as mag_prompt
-from resilience import get_circuit_breaker, CircuitBreakerOpenError
-from utils.http_client import agent_http_client
-
-# Pre-compiled regex for fast title normalization
-TITLE_CLEAN_PATTERN = re.compile(r'[^a-zA-Z0-9]')
 
 logger = logging.getLogger(__name__)
-
-newsdata_cb = get_circuit_breaker("newsdata", failure_threshold=3, recovery_timeout=30.0)
-tavily_cb = get_circuit_breaker("tavily", failure_threshold=3, recovery_timeout=30.0)
-newsapi_cb = get_circuit_breaker("newsapi", failure_threshold=3, recovery_timeout=30.0)
 
 class NewsDataQueryParams(BaseModel):
     """Structured parameters for NewsData.io API query."""
@@ -178,28 +169,8 @@ class ResearchAgent(BaseAgent):
             
             # Deduplicate and analyze
             unique_articles = self._deduplicate_articles(articles)
+            sentiments, weights, rich_articles, headlines, sources = self._analyze_sentiment(unique_articles, sentiment_analyzer)
             
-            chunk_size = 5
-            chunks = [unique_articles[i:i+chunk_size] for i in range(0, len(unique_articles), chunk_size)]
-
-            chunk_results = await asyncio.gather(*[
-                asyncio.to_thread(self._analyze_sentiment, chunk, sentiment_analyzer)
-                for chunk in chunks
-            ])
-
-            sentiments = []
-            weights = []
-            rich_articles = []
-            headlines = []
-            sources = []
-
-            for s, w, ra, hl, src in chunk_results:
-                sentiments.extend(s)
-                weights.extend(w)
-                rich_articles.extend(ra)
-                headlines.extend(hl)
-                sources.extend(src)
-
             # Calculate weighted average sentiment
             if sentiments:
                 total_weighted_sentiment = sum(s for s in sentiments) # already multiplied by weight in _analyze
@@ -284,61 +255,45 @@ class ResearchAgent(BaseAgent):
             
             # 1. LSE RNS (Regulatory News Service) via NewsData.io
             if is_uk and self.newsdata_key:
+                import httpx
                 params = {
                     "apikey": self.newsdata_key,
                     "q": f"{ticker} RNS",
                     "country": "gb",
                     "category": "business"
                 }
-                try:
-                    data = await agent_http_client.execute_with_breaker(
-                        newsdata_cb, "GET", "https://newsdata.io/api/1/latest",
-                        params=params, timeout=10.0, raise_for_status=False
-                    )
-
-                    for art in data.get('results', [])[:5]:
-                        articles.append({
-                            'title': f"[RNS] {art.get('title')}",
-                            'description': art.get('description'),
-                            'source': {'name': 'LSE RNS'},
-                            'url': art.get('link'),
-                            'is_regulatory': True
-                        })
-                except CircuitBreakerOpenError:
-                    logger.warning(f"Regulatory news (NewsData) skipped: circuit breaker is OPEN")
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.get("https://newsdata.io/api/1/latest", params=params)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        for art in data.get('results', [])[:5]:
+                            articles.append({
+                                'title': f"[RNS] {art.get('title')}",
+                                'description': art.get('description'),
+                                'source': {'name': 'LSE RNS'},
+                                'url': art.get('link'),
+                                'is_regulatory': True
+                            })
 
             # 2. SEC Filings / News via Tavily
             if not is_uk and self.tavily_key:
+                from tavily import AsyncTavilyClient
+                tavily = AsyncTavilyClient(api_key=self.tavily_key)
                 # Specialized query for SEC filings
                 query = f"latest SEC filings and regulatory announcements for {ticker}"
                 
-                url = "https://api.tavily.com/search"
-                headers = {"Content-Type": "application/json"}
-                payload = {
-                    "api_key": self.tavily_key,
-                    "query": query,
-                    "search_depth": "advanced",
-                    "max_results": 5
-                }
-
-                try:
-                    data = await agent_http_client.execute_with_breaker(
-                        tavily_cb, "POST", url, headers=headers, json=payload
-                    )
-
-                    for r in data.get('results', []):
-                        # Only include if relevant to SEC or regulatory
-                        content = (r.get('title', '') + (r.get('content', '') or '')).upper()
-                        if any(kw in content for kw in ["SEC", "FORM 8-K", "10-Q", "10-K", "FILING", "REGULATORY"]):
-                            articles.append({
-                                'title': f"[SEC] {r.get('title')}",
-                                'description': r.get('content') or r.get('snippet'),
-                                'source': {'name': 'SEC EDGAR / News'},
-                                'url': r.get('url'),
-                                'is_regulatory': True
-                            })
-                except CircuitBreakerOpenError:
-                    logger.warning(f"Regulatory news (Tavily) skipped: circuit breaker is OPEN")
+                response = await tavily.search(query=query, search_depth="advanced", max_results=5)
+                for r in response.get('results', []):
+                    # Only include if relevant to SEC or regulatory
+                    content = (r.get('title', '') + (r.get('content', '') or '')).upper()
+                    if any(kw in content for kw in ["SEC", "FORM 8-K", "10-Q", "10-K", "FILING", "REGULATORY"]):
+                        articles.append({
+                            'title': f"[SEC] {r.get('title')}",
+                            'description': r.get('content') or r.get('snippet'),
+                            'source': {'name': 'SEC EDGAR / News'},
+                            'url': r.get('url'),
+                            'is_regulatory': True
+                        })
             
             if articles:
                 logger.info(f"ResearchAgent: Found {len(articles)} regulatory announcements for {ticker}")
@@ -351,10 +306,10 @@ class ResearchAgent(BaseAgent):
     async def _fetch_newsapi(self, ticker: str, company_name: str) -> List[Dict]:
         """Fetch from NewsAPI (traditional news sources)."""
         try:
+            import httpx
             from datetime import datetime, timedelta
             
             from_date = (datetime.now() - timedelta(days=7)).isoformat()
-            url = "https://newsapi.org/v2/everything"
             params = {
                 "q": f"{company_name} stock OR {ticker}",
                 "from": from_date,
@@ -364,12 +319,12 @@ class ResearchAgent(BaseAgent):
                 "apiKey": self.newsapi_key
             }
             
-            data = await agent_http_client.execute_with_breaker(newsapi_cb, "GET", url, params=params)
-
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get("https://newsapi.org/v2/everything", params=params)
+                response.raise_for_status()
+                data = response.json()
+            
             return data.get('articles', [])
-        except CircuitBreakerOpenError:
-            logger.warning(f"NewsAPI skipped: circuit breaker is OPEN")
-            return []
         except Exception as e:
             logger.warning(f"NewsAPI failed: {e}")
             return []
@@ -377,6 +332,9 @@ class ResearchAgent(BaseAgent):
     async def _fetch_tavily(self, ticker: str, company_name: str) -> List[Dict]:
         """Fetch from Tavily (AI-powered search)."""
         try:
+            from tavily import AsyncTavilyClient
+            
+            tavily = AsyncTavilyClient(api_key=self.tavily_key)
             is_uk = ticker.upper().endswith(".L")
             
             if ticker == "MARKET":
@@ -385,17 +343,11 @@ class ResearchAgent(BaseAgent):
                 region = "LSE UK" if is_uk else "US"
                 query = f"latest financial news for {company_name} ({ticker}) stock on {region} market"
             
-            url = "https://api.tavily.com/search"
-            headers = {"Content-Type": "application/json"}
-            payload = {
-                "api_key": self.tavily_key,
-                "query": query,
-                "search_depth": "advanced",
-                "max_results": 8
-            }
-            
-            response = await agent_http_client.execute_with_breaker(tavily_cb, "POST", url, headers=headers, json=payload)
-
+            response = await tavily.search(
+                query=query,
+                search_depth="advanced",
+                max_results=8
+            )
             
             # Normalize to common format
             return [
@@ -407,9 +359,6 @@ class ResearchAgent(BaseAgent):
                 }
                 for r in response.get('results', [])
             ]
-        except CircuitBreakerOpenError:
-            logger.warning(f"Tavily skipped: circuit breaker is OPEN")
-            return []
         except Exception as e:
             logger.warning(f"Tavily failed: {e}")
             return []
@@ -422,6 +371,8 @@ class ResearchAgent(BaseAgent):
         Each credit = 10 articles
         """
         try:
+            import httpx
+            
             # Base params
             params = {
                 "apikey": self.newsdata_key,
@@ -459,10 +410,13 @@ class ResearchAgent(BaseAgent):
                      is_uk = ticker.upper().endswith(".L")
                      params["country"] = "gb" if is_uk else "us"
                      # Add 'in' for India support if requested, but architecture mandates US/UK partitioning
-                     if "NSE" in ticker.upper(): params["country"] = "in"
+                     if "NSE" in ticker.upper():
+                         params["country"] = "in"
 
-            data = await agent_http_client.execute_with_breaker(newsdata_cb, "GET", url, params=params, timeout=10.0)
-
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, params=params)
+                response.raise_for_status()
+                data = response.json()
             
             # Normalize to common format
             articles = []
@@ -477,9 +431,6 @@ class ResearchAgent(BaseAgent):
             logger.info(f"NewsData.io returned {len(articles)} articles")
             return articles
             
-        except CircuitBreakerOpenError:
-            logger.warning(f"NewsData.io skipped: circuit breaker is OPEN")
-            return []
         except Exception as e:
             logger.warning(f"NewsData.io failed: {e}")
             return []
@@ -526,7 +477,7 @@ class ResearchAgent(BaseAgent):
             title = art.get('title', '').lower().strip()
             url = art.get('url', '')
             # Simple normalization: remove non-alphanumeric for title check
-            clean_title = TITLE_CLEAN_PATTERN.sub('', title)
+            clean_title = re.sub(r'[^a-zA-Z0-9]', '', title)
             
             if clean_title and clean_title not in seen_titles and (not url or url not in seen_urls):
                 seen_titles.add(clean_title)

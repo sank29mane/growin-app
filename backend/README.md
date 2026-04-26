@@ -5,8 +5,9 @@ This is the Python-based heart of the Growin App. It orchestrates a multi-agent 
 ## 🚀 SOTA Tech Stack (2026)
 - **Runtime**: Python 3.12+ optimized with `uv` for ultra-fast dependency management.
 - **API Framework**: FastAPI with full `asyncio` support for non-blocking agent orchestration.
-- **Local Inference**: **MLX** integration for native Apple Silicon GPU acceleration.
+- **Local Inference**: **MLX** and **vMLX** (jjang-ai) integration for native Apple Silicon GPU acceleration and hardware-aware serving.
 - **Performance Core**: **Rust** (`growin_core`) for high-throughput technical indicators.
+- **Serving Layer**: `vmlx_manager.py` manages the high-performance inference server with M4 Pro (48GB) optimizations.
 - **Precision**: `decimal.Decimal` based financial math layer.
 
 ## 📁 Directory Structure

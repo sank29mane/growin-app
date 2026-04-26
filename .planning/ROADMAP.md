@@ -31,20 +31,34 @@ This document outlines the high-level phases for the Growin App, specifically op
 - [x] 42-03-PLAN.md — Performance Analysis & Selection
 - [x] 42-04-PLAN.md — SOTA AI Chat Interface Enhancements
 
-### Phase 43: Local Intelligence & Serving (Core Engine)
+### Phase 43: Local Intelligence & Serving (Core Engine) (COMPLETED)
 - **Goal**: Transition from vllm-mlx to vMLX with hardware-aware memory optimizations for M4 Pro (48GB).
 - **Success Criteria**:
     - vMLX server managed by backend with 28GB total memory limit.
     - "Thinking" Mode visibility enabled via real-time telemetry.
     - 12GB KV-cache configured via PagedAttention.
 - **Requirements**: INTEL-01, INTEL-02, PERF-01, PERF-02, PERF-03
+- **Status**: COMPLETED
+
+**Plans:** 2/2 plans complete
+- [x] 43-01-PLAN.md — Engine & Factory Transition
+- [x] 43-02-PLAN.md — Telemetry, Thinking & Validation
+
+### Phase 44: Multi-Agent Strategy & Swarm Optimization
+- **Goal**: Optimize specialist agent swarm coordination to minimize latency and maximize reasoning coherence.
+- **Success Criteria**:
+    - "Progressive Synthesis" active (DecisionAgent reasons while specialists complete).
+    - Swarm output summarization active to preserve prefix caching.
+    - Concurrent MLX threshold calibration for M4 Pro.
+- **Requirements**: INTEL-01, PERF-01, UX-05
 - **Status**: ACTIVE
 
-**Plans:** 0/2 plans complete
-- [ ] 43-01-PLAN.md — Engine & Factory Transition
-- [ ] 43-02-PLAN.md — Telemetry, Thinking & Validation
+**Plans:** 1/3 plans complete
+- [x] 44-01-PLAN.md — Core Engine Room (Hardware Guard & ContextBuffer)
+- [ ] 44-02-PLAN.md — Reasoning Pivot (2-Stage Streaming Logic)
+- [ ] 44-03-PLAN.md — Swarm Calibration (Latency Thresholds & Summarization)
 
-### Phase 44: Sovereign UX & macOS 2026 Redesign
+### Phase 45: Sovereign UX & macOS 2026 Redesign
 - **Goal**: Complete architectural UI redesign following macOS Tahoe patterns and 120Hz ProMotion standards.
 - **Success Criteria**:
     - SwiftUI 17+ 0px Ledger UI implemented with Tahoe "Liquid Glass" materials.
@@ -53,7 +67,7 @@ This document outlines the high-level phases for the Growin App, specifically op
 - **Requirements**: UX-01, UX-02, UX-03, UX-05, TRADE-01
 - **Status**: PLANNED
 
-### Phase 45: Adaptive Learning & Alpha Engineering (Unsloth)
+### Phase 46: Adaptive Learning & Alpha Engineering (Unsloth)
 - **Goal**: Deploy local LoRA fine-tuning pipeline for regime-specific alpha extraction.
 - **Success Criteria**:
     - Unsloth/mlx-tune pipeline active for local LoRA fine-tuning on M4 Pro.
@@ -62,7 +76,7 @@ This document outlines the high-level phases for the Growin App, specifically op
 - **Requirements**: LEARN-01, LEARN-02, LEARN-03
 - **Status**: PLANNED
 
-### Phase 46: Multimodal Intelligence & Deep Integration
+### Phase 47: Multimodal Intelligence & Deep Integration
 - **Goal**: Infuse vision intelligence into trading workflows and asset-level fast actions.
 - **Success Criteria**:
     - Gemma 4 multimodal support active for image/chart upload analysis.
@@ -78,10 +92,11 @@ This document outlines the high-level phases for the Growin App, specifically op
 | Phase | Status | Plans | Complete |
 |-------|--------|-------|----------|
 | 42: Model Comparison | ✅ | 4/4 | 100% |
-| 43: Core Engine | 🏗 | 0/2 | 0% |
-| 44: Sovereign UX | ⬜ | 0/3 | 0% |
-| 45: Adaptive Learning | ⬜ | 0/3 | 0% |
-| 46: Multimodal | ⬜ | 0/3 | 0% |
+| 43: Core Engine | ✅ | 2/2 | 100% |
+| 44: Swarm Optimization | 🏗 | 1/3 | 33% |
+| 45: Sovereign UX | ⬜ | 0/3 | 0% |
+| 46: Adaptive Learning | ⬜ | 0/3 | 0% |
+| 47: Multimodal | ⬜ | 0/3 | 0% |
 
 ---
 

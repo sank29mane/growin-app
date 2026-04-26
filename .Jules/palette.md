@@ -49,9 +49,9 @@
 **Learning:** Found multiple instances of custom styling (e.g., chat message Send button, Discover Tiles) in `AIChatPanelView` that used `.buttonStyle(.plain)` to suppress native visual button chrome. This entirely removed standard accessibility boundaries and traits, rendering them silent or functionally meaningless to VoiceOver users.
 **Action:** Consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to any `Button` configured with `.buttonStyle(.plain)`, including using dynamically injected parameters like `filter.rawValue` or `tile.title` to ensure the context of the button remains available for non-visual navigation.
 ## 2026-04-24 - WelcomeView, AccountPicker, and ThemeComponents Accessibility with .buttonStyle(.plain)
-**Learning:** Verified a recurring pattern across multiple disparate views (, , and generic ) where `.buttonStyle(.plain)` is used to implement a 'Liquid Glass' or flat aesthetic, consistently stripping all VoiceOver button traits and text semantics. Even interactive disclosure toggles (like 'INTELLIGENCE TRACE') were being announced as generic text.
-**Action:** When auditing custom UI elements that use `.buttonStyle(.plain)`, systematically ensure `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` are explicitly provided to restore baseline interactive context for assistive technologies.
-
-## 2026-04-24 - WelcomeView, AccountPicker, and ThemeComponents Accessibility with .buttonStyle(.plain)
 **Learning:** Verified a recurring pattern across multiple disparate views (`WelcomeView`, `AccountPicker`, and generic `ThemeComponents`) where `.buttonStyle(.plain)` is used to implement a 'Liquid Glass' or flat aesthetic, consistently stripping all VoiceOver button traits and text semantics. Even interactive disclosure toggles (like 'INTELLIGENCE TRACE') were being announced as generic text.
 **Action:** When auditing custom UI elements that use `.buttonStyle(.plain)`, systematically ensure `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` are explicitly provided to restore baseline interactive context for assistive technologies.
+
+## 2026-04-25 - Sovereign UI `WelcomeView` Button Accessibility
+**Learning:** The suggestion chips in `WelcomeView` used `.buttonStyle(.plain)` to suppress native visual button chrome, which entirely removed standard accessibility boundaries and traits, rendering them functionally meaningless to VoiceOver users.
+**Action:** Consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to any `Button` configured with `.buttonStyle(.plain)`. Used `item.title` to dynamically inject the context into the label and hint.

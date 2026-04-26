@@ -16,7 +16,12 @@ class TestQuantEngineRebalance(unittest.TestCase):
         total = 1000.0
 
         result = engine.analyze_rebalancing_opportunity(current, target, total)
-        self.assertEqual(result["rebalance_actions"][0]["target_pct"], Decimal("0.01"))
+        # Note: analyze_rebalancing_opportunity does not return target_pct.
+        # It returns deviation_pct and amount. 1% deviation = 1.0 deviation_pct
+        # However, 1% deviation (0.01) is not strictly greater than 0.01, so it won't generate a rebalance action!
+        # The threshold is `abs(deviation) > Decimal("0.01")`.
+        self.assertEqual(len(result["rebalance_actions"]), 0)
+        self.assertEqual(result["deviations_pct"]["AAPL"], 1.0)
 
         # Test Case 2: Target > 1 without % (50 -> 0.5)
         current = {"AAPL": "0%"}
@@ -24,7 +29,8 @@ class TestQuantEngineRebalance(unittest.TestCase):
         total = 1000.0
 
         result = engine.analyze_rebalancing_opportunity(current, target, total)
-        self.assertEqual(result["rebalance_actions"][0]["target_pct"], Decimal("0.5"))
+        # Deviation of 50% is 50.0
+        self.assertEqual(result["rebalance_actions"][0]["deviation_pct"], 50.0)
 
         # Test Case 3: Target < 1 without % (0.5 -> 0.5)
         current = {"AAPL": "0%"}
@@ -32,7 +38,8 @@ class TestQuantEngineRebalance(unittest.TestCase):
         total = 1000.0
 
         result = engine.analyze_rebalancing_opportunity(current, target, total)
-        self.assertEqual(result["rebalance_actions"][0]["target_pct"], Decimal("0.5"))
+        # Deviation of 50% is 50.0
+        self.assertEqual(result["rebalance_actions"][0]["deviation_pct"], 50.0)
 
 if __name__ == '__main__':
     unittest.main()
