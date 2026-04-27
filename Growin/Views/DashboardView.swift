@@ -322,6 +322,7 @@ struct AccountSectionView: View {
                                         PositionDeepCard(position: position)
                                     }
                                     .buttonStyle(.plain)
+                                    .accessibilityLabel("Position details for \(position.ticker ?? "Unknown")")
                                     .accessibilityAddTraits(.isButton)
                                     .accessibilityHint("Opens stock chart")
                                 }
