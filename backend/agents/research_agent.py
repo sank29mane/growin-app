@@ -17,6 +17,7 @@ Supported Markets: UK (LSE), India (NSE), US
 from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from market_context import ResearchData, NewsArticle
 from typing import Dict, Any, List, Optional
+from utils.http_client import agent_http_client
 import logging
 import os
 import asyncio
@@ -255,25 +256,23 @@ class ResearchAgent(BaseAgent):
             
             # 1. LSE RNS (Regulatory News Service) via NewsData.io
             if is_uk and self.newsdata_key:
-                import httpx
                 params = {
                     "apikey": self.newsdata_key,
                     "q": f"{ticker} RNS",
                     "country": "gb",
                     "category": "business"
                 }
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    resp = await client.get("https://newsdata.io/api/1/latest", params=params)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        for art in data.get('results', [])[:5]:
-                            articles.append({
-                                'title': f"[RNS] {art.get('title')}",
-                                'description': art.get('description'),
-                                'source': {'name': 'LSE RNS'},
-                                'url': art.get('link'),
-                                'is_regulatory': True
-                            })
+                resp = await agent_http_client.client.get("https://newsdata.io/api/1/latest", params=params)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    for art in data.get('results', [])[:5]:
+                        articles.append({
+                            'title': f"[RNS] {art.get('title')}",
+                            'description': art.get('description'),
+                            'source': {'name': 'LSE RNS'},
+                            'url': art.get('link'),
+                            'is_regulatory': True
+                        })
 
             # 2. SEC Filings / News via Tavily
             if not is_uk and self.tavily_key:
@@ -306,7 +305,6 @@ class ResearchAgent(BaseAgent):
     async def _fetch_newsapi(self, ticker: str, company_name: str) -> List[Dict]:
         """Fetch from NewsAPI (traditional news sources)."""
         try:
-            import httpx
             from datetime import datetime, timedelta
             
             from_date = (datetime.now() - timedelta(days=7)).isoformat()
@@ -319,10 +317,9 @@ class ResearchAgent(BaseAgent):
                 "apiKey": self.newsapi_key
             }
             
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get("https://newsapi.org/v2/everything", params=params)
-                response.raise_for_status()
-                data = response.json()
+            response = await agent_http_client.client.get("https://newsapi.org/v2/everything", params=params)
+            response.raise_for_status()
+            data = response.json()
             
             return data.get('articles', [])
         except Exception as e:
@@ -413,10 +410,9 @@ class ResearchAgent(BaseAgent):
                      if "NSE" in ticker.upper():
                          params["country"] = "in"
 
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(url, params=params)
-                response.raise_for_status()
-                data = response.json()
+            response = await agent_http_client.client.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
             
             # Normalize to common format
             articles = []
