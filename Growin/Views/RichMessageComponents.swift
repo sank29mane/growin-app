@@ -706,6 +706,9 @@ struct QuickActionButtons: View {
                         .foregroundStyle(Color.cyan)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel(action.label)
+                    .accessibilityHint("Executes the \(action.label) quick action")
+                    .accessibilityAddTraits(.isButton)
                 }
             }
         }
