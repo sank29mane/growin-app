@@ -50,7 +50,7 @@ class CoordinatorAgent(BaseAgent):
     CoordinatorAgent: The brain of the swarm.
     Routes queries to specialist agents and aggregates their data.
     """
-    
+
     def __init__(self, config=None, llm=None, mcp_client=None, **kwargs):
         # Support cases where mcp_client is passed as the first positional arg instead of config
         if config is not None and not hasattr(config, 'name') and hasattr(config, 'sessions'):
@@ -69,7 +69,7 @@ class CoordinatorAgent(BaseAgent):
         self.llm = llm
         self.mcp_client = mcp_client
         self.specialists: Dict[str, BaseAgent] = {}
-        
+
     def register_specialists(self, agents: Dict[str, BaseAgent]):
         """Register specialist agents for routing"""
         self.specialists = agents
@@ -93,18 +93,14 @@ class CoordinatorAgent(BaseAgent):
         intent = routing_decision.get("intent", "analytical")
         ticker = routing_decision.get("ticker")
         required_agents = routing_decision.get("required_agents", [])
-        
+
         # SOTA 2026: Automatic ticker extraction if LLM missed it but it was in context
         if not ticker and context.get("ticker"):
-            ticker = context.get("ticker")
-            
-        # Optional: Additional routing based on intent
-        if intent == "analysis" and not ticker:
             ticker = context.get("ticker")
 
         # Update context with routing info
         context["intent"] = intent
-        
+
         # COORDINATOR FIX: Robust normalization via Resolver
         if ticker:
             from utils.ticker_utils import TickerResolver
@@ -113,15 +109,6 @@ class CoordinatorAgent(BaseAgent):
             if ticker != original_ticker:
                 logger.info(f"Ticker normalized (Resolver): {original_ticker} -> {ticker}")
             context["ticker"] = ticker
-
-        # Check if we should directly answer (simple queries)
-        if routing_decision.get("direct_answer"):
-            return AgentResponse(
-                agent_name=self.config.name,
-                success=True,
-                data={"direct_answer": routing_decision.get("direct_answer")},
-                latency_ms=0.0
-            )
 
         # Initialize MarketContext
         market_context = MarketContext(
@@ -135,7 +122,7 @@ class CoordinatorAgent(BaseAgent):
         # 2. Parallel Execution of Specialists
         tasks = []
         c_id = context.get("correlation_id", "swarm-" + os.urandom(4).hex())
-        
+
         for agent_id in required_agents:
             agent = self.specialists.get(agent_id)
             if agent:
@@ -158,8 +145,8 @@ class CoordinatorAgent(BaseAgent):
             if result:
                 await self._merge_result_into_context(market_context, result)
                 market_context.add_agent_result(
-                    result.agent_name, 
-                    result.success, 
+                    result.agent_name,
+                    result.success,
                     result.latency_ms,
                     result.telemetry
                 )
@@ -185,27 +172,27 @@ class CoordinatorAgent(BaseAgent):
             from langchain_core.messages import HumanMessage
             response = await self.llm.ainvoke([HumanMessage(content=query)])
             content = response.content if hasattr(response, 'content') else str(response)
-            
+
             # Extract JSON
             match = re.search(r'\{.*\}', content, re.DOTALL)
             if match:
                 return json.loads(match.group())
         except Exception as e:
             logger.error(f"Coordinator routing failed: {e}")
-            
+
         return {"intent": "analytical", "required_agents": ["research"], "ticker": None}
 
     async def _execute_specialist(self, agent: BaseAgent, context: Dict[str, Any]) -> Optional[AgentResponse]:
         """Execute a single specialist with status tracking and self-correction"""
         from .status_manager import status_manager
         from .messenger import AgentMessage, get_messenger
-        
+
         agent_key = f"{agent.config.name}-{context.get('ticker', 'global')}"
         status_manager.set_status(agent_key, "working", f"Executing {agent.config.name}...")
-        
+
         messenger = get_messenger()
         c_id = context.get("correlation_id")
-        
+
         # Emit telemetry: Started
         start_msg = AgentMessage(
             sender="CoordinatorAgent",
@@ -311,7 +298,7 @@ class CoordinatorAgent(BaseAgent):
                         self.mcp_client.call_tool("search_instruments", {"query": term}),
                         10.0
                     )
-                    
+
                     if hasattr(search_result, 'content'):
                         content = search_result.content
                         if isinstance(content, list) and len(content) > 0:
@@ -351,7 +338,7 @@ class CoordinatorAgent(BaseAgent):
                             "search_score": difflib.SequenceMatcher(None, term.upper(), ticker.upper()).ratio(),
                             "name_score": difflib.SequenceMatcher(None, term.lower(), name.lower()).ratio()
                         })
-                
+
                 # 2. Find best match based on similarity
                 # Priority: Exact Ticker Match > Ticker Similarity > Name Similarity
                 best_match = None
@@ -368,7 +355,7 @@ class CoordinatorAgent(BaseAgent):
                     if score > highest_score:
                         highest_score = score
                         best_match = cand
-                
+
                 # 3. Commit match if it meets threshold (e.g., > 0.6 similarity)
                 if best_match and highest_score > 0.6:
                     found_ticker = best_match["ticker"]
@@ -380,7 +367,7 @@ class CoordinatorAgent(BaseAgent):
                     return normalized
                 else:
                     logger.warning(f"Coordinator Tier 2: No match exceeded similarity threshold (max={highest_score:.2f})")
-                    
+
         except asyncio.TimeoutError:
             logger.warning(f"Ticker search discovery timed out for {term}")
         except Exception as e:
@@ -402,10 +389,10 @@ class CoordinatorAgent(BaseAgent):
 
         Write a Python script that prints the JSON of the modified 'new_context'.
         The script will run in an ISOLATED Docker container.
-        
+
         Input Context:
         {json.dumps(context, default=str)}
-        
+
         Return ONLY a JSON block with the script:
         {{
           "reasoning": "Explain the fix",
@@ -435,7 +422,7 @@ class CoordinatorAgent(BaseAgent):
                             self.mcp_client.call_tool("docker_run_python", {"script": python_code}),
                             30.0
                         )
-                        
+
                         # Parse the output from the tool
                         if result and hasattr(result, 'content') and result.content:
                             output_text = result.content[0].text
@@ -462,7 +449,7 @@ class CoordinatorAgent(BaseAgent):
                         logger.error(f"Docker execution fix timed out")
                     except Exception as e:
                         logger.error(f"Failed to execute Docker fix: {e}")
-                        
+
         except Exception as e:
             logger.warning(f"Self-correction failed: {e}")
 
@@ -494,4 +481,3 @@ class CoordinatorAgent(BaseAgent):
             # Note: GoalData must be imported if not already in context, but dynamic import ok
             from market_context import GoalData
             context.goal = GoalData(**data)
-
