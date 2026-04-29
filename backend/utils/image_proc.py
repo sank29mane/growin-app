@@ -1,10 +1,28 @@
 """Utility for image preprocessing for VLM consumption."""
 import io
 import logging
+import asyncio
 from typing import Tuple, Union, Optional
 from PIL import Image
 
 logger = logging.getLogger(__name__)
+
+async def prepare_vlm_image_async(
+    image_path_or_bytes: Union[str, bytes],
+    max_size: int = 1024,
+    normalize: bool = True
+) -> Tuple[Image.Image, Tuple[int, int]]:
+    """
+    Asynchronous wrapper for prepare_vlm_image.
+    Executes the CPU and I/O bound image processing in a separate thread
+    to avoid blocking the asyncio event loop.
+    """
+    return await asyncio.to_thread(
+        prepare_vlm_image,
+        image_path_or_bytes,
+        max_size,
+        normalize
+    )
 
 def prepare_vlm_image(
     image_path_or_bytes: Union[str, bytes],
