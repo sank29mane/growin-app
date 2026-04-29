@@ -4,9 +4,7 @@ Encapsulates high-performance news fetching for the Growin MAS.
 """
 
 import os
-import asyncio
 import logging
-import httpx
 from typing import List, Dict, Any, Optional
 from resilience import get_circuit_breaker
 
@@ -42,26 +40,27 @@ class NewsDataIOClient:
         }
         
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(self.base_url, params=params)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    results = data.get('results', [])
-                    
-                    # Normalize to standard article format
-                    normalized = []
-                    for art in results:
-                        normalized.append({
-                            'title': art.get('title'),
-                            'description': art.get('description'),
-                            'source': {'name': 'NewsData.io'},
-                            'url': art.get('link'),
-                            'pub_date': art.get('pubDate')
-                        })
-                    return normalized
-                else:
-                    logger.error(f"NewsDataIO fetch failed with status {resp.status_code}: {resp.text}")
-                    return []
+            from utils.http_client import agent_http_client
+            client = agent_http_client.client
+            resp = await client.get(self.base_url, params=params, timeout=10.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                results = data.get('results', [])
+
+                # Normalize to standard article format
+                normalized = []
+                for art in results:
+                    normalized.append({
+                        'title': art.get('title'),
+                        'description': art.get('description'),
+                        'source': {'name': 'NewsData.io'},
+                        'url': art.get('link'),
+                        'pub_date': art.get('pubDate')
+                    })
+                return normalized
+            else:
+                logger.error(f"NewsDataIO fetch failed with status {resp.status_code}: {resp.text}")
+                return []
         except Exception as e:
             logger.error(f"NewsDataIOClient error: {e}")
             return []
