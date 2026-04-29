@@ -60,15 +60,20 @@ class ConversationListViewModel {
         isLoading = true
         defer { isLoading = false }
 
-        for id in ids {
-            guard let url = URL(string: "\(config.baseURL)/conversations/\(id)") else { continue }
-            var request = URLRequest(url: url)
-            request.httpMethod = "DELETE"
+        let baseURL = config.baseURL
+        await withThrowingTaskGroup(of: Void.self) { group in
+            for id in ids {
+                group.addTask {
+                    guard let url = URL(string: "\(baseURL)/conversations/\(id)") else { return }
+                    var request = URLRequest(url: url)
+                    request.httpMethod = "DELETE"
 
-            do {
-                _ = try await URLSession.shared.data(for: request)
-            } catch {
-                print("Error deleting conversation \(id): \(error)")
+                    do {
+                        _ = try await URLSession.shared.data(for: request)
+                    } catch {
+                        print("Error deleting conversation \(id): \(error)")
+                    }
+                }
             }
         }
 
