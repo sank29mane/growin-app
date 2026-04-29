@@ -443,26 +443,62 @@ class AnalyticsDB:
             DataFrame with OHLCV data
         """
         try:
+            batch_result = self.get_batch_recent_ohlcv([ticker], limit)
+            return batch_result.get(ticker)
+        except Exception as e:
+            logger.error(f"Query failed: {e}")
+            return None
+
+    def get_batch_recent_ohlcv(
+        self,
+        tickers: list[str],
+        limit: int = 100
+    ) -> dict[str, pd.DataFrame]:
+        """
+        Get recent OHLCV data for multiple tickers in a single batched query.
+        Resolves N+1 query overhead.
+
+        Args:
+            tickers: List of stock ticker symbols
+            limit: Number of most recent rows to fetch per ticker
+
+        Returns:
+            Dictionary mapping ticker string to DataFrame with OHLCV data
+        """
+        try:
+            if not tickers:
+                return {}
+
             result = self.execute("""
                 SELECT 
+                    ticker,
                     timestamp,
                     open,
                     high,
                     low,
                     close,
                     volume
-                FROM ohlcv_history
-                WHERE ticker = ?
-                ORDER BY timestamp DESC
-                LIMIT ?
-            """, (ticker, limit)).fetchdf()
+                FROM (
+                    SELECT
+                        *,
+                        ROW_NUMBER() OVER(PARTITION BY ticker ORDER BY timestamp DESC) as rn
+                    FROM ohlcv_history
+                    WHERE ticker IN (SELECT unnest(?))
+                ) ranked
+                WHERE rn <= ?
+                ORDER BY ticker, timestamp DESC
+            """, (tickers, limit)).fetchdf()
             
-            return result if not result.empty else None
+            if result.empty:
+                return {}
+
+            grouped = result.groupby('ticker')
+            return {ticker: group.drop('ticker', axis=1).reset_index(drop=True) for ticker, group in grouped}
             
         except Exception as e:
-            logger.error(f"Query failed: {e}")
-            return None
-    
+            logger.error(f"Batched query failed: {e}")
+            return {}
+
     def calculate_volatility(
         self, 
         ticker: str, 
