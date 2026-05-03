@@ -55,3 +55,7 @@
 ## 2026-04-25 - Sovereign UI `WelcomeView` Button Accessibility
 **Learning:** The suggestion chips in `WelcomeView` used `.buttonStyle(.plain)` to suppress native visual button chrome, which entirely removed standard accessibility boundaries and traits, rendering them functionally meaningless to VoiceOver users.
 **Action:** Consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to any `Button` configured with `.buttonStyle(.plain)`. Used `item.title` to dynamically inject the context into the label and hint.
+
+## 2026-05-18 - Missing Accessibility on .plain Buttons in SovereignSidebar and QuickActionButtons
+**Learning:** Found that core navigation elements like `SidebarLink` and dynamic chips like `QuickActionButtons` were using `.buttonStyle(.plain)` to match the 'Sovereign' theme aesthetic, entirely removing their semantic meaning for VoiceOver users.
+**Action:** Consistently added `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to these components, including dynamic state properties like `selection == tab ? [.isSelected, .isButton]` to restore context.
