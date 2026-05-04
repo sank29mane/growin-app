@@ -4,7 +4,6 @@ Encapsulates high-performance news fetching for the Growin MAS.
 """
 
 import os
-import asyncio
 import logging
 import httpx
 from typing import List, Dict, Any, Optional

@@ -9,7 +9,6 @@ import sys
 from typing import Any, Dict, List
 from datetime import datetime
 import pandas as pd
-import yfinance as yf
 from mcp.types import TextContent
 
 from utils import sanitize_nan
@@ -251,7 +250,7 @@ async def handle_get_price_history(
     arguments: Dict[str, Any]
 ) -> List[TextContent]:
     """Handle get_price_history using Yahoo Finance API directly."""
-    import httpx
+    from utils.http_client import agent_http_client
 
     ticker = normalize_ticker(arguments["ticker"])
     start_date = arguments.get("start_date")
@@ -273,13 +272,12 @@ async def handle_get_price_history(
     else:
         url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}?range={period}&interval={interval}"
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        try:
-            resp = await client.get(url, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as e:
-             return [TextContent(type="text", text=f"Failed to fetch historical data for {ticker}: {e}")]
+    try:
+        resp = await agent_http_client.client.get(url, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        return [TextContent(type="text", text=f"Failed to fetch historical data for {ticker}: {e}")]
 
     result_data = data.get("chart", {}).get("result", [])
     if not result_data:
@@ -455,14 +453,13 @@ async def handle_get_current_price(arguments: Dict[str, Any]) -> List[TextConten
 
     try:
         source = "Yahoo Finance API"
-        import httpx
+        from utils.http_client import agent_http_client
         url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}?range=1d&interval=1d"
         headers = {'User-Agent': 'Mozilla/5.0'}
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(url, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
+        resp = await agent_http_client.client.get(url, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
 
         result = data.get("chart", {}).get("result", [])
         if not result:
