@@ -55,3 +55,7 @@
 ## 2026-04-25 - Sovereign UI `WelcomeView` Button Accessibility
 **Learning:** The suggestion chips in `WelcomeView` used `.buttonStyle(.plain)` to suppress native visual button chrome, which entirely removed standard accessibility boundaries and traits, rendering them functionally meaningless to VoiceOver users.
 **Action:** Consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to any `Button` configured with `.buttonStyle(.plain)`. Used `item.title` to dynamically inject the context into the label and hint.
+
+## 2026-05-15 - Dashboard Toolbar Buttons Accessibility
+**Learning:** Icon-only buttons and system-styled text buttons in toolbars lack sufficient context or standard boundaries for assistive technologies, especially when nested in complex sheet views.
+**Action:** Explicitly append `.accessibilityHint` and `.accessibilityAddTraits(.isButton)` (and `.accessibilityLabel` if missing) to all toolbar buttons to ensure unambiguous VoiceOver announcements.
