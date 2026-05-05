@@ -150,6 +150,8 @@ private struct DesktopLedgerRow: View {
             
             Spacer()
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(asset.ticker), \(asset.name), Sector: \(asset.sector). Price: $\(String(format: "%.2f", asset.price)), Change: \(asset.change >= 0 ? "+" : "")\(String(format: "%.2f", asset.change)) percent. Holdings: \(String(format: "%.2f", asset.holdings)) shares, Value: $\(String(format: "%.2f", asset.value)). Signal: \(asset.signal).")
         .padding(.horizontal, 32)
         .padding(.vertical, 14)
     }

@@ -55,3 +55,7 @@
 ## 2026-04-25 - Sovereign UI `WelcomeView` Button Accessibility
 **Learning:** The suggestion chips in `WelcomeView` used `.buttonStyle(.plain)` to suppress native visual button chrome, which entirely removed standard accessibility boundaries and traits, rendering them functionally meaningless to VoiceOver users.
 **Action:** Consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to any `Button` configured with `.buttonStyle(.plain)`. Used `item.title` to dynamically inject the context into the label and hint.
+
+## 2026-05-05 - Optimize Data-Dense Tables for VoiceOver
+**Learning:** Data-dense horizontal rows (like portfolio ledgers) using disjointed `Text` views cause severe VoiceOver fatigue. Reading them element-by-element is painfully slow and lacks context.
+**Action:** Use `.accessibilityElement(children: .combine)` and an explicit `.accessibilityLabel` that structures the cell values into a natural, conversational sentence on the enclosing row container.
