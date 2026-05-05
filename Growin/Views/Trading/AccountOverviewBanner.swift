@@ -21,6 +21,8 @@ struct AccountOverviewBanner: View {
                     .font(SovereignTheme.Fonts.notoSerif(size: 42, weight: .regular))
                     .foregroundStyle(Color.brutalOffWhite)
             }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Total Liquid Equity: \(self.formatCurrency(totalBalance))")
             
             // Separation: Vertical Dotted Line Placeholder (Using Border/Opacity)
             Rectangle()
@@ -43,6 +45,7 @@ struct AccountOverviewBanner: View {
                 .padding(12)
                 .background(Color.white.opacity(0.05))
                 .border(SovereignTheme.Colors.technicalBorder, width: 1)
+                .accessibilityHidden(true)
         }
         .padding(32)
         .background(Color.brutalRecessed)
@@ -66,6 +69,8 @@ private struct MetricColumn: View {
                 .monospacedDigit()
                 .foregroundStyle(color)
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title): \(value)")
     }
 }
 
