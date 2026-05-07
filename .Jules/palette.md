@@ -55,3 +55,7 @@
 ## 2026-04-25 - Sovereign UI `WelcomeView` Button Accessibility
 **Learning:** The suggestion chips in `WelcomeView` used `.buttonStyle(.plain)` to suppress native visual button chrome, which entirely removed standard accessibility boundaries and traits, rendering them functionally meaningless to VoiceOver users.
 **Action:** Consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to any `Button` configured with `.buttonStyle(.plain)`. Used `item.title` to dynamically inject the context into the label and hint.
+
+## 2026-04-26 - SwiftUI Dynamic Accessibility Labels for Metric Groups
+**Learning:** For SwiftUI view components that group text elements to represent a metric (like `MetricColumn` grouping title and value), VoiceOver naturally reads them as separate, disconnected elements. Adding `.accessibilityElement(children: .combine)` helps, but it still might read them in a clunky manner depending on how the views are nested.
+**Action:** When making custom composite metric views accessible, combine the children (`.accessibilityElement(children: .combine)`) and provide a single, explicitly computed `.accessibilityLabel` string that naturally reads the metric as a cohesive sentence (e.g., `\(title): \(value)`).
