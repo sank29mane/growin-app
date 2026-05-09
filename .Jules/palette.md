@@ -55,3 +55,7 @@
 ## 2026-04-25 - Sovereign UI `WelcomeView` Button Accessibility
 **Learning:** The suggestion chips in `WelcomeView` used `.buttonStyle(.plain)` to suppress native visual button chrome, which entirely removed standard accessibility boundaries and traits, rendering them functionally meaningless to VoiceOver users.
 **Action:** Consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to any `Button` configured with `.buttonStyle(.plain)`. Used `item.title` to dynamically inject the context into the label and hint.
+
+## 2026-05-10 - QuickActionButtons Accessibility with .buttonStyle(.plain)
+**Learning:** In SwiftUI, suggestion chips or quick action buttons (like those in `QuickActionButtons` of `RichMessageComponents.swift`) that use `.buttonStyle(.plain)` have their baseline accessibility traits removed, rendering them functionally silent or misidentified as plain text by VoiceOver.
+**Action:** Consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to dynamically generated button components (like `action.label`) when using `.buttonStyle(.plain)` to ensure their context and interactivity are preserved for screen readers.
