@@ -222,6 +222,8 @@ struct DashboardView: View {
                     Image(systemName: "arrow.clockwise")
                 }
                 .accessibilityLabel("Refresh Portfolio")
+                .accessibilityHint("Reloads the portfolio data")
+                .accessibilityAddTraits(.isButton)
                 .disabled(viewModel.isLoading)
             }
         }
