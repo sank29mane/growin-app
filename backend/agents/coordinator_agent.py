@@ -5,20 +5,15 @@ Static SOTA model that routes queries and aggregates results
 
 from .base_agent import BaseAgent, AgentResponse
 from market_context import MarketContext
-from . import QuantAgent, PortfolioAgent, ForecastingAgent, ResearchAgent, SocialAgent, WhaleAgent, GoalPlannerAgent, VisionAgent
-from .decision_agent import DecisionAgent
 from utils.ticker_utils import TickerResolver
-from data_fabricator import DataFabricator
-from typing import Dict, Any, List, Optional, Union
+from typing import Dict, Any, Optional
 import asyncio
 import logging
 from utils.async_utils import run_with_timeout
 import re
 import json
 import difflib
-from typing import Dict, Any, List, Optional, Union, Tuple
 import os
-from utils.async_utils import run_with_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +145,11 @@ class CoordinatorAgent(BaseAgent):
                     result.latency_ms,
                     result.telemetry
                 )
+
+        # SOTA 2026: Strategy Suggestion Engine
+        # Once all context (including portfolio) is aggregated, generate proactive suggestions
+        if market_context.portfolio:
+            self._generate_strategic_suggestions(market_context)
 
         return AgentResponse(
             agent_name=self.config.name,
@@ -413,7 +413,7 @@ class CoordinatorAgent(BaseAgent):
                     return None
 
                 if python_code:
-                    logger.info(f"Coordinator: Delegating fix to Docker Sandbox...")
+                    logger.info("Coordinator: Delegating fix to Docker Sandbox...")
                     # SOTA 2026: Use Docker MCP for isolation
                     try:
                         # Call docker_run_python tool
@@ -446,7 +446,7 @@ class CoordinatorAgent(BaseAgent):
                             else:
                                 logger.warning(f"Docker execution failed: {exec_res}")
                     except asyncio.TimeoutError:
-                        logger.error(f"Docker execution fix timed out")
+                        logger.error("Docker execution fix timed out")
                     except Exception as e:
                         logger.error(f"Failed to execute Docker fix: {e}")
                         
@@ -482,3 +482,33 @@ class CoordinatorAgent(BaseAgent):
             from market_context import GoalData
             context.goal = GoalData(**data)
 
+    def _generate_strategic_suggestions(self, context: MarketContext):
+        """
+        Analyze the aggregated MarketContext (specifically the portfolio)
+        and generate proactive strategic suggestions (e.g., tax-loss harvesting).
+        """
+        suggestions = []
+
+        # 1. Tax-Loss Harvesting (TLH) Alert
+        if context.portfolio:
+            try:
+                from utils.tlh_scanner import TLHScanner
+                scanner = TLHScanner()
+                tlh_opportunities = scanner.scan(context.portfolio.model_dump())
+
+                if tlh_opportunities:
+                    suggestions.append({
+                        "type": "TAX_LOSS_HARVESTING",
+                        "title": "Tax-Loss Harvesting Opportunities",
+                        "description": f"Found {len(tlh_opportunities)} position(s) with potential tax offset benefits.",
+                        "opportunities": tlh_opportunities
+                    })
+            except Exception as e:
+                logger.error(f"Coordinator TLH Scan failed: {e}")
+
+        # 2. Add more strategic modules here over time...
+        # e.g. Diversification scanner, High-Fee ETF swap scanner
+
+        if suggestions:
+            context.user_context["strategic_suggestions"] = suggestions
+            logger.info(f"Coordinator generated {len(suggestions)} strategic suggestion(s).")
