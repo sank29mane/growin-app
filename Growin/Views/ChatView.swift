@@ -56,6 +56,8 @@ struct ChatView: View {
                 }
                 .help("Conversation History")
                 .accessibilityLabel("Conversation History")
+                .accessibilityHint("Opens your previous conversations")
+                .accessibilityAddTraits(.isButton)
             }
             
             ToolbarItem(placement: .automatic) {
@@ -68,6 +70,8 @@ struct ChatView: View {
                 }
                 .help("New Chat")
                 .accessibilityLabel("New Chat")
+                .accessibilityHint("Starts a new conversation")
+                .accessibilityAddTraits(.isButton)
             }
         }
         .sheet(isPresented: $viewModel.showConfigPrompt) {

@@ -55,3 +55,6 @@
 ## 2026-04-25 - Sovereign UI `WelcomeView` Button Accessibility
 **Learning:** The suggestion chips in `WelcomeView` used `.buttonStyle(.plain)` to suppress native visual button chrome, which entirely removed standard accessibility boundaries and traits, rendering them functionally meaningless to VoiceOver users.
 **Action:** Consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to any `Button` configured with `.buttonStyle(.plain)`. Used `item.title` to dynamically inject the context into the label and hint.
+## 2026-05-18 - ChatView ToolbarItem Button Accessibility
+**Learning:** Icon-only buttons used inside `ToolbarItem` in `ChatView` had `.accessibilityLabel` but lacked `.accessibilityHint` and explicit `.accessibilityAddTraits(.isButton)`. Without the `.isButton` trait, VoiceOver may not announce them as actionable buttons, and without hints, the action's result is not explicitly described.
+**Action:** When adding accessibility support to icon-only `ToolbarItem` buttons, always ensure `.accessibilityHint` and `.accessibilityAddTraits(.isButton)` are included alongside the `.accessibilityLabel` to provide full context and correct interaction traits for screen readers.
