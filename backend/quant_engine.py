@@ -427,7 +427,7 @@ class QuantEngine:
                 
                 # Simple alignment: assume same length and timestamps for now
                 # In production, we'd use a more robust outer-join and interpolation
-                closes = np.array([float(item.close) for item in series])
+                closes = np.array([float(item.close) for item in series], dtype=np.float64)
                 
                 if len(closes) < seq_len:
                     # Pad if necessary or truncate
@@ -464,7 +464,7 @@ class QuantEngine:
             
             # 4. Calculate Portfolio CVaR for the optimized portfolio
             # Portfolio returns = ReturnsMatrix * weights
-            w_arr = np.array([float(w) for w in weights])
+            w_arr = np.array([float(w) for w in weights], dtype=np.float64)
             portfolio_returns = np.dot(returns_matrix, w_arr)
             
             from utils.risk_engine import RiskEngine
