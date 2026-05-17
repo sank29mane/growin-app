@@ -55,3 +55,7 @@
 ## 2026-04-25 - Sovereign UI `WelcomeView` Button Accessibility
 **Learning:** The suggestion chips in `WelcomeView` used `.buttonStyle(.plain)` to suppress native visual button chrome, which entirely removed standard accessibility boundaries and traits, rendering them functionally meaningless to VoiceOver users.
 **Action:** Consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to any `Button` configured with `.buttonStyle(.plain)`. Used `item.title` to dynamically inject the context into the label and hint.
+
+## 2026-04-26 - Sovereign UI `ExecutionPanelView` Button Accessibility Hints
+**Learning:** While the custom buttons in `ExecutionPanelView` correctly utilized `.accessibilityLabel` and `.accessibilityAddTraits(.isButton)` to combat the stripping effects of `.buttonStyle(.plain)`, they lacked `.accessibilityHint`. Without a hint, VoiceOver users receive the name of the button but no context on what action will occur when activated (e.g., dismissing an overlay vs. opening a new view).
+**Action:** Always append an explicit `.accessibilityHint` (e.g., "Closes the execution panel") alongside the label and traits when using `.buttonStyle(.plain)` on interactive elements to provide clear consequence context for assistive technologies.
