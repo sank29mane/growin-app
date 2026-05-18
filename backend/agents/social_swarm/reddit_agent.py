@@ -7,6 +7,9 @@ from utils.financial_math import create_decimal
 
 logger = logging.getLogger(__name__)
 
+# Cache sentiment analyzer at the module level to prevent synchronous I/O blocking in async loops
+_sentiment_analyzer = None
+
 class RedditMicroAgent(BaseMicroAgent):
     """
     Micro-agent for monitoring Reddit sentiment.
@@ -31,10 +34,12 @@ class RedditMicroAgent(BaseMicroAgent):
 
         try:
             from tavily import AsyncTavilyClient
-            from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+            global _sentiment_analyzer
+            if _sentiment_analyzer is None:
+                from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+                _sentiment_analyzer = SentimentIntensityAnalyzer()
             
             tavily = AsyncTavilyClient(api_key=self.tavily_key)
-            sentiment_analyzer = SentimentIntensityAnalyzer()
             
             # Non-blocking thread execution
             query = f"${ticker} stock discussion reddit wallstreetbets" if ticker != "MARKET" else "retail investor sentiment reddit wallstreetbets"
@@ -79,7 +84,7 @@ class RedditMicroAgent(BaseMicroAgent):
                     title = res.get('title', '')
                     content = res.get('content', '')
                     text = f"{title}. {content}"
-                    scores = sentiment_analyzer.polarity_scores(text)
+                    scores = _sentiment_analyzer.polarity_scores(text)
                     sents.append(create_decimal(str(scores['compound'])))
                     discs.append(title)
                 return sents, discs

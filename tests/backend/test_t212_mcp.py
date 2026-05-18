@@ -1,8 +1,10 @@
+import pytest
 
 import asyncio
 import json
 from mcp_client import Trading212MCPClient
 
+@pytest.mark.asyncio
 async def test_t212_mcp():
     client = Trading212MCPClient()
     
