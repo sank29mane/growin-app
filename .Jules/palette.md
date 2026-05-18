@@ -56,6 +56,7 @@
 **Learning:** The suggestion chips in `WelcomeView` used `.buttonStyle(.plain)` to suppress native visual button chrome, which entirely removed standard accessibility boundaries and traits, rendering them functionally meaningless to VoiceOver users.
 **Action:** Consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to any `Button` configured with `.buttonStyle(.plain)`. Used `item.title` to dynamically inject the context into the label and hint.
 
+<<<<<<< HEAD
 ## 2025-05-18 - SwiftUI `.buttonStyle(.plain)` ToolbarItem Accessibility
 **Learning:** When applying `.buttonStyle(.plain)` to `Button` views nested within `ToolbarItem`, standard accessibility traits like `.isButton` and context hints are stripped. This causes VoiceOver to read these icon-only navigational actions as generic text elements.
 **Action:** Always append `.accessibilityHint` and `.accessibilityAddTraits(.isButton)` in addition to the `.accessibilityLabel` when using icon-only buttons in toolbars.
@@ -71,3 +72,12 @@
 ## 2026-05-06 - Data-Dense Table Accessibility Patterns
 **Learning:** VoiceOver navigation through data-dense tables (like the Master Ledger or Account Overview) can be exhausting when every cell is a separate focus stop.
 **Action:** Apply `.accessibilityElement(children: .combine)` to entire rows or logical data groups (e.g., a ticker and its current price/change). Provide a single, descriptive `.accessibilityLabel` that reads the row's data as a cohesive sentence (e.g., 'Apple, trading at 150.00, up 2 percent'). Mark decorative background elements with `.accessibilityHidden(true)`.
+=======
+## 2026-05-15 - Dashboard Toolbar Buttons Accessibility
+**Learning:** Icon-only buttons and system-styled text buttons in toolbars lack sufficient context or standard boundaries for assistive technologies, especially when nested in complex sheet views.
+**Action:** Explicitly append `.accessibilityHint` and `.accessibilityAddTraits(.isButton)` (and `.accessibilityLabel` if missing) to all toolbar buttons to ensure unambiguous VoiceOver announcements.
+>>>>>>> palette-dashboard-toolbar-a11y-7982336620919235625
+
+## 2026-05-15 - Dashboard Toolbar Buttons Accessibility
+**Learning:** Icon-only buttons and system-styled text buttons in toolbars lack sufficient context or standard boundaries for assistive technologies, especially when nested in complex sheet views.
+**Action:** Explicitly append `.accessibilityHint` and `.accessibilityAddTraits(.isButton)` (and `.accessibilityLabel` if missing) to all toolbar buttons to ensure unambiguous VoiceOver announcements.

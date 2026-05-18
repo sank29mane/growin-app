@@ -207,6 +207,9 @@ struct DashboardView: View {
                                 Button("Close") {
                                     selectedPosition = nil
                                 }
+                                .accessibilityLabel("Close chart")
+                                .accessibilityHint("Dismisses the selected stock chart view")
+                                .accessibilityAddTraits(.isButton)
                             }
                         }
                 }
