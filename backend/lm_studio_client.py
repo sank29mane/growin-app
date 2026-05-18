@@ -10,6 +10,7 @@ import json
 import asyncio
 import psutil
 from typing import List, Dict, Any, Optional
+from utils.http_client import agent_http_client
 
 logger = logging.getLogger(__name__)
 
@@ -69,17 +70,16 @@ class LMStudioClient:
             path = f"/{path}"
 
         url = f"{self.base_url}{path}"
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            try:
-                response = await client.request(method, url, headers=self.headers, **kwargs)
-                response.raise_for_status()
-                return response.json()
-            except httpx.HTTPStatusError as e:
-                logger.error(f"LM Studio API Error ({e.response.status_code}) at {path}: {e.response.text}")
-                raise RuntimeError(f"LM Studio API Error: {e.response.text}") from e
-            except httpx.RequestError as e:
-                logger.error(f"LM Studio Connection Error at {path}: {e}")
-                raise RuntimeError(f"Could not connect to LM Studio at {self.base_url}") from e
+        try:
+            response = await agent_http_client.client.request(method, url, headers=self.headers, timeout=60.0, **kwargs)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"LM Studio API Error ({e.response.status_code}) at {path}: {e.response.text}")
+            raise RuntimeError(f"LM Studio API Error: {e.response.text}") from e
+        except httpx.RequestError as e:
+            logger.error(f"LM Studio Connection Error at {path}: {e}")
+            raise RuntimeError(f"LM Studio is not reachable at {self.base_url}") from e
 
     async def check_connection(self) -> bool:
         """Verify server is reachable and running."""
@@ -196,41 +196,40 @@ class LMStudioClient:
             try:
                 logger.info(f"LM Studio: Sending chat request (Model: {model_id}, Slots: {self.semaphore._value})")
 
-                async with httpx.AsyncClient(headers=self.headers, timeout=300.0) as client:
-                    # Use /v1/chat/completions for widest compatibility
-                    endpoint = f"{self.base_url}/v1/chat/completions"
+                # Use /v1/chat/completions for widest compatibility
+                endpoint = f"{self.base_url}/v1/chat/completions"
 
-                    response = await client.post(endpoint, json=payload)
-                    response.raise_for_status()
-                    data = response.json()
+                response = await agent_http_client.client.post(endpoint, json=payload, headers=self.headers, timeout=300.0)
+                response.raise_for_status()
+                data = response.json()
 
-                    # Robust extraction for both V1 and OpenAI-style responses
-                    if "choices" in data:
-                        choice = data["choices"][0]
-                        message = choice.get("message", {})
-                    else:
-                        # Native V1 fallback
-                        message = data.get("message", {})
+                # Robust extraction for both V1 and OpenAI-style responses
+                if "choices" in data:
+                    choice = data["choices"][0]
+                    message = choice.get("message", {})
+                else:
+                    # Native V1 fallback
+                    message = data.get("message", {})
 
-                    # Handle reasoning field (for R1/Reasoning models in LM Studio)
-                    content = message.get("content", "")
-                    reasoning = message.get("reasoning", "")
+                # Handle reasoning field (for R1/Reasoning models in LM Studio)
+                content = message.get("content", "")
+                reasoning = message.get("reasoning", "")
 
-                    # If content is empty but reasoning has content, use reasoning
-                    if not content and reasoning:
-                        content = reasoning
+                # If content is empty but reasoning has content, use reasoning
+                if not content and reasoning:
+                    content = reasoning
 
-                    # Handle tool calls if present
-                    if message.get("tool_calls"):
-                        return await self._handle_tool_calls(model_id, messages, message["tool_calls"], tools)
-                    elif message.get("toolCalls"):
-                        return await self._handle_tool_calls(model_id, messages, message["toolCalls"], tools)
+                # Handle tool calls if present
+                if message.get("tool_calls"):
+                    return await self._handle_tool_calls(model_id, messages, message["tool_calls"], tools)
+                elif message.get("toolCalls"):
+                    return await self._handle_tool_calls(model_id, messages, message["toolCalls"], tools)
 
-                    return {
-                        "content": content,
-                        "role": "assistant",
-                        "sessionId": data.get("sessionId", session_id)
-                    }
+                return {
+                    "content": content,
+                    "role": "assistant",
+                    "sessionId": data.get("sessionId", session_id)
+                }
             except httpx.HTTPStatusError as e:
                 error_body = e.response.text
                 logger.error(f"LM Studio V1 chat failed ({e.response.status_code}): {error_body}")
