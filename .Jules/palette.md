@@ -55,3 +55,7 @@
 ## 2026-04-25 - Sovereign UI `WelcomeView` Button Accessibility
 **Learning:** The suggestion chips in `WelcomeView` used `.buttonStyle(.plain)` to suppress native visual button chrome, which entirely removed standard accessibility boundaries and traits, rendering them functionally meaningless to VoiceOver users.
 **Action:** Consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to any `Button` configured with `.buttonStyle(.plain)`. Used `item.title` to dynamically inject the context into the label and hint.
+
+## 2026-05-18 - SwiftUI Toolbar Button Accessibility
+**Learning:** Icon-only buttons used within SwiftUI toolbars (like `chatToggleButton` in `ContentView.swift`) lack clear context for VoiceOver users, even if they have a `.help()` modifier. When toggling states, it's particularly ambiguous.
+**Action:** Always provide explicit, dynamic `.accessibilityLabel` (e.g., "Show/Hide..."), `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to icon-only toggle buttons in toolbars to ensure assistive technologies can correctly announce their current state and function.

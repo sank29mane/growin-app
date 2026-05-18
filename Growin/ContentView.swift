@@ -164,6 +164,9 @@ struct ContentView: View {
                 .foregroundStyle(showChat ? Color.brutalChartreuse : Color.brutalOffWhite)
         }
         .help("Toggle AI Assistant")
+        .accessibilityLabel(showChat ? "Hide AI Assistant" : "Show AI Assistant")
+        .accessibilityHint("Shows or hides the AI Assistant sidebar")
+        .accessibilityAddTraits(.isButton)
     }
     
     private var settingsButton: some View {
