@@ -56,6 +56,7 @@
 **Learning:** The suggestion chips in `WelcomeView` used `.buttonStyle(.plain)` to suppress native visual button chrome, which entirely removed standard accessibility boundaries and traits, rendering them functionally meaningless to VoiceOver users.
 **Action:** Consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to any `Button` configured with `.buttonStyle(.plain)`. Used `item.title` to dynamically inject the context into the label and hint.
 <<<<<<< HEAD
+<<<<<<< HEAD
 
 <<<<<<< HEAD
 <<<<<<< HEAD
@@ -101,3 +102,13 @@
 ## 2026-05-02 - Added accessibility attributes to SovereignSidebar
 **Learning:** Found a custom UI component in SovereignSidebar that used `.buttonStyle(.plain)` to suppress native visual button styling. This entirely removed standard accessibility boundaries and traits, rendering them silent or functionally meaningless to VoiceOver users.
 **Action:** Consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to any `Button` configured with `.buttonStyle(.plain)`. Used `title` to dynamically inject the context into the label and hint, and `.isSelected` trait dynamically based on whether the current tab is active.
+=======
+
+## 2026-04-30 - QuickActionButtons Accessibility with .buttonStyle(.plain)
+**Learning:** Found `QuickActionButtons` in `RichMessageComponents` using `.buttonStyle(.plain)` which strips accessibility traits for VoiceOver users, treating actionable buttons as plain text.
+**Action:** Appended `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` utilizing the dynamic `action.label` for improved context.
+>>>>>>> palette-a11y-quick-actions-13757718762035640256
+
+## 2026-04-30 - QuickActionButtons Accessibility with .buttonStyle(.plain)
+**Learning:** Found `QuickActionButtons` in `RichMessageComponents` using `.buttonStyle(.plain)` which strips accessibility traits for VoiceOver users, treating actionable buttons as plain text.
+**Action:** Appended `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` utilizing the dynamic `action.label` for improved context.
