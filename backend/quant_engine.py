@@ -389,13 +389,19 @@ class QuantEngine:
 
     def calculate_portfolio_metrics(self, positions: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not positions: return {"error": "No positions provided"}
+
+        # Pre-parse data into lists of `Decimal` objects to optimize loop performance
+        qtys = [create_decimal(p.get('qty') or p.get('quantity') or 0) for p in positions]
+        prices = [create_decimal(p.get('current_price') or p.get('currentPrice') or 0) for p in positions]
+        costs = [create_decimal(p.get('avg_cost') or p.get('averagePrice') or 0) for p in positions]
+
         total_value, total_cost = Decimal('0'), Decimal('0')
-        for pos in positions:
-            qty = create_decimal(pos.get('qty') or pos.get('quantity') or 0)
-            price = create_decimal(pos.get('current_price') or pos.get('currentPrice') or 0)
-            avg_cost = create_decimal(pos.get('avg_cost') or pos.get('averagePrice') or 0)
-            total_value += qty * price
-            total_cost += qty * avg_cost
+
+        # Aggregate using zip to avoid repeating dict access overhead and maintain exact Decimal precision
+        for q, p, c in zip(qtys, prices, costs):
+            total_value += q * p
+            total_cost += q * c
+
         total_pnl = total_value - total_cost
         return {"total_value": total_value, "total_cost": total_cost, "total_pnl": total_pnl, "portfolio_return": safe_div(total_pnl, total_cost), "position_count": len(positions)}
 

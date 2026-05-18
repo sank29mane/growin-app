@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, AsyncMock, patch
 import pytest
 
 # --- Python 3.13 Fixes ---
-orig_find_spec = importlib.util.find_spec
+orig_find_spec = importlib.util.util.find_spec if hasattr(importlib.util, 'util') else importlib.util.find_spec
 def patched_find_spec(name, package=None):
     try:
         return orig_find_spec(name, package)
@@ -20,7 +20,7 @@ if backend_path not in sys.path:
     sys.path.insert(0, backend_path)
 
 # --- Global Resource Lifecycle Management ---
-@pytest_asyncio.fixture(autouse=True)
+@pytest_asyncio.fixture(scope="session", autouse=True)
 async def cleanup_resources():
     """Ensure all background processes are killed after the test session."""
     yield
@@ -64,6 +64,14 @@ MOCK_MODULES = [
     'yfinance',
     'docker'  # CRITICAL: Prevent Docker daemon connection attempts in CI
 ]
+
+def make_async(obj):
+    """Recursively wrap all callable attributes of a MagicMock into AsyncMocks."""
+    for name in dir(obj):
+        if name.startswith('_'): continue
+        attr = getattr(obj, name)
+        if callable(attr) and not isinstance(attr, (AsyncMock, MagicMock)):
+            setattr(obj, name, AsyncMock())
 
 for module in MOCK_MODULES:
     try:

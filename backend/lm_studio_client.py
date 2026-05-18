@@ -10,6 +10,7 @@ import json
 import asyncio
 import psutil
 from typing import List, Dict, Any, Optional
+from utils.http_client import agent_http_client
 
 logger = logging.getLogger(__name__)
 
@@ -40,13 +41,8 @@ class LMStudioClient:
         if self.api_token:
             self.headers["Authorization"] = f"Bearer {self.api_token}"
 
-        self.client = httpx.AsyncClient(headers=self.headers, timeout=60.0)
-
+        # Initialize Semaphore-guarded pool
         self._setup_concurrency_limits()
-
-    async def aclose(self):
-        """Cleanly close the persistent HTTP client."""
-        await self.client.aclose()
 
     def _setup_concurrency_limits(self):
         """
@@ -75,13 +71,9 @@ class LMStudioClient:
             path = f"/{path}"
 
         url = f"{self.base_url}{path}"
-
-        # Merge kwargs timeout if needed
-        if 'timeout' not in kwargs:
-             kwargs['timeout'] = 60.0
-
         try:
-            response = await self.client.request(method, url, **kwargs)
+            # Use pooled agent_http_client
+            response = await agent_http_client.client.request(method, url, headers=self.headers, timeout=kwargs.pop('timeout', 60.0), **kwargs)
             response.raise_for_status()
             return response.json()
         except httpx.HTTPStatusError as e:
@@ -89,7 +81,7 @@ class LMStudioClient:
             raise RuntimeError(f"LM Studio API Error: {e.response.text}") from e
         except httpx.RequestError as e:
             logger.error(f"LM Studio Connection Error at {path}: {e}")
-            raise RuntimeError(f"Could not connect to LM Studio at {self.base_url}") from e
+            raise RuntimeError(f"LM Studio is not reachable at {self.base_url}") from e
 
     async def check_connection(self) -> bool:
         """Verify server is reachable and running."""
@@ -209,7 +201,7 @@ class LMStudioClient:
                 # Use /v1/chat/completions for widest compatibility
                 endpoint = f"{self.base_url}/v1/chat/completions"
 
-                response = await self.client.post(endpoint, json=payload, timeout=300.0)
+                response = await agent_http_client.client.post(endpoint, json=payload, headers=self.headers, timeout=300.0)
                 response.raise_for_status()
                 data = response.json()
 

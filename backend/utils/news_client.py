@@ -4,9 +4,11 @@ Encapsulates high-performance news fetching for the Growin MAS.
 """
 
 import os
+import asyncio
 import logging
 from typing import List, Dict, Any, Optional
 from resilience import get_circuit_breaker
+from utils.http_client import agent_http_client
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +42,8 @@ class NewsDataIOClient:
         }
         
         try:
-            from utils.http_client import agent_http_client
-            client = agent_http_client.client
-            resp = await client.get(self.base_url, params=params, timeout=10.0)
+            # SOTA: Transition to centralized http_client for connection pooling
+            resp = await agent_http_client.client.get(self.base_url, params=params, timeout=10.0)
             if resp.status_code == 200:
                 data = resp.json()
                 results = data.get('results', [])
