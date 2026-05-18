@@ -707,7 +707,7 @@ struct QuickActionButtons: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("\(action.label) quick action")
-                    .accessibilityHint("Executes the \(action.label) action")
+                    .accessibilityHint("Executes the \(action.label) quick action")
                     .accessibilityAddTraits(.isButton)
                 }
             }

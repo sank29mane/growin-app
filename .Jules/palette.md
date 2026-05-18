@@ -57,6 +57,7 @@
 **Action:** Consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to any `Button` configured with `.buttonStyle(.plain)`. Used `item.title` to dynamically inject the context into the label and hint.
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 ## 2025-05-18 - SwiftUI `.buttonStyle(.plain)` ToolbarItem Accessibility
 **Learning:** When applying `.buttonStyle(.plain)` to `Button` views nested within `ToolbarItem`, standard accessibility traits like `.isButton` and context hints are stripped. This causes VoiceOver to read these icon-only navigational actions as generic text elements.
 **Action:** Always append `.accessibilityHint` and `.accessibilityAddTraits(.isButton)` in addition to the `.accessibilityLabel` when using icon-only buttons in toolbars.
@@ -81,3 +82,12 @@
 ## 2026-05-15 - Dashboard Toolbar Buttons Accessibility
 **Learning:** Icon-only buttons and system-styled text buttons in toolbars lack sufficient context or standard boundaries for assistive technologies, especially when nested in complex sheet views.
 **Action:** Explicitly append `.accessibilityHint` and `.accessibilityAddTraits(.isButton)` (and `.accessibilityLabel` if missing) to all toolbar buttons to ensure unambiguous VoiceOver announcements.
+=======
+## 2026-05-18 - Missing Accessibility on .plain Buttons in SovereignSidebar and QuickActionButtons
+**Learning:** Found that core navigation elements like `SidebarLink` and dynamic chips like `QuickActionButtons` were using `.buttonStyle(.plain)` to match the 'Sovereign' theme aesthetic, entirely removing their semantic meaning for VoiceOver users.
+**Action:** Consistently added `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to these components, including dynamic state properties like `selection == tab ? [.isSelected, .isButton]` to restore context.
+>>>>>>> palette-plain-button-a11y-1969500908564382227
+
+## 2026-05-18 - Missing Accessibility on .plain Buttons in SovereignSidebar and QuickActionButtons
+**Learning:** Found that core navigation elements like `SidebarLink` and dynamic chips like `QuickActionButtons` were using `.buttonStyle(.plain)` to match the 'Sovereign' theme aesthetic, entirely removing their semantic meaning for VoiceOver users.
+**Action:** Consistently added `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to these components, including dynamic state properties like `selection == tab ? [.isSelected, .isButton]` to restore context.
