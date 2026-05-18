@@ -55,6 +55,7 @@
 ## 2026-04-25 - Sovereign UI `WelcomeView` Button Accessibility
 **Learning:** The suggestion chips in `WelcomeView` used `.buttonStyle(.plain)` to suppress native visual button chrome, which entirely removed standard accessibility boundaries and traits, rendering them functionally meaningless to VoiceOver users.
 **Action:** Consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to any `Button` configured with `.buttonStyle(.plain)`. Used `item.title` to dynamically inject the context into the label and hint.
+<<<<<<< HEAD
 
 <<<<<<< HEAD
 <<<<<<< HEAD
@@ -91,3 +92,12 @@
 ## 2026-05-18 - Missing Accessibility on .plain Buttons in SovereignSidebar and QuickActionButtons
 **Learning:** Found that core navigation elements like `SidebarLink` and dynamic chips like `QuickActionButtons` were using `.buttonStyle(.plain)` to match the 'Sovereign' theme aesthetic, entirely removing their semantic meaning for VoiceOver users.
 **Action:** Consistently added `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to these components, including dynamic state properties like `selection == tab ? [.isSelected, .isButton]` to restore context.
+=======
+## 2026-05-02 - Added accessibility attributes to SovereignSidebar
+**Learning:** Found a custom UI component in SovereignSidebar that used `.buttonStyle(.plain)` to suppress native visual button styling. This entirely removed standard accessibility boundaries and traits, rendering them silent or functionally meaningless to VoiceOver users.
+**Action:** Consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to any `Button` configured with `.buttonStyle(.plain)`. Used `title` to dynamically inject the context into the label and hint, and `.isSelected` trait dynamically based on whether the current tab is active.
+>>>>>>> palette-a11y-sovereign-sidebar-16621935029984361166
+
+## 2026-05-02 - Added accessibility attributes to SovereignSidebar
+**Learning:** Found a custom UI component in SovereignSidebar that used `.buttonStyle(.plain)` to suppress native visual button styling. This entirely removed standard accessibility boundaries and traits, rendering them silent or functionally meaningless to VoiceOver users.
+**Action:** Consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to any `Button` configured with `.buttonStyle(.plain)`. Used `title` to dynamically inject the context into the label and hint, and `.isSelected` trait dynamically based on whether the current tab is active.

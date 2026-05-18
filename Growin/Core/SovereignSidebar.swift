@@ -75,7 +75,7 @@ private struct SidebarLink: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(title)
-        .accessibilityHint("Switches to \(title) tab")
+        .accessibilityHint("Switches to the \(title.lowercased()) section")
         .accessibilityAddTraits(selection == tab ? [.isSelected, .isButton] : [.isButton])
     }
 }
