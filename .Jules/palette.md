@@ -67,3 +67,7 @@
 ## 2026-05-06 - ToolbarItem Icon-Only Buttons Accessibility
 **Learning:** Icon-only `Button` views placed inside `ToolbarItem` components often rely purely on standard visual icons (e.g., `Image(systemName: "plus.circle")`) and lack inherent VoiceOver interaction context beyond basic labels. Because they are often styled invisibly or globally by the toolbar, their functional role and exact purpose can be ambiguous to screen readers.
 **Action:** Systematically ensure that all icon-only buttons in toolbars (and elsewhere) not only have an `.accessibilityLabel`, but explicitly append `.accessibilityHint()` (to explain the action's consequence) and `.accessibilityAddTraits(.isButton)` to guarantee they are announced as actionable buttons rather than static images or generic elements.
+
+## 2026-05-06 - Data-Dense Table Accessibility Patterns
+**Learning:** VoiceOver navigation through data-dense tables (like the Master Ledger or Account Overview) can be exhausting when every cell is a separate focus stop.
+**Action:** Apply `.accessibilityElement(children: .combine)` to entire rows or logical data groups (e.g., a ticker and its current price/change). Provide a single, descriptive `.accessibilityLabel` that reads the row's data as a cohesive sentence (e.g., 'Apple, trading at 150.00, up 2 percent'). Mark decorative background elements with `.accessibilityHidden(true)`.
