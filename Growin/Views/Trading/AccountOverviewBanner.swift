@@ -66,6 +66,8 @@ private struct MetricColumn: View {
                 .monospacedDigit()
                 .foregroundStyle(color)
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title): \(value)")
     }
 }
 
