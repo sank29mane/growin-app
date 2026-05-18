@@ -56,7 +56,7 @@ struct ChatView: View {
                 }
                 .help("Conversation History")
                 .accessibilityLabel("Conversation History")
-                .accessibilityHint("Opens your past conversation list")
+                .accessibilityHint("Opens your past conversations")
                 .accessibilityAddTraits(.isButton)
             }
             
@@ -70,7 +70,7 @@ struct ChatView: View {
                 }
                 .help("New Chat")
                 .accessibilityLabel("New Chat")
-                .accessibilityHint("Starts a new conversation")
+                .accessibilityHint("Starts a new chat session")
                 .accessibilityAddTraits(.isButton)
             }
         }

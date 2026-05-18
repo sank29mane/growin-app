@@ -63,3 +63,7 @@
 ## 2026-04-26 - SwiftUI Dynamic Accessibility Labels for Metric Groups
 **Learning:** For SwiftUI view components that group text elements to represent a metric (like `MetricColumn` grouping title and value), VoiceOver naturally reads them as separate, disconnected elements. Adding `.accessibilityElement(children: .combine)` helps, but it still might read them in a clunky manner depending on how the views are nested.
 **Action:** When making custom composite metric views accessible, combine the children (`.accessibilityElement(children: .combine)`) and provide a single, explicitly computed `.accessibilityLabel` string that naturally reads the metric as a cohesive sentence (e.g., `\(title): \(value)`).
+
+## 2026-05-06 - ToolbarItem Icon-Only Buttons Accessibility
+**Learning:** Icon-only `Button` views placed inside `ToolbarItem` components often rely purely on standard visual icons (e.g., `Image(systemName: "plus.circle")`) and lack inherent VoiceOver interaction context beyond basic labels. Because they are often styled invisibly or globally by the toolbar, their functional role and exact purpose can be ambiguous to screen readers.
+**Action:** Systematically ensure that all icon-only buttons in toolbars (and elsewhere) not only have an `.accessibilityLabel`, but explicitly append `.accessibilityHint()` (to explain the action's consequence) and `.accessibilityAddTraits(.isButton)` to guarantee they are announced as actionable buttons rather than static images or generic elements.

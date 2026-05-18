@@ -193,7 +193,7 @@ struct ConversationListView: View {
                         Image(systemName: "xmark.circle.fill").foregroundStyle(.gray.opacity(0.8))
                     }
                     .accessibilityLabel("Close")
-                    .accessibilityHint("Dismisses the conversation list")
+                    .accessibilityHint("Closes the conversation list")
                     .accessibilityAddTraits(.isButton)
                 }
 
@@ -204,7 +204,7 @@ struct ConversationListView: View {
                         HStack {
                             Button(action: { Task { await viewModel.fetchConversations() } }) { Image(systemName: "arrow.clockwise") }
                                 .accessibilityLabel("Refresh conversations")
-                                .accessibilityHint("Refreshes your conversation list")
+                                .accessibilityHint("Fetches the latest conversations from the server")
                                 .accessibilityAddTraits(.isButton)
                             Button(action: { selectedConversationId = nil; dismiss() }) { Image(systemName: "plus") }
                                 .accessibilityLabel("New conversation")
