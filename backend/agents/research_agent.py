@@ -23,6 +23,7 @@ import asyncio
 import re
 from pydantic import BaseModel, Field
 from magentic import prompt as mag_prompt
+from utils.http_client import agent_http_client
 
 logger = logging.getLogger(__name__)
 
@@ -255,14 +256,13 @@ class ResearchAgent(BaseAgent):
             
             # 1. LSE RNS (Regulatory News Service) via NewsData.io
             if is_uk and self.newsdata_key:
-                from utils.http_client import agent_http_client
                 params = {
                     "apikey": self.newsdata_key,
                     "q": f"{ticker} RNS",
                     "country": "gb",
                     "category": "business"
                 }
-                resp = await agent_http_client.client.get("https://newsdata.io/api/1/latest", params=params)
+                resp = await agent_http_client.client.get("https://newsdata.io/api/1/latest", params=params, timeout=10.0)
                 if resp.status_code == 200:
                     data = resp.json()
                     for art in data.get('results', [])[:5]:
@@ -305,7 +305,6 @@ class ResearchAgent(BaseAgent):
     async def _fetch_newsapi(self, ticker: str, company_name: str) -> List[Dict]:
         """Fetch from NewsAPI (traditional news sources)."""
         try:
-            from utils.http_client import agent_http_client
             from datetime import datetime, timedelta
             
             from_date = (datetime.now() - timedelta(days=7)).isoformat()
@@ -318,7 +317,7 @@ class ResearchAgent(BaseAgent):
                 "apiKey": self.newsapi_key
             }
             
-            response = await agent_http_client.client.get("https://newsapi.org/v2/everything", params=params)
+            response = await agent_http_client.client.get("https://newsapi.org/v2/everything", params=params, timeout=10.0)
             response.raise_for_status()
             data = response.json()
             
@@ -369,8 +368,6 @@ class ResearchAgent(BaseAgent):
         Each credit = 10 articles
         """
         try:
-            from utils.http_client import agent_http_client
-            
             # Base params
             params = {
                 "apikey": self.newsdata_key,
@@ -411,7 +408,7 @@ class ResearchAgent(BaseAgent):
                      if "NSE" in ticker.upper():
                          params["country"] = "in"
 
-            response = await agent_http_client.client.get(url, params=params)
+            response = await agent_http_client.client.get(url, params=params, timeout=10.0)
             response.raise_for_status()
             data = response.json()
             
