@@ -19,12 +19,15 @@
 ## 2026-03-10 - SwiftUI Dynamic Accessibility Labels with `.buttonStyle(.plain)`
 **Learning:** For collapsible UI components (like `ChatReasoningTraceView`), buttons using `.buttonStyle(.plain)` require dynamic `.accessibilityLabel`s that reflect the current state (e.g., 'Expand...' vs 'Collapse...') along with `.accessibilityAddTraits(.isButton)` and `.accessibilityHint` to maintain full VoiceOver support.
 **Action:** Ensure dynamic state bindings (like `isExpanded`) are integrated into the `.accessibilityLabel` strings when the visual state changes.
+
 ## 2026-03-16 - Trade Proposal Accessibility Labels
 **Learning:** When using `.buttonStyle(.plain)` in HITL action cards, static labels like 'Approve Trade Proposal' are insufficient for VoiceOver users who need context on *what* they are approving.
 **Action:** Use dynamic accessibility labels (e.g., `Approve \(proposal.action) for \(proposal.ticker)`) and explicitly add the `.isButton` trait.
+
 ## 2025-03-19 - [Merge Conflict Resolution & Legend A11y]
 **Learning:** Resolving multiple Git merge conflicts manually across SwiftUI files is critical before making UX changes. Adding explicit `.accessibilityElement(children: .combine)` to custom composite views (like LegendItem containing shapes and text) significantly improves VoiceOver coherence.
 **Action:** Always verify for and resolve Git conflict markers before attempting to implement new accessibility features to prevent compilation errors and ensure valid syntax.
+
 ## 2025-03-19 - [FastAPI Exception Handling for Tests]
 **Learning:** Returning un-sanitized `str(e)` in FastAPI 500 exceptions breaks security sanitization checks in `test_security_error_handling.py` and causes the test suite to silently abort with `Fatal Python error: Aborted` (due to testclient constraints or security middleware handling exceptions aggressively).
 **Action:** Always replace broad exception strings with a generic `detail="Internal Server Error"` when propagating 500 errors to clients in routes.
@@ -48,6 +51,7 @@
 ## 2026-03-31 - Sovereign UI `AIChatPanelView` Button Accessibility
 **Learning:** Found multiple instances of custom styling (e.g., chat message Send button, Discover Tiles) in `AIChatPanelView` that used `.buttonStyle(.plain)` to suppress native visual button chrome. This entirely removed standard accessibility boundaries and traits, rendering them silent or functionally meaningless to VoiceOver users.
 **Action:** Consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to any `Button` configured with `.buttonStyle(.plain)`, including using dynamically injected parameters like `filter.rawValue` or `tile.title` to ensure the context of the button remains available for non-visual navigation.
+
 ## 2026-04-24 - WelcomeView, AccountPicker, and ThemeComponents Accessibility with .buttonStyle(.plain)
 **Learning:** Verified a recurring pattern across multiple disparate views (`WelcomeView`, `AccountPicker`, and generic `ThemeComponents`) where `.buttonStyle(.plain)` is used to implement a 'Liquid Glass' or flat aesthetic, consistently stripping all VoiceOver button traits and text semantics. Even interactive disclosure toggles (like 'INTELLIGENCE TRACE') were being announced as generic text.
 **Action:** When auditing custom UI elements that use `.buttonStyle(.plain)`, systematically ensure `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` are explicitly provided to restore baseline interactive context for assistive technologies.
@@ -55,11 +59,7 @@
 ## 2026-04-25 - Sovereign UI `WelcomeView` Button Accessibility
 **Learning:** The suggestion chips in `WelcomeView` used `.buttonStyle(.plain)` to suppress native visual button chrome, which entirely removed standard accessibility boundaries and traits, rendering them functionally meaningless to VoiceOver users.
 **Action:** Consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to any `Button` configured with `.buttonStyle(.plain)`. Used `item.title` to dynamically inject the context into the label and hint.
-<<<<<<< HEAD
-<<<<<<< HEAD
 
-<<<<<<< HEAD
-<<<<<<< HEAD
 ## 2025-05-18 - SwiftUI `.buttonStyle(.plain)` ToolbarItem Accessibility
 **Learning:** When applying `.buttonStyle(.plain)` to `Button` views nested within `ToolbarItem`, standard accessibility traits like `.isButton` and context hints are stripped. This causes VoiceOver to read these icon-only navigational actions as generic text elements.
 **Action:** Always append `.accessibilityHint` and `.accessibilityAddTraits(.isButton)` in addition to the `.accessibilityLabel` when using icon-only buttons in toolbars.
@@ -75,40 +75,23 @@
 ## 2026-05-06 - Data-Dense Table Accessibility Patterns
 **Learning:** VoiceOver navigation through data-dense tables (like the Master Ledger or Account Overview) can be exhausting when every cell is a separate focus stop.
 **Action:** Apply `.accessibilityElement(children: .combine)` to entire rows or logical data groups (e.g., a ticker and its current price/change). Provide a single, descriptive `.accessibilityLabel` that reads the row's data as a cohesive sentence (e.g., 'Apple, trading at 150.00, up 2 percent'). Mark decorative background elements with `.accessibilityHidden(true)`.
-=======
-## 2026-05-15 - Dashboard Toolbar Buttons Accessibility
-**Learning:** Icon-only buttons and system-styled text buttons in toolbars lack sufficient context or standard boundaries for assistive technologies, especially when nested in complex sheet views.
-**Action:** Explicitly append `.accessibilityHint` and `.accessibilityAddTraits(.isButton)` (and `.accessibilityLabel` if missing) to all toolbar buttons to ensure unambiguous VoiceOver announcements.
->>>>>>> palette-dashboard-toolbar-a11y-7982336620919235625
 
 ## 2026-05-15 - Dashboard Toolbar Buttons Accessibility
 **Learning:** Icon-only buttons and system-styled text buttons in toolbars lack sufficient context or standard boundaries for assistive technologies, especially when nested in complex sheet views.
 **Action:** Explicitly append `.accessibilityHint` and `.accessibilityAddTraits(.isButton)` (and `.accessibilityLabel` if missing) to all toolbar buttons to ensure unambiguous VoiceOver announcements.
-=======
-## 2026-05-18 - Missing Accessibility on .plain Buttons in SovereignSidebar and QuickActionButtons
-**Learning:** Found that core navigation elements like `SidebarLink` and dynamic chips like `QuickActionButtons` were using `.buttonStyle(.plain)` to match the 'Sovereign' theme aesthetic, entirely removing their semantic meaning for VoiceOver users.
-**Action:** Consistently added `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to these components, including dynamic state properties like `selection == tab ? [.isSelected, .isButton]` to restore context.
->>>>>>> palette-plain-button-a11y-1969500908564382227
 
 ## 2026-05-18 - Missing Accessibility on .plain Buttons in SovereignSidebar and QuickActionButtons
 **Learning:** Found that core navigation elements like `SidebarLink` and dynamic chips like `QuickActionButtons` were using `.buttonStyle(.plain)` to match the 'Sovereign' theme aesthetic, entirely removing their semantic meaning for VoiceOver users.
 **Action:** Consistently added `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to these components, including dynamic state properties like `selection == tab ? [.isSelected, .isButton]` to restore context.
-=======
-## 2026-05-02 - Added accessibility attributes to SovereignSidebar
-**Learning:** Found a custom UI component in SovereignSidebar that used `.buttonStyle(.plain)` to suppress native visual button styling. This entirely removed standard accessibility boundaries and traits, rendering them silent or functionally meaningless to VoiceOver users.
-**Action:** Consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to any `Button` configured with `.buttonStyle(.plain)`. Used `title` to dynamically inject the context into the label and hint, and `.isSelected` trait dynamically based on whether the current tab is active.
->>>>>>> palette-a11y-sovereign-sidebar-16621935029984361166
 
 ## 2026-05-02 - Added accessibility attributes to SovereignSidebar
 **Learning:** Found a custom UI component in SovereignSidebar that used `.buttonStyle(.plain)` to suppress native visual button styling. This entirely removed standard accessibility boundaries and traits, rendering them silent or functionally meaningless to VoiceOver users.
 **Action:** Consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to any `Button` configured with `.buttonStyle(.plain)`. Used `title` to dynamically inject the context into the label and hint, and `.isSelected` trait dynamically based on whether the current tab is active.
-=======
 
 ## 2026-04-30 - QuickActionButtons Accessibility with .buttonStyle(.plain)
 **Learning:** Found `QuickActionButtons` in `RichMessageComponents` using `.buttonStyle(.plain)` which strips accessibility traits for VoiceOver users, treating actionable buttons as plain text.
 **Action:** Appended `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` utilizing the dynamic `action.label` for improved context.
->>>>>>> palette-a11y-quick-actions-13757718762035640256
 
-## 2026-04-30 - QuickActionButtons Accessibility with .buttonStyle(.plain)
-**Learning:** Found `QuickActionButtons` in `RichMessageComponents` using `.buttonStyle(.plain)` which strips accessibility traits for VoiceOver users, treating actionable buttons as plain text.
-**Action:** Appended `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` utilizing the dynamic `action.label` for improved context.
+## 2026-04-26 - Sovereign UI `ExecutionPanelView` Button Accessibility Hints
+**Learning:** While the custom buttons in `ExecutionPanelView` correctly utilized `.accessibilityLabel` and `.accessibilityAddTraits(.isButton)` to combat the stripping effects of `.buttonStyle(.plain)`, they lacked `.accessibilityHint`. Without a hint, VoiceOver users receive the name of the button but no context on what action will occur when activated (e.g., dismissing an overlay vs. opening a new view).
+**Action:** Always append an explicit `.accessibilityHint` (e.g., "Closes the execution panel") alongside the label and traits when using `.buttonStyle(.plain)` on interactive elements to provide clear consequence context for assistive technologies.
