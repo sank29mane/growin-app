@@ -4,6 +4,7 @@ from decimal import Decimal
 from typing import Optional
 from .base_micro import BaseMicroAgent, MicroAgentResponse
 from utils.financial_math import create_decimal
+from utils.sentiment import get_sentiment_analyzer
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +32,9 @@ class TwitterMicroAgent(BaseMicroAgent):
 
         try:
             from tavily import AsyncTavilyClient
-            from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
             
             tavily = AsyncTavilyClient(api_key=self.tavily_key)
-            sentiment_analyzer = SentimentIntensityAnalyzer()
+            sentiment_analyzer = get_sentiment_analyzer()
             
             # Non-blocking thread execution
             query = f"${ticker} stock discussion twitter x.com" if ticker != "MARKET" else "retail investor sentiment twitter x.com stockmarket"
