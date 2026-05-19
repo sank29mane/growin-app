@@ -311,6 +311,7 @@ async def websocket_chart_data(websocket: WebSocket, symbol: str):
     market = detect_market(ticker)
 
     alpaca = get_alpaca_client()
+    finnhub = get_finnhub_client()
 
     try:
         # Initial full data burst (already region-locked in get_chart_data)

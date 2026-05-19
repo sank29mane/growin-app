@@ -207,6 +207,9 @@ struct DashboardView: View {
                                 Button("Close") {
                                     selectedPosition = nil
                                 }
+                                .accessibilityLabel("Close chart")
+                                .accessibilityHint("Dismisses the selected stock chart view")
+                                .accessibilityAddTraits(.isButton)
                             }
                         }
                 }
@@ -222,6 +225,8 @@ struct DashboardView: View {
                     Image(systemName: "arrow.clockwise")
                 }
                 .accessibilityLabel("Refresh Portfolio")
+                .accessibilityHint("Refreshes portfolio data from the server")
+                .accessibilityAddTraits(.isButton)
                 .disabled(viewModel.isLoading)
             }
         }

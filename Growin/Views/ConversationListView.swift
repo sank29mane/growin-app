@@ -60,15 +60,20 @@ class ConversationListViewModel {
         isLoading = true
         defer { isLoading = false }
 
-        for id in ids {
-            guard let url = URL(string: "\(config.baseURL)/conversations/\(id)") else { continue }
-            var request = URLRequest(url: url)
-            request.httpMethod = "DELETE"
+        let baseURL = config.baseURL
+        await withThrowingTaskGroup(of: Void.self) { group in
+            for id in ids {
+                group.addTask {
+                    guard let url = URL(string: "\(baseURL)/conversations/\(id)") else { return }
+                    var request = URLRequest(url: url)
+                    request.httpMethod = "DELETE"
 
-            do {
-                _ = try await URLSession.shared.data(for: request)
-            } catch {
-                print("Error deleting conversation \(id): \(error)")
+                    do {
+                        _ = try await URLSession.shared.data(for: request)
+                    } catch {
+                        print("Error deleting conversation \(id): \(error)")
+                    }
+                }
             }
         }
 
@@ -193,6 +198,8 @@ struct ConversationListView: View {
                         Image(systemName: "xmark.circle.fill").foregroundStyle(.gray.opacity(0.8))
                     }
                     .accessibilityLabel("Close")
+                    .accessibilityHint("Closes the conversation list")
+                    .accessibilityAddTraits(.isButton)
                 }
 
                 ToolbarItem {
@@ -202,8 +209,12 @@ struct ConversationListView: View {
                         HStack {
                             Button(action: { Task { await viewModel.fetchConversations() } }) { Image(systemName: "arrow.clockwise") }
                                 .accessibilityLabel("Refresh conversations")
+                                .accessibilityHint("Fetches the latest conversations from the server")
+                                .accessibilityAddTraits(.isButton)
                             Button(action: { selectedConversationId = nil; dismiss() }) { Image(systemName: "plus") }
                                 .accessibilityLabel("New conversation")
+                                .accessibilityHint("Starts a new conversation")
+                                .accessibilityAddTraits(.isButton)
                         }
                     }
                 }

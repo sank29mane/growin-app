@@ -47,6 +47,7 @@ struct ExecutionPanelView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Close Execution Panel")
+                .accessibilityHint("Closes the execution panel")
                 .accessibilityAddTraits(.isButton)
 
             }
@@ -134,6 +135,7 @@ struct ExecutionPanelView: View {
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel("Strategy Parameters Info")
+                            .accessibilityHint("Displays risk parameters and model confidence")
                             .accessibilityAddTraits(.isButton)
 
                         }
@@ -242,6 +244,7 @@ private struct StrategyOverlayView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Close Trace Info")
+                .accessibilityHint("Dismisses the strategy parameters overlay")
                 .accessibilityAddTraits(.isButton)
 
                 .font(SovereignTheme.Fonts.spaceGrotesk(size: 10, weight: .bold))

@@ -13,12 +13,12 @@ from routes.market_routes import get_portfolio_history
 @pytest.mark.asyncio
 async def test_get_portfolio_history_vectorized_dataframe():
     # Setup mock
-    with patch('backend.routes.market_routes.state') as mock_state:
+    with patch('routes.market_routes.state') as mock_state:
         mock_account_context = MagicMock()
         mock_state.account_context = mock_account_context
         mock_account_context.get_account_or_default.return_value = 'invest'
 
-        with patch('backend.routes.market_routes.get_live_portfolio') as mock_get_live:
+        with patch('routes.market_routes.get_live_portfolio') as mock_get_live:
             mock_get_live.return_value = {
                 "positions": [
                     {"ticker": "AAPL", "quantity": 10},
@@ -56,12 +56,12 @@ async def test_get_portfolio_history_vectorized_dataframe():
 @pytest.mark.asyncio
 async def test_get_portfolio_history_single_ticker_series():
     # Setup mock
-    with patch('backend.routes.market_routes.state') as mock_state:
+    with patch('routes.market_routes.state') as mock_state:
         mock_account_context = MagicMock()
         mock_state.account_context = mock_account_context
         mock_account_context.get_account_or_default.return_value = 'invest'
 
-        with patch('backend.routes.market_routes.get_live_portfolio') as mock_get_live:
+        with patch('routes.market_routes.get_live_portfolio') as mock_get_live:
             mock_get_live.return_value = {
                 "positions": [{"ticker": "AAPL", "quantity": 10}],
                 "summary": {"cash_balance": {"free": 1000.0}}

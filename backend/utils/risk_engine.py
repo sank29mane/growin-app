@@ -31,9 +31,9 @@ class RiskEngine:
             # Convert to float numpy array for efficient percentile math
             # Returns are usually small floats (e.g. 0.05 for 5%)
             if isinstance(returns[0], Decimal):
-                ret_array = np.array([float(r) for r in returns])
+                ret_array = np.array([float(r) for r in returns], dtype=np.float64)
             else:
-                ret_array = np.array(returns)
+                ret_array = np.array(returns, dtype=np.float64)
                 
             # 1. Find the 5th percentile (Value at Risk)
             var_95 = np.percentile(ret_array, 5)
@@ -62,9 +62,9 @@ class RiskEngine:
             
         try:
             if isinstance(returns[0], Decimal):
-                ret_array = np.array([float(r) for r in returns])
+                ret_array = np.array([float(r) for r in returns], dtype=np.float64)
             else:
-                ret_array = np.array(returns)
+                ret_array = np.array(returns, dtype=np.float64)
                 
             vol = np.std(ret_array)
             if annualized:
