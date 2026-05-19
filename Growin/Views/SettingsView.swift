@@ -283,6 +283,9 @@ struct HFModelHubSection: View {
                                 .background(Color.accentColor)
                                 .foregroundColor(.white)
                                 .clipShape(.rect(cornerRadius: 8))
+                                .accessibilityLabel("Deploy \(model.id)")
+                                .accessibilityHint("Selects and deploys this HuggingFace model")
+                                .accessibilityAddTraits(.isButton)
                             }
                         }
                     }
