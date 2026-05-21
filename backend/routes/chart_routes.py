@@ -385,4 +385,5 @@ async def websocket_chart_data(websocket: WebSocket, symbol: str):
         logger.error(f"WebSocket error for {symbol}: {e}")
         try:
             await websocket.send_json({"type": "error", "message": str(e)})
-        except: pass
+        except Exception:
+            pass
