@@ -127,3 +127,7 @@
 ## 2026-05-13 - QuickActionButtons Accessibility with `.buttonStyle(.plain)`
 **Learning:** Verified a recurring pattern in `QuickActionButtons` (used in chat or dynamic views) where `.buttonStyle(.plain)` suppresses native visual button styling for a custom look, which entirely removes standard accessibility boundaries and traits. This rendered dynamic quick actions functionally meaningless to VoiceOver users, treating them as un-actionable items.
 **Action:** When creating dynamic list components using `.buttonStyle(.plain)` (like `QuickActionButtons`), consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to restore VoiceOver functionality, dynamically injecting properties like `action.label` as the context.
+
+## 2026-05-18 - ChatView ToolbarItem Button Accessibility
+**Learning:** Icon-only buttons used inside `ToolbarItem` in `ChatView` had `.accessibilityLabel` but lacked `.accessibilityHint` and explicit `.accessibilityAddTraits(.isButton)`. Without the `.isButton` trait, VoiceOver may not announce them as actionable buttons, and without hints, the action's result is not explicitly described.
+**Action:** When adding accessibility support to icon-only `ToolbarItem` buttons, always ensure `.accessibilityHint` and `.accessibilityAddTraits(.isButton)` are included alongside the `.accessibilityLabel` to provide full context and correct interaction traits for screen readers.
