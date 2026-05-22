@@ -60,7 +60,6 @@
 **Learning:** The suggestion chips in `WelcomeView` used `.buttonStyle(.plain)` to suppress native visual button chrome, which entirely removed standard accessibility boundaries and traits, rendering them functionally meaningless to VoiceOver users.
 **Action:** Consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to any `Button` configured with `.buttonStyle(.plain)`. Used `item.title` to dynamically inject the context into the label and hint.
 
-<<<<<<< HEAD
 ## 2025-05-18 - SwiftUI `.buttonStyle(.plain)` ToolbarItem Accessibility
 **Learning:** When applying `.buttonStyle(.plain)` to `Button` views nested within `ToolbarItem`, standard accessibility traits like `.isButton` and context hints are stripped. This causes VoiceOver to read these icon-only navigational actions as generic text elements.
 **Action:** Always append `.accessibilityHint` and `.accessibilityAddTraits(.isButton)` in addition to the `.accessibilityLabel` when using icon-only buttons in toolbars.
@@ -104,3 +103,7 @@
 ## 2026-04-28 - Sovereign UI `QuickActionButtons` Button Accessibility
 **Learning:** Found an instance in `RichMessageComponents.swift` where quick action chips in a horizontal ScrollView used `.buttonStyle(.plain)` which stripped basic interaction context from VoiceOver users, rendering them as non-interactive text.
 **Action:** Always append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to any `Button` configured with `.buttonStyle(.plain)`. Use dynamically injected parameters (like `action.label`) to ensure full context for VoiceOver.
+
+## 2026-05-10 - QuickActionButtons Accessibility with .buttonStyle(.plain)
+**Learning:** In SwiftUI, suggestion chips or quick action buttons (like those in `QuickActionButtons` of `RichMessageComponents.swift`) that use `.buttonStyle(.plain)` have their baseline accessibility traits removed, rendering them functionally silent or misidentified as plain text by VoiceOver.
+**Action:** Consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to dynamically generated button components (like `action.label`) when using `.buttonStyle(.plain)` to ensure their context and interactivity are preserved for screen readers.
