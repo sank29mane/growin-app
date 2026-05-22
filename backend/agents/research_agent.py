@@ -255,6 +255,7 @@ class ResearchAgent(BaseAgent):
             
             # 1. LSE RNS (Regulatory News Service) via NewsData.io
             if is_uk and self.newsdata_key:
+
                 params = {
                     "apikey": self.newsdata_key,
                     "q": f"{ticker} RNS",
@@ -316,6 +317,7 @@ class ResearchAgent(BaseAgent):
                 "apiKey": self.newsapi_key
             }
             
+
             response = await agent_http_client.client.get("https://newsapi.org/v2/everything", params=params, timeout=10.0)
             response.raise_for_status()
             data = response.json()
@@ -367,6 +369,7 @@ class ResearchAgent(BaseAgent):
         Each credit = 10 articles
         """
         try:
+
             # Base params
             params = {
                 "apikey": self.newsdata_key,
@@ -406,6 +409,7 @@ class ResearchAgent(BaseAgent):
                      # Add 'in' for India support if requested, but architecture mandates US/UK partitioning
                      if "NSE" in ticker.upper():
                          params["country"] = "in"
+
 
             response = await agent_http_client.client.get(url, params=params, timeout=10.0)
             response.raise_for_status()
