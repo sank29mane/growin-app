@@ -59,6 +59,7 @@
 ## 2026-04-25 - Sovereign UI `WelcomeView` Button Accessibility
 **Learning:** The suggestion chips in `WelcomeView` used `.buttonStyle(.plain)` to suppress native visual button chrome, which entirely removed standard accessibility boundaries and traits, rendering them functionally meaningless to VoiceOver users.
 **Action:** Consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to any `Button` configured with `.buttonStyle(.plain)`. Used `item.title` to dynamically inject the context into the label and hint.
+<<<<<<< HEAD
 
 ## 2025-05-18 - SwiftUI `.buttonStyle(.plain)` ToolbarItem Accessibility
 **Learning:** When applying `.buttonStyle(.plain)` to `Button` views nested within `ToolbarItem`, standard accessibility traits like `.isButton` and context hints are stripped. This causes VoiceOver to read these icon-only navigational actions as generic text elements.
@@ -107,3 +108,7 @@
 ## 2026-05-10 - QuickActionButtons Accessibility with .buttonStyle(.plain)
 **Learning:** In SwiftUI, suggestion chips or quick action buttons (like those in `QuickActionButtons` of `RichMessageComponents.swift`) that use `.buttonStyle(.plain)` have their baseline accessibility traits removed, rendering them functionally silent or misidentified as plain text by VoiceOver.
 **Action:** Consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to dynamically generated button components (like `action.label`) when using `.buttonStyle(.plain)` to ensure their context and interactivity are preserved for screen readers.
+
+## 2026-05-10 - Sovereign UI SovereignSidebar Navigation Accessibility
+**Learning:** Found that structurally critical main navigation tabs in `SovereignSidebar` used `.buttonStyle(.plain)` to achieve a brutalist/terminal aesthetic. This entirely stripped VoiceOver context, meaning users would not know these elements were interactive tabs or whether they were currently selected.
+**Action:** When creating custom navigation components using `.buttonStyle(.plain)`, consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits` with conditional logic (e.g., `selection == tab ? [.isButton, .isSelected] : [.isButton]`) to restore native navigation semantics for screen readers.
