@@ -123,3 +123,7 @@
 ## 2026-05-19 - Added accessibility modifiers to QuickActionButtons
 **Learning:** When using `.buttonStyle(.plain)` on custom buttons (like the `QuickActionButtons` in `RichMessageComponents.swift`), VoiceOver may lose essential context, failing to announce the element as a button or dropping its label.
 **Action:** Always manually append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to buttons styled with `.plain` to ensure they remain discoverable and usable via assistive technologies.
+
+## 2026-05-13 - QuickActionButtons Accessibility with `.buttonStyle(.plain)`
+**Learning:** Verified a recurring pattern in `QuickActionButtons` (used in chat or dynamic views) where `.buttonStyle(.plain)` suppresses native visual button styling for a custom look, which entirely removes standard accessibility boundaries and traits. This rendered dynamic quick actions functionally meaningless to VoiceOver users, treating them as un-actionable items.
+**Action:** When creating dynamic list components using `.buttonStyle(.plain)` (like `QuickActionButtons`), consistently append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to restore VoiceOver functionality, dynamically injecting properties like `action.label` as the context.
