@@ -328,9 +328,9 @@ class AnalyticsDB:
 
             # 2. Ensure all required columns exist and fill defaults
             required_cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
-            for col in required_cols:
-                if col not in df.columns:
-                    df[col] = 0.0 if col != 'timestamp' else None
+            missing_cols = {col: (0.0 if col != 'timestamp' else None) for col in required_cols if col not in df.columns}
+            if missing_cols:
+                df = df.assign(**missing_cols)
 
             # 3. Vectorized timestamp conversion
             if pd.api.types.is_numeric_dtype(df['timestamp']):
