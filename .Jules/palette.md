@@ -115,3 +115,11 @@
 ## 2026-05-18 - Toolbar Navigation Buttons with Icon-Only .buttonStyle(.plain)
 **Learning:** Found multiple instances of navigation and action toolbar items (e.g., in `ChatView`, `DashboardView`, and `ConversationListView`) that use `Image(systemName: ...)` as their label and strip visual chrome (either via default toolbar behaviors or explicit `.buttonStyle(.plain)`). This removes critical context, leaving VoiceOver to attempt reading the system image name or ignoring the button intent entirely.
 **Action:** Always append `.accessibilityLabel` (to name the icon), `.accessibilityHint` (to describe the action), and explicitly apply `.accessibilityAddTraits(.isButton)` to icon-only toolbar buttons to ensure unambiguous, safe navigation for assistive technologies.
+
+## 2026-05-12 - Added accessibility modifiers to QuickActionButtons
+**Learning:** When using `.buttonStyle(.plain)` on custom buttons (like the  in `RichMessageComponents.swift`), VoiceOver may lose essential context, failing to announce the element as a button or dropping its label.
+**Action:** Always manually append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to buttons styled with `.plain` to ensure they remain discoverable and usable via assistive technologies.
+
+## 2026-05-19 - Added accessibility modifiers to QuickActionButtons
+**Learning:** When using `.buttonStyle(.plain)` on custom buttons (like the `QuickActionButtons` in `RichMessageComponents.swift`), VoiceOver may lose essential context, failing to announce the element as a button or dropping its label.
+**Action:** Always manually append `.accessibilityLabel`, `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to buttons styled with `.plain` to ensure they remain discoverable and usable via assistive technologies.
