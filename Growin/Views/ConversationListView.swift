@@ -198,7 +198,7 @@ struct ConversationListView: View {
                         Image(systemName: "xmark.circle.fill").foregroundStyle(.gray.opacity(0.8))
                     }
                     .accessibilityLabel("Close")
-                    .accessibilityHint("Closes the conversation list")
+                    .accessibilityHint("Dismisses the conversation list")
                     .accessibilityAddTraits(.isButton)
                 }
 

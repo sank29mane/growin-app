@@ -70,7 +70,7 @@ struct ChatView: View {
                 }
                 .help("New Chat")
                 .accessibilityLabel("New Chat")
-                .accessibilityHint("Starts a new chat session")
+                .accessibilityHint("Starts a new conversation with the AI assistant")
                 .accessibilityAddTraits(.isButton)
             }
         }
