@@ -131,3 +131,7 @@
 ## 2026-05-18 - ChatView ToolbarItem Button Accessibility
 **Learning:** Icon-only buttons used inside `ToolbarItem` in `ChatView` had `.accessibilityLabel` but lacked `.accessibilityHint` and explicit `.accessibilityAddTraits(.isButton)`. Without the `.isButton` trait, VoiceOver may not announce them as actionable buttons, and without hints, the action's result is not explicitly described.
 **Action:** When adding accessibility support to icon-only `ToolbarItem` buttons, always ensure `.accessibilityHint` and `.accessibilityAddTraits(.isButton)` are included alongside the `.accessibilityLabel` to provide full context and correct interaction traits for screen readers.
+
+## 2026-05-18 - SwiftUI Toolbar Button Accessibility
+**Learning:** Icon-only buttons used within SwiftUI toolbars (like `chatToggleButton` in `ContentView.swift`) lack clear context for VoiceOver users, even if they have a `.help()` modifier. When toggling states, it's particularly ambiguous.
+**Action:** Always provide explicit, dynamic `.accessibilityLabel` (e.g., "Show/Hide..."), `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to icon-only toggle buttons in toolbars to ensure assistive technologies can correctly announce their current state and function.
