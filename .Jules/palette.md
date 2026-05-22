@@ -95,3 +95,7 @@
 ## 2026-04-26 - Sovereign UI `ExecutionPanelView` Button Accessibility Hints
 **Learning:** While the custom buttons in `ExecutionPanelView` correctly utilized `.accessibilityLabel` and `.accessibilityAddTraits(.isButton)` to combat the stripping effects of `.buttonStyle(.plain)`, they lacked `.accessibilityHint`. Without a hint, VoiceOver users receive the name of the button but no context on what action will occur when activated (e.g., dismissing an overlay vs. opening a new view).
 **Action:** Always append an explicit `.accessibilityHint` (e.g., "Closes the execution panel") alongside the label and traits when using `.buttonStyle(.plain)` on interactive elements to provide clear consequence context for assistive technologies.
+
+## 2024-11-20 - Dynamic Accessibility Context in Toolbar Buttons
+**Learning:** When adding accessibility labels to SwiftUI buttons that contain dynamic text elements (such as `Text("Delete All (\(selectedIds.count))")`), applying a static `.accessibilityLabel("Delete selected conversations")` causes VoiceOver to lose the critical dynamic context (the count of selected items).
+**Action:** Always interpolate dynamic state variables into the `.accessibilityLabel` (e.g., `.accessibilityLabel("Delete \(selectedIds.count) selected conversations")`) to ensure screen reader users receive the same level of informational detail as visual users.

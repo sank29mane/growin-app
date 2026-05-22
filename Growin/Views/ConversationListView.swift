@@ -204,7 +204,11 @@ struct ConversationListView: View {
 
                 ToolbarItem {
                     if isEditing {
-                        Button("Cancel") { isEditing = false; selectedIds.removeAll() }.foregroundStyle(.white)
+                        Button("Cancel") { isEditing = false; selectedIds.removeAll() }
+                            .foregroundStyle(.white)
+                            .accessibilityLabel("Cancel editing")
+                            .accessibilityHint("Exits edit mode and clears selection")
+                            .accessibilityAddTraits(.isButton)
                     } else {
                         HStack {
                             Button(action: { Task { await viewModel.fetchConversations() } }) { Image(systemName: "arrow.clockwise") }
@@ -222,17 +226,28 @@ struct ConversationListView: View {
                 ToolbarItem {
                     HStack {
                         if isEditing {
-                            Button(selectAllButtonTitle) { toggleSelectAll() }.foregroundStyle(.white)
+                            Button(selectAllButtonTitle) { toggleSelectAll() }
+                                .foregroundStyle(.white)
+                                .accessibilityLabel(selectAllButtonTitle)
+                                .accessibilityHint("Toggles selection of all conversations")
+                                .accessibilityAddTraits(.isButton)
                             if !selectedIds.isEmpty {
                                 Button(role: .destructive) { showDeleteConfirmation = true } label: {
                                     HStack { Image(systemName: "trash"); Text("Delete All (\(selectedIds.count))") }.foregroundStyle(.red)
                                 }
+                                .accessibilityLabel("Delete \(selectedIds.count) selected conversations")
+                                .accessibilityHint("Permanently deletes the selected conversations")
+                                .accessibilityAddTraits(.isButton)
                             }
                         }
                         Button(isEditing ? "Done" : "Edit") {
                             isEditing.toggle()
                             if !isEditing { selectedIds.removeAll() }
-                        }.foregroundStyle(.white)
+                        }
+                        .foregroundStyle(.white)
+                        .accessibilityLabel(isEditing ? "Finish editing" : "Edit conversations")
+                        .accessibilityHint(isEditing ? "Exits edit mode" : "Enters edit mode to select conversations")
+                        .accessibilityAddTraits(.isButton)
                     }
                 }
             }
