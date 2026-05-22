@@ -77,6 +77,33 @@ class PortfolioData(BaseModel):
             return Decimal('0.0')
         return Decimal(str(v))
 
+class T212AccountInfo(BaseModel):
+    """
+    Trading 212 account summary — matches broker API response shape.
+    Fields are optional to tolerate partial responses from mock/demo endpoints.
+    """
+    currencyCode: Optional[str] = None
+    id: Optional[str] = None
+    type: Optional[str] = None
+    # Cash fields from the /equity/account/cash endpoint
+    free: Optional[Decimal] = None
+    total: Optional[Decimal] = None
+    ppl: Optional[Decimal] = None
+    result: Optional[Decimal] = None
+    invested: Optional[Decimal] = None
+    pieCash: Optional[Decimal] = None
+    blocked: Optional[Decimal] = None
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    @field_validator("free", "total", "ppl", "result", "invested", "pieCash", "blocked", mode="before")
+    @classmethod
+    def to_decimal(cls, v):
+        if v is None:
+            return None
+        return Decimal(str(v))
+
+
 class DividendData(BaseModel):
     """
     Unified dividend record supporting Trading 212 and Alpaca formats.
