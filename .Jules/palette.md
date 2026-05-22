@@ -139,3 +139,7 @@
 ## 2026-05-19 - SwiftUI SidebarButton Accessibility with .buttonStyle(.plain)
 **Learning:** In high-density macOS interfaces like `MainTabView`, navigation elements such as `SidebarButton` often use `.buttonStyle(.plain)` to suppress native button chrome. While earlier implementations restored the basic label and button traits, they omitted an `.accessibilityHint`. Without a hint, VoiceOver announces the tab name but does not inform the user what action will occur when they activate it, which is especially important for tabs where activation completely changes the main view context.
 **Action:** Always append explicit `.accessibilityHint` (e.g., "Navigates to the \(label) view") alongside `.accessibilityLabel` and `.accessibilityAddTraits(.isButton)` when applying `.buttonStyle(.plain)` to tab or sidebar navigation elements, providing clear consequence context for assistive technologies.
+
+## 2024-11-20 - Dynamic Accessibility Context in Toolbar Buttons
+**Learning:** When adding accessibility labels to SwiftUI buttons that contain dynamic text elements (such as `Text("Delete All (\(selectedIds.count))")`), applying a static `.accessibilityLabel("Delete selected conversations")` causes VoiceOver to lose the critical dynamic context (the count of selected items).
+**Action:** Always interpolate dynamic state variables into the `.accessibilityLabel` (e.g., `.accessibilityLabel("Delete \(selectedIds.count) selected conversations")`) to ensure screen reader users receive the same level of informational detail as visual users.
