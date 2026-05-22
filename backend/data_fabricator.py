@@ -13,6 +13,7 @@ from decimal import Decimal
 from market_context import MarketContext, PriceData, TimeSeriesItem, ResearchData, NewsArticle, SocialData, WhaleData, GeopoliticalData
 from data_engine import get_alpaca_client, get_finnhub_client
 from utils.news_client import NewsDataIOClient
+from utils.sentiment import get_sentiment_analyzer
 
 logger = logging.getLogger(__name__)
 
@@ -317,8 +318,7 @@ class DataFabricator:
             if not articles:
                 return ResearchData(ticker=ticker, sentiment_score=0.0, sentiment_label="NEUTRAL", articles=[])
 
-            from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-            analyzer = SentimentIntensityAnalyzer()
+            analyzer = get_sentiment_analyzer()
             
             sentiments = []
             rich_articles = []

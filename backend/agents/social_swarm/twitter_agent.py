@@ -4,6 +4,7 @@ from decimal import Decimal
 from typing import Optional
 from .base_micro import BaseMicroAgent, MicroAgentResponse
 from utils.financial_math import create_decimal
+from utils.sentiment import get_sentiment_analyzer
 
 logger = logging.getLogger(__name__)
 
@@ -34,12 +35,8 @@ class TwitterMicroAgent(BaseMicroAgent):
 
         try:
             from tavily import AsyncTavilyClient
-            global _sentiment_analyzer
-            if _sentiment_analyzer is None:
-                from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-                _sentiment_analyzer = SentimentIntensityAnalyzer()
-            
             tavily = AsyncTavilyClient(api_key=self.tavily_key)
+            sentiment_analyzer = get_sentiment_analyzer()
             
             # Non-blocking thread execution
             query = f"${ticker} stock discussion twitter x.com" if ticker != "MARKET" else "retail investor sentiment twitter x.com stockmarket"
@@ -62,7 +59,7 @@ class TwitterMicroAgent(BaseMicroAgent):
                     max_results=5
                 )
                 results = response.get('results', [])
-
+ 
             if not results:
                 return MicroAgentResponse(
                     source="Twitter/X",
@@ -71,7 +68,7 @@ class TwitterMicroAgent(BaseMicroAgent):
                     top_discussions=["No recent Twitter discussions found."],
                     success=True
                 )
-
+ 
             sentiments = []
             discussions = []
             
@@ -83,7 +80,7 @@ class TwitterMicroAgent(BaseMicroAgent):
                     title = res.get('title', '')
                     content = res.get('content', '')
                     text = f"{title}. {content}"
-                    scores = _sentiment_analyzer.polarity_scores(text)
+                    scores = sentiment_analyzer.polarity_scores(text)
                     sents.append(create_decimal(str(scores['compound'])))
                     discs.append(title)
                 return sents, discs
