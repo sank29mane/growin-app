@@ -56,13 +56,10 @@ class ChatMLX(BaseChatModel):
             AIMessage: "assistant",
         }
         
-        prompt_parts = []
-        for msg in messages:
-            role = role_map.get(type(msg), "user")
-            prompt_parts.append(f"<|im_start|>{role}\n{msg.content}<|im_end|>\n")
-        
-        prompt_parts.append("<|im_start|>assistant\n")
-        return "".join(prompt_parts)
+        return "".join(
+            f"<|im_start|>{role_map.get(type(msg), 'user')}\n{msg.content}<|im_end|>\n"
+            for msg in messages
+        ) + "<|im_start|>assistant\n"
 
     def _ensure_model(self, engine: Any) -> Optional[str]:
         """
