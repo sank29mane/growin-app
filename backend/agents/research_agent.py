@@ -24,6 +24,7 @@ import re
 from pydantic import BaseModel, Field
 from magentic import prompt as mag_prompt
 from utils.http_client import agent_http_client
+from utils.sentiment import get_sentiment_analyzer
 
 logger = logging.getLogger(__name__)
 
@@ -119,9 +120,7 @@ class ResearchAgent(BaseAgent):
             return self._neutral_response(ticker, error="No news API keys configured")
         
         try:
-            from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-            
-            sentiment_analyzer = SentimentIntensityAnalyzer()
+            sentiment_analyzer = get_sentiment_analyzer()
             articles = []
             
             # --- Smart Query Expansion Strategy ---
