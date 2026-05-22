@@ -142,6 +142,7 @@ struct ConversationListView: View {
                                 .background(Color.white.opacity(0.1))
                                 .clipShape(Capsule())
                                 .accessibilityLabel("Retry Connection")
+                                .accessibilityHint("Attempts to reload your conversation history")
                                 .accessibilityAddTraits(.isButton)
                         }
                         .frame(maxHeight: .infinity)
