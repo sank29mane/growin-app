@@ -152,6 +152,7 @@ private struct SidebarButton: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(label)
+        .accessibilityHint("Navigates to the \(label) view")
         .accessibilityAddTraits(isActive ? [.isSelected, .isButton] : [.isButton])
     }
 }

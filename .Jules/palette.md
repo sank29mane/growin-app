@@ -135,3 +135,7 @@
 ## 2026-05-18 - SwiftUI Toolbar Button Accessibility
 **Learning:** Icon-only buttons used within SwiftUI toolbars (like `chatToggleButton` in `ContentView.swift`) lack clear context for VoiceOver users, even if they have a `.help()` modifier. When toggling states, it's particularly ambiguous.
 **Action:** Always provide explicit, dynamic `.accessibilityLabel` (e.g., "Show/Hide..."), `.accessibilityHint`, and `.accessibilityAddTraits(.isButton)` to icon-only toggle buttons in toolbars to ensure assistive technologies can correctly announce their current state and function.
+
+## 2026-05-19 - SwiftUI SidebarButton Accessibility with .buttonStyle(.plain)
+**Learning:** In high-density macOS interfaces like `MainTabView`, navigation elements such as `SidebarButton` often use `.buttonStyle(.plain)` to suppress native button chrome. While earlier implementations restored the basic label and button traits, they omitted an `.accessibilityHint`. Without a hint, VoiceOver announces the tab name but does not inform the user what action will occur when they activate it, which is especially important for tabs where activation completely changes the main view context.
+**Action:** Always append explicit `.accessibilityHint` (e.g., "Navigates to the \(label) view") alongside `.accessibilityLabel` and `.accessibilityAddTraits(.isButton)` when applying `.buttonStyle(.plain)` to tab or sidebar navigation elements, providing clear consequence context for assistive technologies.
