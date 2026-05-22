@@ -80,6 +80,8 @@ class CoordinatorAgent(BaseAgent):
             return AgentResponse(
                 agent_name=self.config.name,
                 success=False,
+                data={},
+                latency_ms=0.0,
                 error="No query provided in context"
             )
 
@@ -164,14 +166,17 @@ class CoordinatorAgent(BaseAgent):
         if market_context.portfolio:
             self._generate_strategic_suggestions(market_context)
 
+        # Incorporate metadata into data since AgentResponse does not have a metadata field
+        response_data = market_context.model_dump()
+        response_data["metadata"] = {
+            "routing": routing_decision,
+            "correlation_id": c_id
+        }
+
         return AgentResponse(
             agent_name=self.config.name,
             success=market_context.is_complete(),
-            data=market_context.model_dump(),
-            metadata={
-                "routing": routing_decision,
-                "correlation_id": c_id
-            },
+            data=response_data,
             latency_ms=0.0
         )
 
@@ -284,6 +289,8 @@ class CoordinatorAgent(BaseAgent):
             return AgentResponse(
                 agent_name=agent.config.name,
                 success=False,
+                data={},
+                latency_ms=0.0,
                 error=error_msg
             )
         except Exception as e:
@@ -292,6 +299,8 @@ class CoordinatorAgent(BaseAgent):
             return AgentResponse(
                 agent_name=agent.config.name,
                 success=False,
+                data={},
+                latency_ms=0.0,
                 error=str(e)
             )
 
