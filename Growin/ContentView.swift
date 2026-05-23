@@ -163,6 +163,9 @@ struct ContentView: View {
             Image(systemName: "sidebar.right")
                 .foregroundStyle(showChat ? Color.brutalChartreuse : Color.brutalOffWhite)
         }
+        .accessibilityLabel(showChat ? "Hide AI Assistant" : "Show AI Assistant")
+        .accessibilityHint("Toggles the visibility of the AI Assistant sidebar")
+        .accessibilityAddTraits(.isButton)
         .help("Toggle AI Assistant")
     }
     
