@@ -103,3 +103,7 @@
 ## 2026-05-18 - ConversationListView Toolbar Text Buttons Accessibility
 **Learning:** Text-based buttons within SwiftUI `ToolbarItem`s (like "Cancel", "Edit", and "Done") lack sufficient explicit context or standard action boundaries for VoiceOver, even when not explicitly using `.buttonStyle(.plain)`. Their functional role and dynamic states are better served with explicit labels and hints.
 **Action:** Systematically ensure that text-based interactive elements in toolbars have explicit `.accessibilityLabel` (especially dynamically calculated ones like `isEditing ? "Done editing" : "Edit conversations"`), `.accessibilityHint` (to explain consequences), and `.accessibilityAddTraits(.isButton)` appended to guarantee unambiguous context for assistive technologies.
+
+## 2026-05-24 - AccessibilityHint Missing on Retry Button
+**Learning:** Found an existing custom SwiftUI component ("Retry" button for failed messages in `ChatView.swift`) that correctly applied `.accessibilityLabel` and `.accessibilityAddTraits(.isButton)` to combat the stripping effects of `.buttonStyle(.plain)`, but lacked `.accessibilityHint`. Without a hint, VoiceOver users receive the name of the button but no context on what action will occur when activated, which is crucial for handling error states.
+**Action:** Always append an explicit `.accessibilityHint` (e.g., "Attempts to send the failed message again") alongside the label and traits when using `.buttonStyle(.plain)` on interactive elements to provide clear consequence context for assistive technologies.
