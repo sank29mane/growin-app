@@ -10,8 +10,8 @@ class PortfolioAnalyzerAdditions:
     @staticmethod
     def calculate_daily_returns(price_history: List[float], method: str = 'simple') -> np.ndarray:
         if not price_history or len(price_history) < 2:
-            return np.array([])
-        prices = np.array(price_history)
+            return np.array([], dtype=np.float64)
+        prices = np.array(price_history, dtype=np.float64)
         if method == 'log':
             return np.diff(np.log(prices))
         return np.diff(prices) / prices[:-1]
