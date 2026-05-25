@@ -6,6 +6,7 @@ Ultra-fast algorithmic technical indicator calculations.
 from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from typing import Dict, Any
 import logging
+import numpy as np
 from utils.financial_math import create_decimal
 import numpy as np
 
@@ -102,7 +103,7 @@ class QuantAgent(BaseAgent):
                              if cov_velocity:
                                  logger.info(f"QuantAgent: NPU Covariance Velocity extracted: {cov_velocity:.4f}")
                          except Exception as jmce_e:
-                             logger.warning(f"QuantAgent: JMCE Velocity extraction failed: {jmce_e}")
+                             logger.warning(f"QuantAgent: JMCE Velocity extraction failed: {jmce_e}", exc_info=True)
                     
                     orb_signal = detector.detect_breakout(ohlcv_data, covariance_velocity=cov_velocity)
                     logger.info(f"QuantAgent: ORB detection complete for {ticker}: {orb_signal['signal']}")
