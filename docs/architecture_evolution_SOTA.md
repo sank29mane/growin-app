@@ -1,46 +1,55 @@
-# Growin App Multi-Agent System: Architecture Evolution (SOTA 2026)
+# Growin App Multi-Agent System: Architecture Evolution
 
 ## 1. Executive Summary
-As of Phase 31, the Growin App has transitioned from a purely assistive "Copilot" model to a high-conviction **Autonomous "Autopilot"** system. This evolution leverages the massive parallel processing power of the M4 generation Apple Silicon, implementing **Hardware-Aware Partitioning**, **Neural JMCE Regime Detection**, and **Autonomous Execution Bypasses**.
 
-## 2. Evolution: From Assistive to Autonomous
-
-### Previous Architecture (Phases 16-20)
-- **User** -> **Orchestrator Agent**: Unified entry point for intent classification.
-- **Orchestrator** -> **Specialist Swarm**: Parallel execution of Quant, Research, Portfolio.
-- **Status**: Assisted decision-making with mandatory UI trade approval.
-*Latency: Optimized (<500ms routing overhead)*
-
-### Current SOTA 2026 Architecture (Phases 31-32)
-1. **User** -> **Coordinator Agent**: Sub-100ms routing and classification pinned to ANE.
-2. **Coordinator** -> **Parallel Swarm + MathGenerator**: Specialists perform analysis while MathGenerator creates optimized MLX scripts for the M4 GPU.
-3. **Decision Agent (The Synthesis Brain)**:
-    - Integrates specialist data with **Neural JMCE** covariance velocity.
-    - **High Conviction Bypass**: If conviction is absolute (`LEVEL: 10`), it bypasses the HITL (Human-in-the-Loop) gate.
-4. **Autonomous Execution**: Direct trade placement on Trading 212 with full audit logging.
-*Autonomy: Level 4 (High Conviction Self-Execution)*
-
-## 3. Core SOTA Components (Phases 31+)
-
-### A. Neural JMCE (Joint Mean-Covariance Estimator)
-A sophisticated mathematical engine that runs on the **Apple Neural Engine (ANE)**.
-- **Regime Shift Detection**: Detects volatility spikes and correlation breakdowns in <5ms.
-- **Shift Metric**: A real-time "Velocity" indicator that boosts confidence in intraday breakouts.
-
-### B. M4 Hardware-Aware Partitioning
-Growin intelligently splits its brain across the M4 SoC:
-- **CPU (AMX)**: Handles the high-frequency Python/REST orchestration and T212 API communication.
-- **GPU (MLX/Metal)**: Executes large-model reasoning and performs **Daily Calibration (Weight Adapters)** to tune models to current market regimes.
-- **NPU (ANE)**: Dedicated to Neural JMCE inference and real-time technical indicators.
-
-### C. Autonomous Decision Loop & Audit
-- **Conviction Logic**: Uses `DecisionAgent` to evaluate the alignment of Quant, Forecast, and Risk signals.
-- **Security Sandbox**: Model-generated code is executed in a secure local sandbox using `safe_python.py`.
-- **Audit Logging**: Every autonomous action is recorded in a tamper-proof local log with the full reasoning trace preserved.
-
-### D. Ticker & Currency Normalization Engine
-- **Unified Resolver**: Consolidates 12+ conflicting ticker formats into a single market standard.
-- **Fidelity Guarantee**: Ensures 100% data parity between the app and the broker (Trading 212), including automated GBX to GBP conversion.
+The Growin App architecture has evolved from a simple interactive advisor into a state-of-the-art, high-conviction **Autonomous "Autopilot"** portfolio platform. This evolution leverages the massive parallel processing capabilities of Apple Silicon (M4 generation), implementing **Hardware-Aware Partitioning**, **Local dual-model inference serving (vMLX)**, **Systematic Governance**, and **Robust Connection Pooling**.
 
 ---
-*Status: IMPLEMENTED & VERIFIED (March 2026)*
+
+## 2. Chronological Architecture Evolution
+
+### First-Generation Foundation
+- **Design Intent**: Assistive Copilot for portfolio monitoring.
+- **Workflow**: Simple user interaction triggering a linear chain of agent checks (Coordinator → Specialists).
+- **Execution Model**: All final transaction ideas presented to the user as simple suggestions; execution required manual browser or UI interactions.
+- **Latency**: Variable, bound by per-agent setup and sequential API queries.
+
+### Second-Generation Autonomy
+- **Design Intent**: High-conviction autonomous execution and hardware partitioning.
+- **Workflow**: Transitioned to parallel specialist evaluation (Quant, Forecast, Research, Risk) feeding a centralized synthesis agent.
+- **Execution Model**: **High Conviction Bypass** introduced. If the synthesis agent computes a conviction level of `10/10`, the platform autonomously routes transactions directly to Trading 212 via sandbox APIs, keeping a local tamper-proof audit log.
+- **Hardware Integration**: First mapping of tasks across Apple Silicon: CPU (orchestration), GPU (local model weight adapters), and NPU/ANE (Neural JMCE regime detection).
+- **Data Parity**: Implemented a comprehensive `TickerResolver` mapping brokerage formats to global market standards, alongside automatic GBX-to-GBP normalization.
+
+### Modern State-of-the-Art Architecture (v5.0 — May 2026)
+- **Design Intent**: Multi-agent concurrent scaling, high-throughput local serving, and unified system reliability.
+- **Dual-Model Reasoning**: Transitioned from a single model footprint to a dedicated **dual-model architecture** pairing **Gemma 4 26B A4B MoE** (primary reasoning hub) with **Nemotron-Cascade-2 30B** (executive synthesis and code generation) for deep financial tasks.
+- **vMLX Serving Layer**: Introduced `vmlx_manager.py` — a dedicated local PagedAttention server. Replaces direct unmanaged MLX model instances with a managed, concurrent service allowing multi-agent parallel serving without memory fragmentation or thrashing on M4 Pro/Max GPUs.
+- **SwarmOrchestrator & Strategy Engine**: Upgraded agent coordination to a 2-stage streaming pipeline. The Coordinator now embeds a proactive **Strategy Suggestion Engine** that streams high-conviction trade and alpha recommendations directly into the system ledger.
+- **Centralized Connection Pooling**: Replaced individual per-agent client instances with the global `AgentHttpClient`. This pool maintains a persistent `httpx.AsyncClient` state, enforces endpoint circuit breakers, and applies token-bucket rate limits, eliminating TCP socket exhaustion under heavy swarm loads.
+- **Performance Optimizations**: 
+  - **Async Pipelines**: Fully non-blocking vision tasks utilizing `prepare_vlm_image_async()`.
+  - **Vectorized Math**: Optimization of portfolio processing by avoiding slow iterative pandas `assign` calls and using batch OHLCV retrievals (`get_recent_ohlcv`) to avoid database N+1 loops.
+  - **DuckDB Compatibility**: Rewrote all temporal query functions to use native Python `datetime` arithmetic, replacing fragile database `INTERVAL` syntax.
+
+---
+
+## 3. Core SOTA Architecture Components
+
+### A. Neural JMCE (Joint Mean-Covariance Estimator)
+- **Mathematical Integrity**: Predicts expected asset returns and covariance shifts concurrently.
+- **Apple Neural Engine (ANE)**: CoreML implementation executing volatility regime detection in under 10ms.
+- **Vol-Regime Signal**: Feeds the RiskAgent real-time volatility velocity scores to scale down active positions ahead of market correction events.
+
+### B. vMLX Serving & Memory Partitions
+- **Memory Rule**: Strict resource allocation allocating 60% of M4 unified memory for weights and KV caches (≤ 28GB on 48GB M4 Pro configurations).
+- **ResourceGuard**: Tracks active memory usage, suspending lower-priority background tasks if system resource pressure exceeds 85% capacity.
+
+### C. Governance & Authorization Service
+- **Access Control**: Prohibits agents from executing tasks outside their strict security scope.
+- **Input Sanitization**: Automatically scrubs user input and third-party API payloads before parsing them to local agent prompt runtimes.
+- **Secure Sandboxing**: Any code generated by synthesis engines executes in secure, containerized Docker sandboxes.
+
+---
+
+*Status: IMPLEMENTED, PROFILE VERIFIED & AUDITED (May 2026)*

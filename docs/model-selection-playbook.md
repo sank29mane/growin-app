@@ -1,128 +1,64 @@
-# Model Selection Playbook
+# Model Selection & Routing Playbook
 
-> Guidance for choosing models by phase and task type.
-> 
-> **No model is required.** These are recommendations, not requirements.
+This playbook provides guidance for routing tasks across Growin's local and remote models. It details our dual-model local execution strategy, memory budgets, and task-specific model routing.
 
 ---
 
-## Selection by Phase
+## 🧠 Local Dual-Model Architecture
 
-### Planning & Architecture
+Growin employs a dedicated **dual-model architecture** served locally on Apple Silicon GPUs using the **vMLX Serving Layer** (via PagedAttention and continuous batching). This dual-model approach balances extreme cognitive reasoning with fast execution.
 
-**Recommended capabilities:**
-- Extended reasoning / thinking mode
-- Large context window (analyze multiple files)
-- Strong at structured output (specs, plans)
+### 1. Primary Reasoning Model: **Gemma 4 26B A4B MoE**
+- **Role**: Primary reasoning, deep financial query processing, indicator analysis, and multi-agent debate coordination.
+- **Why**: Extreme logical reasoning capabilities in a highly-optimized Mixture-of-Experts (MoE) footprint, ensuring high reasoning density.
 
-**Why:** Planning requires understanding full system context and making architectural decisions.
-
-**Examples:** Models with "thinking" or "reasoning" modes, larger context variants.
-
----
-
-### Code Implementation
-
-**Recommended capabilities:**
-- Fast iteration speed
-- Good at code completion
-- Tool/function calling (for verification commands)
-
-**Why:** Implementation involves many small changes with frequent verification cycles.
-
-**Examples:** Speed-tier models, code-specialized variants.
+### 2. Executive Synthesis Model: **Nemotron-Cascade-2 30B**
+- **Role**: Code generation (for math sandboxes), executive summarization, structured output formulation, and final user advisory synthesis.
+- **Why**: Superior code writing capabilities and structured JSON/spec generation.
 
 ---
 
-### Refactoring
+## ⚡ vMLX Serving & Memory Budgets (M4 Pro 48GB)
 
-**Recommended capabilities:**
-- Large context window (see before/after)
-- Pattern recognition
-- Consistent style application
+To run dual-model inference locally without SSD swap latency, Growin enforces the **60% Memory Budget Rule** for Apple Silicon unified memory.
 
-**Why:** Refactoring requires maintaining consistency across large code changes.
+```
+Total Physical RAM: 48GB (M4 Pro)
+   ├── OS & SwiftUI Frontend: ~8GB
+   ├── Backend Server & Redis: ~2GB
+   └── vMLX Serving Budget (Max 60%): 28GB  <-- HARD CAP
+          ├── Gemma 4 26B MoE weights + KV cache: ~12GB (4-bit quantized)
+          └── Nemotron-Cascade-2 weights + KV cache: ~14GB (4-bit quantized)
+```
 
-**Examples:** Standard or long-context variants.
-
----
-
-### Debugging
-
-**Recommended capabilities:**
-- Extended reasoning (hypothesis generation)
-- Good at reading stack traces
-- Context for error patterns
-
-**Why:** Debugging requires hypothesis testing and pattern matching.
-
-**Examples:** Reasoning-focused models.
+### vMLX Memory Optimization Policies
+- **PagedAttention**: Dynamically allocates KV cache in small pages, eliminating memory fragmentation and reducing the KV cache footprint by up to 40%.
+- **ResourceGuard Concurrency Limiter**: Monitors system memory pressure. If unified memory usage exceeds 85%, lower-priority tasks (e.g. background news sentiment indexing) are paused to prioritize real-time user-facing SSE chat streams.
+- **Continuous Batching**: Groups parallel agent inference calls into single GPU operations, maintaining throughput under swarm load.
 
 ---
 
-### Code Review
+## 🎯 Task-Specific Routing Matrix
 
-**Recommended capabilities:**
-- Large context (review full PR diff)
-- Security pattern knowledge
-- Style consistency checking
+Growin's `SwarmOrchestrator` routes incoming user intent dynamically to the optimal model configuration:
 
-**Why:** Review requires seeing both code and context together.
-
-**Examples:** Long-context variants.
-
----
-
-## Capability Tiers
-
-| Tier | Characteristics | Best For |
-|------|-----------------|----------|
-| **Fast** | Quick responses, lower cost | Implementation, iteration |
-| **Standard** | Balanced speed/quality | Most tasks |
-| **Reasoning** | Extended thinking, slower | Planning, debugging, architecture |
-| **Long-context** | >100k tokens | Review, refactoring |
+| Task Type | Core Model | Routing Logic |
+|-----------|------------|---------------|
+| **Intent Classification** | Optimized Small Language Model (SLM) | sub-50ms token routing pinned to Apple Neural Engine (ANE) |
+| **Portfolio & Quant Analysis** | Gemma 4 26B A4B MoE | Complex multi-agent debate, risk estimation, and mathematical logic |
+| **Monte Carlo / Math Script Generation** | Nemotron-Cascade-2 30B | Generates code executed inside the containerized Docker sandbox |
+| **RAG & News Synthesis** | Gemma 4 26B A4B MoE | Large context processing and news sentiment extraction |
+| **Final Advisory Summarization** | Nemotron-Cascade-2 30B | Compiles specialist traces into highly-polished customer-facing advisory text |
 
 ---
 
-## Anti-Patterns
+## ❌ Anti-Patterns to Avoid
 
-❌ **Using reasoning models for simple edits** — Overkill, slow, expensive
-
-❌ **Using fast models for architecture** — Insufficient depth for complex decisions
-
-❌ **Ignoring context limits** — Leads to quality degradation
-
-❌ **Forcing a specific model** — Breaks model-agnosticism
+*   ❌ **Direct Unmanaged MLX Calls**: Bypassing the vMLX server causes memory leaks, context thrashing, and GPU starvation. Always interface via the `vmlx_manager` API.
+*   ❌ **Running Both Models Unquantized**: Attempting to run unquantized 26B MoE and 30B models concurrently exceeds the 48GB M4 Pro budget, causing OS memory compaction and severe SSD swapping. Always use 4-bit quantized weights.
+*   ❌ **Blocking the Event Loop**: Executing synchronous model utility calls (e.g., local tokenizers or vision pre-processing) inside FastAPI's async thread blocks active SSE streams. Always route via `prepare_vlm_image_async` or thread executors.
 
 ---
 
-## Model Switching Mid-Session
-
-**When to switch:**
-- Context is getting polluted (approaching 50%)
-- Task type changes significantly (planning → implementation)
-- Current model struggling with task type
-
-**How to switch:**
-1. Create state snapshot
-2. Update STATE.md with current position
-3. Start fresh session with appropriate model
-4. Load STATE.md to resume
-
----
-
-## GSD Model-Agnostic Principle
-
-GSD works with any capable LLM. The methodology compensates for model differences through:
-
-1. **Structured plans** — Reduce ambiguity
-2. **Explicit verification** — Catch errors regardless of model
-3. **State persistence** — Enable model switching
-4. **Fresh context** — Prevent accumulation issues
-
-Choose models based on task needs, not methodology requirements.
-
----
-
-*See PROJECT_RULES.md for canonical rules.*
-*See docs/runbook.md for operational procedures.*
+*See docs/ARCHITECTURE.md for deep system component layouts.*  
+*See docs/runbook.md for local vMLX startup and server diagnostics.*  

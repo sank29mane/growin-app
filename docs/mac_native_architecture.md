@@ -1,42 +1,65 @@
-# Mac-native Architecture Blueprint (SOTA 2026)
+# Mac-Native Architecture Blueprint
 
-Goal: A true Mac-native experience for Growin App, leveraging the full M4 generation Apple Silicon (AMX, Metal, ANE) for on-device inference and a SwiftUI front-end with a high-performance Python backend bridge.
+## Goal
+A true Mac-native experience for the Growin App, leveraging the full power of M4 generation Apple Silicon (AMX CPU, Metal/MLX GPU, and Apple Neural Engine NPU) for on-device local inference, paired with an elegant SwiftUI frontend and a high-performance Python FastAPI backend bridge.
 
-## Core Components
+---
 
-### SwiftUI Frontend (macOS)
-- **Fluid Interface**: Local UI, charts, and user interactions optimized for 120Hz ProMotion displays.
-- **Hardware Acceleration**: Utilizes Apple's `Accelerate` framework for local, ultra-fast vector math and portfolio rebalancing.
-- **Reasoning Visualization**: Real-time agentic "thought traces" visualization using `PhaseAnimator` and Metal-accelerated shaders.
+## SwiftUI Frontend Component Inventory
 
-### Python Backend (FastAPI / uv)
-- **System Brain**: Managed via `uv` for lightning-fast dependency resolution and virtual environment isolation.
-- **Hardware-Aware Routing**: Intelligently routes tasks to the optimal SoC component (AMX, GPU, or NPU).
-- **Tool Handlers**: Modular handlers (`t212_handlers.py`) for secure communication with brokerage APIs via MCP.
+The macOS frontend is a lightweight, responsive command center optimized for 120Hz ProMotion displays, compiled natively to interface with backend services.
+
+### Core SwiftUI Components
+*   **SovereignSidebar**: Monolithic, tonal navigation sidebar designed with a 0px corner radius. Features accessible hotkeys, custom visual states, and complete VoiceOver compatibility.
+*   **MasterLedgerView**: High-density Trading 212-style portfolio ledger displaying net asset value (NAV), available cash balances, allocation breakdowns, and real-time performance indicators.
+*   **ExecutionPanelView**: Interface detailing recent execution signals, transaction history, active order statuses, and toggle controls for autonomous autopilot.
+*   **WatchlistView**: Interactive market watch grid exposing real-time tickers, model-driven daily price forecasts, and ANE volatility scores.
+*   **AIChatPanelView**: A dedicated logic console rendering real-time streaming "thought traces" from the agent swarm, utilizing a clean Monaco-font layout.
+*   **AccountOverviewBanner**: High-density summary component displaying overall portfolio returns, active Swarm statuses, and volatility regime metrics.
+*   **SovereignSlideToConfirm**: A premium tactile gesture slide component with integrated macOS haptics for executing high-conviction order overrides.
+*   **MainTabView**: Monolithic tabbed application container hosting the primary user view controllers and managing system-wide keyboard navigation.
+
+### Performance & Accessibility Polish
+- **VoiceOver & Haptics**: Full `.accessibilityLabel()`, `.accessibilityHint()`, and `.accessibilityAddTraits()` mapping across all elements. Tactile gestures and critical actions are matched with precise haptics.
+- **Metal Shaders**: Accelerated rendering for real-time agent thinking trace animations and complex charting grids.
+- **Accelerate Integration**: Direct calls to Apple's native `Accelerate` framework for high-speed local portfolio calculations and mathematical matrix operations.
+
+---
+
+## Python Backend & Local Serving (uv)
+
+The backend layer is written in Python, managed via `uv` for ultra-fast dependency resolution and virtual environment isolation. It runs local services optimized for Apple Silicon GPU/NPU utilization.
+
+*   **vMLX Serving Layer**: Implements `vmlx_manager.py` to serve **Gemma 4 26B A4B MoE** and **Nemotron-Cascade-2 30B** using PagedAttention, avoiding memory thrashing and enabling parallel agent inference requests.
+*   **SwarmOrchestrator**: Coordinates the agentic swarm (Quant, Forecast, Research, Risk, Whale, Vision, Dividend, Goal) via a non-blocking 2-stage streaming pipeline.
+*   **Strategy Suggestion Engine**: Proactively streams high-conviction trade and portfolio asset recommendations based on live market analysis.
+*   **Global Connection Pooling**: Uses `AgentHttpClient` to maintain persistent connection states, circuit breakers, and rate limiters, avoiding socket leaks.
+
+---
 
 ## M4 Hardware Partitioning (The "Three-Brain" Model)
 
-| Brain | Hardware | Primary Workload |
-|-------|----------|------------------|
-| **The Orchestrator** | **CPU (AMX)** | Python execution, API lifecycle, JSON parsing, and MCP server management. |
-| **The Reasoner** | **GPU (Metal/MLX)** | Large Language Model (LLM) inference, daily model calibration, and **Weight Adapter** training. |
-| **The Math Engine** | **NPU (ANE)** | **Neural JMCE** real-time inference, technical indicator calculations, and covariance shift detection. |
+Growin maximizes the M4 Ultra/Pro system-on-chip (SoC) architectures by partitioning workloads dynamically:
 
-## Data Flow & Precision
-- **Ingestion**: Tiered multi-source data (Alpaca Primary -> Finnhub Primary -> Yahoo Fallback).
-- **Normalization**: Unified `TickerResolver` and `CurrencyNormalizer` ensure broker-data parity (GBX -> GBP handled automatically).
-- **Execution**: High-conviction signals trigger **Autonomous Entry**, bypassing UI confirmation for verified SOTA trade setups.
-
-## Security & Privacy
-- **Local Sovereignty**: All sensitive AI reasoning and mathematical modeling stays on your Mac. No financial data leaves the device for processing.
-- **Execution Guard**: Model-generated scripts are executed in a secure local sandbox (`safe_python.py`).
-- **Audit Logs**: Comprehensive local audit trails record every autonomous decision, reasoning trace, and API call for full accountability.
-
-## Roadmap & Status
-- **Phase 1-2**: Prototyping and performance optimization.
-- **Phase 24-29**: UX Polish and Institutional Portfolio Optimization.
-- **Phase 30-31**: **High-Velocity Intraday Pivot** and **Autonomous Agentic Execution** (COMPLETED).
-- **Phase 32**: **End-to-End Simulation** and production-readiness verification (IN PROGRESS).
+| Brain | Hardware component | Dedicated Workload | Performance Target |
+|-------|--------------------|--------------------|--------------------|
+| **The Orchestrator** | **CPU (AMX)** | Python server loop, FastAPI routing, arq worker tasks, JSON serialization, and global connection pool state. | Low latency process orchestration |
+| **The Reasoner** | **GPU (Metal/MLX)** | Local vMLX inference hosting, weight adapter每日 fine-tuning runs, and VisionAgent image processing. | 60% memory rule (Weights + KV ≤ 28GB) |
+| **The Math Engine** | **NPU (ANE)** | Joint Mean-Covariance Estimator (Neural JMCE) CoreML runs, volatility calculations, and technical indicators. | Static ANE allocations (<10ms execution) |
 
 ---
-*Verified for Apple Silicon M4 Pro/Max/Ultra (March 2026)*
+
+## Security, Privacy & Autonomy
+
+- **Local Sovereignty**: All AI reasoning, visual token processing, and database transactions execute locally. Financial datasets, api keys, and brokerage balances never leave the local device.
+- **Secure Sandboxing**: Code generated by mathematical agents runs in isolated local Docker sandboxes.
+- **Audit Logging**: A local, tamper-proof audit trail records all autonomous actions, signal evaluations, and coordinator logs.
+
+---
+
+## Status & Requirements
+- **OS Version**: macOS 15.0+ (Sequoia) - Apple Silicon mandatory.
+- **Processor**: Optimized for Apple Silicon M4 Pro/Max/Ultra.
+- **Unified Memory**: 32GB minimum (48GB+ recommended for dual-model concurrency).
+
+*Verified for Apple Silicon M4 Pro/Max/Ultra (May 2026)*

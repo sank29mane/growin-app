@@ -70,3 +70,6 @@ backend/*.pid
 .t212_cache.json
 backend/.t212_cache.json
 
+# Tooling Cache
+graphify-out/cache/
+

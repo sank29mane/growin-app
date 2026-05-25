@@ -1,64 +1,78 @@
-# Growin App: Multi-Agent Systems (MAS) Strategy (2026 SOTA)
+# Growin App: Multi-Agent Systems (MAS) Strategy
 
-This document serves as the centralized knowledge base for the Growin App's multi-agent architecture, coordination, and future roadmap. It is designed to align all agents with the project's long-term vision of becoming a cutting-edge financial intelligence platform.
+This document serves as the centralized knowledge base for the Growin App's multi-agent architecture, coordination, and future roadmap. It aligns all agent sub-systems with the long-term vision of providing a cutting-edge, autonomous financial intelligence platform.
 
 ---
 
-## 1. SOTA Research Summary (2025-2026)
+## 1. SOTA Research Summary
 
 ### Key Academic Insights
-- **QuantAgents (2025)**: Demonstrated that multi-agent "meetings" (Analyst, Risk Control, Market News, Manager) yield 3x higher returns via collaborative debate compared to single-agent systems.
-- **Accuracy Gains**: MAS achieves ~42% better accuracy in complex financial forecasting by simulating the decision processes of multiple human-like roles.
-- **Personalized Finance MAS**: Integration of budget optimization agents with investment advisors using news sentiment and technical signals is the current SOTA for retail financial apps.
+- **QuantAgent swarms**: Research proves that multi-agent "meetings" (collaborative debate between specialized Analyst, Risk Control, News, and Portfolio Manager personas) yield up to 3x higher returns than a single-agent system.
+- **Accuracy Gains**: MAS achieves ~42% better accuracy in complex financial forecasting by simulating the decision and review processes of multiple human-like roles.
+- **Personalized Finance MAS**: Integrating goal-tracking, tax-drag models, and passive dividend optimization agents with news sentiment and technical signals represents the current SOTA for retail financial applications.
 
 ### Industry Trends
-- **Agent-to-Operator Shift**: 2026 is the year where agents move from "predictive tools" to "workflow-integrated operators" with full autonomy in sandbox environments.
-- **Trust & Governance**: SOTA systems prioritize **Reasoning Governance**—formal guidelines on how agents route tasks and make decisions.
-- **Local Inference Dominance**: Privacy and latency requirements in finance have shifted SOTA toward local deployment on high-performance unified memory architectures (Apple Silicon).
+- **Agent-to-Operator Shift**: Agents have transitioned from passive "predictive tools" to "workflow-integrated operators" with high-conviction autonomous execution capabilities.
+- **Trust & Governance**: High-performance systems prioritize **Reasoning Governance**—formal validation layers checking agent authorization, token usage budgets, and execution boundaries.
+- **Local Inference Dominance**: Strict privacy and latency mandates in finance have shifted SOTA toward local deployment on high-performance unified memory architectures (Apple Silicon M4 generation) using PagedAttention servers.
 
 ---
 
-## 2. Architecture & Implementation (Phase 20 Baseline)
+## 2. Multi-Agent System Architecture & Implementation
 
-### Flattened Hierarchy (Unified Orchestration)
-As of Phase 20, the system uses a **Unified Orchestrator Agent**. This architecture reduces inter-agent communication overhead by merging routing and reasoning into a single agent lifecycle.
-- **Entry Point**: `OrchestratorAgent.py`
-- **Parallel Swarm**: Specialists (Quant, Research, Portfolio, Social) execute concurrently via `asyncio.gather`.
-- **Trajectory Stitching**: All specialist findings are synthesized into a single cohesive chronological timeline before reasoning.
+### SwarmOrchestrator & The Two-Stage Streaming Pipeline
+The core MAS architecture implements a highly-optimized **SwarmOrchestrator** model, moving away from slow, uncoordinated linear agent chains.
+*   **Entry Point**: User requests pass through the **GovernanceService** directly to the `SwarmOrchestrator`.
+*   **Two-Stage streaming**: The orchestrator performs a fast intent classification, and streams task delegation to active specialist agents in parallel, significantly reducing user-perceived latency.
+*   **Strategy Suggestion Engine**: Integrated directly into the coordination flow, this engine continuously monitors the portfolio ledger and actively streams high-conviction trade and alpha recommendations to the user interface.
 
-### The Critic Pattern & ACE (Governance)
-We have implemented a mandatory **Review Stage** using the `RiskAgent`.
-- **Adversarial Debate**: Risk Agent acts as 'The Contrarian', forcing the Orchestrator to defend or revise its thesis.
-- **ACE Scoring**: An `ACEEvaluator` calculates the robustness of the strategy (0.0 to 1.0) based on debate outcomes.
-- **Safety Gates**: Risk Agent can FLAG or BLOCK suggestions based on exposure, volatility, wash-sale rules, or compliance.
+### The Specialist Swarm
+Growin utilizes 8 highly specialized agent roles executing concurrently:
+1.  **QuantAgent**: Performs high-frequency technical indicator calculations and portfolio rebalancing metrics.
+2.  **ForecasterAgent**: Computes ML-driven price predictions using ANE-accelerated Neural JMCE.
+3.  **ResearchAgent**: Performs semantic web searching and document RAG processing.
+4.  **RiskAgent**: Conducts adversarial debate, portfolio exposure auditing, and leverage validation.
+5.  **WhaleAgent**: Monitors block trade flows, institutional filings, and large-holder footprints.
+6.  **VisionAgent**: Vision-based chart assessment, technical pattern classification, and async image rendering.
+7.  **DividendOptimizationAgent**: Long-term yield optimization, payout schedules, and tax-drag modeling.
+8.  **GoalPlannerAgent**: Translates user goals into actionable portfolio targets and trading milestones.
 
-### Jules Swarm Engine (Asynchronous Delegation)
-- **Containerized Workers**: Heavy-lifting tasks (integration tests, security audits, micro-agent implementation) are dispatched to the `jules` CLI worker.
-- **Safety Guardrails**: Strict local-remote alignment checks prevent context-drift regressions from stale remote branches.
+### Social Swarm (Reddit & Twitter micro-agents)
+- Embedded micro-agents in `backend/agents/social_swarm/` utilize Tavily Search APIs to perform sentiment profiling, social signal scoring, and retail momentum detection on social platforms.
+
+### Trajectory Optimization via R-Stitch Engine
+- **Dynamic Stitching (SLM↔LLM)**: Minimizes latency by routing smaller sub-tasks (classification, syntax checking) to optimized Small Language Models (SLMs) and reserving heavy reasoning or synthesis hops for Large Language Models (LLMs), stitching the intermediate trajectory outputs together dynamically.
+
+### GovernanceService Safety Gates
+- Replaces legacy HMAC-only tokens with a centralized **GovernanceService** runtime.
+- Evaluates agent role capability boundaries, input sanitization rules, and query budgets.
+- If a high-conviction setup is detected by the swarm (`conviction level == 10`), the GovernanceService checks policy constraints to authorize **Autonomous Autopilot Bypass** or prompt the user via the `SovereignSlideToConfirm` gate.
 
 ---
 
 ## 3. Performance & Security (Apple Silicon Optimization)
 
-- **8-bit AFFINE Quantization**: Enforced for all local LLMs (Orchestrator and Risk models) to optimize M4 Pro unified memory performance.
-- **Hardware Affinity**: Lightweight routing models are offloaded to the Apple Neural Engine (ANE) via MLX/CoreML.
-- **HITL Enforcement**: Trade execution via MCP is protected by HMAC-signed `approval_tokens`, ensuring no autonomous trading without human confirmation.
+- **vMLX PagedAttention**: Models are served locally via `vmlx_manager.py` to optimize M4 Pro unified memory bandwidth. Continuous batching and KV-cache prefixing prevent SSD swapping.
+- **Global Connection Pooling**: Centralized `AgentHttpClient` handles all persistent external API calls, enforcing endpoint-specific circuit breakers to prevent request cascading failures during volatile market news events.
+- **Vectorized Computations**: Heavy indicators and risk calculations are vectorized in `QuantEngine` to utilize Apple Silicon AMX CPU execution.
+- **DuckDB Batch Optimization**: Standardizes timeseries data ingestion through DuckDB batch querying, avoiding slow N+1 query patterns.
 
 ---
 
 ## 4. Future Roadmap
 
 ### 🔴 High Priority
-- **AI-Driven Dividend Optimization**: Agents focused on maximizing passive income yield while maintaining capital preservation (Phase 21).
-- **Macro-Economic Agents**: Integration of Geopolitical Risk (GPR) indices into the baseline context.
+- **Cross-Broker Routing Agents**: Proactively route trade execution across multiple broker endpoints (Trading 212, Alpaca) depending on pricing spreads and execution costs.
+- **Real-Time Agent-to-Agent Negotiation**: Enable specialized agents to negotiate optimal trade entry sizes and risk parameters in real-time.
 
 ### 🟡 Medium Priority
-- **Autonomous Goal Rebalancing**: Agents that proactively suggest portfolio adjustments based on long-term goal trajectories.
+- **Autonomous Tax-Loss Harvesting**: Integrate agents dedicated to identifying and executing tax-loss harvesting sales to minimize capital gains liabilities.
 
 ### 🔵 Low Priority
-- **Negotiation Agents**: Agents that simulate/negotiate trade execution prices against multiple market makers.
+- **Dynamic Agent Persona Fine-Tuning**: On-the-fly local calibration of specialist prompts based on recent backtest error rates.
 
 ---
-**Status**: Strategic Alignment COMPLETE (March 2026)
-**Author**: Gemini CLI (Senior AI/ML Engineer)
-**Last Updated**: March 1, 2026
+
+**Status**: Strategic Alignment & Architecture VERIFIED (May 2026)  
+**Author**: Antigravity (Senior AI/ML Systems Architect)  
+**Last Updated**: May 23, 2026

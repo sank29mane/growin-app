@@ -1,385 +1,166 @@
-# GSD Runbook
+# Growin Platform Operations Runbook
 
-> Operational procedures for debugging, validation, and recovery.
+This runbook documents day-to-day operational procedures, troubleshooting steps, diagnostic commands, and recovery workflows for the Growin App. It is strictly optimized for macOS (bash/zsh) and Apple Silicon environments.
 
 ---
 
-## Quick Commands
+## 🚀 Quick Command Sheet
 
-### Status Check
-
-**PowerShell:**
-```powershell
-# Current git status
+### System Status & Git Tracking
+```bash
+# Current repository status
 git status
 
-# Recent commits
+# Recent commits (last 10)
 git log --oneline -10
 
-# Current branch
+# Current active branch
 git branch --show-current
 ```
 
-**Bash:**
+### Server Process Management
 ```bash
-# Current git status
-git status
+# Start all backend services (FastAPI, Redis, vMLX)
+./start.sh
 
-# Recent commits
-git log --oneline -10
+# Stop all background services cleanly
+./stop.sh
 
-# Current branch
-git branch --show-current
+# View active system log streams
+tail -f backend/data/growin_server.log
 ```
 
-## Phase 19-20: SOTA 2026 Operations
+---
 
-### Unified Test Suite Execution
-**Goal:** Run the consolidated SOTA integration tests safely.
+## 🧠 vMLX Operations (Local Serving Layer)
+
+The **vMLX Serving Layer** hosts our local quantized dual-model layout (**Gemma 4 26B A4B MoE** and **Nemotron-Cascade-2 30B**).
+
+### 1. Starting/Stopping the Serving Stack
+The `vmlx_manager.py` manages model loading and hardware slot routing.
 ```bash
-# Run all backend tests from the project root
-export PYTHONPATH=$PYTHONPATH:backend
-uv run --project backend pytest tests/backend/
+# Start the vMLX server manually (if not using start.sh)
+uv run python backend/vmlx_manager.py --host 127.0.0.1 --port 8006 --quantize 4bit
 
-# Run specific Phase 19 Integration Logic
-uv run --project backend pytest tests/integration/agent_revision/
+# Clean teardown of local serving ports
+kill -9 $(lsof -t -i:8006)
 ```
 
-### Alpha Audit Verification
-**Goal:** Verify that DuckDB is correctly correlating agent reasoning with forward returns.
-1. Run a test session via the app or curl.
-2. Check DuckDB records:
+### 2. Live Heartbeat Verification
+Verify the server is responsive and models are loaded:
 ```bash
+# Fetch serving layer health status
+curl http://127.0.0.1:8006/health
+
+# Test prompt completion completion trace on the primary reasoner
+curl http://127.0.0.1:8006/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemma4-26b-moe",
+    "messages": [{"role": "user", "content": "Test heartbeat"}]
+  }'
+```
+
+### 3. Memory Pressure Monitoring
+Always monitor Apple Silicon unified memory to ensure local execution remains within the **60% memory budget rule** (≤ 28GB weights + KV cache footprint):
+```bash
+# Monitor GPU memory and system compaction events in real time
+sudo powermetrics --samplers gpu_power,cpu_power -i 1000
+
+# Retrieve currently allocated active cache sizes
+uv run python -c "from backend.vmlx_manager import get_active_cache; print(get_active_cache().get_summary())"
+```
+
+---
+
+## 🔗 Connection Pooling Diagnostics
+
+Growin aggregates outbound connections through the centralized `AgentHttpClient` to prevent TCP socket exhaustion.
+
+### 1. Checking TCP Socket States
+If the swarm encounters connection drops, verify active connection states:
+```bash
+# Count active sockets on backend ports (look for TIME_WAIT or ESTABLISHED spikes)
+netstat -an | grep 8002 | awk '{print $6}' | sort | uniq -c
+```
+
+### 2. Circuit Breaker Testing
+You can manually query client health metrics to see if connection breakers have tripped:
+```bash
+# Query agent client pool state
+uv run python -c "from backend.app_context import get_http_client; print(get_http_client().get_circuit_status())"
+```
+
+---
+
+## ♿ Accessibility Verification
+
+Before pushing frontend updates, verify that UI layouts conform to native macOS accessibility and VoiceOver specs.
+
+### 1. Verification Checklist
+- Ensure interactive elements (e.g. `SovereignSlideToConfirm`, `SovereignSidebar` tabs) expose descriptive `.accessibilityLabel()` and `.accessibilityHint()` values.
+- Verify elements use `.accessibilityAddTraits(.isButton)` or similar trait flags.
+
+### 2. Launching Accessibility Diagnostics
+Use the macOS native Xcode Accessibility Inspector to audit the layout:
+```bash
+# Launch native macOS Accessibility Inspector
+open /Applications/Xcode.app/Contents/Applications/Accessibility\ Inspector.app
+```
+
+---
+
+## 🧪 Testing Procedures
+
+All tests run via `uv` to maintain strict dependency constraints.
+
+### 1. Execution Roster
+```bash
+# Run all unit and integration tests
+uv run pytest
+
+# Run quantitative math indicator tests
+uv run pytest tests/backend/test_quant_engine.py -v
+
+# Run non-blocking vision chart tests
+uv run pytest tests/vision/ -v
+```
+
+### 2. Database Analytical Auditing
+Check DuckDB local data integrity, ticker normalizations, and agent alpha predictions:
+```bash
+# Query the live analyst database metrics
 uv run python -c "from backend.analytics_db import get_analytics_db; print(get_analytics_db().get_agent_alpha_metrics())"
 ```
 
-### Jules Swarm Synchronization
-**Goal:** Safely poll and apply background tasks from the Jules worker.
-1. Check active remote sessions:
+---
+
+## 🛡️ Sandbox & Container Management
+
+The `MathGeneratorAgent` executes generated code blocks inside an isolated Docker sandbox.
+
+### 1. Check Sandbox Container Readiness
 ```bash
-jules remote list --session
+docker ps | grep growin-npu
 ```
-2. **Safety Audit (Mandatory):** Pull patch locally before applying.
+
+### 2. Recovering from Runaway Sandbox Processes
+If a container fails to terminate within 5 seconds of task completion:
 ```bash
-jules remote pull --session <ID> > audit.patch
-cat audit.patch # Review diff for stale logic
-```
-3. Apply approved patch:
-```bash
-patch -p1 < audit.patch
+# Force-remove all loose growin sandbox containers
+docker rm -f $(docker ps -a -q --filter "ancestor=growin-npu-compute")
 ```
 
 ---
 
-## Phase 16: Hardware Optimization
-
-### Hardware Optimization (M4 Pro)
-**Goal:** Verify 8-bit AFFINE quantization is active for local inference.
-
-1.  **Check Backend Logs:**
-    ```bash
-    grep "Applying 8-bit AFFINE" growin_server.log
-    ```
-2.  **Monitor NPU/GPU usage:** Use `Activity Monitor` (macOS) -> `GPU History` to ensure balanced load during Orchestrator execution.
-
-### Critic Pattern & HITL Verification
-**Goal:** Ensure trade suggestions are audited and require manual signatures.
-
-1.  **Trigger Risk Audit:** Query the chat with a reckless trade (e.g. "Buy £1M of TSLA").
-2.  **Verify Risk Warning:** Confirm the response includes `⚠️ RISK WARNING` and `[ACTION_REQUIRED:TRADE_APPROVAL]`.
-3.  **Test Trade Gate:** Attempt to call a trade tool via `/mcp/tool/call` without an `approval_token`. It MUST return `403 Forbidden`.
-
----
-
-## System Health & Observability
-
-### Telemetry Verification
-**Goal:** Confirm real-time agentic reasoning trace is flowing from backend to frontend.
-
-1.  **Monitor intelligent Console:** Open the macOS app and navigate to "Vital Monitor".
-2.  **Verify SSE Stream:**
-    ```bash
-    curl -N -H "Accept: text/event-stream" http://localhost:8002/api/chat/message -d '{"message": "Analyze AAPL"}'
-    ```
-    Ensure `event: telemetry` packets are visible.
-3.  **Neural Pathway Pulse:** Confirm specialized nodes (Quant, Research, Forecast) transition to `working` state during a live query.
-
-### Python Sandbox (Docker) Operations
-**Goal:** Manage and verify secure mathematical modeling.
-
-1.  **Check Sandbox Readiness:**
-    ```bash
-    docker ps | grep growin-npu
-    ```
-2.  **Manual Test Execution:**
-    ```python
-    # Use the docker_run_python tool via MCP with engine="npu"
-    result = await mcp.call_tool("docker_run_python", {"script": "print(2+2)", "engine": "npu"})
-    ```
-3.  **Resource Cleanup:** The system automatically removes containers on completion. If runaway containers are detected:
-    ```bash
-    docker rm -f $(docker ps -a -q --filter "ancestor=growin-npu-compute")
-    ```
-
----
-
-## Wave Validation
-
-### Verify Wave Completion
-
-**Before marking a wave complete:**
-
-1. All tasks have commits:
-   ```powershell
-   git log --oneline -N  # N = number of tasks in wave
-   ```
-
-2. All verifications passed (documented in SUMMARY.md)
-
-3. STATE.md updated with current position
-
-4. State snapshot created
-
-### Wave Rollback
-
-**If a wave needs to be reverted:**
-
-```powershell
-# Find commit before wave started
-git log --oneline -20
-
-# Reset to that commit (keeps changes staged)
-git reset --soft <commit-hash>
-
-# Or hard reset (discards changes)
-git reset --hard <commit-hash>
-```
-
----
-
-## Debugging Procedures
-
-### 3-Strike Rule
-
-After 3 consecutive failed debug attempts:
-
-1. **Stop** — Don't try a 4th approach in same session
-
-2. **Document** in STATE.md:
-   ```markdown
-   ## Debug Session
-   
-   **Problem:** {description}
-   
-   **Attempts:**
-   1. {approach 1} → {result}
-   2. {approach 2} → {result}
-   3. {approach 3} → {result}
-   
-   **Hypothesis:** {current theory}
-   
-   **Recommended next:** {suggested approach}
-   ```
-
-3. **Fresh session** — Start new conversation with documented context
-
-### Log Inspection
-
-**Find relevant logs:**
-
-```powershell
-# Search for error patterns
-Select-String -Path "*.log" -Pattern "error|exception|failed" -CaseSensitive:$false
-```
-
-```bash
-# Search for error patterns
-grep -ri "error\|exception\|failed" *.log
-```
-
----
-
-## Verification Commands
-
-### Build Verification
-
-```powershell
-# Node.js
-npm run build
-if ($LASTEXITCODE -eq 0) { Write-Host "✅ Build passed" }
-
-# Python
-python -m py_compile src/**/*.py
-```
-
-### Test Verification
-
-```powershell
-# Node.js
-npm test
-
-# Python
-pytest -v
-
-# Go
-go test ./...
-```
-
-### Lint Verification
-
-```powershell
-# Node.js
-npm run lint
-
-# Python
-ruff check .
-
-# Go
-golangci-lint run
-```
-
----
-
-## State Recovery
-
-### From STATE.md
-
-When resuming work:
-
-1. Read STATE.md for current position
-2. Check "Last Action" for context
-3. Follow "Next Steps" to continue
-4. Verify recent commits match documented progress
-
-### From Git History
-
-If STATE.md is outdated:
-
-```powershell
-# See recent work
-git log --oneline -20
-
-# Check specific commit details
-git show <commit-hash> --stat
-
-# View file at specific commit
-git show <commit-hash>:path/to/file
-```
-
-### Context Pollution Recovery
-
-If quality is degrading mid-session:
-
-1. Create state snapshot immediately
-2. Update STATE.md with full context
-3. Commit any pending work
-4. Start fresh session
-5. Run `/resume` to reload context
-
----
-
-## Search Commands
-
-### Find in Codebase
-
-**PowerShell:**
-```powershell
-# Find pattern in files
-Select-String -Path "src/**/*.ts" -Pattern "TODO" -Recurse
-
-# Find files by name
-Get-ChildItem -Recurse -Filter "*.config.*"
-```
-
-**Bash:**
-```bash
-# Find pattern in files (with ripgrep)
-rg "TODO" --type ts
-
-# Find pattern in files (with grep)
-grep -r "TODO" src/
-
-# Find files by name
-find . -name "*.config.*"
-```
-
-### Search-First Workflow
-
-Before reading any file:
-
-1. Search for relevant terms:
-   ```powershell
-   Select-String -Path "**/*.md" -Pattern "architecture" -Recurse
-   ```
-
-2. Identify candidate files from results
-
-3. Read only relevant sections:
-   ```powershell
-   Get-Content file.md | Select-Object -Skip 49 -First 20  # Lines 50-70
-   ```
-
----
-
-## Common Issues
-
-### "SPEC.md not FINALIZED"
-
-**Cause:** Planning lock prevents implementation
-
-**Fix:**
-1. Open `.gsd/SPEC.md`
-2. Complete all required sections
-3. Change status to `Status: FINALIZED`
-4. Retry command
-
-### "Context degrading"
-
-**Symptoms:** Shorter responses, skipped steps, inconsistency
-
-**Fix:**
-1. Create state snapshot
-2. Commit current work
-3. Start fresh session
-4. Run `/resume`
-
-### "Commit failed"
-
-**Causes:** Staged conflicts, hook failures
-
-**Debug:**
-```powershell
-git status
-git diff --staged
-```
-
----
-
-## Checklist Templates
-
-### Pre-Execution Checklist
-
-- [ ] SPEC.md is FINALIZED
-- [ ] ROADMAP.md has current phase
-- [ ] STATE.md loaded and understood
-- [ ] Previous wave verified complete
-
-### Post-Wave Checklist
-
-- [ ] All tasks committed
-- [ ] Verifications documented
-- [ ] STATE.md updated
-- [ ] State snapshot created
-- [ ] No uncommitted changes
-
-### Session End Checklist
-
-- [ ] Current work committed
-- [ ] STATE.md has "Next Steps"
-- [ ] JOURNAL.md updated (if milestone)
-- [ ] No loose ends
-
----
-
-*See PROJECT_RULES.md for canonical rules.*
-*See docs/model-selection-playbook.md for model guidance.*
+## 🩹 Debugging Protocols (The 3-Strike Rule)
+
+If a bug or test failure persists after three consecutive debug attempts:
+
+1.  **Stop**: Immediately suspend manual code changes.
+2.  **Document**: Create an entry detailing:
+    - Current error traceback
+    - Details of the three attempts made
+    - Active working hypothesis
+    - Planned next approach
+3.  **Handoff**: Commit staged changes and start a fresh context session to prevent prompt pollution.
