@@ -117,8 +117,8 @@ struct SuggestionChip: View {
             .scaleEffect(isHovered ? 1.015 : 1.0)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(Text(item.title))
-        .accessibilityHint(Text("Ask AI: \(item.prompt)"))
+        .accessibilityLabel(item.title)
+        .accessibilityHint(item.prompt)
         .accessibilityAddTraits(.isButton)
         .onHover { isHovered = $0 }
         .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isHovered)
