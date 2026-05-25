@@ -299,6 +299,8 @@ class ResearchAgent(BaseAgent):
                             'url': art.get('link'),
                             'is_regulatory': True
                         })
+                except Exception as e:
+                    logger.warning(f"RNS newsData.io failed: {e}")
 
             # 2. SEC Filings / News via Tavily
             if not is_uk and self.tavily_key:
