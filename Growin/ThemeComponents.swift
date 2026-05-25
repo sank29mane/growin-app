@@ -313,6 +313,7 @@ struct MarkdownText: View {
                         })
                         .buttonStyle(.plain)
                         .accessibilityLabel(showThoughts ? "Collapse Intelligence Trace" : "Expand Intelligence Trace")
+                        .accessibilityHint("Toggles the details for the AI's intelligence trace")
                         .accessibilityAddTraits(.isButton)
 
                         if showThoughts {
@@ -425,7 +426,7 @@ struct ErrorCard: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Retry Protocol")
-                .accessibilityHint("Attempts to recover from the simulation error")
+                .accessibilityHint("Retries the failed simulation or connection")
                 .accessibilityAddTraits(.isButton)
             }
         }
