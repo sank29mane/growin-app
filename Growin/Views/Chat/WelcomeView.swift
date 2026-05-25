@@ -118,8 +118,8 @@ struct SuggestionChip: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(item.title)
-        .accessibilityHint(item.prompt)
         .accessibilityAddTraits(.isButton)
+        .accessibilityHint("Uses this suggestion to start a chat")
         .onHover { isHovered = $0 }
         .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isHovered)
     }
