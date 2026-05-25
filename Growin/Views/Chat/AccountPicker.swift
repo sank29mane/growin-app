@@ -40,7 +40,8 @@ struct AccountPicker: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Select \(account) account")
+                .accessibilityLabel("\(account) Account")
+                .accessibilityHint(isSelected ? "Currently selected" : "Selects the \(account) account filter")
                 .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : [.isButton])
             }
         }
