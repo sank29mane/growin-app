@@ -40,7 +40,7 @@ struct AccountPicker: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("\(account) account")
+                .accessibilityLabel("\(account) Account")
                 .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : [.isButton])
             }
         }
