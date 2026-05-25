@@ -4,7 +4,8 @@ from decimal import Decimal
 from typing import Optional
 from .base_micro import BaseMicroAgent, MicroAgentResponse
 from utils.financial_math import create_decimal
-from utils.sentiment import get_sentiment_analyzer
+from resilience import get_circuit_breaker, CircuitBreakerOpenError
+from utils.http_client import agent_http_client
 
 logger = logging.getLogger(__name__)
 
@@ -41,23 +42,23 @@ class TwitterMicroAgent(BaseMicroAgent):
             # Non-blocking thread execution
             query = f"${ticker} stock discussion twitter x.com" if ticker != "MARKET" else "retail investor sentiment twitter x.com stockmarket"
             
-            response = await tavily.search(
-                query=query,
-                search_depth="advanced",
-                include_domains=["x.com", "twitter.com", "stocktwits.com"],
-                max_results=5
-            )
-            
+            url = "https://api.tavily.com/search"
+            headers = {"Content-Type": "application/json"}
+            payload = {
+                "api_key": self.tavily_key,
+                "query": query,
+                "search_depth": "advanced",
+                "include_domains": ["x.com", "twitter.com", "stocktwits.com"],
+                "max_results": 5
+            }
+
+            response = await agent_http_client.execute_with_breaker(tavily_cb, "POST", url, headers=headers, json=payload)
             results = response.get('results', [])
             
             if not results and ticker != "MARKET" and company_name and company_name != ticker:
                 query = f"{company_name} stock sentiment discussion twitter"
-                response = await tavily.search(
-                    query=query,
-                    search_depth="advanced",
-                    include_domains=["x.com", "twitter.com", "stocktwits.com"],
-                    max_results=5
-                )
+                payload["query"] = query
+                response = await agent_http_client.execute_with_breaker(tavily_cb, "POST", url, headers=headers, json=payload)
                 results = response.get('results', [])
  
             if not results:
@@ -85,7 +86,15 @@ class TwitterMicroAgent(BaseMicroAgent):
                     discs.append(title)
                 return sents, discs
                 
-            sentiments, discussions = await asyncio.to_thread(analyze_sentiment, results)
+            batch_size = 50
+            batches = [results[i:i + batch_size] for i in range(0, len(results), batch_size)]
+            tasks = [asyncio.to_thread(analyze_sentiment, batch) for batch in batches]
+
+            if tasks:
+                batch_results = await asyncio.gather(*tasks)
+                for s, d in batch_results:
+                    sentiments.extend(s)
+                    discussions.extend(d)
 
             avg_sentiment = sum(sentiments) / len(sentiments) if sentiments else create_decimal("0.0")
 

@@ -24,8 +24,11 @@ import asyncio
 import re
 from pydantic import BaseModel, Field
 from magentic import prompt as mag_prompt
+from resilience import get_circuit_breaker, CircuitBreakerOpenError
 from utils.http_client import agent_http_client
-from utils.sentiment import get_sentiment_analyzer
+
+# Pre-compiled regex for fast title normalization
+TITLE_CLEAN_PATTERN = re.compile(r'[^a-zA-Z0-9]')
 
 logger = logging.getLogger(__name__)
 
@@ -170,8 +173,28 @@ class ResearchAgent(BaseAgent):
             
             # Deduplicate and analyze
             unique_articles = self._deduplicate_articles(articles)
-            sentiments, weights, rich_articles, headlines, sources = self._analyze_sentiment(unique_articles, sentiment_analyzer)
             
+            chunk_size = 5
+            chunks = [unique_articles[i:i+chunk_size] for i in range(0, len(unique_articles), chunk_size)]
+
+            chunk_results = await asyncio.gather(*[
+                asyncio.to_thread(self._analyze_sentiment, chunk, sentiment_analyzer)
+                for chunk in chunks
+            ])
+
+            sentiments = []
+            weights = []
+            rich_articles = []
+            headlines = []
+            sources = []
+
+            for s, w, ra, hl, src in chunk_results:
+                sentiments.extend(s)
+                weights.extend(w)
+                rich_articles.extend(ra)
+                headlines.extend(hl)
+                sources.extend(src)
+
             # Calculate weighted average sentiment
             if sentiments:
                 total_weighted_sentiment = sum(s for s in sentiments) # already multiplied by weight in _analyze
@@ -262,9 +285,12 @@ class ResearchAgent(BaseAgent):
                     "country": "gb",
                     "category": "business"
                 }
-                resp = await agent_http_client.client.get("https://newsdata.io/api/1/latest", params=params, timeout=10.0)
-                if resp.status_code == 200:
-                    data = resp.json()
+                try:
+                    data = await agent_http_client.execute_with_breaker(
+                        newsdata_cb, "GET", "https://newsdata.io/api/1/latest",
+                        params=params, timeout=10.0, raise_for_status=False
+                    )
+
                     for art in data.get('results', [])[:5]:
                         articles.append({
                             'title': f"[RNS] {art.get('title')}",
@@ -281,18 +307,33 @@ class ResearchAgent(BaseAgent):
                 # Specialized query for SEC filings
                 query = f"latest SEC filings and regulatory announcements for {ticker}"
                 
-                response = await tavily.search(query=query, search_depth="advanced", max_results=5)
-                for r in response.get('results', []):
-                    # Only include if relevant to SEC or regulatory
-                    content = (r.get('title', '') + (r.get('content', '') or '')).upper()
-                    if any(kw in content for kw in ["SEC", "FORM 8-K", "10-Q", "10-K", "FILING", "REGULATORY"]):
-                        articles.append({
-                            'title': f"[SEC] {r.get('title')}",
-                            'description': r.get('content') or r.get('snippet'),
-                            'source': {'name': 'SEC EDGAR / News'},
-                            'url': r.get('url'),
-                            'is_regulatory': True
-                        })
+                url = "https://api.tavily.com/search"
+                headers = {"Content-Type": "application/json"}
+                payload = {
+                    "api_key": self.tavily_key,
+                    "query": query,
+                    "search_depth": "advanced",
+                    "max_results": 5
+                }
+
+                try:
+                    data = await agent_http_client.execute_with_breaker(
+                        tavily_cb, "POST", url, headers=headers, json=payload
+                    )
+
+                    for r in data.get('results', []):
+                        # Only include if relevant to SEC or regulatory
+                        content = (r.get('title', '') + (r.get('content', '') or '')).upper()
+                        if any(kw in content for kw in ["SEC", "FORM 8-K", "10-Q", "10-K", "FILING", "REGULATORY"]):
+                            articles.append({
+                                'title': f"[SEC] {r.get('title')}",
+                                'description': r.get('content') or r.get('snippet'),
+                                'source': {'name': 'SEC EDGAR / News'},
+                                'url': r.get('url'),
+                                'is_regulatory': True
+                            })
+                except CircuitBreakerOpenError:
+                    logger.warning(f"Regulatory news (Tavily) skipped: circuit breaker is OPEN")
             
             if articles:
                 logger.info(f"ResearchAgent: Found {len(articles)} regulatory announcements for {ticker}")
@@ -317,10 +358,8 @@ class ResearchAgent(BaseAgent):
                 "apiKey": self.newsapi_key
             }
             
-            response = await agent_http_client.client.get("https://newsapi.org/v2/everything", params=params, timeout=10.0)
-            response.raise_for_status()
-            data = response.json()
-            
+            data = await agent_http_client.execute_with_breaker(newsapi_cb, "GET", url, params=params)
+
             return data.get('articles', [])
         except Exception as e:
             logger.warning(f"NewsAPI failed: {e}")
@@ -340,11 +379,17 @@ class ResearchAgent(BaseAgent):
                 region = "LSE UK" if is_uk else "US"
                 query = f"latest financial news for {company_name} ({ticker}) stock on {region} market"
             
-            response = await tavily.search(
-                query=query,
-                search_depth="advanced",
-                max_results=8
-            )
+            url = "https://api.tavily.com/search"
+            headers = {"Content-Type": "application/json"}
+            payload = {
+                "api_key": self.tavily_key,
+                "query": query,
+                "search_depth": "advanced",
+                "max_results": 8
+            }
+            
+            response = await agent_http_client.execute_with_breaker(tavily_cb, "POST", url, headers=headers, json=payload)
+
             
             # Normalize to common format
             return [
@@ -406,8 +451,9 @@ class ResearchAgent(BaseAgent):
                      is_uk = ticker.upper().endswith(".L")
                      params["country"] = "gb" if is_uk else "us"
                      # Add 'in' for India support if requested, but architecture mandates US/UK partitioning
-                     if "NSE" in ticker.upper():
-                         params["country"] = "in"
+                     if "NSE" in ticker.upper(): params["country"] = "in"
+
+            data = await agent_http_client.execute_with_breaker(newsdata_cb, "GET", url, params=params, timeout=10.0)
 
             response = await agent_http_client.client.get(url, params=params, timeout=10.0)
             response.raise_for_status()

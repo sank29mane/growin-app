@@ -176,7 +176,11 @@ class CoordinatorAgent(BaseAgent):
         return AgentResponse(
             agent_name=self.config.name,
             success=market_context.is_complete(),
-            data=response_data,
+            data=market_context.model_dump(),
+            metadata={
+                "routing": routing_decision,
+                "correlation_id": c_id
+            },
             latency_ms=0.0
         )
 
@@ -504,33 +508,3 @@ class CoordinatorAgent(BaseAgent):
             from market_context import GoalData
             context.goal = GoalData(**data)
 
-    def _generate_strategic_suggestions(self, context: MarketContext):
-        """
-        Analyze the aggregated MarketContext (specifically the portfolio)
-        and generate proactive strategic suggestions (e.g., tax-loss harvesting).
-        """
-        suggestions = []
-
-        # 1. Tax-Loss Harvesting (TLH) Alert
-        if context.portfolio:
-            try:
-                from utils.tlh_scanner import TLHScanner
-                scanner = TLHScanner()
-                tlh_opportunities = scanner.scan(context.portfolio.model_dump())
-
-                if tlh_opportunities:
-                    suggestions.append({
-                        "type": "TAX_LOSS_HARVESTING",
-                        "title": "Tax-Loss Harvesting Opportunities",
-                        "description": f"Found {len(tlh_opportunities)} position(s) with potential tax offset benefits.",
-                        "opportunities": tlh_opportunities
-                    })
-            except Exception as e:
-                logger.error(f"Coordinator TLH Scan failed: {e}")
-
-        # 2. Add more strategic modules here over time...
-        # e.g. Diversification scanner, High-Fee ETF swap scanner
-
-        if suggestions:
-            context.user_context["strategic_suggestions"] = suggestions
-            logger.info(f"Coordinator generated {len(suggestions)} strategic suggestion(s).")

@@ -9,7 +9,7 @@
 
 ## 🧬 GSD v1.36.0 & Gemini CLI v0.38.0-preview.0 Integration
 
-This project follows the **Get Shit Done (GSD)** methodology (v1.36.0 optimized). 
+This project follows the **Get Shit Done (GSD)** methodology (v1.36.0 optimized).
 The Gemini CLI (v0.38.0-preview.0) operates as the **Master Planner & Autonomous Structural Executor**.
 
 - **Plan Before You Build** — No code without specification (SPEC.md).
