@@ -35,8 +35,6 @@ class ContextBuffer:
         async with self._lock:
             self.results.append(result)
             self.new_data_event.set()
-            # Immediately clear so it can be re-triggered for the next data
-            self.new_data_event.clear()
             logger.debug(f"📥 ContextBuffer received results from {result.source}")
 
     async def get_all(self) -> List[AgentResult]:
@@ -50,8 +48,12 @@ class ContextBuffer:
         """
         Wait until new data arrives in the buffer.
         """
+        if self.new_data_event.is_set():
+            self.new_data_event.clear()
+            return True
         try:
             await asyncio.wait_for(self.new_data_event.wait(), timeout=timeout)
+            self.new_data_event.clear()
             return True
         except asyncio.TimeoutError:
             return False
