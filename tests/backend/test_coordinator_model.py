@@ -1,4 +1,6 @@
 import asyncio
+import pytest
+
 import logging
 import sys
 import os
@@ -14,6 +16,7 @@ load_dotenv(os.path.join(os.getcwd(), 'backend', '.env'))
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("CoordinatorTest")
 
+@pytest.mark.asyncio
 async def test_coordinator_guardrails():
     logger.info("--- Testing Coordinator Agent Guardrails ---")
     try:

@@ -68,6 +68,9 @@ class OrchestratorAgent:
         # Decision logic container (reusing DecisionAgent's internal logic)
         self.decision_engine = DecisionAgent(model_name=model_name, api_keys=api_keys, mcp_client=self.mcp_client)
         
+        from utils.ticker_utils import TickerResolver
+        self.ticker_resolver = TickerResolver()
+
         self.routing_llm = None
         self._initialized = False
         
@@ -234,9 +237,8 @@ Query: "{clean_query}"
             
         # COORDINATOR FIX: Robust normalization via Resolver
         if ticker:
-            from utils.ticker_utils import TickerResolver
             original_ticker = ticker
-            ticker = TickerResolver().normalize(ticker)
+            ticker = self.ticker_resolver.normalize(ticker)
             if ticker != original_ticker:
                 logger.info(f"Ticker normalized (Resolver): {original_ticker} -> {ticker}")
 
@@ -521,9 +523,8 @@ Query: "{clean_query}"
             
         # COORDINATOR FIX: Robust normalization via Resolver
         if ticker:
-            from utils.ticker_utils import TickerResolver
             original_ticker = ticker
-            ticker = TickerResolver().normalize(ticker)
+            ticker = self.ticker_resolver.normalize(ticker)
             if ticker != original_ticker:
                 logger.info(f"Ticker normalized (Resolver): {original_ticker} -> {ticker}")
 
