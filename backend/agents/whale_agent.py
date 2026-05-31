@@ -159,7 +159,7 @@ class WhaleAgent(BaseAgent):
             # 5. Sentiment Impact
             # If price is at the High of recent trades and we see whales, it might be accumulation
             impact = "NEUTRAL"
-            if len(large_trades) > 0:
+            if len(large_trades) > 0 and len(decimal_trades) > 0 and len(large_decimal_prices) > 0:
                 avg_price = sum(t['p'] for t in decimal_trades) / len(decimal_trades)
                 whale_avg_price = sum(large_decimal_prices) / len(large_decimal_prices)
                 
