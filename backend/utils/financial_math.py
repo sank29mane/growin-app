@@ -106,8 +106,17 @@ class TechnicalIndicators:
             avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i]) / period
             avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i]) / period
 
-        rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, 100.0), where=avg_loss != 0)
-        rsi = 100.0 - (100.0 / (1.0 + rs))
+        rs = np.zeros_like(avg_gain)
+        mask_loss_zero = (avg_loss == 0)
+        mask_gain_zero = (avg_gain == 0)
+        mask_normal = ~mask_loss_zero
+
+        rs[mask_normal] = avg_gain[mask_normal] / avg_loss[mask_normal]
+
+        rsi = np.zeros_like(data)
+        rsi[mask_normal] = 100.0 - (100.0 / (1.0 + rs[mask_normal]))
+        rsi[mask_loss_zero & ~mask_gain_zero] = 100.0
+        rsi[mask_loss_zero & mask_gain_zero] = 50.0
         
         # Warm up period
         rsi[:period] = 50.0
