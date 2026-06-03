@@ -7,6 +7,7 @@ from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from typing import Dict, Any
 import logging
 from utils.financial_math import create_decimal
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -122,8 +123,10 @@ class QuantAgent(BaseAgent):
             
             # ORB Overlay: If ORB is BULLISH/BEARISH, it can override or boost technical signals
             if orb_signal and "BREAKOUT" in orb_signal["signal"]:
-                if "BULLISH" in orb_signal["signal"]: overall_signal = "buy"
-                elif "BEARISH" in orb_signal["signal"]: overall_signal = "sell"
+                if "BULLISH" in orb_signal["signal"]:
+                    overall_signal = "buy"
+                elif "BEARISH" in orb_signal["signal"]:
+                    overall_signal = "sell"
 
             signal = signal_map.get(overall_signal, Signal.NEUTRAL)
 

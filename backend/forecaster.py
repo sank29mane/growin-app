@@ -44,7 +44,6 @@ class TTMForecaster:
     def _init_ttm_model(self):
         """Initialize TTM-R2 bridge and Worker residency"""
         import os
-        import sys
         from utils.worker_client import get_worker_client
         
         # Use absolute paths for reliability in subprocess
@@ -231,7 +230,6 @@ class TTMForecaster:
 
     async def _ttm_forecast(self, ohlcv_data: List[Dict[str, Any]], prediction_steps: int, timeframe: str, ticker: str = None) -> Dict[str, Any]:
         """Generate forecast using Fused TTM-JMCE via Worker Service"""
-        import json
         from utils.worker_client import get_worker_client
         
         client = get_worker_client()

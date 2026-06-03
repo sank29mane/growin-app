@@ -22,7 +22,7 @@ except ImportError:
     growin_core = None
     RUST_CORE_AVAILABLE = False
 
-from utils.mlx_loader import mx, nn, HAS_MLX as MLX_AVAILABLE
+from utils.mlx_loader import mx, HAS_MLX as MLX_AVAILABLE
 
 try:
     import torch
@@ -35,9 +35,8 @@ from typing import Dict, List, Any, Optional, TypedDict, Union
 from enum import Enum
 from datetime import datetime
 from decimal import Decimal
-from utils.financial_math import create_decimal, safe_div, PRECISION_CURRENCY, TechnicalIndicators
+from utils.financial_math import create_decimal, safe_div, TechnicalIndicators
 from utils.portfolio_analyzer import PortfolioAnalyzer
-from utils.ticker_utils import TickerResolver
 
 class TechnicalIndicatorsDict(TypedDict, total=False):
     rsi: Optional[Decimal]
