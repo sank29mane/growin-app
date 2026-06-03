@@ -58,8 +58,8 @@ struct ConfigView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
-                        .accessibilityLabel("Cancel")
-                        .accessibilityHint("Dismisses the configuration view")
+                        .accessibilityLabel("Cancel configuration")
+                        .accessibilityHint("Dismisses the configuration view without saving")
                         .accessibilityAddTraits(.isButton)
                 }
             }
