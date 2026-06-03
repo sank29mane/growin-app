@@ -4,6 +4,8 @@ Forecasting Agent - Wrapper around TTM for standardized interface
 
 from typing import Dict, Any
 import logging
+import numpy as np
+
 
 from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from market_context import ForecastData
@@ -86,7 +88,7 @@ class ForecastingAgent(BaseAgent):
         # Fixes GBP/GBX inconsistencies by normalizing outliers to the series median.
         if len(ohlcv_data) > 10:
             try:
-                import numpy as np
+
                 # Extract closes to find median
                 closes = [float(d.get('c', 0)) for d in ohlcv_data if d.get('c')]
                 if closes:
@@ -198,7 +200,7 @@ class ForecastingAgent(BaseAgent):
             )
 
         except CircuitBreakerOpenError:
-            logger.error(f"Forecast skipped: circuit breaker is OPEN")
+            logger.error("Forecast skipped: circuit breaker is OPEN")
             return AgentResponse(
                 agent_name=self.config.name,
                 success=False,

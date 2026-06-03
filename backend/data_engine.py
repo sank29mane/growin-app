@@ -1,3 +1,5 @@
+from resilience import get_circuit_breaker
+import numpy as np
 import os
 import asyncio
 import logging
@@ -11,7 +13,7 @@ from data_models import PriceData
 # Set up logging
 logger = logging.getLogger(__name__)
 
-from resilience import get_circuit_breaker
+
 
 # Circuit Breakers for External Services (SOTA 2026 Resilience API)
 alpaca_circuit = get_circuit_breaker("alpaca", failure_threshold=5, recovery_timeout=60.0)
@@ -93,7 +95,6 @@ class AlpacaClient:
         try:
             import yfinance as yf
             import pandas as pd
-            import numpy as np
             from utils.currency_utils import CurrencyNormalizer
 
             # Map timeframe to yfinance period/interval
@@ -195,8 +196,6 @@ class AlpacaClient:
         """Synchronous helper to fetch bars from yfinance (to be run in thread)."""
         try:
             import yfinance as yf
-            import pandas as pd
-            import numpy as np
             from utils.currency_utils import CurrencyNormalizer
 
             # Map timeframe to yfinance period/interval
@@ -501,7 +500,6 @@ class AlpacaClient:
             # ⚡ OPTIMIZATION: Batched yf.download to prevent 429 rate limits
             import yfinance as yf
             import pandas as pd
-            import numpy as np
             from utils.currency_utils import CurrencyNormalizer
             
             period_map = {
@@ -848,7 +846,7 @@ class FinnhubClient:
                 # normalize_price returns Decimal
                 o = CurrencyNormalizer.normalize_price(candles['o'][i], ticker)
                 h = CurrencyNormalizer.normalize_price(candles['h'][i], ticker)
-                l = CurrencyNormalizer.normalize_price(candles['l'][i], ticker)
+                low_price = CurrencyNormalizer.normalize_price(candles['l'][i], ticker)
                 c = CurrencyNormalizer.normalize_price(candles['c'][i], ticker)
                 v = candles['v'][i] if i < len(candles['v']) else 0
 
@@ -860,7 +858,7 @@ class FinnhubClient:
                     t=int(candles['t'][i] * 1000),
                     open=o,
                     high=h,
-                    low=l,
+                    low=low_price,
                     close=c,
                     volume=int(v)
                 ).model_dump())
