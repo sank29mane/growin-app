@@ -13,23 +13,23 @@ struct PremiumTypography: ViewModifier {
         switch style {
         case .heading:
             content
-                .font(.system(size: 34, weight: .bold, design: .rounded))
+                .font(.system(size: 34, weight: .bold, design: .default))
                 .tracking(-0.5)
         case .title:
             content
-                .font(.system(size: 20, weight: .semibold, design: .rounded))
+                .font(.system(size: 20, weight: .semibold, design: .default))
                 .tracking(-0.2)
         case .body:
             content
-                .font(.system(size: 15, weight: .medium, design: .rounded))
+                .font(.system(size: 15, weight: .medium, design: .default))
                 .tracking(0)
         case .caption:
             content
-                .font(.system(size: 13, weight: .regular, design: .rounded))
+                .font(.system(size: 13, weight: .regular, design: .default))
                 .foregroundStyle(Color.textSecondary)
         case .overline:
             content
-                .font(.system(size: 11, weight: .black, design: .rounded))
+                .font(.system(size: 11, weight: .black, design: .monospaced))
                 .tracking(1.5)
                 .textCase(.uppercase)
                 .foregroundStyle(Color.textSecondary)
@@ -98,16 +98,16 @@ struct GlassCard<Content: View>: View {
     
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: cornerRadius)
+            Rectangle()
                 .fill(Color.growinSurface.opacity(0.4))
                 .background(.ultraThinMaterial)
             
             content
                 .padding()
         }
-        .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+        .clipShape(Rectangle())
         .overlay(
-            RoundedRectangle(cornerRadius: cornerRadius)
+            Rectangle()
                 .stroke(
                     LinearGradient(
                         colors: [
@@ -122,9 +122,9 @@ struct GlassCard<Content: View>: View {
                 )
         )
         .overlay(
-            RoundedRectangle(cornerRadius: cornerRadius)
-                .stroke(Color.stitchNeonIndigo.opacity(isHovered ? 0.3 : 0), lineWidth: 2)
-                .blur(radius: isHovered ? 4 : 0)
+            Rectangle()
+                .stroke(Color.stitchNeonIndigo.opacity(isHovered ? 0.3 : 0), lineWidth: 1)
+                .blur(radius: isHovered ? 2 : 0)
         )
         .shadow(color: Color.growinDarkBg.opacity(0.4), radius: 20, x: 0, y: 15)
         .scaleEffect(isHovered ? 1.015 : 1.0)
@@ -187,10 +187,10 @@ struct PremiumButton: View {
             .padding(.vertical, 14)
             .background(
                 ZStack {
-                    RoundedRectangle(cornerRadius: 16)
+                    Rectangle()
                         .fill(color)
                     
-                    RoundedRectangle(cornerRadius: 16)
+                    Rectangle()
                         .stroke(Color.glassBorder, lineWidth: 1)
                 }
             )
@@ -305,9 +305,9 @@ struct MarkdownText: View {
                                 BlurView(material: .menu, blendingMode: .withinWindow)
                             }
                         )
-                        .cornerRadius(8)
+                        .cornerRadius(0)
                         .overlay(
-                            RoundedRectangle(cornerRadius: 8)
+                            Rectangle()
                                 .stroke(Color.stitchNeonCyan.opacity(0.2), lineWidth: 0.5)
                         )
                         })
@@ -702,7 +702,7 @@ struct LogicTreeItem: View {
         }
         .padding(12)
         .background(Color.glassShine)
-        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .clipShape(Rectangle())
     }
 }
 
@@ -808,10 +808,10 @@ struct FinancialMetricView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             ZStack {
-                RoundedRectangle(cornerRadius: 20)
+                Rectangle()
                     .fill(Color.growinSurface.opacity(0.4))
                 
-                RoundedRectangle(cornerRadius: 20)
+                Rectangle()
                     .stroke(Color.glassShine, lineWidth: 1)
             }
         )
