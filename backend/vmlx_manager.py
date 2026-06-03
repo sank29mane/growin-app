@@ -48,13 +48,10 @@ class VMLXInferenceEngine:
 
         cmd = [
             "uv", "tool", "run", "vmlx", "serve",
-            "--model", model,
+            model,
             "--host", self.host,
             "--port", str(self.port),
-            "--memory-limit", memory_limit,
-            "--kv-cache-limit", kv_cache_limit,
-            "--quantization", quantization,
-            "--trust-remote-code"
+            "--cache-memory-mb", "12288"  # 12GB KV cache approximation
         ]
 
         logger.info(f"🚀 Starting vMLX Server: {' '.join(cmd)}")

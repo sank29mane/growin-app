@@ -86,6 +86,11 @@ class VisionAgent(BaseAgent):
                 "like triangles, head and shoulders, or flags. Provide coordinate hints if possible."
             )
             
+            # Use prepare_vlm_image_async if it is raw bytes or string path
+            if isinstance(image_data, (str, bytes)):
+                from utils.image_proc import prepare_vlm_image_async
+                image_data, _ = await prepare_vlm_image_async(image_data)
+
             # The engine already handles offloading to thread if it uses mlx_vlm directly in a blocking way
             raw_description = await self.engine.generate(processed_img, prompt)
             

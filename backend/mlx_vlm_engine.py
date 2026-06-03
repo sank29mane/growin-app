@@ -125,7 +125,7 @@ class MLXVLMInferenceEngine:
 
     async def generate(
         self,
-        image: Union[Image.Image, List[Image.Image]],
+        image: Union[str, bytes, Image.Image, List[Union[str, bytes, Image.Image]]],
         prompt: str,
         max_tokens: int = 512,
         temperature: float = 0.0,
@@ -149,13 +149,22 @@ class MLXVLMInferenceEngine:
         try:
             from mlx_vlm import generate
             from mlx_vlm.utils import prepare_inputs
+            from utils.image_proc import prepare_vlm_image_async
             
             if not isinstance(image, list):
                 images = [image]
             else:
                 images = image
                 
-            logger.info(f"VLM generating for {len(images)} image(s) with prompt: {prompt[:50]}...")
+            processed_images = []
+            for img in images:
+                if isinstance(img, (str, bytes)):
+                    pil_img, _ = await prepare_vlm_image_async(img)
+                    processed_images.append(pil_img)
+                else:
+                    processed_images.append(img)
+
+            logger.info(f"VLM generating for {len(processed_images)} image(s) with prompt: {prompt[:50]}...")
             
             # Wrap blocking generate in thread
             response = await asyncio.to_thread(
@@ -163,7 +172,7 @@ class MLXVLMInferenceEngine:
                 self.model,
                 self.processor,
                 prompt=prompt,
-                image=images,
+                image=processed_images,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 verbose=verbose
