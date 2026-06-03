@@ -1,26 +1,45 @@
 """
 Trading 212 Handlers - SOTA 2026 MAS Integration
-Provides optimized web handlers for Trading 212 data sync and portfolio visibility.
+Provides MCP tool handlers AND FastAPI router endpoints for Trading 212 data sync.
 """
 
-from fastapi import APIRouter, HTTPException, Depends
-from typing import List, Dict, Any
-import logging
 import asyncio
-from market_context import PortfolioPosition
-from data_models import T212AccountInfo
+import json
+import sys
+from typing import Any, Dict, List, Optional
+from datetime import datetime
+import pandas as pd
+import yfinance as yf
+from mcp.types import TextContent
+
+from fastapi import APIRouter, HTTPException
+from data_models import Position
+from typing import Dict, Any, List
+from utils import sanitize_nan
+from utils.currency_utils import normalize_all_positions, calculate_portfolio_value, CurrencyNormalizer
+from utils.ticker_utils import normalize_ticker
 from utils.http_client import agent_http_client
 
+# Type checking import
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    pass
+
+import logging
 logger = logging.getLogger(__name__)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FastAPI router (added by refactor/centralize-http-client PR)
+# ─────────────────────────────────────────────────────────────────────────────
+
 router = APIRouter(prefix="/t212", tags=["trading212"])
 
-@router.get("/account", response_model=T212AccountInfo)
+@router.get("/account", response_model=Dict[str, Any])
 async def get_account_summary():
     """
     Fetch aggregated account summary from Trading 212 via pooled connection.
     """
     try:
-        # Pooled request to Trading 212 internal/mock aggregator
         response = await agent_http_client.client.get("http://127.0.0.1:8001/t212/account", timeout=5.0)
         response.raise_for_status()
         return response.json()
@@ -28,7 +47,7 @@ async def get_account_summary():
         logger.error(f"Failed to fetch T212 account: {e}")
         raise HTTPException(status_code=502, detail="Trading 212 Gateway Timeout")
 
-@router.get("/positions", response_model=List[PortfolioPosition])
+@router.get("/positions", response_model=List[Position])
 async def get_positions():
     """
     Fetch all active positions from Trading 212.
@@ -53,3 +72,428 @@ async def trigger_sync():
     except Exception as e:
         logger.error(f"Manual sync failed: {e}")
         raise HTTPException(status_code=500, detail="Sync Command Rejected")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MCP Tool Handlers (original module — required by trading212_mcp_server.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def handle_analyze_portfolio(
+    arguments: Dict[str, Any],
+    active_account_type: str,
+    get_clients_func,
+    clients_dict: Dict[str, Any]
+) -> List[TextContent]:
+    """Handle the analyze_portfolio tool call."""
+    requested_account = arguments.get("account_type")
+    if not requested_account:
+        requested_account = active_account_type
+    else:
+        requested_account = requested_account.lower()
+
+    # Determine which clients to query
+    if requested_account == "all":
+        all_clients = get_clients_func()
+    elif requested_account in ["invest", "isa"]:
+        client = clients_dict.get(requested_account)
+        if not client:
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "error": f"No client available for {requested_account.upper()} account. Please configure API keys.",
+                            "requested_account": requested_account,
+                            "summary": {
+                                "total_positions": 0,
+                                "total_invested": 0.0,
+                                "current_value": 0.0,
+                                "total_pnl": 0.0,
+                                "total_pnl_percent": 0.0,
+                                "cash_balance": {"total": 0.0, "free": 0.0},
+                            },
+                            "positions": [],
+                        }
+                    ),
+                )
+            ]
+        all_clients = {requested_account: client}
+    else:
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps(
+                    {
+                        "error": f"Invalid account_type: {requested_account}. Must be 'invest', 'isa', or 'all'."
+                    }
+                ),
+            )
+        ]
+
+    total_invested = 0
+    total_current = 0
+    total_pnl = 0
+    total_cash = 0
+    free_cash = 0
+    all_positions = []
+    account_summaries = {}
+
+    # Fetch instruments for name and currency mapping
+    instrument_metadata = {}
+    try:
+        first_client = list(all_clients.values())[0] if all_clients else None
+        if first_client:
+            instruments = await first_client.get_instruments()
+            for inst in instruments:
+                ticker = inst.get("ticker")
+                if ticker:
+                    instrument_metadata[ticker] = {
+                        "name": inst.get("name"),
+                        "currency": inst.get("currencyCode"),
+                    }
+    except Exception as e:
+        print(f"Warning: Could not fetch instruments for metadata: {e}", file=sys.stderr)
+
+    async def process_account(acc_type, c_instance):
+        try:
+            positions, cash_info = await asyncio.gather(
+                c_instance.get_all_positions(), c_instance.get_account_cash()
+            )
+
+            position_objs = normalize_all_positions(positions, instrument_metadata)
+            acc_current = float(calculate_portfolio_value(position_objs))
+            positions = [p.model_dump(by_alias=True) for p in position_objs]
+
+            acc_invested = sum(
+                float(pos.get("averagePrice", 0)) * float(pos.get("quantity", 0))
+                for pos in positions
+            )
+            acc_pnl = sum(float(pos.get("unrealizedPnl", 0)) for pos in positions)
+
+            for p in positions:
+                ticker = p.get("ticker")
+                p["account_type"] = acc_type
+                if ticker in instrument_metadata:
+                    p["name"] = instrument_metadata[ticker]["name"]
+
+            return {
+                "type": acc_type,
+                "success": True,
+                "positions": positions,
+                "invested": acc_invested,
+                "current": acc_current,
+                "pnl": acc_pnl,
+                "cash": cash_info,
+            }
+        except Exception as e:
+            print(f"Error fetching data for {acc_type}: {e}", file=sys.stderr)
+            return {"type": acc_type, "success": False, "error": str(e)}
+
+    tasks = [process_account(acc_type, client) for acc_type, client in all_clients.items()]
+    results = await asyncio.gather(*tasks)
+
+    for res in results:
+        acc_type = res["type"]
+        if res["success"]:
+            total_invested += res["invested"]
+            total_current += res["current"]
+            total_pnl += res["pnl"]
+            total_cash += res["cash"].get("total", 0)
+            free_cash += res["cash"].get("free", 0)
+            all_positions.extend(res["positions"])
+
+            account_summaries[acc_type] = {
+                "total_invested": round(res["invested"], 2),
+                "current_value": round(res["current"], 2),
+                "total_pnl": round(res["pnl"], 2),
+                "total_pnl_percent": round(
+                    (res["pnl"] / res["invested"]) if res["invested"] > 0 else 0,
+                    4
+                ),
+                "cash_balance": res["cash"],
+                "status": "success",
+            }
+        else:
+            account_summaries[acc_type] = {"status": "error", "error": res["error"]}
+
+    analysis = {
+        "requested_account": requested_account,
+        "active_account_type": active_account_type,
+        "summary": {
+            "total_positions": len(all_positions),
+            "total_invested": round(total_invested, 2),
+            "current_value": round(total_current, 2),
+            "total_pnl": round(total_pnl, 2),
+            "total_pnl_percent": round(
+                (total_pnl / total_invested * 100) if total_invested > 0 else 0,
+                2,
+            ),
+            "net_deposits": round(total_current - total_pnl, 2),
+            "cash_balance": {
+                "total": round(total_cash, 2),
+                "free": round(free_cash, 2),
+            },
+            "accounts": account_summaries,
+        },
+        "positions": all_positions,
+    }
+
+    return [
+        TextContent(
+            type="text", text=json.dumps(sanitize_nan(analysis), default=str, separators=(",", ":"))
+        )
+    ]
+
+
+async def handle_market_order(
+    arguments: Dict[str, Any],
+    client: Any  # Trading212Client
+) -> List[TextContent]:
+    """Handle place_market_order with price validation."""
+    try:
+        from price_validation import PriceValidator
+        validation = await PriceValidator.validate_trade_price(arguments["ticker"])
+        if validation["action"] == "block":
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "error": "Trade blocked due to price variance > 3%",
+                        "details": validation["message"],
+                        "recommended_price": validation.get("recommended_price")
+                    })
+                )
+            ]
+    except Exception as e:
+        print(f"Warning: Price validation skipped/failed: {e}", file=sys.stderr)
+
+    result = await client.place_market_order(
+        ticker=arguments["ticker"],
+        quantity=arguments["quantity"],
+        order_type=arguments["order_type"],
+    )
+    return [
+        TextContent(
+            type="text",
+            text=f"Market order placed successfully:\n{json.dumps(result, separators=(',', ':'))}",
+        )
+    ]
+
+
+async def handle_get_price_history(
+    arguments: Dict[str, Any]
+) -> List[TextContent]:
+    """Handle get_price_history using Yahoo Finance API directly."""
+    ticker = normalize_ticker(arguments["ticker"])
+    start_date = arguments.get("start_date")
+    end_date = arguments.get("end_date")
+    period = arguments.get("period", "3mo")
+    interval = arguments.get("interval", "1d")
+
+    headers = {'User-Agent': 'Mozilla/5.0'}
+
+    if start_date:
+        end = end_date if end_date else datetime.now().strftime("%Y-%m-%d")
+        try:
+            start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").timestamp())
+            end_ts = int(datetime.strptime(end, "%Y-%m-%d").timestamp())
+            url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}?period1={start_ts}&period2={end_ts}&interval={interval}"
+        except Exception as e:
+            return [TextContent(type="text", text=f"Error parsing dates: {e}")]
+    else:
+        url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}?range={period}&interval={interval}"
+
+    try:
+        resp = await agent_http_client.client.get(url, headers=headers, timeout=10.0)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        return [TextContent(type="text", text=f"Failed to fetch historical data for {ticker}: {e}")]
+
+    result_data = data.get("chart", {}).get("result", [])
+    if not result_data:
+        return [TextContent(type="text", text=f"No historical data found for {ticker}")]
+
+    res = result_data[0]
+    timestamps = res.get("timestamp", [])
+    if not timestamps:
+        return [TextContent(type="text", text=f"No historical data found for {ticker}")]
+
+    quote = res.get("indicators", {}).get("quote", [{}])[0]
+    adjclose = res.get("indicators", {}).get("adjclose", [{}])[0].get("adjclose")
+
+    df = pd.DataFrame({
+        "Date": pd.to_datetime(timestamps, unit="s", utc=True),
+        "Open": quote.get("open", []),
+        "High": quote.get("high", []),
+        "Low": quote.get("low", []),
+        "Close": quote.get("close", []),
+        "Volume": quote.get("volume", [])
+    })
+
+    meta = res.get("meta", {})
+    currency = meta.get("currency", "").upper()
+    is_uk = ticker.endswith(".L") or currency in ["GBX", "GBP"] or CurrencyNormalizer.is_pence_ticker(ticker)
+
+    if is_uk:
+        df = df.ffill().bfill()
+        for col in ["Open", "High", "Low", "Close"]:
+            df[col] = df[col].apply(
+                lambda x: float(CurrencyNormalizer.pence_to_pounds(x)) if x is not None and not pd.isna(x) else x
+            )
+
+    df = df.ffill()
+    df = df.dropna(subset=["Open", "High", "Low", "Close"], how="all")
+
+    if df.empty:
+        return [TextContent(type="text", text=f"No valid historical data points found for {ticker}")]
+
+    df.set_index("Date", inplace=True)
+
+    hist_copy = df.copy()
+    hist_copy["Daily_Change"] = hist_copy["Close"].diff()
+    hist_copy["Daily_Change_Pct"] = hist_copy["Close"].pct_change() * 100
+
+    start_price = hist_copy["Close"].iloc[0]
+    end_price = hist_copy["Close"].iloc[-1]
+    total_change = end_price - start_price
+    total_change_pct = (total_change / start_price) * 100
+
+    up_days = (hist_copy["Daily_Change"] > 0).sum()
+    down_days = (hist_copy["Daily_Change"] < 0).sum()
+    unchanged_days = (hist_copy["Daily_Change"] == 0).sum()
+
+    high_price = hist_copy["High"].max()
+    low_price = hist_copy["Low"].min()
+    high_date = hist_copy["High"].idxmax()
+    low_date = hist_copy["Low"].idxmin()
+
+    avg_daily_change = hist_copy["Daily_Change"].mean()
+    avg_daily_change_pct = hist_copy["Daily_Change_Pct"].mean()
+    volatility = hist_copy["Daily_Change_Pct"].std()
+
+    hist_copy = hist_copy.reset_index()
+    hist_copy["Date"] = hist_copy["Date"].apply(
+        lambda x: x.strftime("%Y-%m-%d") if hasattr(x, "strftime") else str(x)
+    )
+
+    for col in ["Open", "High", "Low", "Close", "Daily_Change", "Daily_Change_Pct"]:
+        if col in hist_copy.columns:
+            hist_copy[col] = hist_copy[col].round(2)
+
+    first_day = hist_copy.iloc[0]
+    last_day = hist_copy.iloc[-1]
+    total_days = len(hist_copy)
+    price_data_note = f"Complete dataset with {total_days} rows."
+
+    result = {
+        "ticker": ticker,
+        "period": {
+            "start_date": first_day["Date"],
+            "end_date": last_day["Date"],
+            "total_trading_days": total_days,
+        },
+        "key_prices": {
+            "first_day": {
+                "date": first_day["Date"],
+                "open": round(first_day["Open"], 2),
+                "close": round(first_day["Close"], 2),
+            },
+            "last_day": {
+                "date": last_day["Date"],
+                "open": round(last_day["Open"], 2),
+                "close": round(last_day["Close"], 2),
+            },
+            "period_high": {
+                "price": round(high_price, 2),
+                "date": high_date.strftime("%Y-%m-%d") if hasattr(high_date, "strftime") else str(high_date),
+            },
+            "period_low": {
+                "price": round(low_price, 2),
+                "date": low_date.strftime("%Y-%m-%d") if hasattr(low_date, "strftime") else str(low_date),
+            },
+        },
+        "performance": {
+            "total_change": round(total_change, 2),
+            "total_change_percent": round(total_change_pct, 2),
+            "avg_daily_change": round(avg_daily_change, 2),
+            "avg_daily_change_percent": round(avg_daily_change_pct, 2),
+            "volatility_percent": round(volatility, 2),
+        },
+        "daily_movement": {
+            "up_days": int(up_days),
+            "down_days": int(down_days),
+            "unchanged_days": int(unchanged_days),
+            "up_down_ratio": round(up_days / down_days, 2) if down_days > 0 else None,
+        },
+        "price_data_info": price_data_note,
+        "price_data": hist_copy.reset_index()[
+            ["Date", "Open", "High", "Low", "Close", "Volume", "Daily_Change", "Daily_Change_Pct"]
+        ].to_dict(orient="records"),
+    }
+
+    return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+
+
+async def handle_get_current_price(arguments: Dict[str, Any]) -> List[TextContent]:
+    ticker = normalize_ticker(arguments.get("ticker"))
+    price_data = {}
+    source = "Trading 212"
+
+    try:
+        source = "Yahoo Finance API"
+        url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}?range=1d&interval=1d"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+
+        resp = await agent_http_client.client.get(url, headers=headers, timeout=10.0)
+        resp.raise_for_status()
+        data = resp.json()
+
+        result = data.get("chart", {}).get("result", [])
+        if not result:
+            raise ValueError("No result in API response")
+
+        res = result[0]
+        meta = res.get("meta", {})
+
+        current_price = meta.get("regularMarketPrice")
+        currency = meta.get("currency", "USD").upper()
+
+        if current_price is not None:
+            is_uk = ticker.endswith(".L") or currency in ["GBX", "GBP"] or CurrencyNormalizer.is_pence_ticker(ticker)
+            if is_uk:
+                current_price = float(CurrencyNormalizer.pence_to_pounds(current_price))
+
+        if current_price is None:
+            quote = res.get("indicators", {}).get("quote", [{}])[0]
+            close_prices = quote.get("close", [])
+            valid_closes = [p for p in close_prices if p is not None]
+            if valid_closes:
+                current_price = valid_closes[-1]
+
+        currency = meta.get("currency", "USD")
+
+        if current_price is not None:
+            price_data = {
+                "ticker": ticker,
+                "price": current_price,
+                "currency": currency,
+                "source": source,
+            }
+        else:
+            raise ValueError("Price not found")
+
+    except Exception as e:
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps(
+                    {
+                        "error": f"Failed to fetch price for {ticker}: {e}",
+                        "source": source,
+                    }
+                ),
+            )
+        ]
+
+    return [TextContent(type="text", text=json.dumps(price_data, indent=2))]
