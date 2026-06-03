@@ -570,6 +570,7 @@ extension PortfolioView {
         .opacity(viewModel.isLoading ? 0.5 : 1)
         .accessibilityLabel("Refresh Portfolio")
         .accessibilityHint("Refreshes portfolio data from the server")
+        .accessibilityAddTraits(.isButton)
         .disabled(viewModel.isLoading)
     }
 
