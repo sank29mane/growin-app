@@ -713,7 +713,7 @@ class AlpacaClient:
                      }
                 
                 return {
-                    "cash_balance": {"total": Decimal(str(acct.cash)), "currency": str(acct.currency)}, # Fix dict-item (str expected)
+                    "cash_balance": {"total": str(acct.cash), "currency": str(acct.currency)},
 
                     "portfolio_value": Decimal(str(acct.portfolio_value)),
                     "unrealized_pnl": Decimal(str(acct.equity)) - Decimal(str(acct.last_equity)), # Approx
