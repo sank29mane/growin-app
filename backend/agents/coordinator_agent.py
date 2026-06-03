@@ -64,6 +64,7 @@ class CoordinatorAgent(BaseAgent):
         self.llm = llm
         self.mcp_client = mcp_client
         self.specialists: Dict[str, BaseAgent] = {}
+
         self.ticker_resolver = TickerResolver()
         
     def register_specialists(self, agents: Dict[str, BaseAgent]):
