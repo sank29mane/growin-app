@@ -42,12 +42,19 @@ class WhaleAgent(BaseAgent):
         # 1. Handle "MARKET" Ticker with Bellwether Aggregation
         if ticker == "MARKET":
             bellwethers = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN"]
-            logger.info(
-                "WhaleAgent: Performing Bellwether Aggregation for broad market..."
-            )
+            logger.info("WhaleAgent: Performing Bellwether Aggregation for broad market...")
+            
+            # Optimization: Fetch bars for all bellwethers in one batch to prevent N+1 queries during fallback.
+            # Only do this if they end up needing volume anomaly (e.g., if trades fetch fails).
+            batch_bars = await self.alpaca.get_batch_bars(bellwethers, timeframe="1Day", limit=25)
 
             # Use parallel execution for speed
-            tasks = [self.analyze({"ticker": b}) for b in bellwethers]
+            # Optimization: Skip institutional holdings for bellwethers as it's not used in aggregation
+            tasks = [self.analyze({
+                "ticker": b,
+                "skip_holdings": True,
+                "pre_fetched_bars": batch_bars.get(b)
+            }) for b in bellwethers]
             results = await asyncio.gather(*tasks)
 
             valid_results = [
@@ -109,9 +116,8 @@ class WhaleAgent(BaseAgent):
 
             # --- FALLBACK: Data Maximization via Volume Anomaly ---
             if not trades:
-                logger.info(f"WhaleAgent: No trades found for {ticker} Attempting Volume Anomaly Detection...")
-                return await self._analyze_via_volume_anomaly(ticker)
-
+                logger.info(f"WhaleAgent: No trades found for {ticker}. Attempting Volume Anomaly Detection...")
+                return await self._analyze_via_volume_anomaly(ticker, context.get("pre_fetched_bars"))
             from utils.currency_utils import DataSourceNormalizer
 
             ticker_currency = DataSourceNormalizer.get_currency_for_ticker(ticker)
@@ -139,6 +145,7 @@ class WhaleAgent(BaseAgent):
                 value = p * s
                 if value >= whale_threshold:
                     t = trades[i]
+                    large_decimal_prices.append(p)
                     large_trades.append({
                         "price": float(p),
                         "size": float(s),
@@ -318,18 +325,17 @@ class WhaleAgent(BaseAgent):
             logger.warning(f"13F fetch failed: {e}")
             return []
 
-    async def _analyze_via_volume_anomaly(self, ticker: str) -> AgentResponse:
+    async def _analyze_via_volume_anomaly(self, ticker: str, pre_fetched_bars: Optional[Dict] = None) -> AgentResponse:
         """
         Fallback: Analyze daily volume vs 20-day average to detect hidden institutional activity.
         Useful when granular trade data is unavailable (e.g. some LSE stocks or free tier).
         """
         try:
             from utils.financial_math import create_decimal
-
-            # Fetch daily bars
-            bars_resp = await self.alpaca.get_historical_bars(
-                ticker, limit=25, timeframe="1Day"
-            )
+            # Fetch daily bars if not pre-fetched
+            bars_resp = pre_fetched_bars
+            if not bars_resp:
+                bars_resp = await self.alpaca.get_historical_bars(ticker, limit=25, timeframe="1Day")
             if not bars_resp or "bars" not in bars_resp or len(bars_resp["bars"]) < 20:
                 return AgentResponse(
                     agent_name=self.config.name,
@@ -340,7 +346,6 @@ class WhaleAgent(BaseAgent):
                     ).model_dump(),
                     latency_ms=0,
                 )
-
             bars = bars_resp["bars"]
 
             # Only pre-parse the elements we actually need (last 20 + last 1)
