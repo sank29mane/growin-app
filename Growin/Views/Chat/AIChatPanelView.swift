@@ -5,6 +5,7 @@ import SwiftUI
 struct AIChatPanelView: View {
     @State private var chatInput: String = ""
     @State private var selectedAccountType: String = "all"
+    @State private var selectedFilter: AccountFilter = .all
     
     // State to simulate switching into an active chat view vs the "Home" state
     @State private var hasStartedChat: Bool = false
@@ -288,6 +289,22 @@ private struct RoundedCornerShape: Shape {
         path.addArc(center: CGPoint(x: minx + tl, y: miny + tl), radius: tl, startAngle: Angle(degrees: 180), endAngle: Angle(degrees: 270), clockwise: false)
         
         return path
+    }
+}
+
+enum AccountFilter: String, CaseIterable, Identifiable {
+    case all = "ALL"
+    case invest = "INVEST"
+    case isa = "ISA"
+    
+    var id: String { self.rawValue }
+    
+    var icon: String {
+        switch self {
+        case .all: return "brain.filled.head.profile"
+        case .invest: return "chart.line.uptrend.xyaxis"
+        case .isa: return "shield.fill"
+        }
     }
 }
 

@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v5.0
 milestone_name: MLX Intelligence & macOS 2026 UX Overhaul
 status: ACTIVE
-last_updated: "2026-06-03T21:40:00.000Z"
-last_activity: "2026-06-03 — Swarm Calibration (44-03) Verified"
+last_updated: "2026-06-03T21:50:00.000Z"
+last_activity: "2026-06-03 — 0px Ledger UI Scaffold (45-01) Verified"
 progress:
   total_phases: 6
   completed_phases: 3
   total_plans: 9
-  completed_plans: 9
+  completed_plans: 10
 ---
 
 # GSD STATE MEMORY
@@ -17,14 +17,15 @@ progress:
 ## Current Position
 
 Phase: 45 — Sovereign UX & macOS 2026 Redesign
-Plan: 01 — SwiftUI 17+ 0px Ledger UI Scaffold
+Plan: 02 — Stage Manager 2.0 Saved Window Sets Integration
 Status: PLANNED
-Last activity: 2026-06-03 — Swarm Calibration (44-03) Verified
+Last activity: 2026-06-03 — 0px Ledger UI Scaffold (45-01) Verified
 
 ## Summary
 
 - **Phase 43 Completed**: All engine transition and hardware calibration tasks verified.
 - **Phase 44 Completed**: Swarm calibration timeouts, dynamic memory-aware scaling, and specialist summarization implemented and verified.
+- **Phase 45-01 Completed**: SwiftUI 17+ 0px Ledger UI layout primitives and theme refactoring implemented and verified.
 
 ## Milestone Status
 
@@ -38,8 +39,8 @@ Last activity: 2026-06-03 — Swarm Calibration (44-03) Verified
 
 ## Next Focus
 
-1. **Task 45-01.1**: Define SwiftUI 17+ (Tahoe) window style primitives.
-2. **Task 45-01.2**: Implement basic 0px corner Ledger view layout.
+1. **Task 45-02.1**: Define window scene groups in `GrowinApp.swift`.
+2. **Task 45-02.2**: Implement workspace set trigger in `MainTabView.swift`.
 
 ## Accumulated Context
 
