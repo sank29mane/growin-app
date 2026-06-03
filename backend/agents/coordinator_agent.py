@@ -64,6 +64,7 @@ class CoordinatorAgent(BaseAgent):
         self.llm = llm
         self.mcp_client = mcp_client
         self.specialists: Dict[str, BaseAgent] = {}
+        self.ticker_resolver = TickerResolver()
         
     def register_specialists(self, agents: Dict[str, BaseAgent]):
         """Register specialist agents for routing"""
@@ -104,9 +105,8 @@ class CoordinatorAgent(BaseAgent):
         
         # COORDINATOR FIX: Robust normalization via Resolver
         if ticker:
-            from utils.ticker_utils import TickerResolver
             original_ticker = ticker
-            ticker = TickerResolver().normalize(ticker)
+            ticker = self.ticker_resolver.normalize(ticker)
             if ticker != original_ticker:
                 logger.info(f"Ticker normalized (Resolver): {original_ticker} -> {ticker}")
             context["ticker"] = ticker
@@ -176,11 +176,7 @@ class CoordinatorAgent(BaseAgent):
         return AgentResponse(
             agent_name=self.config.name,
             success=market_context.is_complete(),
-            data=market_context.model_dump(),
-            metadata={
-                "routing": routing_decision,
-                "correlation_id": c_id
-            },
+            data=response_data,
             latency_ms=0.0
         )
 
@@ -334,12 +330,10 @@ class CoordinatorAgent(BaseAgent):
                         search_result = json.loads(search_result)
                 except Exception as e:
                     logger.warning(f"MCP search failed, falling back to local resolver: {e}")
-                    resolver = TickerResolver()
-                    resolved = await resolver.resolve(term)
+                    resolved = await self.ticker_resolver.resolve(term)
                     search_result = [{"ticker": resolved, "name": term}] if resolved else []
             else:
-                resolver = TickerResolver()
-                resolved = await resolver.resolve(term)
+                resolved = await self.ticker_resolver.resolve(term)
                 search_result = [{"ticker": resolved, "name": term}] if resolved else []
 
             # Check if search_result is wrapped in TextContent or JSON string
@@ -387,7 +381,7 @@ class CoordinatorAgent(BaseAgent):
                     found_ticker = best_match["ticker"]
 
                     # Normalize the found ticker via Resolver
-                    normalized = TickerResolver().normalize(found_ticker)
+                    normalized = self.ticker_resolver.normalize(found_ticker)
 
                     logger.info(f"Coordinator Tier 2: Found best match '{best_match['name']}' ({found_ticker}) score={highest_score:.2f} -> {normalized}")
                     return normalized
