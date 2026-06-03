@@ -37,24 +37,24 @@ async def test_coordinator_guardrails():
         # Test 2: Analytical Intent (Structured Output)
         query = "How is Apple stock performing today?"
         logger.info(f"\nTesting Analytical Query: '{query}'")
-        intent = await agent._classify_intent(query)
+        intent = await agent._get_routing_decision(query)
         logger.info(f"Result: {json.dumps(intent, indent=2)}")
         
-        assert intent.get("type") == "analytical", "Classification failed for analytical query"
-        assert "quant" in intent.get("needs", []), "Missing quant need for stock query"
+        assert intent.get("intent") == "analytical", "Classification failed for analytical query"
+        assert "quant" in intent.get("required_agents", []), "Missing quant need for stock query"
         
         # Test 3: Educational Intent with Grounding
         query = "What is the difference between RSI and MACD?"
         logger.info(f"\nTesting Educational Query: '{query}'")
-        intent = await agent._classify_intent(query)
+        intent = await agent._get_routing_decision(query)
         logger.info(f"Result: {json.dumps(intent, indent=2)}")
         
-        assert intent.get("type") == "educational", "Classification failed for educational query"
+        assert intent.get("intent") == "educational", "Classification failed for educational query"
         
         # Test 4: Hardware Check (Account Context)
         query = "How is my ISA doing?"
         logger.info(f"\nTesting Account Query: '{query}'")
-        intent = await agent._classify_intent(query)
+        intent = await agent._get_routing_decision(query)
         logger.info(f"Result: {json.dumps(intent, indent=2)}")
         
         # Note: The system prompt might capture account in 'account' field if supported
@@ -65,7 +65,7 @@ async def test_coordinator_guardrails():
         long_query = "test " * 1000
         logger.info("\nTesting Input Sanitization (Long Query)")
         # We just want to ensure it doesn't crash and returns valid JSON
-        intent = await agent._classify_intent(long_query)
+        intent = await agent._get_routing_decision(long_query)
         logger.info("Sanitization check passed (returned valid JSON)")
         
         logger.info("\n✅ All Coordinator Guardrail Tests Passed!")
