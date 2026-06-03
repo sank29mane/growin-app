@@ -42,7 +42,8 @@ struct WatchlistView: View {
                                         .contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
-                                .accessibilityAddTraits(.isButton)
+                                .accessibilityLabel("\(asset.ticker), \(asset.name). Price: \(String(format: "%.2f", asset.price)), Change: \(asset.change >= 0 ? "Up" : "Down") \(String(format: "%.2f", abs(asset.change)))%")
+                                .accessibilityAddTraits(selectedAssetId == asset.id ? [.isSelected, .isButton] : [.isButton])
                                 .accessibilityHint("Selects asset for analysis")
                                 .background(selectedAssetId == asset.id ? Color.white.opacity(0.05) : Color.clear)
                                 .border(SovereignTheme.Colors.technicalBorder.opacity(0.2), width: 0.5)
