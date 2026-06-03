@@ -178,7 +178,7 @@ struct ChatView: View {
                     .background(Color.red)
                     .cornerRadius(8)
                     .accessibilityLabel("Retry sending message")
-                    .accessibilityHint("Attempts to resend your last message to the AI")
+                    .accessibilityHint("Attempts to send the failed message again")
                     .accessibilityAddTraits(.isButton)
                 }
                 .font(.caption)
