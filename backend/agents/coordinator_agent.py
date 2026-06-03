@@ -521,7 +521,3 @@ class CoordinatorAgent(BaseAgent):
             # Note: GoalData must be imported if not already in context, but dynamic import ok
             from market_context import GoalData
             context.goal = GoalData(**data)
-<<<<<<< HEAD
-
-=======
->>>>>>> 5376716 (Fix VLM async processing, CoordinatorAgent methods, and Benchmark N+1)
