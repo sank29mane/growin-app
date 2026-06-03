@@ -70,8 +70,15 @@ class WorkerClient:
             
         async with self.io_lock:
             try:
+                from decimal import Decimal
+                class CustomEncoder(json.JSONEncoder):
+                    def default(self, obj):
+                        if isinstance(obj, Decimal):
+                            return float(obj)
+                        return super().default(obj)
+
                 # Encode request
-                req_json = json.dumps(request) + "\n"
+                req_json = json.dumps(request, cls=CustomEncoder) + "\n"
                 self.process.stdin.write(req_json.encode())
                 await self.process.stdin.drain()
                 

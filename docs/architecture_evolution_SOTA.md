@@ -53,3 +53,8 @@ The Growin App architecture has evolved from a simple interactive advisor into a
 ---
 
 *Status: IMPLEMENTED, PROFILE VERIFIED & AUDITED (May 2026)*
+
+## 2026 SOTA Refactor Technical Additions
+- Abstract `analyze` method explicitly added to `CoordinatorAgent` to prevent instantiation failures.
+- `execute` acts as main router in `CoordinatorAgent`.
+- Benchmark file for N+1 correctly placed and verified.

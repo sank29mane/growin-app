@@ -561,8 +561,8 @@ def _generate_ai_analysis_text(quant_data: dict, forecast_data: dict, bars: list
     parts = []
     
     # 1. Current trend from quant data
-    support = quant_data.get("support_level") or 0
-    resistance = quant_data.get("resistance_level") or 0
+    support = float(quant_data.get("support_level") or 0)
+    resistance = float(quant_data.get("resistance_level") or 0)
     
     if not bars or len(bars) < 21:
         return "Insufficient data for trend analysis."

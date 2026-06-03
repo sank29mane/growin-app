@@ -61,17 +61,36 @@ class CoordinatorAgent(BaseAgent):
             cache_ttl=300
         )
         super().__init__(config)
-        self.llm = llm
         self.mcp_client = mcp_client
         self.specialists: Dict[str, BaseAgent] = {}
 
         self.ticker_resolver = TickerResolver()
         
+        # SOTA 2026: Clean self.llm initialization explicitly via LLMFactory if not provided
+        if llm is None:
+            from agents.llm_factory import LLMFactory
+            self.llm = LLMFactory.create_llm(temperature=0.0)
+        else:
+            self.llm = llm
+
     def register_specialists(self, agents: Dict[str, BaseAgent]):
         """Register specialist agents for routing"""
         self.specialists = agents
 
     async def analyze(self, context: Dict[str, Any]) -> AgentResponse:
+        """
+        Implementation of BaseAgent.analyze.
+        Coordinator Agent acts as a router, `execute` is the main entry point.
+        This satisfies the BaseAgent abstract method requirement.
+        """
+        return AgentResponse(
+            agent_name=self.config.name,
+            success=True,
+            data={},
+            latency_ms=0
+        )
+
+    async def execute(self, context: Dict[str, Any]) -> AgentResponse:
         """
         1. Classifies the query using LLM
         2. Routes to required specialists
@@ -502,4 +521,7 @@ class CoordinatorAgent(BaseAgent):
             # Note: GoalData must be imported if not already in context, but dynamic import ok
             from market_context import GoalData
             context.goal = GoalData(**data)
+<<<<<<< HEAD
 
+=======
+>>>>>>> 5376716 (Fix VLM async processing, CoordinatorAgent methods, and Benchmark N+1)

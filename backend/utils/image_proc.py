@@ -1,3 +1,4 @@
+import asyncio
 """Utility for image preprocessing for VLM consumption."""
 import io
 import logging
