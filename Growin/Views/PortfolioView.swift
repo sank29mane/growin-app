@@ -34,6 +34,9 @@ struct PortfolioView: View {
                                 Button("Close") {
                                     viewModel.selectedPosition = nil
                                 }
+                                .accessibilityLabel("Close chart")
+                                .accessibilityHint("Dismisses the selected stock chart view")
+                                .accessibilityAddTraits(.isButton)
                             }
                         }
                 }
