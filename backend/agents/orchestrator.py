@@ -1,12 +1,12 @@
 import asyncio
 import logging
 import os
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.openai import OpenAIModel
 from pydantic import BaseModel
 from utils.hardware_guard import hardware_guard
-from .swarm_utils import ContextBuffer, AgentResult
+from .swarm_utils import ContextBuffer, AgentResult, summarize_specialist_data
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +27,15 @@ class SwarmOrchestrator:
     using pydantic-ai.
     """
     
-    def __init__(self, model_name: str = "nemotron-3-30b-moe-jang-q4_k_m"):
+    def __init__(
+        self, 
+        model_name: str = "nemotron-3-30b-moe-jang-q4_k_m",
+        reflex_timeout: float = 0.4,
+        synthesis_timeout: float = 1.5
+    ):
         self.model_name = model_name
+        self.reflex_timeout = reflex_timeout
+        self.synthesis_timeout = synthesis_timeout
         # Initialize OpenAI-compatible model for vMLX
         self.model = OpenAIModel(
             model_name,
@@ -44,6 +51,28 @@ class SwarmOrchestrator:
             )
         )
         self.buffer = ContextBuffer()
+
+    def _get_scaled_timeouts(self) -> Tuple[float, float]:
+        """
+        Inspect virtual memory to adjust timeouts dynamically under heavy load.
+        """
+        import psutil
+        try:
+            mem = psutil.virtual_memory()
+            available_gb = mem.available / (1024**3)
+            percent = mem.percent
+            
+            # If memory pressure is high (>85% or <6GB free RAM), scale timeouts by 1.5x
+            if percent > 85.0 or available_gb < 6.0:
+                logger.warning(
+                    f"⚠️ High memory pressure detected ({percent}% used, {available_gb:.2f}GB free). "
+                    "Scaling timeout thresholds by 1.5x."
+                )
+                return self.reflex_timeout * 1.5, self.synthesis_timeout * 1.5
+        except Exception as e:
+            logger.warning(f"Failed to read virtual memory for scaling timeouts: {e}")
+            
+        return self.reflex_timeout, self.synthesis_timeout
 
     async def test_tool(self, ctx: RunContext) -> str:
         """A simple test tool to verify delegation logic."""
@@ -63,7 +92,10 @@ class SwarmOrchestrator:
         Stage 1: Reflex - triggered immediately when fast specialist data is available.
         Stage 2: Synthesis - triggered when slow specialist data is available, refining or pivoting.
         """
-        # Ensure we have some fast data (wait up to 500ms for fast specialists)
+        scaled_reflex, scaled_synthesis = self._get_scaled_timeouts()
+        logger.info(f"Calibration timeouts: Reflex={scaled_reflex}s, Synthesis={scaled_synthesis}s")
+
+        # Ensure we have some fast data
         fast_sources = {"QuantEngine", "ForecastBridge", "QuantAgent"}
         all_results = await self.buffer.get_all()
         fast_data = [r for r in all_results if r.source in fast_sources]
@@ -72,7 +104,7 @@ class SwarmOrchestrator:
             if len(all_results) == 0:
                 # Trigger default simulation in case nothing is pushed
                 asyncio.create_task(self._simulate_fast_specialist())
-            await self.buffer.wait_for_new(timeout=0.5)
+            await self.buffer.wait_for_new(timeout=scaled_reflex)
             all_results = await self.buffer.get_all()
             fast_data = [r for r in all_results if r.source in fast_sources]
 
@@ -83,8 +115,9 @@ class SwarmOrchestrator:
                 # Fallback to whatever we have if no specific fast data found
                 fast_data = [all_results[0]]
 
+            # Apply summarization to preserve prefix caching
             fast_context = "\n".join([
-                f"- {r.source}: {r.data} (Conviction: {r.conviction}/10)" 
+                f"- {r.source}: {summarize_specialist_data(r).data} (Conviction: {r.conviction}/10)" 
                 for r in fast_data
             ])
             
@@ -108,16 +141,17 @@ class SwarmOrchestrator:
         slow_data = [r for r in all_results if r not in fast_data]
 
         if not slow_data:
-            logger.info("⏳ Waiting up to 2.0s for slow specialist data...")
+            logger.info(f"⏳ Waiting up to {scaled_synthesis}s for slow specialist data...")
             self.buffer.new_data_event.clear()  # Clear stale events from fast data pushes
-            await self.buffer.wait_for_new(timeout=2.0)
+            await self.buffer.wait_for_new(timeout=scaled_synthesis)
             all_results = await self.buffer.get_all()
             slow_data = [r for r in all_results if r not in fast_data]
 
         if slow_data:
             logger.info("📥 Slow data received, triggering Stage 2: Synthesis Pivot")
+            # Apply summarization to preserve prefix caching
             slow_context = "\n".join([
-                f"- {r.source}: {r.data} (Conviction: {r.conviction}/10)" 
+                f"- {r.source}: {summarize_specialist_data(r).data} (Conviction: {r.conviction}/10)" 
                 for r in slow_data
             ])
             
