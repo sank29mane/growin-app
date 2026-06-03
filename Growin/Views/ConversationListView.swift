@@ -208,7 +208,7 @@ struct ConversationListView: View {
                         Button("Cancel") { isEditing = false; selectedIds.removeAll() }
                             .foregroundStyle(.white)
                             .accessibilityLabel("Cancel editing")
-                            .accessibilityHint("Exits edit mode and clears selection")
+                            .accessibilityHint("Cancels the selection of conversations to delete")
                             .accessibilityAddTraits(.isButton)
                     } else {
                         HStack {
@@ -246,8 +246,8 @@ struct ConversationListView: View {
                             if !isEditing { selectedIds.removeAll() }
                         }
                         .foregroundStyle(.white)
-                        .accessibilityLabel(isEditing ? "Finish editing" : "Edit conversations")
-                        .accessibilityHint(isEditing ? "Exits edit mode" : "Enters edit mode to select conversations")
+                        .accessibilityLabel(isEditing ? "Done editing" : "Edit conversations")
+                        .accessibilityHint(isEditing ? "Finishes editing and clears selection" : "Allows selecting multiple conversations for deletion")
                         .accessibilityAddTraits(.isButton)
                     }
                 }
