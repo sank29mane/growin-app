@@ -104,6 +104,10 @@ class QuantAgent(BaseAgent):
                                  logger.info(f"QuantAgent: NPU Covariance Velocity extracted: {cov_velocity:.4f}")
                          except Exception as jmce_e:
                              logger.warning(f"QuantAgent: JMCE Velocity extraction failed: {jmce_e}", exc_info=True)
+                             if isinstance(jmce_e, (ImportError, ModuleNotFoundError)) or "numpy" in str(jmce_e).lower() or "mlx" in str(jmce_e).lower():
+                                 logger.error("QuantAgent: Critical dependency missing for NPU acceleration. Ensure MLX/NumPy are installed.")
+                                 # Re-raise to ensure it is not silently swallowed
+                                 raise jmce_e
                     
                     orb_signal = detector.detect_breakout(ohlcv_data, covariance_velocity=cov_velocity)
                     logger.info(f"QuantAgent: ORB detection complete for {ticker}: {orb_signal['signal']}")
