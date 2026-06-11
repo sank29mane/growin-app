@@ -241,40 +241,23 @@ class WhaleAgent(BaseAgent):
             )
 
     async def _fetch_institutional_holdings(self, ticker: str) -> List[Dict]:
-        """Fetch institutional holdings (13F) data for a ticker using Tavily/Search."""
+        """Fetch institutional holdings (13F) data for a ticker using Search Plugin."""
         try:
-            # We use Tavily here as a robust way to find recent 13F filings summarized on sites like Fintel or WhaleWisdom
+            # We use Search Plugin here as a robust way to find recent 13F filings summarized on sites like Fintel or WhaleWisdom
             # This is more resilient than direct EDGAR scraping for a prototype
-            from tavily import AsyncTavilyClient
-            import os
+            from utils.search_provider import get_search_plugin
+            search_plugin = get_search_plugin()
 
-            tavily_key = os.getenv("TAVILY_API_KEY")
-            if not tavily_key:
+            if not search_plugin:
                 return []
                 
             query = f"top institutional holders and 13F filing summary for {ticker} 2025 2026"
             
-            url = "https://api.tavily.com/search"
-            headers = {"Content-Type": "application/json"}
-            payload = {
-                "api_key": tavily_key,
-                "query": query,
-                "search_depth": "advanced",
-                "max_results": 5
-            }
-            
-            response = await agent_http_client.execute_with_breaker(
-                self._tavily_cb, "POST", url,
-                headers=headers, json=payload
-            )
-
-            tavily = AsyncTavilyClient(api_key=tavily_key)
-            query = f"top institutional holders and 13F filing summary for {ticker} 2025 2026"
-
-            response = await tavily.search(
+            search_results = await search_plugin.search(
                 query=query, search_depth="advanced", max_results=5
             )
-            results = response.get("results", [])
+
+            results = [{"title": r.title, "content": r.content, "snippet": r.content} for r in search_results]
             logger.info(f"WhaleAgent: Search returned {len(results)} results")
 
             # Simple heuristic to extract holder info from search snippets

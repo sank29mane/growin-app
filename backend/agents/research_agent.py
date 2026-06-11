@@ -302,28 +302,24 @@ class ResearchAgent(BaseAgent):
                 except Exception as e:
                     logger.warning(f"RNS newsData.io failed: {e}")
 
-            # 2. SEC Filings / News via Tavily
+            # 2. SEC Filings / News via Search Plugin
             if not is_uk and self.tavily_key:
-                from tavily import AsyncTavilyClient
-                tavily = AsyncTavilyClient(api_key=self.tavily_key)
+                from utils.search_provider import get_search_plugin
+                search_plugin = get_search_plugin()
                 # Specialized query for SEC filings
                 query = f"latest SEC filings and regulatory announcements for {ticker}"
                 
-                url = "https://api.tavily.com/search"
-                headers = {"Content-Type": "application/json"}
-                payload = {
-                    "api_key": self.tavily_key,
-                    "query": query,
-                    "search_depth": "advanced",
-                    "max_results": 5
-                }
-
                 try:
-                    data = await agent_http_client.execute_with_breaker(
-                        tavily_cb, "POST", url, headers=headers, json=payload
-                    )
+                    search_results = await search_plugin.search(
+                        query=query,
+                        search_depth="advanced",
+                        max_results=5
+                    ) if search_plugin else []
 
-                    for r in data.get('results', []):
+                    # Convert to expected format
+                    results = [{"title": r.title, "content": r.content, "snippet": r.content, "url": r.url} for r in search_results]
+
+                    for r in results:
                         # Only include if relevant to SEC or regulatory
                         content = (r.get('title', '') + (r.get('content', '') or '')).upper()
                         if any(kw in content for kw in ["SEC", "FORM 8-K", "10-Q", "10-K", "FILING", "REGULATORY"]):
@@ -368,11 +364,10 @@ class ResearchAgent(BaseAgent):
             return []
 
     async def _fetch_tavily(self, ticker: str, company_name: str) -> List[Dict]:
-        """Fetch from Tavily (AI-powered search)."""
+        """Fetch from Search Plugin (AI-powered search)."""
         try:
-            from tavily import AsyncTavilyClient
-            
-            tavily = AsyncTavilyClient(api_key=self.tavily_key)
+            from utils.search_provider import get_search_plugin
+            search_plugin = get_search_plugin()
             is_uk = ticker.upper().endswith(".L")
             
             if ticker == "MARKET":
@@ -381,30 +376,24 @@ class ResearchAgent(BaseAgent):
                 region = "LSE UK" if is_uk else "US"
                 query = f"latest financial news for {company_name} ({ticker}) stock on {region} market"
             
-            url = "https://api.tavily.com/search"
-            headers = {"Content-Type": "application/json"}
-            payload = {
-                "api_key": self.tavily_key,
-                "query": query,
-                "search_depth": "advanced",
-                "max_results": 8
-            }
-            
-            response = await agent_http_client.execute_with_breaker(tavily_cb, "POST", url, headers=headers, json=payload)
-
+            search_results = await search_plugin.search(
+                query=query,
+                search_depth="advanced",
+                max_results=8
+            ) if search_plugin else []
             
             # Normalize to common format
             return [
                 {
-                    'title': r.get('title'),
-                    'description': r.get('content') or r.get('snippet'),
-                    'source': {'name': 'Tavily'},
-                    'url': r.get('url')
+                    'title': r.title,
+                    'description': r.content,
+                    'source': {'name': r.source},
+                    'url': r.url
                 }
-                for r in response.get('results', [])
+                for r in search_results
             ]
         except Exception as e:
-            logger.warning(f"Tavily failed: {e}")
+            logger.warning(f"Search plugin failed: {e}")
             return []
 
     async def _fetch_newsdata(self, ticker: str, company_name: str) -> List[Dict]:
