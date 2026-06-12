@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from utils.mlx_loader import mx
+from utils.mlx_loader import mx, HAS_MLX
 from scipy.optimize import minimize
 from decimal import Decimal
 from typing import Dict, List, Optional, Union, Any
@@ -53,32 +53,34 @@ class PortfolioAnalyzer:
             # SOTA 2026: NeuralJMCE returns (mu, L, V)
             # Input shape: (seq_len, n_assets) or (1, seq_len, n_assets)
             
-            if hasattr(self.model, "__call__"):
-                if isinstance(self.model, NeuralJMCE):
-                    # MLX Path (GPU)
-                    x = mx.array(returns_history[np.newaxis, :, :].astype(np.float32))
-                    mu_mx, L_mx, _ = self.model(x)
-                    sigma_mx = self.model.get_covariance(L_mx)
+            if isinstance(self.model, NeuralJMCE) and HAS_MLX:
+                # MLX Path (GPU)
+                x = mx.array(returns_history[np.newaxis, :, :].astype(np.float32))
+                mu_mx, L_mx, _ = self.model(x)
+                sigma_mx = self.model.get_covariance(L_mx)
+                
+                # Convert to numpy for SciPy
+                mu = np.array(mu_mx[0])
+                sigma = np.array(sigma_mx[0])
+            elif hasattr(self.model, '_initialized') and self.model._initialized:
+                # CoreML Path (ANE) - Using duck typing for CoreMLJMCE
+                # Expects (seq_len, n_assets)
+                mu, L, _ = self.model(returns_history.astype(np.float32))
+                
+                # CoreML outputs are already numpy arrays
+                # We need to compute sigma = L * L^T if L is Cholesky
+                if mu is None or L is None:
+                    raise RuntimeError("CoreML model returned None for mu or L")
                     
-                    # Convert to numpy for SciPy
-                    mu = np.array(mu_mx[0])
-                    sigma = np.array(sigma_mx[0])
-                else:
-                    # CoreML Path (ANE) - Using duck typing for CoreMLJMCE
-                    # Expects (seq_len, n_assets)
-                    mu, L, _ = self.model(returns_history.astype(np.float32))
-                    
-                    # CoreML outputs are already numpy arrays
-                    # We need to compute sigma = L * L^T if L is Cholesky
-                    if mu is None or L is None:
-                        raise RuntimeError("CoreML model returned None for mu or L")
-                        
-                    if L.ndim == 3: L = L[0] # remove batch if present
-                    if mu.ndim == 2: mu = mu[0]
-                    
-                    sigma = np.matmul(L, L.T)
+                if L.ndim == 3: L = L[0] # remove batch if present
+                if mu.ndim == 2: mu = mu[0]
+                
+                sigma = np.matmul(L, L.T)
             else:
-                raise RuntimeError("Invalid JMCE model loaded")
+                # CPU Fallback (Numpy) - Safely estimate mu and sigma from history
+                logger.info("Using CPU/Numpy statistical fallback for portfolio optimization")
+                mu = np.mean(returns_history, axis=0)
+                sigma = np.atleast_2d(np.cov(returns_history, rowvar=False))
             
             # 2. Dynamic Hurdle (75 bps + Friction)
             # In a real scenario, friction would be asset-specific (e.g. T212 spreads/FX)
@@ -153,25 +155,24 @@ class PortfolioAnalyzer:
         Uses M4 NPU (MLX/ANE) to detect rapid correlation changes.
         """
         try:
-            if hasattr(self.model, "__call__"):
-                if isinstance(self.model, NeuralJMCE):
-                    x = mx.array(returns_history[np.newaxis, :, :].astype(np.float32))
-                    _, _, V_mx = self.model(x, return_velocity=True)
-                    if V_mx is not None:
-                        # For single asset (N=1), V is (1, 1, 1). Return the scalar.
-                        # For multiple assets, return Frobenius norm as a shift indicator.
-                        if V_mx.shape[1] == 1:
-                            return float(V_mx[0, 0, 0])
-                        else:
-                            # Use mx.linalg.norm if available, or manual Fro norm
-                            v_np = np.array(V_mx[0])
-                            return float(np.linalg.norm(v_np))
-                else:
-                    # CoreML Path (ANE)
-                    _, _, V = self.model(returns_history.astype(np.float32), return_velocity=True)
-                    if V is not None:
-                        if V.ndim == 3: V = V[0]
-                        return float(np.linalg.norm(V))
+            if isinstance(self.model, NeuralJMCE) and HAS_MLX:
+                x = mx.array(returns_history[np.newaxis, :, :].astype(np.float32))
+                _, _, V_mx = self.model(x, return_velocity=True)
+                if V_mx is not None:
+                    # For single asset (N=1), V is (1, 1, 1). Return the scalar.
+                    # For multiple assets, return Frobenius norm as a shift indicator.
+                    if V_mx.shape[1] == 1:
+                        return float(V_mx[0, 0, 0])
+                    else:
+                        # Use mx.linalg.norm if available, or manual Fro norm
+                        v_np = np.array(V_mx[0])
+                        return float(np.linalg.norm(v_np))
+            elif hasattr(self.model, '_initialized') and self.model._initialized:
+                # CoreML Path (ANE)
+                _, _, V = self.model(returns_history.astype(np.float32), return_velocity=True)
+                if V is not None:
+                    if V.ndim == 3: V = V[0]
+                    return float(np.linalg.norm(V))
             return None
         except Exception as e:
             logger.warning(f"Failed to extract covariance velocity: {e}")
