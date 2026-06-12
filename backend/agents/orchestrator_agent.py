@@ -82,8 +82,20 @@ class OrchestratorAgent:
             return
             
         # Initialize routing LLM (lightweight)
-        # Using granite-tiny as default for routing to minimize latency
-        self.routing_llm = await LLMFactory.create_llm("granite-tiny")
+        # If the user's selected model is from LM Studio (HF-style ID with '/'),
+        # use lmstudio-auto for routing too, to avoid vMLX dependency.
+        is_lmstudio_model = "/" in (self.model_name or "")
+        routing_model = "lmstudio-auto" if is_lmstudio_model else "granite-tiny"
+        
+        try:
+            self.routing_llm = await LLMFactory.create_llm(routing_model)
+        except Exception as e:
+            logger.warning(f"Routing LLM ({routing_model}) failed: {e}. Falling back to lmstudio-auto.")
+            try:
+                self.routing_llm = await LLMFactory.create_llm("lmstudio-auto")
+            except Exception as e2:
+                logger.error(f"Routing LLM fallback also failed: {e2}. Routing will use heuristics only.")
+                self.routing_llm = None
         
         # Initialize decision engine (reasoning model)
         await self.decision_engine._initialize_llm()
@@ -92,8 +104,13 @@ class OrchestratorAgent:
 
     async def _classify_intent(self, query: str) -> Dict[str, Any]:
         """Classify user intent using routing LLM (reused from Coordinator)"""
-        if not self.routing_llm:
+        if not self._initialized:
             await self._initialize()
+        
+        # If routing LLM is still None (all init attempts failed), use heuristic fallback
+        if not self.routing_llm:
+            logger.warning("Orchestrator: No routing LLM available, using keyword heuristics")
+            return self._heuristic_classify(query)
             
         clean_query = query.strip()[:500]
         prompt = f"""You are the Orchestrator.
@@ -165,7 +182,53 @@ Query: "{clean_query}"
             }
         except Exception as e:
             logger.error(f"Orchestrator routing failed: {e}")
-            return {"type": "market_analysis", "needs": ["quant", "portfolio"], "primary_ticker": None, "reason": "Routing Fallback"}
+            return self._heuristic_classify(query)
+
+    def _heuristic_classify(self, query: str) -> Dict[str, Any]:
+        """Lightweight keyword-based intent classification when routing LLM is unavailable."""
+        q_lower = (query or "").lower()
+        
+        needs_map = {
+            "price_check": ["quant"],
+            "market_analysis": ["quant", "forecast", "research", "social", "whale", "portfolio"],
+            "portfolio_query": ["portfolio", "quant", "forecast"],
+            "goal_planning": ["goal_planner", "portfolio"],
+            "intraday_trade": ["quant", "forecast", "research", "whale"],
+            "swing_trade": ["quant", "forecast", "research", "whale"],
+            "conversational": [],
+        }
+        
+        # Simple keyword matching
+        if "portfolio" in q_lower or "holdings" in q_lower or "positions" in q_lower:
+            intent_type = "portfolio_query"
+        elif any(w in q_lower for w in ["hello", "hi", "hey", "what is", "how does", "tell me about", "who are you"]):
+            intent_type = "conversational"
+        elif "goal" in q_lower or "plan" in q_lower or "retire" in q_lower:
+            intent_type = "goal_planning"
+        elif "intraday" in q_lower or "scalp" in q_lower or "day trade" in q_lower:
+            intent_type = "intraday_trade"
+        elif "swing" in q_lower:
+            intent_type = "swing_trade"
+        elif "price" in q_lower or "quote" in q_lower:
+            intent_type = "price_check"
+        else:
+            intent_type = "market_analysis"
+        
+        # Try to extract ticker from query
+        ticker = None
+        words = query.upper().split()
+        for word in words:
+            if len(word) >= 2 and len(word) <= 5 and word.isalpha() and word not in ["ISA", "INVEST", "MY", "DEEP", "DIVE", "MORE", "SOME", "RSI", "MACD", "THE", "AND", "FOR", "HOW", "WHAT"]:
+                ticker = word
+                break
+        
+        needs = needs_map.get(intent_type, ["quant", "forecast"])
+        return {
+            "type": intent_type,
+            "needs": needs,
+            "primary_ticker": ticker,
+            "reason": "Heuristic Routing (No LLM)"
+        }
 
     async def run(self, query: str, conversation_id: Optional[str] = None, history: List[Dict] = [], ticker: Optional[str] = None, account_type: Optional[str] = None) -> Dict[str, Any]:
         """

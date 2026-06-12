@@ -425,3 +425,42 @@ class LMStudioClient:
 
         logger.warning(f"LM Studio: Timeout waiting for {model_id} to be ready.")
         return False
+
+    async def ainvoke(self, messages: List[Any], **kwargs) -> Any:
+        """
+        Duck-type LangChain's ainvoke method to allow standard agents to use LMStudioClient.
+        """
+        msg_dicts = []
+        for m in messages:
+            role = "user"
+            if hasattr(m, "type"):
+                if m.type == "system": role = "system"
+                elif m.type == "ai": role = "assistant"
+            elif isinstance(m, dict):
+                role = m.get("role", "user")
+
+            content = m.content if hasattr(m, "content") else str(m)
+            if isinstance(m, dict):
+                content = m.get("content", content)
+                
+            msg_dicts.append({"role": role, "content": content})
+            
+        resp = await self.chat(model_id=self.active_model_id, messages=msg_dicts, **kwargs)
+        
+        class _Response:
+            def __init__(self, content):
+                self.content = content
+        return _Response(resp.get("content", ""))
+
+    async def astream(self, messages: List[Any], **kwargs) -> Any:
+        """
+        Duck-type LangChain's astream method to allow standard agents to use LMStudioClient.
+        Note: Since LMStudioClient chat is not streaming natively here, we yield the whole response.
+        """
+        resp = await self.ainvoke(messages, **kwargs)
+        
+        class _Chunk:
+            def __init__(self, content):
+                self.content = content
+        
+        yield _Chunk(resp.content)

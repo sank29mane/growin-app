@@ -102,6 +102,9 @@ class QuantAgent(BaseAgent):
                              cov_velocity = await analyzer.get_covariance_velocity(rets)
                              if cov_velocity:
                                  logger.info(f"QuantAgent: NPU Covariance Velocity extracted: {cov_velocity:.4f}")
+                         except ImportError as ie:
+                             logger.error(f"QuantAgent: Critical dependency missing for JMCE extraction: {ie}")
+                             raise
                          except Exception as jmce_e:
                              logger.warning(f"QuantAgent: JMCE Velocity extraction failed: {jmce_e}", exc_info=True)
                     

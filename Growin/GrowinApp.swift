@@ -53,6 +53,34 @@ struct GrowinApp: App {
             }
         }
         
+        
+        
+        WindowGroup(id: "live-charts") {
+            if #available(macOS 15.0, *) {
+                StockChartView(viewModel: StockChartViewModel(symbol: "AAPL"))
+                    .preferredColorScheme(.dark)
+                    .containerBackground(.thinMaterial, for: .window)
+            } else {
+                StockChartView(viewModel: StockChartViewModel(symbol: "AAPL"))
+                    .preferredColorScheme(.dark)
+            }
+        }
+        .windowStyle(.hiddenTitleBar)
+        .windowToolbarStyle(.unified(showsTitle: false))
+
+        WindowGroup(id: "agent-console") {
+            if #available(macOS 15.0, *) {
+                IntelligentConsoleView()
+                    .preferredColorScheme(.dark)
+                    .containerBackground(.thinMaterial, for: .window)
+            } else {
+                IntelligentConsoleView()
+                    .preferredColorScheme(.dark)
+            }
+        }
+        .windowStyle(.hiddenTitleBar)
+        .windowToolbarStyle(.unified(showsTitle: false))
+
         Settings {
             SettingsView()
                 .frame(width: 500, height: 600)

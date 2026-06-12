@@ -231,7 +231,7 @@ async def get_lmstudio_status():
         online = await client.check_connection()
         if not online:
             res = LMStudioStatusResponse(status="offline", active=False)
-            cache.set(cache_key, res, ttl=5) # Cache offline status longer
+            cache.set(cache_key, res, ttl=15) # Cache offline status longer
             return res
             
         loaded = await client.list_loaded_models()
@@ -244,8 +244,8 @@ async def get_lmstudio_status():
             active=True,
             memory_usage={} 
         )
-        # Cache for 5s to bridge the polling interval without spamming LM Studio logs
-        cache.set(cache_key, result, ttl=5)
+        # Cache for 15s to bridge the polling interval without spamming LM Studio logs
+        cache.set(cache_key, result, ttl=15)
         return result
     except Exception as e:
         logger.warning(f"Failed to get LM Studio status: {e}")

@@ -3,6 +3,7 @@ import SwiftUI
 /// MainTabView: The root navigation for the Sovereign UI.
 /// Uses a macOS-style NavigationSplitView with a brutalist sidebar and 0px corners.
 public struct MainTabView: View {
+    @Environment(\.openWindow) private var openWindow
     @State private var selectedTab: SovereignTab = .ledger
     
     public enum SovereignTab: String, CaseIterable, Hashable {
@@ -65,6 +66,37 @@ public struct MainTabView: View {
                                 selectedTab = tab
                             }
                         }
+                        
+                        Divider()
+                            .background(Color.white.opacity(0.1))
+                            .padding(.vertical, 8)
+                            .padding(.horizontal, 20)
+                        
+                        Button(action: {
+                            openWindow(id: "live-charts")
+                            openWindow(id: "agent-console")
+                        }) {
+                            HStack(spacing: 12) {
+                                Image(systemName: "macwindow.on.rectangle")
+                                    .font(.system(size: 16, weight: .medium))
+                                    .frame(width: 20)
+                                
+                                Text("LAUNCH WORKSPACE")
+                                    .font(SovereignTheme.Fonts.spaceGrotesk(size: 12, weight: .bold))
+                                    .kerning(1.2)
+                                
+                                Spacer()
+                            }
+                            .padding(.horizontal, 20)
+                            .frame(height: 48)
+                            .foregroundStyle(Color.brutalChartreuse)
+                            .background(Color.brutalChartreuse.opacity(0.05))
+                            .border(Color.brutalChartreuse.opacity(0.3), width: 1)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Launch Workspace")
+                        .accessibilityHint("Launches Stage Manager 2.0 multi-window sets")
+                        .padding(.horizontal, 10)
                     }
                     .padding(.vertical, 8)
                 }
@@ -112,6 +144,24 @@ public struct MainTabView: View {
                 }
             }
             .transition(.identity) // Performant, sharp transitions
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Button(action: {
+                        openWindow(id: "live-charts")
+                        openWindow(id: "agent-console")
+                    }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "macwindow.on.rectangle")
+                            Text("WORKSPACE")
+                                .font(SovereignTheme.Fonts.spaceGrotesk(size: 10, weight: .bold))
+                        }
+                        .foregroundColor(.brutalChartreuse)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Launch Workspace")
+                    .accessibilityHint("Opens live charts and agent console window sets")
+                }
+            }
         }
         .navigationSplitViewStyle(.balanced)
     }

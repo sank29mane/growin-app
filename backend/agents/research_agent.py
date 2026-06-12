@@ -15,6 +15,7 @@ Supported Markets: UK (LSE), India (NSE), US
 """
 
 from .base_agent import BaseAgent, AgentConfig, AgentResponse
+from utils.sentiment import get_sentiment_analyzer
 from market_context import ResearchData, NewsArticle
 from typing import Dict, Any, List, Optional
 from utils.http_client import agent_http_client

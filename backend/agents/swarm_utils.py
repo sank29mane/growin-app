@@ -35,8 +35,6 @@ class ContextBuffer:
         async with self._lock:
             self.results.append(result)
             self.new_data_event.set()
-            # Immediately clear so it can be re-triggered for the next data
-            self.new_data_event.clear()
             logger.debug(f"📥 ContextBuffer received results from {result.source}")
 
     async def get_all(self) -> List[AgentResult]:
@@ -50,11 +48,54 @@ class ContextBuffer:
         """
         Wait until new data arrives in the buffer.
         """
+        if self.new_data_event.is_set():
+            self.new_data_event.clear()
+            return True
         try:
             await asyncio.wait_for(self.new_data_event.wait(), timeout=timeout)
+            self.new_data_event.clear()
             return True
         except asyncio.TimeoutError:
             return False
 
     def __len__(self):
         return len(self.results)
+
+def summarize_specialist_data(result: AgentResult) -> AgentResult:
+    """
+    Summarizes large data values inside an AgentResult to keep prompt context size small
+    and preserve prefix caching.
+    """
+    import re
+    summarized_data = {}
+    
+    for k, v in result.data.items():
+        if isinstance(v, str):
+            # If string is large (more than 150 words or 600 characters)
+            word_count = len(v.split())
+            if word_count > 150 or len(v) > 600:
+                # Extract first 2 sentences, or fallback to simple truncation
+                sentences = re.split(r'(?<=[.!?])\s+', v)
+                summary = " ".join(sentences[:2])
+                if len(summary) < len(v) and len(summary) > 20:
+                    summarized_data[k] = f"{summary} [Summarized; original length: {len(v)} chars]"
+                else:
+                    summarized_data[k] = v[:400] + "... [Truncated]"
+            else:
+                summarized_data[k] = v
+        elif isinstance(v, list) and len(v) > 5:
+            # For lists (e.g. news articles or tickers), take top 5 and add a summary count
+            summarized_data[k] = v[:5] + [f"... and {len(v) - 5} more items"]
+        elif isinstance(v, dict):
+            # Recursively check sub-dicts or keep it simple
+            summarized_data[k] = v
+        else:
+            summarized_data[k] = v
+            
+    return AgentResult(
+        source=result.source,
+        data=summarized_data,
+        conviction=result.conviction,
+        timestamp=result.timestamp,
+        correlation_id=result.correlation_id
+    )
