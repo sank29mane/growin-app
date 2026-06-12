@@ -107,3 +107,7 @@
 ## 2026-05-24 - AccessibilityHint Missing on Retry Button
 **Learning:** Found an existing custom SwiftUI component ("Retry" button for failed messages in `ChatView.swift`) that correctly applied `.accessibilityLabel` and `.accessibilityAddTraits(.isButton)` to combat the stripping effects of `.buttonStyle(.plain)`, but lacked `.accessibilityHint`. Without a hint, VoiceOver users receive the name of the button but no context on what action will occur when activated, which is crucial for handling error states.
 **Action:** Always append an explicit `.accessibilityHint` (e.g., "Attempts to send the failed message again") alongside the label and traits when using `.buttonStyle(.plain)` on interactive elements to provide clear consequence context for assistive technologies.
+
+## 2026-05-25 - AccessibilityHint Missing on System Settings Button
+**Learning:** Found a custom SwiftUI component (`settingsButton` in `ContentView.swift`) that correctly applied `.accessibilityLabel` and `.accessibilityAddTraits(.isButton)` to combat the stripping effects of `.buttonStyle(.plain)`, but lacked `.accessibilityHint`. Furthermore, VoiceOver relies on hint to provide consequence context when the button is interacted with.
+**Action:** Always append an explicit `.accessibilityHint` (e.g., "Opens system settings and console") alongside the label and traits when using `.buttonStyle(.plain)` on interactive elements.
