@@ -190,7 +190,7 @@ struct ContentView: View {
         .buttonStyle(.plain)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("System Settings, backend \(backendStatus.isOnline ? "online" : "offline")")
-        .accessibilityHint("Opens system settings and console")
+        .accessibilityHint("Opens the system console and settings overlay")
         .accessibilityAddTraits(.isButton)
         .help("System Settings & Console")
     }
