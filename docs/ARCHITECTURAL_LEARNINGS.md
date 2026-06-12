@@ -63,6 +63,11 @@
 - **Error Sanitization:** All database and API errors are sanitized at the route level to prevent sensitive string leaks (DB strings, API keys).
 - **Validation:** `PriceValidator` refactored to use region-locked providers, preventing cross-contamination during variance checks.
 
+## 🔌 NPU Degradation & CPU Fallback (JMCE)
+- **Learning:** Falling back to a dummy class/module or executing invalid prediction runs on CPU when MLX or CoreML dependencies are absent causes runtime crashes (e.g. `NoneType is not callable` or unpacking errors), making the portfolio optimizer unusable on Linux CI or non-macOS environments.
+- **Solution:** Added explicit checks for MLX (`isinstance(self.model, NeuralJMCE) and HAS_MLX`) and CoreML (`hasattr(self.model, '_initialized') and self.model._initialized`). If neither acceleration target is active, the system automatically uses a CPU/Numpy statistical fallback (estimating `mu` as return means and `sigma` as return covariance), and returns `None` for covariance velocity without log pollution.
+- **Impact:** Unified cross-platform execution. The portfolio optimizer runs reliably on Linux CI/CD platforms using CPU, while maintaining accelerated NPU runs on Apple Silicon Macs.
+
 ## 🧪 Future Optimization Notes
 - **TTFT (Time to First Token):** For agentic workflows, TTFT is the bottleneck. Recommendation: Implement **Content-Based Prefix Caching** for shared agent system prompts to reduce TTFT by up to 5.8x.
 - **Throughput:** Utilize `vllm-mlx` for continuous batching if concurrency exceeds 10+ simultaneous users.

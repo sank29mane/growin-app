@@ -128,6 +128,12 @@ PYTHONPATH=.:backend uv run scripts/backtest_portfolio_today.py
 
 # Run backend unit and integration test suite
 uv run pytest
+
+# Verify NPU degradation / CPU fallback behavior manually
+PYTHONPATH=backend uv run python3 tests/verify_mlx_degradation.py
+
+# Verify QuantAgent indicators and ORB detection manually
+PYTHONPATH=backend uv run python3 tests/verify_quant.py
 ```
 
 ---

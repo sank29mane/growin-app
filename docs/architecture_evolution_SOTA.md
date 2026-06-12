@@ -58,3 +58,5 @@ The Growin App architecture has evolved from a simple interactive advisor into a
 - Abstract `analyze` method explicitly added to `CoordinatorAgent` to prevent instantiation failures.
 - `execute` acts as main router in `CoordinatorAgent`.
 - Benchmark file for N+1 correctly placed and verified.
+- Robust NPU degradation handling with CPU/NumPy statistical fallback (mean/covariance estimation) in `PortfolioAnalyzer` and graceful `None` fallback for covariance velocity when MLX/CoreML are missing.
+- Verification scripts (`verify_mlx_degradation.py`, `verify_quant.py`) relocated to the `tests/` directory.
