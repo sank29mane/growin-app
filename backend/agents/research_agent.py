@@ -15,6 +15,7 @@ Supported Markets: UK (LSE), India (NSE), US
 """
 
 from .base_agent import BaseAgent, AgentConfig, AgentResponse
+from utils.sentiment import get_sentiment_analyzer
 from market_context import ResearchData, NewsArticle
 from typing import Dict, Any, List, Optional
 from utils.http_client import agent_http_client
@@ -87,6 +88,9 @@ class ResearchAgent(BaseAgent):
         self.newsapi_key = os.getenv("NEWSAPI_KEY") if is_valid(os.getenv("NEWSAPI_KEY")) else None
         self.tavily_key = os.getenv("TAVILY_API_KEY") if is_valid(os.getenv("TAVILY_API_KEY")) else None
         self.newsdata_key = os.getenv("NEWSDATA_API_KEY") if is_valid(os.getenv("NEWSDATA_API_KEY")) else None
+        self._tavily_cb = get_circuit_breaker("tavily_research", failure_threshold=3, recovery_timeout=30.0)
+        self._newsdata_cb = get_circuit_breaker("newsdata_research", failure_threshold=3, recovery_timeout=30.0)
+        self._newsapi_cb = get_circuit_breaker("newsapi_research", failure_threshold=3, recovery_timeout=30.0)
         
         # Log available sources
         sources = []
@@ -287,7 +291,7 @@ class ResearchAgent(BaseAgent):
                 }
                 try:
                     data = await agent_http_client.execute_with_breaker(
-                        newsdata_cb, "GET", "https://newsdata.io/api/1/latest",
+                        self._newsdata_cb, "GET", "https://newsdata.io/api/1/latest",
                         params=params, timeout=10.0, raise_for_status=False
                     )
 
@@ -356,7 +360,7 @@ class ResearchAgent(BaseAgent):
                 "apiKey": self.newsapi_key
             }
             
-            data = await agent_http_client.execute_with_breaker(newsapi_cb, "GET", url, params=params)
+            data = await agent_http_client.execute_with_breaker(self._newsapi_cb, "GET", url, params=params)
 
             return data.get('articles', [])
         except Exception as e:
@@ -444,7 +448,7 @@ class ResearchAgent(BaseAgent):
                      # Add 'in' for India support if requested, but architecture mandates US/UK partitioning
                      if "NSE" in ticker.upper(): params["country"] = "in"
 
-            data = await agent_http_client.execute_with_breaker(newsdata_cb, "GET", url, params=params, timeout=10.0)
+            data = await agent_http_client.execute_with_breaker(self._newsdata_cb, "GET", url, params=params, timeout=10.0)
 
             response = await agent_http_client.client.get(url, params=params, timeout=10.0)
             response.raise_for_status()

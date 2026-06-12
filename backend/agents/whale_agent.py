@@ -145,7 +145,6 @@ class WhaleAgent(BaseAgent):
                 value = p * s
                 if value >= whale_threshold:
                     t = trades[i]
-                    large_decimal_prices.append(p)
                     large_trades.append({
                         "price": float(p),
                         "size": float(s),
@@ -262,12 +261,11 @@ class WhaleAgent(BaseAgent):
 
             # Simple heuristic to extract holder info from search snippets
             holders = []
+            seen_holder_names = set()
             for r in results:
-                content = (
-                    r.get("title", "")
-                    + " "
-                    + (r.get("content", "") or r.get("snippet", ""))
-                ).lower()
+                title = r.get("title", "")
+                body = r.get("content", "") or r.get("snippet", "")
+                content = f"{title} {body}".lower()
                 logger.debug(f"WhaleAgent: Analyzing content: {content[:100]}...")
                 # Look for common institutional names (expanded for SOTA coverage)
                 institutions = [
@@ -285,14 +283,12 @@ class WhaleAgent(BaseAgent):
                     "t. rowe price",
                 ]
                 for inst in institutions:
-                    if inst in content and inst.capitalize() not in [
-                        h["name"] for h in holders
-                    ]:
+                    inst_name = inst.capitalize() if inst != "jpmorgan" else "JPMorgan"
+                    if inst in content and inst_name not in seen_holder_names:
+                        seen_holder_names.add(inst_name)
                         holders.append(
                             {
-                                "name": inst.capitalize()
-                                if inst != "jpmorgan"
-                                else "JPMorgan",
+                                "name": inst_name,
                                 "type": "Institutional",
                                 "source": r.get("url"),
                             }

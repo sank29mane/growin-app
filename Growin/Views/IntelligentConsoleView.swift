@@ -216,6 +216,8 @@ struct MetricCard: View {
                 .premiumTypography(.title)
                 .foregroundColor(.white)
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title): \(value)")
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
         .glassEffect(.thin)

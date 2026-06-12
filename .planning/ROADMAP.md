@@ -51,12 +51,12 @@ This document outlines the high-level phases for the Growin App, specifically op
     - Swarm output summarization active to preserve prefix caching.
     - Concurrent MLX threshold calibration for M4 Pro.
 - **Requirements**: INTEL-01, PERF-01, UX-05
-- **Status**: ACTIVE
+- **Status**: COMPLETED
 
-**Plans:** 1/3 plans complete
+**Plans:** 3/3 plans complete
 - [x] 44-01-PLAN.md — Core Engine Room (Hardware Guard & ContextBuffer)
-- [ ] 44-02-PLAN.md — Reasoning Pivot (2-Stage Streaming Logic)
-- [ ] 44-03-PLAN.md — Swarm Calibration (Latency Thresholds & Summarization)
+- [x] 44-02-PLAN.md — Reasoning Pivot (2-Stage Streaming Logic)
+- [x] 44-03-PLAN.md — Swarm Calibration (Latency Thresholds & Summarization)
 
 ### Phase 45: Sovereign UX & macOS 2026 Redesign
 - **Goal**: Complete architectural UI redesign following macOS Tahoe patterns and 120Hz ProMotion standards.
@@ -65,7 +65,12 @@ This document outlines the high-level phases for the Growin App, specifically op
     - Stage Manager 2.0 window sets integrated for trading workflows.
     - 120Hz ProMotion fluid rendering and <16ms price synchronization.
 - **Requirements**: UX-01, UX-02, UX-03, UX-05, TRADE-01
-- **Status**: PLANNED
+- **Status**: COMPLETED
+
+**Plans:** 3/3 plans complete
+- [x] 45-01-PLAN.md — SwiftUI 17+ 0px Ledger UI Scaffold & Theme
+- [x] 45-02-PLAN.md — Stage Manager 2.0 Saved Window Sets Integration
+- [x] 45-03-PLAN.md — ProMotion 120Hz Rendering & Sub-16ms Price Sync
 
 ### Phase 46: Adaptive Learning & Alpha Engineering (Unsloth)
 - **Goal**: Deploy local LoRA fine-tuning pipeline for regime-specific alpha extraction.
@@ -93,8 +98,8 @@ This document outlines the high-level phases for the Growin App, specifically op
 |-------|--------|-------|----------|
 | 42: Model Comparison | ✅ | 4/4 | 100% |
 | 43: Core Engine | ✅ | 2/2 | 100% |
-| 44: Swarm Optimization | 🏗 | 1/3 | 33% |
-| 45: Sovereign UX | ⬜ | 0/3 | 0% |
+| 44: Swarm Optimization | ✅ | 3/3 | 100% |
+| 45: Sovereign UX | ✅ | 3/3 | 100% |
 | 46: Adaptive Learning | ⬜ | 0/3 | 0% |
 | 47: Multimodal | ⬜ | 0/3 | 0% |
 

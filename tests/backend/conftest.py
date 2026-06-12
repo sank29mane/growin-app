@@ -19,7 +19,18 @@ backend_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.p
 if backend_path not in sys.path:
     sys.path.insert(0, backend_path)
 
+import asyncio
+
+# --- Session-scoped event loop so async session fixtures work in STRICT mode ---
+@pytest.fixture(scope="session")
+def event_loop():
+    """Session-scoped event loop for pytest-asyncio STRICT mode compatibility."""
+    loop = asyncio.new_event_loop()
+    yield loop
+    loop.close()
+
 # --- Global Resource Lifecycle Management ---
+
 @pytest_asyncio.fixture(scope="session", autouse=True)
 async def cleanup_resources():
     """Ensure all background processes are killed after the test session."""

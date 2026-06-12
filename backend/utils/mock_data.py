@@ -14,10 +14,14 @@ def generate_synthetic_chart_data(ticker: str, timeframe: str = "1Day", limit: i
     random.seed(seed_val)
     
     base_price = 100.0
-    if ticker in ["AAPL", "GOOGL", "AMZN"]: base_price = 150.0
-    elif ticker in ["TSLA", "NVDA"]: base_price = 200.0
-    elif ticker in ["MSFT"]: base_price = 300.0
-    elif "BTC" in ticker: base_price = 40000.0
+    if ticker in {"AAPL", "GOOGL", "AMZN"}:
+        base_price = 150.0
+    elif ticker in {"TSLA", "NVDA"}:
+        base_price = 200.0
+    elif ticker in {"MSFT"}:
+        base_price = 300.0
+    elif "BTC" in ticker:
+        base_price = 40000.0
     
     volatility = 0.02 # 2% daily volatility
     drift = 0.0005 # Slight upward drift

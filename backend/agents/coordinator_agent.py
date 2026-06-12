@@ -479,8 +479,7 @@ class CoordinatorAgent(BaseAgent):
                             elif isinstance(exec_res, dict):
                                 # If it's a dict but we don't have exit code 0 or maybe it's just the context dict directly (like in the original code before merge)
                                 # Let's support both formats
-                                for k, v in exec_res.items():
-                                    context[k] = v
+                                context.update(exec_res)
                                 logger.info(f"Coordinator: Auto-fix successful. Updated keys: {list(exec_res.keys())}")
                                 return await agent.execute(context)
                             else:

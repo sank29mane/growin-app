@@ -56,10 +56,10 @@ class ChatMLX(BaseChatModel):
             AIMessage: "assistant",
         }
         
-        return "".join(
+        return "".join([
             f"<|im_start|>{role_map.get(type(msg), 'user')}\n{msg.content}<|im_end|>\n"
             for msg in messages
-        ) + "<|im_start|>assistant\n"
+        ]) + "<|im_start|>assistant\n"
 
     def _ensure_model(self, engine: Any) -> Optional[str]:
         """

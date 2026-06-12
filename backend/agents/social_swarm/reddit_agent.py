@@ -6,7 +6,9 @@ from .base_micro import BaseMicroAgent, MicroAgentResponse
 from utils.financial_math import create_decimal
 from resilience import get_circuit_breaker, CircuitBreakerOpenError
 from utils.http_client import agent_http_client
+from utils.sentiment import get_sentiment_analyzer
 
+from utils.sentiment import get_sentiment_analyzer
 logger = logging.getLogger(__name__)
 
 # Cache sentiment analyzer at the module level to prevent synchronous I/O blocking in async loops
@@ -21,6 +23,7 @@ class RedditMicroAgent(BaseMicroAgent):
     def __init__(self, tavily_key: Optional[str] = None):
         super().__init__("RedditAgent")
         self.tavily_key = tavily_key
+        self._tavily_cb = get_circuit_breaker("tavily_reddit", failure_threshold=3, recovery_timeout=30.0)
 
     async def fetch_data(self, ticker: str, company_name: str) -> MicroAgentResponse:
         """Fetch Reddit discussions asynchronously."""
