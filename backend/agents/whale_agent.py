@@ -280,11 +280,9 @@ class WhaleAgent(BaseAgent):
             holders = []
             seen_holder_names = set()
             for r in results:
-                content = (
-                    r.get("title", "")
-                    + " "
-                    + (r.get("content", "") or r.get("snippet", ""))
-                ).lower()
+                title = r.get("title", "")
+                body = r.get("content", "") or r.get("snippet", "")
+                content = f"{title} {body}".lower()
                 logger.debug(f"WhaleAgent: Analyzing content: {content[:100]}...")
                 # Look for common institutional names (expanded for SOTA coverage)
                 institutions = [
