@@ -38,31 +38,32 @@ class TwitterMicroAgent(BaseMicroAgent):
             )
 
         try:
-            from tavily import AsyncTavilyClient
-            tavily = AsyncTavilyClient(api_key=self.tavily_key)
+            from utils.search_provider import get_search_plugin
+            search_plugin = get_search_plugin()
             sentiment_analyzer = get_sentiment_analyzer()
             
             # Non-blocking thread execution
             query = f"${ticker} stock discussion twitter x.com" if ticker != "MARKET" else "retail investor sentiment twitter x.com stockmarket"
             
-            url = "https://api.tavily.com/search"
-            headers = {"Content-Type": "application/json"}
-            payload = {
-                "api_key": self.tavily_key,
-                "query": query,
-                "search_depth": "advanced",
-                "include_domains": ["x.com", "twitter.com", "stocktwits.com"],
-                "max_results": 5
-            }
+            search_results = await search_plugin.search(
+                query=query,
+                search_depth="advanced",
+                include_domains=["x.com", "twitter.com", "stocktwits.com"],
+                max_results=5
+            ) if search_plugin else []
 
-            response = await agent_http_client.execute_with_breaker(self._tavily_cb, "POST", url, headers=headers, json=payload)
-            results = response.get('results', [])
+            # Convert to old results format
+            results = [{"title": r.title, "content": r.content, "url": r.url} for r in search_results]
             
             if not results and ticker != "MARKET" and company_name and company_name != ticker:
                 query = f"{company_name} stock sentiment discussion twitter"
-                payload["query"] = query
-                response = await agent_http_client.execute_with_breaker(self._tavily_cb, "POST", url, headers=headers, json=payload)
-                results = response.get('results', [])
+                search_results = await search_plugin.search(
+                    query=query,
+                    search_depth="advanced",
+                    include_domains=["x.com", "twitter.com", "stocktwits.com"],
+                    max_results=5
+                ) if search_plugin else []
+                results = [{"title": r.title, "content": r.content, "url": r.url} for r in search_results]
  
             if not results:
                 return MicroAgentResponse(
