@@ -6,6 +6,7 @@ from .base_micro import BaseMicroAgent, MicroAgentResponse
 from utils.financial_math import create_decimal
 from resilience import get_circuit_breaker, CircuitBreakerOpenError
 from utils.http_client import agent_http_client
+from utils.sentiment import get_sentiment_analyzer
 
 logger = logging.getLogger(__name__)
 

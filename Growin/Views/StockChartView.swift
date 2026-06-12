@@ -8,6 +8,26 @@ struct StockChartView: View {
     
     let timeframes = ["1Day", "1Week", "1Month", "3Month", "1Year", "Max"]
     
+    private var downsampledChartData: [ChartDataPoint] {
+        let maxPoints = 500
+        let data = viewModel.chartData
+        guard data.count > maxPoints else { return data }
+        
+        let strideValue = Int(ceil(Double(data.count) / Double(maxPoints)))
+        var result: [ChartDataPoint] = []
+        result.reserveCapacity(maxPoints + 1)
+        
+        for index in stride(from: 0, to: data.count - 1, by: strideValue) {
+            result.append(data[index])
+        }
+        
+        if let last = data.last, result.last?.timestamp != last.timestamp {
+            result.append(last)
+        }
+        
+        return result
+    }
+    
     var body: some View {
         ScrollView(showsIndicators: false) {
             VStack(spacing: 24) {
@@ -194,7 +214,7 @@ struct StockChartView: View {
     
     private var chartView: some View {
         Chart {
-            ForEach(viewModel.chartData) { point in
+            ForEach(downsampledChartData) { point in
                 AreaMark(
                     x: .value("Date", point.date),
                     yStart: .value("Baseline", Double(truncating: viewModel.minValue as NSNumber)),
@@ -249,7 +269,7 @@ struct StockChartView: View {
                                 if let plotFrame = proxy.plotFrame {
                                     let x = value.location.x - geometry[plotFrame].origin.x
                                     if let date: Date = proxy.value(atX: x) {
-                                        if let closest = findClosestPoint(to: date, in: viewModel.chartData) {
+                                        if let closest = findClosestPoint(to: date, in: downsampledChartData) {
                                             selectedPoint = closest
                                         }
                                     }

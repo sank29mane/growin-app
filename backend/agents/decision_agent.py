@@ -508,11 +508,12 @@ class DecisionAgent:
                     context.reasoning = reasoning
                 
             # Post-stream processing (Price Validation)
-            validation = await PriceValidator.validate_trade_price(context.ticker)
-            if validation["action"] in ["block", "warn"] and context.ticker:
-                 if any(word in full_response.upper() for word in ["BUY", "SELL"]):
-                     warning = f"\n\n⚠️ **Price Warning**: {validation['message']}"
-                     yield warning
+            if context.ticker:
+                validation = await PriceValidator.validate_trade_price(context.ticker)
+                if validation["action"] in ["block", "warn"]:
+                     if any(word in full_response.upper() for word in ["BUY", "SELL"]):
+                         warning = f"\n\n⚠️ **Price Warning**: {validation['message']}"
+                         yield warning
             
             status_manager.set_status("decision_agent", "ready", "Stream complete", model=self.model_name)
             

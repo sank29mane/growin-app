@@ -13,8 +13,7 @@ import yfinance as yf
 from mcp.types import TextContent
 
 from fastapi import APIRouter, HTTPException
-from data_models import Position
-from typing import Dict, Any, List
+from data_models import Position, T212AccountInfo
 from utils import sanitize_nan
 from utils.currency_utils import normalize_all_positions, calculate_portfolio_value, CurrencyNormalizer
 from utils.ticker_utils import normalize_ticker

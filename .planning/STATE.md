@@ -2,29 +2,30 @@
 gsd_state_version: 1.0
 milestone: v5.0
 milestone_name: MLX Intelligence & macOS 2026 UX Overhaul
-status: PLANNED
-last_updated: "2026-04-14T18:59:26.568Z"
-last_activity: 2026-04-10 — Phase 42 Completed (Nemotron 3 30B MoE Selected)
+status: ACTIVE
+last_updated: "2026-06-03T22:10:00.000Z"
+last_activity: "2026-06-03 — 120Hz price VSync and downsampling (45-03) Verified"
 progress:
-  total_phases: 5
-  completed_phases: 0
-  total_plans: 3
-  completed_plans: 1
+  total_phases: 6
+  completed_phases: 4
+  total_plans: 9
+  completed_plans: 12
 ---
 
 # GSD STATE MEMORY
 
 ## Current Position
 
-Phase: 44 — Multi-Agent Strategy & Swarm Optimization
-Plan: 02 — Reasoning Pivot (2-Stage Streaming Logic)
+Phase: 46 — Adaptive Learning & Alpha Engineering (Unsloth)
+Plan: 01 — Unsloth Local LoRA Tuning Environment Setup
 Status: PLANNED
-Last activity: 2026-04-16 — Core Infrastructure (44-01) Verified
+Last activity: 2026-06-03 — 120Hz price VSync and downsampling (45-03) Verified
 
 ## Summary
 
 - **Phase 43 Completed**: All engine transition and hardware calibration tasks verified.
-- **Phase 44-01 Completed**: Core infrastructure (Semaphore, Buffer, Orchestrator Scaffold) implemented.
+- **Phase 44 Completed**: Swarm calibration timeouts, dynamic memory-aware scaling, and specialist summarization implemented and verified.
+- **Phase 45 Completed**: SwiftUI 17+ 0px Sovereign UX, Stage Manager 2.0 window sets, and CADisplayLink VSync-driven 120Hz downsampled rendering loop implemented and verified.
 
 ## Milestone Status
 
@@ -38,9 +39,8 @@ Last activity: 2026-04-16 — Core Infrastructure (44-01) Verified
 
 ## Next Focus
 
-1. **Task 44-01.1**: Implement `AsyncSwarmOrchestrator` with "Progressive Synthesis" logic.
-2. **Task 44-01.2**: Add dynamic summarization layer for specialist agent outputs.
-3. **Task 44-01.3**: Calibrate concurrent MLX call thresholds to prevent memory contention.
+1. **Task 46-01.1**: Bootstrap local Unsloth/mlx-tune LoRA fine-tuning environment.
+2. **Task 46-01.2**: Setup DuckDB feature engineering pipelines for regime detection.
 
 ## Accumulated Context
 

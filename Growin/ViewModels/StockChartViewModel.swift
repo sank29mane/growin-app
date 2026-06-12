@@ -1,5 +1,7 @@
 import Foundation
 import SwiftUI
+import Charts
+import QuartzCore
 import Combine
 
 // MARK: - High Performance Data Processor
@@ -115,7 +117,13 @@ class StockChartViewModel {
     var market: String = "UK"
     var provider: String = "yfinance"
     var showProviderNotification: Bool = false
-    var providerNotificationMessage: String = ""
+        var providerNotificationMessage: String = ""
+    
+    // CADisplayLink VSync buffers
+    private var pendingChartTicks: [ChartDataPoint] = []
+    private var pendingQuote: (price: Decimal?, change: Decimal?, percent: Decimal?)? = nil
+    @ObservationIgnored nonisolated(unsafe) private var displayLink: CADisplayLink?
+    @ObservationIgnored nonisolated(unsafe) private var displayLinkProxy: DisplayLinkProxy?
     
     let symbol: String
     private let config = AppConfig.shared
@@ -126,6 +134,11 @@ class StockChartViewModel {
         self.symbol = symbol
         Task { await fetchChartData() }
         connectWebSocket()
+        setupDisplayLink()
+    }
+    
+    deinit {
+        displayLink?.invalidate()
     }
     
     func fetchChartData() async {
@@ -231,19 +244,9 @@ class StockChartViewModel {
         case .chartInit(let newPoints):
             self.chartData = newPoints
         case .chartTick(let tick):
-            if self.chartData.last?.timestamp != tick.timestamp {
-                withAnimation(.linear(duration: 0.5)) {
-                    self.chartData.append(tick)
-                    if self.chartData.count > 1000 {
-                        self.chartData.removeFirst()
-                    }
-                }
-            }
+            self.pendingChartTicks.append(tick)
         case .realtimeQuote(let price, let change, let percent):
-            self.realtimePrice = price
-            self.priceChange = change
-            self.priceChangePercent = percent
-            self.lastUpdated = Date()
+            self.pendingQuote = (price, change, percent)
         case .error(let message):
             self.errorMessage = message
         case .unknown:
@@ -316,5 +319,61 @@ class StockChartViewModel {
         selectedTimeframe = timeframe
         updateChartMetadata()
         Task { await fetchChartData() }
+    }
+    
+    private func setupDisplayLink() {
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+        let proxy = DisplayLinkProxy { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.handleDisplayLinkTick()
+            }
+        }
+        self.displayLinkProxy = proxy
+        displayLink = screen.displayLink(target: proxy, selector: #selector(DisplayLinkProxy.onTick(_:)))
+        displayLink?.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
+        displayLink?.add(to: .main, forMode: .common)
+    }
+    
+    @MainActor
+    private func handleDisplayLinkTick() {
+        // 1. Flush pending chart ticks
+        if !pendingChartTicks.isEmpty {
+            let ticksToAppend = pendingChartTicks
+            pendingChartTicks.removeAll()
+            
+            withAnimation(.linear(duration: 0.2)) {
+                for tick in ticksToAppend {
+                    if self.chartData.last?.timestamp != tick.timestamp {
+                        self.chartData.append(tick)
+                    }
+                }
+                if self.chartData.count > 1000 {
+                    let removeCount = self.chartData.count - 1000
+                    self.chartData.removeFirst(removeCount)
+                }
+            }
+        }
+        
+        // 2. Flush pending quotes
+        if let quote = pendingQuote {
+            self.realtimePrice = quote.price
+            self.priceChange = quote.change
+            self.priceChangePercent = quote.percent
+            self.lastUpdated = Date()
+            self.pendingQuote = nil
+        }
+    }
+}
+
+private class DisplayLinkProxy: NSObject {
+    private let tickAction: () -> Void
+    
+    init(tickAction: @escaping () -> Void) {
+        self.tickAction = tickAction
+        super.init()
+    }
+    
+    @objc func onTick(_ sender: CADisplayLink) {
+        tickAction()
     }
 }

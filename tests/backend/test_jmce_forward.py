@@ -31,7 +31,7 @@ def test_jmce_forward():
     x = mx.random.normal((batch_size, seq_len, n_assets)) * 0.01
 
     # Forward pass
-    mu, L = model(x)
+    mu, L, _ = model(x)
 
     # Calculate covariance Sigma = LL^T
     sigma = model.get_covariance(L)

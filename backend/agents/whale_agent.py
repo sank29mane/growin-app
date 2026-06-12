@@ -145,7 +145,6 @@ class WhaleAgent(BaseAgent):
                 value = p * s
                 if value >= whale_threshold:
                     t = trades[i]
-                    large_decimal_prices.append(p)
                     large_trades.append({
                         "price": float(p),
                         "size": float(s),
