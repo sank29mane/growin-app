@@ -29,6 +29,9 @@ struct ReasoningTraceView: View, Equatable {
                             .font(.title2)
                             .foregroundStyle(.secondary)
                     }
+                    .accessibilityLabel("Close")
+                    .accessibilityHint("Dismisses the reasoning trace view")
+                    .accessibilityAddTraits(.isButton)
                 }
                 .padding()
                 
