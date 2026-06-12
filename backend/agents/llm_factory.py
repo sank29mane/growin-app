@@ -56,17 +56,32 @@ class LLMFactory:
         # Normalization and Provider Detection
         model_lower = (model_name or "").lower()
         
+        # CRITICAL: Detect HuggingFace-style model IDs (contain '/') that come
+        # from LM Studio's model list. These MUST be routed to LM Studio before
+        # any heuristic matching, because substrings like "gemma", "mistral",
+        # "granite" would incorrectly match Ollama/MLX/Google providers.
+        is_hf_style_id = "/" in model_lower and provider == ""
+        
         try:
             llm_instance = None
             
+            # 0. HuggingFace-style ID → Always LM Studio
+            if is_hf_style_id:
+                logger.info(f"LLM Factory: Detected HF-style model ID '{model_name}', routing to LM Studio")
+                try:
+                    llm_instance = await LLMFactory._create_lmstudio(model_name)
+                except Exception as lm_err:
+                    logger.warning(f"LLM Factory: LM Studio creation failed for HF-style ID {model_name}: {lm_err}")
+            
             # 1. vMLX Priority (High-Performance Apple Silicon Engine)
             # Use vmlx for 'native-mlx', 'jang' models, or if provider is explicitly 'vmlx'
-            is_vmlx_hint = "native-mlx" in model_lower or "jang" in model_lower
-            if provider == "vmlx" or (not provider and is_vmlx_hint):
-                try:
-                    llm_instance = await LLMFactory._create_vmlx(model_name)
-                except Exception as vmlx_err:
-                    logger.warning(f"LLM Factory: vMLX creation failed for {model_name}: {vmlx_err}")
+            if not llm_instance:
+                is_vmlx_hint = "native-mlx" in model_lower or "jang" in model_lower
+                if provider == "vmlx" or (not provider and is_vmlx_hint):
+                    try:
+                        llm_instance = await LLMFactory._create_vmlx(model_name)
+                    except Exception as vmlx_err:
+                        logger.warning(f"LLM Factory: vMLX creation failed for {model_name}: {vmlx_err}")
 
             if not llm_instance:
                 is_lmstudio_hint = "lmstudio" in model_lower or "nemotron" in model_lower

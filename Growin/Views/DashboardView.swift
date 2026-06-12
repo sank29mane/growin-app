@@ -116,7 +116,7 @@ struct DashboardView: View {
                                                 innerRadius: .ratio(0.618),
                                                 angularInset: 1.5
                                             )
-                                            .cornerRadius(5)
+                                            .cornerRadius(0)
                                             .foregroundStyle(by: .value("Name", item.label))
                                         }
                                     }
@@ -302,7 +302,7 @@ struct AccountSectionView: View {
                                             innerRadius: .ratio(0.618),
                                             angularInset: 1.5
                                         )
-                                        .cornerRadius(5)
+                                        .cornerRadius(0)
                                         .foregroundStyle(by: .value("Name", item.label))
                                     }
                                 }
