@@ -164,12 +164,9 @@ struct ContentView: View {
                 .foregroundStyle(showChat ? Color.brutalChartreuse : Color.brutalOffWhite)
         }
         .accessibilityLabel(showChat ? "Hide AI Assistant" : "Show AI Assistant")
-        .accessibilityHint("Toggles the visibility of the AI Assistant sidebar")
-        .accessibilityAddTraits(.isButton)
-        .help("Toggle AI Assistant")
-        .accessibilityLabel(showChat ? "Hide AI Assistant" : "Show AI Assistant")
         .accessibilityHint("Shows or hides the AI Assistant sidebar")
         .accessibilityAddTraits(.isButton)
+        .help("Toggle AI Assistant")
     }
     
     private var settingsButton: some View {
@@ -193,6 +190,7 @@ struct ContentView: View {
         .buttonStyle(.plain)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("System Settings, backend \(backendStatus.isOnline ? "online" : "offline")")
+        .accessibilityHint("Opens system settings and console")
         .accessibilityAddTraits(.isButton)
         .help("System Settings & Console")
     }
