@@ -127,6 +127,7 @@ struct ConfidenceVisualizationView: View {
                             .foregroundStyle(.secondary)
                             .buttonStyle(.plain)
                             .accessibilityLabel("Cancel Order")
+                            .accessibilityHint("Cancels the proposed order and discards the trade")
                             .accessibilityAddTraits(.isButton)
                     }
                     .padding(.top, 8)

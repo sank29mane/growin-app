@@ -258,6 +258,7 @@ struct HFModelHubSection: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Search Models")
+                    .accessibilityHint("Searches HuggingFace for the specified model")
                     .accessibilityAddTraits(.isButton)
                 }
                 

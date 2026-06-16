@@ -41,6 +41,7 @@ struct AccountPicker: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("\(account) Account")
+                .accessibilityHint("Switches current context to \(account) account")
                 .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : [.isButton])
             }
         }
