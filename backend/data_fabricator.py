@@ -318,7 +318,7 @@ class DataFabricator:
             if not articles:
                 return ResearchData(ticker=ticker, sentiment_score=0.0, sentiment_label="NEUTRAL", articles=[])
 
-            analyzer = get_sentiment_analyzer()
+            analyzer = await get_sentiment_analyzer()
             
             sentiments = []
             rich_articles = []

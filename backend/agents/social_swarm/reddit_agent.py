@@ -40,7 +40,7 @@ class RedditMicroAgent(BaseMicroAgent):
         try:
             from utils.search_provider import get_search_plugin
             search_plugin = get_search_plugin()
-            sentiment_analyzer = get_sentiment_analyzer()
+            sentiment_analyzer = await get_sentiment_analyzer()
             
             # Non-blocking thread execution
             query = f"${ticker} stock discussion reddit wallstreetbets" if ticker != "MARKET" else "retail investor sentiment reddit wallstreetbets"

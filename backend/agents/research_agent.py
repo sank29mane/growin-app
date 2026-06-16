@@ -128,7 +128,7 @@ class ResearchAgent(BaseAgent):
             return self._neutral_response(ticker, error="No news API keys configured")
         
         try:
-            sentiment_analyzer = get_sentiment_analyzer()
+            sentiment_analyzer = await get_sentiment_analyzer()
             articles = []
             
             # --- Smart Query Expansion Strategy ---
