@@ -35,11 +35,22 @@ def convert_yf_json_to_csv(json_data, filename):
         
         df.set_index('Datetime', inplace=True)
         df.dropna(inplace=True)
+        
+        # Resample to 10-minute intervals
+        df = df.resample('10min').agg({
+            'Open': 'first',
+            'High': 'max',
+            'Low': 'min',
+            'Close': 'last',
+            'Volume': 'sum'
+        }).dropna()
+        
         df.to_csv(filename)
         return len(df)
     except Exception as e:
         print(f"Error parsing JSON: {e}")
         return 0
+
 
 def fetch_data(test_mode=False):
     tickers = load_tickers()
@@ -76,7 +87,7 @@ def fetch_data(test_mode=False):
                 try:
                     data = json.loads(content)
                     if "chart" in data and data["chart"]["result"] is not None:
-                        filename = f"data/etfs/{ticker}_5m.csv"
+                        filename = f"data/etfs/{ticker}_10m.csv"
                         rows = convert_yf_json_to_csv(data, filename)
                         if rows > 0:
                             saved_count += 1
