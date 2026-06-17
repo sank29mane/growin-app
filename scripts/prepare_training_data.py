@@ -66,7 +66,7 @@ def prepare_data(db_path="backend/data/analytics.duckdb", output_dir="data/etfs"
         # --- Task 3.2: Forward-Looking Return & Labels ---
         # Predict 6 periods ahead (1 hour ahead at 10-minute bars)
         df_ticker['forward_return'] = (df_ticker['close'].shift(-6) - df_ticker['close']) / df_ticker['close']
-        df_ticker['forward_return'].fillna(0, inplace=True)
+        df_ticker['forward_return'] = df_ticker['forward_return'].fillna(0)
         
         # Calculate standard deviation of returns for this ticker to calibrate dynamic thresholds
         ret_std = df_ticker['log_return'].std()

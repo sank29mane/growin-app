@@ -374,6 +374,7 @@ class AnalyticsDB:
                 df['timestamp'] = pd.to_datetime(df['timestamp'])
 
             df['ticker'] = ticker
+            df['ticker'] = df['ticker'].astype('object')
             
             # Bulk insert using DuckDB's fast path
             # SOTA: Registering dataframe explicitly to avoid scope resolution issues
