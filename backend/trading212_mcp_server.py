@@ -14,6 +14,7 @@ import time
 from typing import Any, Dict, Optional
 from urllib.parse import urlencode
 
+import aiofiles
 import httpx
 import pandas as pd
 import yfinance as yf
@@ -106,6 +107,7 @@ class FileCache:
         self.ttl_seconds = ttl_seconds
         self._cache: Dict[str, Any] = {}
         self._timestamps: Dict[str, float] = {}
+        self._lock = None
         self._load_from_disk()
 
     def _load_from_disk(self):
@@ -115,28 +117,46 @@ class FileCache:
                     data = json.load(f)
                     self._cache = data.get('cache', {})
                     self._timestamps = data.get('timestamps', {})
-                self._cleanup_expired()
+                # Cleanup is now async, so we just clean up the memory state directly
+                now = time.time()
+                expired = [k for k, ts in self._timestamps.items() if now - ts > self.ttl_seconds]
+                for k in expired:
+                    del self._cache[k]
+                    del self._timestamps[k]
+                if expired:
+                    # Sync save because we are in __init__
+                    with open(self.filename, 'w') as f:
+                        json.dump({
+                            'cache': self._cache,
+                            'timestamps': self._timestamps
+                        }, f)
             except Exception as e:
                 print(f"Warning: Failed to load cache from {self.filename}: {e}", file=sys.stderr)
 
-    def _save_to_disk(self):
-        try:
-            with open(self.filename, 'w') as f:
-                json.dump({
-                    'cache': self._cache,
-                    'timestamps': self._timestamps
-                }, f)
-        except Exception as e:
-            print(f"Warning: Failed to save cache to {self.filename}: {e}", file=sys.stderr)
+    async def _save_to_disk(self):
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        async with self._lock:
+            try:
+                tmp_filename = self.filename + ".tmp"
+                async with aiofiles.open(tmp_filename, 'w') as f:
+                    data = json.dumps({
+                        'cache': self._cache,
+                        'timestamps': self._timestamps
+                    })
+                    await f.write(data)
+                os.replace(tmp_filename, self.filename)
+            except Exception as e:
+                print(f"Warning: Failed to save cache to {self.filename}: {e}", file=sys.stderr)
 
-    def _cleanup_expired(self):
+    async def _cleanup_expired(self):
         now = time.time()
         expired = [k for k, ts in self._timestamps.items() if now - ts > self.ttl_seconds]
         for k in expired:
             del self._cache[k]
             del self._timestamps[k]
         if expired:
-            self._save_to_disk()
+            await self._save_to_disk()
 
     def get(self, key: str) -> Optional[Any]:
         value, is_expired = self.get_with_expiry_status(key)
@@ -150,10 +170,10 @@ class FileCache:
             return self._cache[key], is_expired
         return None, True
 
-    def set(self, key: str, value: Any, custom_ttl: Optional[int] = None):
+    async def set(self, key: str, value: Any, custom_ttl: Optional[int] = None):
         self._cache[key] = value
         self._timestamps[key] = time.time()
-        self._save_to_disk()
+        await self._save_to_disk()
 
 
 class Trading212Client:
@@ -301,7 +321,7 @@ class Trading212Client:
             return cached
         try:
             data = await self._request("GET", "equity/metadata/instruments")
-            self.cache.set(cache_key, data)
+            await self.cache.set(cache_key, data)
             return data
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 429:
@@ -317,7 +337,7 @@ class Trading212Client:
             return cached
         try:
             data = await self._request("GET", "equity/metadata/exchanges")
-            self.cache.set(cache_key, data)
+            await self.cache.set(cache_key, data)
             return data
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 429:
