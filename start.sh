@@ -17,8 +17,8 @@ if lsof -i:$PORT >/dev/null 2>&1; then
 fi
 
 # === 2. Open Xcode (Parallel) ===
-if [ -d "Growin/Growin.xcodeproj" ]; then
-    open "Growin/Growin.xcodeproj" &
+if [ -d "Growin.xcodeproj" ]; then
+    open "Growin.xcodeproj" &
 fi
 
 # === 3. Env Optimization ===

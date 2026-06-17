@@ -49,7 +49,11 @@ class LMStudioClient:
         SOTA: Implement 60% RAM Rule for M4 Pro/Max memory bandwidth safety.
         Prevents SSD swapping during heavy parallel multi-agent bursts.
         """
-        total_ram_gb = psutil.virtual_memory().total / (1024**3)
+        try:
+            total_ram_gb = psutil.virtual_memory().total / (1024**3)
+        except Exception as e:
+            logger.warning(f"Failed to check virtual memory total: {e}. Defaulting to 16GB.")
+            total_ram_gb = 16.0
 
         # Rule: Use only 60% of RAM for LLM tasks to leave room for OS/Apps
         safe_ram_limit = total_ram_gb * 0.6
@@ -87,12 +91,12 @@ class LMStudioClient:
         """Verify server is reachable and running."""
         try:
             # Try V1 models endpoint (management)
-            await self._request("GET", "/api/v1/models")
+            await self._request("GET", "/api/v1/models", timeout=2.0)
             return True
         except Exception:
             try:
                 # Fallback OpenAI compat
-                await self._request("GET", "/v1/models")
+                await self._request("GET", "/v1/models", timeout=2.0)
                 return True
             except Exception:
                 return False

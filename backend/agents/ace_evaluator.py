@@ -47,7 +47,7 @@ class ACEEvaluator:
         # Analysis of defense quality (simplified heuristic for now)
         import re
         for turn in debate_trace:
-            refutation = turn.get("refutation", "").lower()
+            refutation = (turn.get("refutation") or "").lower()
             # Use word boundaries and check for negation
             if re.search(r'\b(addressed|resolved|fixed)\b', refutation):
                 if not re.search(r'\b(not|never|un|failed to)\b', refutation):

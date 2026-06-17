@@ -8,11 +8,15 @@ client = TestClient(app)
 
 def test_strategy_stream_headers():
     """Verify SSE headers for SOTA AG-UI streaming."""
-    with client.stream("GET", "/api/ai/strategy/stream?session_id=test-session") as response:
-        assert response.status_code == 200
-        assert "text/event-stream" in response.headers["Content-Type"]
-        assert response.headers["Cache-Control"] == "no-cache"
-        assert response.headers["X-Accel-Buffering"] == "no"
+    from unittest.mock import patch, AsyncMock
+    with patch("agents.orchestrator_agent.OrchestratorAgent") as MockOrch:
+        mock_orch_instance = MockOrch.return_value
+        mock_orch_instance.run = AsyncMock(return_value={"content": "Success"})
+        with client.stream("GET", "/api/ai/strategy/stream?session_id=test-session") as response:
+            assert response.status_code == 200
+            assert "text/event-stream" in response.headers["Content-Type"]
+            assert response.headers["Cache-Control"] == "no-cache"
+            assert response.headers["X-Accel-Buffering"] == "no"
 
 @pytest.mark.asyncio
 async def test_strategy_stream_events():

@@ -6,7 +6,6 @@ from .research_agent import ResearchAgent
 from .social_agent import SocialAgent
 from .whale_agent import WhaleAgent
 from .goal_planner_agent import GoalPlannerAgent
-from .vision_agent import VisionAgent
 
 __all__ = [
     "QuantAgent",
@@ -15,6 +14,5 @@ __all__ = [
     "ResearchAgent",
     "SocialAgent",
     "WhaleAgent",
-    "GoalPlannerAgent",
-    "VisionAgent"
+    "GoalPlannerAgent"
 ]

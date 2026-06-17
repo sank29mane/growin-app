@@ -46,7 +46,7 @@ def test_mcp_status_leak():
             client.delete(f"/mcp/servers/{server_name}")
 
 def test_additional_routes_leak():
-    """Test /mcp/servers for leaks"""
+    """Test /mcp/status for leaks in additional server configs"""
     secret_value = "SUPER_SECRET_KEY_456"
     server_name = "LeakTestServer_Routes"
 
@@ -61,8 +61,8 @@ def test_additional_routes_leak():
         })
 
         try:
-            # 2. Call /mcp/servers
-            response = client.get("/mcp/servers")
+            # 2. Call /mcp/status
+            response = client.get("/mcp/status")
             assert response.status_code == 200
             data = response.json()
 
@@ -76,7 +76,7 @@ def test_additional_routes_leak():
             assert target_server is not None
 
             env = target_server.get("env", {})
-            assert env.get("API_KEY") == "********", "Vulnerability Fix FAILED in /mcp/servers!"
+            assert env.get("API_KEY") == "********", "Vulnerability Fix FAILED in /mcp/status!"
 
         finally:
             client.delete(f"/mcp/servers/{server_name}")

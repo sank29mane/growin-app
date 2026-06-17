@@ -30,7 +30,9 @@ async def test_get_lmstudio_models_online():
 @pytest.mark.asyncio
 async def test_load_lmstudio_model():
     """Verify triggering a model load."""
-    with mock.patch("lm_studio_client.LMStudioClient.ensure_model_loaded") as mock_load:
+    with mock.patch("lm_studio_client.LMStudioClient.list_loaded_models") as mock_list_loaded, \
+         mock.patch("lm_studio_client.LMStudioClient.ensure_model_loaded") as mock_load:
+        mock_list_loaded.return_value = []
         mock_load.return_value = True
 
         response = client.post(
@@ -39,7 +41,7 @@ async def test_load_lmstudio_model():
         )
         assert response.status_code == 200
         assert response.json()["status"] == "success"
-        mock_load.assert_called_once_with("llama-3-8b", context_length=4096, gpu_offload="max")
+        mock_load.assert_called_once_with("llama-3-8b", context_length=4096, gpu="max")
 
 @pytest.mark.asyncio
 async def test_get_lmstudio_status():

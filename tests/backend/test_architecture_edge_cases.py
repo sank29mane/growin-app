@@ -56,49 +56,54 @@ async def test_frayer_resilience_uk_primary_failure():
 async def test_decision_agent_agentic_loop_tool_execution():
     """Test DecisionAgent correctly identifies and executes a tool call in its loop"""
     # Need to patch LLMFactory to avoid actual initialization
-    with patch.object(LLMFactory, 'create_llm', new_callable=AsyncMock) as mock_factory, \
-         patch("utils.skill_loader.get_skill_loader") as mock_sl, \
-         patch("agents.decision_agent.extract_tool_calls") as mock_ext:
-        mock_sl.return_value.get_relevant_skills.return_value = ""
+    orig_shadow = os.environ.pop("USE_SHADOW_LLM", None)
+    try:
+        with patch.object(LLMFactory, 'create_llm', new_callable=AsyncMock) as mock_factory, \
+             patch("utils.skill_loader.get_skill_loader") as mock_sl, \
+             patch("agents.decision_agent.extract_tool_calls") as mock_ext:
+            mock_sl.return_value.get_relevant_skills.return_value = ""
 
-        # Tool call extraction mock
-        from agents.decision_agent import ToolCall
-        mock_ext.side_effect = [[ToolCall(tool_name="docker_run_python", arguments={"script": "print(2+2)", "engine": "npu"})], []]
-        mock_llm = MagicMock()
-        mock_factory.return_value = mock_llm
+            # Tool call extraction mock
+            from agents.decision_agent import ToolCall
+            mock_ext.side_effect = [[ToolCall(tool_name="docker_run_python", arguments={"script": "print(2+2)", "engine": "npu"})], []]
+            mock_llm = MagicMock()
+            mock_factory.return_value = mock_llm
 
-        agent = DecisionAgent(model_name="native-mlx")
-        await agent._initialize_llm()
+            agent = DecisionAgent(model_name="native-mlx")
+            await agent._initialize_llm()
 
-        # Turn 1: LLM outputs a tool call
-        # Turn 2: LLM outputs final answer based on tool result
-        tool_call_content = '[TOOL:docker_run_python({"script": "print(2+2)", "engine": "npu"})]'
-        final_answer = "The result of the calculation is 4."
+            # Turn 1: LLM outputs a tool call
+            # Turn 2: LLM outputs final answer based on tool result
+            tool_call_content = '[TOOL:docker_run_python({"script": "print(2+2)", "engine": "npu"})]'
+            final_answer = "The result of the calculation is 4."
 
-        mock_llm.chat = AsyncMock(side_effect=[
-            {"content": tool_call_content},
-            {"content": final_answer}
-        ])
+            mock_llm.chat = AsyncMock(side_effect=[
+                {"content": tool_call_content},
+                {"content": final_answer}
+            ])
 
-        mock_context = MarketContext(query="Analyze generic item 2+2", intent="analytical")
-        import app_context
-        app_context.state._rag_manager = None
+            mock_context = MarketContext(query="Analyze generic item 2+2", intent="analytical")
+            import app_context
+            app_context.state._rag_manager = None
 
-        with patch("app_context.state.mcp_client.call_tool", new_callable=AsyncMock) as mock_tool:
-            mock_tool.return_value = MagicMock(content=[MagicMock(text='{"stdout": "4", "exit_code": 0}')])
+            with patch("app_context.state.mcp_client.call_tool", new_callable=AsyncMock) as mock_tool:
+                mock_tool.return_value = MagicMock(content=[MagicMock(text='{"stdout": "4", "exit_code": 0}')])
 
-            result = await agent.make_decision(mock_context, "Analyze generic item 2+2")
+                result = await agent.make_decision(mock_context, "Analyze generic item 2+2")
 
-            # The result could be a dictionary with 'content', or a string.
-            if isinstance(result, dict) and 'content' in result:
-                assert "4" in result['content']
-            else:
-                assert "4" in result
-            assert mock_tool.call_count == 1
-            # Verify it used the NPU engine as instructed in persona
-            name, args = mock_tool.call_args[0]
-            assert name == "docker_run_python"
-            assert args["engine"] == "npu"
+                # The result could be a dictionary with 'content', or a string.
+                if isinstance(result, dict) and 'content' in result:
+                    assert "4" in result['content']
+                else:
+                    assert "4" in result
+                assert mock_tool.call_count == 1
+                # Verify it used the NPU engine as instructed in persona
+                name, args = mock_tool.call_args[0]
+                assert name == "docker_run_python"
+                assert args["engine"] == "npu"
+    finally:
+        if orig_shadow is not None:
+            os.environ["USE_SHADOW_LLM"] = orig_shadow
 
 @pytest.mark.asyncio
 async def test_sandbox_security_timeout():
@@ -125,22 +130,27 @@ async def test_sandbox_security_timeout():
 @pytest.mark.asyncio
 async def test_price_validation_mismatch_correction():
     """Test that DataFabricator corrects GBX/GBP mismatches (100x factor)"""
-    from data_fabricator import DataFabricator
-    fab = DataFabricator()
+    orig_shadow = os.environ.pop("USE_SHADOW_LLM", None)
+    try:
+        from data_fabricator import DataFabricator
+        fab = DataFabricator()
 
-    # Mock history close at 1.0 (GBP) and current quote at 100.0 (GBX)
-    with patch.object(fab, '_fetch_news_data', new_callable=AsyncMock), \
-         patch.object(fab, '_fetch_social_data', new_callable=AsyncMock), \
-         patch("utils.data_frayer.get_data_frayer") as mock_frayer_get:
+        # Mock history close at 1.0 (GBP) and current quote at 100.0 (GBX)
+        with patch.object(fab, '_fetch_news_data', new_callable=AsyncMock), \
+             patch.object(fab, '_fetch_social_data', new_callable=AsyncMock), \
+             patch("utils.data_frayer.get_data_frayer") as mock_frayer_get:
 
-        mock_frayer = mock_frayer_get.return_value
-        mock_frayer.fetch_frayed_bars = AsyncMock(return_value=[{"t": 1, "o": 1, "h": 1, "l": 1, "c": 1.0, "v": 1}])
+            mock_frayer = mock_frayer_get.return_value
+            mock_frayer.fetch_frayed_bars = AsyncMock(return_value=[{"t": 1, "o": 1, "h": 1, "l": 1, "c": 1.0, "v": 1}])
 
-        # Alpaca mock for US quote
-        fab.alpaca.get_real_time_quote = AsyncMock(return_value={"current_price": 100.0})
+            # Alpaca mock for US quote
+            fab.alpaca.get_real_time_quote = AsyncMock(return_value={"current_price": 100.0})
 
-        # Test 100x correction
-        res = await fab._fetch_price_data("AAPL") # US ticker -> Alpaca quote
+            # Test 100x correction
+            res = await fab._fetch_price_data("AAPL") # US ticker -> Alpaca quote
 
-        # 100.0 (quote) / 1.0 (history) = 100 -> Corrects to 1.0
-        assert res.current_price == Decimal('1.0')
+            # 100.0 (quote) / 1.0 (history) = 100 -> Corrects to 1.0
+            assert res.current_price == Decimal('1.0')
+    finally:
+        if orig_shadow is not None:
+            os.environ["USE_SHADOW_LLM"] = orig_shadow

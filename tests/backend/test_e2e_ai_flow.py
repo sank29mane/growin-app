@@ -40,12 +40,12 @@ async def test_e2e_ai_flow():
     assert has_final or has_error
 
     if has_error:
-        # Check if the error is specifically due to missing MLX hardware
+        # Check if the error is specifically due to missing MLX hardware or LM Studio being offline
         error_event = next(e for e in events if e["event"] == "error")
         error_msg = error_event["data"].get("error", "") or error_event["data"].get("message", "")
         error_msg_str = str(error_msg)
-        if any(x in error_msg_str for x in ["MLX", "hardware", "libmlx.so", "Total failure", "NoneType"]) or "mlx" in error_msg_str.lower():
-            pytest.skip(f"Missing MLX hardware in CI environment: {error_msg_str}")
+        if any(x in error_msg_str for x in ["MLX", "hardware", "libmlx.so", "Total failure", "NoneType", "LM Studio", "reachable", "Connection", "unreachable"]) or "mlx" in error_msg_str.lower():
+            pytest.skip(f"Missing MLX hardware or LM Studio offline: {error_msg_str}")
         else:
             pytest.fail(f"Real regression detected in AI stream: {error_msg_str}")
 

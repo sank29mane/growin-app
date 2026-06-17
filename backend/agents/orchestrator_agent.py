@@ -263,7 +263,7 @@ Query: "{clean_query}"
                 if msg.get("role") != "user":
                     continue
                     
-                content = msg.get("content", "")
+                content = msg.get("content") or ""
                 found = extract_ticker_from_text(content)
                 if found and found not in ["ISA", "INVEST", "MY", "DEEP", "DIVE", "MORE", "SOME", "RSI"]:
                     ticker = found
@@ -570,7 +570,7 @@ Query: "{clean_query}"
                 if msg.get("role") != "user":
                     continue
                     
-                content = msg.get("content", "")
+                content = msg.get("content") or ""
                 found = extract_ticker_from_text(content)
                 if found and found not in ["ISA", "INVEST", "MY", "DEEP", "DIVE", "MORE", "SOME", "RSI"]:
                     ticker = found

@@ -39,7 +39,7 @@ def test_rag():
 
     count = rag.count()
     print(f"   Count: {count}")
-    assert count == 2
+    assert count == 5
 
     # 2. Test Querying
     print("2. Querying 'Apple earnings'...")

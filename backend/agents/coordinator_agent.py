@@ -29,7 +29,6 @@ Specialist Agents:
 - SocialAgent: Twitter/Reddit sentiment ("social")
 - WhaleAgent: Institutional trade activity ("whale")
 - GoalPlannerAgent: Financial goal implementation ("goal")
-- VisionAgent: Technical chart pattern recognition ("vision")
 
 JSON Output Format:
 {
@@ -513,9 +512,6 @@ class CoordinatorAgent(BaseAgent):
             context.social = SocialData(**data)
         elif agent_name == "WhaleAgent":
             context.whale = WhaleData(**data)
-        elif agent_name == "VisionAgent":
-            from market_context import VisionData
-            context.vision = VisionData(**data)
         elif agent_name == "GoalPlannerAgent":
             # Note: GoalData must be imported if not already in context, but dynamic import ok
             from market_context import GoalData

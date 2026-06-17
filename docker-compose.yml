@@ -14,10 +14,8 @@ services:
       - backend/.env
     volumes:
       - ./backend/data:/app/data
-      - ./growin_rag_db:/app/growin_rag_db
     environment:
       - REDIS_URL=redis://redis:6379/0
-      - CHROMA_DB_PATH=/app/growin_rag_db
     depends_on:
       - redis
     networks:

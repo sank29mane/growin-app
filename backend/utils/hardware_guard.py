@@ -28,12 +28,15 @@ class ResourceGuard:
         """
         Verify if loading a new model is safe for the system.
         """
-        mem = psutil.virtual_memory()
-        available_gb = mem.available / (1024**3)
-        
-        if available_gb < self.ram_min_free_gb:
-            logger.warning(f"⚠️ Memory safety check failed: {available_gb:.2f}GB available (Min: {self.ram_min_free_gb}GB)")
-            return False
+        try:
+            mem = psutil.virtual_memory()
+            available_gb = mem.available / (1024**3)
+            
+            if available_gb < self.ram_min_free_gb:
+                logger.warning(f"⚠️ Memory safety check failed: {available_gb:.2f}GB available (Min: {self.ram_min_free_gb}GB)")
+                return False
+        except Exception as e:
+            logger.warning(f"Failed to check memory safety using psutil: {e}. Defaulting to safe state.")
             
         return True
 

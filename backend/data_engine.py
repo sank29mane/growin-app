@@ -492,102 +492,27 @@ class AlpacaClient:
                 logger.warning(f"Batch fetch failed: {e}. Falling back to individual.")
                 fallback_candidates.extend(alpaca_candidates) # Add back to fallback queue
 
+        # Process fallback candidates individually using their primary sources first
+        if fallback_candidates:
+            tasks = [self.get_historical_bars(t, timeframe, limit) for t in fallback_candidates]
+            fallback_results = await asyncio.gather(*tasks, return_exceptions=True)
+            for res in fallback_results:
+                if res and isinstance(res, dict) and 'ticker' in res:
+                    results[res['ticker']] = res
+
         # 4. Process Fallbacks (UK stocks + any failed Alpaca + ones missing from batch response)
         # Check what we still miss
         still_missing = [t for t in missing_tickers if t not in results]
         
         if still_missing:
-            # ⚡ OPTIMIZATION: Batched yf.download to prevent 429 rate limits
-            import yfinance as yf
-            import pandas as pd
-            from utils.currency_utils import CurrencyNormalizer
-            
-            period_map = {
-                "1Min": ("5d", "1m"),
-                "5Min": ("60d", "5m"),
-                "15Min": ("60d", "15m"),
-                "1Hour": ("730d", "1h"),
-                "1Day": ("5y", "1d"),
-                "1Week": ("5y", "1wk"),
-                "1Month": ("max", "1mo")
-            }
-            period, interval = period_map.get(timeframe, ("5y", "1d"))
-
-            # We need normalized tickers for yf.download
-            norm_map = {normalize_ticker(t): t for t in still_missing}
-            yf_tickers = list(norm_map.keys())
-
             try:
-                loop = asyncio.get_running_loop()
-                data = await loop.run_in_executor(
-                    None,
-                    lambda: yf.download(yf_tickers, period=period, interval=interval, progress=False)
+                yf_results = await asyncio.to_thread(
+                    self._fetch_batch_from_yfinance,
+                    still_missing,
+                    timeframe,
+                    limit
                 )
-
-                if not data.empty:
-                    # Ensure it's a MultiIndex if multiple tickers, else convert to MultiIndex format for uniform processing
-                    if not isinstance(data.columns, pd.MultiIndex):
-                        data.columns = pd.MultiIndex.from_product([data.columns, [yf_tickers[0]]])
-
-                    for yf_ticker in yf_tickers:
-                        orig_ticker = norm_map[yf_ticker]
-                        if yf_ticker not in data.columns.get_level_values(1):
-                            continue
-
-                        df = data.xs(yf_ticker, level=1, axis=1).copy()
-                        df = df.dropna(how='all') # Drop empty days for this ticker
-
-                        if df.empty:
-                            continue
-
-                        is_uk = CurrencyNormalizer.is_uk_stock(yf_ticker)
-                        if is_uk:
-                            cols_to_normalize = ['Open', 'High', 'Low', 'Close']
-                            cols_to_norm = [c for c in cols_to_normalize if c in df.columns]
-                            df[cols_to_norm] = df[cols_to_norm] / 100.0
-
-                        cols_to_round = ['Open', 'High', 'Low', 'Close']
-                        cols_to_r = [c for c in cols_to_round if c in df.columns]
-                        df[cols_to_r] = df[cols_to_r].round(2)
-
-                        if df.index.tz is None:
-                            market_tz = "Europe/London" if is_uk else "America/New_York"
-                            df.index = df.index.tz_localize(market_tz).tz_convert('UTC')
-                        else:
-                            df.index = df.index.tz_convert('UTC')
-
-                        df['t'] = df.index.tz_localize(None).astype('datetime64[ms]').astype(np.int64)
-
-                        df = df.rename(columns={'Open': 'o', 'High': 'h', 'Low': 'l', 'Close': 'c', 'Volume': 'v'})
-                        if 'v' in df.columns:
-                            df['v'] = df['v'].fillna(0).astype(int)
-
-                        req_cols = ['t', 'o', 'h', 'l', 'c', 'v']
-                        sel_cols = [c for c in req_cols if c in df.columns]
-                        df = df[sel_cols]
-
-                        raw_records = df.to_dict('records')
-                        bar_list = []
-
-                        for r in raw_records:
-                            if pd.isna(r.get('c')):
-                                continue
-                            ts_iso = datetime.fromtimestamp(r['t'] / 1000.0, tz=timezone.utc).isoformat()
-                            bar_list.append(PriceData(
-                                ticker=orig_ticker,
-                                timestamp=ts_iso,
-                                t=int(r['t']),
-                                open=Decimal(str(r.get('o', 0))),
-                                high=Decimal(str(r.get('h', 0))),
-                                low=Decimal(str(r.get('l', 0))),
-                                close=Decimal(str(r.get('c', 0))),
-                                volume=int(r.get('v', 0))
-                            ).model_dump())
-
-                        if bar_list:
-                            res: BarDataDict = {"ticker": orig_ticker, "bars": bar_list[-limit:], "timeframe": timeframe}
-                            results[orig_ticker] = res
-                            cache.set(f"bars_{orig_ticker}_{timeframe}_{limit}", res, ttl=300)
+                results.update(yf_results)
 
             except Exception as e:
                 logger.warning(f"Batched yf.download fallback failed: {e}. Attempting individual fetches.")
