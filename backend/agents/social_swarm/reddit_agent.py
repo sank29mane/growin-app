@@ -6,9 +6,8 @@ from .base_micro import BaseMicroAgent, MicroAgentResponse
 from utils.financial_math import create_decimal
 from resilience import get_circuit_breaker, CircuitBreakerOpenError
 from utils.http_client import agent_http_client
-from utils.sentiment import get_sentiment_analyzer
+from utils.sentiment import get_sentiment_analyzer_async
 
-from utils.sentiment import get_sentiment_analyzer
 logger = logging.getLogger(__name__)
 
 # Cache sentiment analyzer at the module level to prevent synchronous I/O blocking in async loops
@@ -40,7 +39,7 @@ class RedditMicroAgent(BaseMicroAgent):
         try:
             from utils.search_provider import get_search_plugin
             search_plugin = get_search_plugin()
-            sentiment_analyzer = get_sentiment_analyzer()
+            sentiment_analyzer = await get_sentiment_analyzer_async()
             
             # Non-blocking thread execution
             query = f"${ticker} stock discussion reddit wallstreetbets" if ticker != "MARKET" else "retail investor sentiment reddit wallstreetbets"

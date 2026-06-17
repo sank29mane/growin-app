@@ -15,7 +15,7 @@ Supported Markets: UK (LSE), India (NSE), US
 """
 
 from .base_agent import BaseAgent, AgentConfig, AgentResponse
-from utils.sentiment import get_sentiment_analyzer
+from utils.sentiment import get_sentiment_analyzer_async
 from market_context import ResearchData, NewsArticle
 from typing import Dict, Any, List, Optional
 from utils.http_client import agent_http_client
@@ -128,7 +128,7 @@ class ResearchAgent(BaseAgent):
             return self._neutral_response(ticker, error="No news API keys configured")
         
         try:
-            sentiment_analyzer = get_sentiment_analyzer()
+            sentiment_analyzer = await get_sentiment_analyzer_async()
             articles = []
             
             # --- Smart Query Expansion Strategy ---
