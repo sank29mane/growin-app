@@ -73,3 +73,7 @@ backend/.t212_cache.json
 # Tooling Cache
 graphify-out/cache/
 
+# Model adapters
+/adapters/
+
+
