@@ -108,8 +108,26 @@ class MLXInferenceEngine:
                 # but we'll pass it as a hint if the library version supports it
                 load_kwargs["adapter_path"] = None # Placeholder for potential adapters
             
+            # Check if it is a Vision-Language Model (like gemma-4)
+            is_vlm = False
+            try:
+                import os
+                import json
+                # Check config.json if model_path is a local directory or cached HF path
+                # Since huggingface-hub downloads to cache, it might be resolved.
+                # We also check for gemma-4 or vlm in path.
+                if "gemma-4" in model_path.lower() or "vlm" in model_path.lower():
+                    is_vlm = True
+            except Exception:
+                pass
+
             # Load new model
-            self.model, self.tokenizer = load(model_path, **load_kwargs)
+            if is_vlm:
+                logger.info("Detected Vision-Language Model. Loading via mlx-vlm...")
+                from mlx_vlm import load as vlm_load
+                self.model, self.tokenizer = vlm_load(model_path, **load_kwargs)
+            else:
+                self.model, self.tokenizer = load(model_path, **load_kwargs)
             
             # SOTA Hardware Optimization: Force 8-bit Affine on M4 Pro if requested
             if quantize_8bit and hasattr(self.model, "quantize"):

@@ -107,15 +107,30 @@ def prepare_data(db_path="backend/data/analytics.duckdb", output_dir="data/etfs"
     for _, row in df_final.iterrows():
         rec_str = label_map[int(row['label'])]
         prompt = f"<market_state> Ticker={row['ticker']} Vol={row['volatility']:.5f} RSI={row['rsi']:.1f} ATR={row['atr']:.5f} CVD={row['cvd']:.0f} </market_state> Recommendation:"
-        text = f"{prompt} {rec_str}"
-        jsonl_records.append({"text": text})
+        jsonl_records.append({"question": prompt, "answer": rec_str})
         
-    jsonl_path = os.path.join(output_dir, "processed_features.jsonl")
-    with open(jsonl_path, "w") as f:
-        for r in jsonl_records:
+    # Shuffle and split into train (80%) and validation (20%)
+    import random
+    random.seed(42)
+    random.shuffle(jsonl_records)
+    
+    split_idx = int(len(jsonl_records) * 0.8)
+    train_records = jsonl_records[:split_idx]
+    valid_records = jsonl_records[split_idx:]
+    
+    # Save train.jsonl
+    train_path = os.path.join(output_dir, "train.jsonl")
+    with open(train_path, "w") as f:
+        for r in train_records:
             f.write(json.dumps(r) + "\n")
             
-    print(f"✅ Exported JSONL dataset to {jsonl_path} ({len(jsonl_records)} lines)")
+    # Save valid.jsonl
+    valid_path = os.path.join(output_dir, "valid.jsonl")
+    with open(valid_path, "w") as f:
+        for r in valid_records:
+            f.write(json.dumps(r) + "\n")
+            
+    print(f"✅ Exported train.jsonl ({len(train_records)} lines) and valid.jsonl ({len(valid_records)} lines) to {output_dir}")
     
     # Show label distribution
     label_dist = df_final['label'].value_counts()

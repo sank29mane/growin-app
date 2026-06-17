@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from backend.mlx_engine import get_mlx_engine
 
 def benchmark():
-    model_path = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+    model_path = "mlx-community/gemma-4-E4B-it-qat-4bit"
     adapter_path = "adapters/high_vol_bull"
     
     print("📊 Benchmarking MLX LoRA Adapter In-Memory Hot-Swapping...")
