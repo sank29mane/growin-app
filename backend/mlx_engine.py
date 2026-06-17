@@ -63,8 +63,27 @@ class MLXInferenceEngine:
     def __init__(self):
         self.model = None
         self.tokenizer = None
+        self.processor = None
         self.current_model_path: Optional[str] = None
         self._loading = False  # Prevent concurrent loads
+
+    def _process_images(self, images: Optional[List[str]]) -> List[Any]:
+        if not images:
+            return []
+        processed = []
+        import base64
+        from io import BytesIO
+        from PIL import Image
+        for img_str in images:
+            try:
+                if "," in img_str:
+                    img_str = img_str.split(",")[1]
+                data = base64.b64decode(img_str)
+                img = Image.open(BytesIO(data)).convert("RGB")
+                processed.append(img)
+            except Exception as e:
+                logger.error(f"Error decoding image base64: {e}")
+        return processed
         
     def load_model(self, model_path: str, quantize_8bit: bool = False, adapter_path: Optional[str] = None) -> bool:
         """
@@ -125,9 +144,11 @@ class MLXInferenceEngine:
             if is_vlm:
                 logger.info("Detected Vision-Language Model. Loading via mlx-vlm...")
                 from mlx_vlm import load as vlm_load
-                self.model, self.tokenizer = vlm_load(model_path, **load_kwargs)
+                self.model, self.processor = vlm_load(model_path, **load_kwargs)
+                self.tokenizer = self.processor.tokenizer
             else:
                 self.model, self.tokenizer = load(model_path, **load_kwargs)
+                self.processor = None
             
             # SOTA Hardware Optimization: Force 8-bit Affine on M4 Pro if requested
             if quantize_8bit and hasattr(self.model, "quantize"):
@@ -185,36 +206,51 @@ class MLXInferenceEngine:
         temperature: float = 0.7,
         top_p: float = 0.9,
         sampler: Optional[Any] = None,
-        stream: bool = False
+        stream: bool = False,
+        images: Optional[List[Any]] = None
     ) -> str:
         """
         Generate text using loaded MLX model or vMLX backend
         """
-        if self.model is None or self.tokenizer is None:
+        if self.model is None or (self.tokenizer is None and self.processor is None):
             raise RuntimeError("No model loaded. Call load_model() first.")
         
         try:
             import asyncio
-            from mlx_lm import generate
             from mlx_lm.sample_utils import make_sampler
             
-            logger.info(f"Generating with MLX model, prompt length: {len(prompt)}")
+            logger.info(f"Generating with MLX model, prompt length: {len(prompt)}, images: {len(images) if images else 0}")
             
-            if sampler is None:
-                sampler = make_sampler(temp=temperature, top_p=top_p)
-            
-            # Wrap the blocking generate call in asyncio.to_thread to prevent event loop blocking
-            response = await asyncio.to_thread(
-                generate,
-                self.model,
-                self.tokenizer,
-                prompt=prompt,
-                max_tokens=max_tokens,
-                sampler=sampler,
-                verbose=False
-            )
-            
-            return response
+            if self.processor is not None:
+                from mlx_vlm import generate as vlm_generate
+                pil_images = self._process_images(images)
+                
+                response = await asyncio.to_thread(
+                    vlm_generate,
+                    self.model,
+                    self.processor,
+                    pil_images,
+                    prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature
+                )
+                return response
+            else:
+                from mlx_lm import generate
+                if sampler is None:
+                    sampler = make_sampler(temp=temperature, top_p=top_p)
+                
+                # Wrap the blocking generate call in asyncio.to_thread to prevent event loop blocking
+                response = await asyncio.to_thread(
+                    generate,
+                    self.model,
+                    self.tokenizer,
+                    prompt=prompt,
+                    max_tokens=max_tokens,
+                    sampler=sampler,
+                    verbose=False
+                )
+                return response
             
         except Exception as e:
             logger.error(f"MLX generation error: {e}")
@@ -226,32 +262,49 @@ class MLXInferenceEngine:
         max_tokens: int = 512,
         temperature: float = 0.7,
         top_p: float = 0.9,
-        sampler: Optional[Any] = None
+        sampler: Optional[Any] = None,
+        images: Optional[List[Any]] = None
     ) -> AsyncIterator[str]:
         """
         Stream generated text token by token using loaded MLX model or vMLX backend
         """
-        if self.model is None or self.tokenizer is None:
+        if self.model is None or (self.tokenizer is None and self.processor is None):
             raise RuntimeError("No model loaded. Call load_model() first.")
         
         try:
-            from mlx_lm import stream_generate
-            from mlx_lm.sample_utils import make_sampler
             import asyncio
             
-            if sampler is None:
-                sampler = make_sampler(temp=temperature, top_p=top_p)
-            
-            for response in stream_generate(
-                self.model,
-                self.tokenizer,
-                prompt=prompt,
-                max_tokens=max_tokens,
-                sampler=sampler
-            ):
-                yield response.text
-                # Small delay to allow other async operations
-                await asyncio.sleep(0.001)
+            if self.processor is not None:
+                from mlx_vlm import stream_generate as vlm_stream_generate
+                pil_images = self._process_images(images)
+                
+                for response in vlm_stream_generate(
+                    self.model,
+                    self.processor,
+                    prompt=prompt,
+                    image=pil_images,
+                    max_tokens=max_tokens,
+                    temperature=temperature
+                ):
+                    yield response.text
+                    await asyncio.sleep(0.001)
+            else:
+                from mlx_lm import stream_generate
+                from mlx_lm.sample_utils import make_sampler
+                
+                if sampler is None:
+                    sampler = make_sampler(temp=temperature, top_p=top_p)
+                
+                for response in stream_generate(
+                    self.model,
+                    self.tokenizer,
+                    prompt=prompt,
+                    max_tokens=max_tokens,
+                    sampler=sampler
+                ):
+                    yield response.text
+                    # Small delay to allow other async operations
+                    await asyncio.sleep(0.001)
                 
         except Exception as e:
             logger.error(f"MLX streaming error: {e}")
@@ -262,9 +315,13 @@ class MLXInferenceEngine:
         if self.model is not None:
             logger.info(f"Unloading MLX model: {self.current_model_path}")
             del self.model
-            del self.tokenizer
+            if self.tokenizer is not None:
+                del self.tokenizer
+            if self.processor is not None:
+                del self.processor
             self.model = None
             self.tokenizer = None
+            self.processor = None
             self.current_model_path = None
             
             # Clear MLX memory cache

@@ -100,6 +100,7 @@ class ChatMessage(BaseModel):
     coordinator_model: Optional[str] = "granite-tiny"
     api_keys: Optional[Dict[str, str]] = None
     account_type: Optional[str] = None  # None = ask user interactively
+    images: Optional[List[str]] = None
 
 class AnalyzeRequest(BaseModel):
     query: str

@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 import logging
 from typing import Dict, List, Optional
-from backend.utils.error_handler import DatabaseError, handle_error
+from utils.error_handler import DatabaseError, handle_error
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +56,12 @@ class ChatManager:
         # Add lm_studio_response_id column if it doesn't exist
         try:
             cursor.execute("ALTER TABLE messages ADD COLUMN lm_studio_response_id TEXT")
+        except sqlite3.OperationalError:
+            pass
+
+        # Add images column if it doesn't exist
+        try:
+            cursor.execute("ALTER TABLE messages ADD COLUMN images TEXT")
         except sqlite3.OperationalError:
             pass
 
@@ -227,6 +233,7 @@ class ChatManager:
         agent_name: Optional[str] = None,
         model_name: Optional[str] = None,
         lm_studio_response_id: Optional[str] = None,
+        images: Optional[List[str]] = None,
     ) -> str:
         """Save a message to the conversation"""
         message_id = str(uuid.uuid4())
@@ -234,8 +241,8 @@ class ChatManager:
 
         cursor.execute(
             """
-            INSERT INTO messages (id, conversation_id, role, content, tool_calls, agent_name, model_name, lm_studio_response_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO messages (id, conversation_id, role, content, tool_calls, agent_name, model_name, lm_studio_response_id, images)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 message_id,
@@ -246,6 +253,7 @@ class ChatManager:
                 agent_name,
                 model_name,
                 lm_studio_response_id,
+                json.dumps(images) if images else None,
             ),
         )
         self.conn.commit()
@@ -257,7 +265,7 @@ class ChatManager:
 
         cursor.execute(
             """
-            SELECT id, role, content, strftime('%Y-%m-%dT%H:%M:%SZ', timestamp) as timestamp, tool_calls, agent_name, model_name, lm_studio_response_id
+            SELECT id, role, content, strftime('%Y-%m-%dT%H:%M:%SZ', timestamp) as timestamp, tool_calls, agent_name, model_name, lm_studio_response_id, images
             FROM messages
             WHERE conversation_id = ?
             ORDER BY timestamp DESC
@@ -280,6 +288,7 @@ class ChatManager:
                     "agent_name": row["agent_name"],
                     "model_name": row["model_name"],
                     "lm_studio_response_id": row["lm_studio_response_id"],
+                    "images": json.loads(row["images"]) if row["images"] else None,
                 }
             )
 

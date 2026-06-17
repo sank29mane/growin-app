@@ -141,6 +141,7 @@ class ChatMLX(BaseChatModel):
             return ChatResult(generations=[ChatGeneration(message=AIMessage(content=error_msg))])
 
         prompt = self._build_chatml_prompt(messages)
+        images = kwargs.get("images")
 
         try:
             from mlx_lm.sample_utils import make_sampler
@@ -150,6 +151,7 @@ class ChatMLX(BaseChatModel):
                 prompt=prompt,
                 max_tokens=self.max_tokens,
                 sampler=sampler,
+                images=images
             )
             
             return ChatResult(generations=[ChatGeneration(message=AIMessage(content=response_text))])
@@ -157,6 +159,40 @@ class ChatMLX(BaseChatModel):
         except Exception as e:
             logger.error(f"MLX async generation failed: {e}")
             return ChatResult(generations=[ChatGeneration(message=AIMessage(content=f"Error generating response: {e}"))])
+
+    async def _astream(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Stream generated response using MLX Engine."""
+        from langchain_core.outputs import ChatGenerationChunk
+        from langchain_core.messages import AIMessageChunk
+        
+        engine = get_mlx_engine()
+        if error_msg := self._ensure_model(engine):
+            yield ChatGenerationChunk(message=AIMessageChunk(content=error_msg))
+            return
+            
+        prompt = self._build_chatml_prompt(messages)
+        images = kwargs.get("images")
+        
+        try:
+            from mlx_lm.sample_utils import make_sampler
+            sampler = make_sampler(temp=self.temperature)
+            
+            async for chunk in engine.generate_stream(
+                prompt=prompt,
+                max_tokens=self.max_tokens,
+                sampler=sampler,
+                images=images
+            ):
+                yield ChatGenerationChunk(message=AIMessageChunk(content=chunk))
+        except Exception as e:
+            logger.error(f"MLX stream generation failed: {e}")
+            yield ChatGenerationChunk(message=AIMessageChunk(content=f"\n[Error streaming: {e}]"))
 
     @property
     def _identifying_params(self) -> Dict[str, Any]:
