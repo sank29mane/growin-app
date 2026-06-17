@@ -86,6 +86,24 @@ class AnalyticsDB:
                 PRIMARY KEY (ticker, timestamp)
             );
 
+            -- Raw market data table for adaptive learning
+            CREATE TABLE IF NOT EXISTS raw_market_data (
+                ticker VARCHAR NOT NULL,
+                timestamp TIMESTAMP NOT NULL,
+                open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE,
+                volume BIGINT,
+                PRIMARY KEY (ticker, timestamp)
+            );
+
+            -- Clean market data table for feature extraction
+            CREATE TABLE IF NOT EXISTS clean_market_data (
+                ticker VARCHAR NOT NULL,
+                timestamp TIMESTAMP NOT NULL,
+                open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE,
+                volume BIGINT,
+                PRIMARY KEY (ticker, timestamp)
+            );
+
             -- Agent Telemetry table
             CREATE TABLE IF NOT EXISTS agent_telemetry (
                 id VARCHAR PRIMARY KEY,
@@ -108,6 +126,8 @@ class AnalyticsDB:
 
             -- Indices
             CREATE INDEX IF NOT EXISTS idx_ticker_time ON ohlcv_history(ticker, timestamp DESC);
+            CREATE INDEX IF NOT EXISTS idx_raw_ticker_time ON raw_market_data(ticker, timestamp DESC);
+            CREATE INDEX IF NOT EXISTS idx_clean_ticker_time ON clean_market_data(ticker, timestamp DESC);
             CREATE INDEX IF NOT EXISTS idx_telemetry_correlation ON agent_telemetry(correlation_id);
             CREATE INDEX IF NOT EXISTS idx_performance_ticker ON agent_performance(ticker);
 
@@ -288,7 +308,7 @@ class AnalyticsDB:
         except Exception as e:
             logger.error(f"Failed to calculate agent alpha: {e}")
     
-    def bulk_insert_ohlcv(self, ticker: str, data: List[Dict[str, Any]]) -> int:
+    def bulk_insert_ohlcv(self, ticker: str, data: List[Dict[str, Any]], table_name: str = 'ohlcv_history') -> int:
         """
         Fast bulk insert for OHLCV data.
         Uses DuckDB's native DataFrame integration for maximum speed.
@@ -296,6 +316,7 @@ class AnalyticsDB:
         Args:
             ticker: Stock ticker symbol
             data: List of OHLCV dicts with keys: o, h, l, c, v, t OR timestamp, open, high, low, close, volume
+            table_name: Target table name in DuckDB
         
         Returns:
             Number of rows inserted
@@ -362,8 +383,12 @@ class AnalyticsDB:
                     if _global_conn is None:
                         _global_conn = duckdb.connect(self.db_path)
                     _global_conn.register('df_tmp', df)
-                    _global_conn.execute("""
-                        INSERT INTO ohlcv_history
+                    # Use a whitelist/safe interpolation for table_name
+                    target_table = 'ohlcv_history'
+                    if table_name in ['ohlcv_history', 'raw_market_data', 'clean_market_data']:
+                        target_table = table_name
+                    _global_conn.execute(f"""
+                        INSERT INTO {target_table}
                         SELECT ticker, timestamp, open, high, low, close, volume
                         FROM df_tmp
                         ON CONFLICT (ticker, timestamp) DO UPDATE SET
