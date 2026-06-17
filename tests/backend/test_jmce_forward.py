@@ -71,6 +71,76 @@ def test_jmce_forward():
     print("\n✅ NeuralJMCE Forward Pass Verification Successful!")
     print("Verification passed for shapes, triangularity, symmetry, and Positive Definiteness.")
 
+@pytest.mark.skipif(not HAS_MLX, reason="MLX is not installed or available")
+def test_jmce_forward_returns_three_values():
+    """
+    Regression test: model() must always return a 3-tuple (mu, L, V).
+    Prior to this PR the call returned only (mu, L); the unpacking to
+    `mu, L, _` would raise ValueError with the old signature.
+    """
+    model = NeuralJMCE(n_assets=4, d_model=32, n_layers=1, n_heads=2, seq_len=20)
+    x = mx.random.normal((2, 20, 4)) * 0.01
+    result = model(x)
+    assert len(result) == 3, f"Expected 3-tuple, got {len(result)}-tuple"
+
+
+@pytest.mark.skipif(not HAS_MLX, reason="MLX is not installed or available")
+def test_jmce_default_call_velocity_is_none():
+    """
+    When return_velocity is not specified (defaults to False) the third
+    return value (V) must be None.
+    """
+    model = NeuralJMCE(n_assets=4, d_model=32, n_layers=1, n_heads=2, seq_len=20)
+    x = mx.random.normal((2, 20, 4)) * 0.01
+    mu, L, V = model(x)
+    assert V is None, "V should be None when return_velocity=False"
+
+
+@pytest.mark.skipif(not HAS_MLX, reason="MLX is not installed or available")
+def test_jmce_return_velocity_true_gives_non_none():
+    """
+    When return_velocity=True the third return value (V) must be a non-None
+    array with the same shape as L.
+    """
+    n_assets = 4
+    batch_size = 2
+    seq_len = 20
+    model = NeuralJMCE(n_assets=n_assets, d_model=32, n_layers=1, n_heads=2, seq_len=seq_len)
+    x = mx.random.normal((batch_size, seq_len, n_assets)) * 0.01
+    mu, L, V = model(x, return_velocity=True)
+
+    assert V is not None, "V should be non-None when return_velocity=True"
+    assert V.shape == L.shape, (
+        f"Velocity V shape {V.shape} must match Cholesky L shape {L.shape}"
+    )
+
+
+@pytest.mark.skipif(not HAS_MLX, reason="MLX is not installed or available")
+def test_jmce_velocity_shape_single_asset():
+    """
+    Regression for the backend/test_jmce.py scenario (n_assets=1, intraday
+    5-min resolution): return_velocity must work correctly for a single asset.
+    """
+    from utils.jmce_model import TimeResolution
+    model = NeuralJMCE(
+        n_assets=1,
+        d_model=32,
+        n_layers=1,
+        n_heads=1,
+        seq_len=78,
+        resolution=TimeResolution.INTRADAY_5MIN,
+    )
+    x = mx.random.normal((1, 78, 1)) * 0.01
+    mu, L, V = model(x, return_velocity=True)
+
+    assert V is not None
+    # For n_assets=1 the Cholesky matrix is (batch, 1, 1)
+    assert V.shape == (1, 1, 1), f"Expected (1,1,1), got {V.shape}"
+    # The scalar value must be finite
+    v_scalar = float(V[0, 0, 0])
+    assert np.isfinite(v_scalar)
+
+
 if __name__ == "__main__":
     try:
         test_jmce_forward()
