@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v5.0
 milestone_name: MLX Intelligence & macOS 2026 UX Overhaul
 status: ACTIVE
-last_updated: "2026-06-03T22:10:00.000Z"
-last_activity: "2026-06-03 — 120Hz price VSync and downsampling (45-03) Verified"
+last_updated: "2026-06-17T18:30:00.000Z"
+last_activity: "2026-06-17 — Phase 46 context and assumptions audited"
 progress:
   total_phases: 6
   completed_phases: 4
@@ -16,10 +16,10 @@ progress:
 
 ## Current Position
 
-Phase: 46 — Adaptive Learning & Alpha Engineering (Unsloth)
-Plan: 01 — Unsloth Local LoRA Tuning Environment Setup
-Status: PLANNED
-Last activity: 2026-06-03 — 120Hz price VSync and downsampling (45-03) Verified
+Phase: 46 — Adaptive Learning & Alpha Engineering
+Plan: 01 — Local LoRA Tuning Environment Setup
+Status: CONTEXT_READY
+Last activity: 2026-06-17 — Phase 46 context and assumptions audited
 
 ## Summary
 
@@ -39,12 +39,14 @@ Last activity: 2026-06-03 — 120Hz price VSync and downsampling (45-03) Verifie
 
 ## Next Focus
 
-1. **Task 46-01.1**: Bootstrap local Unsloth/mlx-tune LoRA fine-tuning environment.
-2. **Task 46-01.2**: Setup DuckDB feature engineering pipelines for regime detection.
+1. **Task 46-01.1**: Run `/gsd-plan-phase 46` to generate detailed plans for Phase 46.
+2. **Task 46-01.2**: Implement in-memory parameter updates (`model.update()`) inside MLXInferenceEngine for hot-swappable adapters.
+3. **Task 46-01.3**: Configure DuckDB regime extraction and training dataset prompt construction.
 
 ## Accumulated Context
 
-- **Tech Stack**: SwiftUI 17+ (Tahoe), Python/FastAPI, DuckDB, MLX, vmlx (jjang-ai), Unsloth.
+- **Tech Stack**: SwiftUI 17+ (Tahoe), Python/FastAPI, DuckDB, MLX (mlx-lm.lora), LM Studio.
 - **Hardware**: Optimized for M4 Pro (48GB RAM). 60% Rule: Weight + KV <= 28GB.
-- **Decisions**: Standardizing on `vmlx` for caching (Prefix, Paged KV, KV-Quant).
-- **Models**: Level 0 Hub: Gemma-4 26B; Level 1 Executive: Nemotron-Cascade-2 30B.
+- **Decisions**: Standardizing on LM Studio for slow-loop orchestrators and native MLX for fast-loop predictions with in-memory adapter hot-swapping.
+- **Models**: Level 0 Hub: Gemma-4 26B; Level 1 Executive: Nemotron-Cascade-2 30B (LM Studio); Fast-Loop: LFM 2.5B / Granite 2B (MLX).
+
