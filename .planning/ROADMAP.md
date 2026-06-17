@@ -72,14 +72,21 @@ This document outlines the high-level phases for the Growin App, specifically op
 - [x] 45-02-PLAN.md — Stage Manager 2.0 Saved Window Sets Integration
 - [x] 45-03-PLAN.md — ProMotion 120Hz Rendering & Sub-16ms Price Sync
 
-### Phase 46: Adaptive Learning & Alpha Engineering (Unsloth)
+### Phase 46: Adaptive Learning & Alpha Engineering (Unsloth) (COMPLETED)
 - **Goal**: Deploy local LoRA fine-tuning pipeline for regime-specific alpha extraction.
 - **Success Criteria**:
     - Unsloth/mlx-tune pipeline active for local LoRA fine-tuning on M4 Pro.
     - Automated alpha feature engineering from DuckDB historical data.
     - Dynamic LoRA adapter switching based on detected market regimes.
 - **Requirements**: LEARN-01, LEARN-02, LEARN-03
-- **Status**: PLANNED
+- **Status**: COMPLETED
+- **Plans**: 6/6 plans complete
+    - [x] 46-PLAN-1-DATA-GATHERING.md — Data Gathering Setup
+    - [x] 46-PLAN-2-DATA-CLEANING.md — Data Cleaning Pipeline
+    - [x] 46-PLAN-3-DATA-PROCESSING.md — Feature Engineering
+    - [x] 46-PLAN-4-TRAINING-COREML.md — NeuralJMCE CoreML ANE Model
+    - [x] 46-PLAN-5-TRAINING-MLX.md — QLoRA SLM Fine-Tuning
+    - [x] 46-PLAN-6-ADAPTER-ROUTING.md — In-Memory Adapter Hot-Swapping
 
 ### Phase 47: Multimodal Intelligence & Deep Integration
 - **Goal**: Infuse vision intelligence into trading workflows and asset-level fast actions.
@@ -100,7 +107,7 @@ This document outlines the high-level phases for the Growin App, specifically op
 | 43: Core Engine | ✅ | 2/2 | 100% |
 | 44: Swarm Optimization | ✅ | 3/3 | 100% |
 | 45: Sovereign UX | ✅ | 3/3 | 100% |
-| 46: Adaptive Learning | ⬜ | 0/3 | 0% |
+| 46: Adaptive Learning | ✅ | 6/6 | 100% |
 | 47: Multimodal | ⬜ | 0/3 | 0% |
 
 ---
