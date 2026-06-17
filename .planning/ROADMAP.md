@@ -97,6 +97,12 @@ This document outlines the high-level phases for the Growin App, specifically op
 - **Requirements**: INTEL-03, UX-04, TRADE-02
 - **Status**: PLANNED
 
+**Plans:** 0/3 plans complete
+- [ ] 47-01-PLAN.md — VLM Inference Engine & API Hardening
+- [ ] 47-02-PLAN.md — SwiftUI Image Upload & VLM Prompting
+- [ ] 47-03-PLAN.md — Dynamic Interactive Tiles & Local Link Interception
+
+
 ---
 
 ## 📊 PROGRESS SUMMARY
