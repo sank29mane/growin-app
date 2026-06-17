@@ -96,6 +96,7 @@ public struct MainTabView: View {
                         .buttonStyle(.plain)
                         .accessibilityLabel("Launch Workspace")
                         .accessibilityHint("Launches Stage Manager 2.0 multi-window sets")
+                        .accessibilityAddTraits(.isButton)
                         .padding(.horizontal, 10)
                     }
                     .padding(.vertical, 8)
@@ -160,6 +161,7 @@ public struct MainTabView: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel("Launch Workspace")
                     .accessibilityHint("Opens live charts and agent console window sets")
+                    .accessibilityAddTraits(.isButton)
                 }
             }
         }
