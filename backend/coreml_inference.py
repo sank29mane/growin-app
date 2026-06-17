@@ -20,12 +20,13 @@ class CoreMLRunner:
         try:
             self.model_path = model_path
             # Load Core ML model with ANE compute units
-            config = self._ct.MLModelConfiguration()
-            config.computeUnits = self._compute_units
-            self._model = self._ct.models.MLModel(model_path, config=config)
+            # SOTA 2026: Pass compute_units directly to constructor to avoid removed API error
+            self._model = self._ct.models.MLModel(model_path, compute_units=self._compute_units)
             self._available = True
             return True
-        except Exception:
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Failed to load CoreML model: {e}")
             self._available = False
             return False
 

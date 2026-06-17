@@ -4,10 +4,54 @@ import coremltools as ct
 import numpy as np
 import os
 
+class SimpleSelfAttention(nn.Module):
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, d_model)
+        self.v_proj = nn.Linear(d_model, d_model)
+        self.out_proj = nn.Linear(d_model, d_model)
+
+    def forward(self, x):
+        batch_size, seq_len, _ = x.shape
+        q = self.q_proj(x).view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
+
+        # Scale dot product
+        scores = torch.matmul(q, k.transpose(-2, -1)) / (self.head_dim ** 0.5)
+        attn = torch.softmax(scores, dim=-1)
+        
+        # Weighted sum of values
+        context = torch.matmul(attn, v).transpose(1, 2).contiguous()
+        context = context.view(batch_size, seq_len, self.d_model)
+        return self.out_proj(context)
+
+class SimpleTransformerBlock(nn.Module):
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.attn = SimpleSelfAttention(d_model, n_heads)
+        self.ln1 = nn.LayerNorm(d_model)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.mlp = nn.Sequential(
+            nn.Linear(d_model, d_model * 4),
+            nn.GELU(),
+            nn.Linear(d_model * 4, d_model)
+        )
+
+    def forward(self, x):
+        h = x + self.attn(self.ln1(x))
+        h = h + self.mlp(self.ln2(h))
+        return h
+
 class NeuralJMCE(nn.Module):
     """
     SOTA 2026: PyTorch implementation of JMCE for CoreML export.
     Matches the MLX architecture exactly for NPU parity.
+    Uses trace-friendly attention blocks to bypass CoreML conversion bugs.
     """
     def __init__(self, n_assets=50, d_model=128, n_layers=3, n_heads=4, seq_len=180):
         super().__init__()
@@ -17,14 +61,10 @@ class NeuralJMCE(nn.Module):
         # 1. Input Projection
         self.input_proj = nn.Linear(n_assets, d_model)
         
-        # 2. Transformer Encoder
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model, 
-            nhead=n_heads, 
-            dim_feedforward=d_model * 4,
-            batch_first=True
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
+        # 2. Transformer Encoder (Trace-friendly custom layers)
+        self.layers = nn.ModuleList([
+            SimpleTransformerBlock(d_model, n_heads) for _ in range(n_layers)
+        ])
         
         # 3. Task Heads
         self.mu_head = nn.Linear(d_model, n_assets)
@@ -35,12 +75,11 @@ class NeuralJMCE(nn.Module):
         # x shape: (1, seq_len, n_assets)
         h = self.input_proj(x)
         
-        # Transformer pass
-        # SOTA: Avoid fancy pooling that breaks ANE tracing
-        h = self.transformer(h)
-        
+        # Transformer layers
+        for layer in self.layers:
+            h = layer(h)
+            
         # Take the last token's representation for the final estimate
-        # Use simple indexing instead of fancy slicing
         h_final = h[:, -1]
         
         mu = self.mu_head(h_final)
@@ -61,9 +100,8 @@ def export():
     # Create example input
     example_input = torch.randn(1, seq_len, n_assets)
     
-    # Trace the model with check=False to bypass the graph diff error
-    # The diff was likely due to PyTorch's internal Transformer optimizations
-    traced_model = torch.jit.trace(model, example_input, check_trace=False)
+    # Trace the model
+    traced_model = torch.jit.trace(model, example_input)
     
     # CoreML Export
     # Target ANE by specifying Tensor types and fixed shapes
