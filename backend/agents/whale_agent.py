@@ -123,13 +123,10 @@ class WhaleAgent(BaseAgent):
             ticker_currency = DataSourceNormalizer.get_currency_for_ticker(ticker)
             currency_symbol = "£" if ticker_currency == "GBP" else "$"
 
-            # Pre-parse trades to avoid repetitive create_decimal calls
+            # Pre-parse trades to avoid repetitive create_decimal calls and dictionary overhead
+            # Using tuples for memory and iteration efficiency
             decimal_trades = [
-                {
-                    "p": create_decimal(t['p']),
-                    "s": create_decimal(t['s']),
-                    "t": t['t']
-                }
+                (create_decimal(t['p']), create_decimal(t['s']))
                 for t in trades
             ]
 
@@ -139,9 +136,7 @@ class WhaleAgent(BaseAgent):
             total_whale_volume = create_decimal(0)
             whale_threshold = create_decimal(self.whale_threshold_usd)
             
-            for i, t_dec in enumerate(decimal_trades):
-                p = t_dec['p']
-                s = t_dec['s']
+            for i, (p, s) in enumerate(decimal_trades):
                 value = p * s
                 if value >= whale_threshold:
                     t = trades[i]
@@ -166,7 +161,7 @@ class WhaleAgent(BaseAgent):
             # If price is at the High of recent trades and we see whales, it might be accumulation
             impact = "NEUTRAL"
             if len(large_trades) > 0 and len(decimal_trades) > 0 and len(large_decimal_prices) > 0:
-                avg_price = sum(t['p'] for t in decimal_trades) / len(decimal_trades)
+                avg_price = sum(p for p, _ in decimal_trades) / len(decimal_trades)
                 whale_avg_price = sum(large_decimal_prices) / len(large_decimal_prices)
                 
                 if whale_avg_price > avg_price * create_decimal(1.001):
