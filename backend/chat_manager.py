@@ -3,7 +3,11 @@ import sqlite3
 import sys
 import uuid
 from datetime import datetime
+import logging
 from typing import Dict, List, Optional
+from backend.utils.error_handler import DatabaseError, handle_error
+
+logger = logging.getLogger(__name__)
 
 
 class ChatManager:
@@ -333,9 +337,8 @@ class ChatManager:
                 (title, conversation_id),
             )
             self.conn.commit()
-        except Exception as e:
-            print(f"Error updating conversation title: {e}")
-            raise
+        except sqlite3.Error as e:
+            handle_error(e, "Error updating conversation title", logger, raise_error=True, custom_error=DatabaseError("Failed to update conversation title"))
 
     def delete_conversation(self, conversation_id: str):
         """Delete a conversation and all its messages"""
@@ -347,9 +350,8 @@ class ChatManager:
             )
             cursor.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
             self.conn.commit()
-        except Exception as e:
-            print(f"Error deleting conversation: {e}")
-            raise
+        except sqlite3.Error as e:
+            handle_error(e, "Error deleting conversation", logger, raise_error=True, custom_error=DatabaseError("Failed to delete conversation"))
 
     def clear_conversation(self, conversation_id: str):
         """Clear all messages from a conversation"""
@@ -357,9 +359,8 @@ class ChatManager:
             cursor = self.conn.cursor()
             cursor.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
             self.conn.commit()
-        except Exception as e:
-            print(f"Error clearing conversation: {e}")
-            raise
+        except sqlite3.Error as e:
+            handle_error(e, "Error clearing conversation", logger, raise_error=True, custom_error=DatabaseError("Failed to clear conversation"))
 
     def save_portfolio_snapshot(
         self,
