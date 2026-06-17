@@ -1,5 +1,5 @@
 import pytest
-from httpx import AsyncClient
+from httpx import AsyncClient, ASGITransport
 import uuid
 from decimal import Decimal
 from datetime import datetime
@@ -30,7 +30,7 @@ async def test_approve_trade_success():
     with patch.object(state.mcp_client, "call_tool", new_callable=AsyncMock) as mock_call:
         mock_call.return_value = {"orderId": "T212-123", "status": "PLACED"}
         
-        async with AsyncClient(app=app, base_url="http://test") as ac:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
             response = await ac.post(
                 "/api/ai/trade/approve",
                 json={"proposal_id": proposal_id, "decision": "APPROVED"}
@@ -58,7 +58,7 @@ async def test_approve_trade_success():
 @pytest.mark.asyncio
 async def test_approve_trade_not_found():
     """Test approval of non-existent proposal."""
-    async with AsyncClient(app=app, base_url="http://test") as ac:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         response = await ac.post(
             "/api/ai/trade/approve",
             json={"proposal_id": "non-existent", "decision": "APPROVED"}
@@ -79,7 +79,7 @@ async def test_approve_trade_already_processed():
         "status": "APPROVED"
     }
     
-    async with AsyncClient(app=app, base_url="http://test") as ac:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         response = await ac.post(
             "/api/ai/trade/approve",
             json={"proposal_id": proposal_id, "decision": "APPROVED"}
@@ -100,7 +100,7 @@ async def test_reject_trade_success():
         "status": "PENDING"
     }
     
-    async with AsyncClient(app=app, base_url="http://test") as ac:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         response = await ac.post(
             "/api/ai/trade/reject",
             json={
