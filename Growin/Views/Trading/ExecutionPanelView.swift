@@ -101,6 +101,8 @@ struct ExecutionPanelView: View {
                                 .padding(16)
                                 .background(Color.black.opacity(0.3))
                                 .border(SovereignTheme.Colors.technicalBorder, width: 1)
+                                .accessibilityLabel("Order Quantity")
+                                .accessibilityHint("Enter the number of shares to trade")
                         }
                         
                         if orderType == .limit {
@@ -117,6 +119,8 @@ struct ExecutionPanelView: View {
                                     .padding(16)
                                     .background(Color.black.opacity(0.3))
                                     .border(SovereignTheme.Colors.technicalBorder, width: 1)
+                                    .accessibilityLabel("Limit Price")
+                                    .accessibilityHint("Enter the target price per share")
                             }
                         }
                     }
