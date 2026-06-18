@@ -60,8 +60,8 @@ class PortfolioAnalyzer:
                 sigma_mx = self.model.get_covariance(L_mx)
                 
                 # Convert to numpy for SciPy
-                mu = np.array(mu_mx[0])
-                sigma = np.array(sigma_mx[0])
+                mu = np.array(mu_mx[0], dtype=np.float64)
+                sigma = np.array(sigma_mx[0], dtype=np.float64)
             elif hasattr(self.model, '_initialized') and self.model._initialized:
                 # CoreML Path (ANE) - Using duck typing for CoreMLJMCE
                 # Expects (seq_len, n_assets)
@@ -118,7 +118,7 @@ class PortfolioAnalyzer:
             # 5. Optimization (SLSQP)
             # Initial guess: equal weights (capped at 10%)
             # If more than 10 assets, equal weights will be < 10%
-            init_w = np.array([1.0 / n_assets] * n_assets)
+            init_w = np.array([1.0 / n_assets] * n_assets, dtype=np.float64)
             
             # Run optimizer
             res = minimize(

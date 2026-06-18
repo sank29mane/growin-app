@@ -200,8 +200,8 @@ class GoalPlannerAgent(BaseAgent):
                     pool = [k for k in pool if universe_to_use[k]["vol"] < 0.20]
                 
                 # Extract matrices
-                returns = np.array([universe_to_use[a]["return"] for a in pool])
-                vols = np.array([universe_to_use[a]["vol"] for a in pool])
+                returns = np.array([universe_to_use[a]["return"] for a in pool], dtype=np.float64)
+                vols = np.array([universe_to_use[a]["vol"] for a in pool], dtype=np.float64)
                 
                 # Simple Correlation Matrix
                 # NOTE: This is a simplification ("Mock Correlation"). 
@@ -430,7 +430,7 @@ class GoalPlannerAgent(BaseAgent):
         bounds = tuple((0, 1) for _ in range(n))
         
         # Initial guess: Equal weights
-        init_guess = np.array([1.0/n] * n)
+        init_guess = np.array([1.0/n] * n, dtype=np.float64)
         
         res = minimize(objective, init_guess, method='SLSQP', bounds=bounds, constraints=constraints)
         

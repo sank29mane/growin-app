@@ -379,9 +379,9 @@ class QuantEngine:
             for i in range(order, len(closes) - order):
                 if all(highs[i] > highs[i-j] for j in range(1, order+1)) and all(highs[i] > highs[i+j] for j in range(1, order+1)): peaks.append(highs[i])
                 if all(lows[i] < lows[i-j] for j in range(1, order+1)) and all(lows[i] < lows[i+j] for j in range(1, order+1)): troughs.append(lows[i])
-            peaks, troughs = np.array(peaks), np.array(troughs)
-        if len(peaks) == 0: peaks = np.array([np.max(highs[-50:])])
-        if len(troughs) == 0: troughs = np.array([np.min(lows[-50:])])
+            peaks, troughs = np.array(peaks, dtype=np.float64), np.array(troughs, dtype=np.float64)
+        if len(peaks) == 0: peaks = np.array([np.max(highs[-50:])], dtype=np.float64)
+        if len(troughs) == 0: troughs = np.array([np.min(lows[-50:])], dtype=np.float64)
         res = np.min(peaks[peaks > current_price]) if np.any(peaks > current_price) else np.max(peaks)
         sup = np.max(troughs[troughs < current_price]) if np.any(troughs < current_price) else np.min(troughs)
         return {"support": create_decimal(sup), "resistance": create_decimal(res)}
