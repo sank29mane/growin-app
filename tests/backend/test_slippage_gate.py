@@ -1,8 +1,11 @@
 import sys
 import os
 import asyncio
+import pytest
 from decimal import Decimal
 from datetime import datetime, timezone
+
+pytestmark = pytest.mark.asyncio
 
 # Add backend to path
 sys.path.append(os.path.join(os.getcwd(), 'backend'))
@@ -25,7 +28,6 @@ async def test_risk_gate():
     )
 
     agent = RiskAgent(model_name="mistral")
-    await agent._initialize()
     res_normal = await agent.review(context_normal, "Suggest buying 100 shares of AAPL.")
     print(f"\n[NORMAL CASE (10 bps)]\nSuccess: {res_normal.get('decision', 'N/A')}\nContent: {res_normal.get('feedback', '')[:200]}...")
 

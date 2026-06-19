@@ -1,7 +1,10 @@
 import asyncio
 import logging
 import time
+import pytest
 from forecaster import TTMForecaster
+
+pytestmark = pytest.mark.asyncio
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("TestTTM")

@@ -1,8 +1,10 @@
-
 import asyncio
 import logging
 import sys
+import pytest
 from unittest.mock import MagicMock
+
+pytestmark = pytest.mark.asyncio
 
 # --- MOCKING START ---
 # We need to mock app_context.state.mcp_client before importing the agent

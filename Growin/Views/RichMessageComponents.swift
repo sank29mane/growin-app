@@ -316,7 +316,7 @@ struct RiskGovernanceCard: View, Equatable {
                     }
                 }
                 
-                if let cvar = risk.slippageBps { // Using slippage as placeholder for CVaR if not directly mapped
+                if risk.slippageBps != nil { // Using slippage as placeholder for CVaR if not directly mapped
                     VStack(alignment: .leading, spacing: 2) {
                         Text("CVaR (95%)")
                             .font(.caption2)

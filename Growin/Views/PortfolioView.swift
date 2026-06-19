@@ -658,7 +658,7 @@ extension PortfolioView {
                             .glassEffect(.thin.interactive(), in: .rect(cornerRadius: 14))
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Position details for \(position.ticker)")
+                    .accessibilityLabel("Position details for \(position.ticker ?? "")")
                     .accessibilityAddTraits(.isButton)
                     .accessibilityHint("Double tap to view detailed analysis")
                 }
