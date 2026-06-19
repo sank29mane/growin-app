@@ -13,6 +13,9 @@ class ChatViewModel {
     var selectedAccountType: String = "isa"
     var showConfigPrompt = false
     var missingConfigProvider: String?
+    
+    // VLM state tracking (Phase 47)
+    var selectedImages: [NSImage] = []
 
     // Active reasoning tracing for current message
     var activeReasoningSteps: [ReasoningStep] = []
@@ -92,7 +95,8 @@ class ChatViewModel {
                     agentName: old.agentName,
                     modelName: old.modelName,
                     data: newData,
-                    quickActions: old.quickActions
+                    quickActions: old.quickActions,
+                    images: old.images
                 )
                 break
             }
@@ -136,6 +140,22 @@ class ChatViewModel {
         streamingStatus = "Planning..."
         activeReasoningSteps = []
         
+        // Encode selectedImages into Base64 strings
+        var base64Images: [String]? = nil
+        if !selectedImages.isEmpty {
+            base64Images = selectedImages.compactMap { image in
+                guard let tiffData = image.tiffRepresentation,
+                      let bitmap = NSBitmapImageRep(data: tiffData),
+                      let pngData = bitmap.representation(using: .png, properties: [:]) else {
+                    return nil
+                }
+                return pngData.base64EncodedString()
+            }
+        }
+        
+        let currentImages = base64Images
+        selectedImages = []
+        
         let userModel = ChatMessageModel(
             messageId: UUID().uuidString,
             role: "user",
@@ -146,7 +166,8 @@ class ChatViewModel {
             agentName: nil,
             modelName: nil,
             data: nil,
-            quickActions: nil
+            quickActions: nil,
+            images: currentImages
         )
         messages.append(userModel)
 
@@ -162,7 +183,8 @@ class ChatViewModel {
             agentName: "DecisionAgent",
             modelName: effectiveModelName,
             data: nil,
-            quickActions: nil
+            quickActions: nil,
+            images: nil
         )
         messages.append(assistantModel)
 
@@ -172,7 +194,8 @@ class ChatViewModel {
             query: message,
             conversationId: selectedConversationId,
             model: effectiveModelName,
-            accountType: selectedAccountType
+            accountType: selectedAccountType,
+            images: currentImages
         )
         
         for await event in stream {
@@ -305,7 +328,8 @@ class ChatViewModel {
                             agentName: lastMsg.agentName,
                             modelName: lastMsg.modelName,
                             data: newData,
-                            quickActions: lastMsg.quickActions
+                            quickActions: lastMsg.quickActions,
+                            images: lastMsg.images
                         )
                     }
                 }
@@ -333,7 +357,8 @@ class ChatViewModel {
                 agentName: old.agentName,
                 modelName: old.modelName,
                 data: old.data,
-                quickActions: quickActions ?? old.quickActions
+                quickActions: quickActions ?? old.quickActions,
+                images: old.images
             )
         }
     }

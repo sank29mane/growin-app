@@ -419,6 +419,7 @@ struct ChatMessageModel: Codable, Identifiable, Equatable {
     let modelName: String?
     let data: MarketContextData?
     let quickActions: [QuickAction]?
+    let images: [String]?
 
     enum CodingKeys: String, CodingKey {
         case messageId = "message_id"
@@ -429,6 +430,7 @@ struct ChatMessageModel: Codable, Identifiable, Equatable {
         case modelName = "model_name"
         case data
         case quickActions = "quick_actions"
+        case images
     }
 
     var isUser: Bool { role == "user" }
@@ -538,6 +540,7 @@ struct GrowinChatMessage: Codable {
     let coordinatorModel: String?
     let apiKeys: [String: String]?
     let accountType: String?
+    let images: [String]?
     
     enum CodingKeys: String, CodingKey {
         case message
@@ -546,6 +549,7 @@ struct GrowinChatMessage: Codable {
         case coordinatorModel = "coordinator_model"
         case apiKeys = "api_keys"
         case accountType = "account_type"
+        case images
     }
 }
 

@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ChatView: View {
     @Bindable var viewModel: ChatViewModel
@@ -190,6 +191,36 @@ struct ChatView: View {
             }
             
             VStack(spacing: 10) {
+                if !viewModel.selectedImages.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(0..<viewModel.selectedImages.count, id: \.self) { index in
+                                ZStack(alignment: .topTrailing) {
+                                    Image(nsImage: viewModel.selectedImages[index])
+                                        .resizable()
+                                        .scaledToFill()
+                                        .frame(width: 60, height: 60)
+                                        .cornerRadius(8)
+                                        .clipped()
+                                    
+                                    Button(action: {
+                                        viewModel.selectedImages.remove(at: index)
+                                    }) {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .foregroundColor(.white)
+                                            .background(Circle().fill(Color.black.opacity(0.7)))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .padding(2)
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 4)
+                    }
+                    .frame(height: 64)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+
                 HStack {
                     AccountPicker(selectedAccount: $viewModel.selectedAccountType)
                     Spacer()
@@ -197,6 +228,21 @@ struct ChatView: View {
                 .padding(.horizontal, 4)
                 
                 HStack(spacing: 12) {
+                    Button(action: {
+                        selectImages()
+                    }) {
+                        Image(systemName: "paperclip")
+                            .font(.system(size: 18))
+                            .foregroundStyle(.secondary)
+                            .padding(10)
+                            .background(Color.white.opacity(0.05))
+                            .cornerRadius(10)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Attach Image")
+                    .accessibilityHint("Selects an image to analyze with the VLM model")
+                    .accessibilityAddTraits(.isButton)
+
                     TextField(isLiveMode ? "LIVE TRADING: Ask about your portfolio..." : "Ask about your portfolio...", text: $viewModel.inputText, axis: .vertical)
                         .textFieldStyle(.plain)
                         .padding(12)
@@ -215,7 +261,7 @@ struct ChatView: View {
                         viewModel.sendMessage()
                     }) {
                         ZStack {
-                            if viewModel.inputText.isEmpty && !viewModel.isProcessing {
+                            if viewModel.inputText.isEmpty && viewModel.selectedImages.isEmpty && !viewModel.isProcessing {
                                 Circle()
                                     .fill(Color.gray.opacity(0.2))
                                     .frame(width: 40, height: 40)
@@ -235,7 +281,7 @@ struct ChatView: View {
                         }
                     }
                     .buttonStyle(.plain)
-                    .disabled(viewModel.inputText.isEmpty && !viewModel.isProcessing)
+                    .disabled(viewModel.inputText.isEmpty && viewModel.selectedImages.isEmpty && !viewModel.isProcessing)
                     .accessibilityLabel(viewModel.isProcessing ? "Stop generating" : "Send message")
                     .accessibilityHint(viewModel.isProcessing ? "Stops the current response generation" : "Sends your question to the AI assistant")
                     .accessibilityAddTraits(.isButton)
@@ -253,6 +299,19 @@ struct ChatView: View {
             }
         } else {
             proxy.scrollTo(bottomAnchorID, anchor: .bottom)
+        }
+    }
+    
+    private func selectImages() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = [.image, .png, .jpeg]
+        
+        if panel.runModal() == .OK {
+            let images = panel.urls.compactMap { NSImage(contentsOf: $0) }
+            viewModel.selectedImages.append(contentsOf: images)
         }
     }
 }
@@ -292,17 +351,38 @@ struct ChatBubble: View, Equatable {
                 }
                 
                 if message.isUser {
-                    Text(message.content)
-                        .padding(14)
-                        .background(
-                            LinearGradient(
-                                colors: [Color.blue, Color.blue.opacity(0.8)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
+                    VStack(alignment: .trailing, spacing: 8) {
+                        if let images = message.images, !images.isEmpty {
+                            HStack(spacing: 8) {
+                                ForEach(images, id: \.self) { base64 in
+                                    if let data = Data(base64Encoded: base64),
+                                       let nsImage = NSImage(data: data) {
+                                        Image(nsImage: nsImage)
+                                            .resizable()
+                                            .scaledToFit()
+                                            .frame(maxWidth: 200, maxHeight: 150)
+                                            .cornerRadius(12)
+                                            .overlay(
+                                                RoundedRectangle(cornerRadius: 12)
+                                                    .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                                            )
+                                    }
+                                }
+                            }
+                        }
+                        
+                        Text(message.content)
+                            .padding(14)
+                            .background(
+                                LinearGradient(
+                                    colors: [Color.blue, Color.blue.opacity(0.8)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
                             )
-                        )
-                        .foregroundStyle(.white)
-                        .cornerRadius(18, corners: [.topLeft, .topRight, .bottomLeft])
+                            .foregroundStyle(.white)
+                            .cornerRadius(18, corners: [.topLeft, .topRight, .bottomLeft])
+                    }
                 } else {
                     GlassCard(cornerRadius: 16) {
                         VStack(alignment: .leading, spacing: 12) {
