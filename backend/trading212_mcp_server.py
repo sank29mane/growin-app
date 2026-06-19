@@ -5,6 +5,7 @@ A Model Context Protocol server for Trading 212 API integration.
 Provides comprehensive access to account data, portfolio management, and trading operations.
 """
 
+import aiofiles
 import asyncio
 import base64
 import json
@@ -24,7 +25,12 @@ from mcp.server.stdio import stdio_server
 from mcp.types import Resource, TextContent, Tool
 from utils import sanitize_nan
 from utils.process_guard import start_parent_watchdog
-from utils.rate_limiter import get_t212_budgeter, PRIORITY_EXECUTION, PRIORITY_SYNC, PRIORITY_POLLING
+from utils.rate_limiter import (
+    get_t212_budgeter,
+    PRIORITY_EXECUTION,
+    PRIORITY_SYNC,
+    PRIORITY_POLLING,
+)
 
 # Start watchdog immediately to ensure cleanup if parent dies
 start_parent_watchdog()
@@ -34,23 +40,27 @@ LIVE_API_BASE = "https://live.trading212.com/api/v0"
 DEMO_API_BASE = "https://demo.trading212.com/api/v0"
 STATE_FILE = ".state.json"
 
-def _load_state(filepath: str) -> Optional[Dict[str, Any]]:
-    """Loads state from file synchronously."""
+
+async def _load_state(filepath: str) -> Optional[Dict[str, Any]]:
+    """Loads state from file asynchronously."""
     try:
         if os.path.exists(filepath):
-            with open(filepath, "r") as f:
-                return json.load(f)
+            async with aiofiles.open(filepath, "r") as f:
+                content = await f.read()
+                return json.loads(content)
     except Exception:
         pass
     return None
 
-def _save_state(filepath: str, data: Dict[str, Any]):
-    """Saves state to file synchronously."""
+
+async def _save_state(filepath: str, data: Dict[str, Any]):
+    """Saves state to file asynchronously."""
     try:
-        with open(filepath, "w") as f:
-            json.dump(data, f)
+        async with aiofiles.open(filepath, "w") as f:
+            await f.write(json.dumps(data))
     except Exception:
         pass
+
 
 # Import centralized currency normalization
 from utils.currency_utils import normalize_all_positions
@@ -59,8 +69,9 @@ from t212_handlers import (
     handle_analyze_portfolio,
     handle_market_order,
     handle_get_price_history,
-    handle_get_current_price
+    handle_get_current_price,
 )
+
 
 def _compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Helper to compute technical indicators efficiently."""
@@ -113,25 +124,29 @@ class FileCache:
     def _load_from_disk(self):
         if os.path.exists(self.filename):
             try:
-                with open(self.filename, 'r') as f:
+                with open(self.filename, "r") as f:
                     data = json.load(f)
-                    self._cache = data.get('cache', {})
-                    self._timestamps = data.get('timestamps', {})
+                    self._cache = data.get("cache", {})
+                    self._timestamps = data.get("timestamps", {})
                 # Cleanup is now async, so we just clean up the memory state directly
                 now = time.time()
-                expired = [k for k, ts in self._timestamps.items() if now - ts > self.ttl_seconds]
+                expired = [
+                    k for k, ts in self._timestamps.items() if now - ts > self.ttl_seconds
+                ]
                 for k in expired:
                     del self._cache[k]
                     del self._timestamps[k]
                 if expired:
                     # Sync save because we are in __init__
-                    with open(self.filename, 'w') as f:
-                        json.dump({
-                            'cache': self._cache,
-                            'timestamps': self._timestamps
-                        }, f)
+                    with open(self.filename, "w") as f:
+                        json.dump(
+                            {"cache": self._cache, "timestamps": self._timestamps}, f
+                        )
             except Exception as e:
-                print(f"Warning: Failed to load cache from {self.filename}: {e}", file=sys.stderr)
+                print(
+                    f"Warning: Failed to load cache from {self.filename}: {e}",
+                    file=sys.stderr,
+                )
 
     async def _save_to_disk(self):
         if self._lock is None:
@@ -139,19 +154,23 @@ class FileCache:
         async with self._lock:
             try:
                 tmp_filename = self.filename + ".tmp"
-                async with aiofiles.open(tmp_filename, 'w') as f:
-                    data = json.dumps({
-                        'cache': self._cache,
-                        'timestamps': self._timestamps
-                    })
+                async with aiofiles.open(tmp_filename, "w") as f:
+                    data = json.dumps(
+                        {"cache": self._cache, "timestamps": self._timestamps}
+                    )
                     await f.write(data)
                 os.replace(tmp_filename, self.filename)
             except Exception as e:
-                print(f"Warning: Failed to save cache to {self.filename}: {e}", file=sys.stderr)
+                print(
+                    f"Warning: Failed to save cache to {self.filename}: {e}",
+                    file=sys.stderr,
+                )
 
     async def _cleanup_expired(self):
         now = time.time()
-        expired = [k for k, ts in self._timestamps.items() if now - ts > self.ttl_seconds]
+        expired = [
+            k for k, ts in self._timestamps.items() if now - ts > self.ttl_seconds
+        ]
         for k in expired:
             del self._cache[k]
             del self._timestamps[k]
@@ -166,7 +185,7 @@ class FileCache:
 
     def get_with_expiry_status(self, key: str) -> tuple[Optional[Any], bool]:
         if key in self._cache:
-            is_expired = (time.time() - self._timestamps[key] > self.ttl_seconds)
+            is_expired = time.time() - self._timestamps[key] > self.ttl_seconds
             return self._cache[key], is_expired
         return None, True
 
@@ -186,7 +205,9 @@ class Trading212Client:
 
         if api_secret:
             credentials = f"{api_key}:{api_secret}"
-            encoded_credentials = base64.b64encode(credentials.encode("utf-8")).decode("utf-8")
+            encoded_credentials = base64.b64encode(credentials.encode("utf-8")).decode(
+                "utf-8"
+            )
             self.auth_header = f"Basic {encoded_credentials}"
         else:
             self.auth_header = api_key
@@ -207,21 +228,21 @@ class Trading212Client:
         url = f"{self.base_url}/{endpoint}"
         max_retries = 3
         base_delay = 1.0
-        
+
         # SOTA 2026: Determine request priority for the Budgeter
         priority = PRIORITY_POLLING
         if method.upper() in ["POST", "DELETE"]:
             priority = PRIORITY_EXECUTION
         elif "account" in endpoint or "portfolio" in endpoint or "history" in endpoint:
             priority = PRIORITY_SYNC
-            
+
         budgeter = get_t212_budgeter()
 
         for attempt in range(max_retries + 1):
             try:
                 # Acquire token before sending request
                 await budgeter.acquire(priority=priority)
-                
+
                 response = await self.client.request(method, url, **kwargs)
                 response.raise_for_status()
                 if response.content:
@@ -230,7 +251,9 @@ class Trading212Client:
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 429 and attempt < max_retries:
                     delay = base_delay * (2**attempt)
-                    logger.warning(f"T212 API 429: Throttled by broker. Manual backoff: {delay}s")
+                    logger.warning(
+                        f"T212 API 429: Throttled by broker. Manual backoff: {delay}s"
+                    )
                     await asyncio.sleep(delay)
                     continue
                 raise
@@ -262,57 +285,114 @@ class Trading212Client:
     async def _apply_temporal_jitter(self):
         """SOTA 2026: Randomized execution delay to avoid 'velocity clustering' flags."""
         import random
-        jitter = random.uniform(0.5, 2.0) # 500ms to 2000ms
+
+        jitter = random.uniform(0.5, 2.0)  # 500ms to 2000ms
         logger.info(f"Applying Temporal Jitter: {jitter:.2f}s delay before dispatch...")
         await asyncio.sleep(jitter)
 
-    async def place_market_order(self, ticker: str, quantity: float, order_type: str = "BUY") -> dict:
+    async def place_market_order(
+        self, ticker: str, quantity: float, order_type: str = "BUY"
+    ) -> dict:
         await self._apply_temporal_jitter()
         adjusted_quantity = quantity if order_type.upper() == "BUY" else -abs(quantity)
         payload = {"ticker": ticker, "quantity": adjusted_quantity}
         return await self._request("POST", "equity/orders/market", json=payload)
 
-    async def place_limit_order(self, ticker: str, quantity: float, limit_price: float, order_type: str = "BUY", time_validity: str = "DAY") -> dict:
+    async def place_limit_order(
+        self,
+        ticker: str,
+        quantity: float,
+        limit_price: float,
+        order_type: str = "BUY",
+        time_validity: str = "DAY",
+    ) -> dict:
         await self._apply_temporal_jitter()
         adjusted_quantity = quantity if order_type.upper() == "BUY" else -abs(quantity)
-        api_time_validity = "GOOD_TILL_CANCEL" if time_validity.upper() == "GTC" else time_validity
-        payload = {"ticker": ticker, "quantity": adjusted_quantity, "limitPrice": limit_price, "timeValidity": api_time_validity}
+        api_time_validity = (
+            "GOOD_TILL_CANCEL" if time_validity.upper() == "GTC" else time_validity
+        )
+        payload = {
+            "ticker": ticker,
+            "quantity": adjusted_quantity,
+            "limitPrice": limit_price,
+            "timeValidity": api_time_validity,
+        }
         return await self._request("POST", "equity/orders/limit", json=payload)
 
-    async def place_stop_order(self, ticker: str, quantity: float, stop_price: float, order_type: str = "BUY", time_validity: str = "DAY") -> dict:
+    async def place_stop_order(
+        self,
+        ticker: str,
+        quantity: float,
+        stop_price: float,
+        order_type: str = "BUY",
+        time_validity: str = "DAY",
+    ) -> dict:
         await self._apply_temporal_jitter()
         adjusted_quantity = quantity if order_type.upper() == "BUY" else -abs(quantity)
-        api_time_validity = "GOOD_TILL_CANCEL" if time_validity.upper() == "GTC" else time_validity
-        payload = {"ticker": ticker, "quantity": adjusted_quantity, "stopPrice": stop_price, "timeValidity": api_time_validity}
+        api_time_validity = (
+            "GOOD_TILL_CANCEL" if time_validity.upper() == "GTC" else time_validity
+        )
+        payload = {
+            "ticker": ticker,
+            "quantity": adjusted_quantity,
+            "stopPrice": stop_price,
+            "timeValidity": api_time_validity,
+        }
         return await self._request("POST", "equity/orders/stop", json=payload)
 
-    async def place_stop_limit_order(self, ticker: str, quantity: float, limit_price: float, stop_price: float, order_type: str = "BUY", time_validity: str = "DAY") -> dict:
+    async def place_stop_limit_order(
+        self,
+        ticker: str,
+        quantity: float,
+        limit_price: float,
+        stop_price: float,
+        order_type: str = "BUY",
+        time_validity: str = "DAY",
+    ) -> dict:
         await self._apply_temporal_jitter()
         adjusted_quantity = quantity if order_type.upper() == "BUY" else -abs(quantity)
-        api_time_validity = "GOOD_TILL_CANCEL" if time_validity.upper() == "GTC" else time_validity
-        payload = {"ticker": ticker, "quantity": adjusted_quantity, "limitPrice": limit_price, "stopPrice": stop_price, "timeValidity": api_time_validity}
+        api_time_validity = (
+            "GOOD_TILL_CANCEL" if time_validity.upper() == "GTC" else time_validity
+        )
+        payload = {
+            "ticker": ticker,
+            "quantity": adjusted_quantity,
+            "limitPrice": limit_price,
+            "stopPrice": stop_price,
+            "timeValidity": api_time_validity,
+        }
         return await self._request("POST", "equity/orders/stop_limit", json=payload)
 
     async def cancel_order(self, order_id: str) -> dict:
         return await self._request("DELETE", f"equity/orders/{order_id}")
 
-    async def get_historical_orders(self, cursor: Optional[int] = None, limit: int = 50) -> dict:
+    async def get_historical_orders(
+        self, cursor: Optional[int] = None, limit: int = 50
+    ) -> dict:
         params = {"limit": min(limit, 50)}
         if cursor:
             params["cursor"] = cursor
         return await self._request("GET", f"equity/history/orders?{urlencode(params)}")
 
-    async def get_dividends(self, cursor: Optional[int] = None, limit: int = 50) -> dict:
+    async def get_dividends(
+        self, cursor: Optional[int] = None, limit: int = 50
+    ) -> dict:
         params = {"limit": min(limit, 50)}
         if cursor:
             params["cursor"] = cursor
-        return await self._request("GET", f"equity/history/dividends?{urlencode(params)}")
+        return await self._request(
+            "GET", f"equity/history/dividends?{urlencode(params)}"
+        )
 
-    async def get_transactions(self, cursor: Optional[int] = None, limit: int = 50) -> dict:
+    async def get_transactions(
+        self, cursor: Optional[int] = None, limit: int = 50
+    ) -> dict:
         params = {"limit": min(limit, 50)}
         if cursor:
             params["cursor"] = cursor
-        return await self._request("GET", f"equity/history/transactions?{urlencode(params)}")
+        return await self._request(
+            "GET", f"equity/history/transactions?{urlencode(params)}"
+        )
 
     async def get_instruments(self) -> list:
         cache_key = "instruments"
@@ -356,7 +436,9 @@ class Trading212Client:
         payload = {"name": name, "icon": icon, "instruments": instruments}
         return await self._request("POST", "equity/pies", json=payload)
 
-    async def update_pie(self, pie_id: int, name: str, icon: str, instruments: list) -> dict:
+    async def update_pie(
+        self, pie_id: int, name: str, icon: str, instruments: list
+    ) -> dict:
         payload = {"name": name, "icon": icon, "instruments": instruments}
         return await self._request("POST", f"equity/pies/{pie_id}", json=payload)
 
@@ -366,20 +448,62 @@ class Trading212Client:
 
 app = Server("trading212-mcp-server")
 
+
 @app.list_resources()
 async def list_resources() -> list[Resource]:
     return [
-        Resource(uri="trading212://account/info", name="Account Info", mimeType="application/json"),
-        Resource(uri="trading212://account/cash", name="Account Cash", mimeType="application/json"),
-        Resource(uri="trading212://portfolio/positions", name="Portfolio Positions", mimeType="application/json"),
-        Resource(uri="trading212://orders/pending", name="Pending Orders", mimeType="application/json"),
-        Resource(uri="trading212://instruments/all", name="All Instruments", mimeType="application/json"),
-        Resource(uri="trading212://exchanges/all", name="All Exchanges", mimeType="application/json"),
-        Resource(uri="trading212://pies/all", name="Investment Pies", mimeType="application/json"),
-        Resource(uri="trading212://history/orders", name="Historical Orders", mimeType="application/json"),
-        Resource(uri="trading212://history/dividends", name="Dividend History", mimeType="application/json"),
-        Resource(uri="trading212://history/transactions", name="Transaction History", mimeType="application/json"),
+        Resource(
+            uri="trading212://account/info",
+            name="Account Info",
+            mimeType="application/json",
+        ),
+        Resource(
+            uri="trading212://account/cash",
+            name="Account Cash",
+            mimeType="application/json",
+        ),
+        Resource(
+            uri="trading212://portfolio/positions",
+            name="Portfolio Positions",
+            mimeType="application/json",
+        ),
+        Resource(
+            uri="trading212://orders/pending",
+            name="Pending Orders",
+            mimeType="application/json",
+        ),
+        Resource(
+            uri="trading212://instruments/all",
+            name="All Instruments",
+            mimeType="application/json",
+        ),
+        Resource(
+            uri="trading212://exchanges/all",
+            name="All Exchanges",
+            mimeType="application/json",
+        ),
+        Resource(
+            uri="trading212://pies/all",
+            name="Investment Pies",
+            mimeType="application/json",
+        ),
+        Resource(
+            uri="trading212://history/orders",
+            name="Historical Orders",
+            mimeType="application/json",
+        ),
+        Resource(
+            uri="trading212://history/dividends",
+            name="Dividend History",
+            mimeType="application/json",
+        ),
+        Resource(
+            uri="trading212://history/transactions",
+            name="Transaction History",
+            mimeType="application/json",
+        ),
     ]
+
 
 @app.read_resource()
 async def read_resource(uri: str) -> str:
@@ -399,76 +523,363 @@ async def read_resource(uri: str) -> str:
     if uri not in resource_map:
         raise ValueError(f"Unknown resource: {uri}")
     data = await resource_map[uri]()
-    return json.dumps(data, separators=( ",", ":"))
+    return json.dumps(data, separators=(",", ":"))
+
 
 @app.list_tools()
 async def list_tools() -> list[Tool]:
     return [
-        Tool(name="analyze_portfolio", description="Analyze portfolio", inputSchema={"type": "object", "properties": {"account_type": {"type": "string", "enum": ["invest", "isa", "all"]}}}),
-        Tool(name="get_position_details", description="Get position details", inputSchema={"type": "object", "properties": {"ticker": {"type": "string"}}, "required": ["ticker"]}),
-        Tool(name="place_market_order", description="Place market order", inputSchema={"type": "object", "properties": {"ticker": {"type": "string"}, "quantity": {"type": "number"}, "order_type": {"type": "string", "enum": ["BUY", "SELL"]}}, "required": ["ticker", "quantity", "order_type"]}),
-        Tool(name="place_limit_order", description="Place limit order", inputSchema={"type": "object", "properties": {"ticker": {"type": "string"}, "quantity": {"type": "number"}, "limit_price": {"type": "number"}, "order_type": {"type": "string", "enum": ["BUY", "SELL"]}, "time_validity": {"type": "string", "enum": ["DAY", "GTC"]}}, "required": ["ticker", "quantity", "limit_price", "order_type"]}),
-        Tool(name="place_stop_order", description="Place stop order", inputSchema={"type": "object", "properties": {"ticker": {"type": "string"}, "quantity": {"type": "number"}, "stop_price": {"type": "number"}, "order_type": {"type": "string", "enum": ["BUY", "SELL"]}, "time_validity": {"type": "string", "enum": ["DAY", "GTC"]}}, "required": ["ticker", "quantity", "stop_price", "order_type"]}),
-        Tool(name="place_stop_limit_order", description="Place stop-limit order", inputSchema={"type": "object", "properties": {"ticker": {"type": "string"}, "quantity": {"type": "number"}, "stop_price": {"type": "number"}, "limit_price": {"type": "number"}, "order_type": {"type": "string", "enum": ["BUY", "SELL"]}, "time_validity": {"type": "string", "enum": ["DAY", "GTC"]}}, "required": ["ticker", "quantity", "stop_price", "limit_price", "order_type"]}),
-        Tool(name="cancel_order", description="Cancel order", inputSchema={"type": "object", "properties": {"order_id": {"type": "string"}}, "required": ["order_id"]}),
-        Tool(name="search_instruments", description="Search instruments", inputSchema={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}),
-        Tool(name="get_historical_performance", description="Get performance", inputSchema={"type": "object", "properties": {"limit": {"type": "number"}}}),
-        Tool(name="calculate_portfolio_metrics", description="Calculate portfolio metrics", inputSchema={"type": "object"}),
-        Tool(name="get_all_pies", description="Get all pies", inputSchema={"type": "object"}),
-        Tool(name="get_pie_details", description="Get pie details", inputSchema={"type": "object", "properties": {"pie_id": {"type": "number"}}, "required": ["pie_id"]}),
-        Tool(name="create_investment_pie", description="Create pie", inputSchema={"type": "object", "properties": {"name": {"type": "string"}, "icon": {"type": "string"}, "instruments": {"type": "array", "items": {"type": "object", "properties": {"ticker": {"type": "string"}, "targetShare": {"type": "number"}}}}}, "required": ["name", "icon", "instruments"]}),
-        Tool(name="update_investment_pie", description="Update pie", inputSchema={"type": "object", "properties": {"pie_id": {"type": "number"}, "name": {"type": "string"}, "icon": {"type": "string"}, "instruments": {"type": "array", "items": {"type": "object", "properties": {"ticker": {"type": "string"}, "targetShare": {"type": "number"}}}}}, "required": ["pie_id", "name", "icon", "instruments"]}),
-        Tool(name="delete_investment_pie", description="Delete pie", inputSchema={"type": "object", "properties": {"pie_id": {"type": "number"}}, "required": ["pie_id"]}),
-        Tool(name="update_pie", description="Create or update an investment pie", inputSchema={"type": "object", "properties": {"action": {"type": "string", "enum": ["create", "update"]}, "pie_name": {"type": "string"}, "weights": {"type": "object", "additionalProperties": {"type": "number"}}}, "required": ["action", "pie_name", "weights"]}),
-        Tool(name="switch_account", description="Switch account", inputSchema={"type": "object", "properties": {"account_type": {"type": "string", "enum": ["invest", "isa"]}, "key": {"type": "string"}, "secret": {"type": "string"}}, "required": ["account_type"]}),
-        Tool(name="get_price_history", description="Get price history", inputSchema={"type": "object", "properties": {"ticker": {"type": "string"}, "start_date": {"type": "string"}, "end_date": {"type": "string"}, "period": {"type": "string", "enum": ["1d", "5d", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"]}, "interval": {"type": "string", "enum": ["1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d", "1wk", "1mo", "3mo"]}}, "required": ["ticker"]}),
-        Tool(name="get_ticker_analysis", description="Get ticker analysis", inputSchema={"type": "object", "properties": {"ticker": {"type": "string"}}, "required": ["ticker"]}),
-        Tool(name="calculate_technical_indicators", description="Calculate technical indicators", inputSchema={"type": "object", "properties": {"ticker": {"type": "string"}, "period": {"type": "string", "enum": ["3mo", "6mo", "1y", "2y", "5y"]}, "interval": {"type": "string", "enum": ["1d", "1wk", "1mo"]}}, "required": ["ticker"]}),
-        Tool(name="get_current_price", description="Get current price", inputSchema={"type": "object", "properties": {"ticker": {"type": "string"}}, "required": ["ticker"]}),
+        Tool(
+            name="analyze_portfolio",
+            description="Analyze portfolio",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account_type": {"type": "string", "enum": ["invest", "isa", "all"]}
+                },
+            },
+        ),
+        Tool(
+            name="get_position_details",
+            description="Get position details",
+            inputSchema={
+                "type": "object",
+                "properties": {"ticker": {"type": "string"}},
+                "required": ["ticker"],
+            },
+        ),
+        Tool(
+            name="place_market_order",
+            description="Place market order",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ticker": {"type": "string"},
+                    "quantity": {"type": "number"},
+                    "order_type": {"type": "string", "enum": ["BUY", "SELL"]},
+                },
+                "required": ["ticker", "quantity", "order_type"],
+            },
+        ),
+        Tool(
+            name="place_limit_order",
+            description="Place limit order",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ticker": {"type": "string"},
+                    "quantity": {"type": "number"},
+                    "limit_price": {"type": "number"},
+                    "order_type": {"type": "string", "enum": ["BUY", "SELL"]},
+                    "time_validity": {"type": "string", "enum": ["DAY", "GTC"]},
+                },
+                "required": ["ticker", "quantity", "limit_price", "order_type"],
+            },
+        ),
+        Tool(
+            name="place_stop_order",
+            description="Place stop order",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ticker": {"type": "string"},
+                    "quantity": {"type": "number"},
+                    "stop_price": {"type": "number"},
+                    "order_type": {"type": "string", "enum": ["BUY", "SELL"]},
+                    "time_validity": {"type": "string", "enum": ["DAY", "GTC"]},
+                },
+                "required": ["ticker", "quantity", "stop_price", "order_type"],
+            },
+        ),
+        Tool(
+            name="place_stop_limit_order",
+            description="Place stop-limit order",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ticker": {"type": "string"},
+                    "quantity": {"type": "number"},
+                    "stop_price": {"type": "number"},
+                    "limit_price": {"type": "number"},
+                    "order_type": {"type": "string", "enum": ["BUY", "SELL"]},
+                    "time_validity": {"type": "string", "enum": ["DAY", "GTC"]},
+                },
+                "required": [
+                    "ticker",
+                    "quantity",
+                    "stop_price",
+                    "limit_price",
+                    "order_type",
+                ],
+            },
+        ),
+        Tool(
+            name="cancel_order",
+            description="Cancel order",
+            inputSchema={
+                "type": "object",
+                "properties": {"order_id": {"type": "string"}},
+                "required": ["order_id"],
+            },
+        ),
+        Tool(
+            name="search_instruments",
+            description="Search instruments",
+            inputSchema={
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+        ),
+        Tool(
+            name="get_historical_performance",
+            description="Get performance",
+            inputSchema={"type": "object", "properties": {"limit": {"type": "number"}}},
+        ),
+        Tool(
+            name="calculate_portfolio_metrics",
+            description="Calculate portfolio metrics",
+            inputSchema={"type": "object"},
+        ),
+        Tool(
+            name="get_all_pies",
+            description="Get all pies",
+            inputSchema={"type": "object"},
+        ),
+        Tool(
+            name="get_pie_details",
+            description="Get pie details",
+            inputSchema={
+                "type": "object",
+                "properties": {"pie_id": {"type": "number"}},
+                "required": ["pie_id"],
+            },
+        ),
+        Tool(
+            name="create_investment_pie",
+            description="Create pie",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "icon": {"type": "string"},
+                    "instruments": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "ticker": {"type": "string"},
+                                "targetShare": {"type": "number"},
+                            },
+                        },
+                    },
+                },
+                "required": ["name", "icon", "instruments"],
+            },
+        ),
+        Tool(
+            name="update_investment_pie",
+            description="Update pie",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pie_id": {"type": "number"},
+                    "name": {"type": "string"},
+                    "icon": {"type": "string"},
+                    "instruments": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "ticker": {"type": "string"},
+                                "targetShare": {"type": "number"},
+                            },
+                        },
+                    },
+                },
+                "required": ["pie_id", "name", "icon", "instruments"],
+            },
+        ),
+        Tool(
+            name="delete_investment_pie",
+            description="Delete pie",
+            inputSchema={
+                "type": "object",
+                "properties": {"pie_id": {"type": "number"}},
+                "required": ["pie_id"],
+            },
+        ),
+        Tool(
+            name="update_pie",
+            description="Create or update an investment pie",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["create", "update"]},
+                    "pie_name": {"type": "string"},
+                    "weights": {
+                        "type": "object",
+                        "additionalProperties": {"type": "number"},
+                    },
+                },
+                "required": ["action", "pie_name", "weights"],
+            },
+        ),
+        Tool(
+            name="switch_account",
+            description="Switch account",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account_type": {"type": "string", "enum": ["invest", "isa"]},
+                    "key": {"type": "string"},
+                    "secret": {"type": "string"},
+                },
+                "required": ["account_type"],
+            },
+        ),
+        Tool(
+            name="get_price_history",
+            description="Get price history",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ticker": {"type": "string"},
+                    "start_date": {"type": "string"},
+                    "end_date": {"type": "string"},
+                    "period": {
+                        "type": "string",
+                        "enum": [
+                            "1d",
+                            "5d",
+                            "3mo",
+                            "6mo",
+                            "1y",
+                            "2y",
+                            "5y",
+                            "10y",
+                            "ytd",
+                            "max",
+                        ],
+                    },
+                    "interval": {
+                        "type": "string",
+                        "enum": [
+                            "1m",
+                            "2m",
+                            "5m",
+                            "15m",
+                            "30m",
+                            "60m",
+                            "90m",
+                            "1h",
+                            "1d",
+                            "5d",
+                            "1wk",
+                            "1mo",
+                            "3mo",
+                        ],
+                    },
+                },
+                "required": ["ticker"],
+            },
+        ),
+        Tool(
+            name="get_ticker_analysis",
+            description="Get ticker analysis",
+            inputSchema={
+                "type": "object",
+                "properties": {"ticker": {"type": "string"}},
+                "required": ["ticker"],
+            },
+        ),
+        Tool(
+            name="calculate_technical_indicators",
+            description="Calculate technical indicators",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ticker": {"type": "string"},
+                    "period": {
+                        "type": "string",
+                        "enum": ["3mo", "6mo", "1y", "2y", "5y"],
+                    },
+                    "interval": {"type": "string", "enum": ["1d", "1wk", "1mo"]},
+                },
+                "required": ["ticker"],
+            },
+        ),
+        Tool(
+            name="get_current_price",
+            description="Get current price",
+            inputSchema={
+                "type": "object",
+                "properties": {"ticker": {"type": "string"}},
+                "required": ["ticker"],
+            },
+        ),
     ]
+
 
 @app.call_tool()
 async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     global active_account_type
     c = get_active_client()
-    
+
     # SOTA 2026: Shadow Mode Interceptor (Phase 36 Wave 3)
     # Block real execution if GROWIN_SHADOW_MODE is 1
     is_shadow = os.environ.get("GROWIN_SHADOW_MODE", "0") == "1"
     sensitive_tools = [
-        "place_market_order", "place_limit_order", "place_stop_order", 
-        "place_stop_limit_order", "cancel_order", "create_investment_pie",
-        "update_investment_pie", "delete_investment_pie", "update_pie"
+        "place_market_order",
+        "place_limit_order",
+        "place_stop_order",
+        "place_stop_limit_order",
+        "cancel_order",
+        "create_investment_pie",
+        "update_investment_pie",
+        "delete_investment_pie",
+        "update_pie",
     ]
-    
+
     if is_shadow and name in sensitive_tools:
-        log_msg = f"🕵️ SHADOW MODE INTERCEPT: Tool '{name}' with args {json.dumps(arguments)}"
+        log_msg = (
+            f"🕵️ SHADOW MODE INTERCEPT: Tool '{name}' with args {json.dumps(arguments)}"
+        )
         print(log_msg, file=sys.stderr)
-        
+
         # Log to a dedicated file for the UAT harness to consume
         shadow_log_path = "shadow_trades.log"
 
         def write_shadow_log():
             with open(shadow_log_path, "a") as f:
-                f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {name} | {json.dumps(arguments)}\n")
+                f.write(
+                    f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {name} | {json.dumps(arguments)}\n"
+                )
 
         await asyncio.to_thread(write_shadow_log)
-            
-        return [TextContent(type="text", text=f"[SHADOW_SUCCESS] {name} intercepted successfully. No capital committed.")]
+
+        return [
+            TextContent(
+                type="text",
+                text=f"[SHADOW_SUCCESS] {name} intercepted successfully. No capital committed.",
+            )
+        ]
 
     try:
         if name == "analyze_portfolio":
-            return await handle_analyze_portfolio(arguments, active_account_type, get_clients, clients)
-        
+            return await handle_analyze_portfolio(
+                arguments, active_account_type, get_clients, clients
+            )
+
         elif name == "place_market_order":
             return await handle_market_order(arguments, c)
-        
+
         elif name == "get_price_history":
             return await handle_get_price_history(arguments)
-        
+
         elif name == "get_current_price":
             return await handle_get_current_price(arguments)
-        
+
         elif name == "get_position_details":
             ticker = arguments["ticker"].upper()
             all_clients = get_clients()
@@ -477,31 +888,48 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     position = await client.get_position_by_ticker(ticker)
                     if position:
                         position["account_type"] = acc_type
-                        return [TextContent(type="text", text=json.dumps(sanitize_nan(position), separators=(",", ":")))]
+                        return [
+                            TextContent(
+                                type="text",
+                                text=json.dumps(
+                                    sanitize_nan(position), separators=(",", ":")
+                                ),
+                            )
+                        ]
                 except Exception:
                     continue
             return [TextContent(type="text", text=f"Position {ticker} not found.")]
-        
+
         elif name == "place_limit_order":
             result = await c.place_limit_order(
                 ticker=arguments["ticker"],
                 quantity=arguments["quantity"],
                 limit_price=arguments["limit_price"],
                 order_type=arguments["order_type"],
-                time_validity=arguments.get("time_validity", "DAY")
+                time_validity=arguments.get("time_validity", "DAY"),
             )
-            return [TextContent(type="text", text=f"Limit order placed:\n{json.dumps(result, indent=2)}")]
-        
+            return [
+                TextContent(
+                    type="text",
+                    text=f"Limit order placed:\n{json.dumps(result, indent=2)}",
+                )
+            ]
+
         elif name == "place_stop_order":
             result = await c.place_stop_order(
                 ticker=arguments["ticker"],
                 quantity=arguments["quantity"],
                 stop_price=arguments["stop_price"],
                 order_type=arguments["order_type"],
-                time_validity=arguments.get("time_validity", "DAY")
+                time_validity=arguments.get("time_validity", "DAY"),
             )
-            return [TextContent(type="text", text=f"Stop order placed:\n{json.dumps(result, indent=2)}")]
-        
+            return [
+                TextContent(
+                    type="text",
+                    text=f"Stop order placed:\n{json.dumps(result, indent=2)}",
+                )
+            ]
+
         elif name == "place_stop_limit_order":
             result = await c.place_stop_limit_order(
                 ticker=arguments["ticker"],
@@ -509,88 +937,168 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 stop_price=arguments["stop_price"],
                 limit_price=arguments["limit_price"],
                 order_type=arguments["order_type"],
-                time_validity=arguments.get("time_validity", "DAY")
+                time_validity=arguments.get("time_validity", "DAY"),
             )
-            return [TextContent(type="text", text=f"Stop-limit order placed:\n{json.dumps(result, indent=2)}")]
-        
+            return [
+                TextContent(
+                    type="text",
+                    text=f"Stop-limit order placed:\n{json.dumps(result, indent=2)}",
+                )
+            ]
+
         elif name == "cancel_order":
             result = await c.cancel_order(arguments["order_id"])
-            return [TextContent(type="text", text=f"Order cancelled:\n{json.dumps(result, indent=2)}")]
-        
+            return [
+                TextContent(
+                    type="text",
+                    text=f"Order cancelled:\n{json.dumps(result, indent=2)}",
+                )
+            ]
+
         elif name == "search_instruments":
             query = arguments["query"].upper()
             instruments = await c.get_instruments()
-            results = [inst for inst in instruments if query in inst.get("ticker", "").upper() or query in inst.get("name", "").upper()]
-            return [TextContent(type="text", text=json.dumps(sanitize_nan(results[:20]), separators=( ",", ":")))]
-        
+            results = [
+                inst
+                for inst in instruments
+                if query in inst.get("ticker", "").upper()
+                or query in inst.get("name", "").upper()
+            ]
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(sanitize_nan(results[:20]), separators=(",", ":")),
+                )
+            ]
+
         elif name == "get_historical_performance":
             limit = arguments.get("limit", 50)
             history = await c.get_historical_orders(limit=min(limit, 50))
-            return [TextContent(type="text", text=json.dumps(sanitize_nan(history), indent=2))]
-        
+            return [
+                TextContent(
+                    type="text", text=json.dumps(sanitize_nan(history), indent=2)
+                )
+            ]
+
         elif name == "calculate_portfolio_metrics":
-            positions, cash = await asyncio.gather(c.get_all_positions(), c.get_account_cash())
+            positions, cash = await asyncio.gather(
+                c.get_all_positions(), c.get_account_cash()
+            )
             instruments = await c.get_instruments()
             metadata_cache = {i.get("ticker"): i for i in instruments}
             positions = normalize_all_positions(positions, metadata_cache)
-            total_value = sum(pos.get("currentPrice", 0) * pos.get("quantity", 0) for pos in positions)
-            total_cost = sum(pos.get("averagePrice", 0) * pos.get("quantity", 0) for pos in positions)
+            total_value = sum(
+                pos.get("currentPrice", 0) * pos.get("quantity", 0) for pos in positions
+            )
+            total_cost = sum(
+                pos.get("averagePrice", 0) * pos.get("quantity", 0) for pos in positions
+            )
             total_pnl = sum(pos.get("ppl", 0) for pos in positions)
-            sorted_by_pnl = sorted(positions, key=lambda x: x.get("ppl", 0), reverse=True)
+            sorted_by_pnl = sorted(
+                positions, key=lambda x: x.get("ppl", 0), reverse=True
+            )
             metrics = {
                 "portfolio_value": round(total_value, 2),
                 "total_invested": round(total_cost, 2),
                 "total_pnl": round(total_pnl, 2),
-                "pnl_percentage": round((total_pnl / total_cost * 100) if total_cost > 0 else 0, 2),
+                "pnl_percentage": round(
+                    (total_pnl / total_cost * 100) if total_cost > 0 else 0, 2
+                ),
                 "cash_balance": cash,
                 "number_of_positions": len(positions),
                 "top_performers": sorted_by_pnl[:5],
-                "worst_performers": sorted_by_pnl[-5:] if len(sorted_by_pnl) > 5 else [],
+                "worst_performers": sorted_by_pnl[-5:]
+                if len(sorted_by_pnl) > 5
+                else [],
             }
-            return [TextContent(type="text", text=json.dumps(sanitize_nan(metrics), separators=( ",", ":")))]
-        
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(sanitize_nan(metrics), separators=(",", ":")),
+                )
+            ]
+
         elif name == "get_all_pies":
             pies = await c.get_all_pies()
-            return [TextContent(type="text", text=json.dumps(pies, separators=( ",", ":")))]
-        
+            return [
+                TextContent(type="text", text=json.dumps(pies, separators=(",", ":")))
+            ]
+
         elif name == "get_pie_details":
             pie = await c.get_pie(arguments["pie_id"])
             return [TextContent(type="text", text=json.dumps(pie, indent=2))]
-        
+
         elif name == "create_investment_pie":
-            result = await c.create_pie(name=arguments["name"], icon=arguments["icon"], instruments=arguments["instruments"])
-            return [TextContent(type="text", text=f"Pie created:\n{json.dumps(result, indent=2)}")]
-        
+            result = await c.create_pie(
+                name=arguments["name"],
+                icon=arguments["icon"],
+                instruments=arguments["instruments"],
+            )
+            return [
+                TextContent(
+                    type="text", text=f"Pie created:\n{json.dumps(result, indent=2)}"
+                )
+            ]
+
         elif name == "update_investment_pie":
-            result = await c.update_pie(pie_id=arguments["pie_id"], name=arguments["name"], icon=arguments["icon"], instruments=arguments["instruments"])
-            return [TextContent(type="text", text=f"Pie updated:\n{json.dumps(result, indent=2)}")]
-        
+            result = await c.update_pie(
+                pie_id=arguments["pie_id"],
+                name=arguments["name"],
+                icon=arguments["icon"],
+                instruments=arguments["instruments"],
+            )
+            return [
+                TextContent(
+                    type="text", text=f"Pie updated:\n{json.dumps(result, indent=2)}"
+                )
+            ]
+
         elif name == "delete_investment_pie":
             result = await c.delete_pie(arguments["pie_id"])
-            return [TextContent(type="text", text=f"Pie deleted:\n{json.dumps(result, indent=2)}")]
-        
+            return [
+                TextContent(
+                    type="text", text=f"Pie deleted:\n{json.dumps(result, indent=2)}"
+                )
+            ]
+
         elif name == "update_pie":
             action = arguments["action"]
             pie_name = arguments["pie_name"]
-            weights = arguments["weights"] # Dict of {ticker: weight}
-            
+            weights = arguments["weights"]  # Dict of {ticker: weight}
+
             # Map weights to instruments list format for T212 API
             instruments = []
             for ticker, weight in weights.items():
-                instruments.append({
-                    "ticker": normalize_ticker(ticker),
-                    "targetShare": float(weight) / 100.0 if float(weight) > 1.0 else float(weight)
-                })
-            
+                instruments.append(
+                    {
+                        "ticker": normalize_ticker(ticker),
+                        "targetShare": float(weight) / 100.0
+                        if float(weight) > 1.0
+                        else float(weight),
+                    }
+                )
+
             if action == "create":
                 # Icon is required by create_pie in this server, default to a briefcase
-                result = await c.create_pie(name=pie_name, icon="briefcase", instruments=instruments)
-                return [TextContent(type="text", text=f"Pie created: {pie_name}\n{json.dumps(result, indent=2)}")]
+                result = await c.create_pie(
+                    name=pie_name, icon="briefcase", instruments=instruments
+                )
+                return [
+                    TextContent(
+                        type="text",
+                        text=f"Pie created: {pie_name}\n{json.dumps(result, indent=2)}",
+                    )
+                ]
             else:
                 # For update, we'd need a pie_id. This is a simplification.
                 # In a real scenario, we would search for the pie by name first.
-                return [TextContent(type="text", text=f"Update action for {pie_name} not fully implemented without pie_id.")]
-        
+                return [
+                    TextContent(
+                        type="text",
+                        text=f"Update action for {pie_name} not fully implemented without pie_id.",
+                    )
+                ]
+
         elif name == "switch_account":
             account_type = arguments["account_type"].lower()
             new_key, new_secret = arguments.get("key"), arguments.get("secret")
@@ -605,49 +1113,110 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     credentials[account_type]["secret"] = new_secret
                 if clients.get(account_type):
                     await clients[account_type].close()
-                clients[account_type] = Trading212Client(new_key, new_secret or "", credentials.get("use_demo", False))
-            
+                clients[account_type] = Trading212Client(
+                    new_key, new_secret or "", credentials.get("use_demo", False)
+                )
+
             if not clients.get(account_type):
                 raise ValueError(f"No API key found for {account_type.upper()}.")
-            
-            await asyncio.to_thread(_save_state, STATE_FILE, {"account_type": active_account_type})
-            return [TextContent(type="text", text=f"Switched to {account_type.upper()}.")]
-        
+
+            await _save_state(STATE_FILE, {"account_type": active_account_type})
+            return [
+                TextContent(type="text", text=f"Switched to {account_type.upper()}.")
+            ]
+
         elif name == "get_ticker_analysis":
             ticker = normalize_ticker(arguments["ticker"])
             loop = asyncio.get_running_loop()
             info = await loop.run_in_executor(None, lambda: yf.Ticker(ticker).info)
-            keys = ["sector", "industry", "marketCap", "forwardPE", "trailingPE", "dividendYield", "fiftyTwoWeekHigh", "fiftyTwoWeekLow", "averageVolume", "currentPrice", "targetMeanPrice", "recommendationKey", "ebitda", "debtToEquity", "returnOnEquity", "freeCashflow", "beta", "shortName", "longName", "currency"]
+            keys = [
+                "sector",
+                "industry",
+                "marketCap",
+                "forwardPE",
+                "trailingPE",
+                "dividendYield",
+                "fiftyTwoWeekHigh",
+                "fiftyTwoWeekLow",
+                "averageVolume",
+                "currentPrice",
+                "targetMeanPrice",
+                "recommendationKey",
+                "ebitda",
+                "debtToEquity",
+                "returnOnEquity",
+                "freeCashflow",
+                "beta",
+                "shortName",
+                "longName",
+                "currency",
+            ]
             filtered = {k: v for k, v in info.items() if k in keys}
             return [TextContent(type="text", text=json.dumps(filtered, indent=2))]
-        
+
         elif name == "calculate_technical_indicators":
             ticker = normalize_ticker(arguments["ticker"])
-            period, interval = arguments.get("period", "1y"), arguments.get("interval", "1d")
+            period, interval = (
+                arguments.get("period", "1y"),
+                arguments.get("interval", "1d"),
+            )
             loop = asyncio.get_running_loop()
-            df = await loop.run_in_executor(None, lambda: _compute_indicators(yf.Ticker(ticker).history(period=period, interval=interval)))
+            df = await loop.run_in_executor(
+                None,
+                lambda: _compute_indicators(
+                    yf.Ticker(ticker).history(period=period, interval=interval)
+                ),
+            )
             if df is None or df.empty:
                 return [TextContent(type="text", text=f"No data for {ticker}")]
             latest = df.iloc[-10:].copy().reset_index()
-            latest["Date"] = latest["Date"].apply(lambda x: x.isoformat() if hasattr(x, "isoformat") else str(x))
-            cols = ["Date", "Close", "Volume", "SMA_50", "SMA_200", "RSI", "MACD", "Signal_Line", "BB_Upper", "BB_Lower"]
+            latest["Date"] = latest["Date"].apply(
+                lambda x: x.isoformat() if hasattr(x, "isoformat") else str(x)
+            )
+            cols = [
+                "Date",
+                "Close",
+                "Volume",
+                "SMA_50",
+                "SMA_200",
+                "RSI",
+                "MACD",
+                "Signal_Line",
+                "BB_Upper",
+                "BB_Lower",
+            ]
             cols = [c for c in cols if c in latest.columns]
             result = latest[cols].to_dict(orient="records")
-            summary = {"ticker": ticker, "latest_indicators": result[-1], "recent_trend": result}
-            return [TextContent(type="text", text=json.dumps(summary, indent=2, default=str))]
-        
+            summary = {
+                "ticker": ticker,
+                "latest_indicators": result[-1],
+                "recent_trend": result,
+            }
+            return [
+                TextContent(
+                    type="text", text=json.dumps(summary, indent=2, default=str)
+                )
+            ]
+
         else:
             raise ValueError(f"Unknown tool: {name}")
-            
+
     except Exception as e:
-        return [TextContent(type="text", text=json.dumps({"error": str(e), "success": False}))]
+        return [
+            TextContent(
+                type="text", text=json.dumps({"error": str(e), "success": False})
+            )
+        ]
+
 
 clients: Dict[str, Trading212Client] = {}
 credentials: dict = {}
 active_account_type: str = "invest"
 
+
 def get_clients() -> Dict[str, Trading212Client]:
     return {k: v for k, v in clients.items() if v is not None}
+
 
 def get_active_client() -> Trading212Client:
     global active_account_type
@@ -659,47 +1228,53 @@ def get_active_client() -> Trading212Client:
         return list(available.values())[0]
     return c
 
+
 async def main():
     global clients, credentials
     load_dotenv()
+
     def get_env_var(name: str) -> Optional[str]:
         val = os.getenv(name)
         return val if val and val.strip() else None
-    
+
     generic_key = get_env_var("TRADING212_API_KEY")
     invest_key = get_env_var("TRADING212_API_KEY_INVEST") or generic_key
     isa_key = get_env_var("TRADING212_API_KEY_ISA")
-    
+
     generic_secret = get_env_var("TRADING212_API_SECRET")
     invest_secret = get_env_var("TRADING212_API_SECRET_INVEST") or generic_secret
     isa_secret = get_env_var("TRADING212_API_SECRET_ISA") or generic_secret
-    
+
     use_demo = (get_env_var("TRADING212_USE_DEMO") or "false").lower() == "true"
-    
+
     if use_demo:
         print("Trading 212: Using DEMO environment.", file=sys.stderr)
     else:
         print("Trading 212: Using LIVE environment. EXERCISE CAUTION.", file=sys.stderr)
-    
+
     credentials = {
         "invest": {"key": invest_key, "secret": invest_secret},
         "isa": {"key": isa_key, "secret": isa_secret},
-        "use_demo": use_demo
+        "use_demo": use_demo,
     }
-    
+
     if invest_key and isa_key and invest_key == isa_key:
         clients["invest"] = Trading212Client(invest_key, invest_secret or "", use_demo)
         clients["isa"] = clients["invest"]
     else:
         if invest_key:
-            clients["invest"] = Trading212Client(invest_key, invest_secret or "", use_demo)
+            clients["invest"] = Trading212Client(
+                invest_key, invest_secret or "", use_demo
+            )
         if isa_key:
             clients["isa"] = Trading212Client(isa_key, isa_secret or "", use_demo)
-            
+
     global active_account_type
-    active_account_type = "invest" if "invest" in clients else ("isa" if "isa" in clients else "invest")
-    
-    state_data = await asyncio.to_thread(_load_state, STATE_FILE)
+    active_account_type = (
+        "invest" if "invest" in clients else ("isa" if "isa" in clients else "invest")
+    )
+
+    state_data = await _load_state(STATE_FILE)
     if state_data:
         saved_type = state_data.get("account_type")
         if saved_type in credentials:
@@ -707,6 +1282,7 @@ async def main():
 
     async with stdio_server() as (read_stream, write_stream):
         await app.run(read_stream, write_stream, app.create_initialization_options())
+
 
 if __name__ == "__main__":
     asyncio.run(main())
