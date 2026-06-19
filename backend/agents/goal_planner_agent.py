@@ -345,28 +345,30 @@ class GoalPlannerAgent(BaseAgent):
                     
                     # Calculate Metrics
                     # 1. Prices (handle both dict and object from batch)
-                    prices = []
-                    for b in bars:
-                        if isinstance(b, dict):
-                            if 'close' in b:
-                                prices.append(float(b['close']))
-                            elif 'c' in b:
-                                prices.append(float(b['c']))
-                        elif hasattr(b, 'close'):
-                            prices.append(float(b.close))
-                        elif hasattr(b, 'c'):
-                            prices.append(float(b.c))
+                    first_b = bars[0]
+                    if isinstance(first_b, dict):
+                        if 'close' in first_b:
+                            prices = [float(b['close']) for b in bars]
+                        else:
+                            prices = [float(b['c']) for b in bars]
+                    else:
+                        if hasattr(first_b, 'close'):
+                            prices = [float(b.close) for b in bars]
+                        else:
+                            prices = [float(b.c) for b in bars]
 
                     if len(prices) < 30:
                          real_universe[t] = self.asset_universe.get(t)
                          continue
                     
+                    prices_arr = np.array(prices, dtype=np.float64)
+
                     # 2. Daily Returns
-                    daily_returns = np.diff(prices) / prices[:-1]
+                    daily_returns = np.diff(prices_arr) / prices_arr[:-1]
                     
                     # 3. Annual Return (CAGR approx or simple 1y change)
-                    start_price = prices[0]
-                    end_price = prices[-1]
+                    start_price = prices_arr[0]
+                    end_price = prices_arr[-1]
                     total_ret = (end_price - start_price) / start_price if start_price > 0 else 0
                     
                     # Normalize to 1-year if data is short (e.g. IPO)
