@@ -235,6 +235,8 @@ class ChatViewModel {
                 }
             case .error(let error):
                 errorMessage = error
+                isProcessing = false
+                streamingStatus = nil
             case .done:
                 isProcessing = false
                 streamingStatus = nil

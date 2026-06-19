@@ -151,7 +151,7 @@ class LMStudioClient:
     async def chat(
         self,
         model_id: Optional[str] = None,
-        messages: List[Dict[str, str]] = None,
+        messages: List[Dict[str, Any]] = None,
         input_text: str = None,
         system_prompt: str = None,
         temperature: float = 0.7,
@@ -161,7 +161,9 @@ class LMStudioClient:
         stream: bool = False,
         session_id: Optional[str] = None,
         enable_thinking: bool = True,
-        truncate_thinking: bool = True
+        truncate_thinking: bool = True,
+        images: Optional[List[Any]] = None,
+        **kwargs
     ) -> Dict[str, Any]:
         """
         Send a chat request.
@@ -178,6 +180,43 @@ class LMStudioClient:
                 messages.append({"role": "system", "content": system_prompt})
             if input_text:
                 messages.append({"role": "user", "content": input_text})
+
+        if images and messages:
+            import base64
+            from io import BytesIO
+            
+            def pil_to_base64(img) -> str:
+                buffered = BytesIO()
+                img.save(buffered, format="JPEG")
+                return base64.b64encode(buffered.getvalue()).decode('utf-8')
+                
+            # Find the last user message to attach the images to
+            for i in range(len(messages) - 1, -1, -1):
+                if messages[i].get("role") == "user":
+                    content = messages[i].get("content", "")
+                    if isinstance(content, str):
+                        content_list = [{"type": "text", "text": content}]
+                    elif isinstance(content, list):
+                        content_list = list(content)
+                    else:
+                        content_list = [{"type": "text", "text": str(content)}]
+                        
+                    for img in images:
+                        if hasattr(img, "save"):
+                            b64 = pil_to_base64(img)
+                        else:
+                            b64 = str(img)
+                            if "," in b64:
+                                b64 = b64.split(",")[1]
+                                
+                        content_list.append({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{b64}"
+                            }
+                        })
+                    messages[i]["content"] = content_list
+                    break
 
         # OpenAI compatible payload with 0.4.0+ specialized fields
         # SOTA: cache_prompt=True enables Content-Based Prefix Caching for TTFT reduction

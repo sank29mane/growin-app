@@ -9,6 +9,14 @@ from rag_manager import RAGManager
 from mcp_client import Trading212MCPClient
 
 import time
+import os
+
+# SOTA 2026: Route default OpenAI-compatible clients (e.g. magentic) to local LM Studio
+# when no explicit OpenAI key is set in .env
+if not os.getenv("OPENAI_API_KEY"):
+    os.environ["OPENAI_API_KEY"] = "lmstudio-local"
+if not os.getenv("OPENAI_BASE_URL"):
+    os.environ["OPENAI_BASE_URL"] = "http://127.0.0.1:1234/v1"
 
 
 
