@@ -111,3 +111,7 @@
 ## 2026-05-25 - AccessibilityHint Missing on System Settings Button
 **Learning:** Found a custom SwiftUI component (`settingsButton` in `ContentView.swift`) that correctly applied `.accessibilityLabel` and `.accessibilityAddTraits(.isButton)` to combat the stripping effects of `.buttonStyle(.plain)`, but lacked `.accessibilityHint`. Furthermore, VoiceOver relies on hint to provide consequence context when the button is interacted with.
 **Action:** Always append an explicit `.accessibilityHint` (e.g., "Opens system settings and console") alongside the label and traits when using `.buttonStyle(.plain)` on interactive elements.
+
+## 2026-05-26 - TextField Placeholder Accessibility
+**Learning:** In SwiftUI, `TextField` elements that rely on purely numerical or generic placeholders (e.g., `TextField("0.00", text: $quantity)`) are read by VoiceOver merely as the placeholder string. Even if they are visually grouped with descriptive text elements above them (like "QUANTITY"), screen readers treat those as disconnected entities, resulting in a loss of context.
+**Action:** Always append an explicit `.accessibilityLabel` and `.accessibilityHint` directly to `TextField` elements to provide clear context (e.g., `.accessibilityLabel("Order Quantity")`, `.accessibilityHint("Enter the number of shares to trade")`) for assistive technologies.
