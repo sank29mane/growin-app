@@ -434,8 +434,7 @@ async def test_get_covariance_velocity_not_initialized_returns_none(multi_asset_
 async def test_get_covariance_velocity_mlx_path_multi_asset():
     """
     Verifies the MLX branch of get_covariance_velocity for multi-asset case
-    by patching HAS_MLX and mx, using a NeuralJMCE subclass so isinstance
-    check passes without requiring real MLX.
+    by patching HAS_MLX, mx, and isinstance to avoid real MLX C++ class call intercepting.
     """
     n = 3
     rng = np.random.default_rng(7)
@@ -444,7 +443,7 @@ async def test_get_covariance_velocity_mlx_path_multi_asset():
     V_fake = np.ones((1, n, n), dtype=np.float32)  # (batch=1, n, n)
     expected_norm = float(np.linalg.norm(V_fake[0]))
 
-    class _FakeNeuralJMCE(NeuralJMCE):
+    class _FakeNeuralJMCE:
         def __init__(self):
             self.n_assets = n
 
@@ -457,8 +456,15 @@ async def test_get_covariance_velocity_mlx_path_multi_asset():
     mock_mx = MagicMock()
     mock_mx.array.side_effect = lambda x: x  # pass-through
 
+    orig_isinstance = isinstance
+    def my_isinstance(obj, classinfo):
+        if classinfo == NeuralJMCE:
+            return True
+        return orig_isinstance(obj, classinfo)
+
     with patch('utils.portfolio_analyzer.HAS_MLX', True), \
-         patch('utils.portfolio_analyzer.mx', mock_mx):
+         patch('utils.portfolio_analyzer.mx', mock_mx), \
+         patch('builtins.isinstance', my_isinstance):
         result = await analyzer.get_covariance_velocity(returns)
 
     assert result is not None
@@ -478,7 +484,7 @@ async def test_get_covariance_velocity_mlx_path_single_asset():
 
     V_scalar = np.array([[[0.42]]], dtype=np.float32)  # shape (1, 1, 1)
 
-    class _SingleAssetModel(NeuralJMCE):
+    class _SingleAssetModel:
         def __init__(self):
             self.n_assets = n
 
@@ -491,8 +497,15 @@ async def test_get_covariance_velocity_mlx_path_single_asset():
     mock_mx = MagicMock()
     mock_mx.array.side_effect = lambda x: x
 
+    orig_isinstance = isinstance
+    def my_isinstance(obj, classinfo):
+        if classinfo == NeuralJMCE:
+            return True
+        return orig_isinstance(obj, classinfo)
+
     with patch('utils.portfolio_analyzer.HAS_MLX', True), \
-         patch('utils.portfolio_analyzer.mx', mock_mx):
+         patch('utils.portfolio_analyzer.mx', mock_mx), \
+         patch('builtins.isinstance', my_isinstance):
         result = await analyzer.get_covariance_velocity(returns)
 
     assert result is not None
