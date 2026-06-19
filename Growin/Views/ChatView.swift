@@ -246,6 +246,8 @@ struct ChatView: View {
                     TextField(isLiveMode ? "LIVE TRADING: Ask about your portfolio..." : "Ask about your portfolio...", text: $viewModel.inputText, axis: .vertical)
                         .textFieldStyle(.plain)
                         .padding(12)
+                        .accessibilityLabel("Chat Input")
+                        .accessibilityHint("Enter your question or command for the AI assistant")
                         .background(isLiveMode ? Color.red.opacity(0.1) : Color.white.opacity(0.05))
                         .cornerRadius(12)
                         .overlay(

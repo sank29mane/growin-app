@@ -245,6 +245,8 @@ struct HFModelHubSection: View {
                     TextField("Search HuggingFace...", text: $hfSearchQuery)
                         .textFieldStyle(.plain)
                         .padding(10)
+                        .accessibilityLabel("Search HuggingFace Models")
+                        .accessibilityHint("Enter a model name to search on HuggingFace")
                         .background(Color.secondary.opacity(0.1))
                         .clipShape(.rect(cornerRadius: 8))
                     

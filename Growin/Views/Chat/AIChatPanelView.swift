@@ -97,6 +97,8 @@ struct AIChatPanelView: View {
                         TextField("Ask about your portfolio or market strategies...", text: $chatInput)
                             .font(SovereignTheme.Fonts.spaceGrotesk(size: 14))
                             .foregroundStyle(Color.brutalOffWhite)
+                            .accessibilityLabel("Chat Input")
+                            .accessibilityHint("Enter your question about your portfolio or market strategies")
                             .textFieldStyle(.plain)
                             .onSubmit {
                                 if !chatInput.isEmpty {

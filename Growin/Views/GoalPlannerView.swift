@@ -102,6 +102,8 @@ struct GoalPlannerView: View {
                             TextField("Amount", value: $viewModel.capital, format: .number)
                                 .multilineTextAlignment(.trailing)
                                 .textFieldStyle(.plain)
+                                .accessibilityLabel("Scenario Capital Amount")
+                                .accessibilityHint("Enter the capital amount in pounds for the scenario simulator")
                                 .font(.system(size: 28, weight: .heavy, design: .rounded))
                                 .foregroundStyle(.white)
                                 .frame(width: 160)
