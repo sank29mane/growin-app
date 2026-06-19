@@ -313,7 +313,7 @@ async def get_portfolio_history(days: int = 30, account_type: Optional[str] = No
 
                     # 3. Calculate portfolio value using dot product
                     ordered_tickers = list(valid_holdings.keys())
-                    weights = np.array([valid_holdings[t] for t in ordered_tickers])
+                    weights = np.array([valid_holdings[t] for t in ordered_tickers], dtype=np.float64)
 
                     # Subset dataframe
                     df_subset = df_calc[ordered_tickers]
