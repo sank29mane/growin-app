@@ -57,6 +57,7 @@ dependencies = [
     "magentic>=0.41.0",
     "mlx-vlm>=0.0.7",
     "pydantic-ai>=0.0.41",
+    "aiofiles>=25.1.0",
 ]
 
 [tool.uv.sources]
