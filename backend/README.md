@@ -1,20 +1,21 @@
 # Growin Backend: AI Financial Intelligence Engine
 
-This is the Python-based heart of the Growin App. It orchestrates a multi-agent system to provide real-time financial analysis, leveraging local LLMs, a dedicated serving layer, and Rust-accelerated quantitative engines.
+This is the Python-based heart of the Growin App. It orchestrates a multi-agent system to provide real-time financial analysis, leveraging local LLMs, direct MLX inference, and Rust-accelerated quantitative engines.
 
 ---
 
-## 🚀 SOTA Tech Stack (v5.0 — May 2026)
+## 🚀 SOTA Tech Stack (v5.1 — June 2026)
 
 *   **Runtime**: Python 3.12+ optimized with `uv` for ultra-fast dependency resolution and virtual environment isolation.
 *   **API Framework**: FastAPI with full `asyncio` support for non-blocking agent orchestration.
-*   **Local Inference**: **vMLX** (jjang-ai) integration serving local models on Apple Silicon GPU utilizing PagedAttention.
+*   **Local Inference**: Direct **MLX** inference via `mlx_lm` and `mlx_vlm` on Apple Silicon GPU with in-memory QLoRA adapter hot-swapping. Supports VLM-capable models (e.g., Gemma 4).
 *   **Primary Models**: **Gemma 4 26B A4B MoE** (primary reasoning hub) paired with **Nemotron-Cascade-2 30B** (executive synthesis and code generation).
 *   **Background Processing**: **arq** for async Redis-backed background workers and long-running optimization tasks.
 *   **Serialization**: **orjson** for high-throughput, ultra-fast JSON serialization.
 *   **Streaming**: **sse-starlette** for high-efficiency Server-Sent Events (SSE) reasoning trace delivery.
 *   **Performance Core**: **Rust** (`growin_core`) for high-throughput quantitative math and technical indicator calculation.
-*   **Precision**: `decimal.Decimal` based financial math layer to guarantee arithmetic accuracy.
+*   **Precision**: `decimal.Decimal` based financial math layer to guarantee arithmetic accuracy (pre-parsed Decimal arrays in WhaleAgent).
+*   **Error Handling**: Centralized `DatabaseError` and `handle_error()` utilities in `utils/error_handler.py`.
 
 ---
 
@@ -25,13 +26,15 @@ backend/
 ├── agents/             # Specialist agents and coordinators
 │   └── social_swarm/   # Reddit & Twitter micro-agents
 ├── routes/             # FastAPI endpoint routers (chat, status, market)
-├── models/             # Neural ODE and local MLX model architectures
 ├── workers/            # arq background task processors (e.g. portfolio optimization)
 ├── backtest_lab/       # Historical backtesting simulation environments
 ├── benchmarks/         # Performance profiling and latency benchmarks
 ├── fallbacks/          # Graceful degradation handlers for API and serving layers
-├── utils/              # Shared utilities (SafePythonExecutor sandbox, TickerResolver)
-└── growin_core_src/    # Rust source code for the quantitative math engine
+├── utils/              # Shared utilities (error_handler, SafePythonExecutor, TickerResolver, sentiment)
+├── growin_core_src/    # Rust source code for the quantitative math engine
+├── mlx_engine.py       # MLXInferenceEngine - model loading, inference, and adapter hot-swap
+├── coreml_inference.py # NeuralJMCE CoreML export and ANE inference
+└── data_engine.py      # Market data fetching and DuckDB integration
 ```
 
 ---
@@ -43,6 +46,7 @@ Growin employs a robust connection layer designed to survive high-concurrency sw
 *   **AgentHttpClient**: A single, centralized global HTTP client utilizing `httpx.AsyncClient` with connection pooling. Replaces per-agent individual client instantiations.
 *   **Circuit Breakers**: Endpoint-specific circuit breakers to prevent cascade failures. If an external service (e.g., Alpaca or Trading 212) exhibits failures, the circuit trips immediately to route requests to local fallback estimators.
 *   **Rate Limiting**: Enforces strict Token Bucket rate limits per destination to comply with broker API limits.
+*   **Search Plugins**: Pluggable `SearchPlugin` abstraction decouples agents from hardcoded Tavily calls, enabling hot-swappable search providers.
 
 ---
 
@@ -61,7 +65,7 @@ uv pip install -r requirements.txt
 ```
 
 ### 3. Start System Services
-Use the main project scripts at the root directory to manage FastAPI, Redis, and vMLX serving layers:
+Use the main project scripts at the root directory to manage FastAPI and Redis:
 ```bash
 # Start all backend services
 ./start.sh
@@ -74,16 +78,13 @@ Use the main project scripts at the root directory to manage FastAPI, Redis, and
 
 ## 🧪 Testing & Quality Assurance
 
-Run the comprehensive test suite including vision, LLM evaluation, and benchmark suites:
+Run the comprehensive test suite:
 ```bash
 # Run unit and integration tests
-uv run pytest
+PYTHONPATH=backend uv run pytest tests/backend/
 
 # Run performance benchmarks
-uv run pytest tests/benchmarks/ -v
-
-# Run agent visual processing evaluations
-uv run pytest tests/vision/ -v
+PYTHONPATH=backend uv run pytest tests/backend/test_performance_benchmarks.py -v
 ```
 *   **DeepEval Integration**: Incorporates LLM-in-the-loop validation for agent outputs, verifying factual consistency, trading constraint adherence, and semantic accuracy.
 
@@ -92,7 +93,7 @@ uv run pytest tests/vision/ -v
 ## 🛡️ Security & Sandboxing
 
 *   **GovernanceService**: Central security module enforcing role-based capabilities, query budget limits, and runtime token verification on the agentic swarm.
-*   **SafePythonExecutor**: Generated mathematical scripts and Monte Carlo simulations run in secure, sandboxed Docker containers.
+*   **SafePythonExecutor**: Generated mathematical scripts and Monte Carlo simulations run in secure, sandboxed environments.
 *   **Error Sanitization**: Route-level filters scrub raw database tracebacks and agent execution logs of private variables before transmitting client-facing errors.
 *   **Secret Masking**: FastAPI middleware scrubs sensitive keys (API tokens, passwords) from system logs.
 
@@ -107,13 +108,11 @@ The backend uses a high-performance **Coordinator-Specialist** design:
 3.  **Parallel Specialists**: Specialist agents execute concurrently:
     -   *QuantAgent*: Vectorized indicator math.
     -   *ForecasterAgent*: Prediction models using ANE-based Neural JMCE.
-    -   *ResearchAgent & Social Swarm*: Tavily RAG searches and sentiment profiling on Reddit/Twitter.
-    -   *WhaleAgent*: Flow and block-trade metrics.
-    -   *VisionAgent*: Non-blocking chart analysis via `prepare_vlm_image_async()`.
-    -   *DividendOptimizationAgent*: Yield tax-drag models.
+    -   *ResearchAgent & Social Swarm*: Tavily RAG searches (via SearchPlugin) and lazy-loaded VADER sentiment profiling on Reddit/Twitter.
+    -   *WhaleAgent*: Flow and block-trade metrics with high-precision Decimal arithmetic.
     -   *GoalPlannerAgent*: Financial target milestones.
 4.  **Trajectory Optimization**: The **R-Stitch Engine** dynamically stitches outputs from Small Language Models (SLMs) and Large Language Models (LLMs) to optimize speed.
-5.  **Synthesis**: The final response is generated using local **vMLX** inference, streaming thoughts via Server-Sent Events (SSE).
+5.  **Synthesis**: The final response is generated using direct **MLX** inference (with regime-aware QLoRA adapters), streaming thoughts via Server-Sent Events (SSE).
 
 ---
 

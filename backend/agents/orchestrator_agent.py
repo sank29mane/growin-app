@@ -230,7 +230,7 @@ Query: "{clean_query}"
             "reason": "Heuristic Routing (No LLM)"
         }
 
-    async def run(self, query: str, conversation_id: Optional[str] = None, history: List[Dict] = [], ticker: Optional[str] = None, account_type: Optional[str] = None) -> Dict[str, Any]:
+    async def run(self, query: str, conversation_id: Optional[str] = None, history: List[Dict] = [], ticker: Optional[str] = None, account_type: Optional[str] = None, images: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         Execute full Orchestrator lifecycle: Routing -> Collection -> Reasoning.
         """
@@ -398,7 +398,7 @@ Query: "{clean_query}"
         tlh_prompt = f"\n[TAX-LOSS HARVESTING OPPORTUNITIES]\n{json.dumps(tlh_candidates)}\n"
         full_query = query + alpha_prompt + tlh_prompt + f"\n[STITCHED NARRATIVE]\n{stitched_narrative}\n"
         
-        decision_result = await self.decision_engine.make_decision(context, full_query)
+        decision_result = await self.decision_engine.make_decision(context, full_query, images=images)
         recommendation = decision_result.get("content", "")
         quick_actions = decision_result.get("quick_actions", [])
         
@@ -549,7 +549,7 @@ Query: "{clean_query}"
         elif name == "SocialAgent": context.social = SocialData(**data)
         elif name == "WhaleAgent": context.whale = WhaleData(**data)
 
-    async def run_stream(self, query: str, conversation_id: Optional[str] = None, history: List[Dict] = [], ticker: Optional[str] = None, account_type: Optional[str] = None):
+    async def run_stream(self, query: str, conversation_id: Optional[str] = None, history: List[Dict] = [], ticker: Optional[str] = None, account_type: Optional[str] = None, images: Optional[List[str]] = None):
         """Streaming variant of Orchestrator lifecycle"""
         await self._initialize()
         c_id = correlation_id_ctx.get() or str(uuid.uuid4())
@@ -661,7 +661,7 @@ Query: "{clean_query}"
         
         # 3. Stream Reasoning
         full_response = ""
-        async for chunk in self.decision_engine.make_decision_stream(context, query):
+        async for chunk in self.decision_engine.make_decision_stream(context, query, images=images):
             full_response += chunk
             yield chunk
 

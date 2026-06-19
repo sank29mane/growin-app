@@ -120,7 +120,8 @@ async def chat_message(
             conversation_id=conversation_id,
             history=history,
             ticker=ticker,
-            account_type=request.account_type
+            account_type=request.account_type,
+            images=request.images
         )
         
         response = result.get("content", "")
@@ -230,7 +231,8 @@ async def stream_chat_generator(request: ChatMessage):
                     conversation_id=conversation_id,
                     history=history,
                     ticker=ticker,
-                    account_type=request.account_type
+                    account_type=request.account_type,
+                    images=request.images
                 ):
                     if isinstance(event, str):
                         full_response += event

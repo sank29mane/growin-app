@@ -169,7 +169,25 @@ class DecisionAgent:
             logger.error(f"DecisionAgent initialization failed: {e}")
             raise
 
-    async def make_decision(self, context: MarketContext, query: str, previous_response_id: Optional[str] = None) -> Dict[str, Any]:
+    def _convert_base64_to_pil(self, images: Optional[List[str]]) -> List[Any]:
+        if not images:
+            return []
+        import base64
+        from io import BytesIO
+        from PIL import Image
+        pil_images = []
+        for img_str in images:
+            try:
+                if "," in img_str:
+                    img_str = img_str.split(",")[1]
+                data = base64.b64decode(img_str)
+                img = Image.open(BytesIO(data)).convert("RGB")
+                pil_images.append(img)
+            except Exception as e:
+                logger.error(f"Error converting base64 image in DecisionAgent: {e}")
+        return pil_images
+
+    async def make_decision(self, context: MarketContext, query: str, previous_response_id: Optional[str] = None, images: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         Make a trading decision based on aggregated market context.
         Returns a dict with 'content' and 'response_id'.
@@ -189,9 +207,17 @@ class DecisionAgent:
         if contradictions:
             context.user_context["contradictions"] = contradictions
 
+        # Convert base64 images to PIL images
+        pil_images = self._convert_base64_to_pil(images)
+
         # 2. Build optimized prompt
         prompt = self._build_prompt(context, query)
         prompt = self._inject_context_layers(prompt, query)
+
+        # Gemma-4 VLM prompt formatting
+        if images and "gemma-4" in (self.model_name or "").lower():
+            if not prompt.startswith("<|image|>"):
+                prompt = "<|image|>\n" + prompt
 
         # 2.5 SOTA 2026: JMCE Uncertainty Gating
         uncertainty_warning = ""
@@ -280,7 +306,7 @@ class DecisionAgent:
             system_content = self._get_system_persona(context.intent)
             
             # Execute loop (Stateful and Consolidated)
-            loop_result = await self._run_agentic_loop(system_content, prompt, context, previous_response_id)
+            loop_result = await self._run_agentic_loop(system_content, prompt, context, previous_response_id, images=pil_images)
             recommendation = loop_result.get("content", "")
             response_id = loop_result.get("response_id")
             
@@ -415,7 +441,7 @@ class DecisionAgent:
                 
         return contradictions
 
-    async def make_decision_stream(self, context: MarketContext, query: str):
+    async def make_decision_stream(self, context: MarketContext, query: str, images: Optional[List[str]] = None):
         """
         Stream the decision making process.
         Yields chunks of text with formatting protection and thinking telemetry.
@@ -443,12 +469,35 @@ class DecisionAgent:
         prompt = self._inject_context_layers(prompt, query)
         system_content = self._get_system_persona(context.intent)
 
+        # Convert base64 images to PIL images
+        pil_images = self._convert_base64_to_pil(images)
+
+        # Gemma-4 VLM prompt formatting
+        if images and "gemma-4" in (self.model_name or "").lower():
+            if not prompt.startswith("<|image|>"):
+                prompt = "<|image|>\n" + prompt
+
         try:
             full_response = ""
             
             if hasattr(self.llm, "astream"):
-                messages = [SystemMessage(content=system_content), HumanMessage(content=prompt)]
-                async for chunk in self.llm.astream(messages):
+                from langchain_core.messages import AIMessage, SystemMessage, HumanMessage
+                messages = [SystemMessage(content=system_content)]
+                
+                # Format history & strip thought tokens
+                history = context.user_context.get("history", [])
+                for msg in history:
+                    content = msg.get("content") or ""
+                    import re
+                    content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
+                    if msg.get("role") == "user":
+                        messages.append(HumanMessage(content=content))
+                    else:
+                        messages.append(AIMessage(content=content))
+                        
+                messages.append(HumanMessage(content=prompt))
+                
+                async for chunk in self.llm.astream(messages, images=pil_images):
                     content = chunk.content
                     
                     # Process via Thinking Parser
@@ -497,7 +546,7 @@ class DecisionAgent:
                             context.reasoning += "\n" + event["content"]
             else:
                 # Fallback
-                response = await self._generate_draft(system_content, prompt, context=context, query=query)
+                response = await self._generate_draft(system_content, prompt, context=context, query=query, images=pil_images)
                 full_response = response
                 yield response
             
@@ -543,10 +592,11 @@ class DecisionAgent:
             logger.error(f"Streaming failed: {e}")
             yield f"Error: {str(e)}"
 
-    async def _run_agentic_loop(self, system_content: str, prompt: str, context: MarketContext, previous_response_id: Optional[str] = None) -> Dict[str, Any]:
+    async def _run_agentic_loop(self, system_content: str, prompt: str, context: MarketContext, previous_response_id: Optional[str] = None, images: Optional[List[Any]] = None) -> Dict[str, Any]:
         """Runs multi-turn LLM loop with tool support and server-side state."""
         import asyncio
         import os
+        import re
         
         # 0. Shadow Mode Priority Override
         if os.getenv("USE_SHADOW_LLM") == "1" and context:
@@ -588,9 +638,15 @@ class DecisionAgent:
 
         # 2. Stateless Fallback: Standard Agentic Loop
         messages = [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": prompt}
+            {"role": "system", "content": system_content}
         ]
+        history = context.user_context.get("history", [])
+        for msg in history:
+            content = msg.get("content") or ""
+            content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
+            messages.append({"role": msg.get("role", "user"), "content": content})
+            
+        messages.append({"role": "user", "content": prompt})
         
         mcp = self.mcp_client
         response_id = None
@@ -667,7 +723,7 @@ class DecisionAgent:
                 return {"content": self._clean_response(content), "response_id": response_id}
             else:
                 # Basic generation fallback
-                draft = await self._generate_draft(system_content, prompt, context=context, query=query)
+                draft = await self._generate_draft(system_content, prompt, context=context, query=query, images=images)
                 reasoning = self._extract_reasoning(draft)
                 if reasoning:
                     context.reasoning = reasoning
@@ -676,12 +732,15 @@ class DecisionAgent:
         return {"content": "Reasoning loop exceeded max turns.", "response_id": None}
 
 
-    async def _generate_draft(self, system_content: str, prompt: str, context: Optional[MarketContext] = None, query: str = "") -> str:
+    async def _generate_draft(self, system_content: str, prompt: str, context: Optional[MarketContext] = None, query: str = "", images: Optional[List[Any]] = None) -> str:
         """Generate initial draft."""
         if hasattr(self.llm, "ainvoke"):
             # LangChain
             messages = [SystemMessage(content=system_content), HumanMessage(content=prompt)]
-            response = await self.llm.ainvoke(messages)
+            kwargs = {}
+            if images:
+                kwargs["images"] = images
+            response = await self.llm.ainvoke(messages, **kwargs)
             return response.content
         elif hasattr(self.llm, "chat"):
             # LM Studio Client - Optimized for High Token Throughput

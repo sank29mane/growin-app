@@ -20,7 +20,7 @@ git branch --show-current
 
 ### Server Process Management
 ```bash
-# Start all backend services (FastAPI, Redis, vMLX)
+# Start all backend services (FastAPI, Redis)
 ./start.sh
 
 # Stop all background services cleanly
@@ -32,33 +32,22 @@ tail -f backend/data/growin_server.log
 
 ---
 
-## 🧠 vMLX Operations (Local Serving Layer)
+## 🧠 MLX Inference Operations
 
-The **vMLX Serving Layer** hosts our local quantized dual-model layout (**Gemma 4 26B A4B MoE** and **Nemotron-Cascade-2 30B**).
+The **MLX Inference Engine** (`mlx_engine.py`) manages local model loading, inference, and adapter hot-swapping using `mlx_lm` and `mlx_vlm` directly on Apple Silicon GPU.
 
-### 1. Starting/Stopping the Serving Stack
-The `vmlx_manager.py` manages model loading and hardware slot routing.
+### 1. Model Loading & Status
+The `MLXInferenceEngine` is a lazy-initialized singleton — models load on first inference request.
 ```bash
-# Start the vMLX server manually (if not using start.sh)
-uv run python backend/vmlx_manager.py --host 127.0.0.1 --port 8006 --quantize 4bit
-
-# Clean teardown of local serving ports
-kill -9 $(lsof -t -i:8006)
+# Check engine status (model loaded, memory usage)
+PYTHONPATH=backend uv run python -c "from mlx_engine import get_mlx_engine; print(get_mlx_engine().get_status())"
 ```
 
-### 2. Live Heartbeat Verification
-Verify the server is responsive and models are loaded:
+### 2. Adapter Hot-Swap
+Regime-specific QLoRA adapters can be swapped in-memory (10-50ms):
 ```bash
-# Fetch serving layer health status
-curl http://127.0.0.1:8006/health
-
-# Test prompt completion completion trace on the primary reasoner
-curl http://127.0.0.1:8006/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "gemma4-26b-moe",
-    "messages": [{"role": "user", "content": "Test heartbeat"}]
-  }'
+# Verify adapter weights exist
+ls adapters/high_vol_bull/adapters.safetensors
 ```
 
 ### 3. Memory Pressure Monitoring
@@ -66,9 +55,6 @@ Always monitor Apple Silicon unified memory to ensure local execution remains wi
 ```bash
 # Monitor GPU memory and system compaction events in real time
 sudo powermetrics --samplers gpu_power,cpu_power -i 1000
-
-# Retrieve currently allocated active cache sizes
-uv run python -c "from backend.vmlx_manager import get_active_cache; print(get_active_cache().get_summary())"
 ```
 
 ---
@@ -100,6 +86,7 @@ Before pushing frontend updates, verify that UI layouts conform to native macOS 
 ### 1. Verification Checklist
 - Ensure interactive elements (e.g. `SovereignSlideToConfirm`, `SovereignSidebar` tabs) expose descriptive `.accessibilityLabel()` and `.accessibilityHint()` values.
 - Verify elements use `.accessibilityAddTraits(.isButton)` or similar trait flags.
+- Verify `.buttonStyle(.plain)` buttons include accessibility hints.
 
 ### 2. Launching Accessibility Diagnostics
 Use the macOS native Xcode Accessibility Inspector to audit the layout:
@@ -117,38 +104,33 @@ All tests run via `uv` to maintain strict dependency constraints.
 ### 1. Execution Roster
 ```bash
 # Run all unit and integration tests
-uv run pytest
+PYTHONPATH=backend uv run pytest tests/backend/
 
 # Run quantitative math indicator tests
-uv run pytest tests/backend/test_quant_engine.py -v
+PYTHONPATH=backend uv run pytest tests/backend/test_quant_engine.py -v
 
-# Run non-blocking vision chart tests
-uv run pytest tests/vision/ -v
+# Run performance benchmarks
+PYTHONPATH=backend uv run pytest tests/backend/test_performance_benchmarks.py -v
 ```
 
 ### 2. Database Analytical Auditing
 Check DuckDB local data integrity, ticker normalizations, and agent alpha predictions:
 ```bash
 # Query the live analyst database metrics
-uv run python -c "from backend.analytics_db import get_analytics_db; print(get_analytics_db().get_agent_alpha_metrics())"
+PYTHONPATH=backend uv run python -c "from analytics_db import get_analytics_db; print(get_analytics_db().get_agent_alpha_metrics())"
 ```
 
 ---
 
-## 🛡️ Sandbox & Container Management
+## 🛡️ Sandbox & Code Execution
 
-The `MathGeneratorAgent` executes generated code blocks inside an isolated Docker sandbox.
+The `MathGeneratorAgent` executes generated code blocks via the `SafePythonExecutor` sandbox.
 
-### 1. Check Sandbox Container Readiness
+### 1. Verifying Sandbox Security
+Ensure the executor is properly isolated and not accessing external resources:
 ```bash
-docker ps | grep growin-npu
-```
-
-### 2. Recovering from Runaway Sandbox Processes
-If a container fails to terminate within 5 seconds of task completion:
-```bash
-# Force-remove all loose growin sandbox containers
-docker rm -f $(docker ps -a -q --filter "ancestor=growin-npu-compute")
+# Run sandbox isolation tests
+PYTHONPATH=backend uv run pytest tests/backend/ -k "sandbox" -v
 ```
 
 ---

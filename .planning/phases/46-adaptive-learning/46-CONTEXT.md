@@ -13,7 +13,7 @@ Establishing local model fine-tuning (LoRA adapters) and automated alpha feature
 <decisions>
 ## Implementation Decisions
 
-- **D-16 (Fine-Tuning Engine):** Standardized on native MLX fine-tuning (`mlx-lm.lora`) utilizing Metal GPU acceleration on macOS, bypassing CUDA-bound Unsloth to avoid Docker/VM performance loss.
+- **D-16 (Fine-Tuning Engine):** Standardized on native MLX fine-tuning (`mlx-vlm.lora`) utilizing Metal GPU acceleration on macOS, bypassing CUDA-bound Unsloth to avoid Docker/VM performance loss.
 - **D-17 (Dynamic Adapter Switching):** Standardized on in-memory weight patching for LoRA adapters in `MLXInferenceEngine` via `model.update(tree_unflatten(list(weights.items())))` and `mx.eval(model.parameters())` to avoid reload latency (dropping it to 10-50ms) and eliminate 2x base model RAM spikes.
 - **D-18 (NeuralJMCE Hardware Partitioning):** Execute neural network feature extraction on ANE (via CoreML) and partition mathematical transformations (Cholesky decomposition, FFTs) to run on the CPU (using Accelerate) or GPU (using Metal/MPS) to avoid custom CoreML layer overhead.
 - **D-19 (Local Concurrency Limits):** Throtle memory-intensive operations between LM Studio and MLX runtime elements to keep system-wide VRAM and RAM consumption below the 60% memory threshold (28GB threshold on M4 Pro).

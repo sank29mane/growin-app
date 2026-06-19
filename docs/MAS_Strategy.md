@@ -27,18 +27,17 @@ The core MAS architecture implements a highly-optimized **SwarmOrchestrator** mo
 *   **Strategy Suggestion Engine**: Integrated directly into the coordination flow, this engine continuously monitors the portfolio ledger and actively streams high-conviction trade and alpha recommendations to the user interface.
 
 ### The Specialist Swarm
-Growin utilizes 8 highly specialized agent roles executing concurrently:
+Growin utilizes 6 highly specialized agent roles executing concurrently:
 1.  **QuantAgent**: Performs high-frequency technical indicator calculations and portfolio rebalancing metrics.
 2.  **ForecasterAgent**: Computes ML-driven price predictions using ANE-accelerated Neural JMCE.
 3.  **ResearchAgent**: Performs semantic web searching and document RAG processing.
 4.  **RiskAgent**: Conducts adversarial debate, portfolio exposure auditing, and leverage validation.
-5.  **WhaleAgent**: Monitors block trade flows, institutional filings, and large-holder footprints.
-6.  **VisionAgent**: Vision-based chart assessment, technical pattern classification, and async image rendering.
-7.  **DividendOptimizationAgent**: Long-term yield optimization, payout schedules, and tax-drag modeling.
-8.  **GoalPlannerAgent**: Translates user goals into actionable portfolio targets and trading milestones.
+5.  **WhaleAgent**: Monitors block trade flows, institutional filings, and large-holder footprints. Optimized with pre-parsed `Decimal` arithmetic for high-precision financial calculations.
+6.  **GoalPlannerAgent**: Translates user goals into actionable portfolio targets and trading milestones.
 
 ### Social Swarm (Reddit & Twitter micro-agents)
-- Embedded micro-agents in `backend/agents/social_swarm/` utilize Tavily Search APIs to perform sentiment profiling, social signal scoring, and retail momentum detection on social platforms.
+- Embedded micro-agents in `backend/agents/social_swarm/` utilize Tavily Search APIs (via the pluggable `SearchPlugin` abstraction) to perform sentiment profiling, social signal scoring, and retail momentum detection on social platforms.
+- Sentiment analysis uses the **lazy-loaded VADER analyzer** (`get_sentiment_analyzer_async()`) to avoid event loop blocking on first invocation.
 
 ### Trajectory Optimization via R-Stitch Engine
 - **Dynamic Stitching (SLM↔LLM)**: Minimizes latency by routing smaller sub-tasks (classification, syntax checking) to optimized Small Language Models (SLMs) and reserving heavy reasoning or synthesis hops for Large Language Models (LLMs), stitching the intermediate trajectory outputs together dynamically.
@@ -52,7 +51,7 @@ Growin utilizes 8 highly specialized agent roles executing concurrently:
 
 ## 3. Performance & Security (Apple Silicon Optimization)
 
-- **vMLX PagedAttention**: Models are served locally via `vmlx_manager.py` to optimize M4 Pro unified memory bandwidth. Continuous batching and KV-cache prefixing prevent SSD swapping.
+- **Direct MLX Inference**: Models are served locally via `MLXInferenceEngine` (`mlx_engine.py`) using `mlx_lm` and `mlx_vlm` directly on Apple Silicon GPU. In-memory QLoRA adapter hot-swapping enables regime-aware model customization with 10-50ms swap latency.
 - **Global Connection Pooling**: Centralized `AgentHttpClient` handles all persistent external API calls, enforcing endpoint-specific circuit breakers to prevent request cascading failures during volatile market news events.
 - **Vectorized Computations**: Heavy indicators and risk calculations are vectorized in `QuantEngine` to utilize Apple Silicon AMX CPU execution.
 - **DuckDB Batch Optimization**: Standardizes timeseries data ingestion through DuckDB batch querying, avoiding slow N+1 query patterns.
@@ -73,6 +72,6 @@ Growin utilizes 8 highly specialized agent roles executing concurrently:
 
 ---
 
-**Status**: Strategic Alignment & Architecture VERIFIED (May 2026)  
+**Status**: Strategic Alignment & Architecture VERIFIED (June 2026)  
 **Author**: Antigravity (Senior AI/ML Systems Architect)  
-**Last Updated**: May 23, 2026
+**Last Updated**: June 17, 2026

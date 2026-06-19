@@ -33,10 +33,10 @@
 - **Solution:** Consolidated portfolio computations in `QuantEngine` to utilize vectorized NumPy/pandas array operations. Replaced individual queries with `get_recent_ohlcv`, which performs a single batch retrieval across all active tickers in a single pass.
 - **Impact:** Decreased portfolio risk analysis time from 8.2 seconds to 0.4 seconds.
 
-## 🖼️ Async Image Processing & VLM Pipelines
-- **Learning:** Standard visual image pre-processing (PIL image scaling, format conversion, and byte manipulation) in `VisionAgent` is CPU-bound. Running this synchronously inside FastAPI's async event loop blocks all other concurrent agent requests, freezing SSE streams and causing client-side timeouts.
-- **Solution:** Structured the visual pipeline to use a dedicated asynchronous worker wrapper: `prepare_vlm_image_async()`. This offloads heavy image formatting and tensor preparation to an external thread pool executor, returning control immediately back to the event loop.
-- **Impact:** vision pipeline requests no longer block active HTTP/SSE connections. Event loop latency during simultaneous visual analysis dropped to ~0ms overhead.
+## 🖼️ Async Image Processing & VLM Pipelines (Historical)
+- **Learning:** Standard visual image pre-processing (PIL image scaling, format conversion, and byte manipulation) is CPU-bound. Running this synchronously inside FastAPI's async event loop blocks all other concurrent agent requests, freezing SSE streams and causing client-side timeouts.
+- **Solution:** The visual pipeline used a dedicated asynchronous worker wrapper: `prepare_vlm_image_async()`. This offloaded heavy image formatting and tensor preparation to an external thread pool executor.
+- **Current Status:** The standalone VisionAgent and its utilities (`image_proc.py`, `mlx_injections.py`) were deprecated and removed in v5.1.0. VLM capabilities are now handled directly through `mlx_vlm` integration in `MLXInferenceEngine`.
 
 ## ♿ Accessibility as Architecture
 - **Learning:** Incorporating accessibility after the fact leads to fragmented UI hierarchies and high maintenance overhead. Accessibility must be treated as a first-class architectural layer.
@@ -44,7 +44,7 @@
 - **Benefit:** Growin is fully usable for visually impaired retail investors using native macOS VoiceOver tools, establishing a premium design standard.
 
 ## 🧹 Exception Handling Hygiene
-- **Learning:** Utilizing bare `except:` clauses catches system-level exceptions like `SystemExit` and `KeyboardInterrupt`. This intercepts signal handling and prevents the FastAPI application, arq background workers, or vMLX servers from shutting down cleanly, leaving active zombie processes in the OS.
+- **Learning:** Utilizing bare `except:` clauses catches system-level exceptions like `SystemExit` and `KeyboardInterrupt`. This intercepts signal handling and prevents the FastAPI application, arq background workers, or the MLX engine from shutting down cleanly, leaving active zombie processes in the OS.
 - **Solution:** Enforced a strict refactor of all bare `except:` clauses to `except Exception:` across the entire codebase. Long-running processes also implement process guard watchdogs.
 - **Impact:** Zero lingering backend processes or zombie workers after calling `./stop.sh`.
 
@@ -70,4 +70,15 @@
 
 ## 🧪 Future Optimization Notes
 - **TTFT (Time to First Token):** For agentic workflows, TTFT is the bottleneck. Recommendation: Implement **Content-Based Prefix Caching** for shared agent system prompts to reduce TTFT by up to 5.8x.
-- **Throughput:** Utilize `vllm-mlx` for continuous batching if concurrency exceeds 10+ simultaneous users.
+- **Adapter Routing Optimization:** Explore pre-loading regime adapters in a secondary model slot to achieve sub-10ms adapter swap latency.
+- **Throughput:** Consider `mlx-lm` continuous batching for high-concurrency scenarios exceeding 10+ simultaneous users.
+
+## ♻️ Centralized Error Handling (v5.1.0)
+- **Learning:** Fragmented `try/except Exception:` blocks across `data_engine.py`, `chat_manager.py`, and `lm_studio_client.py` led to inconsistent error reporting and silent failures. Different modules logged errors in incompatible formats, making traceability difficult.
+- **Solution:** Implemented a centralized `DatabaseError` exception class and `handle_error()` utility in `utils/error_handler.py`. All backend modules now route errors through this unified handler, which provides consistent logging, error classification, and sanitized client-facing messages.
+- **Impact:** Reduced duplicate error handling code by ~40%. Error traceability improved significantly with structured error types.
+
+## ⏱️ Lazy VADER Sentiment Loading (v5.1.0)
+- **Learning:** The `SentimentIntensityAnalyzer` from VADER loads a heavy lexicon file synchronously on first instantiation. When called inside async agent methods (e.g., `TwitterMicroAgent.fetch_data`), it blocks the event loop for 200-500ms, stalling all concurrent agent operations.
+- **Solution:** Implemented `get_sentiment_analyzer_async()` in `utils/sentiment.py` which offloads the initial VADER instantiation to `asyncio.to_thread()`. Subsequent calls return the cached instance immediately.
+- **Impact:** Eliminated first-call latency spikes in social swarm agents. Event loop remains unblocked during initial sentiment analyzer bootstrap.

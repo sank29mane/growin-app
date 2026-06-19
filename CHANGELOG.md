@@ -4,6 +4,34 @@ All notable changes to the Growin project will be documented in this file. The f
 
 ---
 
+## [5.1.0] - 2026-06-17
+
+### Added
+- **Phase 46 Adaptive Learning Pipeline**: End-to-end on-device fine-tuning system — DuckDB raw/clean data ingestion (10-min intervals), feature engineering (volatility, RSI, ATR, CVD), QLoRA 4-bit fine-tuning on Gemma 4 via `mlx_vlm`, CoreML NeuralJMCE export, and in-memory adapter hot-swap (10-50ms, zero 2× RAM).
+- **MLXInferenceEngine Adapter Hot-Swap**: `switch_adapter()` method patches QLoRA weights in-memory via `model.update(tree_unflatten(...))` — enables regime-aware adapter routing without full model reload.
+- **Centralized Error Handler**: Unified `DatabaseError` and `handle_error()` in `utils/error_handler.py`, replacing fragmented try/except blocks across backend modules (#348).
+- **Lazy-Loaded VADER Sentiment**: `get_sentiment_analyzer_async()` offloads heavy lexicon initialization to background thread, preventing async event loop stalling (#347).
+- **High-Precision Financial Arithmetic**: WhaleAgent refactored to use pre-parsed `Decimal` arrays in tight loops, eliminating redundant `create_decimal` calls (#346).
+- **Accessibility Enhancements**: Added `.accessibilityHint()` to all plain-style SwiftUI buttons, Settings, and Workspace controls (#345, #350).
+- **HITL Trade Route Tests**: Fixed `AsyncClient` initialization using `httpx.ASGITransport(app=app)` for compatibility with newer httpx versions.
+- **DuckDB Schema**: `raw_market_data` and `clean_market_data` tables with bulk insert/upsert operations for the adaptive learning pipeline.
+
+### Removed
+- **vMLX Serving Layer**: Deleted `vmlx_manager.py` (PagedAttention server), `vllm_engine.py`, and all associated tests/scripts. Inference now uses direct `mlx_lm`/`mlx_vlm`.
+- **VisionAgent**: Deleted `agents/vision_agent.py`, `utils/image_proc.py`, `utils/mlx_injections.py`, and `mlx_vlm_engine.py`.
+- **DividendBridge**: Deleted `dividend_bridge.py` and standalone `DividendAgent`. Dividend optimization is handled through the swarm coordinator.
+- **Docker NPU Sandbox**: Removed Docker compose sandbox configuration.
+- **Legacy Test Suites**: Removed `test_vmlx_engine.py`, `test_vllm_engine.py`, `test_mlx_injections.py`, `test_dividend_agent.py`, `test_dividend_bridge.py`, `test_dividend_capture.py`, `test_lmstudio_fix.py`, `test_nemotron_usage.py`, `test_security_headers.py`, `test_status_debug.py`.
+
+### Changed
+- **MLX Inference**: Now uses direct `MLXInferenceEngine` singleton in `mlx_engine.py` — lazy model loading, async generation, Metal cache management, and VLM detection for Gemma 4.
+- **Import Paths**: `chat_manager.py` standardized to use relative imports (`utils.error_handler`) for `PYTHONPATH=backend` compatibility.
+- **Search Abstraction**: Agents decoupled from hardcoded Tavily calls via pluggable `SearchPlugin` architecture.
+- **Test Runner**: Standardized on `PYTHONPATH=backend uv run pytest tests/backend/`.
+- **Start Script**: Removed vMLX process management from `start.sh`.
+
+---
+
 ## [5.0.0] - 2026-05-23
 
 ### Added

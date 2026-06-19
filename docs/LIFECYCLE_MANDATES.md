@@ -13,10 +13,10 @@
 - It MUST implement a clean `close()` method that drains active sockets and shuts down connection tunnels.
 - This `close()` method must be called during FastAPI shutdown hooks to ensure all outbound TCP connections are closed cleanly, preventing socket leaks.
 
-## 3. vMLX Server & Serve Lifecycle
-- The local vMLX serving server manages GPU/unified memory slots and active KV-caches.
-- **Startup Order**: The vMLX serving layer MUST be initialized and report a successful healthy status (`/health`) BEFORE the main FastAPI application or arq background workers start routing agent queries.
-- **Shutdown Order**: During system teardown, the main FastAPI application must stop accepting incoming routes first. Then, the background arq queues must be drained, and finally, the vMLX server models must be unloaded and the server stopped, freeing unified memory space cleanly.
+## 3. MLX Engine & Model Lifecycle
+- The `MLXInferenceEngine` singleton manages local model loading, inference, and adapter hot-swapping.
+- **Startup Order**: The MLX engine uses lazy initialization — models load on first use. The FastAPI application and arq workers can start immediately without waiting for model readiness.
+- **Shutdown Order**: During system teardown, the main FastAPI application must stop accepting incoming routes first. Then, the background arq queues must be drained, and finally, `MLXInferenceEngine.unload()` must be called to free model weights and clear the Metal GPU cache via `mx.metal.clear_cache()`.
 
 ## 4. ResourceGuard Cleanup Mandate
 - The `ResourceGuard` monitors system memory heartbeats and controls query concurrency limiters.

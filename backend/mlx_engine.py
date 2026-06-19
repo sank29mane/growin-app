@@ -1,6 +1,6 @@
 """MLX-powered inference engine for Apple Silicon optimized models"""
 import logging
-from typing import Optional, AsyncIterator, Any, Dict
+from typing import Optional, AsyncIterator, Any, Dict, List
 
 from utils.mlx_loader import mx, HAS_MLX
 
@@ -67,15 +67,19 @@ class MLXInferenceEngine:
         self.current_model_path: Optional[str] = None
         self._loading = False  # Prevent concurrent loads
 
-    def _process_images(self, images: Optional[List[str]]) -> List[Any]:
+    def _process_images(self, images: Optional[List[Any]]) -> List[Any]:
         if not images:
             return []
         processed = []
         import base64
         from io import BytesIO
         from PIL import Image
-        for img_str in images:
+        for img_val in images:
+            if isinstance(img_val, Image.Image):
+                processed.append(img_val)
+                continue
             try:
+                img_str = str(img_val)
                 if "," in img_str:
                     img_str = img_str.split(",")[1]
                 data = base64.b64decode(img_str)
