@@ -79,3 +79,4 @@ psutil>=5.9.0
 redis>=5.0.0
 sse-starlette>=1.8.0
 httpx
+aiofiles>=23.2.1
