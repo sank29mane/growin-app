@@ -6,6 +6,7 @@ class PortfolioSummaryObserver {
     static let shared = PortfolioSummaryObserver()
     
     var lastSummary: PortfolioSummary?
+    var positions: [Position] = []
     var menuBarLabel: String = "Growin"
     var menuBarIcon: String = "chart.line.uptrend.xyaxis"
     
@@ -38,6 +39,7 @@ class PortfolioSummaryObserver {
             let decoded = try JSONDecoder().decode(PortfolioSnapshot.self, from: data)
             
             self.lastSummary = decoded.summary
+            self.positions = decoded.positions ?? []
             
             // Update Menu Bar Label
             if let pnl = decoded.summary?.totalPnl {

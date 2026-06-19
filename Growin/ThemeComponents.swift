@@ -344,6 +344,22 @@ struct MarkdownText: View {
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
+                    .environment(\.openURL, OpenURLAction { url in
+                        if url.scheme == "growin" {
+                            if url.host == "ledger" {
+                                let ticker = url.lastPathComponent
+                                if !ticker.isEmpty {
+                                    NotificationCenter.default.post(
+                                        name: NSNotification.Name("DeepLinkTicker"),
+                                        object: nil,
+                                        userInfo: ["ticker": ticker]
+                                    )
+                                    return .handled
+                                }
+                            }
+                        }
+                        return .systemAction
+                    })
             }
         }
     }

@@ -259,6 +259,17 @@ private struct ChatMessageRow: View {
     let message: ChatMessage
     var onSuggestionTap: (String) -> Void
     
+    private var extractedTicker: String? {
+        let words = message.text.uppercased().components(separatedBy: CharacterSet.whitespacesAndNewlines)
+        for word in words {
+            let clean = word.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+            if clean.count >= 2 && clean.count <= 5 && clean.allSatisfy({ $0.isLetter }) {
+                return clean
+            }
+        }
+        return nil
+    }
+    
     var body: some View {
         HStack(alignment: .bottom, spacing: 12) {
             if message.isUser {
@@ -295,8 +306,8 @@ private struct ChatMessageRow: View {
                     if message.hasDynamicTiles {
                         // Example dynamic inline tile UI from the agent
                         HStack(spacing: 12) {
-                            InlineActionTile(title: "Execute Trace", icon: "bolt.fill", color: .brutalChartreuse)
-                            InlineActionTile(title: "View Ledger", icon: "doc.text.fill", color: .cyan)
+                            InlineActionTile(title: "Execute Trace", icon: "bolt.fill", color: .brutalChartreuse, ticker: extractedTicker)
+                            InlineActionTile(title: "View Ledger", icon: "doc.text.fill", color: .cyan, ticker: extractedTicker)
                         }
                         .padding(.leading, 8)
                     }
@@ -311,14 +322,36 @@ private struct InlineActionTile: View {
     let title: String
     let icon: String
     let color: Color
+    let ticker: String?
+    
+    @State private var observer = PortfolioSummaryObserver.shared
+    @State private var livePrice: Decimal? = nil
+    @State private var dailyPnl: Decimal? = nil
+    
+    private var matchingPosition: Position? {
+        guard let ticker = ticker else { return nil }
+        return observer.positions.first(where: { $0.ticker?.uppercased() == ticker.uppercased() })
+    }
     
     var body: some View {
         Button(action: {}) {
             HStack(spacing: 8) {
                 Image(systemName: icon)
                     .font(.system(size: 10))
-                Text(title)
-                    .font(SovereignTheme.Fonts.spaceGrotesk(size: 12, weight: .bold))
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(SovereignTheme.Fonts.spaceGrotesk(size: 12, weight: .bold))
+                    
+                    if let price = livePrice {
+                        let pnl = dailyPnl ?? 0
+                        let pnlSign = pnl >= 0 ? "+" : ""
+                        Text("£\(price.formatted(.number.precision(.fractionLength(2)))) (\(pnlSign)£\(pnl.formatted(.number.precision(.fractionLength(2)))))")
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .foregroundStyle(pnl >= 0 ? Color.green : Color.red)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
+                }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -334,6 +367,18 @@ private struct InlineActionTile: View {
         .accessibilityLabel("\(title) Action")
         .accessibilityHint("Executes the \(title) action")
         .accessibilityAddTraits(.isButton)
+        .onAppear {
+            if let pos = matchingPosition {
+                livePrice = pos.currentPrice
+                dailyPnl = pos.ppl
+            }
+        }
+        .onChange(of: matchingPosition?.currentPrice) { _, newPrice in
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
+                livePrice = newPrice
+                dailyPnl = matchingPosition?.ppl
+            }
+        }
     }
 }
 
