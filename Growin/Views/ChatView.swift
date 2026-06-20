@@ -212,6 +212,9 @@ struct ChatView: View {
                                     }
                                     .buttonStyle(.plain)
                                     .padding(2)
+                                    .accessibilityLabel("Remove image")
+                                    .accessibilityHint("Removes the selected image from the attachment list")
+                                    .accessibilityAddTraits(.isButton)
                                 }
                             }
                         }
