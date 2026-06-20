@@ -492,13 +492,23 @@ class AlpacaClient:
                 logger.warning(f"Batch fetch failed: {e}. Falling back to individual.")
                 fallback_candidates.extend(alpaca_candidates) # Add back to fallback queue
 
-        # Process fallback candidates individually using their primary sources first
+        # Process fallback candidates using batched primary source (yfinance)
         if fallback_candidates:
-            tasks = [self.get_historical_bars(t, timeframe, limit) for t in fallback_candidates]
-            fallback_results = await asyncio.gather(*tasks, return_exceptions=True)
-            for res in fallback_results:
-                if res and isinstance(res, dict) and 'ticker' in res:
-                    results[res['ticker']] = res
+            try:
+                yf_fallback_results = await asyncio.to_thread(
+                    self._fetch_batch_from_yfinance,
+                    fallback_candidates,
+                    timeframe,
+                    limit
+                )
+                results.update(yf_fallback_results)
+            except Exception as e:
+                logger.warning(f"Batched fallback fetch failed: {e}. Attempting individual fetches.")
+                tasks = [self.get_historical_bars(t, timeframe, limit) for t in fallback_candidates]
+                fallback_results = await asyncio.gather(*tasks, return_exceptions=True)
+                for res in fallback_results:
+                    if res and isinstance(res, dict) and 'ticker' in res:
+                        results[res['ticker']] = res
 
         # 4. Process Fallbacks (UK stocks + any failed Alpaca + ones missing from batch response)
         # Check what we still miss
