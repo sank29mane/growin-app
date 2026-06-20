@@ -54,6 +54,14 @@ struct PortfolioView: View {
     }
 }
 
+struct PremiumPressButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.92 : 1.0)
+            .animation(.spring(response: 0.3, dampingFraction: 0.6), value: configuration.isPressed)
+    }
+}
+
 struct MetricGrid: View {
     let summary: PortfolioSummary?
     
@@ -562,15 +570,17 @@ extension PortfolioView {
         Button(action: { Task { await viewModel.fetchPortfolio() } }) {
             Image(systemName: "arrow.clockwise")
                 .font(.system(size: 12, weight: .bold))
+                .rotationEffect(.degrees(viewModel.isLoading ? 360 : 0))
+                .animation(viewModel.isLoading ? .linear(duration: 1.2).repeatForever(autoreverses: false) : .default, value: viewModel.isLoading)
                 .frame(width: 32, height: 32)
                 .background(Color.white.opacity(0.05))
                 .clipShape(Circle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PremiumPressButtonStyle())
         .opacity(viewModel.isLoading ? 0.5 : 1)
         .accessibilityLabel("Refresh Portfolio")
-        .accessibilityHint("Refreshes portfolio data from the server")
         .accessibilityAddTraits(.isButton)
+        .sensoryFeedback(trigger: viewModel.isLoading) { old, new in new ? .impact(weight: .light) : .success }
         .disabled(viewModel.isLoading)
     }
 
