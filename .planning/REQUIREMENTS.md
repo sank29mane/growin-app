@@ -1,35 +1,27 @@
-# Milestone v5.0 Requirements: MLX Intelligence & macOS 2026 UX Overhaul
+# Milestone v6.0 Requirements: Hardened System Exploitation & Alpha Accuracy
 
 ## Status: ACTIVE
-**Goal:** Transform Growin into a SOTA macOS 2026 native experience by integrating fine-tuned Gemma 4 26B A4B MoE intelligence with a complete UI/UX overhaul and hardened RL-driven profit extraction.
+**Goal:** Drastically improve overall trading accuracy and maximize system throughput by fully utilizing the M4 Pro (48GB RAM) compute blocks (ANE, GPU, and CPU) and establishing an off-market learning loop.
 
 ---
 
 ## 🎯 Active Requirements
 
-### Core Intelligence & Serving
-- [ ] **INTEL-01**: Deploy Gemma 4 26B A4B MoE as the primary reasoning engine.
-- [ ] **INTEL-02**: Implement "Thinking" Mode visibility in the chat interface.
-- [ ] **INTEL-03**: Enable Gemma 4 Multimodal support for image/chart uploads and analysis.
-- [ ] **PERF-01**: Serve Gemma 4 MoE locally via vllm-mlx with PagedAttention.
-- [ ] **PERF-02**: Implement FP8 KV-cache quantization for M4 Pro VRAM optimization.
-- [ ] **PERF-03**: Configure system-level memory limit overrides for concurrent serving/training.
+### Core Optimization & Acceleration (System Exploitation)
+- [ ] **PERF-04**: Optimize vectorized SQL calculations and rollups in DuckDB for high-throughput feature ingestion.
+- [ ] **PERF-05**: Calibrate and optimize Apple Neural Engine (ANE/NPU) float16 pipelines for sub-millisecond numerical forecasts.
 
-### macOS 2026 UX Overhaul
-- [ ] **UX-01**: Complete UI redesign using SwiftUI SDK 17+ (macOS Tahoe patterns).
-- [ ] **UX-02**: Integrate Stage Manager 2.0 with saved window sets for trading workflows.
-- [ ] **UX-03**: Implement Agentic Sidebar for proactive context management.
-- [ ] **UX-04**: Build Dynamic Interactive Tiles for real-time asset monitoring and fast actions.
-- [ ] **UX-05**: Achieve 120Hz ProMotion fluid rendering across all high-density views.
+### Prediction & Classification Accuracy
+- [ ] **ACC-01**: Implement unsupervised GMM (Gaussian Mixture Model) clustering on rolling price variance and volume profiles to classify regimes.
+- [ ] **ACC-02**: Integrate 2ms hot-swapping router to switch local QLoRA adapters based on GMM regime classifications.
+- [ ] **ACC-03**: Research and implement Simulation-in-the-Loop pre-flight checks with configurable failure modes (heuristic re-optimization vs. capital scaling).
 
-### Adaptive Learning (Unsloth)
-- [ ] **LEARN-01**: Set up Unsloth/mlx-tune pipeline for local LoRA fine-tuning.
-- [ ] **LEARN-02**: Implement automated alpha feature engineering from DuckDB data.
-- [ ] **LEARN-03**: Dynamic LoRA adapter switching based on detected market regimes.
+### Hardened Order Execution
+- [ ] **EXEC-01**: Build adaptive limit order execution utilizing short-term ANE volatility indicators.
+- [ ] **EXEC-02**: Implement dynamic re-pricing and re-quoting engine with emergency market-order fallback.
 
-### Integrated Trading Features
-- [ ] **TRADE-01**: Real-time price synchronization (<16ms) for 120Hz fidelity.
-- [ ] **TRADE-02**: Deep linking from chat reasoning to Sovereign Ledger views.
+### Continuous Learning Loop
+- [ ] **LEARN-04**: Establish off-market QLoRA training runs triggered when validation performance drops below thresholds.
 
 ---
 
@@ -43,7 +35,7 @@
 
 ## 🚫 Out of Scope
 - Cloud-based LLM fallback (Milestone focus is 100% Sovereign Local AI).
-- Mobile/iOS support (Milestone focus is macOS 2026 Desktop patterns).
+- High-frequency tick updates (Targeting dynamic order book re-pricing on a sub-second scale but not HFT microsecond execution).
 
 ---
 
@@ -51,19 +43,11 @@
 
 | REQ-ID | Phase | Success Criteria | Status |
 |--------|-------|------------------|--------|
-| INTEL-01 | 42, 43 | Final model selection and deployment. | ⬜ |
-| INTEL-02 | 43 | "Thinking" mode visible in chat interface. | ⬜ |
-| INTEL-03 | 46 | Gemma 4 multimodal support active. | ⬜ |
-| PERF-01 | 42, 43 | vllm-mlx with PagedAttention configured. | ⬜ |
-| PERF-02 | 43 | FP8 KV-cache quantization implemented. | ⬜ |
-| PERF-03 | 43 | M4 Pro memory overrides active. | ⬜ |
-| UX-01 | 44 | SwiftUI 17+ Redesign with Tahoe patterns. | ⬜ |
-| UX-02 | 44 | Stage Manager 2.0 integration complete. | ⬜ |
-| UX-03 | 44 | Agentic Sidebar active for context. | ⬜ |
-| UX-04 | 46 | Dynamic Interactive Tiles built. | ⬜ |
-| UX-05 | 44 | 120Hz ProMotion fluid rendering. | ⬜ |
-| LEARN-01 | 45 | Unsloth/mlx-tune pipeline active. | ⬜ |
-| LEARN-02 | 45 | Automated DuckDB alpha extraction. | ⬜ |
-| LEARN-03 | 45 | Dynamic LoRA adapter switching. | ⬜ |
-| TRADE-01 | 44 | Real-time price sync (<16ms). | ⬜ |
-| TRADE-02 | 46 | Deep linking reasoning to Ledger. | ⬜ |
+| PERF-04 | 48 | Vectorized feature rollups execute within 10ms in DuckDB. | ⬜ |
+| PERF-05 | 49 | Neural JMCE/TTM-R2 running on ANE with sub-millisecond latency. | ⬜ |
+| ACC-01  | 50 | GMM clustering model correctly classifies at least 3 historical regimes. | ⬜ |
+| ACC-02  | 50 | MLX adapter hot-swap latency stays under 2ms. | ⬜ |
+| ACC-03  | 51 | Simulation-in-the-loop triggers re-optimization on simulator drawdowns. | ⬜ |
+| EXEC-01 | 52 | Limit orders submitted with volatility-adjusted price bounds. | ⬜ |
+| EXEC-02 | 52 | Re-quoting agent actively updates orders every N seconds. | ⬜ |
+| LEARN-04| 53 | Automated off-market cron triggers QLoRA tuning when accuracy drifts. | ⬜ |
