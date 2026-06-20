@@ -55,7 +55,7 @@ async def test_get_historical_bars_yfinance_fallback(mock_logger):
 
 @pytest.mark.asyncio
 async def test_get_batch_bars(mock_logger):
-    """Test batch bar fetching with mocked internal method"""
+    """Test batch bar fetching with mocked internal method (success path)"""
     with patch('data_engine.get_finnhub_client') as mock_finnhub:
 
         mock_fh_instance = MagicMock()
@@ -76,8 +76,40 @@ async def test_get_batch_bars(mock_logger):
             results = await client.get_batch_bars(tickers)
 
             assert len(results) == 2
-            assert mock_fh_instance.get_historical_bars.call_count == 1
-            assert mock_yf.call_count == 1
+            assert mock_fh_instance.get_historical_bars.call_count == 0
+            assert mock_yf.call_count == 2
+
+@pytest.mark.asyncio
+async def test_get_batch_bars_yfinance_failure_fallback(mock_logger):
+    """Test batch bar fetching: batch yfinance fails, falls back to individual fetches"""
+    with patch('data_engine.get_finnhub_client') as mock_finnhub:
+
+        mock_fh_instance = MagicMock()
+        mock_finnhub.return_value = mock_fh_instance
+        async def fh_side_effect(ticker, timeframe, limit):
+            return {"ticker": ticker, "bars": [], "source": "finnhub"}
+        mock_fh_instance.get_historical_bars.side_effect = fh_side_effect
+
+        client = AlpacaClient()
+        client.data_client = None
+
+        with patch.object(client, '_fetch_batch_from_yfinance') as mock_yf:
+            mock_yf.side_effect = Exception("yfinance batch download failed")
+
+            # We also need to mock yfinance.Ticker to return empty history for AAPL if it falls back to individual get_historical_bars
+            with patch('yfinance.Ticker') as MockTicker:
+                mock_ticker_instance = MagicMock()
+                mock_ticker_instance.history.return_value = pd.DataFrame()
+                MockTicker.return_value = mock_ticker_instance
+
+                tickers = ["AAPL", "LLOY.L"]
+                results = await client.get_batch_bars(tickers)
+
+                # AAPL individual fetch fails/returns empty, LLOY.L individual fetch goes to Finnhub and succeeds
+                # So we expect results to contain LLOY.L
+                assert "LLOY.L" in results
+                assert mock_fh_instance.get_historical_bars.call_count == 1
+                assert mock_yf.call_count == 2
 
 
 @pytest.mark.asyncio
