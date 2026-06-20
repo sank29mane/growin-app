@@ -104,7 +104,6 @@ class TickerResolver:
         self.special_mappings = SPECIAL_MAPPINGS
         self.us_exclusions = US_EXCLUSIONS
         self.uk_stems = UK_COMMON_STEMS
-        self._cache = {} # Simple in-memory cache for this instance
 
     def normalize(self, ticker: str) -> str:
         """
@@ -205,23 +204,30 @@ class TickerResolver:
         2. Normalize & Validate
         3. Provider Search (Stub for now)
         """
-        # 1. Quick normalization
+        from cache_manager import cache
+
+        # 1. Check Cache first with original query
+        cache_key = f"ticker_resolve:{query}"
+        cached_result = cache.get(cache_key)
+        if cached_result:
+            return cached_result
+
+        # 2. Quick normalization
         ticker = self.normalize(query)
         if not ticker:
             return None
-            
-        # 2. Check Cache
-        if ticker in self._cache:
-            return self._cache[ticker]
             
         # 3. Extraction if query is a sentence
         if " " in query:
             extracted = self.extract(query)
             if extracted:
-                return extracted[0] # Return first match
+                result = extracted[0] # Return first match
+                cache.set(cache_key, result, ttl=86400)
+                return result
                 
         # 4. Provider Validation (Future: call Alpaca/Finnhub search)
 
+        cache.set(cache_key, ticker, ttl=86400)
         return ticker
 
     async def search(self, term: str) -> list[dict]:
