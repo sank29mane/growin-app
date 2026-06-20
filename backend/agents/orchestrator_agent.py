@@ -83,7 +83,7 @@ class OrchestratorAgent:
             
         # Initialize routing LLM (lightweight)
         # If the user's selected model is from LM Studio (HF-style ID with '/'),
-        # use lmstudio-auto for routing too, to avoid vMLX dependency.
+        # use lmstudio-auto for routing too, to avoid dependencies on missing local models.
         is_lmstudio_model = "/" in (self.model_name or "")
         routing_model = "lmstudio-auto" if is_lmstudio_model else "granite-tiny"
         

@@ -214,7 +214,7 @@ class MLXInferenceEngine:
         images: Optional[List[Any]] = None
     ) -> str:
         """
-        Generate text using loaded MLX model or vMLX backend
+        Generate text using loaded MLX model.
         """
         if self.model is None or (self.tokenizer is None and self.processor is None):
             raise RuntimeError("No model loaded. Call load_model() first.")
@@ -270,7 +270,7 @@ class MLXInferenceEngine:
         images: Optional[List[Any]] = None
     ) -> AsyncIterator[str]:
         """
-        Stream generated text token by token using loaded MLX model or vMLX backend
+        Stream generated text token by token using loaded MLX model.
         """
         if self.model is None or (self.tokenizer is None and self.processor is None):
             raise RuntimeError("No model loaded. Call load_model() first.")

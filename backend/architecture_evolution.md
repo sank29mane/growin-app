@@ -8,9 +8,9 @@ This document details the backend architectural roadmap, tracing our development
 
 The modern iteration of the Growin backend focuses on serving efficiency, high-throughput local AI execution, and system-level resilience.
 
-### 1. Dual-Model Local Inference & vMLX Serving
+### 1. Dual-Model Local Inference & Local Serving
 - **Evolution**: Migrated from standard single-model REST configurations to a local **dual-model serving architecture** pairing **Gemma 4 26B A4B MoE** and **Nemotron-Cascade-2 30B**.
-- **Implementation**: Replaced unmanaged local model loads with a dedicated local server `vmlx_manager.py` using **PagedAttention** and continuous batching.
+- **Implementation**: Replaced unmanaged local model loads with direct local serving via **LM Studio** and **direct MLX** library execution (`mlx_lm`).
 - **Benefit**: Enabled multi-agent concurrent serving without memory thrashing, keeping weights and KV caches within a strict 60% memory limit (≤ 28GB on 48GB M4 Pro configurations).
 
 ### 2. Centralized Connection Pooling & AgentHttpClient
@@ -39,10 +39,10 @@ The modern iteration of the Growin backend focuses on serving efficiency, high-t
   - `growin-sandbox`: Local NPU compute image running generated mathematical modeling scripts safely.
 
 ### 2. Monitoring, Observability & Tracing
-- **OpenTelemetry (OTEL)**: Instrument `GlobalTracer` to trace requests through FastAPI -> SwarmOrchestrator -> vMLX models -> tool execution.
+- **OpenTelemetry (OTEL)**: Instrument `GlobalTracer` to trace requests through FastAPI -> SwarmOrchestrator -> local models -> tool execution.
 - **Prometheus Metrics**:
   - `agent_execution_time`: Latency histograms per specialist agent.
-  - `vmlx_cache_hit_rate`: Monitor KV-cache reuse.
+  - `cache_hit_rate`: Monitor KV-cache reuse.
   - `circuit_breaker_trips`: Track third-party broker API outages.
 - **Grafana Dashboard**: Visualizing agent execution times, system memory pressures, and audit logging statistics.
 

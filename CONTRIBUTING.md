@@ -10,7 +10,7 @@ All contributions must adhere to the core hardware and architectural constraints
 
 ### 1. Unified Memory Rule (M4 Pro/Max/Ultra)
 - Local model executions must respect the **60% Unified Memory budget** (≤ 28GB on 48GB platforms).
-- Never instantiate unmanaged local model runners. All model routing and completions must go through the centralized vMLX serving layer API (`vmlx_manager`).
+- Never instantiate unmanaged local model runners. All model routing and completions must go through the centralized local serving layer API (LM Studio).
 
 ### 2. Connection Pool Hygiene
 - Never instantiate standalone `httpx.AsyncClient` or standard `requests` clients inside agent files.
