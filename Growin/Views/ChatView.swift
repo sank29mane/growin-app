@@ -248,6 +248,8 @@ struct ChatView: View {
                         .padding(12)
                         .background(isLiveMode ? Color.red.opacity(0.1) : Color.white.opacity(0.05))
                         .cornerRadius(12)
+                        .accessibilityLabel("Chat Message Input")
+                        .accessibilityHint("Enter your question or command for the AI assistant")
                         .overlay(
                             RoundedRectangle(cornerRadius: 12)
                                 .stroke(isLiveMode ? Color.red.opacity(0.5) : Color.white.opacity(0.1), lineWidth: 1)
