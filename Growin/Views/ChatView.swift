@@ -211,6 +211,9 @@ struct ChatView: View {
                                             .background(Circle().fill(Color.black.opacity(0.7)))
                                     }
                                     .buttonStyle(.plain)
+                                    .accessibilityLabel("Remove image")
+                                    .accessibilityHint("Removes this image from the selection")
+                                    .accessibilityAddTraits(.isButton)
                                     .padding(2)
                                 }
                             }
