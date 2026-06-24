@@ -98,6 +98,8 @@ struct AIChatPanelView: View {
                             .font(SovereignTheme.Fonts.spaceGrotesk(size: 14))
                             .foregroundStyle(Color.brutalOffWhite)
                             .textFieldStyle(.plain)
+                            .accessibilityLabel("Chat Input")
+                            .accessibilityHint("Enter your message to ask about your portfolio or market strategies")
                             .onSubmit {
                                 if !chatInput.isEmpty {
                                     startChat(with: chatInput)
