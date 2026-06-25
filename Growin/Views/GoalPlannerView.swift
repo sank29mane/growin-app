@@ -105,8 +105,8 @@ struct GoalPlannerView: View {
                                 .font(.system(size: 28, weight: .heavy, design: .rounded))
                                 .foregroundStyle(.white)
                                 .frame(width: 160)
-                                .accessibilityLabel("Initial Capital")
-                                .accessibilityHint("Enter the initial capital amount for the scenario simulator")
+                                .accessibilityLabel("Initial Capital Amount")
+                                .accessibilityHint("Enter the starting amount for your investment simulation")
                         }
                         .padding(.horizontal, 16)
                         .padding(.vertical, 10)
@@ -133,7 +133,7 @@ struct GoalPlannerView: View {
                             Text("\(Int(viewModel.targetReturn))%")
                                 .font(.system(size: 24, weight: .bold, design: .rounded))
                             Spacer()
-                            Stepper("", value: $viewModel.targetReturn, in: 2...50)
+                            Stepper("Target Return Percentage", value: $viewModel.targetReturn, in: 2...50)
                                 .labelsHidden()
                                 .scaleEffect(0.9)
                         }
