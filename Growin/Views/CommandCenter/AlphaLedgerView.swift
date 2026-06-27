@@ -80,6 +80,11 @@ struct LedgerRow: View {
             withAnimation(.easeInOut(duration: 0.15)) {
                 isHovered = hovering
             }
+            if hovering {
+                NSCursor.pointingHand.push()
+            } else {
+                NSCursor.pop()
+            }
         }
     }
 }
