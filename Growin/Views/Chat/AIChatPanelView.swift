@@ -226,8 +226,11 @@ private struct DiscoveryHomeView: View {
                         .accessibilityAddTraits(.isButton)
                         // Simple hover mechanic simulator
                         .onHover { isHovered in
-                            guard isHovered else { return }
-                            NSCursor.pointingHand.push()
+                            if isHovered {
+                                NSCursor.pointingHand.push()
+                            } else {
+                                NSCursor.pop()
+                            }
                         }
                     }
                 }
