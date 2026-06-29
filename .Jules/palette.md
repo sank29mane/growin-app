@@ -115,6 +115,7 @@
 ## 2026-05-26 - TextField Placeholder Accessibility
 **Learning:** In SwiftUI, `TextField` elements that rely on purely numerical or generic placeholders (e.g., `TextField("0.00", text: $quantity)`) are read by VoiceOver merely as the placeholder string. Even if they are visually grouped with descriptive text elements above them (like "QUANTITY"), screen readers treat those as disconnected entities, resulting in a loss of context.
 **Action:** Always append an explicit `.accessibilityLabel` and `.accessibilityHint` directly to `TextField` elements to provide clear context (e.g., `.accessibilityLabel("Order Quantity")`, `.accessibilityHint("Enter the number of shares to trade")`) for assistive technologies.
+
 ## 2026-06-21 - TextField Placeholder Accessibility
 **Learning:** In SwiftUI, `TextField` elements that rely on purely numerical or generic placeholders (e.g., `TextField("0.00", text: $quantity)`) are read by VoiceOver merely as the placeholder string. Even if they are visually grouped with descriptive text elements above them (like "QUANTITY"), screen readers treat those as disconnected entities, resulting in a loss of context.
 **Action:** Always append an explicit `.accessibilityLabel` and `.accessibilityHint` directly to `TextField` elements to provide clear context (e.g., `.accessibilityLabel("Order Quantity")`, `.accessibilityHint("Enter the number of shares to trade")`) for assistive technologies.
@@ -126,3 +127,7 @@
 ## 2024-06-25 - Contextualized Generic SwiftUI Input Fields
 **Learning:** Using `TextField("Amount", ...)` or `Stepper("", ...)` with `.labelsHidden()` creates an accessibility dead-zone for VoiceOver users, who only hear "Amount" or lose context entirely. However, providing a descriptive label to a `Stepper` (e.g., `Stepper("Target Return", ...)`) while keeping `.labelsHidden()` perfectly satisfies both the visual design constraints and VoiceOver context requirements.
 **Action:** Always inspect `.labelsHidden()` implementations and purely numeric/generic TextFields. Replace empty strings with descriptive labels for hidden elements, and append explicit `.accessibilityLabel` and `.accessibilityHint` modifiers to generic TextFields.
+
+## 2026-05-27 - NSCursor hover state management in SwiftUI
+**Learning:** Found a custom UI component in `AIChatPanelView.swift` that used `.onHover` to implement a "pointing hand" cursor by calling `NSCursor.pointingHand.push()`. However, the hover state did not balance this push with a corresponding `NSCursor.pop()` when the user moved their cursor away, resulting in a permanently stuck cursor.
+**Action:** Always balance `NSCursor.push()` calls with `NSCursor.pop()` inside `.onHover` handlers in macOS native SwiftUI views to accurately reflect the element's bounds and prevent stuck cursor states.
