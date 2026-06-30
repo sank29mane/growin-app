@@ -115,7 +115,6 @@
 ## 2026-05-26 - TextField Placeholder Accessibility
 **Learning:** In SwiftUI, `TextField` elements that rely on purely numerical or generic placeholders (e.g., `TextField("0.00", text: $quantity)`) are read by VoiceOver merely as the placeholder string. Even if they are visually grouped with descriptive text elements above them (like "QUANTITY"), screen readers treat those as disconnected entities, resulting in a loss of context.
 **Action:** Always append an explicit `.accessibilityLabel` and `.accessibilityHint` directly to `TextField` elements to provide clear context (e.g., `.accessibilityLabel("Order Quantity")`, `.accessibilityHint("Enter the number of shares to trade")`) for assistive technologies.
-
 ## 2026-06-21 - TextField Placeholder Accessibility
 **Learning:** In SwiftUI, `TextField` elements that rely on purely numerical or generic placeholders (e.g., `TextField("0.00", text: $quantity)`) are read by VoiceOver merely as the placeholder string. Even if they are visually grouped with descriptive text elements above them (like "QUANTITY"), screen readers treat those as disconnected entities, resulting in a loss of context.
 **Action:** Always append an explicit `.accessibilityLabel` and `.accessibilityHint` directly to `TextField` elements to provide clear context (e.g., `.accessibilityLabel("Order Quantity")`, `.accessibilityHint("Enter the number of shares to trade")`) for assistive technologies.
@@ -123,3 +122,7 @@
 ## 2026-05-26 - Missing Accessibility on Remove Image Button in ChatView
 **Learning:** Found an existing custom SwiftUI component ("Remove image" button on attached images in `ChatView.swift`) that used `.buttonStyle(.plain)` to suppress native styling. While this achieves the desired 'Liquid Glass' UI effect, it entirely removed the button's semantic meaning, making it inaccessible to VoiceOver users.
 **Action:** When auditing views with `.buttonStyle(.plain)` on actionable elements, always append `.accessibilityLabel` to name the element, `.accessibilityHint` to provide context on its action (e.g., "Removes the attached image from the message"), and explicitly `.accessibilityAddTraits(.isButton)` to guarantee it is announced correctly as an interactive button.
+
+## 2024-06-25 - Contextualized Generic SwiftUI Input Fields
+**Learning:** Using `TextField("Amount", ...)` or `Stepper("", ...)` with `.labelsHidden()` creates an accessibility dead-zone for VoiceOver users, who only hear "Amount" or lose context entirely. However, providing a descriptive label to a `Stepper` (e.g., `Stepper("Target Return", ...)`) while keeping `.labelsHidden()` perfectly satisfies both the visual design constraints and VoiceOver context requirements.
+**Action:** Always inspect `.labelsHidden()` implementations and purely numeric/generic TextFields. Replace empty strings with descriptive labels for hidden elements, and append explicit `.accessibilityLabel` and `.accessibilityHint` modifiers to generic TextFields.
