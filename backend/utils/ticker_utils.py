@@ -5,6 +5,7 @@ Shared logic for resolving ticker discrepancies between T212, Yahoo Finance, and
 
 import re
 from typing import Optional
+from cache_manager import cache
 
 # Bolt Optimization: Import optional dependencies at module level to avoid repeated ImportErrors (PR #48)
 try:
@@ -104,7 +105,6 @@ class TickerResolver:
         self.special_mappings = SPECIAL_MAPPINGS
         self.us_exclusions = US_EXCLUSIONS
         self.uk_stems = UK_COMMON_STEMS
-        self._cache = {} # Simple in-memory cache for this instance
 
     def normalize(self, ticker: str) -> str:
         """
@@ -211,18 +211,22 @@ class TickerResolver:
             return None
             
         # 2. Check Cache
-        if ticker in self._cache:
-            return self._cache[ticker]
+        cache_key = f"ticker_resolve:{ticker}"
+        cached_result = cache.get(cache_key)
+        if cached_result:
+            return cached_result
             
         # 3. Extraction if query is a sentence
+        result = ticker
         if " " in query:
             extracted = self.extract(query)
             if extracted:
-                return extracted[0] # Return first match
+                result = extracted[0] # Return first match
                 
         # 4. Provider Validation (Future: call Alpaca/Finnhub search)
 
-        return ticker
+        cache.set(cache_key, result, ttl=3600)  # Cache for 1 hour
+        return result
 
     async def search(self, term: str) -> list[dict]:
         """
