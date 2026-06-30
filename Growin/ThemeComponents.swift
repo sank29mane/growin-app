@@ -313,7 +313,6 @@ struct MarkdownText: View {
                         })
                         .buttonStyle(.plain)
                         .accessibilityLabel(showThoughts ? "Collapse Intelligence Trace" : "Expand Intelligence Trace")
-                        .accessibilityHint("Toggles the details for the AI's intelligence trace")
                         .accessibilityAddTraits(.isButton)
 
                         if showThoughts {
@@ -442,7 +441,6 @@ struct ErrorCard: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Retry Protocol")
-                .accessibilityHint("Retries the failed simulation or connection")
                 .accessibilityAddTraits(.isButton)
             }
         }
@@ -704,7 +702,6 @@ struct LogicTreeItem: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("\(isExpanded ? "Collapse" : "Expand") \(title)")
-            .accessibilityHint("Toggles the details for this logic step")
             .accessibilityAddTraits(.isButton)
             
             if isExpanded {
