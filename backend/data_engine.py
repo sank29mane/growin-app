@@ -135,7 +135,7 @@ class AlpacaClient:
                     else:
                         continue
 
-                df = df.dropna(how='all')
+                df = df.dropna(subset=['Open', 'High', 'Low', 'Close'])
                 if df.empty:
                     continue
 
@@ -214,6 +214,11 @@ class AlpacaClient:
             ticker_obj = yf.Ticker(normalized_ticker)
             data = ticker_obj.history(period=period, interval=interval)
 
+            if data.empty:
+                return None
+
+            # Drop rows where any of the OHLC price columns are NaN
+            data = data.dropna(subset=['Open', 'High', 'Low', 'Close'])
             if data.empty:
                 return None
 

@@ -3,8 +3,6 @@ import os
 import pytest
 import tempfile
 import numpy as np
-import mlx.core as mx
-import mlx.nn as nn
 
 # Ensure root and backend are in sys.path
 root_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -13,6 +11,10 @@ if root_path not in sys.path:
 backend_path = os.path.join(root_path, "backend")
 if backend_path not in sys.path:
     sys.path.insert(0, backend_path)
+
+from utils.mlx_loader import mx, nn, HAS_MLX
+
+pytestmark = pytest.mark.skipif(not HAS_MLX, reason="MLX is not installed or available")
 
 from backend.mlx_engine import MLXInferenceEngine
 

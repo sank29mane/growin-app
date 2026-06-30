@@ -7,7 +7,7 @@ try:
     import mlx.core as mx
     import mlx.nn as nn
     HAS_MLX = True
-except ImportError:
+except BaseException:
     mx = None
 
     class DummyModule:

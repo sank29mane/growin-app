@@ -79,6 +79,7 @@ US_EXCLUSIONS = {
 
     # ETFs
     "SPY", "QQQ", "DIA", "IWM", "IVV", "VOO", "VTI", "GLD", "SLV", "ARKK", "SMH", "XLF", "XLE", "XLK", "XLV",
+    "BND", "VIG", "VXUS", "BITO", "TQQQ",
 
     # Single Letter US Tickers
     "F", "T", "C", "V", "Z", "O", "D", "R", "K", "X", "S", "M", "A", "G"
