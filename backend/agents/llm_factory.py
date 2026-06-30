@@ -5,6 +5,7 @@ Refactored from DecisionAgent to reduce complexity.
 
 import logging
 import os
+from utils.error_handler import handle_error
 from typing import Dict
 
 logger = logging.getLogger(__name__)
@@ -52,7 +53,8 @@ class LLMFactory:
                 try:
                     llm_instance = await LLMFactory._create_lmstudio(model_name)
                 except Exception as lm_err:
-                    logger.warning(f"LLM Factory: LM Studio creation failed for HF-style ID {model_name}: {lm_err}")
+
+                    handle_error(lm_err, "LLM Factory: LM Studio creation failed for HF-style ID {model_name}", logger, raise_error=False)
             
 
 
@@ -62,7 +64,8 @@ class LLMFactory:
                     try:
                         llm_instance = await LLMFactory._create_lmstudio(model_name)
                     except Exception as lm_err:
-                        logger.warning(f"LM Factory: LM Studio creation failed for {model_name}: {lm_err}")
+
+                        handle_error(lm_err, "LM Factory: LM Studio creation failed for {model_name}", logger, raise_error=False)
                     # If provider was explicitly lmstudio, we should probably fall through to auto-detect later
                     # but if it was just a hint, we keep going to other providers
 
@@ -97,7 +100,9 @@ class LLMFactory:
             return llm_instance
 
         except Exception as e:
-            logger.error(f"LLM Factory: Failed to initialize {model_name}: {e}")
+
+
+            handle_error(e, "LLM Factory: Failed to initialize {model_name}", logger, raise_error=False)
 
             # Safe Fallback Strategy
             if "native-mlx" in model_name:
@@ -110,7 +115,8 @@ class LLMFactory:
                     logger.info("Attempting fallback to Native MLX (Apple Silicon detected)...")
                     return LLMFactory._create_mlx("native-mlx")
                 except Exception as fallback_error:
-                    logger.error(f"MLX Fallback failed: {fallback_error}")
+
+                    handle_error(fallback_error, "MLX Fallback failed", logger, raise_error=False)
 
             raise RuntimeError(f"Total failure: Model {model_name} could not be initialized and no suitable fallbacks found. Error: {e}")
 
@@ -194,7 +200,8 @@ class LLMFactory:
                 
                 return client
             except Exception as e:
-                logger.warning(f"Failed to load requested model {target_model_id}: {e}")
+
+                handle_error(e, "Failed to load requested model {target_model_id}", logger, raise_error=False)
                 status_manager.set_status("lmstudio", "error", f"Load failed: {target_model_id}")
                 logger.info("Falling back to auto-detected model...")
 

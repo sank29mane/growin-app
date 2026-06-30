@@ -9,6 +9,7 @@ import logging
 import json
 import asyncio
 import psutil
+from utils.error_handler import handle_error
 from typing import List, Dict, Any, Optional
 from utils.http_client import agent_http_client
 
@@ -52,7 +53,8 @@ class LMStudioClient:
         try:
             total_ram_gb = psutil.virtual_memory().total / (1024**3)
         except Exception as e:
-            logger.warning(f"Failed to check virtual memory total: {e}. Defaulting to 16GB.")
+
+            handle_error(e, "Failed to check virtual memory total. Defaulting to 16GB.", logger, raise_error=False)
             total_ram_gb = 16.0
 
         # Rule: Use only 60% of RAM for LLM tasks to leave room for OS/Apps
@@ -113,7 +115,8 @@ class LMStudioClient:
             # Native V1 uses 'models' key, OpenAI uses 'data' key
             return data.get("models") if management else data.get("data", [])
         except Exception as e:
-            logger.error(f"LM Studio: Failed to list models via {path}: {e}")
+
+            handle_error(e, "LM Studio: Failed to list models via {path}", logger, raise_error=False)
             return []
 
     async def list_loaded_models(self) -> List[str]:
@@ -292,7 +295,8 @@ class LMStudioClient:
                             logger.info("LM Studio: Model reloaded. Retrying V1 chat...")
                             return await self.chat(model_id=model_id, messages=messages, tools=tools)
                     except Exception as recovery_err:
-                        logger.error(f"LM Studio: Recovery failed: {recovery_err}")
+
+                        handle_error(recovery_err, "LM Studio: Recovery failed", logger, raise_error=False)
 
                 return {"error": f"V1 API Error: {error_body}", "content": ""}
             except Exception as e:
@@ -356,7 +360,8 @@ class LMStudioClient:
                     "stats": data.get("stats", {})
                 }
             except Exception as e:
-                logger.error(f"LM Studio stateful chat failed: {e}")
+
+                handle_error(e, "LM Studio stateful chat failed", logger, raise_error=False)
                 return {"error": str(e), "content": ""}
 
     async def _handle_tool_calls(
@@ -416,7 +421,8 @@ class LMStudioClient:
 
             return {"error": f"Tool execution for {tool_name} not implemented in client"}
         except Exception as e:
-            logger.error(f"Tool execution failed: {e}")
+
+            handle_error(e, "Tool execution failed", logger, raise_error=False)
             return {"error": str(e)}
 
     async def download_model(self, model_path: str) -> Dict[str, Any]:
@@ -451,7 +457,8 @@ class LMStudioClient:
             await self.load_model(model_id, context_length=context_length, gpu=gpu)
             return True
         except Exception as e:
-            logger.error(f"Failed to ensure model {model_id} is loaded: {e}")
+
+            handle_error(e, "Failed to ensure model {model_id} is loaded", logger, raise_error=False)
             return False
 
     async def wait_until_ready(self, model_id: str, timeout: int = 60) -> bool:

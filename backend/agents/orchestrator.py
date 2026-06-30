@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+from utils.error_handler import handle_error
 from typing import List, Dict, Any, Optional, Tuple
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.openai import OpenAIModel
@@ -71,7 +72,8 @@ class SwarmOrchestrator:
                 )
                 return self.reflex_timeout * 1.5, self.synthesis_timeout * 1.5
         except Exception as e:
-            logger.warning(f"Failed to read virtual memory for scaling timeouts: {e}")
+
+            handle_error(e, "Failed to read virtual memory for scaling timeouts", logger, raise_error=False)
             
         return self.reflex_timeout, self.synthesis_timeout
 

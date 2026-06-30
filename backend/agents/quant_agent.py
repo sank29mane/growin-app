@@ -4,6 +4,7 @@ Ultra-fast algorithmic technical indicator calculations.
 """
 
 from .base_agent import BaseAgent, AgentConfig, AgentResponse
+from utils.error_handler import handle_error
 from typing import Dict, Any
 import logging
 import numpy as np
@@ -106,7 +107,8 @@ class QuantAgent(BaseAgent):
                              logger.error(f"QuantAgent: Critical dependency missing for JMCE extraction: {ie}")
                              raise
                          except Exception as jmce_e:
-                             logger.warning(f"QuantAgent: JMCE Velocity extraction failed: {jmce_e}", exc_info=True)
+
+                             handle_error(jmce_e, "QuantAgent: JMCE Velocity extraction failed", logger, raise_error=False)
                              if isinstance(jmce_e, (ImportError, ModuleNotFoundError)) or "numpy" in str(jmce_e).lower() or "mlx" in str(jmce_e).lower():
                                  logger.error("QuantAgent: Critical dependency missing for NPU acceleration. Ensure MLX/NumPy are installed.")
                                  # Re-raise to ensure it is not silently swallowed
@@ -115,7 +117,8 @@ class QuantAgent(BaseAgent):
                     orb_signal = detector.detect_breakout(ohlcv_data, covariance_velocity=cov_velocity)
                     logger.info(f"QuantAgent: ORB detection complete for {ticker}: {orb_signal['signal']}")
                 except Exception as orb_e:
-                    logger.warning(f"QuantAgent: ORB detection failed: {orb_e}")
+
+                    handle_error(orb_e, "QuantAgent: ORB detection failed", logger, raise_error=False)
 
             # 4. Map to QuantData model
             from market_context import QuantData, Signal
@@ -168,7 +171,9 @@ class QuantAgent(BaseAgent):
             )
 
         except Exception as e:
-            logger.error(f"QuantAgent analysis failed: {e}")
+
+
+            handle_error(e, "QuantAgent analysis failed", logger, raise_error=False)
             return AgentResponse(
                 agent_name=self.config.name,
                 success=False,

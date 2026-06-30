@@ -5,6 +5,7 @@ import asyncio
 import logging
 from decimal import Decimal
 from datetime import datetime, timedelta, timezone
+from utils.error_handler import handle_error
 from typing import List, Dict, Any, Optional, TypedDict, Union
 from utils.ticker_utils import normalize_ticker
 from utils.currency_utils import CurrencyNormalizer
@@ -86,7 +87,8 @@ class AlpacaClient:
                 self.data_client = StockHistoricalDataClient(API_KEY, API_SECRET)
                 logger.info(f"AlpacaClient: Successfully connected to Alpaca API ({'Paper' if USE_PAPER else 'Live'}).")
             except Exception as e:
-                logger.error(f"AlpacaClient: Failed to initialize Alpaca SDK: {e}")
+
+                handle_error(e, "AlpacaClient: Failed to initialize Alpaca SDK", logger, raise_error=False)
         else:
             logger.info("AlpacaClient: API keys not set. Running in offline/mock mode.")
 
@@ -189,7 +191,8 @@ class AlpacaClient:
 
             return results
         except Exception as e:
-            logger.error(f"AlpacaClient: Error fetching batch from yfinance: {e}")
+
+            handle_error(e, "AlpacaClient: Error fetching batch from yfinance", logger, raise_error=False)
             return {}
 
     def _fetch_from_yfinance(self, ticker: str, normalized_ticker: str, timeframe: str, limit: int) -> Optional[BarDataDict]:
@@ -291,7 +294,9 @@ class AlpacaClient:
             return result
 
         except Exception as e:
-            logger.warning(f"AlpacaClient: Error fetching bars (yfinance): {e}")
+
+
+            handle_error(e, "AlpacaClient: Error fetching bars (yfinance)", logger, raise_error=False)
             # Do NOT return mock data for invalid tickers. This causes AI hallucinations.
             return None
 
@@ -369,7 +374,8 @@ class AlpacaClient:
 
                         result = {"ticker": ticker, "bars": bar_list, "timeframe": timeframe}
                 except Exception as e:
-                    logger.warning(f"Alpaca primary fetch failed for {ticker}: {e}")
+
+                    handle_error(e, "Alpaca primary fetch failed for {ticker}", logger, raise_error=False)
         else:
             # UK Data: Primary Finnhub
             try:
@@ -377,7 +383,8 @@ class AlpacaClient:
                 if finnhub:
                     result = await finnhub.get_historical_bars(ticker, timeframe=timeframe, limit=limit)
             except Exception as e:
-                logger.warning(f"Finnhub primary fetch failed for {ticker}: {e}")
+
+                handle_error(e, "Finnhub primary fetch failed for {ticker}", logger, raise_error=False)
 
         # UNIVERSAL FALLBACK: Yahoo Finance
         if not result:
@@ -494,7 +501,9 @@ class AlpacaClient:
                     cache.set(f"bars_{original_ticker}_{timeframe}_{limit}", res, ttl=300)
                     
             except Exception as e:
-                logger.warning(f"Batch fetch failed: {e}. Falling back to individual.")
+
+
+                handle_error(e, "Batch fetch failed. Falling back to individual.", logger, raise_error=False)
                 fallback_candidates.extend(alpaca_candidates) # Add back to fallback queue
 
         # Process fallback candidates using batched primary source (yfinance)
@@ -508,7 +517,8 @@ class AlpacaClient:
                 )
                 results.update(yf_fallback_results)
             except Exception as e:
-                logger.warning(f"Batched fallback fetch failed: {e}. Attempting individual fetches.")
+
+                handle_error(e, "Batched fallback fetch failed. Attempting individual fetches.", logger, raise_error=False)
                 tasks = [self.get_historical_bars(t, timeframe, limit) for t in fallback_candidates]
                 fallback_results = await asyncio.gather(*tasks, return_exceptions=True)
                 for res in fallback_results:
@@ -530,7 +540,9 @@ class AlpacaClient:
                 results.update(yf_results)
 
             except Exception as e:
-                logger.warning(f"Batched yf.download fallback failed: {e}. Attempting individual fetches.")
+
+
+                handle_error(e, "Batched yf.download fallback failed. Attempting individual fetches.", logger, raise_error=False)
                 # Extreme fallback
                 tasks = [self.get_historical_bars(t, timeframe, limit) for t in still_missing if t not in results]
                 fallback_res = await asyncio.gather(*tasks)
@@ -577,7 +589,8 @@ class AlpacaClient:
                     })
                 return pos_list
             except Exception as e:
-                logger.error(f"AlpacaClient: Error fetching positions: {e}")
+
+                handle_error(e, "AlpacaClient: Error fetching positions", logger, raise_error=False)
                 return []
 
         # Mock fallback
@@ -627,7 +640,8 @@ class AlpacaClient:
                         })
                     return trade_list
             except Exception as e:
-                logger.error(f"AlpacaClient: Error fetching trades: {e}")
+
+                handle_error(e, "AlpacaClient: Error fetching trades", logger, raise_error=False)
 
         return []
 
@@ -659,7 +673,8 @@ class AlpacaClient:
                     "status": str(acct.status)
                 }
             except Exception as e:
-                logger.error(f"AlpacaClient: Error fetching account info: {e}")
+
+                handle_error(e, "AlpacaClient: Error fetching account info", logger, raise_error=False)
 
         # Mock fallback
         return {
@@ -700,7 +715,8 @@ class AlpacaClient:
                         "previous_close": None
                     }
             except Exception as e:
-                logger.error(f"AlpacaClient: Error fetching latest quote: {e}")
+
+                handle_error(e, "AlpacaClient: Error fetching latest quote", logger, raise_error=False)
         return None
 
 class FinnhubClient:
@@ -719,7 +735,8 @@ class FinnhubClient:
                 self.client = finnhub.Client(api_key=FINNHUB_API_KEY)
                 logger.info("FinnhubClient: Successfully connected to Finnhub API.")
             except Exception as e:
-                logger.error(f"FinnhubClient: Failed to initialize Finnhub SDK: {e}")
+
+                handle_error(e, "FinnhubClient: Failed to initialize Finnhub SDK", logger, raise_error=False)
         else:
             logger.info("FinnhubClient: API key not set. Running in offline/mock mode.")
 
@@ -850,7 +867,8 @@ class FinnhubClient:
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
         except Exception as e:
-            logger.error(f"FinnhubClient: Error fetching real-time quote: {e}")
+
+            handle_error(e, "FinnhubClient: Error fetching real-time quote", logger, raise_error=False)
             return None
 
 

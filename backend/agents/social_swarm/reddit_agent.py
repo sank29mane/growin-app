@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from decimal import Decimal
+from utils.error_handler import handle_error
 from typing import Optional
 from .base_micro import BaseMicroAgent, MicroAgentResponse
 from utils.financial_math import create_decimal
@@ -111,7 +112,9 @@ class RedditMicroAgent(BaseMicroAgent):
             )
 
         except Exception as e:
-            self.logger.error(f"Reddit analysis failed: {e}")
+
+
+            handle_error(e, "Reddit analysis failed", self.logger, raise_error=False)
             return MicroAgentResponse(
                 source="Reddit",
                 sentiment_score=create_decimal("0.0"),

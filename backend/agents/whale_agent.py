@@ -4,6 +4,7 @@ Whale Alert Agent - Monitors large block trades and institutional flow
 
 import logging
 import asyncio
+from utils.error_handler import handle_error
 from typing import Dict, Any, List, Optional
 from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from market_context import WhaleData
@@ -225,7 +226,9 @@ class WhaleAgent(BaseAgent):
             )
 
         except Exception as e:
-            logger.error(f"WhaleAgent failed: {e}")
+
+
+            handle_error(e, "WhaleAgent failed", logger, raise_error=False)
             return AgentResponse(
                 agent_name=self.config.name,
                 success=False,
@@ -296,7 +299,8 @@ class WhaleAgent(BaseAgent):
 
             return holders[:5]
         except Exception as e:
-            logger.warning(f"13F fetch failed: {e}")
+
+            handle_error(e, "13F fetch failed", logger, raise_error=False)
             return []
 
     async def _analyze_via_volume_anomaly(self, ticker: str, pre_fetched_bars: Optional[Dict] = None) -> AgentResponse:
@@ -339,7 +343,9 @@ class WhaleAgent(BaseAgent):
             )
 
         except Exception as e:
-            logger.warning(f"Volume anomaly fallback failed: {e}")
+
+
+            handle_error(e, "Volume anomaly fallback failed", logger, raise_error=False)
             return AgentResponse(
                 agent_name=self.config.name,
                 success=True,

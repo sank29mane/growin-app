@@ -17,6 +17,7 @@ Supported Markets: UK (LSE), India (NSE), US
 from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from utils.sentiment import get_sentiment_analyzer_async
 from market_context import ResearchData, NewsArticle
+from utils.error_handler import handle_error
 from typing import Dict, Any, List, Optional
 from utils.http_client import agent_http_client
 import logging
@@ -232,7 +233,8 @@ class ResearchAgent(BaseAgent):
                         )
                     logger.info(f"ResearchAgent: Stored {len(rich_articles)} articles in RAG for timeline.")
             except Exception as e:
-                logger.warning(f"ResearchAgent: Failed to store in RAG: {e}")
+
+                handle_error(e, "ResearchAgent: Failed to store in RAG", logger, raise_error=False)
             # ---------------------------------------
             
             return AgentResponse(
@@ -245,7 +247,8 @@ class ResearchAgent(BaseAgent):
         except ImportError:
             return self._neutral_response(ticker, error="Missing dependencies")
         except Exception as e:
-            logger.error(f"Research analysis failed: {e}")
+
+            handle_error(e, "Research analysis failed", logger, raise_error=False)
             # Fail soft on generic errors too, unless critical
             return self._neutral_response(ticker, error=str(e), success=True) # Return neutral data on crash
 
@@ -304,7 +307,8 @@ class ResearchAgent(BaseAgent):
                             'is_regulatory': True
                         })
                 except Exception as e:
-                    logger.warning(f"RNS newsData.io failed: {e}")
+
+                    handle_error(e, "RNS newsData.io failed", logger, raise_error=False)
 
             # 2. SEC Filings / News via Search Plugin
             if not is_uk and self.tavily_key:
@@ -342,7 +346,8 @@ class ResearchAgent(BaseAgent):
             
             return articles
         except Exception as e:
-            logger.warning(f"Regulatory news fetch failed: {e}")
+
+            handle_error(e, "Regulatory news fetch failed", logger, raise_error=False)
             return []
 
     async def _fetch_newsapi(self, ticker: str, company_name: str) -> List[Dict]:
@@ -364,7 +369,8 @@ class ResearchAgent(BaseAgent):
 
             return data.get('articles', [])
         except Exception as e:
-            logger.warning(f"NewsAPI failed: {e}")
+
+            handle_error(e, "NewsAPI failed", logger, raise_error=False)
             return []
 
     async def _fetch_tavily(self, ticker: str, company_name: str) -> List[Dict]:
@@ -397,7 +403,8 @@ class ResearchAgent(BaseAgent):
                 for r in search_results
             ]
         except Exception as e:
-            logger.warning(f"Search plugin failed: {e}")
+
+            handle_error(e, "Search plugin failed", logger, raise_error=False)
             return []
 
     async def _fetch_newsdata(self, ticker: str, company_name: str) -> List[Dict]:
@@ -468,7 +475,9 @@ class ResearchAgent(BaseAgent):
             return articles
             
         except Exception as e:
-            logger.warning(f"NewsData.io failed: {e}")
+
+
+            handle_error(e, "NewsData.io failed", logger, raise_error=False)
             return []
 
     async def _generate_smart_query(self, user_query: str) -> Optional[Dict]:
@@ -496,7 +505,9 @@ class ResearchAgent(BaseAgent):
             return params
             
         except Exception as e:
-            logger.warning(f"Magentic smart query generation failed: {e}. Falling back to basic query.")
+
+
+            handle_error(e, "Magentic smart query generation failed. Falling back to basic query.", logger, raise_error=False)
             # Fail-soft: Return a basic query if the structured generation fails
             return {
                 "q": f"{user_query} stock market news",

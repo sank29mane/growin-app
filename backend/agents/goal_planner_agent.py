@@ -5,6 +5,7 @@ Calculates optimal asset allocations based on user goals using Sharpe ratio opti
 
 import numpy as np
 from scipy.optimize import minimize
+from utils.error_handler import handle_error
 from typing import Dict, Any, List, Optional
 import logging
 import time
@@ -307,7 +308,9 @@ class GoalPlannerAgent(BaseAgent):
             )
             
         except Exception as e:
-            logger.error(f"GoalPlannerAgent failed: {e}")
+
+
+            handle_error(e, "GoalPlannerAgent failed", logger, raise_error=False)
             return AgentResponse(
                 agent_name=self.config.name,
                 success=False,
@@ -395,13 +398,16 @@ class GoalPlannerAgent(BaseAgent):
                         "momentum_score": float(mom_score)
                     }
                 except Exception as ex:
-                    logger.warning(f"Failed to process data for {t}: {ex}")
+
+                    handle_error(ex, "Failed to process data for {t}", logger, raise_error=False)
                     real_universe[t] = self.asset_universe.get(t)
             
             return real_universe
             
         except Exception as e:
-            logger.error(f"Global real data fetch failed: {e}")
+
+
+            handle_error(e, "Global real data fetch failed", logger, raise_error=False)
             return None
 
     def _optimize_portfolio(self, returns, cov_matrix, target_return, risk_profile):

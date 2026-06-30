@@ -2,6 +2,7 @@
 Portfolio Agent - Fetches portfolio data via MCP
 """
 
+from utils.error_handler import handle_error
 from typing import Dict, Any, Optional, List
 import logging
 import json
@@ -165,7 +166,8 @@ class PortfolioAgent(BaseAgent):
                 cache.set("current_portfolio", portfolio_data, ttl=3600)
                 self.logger.info("PortfolioAgent: Updated 'current_portfolio' in global cache")
             except Exception as e:
-                self.logger.warning(f"PortfolioAgent: Failed to update cache: {e}")
+
+                handle_error(e, "PortfolioAgent: Failed to update cache", self.logger, raise_error=False)
             # --------------------------------------------------
             
             # Fetch history for context (default 30 days) - TIMEOUT PROTECTED
@@ -175,7 +177,8 @@ class PortfolioAgent(BaseAgent):
             except asyncio.TimeoutError:
                 self.logger.warning("Portfolio history fetch timed out (5s). Skipping history, returning core data.")
             except Exception as e:
-                self.logger.warning(f"Failed to fetch portfolio history: {e}")
+
+                handle_error(e, "Failed to fetch portfolio history", self.logger, raise_error=False)
 
             # --- RAG INTEGRATION: Store Portfolio Snapshot ---
             try:
@@ -206,7 +209,8 @@ class PortfolioAgent(BaseAgent):
                     )
                     self.logger.info("PortfolioAgent: Stored snapshot in RAG")
             except Exception as e:
-                self.logger.warning(f"PortfolioAgent: Failed to store RAG snapshot: {e}")
+
+                handle_error(e, "PortfolioAgent: Failed to store RAG snapshot", self.logger, raise_error=False)
             # -------------------------------------------------
             
             from status_manager import status_manager
@@ -219,7 +223,9 @@ class PortfolioAgent(BaseAgent):
             )
             
         except Exception as e:
-            self.logger.error(f"Portfolio analysis failed: {e}")
+
+
+            handle_error(e, "Portfolio analysis failed", self.logger, raise_error=False)
             error_msg = str(e)
             
             # Enrich error message for better UI handling
@@ -308,7 +314,9 @@ class PortfolioAgent(BaseAgent):
             self.logger.info(f"PortfolioAgent: Iteratively updated portfolio for {side} {quantity} {ticker}")
 
         except Exception as e:
-            self.logger.error(f"Failed to iteratively update portfolio: {e}")
+
+
+            handle_error(e, "Failed to iteratively update portfolio", self.logger, raise_error=False)
 
     def _consolidate_accounts(self, data_list: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Merge multiple account data dictionaries into a single consolidated view."""
@@ -482,5 +490,6 @@ class PortfolioAgent(BaseAgent):
             
             return history_points
         except Exception as e:
-            self.logger.error(f"Error fetching synthetic history via analyzer: {e}")
+
+            handle_error(e, "Error fetching synthetic history via analyzer", self.logger, raise_error=False)
             return []

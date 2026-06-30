@@ -8,6 +8,7 @@ from market_context import SocialData
 from .social_swarm import RedditMicroAgent, TwitterMicroAgent
 from utils.financial_math import create_decimal
 from decimal import Decimal
+from utils.error_handler import handle_error
 from typing import Dict, Any
 import logging
 import os
@@ -125,7 +126,9 @@ class SocialAgent(BaseAgent):
             )
 
         except Exception as e:
-            logger.error(f"Social analysis failed: {e}")
+
+
+            handle_error(e, "Social analysis failed", logger, raise_error=False)
             # Fail soft on generic errors
             return self._neutral_response(ticker, error=str(e), success=True)
 

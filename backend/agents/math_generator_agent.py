@@ -1,6 +1,7 @@
 import logging
 import json
 import time
+from utils.error_handler import handle_error
 from typing import Dict, Any, List, Optional
 from langchain_core.messages import SystemMessage, HumanMessage
 
@@ -61,7 +62,8 @@ class MathGeneratorAgent(BaseAgent):
                 latency_ms=0  # BaseAgent.execute will overwrite this
             )
         except Exception as e:
-            self.logger.error(f"MathGeneratorAgent analysis failed: {e}", exc_info=True)
+
+            handle_error(e, "MathGeneratorAgent analysis failed", self.logger, raise_error=False)
             return AgentResponse(
                 agent_name=self.config.name,
                 success=False,
@@ -135,7 +137,8 @@ class MathGeneratorAgent(BaseAgent):
                 engine_requirement="npu"
             )
         except Exception as e:
-            self.logger.error(f"Failed to parse MathGeneratorAgent output as JSON: {e}")
+
+            handle_error(e, "Failed to parse MathGeneratorAgent output as JSON", self.logger, raise_error=False)
 
             # Use Fallback Agent/Model if granite fails
             if self.model_name == "granite-tiny":
@@ -161,7 +164,8 @@ class MathGeneratorAgent(BaseAgent):
                         engine_requirement="npu"
                      )
                  except Exception as fallback_e:
-                     self.logger.error(f"Fallback model failed: {fallback_e}")
+
+                     handle_error(fallback_e, "Fallback model failed", self.logger, raise_error=False)
 
             # Fallback behavior
             return MathScriptResponse(
