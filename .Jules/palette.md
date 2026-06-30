@@ -115,3 +115,7 @@
 ## 2026-05-26 - TextField Placeholder Accessibility
 **Learning:** In SwiftUI, `TextField` elements that rely on purely numerical or generic placeholders (e.g., `TextField("0.00", text: $quantity)`) are read by VoiceOver merely as the placeholder string. Even if they are visually grouped with descriptive text elements above them (like "QUANTITY"), screen readers treat those as disconnected entities, resulting in a loss of context.
 **Action:** Always append an explicit `.accessibilityLabel` and `.accessibilityHint` directly to `TextField` elements to provide clear context (e.g., `.accessibilityLabel("Order Quantity")`, `.accessibilityHint("Enter the number of shares to trade")`) for assistive technologies.
+
+## 2026-06-21 - TextField Placeholder Accessibility
+**Learning:** In SwiftUI, `TextField` elements that rely on purely numerical or generic placeholders (e.g., `TextField("0.00", text: $quantity)`) are read by VoiceOver merely as the placeholder string. Even if they are visually grouped with descriptive text elements above them (like "QUANTITY"), screen readers treat those as disconnected entities, resulting in a loss of context.
+**Action:** Always append an explicit `.accessibilityLabel` and `.accessibilityHint` directly to `TextField` elements to provide clear context (e.g., `.accessibilityLabel("Order Quantity")`, `.accessibilityHint("Enter the number of shares to trade")`) for assistive technologies.

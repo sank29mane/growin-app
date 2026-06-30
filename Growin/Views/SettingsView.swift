@@ -247,6 +247,8 @@ struct HFModelHubSection: View {
                         .padding(10)
                         .background(Color.secondary.opacity(0.1))
                         .clipShape(.rect(cornerRadius: 8))
+                        .accessibilityLabel("Search HuggingFace Models")
+                        .accessibilityHint("Enter a model name to search on HuggingFace")
                     
                     Button(action: searchHF) {
                         Image(systemName: isSearching ? "circle.dotted" : "magnifyingglass")

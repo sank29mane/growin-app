@@ -50,6 +50,8 @@ struct ChartsView: View {
             TextField("Search Ticker (e.g. VOD.L, TSLA)", text: $searchText)
                 .textFieldStyle(.plain)
                 .focused($isSearchFocused)
+                .accessibilityLabel("Search Ticker")
+                .accessibilityHint("Enter a stock ticker symbol to search")
                 .onSubmit {
                     performSearch()
                 }

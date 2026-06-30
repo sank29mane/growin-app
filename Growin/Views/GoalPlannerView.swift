@@ -105,6 +105,8 @@ struct GoalPlannerView: View {
                                 .font(.system(size: 28, weight: .heavy, design: .rounded))
                                 .foregroundStyle(.white)
                                 .frame(width: 160)
+                                .accessibilityLabel("Initial Capital")
+                                .accessibilityHint("Enter the initial capital amount for the scenario simulator")
                         }
                         .padding(.horizontal, 16)
                         .padding(.vertical, 10)
