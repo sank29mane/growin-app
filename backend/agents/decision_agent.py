@@ -57,7 +57,7 @@ class ThinkingParser:
         """Processes a token chunk and returns list of events (token, step_start, step_end)."""
         events = []
 
-        # Handle dict chunks from vmlx/SOTA 2026 providers that might have reasoning_content
+        # Handle dict chunks from local/SOTA 2026 providers that might have reasoning_content
         if isinstance(chunk, dict):
             reasoning = chunk.get("reasoning_content")
             content = chunk.get("content")

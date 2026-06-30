@@ -15,15 +15,15 @@ BACKEND_DIR = Path(__file__).parent.absolute()
 # These are the primary models for the application's core logic.
 LOCAL_MLX_MODELS = {
     "native-mlx": {
-        "provider": "vmlx",
-        "model_path": str(BACKEND_DIR / "models/mlx/lmstudio-community--LFM2.5-1.2B-Instruct-MLX-8bit"),
-        "description": "Native vMLX - High Performance Apple Silicon Engine",
+        "provider": "lmstudio",
+        "model_id": "lmstudio-auto",
+        "description": "Native Local Model - Served via LM Studio",
         "requires_key": None
     },
     "granite-small": {
-        "provider": "vmlx",
+        "provider": "lmstudio",
         "model_id": "lmstudio-community/granite-4.0-h-small-MLX-8bit",
-        "description": "Granite 4.0 Small - Native SOTA coordinator (vMLX)"
+        "description": "Granite 4.0 Small - Local SOTA coordinator (LM Studio)"
     }
 }
 
@@ -73,9 +73,9 @@ DECISION_MODELS = {**LOCAL_MLX_MODELS, **CLOUD_ASSISTANCE_MODELS, **OTHER_MODELS
 
 COORDINATOR_MODELS = {
     "granite-tiny": {
-        "provider": "vmlx",
-        "model_path": str(BACKEND_DIR / "models/mlx/lmstudio-community--LFM2.5-1.2B-Instruct-MLX-8bit"),
-        "description": "Granite 4.0 Tiny - Ultra-lightweight coordinator (vMLX)",
+        "provider": "lmstudio",
+        "model_id": "lmstudio-auto",
+        "description": "Granite 4.0 Tiny - Ultra-lightweight coordinator (LM Studio)",
         "temperature": 0,
         "max_tokens": 512,
         "top_p": 1.0
@@ -96,7 +96,7 @@ def get_model_info(model_name: str):
     
     info = DECISION_MODELS.get(model_name) or COORDINATOR_MODELS.get(model_name) or {}
     
-    if is_ci and info.get("provider") == "vmlx":
+    if is_ci and info.get("provider") == "lmstudio":
         # Log or flag that local model is being requested in CI without hardware acceleration
         pass
         

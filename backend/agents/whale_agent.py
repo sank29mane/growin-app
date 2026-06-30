@@ -305,58 +305,35 @@ class WhaleAgent(BaseAgent):
         Useful when granular trade data is unavailable (e.g. some LSE stocks or free tier).
         """
         try:
-            from utils.financial_math import create_decimal
+            from utils.market_data_enrichment import MarketDataEnrichmentService
+
             # Fetch daily bars if not pre-fetched
             bars_resp = pre_fetched_bars
             if not bars_resp:
                 bars_resp = await self.alpaca.get_historical_bars(ticker, limit=25, timeframe="1Day")
-            if not bars_resp or "bars" not in bars_resp or len(bars_resp["bars"]) < 20:
+
+            bars = bars_resp.get("bars", []) if bars_resp else []
+            analysis = MarketDataEnrichmentService.analyze_volume_anomaly(ticker, bars)
+
+            if analysis["status"] == "INSUFFICIENT_DATA":
                 return AgentResponse(
                     agent_name=self.config.name,
-                    success=True,  # Success but empty
+                    success=True,
                     data=WhaleData(
                         ticker=ticker,
-                        summary="Insufficient data for whale or volume analysis.",
+                        summary=analysis["summary"],
                     ).model_dump(),
                     latency_ms=0,
                 )
-            bars = bars_resp["bars"]
-
-            # Only pre-parse the elements we actually need (last 20 + last 1)
-            last_21_bars = bars[-21:] if len(bars) >= 21 else bars
-            prev_vols = [create_decimal(b['v']) for b in last_21_bars[:-1]] if len(last_21_bars) > 1 else []
-            last_bar = bars[-1]
-            current_vol = create_decimal(last_bar['v'])
-            
-            # Calculate avg volume of previous 20 days
-            avg_vol = sum(prev_vols) / len(prev_vols) if prev_vols else create_decimal(1)
-            
-            ratio = float(current_vol / avg_vol)
-            impact = "NEUTRAL"
-            summary = f"Volume is {ratio:.1f}x average. "
-
-            if ratio > 1.5:
-                # High volume
-                c = create_decimal(last_bar['c'])
-                o = create_decimal(last_bar['o'])
-                price_change = float((c - o) / o) if o > create_decimal(0) else 0.0
-                if price_change > 0:
-                    impact = "BULLISH"
-                    summary += "High volume on up day suggests institutional buying (Accumulation)."
-                else:
-                    impact = "BEARISH"
-                    summary += "High volume on down day suggests institutional selling (Distribution)."
-            else:
-                summary += "Volume is within normal range. No anomalies detected."
 
             return AgentResponse(
                 agent_name=self.config.name,
                 success=True,
                 data=WhaleData(
                     ticker=ticker,
-                    unusual_volume=ratio > 1.5,
-                    sentiment_impact=impact,
-                    summary=summary + " (Derived from Daily Volume Anomaly)",
+                    unusual_volume=analysis.get("ratio", 0) > 1.5,
+                    sentiment_impact=analysis.get("impact", "NEUTRAL"),
+                    summary=analysis["summary"] + " (Derived from Daily Volume Anomaly)",
                 ).model_dump(),
                 latency_ms=0,
             )

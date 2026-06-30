@@ -9,26 +9,7 @@ from typing import Dict
 
 logger = logging.getLogger(__name__)
 
-class VMLXProvider:
-    """Helper to configure vMLX specific ChatOpenAI instances."""
-    @staticmethod
-    def create(model_name: str, url: str, **kwargs):
-        from langchain_openai import ChatOpenAI
-        
-        # SOTA: Hardware-aware default headers for vMLX
-        default_headers = {
-            "X-VMLX-Cache-Strategy": "paged",
-            "X-VMLX-KV-Limit": "12GB",
-            "X-VMLX-Precision": "Q4_K_M"
-        }
-        
-        return ChatOpenAI(
-            model=model_name,
-            openai_api_base=url,
-            openai_api_key="vmlx-local-token",
-            default_headers=default_headers,
-            **kwargs
-        )
+
 
 class LLMFactory:
     """Factory for creating LLM instances based on model name and configuration."""
@@ -73,16 +54,7 @@ class LLMFactory:
                 except Exception as lm_err:
                     logger.warning(f"LLM Factory: LM Studio creation failed for HF-style ID {model_name}: {lm_err}")
             
-            # 1. vMLX Priority (Scrapped -> Redirected to LM Studio)
-            # Use LM Studio instead of vMLX
-            if not llm_instance:
-                is_vmlx_hint = "native-mlx" in model_lower or "jang" in model_lower
-                if provider == "vmlx" or (not provider and is_vmlx_hint):
-                    try:
-                        logger.info(f"LLM Factory: Redirecting vMLX target '{model_name}' to LM Studio")
-                        llm_instance = await LLMFactory._create_lmstudio("lmstudio-auto")
-                    except Exception as lm_err:
-                        logger.warning(f"LLM Factory: LM Studio fallback for vMLX failed: {lm_err}")
+
 
             if not llm_instance:
                 is_lmstudio_hint = "lmstudio" in model_lower or "nemotron" in model_lower
@@ -187,11 +159,15 @@ class LLMFactory:
         client = LMStudioClient()
 
         # If specific model_id is fixed in config, use it
-        target_model_id = info.get("model_id")
+        target_model_id = info.get("model_id") if info else None
 
-        # Fallback: If the user passed a direct model ID (not in config), use it directly
-        if not target_model_id and model_name != "lmstudio-auto":
+        # If model_id in config is "lmstudio-auto", it means we want auto-detection.
+        # But if there's no info (not in config), and model_name is not "lmstudio-auto",
+        # then treat model_name itself as the target model ID (like direct HuggingFace ID).
+        if not info and model_name != "lmstudio-auto":
             target_model_id = model_name
+        elif target_model_id == "lmstudio-auto":
+            target_model_id = None
 
         # Check connection
         if not await client.check_connection():
@@ -210,6 +186,7 @@ class LLMFactory:
                 if not is_ready:
                     logger.warning(f"LM Studio: Model {target_model_id} failed to initialize in time.")
                     status_manager.set_status("lmstudio", "error", f"Model {target_model_id} timeout")
+                    raise TimeoutError(f"Model {target_model_id} failed to initialize in time")
                 else:
                     # 3. Only set ready once confirmed
                     client.active_model_id = target_model_id 

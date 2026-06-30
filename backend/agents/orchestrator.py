@@ -36,7 +36,7 @@ class SwarmOrchestrator:
         self.model_name = model_name
         self.reflex_timeout = reflex_timeout
         self.synthesis_timeout = synthesis_timeout
-        # Initialize OpenAI-compatible model for LM Studio (vMLX scrapped)
+        # Initialize OpenAI-compatible model for LM Studio
         lm_studio_url = os.getenv("LM_STUDIO_URL", "http://127.0.0.1:1234")
         self.model = OpenAIModel(
             model_name,

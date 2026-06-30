@@ -11,110 +11,87 @@ This document outlines the high-level phases for the Growin App, specifically op
 - **Milestone v4.0: Sovereign UI & Visual DNA** (Completed 2026-04-03)
     - **Phase 40**: Sovereign Alpha Command Center (0px Primitives)
     - **Phase 41**: Sovereign UI Stitch Generation (Full Component Suite)
+- **Milestone v5.0: MLX Intelligence & macOS 2026 UX Overhaul** (Completed 2026-06-20)
+    - **Phase 42**: Model Performance Comparison
+    - **Phase 43**: Local Serving Core Engine
+    - **Phase 44**: Swarm Optimization
+    - **Phase 45**: Sovereign UX & macOS 2026 Redesign
+    - **Phase 46**: Adaptive Learning & QLoRA Fine-tuning
+    - **Phase 47**: Multimodal Intelligence
 
 ---
 
-## 🚀 CURRENT MILESTONE: v5.0 MLX Intelligence & macOS 2026 UX Overhaul
-**Goal**: Transform Growin into a SOTA macOS 2026 native experience by integrating fine-tuned intelligence with a complete UI/UX overhaul and hardened RL-driven profit extraction.
+## 🚀 CURRENT MILESTONE: v6.0: Hardened System Exploitation & Alpha Accuracy
+**Goal**: Drastically improve overall trading accuracy and maximize system throughput by fully utilizing the M4 Pro (48GB RAM) compute blocks (ANE, GPU, and CPU) and establishing an off-market learning loop.
 
-### Phase 42: Model Performance Comparison (COMPLETED)
-- **Goal**: Compare vllm-mlx output performance for Gemma 2 27B vs Llama-3.1-Nemotron-70B.
+### Must-Haves
+- [ ] Vectorized feature engineering in DuckDB (PERF-04)
+- [ ] Sub-millisecond forecasting on ANE/NPU (PERF-05)
+- [ ] Vol-Spread GMM Clustering for Regime Classification (ACC-01, ACC-02)
+- [ ] Simulation-in-the-Loop Research & Swarm Gate (ACC-03)
+- [ ] Adaptive Limit Orders with Dynamic Re-Quoting (EXEC-01, EXEC-02)
+- [ ] Autonomic Off-Market QLoRA Fine-Tuning (LEARN-04)
+
+### Phase 48: High-Fidelity Feature Engineering & DuckDB Ingestion
+- **Goal**: Optimize DuckDB query logic and create high-throughput feature ingestion tables for rolling spread, volatility, and volume indicators.
 - **Success Criteria**:
-    - Benchmark report on latency, throughput, and reasoning quality.
-    - Final model selection for the milestone.
-- **Requirements**: INTEL-01 (Partial), PERF-01 (Partial), UX-01, UX-02, UX-05
-- **Status**: COMPLETED
+    - Vectorized feature rollups execute within 10ms in DuckDB.
+    - Automated logging of feature parameters to telemetry database.
+- **Requirements**: PERF-04
+- **Status**: ⬜ Not Started
 
-**Plans:** 2/4 plans complete
-- [x] 42-01-PLAN.md — Benchmark Environment Setup
-- [x] 42-02-PLAN.md — Model Quantization & Acquisition
-- [x] 42-03-PLAN.md — Performance Analysis & Selection
-- [x] 42-04-PLAN.md — SOTA AI Chat Interface Enhancements
-
-### Phase 43: Local Intelligence & Serving (Core Engine) (COMPLETED)
-- **Goal**: Transition from vllm-mlx to vMLX with hardware-aware memory optimizations for M4 Pro (48GB).
+### Phase 49: Apple Neural Engine (ANE) Integration for Numeric Forecasting
+- **Goal**: Calibrate and serve time-series models on ANE, achieving sub-millisecond numeric predictions.
 - **Success Criteria**:
-    - vMLX server managed by backend with 28GB total memory limit.
-    - "Thinking" Mode visibility enabled via real-time telemetry.
-    - 12GB KV-cache configured via PagedAttention.
-- **Requirements**: INTEL-01, INTEL-02, PERF-01, PERF-02, PERF-03
-- **Status**: COMPLETED
+    - Neural JMCE/TTM-R2 running on ANE with sub-millisecond latency.
+    - Zero crash or memory fragmentation when running alongside MLX.
+- **Requirements**: PERF-05
+- **Status**: ⬜ Not Started
 
-**Plans:** 2/2 plans complete
-- [x] 43-01-PLAN.md — Engine & Factory Transition
-- [x] 43-02-PLAN.md — Telemetry, Thinking & Validation
-
-### Phase 44: Multi-Agent Strategy & Swarm Optimization
-- **Goal**: Optimize specialist agent swarm coordination to minimize latency and maximize reasoning coherence.
+### Phase 50: Vol-Spread GMM Clustering for Regime Classification
+- **Goal**: Build a GMM clustering classifier to trigger 2ms hot-swaps of local QLoRA adapters.
 - **Success Criteria**:
-    - "Progressive Synthesis" active (DecisionAgent reasons while specialists complete).
-    - Swarm output summarization active to preserve prefix caching.
-    - Concurrent MLX threshold calibration for M4 Pro.
-- **Requirements**: INTEL-01, PERF-01, UX-05
-- **Status**: COMPLETED
+    - GMM model correctly classifies at least 3 historical regimes.
+    - MLX adapter hot-swap latency stays under 2ms.
+- **Requirements**: ACC-01, ACC-02
+- **Status**: ⬜ Not Started
 
-**Plans:** 3/3 plans complete
-- [x] 44-01-PLAN.md — Core Engine Room (Hardware Guard & ContextBuffer)
-- [x] 44-02-PLAN.md — Reasoning Pivot (2-Stage Streaming Logic)
-- [x] 44-03-PLAN.md — Swarm Calibration (Latency Thresholds & Summarization)
-
-### Phase 45: Sovereign UX & macOS 2026 Redesign
-- **Goal**: Complete architectural UI redesign following macOS Tahoe patterns and 120Hz ProMotion standards.
+### Phase 51: Simulation-in-the-Loop Research & Swarm Gate
+- **Goal**: Prototype pre-flight trade backtesting and evaluate re-optimization vs. capital scaling policies.
 - **Success Criteria**:
-    - SwiftUI 17+ 0px Ledger UI implemented with Tahoe "Liquid Glass" materials.
-    - Stage Manager 2.0 window sets integrated for trading workflows.
-    - 120Hz ProMotion fluid rendering and <16ms price synchronization.
-- **Requirements**: UX-01, UX-02, UX-03, UX-05, TRADE-01
-- **Status**: COMPLETED
+    - In-memory simulation checks execute within 50ms.
+    - Configurable fail-safe pathways defined and empirically tested.
+- **Requirements**: ACC-03
+- **Status**: ⬜ Not Started
 
-**Plans:** 3/3 plans complete
-- [x] 45-01-PLAN.md — SwiftUI 17+ 0px Ledger UI Scaffold & Theme
-- [x] 45-02-PLAN.md — Stage Manager 2.0 Saved Window Sets Integration
-- [x] 45-03-PLAN.md — ProMotion 120Hz Rendering & Sub-16ms Price Sync
-
-### Phase 46: Adaptive Learning & Alpha Engineering (Unsloth) (COMPLETED)
-- **Goal**: Deploy local LoRA fine-tuning pipeline for regime-specific alpha extraction.
+### Phase 52: Adaptive Limit Orders with Dynamic Re-Quoting
+- **Goal**: Implement volatility-adjusted limit orders and a dynamic re-quoting engine with emergency fallbacks.
 - **Success Criteria**:
-    - Unsloth/mlx-tune pipeline active for local LoRA fine-tuning on M4 Pro.
-    - Automated alpha feature engineering from DuckDB historical data.
-    - Dynamic LoRA adapter switching based on detected market regimes.
-- **Requirements**: LEARN-01, LEARN-02, LEARN-03
-- **Status**: COMPLETED
-- **Plans**: 6/6 plans complete
-    - [x] 46-PLAN-1-DATA-GATHERING.md — Data Gathering Setup
-    - [x] 46-PLAN-2-DATA-CLEANING.md — Data Cleaning Pipeline
-    - [x] 46-PLAN-3-DATA-PROCESSING.md — Feature Engineering
-    - [x] 46-PLAN-4-TRAINING-COREML.md — NeuralJMCE CoreML ANE Model
-    - [x] 46-PLAN-5-TRAINING-MLX.md — QLoRA SLM Fine-Tuning
-    - [x] 46-PLAN-6-ADAPTER-ROUTING.md — In-Memory Adapter Hot-Swapping
+    - Volatility-adjusted price boundaries computed in real-time.
+    - Re-quoting engine actively updates order parameters every N seconds.
+- **Requirements**: EXEC-01, EXEC-02
+- **Status**: ⬜ Not Started
 
-### Phase 47: Multimodal Intelligence & Deep Integration
-- **Goal**: Infuse vision intelligence into trading workflows and asset-level fast actions.
+### Phase 53: Autonomic Off-Market QLoRA Fine-Tuning
+- **Goal**: Set up background validation auditing and off-market training pipelines for adapter updates.
 - **Success Criteria**:
-    - Gemma 4 multimodal support active for image/chart upload analysis.
-    - Dynamic Interactive Tiles built for real-time asset monitoring.
-    - Deep linking from chat reasoning results to Sovereign Ledger views.
-- **Requirements**: INTEL-03, UX-04, TRADE-02
-- **Status**: COMPLETED
-
-**Plans:** 3/3 plans complete
-- [x] 47-01-PLAN.md — VLM Inference Engine & API Hardening
-- [x] 47-02-PLAN.md — SwiftUI Image Upload & VLM Prompting
-- [x] 47-03-PLAN.md — Dynamic Interactive Tiles & Local Link Interception
-
+    - System detects performance drift below thresholds and triggers auto-training.
+    - Automated cron successfully completes QLoRA fine-tuning within VRAM constraints (28GB override limit).
+- **Requirements**: LEARN-04
+- **Status**: ⬜ Not Started
 
 ---
 
 ## 📊 PROGRESS SUMMARY
 
-| Phase | Status | Plans | Complete |
-|-------|--------|-------|----------|
-| 42: Model Comparison | ✅ | 4/4 | 100% |
-| 43: Core Engine | ✅ | 2/2 | 100% |
-| 44: Swarm Optimization | ✅ | 3/3 | 100% |
-| 45: Sovereign UX | ✅ | 3/3 | 100% |
-| 46: Adaptive Learning | ✅ | 6/6 | 100% |
-| 47: Multimodal | ✅ | 3/3 | 100% |
+| Milestone | Status | Completed Date |
+|-----------|--------|----------------|
+| v1.0 | ✅ | 2026-02-23 |
+| v2.0 | ✅ | 2026-03-04 |
+| v3.0 | ✅ | 2026-03-20 |
+| v4.0 | ✅ | 2026-04-03 |
+| v5.0 | ✅ | 2026-06-20 |
+| v6.0 | 🏗 ACTIVE | |
 
 ---
 
