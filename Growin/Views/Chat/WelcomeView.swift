@@ -120,7 +120,14 @@ struct SuggestionChip: View {
         .accessibilityLabel(item.title)
         .accessibilityHint(item.prompt)
         .accessibilityAddTraits(.isButton)
-        .onHover { isHovered = $0 }
+        .onHover { hovering in
+            isHovered = hovering
+            if hovering {
+                NSCursor.pointingHand.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
         .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isHovered)
     }
 }
