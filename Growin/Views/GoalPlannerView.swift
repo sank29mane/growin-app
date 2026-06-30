@@ -150,7 +150,7 @@ struct GoalPlannerView: View {
                             Text("\(Int(viewModel.durationYears))Y")
                                 .font(.system(size: 24, weight: .bold, design: .rounded))
                             Spacer()
-                            Stepper("", value: $viewModel.durationYears, in: 1...30)
+                            Stepper("Investment Horizon Years", value: $viewModel.durationYears, in: 1...30)
                                 .labelsHidden()
                                 .scaleEffect(0.9)
                         }
