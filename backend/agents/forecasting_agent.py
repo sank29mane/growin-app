@@ -2,6 +2,7 @@
 Forecasting Agent - Wrapper around TTM for standardized interface
 """
 
+from utils.error_handler import handle_error
 from typing import Dict, Any
 import logging
 import numpy as np
@@ -125,7 +126,9 @@ class ForecastingAgent(BaseAgent):
                         logger.warning(f"ForecastingAgent: Sanitized {corrections} bars with unit mismatches (Median: {median_price:.2f}).")
                         
             except Exception as ex:
-                logger.warning(f"ForecastingAgent sanitization error: {ex}")
+
+
+                handle_error(ex, "ForecastingAgent sanitization error", logger, raise_error=False)
         # ---------------------------------------------
 
         try:

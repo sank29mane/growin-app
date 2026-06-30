@@ -6,6 +6,7 @@ Static SOTA model that routes queries and aggregates results
 from .base_agent import BaseAgent, AgentResponse
 from market_context import MarketContext
 from utils.ticker_utils import TickerResolver
+from utils.error_handler import handle_error
 from typing import Dict, Any, Optional
 import asyncio
 import logging
@@ -215,7 +216,8 @@ class CoordinatorAgent(BaseAgent):
             if match:
                 return json.loads(match.group())
         except Exception as e:
-            logger.error(f"Coordinator routing failed: {e}")
+
+            handle_error(e, "Coordinator routing failed", logger, raise_error=False)
             
         return {"intent": "analytical", "required_agents": ["research"], "ticker": None}
 
@@ -313,7 +315,8 @@ class CoordinatorAgent(BaseAgent):
                 error=error_msg
             )
         except Exception as e:
-            logger.error(f"Coordinator: Error executing specialist {agent.config.name}: {e}")
+
+            handle_error(e, "Coordinator: Error executing specialist {agent.config.name}", logger, raise_error=False)
             status_manager.set_status(agent_key, "error", str(e))
             return AgentResponse(
                 agent_name=agent.config.name,
@@ -348,7 +351,8 @@ class CoordinatorAgent(BaseAgent):
                     elif isinstance(search_result, str):
                         search_result = json.loads(search_result)
                 except Exception as e:
-                    logger.warning(f"MCP search failed, falling back to local resolver: {e}")
+
+                    handle_error(e, "MCP search failed, falling back to local resolver", logger, raise_error=False)
                     resolved = await self.ticker_resolver.resolve(term)
                     search_result = [{"ticker": resolved, "name": term}] if resolved else []
             else:
@@ -410,7 +414,8 @@ class CoordinatorAgent(BaseAgent):
         except asyncio.TimeoutError:
             logger.warning(f"Ticker search discovery timed out for {term}")
         except Exception as e:
-            logger.warning(f"Ticker search discovery failed for {term}: {e}")
+
+            handle_error(e, "Ticker search discovery failed for {term}", logger, raise_error=False)
 
         return None
 
@@ -486,10 +491,13 @@ class CoordinatorAgent(BaseAgent):
                     except asyncio.TimeoutError:
                         logger.error("Docker execution fix timed out")
                     except Exception as e:
-                        logger.error(f"Failed to execute Docker fix: {e}")
+
+                        handle_error(e, "Failed to execute Docker fix", logger, raise_error=False)
                         
         except Exception as e:
-            logger.warning(f"Self-correction failed: {e}")
+
+
+            handle_error(e, "Self-correction failed", logger, raise_error=False)
 
         return None
 

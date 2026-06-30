@@ -5,6 +5,7 @@ User-selectable model with price validation integration
 
 from market_context import MarketContext
 from price_validation import PriceValidator
+from utils.error_handler import handle_error
 from typing import Dict, Optional, List, Any
 import logging
 import re
@@ -166,7 +167,9 @@ class DecisionAgent:
             self._initialized = True
 
         except Exception as e:
-            logger.error(f"DecisionAgent initialization failed: {e}")
+
+
+            handle_error(e, "DecisionAgent initialization failed", logger, raise_error=False)
             raise
 
     def _convert_base64_to_pil(self, images: Optional[List[str]]) -> List[Any]:
@@ -184,7 +187,8 @@ class DecisionAgent:
                 img = Image.open(BytesIO(data)).convert("RGB")
                 pil_images.append(img)
             except Exception as e:
-                logger.error(f"Error converting base64 image in DecisionAgent: {e}")
+
+                handle_error(e, "Error converting base64 image in DecisionAgent", logger, raise_error=False)
         return pil_images
 
     async def make_decision(self, context: MarketContext, query: str, previous_response_id: Optional[str] = None, images: Optional[List[str]] = None) -> Dict[str, Any]:
@@ -283,7 +287,8 @@ class DecisionAgent:
                             }
                         )
                     except Exception as telem_err:
-                        logger.error(f"Failed to record math telemetry: {telem_err}")
+
+                        handle_error(telem_err, "Failed to record math telemetry", logger, raise_error=False)
 
                     if exec_result.get("status") == "success":
                         math_output = exec_result.get("stdout", "")
@@ -299,7 +304,8 @@ class DecisionAgent:
                 else:
                     logger.warning(f"DecisionAgent: Math generation failed: {math_response.error}")
             except Exception as me:
-                logger.error(f"DecisionAgent: Math delegation workflow failed: {me}", exc_info=True)
+
+                handle_error(me, "DecisionAgent: Math delegation workflow failed", logger, raise_error=False)
 
         # 4. Agentic Loop with NPU Acceleration
         try:
@@ -354,7 +360,9 @@ class DecisionAgent:
             }
 
         except Exception as e:
-            logger.error(f"Decision making failed: {e}")
+
+
+            handle_error(e, "Decision making failed", logger, raise_error=False)
             status_manager.set_status("decision_agent", "error", f"Error: {str(e)}", model=self.model_name)
             return {"content": f"Error generating recommendation: {str(e)}", "response_id": None, "quick_actions": []}
 
@@ -589,7 +597,9 @@ class DecisionAgent:
             )
             
         except Exception as e:
-            logger.error(f"Streaming failed: {e}")
+
+
+            handle_error(e, "Streaming failed", logger, raise_error=False)
             yield f"Error: {str(e)}"
 
     async def _run_agentic_loop(self, system_content: str, prompt: str, context: MarketContext, previous_response_id: Optional[str] = None, images: Optional[List[Any]] = None) -> Dict[str, Any]:
@@ -634,7 +644,8 @@ class DecisionAgent:
                 else:
                     logger.warning(f"Stateful chat failed: {stateful_resp['error']}. Falling back to stateless loop.")
             except Exception as se:
-                logger.error(f"Stateful transition error: {se}. Falling back.")
+
+                handle_error(se, "Stateful transition error. Falling back.", logger, raise_error=False)
 
         # 2. Stateless Fallback: Standard Agentic Loop
         messages = [
@@ -712,7 +723,8 @@ class DecisionAgent:
                             logger.warning(f"Tool execution skipped: {tool_name} circuit breaker is OPEN")
                             return f"[TOOL_RESULT:{tool_name}] Error: Execution skipped because circuit breaker is OPEN"
                         except Exception as e:
-                            logger.warning(f"Tool execution failed in loop: {e}")
+
+                            handle_error(e, "Tool execution failed in loop", logger, raise_error=False)
                             return f"[TOOL_RESULT:{tool_name}] Error: {str(e)}"
 
                     tool_results = await asyncio.gather(*(execute_tool(t) for t in tool_calls))
@@ -1250,5 +1262,6 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
                 "timestamp": datetime.now().timestamp()
             }
         except Exception as e:
-            logger.warning(f"Failed to extract trade proposal: {e}")
+
+            handle_error(e, "Failed to extract trade proposal", logger, raise_error=False)
             return None

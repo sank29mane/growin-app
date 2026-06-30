@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from decimal import Decimal
+from utils.error_handler import handle_error
 from typing import Optional
 from .base_micro import BaseMicroAgent, MicroAgentResponse
 from utils.financial_math import create_decimal
@@ -110,7 +111,9 @@ class TwitterMicroAgent(BaseMicroAgent):
             )
 
         except Exception as e:
-            self.logger.error(f"Twitter/X analysis failed: {e}")
+
+
+            handle_error(e, "Twitter/X analysis failed", self.logger, raise_error=False)
             return MicroAgentResponse(
                 source="Twitter/X",
                 sentiment_score=create_decimal("0.0"),

@@ -6,6 +6,7 @@ Implements a simple Actor-inspired message bus for 2026 SOTA MAS.
 import asyncio
 import logging
 import uuid
+from utils.error_handler import handle_error
 from typing import Dict, Any, Optional, Callable, Awaitable, List
 from pydantic import BaseModel, Field, model_validator
 from datetime import datetime, timezone
@@ -83,7 +84,8 @@ class AgentMessenger:
             db = get_analytics_db()
             db.log_agent_message(message.model_dump())
         except Exception as e:
-            logger.error(f"Messenger persistence failed: {e}")
+
+            handle_error(e, "Messenger persistence failed", logger, raise_error=False)
 
         # Notify trace subscribers first
         if message.correlation_id and message.correlation_id in self._trace_subscribers:

@@ -7,6 +7,7 @@ import logging
 import json
 import re
 import asyncio
+from utils.error_handler import handle_error
 from typing import Dict, Any, List, Optional, Literal
 from decimal import Decimal
 from pydantic import BaseModel, Field
@@ -134,7 +135,9 @@ class RiskAgent(BaseAgent):
             )
                 
         except Exception as e:
-            logger.error(f"RiskAgent (Magentic) failed: {e}")
+
+
+            handle_error(e, "RiskAgent (Magentic) failed", logger, raise_error=False)
             return AgentResponse(agent_name=self.config.name, success=False, data={}, error=str(e), latency_ms=0)
 
     async def review(self, context: MarketContext, suggestion: str) -> Dict[str, Any]:

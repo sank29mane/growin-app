@@ -10,6 +10,7 @@ import json
 import re
 import uuid
 import time
+from utils.error_handler import handle_error
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
 
@@ -90,11 +91,13 @@ class OrchestratorAgent:
         try:
             self.routing_llm = await LLMFactory.create_llm(routing_model)
         except Exception as e:
-            logger.warning(f"Routing LLM ({routing_model}) failed: {e}. Falling back to lmstudio-auto.")
+
+            handle_error(e, "Routing LLM ({routing_model}) failed. Falling back to lmstudio-auto.", logger, raise_error=False)
             try:
                 self.routing_llm = await LLMFactory.create_llm("lmstudio-auto")
             except Exception as e2:
-                logger.error(f"Routing LLM fallback also failed: {e2}. Routing will use heuristics only.")
+
+                handle_error(e2, "Routing LLM fallback also failed. Routing will use heuristics only.", logger, raise_error=False)
                 self.routing_llm = None
         
         # Initialize decision engine (reasoning model)
@@ -181,7 +184,8 @@ Query: "{clean_query}"
                 "reason": "Unified Routing"
             }
         except Exception as e:
-            logger.error(f"Orchestrator routing failed: {e}")
+
+            handle_error(e, "Orchestrator routing failed", logger, raise_error=False)
             return self._heuristic_classify(query)
 
     def _heuristic_classify(self, query: str) -> Dict[str, Any]:
@@ -291,7 +295,8 @@ Query: "{clean_query}"
                 db = get_analytics_db()
                 historical_alpha = db.get_agent_alpha_metrics(ticker)
             except Exception as e:
-                logger.warning(f"Analytics metrics failed: {e}")
+
+                handle_error(e, "Analytics metrics failed", logger, raise_error=False)
         
         from agents.decision_agent import DecisionAgent
         detected_account = account_type
@@ -533,7 +538,8 @@ Query: "{clean_query}"
                 ))
             return result
         except Exception as e:
-            logger.error(f"Orchestrator specialist failed ({agent_name}): {e}")
+
+            handle_error(e, "Orchestrator specialist failed ({agent_name})", logger, raise_error=False)
             return AgentResponse(agent_name=agent_name, success=False, data={}, error=str(e))
 
     async def _merge_result(self, context: MarketContext, result: AgentResponse):
