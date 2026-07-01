@@ -54,7 +54,6 @@ class CoreMLRunner:
                 
                 # Force cleanup of Core ML returned proxies to prevent ANE/Metal memory leaks
                 del prediction
-                gc.collect()
                 return clean_prediction
                 
             return prediction
