@@ -441,6 +441,7 @@ struct ErrorCard: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Retry Protocol")
+                .accessibilityHint("Attempts to run the protocol simulation again")
                 .accessibilityAddTraits(.isButton)
             }
         }

@@ -131,3 +131,7 @@
 ## 2026-05-27 - NSCursor hover state management in SwiftUI
 **Learning:** Found a custom UI component in `AIChatPanelView.swift` that used `.onHover` to implement a "pointing hand" cursor by calling `NSCursor.pointingHand.push()`. However, the hover state did not balance this push with a corresponding `NSCursor.pop()` when the user moved their cursor away, resulting in a permanently stuck cursor.
 **Action:** Always balance `NSCursor.push()` calls with `NSCursor.pop()` inside `.onHover` handlers in macOS native SwiftUI views to accurately reflect the element's bounds and prevent stuck cursor states.
+
+## 2026-06-25 - AccessibilityHint Missing on Generic Retry Protocol Button
+**Learning:** Found a custom `ErrorCard` SwiftUI component containing a generic "Retry Protocol" button that correctly applied `.accessibilityLabel` and `.accessibilityAddTraits(.isButton)` to combat the stripping effects of `.buttonStyle(.plain)`, but lacked an `.accessibilityHint`. Without a hint, VoiceOver users receive the name of the button but no context on what action will occur when activated, which is particularly crucial for handling error states where the user needs to know what they are retrying.
+**Action:** Always append an explicit `.accessibilityHint` (e.g., "Attempts to run the protocol simulation again") alongside the label and traits when using `.buttonStyle(.plain)` on interactive elements to provide clear consequence context for assistive technologies.
