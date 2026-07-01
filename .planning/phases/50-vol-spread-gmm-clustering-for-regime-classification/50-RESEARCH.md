@@ -14,13 +14,17 @@ GMMs use probabilistic "soft" clustering, ideal for finance where market states 
     *   *Regime 0 (Trend / Quiet):* Low volatility, narrow spread.
     *   *Regime 1 (Mean-Reverting / Choppy):* Medium/high volatility, average to wide spread.
     *   *Regime 2 (Crisis / Liquidity Vacuum):* Extreme volatility, abnormally wide spreads.
+*   **Covariance Configuration:** Use `covariance_type='full'` for the GMM. Unlike K-Means (which assumes spherical clusters), a full covariance matrix allows the model to capture the directional correlation between volatility and spreads (e.g., how spreads widen non-linearly as volatility spikes).
 *   **Application:** The model outputs probabilities (e.g., 80% chance of Regime 0). These probabilities continuously scale position sizes or dynamically switch trading logic and trigger MLX QLoRA adapter hot-swaps.
 
 ## 3. Ultra-Low Latency Implementation (< 2ms)
 To achieve sub-millisecond latency, training must be strictly decoupled from inference.
 
 ### A. Offline Training (Background Process)
-Fit `sklearn.mixture.GaussianMixture` periodically (e.g., daily or hourly) on historical DuckDB data in a separate background thread/process. Extract and serialize the learned parameters: `weights_`, `means_`, and `precisions_cholesky_`.
+Fit `sklearn.mixture.GaussianMixture` periodically (e.g., daily or hourly) on historical DuckDB data in a separate background thread/process.
+*   **Hyperparameter Tuning:** Automatically select the optimal number of components ($K$) and covariance constraints using **Bayesian Information Criterion (BIC)** or Akaike Information Criterion (AIC) minimization to prevent overfitting.
+*   **Non-Stationarity Management:** Financial data is non-stationary; update the global Z-score scaling parameters offline during fitting and store them along with the model weights to align online normalization.
+*   **Serialization:** Extract and serialize the learned parameters: `weights_`, `means_`, and `precisions_cholesky_` (the pre-computed Cholesky decomposition of the precision matrix to speed up Mahalanobis distance calculation during online evaluation).
 
 ### B. Live Inference (Trading Loop)
 Do not call `sklearn`'s `predict()` in the live loop due to Python object overhead. Instead, implement a custom evaluation function using `NumPy` and compile it to machine code using `@numba.njit`. 
