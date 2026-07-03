@@ -131,3 +131,7 @@
 ## 2026-05-27 - NSCursor hover state management in SwiftUI
 **Learning:** Found a custom UI component in `AIChatPanelView.swift` that used `.onHover` to implement a "pointing hand" cursor by calling `NSCursor.pointingHand.push()`. However, the hover state did not balance this push with a corresponding `NSCursor.pop()` when the user moved their cursor away, resulting in a permanently stuck cursor.
 **Action:** Always balance `NSCursor.push()` calls with `NSCursor.pop()` inside `.onHover` handlers in macOS native SwiftUI views to accurately reflect the element's bounds and prevent stuck cursor states.
+
+## 2026-06-25 - Text-based Button Accessibility outside Toolbars
+**Learning:** Text-based standard buttons used in custom modal layouts (like `ChallengeLogicView`) without native styling or within complex generic containers can lack explicit context for VoiceOver users, even if not explicitly `.buttonStyle(.plain)`.
+**Action:** Append `.accessibilityLabel`, `.accessibilityHint` (to describe the consequence of the action, e.g., "Dismisses the view"), and `.accessibilityAddTraits(.isButton)` to text-based buttons to provide clear context for assistive technologies.
