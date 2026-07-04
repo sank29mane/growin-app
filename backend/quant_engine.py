@@ -563,12 +563,6 @@ class QuantEngine:
                 if val_str.endswith('%'):
                     is_percentage = True
                     break
-                try:
-                    if create_decimal(val_str.replace('%', '')) > Decimal("1.0"):
-                        is_percentage = True
-                        break
-                except Exception:
-                    pass
 
             for symbol, val in allocations.items():
                 try:
@@ -576,8 +570,6 @@ class QuantEngine:
                     is_pct = val_str.endswith('%')
                     dec_val = create_decimal(val_str.replace('%', ''))
                     if is_pct or is_percentage:
-                        parsed[symbol] = dec_val / Decimal("100")
-                    elif dec_val > Decimal("1.0"):
                         parsed[symbol] = dec_val / Decimal("100")
                     else:
                         parsed[symbol] = dec_val
