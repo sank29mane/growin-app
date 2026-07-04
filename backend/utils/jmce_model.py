@@ -143,14 +143,27 @@ def get_jmce_model(n_assets: int = 50, use_ane: bool = True, resolution: TimeRes
     logger = setup_logging('jmce_factory')
     if use_ane:
         import os
-        model_name = f'jmce_{n_assets}_{resolution.value}.mlmodel'
-        possible_paths = [os.path.join('models', 'coreml', model_name), os.path.join('backend', 'models', 'coreml', model_name)]
-        for model_path in possible_paths:
-            if os.path.exists(model_path) and os.path.getsize(model_path) > 0:
-                try:
-                    logger.info(f'🚀 Loading JMCE on ANE (NPU) via {model_path}')
-                    return CoreMLJMCE(model_path, n_assets=n_assets)
-                except Exception as e:
-                    logger.warning(f'Failed to load ANE model at {model_path}: {e}')
+        base_name = f'jmce_{n_assets}_{resolution.value}'
+        search_dirs = [
+            os.path.join('models', 'coreml'),
+            os.path.join('backend', 'models', 'coreml'),
+        ]
+        # Priority order: resolution-specific package → resolution-specific model →
+        # canonical package fallback → canonical model fallback
+        candidates = (
+            [f'{base_name}.mlpackage', f'{base_name}.mlmodel'] +
+            ['NeuralJMCE.mlpackage', 'NeuralJMCE.mlmodel']
+        )
+        for model_name in candidates:
+            for search_dir in search_dirs:
+                model_path = os.path.join(search_dir, model_name)
+                if os.path.exists(model_path) and (
+                    os.path.getsize(model_path) > 0 if os.path.isfile(model_path) else True
+                ):
+                    try:
+                        logger.info(f'🚀 Loading JMCE on ANE (CPU+NE) via {model_path}')
+                        return CoreMLJMCE(model_path, n_assets=n_assets)
+                    except Exception as e:
+                        logger.warning(f'Failed to load ANE model at {model_path}: {e}')
     logger.info(f'⚡ Loading NeuralJMCE on GPU (MLX) [Resolution: {resolution.value}]')
     return NeuralJMCE(n_assets=n_assets, resolution=resolution)

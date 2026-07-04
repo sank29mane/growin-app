@@ -8,7 +8,7 @@ class CoreMLRunner:
             import coremltools as ct  # type: ignore
             self._ct = ct
             # Set compute units for Neural Engine priority
-            self._compute_units = ct.ComputeUnit.ALL  # Prioritizes ANE on Apple Silicon
+            self._compute_units = ct.ComputeUnit.CPU_AND_NE  # Locks to CPU + ANE; keeps GPU free for MLX
             self._available = False  # wait until model is loaded
         except Exception:
             self._ct = None
@@ -54,7 +54,6 @@ class CoreMLRunner:
                 
                 # Force cleanup of Core ML returned proxies to prevent ANE/Metal memory leaks
                 del prediction
-                gc.collect()
                 return clean_prediction
                 
             return prediction
