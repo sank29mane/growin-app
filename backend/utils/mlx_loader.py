@@ -1,9 +1,8 @@
-"""
-Centralized utility for importing MLX (Apple Silicon NPU/GPU).
-Safely handles environments where MLX is not available (e.g. Linux CI).
-"""
+import os
 
 try:
+    if os.getenv("CI") == "true" or os.getenv("GITHUB_ACTIONS") == "true":
+        raise RuntimeError("Disabling MLX on CI environment to avoid hardware emulation crashes.")
     import mlx.core as mx
     import mlx.nn as nn
     HAS_MLX = True

@@ -114,6 +114,8 @@ def export():
             ct.TensorType(name="velocity")
         ],
         convert_to="mlprogram", # Modern format for ANE
+        compute_precision=ct.precision.FLOAT16,
+        compute_units=ct.ComputeUnit.CPU_AND_NE,
         minimum_deployment_target=ct.target.macOS14 
     )
     
@@ -128,7 +130,7 @@ def export():
     mlmodel.save(output_path)
     
     print(f"✅ SOTA: JMCE exported to {output_path}")
-    print(f"📍 Targets: ANE, GPU, CPU (MLComputeUnits.all)")
+    print(f"📍 Targets: ANE, CPU (MLComputeUnits.cpuAndNeuralEngine)")
 
 if __name__ == "__main__":
     export()
