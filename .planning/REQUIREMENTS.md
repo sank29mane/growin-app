@@ -8,8 +8,8 @@
 ## 🎯 Active Requirements
 
 ### Core Optimization & Acceleration (System Exploitation)
-- [ ] **PERF-04**: Optimize vectorized SQL calculations and rollups in DuckDB for high-throughput feature ingestion.
-- [ ] **PERF-05**: Calibrate and optimize Apple Neural Engine (ANE/NPU) float16 pipelines for sub-millisecond numerical forecasts.
+- [x] **PERF-04**: Optimize vectorized SQL calculations and rollups in DuckDB for high-throughput feature ingestion.
+- [x] **PERF-05**: Calibrate and optimize Apple Neural Engine (ANE/NPU) float16 pipelines for sub-millisecond numerical forecasts.
 
 ### Prediction & Classification Accuracy
 - [ ] **ACC-01**: Implement unsupervised GMM (Gaussian Mixture Model) clustering on rolling price variance and volume profiles to classify regimes.
@@ -43,8 +43,8 @@
 
 | REQ-ID | Phase | Success Criteria | Status |
 |--------|-------|------------------|--------|
-| PERF-04 | 48 | Vectorized feature rollups execute within 10ms in DuckDB. | ⬜ |
-| PERF-05 | 49 | Neural JMCE/TTM-R2 running on ANE with sub-millisecond latency. | ⬜ |
+| PERF-04 | 48 | Vectorized feature rollups execute within 10ms in DuckDB. | ✅ |
+| PERF-05 | 49 | Neural JMCE/TTM-R2 running on ANE with sub-millisecond latency. | ✅ |
 | ACC-01  | 50 | GMM clustering model correctly classifies at least 3 historical regimes. | ⬜ |
 | ACC-02  | 50 | MLX adapter hot-swap latency stays under 2ms. | ⬜ |
 | ACC-03  | 51 | Simulation-in-the-loop triggers re-optimization on simulator drawdowns. | ⬜ |

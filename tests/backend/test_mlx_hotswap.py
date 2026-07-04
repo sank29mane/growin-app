@@ -1,3 +1,5 @@
+import mlx.core
+import mlx.nn
 import sys
 import os
 import pytest
@@ -10,7 +12,7 @@ if root_path not in sys.path:
     sys.path.insert(0, root_path)
 backend_path = os.path.join(root_path, "backend")
 if backend_path not in sys.path:
-    sys.path.insert(0, backend_path)
+    sys.path.append(backend_path)
 
 from utils.mlx_loader import mx, nn, HAS_MLX
 
