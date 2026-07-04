@@ -24,10 +24,18 @@ This document outlines the high-level phases for the Growin App, specifically op
 ## 🚀 CURRENT MILESTONE: v6.0: Hardened System Exploitation & Alpha Accuracy
 **Goal**: Drastically improve overall trading accuracy and maximize system throughput by fully utilizing the M4 Pro (48GB RAM) compute blocks (ANE, GPU, and CPU) and establishing an off-market learning loop.
 
+**Phases Checklist:**
+- [x] **Phase 48:** High-Fidelity Feature Engineering & DuckDB Ingestion
+- [x] **Phase 49:** Apple Neural Engine (ANE) Integration for Numeric Forecasting
+- [x] **Phase 50:** Vol-Spread GMM Clustering for Regime Classification
+- [ ] **Phase 51:** Simulation-in-the-Loop Research & Swarm Gate
+- [ ] **Phase 52:** Adaptive Limit Orders with Dynamic Re-Quoting
+- [ ] **Phase 53:** Autonomic Off-Market QLoRA Fine-Tuning
+
 ### Must-Haves
 - [ ] Vectorized feature engineering in DuckDB (PERF-04)
-- [ ] Sub-millisecond forecasting on ANE/NPU (PERF-05)
-- [ ] Vol-Spread GMM Clustering for Regime Classification (ACC-01, ACC-02)
+- [x] Sub-millisecond forecasting on ANE/NPU (PERF-05)
+- [x] Vol-Spread GMM Clustering for Regime Classification (ACC-01, ACC-02)
 - [ ] Simulation-in-the-Loop Research & Swarm Gate (ACC-03)
 - [ ] Adaptive Limit Orders with Dynamic Re-Quoting (EXEC-01, EXEC-02)
 - [ ] Autonomic Off-Market QLoRA Fine-Tuning (LEARN-04)
@@ -38,7 +46,7 @@ This document outlines the high-level phases for the Growin App, specifically op
     - Vectorized feature rollups execute within 10ms in DuckDB.
     - Automated logging of feature parameters to telemetry database.
 - **Requirements**: PERF-04
-- **Status**: ⬜ Not Started
+- **Status**: ✅ Complete (2026-07-01)
 
 ### Phase 49: Apple Neural Engine (ANE) Integration for Numeric Forecasting
 - **Goal**: Calibrate and serve time-series models on ANE, achieving sub-millisecond numeric predictions.
@@ -46,7 +54,7 @@ This document outlines the high-level phases for the Growin App, specifically op
     - Neural JMCE/TTM-R2 running on ANE with sub-millisecond latency.
     - Zero crash or memory fragmentation when running alongside MLX.
 - **Requirements**: PERF-05
-- **Status**: ⬜ Not Started
+- **Status**: ✅ Complete (2026-07-01)
 
 ### Phase 50: Vol-Spread GMM Clustering for Regime Classification
 - **Goal**: Build a GMM clustering classifier to trigger 2ms hot-swaps of local QLoRA adapters.
@@ -54,7 +62,7 @@ This document outlines the high-level phases for the Growin App, specifically op
     - GMM model correctly classifies at least 3 historical regimes.
     - MLX adapter hot-swap latency stays under 2ms.
 - **Requirements**: ACC-01, ACC-02
-- **Status**: ⬜ Not Started
+- **Status**: ✅ Complete (2026-07-04)
 
 ### Phase 51: Simulation-in-the-Loop Research & Swarm Gate
 - **Goal**: Prototype pre-flight trade backtesting and evaluate re-optimization vs. capital scaling policies.

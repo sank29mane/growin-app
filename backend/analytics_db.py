@@ -104,6 +104,17 @@ class AnalyticsDB:
                 PRIMARY KEY (ticker, timestamp)
             );
 
+            -- Vectorized Market Features table
+            CREATE TABLE IF NOT EXISTS market_features (
+                ticker VARCHAR NOT NULL,
+                timestamp TIMESTAMP NOT NULL,
+                rolling_spread DOUBLE,
+                rolling_volatility DOUBLE,
+                rolling_volume_avg DOUBLE,
+                rolling_volume_std DOUBLE,
+                PRIMARY KEY (ticker, timestamp)
+            );
+
             -- Agent Telemetry table
             CREATE TABLE IF NOT EXISTS agent_telemetry (
                 id VARCHAR PRIMARY KEY,
@@ -128,6 +139,7 @@ class AnalyticsDB:
             CREATE INDEX IF NOT EXISTS idx_ticker_time ON ohlcv_history(ticker, timestamp DESC);
             CREATE INDEX IF NOT EXISTS idx_raw_ticker_time ON raw_market_data(ticker, timestamp DESC);
             CREATE INDEX IF NOT EXISTS idx_clean_ticker_time ON clean_market_data(ticker, timestamp DESC);
+            CREATE INDEX IF NOT EXISTS idx_features_ticker_time ON market_features(ticker, timestamp DESC);
             CREATE INDEX IF NOT EXISTS idx_telemetry_correlation ON agent_telemetry(correlation_id);
             CREATE INDEX IF NOT EXISTS idx_performance_ticker ON agent_performance(ticker);
 
@@ -406,12 +418,115 @@ class AnalyticsDB:
             
             rows_inserted = len(df)
             logger.info(f"📊 Inserted {rows_inserted} rows for {ticker}")
+
+            # Trigger feature calculation automatically upon ingestion to ohlcv_history
+            if table_name == 'ohlcv_history':
+                try:
+                    self.calculate_and_ingest_features(ticker)
+                except Exception as feat_err:
+                    logger.error(f"Failed to auto-trigger feature calculation: {feat_err}")
+
             return rows_inserted
             
         except Exception as e:
             logger.error(f"Bulk insert failed: {e}")
             return 0
     
+    def calculate_and_ingest_features(self, ticker: str, window: int = 14, correlation_id: Optional[str] = None) -> int:
+        """
+        Calculate rolling spread, volatility, and volume indicators using vectorized SQL in DuckDB.
+        Saves calculated features to market_features table and logs execution telemetry.
+
+        Args:
+            ticker: Stock ticker symbol
+            window: Rolling window size (default 14 days)
+            correlation_id: Optional trace correlation ID
+
+        Returns:
+            Number of rows processed/inserted
+        """
+        import time
+        import uuid
+        start_time = time.time()
+        
+        preceding_rows = window - 1
+        
+        try:
+            # SOTA Vectorized Query using Window functions
+            self.execute("""
+                INSERT INTO market_features (ticker, timestamp, rolling_spread, rolling_volatility, rolling_volume_avg, rolling_volume_std)
+                WITH raw_features AS (
+                    SELECT 
+                        ticker,
+                        timestamp,
+                        -- Spread: (high - low) / close
+                        ((high - low) / NULLIF(close, 0)) as spread,
+                        -- Daily return: (close - lag_close) / lag_close
+                        (close - LAG(close) OVER (PARTITION BY ticker ORDER BY timestamp)) / 
+                            NULLIF(LAG(close) OVER (PARTITION BY ticker ORDER BY timestamp), 0) as daily_return,
+                        volume
+                    FROM ohlcv_history
+                    WHERE ticker = ?
+                ),
+                calculated_features AS (
+                    SELECT
+                        ticker,
+                        timestamp,
+                        AVG(spread) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN ? PRECEDING AND CURRENT ROW) as rolling_spread,
+                        -- Volatility is standard deviation of daily returns
+                        STDDEV(daily_return) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN ? PRECEDING AND CURRENT ROW) as rolling_volatility,
+                        AVG(volume) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN ? PRECEDING AND CURRENT ROW) as rolling_volume_avg,
+                        STDDEV(volume) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN ? PRECEDING AND CURRENT ROW) as rolling_volume_std
+                    FROM raw_features
+                )
+                SELECT ticker, timestamp, rolling_spread, rolling_volatility, rolling_volume_avg, rolling_volume_std
+                FROM calculated_features
+                WHERE rolling_volatility IS NOT NULL
+                ON CONFLICT (ticker, timestamp) DO UPDATE SET
+                    rolling_spread = EXCLUDED.rolling_spread,
+                    rolling_volatility = EXCLUDED.rolling_volatility,
+                    rolling_volume_avg = EXCLUDED.rolling_volume_avg,
+                    rolling_volume_std = EXCLUDED.rolling_volume_std
+            """, (ticker, preceding_rows, preceding_rows, preceding_rows, preceding_rows))
+            
+            # Fetch latest volatility to log and return row count
+            res = self.execute("SELECT COUNT(*) FROM market_features WHERE ticker = ?", (ticker,)).fetchone()
+            rows_inserted = res[0] if res else 0
+            
+            # Get latest volatility for validation telemetry
+            latest_vol_row = self.execute("""
+                SELECT rolling_volatility FROM market_features 
+                WHERE ticker = ? ORDER BY timestamp DESC LIMIT 1
+            """, (ticker,)).fetchone()
+            latest_vol = latest_vol_row[0] if latest_vol_row else 0.0
+
+            latency_ms = (time.time() - start_time) * 1000
+            
+            # Automated logging of feature parameters to telemetry database
+            telemetry_payload = {
+                "ticker": ticker,
+                "window": window,
+                "rows_processed": rows_inserted,
+                "latency_ms": latency_ms,
+                "latest_volatility": float(latest_vol) if latest_vol is not None else 0.0
+            }
+            
+            self.log_agent_message({
+                "id": str(uuid.uuid4()),
+                "correlation_id": correlation_id or str(uuid.uuid4()),
+                "sender": "AnalyticsDB",
+                "subject": "feature_calculation",
+                "payload": telemetry_payload,
+                "timestamp": datetime.now()
+            })
+            
+            logger.info(f"📊 Vectorized features ingested for {ticker}: {rows_inserted} rows in {latency_ms:.2f}ms")
+            return rows_inserted
+            
+        except Exception as e:
+            logger.error(f"Failed to calculate and ingest features: {e}")
+            return 0
+
     def get_aggregated_stats(
         self, 
         ticker: str, 
