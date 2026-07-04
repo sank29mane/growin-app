@@ -58,6 +58,7 @@ dependencies = [
     "mlx-vlm>=0.0.7",
     "pydantic-ai>=0.0.41",
     "aiofiles>=25.1.0",
+    "numba>=0.65.1",
 ]
 
 [tool.uv.sources]
