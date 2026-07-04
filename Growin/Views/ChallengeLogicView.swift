@@ -68,6 +68,9 @@ struct ChallengeLogicView: View {
                     Button("Cancel") { dismiss() }
                         .premiumTypography(.title)
                         .foregroundStyle(.secondary)
+                        .accessibilityLabel("Cancel")
+                        .accessibilityHint("Dismisses the challenge logic view")
+                        .accessibilityAddTraits(.isButton)
                     
                     PremiumButton(title: "Restitch Strategy", icon: "arrow.triangle.2.circlepath") {
                         Task {
