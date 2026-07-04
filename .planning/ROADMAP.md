@@ -27,7 +27,7 @@ This document outlines the high-level phases for the Growin App, specifically op
 **Phases Checklist:**
 - [x] **Phase 48:** High-Fidelity Feature Engineering & DuckDB Ingestion
 - [x] **Phase 49:** Apple Neural Engine (ANE) Integration for Numeric Forecasting
-- [ ] **Phase 50:** Vol-Spread GMM Clustering for Regime Classification
+- [x] **Phase 50:** Vol-Spread GMM Clustering for Regime Classification
 - [ ] **Phase 51:** Simulation-in-the-Loop Research & Swarm Gate
 - [ ] **Phase 52:** Adaptive Limit Orders with Dynamic Re-Quoting
 - [ ] **Phase 53:** Autonomic Off-Market QLoRA Fine-Tuning
@@ -35,7 +35,7 @@ This document outlines the high-level phases for the Growin App, specifically op
 ### Must-Haves
 - [ ] Vectorized feature engineering in DuckDB (PERF-04)
 - [x] Sub-millisecond forecasting on ANE/NPU (PERF-05)
-- [ ] Vol-Spread GMM Clustering for Regime Classification (ACC-01, ACC-02)
+- [x] Vol-Spread GMM Clustering for Regime Classification (ACC-01, ACC-02)
 - [ ] Simulation-in-the-Loop Research & Swarm Gate (ACC-03)
 - [ ] Adaptive Limit Orders with Dynamic Re-Quoting (EXEC-01, EXEC-02)
 - [ ] Autonomic Off-Market QLoRA Fine-Tuning (LEARN-04)
@@ -62,7 +62,7 @@ This document outlines the high-level phases for the Growin App, specifically op
     - GMM model correctly classifies at least 3 historical regimes.
     - MLX adapter hot-swap latency stays under 2ms.
 - **Requirements**: ACC-01, ACC-02
-- **Status**: ⬜ Not Started
+- **Status**: ✅ Complete (2026-07-04)
 
 ### Phase 51: Simulation-in-the-Loop Research & Swarm Gate
 - **Goal**: Prototype pre-flight trade backtesting and evaluate re-optimization vs. capital scaling policies.
