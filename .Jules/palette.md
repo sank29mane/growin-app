@@ -135,3 +135,7 @@
 ## 2026-06-25 - Text-based Button Accessibility outside Toolbars
 **Learning:** Text-based standard buttons used in custom modal layouts (like `ChallengeLogicView`) without native styling or within complex generic containers can lack explicit context for VoiceOver users, even if not explicitly `.buttonStyle(.plain)`.
 **Action:** Append `.accessibilityLabel`, `.accessibilityHint` (to describe the consequence of the action, e.g., "Dismisses the view"), and `.accessibilityAddTraits(.isButton)` to text-based buttons to provide clear context for assistive technologies.
+
+## 2026-06-25 - AccessibilityHint Missing on Generic Retry Protocol Button
+**Learning:** Found a custom `ErrorCard` SwiftUI component containing a generic "Retry Protocol" button that correctly applied `.accessibilityLabel` and `.accessibilityAddTraits(.isButton)` to combat the stripping effects of `.buttonStyle(.plain)`, but lacked an `.accessibilityHint`. Without a hint, VoiceOver users receive the name of the button but no context on what action will occur when activated, which is particularly crucial for handling error states where the user needs to know what they are retrying.
+**Action:** Always append an explicit `.accessibilityHint` (e.g., "Attempts to run the protocol simulation again") alongside the label and traits when using `.buttonStyle(.plain)` on interactive elements to provide clear consequence context for assistive technologies.
