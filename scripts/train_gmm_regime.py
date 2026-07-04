@@ -210,6 +210,22 @@ def main():
         joblib.dump(payload, args.output)
         logger.info(f"✅ GMM Model payload successfully serialized to {args.output}")
         
+        # Save npz file for CoreML/live inference loader
+        npz_output = "models/gmm_regime_params.npz"
+        npz_dir = os.path.dirname(npz_output)
+        if npz_dir:
+            os.makedirs(npz_dir, exist_ok=True)
+            
+        np.savez_compressed(
+            npz_output,
+            weights=model.weights_,
+            means=model.means_,
+            precisions_cholesky=model.precisions_cholesky_,
+            scaler_mean=scaler.mean_,
+            scaler_var=scaler.var_
+        )
+        logger.info(f"✅ GMM Model parameters successfully serialized to {npz_output}")
+        
     except Exception as e:
         logger.error(f"Failed to train GMM regime model: {e}", exc_info=True)
         sys.exit(1)

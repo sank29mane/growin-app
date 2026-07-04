@@ -38,9 +38,9 @@ created: 2026-07-01
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| 50-01-01 | 01 | 1 | ACC-01 | — | N/A | unit | `pytest tests/backend/test_features.py` | ❌ W0 | ⬜ pending |
-| 50-02-01 | 02 | 1 | ACC-01 | — | N/A | unit | `pytest tests/backend/test_training.py` | ❌ W0 | ⬜ pending |
-| 50-03-01 | 03 | 1 | ACC-01 | — | N/A | unit | `pytest tests/backend/test_serialization.py` | ❌ W0 | ⬜ pending |
+| 50-01-01 | 01 | 1 | ACC-01 | — | N/A | unit | `PYTHONPATH=. backend/.venv/bin/pytest tests/backend/test_features.py` | ✅ Yes | ✅ green |
+| 50-02-01 | 02 | 1 | ACC-01 | — | N/A | unit | `pytest tests/backend/test_training.py` | ✅ Yes | ✅ green |
+| 50-03-01 | 03 | 1 | ACC-01 | — | N/A | unit | `pytest tests/backend/test_serialization.py` | ✅ Yes | ✅ green |
 | 50-04-01 | 04 | 1 | PERF-05 | — | N/A | unit | `pytest tests/backend/test_numba.py` | ❌ W0 | ⬜ pending |
 | 50-05-01 | 05 | 1 | PERF-05 | — | N/A | unit | `pytest tests/backend/test_adapter.py` | ❌ W0 | ⬜ pending |
 | 50-06-01 | 06 | 1 | ACC-02 | — | N/A | integration | `pytest tests/backend/test_integration.py` | ❌ W0 | ⬜ pending |
@@ -51,8 +51,8 @@ created: 2026-07-01
 
 ## Wave 0 Requirements
 
-- [ ] `tests/backend/test_features.py` — stubs for features
-- [ ] `tests/backend/test_training.py` — stubs for GMM training
+- [x] `tests/backend/test_features.py` — stubs for features
+- [x] `tests/backend/test_training.py` — stubs for GMM training
 
 *If none: "Existing infrastructure covers all phase requirements."*
 
