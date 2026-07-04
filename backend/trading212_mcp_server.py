@@ -122,13 +122,20 @@ class FileCache:
         self._load_from_disk()
 
     def _load_from_disk(self):
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(asyncio.to_thread(self._sync_load_from_disk))
+        except RuntimeError:
+            self._sync_load_from_disk()
+
+    def _sync_load_from_disk(self):
         if os.path.exists(self.filename):
             try:
                 with open(self.filename, "r") as f:
                     data = json.load(f)
                     self._cache = data.get("cache", {})
                     self._timestamps = data.get("timestamps", {})
-                # Cleanup is now async, so we just clean up the memory state directly
+
                 now = time.time()
                 expired = [
                     k for k, ts in self._timestamps.items() if now - ts > self.ttl_seconds
@@ -137,11 +144,12 @@ class FileCache:
                     del self._cache[k]
                     del self._timestamps[k]
                 if expired:
-                    # Sync save because we are in __init__
-                    with open(self.filename, "w") as f:
+                    tmp_filename = self.filename + ".tmp"
+                    with open(tmp_filename, "w") as f:
                         json.dump(
                             {"cache": self._cache, "timestamps": self._timestamps}, f
                         )
+                    os.replace(tmp_filename, self.filename)
             except Exception as e:
                 print(
                     f"Warning: Failed to load cache from {self.filename}: {e}",
