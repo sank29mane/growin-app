@@ -48,9 +48,34 @@ def welford_zscore_jit(x: float, count: int, mean: float, M2: float, ddof: int) 
     std = np.sqrt(var)
     return (x - mean) / std
 
+@njit(fastmath=True, cache=True)
+def welford_update_and_zscore_jit(x: float, count: int, mean: float, M2: float, ddof: int) -> tuple[int, float, float, float]:
+    """
+    Updates the running mean/variance and computes the Z-score in a single JIT pass.
+    """
+    count += 1
+    delta = x - mean
+    mean += delta / count
+    delta2 = x - mean
+    M2 += delta * delta2
+    
+    div = count - ddof
+    if div <= 0:
+        z = 0.0
+    else:
+        var = M2 / div
+        if var <= 1e-12:
+            z = 0.0
+        else:
+            std = np.sqrt(var)
+            z = (x - mean) / std
+            
+    return count, mean, M2, z
+
 # Pre-compile the JIT functions to avoid compilation latency on the first tick
 _ = welford_update_jit(1.0, 0, 0.0, 0.0)
 _ = welford_zscore_jit(1.0, 2, 1.0, 0.5, 0)
+_ = welford_update_and_zscore_jit(1.0, 2, 1.0, 0.5, 0)
 
 class WelfordStandardizer:
     """
@@ -73,11 +98,10 @@ class WelfordStandardizer:
         Returns:
             float: Updated Z-score
         """
-        x_val = float(x)
-        self.count, self.mean, self.M2 = welford_update_jit(
-            x_val, self.count, self.mean, self.M2
+        self.count, self.mean, self.M2, z = welford_update_and_zscore_jit(
+            float(x), self.count, self.mean, self.M2, self.ddof
         )
-        return self.zscore(x_val)
+        return z
 
     def zscore(self, x: float) -> float:
         """

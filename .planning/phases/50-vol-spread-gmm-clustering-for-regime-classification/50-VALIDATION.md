@@ -43,7 +43,7 @@ created: 2026-07-01
 | 50-03-01 | 03 | 1 | ACC-01 | — | N/A | unit | `pytest tests/backend/test_serialization.py` | ✅ Yes | ✅ green |
 | 50-04-01 | 04 | 1 | PERF-05 | — | N/A | unit | `pytest tests/backend/test_numba.py` | ✅ Yes | ✅ green |
 | 50-05-01 | 05 | 1 | PERF-05 | — | N/A | unit | `pytest tests/backend/test_adapter.py` | ✅ Yes | ✅ green |
-| 50-06-01 | 06 | 1 | ACC-02 | — | N/A | integration | `pytest tests/backend/test_integration.py` | ❌ W0 | ⬜ pending |
+| 50-06-01 | 06 | 1 | ACC-02 | — | N/A | integration | `pytest tests/backend/test_integration.py` | ✅ Yes | ✅ green |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
