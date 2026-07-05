@@ -23,6 +23,8 @@ struct ConfigView: View {
                             .font(.caption)
                         SecureField("sk-...", text: $openaiApiKey)
                             .textFieldStyle(.roundedBorder)
+                            .accessibilityLabel("OpenAI API Key")
+                            .accessibilityHint("Enter your OpenAI API key")
                     }
                     
                     VStack(alignment: .leading) {
@@ -30,6 +32,8 @@ struct ConfigView: View {
                             .font(.caption)
                         SecureField("AIza...", text: $geminiApiKey)
                             .textFieldStyle(.roundedBorder)
+                            .accessibilityLabel("Gemini API Key")
+                            .accessibilityHint("Enter your Gemini API key")
                     }
                 }
                 
@@ -39,6 +43,8 @@ struct ConfigView: View {
                             .font(.caption)
                         SecureField("Your T212 API Key", text: $trading212ApiKey)
                             .textFieldStyle(.roundedBorder)
+                            .accessibilityLabel("Trading 212 API Key")
+                            .accessibilityHint("Enter your Trading 212 API key")
                     }
                     
                     Text("Required for Portfolio Analysis and Trading operations.")
