@@ -374,11 +374,11 @@ struct TradingConfigSection: View {
                     
                     VStack(spacing: 8) {
                         SecureField("API Key", text: $t212InvestKey)
-                            .accessibilityLabel("Trading 212 API Key")
-                            .accessibilityHint("Enter your Trading 212 API key")
+                            .accessibilityLabel("Trading 212 Live API Key")
+                            .accessibilityHint("Enter your live Trading 212 API key")
                         SecureField("Secret", text: $t212InvestSecret)
-                            .accessibilityLabel("Trading 212 API Secret")
-                            .accessibilityHint("Enter your Trading 212 API secret")
+                            .accessibilityLabel("Trading 212 Live API Secret")
+                            .accessibilityHint("Enter your live Trading 212 API secret")
                     }
                     .textFieldStyle(.plain)
                     .padding(10)
