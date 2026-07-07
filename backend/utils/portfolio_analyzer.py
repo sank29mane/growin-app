@@ -169,7 +169,10 @@ class PortfolioAnalyzer:
                         return float(np.linalg.norm(v_np))
             elif hasattr(self.model, '_initialized') and self.model._initialized:
                 # CoreML Path (ANE)
-                _, _, V = self.model(returns_history.astype(np.float32), return_velocity=True)
+                try:
+                    _, _, V = self.model(returns_history.astype(np.float32), return_velocity=True)
+                except TypeError:
+                    _, _, V = self.model(returns_history.astype(np.float32))
                 if V is not None:
                     if V.ndim == 3: V = V[0]
                     return float(np.linalg.norm(V))
