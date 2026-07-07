@@ -1,5 +1,14 @@
 # PROJECT: Growin
 
+## What This Is
+Growin is a self-correcting trading system for LSE Leveraged ETFs, combining local hardware-aware multi-agent intelligence with high-fidelity profit execution and a dedicated dashboard.
+
+## Core Value
+Maximize local alpha extraction through sub-2ms model hot-swapping, on-device training loops, and ANE-optimized regime forecasting on Apple Silicon.
+
+## Requirements
+See [REQUIREMENTS.md](file:///Users/sanketmane/Codes/Growin%20App/.planning/REQUIREMENTS.md) for the full checklist of functional, performance, and hardware specifications.
+
 ## Vision
 Transform Growin into a self-correcting trading weapon for LSE Leveraged ETFs, optimized for M4 Pro (48GB RAM) and high-fidelity local profit extraction. The platform combines hardware-aware MAS (Multi-Agent System) with a radical Sovereign Ledger UI.
 
