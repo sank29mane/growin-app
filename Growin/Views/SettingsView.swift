@@ -169,6 +169,8 @@ struct AIConfigSection: View {
                         .padding(10)
                         .background(Color.secondary.opacity(0.1))
                         .clipShape(.rect(cornerRadius: 8))
+                        .accessibilityLabel("OpenAI API Key Input")
+                        .accessibilityHint("Enter your OpenAI API key")
                 }
                 
                 if selectedProvider == "gemini" {
@@ -177,6 +179,8 @@ struct AIConfigSection: View {
                         .padding(10)
                         .background(Color.secondary.opacity(0.1))
                         .clipShape(.rect(cornerRadius: 8))
+                        .accessibilityLabel("Gemini API Key Input")
+                        .accessibilityHint("Enter your Gemini API key")
                 }
                 
                 statusNote
@@ -370,7 +374,11 @@ struct TradingConfigSection: View {
                     
                     VStack(spacing: 8) {
                         SecureField("API Key", text: $t212InvestKey)
+                            .accessibilityLabel("Trading 212 API Key Input")
+                            .accessibilityHint("Enter your Trading 212 API key")
                         SecureField("Secret", text: $t212InvestSecret)
+                            .accessibilityLabel("Trading 212 API Secret Input")
+                            .accessibilityHint("Enter your Trading 212 API secret")
                     }
                     .textFieldStyle(.plain)
                     .padding(10)
