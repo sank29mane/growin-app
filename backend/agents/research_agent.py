@@ -365,6 +365,7 @@ class ResearchAgent(BaseAgent):
                 "apiKey": self.newsapi_key
             }
             
+            url = "https://newsapi.org/v2/everything"
             data = await agent_http_client.execute_with_breaker(self._newsapi_cb, "GET", url, params=params)
 
             return data.get('articles', [])
@@ -456,10 +457,6 @@ class ResearchAgent(BaseAgent):
                      if "NSE" in ticker.upper(): params["country"] = "in"
 
             data = await agent_http_client.execute_with_breaker(self._newsdata_cb, "GET", url, params=params, timeout=10.0)
-
-            response = await agent_http_client.client.get(url, params=params, timeout=10.0)
-            response.raise_for_status()
-            data = response.json()
             
             # Normalize to common format
             articles = []
