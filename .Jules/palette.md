@@ -142,3 +142,7 @@
 ## 2026-07-06 - SecureField Accessibility Context
 **Learning:** In SwiftUI, `SecureField` elements that rely solely on string placeholders (e.g., `SecureField("sk-...", text: $key)`) are inherently inaccessible. VoiceOver will merely read the visual placeholder out of context. Even if visually grouped under descriptive headers, screen readers treat them as disconnected entities.
 **Action:** Systematically append `.accessibilityLabel` to explicitly name the secure input and `.accessibilityHint` to describe its purpose whenever configuring a `SecureField`.
+
+## 2026-07-09 - Premium Delight Micro-UX with Native ButtonStyle and Sensory Feedback
+**Learning:** Using `@State` and `DragGesture` to drive custom scale animations for button presses bypassing native touch handling, missing out on fluid state transitions and hardware haptics built into SwiftUI.
+**Action:** Replaced the fragile gesture tracker on `PremiumButton` with a custom `ButtonStyle` (`PremiumButtonStyle`). Utilized `configuration.isPressed` to drive a `.spring()` animated `.scaleEffect(0.92)`, and introduced native trackpad/mouse haptics via `.sensoryFeedback(trigger: configuration.isPressed) { old, new in return new ? .impact : nil }` to achieve a 'Premium Delight' micro-UX interaction on macOS.
