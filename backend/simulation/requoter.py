@@ -23,6 +23,20 @@ class AdaptiveReQuoter:
                 logger.error(f"Error in polling loop: {e}")
                 await asyncio.sleep(self.interval)
 
+    def calculate_collar(self, mid_price: float, spread_base: float, current_volatility: float):
+        regime_multiplier = self.get_regime_multiplier(self.current_regime)
+        margin = spread_base + (current_volatility * regime_multiplier)
+        return mid_price - margin, mid_price + margin
+
+    def get_regime_multiplier(self, regime: str) -> float:
+        multipliers = {
+            "low_vol": 1.0,
+            "normal": 1.5,
+            "high_vol": 2.0,
+            "extreme": 3.0
+        }
+        return multipliers.get(regime, 1.5)
+
     async def poll(self):
         # To be implemented in next tasks
         pass
