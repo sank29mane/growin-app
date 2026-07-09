@@ -146,3 +146,7 @@
 ## 2026-07-14 - LabelsHidden on Generic SwiftUI Pickers and Toggles
 **Learning:** Using `Picker("", ...)` or `Toggle("", ...)` with or without `.labelsHidden()` creates an accessibility dead-zone for VoiceOver users, who only hear the current selection or lose context entirely. However, providing a descriptive label (e.g., `Picker("Reasoning Platform", ...)`) perfectly satisfies VoiceOver context requirements while keeping the visual design constraints if `.labelsHidden()` is used.
 **Action:** Always replace empty strings with descriptive labels for Picker and Toggle elements, and append explicit `.accessibilityLabel` and `.accessibilityHint` modifiers to ensure VoiceOver preserves full semantic context.
+
+## 2026-07-09 - Premium Delight Micro-UX with Native ButtonStyle and Sensory Feedback
+**Learning:** Using `@State` and `DragGesture` to drive custom scale animations for button presses bypassing native touch handling, missing out on fluid state transitions and hardware haptics built into SwiftUI.
+**Action:** Replaced the fragile gesture tracker on `PremiumButton` with a custom `ButtonStyle` (`PremiumButtonStyle`). Utilized `configuration.isPressed` to drive a `.spring()` animated `.scaleEffect(0.92)`, and introduced native trackpad/mouse haptics via `.sensoryFeedback(trigger: configuration.isPressed) { old, new in return new ? .impact : nil }` to achieve a 'Premium Delight' micro-UX interaction on macOS.
