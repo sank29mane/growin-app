@@ -50,7 +50,8 @@ class LiveTradingLoop:
         gmm_params: Dict[str, np.ndarray],
         alpha: float = 0.05,
         leverage_coefficients: Optional[Dict[int, float]] = None,
-        telemetry_db_path: str = "simulation_telemetry.db"
+        telemetry_db_path: str = "simulation_telemetry.db",
+        alpaca_client: Any = None
     ):
         """
         Initialize the live trading loop.
@@ -62,8 +63,14 @@ class LiveTradingLoop:
             leverage_coefficients: Risk scaling coefficients mapping regime_id -> weight (default: {0: 1.0, 1: 0.5, 2: 0.1, 3: 0.05})
             telemetry_db_path: Path to the SQLite telemetry database file
         """
+        try:
+            from backend.simulation.requoter import AdaptiveReQuoter
+        except ImportError:
+            from simulation.requoter import AdaptiveReQuoter
+
         self.model_manager = model_manager
         self.gmm_params = gmm_params
+        self.alpaca_client = alpaca_client
         
         # Instantiate fast online features
         self.vol_tracker = OnlineVolatility(alpha=alpha)
@@ -101,6 +108,22 @@ class LiveTradingLoop:
         self.simulator = PreFlightSimulator()
         self.swarm_gate = RiskSwarmGate()
         self.telemetry_logger = TelemetryLogger(db_path=telemetry_db_path)
+        
+        self.requoter = AdaptiveReQuoter(
+            vol_tracker=self.vol_tracker,
+            alpaca_client=self.alpaca_client,
+            current_regime=self.current_regime
+        )
+        self.requoter_task = None
+
+    def start(self):
+        if self.requoter_task is None:
+            self.requoter_task = asyncio.create_task(self.requoter.run_polling_loop())
+
+    def stop(self):
+        if self.requoter_task:
+            self.requoter_task.cancel()
+            self.requoter_task = None
 
     def process_tick(self, mid_price: float, ask: float, bid: float) -> Dict[str, Any]:
         """
@@ -162,6 +185,7 @@ class LiveTradingLoop:
             swap_success = self.model_manager.swap_adapter(adapter_id)
             if swap_success:
                 self.current_regime = dominant_regime
+                self.requoter.current_regime = dominant_regime
                 regime_changed = True
             else:
                 logger.error(f"Failed to hot-swap model adapter to {adapter_id} for regime {dominant_regime}")
