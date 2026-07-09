@@ -70,7 +70,7 @@ This document outlines the high-level phases for the Growin App, specifically op
     - In-memory simulation checks execute within 50ms.
     - Configurable fail-safe pathways defined and empirically tested.
 - **Requirements**: ACC-03
-- **Status**: ⬜ Not Started
+- **Status**: 🏗 ACTIVE (Planned)
 
 ### Phase 52: Adaptive Limit Orders with Dynamic Re-Quoting
 - **Goal**: Implement volatility-adjusted limit orders and a dynamic re-quoting engine with emergency fallbacks.
