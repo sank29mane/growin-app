@@ -136,6 +136,8 @@ struct GoalPlannerView: View {
                             Stepper("Target Return Percentage", value: $viewModel.targetReturn, in: 2...50)
                                 .labelsHidden()
                                 .scaleEffect(0.9)
+                                .accessibilityLabel("Target Return Percentage")
+                                .accessibilityHint("Adjust the target return percentage")
                         }
                         .padding(16)
                         .background(Color.white.opacity(0.03))
@@ -153,6 +155,8 @@ struct GoalPlannerView: View {
                             Stepper("Investment Horizon Years", value: $viewModel.durationYears, in: 1...30)
                                 .labelsHidden()
                                 .scaleEffect(0.9)
+                                .accessibilityLabel("Investment Horizon Years")
+                                .accessibilityHint("Adjust the investment horizon duration in years")
                         }
                         .padding(16)
                         .background(Color.white.opacity(0.03))

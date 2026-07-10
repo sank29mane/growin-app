@@ -344,10 +344,12 @@ struct PersonaToggle: View {
             Text(title)
                 .font(.system(size: 13))
             Spacer()
-            Toggle("", isOn: $isOn).disabled(true)
+            Toggle("Enable \(title) Persona", isOn: $isOn).disabled(true)
                 .labelsHidden()
                 .toggleStyle(.switch)
                 .controlSize(.small)
+                .accessibilityLabel("Enable \(title) Persona")
+                .accessibilityHint("Toggles the \(title) strategy persona")
         }
     }
 }

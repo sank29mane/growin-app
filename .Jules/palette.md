@@ -142,3 +142,6 @@
 ## 2026-07-06 - SecureField Accessibility Context
 **Learning:** In SwiftUI, `SecureField` elements that rely solely on string placeholders (e.g., `SecureField("sk-...", text: $key)`) are inherently inaccessible. VoiceOver will merely read the visual placeholder out of context. Even if visually grouped under descriptive headers, screen readers treat them as disconnected entities.
 **Action:** Systematically append `.accessibilityLabel` to explicitly name the secure input and `.accessibilityHint` to describe its purpose whenever configuring a `SecureField`.
+## 2026-07-10 - Hidden Label Accessibility Context
+**Learning:** In SwiftUI, when interactive elements like `Toggle` or `Stepper` use the `.labelsHidden()` modifier along with empty string initializers (e.g., `Toggle("", isOn: $isOn)`), it creates an accessibility dead-zone. Screen readers lose the context of what the element controls, severely impacting navigation for visually impaired users.
+**Action:** Even when using `.labelsHidden()`, always provide a descriptive string during initialization (e.g., `Toggle("Enable Persona", isOn: $isOn)`) or append explicit `.accessibilityLabel` and `.accessibilityHint` modifiers to ensure complete context is preserved for VoiceOver.
