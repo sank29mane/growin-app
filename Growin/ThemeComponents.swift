@@ -318,6 +318,7 @@ struct MarkdownText: View {
                         })
                         .buttonStyle(.plain)
                         .accessibilityLabel(showThoughts ? "Collapse Intelligence Trace" : "Expand Intelligence Trace")
+                        .accessibilityHint(showThoughts ? "Hides the internal intelligence trace" : "Reveals the internal intelligence trace")
                         .accessibilityAddTraits(.isButton)
 
                         if showThoughts {
@@ -708,6 +709,7 @@ struct LogicTreeItem: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("\(isExpanded ? "Collapse" : "Expand") \(title)")
+            .accessibilityHint(isExpanded ? "Collapses the \(title) content" : "Expands the \(title) content to show more details")
             .accessibilityAddTraits(.isButton)
             
             if isExpanded {
