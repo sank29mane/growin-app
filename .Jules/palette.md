@@ -142,3 +142,7 @@
 ## 2026-07-06 - SecureField Accessibility Context
 **Learning:** In SwiftUI, `SecureField` elements that rely solely on string placeholders (e.g., `SecureField("sk-...", text: $key)`) are inherently inaccessible. VoiceOver will merely read the visual placeholder out of context. Even if visually grouped under descriptive headers, screen readers treat them as disconnected entities.
 **Action:** Systematically append `.accessibilityLabel` to explicitly name the secure input and `.accessibilityHint` to describe its purpose whenever configuring a `SecureField`.
+
+## 2026-07-14 - LabelsHidden on Generic SwiftUI Pickers and Toggles
+**Learning:** Using `Picker("", ...)` or `Toggle("", ...)` with or without `.labelsHidden()` creates an accessibility dead-zone for VoiceOver users, who only hear the current selection or lose context entirely. However, providing a descriptive label (e.g., `Picker("Reasoning Platform", ...)`) perfectly satisfies VoiceOver context requirements while keeping the visual design constraints if `.labelsHidden()` is used.
+**Action:** Always replace empty strings with descriptive labels for Picker and Toggle elements, and append explicit `.accessibilityLabel` and `.accessibilityHint` modifiers to ensure VoiceOver preserves full semantic context.
