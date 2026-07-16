@@ -142,3 +142,7 @@
 ## 2026-07-06 - SecureField Accessibility Context
 **Learning:** In SwiftUI, `SecureField` elements that rely solely on string placeholders (e.g., `SecureField("sk-...", text: $key)`) are inherently inaccessible. VoiceOver will merely read the visual placeholder out of context. Even if visually grouped under descriptive headers, screen readers treat them as disconnected entities.
 **Action:** Systematically append `.accessibilityLabel` to explicitly name the secure input and `.accessibilityHint` to describe its purpose whenever configuring a `SecureField`.
+
+## 2026-07-16 - Added accessibility to PersonaToggle
+**Learning:** In SwiftUI, using `Toggle("", isOn: $isOn)` with `.labelsHidden()` removes all contextual meaning for VoiceOver users, creating an accessibility dead-zone.
+**Action:** Always provide the descriptive title string to the Toggle and append explicit `.accessibilityLabel` and `.accessibilityHint` modifiers to ensure VoiceOver preserves full semantic context.
