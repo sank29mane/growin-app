@@ -92,14 +92,17 @@ struct AIConfigSection: View {
                 HStack {
                     Label("Reasoning Platform", systemImage: "server.rack")
                     Spacer()
-                    Picker("", selection: $selectedProvider) {
+                    Picker("Reasoning Platform Provider", selection: $selectedProvider) {
                         Text("Ollama").tag("ollama")
                         Text("LM Studio").tag("lmstudio")
                         Text("OpenAI").tag("openai")
                         Text("Gemini").tag("gemini")
                         Text("MLX (Local)").tag("mlx")
                     }
+                    .labelsHidden()
                     .pickerStyle(.menu)
+                    .accessibilityLabel("Reasoning Platform Provider")
+                    .accessibilityHint("Selects the provider for reasoning platform")
                     .onChange(of: selectedProvider) { _, newValue in
                         if newValue == "lmstudio" {
                             lmStudioViewModel.fetchModels()
@@ -140,10 +143,13 @@ struct AIConfigSection: View {
                         }
                     }
                     
-                    Picker("", selection: $selectedModel) {
+                    Picker("Model Selection", selection: $selectedModel) {
                         modelOptions
                     }
+                    .labelsHidden()
                     .pickerStyle(.menu)
+                    .accessibilityLabel("Model Selection")
+                    .accessibilityHint("Selects the AI model to use")
                     .disabled(selectedProvider == "lmstudio" && lmStudioViewModel.isLoadingModel)
                     .onChange(of: selectedModel) { _, newValue in
                         if selectedProvider == "lmstudio" && newValue != "lmstudio-auto" {
@@ -363,11 +369,14 @@ struct TradingConfigSection: View {
     var body: some View {
         SettingsCard(title: "Trading 212 API", icon: "dollarsign.circle.fill") {
             VStack(spacing: 20) {
-                Picker("", selection: $t212AccountType) {
+                Picker("Trading 212 Account Type", selection: $t212AccountType) {
                     Text("Invest").tag("invest")
                     Text("ISA").tag("isa")
                 }
+                .labelsHidden()
                 .pickerStyle(.segmented)
+                .accessibilityLabel("Trading 212 Account Type")
+                .accessibilityHint("Selects between Invest and ISA account types")
                 
                 VStack(alignment: .leading, spacing: 12) {
                     Text("LIVE API CREDENTIALS").font(.system(size: 10, weight: .bold))
