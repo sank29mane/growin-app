@@ -166,13 +166,37 @@ struct AppHeader: View {
     }
 }
 
+struct PremiumButtonStyle: ButtonStyle {
+    var color: Color
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .padding(.horizontal, 24)
+            .padding(.vertical, 14)
+            .background(
+                ZStack {
+                    Rectangle()
+                        .fill(color)
+
+                    Rectangle()
+                        .stroke(Color.glassBorder, lineWidth: 1)
+                }
+            )
+            .foregroundStyle(Color.textPrimary)
+            .shadow(color: color.opacity(0.4), radius: 15, x: 0, y: 8)
+            .scaleEffect(configuration.isPressed ? 0.92 : 1.0)
+            .animation(.spring(), value: configuration.isPressed)
+            .sensoryFeedback(trigger: configuration.isPressed) { old, new in
+                return new ? .impact : nil
+            }
+    }
+}
+
 struct PremiumButton: View {
     let title: String
     var icon: String? = nil
     var color: Color = .growinPrimary
     let action: () -> Void
-    
-    @State private var isPressed = false
     
     var body: some View {
         Button(action: action) {
@@ -183,29 +207,10 @@ struct PremiumButton: View {
                 Text(title)
                     .premiumTypography(.title)
             }
-            .padding(.horizontal, 24)
-            .padding(.vertical, 14)
-            .background(
-                ZStack {
-                    Rectangle()
-                        .fill(color)
-                    
-                    Rectangle()
-                        .stroke(Color.glassBorder, lineWidth: 1)
-                }
-            )
-            .foregroundStyle(Color.textPrimary)
-            .shadow(color: color.opacity(0.4), radius: 15, x: 0, y: 8)
-            .scaleEffect(isPressed ? 0.96 : 1.0)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PremiumButtonStyle(color: color))
         .accessibilityLabel(title)
         .accessibilityAddTraits(.isButton)
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { _ in withAnimation(.easeOut(duration: 0.1)) { isPressed = true } }
-                .onEnded { _ in withAnimation(.spring()) { isPressed = false } }
-        )
     }
 }
 
@@ -313,6 +318,7 @@ struct MarkdownText: View {
                         })
                         .buttonStyle(.plain)
                         .accessibilityLabel(showThoughts ? "Collapse Intelligence Trace" : "Expand Intelligence Trace")
+                        .accessibilityHint(showThoughts ? "Hides the internal intelligence trace" : "Reveals the internal intelligence trace")
                         .accessibilityAddTraits(.isButton)
 
                         if showThoughts {
@@ -703,6 +709,7 @@ struct LogicTreeItem: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("\(isExpanded ? "Collapse" : "Expand") \(title)")
+            .accessibilityHint(isExpanded ? "Collapses the \(title) content" : "Expands the \(title) content to show more details")
             .accessibilityAddTraits(.isButton)
             
             if isExpanded {

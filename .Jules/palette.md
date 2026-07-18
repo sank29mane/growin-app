@@ -142,3 +142,18 @@
 ## 2026-07-06 - SecureField Accessibility Context
 **Learning:** In SwiftUI, `SecureField` elements that rely solely on string placeholders (e.g., `SecureField("sk-...", text: $key)`) are inherently inaccessible. VoiceOver will merely read the visual placeholder out of context. Even if visually grouped under descriptive headers, screen readers treat them as disconnected entities.
 **Action:** Systematically append `.accessibilityLabel` to explicitly name the secure input and `.accessibilityHint` to describe its purpose whenever configuring a `SecureField`.
+
+## 2026-07-14 - LabelsHidden on Generic SwiftUI Pickers and Toggles
+**Learning:** Using `Picker("", ...)` or `Toggle("", ...)` with or without `.labelsHidden()` creates an accessibility dead-zone for VoiceOver users, who only hear the current selection or lose context entirely. However, providing a descriptive label (e.g., `Picker("Reasoning Platform", ...)`) perfectly satisfies VoiceOver context requirements while keeping the visual design constraints if `.labelsHidden()` is used.
+**Action:** Always replace empty strings with descriptive labels for Picker and Toggle elements, and append explicit `.accessibilityLabel` and `.accessibilityHint` modifiers to ensure VoiceOver preserves full semantic context.
+
+## 2026-07-09 - Premium Delight Micro-UX with Native ButtonStyle and Sensory Feedback
+**Learning:** Using `@State` and `DragGesture` to drive custom scale animations for button presses bypassing native touch handling, missing out on fluid state transitions and hardware haptics built into SwiftUI.
+**Action:** Replaced the fragile gesture tracker on `PremiumButton` with a custom `ButtonStyle` (`PremiumButtonStyle`). Utilized `configuration.isPressed` to drive a `.spring()` animated `.scaleEffect(0.92)`, and introduced native trackpad/mouse haptics via `.sensoryFeedback(trigger: configuration.isPressed) { old, new in return new ? .impact : nil }` to achieve a 'Premium Delight' micro-UX interaction on macOS.
+
+## 2026-07-11 - AccessibilityHint Missing on Progressive Disclosure Expand/Collapse Buttons
+**Learning:** Found custom SwiftUI components in `ThemeComponents.swift` used for progressive disclosure (expanding/collapsing sections like the Intelligence Trace toggle) that correctly applied `.accessibilityLabel` and `.accessibilityAddTraits(.isButton)` to combat the stripping effects of `.buttonStyle(.plain)`, but lacked `.accessibilityHint`. Without a hint, VoiceOver users receive the name of the button but no context on what action will occur when activated, which is particularly crucial for navigating deeply nested, collapsible information architectures.
+**Action:** Always append an explicit `.accessibilityHint` (e.g., `.accessibilityHint(isExpanded ? "Collapses the \(title) content" : "Expands the \(title) content to show more details")`) alongside the label and traits when using `.buttonStyle(.plain)` on progressive disclosure elements to provide clear consequence context for assistive technologies.
+## 2026-07-10 - Hidden Label Accessibility Context
+**Learning:** In SwiftUI, when interactive elements like `Toggle` or `Stepper` use the `.labelsHidden()` modifier along with empty string initializers (e.g., `Toggle("", isOn: $isOn)`), it creates an accessibility dead-zone. Screen readers lose the context of what the element controls, severely impacting navigation for visually impaired users.
+**Action:** Even when using `.labelsHidden()`, always provide a descriptive string during initialization (e.g., `Toggle("Enable Persona", isOn: $isOn)`) or append explicit `.accessibilityLabel` and `.accessibilityHint` modifiers to ensure complete context is preserved for VoiceOver.

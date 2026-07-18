@@ -555,21 +555,12 @@ class QuantEngine:
 
         def parse_allocations(allocations: Dict[str, Any]) -> Dict[str, Decimal]:
             parsed = {}
-            is_percentage = False
-
-            # First pass: determine if the entire dictionary represents percentages
-            for val in allocations.values():
-                val_str = str(val).strip()
-                if val_str.endswith('%'):
-                    is_percentage = True
-                    break
-
             for symbol, val in allocations.items():
                 try:
                     val_str = str(val).strip()
                     is_pct = val_str.endswith('%')
                     dec_val = create_decimal(val_str.replace('%', ''))
-                    if is_pct or is_percentage:
+                    if is_pct:
                         parsed[symbol] = dec_val / Decimal("100")
                     else:
                         parsed[symbol] = dec_val

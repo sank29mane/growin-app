@@ -126,11 +126,12 @@ graph TB
 
 Verify the system architecture, connection pooling, and test suite:
 ```bash
-# Run backend unit and integration test suite
-PYTHONPATH=backend uv run pytest tests/backend/
+# Run backend unit and integration test suite with the locked Python 3.11 environment.
+# CI=true disables native MLX imports so tests do not depend on accelerator state.
+CI=true PYTHONPATH=backend uv run --project backend pytest tests/backend/
 
 # Run performance benchmarks
-PYTHONPATH=backend uv run pytest tests/backend/test_performance_benchmarks.py
+CI=true PYTHONPATH=backend uv run --project backend pytest tests/backend/test_performance_benchmarks.py
 ```
 
 ---
