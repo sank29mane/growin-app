@@ -108,6 +108,7 @@ class MathGeneratorAgent(BaseAgent):
             HumanMessage(content=user_prompt)
         ]
         
+        content = ""
         try:
             # Generate response using ChatMLX (which handles its own internal async/sync bridging)
             # Note: ChatMLX inherited from BaseChatModel, we use ainvoke for async
