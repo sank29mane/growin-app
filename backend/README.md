@@ -80,11 +80,12 @@ Use the main project scripts at the root directory to manage FastAPI and Redis:
 
 Run the comprehensive test suite:
 ```bash
-# Run unit and integration tests
-PYTHONPATH=backend uv run pytest tests/backend/
+# Run unit and integration tests with the locked Python 3.11 environment.
+# CI=true disables native MLX imports so tests do not depend on accelerator state.
+CI=true PYTHONPATH=backend uv run --project backend pytest tests/backend/
 
 # Run performance benchmarks
-PYTHONPATH=backend uv run pytest tests/backend/test_performance_benchmarks.py -v
+CI=true PYTHONPATH=backend uv run --project backend pytest tests/backend/test_performance_benchmarks.py -v
 ```
 *   **DeepEval Integration**: Incorporates LLM-in-the-loop validation for agent outputs, verifying factual consistency, trading constraint adherence, and semantic accuracy.
 
