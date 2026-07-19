@@ -196,6 +196,7 @@ struct PremiumButton: View {
     let title: String
     var icon: String? = nil
     var color: Color = .growinPrimary
+    var accessibilityHintText: String? = nil
     let action: () -> Void
     
     var body: some View {
@@ -211,6 +212,19 @@ struct PremiumButton: View {
         .buttonStyle(PremiumButtonStyle(color: color))
         .accessibilityLabel(title)
         .accessibilityAddTraits(.isButton)
+        .modifier(OptionalAccessibilityHint(hint: accessibilityHintText))
+    }
+}
+
+struct OptionalAccessibilityHint: ViewModifier {
+    let hint: String?
+
+    func body(content: Content) -> some View {
+        if let hint = hint {
+            content.accessibilityHint(hint)
+        } else {
+            content
+        }
     }
 }
 

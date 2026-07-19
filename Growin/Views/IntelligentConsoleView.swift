@@ -30,7 +30,7 @@ struct IntelligentConsoleView: View {
                     .padding(.top, 24)
 
                     if !backendStatus.isOnline {
-                        PremiumButton(title: "BOOT ENGINE", icon: "power", color: .growinRed) {
+                        PremiumButton(title: "BOOT ENGINE", icon: "power", color: .growinRed, accessibilityHintText: "Boots up the backend engine") {
                             backendStatus.launchBackend()
                         }
                         .padding(.horizontal)
