@@ -192,6 +192,18 @@ struct PremiumButtonStyle: ButtonStyle {
     }
 }
 
+struct OptionalAccessibilityHintModifier: ViewModifier {
+    let hint: String?
+
+    func body(content: Content) -> some View {
+        if let hint = hint {
+            content.accessibilityHint(hint)
+        } else {
+            content
+        }
+    }
+}
+
 struct PremiumButton: View {
     let title: String
     var icon: String? = nil
@@ -210,21 +222,7 @@ struct PremiumButton: View {
             }
         }
         .buttonStyle(PremiumButtonStyle(color: color))
-        .accessibilityLabel(title)
-        .accessibilityAddTraits(.isButton)
-        .modifier(OptionalAccessibilityHint(hint: accessibilityHintText))
-    }
-}
-
-struct OptionalAccessibilityHint: ViewModifier {
-    let hint: String?
-
-    func body(content: Content) -> some View {
-        if let hint = hint {
-            content.accessibilityHint(hint)
-        } else {
-            content
-        }
+        .modifier(OptionalAccessibilityHintModifier(hint: accessibilityHintText))
     }
 }
 
