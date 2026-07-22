@@ -727,6 +727,7 @@ async def list_tools() -> list[Tool]:
                     "pie_name": {"type": "string"},
                     "weights": {
                         "type": "object",
+                        "description": "Dictionary mapping ticker to explicit target weight as a float (e.g. 0.5 for 50%). Do not use whole numbers for percentages.",
                         "additionalProperties": {"type": "number"},
                     },
                 },
@@ -1080,9 +1081,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 instruments.append(
                     {
                         "ticker": normalize_ticker(ticker),
-                        "targetShare": float(weight) / 100.0
-                        if float(weight) > 1.0
-                        else float(weight),
+                        "targetShare": float(weight),
                     }
                 )
 
