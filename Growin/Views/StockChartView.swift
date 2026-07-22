@@ -131,7 +131,7 @@ struct StockChartView: View {
                 Spacer()
 
                 HStack(spacing: 12) {
-                    PremiumButton(title: "Analyze", icon: "sparkles", color: Color.stitchNeonIndigo) {
+                    PremiumButton(title: "Analyze", icon: "sparkles", color: Color.stitchNeonIndigo, accessibilityHintText: "Initiates AI analysis on the current stock chart") {
                         createNewChatFromChart()
                     }
                     

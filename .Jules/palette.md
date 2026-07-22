@@ -157,3 +157,6 @@
 ## 2026-07-10 - Hidden Label Accessibility Context
 **Learning:** In SwiftUI, when interactive elements like `Toggle` or `Stepper` use the `.labelsHidden()` modifier along with empty string initializers (e.g., `Toggle("", isOn: $isOn)`), it creates an accessibility dead-zone. Screen readers lose the context of what the element controls, severely impacting navigation for visually impaired users.
 **Action:** Even when using `.labelsHidden()`, always provide a descriptive string during initialization (e.g., `Toggle("Enable Persona", isOn: $isOn)`) or append explicit `.accessibilityLabel` and `.accessibilityHint` modifiers to ensure complete context is preserved for VoiceOver.
+## 2026-07-20 - Missing AccessibilityHint on Reusable Custom Buttons
+**Learning:** Found a custom UI component (`PremiumButton` in `ThemeComponents.swift`) that correctly used `.accessibilityLabel` and `.accessibilityAddTraits(.isButton)` but lacked a way to provide an `.accessibilityHint`. This led to implementations like "BOOT ENGINE" and "Analyze" lacking consequence context for VoiceOver users.
+**Action:** Always include an optional `accessibilityHint` parameter when creating custom interactive components (like `PremiumButton`), and explicitly provide it at the call site to ensure VoiceOver users understand the specific action outcome.
