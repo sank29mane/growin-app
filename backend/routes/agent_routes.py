@@ -5,6 +5,8 @@ Agent status and health check endpoints
 from fastapi import APIRouter
 import logging
 import asyncio
+import httpx
+from utils.error_handler import APIError, DatabaseError
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -44,7 +46,7 @@ async def get_agents_status():
         if forecaster.loading:
             response["specialists"]["forecasting_agent"]["status"] = "loading"
             response["specialists"]["forecasting_agent"]["detail"] = "Loading TTM-R2 weights..."
-    except Exception:
+    except (ImportError, RuntimeError):
         pass
 
     return response
@@ -77,7 +79,7 @@ async def get_available_models():
         if loaded:
              # Update common models list if needed or just provide as info
              pass
-    except Exception:
+    except (RuntimeError, httpx.RequestError):
         pass
 
     result = {
@@ -142,7 +144,7 @@ async def get_lmstudio_models():
         # Cache for 60 seconds
         cache.set(cache_key, result, ttl=60)
         return result
-    except Exception as e:
+    except (RuntimeError, httpx.RequestError) as e:
         logger.warning(f"Failed to fetch LM Studio models: {e}")
         return {
             "models": [],
@@ -207,7 +209,7 @@ async def load_lmstudio_model(request: LMStudioLoadRequest):
         else:
             status_manager.set_status("lmstudio", "error", f"Failed to load {model_id}")
             return {"status": "error", "message": f"Failed to load {model_id}"}
-    except Exception as e:
+    except (RuntimeError, httpx.RequestError) as e:
         logger.error(f"LM Studio load error: {e}")
         status_manager.set_status("lmstudio", "error", str(e))
         return {"status": "error", "message": str(e)}
@@ -247,7 +249,7 @@ async def get_lmstudio_status():
         # Cache for 15s to bridge the polling interval without spamming LM Studio logs
         cache.set(cache_key, result, ttl=15)
         return result
-    except Exception as e:
+    except (RuntimeError, httpx.RequestError) as e:
         logger.warning(f"Failed to get LM Studio status: {e}")
         return LMStudioStatusResponse(status="error", active=False)
 
@@ -323,6 +325,6 @@ async def search_hf_models(query: str, limit: int = 10):
             })
             
         return {"models": results}
-    except Exception as e:
+    except (ImportError, httpx.RequestError, RuntimeError) as e:
         logger.error(f"HF search error: {e}")
         return {"error": str(e), "models": []}
