@@ -1,9 +1,9 @@
 """Canonical execution models shared by routes and broker dispatchers."""
 
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 

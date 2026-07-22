@@ -27,7 +27,6 @@ from typing import Any, Iterator, Mapping, Optional
 from .models import (
     AdmissionDecision,
     ExecutionAdmission,
-    ExecutionAdmissionInput,
     OrderAck,
     OrderIntent,
     OrderSide,
@@ -1457,7 +1456,6 @@ class ExecutionLedger:
             if reservation_row is None:
                 raise ApprovalConflict("active reservation is required before reconciliation")
             reservation = self._reservation_from_row(reservation_row)
-            ack_id = str(row["acknowledgment_json"] or "")
             if row["acknowledgment_json"]:
                 ack = _ack_from_json(str(row["acknowledgment_json"]))
                 expected_broker_order_id = ack.broker_order_id

@@ -4,7 +4,6 @@ from decimal import Decimal
 import pytest
 
 from execution import ExecutionLedger, ExecutionService, PaperDispatcher
-from execution.service import ExecutionConflictError
 from execution.models import OrderIntent
 
 
