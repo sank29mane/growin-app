@@ -198,45 +198,67 @@ private struct DiscoveryHomeView: View {
                 
                 LazyVGrid(columns: columns, spacing: 16) {
                     ForEach(tiles, id: \.title) { tile in
-                        Button(action: { onTileTap(tile.title) }) {
-                            HStack(spacing: 12) {
-                                Image(systemName: tile.icon)
-                                    .font(.system(size: 14))
-                                    .foregroundStyle(tile.iconColor)
-                                
-                                Text(tile.title)
-                                    .font(SovereignTheme.Fonts.spaceGrotesk(size: 14))
-                                    .foregroundStyle(Color.brutalOffWhite)
-                                
-                                Spacer()
-                                
-                                Image(systemName: "arrow.right.circle.fill")
-                                    .foregroundStyle(Color.white.opacity(0.2))
-                            }
-                            .padding(16)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color.white.opacity(0.04))
-                            .clipShape(RoundedRectangle(cornerRadius: 12)) // Mac-native rounded style
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 12)
-                                    .stroke(Color.white.opacity(0.08), lineWidth: 1)
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Explore \(tile.title)")
-                        .accessibilityHint("Starts a conversation about \(tile.title)")
-                        .accessibilityAddTraits(.isButton)
-                        // Simple hover mechanic simulator
-                        .onHover { isHovered in
-                            if isHovered {
-                                NSCursor.pointingHand.push()
-                            } else {
-                                NSCursor.pop()
-                            }
-                        }
+                        DiscoveryTileButton(
+                            title: tile.title,
+                            icon: tile.icon,
+                            iconColor: tile.iconColor,
+                            onTileTap: onTileTap
+                        )
                     }
                 }
                 .frame(maxWidth: 600)
+            }
+        }
+    }
+}
+
+struct DiscoveryTileButton: View {
+    let title: String
+    let icon: String
+    let iconColor: Color
+    let onTileTap: (String) -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: { onTileTap(title) }) {
+            HStack(spacing: 12) {
+                Image(systemName: icon)
+                    .font(.system(size: 14))
+                    .foregroundStyle(iconColor)
+
+                Text(title)
+                    .font(SovereignTheme.Fonts.spaceGrotesk(size: 14))
+                    .foregroundStyle(Color.brutalOffWhite)
+
+                Spacer()
+
+                Image(systemName: "arrow.right.circle.fill")
+                    .foregroundStyle(Color.white.opacity(0.2))
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.white.opacity(0.04))
+            .clipShape(RoundedRectangle(cornerRadius: 12)) // Mac-native rounded style
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(Color.white.opacity(0.08), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Explore \(title)")
+        .accessibilityHint("Starts a conversation about \(title)")
+        .accessibilityAddTraits(.isButton)
+        .onHover { hovering in
+            isHovered = hovering
+            if hovering {
+                NSCursor.pointingHand.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
+        .onDisappear {
+            if isHovered {
+                NSCursor.pop()
             }
         }
     }

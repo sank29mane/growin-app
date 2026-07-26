@@ -86,6 +86,11 @@ struct LedgerRow: View {
                 NSCursor.pop()
             }
         }
+        .onDisappear {
+            if isHovered {
+                NSCursor.pop()
+            }
+        }
     }
 }
 
