@@ -1,5 +1,9 @@
 import SwiftUI
 
+#if os(macOS)
+import AppKit
+#endif
+
 /// MainTabView: The root navigation for the Sovereign UI.
 /// Uses a macOS-style NavigationSplitView with a brutalist sidebar and 0px corners.
 public struct MainTabView: View {
@@ -177,6 +181,8 @@ private struct SidebarButton: View {
     let isActive: Bool
     let action: () -> Void
     
+    @State private var isHovered = false
+
     var body: some View {
         Button(action: action) {
             HStack(spacing: 12) {
@@ -198,14 +204,33 @@ private struct SidebarButton: View {
             }
             .padding(.horizontal, 20)
             .frame(height: 48) // High-density
-            .foregroundStyle(isActive ? Color.brutalChartreuse : Color.brutalOffWhite)
-            .background(isActive ? Color.white.opacity(0.05) : Color.clear)
+            .foregroundStyle(isActive ? Color.brutalChartreuse : (isHovered ? Color.white : Color.brutalOffWhite))
+            .background(isActive ? Color.white.opacity(0.05) : (isHovered ? Color.white.opacity(0.02) : Color.clear))
             .border(isActive ? Color.white.opacity(0.1) : Color.clear, width: 1) // 0px corners
         }
         .buttonStyle(.plain)
         .accessibilityLabel(label)
         .accessibilityHint("Navigates to the \(label) view")
         .accessibilityAddTraits(isActive ? [.isSelected, .isButton] : [.isButton])
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovered = hovering
+            }
+            #if os(macOS)
+            if hovering {
+                NSCursor.pointingHand.push()
+            } else {
+                NSCursor.pop()
+            }
+            #endif
+        }
+        .onDisappear {
+            #if os(macOS)
+            if isHovered {
+                NSCursor.pop()
+            }
+            #endif
+        }
     }
 }
 
