@@ -445,7 +445,7 @@ class QuantEngine:
                 
                 # Calculate daily returns: (P[t] - P[t-1]) / P[t-1]
                 # Avoid division by zero
-                denom = closes[:-1]
+                denom = closes[:-1].copy()
                 denom[denom == 0] = 1.0
                 rets = (closes[1:] - closes[:-1]) / denom
                 returns_matrix[:, j] = rets
