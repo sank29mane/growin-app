@@ -18,6 +18,10 @@ from utils import sanitize_nan
 from utils.currency_utils import normalize_all_positions, calculate_portfolio_value, CurrencyNormalizer
 from utils.ticker_utils import normalize_ticker
 from utils.http_client import agent_http_client
+from resilience import get_circuit_breaker
+
+t212_circuit = get_circuit_breaker("t212", failure_threshold=3, recovery_timeout=30.0)
+yahoo_circuit = get_circuit_breaker("yahoo", failure_threshold=3, recovery_timeout=30.0)
 
 # Type checking import
 from typing import TYPE_CHECKING
@@ -39,7 +43,7 @@ async def get_account_summary():
     Fetch aggregated account summary from Trading 212 via pooled connection.
     """
     try:
-        response = await agent_http_client.client.get("http://127.0.0.1:8001/t212/account", timeout=5.0)
+        response = await agent_http_client.execute_with_breaker(t212_circuit, "GET", "http://127.0.0.1:8001/t212/account", timeout=5.0)
         response.raise_for_status()
         return response.json()
     except Exception as e:
@@ -52,7 +56,7 @@ async def get_positions():
     Fetch all active positions from Trading 212.
     """
     try:
-        response = await agent_http_client.client.get("http://127.0.0.1:8001/t212/positions", timeout=5.0)
+        response = await agent_http_client.execute_with_breaker(t212_circuit, "GET", "http://127.0.0.1:8001/t212/positions", timeout=5.0)
         response.raise_for_status()
         return response.json()
     except Exception as e:
@@ -303,7 +307,7 @@ async def handle_get_price_history(
         url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}?range={period}&interval={interval}"
 
     try:
-        resp = await agent_http_client.client.get(url, headers=headers, timeout=10.0)
+        resp = await agent_http_client.execute_with_breaker(yahoo_circuit, "GET", url, headers=headers, timeout=10.0)
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
@@ -444,7 +448,7 @@ async def handle_get_current_price(arguments: Dict[str, Any]) -> List[TextConten
         url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}?range=1d&interval=1d"
         headers = {'User-Agent': 'Mozilla/5.0'}
 
-        resp = await agent_http_client.client.get(url, headers=headers, timeout=10.0)
+        resp = await agent_http_client.execute_with_breaker(yahoo_circuit, "GET", url, headers=headers, timeout=10.0)
         resp.raise_for_status()
         data = resp.json()
 
