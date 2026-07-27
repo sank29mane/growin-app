@@ -42,7 +42,7 @@ class NewsDataIOClient:
         
         try:
             # SOTA: Transition to central http_client for connection pooling
-            resp = await agent_http_client.client.get(self.base_url, params=params, timeout=10.0)
+            resp = await agent_http_client.execute_with_breaker(newsdata_circuit, "GET", self.base_url, params=params, timeout=10.0)
             if resp.status_code == 200:
                 data = resp.json()
                 results = data.get('results', [])

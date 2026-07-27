@@ -145,6 +145,7 @@ class MathGeneratorAgent(BaseAgent):
             if self.model_name == "granite-tiny":
                  self.logger.info("Retrying with fallback model (LFM)...")
                  self.llm.model_name = "native-mlx" # Assuming this maps to LFM in ChatMLX
+                 content = ""
                  try:
                      result = await self.llm.ainvoke(messages)
                      content = result.content

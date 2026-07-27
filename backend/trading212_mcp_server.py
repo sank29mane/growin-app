@@ -1078,10 +1078,18 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             # Map weights to instruments list format for T212 API
             instruments = []
             for ticker, weight in weights.items():
+                w_float = float(weight)
+                if w_float < 0.0 or w_float > 1.0:
+                    return [
+                        TextContent(
+                            type="text",
+                            text=f"Error: Trading212 Pies do not support shorts or margin leverage. Weight for {ticker} ({w_float}) must be between 0.0 and 1.0."
+                        )
+                    ]
                 instruments.append(
                     {
                         "ticker": normalize_ticker(ticker),
-                        "targetShare": float(weight),
+                        "targetShare": w_float,
                     }
                 )
 
