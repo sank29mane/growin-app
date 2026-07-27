@@ -163,6 +163,7 @@
 ## 2026-07-26 - Native Hover State for Sidebar Navigation
 **Learning:** Found that custom brutalist sidebar navigation items in `MainTabView` lacked any visual or tactile feedback when hovered, relying solely on standard non-interactive text coloring before selection. This makes the UI feel unresponsive and less intuitive on macOS where pointer interactions are primary.
 **Action:** Always implement a subtle `.onHover` interaction (e.g., a slight background opacity change and text brightening) paired with `NSCursor.pointingHand.push()` and `.pop()` for custom plain-styled buttons to provide immediate, satisfying micro-interaction feedback.
+
 ## 2026-07-26 - NSCursor Stack Balancing in SwiftUI
 **Learning:** In SwiftUI macOS development, manually pushing `NSCursor` within `.onHover` without a fallback can cause a stuck cursor if the view is removed from the hierarchy while hovered, as the `hovering == false` closure is never triggered.
 **Action:** Always balance `NSCursor.push()` calls by adding an `.onDisappear` modifier that conditionally calls `NSCursor.pop()` if the view was in a hovered state at the time of its removal.

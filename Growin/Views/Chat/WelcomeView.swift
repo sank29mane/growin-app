@@ -128,6 +128,11 @@ struct SuggestionChip: View {
                 NSCursor.pop()
             }
         }
+        .onDisappear {
+            if isHovered {
+                NSCursor.pop()
+            }
+        }
         .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isHovered)
     }
 }
