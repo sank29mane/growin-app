@@ -22,6 +22,11 @@ dist/
 build/
 *.egg-info/
 *.db
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*-wal
+*-shm
 yfinance.cache
 .env.example
 ollama.log
@@ -70,10 +75,8 @@ backend/*.pid
 .t212_cache.json
 backend/.t212_cache.json
 
-# Tooling Cache
-graphify-out/cache/
+# Tooling artifacts (local only)
+graphify-out/
 
 # Model adapters
 /adapters/
-
-

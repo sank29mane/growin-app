@@ -1,9 +1,11 @@
-import pytest_asyncio
-import sys
-import os
+import asyncio
 import importlib.util
-from unittest.mock import MagicMock, AsyncMock, patch
+import os
+import sys
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
+import pytest_asyncio
 
 # --- Python 3.13 Fixes ---
 orig_find_spec = importlib.util.util.find_spec if hasattr(importlib.util, 'util') else importlib.util.find_spec
@@ -14,12 +16,16 @@ def patched_find_spec(name, package=None):
         return None
 importlib.util.find_spec = patched_find_spec
 
-# Ensure backend is in path
-backend_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "backend")
-if backend_path not in sys.path:
-    sys.path.insert(0, backend_path)
-
-import asyncio
+# Ensure both supported import styles resolve. The repository contains legacy
+# flat imports (``from execution import ...``) and package imports
+# (``from backend.execution import ...``); pytest must expose both roots.
+project_root = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
+backend_path = os.path.join(project_root, "backend")
+for import_root in (project_root, backend_path):
+    if import_root not in sys.path:
+        sys.path.insert(0, import_root)
 
 # --- Session-scoped event loop so async session fixtures work in STRICT mode ---
 @pytest.fixture(scope="session")
@@ -79,7 +85,8 @@ MOCK_MODULES = [
 def make_async(obj):
     """Recursively wrap all callable attributes of a MagicMock into AsyncMocks."""
     for name in dir(obj):
-        if name.startswith('_'): continue
+        if name.startswith("_"):
+            continue
         attr = getattr(obj, name)
         if callable(attr) and not isinstance(attr, (AsyncMock, MagicMock)):
             setattr(obj, name, AsyncMock())

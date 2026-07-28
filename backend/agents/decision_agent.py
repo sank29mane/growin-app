@@ -141,7 +141,9 @@ class DecisionAgent:
     Performance: 5-8s (LLM reasoning time)
     """
 
-    INTERCEPTED_TOOLS = SENSITIVE_TOOLS
+    # Agents may consult read-only tools, but broker mutations always require a
+    # separately authorized execution path outside the reasoning loop.
+    INTERCEPTED_TOOLS = frozenset(SENSITIVE_TOOLS)
 
     def __init__(self, model_name: str = "native-mlx", api_keys: Optional[Dict[str, str]] = None, mcp_client=None):
 
@@ -324,7 +326,7 @@ class DecisionAgent:
             if trade_proposal:
                 from app_context import state
                 proposal_id = trade_proposal.get("proposal_id")
-                state.trade_proposals[proposal_id] = trade_proposal
+                state.register_trade_proposal(trade_proposal)
                 context.user_context["pending_proposal"] = trade_proposal
                 logger.info(f"DecisionAgent: Detected trade proposal for {trade_proposal.get('ticker')} ({proposal_id}). Routing to HITL gate.")
 
@@ -694,15 +696,9 @@ class DecisionAgent:
                         tool_name = t_call.tool_name
                         tool_args = t_call.arguments
                         try:
-                            # Security Interception (SOTA 2026 Phase 31: Autonomous Bypass for High Conviction)
-                            is_high_conviction = t_call.is_high_conviction or t_call.conviction_level == 10
-                            
-                            if tool_name in self.INTERCEPTED_TOOLS and not is_high_conviction:
-                                logger.info(f"DecisionAgent: INTERCEPTING sensitive tool {tool_name}")
-                                return f"[ACTION_REQUIRED:{tool_name}] Parameters: {json.dumps(tool_args)}. Unauthorized for autonomous execution. Requires UI confirmation."
-
-                            if is_high_conviction and tool_name in self.INTERCEPTED_TOOLS:
-                                logger.info(f"DecisionAgent: AUTONOMOUS BYPASS for sensitive tool {tool_name} (High Conviction Detected)")
+                            if tool_name in self.INTERCEPTED_TOOLS:
+                                logger.info(f"DecisionAgent: BLOCKING sensitive tool {tool_name}")
+                                return f"[ACTION_REQUIRED:{tool_name}] Parameters: {json.dumps(tool_args)}. Broker execution is unavailable to agents. Requires UI confirmation; return a trade proposal."
 
                             logger.info(f"DecisionAgent: Executing Tool {tool_name}")
 
@@ -1258,7 +1254,9 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
                 "quantity": quantity,
                 "reasoning": reasoning,
                 "status": "PENDING",
-                "bypass_confirmation": "HIGH CONVICTION" in (context.reasoning or "").upper() or "CONVICTION LEVEL: 10" in text.upper(),
+                # Retained for response compatibility. Agent confidence never
+                # grants execution authority or bypasses human approval.
+                "bypass_confirmation": False,
                 "timestamp": datetime.now().timestamp()
             }
         except Exception as e:
