@@ -250,16 +250,20 @@ struct DiscoveryTileButton: View {
         .accessibilityAddTraits(.isButton)
         .onHover { hovering in
             isHovered = hovering
+            #if os(macOS)
             if hovering {
                 NSCursor.pointingHand.push()
             } else {
                 NSCursor.pop()
             }
+            #endif
         }
         .onDisappear {
+            #if os(macOS)
             if isHovered {
                 NSCursor.pop()
             }
+            #endif
         }
     }
 }
