@@ -213,6 +213,10 @@ class ApprovalService:
             "ticker": intent["ticker"],
             "side": intent["side"],
             "quantity": intent["quantity"],
+            "order_type": intent.get("order_type"),
+            "limit_price": intent.get("limit_price"),
+            "replaces_proposal_id": intent.get("replaces_proposal_id", ""),
+            "requote_id": intent.get("requote_id", ""),
             "admitted_quantity": str(admission.final_quantity),
             "currency": admission.currency,
             "price": str(admission.price),
@@ -248,9 +252,35 @@ class ApprovalService:
     ) -> ClaimResult:
         """Verify outside SQLite, then atomically consume and claim in the ledger."""
 
+        challenge = self.verify_signature(proposal_id, challenge_id, signature_der)
+        key = self._ledger.get_approval_key()
+        if key is None:
+            # Kept for type narrowing; verify_signature has already enforced this.
+            raise ApprovalConflict("approval signer is not enrolled")
+        payload_hash = hashlib.sha256(challenge.signed_payload).hexdigest()
+        return self._ledger.claim_with_approval(
+            proposal_id=proposal_id,
+            challenge_id=challenge_id,
+            key_id=key.key_id,
+            signature_der=bytes(signature_der),
+            verified_payload_hash=payload_hash,
+            now_epoch=_epoch(self._clock()),
+        )
+
+    def verify_signature(
+        self, proposal_id: str, challenge_id: str, signature_der: bytes
+    ) -> ApprovalChallenge:
+        """Verify one fresh signature without consuming approval or dispatching.
+
+        This is intentionally useful only to constrained local UAT.  It does
+        not claim the order, write approval evidence, or alter the order
+        state; normal execution must continue through ``approve_signed``.
+        """
         challenge = self._ledger.get_approval_challenge(challenge_id)
         if challenge is None or challenge.proposal_id != proposal_id:
             raise ApprovalConflict("approval challenge was not found")
+        if _epoch(self._clock()) >= challenge.expires_at_epoch:
+            raise ApprovalConflict("approval challenge is expired")
         key = self._ledger.get_approval_key()
         if key is None or key.key_id != challenge.key_id:
             raise ApprovalConflict("approval signer is not enrolled")
@@ -263,14 +293,14 @@ class ApprovalService:
             )
         except (InvalidSignature, ValueError) as exc:
             raise ApprovalVerificationError("approval signature is invalid") from exc
-        payload_hash = hashlib.sha256(challenge.signed_payload).hexdigest()
-        return self._ledger.claim_with_approval(
-            proposal_id=proposal_id,
-            challenge_id=challenge_id,
-            key_id=key.key_id,
-            signature_der=bytes(signature_der),
-            verified_payload_hash=payload_hash,
-            now_epoch=_epoch(self._clock()),
+        return ApprovalChallenge(
+            challenge_id=challenge.challenge_id,
+            proposal_id=challenge.proposal_id,
+            key_id=challenge.key_id,
+            intent_hash=challenge.intent_hash,
+            signed_payload=challenge.signed_payload,
+            issued_at_epoch=challenge.issued_at_epoch,
+            expires_at_epoch=challenge.expires_at_epoch,
         )
 
     def create_control_challenge(self, *, ttl_seconds: int = 60) -> ControlChallenge:

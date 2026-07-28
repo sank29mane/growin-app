@@ -12,6 +12,50 @@ from resilience import get_circuit_breaker, CircuitBreakerOpenError
 
 logger = logging.getLogger(__name__)
 
+TRADING212_SERVER_NAME = "Trading 212"
+TRADING212_READ_ACCESS_ENV = "GROWIN_ENABLE_TRADING212_READS"
+TRADING212_READ_ONLY_ENV = "GROWIN_TRADING212_READ_ONLY"
+
+
+def trading212_read_access_enabled() -> bool:
+    """Return whether this process may establish a Trading 212 read session."""
+    return os.getenv(TRADING212_READ_ACCESS_ENV, "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
+def is_trading212_server_config(config: Dict) -> bool:
+    """Identify the local Trading 212 MCP even when its display name is aliased."""
+    normalized_name = "".join(
+        character for character in str(config.get("name", "")).lower()
+        if character.isalnum()
+    )
+    executable_parts = [config.get("command", ""), *(config.get("args") or [])]
+    executable_names = {
+        os.path.basename(str(part)).lower()
+        for part in executable_parts
+        if part
+    }
+    return (
+        "trading212" in normalized_name
+        or "trading212_mcp_server.py" in executable_names
+    )
+
+
+def build_mcp_subprocess_environment(config: Dict) -> Dict[str, str]:
+    """Build a child environment, forcing recognized broker MCPs read-only."""
+    custom_env = {
+        key: str(value)
+        for key, value in (config.get("env") or {}).items()
+        if value and str(value).strip()
+    }
+    environment = {**os.environ.copy(), **custom_env}
+    if is_trading212_server_config(config):
+        environment[TRADING212_READ_ONLY_ENV] = "1"
+    return environment
+
 
 class MultiMCPManager:
     """
@@ -39,10 +83,21 @@ class MultiMCPManager:
 
     @asynccontextmanager
     async def connect_all(self, server_configs: List[Dict]):
-        """Connect to all configured servers with graceful handling"""
+        """Connect non-broker servers during application startup.
+
+        Trading 212 read access is intentionally excluded here.  A process-wide
+        environment flag may permit a deliberate read-only connection through
+        ``connect_server``, but it is not authority to connect a personal broker
+        account merely because the API server starts.
+        """
         try:
             for config in server_configs:
                 self._server_configs[config["name"]] = config
+                if is_trading212_server_config(config):
+                    logger.info(
+                        "Trading 212 startup connection skipped; broker reads require an explicit request"
+                    )
+                    continue
                 await self.connect_server(config)
             yield self
         finally:
@@ -58,6 +113,17 @@ class MultiMCPManager:
         """
         name = config["name"]
         server_type = config["type"]
+        is_trading212 = is_trading212_server_config(config)
+
+        if is_trading212 and not trading212_read_access_enabled():
+            logger.warning(
+                "Trading 212 connection blocked; set %s=true to explicitly enable broker reads",
+                TRADING212_READ_ACCESS_ENV,
+            )
+            return False
+        if is_trading212 and server_type != "stdio":
+            logger.error("Trading 212 connection blocked: only local read-only stdio is allowed")
+            return False
         
         # Check if this server recently failed
         if name in self._failed_servers:
@@ -79,13 +145,10 @@ class MultiMCPManager:
                     if os.path.exists(potential_path):
                         args[0] = potential_path
                 
-                # Filter out empty environment variables to allow .env fallbacks
-                custom_env = {k: v for k, v in (config.get("env") or {}).items() if v and str(v).strip()}
-                
                 server_params = StdioServerParameters(
                     command=command,
                     args=args,
-                    env={**os.environ.copy(), **custom_env}
+                    env=build_mcp_subprocess_environment(config),
                 )
                 
                 read, write = await self._exit_stack.enter_async_context(stdio_client(server_params))

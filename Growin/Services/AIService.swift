@@ -97,6 +97,99 @@ class AIService {
 
     // MARK: - Phase 30: Trade HITL Approval
 
+    func enrollApprovalKey(identity: ApprovalSignerIdentity, token: String) async throws -> String {
+        let result: ApprovalEnrollmentResponse = try await postJSON(
+            endpoint: "/api/ai/trade/approval/enroll",
+            body: [
+                "public_key_x963_b64": identity.publicKeyX963.base64EncodedString(),
+                "enrollment_token": token,
+            ]
+        )
+        guard result.keyId == identity.keyID else {
+            throw TradeApprovalReviewError.signerMismatch
+        }
+        return result.keyId
+    }
+
+    func approvalStatus() async throws -> ApprovalStatusResponse {
+        guard let url = URL(string: baseURL + "/api/ai/trade/approval/status") else {
+            throw URLError(.badURL)
+        }
+        let (data, response) = try await URLSession.shared.data(from: url)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            throw NSError(domain: "AIService.SignedApproval", code: 0,
+                          userInfo: [NSLocalizedDescriptionKey: "Approval status is unavailable."])
+        }
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(ApprovalStatusResponse.self, from: data)
+    }
+
+    func createPaperApprovalCheck() async throws -> TradeProposalData {
+        try await createUATProposal(endpoint: "/api/ai/trade/approval/uat-proposal")
+    }
+
+    func createPaperRequoteCheck() async throws -> TradeProposalData {
+        try await createUATProposal(endpoint: "/api/ai/trade/requote/uat-proposal")
+    }
+
+    func verifyPaperRequoteCheck(_ review: TradeApprovalReview, signature: Data) async throws -> String {
+        let result: ApprovalCompletionResponse = try await postJSON(
+            endpoint: "/api/ai/trade/requote/uat/verify",
+            body: [
+                "proposal_id": review.payload.proposalId,
+                "challenge_id": review.payload.challengeId,
+                "signature_der_b64": signature.base64EncodedString(),
+            ]
+        )
+        return result.message
+    }
+
+    private func createUATProposal(endpoint: String) async throws -> TradeProposalData {
+        guard let url = URL(string: baseURL + endpoint) else {
+            throw URLError(.badURL)
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode([String: String]())
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            let detail = (try? JSONDecoder().decode(ApprovalAPIError.self, from: data).detail)
+                ?? "The paper approval check could not be created."
+            throw NSError(
+                domain: "AIService.SignedApproval",
+                code: (response as? HTTPURLResponse)?.statusCode ?? 0,
+                userInfo: [NSLocalizedDescriptionKey: detail]
+            )
+        }
+        // TradeProposalData supplies explicit snake_case CodingKeys. Do not use
+        // convertFromSnakeCase here: it transforms the input before that mapping
+        // and causes a false missing `proposal_id` decoding error.
+        return try JSONDecoder().decode(TradeProposalData.self, from: data)
+    }
+
+    func requestTradeApproval(proposal: TradeProposalData) async throws -> TradeApprovalReview {
+        let challenge: ApprovalChallengeResponse = try await postJSON(
+            endpoint: "/api/ai/trade/approval/challenge",
+            body: ["proposal_id": proposal.proposalId]
+        )
+        return try TradeApprovalReview(challenge: challenge, expectedProposal: proposal)
+    }
+
+    func completeTradeApproval(_ review: TradeApprovalReview, signature: Data) async throws -> String {
+        let result: ApprovalCompletionResponse = try await postJSON(
+            endpoint: "/api/ai/trade/approval/complete",
+            body: [
+                "proposal_id": review.payload.proposalId,
+                "challenge_id": review.payload.challengeId,
+                "signature_der_b64": signature.base64EncodedString(),
+            ]
+        )
+        return result.message
+    }
+
     func approveTrade(id: String) async throws -> String {
         let url = URL(string: "\(baseURL)/api/ai/trade/approve")!
         var request = URLRequest(url: url)
@@ -139,4 +232,48 @@ class AIService {
         let result = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         return result?["message"] as? String ?? "Trade proposal rejected."
     }
+
+    private func postJSON<Response: Decodable>(
+        endpoint: String,
+        body: [String: String]
+    ) async throws -> Response {
+        guard let url = URL(string: baseURL + endpoint) else {
+            throw URLError(.badURL)
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(body)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            let detail = (try? JSONDecoder().decode(ApprovalAPIError.self, from: data).detail)
+                ?? "The signed approval request failed."
+            throw NSError(
+                domain: "AIService.SignedApproval",
+                code: (response as? HTTPURLResponse)?.statusCode ?? 0,
+                userInfo: [NSLocalizedDescriptionKey: detail]
+            )
+        }
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(Response.self, from: data)
+    }
+}
+
+private struct ApprovalEnrollmentResponse: Decodable {
+    let keyId: String
+}
+
+struct ApprovalStatusResponse: Decodable {
+    let mode: String
+    let enrolled: Bool
+    let keyId: String?
+}
+
+private struct ApprovalCompletionResponse: Decodable {
+    let message: String
+}
+
+private struct ApprovalAPIError: Decodable {
+    let detail: String
 }

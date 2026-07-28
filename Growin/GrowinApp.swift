@@ -10,6 +10,10 @@ struct GrowinApp: App {
     @State private var portfolioObserver = PortfolioSummaryObserver.shared
     
     init() {
+        // Move legacy secrets out of UserDefaults before any view model reads them.
+        // Failed items remain in UserDefaults so migration is lossless and retryable.
+        _ = KeychainStore.shared.migrateLegacyUserDefaults()
+
         // Initialize Notification Manager
         NotificationManager.shared.requestAuthorization()
         

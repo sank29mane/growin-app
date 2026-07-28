@@ -9,6 +9,7 @@ import aiofiles
 import asyncio
 import base64
 import json
+import logging
 import os
 import sys
 import time
@@ -25,6 +26,7 @@ from mcp.server.stdio import stdio_server
 from mcp.types import Resource, TextContent, Tool
 from utils import sanitize_nan
 from utils.process_guard import start_parent_watchdog
+from shared_types import SENSITIVE_TOOLS
 from utils.rate_limiter import (
     get_t212_budgeter,
     PRIORITY_EXECUTION,
@@ -39,6 +41,13 @@ start_parent_watchdog()
 LIVE_API_BASE = "https://live.trading212.com/api/v0"
 DEMO_API_BASE = "https://demo.trading212.com/api/v0"
 STATE_FILE = ".state.json"
+READ_ONLY_ENV = "GROWIN_TRADING212_READ_ONLY"
+
+logger = logging.getLogger(__name__)
+
+
+def is_read_only_mode() -> bool:
+    return os.getenv(READ_ONLY_ENV, "0").strip().lower() in {"1", "true", "yes"}
 
 
 async def _load_state(filepath: str) -> Optional[Dict[str, Any]]:
@@ -233,6 +242,11 @@ class Trading212Client:
         await self.client.aclose()
 
     async def _request(self, method: str, endpoint: str, **kwargs) -> dict:
+        if is_read_only_mode() and method.upper() != "GET":
+            raise PermissionError(
+                "Trading 212 broker mutation blocked by read-only transport"
+            )
+
         url = f"{self.base_url}/{endpoint}"
         max_retries = 3
         base_delay = 1.0
@@ -536,7 +550,7 @@ async def read_resource(uri: str) -> str:
 
 @app.list_tools()
 async def list_tools() -> list[Tool]:
-    return [
+    tools = [
         Tool(
             name="analyze_portfolio",
             description="Analyze portfolio",
@@ -828,29 +842,24 @@ async def list_tools() -> list[Tool]:
             },
         ),
     ]
+    if is_read_only_mode():
+        return [tool for tool in tools if tool.name not in SENSITIVE_TOOLS]
+    return tools
 
 
 @app.call_tool()
 async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     global active_account_type
+
+    if is_read_only_mode() and name in SENSITIVE_TOOLS:
+        raise PermissionError(f"Trading 212 mutation tool blocked in read-only mode: {name}")
+
     c = get_active_client()
 
     # SOTA 2026: Shadow Mode Interceptor (Phase 36 Wave 3)
     # Block real execution if GROWIN_SHADOW_MODE is 1
     is_shadow = os.environ.get("GROWIN_SHADOW_MODE", "0") == "1"
-    sensitive_tools = [
-        "place_market_order",
-        "place_limit_order",
-        "place_stop_order",
-        "place_stop_limit_order",
-        "cancel_order",
-        "create_investment_pie",
-        "update_investment_pie",
-        "delete_investment_pie",
-        "update_pie",
-    ]
-
-    if is_shadow and name in sensitive_tools:
+    if is_shadow and name in SENSITIVE_TOOLS:
         log_msg = (
             f"🕵️ SHADOW MODE INTERCEPT: Tool '{name}' with args {json.dumps(arguments)}"
         )

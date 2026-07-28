@@ -84,6 +84,18 @@ async def lifespan(app: FastAPI):
             logger.warning("⚠️  ANE is enabled but platform is NOT darwin (Docker/Linux?). NPU will NOT be utilized.")
     else:
         logger.info("🧠 ANE Acceleration: DISABLED (Falling back to GPU/CPU)")
+
+    execution_db_path = os.getenv("GROWIN_EXECUTION_DB_PATH")
+    execution_started = False
+    if not os.environ.get("PYTEST_CURRENT_TEST") or execution_db_path:
+        execution_started = state.start_execution(
+            execution_db_path,
+            workspace=os.getenv("GROWIN_WORKSPACE", "uk"),
+        )
+        if execution_started:
+            logger.info("✅ Local paper execution ledger: authority acquired")
+        else:
+            logger.error("⛔ Execution authority unavailable; remaining fail-closed")
     
     # 1. Ensure default MCP servers are configured
     def is_docker_available():
@@ -152,7 +164,12 @@ async def lifespan(app: FastAPI):
     # 3. Connect to MCP servers with graceful degradation
     if os.environ.get("PYTEST_CURRENT_TEST"):
         logger.info("🧪 Test mode: Skipping real MCP connections and model init")
-        yield
+        try:
+            yield
+        finally:
+            await state.close_market_data()
+            if execution_started:
+                state.close_execution()
         return
 
     try:
@@ -175,6 +192,9 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         logger.info("Shutting down...")
+        await state.close_market_data()
+        if execution_started:
+            state.close_execution()
         if not os.environ.get("PYTEST_CURRENT_TEST"):
             state.chat_manager.close()
 
@@ -218,11 +238,21 @@ app.add_middleware(SecurityHeadersMiddleware)
 
 # Include specialized routers
 # Include specialized routers
-from routes import chat_routes, agent_routes, market_routes, mcp_routes, chart_routes, status_routes, ai_routes
+from routes import (
+    agent_routes,
+    ai_routes,
+    chart_routes,
+    chat_routes,
+    market_data_routes,
+    market_routes,
+    mcp_routes,
+    status_routes,
+)
 
 app.include_router(chat_routes.router)
 app.include_router(agent_routes.router)
 app.include_router(market_routes.router)
+app.include_router(market_data_routes.router)
 app.include_router(mcp_routes.router)
 app.include_router(status_routes.router) # Detailed health & agent status
 app.include_router(chart_routes.router)  # Chart data and visualization
@@ -251,7 +281,9 @@ async def health_check():
     """
     return {
         "status": "healthy",
-        "database": "connected" if state.chat_manager.conn else "error"
+        "database": "connected" if state.chat_manager.conn else "error",
+        "execution_authority": state.execution_authority,
+        "execution_mode": "paper" if state.execution_authority else "disabled",
     }
 
 if __name__ == "__main__":
