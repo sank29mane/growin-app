@@ -167,3 +167,7 @@
 ## 2026-07-26 - NSCursor Stack Balancing in SwiftUI
 **Learning:** In SwiftUI macOS development, manually pushing `NSCursor` within `.onHover` without a fallback can cause a stuck cursor if the view is removed from the hierarchy while hovered, as the `hovering == false` closure is never triggered.
 **Action:** Always balance `NSCursor.push()` calls by adding an `.onDisappear` modifier that conditionally calls `NSCursor.pop()` if the view was in a hovered state at the time of its removal.
+
+## 2026-08-01 - Native Hover Feedback and Cross-Platform Cursor Handling in Loops
+**Learning:** Found custom button loops (like `AccountPicker`) in SwiftUI using plain button styles that lacked hover feedback, making the UI feel unresponsive. Furthermore, managing individual hover states and `NSCursor` pushes in a `ForEach` loop requires extracting the iteration into a distinct child view to encapsulate the `@State` properly. Without `#if os(macOS)` compiler directives, `NSCursor` references break cross-platform compilation.
+**Action:** Always extract `ForEach` iterations into child views when adding hover interactions. Apply `#if os(macOS)` to `import AppKit` and cursor manipulation (`NSCursor.push()` / `.pop()`) inside `.onHover` and `.onDisappear` to provide robust, cross-platform micro-interaction feedback.
