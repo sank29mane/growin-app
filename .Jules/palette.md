@@ -167,3 +167,9 @@
 ## 2026-07-26 - NSCursor Stack Balancing in SwiftUI
 **Learning:** In SwiftUI macOS development, manually pushing `NSCursor` within `.onHover` without a fallback can cause a stuck cursor if the view is removed from the hierarchy while hovered, as the `hovering == false` closure is never triggered.
 **Action:** Always balance `NSCursor.push()` calls by adding an `.onDisappear` modifier that conditionally calls `NSCursor.pop()` if the view was in a hovered state at the time of its removal.
+## 2026-07-31 - TextEditor Accessibility Context
+**Learning:** In SwiftUI,  elements without explicit accessibility modifiers lack context for VoiceOver users, similar to s. When visually grouped under descriptive headers (like "IDENTIFY DISCREPANCY"), screen readers treat the editor as a disconnected entity, simply announcing "TextEditor" without conveying what the user should input.
+**Action:** Always append explicit `.accessibilityLabel` and `.accessibilityHint` directly to `TextEditor` elements to provide clear context (e.g., `.accessibilityLabel("Discrepancy Description")`, `.accessibilityHint("Enter the logic discrepancy you want to challenge")`) for assistive technologies.
+## 2026-07-31 - TextEditor Accessibility Context
+**Learning:** In SwiftUI, `TextEditor` elements without explicit accessibility modifiers lack context for VoiceOver users, similar to `TextField`s. When visually grouped under descriptive headers (like "IDENTIFY DISCREPANCY"), screen readers treat the editor as a disconnected entity, simply announcing "TextEditor" without conveying what the user should input.
+**Action:** Always append explicit `.accessibilityLabel` and `.accessibilityHint` directly to `TextEditor` elements to provide clear context (e.g., `.accessibilityLabel("Discrepancy Description")`, `.accessibilityHint("Enter the logic discrepancy you want to challenge")`) for assistive technologies.
