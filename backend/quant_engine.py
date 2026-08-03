@@ -364,7 +364,8 @@ class QuantEngine:
         return signals
 
     def calculate_pivot_levels(self, ohlcv_data: List[Dict[str, Any]], order: int = 5) -> Dict[str, Decimal]:
-        if not ohlcv_data: return {"support": Decimal('0'), "resistance": Decimal('0')}
+        if not ohlcv_data or len(ohlcv_data) <= order * 2:
+            return {"support": Decimal('0'), "resistance": Decimal('0')}
         import numpy as np
         highs = np.array([float(d.get('h', d.get('high', 0))) for d in ohlcv_data], dtype=np.float64)
         lows = np.array([float(d.get('l', d.get('low', 0))) for d in ohlcv_data], dtype=np.float64)
@@ -384,22 +385,21 @@ class QuantEngine:
         if len(troughs) == 0: troughs = np.array([np.min(lows[-50:])], dtype=np.float64)
         res = np.min(peaks[peaks > current_price]) if np.any(peaks > current_price) else np.max(peaks)
         sup = np.max(troughs[troughs < current_price]) if np.any(troughs < current_price) else np.min(troughs)
-        return {"support": create_decimal(sup), "resistance": create_decimal(res)}
+        return {"support": create_decimal(str(sup)), "resistance": create_decimal(str(res))}
 
     def calculate_portfolio_metrics(self, positions: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not positions: return {"error": "No positions provided"}
 
-        # Pre-parse data into lists of `Decimal` objects to optimize loop performance
-        qtys = [create_decimal(p.get('qty') or p.get('quantity') or 0) for p in positions]
-        prices = [create_decimal(p.get('current_price') or p.get('currentPrice') or 0) for p in positions]
-        costs = [create_decimal(p.get('avg_cost') or p.get('averagePrice') or 0) for p in positions]
-
         total_value, total_cost = Decimal('0'), Decimal('0')
 
-        # Aggregate using zip to avoid repeating dict access overhead and maintain exact Decimal precision
-        for q, p, c in zip(qtys, prices, costs):
-            total_value += q * p
-            total_cost += q * c
+        # O(1) single pass aggregation to reduce memory overhead from list comprehensions
+        for p in positions:
+            qty = create_decimal(p.get('qty') or p.get('quantity') or 0)
+            price = create_decimal(p.get('current_price') or p.get('currentPrice') or 0)
+            cost = create_decimal(p.get('avg_cost') or p.get('averagePrice') or 0)
+
+            total_value += qty * price
+            total_cost += qty * cost
 
         total_pnl = total_value - total_cost
         return {"total_value": total_value, "total_cost": total_cost, "total_pnl": total_pnl, "portfolio_return": safe_div(total_pnl, total_cost), "position_count": len(positions)}
