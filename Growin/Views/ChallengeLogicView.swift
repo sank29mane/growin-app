@@ -23,6 +23,8 @@ struct ChallengeLogicView: View {
                         .premiumTypography(.overline)
                     
                     TextEditor(text: $challengeText)
+                        .accessibilityLabel("Challenge Details")
+                        .accessibilityHint("Enter the reason for challenging the logic")
                         .frame(height: 150)
                         .padding()
                         .background(
