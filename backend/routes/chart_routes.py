@@ -68,11 +68,11 @@ async def get_alpaca_chart_data(ticker: str, timeframe: str, limit: int, cache_k
                     timestamp_str += "Z"
 
                 # Normalize currency AT SOURCE
-                close_val = float(CurrencyNormalizer.normalize_price(bar_data.get("c", bar_data.get("close", 0)), ticker))
-                high_val = float(CurrencyNormalizer.normalize_price(bar_data.get("h", bar_data.get("high", 0)), ticker))
-                low_val = float(CurrencyNormalizer.normalize_price(bar_data.get("l", bar_data.get("low", 0)), ticker))
-                open_val = float(CurrencyNormalizer.normalize_price(bar_data.get("o", bar_data.get("open", 0)), ticker))
-                volume_val = int(bar_data.get("v", bar_data.get("volume", 0)))
+                close_val = float(CurrencyNormalizer.normalize_price(bar_data.get("c") or bar_data.get("close", 0), ticker))
+                high_val = float(CurrencyNormalizer.normalize_price(bar_data.get("h") or bar_data.get("high", 0), ticker))
+                low_val = float(CurrencyNormalizer.normalize_price(bar_data.get("l") or bar_data.get("low", 0), ticker))
+                open_val = float(CurrencyNormalizer.normalize_price(bar_data.get("o") or bar_data.get("open", 0), ticker))
+                volume_val = int(bar_data.get("v") or bar_data.get("volume", 0))
 
                 points.append({
                     "timestamp": timestamp_str,
@@ -149,14 +149,14 @@ async def get_yfinance_chart_data(ticker: str, timeframe: str, limit: int, cache
         points = []
         for p in raw_points:
             p_norm = p.copy()
-            close_val = float(CurrencyNormalizer.normalize_price(p.get("close", p.get("c", 0)), ticker))
+            close_val = float(CurrencyNormalizer.normalize_price(p.get("close") or p.get("c", 0), ticker))
             p_norm["close"] = close_val
             p_norm["c"] = close_val
-            p_norm["high"] = float(CurrencyNormalizer.normalize_price(p.get("high", p.get("h", 0)), ticker))
+            p_norm["high"] = float(CurrencyNormalizer.normalize_price(p.get("high") or p.get("h", 0), ticker))
             p_norm["h"] = p_norm["high"]
-            p_norm["low"] = float(CurrencyNormalizer.normalize_price(p.get("low", p.get("l", 0)), ticker))
+            p_norm["low"] = float(CurrencyNormalizer.normalize_price(p.get("low") or p.get("l", 0), ticker))
             p_norm["l"] = p_norm["low"]
-            p_norm["open"] = float(CurrencyNormalizer.normalize_price(p.get("open", p.get("o", 0)), ticker))
+            p_norm["open"] = float(CurrencyNormalizer.normalize_price(p.get("open") or p.get("o", 0), ticker))
             p_norm["o"] = p_norm["open"]
             points.append(p_norm)
 

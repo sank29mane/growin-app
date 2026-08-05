@@ -130,7 +130,7 @@ class CurrencyNormalizer:
         Returns:
             Position object with Decimal values
         """
-        ticker = position.get('ticker', position.get('symbol', ''))
+        ticker = position.get('ticker') or position.get('symbol', '')
 
         # Get metadata if available
         metadata = None
@@ -140,9 +140,9 @@ class CurrencyNormalizer:
         currency = metadata.get('currency') if metadata else position.get('currency', 'USD')
 
         # Extract raw values
-        raw_current = position.get('currentPrice', position.get('current_price', 0))
+        raw_current = position.get('currentPrice') or position.get('current_price', 0)
         raw_avg = position.get('averagePrice', 0)
-        qty = position.get('quantity', position.get('qty', 0))
+        qty = position.get('quantity') or position.get('qty', 0)
 
         # Normalize prices
         norm_current = CurrencyNormalizer.normalize_price(raw_current, ticker, currency, metadata)
