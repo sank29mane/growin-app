@@ -69,7 +69,9 @@ class MarketImpactModel:
 
         if accumulated_qty < abs_size:
             # Trade size exceeds available depth; apply penalty on remaining size
-            last_price = prices[-1] if len(prices) > 0 else mid_price
+            # Filter out zero-size prices to avoid using an irrelevant price level as the penalty baseline
+            valid_prices = [p for p, s in zip(prices, sizes) if s > 0]
+            last_price = valid_prices[-1] if len(valid_prices) > 0 else mid_price
             penalty_pct = 0.05  # 5% penalty for illiquidity exceedance
             penalty_price = last_price * (1.0 + penalty_pct if is_buy else 1.0 - penalty_pct)
             weighted_price_sum += remaining_qty * penalty_price
