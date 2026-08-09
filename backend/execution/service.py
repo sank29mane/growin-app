@@ -182,7 +182,7 @@ class ExecutionService:
                 simulator_evidence.get("simulator_drawdown_pct", 0), "simulator drawdown"
             )
             spread_decimal = _finite_decimal(current_spread_pct, "spread")
-            risk_value = risk_evidence.get("admitted_quantity", risk_evidence.get("scaled_size"))
+            risk_value = risk_evidence.get("admitted_quantity") if risk_evidence.get("admitted_quantity") is not None else risk_evidence.get("scaled_size")
             risk_quantity = _finite_decimal(risk_value, "risk quantity")
             price_decimal = _finite_decimal(
                 price if price is not None else simulator_fill, "price"
@@ -535,7 +535,7 @@ def _intent_from_proposal(proposal: Dict[str, Any]) -> OrderIntent:
         broker=proposal.get("broker", default_broker),
         mode=mode,
         ticker=proposal.get("ticker"),
-        side=str(proposal.get("action", proposal.get("side", ""))).upper(),
+        side=str(proposal.get("action") if proposal.get("action") is not None else proposal.get("side", "")).upper(),
         quantity=proposal.get("quantity"),
     )
 
