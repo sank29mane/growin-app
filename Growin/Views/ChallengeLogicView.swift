@@ -34,6 +34,8 @@ struct ChallengeLogicView: View {
                                 )
                         )
                         .premiumTypography(.body)
+                        .accessibilityLabel("Discrepancy Identification")
+                        .accessibilityHint("Enter your reasoning for challenging the AI's logic")
                         .placeholder(when: challengeText.isEmpty) {
                             Text("e.g., 'The risk assessment ignores the upcoming rate decision' or 'Re-evaluate weighting for TSLA'...")
                                 .premiumTypography(.body)
