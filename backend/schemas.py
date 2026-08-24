@@ -116,3 +116,15 @@ class TradeApprovalRequest(BaseModel):
     decision: str  # APPROVED, REJECTED
     notes: Optional[str] = None
     signature: Optional[str] = None # For future HMAC/Security validation
+
+# --- Allocation Parsing Models ---
+
+class AllocationItem(BaseModel):
+    symbol: str = Field(..., description="The ticker symbol")
+    weight: Decimal = Field(..., description="The allocation weight, can be short (<0) or leveraged (>1)")
+    is_percentage: bool = Field(False, description="Whether the weight was provided as a percentage")
+
+class RebalanceRequest(BaseModel):
+    current_allocation: Dict[str, Any]
+    target_allocation: Dict[str, Any]
+    total_portfolio_value: Decimal
