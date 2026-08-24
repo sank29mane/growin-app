@@ -543,12 +543,15 @@ class QuantEngine:
             "hedge_ratio": safe_div(total_beta_weighted_value, total_portfolio_value)
         }
 
-    def analyze_rebalancing_opportunity(self, current_allocation: Dict[str, str], target_allocation: Dict[str, float],
+    def analyze_rebalancing_opportunity(self, current_allocation: Dict[str, Any], target_allocation: Dict[str, Any],
                                       total_portfolio_value: Any) -> Dict[str, Any]:
         """
         Analyze if portfolio needs rebalancing based on target allocations.
-        Now precision-safe using Decimal.
+        Now precision-safe using Decimal and robust schema validation.
         """
+        from schemas import RebalanceRequest, AllocationItem
+        from pydantic import ValidationError
+
         total_value_dec = create_decimal(total_portfolio_value)
         if total_value_dec <= 0:
              return {"error": "Total portfolio value must be positive"}
@@ -560,16 +563,28 @@ class QuantEngine:
                     val_str = str(val).strip()
                     is_pct = val_str.endswith('%')
                     dec_val = create_decimal(val_str.replace('%', ''))
-                    if is_pct:
-                        parsed[symbol] = dec_val / Decimal("100")
+
+                    item = AllocationItem(symbol=symbol, weight=dec_val, is_percentage=is_pct)
+
+                    if item.is_percentage:
+                        parsed[item.symbol] = item.weight / Decimal("100")
                     else:
-                        parsed[symbol] = dec_val
+                        parsed[item.symbol] = item.weight
                 except Exception:
                     parsed[symbol] = Decimal("0")
             return parsed
 
-        current_parsed = parse_allocations(current_allocation)
-        target_parsed = parse_allocations(target_allocation)
+        try:
+            req = RebalanceRequest(
+                current_allocation=current_allocation,
+                target_allocation=target_allocation,
+                total_portfolio_value=total_value_dec
+            )
+        except ValidationError as e:
+            return {"error": f"Invalid input format: {e}"}
+
+        current_parsed = parse_allocations(req.current_allocation)
+        target_parsed = parse_allocations(req.target_allocation)
 
         deviations = {}
         rebalance_actions = []
