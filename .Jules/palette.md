@@ -167,3 +167,7 @@
 ## 2026-07-26 - NSCursor Stack Balancing in SwiftUI
 **Learning:** In SwiftUI macOS development, manually pushing `NSCursor` within `.onHover` without a fallback can cause a stuck cursor if the view is removed from the hierarchy while hovered, as the `hovering == false` closure is never triggered.
 **Action:** Always balance `NSCursor.push()` calls by adding an `.onDisappear` modifier that conditionally calls `NSCursor.pop()` if the view was in a hovered state at the time of its removal.
+
+## 2026-08-15 - TextEditor Accessibility Context
+**Learning:** In SwiftUI, `TextEditor` elements without explicit accessibility modifiers lack context for VoiceOver users, making it difficult for visually impaired users to understand their purpose, even if they have placeholders or surrounding visual text.
+**Action:** Always append explicit `.accessibilityLabel` and `.accessibilityHint` modifiers to `TextEditor` elements to provide clear context (e.g., `.accessibilityLabel("Discrepancy Details")`, `.accessibilityHint("Enter the reasoning logic discrepancy or challenge")`) for assistive technologies.
