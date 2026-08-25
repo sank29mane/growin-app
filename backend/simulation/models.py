@@ -52,26 +52,32 @@ class MarketImpactModel:
             else:
                 prices = mid_price * (1.0 - step_pct * (np.arange(n_levels) + 1.0))
 
-        # Walk the book to find average fill price
-        accumulated_qty = 0.0
-        weighted_price_sum = 0.0
-        remaining_qty = abs_size
+        # Mask valid sizes (s > 0)
+        valid_mask = sizes > 0
+        valid_prices = prices[valid_mask]
+        valid_sizes = sizes[valid_mask]
 
-        for p, s in zip(prices, sizes):
-            if s <= 0:
-                continue
-            fill_qty = min(remaining_qty, s)
-            weighted_price_sum += fill_qty * p
-            accumulated_qty += fill_qty
-            remaining_qty -= fill_qty
-            if remaining_qty <= 1e-8:
-                break
+        if len(valid_sizes) == 0:
+            return float(mid_price * 0.0002 * (abs_size ** self.impact_exponent))
 
-        if accumulated_qty < abs_size:
-            # Trade size exceeds available depth; apply penalty on remaining size
-            last_price = prices[-1] if len(prices) > 0 else mid_price
+        cum_sizes = np.cumsum(valid_sizes)
+        idx = np.searchsorted(cum_sizes, abs_size)
+
+        if idx < len(valid_sizes):
+            full_levels = idx
+            rem_size = abs_size - (cum_sizes[idx - 1] if idx > 0 else 0.0)
+
+            weighted_price_sum = np.sum(valid_prices[:full_levels] * valid_sizes[:full_levels]) + valid_prices[idx] * rem_size
+            accumulated_qty = abs_size
+        else:
+            weighted_price_sum = np.sum(valid_prices * valid_sizes)
+            accumulated_qty = cum_sizes[-1]
+
+            remaining_qty = abs_size - accumulated_qty
+            last_price = valid_prices[-1]
             penalty_pct = 0.05  # 5% penalty for illiquidity exceedance
             penalty_price = last_price * (1.0 + penalty_pct if is_buy else 1.0 - penalty_pct)
+
             weighted_price_sum += remaining_qty * penalty_price
             accumulated_qty += remaining_qty
 
