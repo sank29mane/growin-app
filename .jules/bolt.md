@@ -1,0 +1,3 @@
+## 2024-05-15 - [Vectorized Order Book Execution]
+**Learning:** Python `for` loops in simulation models evaluating depth per level are inefficient and introduce noticeable latency. We can optimize order book traversal significantly by leveraging boolean masking for validity checks, `np.cumsum` to accumulate sizes, and `np.searchsorted` to immediately locate the boundary execution level without sequential iteration.
+**Action:** Always replace iterative book-walking in high-frequency operations with vectorized numpy alternatives (boolean indexing + `cumsum` + `searchsorted`) to maintain sub-millisecond execution times.
