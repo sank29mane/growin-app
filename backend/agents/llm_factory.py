@@ -223,7 +223,7 @@ class LLMFactory:
             llm_candidates = []
             for m in models:
                 # Handle both 'key' (Native V1) and 'id' (OpenAI)
-                m_id = m.get("key") or m.get("id")
+                m_id = m.get("key") if m.get("key") is not None else m.get("id")
                 if not m_id: continue
                 
                 m_id_str = str(m_id).lower()

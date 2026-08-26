@@ -127,7 +127,7 @@ async def get_lmstudio_models():
         llm_ids = []
         for m in models:
             # Check for both 'key' (Native V1) and 'id' (OpenAI)
-            m_id = m.get("key") or m.get("id")
+            m_id = m.get("key") if m.get("key") is not None else m.get("id")
             if not m_id: continue
             
             # Skip common embedding or utility models
