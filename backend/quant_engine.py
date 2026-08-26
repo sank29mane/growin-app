@@ -366,9 +366,9 @@ class QuantEngine:
     def calculate_pivot_levels(self, ohlcv_data: List[Dict[str, Any]], order: int = 5) -> Dict[str, Decimal]:
         if not ohlcv_data: return {"support": Decimal('0'), "resistance": Decimal('0')}
         import numpy as np
-        highs = np.array([float(d.get('h', d.get('high', 0))) for d in ohlcv_data], dtype=np.float64)
-        lows = np.array([float(d.get('l', d.get('low', 0))) for d in ohlcv_data], dtype=np.float64)
-        closes = np.array([float(d.get('c', d.get('close', 0))) for d in ohlcv_data], dtype=np.float64)
+        highs = np.array([float(d.get('h') if d.get('h') is not None else d.get('high', 0)) for d in ohlcv_data], dtype=np.float64)
+        lows = np.array([float(d.get('l') if d.get('l') is not None else d.get('low', 0)) for d in ohlcv_data], dtype=np.float64)
+        closes = np.array([float(d.get('c') if d.get('c') is not None else d.get('close', 0)) for d in ohlcv_data], dtype=np.float64)
         current_price = closes[-1]
         if SCIPY_AVAILABLE and argrelextrema is not None:
             peak_idx = argrelextrema(highs, np.greater, order=order)[0]
@@ -390,9 +390,9 @@ class QuantEngine:
         if not positions: return {"error": "No positions provided"}
 
         # Pre-parse data into lists of `Decimal` objects to optimize loop performance
-        qtys = [create_decimal(p.get('qty') or p.get('quantity') or 0) for p in positions]
-        prices = [create_decimal(p.get('current_price') or p.get('currentPrice') or 0) for p in positions]
-        costs = [create_decimal(p.get('avg_cost') or p.get('averagePrice') or 0) for p in positions]
+        qtys = [create_decimal((p.get('qty') if p.get('qty') is not None else (p.get('quantity') if p.get('quantity') is not None else 0))) for p in positions]
+        prices = [create_decimal((p.get('current_price') if p.get('current_price') is not None else (p.get('currentPrice') if p.get('currentPrice') is not None else 0))) for p in positions]
+        costs = [create_decimal((p.get('avg_cost') if p.get('avg_cost') is not None else (p.get('averagePrice') if p.get('averagePrice') is not None else 0))) for p in positions]
 
         total_value, total_cost = Decimal('0'), Decimal('0')
 
@@ -522,8 +522,8 @@ class QuantEngine:
         total_portfolio_value = Decimal("0")
         
         for pos in positions:
-            qty = create_decimal(pos.get('qty') or pos.get('quantity') or 0)
-            price = create_decimal(pos.get('current_price') or pos.get('currentPrice') or 0)
+            qty = create_decimal((pos.get('qty') if pos.get('qty') is not None else (pos.get('quantity') if pos.get('quantity') is not None else 0)))
+            price = create_decimal((pos.get('current_price') if pos.get('current_price') is not None else (pos.get('currentPrice') if pos.get('currentPrice') is not None else 0)))
             market_val = qty * price
             
             # Use beta=1.0 if not provided (conservative)

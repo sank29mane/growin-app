@@ -273,7 +273,7 @@ class DataFabricator:
                              text = pos_result.content[0].text
                              if "not found" not in text.lower():
                                  pos_data = json.loads(text)
-                                 t212_price = pos_data.get("currentPrice") or pos_data.get("current_price")
+                                 t212_price = pos_data.get("currentPrice") if pos_data.get("currentPrice") is not None else pos_data.get("current_price")
                                  if t212_price:
                                      logger.info(f"✅ Recovered Real-Time Price from T212 Portfolio for {ticker}: {t212_price}")
                                      current_price = create_decimal(t212_price)
