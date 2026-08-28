@@ -1,0 +1,3 @@
+## 2024-08-28 - Vectorizing Order Book Simulation in Python
+**Learning:** Iterating through price arrays sequentially with `for p, s in zip(prices, sizes):` in financial simulation models introduces O(N) Python loop overhead, which drastically bottlenecks execution engines dealing with deep limit order books.
+**Action:** When vectorizing order book traversal in Python simulation models, use boolean masking for validity checks (e.g., filtering out zero/negative sizes) before applying `np.cumsum` and `np.searchsorted`. Ensure the edge case of an empty valid array is handled (e.g., checking `if len(cum_sizes) > 0:`) to ensure accurate slippage and execution calculations and avoid index out of bounds exceptions on empty subsets.
