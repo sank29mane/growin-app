@@ -52,20 +52,32 @@ class MarketImpactModel:
             else:
                 prices = mid_price * (1.0 - step_pct * (np.arange(n_levels) + 1.0))
 
-        # Walk the book to find average fill price
-        accumulated_qty = 0.0
-        weighted_price_sum = 0.0
-        remaining_qty = abs_size
+        # Vectorized book traversal
+        valid_mask = sizes > 0
+        valid_sizes = sizes[valid_mask]
+        valid_prices = prices[valid_mask]
 
-        for p, s in zip(prices, sizes):
-            if s <= 0:
-                continue
-            fill_qty = min(remaining_qty, s)
-            weighted_price_sum += fill_qty * p
-            accumulated_qty += fill_qty
-            remaining_qty -= fill_qty
-            if remaining_qty <= 1e-8:
-                break
+        cum_sizes = np.cumsum(valid_sizes)
+
+        if len(cum_sizes) > 0:
+            idx = np.searchsorted(cum_sizes, abs_size)
+
+            if idx == 0:
+                weighted_price_sum = abs_size * valid_prices[0]
+                accumulated_qty = abs_size
+            elif idx < len(cum_sizes):
+                weighted_price_sum = np.sum(valid_sizes[:idx] * valid_prices[:idx])
+                remaining = abs_size - cum_sizes[idx - 1]
+                weighted_price_sum += remaining * valid_prices[idx]
+                accumulated_qty = abs_size
+            else:
+                weighted_price_sum = np.sum(valid_sizes * valid_prices)
+                accumulated_qty = cum_sizes[-1]
+        else:
+            weighted_price_sum = 0.0
+            accumulated_qty = 0.0
+
+        remaining_qty = abs_size - accumulated_qty
 
         if accumulated_qty < abs_size:
             # Trade size exceeds available depth; apply penalty on remaining size
