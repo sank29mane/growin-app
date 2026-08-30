@@ -1,5 +1,9 @@
 import SwiftUI
 
+#if os(macOS)
+import AppKit
+#endif
+
 /// SuggestionItem: Data model for the suggestion chips in the welcome screen.
 struct SuggestionItem: Identifiable {
     let id = UUID()
@@ -122,16 +126,20 @@ struct SuggestionChip: View {
         .accessibilityAddTraits(.isButton)
         .onHover { hovering in
             isHovered = hovering
+            #if os(macOS)
             if hovering {
                 NSCursor.pointingHand.push()
             } else {
                 NSCursor.pop()
             }
+            #endif
         }
         .onDisappear {
+            #if os(macOS)
             if isHovered {
                 NSCursor.pop()
             }
+            #endif
         }
         .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isHovered)
     }

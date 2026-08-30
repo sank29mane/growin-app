@@ -1,5 +1,9 @@
 import SwiftUI
 
+#if os(macOS)
+import AppKit
+#endif
+
 /// AIChatPanelView: The conversational hub for the Sovereign Desktop UI.
 /// Incorporates rounded "Mac-native" bubble aesthetics while retaining the core dark-theme color palette (Brutal Chartreuse, Cyan).
 struct AIChatPanelView: View {
@@ -250,16 +254,20 @@ struct DiscoveryTileButton: View {
         .accessibilityAddTraits(.isButton)
         .onHover { hovering in
             isHovered = hovering
+            #if os(macOS)
             if hovering {
                 NSCursor.pointingHand.push()
             } else {
                 NSCursor.pop()
             }
+            #endif
         }
         .onDisappear {
+            #if os(macOS)
             if isHovered {
                 NSCursor.pop()
             }
+            #endif
         }
     }
 }
