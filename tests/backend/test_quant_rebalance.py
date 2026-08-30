@@ -34,5 +34,13 @@ class TestQuantEngineRebalance(unittest.TestCase):
         result = engine.analyze_rebalancing_opportunity(current, target, total)
         self.assertEqual(result["deviations_pct"]["AAPL"], 50.0)
 
+        # Test Case 4: Explicit position parameters via dict
+        current = {"AAPL": "0%"}
+        target = {"AAPL": {"weight": 1.5, "is_percentage": False}}
+        total = 1000.0
+
+        result = engine.analyze_rebalancing_opportunity(current, target, total)
+        self.assertEqual(result["deviations_pct"]["AAPL"], 150.0)
+
 if __name__ == '__main__':
     unittest.main()
