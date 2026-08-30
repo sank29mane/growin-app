@@ -31,6 +31,7 @@ except ImportError:
     torch = None
     TORCH_AVAILABLE = False
 
+import pydantic
 from typing import Dict, List, Any, Optional, TypedDict, Union
 from enum import Enum
 from datetime import datetime
@@ -225,6 +226,16 @@ class PortfolioMarginManager:
         reduction = min(hedging_benefit, standard_margin * Decimal("0.80"))
         
         return standard_margin - reduction
+
+class AllocationSchema(pydantic.RootModel):
+    root: Dict[str, Decimal]
+
+    @pydantic.model_validator(mode='after')
+    def validate_allocations(self) -> 'AllocationSchema':
+        total_abs = sum(abs(v) for v in self.root.values())
+        if total_abs > Decimal("100"):
+            raise ValueError("Total absolute allocation exceeds maximum leverage (100x)")
+        return self
 
 class QuantEngine:
     """
@@ -557,19 +568,30 @@ class QuantEngine:
             parsed = {}
             for symbol, val in allocations.items():
                 try:
-                    val_str = str(val).strip()
-                    is_pct = val_str.endswith('%')
-                    dec_val = create_decimal(val_str.replace('%', ''))
-                    if is_pct:
-                        parsed[symbol] = dec_val / Decimal("100")
+                    if isinstance(val, dict):
+                        weight = create_decimal(val.get('weight', 0))
+                        if val.get('is_percentage', False):
+                            parsed[symbol] = weight / Decimal("100")
+                        else:
+                            parsed[symbol] = weight
                     else:
-                        parsed[symbol] = dec_val
+                        val_str = str(val).strip()
+                        is_pct = val_str.endswith('%')
+                        dec_val = create_decimal(val_str.replace('%', ''))
+                        if is_pct:
+                            parsed[symbol] = dec_val / Decimal("100")
+                        else:
+                            parsed[symbol] = dec_val
                 except Exception:
                     parsed[symbol] = Decimal("0")
-            return parsed
 
-        current_parsed = parse_allocations(current_allocation)
-        target_parsed = parse_allocations(target_allocation)
+            return AllocationSchema(parsed).root
+
+        try:
+            current_parsed = parse_allocations(current_allocation)
+            target_parsed = parse_allocations(target_allocation)
+        except pydantic.ValidationError as e:
+            return {"error": f"Allocation validation failed: {str(e)}"}
 
         deviations = {}
         rebalance_actions = []
