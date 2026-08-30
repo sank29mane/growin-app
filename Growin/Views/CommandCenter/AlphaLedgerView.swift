@@ -1,5 +1,9 @@
 import SwiftUI
 
+#if os(macOS)
+import AppKit
+#endif
+
 /// AlphaLedgerView: A brutalist technical ledger for asset monitoring.
 /// Enforces "Authority through Absence" with no dividers and tonal depth.
 struct AlphaLedgerView: View {
@@ -80,16 +84,20 @@ struct LedgerRow: View {
             withAnimation(.easeInOut(duration: 0.15)) {
                 isHovered = hovering
             }
+            #if os(macOS)
             if hovering {
                 NSCursor.pointingHand.push()
             } else {
                 NSCursor.pop()
             }
+            #endif
         }
         .onDisappear {
+            #if os(macOS)
             if isHovered {
                 NSCursor.pop()
             }
+            #endif
         }
     }
 }
