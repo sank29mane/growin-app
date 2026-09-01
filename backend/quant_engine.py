@@ -37,6 +37,10 @@ from datetime import datetime
 from decimal import Decimal
 from utils.financial_math import create_decimal, safe_div, TechnicalIndicators
 from utils.portfolio_analyzer import PortfolioAnalyzer
+from pydantic import RootModel
+
+class AllocationSchema(RootModel):
+    root: Dict[str, Union[float, str]]
 
 class TechnicalIndicatorsDict(TypedDict, total=False):
     rsi: Optional[Decimal]
@@ -555,21 +559,27 @@ class QuantEngine:
 
         def parse_allocations(allocations: Dict[str, Any]) -> Dict[str, Decimal]:
             parsed = {}
-            for symbol, val in allocations.items():
+            try:
+                validated = AllocationSchema.model_validate(allocations).root
+            except Exception as e:
+                raise ValueError(f"Invalid allocation schema: {e}")
+
+            for symbol, val in validated.items():
                 try:
                     val_str = str(val).strip()
-                    is_pct = val_str.endswith('%')
-                    dec_val = create_decimal(val_str.replace('%', ''))
-                    if is_pct:
-                        parsed[symbol] = dec_val / Decimal("100")
+                    if val_str.endswith('%'):
+                        parsed[symbol] = create_decimal(val_str.replace('%', '')) / Decimal("100")
                     else:
-                        parsed[symbol] = dec_val
+                        parsed[symbol] = create_decimal(val_str)
                 except Exception:
                     parsed[symbol] = Decimal("0")
             return parsed
 
-        current_parsed = parse_allocations(current_allocation)
-        target_parsed = parse_allocations(target_allocation)
+        try:
+            current_parsed = parse_allocations(current_allocation)
+            target_parsed = parse_allocations(target_allocation)
+        except ValueError as e:
+            return {"error": str(e)}
 
         deviations = {}
         rebalance_actions = []
