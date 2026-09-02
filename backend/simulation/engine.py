@@ -82,8 +82,8 @@ class PreFlightSimulator:
             simulated_fill_price = mid_price
 
         # Calculate drawdown from portfolio_state
-        current_equity = float(portfolio_state.get("equity", portfolio_state.get("current_val", 10000.0)))
-        peak_equity = float(portfolio_state.get("peak_equity", portfolio_state.get("peak_val", current_equity)))
+        current_equity = float(portfolio_state.get("equity") if portfolio_state.get("equity") is not None else portfolio_state.get("current_val", 10000.0))
+        peak_equity = float(portfolio_state.get("peak_equity") if portfolio_state.get("peak_equity") is not None else portfolio_state.get("peak_val", current_equity))
         
         # Ensure peak equity is at least current equity
         peak_equity = max(peak_equity, current_equity)
