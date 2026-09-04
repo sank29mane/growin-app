@@ -52,24 +52,38 @@ class MarketImpactModel:
             else:
                 prices = mid_price * (1.0 - step_pct * (np.arange(n_levels) + 1.0))
 
-        # Walk the book to find average fill price
+        # Vectorized walk of the book to find average fill price
+        valid_mask = sizes > 0
+        valid_prices = prices[valid_mask]
+        valid_sizes = sizes[valid_mask]
+
         accumulated_qty = 0.0
         weighted_price_sum = 0.0
-        remaining_qty = abs_size
 
-        for p, s in zip(prices, sizes):
-            if s <= 0:
-                continue
-            fill_qty = min(remaining_qty, s)
-            weighted_price_sum += fill_qty * p
-            accumulated_qty += fill_qty
-            remaining_qty -= fill_qty
-            if remaining_qty <= 1e-8:
-                break
+        if len(valid_sizes) > 0:
+            cum_sizes = np.cumsum(valid_sizes)
+            idx = np.searchsorted(cum_sizes, abs_size)
 
-        if accumulated_qty < abs_size:
+            if idx >= len(cum_sizes):
+                # Trade size exceeds available valid depth
+                accumulated_qty = float(cum_sizes[-1])
+                weighted_price_sum = float(np.sum(valid_prices * valid_sizes))
+            else:
+                # Trade size is satisfied within available depth
+                full_levels_qty = float(cum_sizes[idx - 1]) if idx > 0 else 0.0
+                full_levels_price = float(np.sum(valid_prices[:idx] * valid_sizes[:idx]))
+
+                partial_qty = abs_size - full_levels_qty
+                partial_price = partial_qty * float(valid_prices[idx])
+
+                weighted_price_sum = full_levels_price + partial_price
+                accumulated_qty = abs_size
+
+        remaining_qty = abs_size - accumulated_qty
+
+        if remaining_qty > 1e-8:
             # Trade size exceeds available depth; apply penalty on remaining size
-            last_price = prices[-1] if len(prices) > 0 else mid_price
+            last_price = float(prices[-1]) if len(prices) > 0 else mid_price
             penalty_pct = 0.05  # 5% penalty for illiquidity exceedance
             penalty_price = last_price * (1.0 + penalty_pct if is_buy else 1.0 - penalty_pct)
             weighted_price_sum += remaining_qty * penalty_price
