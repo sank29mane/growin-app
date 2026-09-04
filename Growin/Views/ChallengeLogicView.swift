@@ -34,6 +34,8 @@ struct ChallengeLogicView: View {
                                 )
                         )
                         .premiumTypography(.body)
+                        .accessibilityLabel("Challenge Description")
+                        .accessibilityHint("Enter your reasoning for challenging the strategy logic")
                         .placeholder(when: challengeText.isEmpty) {
                             Text("e.g., 'The risk assessment ignores the upcoming rate decision' or 'Re-evaluate weighting for TSLA'...")
                                 .premiumTypography(.body)
@@ -68,9 +70,7 @@ struct ChallengeLogicView: View {
                     Button("Cancel") { dismiss() }
                         .premiumTypography(.title)
                         .foregroundStyle(.secondary)
-                        .accessibilityLabel("Cancel")
                         .accessibilityHint("Dismisses the challenge logic view")
-                        .accessibilityAddTraits(.isButton)
                     
                     PremiumButton(title: "Restitch Strategy", icon: "arrow.triangle.2.circlepath") {
                         Task {
