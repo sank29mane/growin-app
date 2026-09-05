@@ -23,6 +23,8 @@ struct ChallengeLogicView: View {
                         .premiumTypography(.overline)
                     
                     TextEditor(text: $challengeText)
+                        .accessibilityLabel("Challenge Description")
+                        .accessibilityHint("Enter your reasoning for challenging the AI strategy")
                         .frame(height: 150)
                         .padding()
                         .background(
@@ -68,9 +70,7 @@ struct ChallengeLogicView: View {
                     Button("Cancel") { dismiss() }
                         .premiumTypography(.title)
                         .foregroundStyle(.secondary)
-                        .accessibilityLabel("Cancel")
                         .accessibilityHint("Dismisses the challenge logic view")
-                        .accessibilityAddTraits(.isButton)
                     
                     PremiumButton(title: "Restitch Strategy", icon: "arrow.triangle.2.circlepath") {
                         Task {
