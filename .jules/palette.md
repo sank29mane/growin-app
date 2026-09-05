@@ -1,0 +1,3 @@
+## 2024-05-24 - [TextEditor Accessibility]
+**Learning:** In SwiftUI, `TextEditor` elements lack default context for VoiceOver users. Standard buttons initialized with a text string (e.g., `Button("Cancel") { ... }`) automatically receive the `.isButton` accessibility trait and use the string as its default accessibility label.
+**Action:** Always append explicit `.accessibilityLabel` and `.accessibilityHint` modifiers to `TextEditor` elements to ensure accessibility. Do not explicitly apply `.accessibilityLabel` or `.accessibilityAddTraits(.isButton)` to standard text-initialized buttons, as it is a redundant anti-pattern.
