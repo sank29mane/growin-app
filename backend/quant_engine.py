@@ -35,8 +35,34 @@ from typing import Dict, List, Any, Optional, TypedDict, Union
 from enum import Enum
 from datetime import datetime
 from decimal import Decimal
+from pydantic import RootModel, model_validator, ValidationError
 from utils.financial_math import create_decimal, safe_div, TechnicalIndicators
 from utils.portfolio_analyzer import PortfolioAnalyzer
+
+class AllocationMap(RootModel):
+    root: Dict[str, Decimal]
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_and_convert(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        parsed = {}
+        for symbol, val in data.items():
+            val_str = str(val).strip()
+            if val_str.endswith('%'):
+                try:
+                    dec_val = create_decimal(val_str[:-1]) / Decimal("100")
+                except Exception:
+                    raise ValueError(f"Invalid percentage format for {symbol}: {val}")
+            else:
+                try:
+                    dec_val = create_decimal(val_str)
+                except Exception:
+                    raise ValueError(f"Invalid number format for {symbol}: {val}")
+            parsed[symbol] = dec_val
+        return parsed
 
 class TechnicalIndicatorsDict(TypedDict, total=False):
     rsi: Optional[Decimal]
@@ -553,23 +579,11 @@ class QuantEngine:
         if total_value_dec <= 0:
              return {"error": "Total portfolio value must be positive"}
 
-        def parse_allocations(allocations: Dict[str, Any]) -> Dict[str, Decimal]:
-            parsed = {}
-            for symbol, val in allocations.items():
-                try:
-                    val_str = str(val).strip()
-                    is_pct = val_str.endswith('%')
-                    dec_val = create_decimal(val_str.replace('%', ''))
-                    if is_pct:
-                        parsed[symbol] = dec_val / Decimal("100")
-                    else:
-                        parsed[symbol] = dec_val
-                except Exception:
-                    parsed[symbol] = Decimal("0")
-            return parsed
-
-        current_parsed = parse_allocations(current_allocation)
-        target_parsed = parse_allocations(target_allocation)
+        try:
+            current_parsed = AllocationMap.model_validate(current_allocation).root
+            target_parsed = AllocationMap.model_validate(target_allocation).root
+        except ValidationError as e:
+            return {"error": f"Invalid allocation format: {str(e)}"}
 
         deviations = {}
         rebalance_actions = []
