@@ -52,23 +52,39 @@ class MarketImpactModel:
             else:
                 prices = mid_price * (1.0 - step_pct * (np.arange(n_levels) + 1.0))
 
-        # Walk the book to find average fill price
+        # Vectorized walk of the book to find average fill price
         accumulated_qty = 0.0
         weighted_price_sum = 0.0
         remaining_qty = abs_size
 
-        for p, s in zip(prices, sizes):
-            if s <= 0:
-                continue
-            fill_qty = min(remaining_qty, s)
-            weighted_price_sum += fill_qty * p
-            accumulated_qty += fill_qty
-            remaining_qty -= fill_qty
-            if remaining_qty <= 1e-8:
-                break
+        valid_mask = sizes > 0
+        valid_sizes = sizes[valid_mask]
+        valid_prices = prices[valid_mask]
+
+        if len(valid_sizes) > 0:
+            cum_sizes = np.cumsum(valid_sizes)
+            idx = np.searchsorted(cum_sizes, abs_size)
+
+            if idx == 0:
+                fill_qty = min(abs_size, valid_sizes[0])
+                weighted_price_sum = float(fill_qty * valid_prices[0])
+                accumulated_qty = float(fill_qty)
+                remaining_qty = abs_size - accumulated_qty
+            else:
+                num_full_levels = min(idx, len(valid_sizes))
+                accumulated_qty = float(cum_sizes[num_full_levels - 1])
+                weighted_price_sum = float(np.dot(valid_sizes[:num_full_levels], valid_prices[:num_full_levels]))
+                remaining_qty = abs_size - accumulated_qty
+
+                if idx < len(valid_sizes) and remaining_qty > 1e-8:
+                    fill_qty = min(remaining_qty, valid_sizes[idx])
+                    weighted_price_sum += float(fill_qty * valid_prices[idx])
+                    accumulated_qty += float(fill_qty)
+                    remaining_qty -= float(fill_qty)
 
         if accumulated_qty < abs_size:
             # Trade size exceeds available depth; apply penalty on remaining size
+            # Extract last_price from original unmasked prices array per instructions
             last_price = prices[-1] if len(prices) > 0 else mid_price
             penalty_pct = 0.05  # 5% penalty for illiquidity exceedance
             penalty_price = last_price * (1.0 + penalty_pct if is_buy else 1.0 - penalty_pct)
