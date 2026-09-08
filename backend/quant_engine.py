@@ -366,9 +366,9 @@ class QuantEngine:
     def calculate_pivot_levels(self, ohlcv_data: List[Dict[str, Any]], order: int = 5) -> Dict[str, Decimal]:
         if not ohlcv_data: return {"support": Decimal('0'), "resistance": Decimal('0')}
         import numpy as np
-        highs = np.array([float(d.get('h', d.get('high', 0))) for d in ohlcv_data], dtype=np.float64)
-        lows = np.array([float(d.get('l', d.get('low', 0))) for d in ohlcv_data], dtype=np.float64)
-        closes = np.array([float(d.get('c', d.get('close', 0))) for d in ohlcv_data], dtype=np.float64)
+        highs = np.array([float(d.get('h') if d.get('h') is not None else d.get('high', 0)) for d in ohlcv_data], dtype=np.float64)
+        lows = np.array([float(d.get('l') if d.get('l') is not None else d.get('low', 0)) for d in ohlcv_data], dtype=np.float64)
+        closes = np.array([float(d.get('c') if d.get('c') is not None else d.get('close', 0)) for d in ohlcv_data], dtype=np.float64)
         current_price = closes[-1]
         if SCIPY_AVAILABLE and argrelextrema is not None:
             peak_idx = argrelextrema(highs, np.greater, order=order)[0]
