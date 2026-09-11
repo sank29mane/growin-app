@@ -616,6 +616,7 @@ struct PaperOperationsViewModelTests {
         }
     }
 
+    @MainActor
     private func admittedReview(viewModel: PaperOperationsViewModel) async throws -> TradeApprovalReview {
         await viewModel.startLocalReplay()
         PaperOperationsURLProtocol.reset()

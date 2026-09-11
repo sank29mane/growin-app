@@ -59,8 +59,8 @@ class ChatViewModel {
             throw TradeApprovalReviewError.signerMismatch
         }
         let signature = try LocalApprovalSigner.shared.sign(review.signedBytes)
-        let message = try await aiService.completeTradeApproval(review, signature: signature)
-        streamingStatus = message
+        let result = try await aiService.completeTradeApproval(review, signature: signature)
+        streamingStatus = result.message
         updateProposalStatus(id: review.payload.proposalId, status: "ACKNOWLEDGED")
         pendingTradeApproval = nil
     }

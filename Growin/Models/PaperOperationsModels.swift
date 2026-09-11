@@ -140,6 +140,7 @@ struct PaperPrepareResponse: Decodable, Equatable, Sendable {
 
 protocol PaperTradeApproving: AnyObject {
     func requestTradeApproval(proposal: TradeProposalData) async throws -> TradeApprovalReview
+    func completeTradeApproval(_ review: TradeApprovalReview, signature: Data) async throws -> ApprovalCompletionResponse
 }
 
 final class AIServicePaperTradeApprover: PaperTradeApproving {
@@ -152,6 +153,27 @@ final class AIServicePaperTradeApprover: PaperTradeApproving {
     func requestTradeApproval(proposal: TradeProposalData) async throws -> TradeApprovalReview {
         try await service.requestTradeApproval(proposal: proposal)
     }
+
+    func completeTradeApproval(_ review: TradeApprovalReview, signature: Data) async throws -> ApprovalCompletionResponse {
+        try await service.completeTradeApproval(review, signature: signature)
+    }
+}
+
+enum PaperOperationsLifecycleStep: String, CaseIterable, Equatable, Sendable {
+    case stopped = "STOPPED"
+    case replaying = "REPLAYING"
+    case evidence = "EVIDENCE"
+    case prepared = "PREPARED"
+    case signed = "SIGNED"
+    case acknowledged = "ACKNOWLEDGED"
+    case reconciled = "RECONCILED"
+}
+
+enum PaperOperationsWorkflowAccent: Equatable, Sendable {
+    case start
+    case prepare
+    case acknowledge
+    case reconcile
 }
 
 struct ReplaySessionStartRequest: Encodable, Equatable {
@@ -243,6 +265,8 @@ enum PaperOperationsCopy {
     static let subtitle = "LOCAL INDIA/NSE REPLAY // PAPER ONLY"
     static let modeStrip = "PAPER ONLY · LOCAL REPLAY · NO BROKER"
     static let preparePaperIntent = "Prepare Paper Intent"
+    static let acknowledgeLocalFill = "Acknowledge Local Fill"
+    static let reconcilePaperOutcome = "Reconcile Paper Outcome"
     static let evidenceComplete = "Evidence is complete. Prepare stays a separate explicit action."
     static let missingSnapshot = "Snapshot evidence is missing. Load Snapshot Evidence before preparing."
     static let staleSnapshot = "Snapshot evidence is stale. Refresh Session Status, then Load Snapshot Evidence."

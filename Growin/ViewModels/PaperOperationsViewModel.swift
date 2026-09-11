@@ -7,6 +7,8 @@ enum PaperOperationsInFlightAction: Equatable, Sendable {
     case refresh
     case load
     case prepare
+    case acknowledge
+    case reconcile
 }
 
 @Observable
@@ -25,6 +27,12 @@ final class PaperOperationsViewModel {
     var prepareFailedMessage: String?
     var inFlightAction: PaperOperationsInFlightAction?
     var pendingTradeApproval: TradeApprovalReview?
+    var lifecycleStep: PaperOperationsLifecycleStep = .stopped
+    var lastOrderAck: PaperExecutionAck?
+    var didAcknowledgeLocalFill = false
+    var didReconcilePaperOutcome = false
+    var acknowledgeFailedMessage: String?
+    var reconcileFailedMessage: String?
     var unreconciledIntent = false {
         didSet { applyUnreconciledGate() }
     }
@@ -60,6 +68,23 @@ final class PaperOperationsViewModel {
 
     var disabledPrepareAccessibilityHint: String {
         canPrepare ? "" : blockingSlotCopy
+    }
+
+    var canAcknowledgeLocalFill: Bool {
+        lifecycleStep == .signed && !didAcknowledgeLocalFill
+    }
+
+    var canReconcilePaperOutcome: Bool {
+        lifecycleStep == .acknowledged && !didReconcilePaperOutcome
+    }
+
+    var accentedWorkflowAction: PaperOperationsWorkflowAccent? {
+        if inFlightAction != nil { return nil }
+        if canAcknowledgeLocalFill { return .acknowledge }
+        if canReconcilePaperOutcome { return .reconcile }
+        if canPrepare { return .prepare }
+        if session.state == "STOPPED" { return .start }
+        return nil
     }
 
     var selectedInstrumentSymbol: String? {
@@ -114,6 +139,9 @@ final class PaperOperationsViewModel {
             let started = try await client.startSession()
             session = started
             syncSelectedInstrument(allowImplicitSingle: true)
+            if session.state == "RUNNING" {
+                lifecycleStep = furthestWorkflowStep(atLeast: .replaying)
+            }
             guard session.instruments.count == 1, let symbol = selectedInstrument?.symbol else {
                 blockingReason = selectedInstrument == nil ? .missingSnapshot : durableReasonAfterEvidence()
                 return
@@ -141,6 +169,7 @@ final class PaperOperationsViewModel {
                 blockingReason = .unreconciled
             } else {
                 blockingReason = .stopped
+                lifecycleStep = .stopped
             }
         } catch {
             stopFailedMessage = PaperOperationsCopy.stopFailed
@@ -160,6 +189,9 @@ final class PaperOperationsViewModel {
             syncSelectedInstrument(allowImplicitSingle: true)
             if session.state != "RUNNING" {
                 blockingReason = unreconciledIntent ? .unreconciled : .stopped
+                if !unreconciledIntent {
+                    lifecycleStep = .stopped
+                }
             } else if wasStale {
                 blockingReason = .staleSnapshot
             } else if selectedInstrument == nil || snapshot == nil {
@@ -220,6 +252,7 @@ final class PaperOperationsViewModel {
                 status: response.state
             )
             pendingTradeApproval = try await tradeApprover.requestTradeApproval(proposal: proposal)
+            lifecycleStep = .prepared
         } catch PaperOperationsClientError.paperPreparationDenied {
             pendingTradeApproval = nil
             blockingReason = .rejectedAfterPrepare(reasonCode: "PAPER_PREPARATION_DENIED")
@@ -235,8 +268,29 @@ final class PaperOperationsViewModel {
             throw TradeApprovalReviewError.signerMismatch
         }
         let signature = try signer.sign(review.signedBytes)
-        _ = try await aiService.completeTradeApproval(review, signature: signature)
+        let result = try await tradeApprover.completeTradeApproval(review, signature: signature)
         pendingTradeApproval = nil
+        lifecycleStep = .signed
+        didAcknowledgeLocalFill = false
+        didReconcilePaperOutcome = false
+        acknowledgeFailedMessage = nil
+        if let ack = result.executionDetails, !ack.proposalId.isEmpty {
+            lastOrderAck = ack
+        } else {
+            lastOrderAck = nil
+        }
+        unreconciledIntent = true
+    }
+
+    func acknowledgeLocalFill() {
+        acknowledgeFailedMessage = nil
+        guard lifecycleStep == .signed, !didAcknowledgeLocalFill else { return }
+        guard let ack = lastOrderAck, !ack.proposalId.isEmpty else {
+            acknowledgeFailedMessage = PaperOperationsCopy.acknowledgeFailed
+            return
+        }
+        didAcknowledgeLocalFill = true
+        lifecycleStep = .acknowledged
     }
 
     func applyMalformedSnapshotPayload(_ data: Data) {
@@ -253,6 +307,7 @@ final class PaperOperationsViewModel {
             snapshot = loaded
             lastEvidence = captureEvidence(from: loaded)
             blockingReason = durableReasonAfterEvidence()
+            lifecycleStep = furthestWorkflowStep(atLeast: .evidence)
         } catch {
             if !keepLastEvidenceOnFailure {
                 snapshot = nil
@@ -270,6 +325,15 @@ final class PaperOperationsViewModel {
             return
         }
         selectedInstrument = nil
+    }
+
+    private func furthestWorkflowStep(atLeast candidate: PaperOperationsLifecycleStep) -> PaperOperationsLifecycleStep {
+        let order = PaperOperationsLifecycleStep.allCases
+        guard let currentIndex = order.firstIndex(of: lifecycleStep),
+              let candidateIndex = order.firstIndex(of: candidate) else {
+            return candidate
+        }
+        return candidateIndex >= currentIndex ? candidate : lifecycleStep
     }
 
     private func applyUnreconciledGate() {

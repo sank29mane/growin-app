@@ -178,8 +178,8 @@ class AIService {
         return try TradeApprovalReview(challenge: challenge, expectedProposal: proposal)
     }
 
-    func completeTradeApproval(_ review: TradeApprovalReview, signature: Data) async throws -> String {
-        let result: ApprovalCompletionResponse = try await postJSON(
+    func completeTradeApproval(_ review: TradeApprovalReview, signature: Data) async throws -> ApprovalCompletionResponse {
+        try await postJSON(
             endpoint: "/api/ai/trade/approval/complete",
             body: [
                 "proposal_id": review.payload.proposalId,
@@ -187,7 +187,6 @@ class AIService {
                 "signature_der_b64": signature.base64EncodedString(),
             ]
         )
-        return result.message
     }
 
     func approveTrade(id: String) async throws -> String {
@@ -270,8 +269,16 @@ struct ApprovalStatusResponse: Decodable {
     let keyId: String?
 }
 
-private struct ApprovalCompletionResponse: Decodable {
-    let message: String
+struct PaperExecutionAck: Decodable, Equatable, Sendable {
+    var proposalId: String
+    var broker: String
+    var brokerOrderId: String
+    var status: String
+}
+
+struct ApprovalCompletionResponse: Decodable, Equatable, Sendable {
+    var message: String
+    var executionDetails: PaperExecutionAck?
 }
 
 private struct ApprovalAPIError: Decodable {
