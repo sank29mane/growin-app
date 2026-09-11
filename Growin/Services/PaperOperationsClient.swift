@@ -5,6 +5,7 @@ enum PaperOperationsClientError: Error, LocalizedError, Equatable {
     case badURL
     case invalidResponse
     case staleSnapshot
+    case paperPreparationDenied
     case httpStatus(Int, String)
 
     var errorDescription: String? {
@@ -17,6 +18,8 @@ enum PaperOperationsClientError: Error, LocalizedError, Equatable {
             return "Paper Operations received a non-HTTP response."
         case .staleSnapshot:
             return "STALE_SNAPSHOT"
+        case .paperPreparationDenied:
+            return "PAPER_PREPARATION_DENIED"
         case .httpStatus(let status, let detail):
             return "HTTP \(status): \(detail)"
         }
@@ -90,6 +93,10 @@ struct PaperOperationsClient {
     }
 
     func prepare(symbol: String, quantity: String) async throws -> PaperPrepareResponse {
+        try await prepareIndiaPaper(symbol: symbol, quantity: quantity)
+    }
+
+    func prepareIndiaPaper(symbol: String, quantity: String) async throws -> PaperPrepareResponse {
         let body = try encodePrepareBody(symbol: symbol, quantity: quantity)
         let data = try await perform(method: "POST", path: "/api/market-data/paper-preparations", body: body)
         return try PaperOperationsModels.decodePrepareResponse(data)
@@ -150,14 +157,19 @@ struct PaperOperationsClient {
     }
 
     static func mapHTTPError(status: Int, data: Data) -> PaperOperationsClientError {
-        if status == 409, let code = staleCode(from: data), code == "STALE_SNAPSHOT" {
-            return .staleSnapshot
+        if status == 409, let code = errorCode(from: data) {
+            if code == "STALE_SNAPSHOT" {
+                return .staleSnapshot
+            }
+            if code == "PAPER_PREPARATION_DENIED" {
+                return .paperPreparationDenied
+            }
         }
         let detail = String(data: data, encoding: .utf8) ?? "Unknown Error"
         return .httpStatus(status, detail)
     }
 
-    private static func staleCode(from data: Data) -> String? {
+    private static func errorCode(from data: Data) -> String? {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
         }

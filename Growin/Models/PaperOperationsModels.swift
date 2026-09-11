@@ -116,14 +116,42 @@ struct PaperMarketSnapshot: Decodable, Equatable, Sendable {
 struct PaperAdmission: Decodable, Equatable, Sendable {
     var decision: String
     var reasonCode: String
+    var simulatorFillPrice: String?
+    var simulatorDrawdownPct: String?
+    var riskQuantity: String?
+    var currentSpreadPct: String?
 
     var isAdmitted: Bool { decision == "ADMITTED" }
+}
+
+struct PaperRegimeEvidence: Decodable, Equatable, Sendable {
+    var regimeId: Int?
+    var modelVersion: String?
+    var observedAt: String?
+    var sourceSnapshotId: String?
 }
 
 struct PaperPrepareResponse: Decodable, Equatable, Sendable {
     var proposalId: String
     var state: String
     var admission: PaperAdmission
+    var regime: PaperRegimeEvidence?
+}
+
+protocol PaperTradeApproving: AnyObject {
+    func requestTradeApproval(proposal: TradeProposalData) async throws -> TradeApprovalReview
+}
+
+final class AIServicePaperTradeApprover: PaperTradeApproving {
+    private let service: AIService
+
+    init(service: AIService) {
+        self.service = service
+    }
+
+    func requestTradeApproval(proposal: TradeProposalData) async throws -> TradeApprovalReview {
+        try await service.requestTradeApproval(proposal: proposal)
+    }
 }
 
 struct ReplaySessionStartRequest: Encodable, Equatable {
@@ -214,6 +242,7 @@ enum PaperOperationsCopy {
     static let cardSnapshot = "Snapshot Freshness"
     static let subtitle = "LOCAL INDIA/NSE REPLAY // PAPER ONLY"
     static let modeStrip = "PAPER ONLY · LOCAL REPLAY · NO BROKER"
+    static let preparePaperIntent = "Prepare Paper Intent"
     static let evidenceComplete = "Evidence is complete. Prepare stays a separate explicit action."
     static let missingSnapshot = "Snapshot evidence is missing. Load Snapshot Evidence before preparing."
     static let staleSnapshot = "Snapshot evidence is stale. Refresh Session Status, then Load Snapshot Evidence."

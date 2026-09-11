@@ -6,6 +6,7 @@ enum PaperOperationsInFlightAction: Equatable, Sendable {
     case stop
     case refresh
     case load
+    case prepare
 }
 
 @Observable
@@ -21,7 +22,9 @@ final class PaperOperationsViewModel {
     var stopFailedMessage: String?
     var statusFailedMessage: String?
     var snapshotFailedMessage: String?
+    var prepareFailedMessage: String?
     var inFlightAction: PaperOperationsInFlightAction?
+    var pendingTradeApproval: TradeApprovalReview?
     var unreconciledIntent = false {
         didSet { applyUnreconciledGate() }
     }
@@ -40,6 +43,7 @@ final class PaperOperationsViewModel {
     private let client: PaperOperationsClient
     private let aiService: AIService
     private let signer: PaperApprovalSigning
+    private let tradeApprover: PaperTradeApproving
 
     var sessionState: String { session.state }
     var isStarting: Bool { inFlightAction == .start }
@@ -90,11 +94,14 @@ final class PaperOperationsViewModel {
     init(
         client: PaperOperationsClient,
         aiService: AIService? = nil,
-        signer: PaperApprovalSigning? = nil
+        signer: PaperApprovalSigning? = nil,
+        tradeApprover: PaperTradeApproving? = nil
     ) {
         self.client = client
-        self.aiService = aiService ?? AIService()
+        let service = aiService ?? AIService()
+        self.aiService = service
         self.signer = signer ?? LocalPaperApprovalSigner()
+        self.tradeApprover = tradeApprover ?? AIServicePaperTradeApprover(service: service)
     }
 
     func startLocalReplay() async {
@@ -178,6 +185,60 @@ final class PaperOperationsViewModel {
         }
     }
 
+    func preparePaperIntent() async {
+        guard inFlightAction == nil, canPrepare else { return }
+        guard let symbol = selectedInstrument?.symbol else { return }
+        inFlightAction = .prepare
+        prepareFailedMessage = nil
+        defer { inFlightAction = nil }
+
+        do {
+            let response = try await client.prepareIndiaPaper(symbol: symbol, quantity: quantity)
+            applyAdmission(response.admission)
+            if let regime = response.regime {
+                applyRegime(regime)
+            }
+            if let snapshot {
+                lastEvidence = captureEvidence(from: snapshot)
+            }
+            guard response.admission.isAdmitted else {
+                pendingTradeApproval = nil
+                blockingReason = .admissionDenied(reasonCode: response.admission.reasonCode)
+                return
+            }
+            let trimmed = quantity.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let qty = Decimal(string: trimmed) else {
+                prepareFailedMessage = PaperOperationsCopy.prepareFailed
+                return
+            }
+            let proposal = TradeProposalData(
+                proposalId: response.proposalId,
+                ticker: "NSE:CASH:\(symbol)",
+                action: "BUY",
+                quantity: qty,
+                reasoning: nil,
+                status: response.state
+            )
+            pendingTradeApproval = try await tradeApprover.requestTradeApproval(proposal: proposal)
+        } catch PaperOperationsClientError.paperPreparationDenied {
+            pendingTradeApproval = nil
+            blockingReason = .rejectedAfterPrepare(reasonCode: "PAPER_PREPARATION_DENIED")
+        } catch {
+            pendingTradeApproval = nil
+            prepareFailedMessage = PaperOperationsCopy.prepareFailed
+        }
+    }
+
+    func completeTradeApproval(_ review: TradeApprovalReview) async throws {
+        let identity = try signer.identity()
+        guard identity.keyID == review.payload.keyId else {
+            throw TradeApprovalReviewError.signerMismatch
+        }
+        let signature = try signer.sign(review.signedBytes)
+        _ = try await aiService.completeTradeApproval(review, signature: signature)
+        pendingTradeApproval = nil
+    }
+
     func applyMalformedSnapshotPayload(_ data: Data) {
         do {
             _ = try PaperOperationsModels.decodeSnapshot(data)
@@ -219,6 +280,35 @@ final class PaperOperationsViewModel {
             default:
                 blockingReason = .unreconciled
             }
+        }
+    }
+
+    private func applyAdmission(_ admission: PaperAdmission) {
+        simulatorFillPrice = admission.simulatorFillPrice
+        simulatorDrawdownPct = admission.simulatorDrawdownPct
+        simulatorDecision = admission.decision
+        swarmRiskQuantity = admission.riskQuantity
+        swarmSpreadPct = admission.currentSpreadPct
+        swarmReasonCode = admission.reasonCode
+        if admission.isAdmitted {
+            rejectionReasons = []
+        } else if !admission.reasonCode.isEmpty {
+            rejectionReasons = [admission.reasonCode]
+        }
+    }
+
+    private func applyRegime(_ regime: PaperRegimeEvidence) {
+        if let regimeId = regime.regimeId {
+            self.regimeId = String(regimeId)
+        }
+        if let modelVersion = regime.modelVersion {
+            self.modelVersion = modelVersion
+        }
+        if let observedAt = regime.observedAt {
+            regimeObservedAt = observedAt
+        }
+        if let sourceSnapshotId = regime.sourceSnapshotId {
+            self.sourceSnapshotId = sourceSnapshotId
         }
     }
 

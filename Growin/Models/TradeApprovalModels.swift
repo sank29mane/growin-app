@@ -76,6 +76,49 @@ struct TradeApprovalReview: Identifiable, Sendable {
         self.payload = payload
         self.signedBytes = bytes
     }
+
+    init(challenge: ApprovalChallengeResponse, payload: SignedTradeApprovalPayload, signedBytes: Data) {
+        self.challenge = challenge
+        self.payload = payload
+        self.signedBytes = signedBytes
+    }
+
+    static func testingPlaceholder(proposal: TradeProposalData) -> TradeApprovalReview {
+        let now = Int(Date().timeIntervalSince1970)
+        let challenge = ApprovalChallengeResponse(
+            challengeId: "test-challenge",
+            proposalId: proposal.proposalId,
+            keyId: "test-key",
+            intentHash: "test-intent",
+            signedPayloadB64: Data("{}".utf8).base64EncodedString(),
+            issuedAt: now,
+            expiresAt: now + 600
+        )
+        let payload = SignedTradeApprovalPayload(
+            version: 1,
+            purpose: "growin.execution.dispatch",
+            challengeId: challenge.challengeId,
+            proposalId: proposal.proposalId,
+            clientOrderId: "test-client-order",
+            intentHash: challenge.intentHash,
+            workspace: "india",
+            account: "paper",
+            broker: "local-paper",
+            mode: "PAPER",
+            ticker: proposal.ticker,
+            side: proposal.action,
+            quantity: "\(proposal.quantity)",
+            orderType: nil,
+            limitPrice: nil,
+            replacesProposalId: nil,
+            requoteId: nil,
+            nonce: "test-nonce",
+            issuedAt: challenge.issuedAt,
+            expiresAt: challenge.expiresAt,
+            keyId: challenge.keyId
+        )
+        return TradeApprovalReview(challenge: challenge, payload: payload, signedBytes: Data())
+    }
 }
 
 enum TradeApprovalReviewError: LocalizedError {
