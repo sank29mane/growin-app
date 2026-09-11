@@ -95,7 +95,7 @@ struct PaperOperationsSessionCard: View {
                     title: PaperOperationsCopy.startLocalReplay,
                     inFlight: viewModel.inFlightAction == .start,
                     enabled: startEnabled,
-                    accent: startEnabled,
+                    accent: viewModel.accentedWorkflowAction == .start,
                     destructive: false
                 ) {
                     Task { await viewModel.startLocalReplay() }

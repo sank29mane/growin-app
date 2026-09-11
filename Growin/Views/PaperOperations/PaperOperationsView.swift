@@ -15,6 +15,7 @@ struct PaperOperationsView: View {
                     PaperOperationsSessionCard(viewModel: viewModel)
                     PaperOperationsEvidenceGrid(viewModel: viewModel)
                     prepareRow
+                    PaperOperationsLifecycleStrip(viewModel: viewModel)
                 }
                 .padding(24)
             }
@@ -28,7 +29,7 @@ struct PaperOperationsView: View {
 
     private var prepareRow: some View {
         let enabled = viewModel.canPrepare && viewModel.inFlightAction == nil
-        let accent = viewModel.canPrepare && viewModel.inFlightAction == nil
+        let accent = viewModel.accentedWorkflowAction == .prepare
 
         return VStack(alignment: .leading, spacing: 8) {
             Button {
