@@ -162,6 +162,19 @@ struct PaperOperationsEvidence: Equatable, Sendable {
     var source: String
     var bid: String
     var ask: String
+    var quoteObservedAt: String? = nil
+    var snapshotId: String? = nil
+    var regimeId: String? = nil
+    var modelVersion: String? = nil
+    var regimeObservedAt: String? = nil
+    var sourceSnapshotId: String? = nil
+    var simulatorFillPrice: String? = nil
+    var simulatorDrawdownPct: String? = nil
+    var simulatorDecision: String? = nil
+    var swarmRiskQuantity: String? = nil
+    var swarmSpreadPct: String? = nil
+    var swarmReasonCode: String? = nil
+    var rejectionReasons: [String] = []
 }
 
 enum PaperOperationsCopy {
@@ -189,6 +202,16 @@ enum PaperOperationsCopy {
     static func snapshotFailed(symbol: String) -> String {
         "Snapshot could not be loaded for \(symbol). Select a subscribed instrument, then Load Snapshot Evidence."
     }
+    static let prepareFailed = "Paper intent was not prepared. No broker was contacted. Fix the blocking reason, then try Prepare Paper Intent again."
+    static let acknowledgeFailed = "Local fill was not acknowledged. The signed intent is unchanged. Try Acknowledge Local Fill again."
+    static let reconcileFailed = "Paper outcome was not reconciled. Try Reconcile Paper Outcome again before preparing another intent."
+    static let missingField = "Missing"
+    static let rejectionReason = "Rejection reason"
+    static let rejectionReasons = "Rejection reasons"
+    static let cardRegime = "Regime"
+    static let cardSimulator = "Simulator"
+    static let cardSwarm = "Swarm/Risk"
+    static let cardSnapshot = "Snapshot Freshness"
     static let subtitle = "LOCAL INDIA/NSE REPLAY // PAPER ONLY"
     static let modeStrip = "PAPER ONLY · LOCAL REPLAY · NO BROKER"
     static let evidenceComplete = "Evidence is complete. Prepare stays a separate explicit action."
@@ -204,6 +227,14 @@ enum PaperOperationsCopy {
 
     static func rejectedAfterPrepare(reasonCode: String) -> String {
         "Preparation was rejected: \(reasonCode). Last evidence stays visible. Prepare stays disabled."
+    }
+
+    static func truncatedHash(_ value: String) -> String {
+        let prefix = String(value.prefix(16))
+        if value.count <= 16 {
+            return prefix
+        }
+        return prefix + "…"
     }
 }
 

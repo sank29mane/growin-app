@@ -249,6 +249,117 @@ struct PaperOperationsViewModelTests {
     }
 
     @Test
+    func runningWithoutSnapshotKeepsCanPrepareFalseAndMissingCopy() async {
+        await PaperOperationsHTTPIsolation.shared.run {
+            let viewModel = PaperOperationsViewModel(
+                client: makeClient(),
+                signer: StubPaperApprovalSigner(configured: true)
+            )
+            PaperOperationsURLProtocol.overrideStartPayload = Data(
+                #"{"state":"RUNNING","provider":"local-replay","instruments":[{"workspace":"india","venue":"NSE","segment":"CASH","symbol":"RELIANCE","currency":"INR"},{"workspace":"india","venue":"NSE","segment":"CASH","symbol":"INFY","currency":"INR"}],"read_only":true}"#.utf8
+            )
+
+            await viewModel.startLocalReplay()
+            viewModel.selectedInstrumentSymbol = "RELIANCE"
+
+            #expect(viewModel.sessionState == "RUNNING")
+            #expect(viewModel.snapshot == nil)
+            #expect(viewModel.regimeId == nil)
+            #expect(viewModel.canPrepare == false)
+            #expect(viewModel.blockingReason?.kind == .missingSnapshot)
+            #expect(viewModel.blockingReason?.copy == PaperOperationsCopy.missingSnapshot)
+            #expect(viewModel.disabledPrepareAccessibilityHint == PaperOperationsCopy.missingSnapshot)
+        }
+    }
+
+    @Test
+    func signerNotConfiguredBlocksPrepareWithoutCreatingIdentity() async {
+        await PaperOperationsHTTPIsolation.shared.run {
+            let signer = StubPaperApprovalSigner(configured: false)
+            let viewModel = PaperOperationsViewModel(client: makeClient(), signer: signer)
+
+            await viewModel.startLocalReplay()
+
+            #expect(viewModel.sessionState == "RUNNING")
+            #expect(viewModel.snapshot != nil)
+            #expect(signer.identityCallCount == 0)
+            #expect(signer.signCallCount == 0)
+            #expect(viewModel.canPrepare == false)
+            #expect(viewModel.blockingReason?.kind == .signerMissing)
+            #expect(viewModel.blockingReason?.copy == PaperOperationsCopy.signerMissing)
+            #expect(viewModel.disabledPrepareAccessibilityHint == PaperOperationsCopy.signerMissing)
+        }
+    }
+
+    @Test
+    func unreconciledIntentBlocksPrepareWithUnreconciledCopy() async {
+        await PaperOperationsHTTPIsolation.shared.run {
+            let viewModel = PaperOperationsViewModel(
+                client: makeClient(),
+                signer: StubPaperApprovalSigner(configured: true)
+            )
+            await viewModel.startLocalReplay()
+            #expect(viewModel.canPrepare == true)
+
+            viewModel.unreconciledIntent = true
+
+            #expect(viewModel.canPrepare == false)
+            #expect(viewModel.blockingReason?.kind == .unreconciled)
+            #expect(viewModel.blockingReason?.copy == PaperOperationsCopy.unreconciled)
+            #expect(viewModel.disabledPrepareAccessibilityHint == PaperOperationsCopy.unreconciled)
+        }
+    }
+
+    @Test
+    func emptyObjectSnapshotPayloadIsMalformedAndKeepsLastSnapshotFields() async {
+        await PaperOperationsHTTPIsolation.shared.run {
+            let viewModel = PaperOperationsViewModel(
+                client: makeClient(),
+                signer: StubPaperApprovalSigner(configured: true)
+            )
+            await viewModel.startLocalReplay()
+            #expect(viewModel.snapshot?.bid == "99.02")
+            #expect(viewModel.lastEvidence?.ask == "101.02")
+            PaperOperationsURLProtocol.reset()
+            PaperOperationsURLProtocol.overrideSnapshotPayload = Data(#"{}"#.utf8)
+
+            await viewModel.loadSnapshotEvidence()
+
+            #expect(viewModel.blockingReason?.kind == .malformed)
+            #expect(viewModel.blockingReason?.copy == PaperOperationsCopy.malformed)
+            #expect(viewModel.canPrepare == false)
+            #expect(viewModel.snapshot?.bid == "99.02")
+            #expect(viewModel.snapshot?.ask == "101.02")
+            #expect(viewModel.lastEvidence?.bid == "99.02")
+            #expect(viewModel.lastEvidence?.ask == "101.02")
+        }
+    }
+
+    @Test
+    func canPrepareIsTrueWithoutRegimeSimulatorOrSwarmAndSlotSaysEvidenceComplete() async {
+        await PaperOperationsHTTPIsolation.shared.run {
+            let viewModel = PaperOperationsViewModel(
+                client: makeClient(),
+                signer: StubPaperApprovalSigner(configured: true)
+            )
+
+            await viewModel.startLocalReplay()
+
+            #expect(viewModel.snapshot?.source == "local-replay")
+            #expect(viewModel.regimeId == nil)
+            #expect(viewModel.modelVersion == nil)
+            #expect(viewModel.simulatorFillPrice == nil)
+            #expect(viewModel.simulatorDecision == nil)
+            #expect(viewModel.swarmRiskQuantity == nil)
+            #expect(viewModel.swarmReasonCode == nil)
+            #expect(viewModel.canPrepare == true)
+            #expect(viewModel.blockingReason == nil)
+            #expect(viewModel.blockingSlotCopy == PaperOperationsCopy.evidenceComplete)
+            #expect(viewModel.disabledPrepareAccessibilityHint.isEmpty)
+        }
+    }
+
+    @Test
     func quantityLongerThan32KeepsCanPrepareFalse() async {
         await PaperOperationsHTTPIsolation.shared.run {
             let viewModel = PaperOperationsViewModel(
@@ -298,16 +409,20 @@ struct PaperOperationsViewModelTests {
 
 final class StubPaperApprovalSigner: PaperApprovalSigning {
     var isConfigured: Bool
+    private(set) var identityCallCount = 0
+    private(set) var signCallCount = 0
 
     init(configured: Bool) {
         isConfigured = configured
     }
 
     func identity() throws -> ApprovalSignerIdentity {
-        ApprovalSignerIdentity(keyID: "test-key", publicKeyX963: Data())
+        identityCallCount += 1
+        return ApprovalSignerIdentity(keyID: "test-key", publicKeyX963: Data())
     }
 
     func sign(_ payload: Data) throws -> Data {
-        Data()
+        signCallCount += 1
+        return Data()
     }
 }

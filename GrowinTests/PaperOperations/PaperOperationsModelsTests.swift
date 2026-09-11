@@ -67,4 +67,87 @@ struct PaperOperationsModelsTests {
             try PaperOperationsModels.decodeSnapshot(data)
         }
     }
+
+    @Test
+    func emptyObjectSnapshotDataIsMalformedNotAFakeQuote() throws {
+        #expect(throws: PaperOperationsModels.DecodeError.malformedSnapshot) {
+            try PaperOperationsModels.decodeSnapshot(Data(#"{}"#.utf8))
+        }
+    }
+
+    @Test
+    func paperOperationsCopyMatchesUISpecEvidenceCompleteAndSignerMissing() {
+        #expect(
+            PaperOperationsCopy.evidenceComplete
+                == "Evidence is complete. Prepare stays a separate explicit action."
+        )
+        #expect(
+            PaperOperationsCopy.signerMissing
+                == "Local paper approval is not configured. Open System Settings, choose Set up local paper approvals, then return here."
+        )
+        #expect(
+            PaperOperationsCopy.stopped
+                == "Replay is stopped. Start Local Replay, then inspect evidence before preparing."
+        )
+        #expect(
+            PaperOperationsCopy.missingSnapshot
+                == "Snapshot evidence is missing. Load Snapshot Evidence before preparing."
+        )
+        #expect(
+            PaperOperationsCopy.staleSnapshot
+                == "Snapshot evidence is stale. Refresh Session Status, then Load Snapshot Evidence."
+        )
+        #expect(
+            PaperOperationsCopy.malformed
+                == "The server returned unreadable evidence. Do not prepare. Refresh Session Status. If this repeats, Stop Local Replay and start again."
+        )
+        #expect(
+            PaperOperationsCopy.unreconciled
+                == "This paper intent is unreconciled. Reconcile Paper Outcome before starting another prepare."
+        )
+        #expect(
+            PaperOperationsCopy.admissionDenied(reasonCode: "SPREAD_TOO_WIDE")
+                == "Paper intent was denied: SPREAD_TOO_WIDE. Inspect the evidence. Prepare stays disabled until a fresh admitted snapshot exists."
+        )
+        #expect(
+            PaperOperationsCopy.rejectedAfterPrepare(reasonCode: "SPREAD_TOO_WIDE")
+                == "Preparation was rejected: SPREAD_TOO_WIDE. Last evidence stays visible. Prepare stays disabled."
+        )
+        #expect(
+            PaperOperationsCopy.startFailed
+                == "Local replay could not start. Confirm the backend is reachable on loopback, then try Start Local Replay again."
+        )
+        #expect(
+            PaperOperationsCopy.stopFailed
+                == "Local replay could not stop. Try Stop Local Replay again. Do not assume the session is gone."
+        )
+        #expect(
+            PaperOperationsCopy.statusFailed
+                == "Session status could not be read. Try Refresh Session Status. Prepare stays disabled."
+        )
+        #expect(
+            PaperOperationsCopy.snapshotFailed(symbol: "RELIANCE")
+                == "Snapshot could not be loaded for RELIANCE. Select a subscribed instrument, then Load Snapshot Evidence."
+        )
+        #expect(
+            PaperOperationsCopy.prepareFailed
+                == "Paper intent was not prepared. No broker was contacted. Fix the blocking reason, then try Prepare Paper Intent again."
+        )
+        #expect(
+            PaperOperationsCopy.acknowledgeFailed
+                == "Local fill was not acknowledged. The signed intent is unchanged. Try Acknowledge Local Fill again."
+        )
+        #expect(
+            PaperOperationsCopy.reconcileFailed
+                == "Paper outcome was not reconciled. Try Reconcile Paper Outcome again before preparing another intent."
+        )
+    }
+
+    @Test
+    func truncatedHashUsesSixteenCharactersPlusEllipsis() {
+        let full = String(repeating: "b", count: 64)
+        #expect(PaperOperationsCopy.truncatedHash(full) == String(repeating: "b", count: 16) + "…")
+        #expect(PaperOperationsCopy.truncatedHash("abc") == "abc")
+        #expect(PaperOperationsCopy.truncatedHash(String(repeating: "c", count: 16)) == String(repeating: "c", count: 16))
+    }
 }

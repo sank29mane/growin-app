@@ -22,7 +22,20 @@ final class PaperOperationsViewModel {
     var statusFailedMessage: String?
     var snapshotFailedMessage: String?
     var inFlightAction: PaperOperationsInFlightAction?
-    var unreconciledIntent = false
+    var unreconciledIntent = false {
+        didSet { applyUnreconciledGate() }
+    }
+    var rejectionReasons: [String] = []
+    var regimeId: String?
+    var modelVersion: String?
+    var regimeObservedAt: String?
+    var sourceSnapshotId: String?
+    var simulatorFillPrice: String?
+    var simulatorDrawdownPct: String?
+    var simulatorDecision: String?
+    var swarmRiskQuantity: String?
+    var swarmSpreadPct: String?
+    var swarmReasonCode: String?
 
     private let client: PaperOperationsClient
     private let aiService: AIService
@@ -30,6 +43,20 @@ final class PaperOperationsViewModel {
 
     var sessionState: String { session.state }
     var isStarting: Bool { inFlightAction == .start }
+
+    var blockingSlotCopy: String {
+        if let blockingReason {
+            return blockingReason.copy
+        }
+        if canPrepare {
+            return PaperOperationsCopy.evidenceComplete
+        }
+        return PaperOperationsCopy.missingSnapshot
+    }
+
+    var disabledPrepareAccessibilityHint: String {
+        canPrepare ? "" : blockingSlotCopy
+    }
 
     var selectedInstrumentSymbol: String? {
         get { selectedInstrument?.symbol }
@@ -163,12 +190,7 @@ final class PaperOperationsViewModel {
         do {
             let loaded = try await client.snapshot(symbol: symbol)
             snapshot = loaded
-            lastEvidence = PaperOperationsEvidence(
-                snapshotSymbol: loaded.instrument.symbol,
-                source: loaded.source,
-                bid: loaded.bid,
-                ask: loaded.ask
-            )
+            lastEvidence = captureEvidence(from: loaded)
             blockingReason = durableReasonAfterEvidence()
         } catch {
             if !keepLastEvidenceOnFailure {
@@ -189,6 +211,17 @@ final class PaperOperationsViewModel {
         selectedInstrument = nil
     }
 
+    private func applyUnreconciledGate() {
+        if unreconciledIntent {
+            switch blockingReason {
+            case .malformed, .staleSnapshot, .admissionDenied, .rejectedAfterPrepare:
+                return
+            default:
+                blockingReason = .unreconciled
+            }
+        }
+    }
+
     private func durableReasonAfterEvidence() -> BlockingReason? {
         if !signer.isConfigured {
             return .signerMissing
@@ -198,6 +231,34 @@ final class PaperOperationsViewModel {
         }
         return nil
     }
+
+    private func captureEvidence(from snapshot: PaperMarketSnapshot) -> PaperOperationsEvidence {
+        PaperOperationsEvidence(
+            snapshotSymbol: snapshot.instrument.symbol,
+            source: snapshot.source,
+            bid: snapshot.bid,
+            ask: snapshot.ask,
+            quoteObservedAt: Self.isoStamp.string(from: snapshot.quoteObservedAt),
+            snapshotId: snapshot.snapshotId,
+            regimeId: regimeId,
+            modelVersion: modelVersion,
+            regimeObservedAt: regimeObservedAt,
+            sourceSnapshotId: sourceSnapshotId,
+            simulatorFillPrice: simulatorFillPrice,
+            simulatorDrawdownPct: simulatorDrawdownPct,
+            simulatorDecision: simulatorDecision,
+            swarmRiskQuantity: swarmRiskQuantity,
+            swarmSpreadPct: swarmSpreadPct,
+            swarmReasonCode: swarmReasonCode,
+            rejectionReasons: rejectionReasons
+        )
+    }
+
+    private static let isoStamp: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
 
     private func mapSnapshotFailure(_ error: Error) -> BlockingReason {
         if case PaperOperationsClientError.staleSnapshot = error {
