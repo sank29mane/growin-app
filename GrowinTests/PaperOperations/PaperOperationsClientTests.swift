@@ -27,6 +27,9 @@ final class PaperOperationsURLProtocol: URLProtocol {
     nonisolated(unsafe) static var overrideCurrentPayload: Data?
     nonisolated(unsafe) static var overrideSnapshotStatus = 200
     nonisolated(unsafe) static var overrideSnapshotPayload: Data?
+    nonisolated(unsafe) static var overridePrepareStatus = 201
+    nonisolated(unsafe) static var overridePreparePayload: Data?
+    nonisolated(unsafe) static var overridePrepareTransportFailure = false
 
     static let allowlistPrefixes: [String] = [
         "/api/market-data/sessions",
@@ -45,6 +48,9 @@ final class PaperOperationsURLProtocol: URLProtocol {
         overrideCurrentPayload = nil
         overrideSnapshotStatus = 200
         overrideSnapshotPayload = nil
+        overridePrepareStatus = 201
+        overridePreparePayload = nil
+        overridePrepareTransportFailure = false
         lock.unlock()
     }
 
@@ -73,8 +79,12 @@ final class PaperOperationsURLProtocol: URLProtocol {
         let payload: Data
         let status: Int
         if path.hasSuffix("/paper-preparations") {
-            status = 201
-            payload = Data(#"{"proposal_id":"p1","state":"DENIED","admission":{"decision":"DENIED","reason_code":"SPREAD_TOO_WIDE","ticker":"NSE:CASH:RELIANCE","side":"BUY"}}"#.utf8)
+            if Self.overridePrepareTransportFailure {
+                client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet))
+                return
+            }
+            status = Self.overridePrepareStatus
+            payload = Self.overridePreparePayload ?? Data(#"{"proposal_id":"p1","state":"DENIED","admission":{"decision":"DENIED","reason_code":"SPREAD_TOO_WIDE","ticker":"NSE:CASH:RELIANCE","side":"BUY"}}"#.utf8)
         } else if path.contains("/snapshots/") {
             status = Self.overrideSnapshotStatus
             payload = Self.overrideSnapshotPayload ?? Data(#"{"instrument":{"workspace":"india","venue":"NSE","segment":"CASH","symbol":"RELIANCE","currency":"INR"},"source":"local-replay","bid":"99.02","ask":"101.02","quote_observed_at":"2026-09-11T18:37:05Z","quote_received_at":"2026-09-11T18:37:05Z","quote_sequence":3,"last_trade_price":"100","snapshot_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}"#.utf8)
@@ -241,6 +251,45 @@ struct PaperOperationsClientTests {
                 _ = try await client.snapshot(symbol: "RELIANCE")
                 Issue.record("expected staleSnapshot error")
             } catch PaperOperationsClientError.staleSnapshot {
+                // expected
+            } catch {
+                Issue.record("unexpected error \(error)")
+            }
+        }
+    }
+
+    @Test
+    func prepareIndiaPaperJSONHasOnlyConfirmationSymbolAndQuantity() async throws {
+        try await PaperOperationsHTTPIsolation.shared.run {
+            let client = makeClient()
+            _ = try await client.prepareIndiaPaper(symbol: "RELIANCE", quantity: "1")
+
+            let record = PaperOperationsURLProtocol.snapshotRecord()
+            #expect(record.urls.map(\.path) == ["/api/market-data/paper-preparations"])
+            #expect(record.methods == ["POST"])
+            let body = try #require(record.bodies.first)
+            let object = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+            #expect(Set(object.keys) == Set(["confirmation", "symbol", "quantity"]))
+            #expect(object["confirmation"] as? String == "PREPARE_INDIA_PAPER")
+            #expect(object["symbol"] as? String == "RELIANCE")
+            #expect(object["quantity"] as? String == "1")
+            #expect(object["workspace"] == nil)
+        }
+    }
+
+    @Test
+    func prepare409PaperPreparationDeniedMapsToTypedClientError() async {
+        await PaperOperationsHTTPIsolation.shared.run {
+            let client = makeClient()
+            PaperOperationsURLProtocol.overridePrepareStatus = 409
+            PaperOperationsURLProtocol.overridePreparePayload = Data(
+                #"{"detail":{"code":"PAPER_PREPARATION_DENIED","message":"workspace is not india"}}"#.utf8
+            )
+
+            do {
+                _ = try await client.prepareIndiaPaper(symbol: "RELIANCE", quantity: "1")
+                Issue.record("expected paperPreparationDenied error")
+            } catch PaperOperationsClientError.paperPreparationDenied {
                 // expected
             } catch {
                 Issue.record("unexpected error \(error)")

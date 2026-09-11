@@ -405,6 +405,133 @@ struct PaperOperationsViewModelTests {
             #expect(PaperOperationsURLProtocol.snapshotRecord().urls.isEmpty)
         }
     }
+
+    @Test
+    func preparePaperIntentIsNoOpWhenCanPrepareIsFalse() async {
+        await PaperOperationsHTTPIsolation.shared.run {
+            let approver = StubPaperTradeApprover()
+            let viewModel = PaperOperationsViewModel(
+                client: makeClient(),
+                signer: StubPaperApprovalSigner(configured: false),
+                tradeApprover: approver
+            )
+
+            await viewModel.preparePaperIntent()
+
+            #expect(PaperOperationsURLProtocol.snapshotRecord().urls.isEmpty)
+            #expect(viewModel.pendingTradeApproval == nil)
+            #expect(approver.requestCallCount == 0)
+        }
+    }
+
+    @Test
+    func prepare201DeniedDoesNotOpenSheetAndKeepsLastEvidence() async {
+        await PaperOperationsHTTPIsolation.shared.run {
+            let approver = StubPaperTradeApprover()
+            let viewModel = PaperOperationsViewModel(
+                client: makeClient(),
+                signer: StubPaperApprovalSigner(configured: true),
+                tradeApprover: approver
+            )
+            await viewModel.startLocalReplay()
+            #expect(viewModel.canPrepare == true)
+            let keptBid = viewModel.lastEvidence?.bid
+            PaperOperationsURLProtocol.reset()
+            PaperOperationsURLProtocol.overridePreparePayload = Data(
+                #"{"proposal_id":"paper-denied-1","state":"DENIED","admission":{"decision":"DENIED","reason_code":"SPREAD_TOO_WIDE","simulator_fill_price":"100.51","simulator_drawdown_pct":"0.01","risk_quantity":"1","current_spread_pct":"0.09"}}"#.utf8
+            )
+
+            await viewModel.preparePaperIntent()
+
+            let record = PaperOperationsURLProtocol.snapshotRecord()
+            #expect(record.urls.map(\.path) == ["/api/market-data/paper-preparations"])
+            #expect(record.urls.allSatisfy { !$0.absoluteString.contains("/api/ai/trade/approve") })
+            #expect(viewModel.pendingTradeApproval == nil)
+            #expect(approver.requestCallCount == 0)
+            #expect(viewModel.blockingReason?.kind == .admissionDenied)
+            #expect(viewModel.blockingReason?.copy == PaperOperationsCopy.admissionDenied(reasonCode: "SPREAD_TOO_WIDE"))
+            #expect(viewModel.canPrepare == false)
+            #expect(viewModel.lastEvidence?.bid == keptBid)
+        }
+    }
+
+    @Test
+    func prepare201AdmittedOpensSheetWithExecutionTicker() async {
+        await PaperOperationsHTTPIsolation.shared.run {
+            let approver = StubPaperTradeApprover()
+            let viewModel = PaperOperationsViewModel(
+                client: makeClient(),
+                signer: StubPaperApprovalSigner(configured: true),
+                tradeApprover: approver
+            )
+            await viewModel.startLocalReplay()
+            PaperOperationsURLProtocol.reset()
+            PaperOperationsURLProtocol.overridePreparePayload = Data(
+                #"{"proposal_id":"paper-admitted-1","state":"PENDING","admission":{"decision":"ADMITTED","reason_code":"ADMITTED","simulator_fill_price":"100.51","simulator_drawdown_pct":"0.01","risk_quantity":"1","current_spread_pct":"0.01"},"regime":{"regime_id":1,"model_version":"gmm-v1","observed_at":"2026-09-11T18:37:05Z","source_snapshot_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}"#.utf8
+            )
+
+            await viewModel.preparePaperIntent()
+
+            let record = PaperOperationsURLProtocol.snapshotRecord()
+            #expect(record.urls.map(\.path) == ["/api/market-data/paper-preparations"])
+            #expect(record.urls.allSatisfy { !$0.absoluteString.contains("/api/ai/trade/approve") })
+            #expect(approver.requestCallCount == 1)
+            #expect(approver.lastProposal?.proposalId == "paper-admitted-1")
+            #expect(approver.lastProposal?.ticker == "NSE:CASH:RELIANCE")
+            #expect(approver.lastProposal?.action == "BUY")
+            #expect(approver.lastProposal?.quantity == Decimal(string: "1"))
+            #expect(viewModel.pendingTradeApproval != nil)
+            #expect(viewModel.simulatorFillPrice == "100.51")
+            #expect(viewModel.swarmRiskQuantity == "1")
+            #expect(viewModel.regimeId == "1")
+            #expect(viewModel.modelVersion == "gmm-v1")
+            #expect(viewModel.blockingReason?.kind != .admissionDenied)
+        }
+    }
+
+    @Test
+    func prepare409DeniedKeepsPrepareDisabledWithFailClosedCopy() async {
+        await PaperOperationsHTTPIsolation.shared.run {
+            let viewModel = PaperOperationsViewModel(
+                client: makeClient(),
+                signer: StubPaperApprovalSigner(configured: true),
+                tradeApprover: StubPaperTradeApprover()
+            )
+            await viewModel.startLocalReplay()
+            #expect(viewModel.canPrepare == true)
+            PaperOperationsURLProtocol.reset()
+            PaperOperationsURLProtocol.overridePrepareStatus = 409
+            PaperOperationsURLProtocol.overridePreparePayload = Data(
+                #"{"detail":{"code":"PAPER_PREPARATION_DENIED","message":"workspace is not india"}}"#.utf8
+            )
+
+            await viewModel.preparePaperIntent()
+
+            #expect(viewModel.pendingTradeApproval == nil)
+            #expect(viewModel.canPrepare == false)
+            #expect(viewModel.blockingReason?.kind == .rejectedAfterPrepare)
+            #expect(viewModel.blockingReason?.copy == PaperOperationsCopy.rejectedAfterPrepare(reasonCode: "PAPER_PREPARATION_DENIED"))
+        }
+    }
+
+    @Test
+    func prepareTransportFailureUsesPrepareFailedCopyAndDoesNotOpenSheet() async {
+        await PaperOperationsHTTPIsolation.shared.run {
+            let viewModel = PaperOperationsViewModel(
+                client: makeClient(),
+                signer: StubPaperApprovalSigner(configured: true),
+                tradeApprover: StubPaperTradeApprover()
+            )
+            await viewModel.startLocalReplay()
+            PaperOperationsURLProtocol.reset()
+            PaperOperationsURLProtocol.overridePrepareTransportFailure = true
+
+            await viewModel.preparePaperIntent()
+
+            #expect(viewModel.pendingTradeApproval == nil)
+            #expect(viewModel.prepareFailedMessage == PaperOperationsCopy.prepareFailed)
+        }
+    }
 }
 
 final class StubPaperApprovalSigner: PaperApprovalSigning {
@@ -424,5 +551,16 @@ final class StubPaperApprovalSigner: PaperApprovalSigning {
     func sign(_ payload: Data) throws -> Data {
         signCallCount += 1
         return Data()
+    }
+}
+
+final class StubPaperTradeApprover: PaperTradeApproving {
+    private(set) var requestCallCount = 0
+    private(set) var lastProposal: TradeProposalData?
+
+    func requestTradeApproval(proposal: TradeProposalData) async throws -> TradeApprovalReview {
+        requestCallCount += 1
+        lastProposal = proposal
+        return TradeApprovalReview.testingPlaceholder(proposal: proposal)
     }
 }
