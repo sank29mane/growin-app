@@ -23,6 +23,10 @@ final class PaperOperationsURLProtocol: URLProtocol {
     nonisolated(unsafe) static var recordedURLs: [URL] = []
     nonisolated(unsafe) static var recordedMethods: [String] = []
     nonisolated(unsafe) static var recordedBodies: [Data] = []
+    nonisolated(unsafe) static var overrideStartPayload: Data?
+    nonisolated(unsafe) static var overrideCurrentPayload: Data?
+    nonisolated(unsafe) static var overrideSnapshotStatus = 200
+    nonisolated(unsafe) static var overrideSnapshotPayload: Data?
 
     static let allowlistPrefixes: [String] = [
         "/api/market-data/sessions",
@@ -37,6 +41,10 @@ final class PaperOperationsURLProtocol: URLProtocol {
         recordedURLs = []
         recordedMethods = []
         recordedBodies = []
+        overrideStartPayload = nil
+        overrideCurrentPayload = nil
+        overrideSnapshotStatus = 200
+        overrideSnapshotPayload = nil
         lock.unlock()
     }
 
@@ -68,11 +76,14 @@ final class PaperOperationsURLProtocol: URLProtocol {
             status = 201
             payload = Data(#"{"proposal_id":"p1","state":"DENIED","admission":{"decision":"DENIED","reason_code":"SPREAD_TOO_WIDE","ticker":"NSE:CASH:RELIANCE","side":"BUY"}}"#.utf8)
         } else if path.contains("/snapshots/") {
-            status = 200
-            payload = Data(#"{"instrument":{"workspace":"india","venue":"NSE","segment":"CASH","symbol":"RELIANCE","currency":"INR"},"source":"local-replay","bid":"99.02","ask":"101.02","quote_observed_at":"2026-09-11T18:37:05Z","quote_received_at":"2026-09-11T18:37:05Z","quote_sequence":3,"last_trade_price":"100","snapshot_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}"#.utf8)
+            status = Self.overrideSnapshotStatus
+            payload = Self.overrideSnapshotPayload ?? Data(#"{"instrument":{"workspace":"india","venue":"NSE","segment":"CASH","symbol":"RELIANCE","currency":"INR"},"source":"local-replay","bid":"99.02","ask":"101.02","quote_observed_at":"2026-09-11T18:37:05Z","quote_received_at":"2026-09-11T18:37:05Z","quote_sequence":3,"last_trade_price":"100","snapshot_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}"#.utf8)
         } else if request.httpMethod == "POST" {
             status = 201
-            payload = Data(#"{"state":"RUNNING","provider":"local-replay","instruments":[{"workspace":"india","venue":"NSE","segment":"CASH","symbol":"RELIANCE","currency":"INR"}],"read_only":true}"#.utf8)
+            payload = Self.overrideStartPayload ?? Data(#"{"state":"RUNNING","provider":"local-replay","instruments":[{"workspace":"india","venue":"NSE","segment":"CASH","symbol":"RELIANCE","currency":"INR"}],"read_only":true}"#.utf8)
+        } else if path.hasSuffix("/sessions/current"), let override = Self.overrideCurrentPayload {
+            status = 200
+            payload = override
         } else {
             status = 200
             payload = Data(#"{"state":"STOPPED","provider":null,"instruments":[],"read_only":true}"#.utf8)
@@ -188,6 +199,51 @@ struct PaperOperationsClientTests {
                 #expect(object["mode"] == nil)
                 #expect(object["url"] == nil)
                 #expect(object["api_key"] == nil)
+            }
+        }
+    }
+
+    @Test
+    func stopSessionDeletesCurrentAndDoesNotGetSnapshots() async throws {
+        try await PaperOperationsHTTPIsolation.shared.run {
+            let client = makeClient()
+            _ = try await client.stopSession()
+
+            let record = PaperOperationsURLProtocol.snapshotRecord()
+            #expect(record.methods == ["DELETE"])
+            #expect(record.urls.map(\.path) == ["/api/market-data/sessions/current"])
+            #expect(record.urls.allSatisfy { !$0.path.contains("/snapshots/") })
+        }
+    }
+
+    @Test
+    func currentSessionGetsSessionsCurrent() async throws {
+        try await PaperOperationsHTTPIsolation.shared.run {
+            let client = makeClient()
+            _ = try await client.currentSession()
+
+            let record = PaperOperationsURLProtocol.snapshotRecord()
+            #expect(record.methods == ["GET"])
+            #expect(record.urls.map(\.path) == ["/api/market-data/sessions/current"])
+        }
+    }
+
+    @Test
+    func snapshot409StaleSnapshotMapsToTypedClientError() async {
+        await PaperOperationsHTTPIsolation.shared.run {
+            let client = makeClient()
+            PaperOperationsURLProtocol.overrideSnapshotStatus = 409
+            PaperOperationsURLProtocol.overrideSnapshotPayload = Data(
+                #"{"detail":{"code":"STALE_SNAPSHOT","message":"top-of-book snapshot is stale"}}"#.utf8
+            )
+
+            do {
+                _ = try await client.snapshot(symbol: "RELIANCE")
+                Issue.record("expected staleSnapshot error")
+            } catch PaperOperationsClientError.staleSnapshot {
+                // expected
+            } catch {
+                Issue.record("unexpected error \(error)")
             }
         }
     }
