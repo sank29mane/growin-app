@@ -2,7 +2,24 @@ import Foundation
 import Testing
 @testable import Growin
 
+actor PaperOperationsHTTPIsolation {
+    static let shared = PaperOperationsHTTPIsolation()
+    private var occupied = false
+
+    func run<T: Sendable>(
+        _ operation: @MainActor @Sendable () async throws -> T
+    ) async rethrows -> T {
+        while occupied {
+            await Task.yield()
+        }
+        occupied = true
+        defer { occupied = false }
+        return try await operation()
+    }
+}
+
 final class PaperOperationsURLProtocol: URLProtocol {
+    private static let lock = NSLock()
     nonisolated(unsafe) static var recordedURLs: [URL] = []
     nonisolated(unsafe) static var recordedMethods: [String] = []
     nonisolated(unsafe) static var recordedBodies: [Data] = []
@@ -16,9 +33,17 @@ final class PaperOperationsURLProtocol: URLProtocol {
     ]
 
     static func reset() {
+        lock.lock()
         recordedURLs = []
         recordedMethods = []
         recordedBodies = []
+        lock.unlock()
+    }
+
+    static func snapshotRecord() -> (urls: [URL], methods: [String], bodies: [Data]) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (recordedURLs, recordedMethods, recordedBodies)
     }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -26,6 +51,7 @@ final class PaperOperationsURLProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        Self.lock.lock()
         if let url = request.url {
             Self.recordedURLs.append(url)
         }
@@ -33,6 +59,7 @@ final class PaperOperationsURLProtocol: URLProtocol {
         if let body = Self.body(from: request) {
             Self.recordedBodies.append(body)
         }
+        Self.lock.unlock()
 
         let path = request.url?.path ?? ""
         let payload: Data
@@ -83,74 +110,85 @@ final class PaperOperationsURLProtocol: URLProtocol {
 }
 
 struct PaperOperationsClientTests {
-    private func makeClient() -> PaperOperationsClient {
-        PaperOperationsURLProtocol.reset()
+    static func makeTestSession() -> URLSession {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [PaperOperationsURLProtocol.self]
-        let session = URLSession(configuration: config)
+        return URLSession(configuration: config)
+    }
+
+    private func makeClient() -> PaperOperationsClient {
+        PaperOperationsURLProtocol.reset()
         return PaperOperationsClient(
-            session: session,
+            session: Self.makeTestSession(),
             baseURL: URL(string: "http://127.0.0.1:8002")!
         )
     }
 
-    @Test @MainActor
+    @Test
     func startReplayPostsConfirmationLiteralAndRelianceFixture() async throws {
-        let client = makeClient()
-        _ = try await client.startReplay()
+        try await PaperOperationsHTTPIsolation.shared.run {
+            let client = makeClient()
+            _ = try await client.startReplay()
 
-        #expect(PaperOperationsURLProtocol.recordedMethods.contains("POST"))
-        let startURL = try #require(PaperOperationsURLProtocol.recordedURLs.first { $0.path == "/api/market-data/sessions" })
-        #expect(startURL.path == "/api/market-data/sessions")
+            let record = PaperOperationsURLProtocol.snapshotRecord()
+            #expect(record.methods.contains("POST"))
+            let startURL = try #require(record.urls.first { $0.path == "/api/market-data/sessions" })
+            #expect(startURL.path == "/api/market-data/sessions")
 
-        let body = try #require(PaperOperationsURLProtocol.recordedBodies.first)
-        let object = try JSONSerialization.jsonObject(with: body) as? [String: Any]
-        #expect(object?["confirmation"] as? String == "START_READ_ONLY_REPLAY")
-        #expect(object?["provider"] as? String == "local-replay")
-        let instruments = try #require(object?["instruments"] as? [[String: Any]])
-        #expect(instruments.first?["symbol"] as? String == "RELIANCE")
-        #expect(instruments.first?["workspace"] as? String == "india")
-        #expect(instruments.first?["venue"] as? String == "NSE")
-        #expect(instruments.first?["segment"] as? String == "CASH")
-        #expect(instruments.first?["currency"] as? String == "INR")
-    }
-
-    @Test @MainActor
-    func recordedURLsStayInsideMarketDataAllowlist() async throws {
-        let client = makeClient()
-        _ = try await client.startReplay()
-        _ = try await client.refreshStatus()
-        _ = try await client.loadSnapshot(symbol: "RELIANCE")
-        _ = try await client.prepare(symbol: "RELIANCE", quantity: "1")
-        _ = try await client.reconcile(proposalId: "p1")
-        _ = try await client.stopReplay()
-
-        #expect(!PaperOperationsURLProtocol.recordedURLs.isEmpty)
-        for url in PaperOperationsURLProtocol.recordedURLs {
-            let allowed = PaperOperationsURLProtocol.allowlistPrefixes.contains { prefix in
-                url.path == prefix || url.path.hasPrefix(prefix)
-            }
-            #expect(allowed, "recorded URL escaped allowlist: \(url.absoluteString)")
-            #expect(!url.path.contains("breeze"))
-            #expect(!url.path.contains("trading212"))
-            #expect(!url.path.contains("mcp"))
-            #expect(!url.absoluteString.contains("/api/ai/trade/approve"))
-            #expect(!url.absoluteString.contains("/api/system/status"))
+            let body = try #require(record.bodies.first)
+            let object = try JSONSerialization.jsonObject(with: body) as? [String: Any]
+            #expect(object?["confirmation"] as? String == "START_READ_ONLY_REPLAY")
+            #expect(object?["provider"] as? String == "local-replay")
+            let instruments = try #require(object?["instruments"] as? [[String: Any]])
+            #expect(instruments.first?["symbol"] as? String == "RELIANCE")
+            #expect(instruments.first?["workspace"] as? String == "india")
+            #expect(instruments.first?["venue"] as? String == "NSE")
+            #expect(instruments.first?["segment"] as? String == "CASH")
+            #expect(instruments.first?["currency"] as? String == "INR")
         }
     }
 
     @Test
-    func sessionAndPrepareBodiesOmitBrokerModeURLAndAPIKey() throws {
-        let client = makeClient()
-        let sessionBody = try client.encodeSessionStartBody()
-        let prepareBody = try client.encodePrepareBody(symbol: "RELIANCE", quantity: "1")
+    func recordedURLsStayInsideMarketDataAllowlist() async throws {
+        try await PaperOperationsHTTPIsolation.shared.run {
+            let client = makeClient()
+            _ = try await client.startReplay()
+            _ = try await client.refreshStatus()
+            _ = try await client.loadSnapshot(symbol: "RELIANCE")
+            _ = try await client.prepare(symbol: "RELIANCE", quantity: "1")
+            _ = try await client.reconcile(proposalId: "p1")
+            _ = try await client.stopReplay()
 
-        for body in [sessionBody, prepareBody] {
-            let object = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
-            #expect(object["broker"] == nil)
-            #expect(object["mode"] == nil)
-            #expect(object["url"] == nil)
-            #expect(object["api_key"] == nil)
+            let record = PaperOperationsURLProtocol.snapshotRecord()
+            #expect(!record.urls.isEmpty)
+            for url in record.urls {
+                let allowed = PaperOperationsURLProtocol.allowlistPrefixes.contains { prefix in
+                    url.path == prefix || url.path.hasPrefix(prefix)
+                }
+                #expect(allowed, "recorded URL escaped allowlist: \(url.absoluteString)")
+                #expect(!url.path.contains("breeze"))
+                #expect(!url.path.contains("trading212"))
+                #expect(!url.path.contains("mcp"))
+                #expect(!url.absoluteString.contains("/api/ai/trade/approve"))
+                #expect(!url.absoluteString.contains("/api/system/status"))
+            }
+        }
+    }
+
+    @Test
+    func sessionAndPrepareBodiesOmitBrokerModeURLAndAPIKey() async throws {
+        try await PaperOperationsHTTPIsolation.shared.run {
+            let client = makeClient()
+            let sessionBody = try client.encodeSessionStartBody()
+            let prepareBody = try client.encodePrepareBody(symbol: "RELIANCE", quantity: "1")
+
+            for body in [sessionBody, prepareBody] {
+                let object = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+                #expect(object["broker"] == nil)
+                #expect(object["mode"] == nil)
+                #expect(object["url"] == nil)
+                #expect(object["api_key"] == nil)
+            }
         }
     }
 }

@@ -5,52 +5,98 @@ import Testing
 struct PaperOperationsViewModelTests {
     private func makeClient() -> PaperOperationsClient {
         PaperOperationsURLProtocol.reset()
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [PaperOperationsURLProtocol.self]
-        let session = URLSession(configuration: config)
         return PaperOperationsClient(
-            session: session,
+            session: PaperOperationsClientTests.makeTestSession(),
             baseURL: URL(string: "http://127.0.0.1:8002")!
         )
     }
 
-    @Test @MainActor
-    func constructingViewModelDoesNotIssueAClientCall() {
-        let client = makeClient()
-        _ = PaperOperationsViewModel(client: client)
-
-        #expect(PaperOperationsURLProtocol.recordedURLs.isEmpty)
+    @Test
+    func constructingViewModelDoesNotIssueAClientCall() async {
+        await PaperOperationsHTTPIsolation.shared.run {
+            let client = makeClient()
+            _ = PaperOperationsViewModel(client: client, signer: StubPaperApprovalSigner(configured: false))
+            #expect(PaperOperationsURLProtocol.snapshotRecord().urls.isEmpty)
+        }
     }
 
-    @Test @MainActor
-    func canPrepareIsFalseWhileSessionIsStopped() {
-        let viewModel = PaperOperationsViewModel(client: makeClient())
+    @Test
+    func canPrepareIsFalseWhileSessionIsStopped() async {
+        await PaperOperationsHTTPIsolation.shared.run {
+            let viewModel = PaperOperationsViewModel(
+                client: makeClient(),
+                signer: StubPaperApprovalSigner(configured: false)
+            )
 
-        #expect(viewModel.sessionState == "STOPPED")
-        #expect(viewModel.canPrepare == false)
-        #expect(viewModel.blockingReason?.copy == PaperOperationsCopy.stopped)
+            #expect(viewModel.sessionState == "STOPPED")
+            #expect(viewModel.canPrepare == false)
+            #expect(viewModel.blockingReason?.copy == PaperOperationsCopy.stopped)
+        }
     }
 
-    @Test @MainActor
-    func malformedPayloadMapsToDurableBlockingReasonAndKeepsLastEvidence() async throws {
-        let client = makeClient()
-        let viewModel = PaperOperationsViewModel(client: client)
-        viewModel.lastEvidence = PaperOperationsEvidence(
-            snapshotSymbol: "RELIANCE",
-            source: "local-replay",
-            bid: "99.02",
-            ask: "101.02"
-        )
+    @Test
+    func startLocalReplayPostsConfirmationThenGetsRelianceSnapshot() async throws {
+        try await PaperOperationsHTTPIsolation.shared.run {
+            let viewModel = PaperOperationsViewModel(
+                client: makeClient(),
+                signer: StubPaperApprovalSigner(configured: false)
+            )
 
-        PaperOperationsURLProtocol.reset()
-        await viewModel.applyMalformedSnapshotPayload(
-            Data(#"{"source":"local-replay","ask":"101"}"#.utf8)
-        )
+            await viewModel.startLocalReplay()
 
-        #expect(viewModel.canPrepare == false)
-        #expect(viewModel.blockingReason != nil)
-        #expect(viewModel.blockingReason?.kind == .malformed)
-        #expect(viewModel.lastEvidence?.snapshotSymbol == "RELIANCE")
-        #expect(viewModel.lastEvidence?.bid == "99.02")
+            let record = PaperOperationsURLProtocol.snapshotRecord()
+            #expect(record.methods == ["POST", "GET"])
+            #expect(record.urls.map(\.path) == [
+                "/api/market-data/sessions",
+                "/api/market-data/snapshots/RELIANCE",
+            ])
+            let body = try #require(record.bodies.first)
+            let object = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+            #expect(object["confirmation"] as? String == "START_READ_ONLY_REPLAY")
+            #expect(viewModel.canPrepare == false)
+            #expect(viewModel.sessionState == "RUNNING")
+        }
+    }
+
+    @Test
+    func malformedPayloadMapsToDurableBlockingReasonAndKeepsLastEvidence() async {
+        await PaperOperationsHTTPIsolation.shared.run {
+            let viewModel = PaperOperationsViewModel(
+                client: makeClient(),
+                signer: StubPaperApprovalSigner(configured: false)
+            )
+            viewModel.lastEvidence = PaperOperationsEvidence(
+                snapshotSymbol: "RELIANCE",
+                source: "local-replay",
+                bid: "99.02",
+                ask: "101.02"
+            )
+
+            viewModel.applyMalformedSnapshotPayload(
+                Data(#"{"source":"local-replay","ask":"101"}"#.utf8)
+            )
+
+            #expect(viewModel.canPrepare == false)
+            #expect(viewModel.blockingReason != nil)
+            #expect(viewModel.blockingReason?.kind == .malformed)
+            #expect(viewModel.lastEvidence?.snapshotSymbol == "RELIANCE")
+            #expect(viewModel.lastEvidence?.bid == "99.02")
+        }
+    }
+}
+
+final class StubPaperApprovalSigner: PaperApprovalSigning {
+    var isConfigured: Bool
+
+    init(configured: Bool) {
+        isConfigured = configured
+    }
+
+    func identity() throws -> ApprovalSignerIdentity {
+        ApprovalSignerIdentity(keyID: "test-key", publicKeyX963: Data())
+    }
+
+    func sign(_ payload: Data) throws -> Data {
+        Data()
     }
 }
