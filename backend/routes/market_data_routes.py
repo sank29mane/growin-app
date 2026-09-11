@@ -1,16 +1,20 @@
 """Explicit, local-only market-data replay lifecycle and snapshot resources."""
 
+from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app_context import state
-from execution import LedgerError
+from execution import LedgerError, OrderAck, ReconciliationSnapshot, ReconciliationStatus
+from execution.service import ExecutionDisabledError
 from market_data import (
     IndiaInstrument,
     MarketDataError,
     MarketDataEvent,
+    RegimeClassifier,
 )
 
 
@@ -47,6 +51,13 @@ class IndiaPaperPreparationRequest(BaseModel):
     quantity: str = Field(..., min_length=1, max_length=32)
 
 
+class IndiaPaperReconcileRequest(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    confirmation: Literal["RECONCILE_INDIA_PAPER"]
+    proposal_id: str = Field(..., min_length=1, max_length=64)
+
+
 def _market_error(error: MarketDataError) -> HTTPException:
     status = 409
     if error.code in {"INSTRUMENT_OUT_OF_SCOPE", "INSTRUMENT_MISMATCH"}:
@@ -69,6 +80,27 @@ def _require_loopback(request: Request) -> None:
                 "message": "market-data session control is local-only",
             },
         )
+
+
+def _optional_prepare_regime(symbol: str):
+    session = state._market_data_session
+    if session is None:
+        return None
+    try:
+        classifier = state._regime_classifier or RegimeClassifier()
+        state._regime_classifier = classifier
+        return classifier.evidence(session, IndiaInstrument(symbol=symbol)).model_dump(
+            mode="json"
+        )
+    except MarketDataError:
+        return None
+
+
+def _paper_reconcile_denied(exc: Exception) -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={"code": "PAPER_RECONCILE_DENIED", "message": str(exc)},
+    )
 
 
 @router.post("/sessions", status_code=201)
@@ -126,4 +158,55 @@ async def prepare_india_paper(payload: IndiaPaperPreparationRequest, request: Re
         raise _market_error(exc) from exc
     except (LedgerError, ValueError) as exc:
         raise HTTPException(status_code=409, detail={"code": "PAPER_PREPARATION_DENIED", "message": str(exc)}) from exc
-    return {"proposal_id": proposal["proposal_id"], "state": proposal["status"], "admission": admission.model_dump(mode="json")}
+    body = {
+        "proposal_id": proposal["proposal_id"],
+        "state": proposal["status"],
+        "admission": admission.model_dump(mode="json"),
+    }
+    regime = _optional_prepare_regime(payload.symbol)
+    if regime is not None:
+        body["regime"] = regime
+    return body
+
+
+@router.post("/paper-reconciliations")
+async def reconcile_india_paper(payload: IndiaPaperReconcileRequest, request: Request):
+    """Reconcile a stored India paper ack locally. Never invents a fill or reads a broker."""
+    _require_loopback(request)
+    try:
+        proposal = state.execution_service.get_proposal(payload.proposal_id)
+    except ExecutionDisabledError as exc:
+        raise _paper_reconcile_denied(exc) from exc
+    ack_payload = None if proposal is None else proposal.get("execution_ack")
+    if not ack_payload:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "PAPER_RECONCILE_DENIED",
+                "message": "stored paper acknowledgement is required",
+            },
+        )
+    ack = OrderAck.model_validate(ack_payload)
+    snapshot = ReconciliationSnapshot(
+        proposal_id=payload.proposal_id,
+        broker_order_id=ack.broker_order_id,
+        source="local-paper-operations",
+        cumulative_quantity=Decimal("0"),
+        cumulative_notional=Decimal("0"),
+        status=ReconciliationStatus.ACKNOWLEDGED,
+        evidence_fingerprint=f"local-paper-operations:{ack.broker_order_id}",
+        observed_at=datetime.now(timezone.utc),
+    )
+    try:
+        order = state.execution_service.reconcile(snapshot)
+    except (LedgerError, ExecutionDisabledError) as exc:
+        raise _paper_reconcile_denied(exc) from exc
+    acknowledgment = None
+    if order.acknowledgment is not None:
+        acknowledgment = order.acknowledgment.model_dump(mode="json")
+    return {
+        "proposal_id": order.proposal_id,
+        "state": order.state,
+        "client_order_id": order.client_order_id,
+        "acknowledgment": acknowledgment,
+    }

@@ -187,6 +187,7 @@ async def test_paper_preparation_is_real_loopback_only_fail_closed_and_reserves_
         assert stopped.status_code == 201
         assert stopped.json()["admission"]["decision"] == "DENIED"
         assert state._execution_ledger.get_reservation(stopped.json()["proposal_id"]) is None
+        assert "regime" not in body
 
         override = await request("POST", "/api/market-data/paper-preparations", json={**body, "broker": "t212"})
         assert override.status_code == 422
@@ -197,6 +198,11 @@ async def test_paper_preparation_is_real_loopback_only_fail_closed_and_reserves_
         assert prepared.status_code == 201, prepared.text
         assert prepared.json()["admission"]["decision"] == "ADMITTED"
         assert state._execution_ledger.get_reservation(prepared.json()["proposal_id"]) is not None
+        assert "regime" not in body
+        regime = prepared.json().get("regime")
+        if regime is not None:
+            assert "regime_id" in regime
+            assert "source_snapshot_id" in regime
         isolated_market_session.call_tool.assert_not_awaited()
     finally:
         state.close_execution()
