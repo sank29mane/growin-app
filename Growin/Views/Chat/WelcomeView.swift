@@ -1,5 +1,9 @@
 import SwiftUI
 
+#if os(macOS)
+import AppKit
+#endif
+
 /// SuggestionItem: Data model for the suggestion chips in the welcome screen.
 struct SuggestionItem: Identifiable {
     let id = UUID()

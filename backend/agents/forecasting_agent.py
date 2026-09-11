@@ -186,7 +186,7 @@ class ForecastingAgent(BaseAgent):
                 forecast_7d=forecast_7d,
                 confidence=result.get("confidence", 0.5) > 0.7 and "HIGH" or "MEDIUM",
                 trend=trend,
-                algorithm=result.get("algorithm") or result.get("model_used") or "IBM Granite TTM-R2.1",
+                algorithm=result.get("algorithm") if result.get("algorithm") is not None else result.get("model_used", "IBM Granite TTM-R2.1"),
                 is_fallback=result.get("is_fallback", False) or result.get("model_used") == "statistical_trend_holt",
                 note=result.get("note"),
                 raw_series=forecast_bars, # Already matches TimeSeriesItem structure
