@@ -616,6 +616,86 @@ struct PaperOperationsViewModelTests {
         }
     }
 
+    @Test
+    func reconcilePaperOutcomeIsNoOpBeforeAcknowledgement() async throws {
+        try await PaperOperationsHTTPIsolation.shared.run {
+            let approver = StubPaperTradeApprover()
+            let viewModel = PaperOperationsViewModel(
+                client: makeClient(),
+                signer: StubPaperApprovalSigner(configured: true),
+                tradeApprover: approver
+            )
+            let review = try await admittedReview(viewModel: viewModel)
+            try await viewModel.completeTradeApproval(review)
+            PaperOperationsURLProtocol.reset()
+
+            await viewModel.reconcilePaperOutcome()
+
+            #expect(PaperOperationsURLProtocol.snapshotRecord().urls.isEmpty)
+            #expect(viewModel.lifecycleStep == .signed)
+            #expect(viewModel.canPrepare == false)
+        }
+    }
+
+    @Test
+    func reconcileAfterAcknowledgePostsLoopbackConfirmationAndUnblocksPrepare() async throws {
+        try await PaperOperationsHTTPIsolation.shared.run {
+            let approver = StubPaperTradeApprover()
+            let viewModel = PaperOperationsViewModel(
+                client: makeClient(),
+                signer: StubPaperApprovalSigner(configured: true),
+                tradeApprover: approver
+            )
+            let review = try await admittedReview(viewModel: viewModel)
+            try await viewModel.completeTradeApproval(review)
+            viewModel.acknowledgeLocalFill()
+            #expect(viewModel.canPrepare == false)
+            #expect(viewModel.blockingReason?.kind == .unreconciled)
+            PaperOperationsURLProtocol.reset()
+
+            await viewModel.reconcilePaperOutcome()
+
+            let record = PaperOperationsURLProtocol.snapshotRecord()
+            #expect(record.urls.map(\.path) == ["/api/market-data/paper-reconciliations"])
+            #expect(record.methods == ["POST"])
+            let body = try #require(record.bodies.first)
+            let object = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+            #expect(Set(object.keys) == Set(["confirmation", "proposal_id"]))
+            #expect(object["confirmation"] as? String == "RECONCILE_INDIA_PAPER")
+            #expect(object["proposal_id"] as? String == "paper-admitted-1")
+            #expect(object["broker"] == nil)
+            #expect(viewModel.lifecycleStep == .reconciled)
+            #expect(viewModel.unreconciledIntent == false)
+            #expect(viewModel.canPrepare == true)
+        }
+    }
+
+    @Test
+    func reconcileFailureKeepsUnreconciledCopyAndDoesNotInventAFill() async throws {
+        try await PaperOperationsHTTPIsolation.shared.run {
+            let approver = StubPaperTradeApprover()
+            let viewModel = PaperOperationsViewModel(
+                client: makeClient(),
+                signer: StubPaperApprovalSigner(configured: true),
+                tradeApprover: approver
+            )
+            let review = try await admittedReview(viewModel: viewModel)
+            try await viewModel.completeTradeApproval(review)
+            viewModel.acknowledgeLocalFill()
+            PaperOperationsURLProtocol.reset()
+            PaperOperationsURLProtocol.overrideReconcileStatus = 500
+            PaperOperationsURLProtocol.overrideReconcilePayload = Data(#"{"detail":"loopback failed"}"#.utf8)
+
+            await viewModel.reconcilePaperOutcome()
+
+            #expect(viewModel.lifecycleStep == .acknowledged)
+            #expect(viewModel.unreconciledIntent == true)
+            #expect(viewModel.canPrepare == false)
+            #expect(viewModel.reconcileFailedMessage == PaperOperationsCopy.reconcileFailed)
+            #expect(viewModel.lastOrderAck?.brokerOrderId == "bo-1")
+        }
+    }
+
     @MainActor
     private func admittedReview(viewModel: PaperOperationsViewModel) async throws -> TradeApprovalReview {
         await viewModel.startLocalReplay()

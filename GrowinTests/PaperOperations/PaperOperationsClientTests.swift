@@ -30,6 +30,8 @@ final class PaperOperationsURLProtocol: URLProtocol {
     nonisolated(unsafe) static var overridePrepareStatus = 201
     nonisolated(unsafe) static var overridePreparePayload: Data?
     nonisolated(unsafe) static var overridePrepareTransportFailure = false
+    nonisolated(unsafe) static var overrideReconcileStatus = 200
+    nonisolated(unsafe) static var overrideReconcilePayload: Data?
 
     static let allowlistPrefixes: [String] = [
         "/api/market-data/sessions",
@@ -51,6 +53,8 @@ final class PaperOperationsURLProtocol: URLProtocol {
         overridePrepareStatus = 201
         overridePreparePayload = nil
         overridePrepareTransportFailure = false
+        overrideReconcileStatus = 200
+        overrideReconcilePayload = nil
         lock.unlock()
     }
 
@@ -85,6 +89,9 @@ final class PaperOperationsURLProtocol: URLProtocol {
             }
             status = Self.overridePrepareStatus
             payload = Self.overridePreparePayload ?? Data(#"{"proposal_id":"p1","state":"DENIED","admission":{"decision":"DENIED","reason_code":"SPREAD_TOO_WIDE","ticker":"NSE:CASH:RELIANCE","side":"BUY"}}"#.utf8)
+        } else if path.hasSuffix("/paper-reconciliations") {
+            status = Self.overrideReconcileStatus
+            payload = Self.overrideReconcilePayload ?? Data(#"{}"#.utf8)
         } else if path.contains("/snapshots/") {
             status = Self.overrideSnapshotStatus
             payload = Self.overrideSnapshotPayload ?? Data(#"{"instrument":{"workspace":"india","venue":"NSE","segment":"CASH","symbol":"RELIANCE","currency":"INR"},"source":"local-replay","bid":"99.02","ask":"101.02","quote_observed_at":"2026-09-11T18:37:05Z","quote_received_at":"2026-09-11T18:37:05Z","quote_sequence":3,"last_trade_price":"100","snapshot_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}"#.utf8)
@@ -274,6 +281,27 @@ struct PaperOperationsClientTests {
             #expect(object["symbol"] as? String == "RELIANCE")
             #expect(object["quantity"] as? String == "1")
             #expect(object["workspace"] == nil)
+        }
+    }
+
+    @Test
+    func reconcileIndiaPaperJSONHasOnlyConfirmationAndProposalId() async throws {
+        try await PaperOperationsHTTPIsolation.shared.run {
+            let client = makeClient()
+            _ = try await client.reconcileIndiaPaper(proposalId: "paper-admitted-1")
+
+            let record = PaperOperationsURLProtocol.snapshotRecord()
+            #expect(record.urls.map(\.path) == ["/api/market-data/paper-reconciliations"])
+            #expect(record.methods == ["POST"])
+            let body = try #require(record.bodies.first)
+            let object = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+            #expect(Set(object.keys) == Set(["confirmation", "proposal_id"]))
+            #expect(object["confirmation"] as? String == "RECONCILE_INDIA_PAPER")
+            #expect(object["proposal_id"] as? String == "paper-admitted-1")
+            #expect(object["broker"] == nil)
+            #expect(object["mode"] == nil)
+            #expect(object["url"] == nil)
+            #expect(object["api_key"] == nil)
         }
     }
 
