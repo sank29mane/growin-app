@@ -157,7 +157,10 @@ class PortfolioAnalyzer:
         try:
             if isinstance(self.model, NeuralJMCE) and HAS_MLX:
                 x = mx.array(returns_history[np.newaxis, :, :].astype(np.float32))
-                _, _, V_mx = self.model(x, return_velocity=True)
+                try:
+                    _, _, V_mx = self.model(x, return_velocity=True)
+                except TypeError:
+                    _, _, V_mx = self.model(x)
                 if V_mx is not None:
                     # For single asset (N=1), V is (1, 1, 1). Return the scalar.
                     # For multiple assets, return Frobenius norm as a shift indicator.
