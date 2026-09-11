@@ -53,3 +53,4 @@ venv_forecast/
 growin.db
 .state.json
 .t212_cache.json
+catboost_info/
