@@ -1,5 +1,9 @@
 import SwiftUI
 
+#if os(macOS)
+import AppKit
+#endif
+
 /// AlphaLedgerView: A brutalist technical ledger for asset monitoring.
 /// Enforces "Authority through Absence" with no dividers and tonal depth.
 struct AlphaLedgerView: View {

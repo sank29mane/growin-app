@@ -1,5 +1,9 @@
 import SwiftUI
 
+#if os(macOS)
+import AppKit
+#endif
+
 /// AIChatPanelView: The conversational hub for the Sovereign Desktop UI.
 /// Incorporates rounded "Mac-native" bubble aesthetics while retaining the core dark-theme color palette (Brutal Chartreuse, Cyan).
 struct AIChatPanelView: View {
