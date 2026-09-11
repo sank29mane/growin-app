@@ -4,6 +4,7 @@ enum PaperOperationsClientError: Error, LocalizedError, Equatable {
     case disallowedPath(String)
     case badURL
     case invalidResponse
+    case staleSnapshot
     case httpStatus(Int, String)
 
     var errorDescription: String? {
@@ -14,6 +15,8 @@ enum PaperOperationsClientError: Error, LocalizedError, Equatable {
             return "Paper Operations could not build a loopback URL."
         case .invalidResponse:
             return "Paper Operations received a non-HTTP response."
+        case .staleSnapshot:
+            return "STALE_SNAPSHOT"
         case .httpStatus(let status, let detail):
             return "HTTP \(status): \(detail)"
         }
@@ -77,9 +80,13 @@ struct PaperOperationsClient {
         try await snapshot(symbol: symbol)
     }
 
-    func stopReplay() async throws -> PaperSessionStatus {
+    func stopSession() async throws -> PaperSessionStatus {
         let data = try await perform(method: "DELETE", path: "/api/market-data/sessions/current")
         return try PaperOperationsModels.decodeSession(data)
+    }
+
+    func stopReplay() async throws -> PaperSessionStatus {
+        try await stopSession()
     }
 
     func prepare(symbol: String, quantity: String) async throws -> PaperPrepareResponse {
@@ -137,10 +144,27 @@ struct PaperOperationsClient {
             throw PaperOperationsClientError.invalidResponse
         }
         guard (200...299).contains(http.statusCode) else {
-            let detail = String(data: data, encoding: .utf8) ?? "Unknown Error"
-            throw PaperOperationsClientError.httpStatus(http.statusCode, detail)
+            throw Self.mapHTTPError(status: http.statusCode, data: data)
         }
         return data
+    }
+
+    static func mapHTTPError(status: Int, data: Data) -> PaperOperationsClientError {
+        if status == 409, let code = staleCode(from: data), code == "STALE_SNAPSHOT" {
+            return .staleSnapshot
+        }
+        let detail = String(data: data, encoding: .utf8) ?? "Unknown Error"
+        return .httpStatus(status, detail)
+    }
+
+    private static func staleCode(from data: Data) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        if let detail = object["detail"] as? [String: Any], let code = detail["code"] as? String {
+            return code
+        }
+        return object["code"] as? String
     }
 
     static func validatePath(_ path: String) throws {
