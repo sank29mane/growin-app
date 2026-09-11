@@ -600,9 +600,11 @@ class QuantEngine:
              return {"error": "Total portfolio value must be positive"}
 
         try:
-            current_parsed = AllocationMap.model_validate(current_allocation).root
-            target_parsed = AllocationMap.model_validate(target_allocation).root
-        except ValidationError as e:
+            # Bolt Optimization: In performance-critical loops, avoid Pydantic instantiation overhead
+            # Validate natively since data is already a dict-like structure.
+            current_parsed = AllocationMap.validate_and_convert(current_allocation)
+            target_parsed = AllocationMap.validate_and_convert(target_allocation)
+        except Exception as e:
             return {"error": f"Invalid allocation format: {str(e)}"}
 
         deviations = {}
