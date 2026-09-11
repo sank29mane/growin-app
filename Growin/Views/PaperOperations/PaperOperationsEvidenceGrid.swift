@@ -36,20 +36,6 @@ struct PaperOperationsEvidenceGrid: View {
             if !viewModel.rejectionReasons.isEmpty {
                 rejectionList
             }
-
-            VStack(alignment: .leading, spacing: 8) {
-                Color.clear
-                    .frame(height: 32)
-                    .accessibilityHidden(true)
-                if !viewModel.canPrepare {
-                    Text(viewModel.blockingSlotCopy)
-                        .font(SovereignTheme.Fonts.spaceGrotesk(size: 16))
-                        .foregroundStyle(Color.brutalOffWhite)
-                        .lineSpacing(8)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityHint(viewModel.disabledPrepareAccessibilityHint)
-                }
-            }
         }
     }
 
