@@ -293,6 +293,28 @@ final class PaperOperationsViewModel {
         lifecycleStep = .acknowledged
     }
 
+    func reconcilePaperOutcome() async {
+        guard inFlightAction == nil else { return }
+        guard lifecycleStep == .acknowledged,
+              let proposalId = lastOrderAck?.proposalId,
+              !proposalId.isEmpty else {
+            return
+        }
+        inFlightAction = .reconcile
+        reconcileFailedMessage = nil
+        defer { inFlightAction = nil }
+
+        do {
+            _ = try await client.reconcileIndiaPaper(proposalId: proposalId)
+            didReconcilePaperOutcome = true
+            lifecycleStep = .reconciled
+            unreconciledIntent = false
+        } catch {
+            reconcileFailedMessage = PaperOperationsCopy.reconcileFailed
+            unreconciledIntent = true
+        }
+    }
+
     func applyMalformedSnapshotPayload(_ data: Data) {
         do {
             _ = try PaperOperationsModels.decodeSnapshot(data)
@@ -344,6 +366,8 @@ final class PaperOperationsViewModel {
             default:
                 blockingReason = .unreconciled
             }
+        } else if blockingReason?.kind == .unreconciled {
+            blockingReason = durableReasonAfterEvidence()
         }
     }
 

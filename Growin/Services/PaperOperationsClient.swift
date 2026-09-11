@@ -103,6 +103,10 @@ struct PaperOperationsClient {
     }
 
     func reconcile(proposalId: String) async throws -> Data {
+        try await reconcileIndiaPaper(proposalId: proposalId)
+    }
+
+    func reconcileIndiaPaper(proposalId: String) async throws -> Data {
         let body = try encodeReconcileBody(proposalId: proposalId)
         return try await perform(method: "POST", path: "/api/market-data/paper-reconciliations", body: body)
     }
