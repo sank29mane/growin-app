@@ -8,25 +8,14 @@ struct PaperOperationsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
                     PaperOperationsHeaderView()
-                    PaperOperationsBlockingSlot(reason: viewModel.blockingReason)
+                    PaperOperationsBlockingSlot(
+                        copy: viewModel.blockingSlotCopy,
+                        blocked: !viewModel.canPrepare
+                    )
                     PaperOperationsSessionCard(viewModel: viewModel)
-                    emptyEvidence
+                    PaperOperationsEvidenceGrid(viewModel: viewModel)
                 }
                 .padding(24)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var emptyEvidence: some View {
-        if viewModel.sessionState == "STOPPED" {
-            VStack(alignment: .leading, spacing: 8) {
-                Text(PaperOperationsCopy.emptyHeading)
-                    .font(SovereignTheme.Fonts.spaceGrotesk(size: 16))
-                    .foregroundStyle(Color.brutalOffWhite)
-                Text(PaperOperationsCopy.emptyBody)
-                    .font(SovereignTheme.Fonts.spaceGrotesk(size: 16))
-                    .foregroundStyle(Color.brutalOffWhite.opacity(0.6))
             }
         }
     }
