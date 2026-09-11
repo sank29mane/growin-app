@@ -126,7 +126,7 @@ class LMStudioClient:
 
         # SOTA: Use 'key' for Native V1 and fallback to 'id'
         loaded_ids = [
-            (m.get("key") or m.get("id")) for m in models
+            (m.get("key") if m.get("key") is not None else m.get("id")) for m in models
             if m.get("loaded_instances") and len(m.get("loaded_instances", [])) > 0
         ]
 
