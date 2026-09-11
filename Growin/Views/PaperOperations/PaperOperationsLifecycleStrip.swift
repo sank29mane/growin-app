@@ -14,7 +14,7 @@ struct PaperOperationsLifecycleStrip: View {
                 }
 
                 HStack(alignment: .top, spacing: 16) {
-                    workflowButton(
+                    PaperOperationsWorkflowButton(
                         title: PaperOperationsCopy.acknowledgeLocalFill,
                         inFlight: viewModel.inFlightAction == .acknowledge,
                         enabled: viewModel.canAcknowledgeLocalFill && viewModel.inFlightAction == nil,
@@ -24,7 +24,7 @@ struct PaperOperationsLifecycleStrip: View {
                     }
                     .accessibilityHint(acknowledgeHint)
 
-                    workflowButton(
+                    PaperOperationsWorkflowButton(
                         title: PaperOperationsCopy.reconcilePaperOutcome,
                         inFlight: viewModel.inFlightAction == .reconcile,
                         enabled: viewModel.canReconcilePaperOutcome && viewModel.inFlightAction == nil,
@@ -116,43 +116,5 @@ struct PaperOperationsLifecycleStrip: View {
             return Color.brutalOffWhite
         }
         return Color.brutalOffWhite.opacity(0.3)
-    }
-
-    private func workflowButton(
-        title: String,
-        inFlight: Bool,
-        enabled: Bool,
-        accent: Bool,
-        action: @escaping () -> Void
-    ) -> some View {
-        let color: Color = {
-            if !enabled {
-                return Color.brutalOffWhite.opacity(0.3)
-            }
-            if accent {
-                return Color.brutalChartreuse
-            }
-            return Color.brutalOffWhite
-        }()
-
-        return Button(action: action) {
-            HStack(spacing: 8) {
-                if inFlight {
-                    ProgressView()
-                        .controlSize(.small)
-                }
-                Text(title)
-                    .font(SovereignTheme.Fonts.spaceGrotesk(size: 16))
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            .foregroundStyle(color)
-            .background(Color.brutalRecessed)
-            .border(Color.white.opacity(0.15), width: 1)
-        }
-        .buttonStyle(.plain)
-        .disabled(!enabled)
-        .accessibilityLabel(title)
-        .accessibilityAddTraits(.isButton)
     }
 }

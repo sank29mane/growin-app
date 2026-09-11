@@ -32,28 +32,15 @@ struct PaperOperationsView: View {
         let accent = viewModel.accentedWorkflowAction == .prepare
 
         return VStack(alignment: .leading, spacing: 8) {
-            Button {
+            PaperOperationsWorkflowButton(
+                title: PaperOperationsCopy.preparePaperIntent,
+                inFlight: viewModel.inFlightAction == .prepare,
+                enabled: enabled,
+                accent: accent
+            ) {
                 Task { await viewModel.preparePaperIntent() }
-            } label: {
-                HStack(spacing: 8) {
-                    if viewModel.inFlightAction == .prepare {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-                    Text(PaperOperationsCopy.preparePaperIntent)
-                        .font(SovereignTheme.Fonts.spaceGrotesk(size: 16))
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-                .foregroundStyle(prepareColor(enabled: enabled, accent: accent))
-                .background(Color.brutalRecessed)
-                .border(Color.white.opacity(0.15), width: 1)
             }
-            .buttonStyle(.plain)
-            .disabled(!enabled)
-            .accessibilityLabel(PaperOperationsCopy.preparePaperIntent)
             .accessibilityHint(enabled ? "" : viewModel.disabledPrepareAccessibilityHint)
-            .accessibilityAddTraits(.isButton)
 
             if !viewModel.canPrepare {
                 Text(viewModel.blockingSlotCopy)
@@ -72,15 +59,5 @@ struct PaperOperationsView: View {
             }
         }
         .padding(.top, 8)
-    }
-
-    private func prepareColor(enabled: Bool, accent: Bool) -> Color {
-        if !enabled {
-            return Color.brutalOffWhite.opacity(0.3)
-        }
-        if accent {
-            return Color.brutalChartreuse
-        }
-        return Color.brutalOffWhite
     }
 }

@@ -46,8 +46,8 @@ struct PaperOperationsViewModelTests {
     }
 
     @Test
-    func viewModelRecordedPathsStayOnAllowlistAndOmitForbiddenPrefixes() async throws {
-        try await PaperOperationsHTTPIsolation.shared.run {
+    func viewModelRecordedPathsStayOnAllowlistAndOmitForbiddenPrefixes() async {
+        await PaperOperationsHTTPIsolation.shared.run {
             let viewModel = PaperOperationsViewModel(
                 client: makeClient(),
                 signer: StubPaperApprovalSigner(configured: true)
@@ -83,6 +83,27 @@ struct PaperOperationsViewModelTests {
             #expect(viewModel.accentedWorkflowAction == .start)
             #expect(viewModel.sessionState == "STOPPED")
         }
+    }
+
+    @Test
+    func workflowCTAViewsUseEightPointStyleAndSkipSovereignButtonStyle() throws {
+        let view = try PaperOperationsSourceProbe.contents("Growin/Views/PaperOperations/PaperOperationsView.swift")
+        let session = try PaperOperationsSourceProbe.contents("Growin/Views/PaperOperations/PaperOperationsSessionCard.swift")
+        let lifecycle = try PaperOperationsSourceProbe.contents("Growin/Views/PaperOperations/PaperOperationsLifecycleStrip.swift")
+        let style = try PaperOperationsSourceProbe.contents("Growin/Views/PaperOperations/PaperOperationsWorkflowButton.swift")
+
+        #expect(style.contains("padding(.vertical, 8)"))
+        #expect(style.contains("padding(.horizontal, 16)"))
+        #expect(!style.contains("SovereignButtonStyle"))
+        #expect(view.contains("PaperOperationsWorkflowButton"))
+        #expect(!view.contains("sovereignButtonStyle"))
+        #expect(session.contains("PaperOperationsCopy.startLocalReplay"))
+        #expect(session.contains("PaperOperationsWorkflowButton"))
+        #expect(lifecycle.contains("PaperOperationsCopy.acknowledgeLocalFill"))
+        #expect(lifecycle.contains("PaperOperationsCopy.reconcilePaperOutcome"))
+        #expect(lifecycle.contains("PaperOperationsWorkflowButton"))
+        #expect(!lifecycle.contains("sovereignButtonStyle"))
+        #expect(session.contains("sovereignButtonStyle"))
     }
 
     @Test
