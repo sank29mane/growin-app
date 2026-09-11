@@ -532,6 +532,99 @@ struct PaperOperationsViewModelTests {
             #expect(viewModel.prepareFailedMessage == PaperOperationsCopy.prepareFailed)
         }
     }
+
+    @Test
+    func approvalCompletionResponseDecodesOptionalExecutionDetailsWithSnakeCase() throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let withAck = try decoder.decode(
+            ApprovalCompletionResponse.self,
+            from: Data(#"{"message":"Paper trade acknowledged by local-paper.","execution_details":{"proposal_id":"paper-admitted-1","broker":"local-paper","broker_order_id":"bo-1","status":"ACKNOWLEDGED","raw":{},"idempotent_replay":false}}"#.utf8)
+        )
+        #expect(withAck.message == "Paper trade acknowledged by local-paper.")
+        #expect(withAck.executionDetails?.proposalId == "paper-admitted-1")
+        #expect(withAck.executionDetails?.broker == "local-paper")
+        #expect(withAck.executionDetails?.brokerOrderId == "bo-1")
+        #expect(withAck.executionDetails?.status == "ACKNOWLEDGED")
+
+        let withoutAck = try decoder.decode(
+            ApprovalCompletionResponse.self,
+            from: Data(#"{"message":"ok"}"#.utf8)
+        )
+        #expect(withoutAck.executionDetails == nil)
+    }
+
+    @Test
+    func signedCompleteStoresOrderAckAndAcknowledgeDoesNotCallCompleteAgain() async throws {
+        try await PaperOperationsHTTPIsolation.shared.run {
+            let approver = StubPaperTradeApprover()
+            let viewModel = PaperOperationsViewModel(
+                client: makeClient(),
+                signer: StubPaperApprovalSigner(configured: true),
+                tradeApprover: approver
+            )
+            let review = try await admittedReview(viewModel: viewModel)
+            PaperOperationsURLProtocol.reset()
+
+            try await viewModel.completeTradeApproval(review)
+
+            #expect(approver.completeCallCount == 1)
+            #expect(viewModel.lifecycleStep == .signed)
+            #expect(viewModel.lastOrderAck?.proposalId == "paper-admitted-1")
+            #expect(viewModel.lastOrderAck?.brokerOrderId == "bo-1")
+            #expect(viewModel.pendingTradeApproval == nil)
+            #expect(viewModel.canPrepare == false)
+            #expect(viewModel.unreconciledIntent == true)
+
+            viewModel.acknowledgeLocalFill()
+
+            #expect(approver.completeCallCount == 1)
+            #expect(viewModel.lifecycleStep == .acknowledged)
+            #expect(PaperOperationsURLProtocol.snapshotRecord().urls.isEmpty)
+            #expect(PaperOperationsURLProtocol.snapshotRecord().urls.allSatisfy {
+                !$0.absoluteString.contains("/api/ai/trade/approval/complete")
+            })
+        }
+    }
+
+    @Test
+    func acknowledgeWithoutStoredAckUsesFailedCopyAndDoesNotAdvance() async throws {
+        try await PaperOperationsHTTPIsolation.shared.run {
+            let approver = StubPaperTradeApprover()
+            approver.completeResponse = ApprovalCompletionResponse(
+                message: "Paper trade acknowledged by local-paper.",
+                executionDetails: nil
+            )
+            let viewModel = PaperOperationsViewModel(
+                client: makeClient(),
+                signer: StubPaperApprovalSigner(configured: true),
+                tradeApprover: approver
+            )
+            let review = try await admittedReview(viewModel: viewModel)
+
+            try await viewModel.completeTradeApproval(review)
+
+            #expect(viewModel.lifecycleStep == .signed)
+            #expect(viewModel.lastOrderAck == nil)
+            #expect(viewModel.lifecycleStep != .acknowledged)
+
+            viewModel.acknowledgeLocalFill()
+
+            #expect(approver.completeCallCount == 1)
+            #expect(viewModel.acknowledgeFailedMessage == PaperOperationsCopy.acknowledgeFailed)
+            #expect(viewModel.lifecycleStep != .acknowledged)
+        }
+    }
+
+    private func admittedReview(viewModel: PaperOperationsViewModel) async throws -> TradeApprovalReview {
+        await viewModel.startLocalReplay()
+        PaperOperationsURLProtocol.reset()
+        PaperOperationsURLProtocol.overridePreparePayload = Data(
+            #"{"proposal_id":"paper-admitted-1","state":"PENDING","admission":{"decision":"ADMITTED","reason_code":"ADMITTED","simulator_fill_price":"100.51","simulator_drawdown_pct":"0.01","risk_quantity":"1","current_spread_pct":"0.01"}}"#.utf8
+        )
+        await viewModel.preparePaperIntent()
+        return try #require(viewModel.pendingTradeApproval)
+    }
 }
 
 final class StubPaperApprovalSigner: PaperApprovalSigning {
@@ -556,11 +649,26 @@ final class StubPaperApprovalSigner: PaperApprovalSigning {
 
 final class StubPaperTradeApprover: PaperTradeApproving {
     private(set) var requestCallCount = 0
+    private(set) var completeCallCount = 0
     private(set) var lastProposal: TradeProposalData?
+    var completeResponse = ApprovalCompletionResponse(
+        message: "Paper trade acknowledged by local-paper.",
+        executionDetails: PaperExecutionAck(
+            proposalId: "paper-admitted-1",
+            broker: "local-paper",
+            brokerOrderId: "bo-1",
+            status: "ACKNOWLEDGED"
+        )
+    )
 
     func requestTradeApproval(proposal: TradeProposalData) async throws -> TradeApprovalReview {
         requestCallCount += 1
         lastProposal = proposal
         return TradeApprovalReview.testingPlaceholder(proposal: proposal)
+    }
+
+    func completeTradeApproval(_ review: TradeApprovalReview, signature: Data) async throws -> ApprovalCompletionResponse {
+        completeCallCount += 1
+        return completeResponse
     }
 }
