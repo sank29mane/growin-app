@@ -1,0 +1,156 @@
+import Foundation
+import Testing
+@testable import Growin
+
+final class PaperOperationsURLProtocol: URLProtocol {
+    nonisolated(unsafe) static var recordedURLs: [URL] = []
+    nonisolated(unsafe) static var recordedMethods: [String] = []
+    nonisolated(unsafe) static var recordedBodies: [Data] = []
+
+    static let allowlistPrefixes: [String] = [
+        "/api/market-data/sessions",
+        "/api/market-data/sessions/current",
+        "/api/market-data/snapshots/",
+        "/api/market-data/paper-preparations",
+        "/api/market-data/paper-reconciliations",
+    ]
+
+    static func reset() {
+        recordedURLs = []
+        recordedMethods = []
+        recordedBodies = []
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        if let url = request.url {
+            Self.recordedURLs.append(url)
+        }
+        Self.recordedMethods.append(request.httpMethod ?? "")
+        if let body = Self.body(from: request) {
+            Self.recordedBodies.append(body)
+        }
+
+        let path = request.url?.path ?? ""
+        let payload: Data
+        let status: Int
+        if path.hasSuffix("/paper-preparations") {
+            status = 201
+            payload = Data(#"{"proposal_id":"p1","state":"DENIED","admission":{"decision":"DENIED","reason_code":"SPREAD_TOO_WIDE","ticker":"NSE:CASH:RELIANCE","side":"BUY"}}"#.utf8)
+        } else if path.contains("/snapshots/") {
+            status = 200
+            payload = Data(#"{"instrument":{"workspace":"india","venue":"NSE","segment":"CASH","symbol":"RELIANCE","currency":"INR"},"source":"local-replay","bid":"99.02","ask":"101.02","quote_observed_at":"2026-09-11T18:37:05Z","quote_received_at":"2026-09-11T18:37:05Z","quote_sequence":3,"last_trade_price":"100","snapshot_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}"#.utf8)
+        } else if request.httpMethod == "POST" {
+            status = 201
+            payload = Data(#"{"state":"RUNNING","provider":"local-replay","instruments":[{"workspace":"india","venue":"NSE","segment":"CASH","symbol":"RELIANCE","currency":"INR"}],"read_only":true}"#.utf8)
+        } else {
+            status = 200
+            payload = Data(#"{"state":"STOPPED","provider":null,"instruments":[],"read_only":true}"#.utf8)
+        }
+
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: status,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: payload)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+
+    private static func body(from request: URLRequest) -> Data? {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return nil }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        let bufferSize = 1024
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
+        defer { buffer.deallocate() }
+        while stream.hasBytesAvailable {
+            let read = stream.read(buffer, maxLength: bufferSize)
+            if read <= 0 { break }
+            data.append(buffer, count: read)
+        }
+        return data.isEmpty ? nil : data
+    }
+}
+
+struct PaperOperationsClientTests {
+    private func makeClient() -> PaperOperationsClient {
+        PaperOperationsURLProtocol.reset()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [PaperOperationsURLProtocol.self]
+        let session = URLSession(configuration: config)
+        return PaperOperationsClient(
+            session: session,
+            baseURL: URL(string: "http://127.0.0.1:8002")!
+        )
+    }
+
+    @Test @MainActor
+    func startReplayPostsConfirmationLiteralAndRelianceFixture() async throws {
+        let client = makeClient()
+        _ = try await client.startReplay()
+
+        #expect(PaperOperationsURLProtocol.recordedMethods.contains("POST"))
+        let startURL = try #require(PaperOperationsURLProtocol.recordedURLs.first { $0.path == "/api/market-data/sessions" })
+        #expect(startURL.path == "/api/market-data/sessions")
+
+        let body = try #require(PaperOperationsURLProtocol.recordedBodies.first)
+        let object = try JSONSerialization.jsonObject(with: body) as? [String: Any]
+        #expect(object?["confirmation"] as? String == "START_READ_ONLY_REPLAY")
+        #expect(object?["provider"] as? String == "local-replay")
+        let instruments = try #require(object?["instruments"] as? [[String: Any]])
+        #expect(instruments.first?["symbol"] as? String == "RELIANCE")
+        #expect(instruments.first?["workspace"] as? String == "india")
+        #expect(instruments.first?["venue"] as? String == "NSE")
+        #expect(instruments.first?["segment"] as? String == "CASH")
+        #expect(instruments.first?["currency"] as? String == "INR")
+    }
+
+    @Test @MainActor
+    func recordedURLsStayInsideMarketDataAllowlist() async throws {
+        let client = makeClient()
+        _ = try await client.startReplay()
+        _ = try await client.refreshStatus()
+        _ = try await client.loadSnapshot(symbol: "RELIANCE")
+        _ = try await client.prepare(symbol: "RELIANCE", quantity: "1")
+        _ = try await client.reconcile(proposalId: "p1")
+        _ = try await client.stopReplay()
+
+        #expect(!PaperOperationsURLProtocol.recordedURLs.isEmpty)
+        for url in PaperOperationsURLProtocol.recordedURLs {
+            let allowed = PaperOperationsURLProtocol.allowlistPrefixes.contains { prefix in
+                url.path == prefix || url.path.hasPrefix(prefix)
+            }
+            #expect(allowed, "recorded URL escaped allowlist: \(url.absoluteString)")
+            #expect(!url.path.contains("breeze"))
+            #expect(!url.path.contains("trading212"))
+            #expect(!url.path.contains("mcp"))
+            #expect(!url.absoluteString.contains("/api/ai/trade/approve"))
+            #expect(!url.absoluteString.contains("/api/system/status"))
+        }
+    }
+
+    @Test
+    func sessionAndPrepareBodiesOmitBrokerModeURLAndAPIKey() throws {
+        let client = makeClient()
+        let sessionBody = try client.encodeSessionStartBody()
+        let prepareBody = try client.encodePrepareBody(symbol: "RELIANCE", quantity: "1")
+
+        for body in [sessionBody, prepareBody] {
+            let object = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+            #expect(object["broker"] == nil)
+            #expect(object["mode"] == nil)
+            #expect(object["url"] == nil)
+            #expect(object["api_key"] == nil)
+        }
+    }
+}
