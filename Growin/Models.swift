@@ -6,7 +6,13 @@ struct SystemStatusResponse: Codable {
     let system: GSystemStatus
     let agents: [String: GAgentDetailedStatus]
     let environment: EnvironmentStatus?
+    let execution: ExecutionStatus?
     let timestamp: Double
+}
+
+struct ExecutionStatus: Codable {
+    let mode: String
+    let authority: Bool
 }
 
 struct EnvironmentStatus: Codable {

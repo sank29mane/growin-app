@@ -13,6 +13,7 @@ class ChatViewModel {
     var selectedAccountType: String = "isa"
     var showConfigPrompt = false
     var missingConfigProvider: String?
+    var pendingTradeApproval: TradeApprovalReview?
     
     // VLM state tracking (Phase 47)
     var selectedImages: [NSImage] = []
@@ -34,18 +35,34 @@ class ChatViewModel {
     func approveTrade(id: String) {
         Task {
             isProcessing = true
-            streamingStatus = "Executing trade..."
+            streamingStatus = "Preparing immutable trade review..."
             do {
-                let message = try await aiService.approveTrade(id: id)
-                streamingStatus = message
-                // Update local state for the proposal status if found
-                updateProposalStatus(id: id, status: "APPROVED")
+                guard let proposal = messages.compactMap(\.data?.tradeProposal).first(
+                    where: { $0.proposalId == id }
+                ) else {
+                    throw TradeApprovalReviewError.proposalMismatch
+                }
+                pendingTradeApproval = try await aiService.requestTradeApproval(
+                    proposal: proposal
+                )
+                streamingStatus = nil
             } catch {
                 errorMessage = error.localizedDescription
-                updateProposalStatus(id: id, status: "FAILED")
             }
             isProcessing = false
         }
+    }
+
+    func completeTradeApproval(_ review: TradeApprovalReview) async throws {
+        let identity = try LocalApprovalSigner.shared.identity()
+        guard identity.keyID == review.payload.keyId else {
+            throw TradeApprovalReviewError.signerMismatch
+        }
+        let signature = try LocalApprovalSigner.shared.sign(review.signedBytes)
+        let message = try await aiService.completeTradeApproval(review, signature: signature)
+        streamingStatus = message
+        updateProposalStatus(id: review.payload.proposalId, status: "ACKNOWLEDGED")
+        pendingTradeApproval = nil
     }
 
     func rejectTrade(id: String) {
@@ -110,8 +127,8 @@ class ChatViewModel {
     func sendMessage() {
         guard !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
-        let openaiApiKey = defaults.string(forKey: "openaiApiKey") ?? ""
-        let geminiApiKey = defaults.string(forKey: "geminiApiKey") ?? ""
+        let openaiApiKey = (try? KeychainStore.shared.string(for: "openaiApiKey")) ?? ""
+        let geminiApiKey = (try? KeychainStore.shared.string(for: "geminiApiKey")) ?? ""
         let selectedProvider = defaults.string(forKey: "selectedProvider") ?? "mlx"
 
         if selectedProvider == "openai" && openaiApiKey.isEmpty {
