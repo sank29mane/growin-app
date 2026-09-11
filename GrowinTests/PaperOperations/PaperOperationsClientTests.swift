@@ -2,6 +2,17 @@ import Foundation
 import Testing
 @testable import Growin
 
+enum PaperOperationsSourceProbe {
+    static func contents(_ relativePath: String) throws -> String {
+        let testsFile = URL(fileURLWithPath: #filePath)
+        let repoRoot = testsFile
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        return try String(contentsOf: repoRoot.appendingPathComponent(relativePath), encoding: .utf8)
+    }
+}
+
 actor PaperOperationsHTTPIsolation {
     static let shared = PaperOperationsHTTPIsolation()
     private var occupied = false
@@ -303,6 +314,52 @@ struct PaperOperationsClientTests {
             #expect(object["url"] == nil)
             #expect(object["api_key"] == nil)
         }
+    }
+
+    @Test
+    func forbiddenPathsThrowBeforeTheSessionFires() throws {
+        PaperOperationsURLProtocol.reset()
+        let forbidden = [
+            "/api/system/status",
+            "/mcp/trading212/anything",
+            "/api/ai/trade/approve",
+        ]
+        for path in forbidden {
+            do {
+                _ = try PaperOperationsClient.makeAllowlistedURL(
+                    baseURL: "http://127.0.0.1:8002",
+                    path: path
+                )
+                Issue.record("expected disallowedPath for \(path)")
+            } catch PaperOperationsClientError.disallowedPath(let refused) {
+                #expect(refused == path)
+            } catch {
+                Issue.record("unexpected error \(error) for \(path)")
+            }
+        }
+        #expect(PaperOperationsURLProtocol.snapshotRecord().urls.isEmpty)
+        #expect(PaperOperationsURLProtocol.snapshotRecord().methods.isEmpty)
+    }
+
+    @Test
+    func makeAllowlistedURLBuildsLoopbackMarketDataURL() throws {
+        let url = try PaperOperationsClient.makeAllowlistedURL(
+            baseURL: "http://127.0.0.1:8002/",
+            path: "/api/market-data/sessions"
+        )
+        #expect(url.scheme == "http")
+        #expect(url.host == "127.0.0.1")
+        #expect(url.port == 8002)
+        #expect(url.path == "/api/market-data/sessions")
+    }
+
+    @Test
+    func paperOperationsClientSourceDoesNotReferenceBackendStatus() throws {
+        let source = try PaperOperationsSourceProbe.contents("Growin/Services/PaperOperationsClient.swift")
+        #expect(!source.contains("BackendStatusViewModel"))
+        #expect(!source.contains("MarketClient"))
+        #expect(source.contains("validatePath"))
+        #expect(source.contains("makeAllowlistedURL"))
     }
 
     @Test

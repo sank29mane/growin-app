@@ -140,10 +140,7 @@ struct PaperOperationsClient {
     }
 
     private func perform(method: String, path: String, body: Data? = nil) async throws -> Data {
-        try Self.validatePath(path)
-        guard let url = URL(string: baseURLString + path) else {
-            throw PaperOperationsClientError.badURL
-        }
+        let url = try Self.makeAllowlistedURL(baseURL: baseURLString, path: path)
         var request = URLRequest(url: url)
         request.httpMethod = method
         if let body {
@@ -181,6 +178,15 @@ struct PaperOperationsClient {
             return code
         }
         return object["code"] as? String
+    }
+
+    static func makeAllowlistedURL(baseURL: String, path: String) throws -> URL {
+        try validatePath(path)
+        let trimmed = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
+        guard let url = URL(string: trimmed + path) else {
+            throw PaperOperationsClientError.badURL
+        }
+        return url
     }
 
     static func validatePath(_ path: String) throws {

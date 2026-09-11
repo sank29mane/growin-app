@@ -21,6 +21,71 @@ struct PaperOperationsViewModelTests {
     }
 
     @Test
+    func idleViewModelRecordsZeroRequestsAfter200ms() async {
+        await PaperOperationsHTTPIsolation.shared.run {
+            let client = makeClient()
+            _ = PaperOperationsViewModel(client: client, signer: StubPaperApprovalSigner(configured: false))
+            try? await Task.sleep(for: .milliseconds(200))
+            #expect(PaperOperationsURLProtocol.snapshotRecord().urls.isEmpty)
+            #expect(PaperOperationsURLProtocol.snapshotRecord().methods.isEmpty)
+        }
+    }
+
+    @Test
+    func viewModelSourceHasNoPollingLoopOrSharedBackendStatus() throws {
+        let source = try PaperOperationsSourceProbe.contents("Growin/ViewModels/PaperOperationsViewModel.swift")
+        #expect(!source.contains("Task.sleep"))
+        #expect(!source.contains("BackendStatusViewModel.shared"))
+        #expect(!source.contains("BackendStatusViewModel"))
+        #expect(!source.contains("MarketClient"))
+        #expect(!source.contains("/api/system/status"))
+        #expect(!source.contains("/mcp/"))
+        #expect(!source.contains("trading212"))
+        #expect(!source.contains("breeze"))
+        #expect(!source.contains("/api/ai/trade/approve"))
+    }
+
+    @Test
+    func viewModelRecordedPathsStayOnAllowlistAndOmitForbiddenPrefixes() async throws {
+        try await PaperOperationsHTTPIsolation.shared.run {
+            let viewModel = PaperOperationsViewModel(
+                client: makeClient(),
+                signer: StubPaperApprovalSigner(configured: true)
+            )
+            await viewModel.startLocalReplay()
+            await viewModel.refreshSessionStatus()
+            await viewModel.loadSnapshotEvidence()
+            await viewModel.stopLocalReplay()
+
+            let record = PaperOperationsURLProtocol.snapshotRecord()
+            #expect(!record.urls.isEmpty)
+            for url in record.urls {
+                let allowed = PaperOperationsClient.allowlistPrefixes.contains { prefix in
+                    url.path == prefix || url.path.hasPrefix(prefix)
+                }
+                #expect(allowed, "ViewModel escaped allowlist: \(url.absoluteString)")
+                #expect(!url.path.contains("mcp"))
+                #expect(!url.path.contains("trading212"))
+                #expect(!url.path.contains("breeze"))
+                #expect(!url.absoluteString.contains("/api/system/status"))
+                #expect(!url.absoluteString.contains("/api/ai/trade/approve"))
+            }
+        }
+    }
+
+    @Test
+    func atMostOneWorkflowAccentIsReserved() async {
+        await PaperOperationsHTTPIsolation.shared.run {
+            let viewModel = PaperOperationsViewModel(
+                client: makeClient(),
+                signer: StubPaperApprovalSigner(configured: false)
+            )
+            #expect(viewModel.accentedWorkflowAction == .start)
+            #expect(viewModel.sessionState == "STOPPED")
+        }
+    }
+
+    @Test
     func canPrepareIsFalseWhileSessionIsStopped() async {
         await PaperOperationsHTTPIsolation.shared.run {
             let viewModel = PaperOperationsViewModel(
