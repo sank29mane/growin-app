@@ -159,7 +159,9 @@ class PortfolioAnalyzer:
                 x = mx.array(returns_history[np.newaxis, :, :].astype(np.float32))
                 try:
                     _, _, V_mx = self.model(x, return_velocity=True)
-                except TypeError:
+                except TypeError as e:
+                    if "return_velocity" not in str(e):
+                        raise
                     _, _, V_mx = self.model(x)
                 if V_mx is not None:
                     # For single asset (N=1), V is (1, 1, 1). Return the scalar.

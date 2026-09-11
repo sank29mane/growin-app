@@ -404,6 +404,7 @@ private struct InlineActionTile: View {
         .accessibilityHint("Executes the \(title) action")
         .accessibilityAddTraits(.isButton)
         .onHover { hovering in
+            guard hovering != isHovered else { return }
             withAnimation(.easeInOut(duration: 0.15)) {
                 isHovered = hovering
             }
