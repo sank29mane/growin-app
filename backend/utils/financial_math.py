@@ -27,15 +27,25 @@ PRECISION_CURRENCY = Decimal('0.01')
 # Set global context for financial calculations
 getcontext().rounding = ROUND_HALF_UP
 
+import math
+_isnan = math.isnan
+_isinf = math.isinf
+
 def create_decimal(value: Any) -> Decimal:
     """Safe conversion to Decimal, handling strings, floats, ints, and NaN."""
     if value is None:
         return Decimal('0')
-    if isinstance(value, float):
-        import math
-        if math.isnan(value) or math.isinf(value):
+
+    t = type(value)
+    if t is Decimal:
+        return value
+    elif t is float:
+        if _isnan(value) or _isinf(value):
             return Decimal('0')
-    if isinstance(value, str):
+        return Decimal(str(value))
+    elif t is int:
+        return Decimal(value)
+    elif t is str:
         # Remove currency symbols or commas if present
         clean_val = value.replace('£', '').replace('$', '').replace(',', '').strip()
         if clean_val.lower() in ['nan', 'inf', '-inf']:
@@ -44,6 +54,7 @@ def create_decimal(value: Any) -> Decimal:
             return Decimal(clean_val)
         except Exception:
             return Decimal('0')
+
     try:
         return Decimal(str(value))
     except Exception:
