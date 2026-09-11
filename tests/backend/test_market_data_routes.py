@@ -209,3 +209,104 @@ async def test_paper_preparation_is_real_loopback_only_fail_closed_and_reserves_
     body["events"][0]["instrument"]["symbol"] = "TCS"
     rejected = await request("POST", "/api/market-data/sessions", json=body)
     assert rejected.status_code == 422
+
+
+async def _acknowledge_india_paper_without_fill(proposal_id: str):
+    from execution.models import OrderIntent
+    from execution.paper_dispatcher import PaperDispatcher
+
+    ledger = state._execution_ledger
+    order = ledger.get_order(proposal_id)
+    assert order is not None
+    intent = OrderIntent.model_validate(dict(order.intent))
+    previous_approval = ledger.require_approval
+    ledger.require_approval = False
+    try:
+        ledger.claim_intent(intent)
+        ack = await PaperDispatcher().dispatch(intent)
+        stored = ledger.finalize(proposal_id, ack)
+    finally:
+        ledger.require_approval = previous_approval
+    assert stored.broker_order_id.startswith("paper-")
+    assert stored.status == "ACKNOWLEDGED"
+    return stored
+
+
+@pytest.mark.asyncio
+async def test_paper_reconcile_remote_request_is_loopback_only():
+    rejected = await remote_request(
+        "POST",
+        "/api/market-data/paper-reconciliations",
+        json={"confirmation": "RECONCILE_INDIA_PAPER", "proposal_id": "proposal-loopback"},
+    )
+    assert rejected.status_code == 403
+    assert rejected.json()["detail"]["code"] == "LOCAL_ACCESS_REQUIRED"
+
+
+@pytest.mark.asyncio
+async def test_paper_reconcile_rejects_extra_broker_field():
+    rejected = await request(
+        "POST",
+        "/api/market-data/paper-reconciliations",
+        json={
+            "confirmation": "RECONCILE_INDIA_PAPER",
+            "proposal_id": "proposal-extra",
+            "broker": "t212",
+        },
+    )
+    assert rejected.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_paper_reconcile_rejects_wrong_confirmation():
+    rejected = await request(
+        "POST",
+        "/api/market-data/paper-reconciliations",
+        json={"confirmation": "PREPARE_INDIA_PAPER", "proposal_id": "proposal-confirm"},
+    )
+    assert rejected.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_paper_reconcile_persists_ack_evidence_without_fill(
+    tmp_path, isolated_market_session
+):
+    original_authority = state.execution_authority
+    original_ledger = state._execution_ledger
+    original_service = state._execution_service
+    original_policy = state._preflight_policy_connection
+    assert state.start_execution(tmp_path / "india.sqlite3", workspace="india")
+    try:
+        await request("POST", "/api/market-data/sessions", json=start_body())
+        state._execution_ledger.configure_paper_budget("paper", "INR", "1000")
+        prepared = await request(
+            "POST",
+            "/api/market-data/paper-preparations",
+            json={"confirmation": "PREPARE_INDIA_PAPER", "symbol": "RELIANCE", "quantity": "1"},
+        )
+        assert prepared.status_code == 201, prepared.text
+        assert prepared.json()["admission"]["decision"] == "ADMITTED"
+        proposal_id = prepared.json()["proposal_id"]
+        ack = await _acknowledge_india_paper_without_fill(proposal_id)
+
+        reconciled = await request(
+            "POST",
+            "/api/market-data/paper-reconciliations",
+            json={"confirmation": "RECONCILE_INDIA_PAPER", "proposal_id": proposal_id},
+        )
+        assert 200 <= reconciled.status_code < 300, reconciled.text
+        evidence = state._execution_ledger.get_latest_reconciliation(proposal_id)
+        assert evidence is not None
+        assert evidence.source == "local-paper-operations"
+        assert evidence.status.value == "ACKNOWLEDGED"
+        assert evidence.cumulative_quantity == 0
+        assert evidence.broker_order_id == ack.broker_order_id
+        ticker = dict(state._execution_ledger.get_order(proposal_id).intent)["ticker"]
+        assert state._execution_ledger.get_paper_position("paper", "INR", ticker) is None
+        isolated_market_session.call_tool.assert_not_awaited()
+    finally:
+        state.close_execution()
+        state.execution_authority = original_authority
+        state._execution_ledger = original_ledger
+        state._execution_service = original_service
+        state._preflight_policy_connection = original_policy
