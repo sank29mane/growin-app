@@ -147,8 +147,18 @@ struct ConversationListView: View {
                         }
                         .frame(maxHeight: .infinity)
                     } else if viewModel.conversations.isEmpty {
-                        ContentUnavailableView("No Conversations", systemImage: "bubble.left.and.bubble.right", description: Text("Start chatting to see your history"))
-                            .frame(maxHeight: .infinity)
+                        ContentUnavailableView {
+                            Label("No Conversations", systemImage: "bubble.left.and.bubble.right")
+                        } description: {
+                            Text("Start chatting to see your history")
+                        } actions: {
+                            Button("Start New Chat") {
+                                selectedConversationId = nil
+                                dismiss()
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+                        .frame(maxHeight: .infinity)
                     } else {
                         // SOTA: Use ScrollView + LazyVStack instead of List for better macOS rendering
                         ScrollView {
