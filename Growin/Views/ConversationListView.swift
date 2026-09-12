@@ -157,7 +157,6 @@ struct ConversationListView: View {
                                 dismiss()
                             }
                             .buttonStyle(.borderedProminent)
-                            .tint(Color.stitchNeonIndigo)
                         }
                         .frame(maxHeight: .infinity)
                     } else {
