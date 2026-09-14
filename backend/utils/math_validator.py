@@ -47,6 +47,12 @@ class MathValidator:
                         if node.attr not in ("__init__", "__str__", "__repr__", "__len__"):
                             return False, f"Blocked dunder access: {node.attr}"
                 
+                # Block string literal access to dangerous dunder methods
+                if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    if node.value.startswith("__") and node.value.endswith("__"):
+                        if node.value not in ("__init__", "__str__", "__repr__", "__len__"):
+                            return False, f"Blocked dunder access in string literal: {node.value}"
+
                 # Check imports
                 if isinstance(node, ast.Import):
                     for alias in node.names:
