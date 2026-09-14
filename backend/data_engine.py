@@ -484,17 +484,18 @@ class AlpacaClient:
                     original_ticker = norm_map.get(norm_sym, norm_sym)
                     
                     bar_list = []
+                    # ⚡ OPTIMIZATION: Construct dict directly instead of Pydantic model_dump in hot loop
                     for bar in alpaca_bars:
-                        bar_list.append(PriceData(
-                            ticker=original_ticker,
-                            timestamp=bar.timestamp.isoformat(),
-                            t=int(bar.timestamp.timestamp() * 1000),
-                            open=Decimal(str(bar.open)),
-                            high=Decimal(str(bar.high)),
-                            low=Decimal(str(bar.low)),
-                            close=Decimal(str(bar.close)),
-                            volume=int(bar.volume)
-                        ).model_dump())
+                        bar_list.append({
+                            "ticker": original_ticker,
+                            "timestamp": bar.timestamp.isoformat(),
+                            "t": int(bar.timestamp.timestamp() * 1000),
+                            "open": Decimal(str(bar.open)),
+                            "high": Decimal(str(bar.high)),
+                            "low": Decimal(str(bar.low)),
+                            "close": Decimal(str(bar.close)),
+                            "volume": int(bar.volume)
+                        })
                     
                     res: BarDataDict = {"ticker": original_ticker, "bars": bar_list, "timeframe": timeframe}
                     results[original_ticker] = res
@@ -797,28 +798,39 @@ class FinnhubClient:
 
             # Convert Finnhub format to our standard format
             bar_list = []
-            for i in range(len(candles['c'])):
-                # Normalize prices
-                # Note: CurrencyNormalizer now used inside the loop or logic
-                # normalize_price returns Decimal
-                o = CurrencyNormalizer.normalize_price(candles['o'][i], ticker)
-                h = CurrencyNormalizer.normalize_price(candles['h'][i], ticker)
-                low_price = CurrencyNormalizer.normalize_price(candles['l'][i], ticker)
-                c = CurrencyNormalizer.normalize_price(candles['c'][i], ticker)
-                v = candles['v'][i] if i < len(candles['v']) else 0
 
-                ts_iso = datetime.fromtimestamp(candles['t'][i]).isoformat()
+            # ⚡ OPTIMIZATION: Extract normalization check outside loop and construct dicts directly
+            is_uk = CurrencyNormalizer.is_uk_stock(ticker)
+            multiplier = 0.01 if is_uk else 1.0
 
-                bar_list.append(PriceData(
-                    ticker=ticker,
-                    timestamp=ts_iso,
-                    t=int(candles['t'][i] * 1000),
-                    open=o,
-                    high=h,
-                    low=low_price,
-                    close=c,
-                    volume=int(v)
-                ).model_dump())
+            c_o = candles['o']
+            c_h = candles['h']
+            c_l = candles['l']
+            c_c = candles['c']
+            c_v = candles['v']
+            c_t = candles['t']
+            v_len = len(c_v)
+
+            for i in range(len(c_c)):
+                # Avoid the normalize_price overhead completely
+                o = Decimal(str(round(c_o[i] * multiplier, 2)))
+                h = Decimal(str(round(c_h[i] * multiplier, 2)))
+                low_price = Decimal(str(round(c_l[i] * multiplier, 2)))
+                c = Decimal(str(round(c_c[i] * multiplier, 2)))
+                v = c_v[i] if i < v_len else 0
+
+                ts_iso = datetime.fromtimestamp(c_t[i]).isoformat()
+
+                bar_list.append({
+                    "ticker": ticker,
+                    "timestamp": ts_iso,
+                    "t": int(c_t[i] * 1000),
+                    "open": o,
+                    "high": h,
+                    "low": low_price,
+                    "close": c,
+                    "volume": int(v)
+                })
 
             result: BarDataDict = {"ticker": ticker, "bars": bar_list[-limit:], "timeframe": timeframe}
             return result
