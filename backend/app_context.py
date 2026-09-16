@@ -38,6 +38,23 @@ class AppState:
         self.ane_config = ANEConfig()
         # Phase 30: High-Velocity Trade Proposals (HITL)
         self.trade_proposals: Dict[str, Any] = {}
+        self._execution_service = None
+
+    @property
+    def execution_service(self):
+        return self._execution_service
+
+    @property
+    def execution_authority(self):
+        return hasattr(self, '_execution_authority') and self._execution_authority
+
+    def start_execution(self, db_path):
+        self._execution_authority = True
+        return True
+
+    def close_execution(self):
+        self._execution_authority = False
+        self._execution_service = None
 
     @property
     def chat_manager(self) -> ChatManager:

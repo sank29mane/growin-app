@@ -113,6 +113,10 @@ async def test_dispatch_wait_holds_no_sqlite_write_transaction(tmp_path):
 
         assert state == "PENDING"
 
+class MockAppState:
+    def __init__(self):
+        self.execution_service = None
+        self.execution_authority = False
 
 def test_app_state_owns_one_local_paper_authority_and_reopens(tmp_path):
     db_path = tmp_path / "execution.sqlite3"
