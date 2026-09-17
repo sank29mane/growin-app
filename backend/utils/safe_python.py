@@ -147,6 +147,12 @@ class SafePythonExecutor:
                         if node.attr not in ("__init__", "__str__", "__repr__", "__len__"):
                             return False, f"Blocked dunder access: {node.attr}"
                 
+                # Block dangerous dunder string literals to prevent sandbox escapes
+                if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    if node.value.startswith("__") and node.value.endswith("__"):
+                        if node.value not in ("__init__", "__str__", "__repr__", "__len__"):
+                            return False, f"Blocked dunder string literal: {node.value}"
+
                 # Check imports are in whitelist
                 if isinstance(node, ast.Import):
                     for alias in node.names:
