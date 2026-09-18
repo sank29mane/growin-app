@@ -165,19 +165,24 @@ async def handle_analyze_portfolio(
 
             position_objs = normalize_all_positions(positions, instrument_metadata)
             acc_current = float(calculate_portfolio_value(position_objs))
-            positions = [p.model_dump(by_alias=True) for p in position_objs]
+            acc_invested = 0.0
+            acc_pnl = 0.0
+            positions = []
 
-            acc_invested = sum(
-                float(pos.get("averagePrice", 0)) * float(pos.get("quantity", 0))
-                for pos in positions
-            )
-            acc_pnl = sum(float(pos.get("unrealizedPnl", 0)) for pos in positions)
+            for p in position_objs:
+                qty = float(p.quantity)
+                avg_price = float(p.average_price)
+                unrealized_pnl = float(p.unrealized_pnl)
 
-            for p in positions:
-                ticker = p.get("ticker")
-                p["account_type"] = acc_type
+                acc_invested += avg_price * qty
+                acc_pnl += unrealized_pnl
+
+                pos_dict = p.model_dump(by_alias=True)
+                pos_dict["account_type"] = acc_type
+                ticker = p.ticker
                 if ticker in instrument_metadata:
-                    p["name"] = instrument_metadata[ticker]["name"]
+                    pos_dict["name"] = instrument_metadata[ticker]["name"]
+                positions.append(pos_dict)
 
             return {
                 "type": acc_type,
