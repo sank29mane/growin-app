@@ -18,13 +18,13 @@ class TestQuantEngineRebalance(unittest.TestCase):
         result = engine.analyze_rebalancing_opportunity(current, target, total)
         self.assertEqual(result["deviations_pct"]["AAPL"], 1.0)
 
-        # Test Case 2: Target > 1 without % (50 -> 50)
+        # Test Case 2: Target > 1 without % (5.0 -> 5.0)
         current = {"AAPL": "0%"}
-        target = {"AAPL": 50.0}
+        target = {"AAPL": 5.0}
         total = 1000.0
 
         result = engine.analyze_rebalancing_opportunity(current, target, total)
-        self.assertEqual(result["deviations_pct"]["AAPL"], 5000.0)
+        self.assertEqual(result["deviations_pct"]["AAPL"], 500.0)
 
         # Test Case 3: Target < 1 without % (0.5 -> 0.5)
         current = {"AAPL": "0%"}
@@ -33,6 +33,15 @@ class TestQuantEngineRebalance(unittest.TestCase):
 
         result = engine.analyze_rebalancing_opportunity(current, target, total)
         self.assertEqual(result["deviations_pct"]["AAPL"], 50.0)
+
+        # Test Case 4: Target > 1000% without % (150 -> error)
+        current = {"AAPL": "0%"}
+        target = {"AAPL": 150.0}
+        total = 1000.0
+
+        result = engine.analyze_rebalancing_opportunity(current, target, total)
+        self.assertTrue("error" in result)
+        self.assertTrue("out of bounds" in result["error"])
 
 if __name__ == '__main__':
     unittest.main()
