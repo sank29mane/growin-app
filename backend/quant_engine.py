@@ -61,6 +61,10 @@ class AllocationMap(RootModel):
                     dec_val = create_decimal(val_str)
                 except Exception:
                     raise ValueError(f"Invalid number format for {symbol}: {val}")
+
+            if abs(dec_val) > Decimal("10.0"):
+                raise ValueError(f"Allocation for {symbol} is out of bounds or ambiguous: {val}. Must be between -10.0 and 10.0 (or -1000% to 1000%).")
+
             parsed[symbol] = dec_val
         return parsed
 
