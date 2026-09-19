@@ -156,8 +156,6 @@ struct ConversationListView: View {
                                 selectedConversationId = nil
                             }
                             .buttonStyle(.borderedProminent)
-                            .accessibilityLabel("Start a new conversation")
-                            .accessibilityHint("Starts a new chat")
                         }
                         .frame(maxHeight: .infinity)
                     } else {
