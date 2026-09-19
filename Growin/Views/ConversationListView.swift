@@ -154,11 +154,10 @@ struct ConversationListView: View {
                         } actions: {
                             Button("New Conversation") {
                                 selectedConversationId = nil
-                                dismiss()
                             }
                             .buttonStyle(.borderedProminent)
                             .accessibilityLabel("Start a new conversation")
-                            .accessibilityHint("Dismisses the list to start a new chat")
+                            .accessibilityHint("Starts a new chat")
                         }
                         .frame(maxHeight: .infinity)
                     } else {
