@@ -154,6 +154,7 @@ struct ConversationListView: View {
                         } actions: {
                             Button("New Conversation") {
                                 selectedConversationId = nil
+                                dismiss()
                             }
                             .buttonStyle(.borderedProminent)
                         }
