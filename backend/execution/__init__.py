@@ -31,7 +31,6 @@ from .ledger import (
     LedgerWriterUnavailable,
     default_ledger_path,
 )
-from .paper_dispatcher import PaperDispatcher
 from .service import (
     BrokerExecutionError,
     BrokerOutcomeUnknownError,
@@ -68,7 +67,6 @@ __all__ = [
     "OrderState",
     "PaperBudget",
     "PaperReservation",
-    "PaperDispatcher",
     "ReconciliationSnapshot",
     "ReconciliationStatus",
     "Trading212Dispatcher",
