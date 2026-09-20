@@ -175,16 +175,16 @@ class AlpacaClient:
                 bar_list = []
                 for r in raw_records:
                     ts_iso = datetime.fromtimestamp(r['t'] / 1000.0, tz=timezone.utc).isoformat()
-                    bar_list.append(PriceData(
-                        ticker=original_ticker,
-                        timestamp=ts_iso,
-                        t=int(r['t']),
-                        open=Decimal(str(r['o'])),
-                        high=Decimal(str(r['h'])),
-                        low=Decimal(str(r['l'])),
-                        close=Decimal(str(r['c'])),
-                        volume=int(r['v'])
-                    ).model_dump())
+                    bar_list.append({
+                        "ticker": original_ticker,
+                        "timestamp": ts_iso,
+                        "t": int(r['t']),
+                        "open": Decimal(str(r['o'])),
+                        "high": Decimal(str(r['h'])),
+                        "low": Decimal(str(r['l'])),
+                        "close": Decimal(str(r['c'])),
+                        "volume": int(r['v'])
+                    })
 
                 if bar_list:
                     results[original_ticker] = {"ticker": original_ticker, "bars": bar_list[-limit:], "timeframe": timeframe}
@@ -279,16 +279,16 @@ class AlpacaClient:
                 # Convert timestamp ms to isoformat
                 ts_iso = datetime.fromtimestamp(r['t'] / 1000.0, tz=timezone.utc).isoformat()
 
-                bar_list.append(PriceData(
-                    ticker=ticker,
-                    timestamp=ts_iso,
-                    t=int(r['t']),
-                    open=Decimal(str(r['o'])),
-                    high=Decimal(str(r['h'])),
-                    low=Decimal(str(r['l'])),
-                    close=Decimal(str(r['c'])),
-                    volume=int(r['v'])
-                ).model_dump())
+                bar_list.append({
+                    "ticker": ticker,
+                    "timestamp": ts_iso,
+                    "t": int(r['t']),
+                    "open": Decimal(str(r['o'])),
+                    "high": Decimal(str(r['h'])),
+                    "low": Decimal(str(r['l'])),
+                    "close": Decimal(str(r['c'])),
+                    "volume": int(r['v'])
+                })
 
             result: BarDataDict = {"ticker": ticker, "bars": bar_list[-limit:], "timeframe": timeframe}
             return result
@@ -361,16 +361,16 @@ class AlpacaClient:
                         alpaca_bars = bars_response_obj.data[normalized_ticker]
                         bar_list = []
                         for bar in alpaca_bars:
-                            bar_list.append(PriceData(
-                                ticker=ticker,
-                                timestamp=bar.timestamp.isoformat(),
-                                t=int(bar.timestamp.timestamp() * 1000),
-                                open=Decimal(str(bar.open)),
-                                high=Decimal(str(bar.high)),
-                                low=Decimal(str(bar.low)),
-                                close=Decimal(str(bar.close)),
-                                volume=int(bar.volume)
-                            ).model_dump())
+                            bar_list.append({
+                                "ticker": ticker,
+                                "timestamp": bar.timestamp.isoformat(),
+                                "t": int(bar.timestamp.timestamp() * 1000),
+                                "open": Decimal(str(bar.open)),
+                                "high": Decimal(str(bar.high)),
+                                "low": Decimal(str(bar.low)),
+                                "close": Decimal(str(bar.close)),
+                                "volume": int(bar.volume)
+                            })
 
                         result = {"ticker": ticker, "bars": bar_list, "timeframe": timeframe}
                 except Exception as e:
@@ -485,16 +485,16 @@ class AlpacaClient:
                     
                     bar_list = []
                     for bar in alpaca_bars:
-                        bar_list.append(PriceData(
-                            ticker=original_ticker,
-                            timestamp=bar.timestamp.isoformat(),
-                            t=int(bar.timestamp.timestamp() * 1000),
-                            open=Decimal(str(bar.open)),
-                            high=Decimal(str(bar.high)),
-                            low=Decimal(str(bar.low)),
-                            close=Decimal(str(bar.close)),
-                            volume=int(bar.volume)
-                        ).model_dump())
+                        bar_list.append({
+                            "ticker": original_ticker,
+                            "timestamp": bar.timestamp.isoformat(),
+                            "t": int(bar.timestamp.timestamp() * 1000),
+                            "open": Decimal(str(bar.open)),
+                            "high": Decimal(str(bar.high)),
+                            "low": Decimal(str(bar.low)),
+                            "close": Decimal(str(bar.close)),
+                            "volume": int(bar.volume)
+                        })
                     
                     res: BarDataDict = {"ticker": original_ticker, "bars": bar_list, "timeframe": timeframe}
                     results[original_ticker] = res
@@ -809,16 +809,16 @@ class FinnhubClient:
 
                 ts_iso = datetime.fromtimestamp(candles['t'][i]).isoformat()
 
-                bar_list.append(PriceData(
-                    ticker=ticker,
-                    timestamp=ts_iso,
-                    t=int(candles['t'][i] * 1000),
-                    open=o,
-                    high=h,
-                    low=low_price,
-                    close=c,
-                    volume=int(v)
-                ).model_dump())
+                bar_list.append({
+                    "ticker": ticker,
+                    "timestamp": ts_iso,
+                    "t": int(candles['t'][i] * 1000),
+                    "open": Decimal(str(o)),
+                    "high": Decimal(str(h)),
+                    "low": Decimal(str(low_price)),
+                    "close": Decimal(str(c)),
+                    "volume": int(v)
+                })
 
             result: BarDataDict = {"ticker": ticker, "bars": bar_list[-limit:], "timeframe": timeframe}
             return result
