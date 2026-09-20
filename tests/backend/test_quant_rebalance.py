@@ -18,13 +18,14 @@ class TestQuantEngineRebalance(unittest.TestCase):
         result = engine.analyze_rebalancing_opportunity(current, target, total)
         self.assertEqual(result["deviations_pct"]["AAPL"], 1.0)
 
-        # Test Case 2: Target > 1 without % (50 -> 50)
+        # Test Case 2: Target > 10 without % (50 -> 50) should be out-of-bounds error
         current = {"AAPL": "0%"}
         target = {"AAPL": 50.0}
         total = 1000.0
 
         result = engine.analyze_rebalancing_opportunity(current, target, total)
-        self.assertEqual(result["deviations_pct"]["AAPL"], 5000.0)
+        self.assertTrue("error" in result)
+        self.assertTrue("out of bounds for explicit weights" in result["error"])
 
         # Test Case 3: Target < 1 without % (0.5 -> 0.5)
         current = {"AAPL": "0%"}
