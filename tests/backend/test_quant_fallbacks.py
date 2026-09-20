@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 import numpy as np
 import pandas as pd
 from quant_engine import QuantEngine

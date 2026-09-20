@@ -1,8 +1,9 @@
+from unittest.mock import AsyncMock
 import pytest
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
-from execution import ApprovalService, ExecutionLedger, ExecutionService, PaperDispatcher
+from execution import ApprovalService, ExecutionLedger, ExecutionService
 
 
 def key_material():
@@ -35,7 +36,7 @@ def test_workspace_switch_isolated_and_clear_requires_purpose_bound_signature(tm
 def test_engaged_workspace_blocks_admission_and_reservation(tmp_path):
     with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
         ledger.configure_paper_budget("invest", "GBP", "1000")
-        service = ExecutionService(PaperDispatcher(), ledger)
+        service = ExecutionService(AsyncMock(), ledger)
         ledger.engage_workspace_control("MANUAL_KILL")
         with pytest.raises(Exception, match="control"):
             service.admit(

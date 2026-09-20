@@ -3,7 +3,7 @@ import unittest
 import pandas as pd
 import numpy as np
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timezone
 
 # We need to ensure we can import data_engine.

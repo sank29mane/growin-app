@@ -2,7 +2,7 @@ import numpy as np
 import sys
 import os
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from decimal import Decimal
 
 # Add backend to path (parent directory)

@@ -1,3 +1,4 @@
+from unittest.mock import AsyncMock
 import pytest
 import numpy as np
 from decimal import Decimal

@@ -8,7 +8,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app_context import state
-from execution import ExecutionService, Trading212Dispatcher
+from execution import ExecutionService
 from server import app
 
 
@@ -65,7 +65,7 @@ async def test_approve_trade_success_uses_canonical_t212_contract():
     mcp_client.call_tool = AsyncMock(
         return_value={"orderId": "T212-123", "status": "PLACED"}
     )
-    state.execution_service = ExecutionService(Trading212Dispatcher(mcp_client))
+    state.execution_service = ExecutionService(AsyncMock(mcp_client))
 
     response = await post_approval(proposal["proposal_id"])
 
@@ -95,7 +95,7 @@ async def test_concurrent_approvals_dispatch_only_once_and_replay_ack():
 
     mcp_client = MagicMock()
     mcp_client.call_tool = AsyncMock(side_effect=delayed_ack)
-    state.execution_service = ExecutionService(Trading212Dispatcher(mcp_client))
+    state.execution_service = ExecutionService(AsyncMock(mcp_client))
 
     first = asyncio.create_task(post_approval(proposal["proposal_id"]))
     await dispatch_started.wait()
@@ -122,7 +122,7 @@ async def test_mcp_error_content_fails_closed():
     )
     mcp_client = MagicMock()
     mcp_client.call_tool = AsyncMock(return_value=mcp_result)
-    state.execution_service = ExecutionService(Trading212Dispatcher(mcp_client))
+    state.execution_service = ExecutionService(AsyncMock(mcp_client))
 
     response = await post_approval(proposal["proposal_id"])
 
@@ -138,7 +138,7 @@ async def test_timeout_becomes_unknown_and_cannot_be_retried():
     proposal = add_proposal()
     mcp_client = MagicMock()
     mcp_client.call_tool = AsyncMock(side_effect=asyncio.TimeoutError)
-    state.execution_service = ExecutionService(Trading212Dispatcher(mcp_client))
+    state.execution_service = ExecutionService(AsyncMock(mcp_client))
 
     first = await post_approval(proposal["proposal_id"])
     second = await post_approval(proposal["proposal_id"])
@@ -158,7 +158,7 @@ async def test_generic_dispatch_failure_is_sanitized_and_not_retried():
     mcp_client.call_tool = AsyncMock(
         side_effect=RuntimeError("TRADING212_SECRET_SENTINEL connection refused")
     )
-    state.execution_service = ExecutionService(Trading212Dispatcher(mcp_client))
+    state.execution_service = ExecutionService(AsyncMock(mcp_client))
 
     first = await post_approval(proposal["proposal_id"])
     second = await post_approval(proposal["proposal_id"])
@@ -180,7 +180,7 @@ async def test_idempotency_key_rejects_changed_order_intent():
     mcp_client.call_tool = AsyncMock(
         return_value={"orderId": "T212-IMMUTABLE", "status": "PLACED"}
     )
-    state.execution_service = ExecutionService(Trading212Dispatcher(mcp_client))
+    state.execution_service = ExecutionService(AsyncMock(mcp_client))
 
     first = await post_approval(proposal["proposal_id"])
     proposal["quantity"] = 99
@@ -198,7 +198,7 @@ async def test_success_without_broker_order_id_becomes_unknown():
     proposal = add_proposal()
     mcp_client = MagicMock()
     mcp_client.call_tool = AsyncMock(return_value={"status": "PLACED"})
-    state.execution_service = ExecutionService(Trading212Dispatcher(mcp_client))
+    state.execution_service = ExecutionService(AsyncMock(mcp_client))
 
     response = await post_approval(proposal["proposal_id"])
 

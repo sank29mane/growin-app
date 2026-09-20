@@ -1,7 +1,7 @@
 import sys
 import os
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Rely on pytest.ini and conftest.py for pathing
 from utils.ticker_utils import normalize_ticker

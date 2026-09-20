@@ -1,3 +1,4 @@
+from unittest.mock import AsyncMock
 import pytest
 from utils.rstitch_engine import RStitchEngine
 

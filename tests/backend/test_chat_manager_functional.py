@@ -1,3 +1,4 @@
+from unittest.mock import AsyncMock
 import pytest
 import os
 from chat_manager import ChatManager

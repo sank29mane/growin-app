@@ -2,7 +2,7 @@ import asyncio
 import logging
 import sys
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 pytestmark = pytest.mark.asyncio
 

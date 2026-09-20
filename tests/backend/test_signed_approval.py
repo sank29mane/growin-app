@@ -1,3 +1,4 @@
+from unittest.mock import AsyncMock
 import asyncio
 import json
 import os
@@ -18,7 +19,7 @@ from execution import (
     ExecutionDisabledError,
     ExecutionLedger,
     ExecutionService,
-    PaperDispatcher,
+
 )
 from execution.ledger import IntentConflict
 from execution.models import OrderIntent
@@ -62,7 +63,7 @@ def make_intent(proposal_id: str = "signed-1", **overrides) -> OrderIntent:
 
 
 def admit_and_reserve(ledger: ExecutionLedger, intent: OrderIntent) -> None:
-    service = ExecutionService(PaperDispatcher(), ledger, require_approval=True)
+    service = ExecutionService(AsyncMock(), ledger, require_approval=True)
     service.admit(
         intent,
         currency="GBP",
@@ -125,7 +126,7 @@ async def test_signed_payload_is_exact_and_success_replays_only_same_evidence(tm
         key = private_key()
         enrolled = enroll(approval, key)
         service = ExecutionService(
-            PaperDispatcher(),
+            AsyncMock(),
             ledger,
             require_approval=True,
             approval_service=approval,
@@ -202,7 +203,7 @@ async def test_required_approval_blocks_legacy_and_invalid_signature(tmp_path):
         key = private_key()
         enroll(approval, key)
         service = ExecutionService(
-            PaperDispatcher(), ledger, require_approval=True, approval_service=approval
+            AsyncMock(), ledger, require_approval=True, approval_service=approval
         )
         intent = make_intent()
         admit_and_reserve(ledger, intent)
@@ -232,7 +233,7 @@ async def test_concurrent_services_create_one_approval_and_dispatch(tmp_path):
             self.calls += 1
             self.started.set()
             await self.release.wait()
-            return await PaperDispatcher().dispatch(intent)
+            return await AsyncMock().dispatch(intent)
 
     with ExecutionLedger(tmp_path / "execution.sqlite3", require_approval=True) as ledger:
         approval = ApprovalService(ledger, clock=MutableClock())

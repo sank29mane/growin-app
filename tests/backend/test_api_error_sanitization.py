@@ -1,6 +1,6 @@
 import sys
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi.testclient import TestClient
 import httpx
 

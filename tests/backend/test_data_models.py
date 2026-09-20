@@ -1,3 +1,4 @@
+from unittest.mock import AsyncMock
 from datetime import date
 from decimal import Decimal
 from data_models import DividendData

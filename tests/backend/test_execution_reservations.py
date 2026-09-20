@@ -1,9 +1,10 @@
+from unittest.mock import AsyncMock
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 
 import pytest
 
-from execution import ExecutionLedger, ExecutionService, PaperDispatcher
+from execution import ExecutionLedger, ExecutionService
 from execution.models import OrderIntent
 
 
@@ -34,7 +35,7 @@ def prepare(service, ledger, pid, quantity="5"):
 
 def test_explicit_budget_is_required_and_reservation_is_decimal(tmp_path):
     with ExecutionLedger(tmp_path / "execution.sqlite3") as ledger:
-        service = ExecutionService(PaperDispatcher(), ledger)
+        service = ExecutionService(AsyncMock(), ledger)
         prepare(service, ledger, "one")
         with pytest.raises(Exception, match="budget"):
             service.reserve("one")
@@ -46,7 +47,7 @@ def test_explicit_budget_is_required_and_reservation_is_decimal(tmp_path):
 
 def test_concurrent_buy_reservations_cannot_overallocate_budget(tmp_path):
     with ExecutionLedger(tmp_path / "execution.sqlite3") as ledger:
-        service = ExecutionService(PaperDispatcher(), ledger)
+        service = ExecutionService(AsyncMock(), ledger)
         ledger.configure_paper_budget("invest", "GBP", "100")
         for pid in ("one", "two", "three"):
             prepare(service, ledger, pid)
@@ -65,7 +66,7 @@ def _reserve(service, pid):
 
 def test_cross_workspace_and_sell_reservations_fail_closed(tmp_path):
     with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
-        service = ExecutionService(PaperDispatcher(), ledger)
+        service = ExecutionService(AsyncMock(), ledger)
         ledger.configure_paper_budget("invest", "GBP", "100")
         with pytest.raises(Exception, match="workspace"):
             ledger.register_intent(

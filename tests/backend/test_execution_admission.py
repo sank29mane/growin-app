@@ -8,7 +8,7 @@ from execution import (
     AdmissionDecision,
     ExecutionLedger,
     ExecutionService,
-    PaperDispatcher,
+
     OrderIntent,
 )
 
@@ -63,7 +63,7 @@ def test_missing_or_denied_evidence_records_no_reservation_or_dispatch(tmp_path)
 )
 def test_non_finite_and_zero_simulator_values_deny(tmp_path, simulator_evidence):
     with ExecutionLedger(tmp_path / "execution.sqlite3") as ledger:
-        service = ExecutionService(PaperDispatcher(), ledger)
+        service = ExecutionService(AsyncMock(), ledger)
         result = evidence(service, simulator_evidence=simulator_evidence)
         assert result.decision is AdmissionDecision.DENIED
         assert ledger.get_reservation("admit-1") is None
@@ -71,7 +71,7 @@ def test_non_finite_and_zero_simulator_values_deny(tmp_path, simulator_evidence)
 
 def test_stale_and_sell_evidence_fail_closed(tmp_path):
     with ExecutionLedger(tmp_path / "execution.sqlite3") as ledger:
-        service = ExecutionService(PaperDispatcher(), ledger)
+        service = ExecutionService(AsyncMock(), ledger)
         stale = evidence(
             service,
             evidence_at=datetime.now(timezone.utc) - timedelta(minutes=5),
@@ -91,7 +91,7 @@ def test_stale_and_sell_evidence_fail_closed(tmp_path):
 
 def test_admitted_evidence_is_decimal_and_immutable(tmp_path):
     with ExecutionLedger(tmp_path / "execution.sqlite3") as ledger:
-        service = ExecutionService(PaperDispatcher(), ledger)
+        service = ExecutionService(AsyncMock(), ledger)
         result = evidence(service, value="1.5")
         assert result.decision is AdmissionDecision.ADMITTED
         assert result.final_quantity == Decimal("1.5")

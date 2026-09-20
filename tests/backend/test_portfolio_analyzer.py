@@ -2,7 +2,7 @@ import pytest
 import numpy as np
 import pandas as pd
 from decimal import Decimal
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from utils.portfolio_analyzer import PortfolioAnalyzer
 from utils.jmce_model import NeuralJMCE
 from utils.mlx_loader import HAS_MLX

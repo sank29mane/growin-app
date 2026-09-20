@@ -1,3 +1,4 @@
+from unittest.mock import AsyncMock
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -7,14 +8,14 @@ from execution import (
     ExecutionLedger,
     ExecutionService,
     OrderAck,
-    PaperDispatcher,
+
     ReconciliationSnapshot,
 )
 from execution.service import _intent_from_proposal
 
 
 def setup_order(ledger, pid="recon", quantity="2"):
-    service = ExecutionService(PaperDispatcher(), ledger)
+    service = ExecutionService(AsyncMock(), ledger)
     proposal = {
         "proposal_id": pid,
         "workspace": "uk",

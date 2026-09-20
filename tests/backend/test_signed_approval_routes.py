@@ -1,3 +1,4 @@
+from unittest.mock import AsyncMock
 import base64
 import json
 import uuid
@@ -8,7 +9,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from httpx import ASGITransport, AsyncClient
 
 from app_context import state
-from execution import ExecutionLedger, ExecutionService, PaperDispatcher
+from execution import ExecutionLedger, ExecutionService
 from server import app
 
 
@@ -20,7 +21,7 @@ def signed_execution(tmp_path):
         tmp_path / "execution.sqlite3", workspace="uk", require_approval=True
     )
     service = ExecutionService(
-        PaperDispatcher(), ledger, require_approval=True
+        AsyncMock(), ledger, require_approval=True
     )
     state.execution_service = service
     state.trade_proposals.clear()
