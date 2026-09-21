@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app_context import AppState
-from execution import ExecutionLedger, ExecutionService, PaperDispatcher
+from execution import ExecutionLedger, ExecutionService
 from execution.service import ExecutionDisabledError
 
 

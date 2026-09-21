@@ -3,7 +3,7 @@ from decimal import Decimal
 
 import pytest
 
-from execution import ExecutionLedger, ExecutionService, PaperDispatcher
+from execution import ExecutionLedger, ExecutionService
 from execution.models import OrderIntent
 
 

@@ -2,7 +2,7 @@ import pytest
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
-from execution import ApprovalService, ExecutionLedger, ExecutionService, PaperDispatcher
+from execution import ApprovalService, ExecutionLedger, ExecutionService
 
 
 def key_material():

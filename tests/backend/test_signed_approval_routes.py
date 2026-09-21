@@ -8,7 +8,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from httpx import ASGITransport, AsyncClient
 
 from app_context import state
-from execution import ExecutionLedger, ExecutionService, PaperDispatcher
+from execution import ExecutionLedger, ExecutionService
 from server import app
 
 

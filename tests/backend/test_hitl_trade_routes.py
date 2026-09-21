@@ -8,7 +8,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app_context import state
-from execution import ExecutionService, Trading212Dispatcher
+from execution import ExecutionService
 from server import app
 
 
