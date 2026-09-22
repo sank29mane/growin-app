@@ -5,6 +5,7 @@ MCP Routes - Server management and tool execution
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from app_context import state, T212ConfigRequest
 from utils.mcp_validation import validate_mcp_config
+from utils.secret_masker import SecretMasker
 import logging
 import json
 import os
@@ -217,7 +218,8 @@ async def call_mcp_tool(request: ToolCallRequest):
         return {"status": "success", "result": result.content}
     except Exception as e:
         logger.error(f"Tool execution failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        safe_error = SecretMasker.mask_string(str(e))
+        raise HTTPException(status_code=500, detail=safe_error)
 
 
 @router.post("/mcp/servers/add")
