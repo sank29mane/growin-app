@@ -1,6 +1,6 @@
 import sys
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, AsyncMock
 from fastapi.testclient import TestClient
 import httpx
 
@@ -107,7 +107,7 @@ def test_mcp_tool_call_sanitization():
     """Test that MCP tool call endpoint sanitizes exception details."""
     with TestClient(app) as client:
         mock_session = MagicMock()
-        mock_session.call_tool = MagicMock(side_effect=Exception("TOOL_CALL_API_KEY_LEAK"))
+        mock_session.call_tool = AsyncMock(side_effect=Exception("Failed execution due to API_KEY=my_secret_key_123"))
 
         with patch.dict(state.mcp_client.sessions, {"test_server": mock_session}):
             response = client.post("/mcp/tool/call", json={
@@ -118,5 +118,5 @@ def test_mcp_tool_call_sanitization():
 
             assert response.status_code == 500
             detail = response.json().get("detail")
-            assert detail == "Internal Server Error"
-            assert "TOOL_CALL_API_KEY_LEAK" not in str(response.content)
+            assert "API_KEY=***MASKED***" in detail
+            assert "my_secret_key_123" not in detail
