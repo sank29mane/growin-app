@@ -170,3 +170,6 @@
 ## 2026-07-28 - Hover States in ForEach Loops
 **Learning:** In SwiftUI, attempting to manage a hover state micro-interaction (like cursor pushes or background changes) for multiple items generated within a `ForEach` loop using a single shared `@State` variable in the parent view causes all items to react simultaneously or unpredictably.
 **Action:** When implementing individual hover states for items in a `ForEach` loop, always extract the button/item content into a separate private child `View` struct. Give this child view its own `@State private var isHovered = false` so each item manages its own state independently.
+## 2024-05-24 - Empty States with Actions
+**Learning:** Empty states natively supported via `ContentUnavailableView` should utilize the `actions` closure to provide immediate, actionable next steps instead of stranding the user in a dead-end UI flow.
+**Action:** Always upgrade dead-end empty state screens (e.g. "No Items") by providing at least one concrete Call-To-Action via the iOS 17/macOS 14 native `ContentUnavailableView(label:description:actions:)` initializer to smoothly redirect user focus.
