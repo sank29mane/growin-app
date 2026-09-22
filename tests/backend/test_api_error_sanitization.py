@@ -102,3 +102,21 @@ def test_market_forecast_sanitization():
             # Ensure it masks the exception message
             assert error_msg == "Failed to fetch historical data for forecasting" or error_msg == "Internal Server Error"
             assert "FORECAST_MODEL_PATH_LEAK" not in str(response.content)
+
+def test_mcp_tool_call_sanitization():
+    """Test that MCP tool call endpoint sanitizes exception details."""
+    with TestClient(app) as client:
+        mock_session = MagicMock()
+        mock_session.call_tool = MagicMock(side_effect=Exception("TOOL_CALL_API_KEY_LEAK"))
+
+        with patch.dict(state.mcp_client.sessions, {"test_server": mock_session}):
+            response = client.post("/mcp/tool/call", json={
+                "server_name": "test_server",
+                "tool_name": "test_tool",
+                "arguments": {}
+            })
+
+            assert response.status_code == 500
+            detail = response.json().get("detail")
+            assert detail == "Internal Server Error"
+            assert "TOOL_CALL_API_KEY_LEAK" not in str(response.content)

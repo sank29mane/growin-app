@@ -217,7 +217,7 @@ async def call_mcp_tool(request: ToolCallRequest):
         return {"status": "success", "result": result.content}
     except Exception as e:
         logger.error(f"Tool execution failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 
 @router.post("/mcp/servers/add")
