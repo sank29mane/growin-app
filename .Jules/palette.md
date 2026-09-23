@@ -167,3 +167,10 @@
 ## 2026-07-26 - NSCursor Stack Balancing in SwiftUI
 **Learning:** In SwiftUI macOS development, manually pushing `NSCursor` within `.onHover` without a fallback can cause a stuck cursor if the view is removed from the hierarchy while hovered, as the `hovering == false` closure is never triggered.
 **Action:** Always balance `NSCursor.push()` calls by adding an `.onDisappear` modifier that conditionally calls `NSCursor.pop()` if the view was in a hovered state at the time of its removal.
+## 2026-07-28 - Hover States in ForEach Loops
+**Learning:** In SwiftUI, attempting to manage a hover state micro-interaction (like cursor pushes or background changes) for multiple items generated within a `ForEach` loop using a single shared `@State` variable in the parent view causes all items to react simultaneously or unpredictably.
+**Action:** When implementing individual hover states for items in a `ForEach` loop, always extract the button/item content into a separate private child `View` struct. Give this child view its own `@State private var isHovered = false` so each item manages its own state independently.
+
+## 2024-05-14 - Accessibility improvements for TextEditor and Button
+**Learning:** TextEditor elements lack default context for VoiceOver users, and standard buttons initialized with text strings automatically receive the .isButton trait and label.
+**Action:** Always append explicit .accessibilityLabel and .accessibilityHint to TextEditor, and avoid redundantly applying them to standard text-initialized buttons.

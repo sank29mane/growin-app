@@ -7,8 +7,8 @@ from quant_engine import QuantEngine
 class TestQuantFallbacks(unittest.TestCase):
     def test_pure_pandas_fallback(self):
         # Force fallback to Pure Pandas path
-        with patch('backend.quant_engine.PANDAS_TA_AVAILABLE', False):
-            with patch('backend.quant_engine.RUST_CORE_AVAILABLE', False):
+        with patch('quant_engine.PANDAS_TA_AVAILABLE', False):
+            with patch('quant_engine.RUST_CORE_AVAILABLE', False):
                 engine = QuantEngine()
 
                 # Create synthetic OHLCV data
@@ -57,7 +57,7 @@ class TestQuantFallbacks(unittest.TestCase):
 
     def test_pivot_points_fallback(self):
         """Test fallback logic for pivot points when SciPy is unavailable."""
-        with patch('backend.quant_engine.SCIPY_AVAILABLE', False):
+        with patch('quant_engine.SCIPY_AVAILABLE', False):
             engine = QuantEngine()
 
             # Create synthetic data with clear peaks and troughs
