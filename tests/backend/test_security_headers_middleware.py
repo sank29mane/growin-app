@@ -20,6 +20,8 @@ def test_security_headers_middleware():
     assert headers.get("X-Content-Type-Options") == "nosniff"
     assert headers.get("X-Frame-Options") == "DENY"
     assert headers.get("Referrer-Policy") == "strict-origin-when-cross-origin"
+    assert headers.get("Strict-Transport-Security") == "max-age=31536000; includeSubDomains; preload"
+    assert headers.get("X-XSS-Protection") == "1; mode=block"
 
     # Basic CSP check
     csp = headers.get("Content-Security-Policy", "")
@@ -34,3 +36,5 @@ def test_security_headers_on_error():
     headers = response.headers
     assert headers.get("X-Content-Type-Options") == "nosniff"
     assert headers.get("X-Frame-Options") == "DENY"
+    assert headers.get("Strict-Transport-Security") == "max-age=31536000; includeSubDomains; preload"
+    assert headers.get("X-XSS-Protection") == "1; mode=block"
