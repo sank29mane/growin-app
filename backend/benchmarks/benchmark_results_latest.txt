@@ -1,0 +1,38 @@
+============================================================
+📈 GROWIN SOTA FORECASTER BENCHMARK (NSE / INDIA)
+============================================================
+YF.download() has changed argument auto_adjust default to True
+
+📊 Benchmarking RELIANCE.NS (364 data points)...
+  ✅ IBM_TTM_Baseline               | MAE:     2.74 | Ops/sec:  590.5 | Latency:   1.7ms
+  ✅ TimesFM_CatBoost_Base          | MAE:     2.11 | Ops/sec:  287.8 | Latency:   3.5ms
+  ✅ TimesFM_CatBoost_Finetuned     | MAE:     2.06 | Ops/sec:  291.5 | Latency:   3.4ms
+
+📊 Benchmarking TCS.NS (363 data points)...
+  ✅ IBM_TTM_Baseline               | MAE:     7.78 | Ops/sec: 1451.3 | Latency:   0.7ms
+  ✅ TimesFM_CatBoost_Base          | MAE:     3.29 | Ops/sec:  290.6 | Latency:   3.4ms
+  ✅ TimesFM_CatBoost_Finetuned     | MAE:     3.21 | Ops/sec:  279.2 | Latency:   3.6ms
+
+📊 Benchmarking TATAPOWER.NS (363 data points)...
+  ✅ IBM_TTM_Baseline               | MAE:     1.27 | Ops/sec: 1420.8 | Latency:   0.7ms
+  ✅ TimesFM_CatBoost_Base          | MAE:     1.40 | Ops/sec:  284.5 | Latency:   3.5ms
+  ✅ TimesFM_CatBoost_Finetuned     | MAE:     1.42 | Ops/sec:  285.9 | Latency:   3.5ms
+
+📊 Benchmarking SUZLON.NS (364 data points)...
+  ✅ IBM_TTM_Baseline               | MAE:     0.19 | Ops/sec: 1407.3 | Latency:   0.7ms
+  ✅ TimesFM_CatBoost_Base          | MAE:     0.23 | Ops/sec:  275.9 | Latency:   3.6ms
+  ✅ TimesFM_CatBoost_Finetuned     | MAE:     0.23 | Ops/sec:  283.0 | Latency:   3.5ms
+
+📊 Benchmarking RVNL.NS (363 data points)...
+  ✅ IBM_TTM_Baseline               | MAE:     0.55 | Ops/sec: 1400.1 | Latency:   0.7ms
+  ✅ TimesFM_CatBoost_Base          | MAE:     3.35 | Ops/sec:  285.9 | Latency:   3.5ms
+  ✅ TimesFM_CatBoost_Finetuned     | MAE:     3.38 | Ops/sec:  285.8 | Latency:   3.5ms
+
+============================================================
+🏆 BENCHMARK SUMMARY (AVERAGES ACROSS ALL STOCKS)
+============================================================
+                              MAE  MAPE_%  Throughput_ops  Latency_ms
+Model
+TimesFM_CatBoost_Finetuned 2.0578  0.5444        285.0757      3.5085
+TimesFM_CatBoost_Base      2.0739  0.5420        284.9674      3.5103
+IBM_TTM_Baseline           2.5069  0.3111       1254.0163      0.9022
