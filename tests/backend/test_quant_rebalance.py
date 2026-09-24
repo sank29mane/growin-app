@@ -18,13 +18,14 @@ class TestQuantEngineRebalance(unittest.TestCase):
         result = engine.analyze_rebalancing_opportunity(current, target, total)
         self.assertEqual(result["deviations_pct"]["AAPL"], 1.0)
 
-        # Test Case 2: Target > 1 without % (50 -> 50)
+        # Test Case 2: Target > 10 without % should be rejected as ambiguous
         current = {"AAPL": "0%"}
         target = {"AAPL": 50.0}
         total = 1000.0
 
         result = engine.analyze_rebalancing_opportunity(current, target, total)
-        self.assertEqual(result["deviations_pct"]["AAPL"], 5000.0)
+        self.assertIn("error", result)
+        self.assertIn("Ambiguous or out-of-bounds allocation for AAPL: 50.0", result["error"])
 
         # Test Case 3: Target < 1 without % (0.5 -> 0.5)
         current = {"AAPL": "0%"}
