@@ -38,7 +38,7 @@ from .models import (
 )
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 _WORKSPACE_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 _REASON_CODE_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
@@ -69,6 +69,10 @@ class ApprovalConflict(LedgerError):
 
 class ApprovalKeyConflict(LedgerError):
     """Raised when approval-key enrollment would replace an active key."""
+
+
+class RequoteConflict(LedgerError):
+    """Raised when immutable local re-quote evidence is inconsistent."""
 
 
 class ClaimStatus(str, Enum):
@@ -142,6 +146,24 @@ class LedgerApprovalChallenge:
     signed_payload: bytes
     issued_at_epoch: int
     expires_at_epoch: int
+
+
+@dataclass(frozen=True)
+class LedgerRequote:
+    """Durable, non-executable local re-quote candidate evidence."""
+
+    requote_id: str
+    proposal_id: str
+    parent_intent_hash: str
+    parent_reconciliation_fingerprint: str
+    idempotency_key: str
+    snapshot_hash: str
+    candidate: Mapping[str, Any]
+    state: str
+    reason_code: str
+    replacement_proposal_id: str
+    created_at: str
+    updated_at: str
 
 
 def default_ledger_path(workspace: str = "uk") -> Path:
@@ -223,6 +245,7 @@ class ExecutionLedger:
             self._create_schema()
             os.chmod(self.path, 0o600)
             self.recover_abandoned_submissions()
+            self.recover_pending_requotes()
         except Exception:
             self.close()
             raise
@@ -459,10 +482,62 @@ class ExecutionLedger:
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS requote_intents (
+                requote_id TEXT PRIMARY KEY,
+                proposal_id TEXT NOT NULL REFERENCES order_intents(proposal_id),
+                parent_intent_hash TEXT NOT NULL,
+                parent_reconciliation_fingerprint TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                snapshot_hash TEXT NOT NULL,
+                candidate_json TEXT NOT NULL,
+                state TEXT NOT NULL,
+                reason_code TEXT NOT NULL DEFAULT '',
+                replacement_proposal_id TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS requote_intents_parent_state
+            ON requote_intents(proposal_id, state, created_at)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS requote_events (
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                requote_id TEXT NOT NULL REFERENCES requote_intents(requote_id),
+                event_type TEXT NOT NULL,
+                from_state TEXT,
+                to_state TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """,
+            """
             CREATE TRIGGER IF NOT EXISTS order_intents_no_update
             BEFORE UPDATE ON order_intents
             BEGIN
                 SELECT RAISE(ABORT, 'order_intents are immutable');
+            END
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS requote_intents_no_delete
+            BEFORE DELETE ON requote_intents
+            BEGIN
+                SELECT RAISE(ABORT, 'requote intents are immutable');
+            END
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS requote_events_no_update
+            BEFORE UPDATE ON requote_events
+            BEGIN
+                SELECT RAISE(ABORT, 'requote events are append-only');
+            END
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS requote_events_no_delete
+            BEFORE DELETE ON requote_events
+            BEGIN
+                SELECT RAISE(ABORT, 'requote events are append-only');
             END
             """,
             """
@@ -554,6 +629,15 @@ class ExecutionLedger:
                 if budget_columns and "reserved" not in budget_columns:
                     connection.execute(
                         "ALTER TABLE paper_budgets ADD COLUMN reserved TEXT NOT NULL DEFAULT '0'"
+                    )
+            if current_version < 5:
+                requote_columns = {
+                    str(row[1])
+                    for row in connection.execute("PRAGMA table_info(requote_intents)").fetchall()
+                }
+                if requote_columns and "replacement_proposal_id" not in requote_columns:
+                    connection.execute(
+                        "ALTER TABLE requote_intents ADD COLUMN replacement_proposal_id TEXT NOT NULL DEFAULT ''"
                     )
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION:d}")
 
@@ -681,12 +765,24 @@ class ExecutionLedger:
                     now,
                 ),
             )
+            previous_state = str(order["state"])
+            next_state = previous_state
+            if admission.decision is AdmissionDecision.DENIED and previous_state == "PENDING":
+                next_state = "REJECTED"
+                connection.execute(
+                    """
+                    UPDATE order_projection
+                    SET state = 'REJECTED', rejection_notes = ?, updated_at = ?
+                    WHERE proposal_id = ? AND state = 'PENDING'
+                    """,
+                    (admission.reason_code, now, proposal_id),
+                )
             self._append_event(
                 connection,
                 proposal_id,
                 "ADMISSION_DECIDED",
-                str(order["state"]),
-                str(order["state"]),
+                previous_state,
+                next_state,
                 {
                     "decision": admission.decision.value,
                     "reason_code": admission.reason_code,
@@ -853,6 +949,27 @@ class ExecutionLedger:
                 (proposal_id,),
             ).fetchone()
         return self._reservation_from_row(row) if row is not None else None
+
+    def find_active_pending_reservation(self, account: str) -> Optional[str]:
+        """Return the newest pending proposal that still owns this account's reservation."""
+
+        with self._mutex:
+            row = self._require_connection().execute(
+                """
+                SELECT reservation.proposal_id
+                FROM buying_power_reservations AS reservation
+                JOIN order_projection AS projection
+                  ON projection.proposal_id = reservation.proposal_id
+                WHERE reservation.workspace = ?
+                  AND reservation.account = ?
+                  AND reservation.state = 'ACTIVE'
+                  AND projection.state = 'PENDING'
+                ORDER BY reservation.created_at DESC
+                LIMIT 1
+                """,
+                (self.workspace, account),
+            ).fetchone()
+        return str(row["proposal_id"]) if row is not None else None
 
     def engage_workspace_control(
         self, reason_code: str = "MANUAL_KILL", *, actor: str = "local", evidence_id: str = ""
@@ -1134,6 +1251,10 @@ class ExecutionLedger:
                 "ticker": intent.get("ticker"),
                 "side": intent.get("side"),
                 "quantity": intent.get("quantity"),
+                "order_type": intent.get("order_type"),
+                "limit_price": intent.get("limit_price"),
+                "replaces_proposal_id": intent.get("replaces_proposal_id", ""),
+                "requote_id": intent.get("requote_id", ""),
                 "issued_at": int(challenge["issued_at_epoch"]),
                 "expires_at": int(challenge["expires_at_epoch"]),
                 "key_id": key_id,
@@ -1434,6 +1555,59 @@ class ExecutionLedger:
 
     finalize_ack = finalize
 
+    def acknowledge_local_requote_fixture(
+        self, proposal_id: str, acknowledgment: OrderAck
+    ) -> OrderAck:
+        """Acknowledge the fixed Phase 52 local UAT parent without dispatching.
+
+        This is not a general execution shortcut.  It is restricted to the
+        single local fixture account used to demonstrate a cancelled parent
+        and fresh replacement.  It deliberately creates no dispatch attempt.
+        """
+
+        if str(acknowledgment.proposal_id) != proposal_id:
+            raise IntentConflict("acknowledgement proposal_id does not match the order")
+        safe_ack = _safe_acknowledgment(acknowledgment)
+        safe_json = canonical_json(safe_ack)
+        now = _now()
+        with self._transaction() as connection:
+            row = self._select_order(connection, proposal_id)
+            if row is None:
+                raise OrderNotFound(f"order {proposal_id!r} was not found")
+            intent = json.loads(str(row["canonical_json"]))
+            if (
+                intent.get("account") != "paper-requote-uat-v1"
+                or intent.get("broker") != "paper"
+                or intent.get("mode") != "PAPER"
+                or acknowledgment.broker != "paper"
+            ):
+                raise ApprovalConflict("local fixture acknowledgement is not authorized")
+            state = str(row["state"])
+            if state == "ACKNOWLEDGED":
+                if row["acknowledgment_json"] != safe_json:
+                    raise IntentConflict("order already has a different acknowledgement")
+                return _ack_from_json(safe_json, replay=True)
+            if state != "PENDING":
+                raise InvalidTransition(f"cannot locally acknowledge an order in {state}")
+            connection.execute(
+                """
+                UPDATE order_projection
+                SET state = 'ACKNOWLEDGED', acknowledgment_json = ?, updated_at = ?
+                WHERE proposal_id = ? AND state = 'PENDING'
+                """,
+                (safe_json, now, proposal_id),
+            )
+            self._append_event(
+                connection,
+                proposal_id,
+                "LOCAL_REQUOTE_UAT_FIXTURE_ACKNOWLEDGED",
+                "PENDING",
+                "ACKNOWLEDGED",
+                json.loads(safe_json),
+                now,
+            )
+        return _ack_from_json(safe_json)
+
     def reconcile(self, snapshot: ReconciliationSnapshot) -> LedgerOrder:
         """Apply one monotonic typed reconciliation snapshot atomically."""
 
@@ -1558,6 +1732,24 @@ class ExecutionLedger:
                 now,
             )
             return self._get_order_locked(connection, snapshot.proposal_id)
+
+    def get_latest_reconciliation(self, proposal_id: str) -> Optional[ReconciliationSnapshot]:
+        """Return the latest durable local reconciliation evidence, if any."""
+
+        with self._mutex:
+            row = self._require_connection().execute(
+                "SELECT * FROM reconciliation_evidence WHERE proposal_id = ? ORDER BY evidence_id DESC LIMIT 1",
+                (proposal_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return ReconciliationSnapshot(
+            proposal_id=str(row["proposal_id"]), broker_order_id=str(row["broker_order_id"]),
+            source=str(row["source"]), cumulative_quantity=_decimal(row["cumulative_quantity"]),
+            cumulative_notional=_decimal(row["cumulative_notional"]), status=str(row["status"]),
+            evidence_fingerprint=str(row["evidence_fingerprint"]),
+            observed_at=datetime.fromisoformat(str(row["observed_at"])),
+        )
 
     def _apply_reservation_reconciliation_locked(
         self,
@@ -1827,6 +2019,250 @@ class ExecutionLedger:
                 )
             return len(rows)
 
+    def record_requote_intent(
+        self,
+        *,
+        requote_id: str,
+        proposal_id: str,
+        parent_intent_hash: str,
+        parent_reconciliation_fingerprint: str,
+        idempotency_key: str,
+        snapshot_hash: str,
+        candidate: Mapping[str, Any],
+    ) -> LedgerRequote:
+        """Record or replay one immutable, local-only candidate.
+
+        This method never changes the parent order, its reservation, approval,
+        dispatch state, or any transport.  The parent must still be a locally
+        acknowledged BUY with an active reservation and the exact acknowledgement
+        identity supplied as the reconciliation fingerprint.
+        """
+
+        for label, value in {
+            "requote id": requote_id,
+            "proposal id": proposal_id,
+            "parent intent hash": parent_intent_hash,
+            "parent reconciliation fingerprint": parent_reconciliation_fingerprint,
+            "idempotency key": idempotency_key,
+            "snapshot hash": snapshot_hash,
+        }.items():
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{label} is required")
+        payload = canonical_json(candidate)
+        now = _now()
+        with self._transaction() as connection:
+            if self._workspace_engaged_locked(connection):
+                raise RequoteConflict("workspace execution control is engaged")
+            existing = connection.execute(
+                "SELECT * FROM requote_intents WHERE requote_id = ? OR idempotency_key = ?",
+                (requote_id, idempotency_key),
+            ).fetchone()
+            if existing is not None:
+                existing_requote = self._requote_from_row(existing)
+                if (
+                    existing_requote.requote_id != requote_id
+                    or existing_requote.idempotency_key != idempotency_key
+                    or existing_requote.proposal_id != proposal_id
+                    or existing_requote.parent_intent_hash != parent_intent_hash
+                    or existing_requote.parent_reconciliation_fingerprint
+                    != parent_reconciliation_fingerprint
+                    or existing_requote.snapshot_hash != snapshot_hash
+                    or canonical_json(existing_requote.candidate) != payload
+                ):
+                    raise RequoteConflict("re-quote idempotency identity was reused")
+                return existing_requote
+
+            order = self._select_order(connection, proposal_id)
+            if order is None:
+                raise OrderNotFound(f"order {proposal_id!r} was not found")
+            if str(order["intent_hash"]) != parent_intent_hash:
+                raise RequoteConflict("parent immutable intent hash does not match")
+            if str(order["state"]) != "ACKNOWLEDGED":
+                raise RequoteConflict("parent order is not eligible for local re-quote")
+            if not order["acknowledgment_json"]:
+                raise RequoteConflict("parent acknowledgement is required")
+            acknowledgment = _ack_from_json(str(order["acknowledgment_json"]))
+            expected_fingerprint = f"ack:{acknowledgment.broker_order_id}"
+            if parent_reconciliation_fingerprint != expected_fingerprint:
+                raise RequoteConflict("parent acknowledgement identity does not match")
+            reservation_row = connection.execute(
+                "SELECT state, intent_hash FROM buying_power_reservations WHERE proposal_id = ?",
+                (proposal_id,),
+            ).fetchone()
+            if (
+                reservation_row is None
+                or str(reservation_row["state"]) != "ACTIVE"
+                or str(reservation_row["intent_hash"]) != parent_intent_hash
+            ):
+                raise RequoteConflict("parent active reservation is required")
+            connection.execute(
+                """
+                INSERT INTO requote_intents
+                    (requote_id, proposal_id, parent_intent_hash,
+                     parent_reconciliation_fingerprint, idempotency_key,
+                     snapshot_hash, candidate_json, state, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'EVALUATED', ?, ?)
+                """,
+                (
+                    requote_id,
+                    proposal_id,
+                    parent_intent_hash,
+                    parent_reconciliation_fingerprint,
+                    idempotency_key,
+                    snapshot_hash,
+                    payload,
+                    now,
+                    now,
+                ),
+            )
+            self._append_requote_event(
+                connection,
+                requote_id,
+                "REQUOTE_EVALUATED",
+                None,
+                "EVALUATED",
+                {"proposal_id": proposal_id, "snapshot_hash": snapshot_hash},
+                now,
+            )
+            row = connection.execute(
+                "SELECT * FROM requote_intents WHERE requote_id = ?", (requote_id,)
+            ).fetchone()
+            if row is None:
+                raise LedgerError("re-quote intent did not persist")
+            return self._requote_from_row(row)
+
+    def block_requote(self, requote_id: str, reason_code: str) -> LedgerRequote:
+        """Stop a candidate locally without altering the parent order."""
+
+        if not _REASON_CODE_PATTERN.fullmatch(reason_code):
+            raise ValueError("reason_code must be a short, non-sensitive code")
+        now = _now()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM requote_intents WHERE requote_id = ?", (requote_id,)
+            ).fetchone()
+            if row is None:
+                raise OrderNotFound(f"re-quote {requote_id!r} was not found")
+            current = self._requote_from_row(row)
+            target = f"BLOCKED_{reason_code}"
+            if current.state == target:
+                return current
+            if current.state != "EVALUATED":
+                raise InvalidTransition(
+                    f"cannot block re-quote {requote_id!r} from {current.state}"
+                )
+            connection.execute(
+                "UPDATE requote_intents SET state = ?, reason_code = ?, updated_at = ? WHERE requote_id = ?",
+                (target, reason_code, now, requote_id),
+            )
+            self._append_requote_event(
+                connection,
+                requote_id,
+                "REQUOTE_BLOCKED",
+                current.state,
+                target,
+                {"reason_code": reason_code},
+                now,
+            )
+            updated = connection.execute(
+                "SELECT * FROM requote_intents WHERE requote_id = ?", (requote_id,)
+            ).fetchone()
+            if updated is None:
+                raise LedgerError("re-quote intent disappeared")
+            return self._requote_from_row(updated)
+
+    def mark_requote_replacement_prepared(
+        self, requote_id: str, replacement_proposal_id: str
+    ) -> LedgerRequote:
+        """Bind one fresh pending intent to a reconciled local candidate."""
+
+        if not replacement_proposal_id:
+            raise ValueError("replacement proposal id is required")
+        now = _now()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM requote_intents WHERE requote_id = ?", (requote_id,)
+            ).fetchone()
+            if row is None:
+                raise OrderNotFound(f"re-quote {requote_id!r} was not found")
+            current = self._requote_from_row(row)
+            if current.state == "REPLACEMENT_PREPARED":
+                if current.replacement_proposal_id != replacement_proposal_id:
+                    raise RequoteConflict("re-quote already prepared a different replacement")
+                return current
+            if current.state != "BLOCKED_NO_MUTATION_CAPABILITY":
+                raise InvalidTransition("re-quote is not eligible for replacement preparation")
+            replacement = self._select_order(connection, replacement_proposal_id)
+            if replacement is None or str(replacement["state"]) != "PENDING":
+                raise RequoteConflict("replacement must be a fresh pending intent")
+            replacement_intent = json.loads(str(replacement["canonical_json"]))
+            if (
+                replacement_intent.get("replaces_proposal_id") != current.proposal_id
+                or replacement_intent.get("requote_id") != requote_id
+            ):
+                raise RequoteConflict("replacement lineage does not match re-quote")
+            connection.execute(
+                "UPDATE requote_intents SET state = 'REPLACEMENT_PREPARED', replacement_proposal_id = ?, updated_at = ? WHERE requote_id = ?",
+                (replacement_proposal_id, now, requote_id),
+            )
+            self._append_requote_event(
+                connection, requote_id, "REPLACEMENT_PREPARED", current.state,
+                "REPLACEMENT_PREPARED", {"replacement_proposal_id": replacement_proposal_id}, now,
+            )
+            updated = connection.execute(
+                "SELECT * FROM requote_intents WHERE requote_id = ?", (requote_id,)
+            ).fetchone()
+            if updated is None:
+                raise LedgerError("re-quote intent disappeared")
+            return self._requote_from_row(updated)
+
+    def get_requote(self, requote_id: str) -> Optional[LedgerRequote]:
+        with self._mutex:
+            row = self._require_connection().execute(
+                "SELECT * FROM requote_intents WHERE requote_id = ?", (requote_id,)
+            ).fetchone()
+        return self._requote_from_row(row) if row is not None else None
+
+    def list_requotes(self, proposal_id: Optional[str] = None) -> list[LedgerRequote]:
+        sql = "SELECT * FROM requote_intents"
+        parameters: tuple[object, ...] = ()
+        if proposal_id is not None:
+            sql += " WHERE proposal_id = ?"
+            parameters = (proposal_id,)
+        sql += " ORDER BY created_at, requote_id"
+        with self._mutex:
+            rows = self._require_connection().execute(sql, parameters).fetchall()
+        return [self._requote_from_row(row) for row in rows]
+
+    def list_requote_events(self, requote_id: str) -> list[Mapping[str, Any]]:
+        with self._mutex:
+            rows = self._require_connection().execute(
+                "SELECT * FROM requote_events WHERE requote_id = ? ORDER BY event_id",
+                (requote_id,),
+            ).fetchall()
+        return [
+            {
+                "event_id": int(row["event_id"]),
+                "event_type": str(row["event_type"]),
+                "from_state": row["from_state"],
+                "to_state": str(row["to_state"]),
+                "payload": json.loads(str(row["payload_json"])),
+                "created_at": str(row["created_at"]),
+            }
+            for row in rows
+        ]
+
+    def recover_pending_requotes(self) -> int:
+        """Fail closed after restart; fresh evidence is always required."""
+
+        with self._mutex:
+            rows = self._require_connection().execute(
+                "SELECT requote_id FROM requote_intents WHERE state = 'EVALUATED'"
+            ).fetchall()
+        for row in rows:
+            self.block_requote(str(row["requote_id"]), "RESTART_REQUIRES_FRESH_EVIDENCE")
+        return len(rows)
+
     def get_order(self, proposal_id: str) -> Optional[LedgerOrder]:
         with self._mutex:
             row = self._select_order(self._require_connection(), proposal_id)
@@ -2042,6 +2478,25 @@ class ExecutionLedger:
         )
 
     @staticmethod
+    def _requote_from_row(row: sqlite3.Row) -> LedgerRequote:
+        return LedgerRequote(
+            requote_id=str(row["requote_id"]),
+            proposal_id=str(row["proposal_id"]),
+            parent_intent_hash=str(row["parent_intent_hash"]),
+            parent_reconciliation_fingerprint=str(
+                row["parent_reconciliation_fingerprint"]
+            ),
+            idempotency_key=str(row["idempotency_key"]),
+            snapshot_hash=str(row["snapshot_hash"]),
+            candidate=json.loads(str(row["candidate_json"])),
+            state=str(row["state"]),
+            reason_code=str(row["reason_code"]),
+            replacement_proposal_id=str(row["replacement_proposal_id"]),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+        )
+
+    @staticmethod
     def _approval_key_from_row(row: sqlite3.Row) -> LedgerApprovalKey:
         return LedgerApprovalKey(
             workspace=str(row["workspace"]),
@@ -2068,6 +2523,32 @@ class ExecutionLedger:
             """,
             (
                 proposal_id,
+                event_type,
+                from_state,
+                to_state,
+                canonical_json(payload),
+                created_at,
+            ),
+        )
+
+    @staticmethod
+    def _append_requote_event(
+        connection: sqlite3.Connection,
+        requote_id: str,
+        event_type: str,
+        from_state: Optional[str],
+        to_state: str,
+        payload: Mapping[str, Any],
+        created_at: str,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO requote_events
+                (requote_id, event_type, from_state, to_state, payload_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                requote_id,
                 event_type,
                 from_state,
                 to_state,
@@ -2155,11 +2636,13 @@ __all__ = [
     "LedgerApprovalChallenge",
     "LedgerApprovalKey",
     "LedgerOrder",
+    "LedgerRequote",
     "LedgerWriterUnavailable",
     "OrderNotFound",
     "PaperBudget",
     "PaperReservation",
     "ReconciliationSnapshot",
+    "RequoteConflict",
     "WorkspaceControl",
     "canonical_json",
     "default_ledger_path",

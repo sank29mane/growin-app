@@ -12,11 +12,13 @@ struct ContentView: View {
     @State private var dashboardViewModel = DashboardViewModel()
     @State private var goalPlannerViewModel = GoalPlannerViewModel()
     @State private var chatViewModel = ChatViewModel()
+    @State private var paperOperationsViewModel = PaperOperationsViewModel(client: PaperOperationsClient())
     
     enum SidebarItem: String, CaseIterable, Identifiable {
         case alphaCommand = "Alpha Command"
         case reasoning = "Agent Reasoning"
         case calibration = "Strategy Lab"
+        case paperOperations = "Paper Operations"
         case portfolio = "Portfolio"
         case charts = "Charts"
         case goalPlanner = "Goal Planner"
@@ -29,6 +31,7 @@ struct ContentView: View {
             case .alphaCommand: return "terminal.fill"
             case .reasoning: return "brain.head.profile"
             case .calibration: return "slider.horizontal.3"
+            case .paperOperations: return "internaldrive"
             case .portfolio: return "chart.pie.fill"
             case .charts: return "chart.xyaxis.line"
             case .goalPlanner: return "target"
@@ -41,6 +44,7 @@ struct ContentView: View {
             case .alphaCommand: return .brutalChartreuse
             case .reasoning: return .brutalOffWhite
             case .calibration: return .brutalChartreuse
+            case .paperOperations: return .brutalChartreuse
             case .portfolio: return .Persona.analyst
             case .charts: return .Persona.trader
             case .goalPlanner: return .Persona.risk
@@ -61,6 +65,7 @@ struct ContentView: View {
                         SidebarRow(item: .alphaCommand, selection: selection)
                         SidebarRow(item: .reasoning, selection: selection)
                         SidebarRow(item: .calibration, selection: selection)
+                        SidebarRow(item: .paperOperations, selection: selection)
                     }
                     
                     Section("Intelligence & Accounts") {
@@ -147,6 +152,8 @@ struct ContentView: View {
             )
         case .calibration:
             StrategyLabView()
+        case .paperOperations:
+            PaperOperationsView(viewModel: paperOperationsViewModel)
         case .portfolio:
             PortfolioView(viewModel: portfolioViewModel)
         case .charts:

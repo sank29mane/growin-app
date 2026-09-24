@@ -405,6 +405,15 @@ class LMStudioClient:
     async def _execute_mcp_tool(self, tool_name: str, arguments: Dict) -> Any:
         """Integration hook for MCP tool execution"""
         try:
+            from shared_types import SENSITIVE_TOOLS
+
+            if tool_name in SENSITIVE_TOOLS:
+                logger.warning("Blocked sensitive LM Studio tool call: %s", tool_name)
+                return {
+                    "error": "Broker execution is unavailable to model tool calls; "
+                    "return a proposal for human approval"
+                }
+
             # Try to get the MCP client from global AppState if available
             # This avoids circular imports by doing it inside the method
             # We assume a global AppState or similar exists.

@@ -5,6 +5,7 @@ Status Routes - System health and agent monitoring
 from fastapi import APIRouter, HTTPException
 from status_manager import status_manager
 from agents.messenger import get_messenger
+from app_context import state
 import time
 
 router = APIRouter()
@@ -19,6 +20,13 @@ async def get_system_status():
         "environment": {
             "trading212": "demo" if os.getenv("TRADING212_USE_DEMO", "true").lower() == "true" else "live",
             "alpaca": "paper" if os.getenv("ALPACA_USE_PAPER", "true").lower() == "true" else "live",
+        },
+        # Execution authority is the only permission signal the client may use.
+        # Legacy broker configuration flags are diagnostic-only and never enable
+        # live execution.
+        "execution": {
+            "mode": "paper" if state.execution_authority else "disabled",
+            "authority": state.execution_authority,
         },
         "timestamp": time.time()
     }

@@ -53,7 +53,7 @@ def test_real_file_pragmas_and_private_permissions(tmp_path):
             "synchronous": 2,
             "foreign_keys": 1,
             "busy_timeout": 2_500,
-            "user_version": 3,
+            "user_version": 5,
         }
         assert stat.S_IMODE(db_path.parent.stat().st_mode) == 0o700
         assert stat.S_IMODE(db_path.stat().st_mode) == 0o600

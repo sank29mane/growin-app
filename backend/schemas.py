@@ -116,3 +116,18 @@ class TradeApprovalRequest(BaseModel):
     decision: str  # APPROVED, REJECTED
     notes: Optional[str] = None
     signature: Optional[str] = None # For future HMAC/Security validation
+
+
+class ApprovalKeyEnrollmentRequest(BaseModel):
+    public_key_x963_b64: str = Field(..., min_length=88, max_length=88)
+    enrollment_token: str = Field(..., min_length=16, max_length=4096)
+
+
+class ApprovalChallengeRequest(BaseModel):
+    proposal_id: str = Field(..., min_length=1, max_length=128)
+
+
+class SignedApprovalRequest(BaseModel):
+    proposal_id: str = Field(..., min_length=1, max_length=128)
+    challenge_id: str = Field(..., min_length=36, max_length=36)
+    signature_der_b64: str = Field(..., min_length=8, max_length=256)

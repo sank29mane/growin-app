@@ -9,9 +9,8 @@ struct ChatView: View {
     @Namespace private var animation
     private let bottomAnchorID = "bottom"
     
-    private var isLiveMode: Bool {
-        let status = BackendStatusViewModel.shared.fullStatus?.environment
-        return status?.trading212 == "live" || status?.alpaca == "live"
+    private var isPaperMode: Bool {
+        BackendStatusViewModel.shared.fullStatus?.execution?.mode == "paper"
     }
     
     var body: some View {
@@ -28,8 +27,8 @@ struct ChatView: View {
             .ignoresSafeArea()
             
             VStack(spacing: 0) {
-                if isLiveMode {
-                    LiveTradingBanner()
+                if isPaperMode {
+                    PaperTradingBanner()
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
                 
@@ -80,6 +79,11 @@ struct ChatView: View {
         }
         .sheet(isPresented: $showConversationList) {
             ConversationListView(selectedConversationId: $viewModel.selectedConversationId)
+        }
+        .sheet(item: $viewModel.pendingTradeApproval) { review in
+            TradeApprovalSheet(review: review) {
+                try await viewModel.completeTradeApproval(review)
+            }
         }
     }
     
@@ -246,16 +250,16 @@ struct ChatView: View {
                     .accessibilityHint("Selects an image to analyze with the VLM model")
                     .accessibilityAddTraits(.isButton)
 
-                    TextField(isLiveMode ? "LIVE TRADING: Ask about your portfolio..." : "Ask about your portfolio...", text: $viewModel.inputText, axis: .vertical)
+                    TextField(isPaperMode ? "PAPER ONLY: Ask about your portfolio..." : "Ask about your portfolio...", text: $viewModel.inputText, axis: .vertical)
                         .textFieldStyle(.plain)
                         .padding(12)
-                        .background(isLiveMode ? Color.red.opacity(0.1) : Color.white.opacity(0.05))
+                        .background(isPaperMode ? Color.orange.opacity(0.1) : Color.white.opacity(0.05))
                         .cornerRadius(12)
                         .accessibilityLabel("Chat Message Input")
                         .accessibilityHint("Enter your question or command for the AI assistant")
                         .overlay(
                             RoundedRectangle(cornerRadius: 12)
-                                .stroke(isLiveMode ? Color.red.opacity(0.5) : Color.white.opacity(0.1), lineWidth: 1)
+                                .stroke(isPaperMode ? Color.orange.opacity(0.5) : Color.white.opacity(0.1), lineWidth: 1)
                         )
                         .lineLimit(1...5)
                         .onSubmit {
@@ -273,7 +277,7 @@ struct ChatView: View {
                             } else {
                                 Circle()
                                     .fill(LinearGradient(
-                                        colors: isLiveMode ? [.red, .red.opacity(0.8)] : [.blue, .blue.opacity(0.8)],
+                                        colors: isPaperMode ? [.orange, .orange.opacity(0.8)] : [.blue, .blue.opacity(0.8)],
                                         startPoint: .topLeading,
                                         endPoint: .bottomTrailing
                                     ))
@@ -504,7 +508,7 @@ struct ToolExecutionBlock: View {
     }
 }
 
-struct LiveTradingBanner: View {
+struct PaperTradingBanner: View {
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: "exclamationmark.shield.fill")
@@ -512,16 +516,16 @@ struct LiveTradingBanner: View {
                 .foregroundColor(.white)
             
             VStack(alignment: .leading, spacing: 2) {
-                Text("LIVE TRADING MODE")
+                Text("PAPER EXECUTION MODE")
                     .font(.system(size: 12, weight: .black))
-                Text("Real capital is at risk. All trades require manual confirmation.")
+                Text("Local paper acknowledgements only. Live execution is disabled.")
                     .font(.system(size: 10))
                     .opacity(0.9)
             }
             
             Spacer()
             
-            Text("ACTIVE")
+            Text("PAPER ONLY")
                 .font(.system(size: 10, weight: .bold))
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
@@ -533,7 +537,7 @@ struct LiveTradingBanner: View {
         .padding(.vertical, 10)
         .background(
             LinearGradient(
-                colors: [.red, Color(red: 0.6, green: 0, blue: 0)],
+                colors: [.orange, Color(red: 0.65, green: 0.32, blue: 0)],
                 startPoint: .leading,
                 endPoint: .trailing
             )

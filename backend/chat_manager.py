@@ -17,6 +17,7 @@ class ChatManager:
         self.db_path = db_path
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA secure_delete = ON")
         self._init_schema()
 
     def _init_schema(self):
@@ -139,6 +140,32 @@ class ChatManager:
             """,
                 (json.dumps({}),)
             )
+
+        # One-time safety migration: broker credentials belong in the native
+        # Keychain and must never remain serialized in the chat database.
+        cursor.execute("SELECT env FROM mcp_servers WHERE name = 'Trading 212'")
+        row = cursor.fetchone()
+        if row and row[0]:
+            try:
+                persisted_env = json.loads(row[0])
+            except (json.JSONDecodeError, TypeError):
+                persisted_env = {}
+            sensitive_names = {
+                "TRADING212_API_KEY",
+                "TRADING212_API_SECRET",
+                "TRADING212_API_KEY_ISA",
+                "TRADING212_API_SECRET_ISA",
+            }
+            scrubbed_env = {
+                key: value
+                for key, value in persisted_env.items()
+                if key not in sensitive_names
+            }
+            if scrubbed_env != persisted_env:
+                cursor.execute(
+                    "UPDATE mcp_servers SET env = ? WHERE name = 'Trading 212'",
+                    (json.dumps(scrubbed_env),),
+                )
 
         self.conn.commit()
 

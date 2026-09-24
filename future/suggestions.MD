@@ -35,3 +35,34 @@ This document tracks visionary or architectural suggestions identified during co
 | 027 | Unify NeuralJMCE return_velocity Signature | Refactor `NeuralJMCE.__call__` and `CoreMLJMCE.__call__` to handle `return_velocity` homogeneously or explicitly enforce duck-typing guarantees across GPU/ANE execution paths. | The current implementation passes `return_velocity=True` via duck-typing to `self.model(x, return_velocity=True)` in `portfolio_analyzer.py`, but various instantiations of the model (especially custom stubs or missing hardware fallbacks) might not uniformly support this kwarg, leading to silent `TypeError`s. | Completed |
 | 028 | Consolidate and specialize error handling in agent routing | Replace generic `except Exception:` blocks in `backend/routes/agent_routes.py` with specialized exception handlers. | Using generic exception blocks throughout `agent_routes.py` masks specific operational issues (like `DatabaseError` vs `APIError`). Implementing structured handling improves system observability, alerting precision, and helps isolate failure domains (e.g., distinguishing between a network timeout and an ML generation failure). | Completed |
 | 029 | Implement API Schema Validation for Allocations | The current API lacks explicit schema validation to disambiguate user intent for leveraged and short positions in `analyze_rebalancing_opportunity`. Introduce Pydantic schema validation to safely handle explicit position parameters without heuristics. | Proposed |
+
+## Deferred after v7.0 scope review
+
+These items are intentionally excluded from v7.0 India Research & Paper
+Operations. Promotion requires a later milestone decision and fresh evidence.
+
+| ID | Future suggestion | Earliest prerequisite | Why it is not in v7.0 |
+|---|---|---|---|
+| 030 | Forward paper-validation program over representative market sessions | Phase 63 paper admission accepted | v7 creates the admission decision but does not claim forward operational evidence |
+| 031 | Paper-fill and cost-model calibration from observed outcomes | Sufficient reconciled forward-paper samples | Phase 59 establishes versioned assumptions before later empirical calibration |
+| 032 | Model, feature, data, and cost drift monitoring | Stable v7 research and paper artifacts | Monitoring thresholds require accepted baselines first |
+| 033 | Approved read-only India market-data provider | Data entitlement, freshness, outage, and reconciliation plan | v7 uses licensed historical or local inputs and grants no live-data authority |
+| 034 | Breeze broker-neutral gateway and capability contract | Accepted research plus separate broker-security review | Broker connectivity is a distinct authority boundary |
+| 035 | India PAPER to SHADOW rollout | Read-only provider and broker gateway independently verified | Shadow execution needs external operational evidence absent from v7 |
+| 036 | India LIVE_CANARY rollout with per-order human approval | Representative paper and shadow sessions with zero unexplained discrepancies | Live authority cannot be inferred from historical or paper research |
+| 037 | F&O and options research, Greeks, expiry, margin, and assignment modeling | NSE cash and ETF research foundation accepted | Derivatives add different data, risk, cost, and settlement contracts |
+| 038 | MCX and commodity strategy research | Separate market profile, data licence, and execution model | Multi-asset expansion is outside the India cash-equity slice |
+| 039 | UK Trading 212 research and rollout parity | Independent UK data, models, budgets, and evidence | India and UK workspaces must not share authority or inferred readiness |
+| 040 | Portfolio-level capital allocation across intraday, swing, long-term, and cash | Multiple independently validated strategy families | Phase 61 compares candidates but does not authorize full wealth allocation |
+| 041 | Goal-aware profit reinvestment and high-water-mark distribution automation | Reconciled realised outcomes and approved accounting policy | Wealth-distribution automation needs durable production-grade records |
+| 042 | Off-market QLoRA learning from realised outcomes | Trustworthy order, fill, PnL, and drift labels with rollback | Training before reliable labels would learn simulation artifacts |
+| 043 | Multi-user Supabase migration and role-based authority | Single-user safety model proven and separately threat-modeled | Authentication and shared authority are not needed for local v7 research |
+| 044 | Real-time order-book heatmaps and microstructure analytics | Approved live provider with depth entitlement | v7 has no real-time feed and does not require depth visualization |
+| 045 | VisionOS or secondary-device operator surfaces | macOS workflow proven through UAT | Additional clients would multiply safety and continuity paths too early |
+| 046 | Disaster recovery, encrypted backup, and cross-device restore | Stable schemas and documented recovery objectives | Important operational hardening, but not required to validate v7 research semantics |
+| 047 | Broker and regulator evidence-export pack | Approved gateway and current compliance mapping | The later broker milestone must re-check then-current SEBI and exchange requirements |
+| 048 | M4 Pro performance profiling and selective MLX, ANE, or vectorization work | Representative v7 workloads and measured bottlenecks | Hardware changes should follow profiles rather than assumptions |
+| 049 | Distributed queue, Redis cache, or multi-process research workers | Demonstrated local throughput or reliability bottleneck | Local sequential correctness has priority over premature distribution |
+| 050 | Stronger SafePythonExecutor process or WASM isolation | Separate execution-sandbox threat review | It is valuable hardening but not part of the v7 evidence pipeline unless a phase proves a direct dependency |
+| 051 | Unified time-series portfolio attribution and tax reporting | Reconciled positions, cash flows, and realised outcomes | v7 reports research metrics, not complete personal tax or accounting records |
+| 052 | Automated strategy discovery from social, news, or alternative data | Point-in-time alternative-data licences and leakage controls | v7 validates a bounded candidate registry before expanding idea generation |
