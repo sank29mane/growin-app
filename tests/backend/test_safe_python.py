@@ -57,7 +57,7 @@ classes = subclasses_method()
 
         # This should now FAIL because getattr is removed
         self.assertFalse(res['success'], "RCE attempt should fail")
-        self.assertIn("name 'getattr' is not defined", res['error'])
+        self.assertIn("Blocked function call: getattr", res['error'])
 
         return res
 
