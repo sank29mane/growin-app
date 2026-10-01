@@ -11,6 +11,11 @@ backend/trading212_mcp_server.py
 backend/t212_handlers.py
 backend/shared_types.py
 backend/security_middleware.py
+backend/agents/risk_agent.py
+backend/agents/decision_agent.py
+backend/utils/risk_engine.py
+backend/lm_studio_client.py
+backend/routes/mcp_routes.py
 backend/routes/ai_routes.py
 backend/routes/market_routes.py
 backend/routes/market_data_routes.py

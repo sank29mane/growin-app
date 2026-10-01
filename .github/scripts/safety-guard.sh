@@ -32,15 +32,22 @@ matches() {
   return 1
 }
 
+is_test() {
+  case "$1" in
+    tests/*|GrowinTests/*|GrowinUITests/*) return 0 ;;
+  esac
+  return 1
+}
+
 hits=()
 while IFS=$'\t' read -r status path previous; do
   if matches "$path" || matches "$previous"; then
     hits+=("$status $path${previous:+ (from $previous)}")
   fi
-  if [[ "$status" == "removed" && "$path" == tests/* ]]; then
+  if [[ "$status" == "removed" ]] && is_test "$path"; then
     hits+=("DELETED TEST $path")
   fi
-  if [[ "$status" == "renamed" && "$previous" == tests/* && "$path" != tests/* ]]; then
+  if [[ "$status" == "renamed" ]] && is_test "$previous" && ! is_test "$path"; then
     hits+=("TEST MOVED OUT $previous -> $path")
   fi
 done < "$changes"
@@ -55,5 +62,5 @@ if [[ "${REVIEWED:-false}" == "true" ]]; then
   echo "Label 'safety-reviewed' present. Passing."
   exit 0
 fi
-echo "::error::This PR touches execution/broker/risk/security paths or removes tests. A human must review it and add the 'safety-reviewed' label."
+echo "::error::This PR touches execution/broker/risk/security paths or removes or moves tests. A human must review it and add the 'safety-reviewed' label."
 exit 1
