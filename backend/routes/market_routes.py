@@ -14,6 +14,7 @@ from app_context import state
 from cache_manager import cache
 from utils.ticker_utils import normalize_ticker
 from data_engine import get_alpaca_client
+from mcp_client import TRADING212_SERVER_NAME
 from schemas import GoalPlanContext, GoalExecutionRequest, SetActiveAccountRequest
 
 
@@ -66,57 +67,19 @@ async def create_goal_plan(context: GoalPlanContext):
 @router.post("/api/goal/execute")
 async def execute_goal_plan(plan: GoalExecutionRequest):
     """
-    Execute a goal plan by creating or updating a Trading 212 Pie.
+    Keep goal-plan execution fail-closed during execution-kernel containment.
     
     Args:
         plan: GoalExecutionRequest model containing implementation details and instrument weights.
     
-    Returns:
-        Status of the Pie execution.
+    Goal planning remains available, but broker mutation must later be expressed
+    as a typed intent and approved through ExecutionService.
     """
-    try:
-        from app_context import state
-        
-        # Validation
-        if not state.mcp_client.session:
-             raise HTTPException(status_code=503, detail="Trading 212 connection not active")
-             
-        impl = plan.implementation
-        if impl.type != "TRADING212_PIE":
-             raise HTTPException(status_code=400, detail="Invalid execution type. Only TRADING212_PIE supported.")
-        
-        # Extract weights from plan (suggested_instruments)
-        instruments = plan.suggested_instruments
-        if not instruments:
-             raise HTTPException(status_code=400, detail="No instruments found in plan")
-             
-        pie_payload = {
-            "name": impl.name,
-            "instruments": {i.ticker: i.weight for i in instruments}
-        }
-        
-        logger.info(f"Executing Pie Creation: {pie_payload['name']}")
-        
-        # Call MCP Tool
-        # We use 'update_pie' with 'create' action (or infer from action)
-        # Note: MCP update_pie tool signature needs: action, pie_id (optional), name (optional), weights (optional)
-        # Since we are creating from scratch usually, we map CREATE_OR_UPDATE to CREATE if ID missing
-        
-        result = await state.mcp_client.call_tool(
-            "update_pie", 
-            {
-                "action": "create", # Force create for new goals for now
-                "pie_name": pie_payload["name"],
-                "weights": pie_payload["instruments"]
-            }
-        )
-        
-        return {"status": "success", "result": str(result), "pie_name": pie_payload["name"]}
-
-    except Exception as e:
-        logger.error(f"Goal execution failed: {e}", exc_info=True)
-        # Sentinel: Sanitized error message
-        raise HTTPException(status_code=500, detail="Internal Server Error")
+    logger.warning("Blocked direct goal-plan execution during containment")
+    raise HTTPException(
+        status_code=503,
+        detail="Goal execution is disabled until it uses the execution service",
+    )
 
 @router.get("/portfolio/live")
 async def get_live_portfolio(account_type: Optional[str] = None):
@@ -137,6 +100,13 @@ async def get_live_portfolio(account_type: Optional[str] = None):
         HTTPException: If portfolio fetch fails or MCP not connected
     """
     from app_context import account_context
+
+    if TRADING212_SERVER_NAME not in state.mcp_client.sessions:
+        raise HTTPException(
+            status_code=503,
+            detail="Trading 212 reads are not enabled",
+        )
+
     account_type = account_context.get_account_or_default(account_type)
     
     cache_key = f"portfolio_live_{account_type}"
