@@ -80,3 +80,7 @@ graphify-out/
 
 # Model adapters
 /adapters/
+
+# ICICI reference material is local-only; only the README with links is tracked
+docs/icici-docs/*
+!docs/icici-docs/README.md
