@@ -18,6 +18,10 @@ class OrderMode(str, Enum):
     LIVE = "LIVE"
 
 
+class OrderType(str, Enum):
+    LIMIT = "LIMIT"
+
+
 class OrderState(str, Enum):
     PENDING = "PENDING"
     SUBMITTING = "SUBMITTING"
@@ -47,11 +51,25 @@ class OrderIntent(BaseModel):
     ticker: str = Field(..., min_length=1)
     side: OrderSide
     quantity: Decimal = Field(..., gt=0)
+    order_type: OrderType | None = None
+    limit_price: Decimal | None = Field(default=None, gt=0)
+    replaces_proposal_id: str = Field(default="", max_length=96)
+    requote_id: str = Field(default="", max_length=96)
 
     @model_validator(mode="after")
     def ensure_client_order_id(self) -> "OrderIntent":
         if not self.client_order_id:
             object.__setattr__(self, "client_order_id", f"growin-{self.proposal_id}")
+        return self
+
+    @model_validator(mode="after")
+    def validate_limit_lineage(self) -> "OrderIntent":
+        if self.order_type is OrderType.LIMIT and self.limit_price is None:
+            raise ValueError("limit orders require a limit price")
+        if self.limit_price is not None and self.order_type is not OrderType.LIMIT:
+            raise ValueError("limit price requires LIMIT order type")
+        if bool(self.replaces_proposal_id) != bool(self.requote_id):
+            raise ValueError("replacement lineage requires parent proposal and re-quote id")
         return self
 
 
