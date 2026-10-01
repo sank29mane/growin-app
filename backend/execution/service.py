@@ -66,7 +66,6 @@ class ExecutionService:
         approval_service: Optional[ApprovalService] = None,
         simulator: Any = None,
         risk_gate: Any = None,
-        require_runtime_preflight: bool = False,
     ):
         self._dispatcher = dispatcher
         self._ledger = ledger
@@ -74,7 +73,6 @@ class ExecutionService:
         self._approval_service = approval_service
         self._simulator = simulator
         self._risk_gate = risk_gate
-        self._require_runtime_preflight = require_runtime_preflight
         if require_approval:
             if ledger is not None:
                 ledger.require_approval = True
@@ -125,10 +123,9 @@ class ExecutionService:
         risk_gate: Any = None,
         tick_window: Optional[Dict[str, Any]] = None,
         portfolio_state: Optional[Dict[str, Any]] = None,
-        regime_id: Optional[int] = None,
-        current_spread_pct: object = None,
+        regime_id: int = 0,
+        current_spread_pct: object = 0,
         risk_db_connection: Any = None,
-        deny_reason: Optional[str] = None,
     ) -> ExecutionAdmission:
         """Run deterministic simulation/risk checks and persist immutable evidence."""
 
@@ -150,8 +147,6 @@ class ExecutionService:
         price_decimal = Decimal("0")
         spread_decimal = Decimal("0")
         try:
-            if deny_reason:
-                raise ValueError(deny_reason)
             if observed_at.tzinfo is None:
                 raise ValueError("admission evidence timestamp must be timezone-aware")
             if (now - observed_at).total_seconds() > max_age_seconds or observed_at > now:
@@ -159,16 +154,6 @@ class ExecutionService:
             if intent.side is not OrderSide.BUY:
                 raise ValueError("SELL admission requires a position reservation")
             selected_simulator = simulator or self._simulator
-            selected_gate = risk_gate or self._risk_gate
-            if self._require_runtime_preflight:
-                if selected_simulator is None or selected_gate is None:
-                    raise ValueError("runtime preflight controls are unavailable")
-                if tick_window is None or portfolio_state is None or risk_db_connection is None:
-                    raise ValueError("runtime preflight context is required")
-                if not isinstance(regime_id, int) or isinstance(regime_id, bool):
-                    raise ValueError("GMM regime id is required")
-                if current_spread_pct is None:
-                    raise ValueError("current spread is required")
             if selected_simulator is not None:
                 simulator_evidence = dict(
                     selected_simulator.simulate_execution(
@@ -178,12 +163,13 @@ class ExecutionService:
                         portfolio_state or {},
                     )
                 )
+            selected_gate = risk_gate or self._risk_gate
             if selected_gate is not None:
                 risk_output = selected_gate.evaluate(
                     float(simulator_evidence.get("simulated_fill_price", 0)),
                     float(intent.quantity),
-                    0 if regime_id is None else regime_id,
-                    0 if current_spread_pct is None else float(current_spread_pct),
+                    regime_id,
+                    float(current_spread_pct),
                     risk_db_connection,
                 )
                 risk_evidence = {**risk_evidence, "scaled_size": risk_output}
@@ -195,9 +181,7 @@ class ExecutionService:
             drawdown = _finite_decimal(
                 simulator_evidence.get("simulator_drawdown_pct", 0), "simulator drawdown"
             )
-            spread_decimal = _finite_decimal(
-                0 if current_spread_pct is None else current_spread_pct, "spread"
-            )
+            spread_decimal = _finite_decimal(current_spread_pct, "spread")
             risk_value = risk_evidence.get("admitted_quantity", risk_evidence.get("scaled_size"))
             risk_quantity = _finite_decimal(risk_value, "risk quantity")
             price_decimal = _finite_decimal(
@@ -211,7 +195,7 @@ class ExecutionService:
                 raise ValueError("risk gate denied the intent")
             decision = AdmissionDecision.ADMITTED
             reason = "ADMITTED"
-        except Exception as exc:
+        except (ValueError, TypeError, InvalidOperation, OverflowError) as exc:
             reason = _reason_code(str(exc))
             simulator_fill = max(Decimal("0"), simulator_fill)
             drawdown = max(Decimal("0"), drawdown)
@@ -250,12 +234,7 @@ class ExecutionService:
             reason_code=reason,
             created_at=now,
         )
-        stored = self._ledger.record_admission(intent, admission)
-        if isinstance(proposal, dict):
-            order = self._ledger.get_order(intent.proposal_id)
-            if order is not None:
-                _sync_projection(proposal, order.state)
-        return stored
+        return self._ledger.record_admission(intent, admission)
 
     def reserve(self, proposal_id: str):
         if self._ledger is None:
@@ -289,10 +268,6 @@ class ExecutionService:
             "ticker": intent.get("ticker"),
             "action": intent.get("side"),
             "quantity": intent.get("quantity"),
-            "order_type": intent.get("order_type"),
-            "limit_price": intent.get("limit_price"),
-            "replaces_proposal_id": intent.get("replaces_proposal_id", ""),
-            "requote_id": intent.get("requote_id", ""),
             "status": order.state,
             "execution_intent": intent,
         }
@@ -329,14 +304,6 @@ class ExecutionService:
             raise ExecutionDisabledError("Signed approval service is unavailable")
         return self._approval_service.enroll_key(public_key_x963, enrollment_token)
 
-    def approval_key_id(self) -> Optional[str]:
-        """Return the enrolled public-key identifier without exposing key material."""
-
-        if self._ledger is None:
-            return None
-        enrolled = self._ledger.get_approval_key()
-        return enrolled.key_id if enrolled is not None else None
-
     def create_approval_challenge(
         self, proposal_id: str, *, ttl_seconds: int = 60
     ) -> ApprovalChallenge:
@@ -344,17 +311,6 @@ class ExecutionService:
             raise ExecutionDisabledError("Signed approval service is unavailable")
         return self._approval_service.create_challenge(
             proposal_id, ttl_seconds=ttl_seconds
-        )
-
-    def verify_approval_signature_for_uat(
-        self, proposal_id: str, challenge_id: str, signature_der: bytes
-    ) -> ApprovalChallenge:
-        """Verify local UAT signing evidence without claiming or dispatching."""
-
-        if self._approval_service is None:
-            raise ExecutionDisabledError("Signed approval service is unavailable")
-        return self._approval_service.verify_signature(
-            proposal_id, challenge_id, signature_der
         )
 
     async def approve_signed(
@@ -581,10 +537,6 @@ def _intent_from_proposal(proposal: Dict[str, Any]) -> OrderIntent:
         ticker=proposal.get("ticker"),
         side=str(proposal.get("action", proposal.get("side", ""))).upper(),
         quantity=proposal.get("quantity"),
-        order_type=proposal.get("order_type"),
-        limit_price=proposal.get("limit_price"),
-        replaces_proposal_id=proposal.get("replaces_proposal_id", ""),
-        requote_id=proposal.get("requote_id", ""),
     )
 
 
