@@ -55,6 +55,13 @@ def create_decimal(value: Any) -> Decimal:
         except Exception:
             return Decimal('0')
 
+    # Slow path: subclasses (e.g. numpy.float64) miss the exact-type fast paths
+    # above, so keep the NaN/Inf and currency-symbol handling for them.
+    if isinstance(value, float):
+        return create_decimal(float(value))
+    if isinstance(value, str):
+        return create_decimal(str(value))
+
     try:
         return Decimal(str(value))
     except Exception:

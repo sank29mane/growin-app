@@ -746,7 +746,7 @@ struct TradeProposalCard: View, Equatable {
                     Image(systemName: "bolt.fill")
                         .font(.system(size: 10))
                         .foregroundStyle(.white)
-                    Text("NPU TRADE PROPOSAL")
+                    Text("PAPER TRADE PROPOSAL")
                         .font(.system(size: 10, weight: .black))
                         .foregroundStyle(.white)
                 }
