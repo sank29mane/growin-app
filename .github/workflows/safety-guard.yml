@@ -1,60 +1,60 @@
 name: Safety Guard
 
+# pull_request_target runs this file as it exists on main, so a PR cannot
+# rewrite the guard, its script, or its pattern list to make itself pass.
+# SECURITY: never check out or execute PR code in this workflow. It reads the
+# PR file list from the API and runs only files from the base commit.
 on:
-  pull_request:
+  pull_request_target:
     branches: [ main ]
     types: [ opened, synchronize, reopened, labeled, unlabeled ]
 
 permissions:
   contents: read
-  pull-requests: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: safety-guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   guard:
     name: Safety Guard
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out guard files from the base commit only
+        uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            .github/safety-paths.txt
+            .github/scripts/safety-guard.sh
+          sparse-checkout-cone-mode: false
 
-      - name: Check safety paths and deleted tests
+      - name: Drop the review label when new commits arrive
+        id: relabel
+        if: github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'safety-reviewed')
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          REVIEWED: ${{ contains(github.event.pull_request.labels.*.name, 'safety-reviewed') }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
         run: |
-          patterns=()
-          while IFS= read -r line; do
-            [[ -z "${line// }" || "$line" == \#* ]] && continue
-            patterns+=("$line")
-          done < .github/safety-paths.txt
-          if [[ ${#patterns[@]} -eq 0 ]]; then
-            echo "::error::No safety patterns loaded from .github/safety-paths.txt. Failing closed."
-            exit 1
-          fi
-          git diff --name-status "$BASE_SHA" "$HEAD_SHA" > /tmp/changes.txt
+          gh api -X DELETE "repos/$REPO/issues/$PR/labels/safety-reviewed" >/dev/null
+          echo "::warning::New commits after review. Removed 'safety-reviewed'; re-review and re-label."
+          echo "dropped=true" >> "$GITHUB_OUTPUT"
 
-          hits=()
-          while IFS=$'\t' read -r status path rest; do
-            target="${rest:-$path}"
-            for p in "${patterns[@]}"; do
-              [[ "$path" == $p || "$target" == $p ]] && { hits+=("$status $target"); break; }
-            done
-            if [[ "$status" == D* && "$path" == tests/* ]]; then
-              hits+=("DELETED TEST $path")
-            fi
-          done < /tmp/changes.txt
+      - name: List changed files from the API
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh api --paginate "repos/$REPO/pulls/$PR/files" \
+            --jq '.[] | [.status, .filename, (.previous_filename // "")] | @tsv' > "$RUNNER_TEMP/changes.tsv"
 
-          if [[ ${#hits[@]} -eq 0 ]]; then
-            echo "No safety-critical paths touched."
-            exit 0
-          fi
-
-          printf 'Safety-critical changes:\n'; printf '  %s\n' "${hits[@]}"
-          if [[ "$REVIEWED" == "true" ]]; then
-            echo "Label 'safety-reviewed' present. Passing."
-            exit 0
-          fi
-          echo "::error::This PR touches execution/broker/risk/security paths or deletes tests. A human must review it and add the 'safety-reviewed' label."
-          exit 1
+      - name: Verdict
+        env:
+          REVIEWED: ${{ steps.relabel.outputs.dropped != 'true' && contains(github.event.pull_request.labels.*.name, 'safety-reviewed') }}
+        run: bash .github/scripts/safety-guard.sh "$RUNNER_TEMP/changes.tsv" .github/safety-paths.txt
