@@ -1,0 +1,8 @@
+name: Spoof (test only, do not merge)
+on: pull_request
+jobs:
+  guard:
+    name: Safety Guard
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "pretending to be Safety Guard"; exit 0
