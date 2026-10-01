@@ -59,6 +59,10 @@ class AllocationMap(RootModel):
             else:
                 try:
                     dec_val = create_decimal(val_str)
+                    if abs(dec_val) > Decimal("10"):
+                        raise ValueError(f"Ambiguous or grossly out-of-bounds allocation for {symbol}: {val}. Please use explicit percentages (e.g., '50%') or fractions (e.g., '0.5').")
+                except ValueError as e:
+                    raise e
                 except Exception:
                     raise ValueError(f"Invalid number format for {symbol}: {val}")
             parsed[symbol] = dec_val
@@ -395,6 +399,10 @@ class QuantEngine:
         highs = np.array([float(d.get('h') if d.get('h') is not None else d.get('high', 0)) for d in ohlcv_data], dtype=np.float64)
         lows = np.array([float(d.get('l') if d.get('l') is not None else d.get('low', 0)) for d in ohlcv_data], dtype=np.float64)
         closes = np.array([float(d.get('c') if d.get('c') is not None else d.get('close', 0)) for d in ohlcv_data], dtype=np.float64)
+
+        if len(closes) <= order * 2:
+            return {"support": Decimal(str(np.min(lows))), "resistance": Decimal(str(np.max(highs)))}
+
         current_price = closes[-1]
         if SCIPY_AVAILABLE and argrelextrema is not None:
             peak_idx = argrelextrema(highs, np.greater, order=order)[0]
@@ -435,17 +443,17 @@ class QuantEngine:
     def calculate_portfolio_metrics(self, positions: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not positions: return {"error": "No positions provided"}
 
-        # Pre-parse data into lists of `Decimal` objects to optimize loop performance
-        qtys = [create_decimal((p.get('qty') if p.get('qty') is not None else (p.get('quantity') if p.get('quantity') is not None else 0))) for p in positions]
-        prices = [create_decimal((p.get('current_price') if p.get('current_price') is not None else (p.get('currentPrice') if p.get('currentPrice') is not None else 0))) for p in positions]
-        costs = [create_decimal((p.get('avg_cost') if p.get('avg_cost') is not None else (p.get('averagePrice') if p.get('averagePrice') is not None else 0))) for p in positions]
+        total_value = Decimal('0')
+        total_cost = Decimal('0')
 
-        total_value, total_cost = Decimal('0'), Decimal('0')
+        # Aggregate directly in a single pass to avoid memory overhead of intermediate lists
+        for p in positions:
+            q = create_decimal((p.get('qty') if p.get('qty') is not None else (p.get('quantity') if p.get('quantity') is not None else 0)))
+            price = create_decimal((p.get('current_price') if p.get('current_price') is not None else (p.get('currentPrice') if p.get('currentPrice') is not None else 0)))
+            cost = create_decimal((p.get('avg_cost') if p.get('avg_cost') is not None else (p.get('averagePrice') if p.get('averagePrice') is not None else 0)))
 
-        # Aggregate using zip to avoid repeating dict access overhead and maintain exact Decimal precision
-        for q, p, c in zip(qtys, prices, costs):
-            total_value += q * p
-            total_cost += q * c
+            total_value += q * price
+            total_cost += q * cost
 
         total_pnl = total_value - total_cost
         return {"total_value": total_value, "total_cost": total_cost, "total_pnl": total_pnl, "portfolio_return": safe_div(total_pnl, total_cost), "position_count": len(positions)}
