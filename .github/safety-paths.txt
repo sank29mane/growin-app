@@ -1,0 +1,23 @@
+# Paths that can move money or weaken a safety gate.
+# A PR touching any of these needs the `safety-reviewed` label to pass `Safety Guard`.
+# One glob per line (bash extglob, matched against repo-relative paths).
+backend/execution/*
+backend/brokers/*
+backend/market_data/*
+backend/simulation/*
+backend/app_context.py
+backend/trading_loop.py
+backend/trading212_mcp_server.py
+backend/t212_handlers.py
+backend/shared_types.py
+backend/security_middleware.py
+backend/agents/risk_agent.py
+backend/agents/decision_agent.py
+backend/utils/risk_engine.py
+backend/lm_studio_client.py
+backend/routes/mcp_routes.py
+backend/routes/ai_routes.py
+backend/routes/market_routes.py
+backend/routes/market_data_routes.py
+Growin/Security/*
+.github/*

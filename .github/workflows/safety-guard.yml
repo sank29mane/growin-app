@@ -1,0 +1,82 @@
+name: Safety Guard
+
+# pull_request_target runs this file as it exists on main, so a PR cannot
+# rewrite the guard, its script, or its pattern list to make itself pass.
+# SECURITY: never check out or execute PR code in this workflow. It reads the
+# PR file list from the API and runs only files from the base commit.
+on:
+  pull_request_target:
+    branches: [ main ]
+    types: [ opened, synchronize, reopened, labeled, unlabeled ]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: safety-guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    name: Safety Guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out guard files from the base commit only
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            .github/safety-paths.txt
+            .github/scripts/safety-guard.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Drop the review label when new commits arrive
+        id: relabel
+        if: github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'safety-reviewed')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh api -X DELETE "repos/$REPO/issues/$PR/labels/safety-reviewed" >/dev/null
+          echo "::warning::New commits after review. Removed 'safety-reviewed'; re-review and re-label."
+          echo "dropped=true" >> "$GITHUB_OUTPUT"
+
+      - name: Verify a human applied the review label
+        id: label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          HAS_LABEL: ${{ steps.relabel.outputs.dropped != 'true' && contains(github.event.pull_request.labels.*.name, 'safety-reviewed') }}
+        run: |
+          if [[ "$HAS_LABEL" != "true" ]]; then
+            echo "reviewed=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          last=$(gh api --paginate "repos/$REPO/issues/$PR/events" \
+            --jq '.[] | select(.event=="labeled" and .label.name=="safety-reviewed") | "\(.actor.type) \(.actor.login)"' | tail -n 1)
+          type="${last%% *}"; login="${last#* }"
+          if [[ "$type" != "User" || "$login" == *"[bot]" || -z "$last" ]]; then
+            gh api -X DELETE "repos/$REPO/issues/$PR/labels/safety-reviewed" >/dev/null || true
+            echo "::error::'safety-reviewed' was applied by '${login:-unknown}' (${type:-unknown}), not a human account. Label removed."
+            echo "reviewed=false" >> "$GITHUB_OUTPUT"; exit 1
+          fi
+          echo "Label applied by $login ($type)."
+          echo "reviewed=true" >> "$GITHUB_OUTPUT"
+
+      - name: List changed files from the API
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh api --paginate "repos/$REPO/pulls/$PR/files" \
+            --jq '.[] | [.status, .filename, (.previous_filename // "")] | @tsv' > "$RUNNER_TEMP/changes.tsv"
+
+      - name: Verdict
+        env:
+          REVIEWED: ${{ steps.label.outputs.reviewed }}
+        run: bash .github/scripts/safety-guard.sh "$RUNNER_TEMP/changes.tsv" .github/safety-paths.txt
