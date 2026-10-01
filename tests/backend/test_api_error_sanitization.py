@@ -68,10 +68,11 @@ def test_update_t212_config_sanitization():
         with patch.object(state.chat_manager, 'conn', mock_conn):
             response = client.post("/mcp/trading212/config", json={"account_type": "invest"})
 
-            assert response.status_code == 500
+            assert response.status_code == 503
             detail = response.json().get("detail")
-            assert detail == "Internal Server Error"
+            assert detail == "Trading 212 MCP is not connected; credentials were not stored"
             assert "API_KEY_LEAK_IN_TRACEBACK" not in str(response.content)
+            mock_conn.cursor.assert_not_called()
 
 def test_add_mcp_server_sanitization():
     """Test that adding MCP server sanitizes errors."""
