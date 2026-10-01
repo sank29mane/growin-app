@@ -1,5 +1,9 @@
 import SwiftUI
 
+#if os(macOS)
+import AppKit
+#endif
+
 /// AIChatPanelView: The conversational hub for the Sovereign Desktop UI.
 /// Incorporates rounded "Mac-native" bubble aesthetics while retaining the core dark-theme color palette (Brutal Chartreuse, Cyan).
 struct AIChatPanelView: View {
@@ -358,6 +362,7 @@ private struct InlineActionTile: View {
     @State private var observer = PortfolioSummaryObserver.shared
     @State private var livePrice: Decimal? = nil
     @State private var dailyPnl: Decimal? = nil
+    @State private var isHovered = false
     
     private var matchingPosition: Position? {
         guard let ticker = ticker else { return nil }
@@ -386,7 +391,7 @@ private struct InlineActionTile: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .background(color.opacity(0.1))
+            .background(color.opacity(isHovered ? 0.2 : 0.1))
             .foregroundStyle(color)
             .clipShape(RoundedRectangle(cornerRadius: 8))
             .overlay(
@@ -398,6 +403,26 @@ private struct InlineActionTile: View {
         .accessibilityLabel("\(title) Action")
         .accessibilityHint("Executes the \(title) action")
         .accessibilityAddTraits(.isButton)
+        .onHover { hovering in
+            guard hovering != isHovered else { return }
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovered = hovering
+            }
+            #if os(macOS)
+            if hovering {
+                NSCursor.pointingHand.push()
+            } else {
+                NSCursor.pop()
+            }
+            #endif
+        }
+        .onDisappear {
+            #if os(macOS)
+            if isHovered {
+                NSCursor.pop()
+            }
+            #endif
+        }
         .onAppear {
             if let pos = matchingPosition {
                 livePrice = pos.currentPrice
