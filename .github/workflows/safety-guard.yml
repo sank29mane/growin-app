@@ -1,0 +1,60 @@
+name: Safety Guard
+
+on:
+  pull_request:
+    branches: [ main ]
+    types: [ opened, synchronize, reopened, labeled, unlabeled ]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  guard:
+    name: Safety Guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check safety paths and deleted tests
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REVIEWED: ${{ contains(github.event.pull_request.labels.*.name, 'safety-reviewed') }}
+        run: |
+          patterns=()
+          while IFS= read -r line; do
+            [[ -z "${line// }" || "$line" == \#* ]] && continue
+            patterns+=("$line")
+          done < .github/safety-paths.txt
+          if [[ ${#patterns[@]} -eq 0 ]]; then
+            echo "::error::No safety patterns loaded from .github/safety-paths.txt. Failing closed."
+            exit 1
+          fi
+          git diff --name-status "$BASE_SHA" "$HEAD_SHA" > /tmp/changes.txt
+
+          hits=()
+          while IFS=$'\t' read -r status path rest; do
+            target="${rest:-$path}"
+            for p in "${patterns[@]}"; do
+              [[ "$path" == $p || "$target" == $p ]] && { hits+=("$status $target"); break; }
+            done
+            if [[ "$status" == D* && "$path" == tests/* ]]; then
+              hits+=("DELETED TEST $path")
+            fi
+          done < /tmp/changes.txt
+
+          if [[ ${#hits[@]} -eq 0 ]]; then
+            echo "No safety-critical paths touched."
+            exit 0
+          fi
+
+          printf 'Safety-critical changes:\n'; printf '  %s\n' "${hits[@]}"
+          if [[ "$REVIEWED" == "true" ]]; then
+            echo "Label 'safety-reviewed' present. Passing."
+            exit 0
+          fi
+          echo "::error::This PR touches execution/broker/risk/security paths or deletes tests. A human must review it and add the 'safety-reviewed' label."
+          exit 1
