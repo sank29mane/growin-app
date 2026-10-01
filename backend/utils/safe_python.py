@@ -146,6 +146,18 @@ class SafePythonExecutor:
                     if node.attr.startswith("__") and node.attr.endswith("__"):
                         if node.attr not in ("__init__", "__str__", "__repr__", "__len__"):
                             return False, f"Blocked dunder access: {node.attr}"
+
+                if isinstance(node, ast.Constant):
+                    if isinstance(node.value, str):
+                        val = node.value
+                        if val.startswith("__") and val.endswith("__") and len(val) > 4:
+                            if val not in ("__init__", "__str__", "__repr__", "__len__", "__name__", "__main__"):
+                                return False, f"Blocked dunder string literal: {val}"
+
+                if isinstance(node, ast.Name):
+                    if node.id.startswith("__") and node.id.endswith("__"):
+                        if node.id not in ("__name__", "__main__"):
+                            return False, f"Blocked dunder name: {node.id}"
                 
                 # Check imports are in whitelist
                 if isinstance(node, ast.Import):
@@ -161,7 +173,7 @@ class SafePythonExecutor:
                 if isinstance(node, ast.Call):
                     func = node.func
                     if isinstance(func, ast.Name):
-                        if func.id in ("exec", "eval", "compile", "open", "input", "globals", "locals", "vars", "dir", "delattr", "setattr", "help", "exit", "quit", "__import__"):
+                        if func.id in ("exec", "eval", "compile", "open", "input", "globals", "locals", "vars", "dir", "delattr", "setattr", "help", "exit", "quit", "__import__", "getattr"):
                             return False, f"Blocked function call: {func.id}"
                         
         except SyntaxError as e:
