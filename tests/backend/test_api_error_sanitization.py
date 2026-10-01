@@ -68,10 +68,11 @@ def test_update_t212_config_sanitization():
         with patch.object(state.chat_manager, 'conn', mock_conn):
             response = client.post("/mcp/trading212/config", json={"account_type": "invest"})
 
-            assert response.status_code == 500
+            assert response.status_code == 503
             detail = response.json().get("detail")
-            assert detail == "Internal Server Error"
+            assert detail == "Trading 212 MCP is not connected; credentials were not stored"
             assert "API_KEY_LEAK_IN_TRACEBACK" not in str(response.content)
+            mock_conn.cursor.assert_not_called()
 
 def test_add_mcp_server_sanitization():
     """Test that adding MCP server sanitizes errors."""
@@ -104,7 +105,7 @@ def test_market_forecast_sanitization():
             assert "FORECAST_MODEL_PATH_LEAK" not in str(response.content)
 
 def test_mcp_tool_call_sanitization():
-    """Test that MCP tool call endpoint sanitizes exception details."""
+    """Test that MCP tool call endpoint returns a generic error and never leaks exception details."""
     with TestClient(app) as client:
         mock_session = MagicMock()
         mock_session.call_tool = AsyncMock(side_effect=Exception("Failed execution due to API_KEY=my_secret_key_123"))
@@ -118,5 +119,6 @@ def test_mcp_tool_call_sanitization():
 
             assert response.status_code == 500
             detail = response.json().get("detail")
-            assert "API_KEY=***MASKED***" in detail
+            assert detail == "Internal Server Error"
+            assert "API_KEY" not in detail
             assert "my_secret_key_123" not in detail

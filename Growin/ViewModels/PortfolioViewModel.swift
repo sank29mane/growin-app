@@ -53,10 +53,10 @@ class PortfolioViewModel {
         
         let config = TradingConfig(
             accountType: newType,
-            investKey: defaults.string(forKey: "t212InvestKey") ?? "",
-            investSecret: defaults.string(forKey: "t212InvestSecret") ?? "",
-            isaKey: defaults.string(forKey: "t212IsaKey") ?? "",
-            isaSecret: defaults.string(forKey: "t212IsaSecret") ?? ""
+            investKey: (try? KeychainStore.shared.string(for: "t212InvestKey")) ?? "",
+            investSecret: (try? KeychainStore.shared.string(for: "t212InvestSecret")) ?? "",
+            isaKey: (try? KeychainStore.shared.string(for: "t212IsaKey")) ?? "",
+            isaSecret: (try? KeychainStore.shared.string(for: "t212IsaSecret")) ?? ""
         )
         
         do {
