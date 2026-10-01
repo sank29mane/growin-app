@@ -157,6 +157,10 @@ async def test_signed_payload_is_exact_and_success_replays_only_same_evidence(tm
             "issued_at",
             "expires_at",
             "key_id",
+            "replaces_proposal_id",
+            "limit_price",
+            "requote_id",
+            "order_type",
         }
         assert payload["version"] == 1
         assert payload["purpose"] == "growin.execution.dispatch"
@@ -387,7 +391,7 @@ def test_v1_database_migrates_without_losing_existing_order(tmp_path):
     connection.close()
 
     with ExecutionLedger(db_path) as ledger:
-        assert ledger.pragmas()["user_version"] == 3
+        assert ledger.pragmas()["user_version"] == 5
         assert ledger.get_order("legacy").intent_hash == digest
         columns = {
             row[1]
