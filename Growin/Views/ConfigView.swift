@@ -2,9 +2,9 @@ import SwiftUI
 
 struct ConfigView: View {
     @Environment(\.dismiss) var dismiss
-    @KeychainStorage("openaiApiKey") private var openaiApiKey = ""
-    @KeychainStorage("geminiApiKey") private var geminiApiKey = ""
-    @KeychainStorage("trading212ApiKey") private var trading212ApiKey = ""
+    @AppStorage("openaiApiKey") private var openaiApiKey = ""
+    @AppStorage("geminiApiKey") private var geminiApiKey = ""
+    @AppStorage("trading212ApiKey") private var trading212ApiKey = "" // Added as requested for "Configure MCP"
     
     var provider: String? // Optional provider that triggered this
     

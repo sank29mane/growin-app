@@ -1,14 +1,8 @@
 from pydantic import BaseModel, Field
-try:
-    from backend.simulation.engine import PreFlightSimulator
-    from backend.simulation.models import MarketImpactModel
-    from backend.simulation.swarm_gate import RiskSwarmGate
-    from backend.simulation.telemetry import TelemetryLogger
-except ImportError:
-    from .engine import PreFlightSimulator
-    from .models import MarketImpactModel
-    from .swarm_gate import RiskSwarmGate
-    from .telemetry import TelemetryLogger
+from backend.simulation.engine import PreFlightSimulator
+from backend.simulation.models import MarketImpactModel
+from backend.simulation.swarm_gate import RiskSwarmGate
+from backend.simulation.telemetry import TelemetryLogger
 
 class PreFlightDecision(BaseModel):
     """

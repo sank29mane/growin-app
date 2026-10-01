@@ -42,7 +42,6 @@ struct SettingsOverlay: View {
                                         HFModelHubSection()
                                         AgentPersonasSection()
                                     } else if selectedTab == 1 {
-                                        ApprovalSecuritySection()
                                         TradingConfigSection()
                                         AccountStatusSection()
                                     }

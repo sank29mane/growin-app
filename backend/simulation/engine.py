@@ -1,10 +1,7 @@
 import time
 import numpy as np
-from typing import Dict, Any
-try:
-    from backend.simulation.models import MarketImpactModel
-except ImportError:
-    from .models import MarketImpactModel
+from typing import Dict, Any, Optional
+from backend.simulation.models import MarketImpactModel
 
 class PreFlightSimulator:
     """
