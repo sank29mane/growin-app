@@ -197,6 +197,52 @@ def test_invalid_json_file(private_config_dir: Path):
     assert _load_error(private_config_dir).code == "INVALID_JSON"
 
 
+def _assert_detached(error: PrivateConfigError, marker: str) -> None:
+    # No cause or context: nothing that walks the chain reaches file content.
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert marker not in str(error)
+    assert marker not in repr(error)
+
+
+def test_non_utf8_error_does_not_chain_file_bytes(private_config_dir: Path):
+    (private_config_dir / "india" / "limits.json").write_bytes(b'{"k": "MARK3141", "a": "\xff"}')
+    error = _load_error(private_config_dir)
+    assert error.code == "NOT_UTF8"
+    _assert_detached(error, "MARK3141")
+
+
+def test_invalid_json_error_does_not_chain_file_text(private_config_dir: Path):
+    (private_config_dir / "india" / "limits.json").write_text(
+        '{"capital_cap": "MARK3141", ', encoding="utf-8"
+    )
+    error = _load_error(private_config_dir)
+    assert error.code == "INVALID_JSON"
+    _assert_detached(error, "MARK3141")
+
+
+def test_duplicate_key_error_does_not_chain(private_config_dir: Path):
+    (private_config_dir / "india" / "limits.json").write_text(
+        '{"capital_cap": "MARK3141", "capital_cap": "1"}', encoding="utf-8"
+    )
+    error = _load_error(private_config_dir)
+    assert error.code == "DUPLICATE_KEY"
+    _assert_detached(error, "MARK3141")
+
+
+def test_lone_surrogate_in_params_is_refused(private_config_dir: Path):
+    _edit_strategy(private_config_dir, params={"k": "\ud800", "other": "MARK3141"})
+    error = _load_error(private_config_dir)
+    assert (error.code, error.field) == ("INVALID_UNICODE", "strategy.json")
+    _assert_detached(error, "MARK3141")
+
+
+def test_lone_surrogate_in_ref_path_is_refused(private_config_dir: Path):
+    _edit_strategy(private_config_dir, research_refs=[{"path": "a\udc00b", "sha256": "0" * 64}])
+    error = _load_error(private_config_dir)
+    assert (error.code, error.field) == ("INVALID_UNICODE", "strategy.json")
+
+
 @pytest.mark.parametrize("text", ["[]", '"x"', "5", "null"])
 def test_non_object_top_level(private_config_dir: Path, text: str):
     (private_config_dir / "india" / "limits.json").write_text(text, encoding="utf-8")
@@ -365,6 +411,33 @@ def test_wrong_currency_is_refused(private_config_dir: Path):
 def test_wrong_schema_version_is_schema_invalid(private_config_dir: Path):
     _write_limits(private_config_dir, schema_version=2)
     assert _load_error(private_config_dir).code == "SCHEMA_INVALID"
+
+
+@pytest.mark.parametrize("bad", [True, False, "1", None])
+def test_non_integer_schema_version_is_schema_invalid(private_config_dir: Path, bad):
+    # JSON true would otherwise coerce to 1 and pass Literal[1].
+    _write_limits(private_config_dir, schema_version=bad)
+    error = _load_error(private_config_dir)
+    assert (error.code, error.field) == ("SCHEMA_INVALID", "schema_version")
+
+
+def test_bool_schema_version_refused_in_strategy_and_manifest(private_config_dir: Path):
+    _edit_strategy(private_config_dir, schema_version=True)
+    error = _load_error(private_config_dir)
+    assert (error.code, error.field) == ("SCHEMA_INVALID", "schema_version")
+    manifest_path = private_config_dir / "uk" / "manifest.json"
+    manifest = _read(manifest_path)
+    manifest["schema_version"] = True
+    _write(manifest_path, manifest)
+    error = _load_error(private_config_dir, "uk")
+    assert (error.code, error.field) == ("SCHEMA_INVALID", "schema_version")
+
+
+def test_schema_error_does_not_chain_validation_error(private_config_dir: Path):
+    _write_limits(private_config_dir, capital_cap="MARK3141")
+    error = _load_error(private_config_dir)
+    assert (error.code, error.field) == ("SCHEMA_INVALID", "capital_cap")
+    _assert_detached(error, "MARK3141")
 
 
 # --- limit ordering --------------------------------------------------------------

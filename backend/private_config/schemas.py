@@ -44,6 +44,17 @@ DecimalStr = Annotated[
     Field(allow_inf_nan=False),
 ]
 
+
+def _require_plain_int(value: Any) -> Any:
+    # Lax mode turns JSON true into 1 before the Literal check, so Literal[1]
+    # alone would accept it.
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("schema_version must be an integer")
+    return value
+
+
+SchemaVersion = Annotated[Literal[1], BeforeValidator(_require_plain_int)]
+
 _STRICT_MODEL = ConfigDict(extra="forbid", frozen=True)
 
 
@@ -72,7 +83,7 @@ class IndiaLimits(BaseModel):
 
     model_config = _STRICT_MODEL
 
-    schema_version: Literal[1]
+    schema_version: SchemaVersion
     workspace: Literal["india"]
     currency: Literal["INR"]
     capital_cap: DecimalStr = Field(repr=False)
@@ -87,7 +98,7 @@ class IndiaStrategy(BaseModel):
 
     model_config = _STRICT_MODEL
 
-    schema_version: Literal[1]
+    schema_version: SchemaVersion
     workspace: Literal["india"]
     strategy_params_version: str = Field(pattern=r"^[A-Za-z0-9._-]{1,64}$")
     params: dict[str, Any] = Field(repr=False)
@@ -109,6 +120,6 @@ class UkManifest(BaseModel):
 
     model_config = _STRICT_MODEL
 
-    schema_version: Literal[1]
+    schema_version: SchemaVersion
     workspace: Literal["uk"]
     currency: Literal["GBP"]

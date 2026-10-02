@@ -139,12 +139,19 @@ def _refuse_constant(_text: str) -> Any:
 
 
 def _parse_object(raw: bytes, name: str) -> dict[str, Any]:
+    # Decode and parse errors hold the file content (``.object`` and ``.doc``).
+    # Each failure is raised after its except block so the new error has no
+    # cause and no context that could reach that content.
+    failure = ""
     try:
         text = raw.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise PrivateConfigError("NOT_UTF8", name) from exc
+    except UnicodeDecodeError:
+        failure = "NOT_UTF8"
+    if failure:
+        raise PrivateConfigError(failure, name)
     if not text.strip():
         raise PrivateConfigError("FILE_EMPTY", name)
+    field = name
     try:
         data = json.loads(
             text,
@@ -155,13 +162,22 @@ def _parse_object(raw: bytes, name: str) -> dict[str, Any]:
     except PrivateConfigError as exc:
         # Parse hooks do not know which file they ran for; name it when the
         # hook supplied no field of its own.
-        if exc.field:
-            raise
-        raise PrivateConfigError(exc.code, name) from None
-    except (ValueError, RecursionError) as exc:
-        raise PrivateConfigError("INVALID_JSON", name) from exc
+        failure, field = exc.code, exc.field or name
+    except (ValueError, RecursionError):
+        failure, field = "INVALID_JSON", name
+    if failure:
+        raise PrivateConfigError(failure, field)
     if not isinstance(data, dict):
         raise PrivateConfigError("NOT_AN_OBJECT", name)
+    # JSON escapes can produce a lone surrogate (\uD800) from valid UTF-8.
+    # Refuse it here so no later encode or path call fails outside
+    # PrivateConfigError.
+    try:
+        json.dumps(data, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError:
+        failure = "INVALID_UNICODE"
+    if failure:
+        raise PrivateConfigError(failure, name)
     return data
 
 
@@ -185,10 +201,13 @@ def _check_identity(data: dict[str, Any], workspace: str) -> None:
 
 
 def _validate_model(model: type[BaseModel], data: dict[str, Any]) -> Any:
+    # ValidationError text includes the rejected value. Raising after the
+    # except block keeps it off __context__ as well as __cause__.
     try:
         return model.model_validate(data)
     except ValidationError as exc:
-        raise schema_error_from_validation_error(exc) from None
+        error = schema_error_from_validation_error(exc)
+    raise error
 
 
 def _check_bound_identity(parsed: Any, workspace: str) -> None:
