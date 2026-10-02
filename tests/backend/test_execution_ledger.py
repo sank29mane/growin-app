@@ -23,6 +23,7 @@ def make_intent(proposal_id: str = "proposal-1", **overrides) -> OrderIntent:
     values = {
         "proposal_id": proposal_id,
         "workspace": "uk",
+        "account": "invest",
         "broker": "paper",
         "ticker": "TQQQ",
         "side": "BUY",
@@ -45,7 +46,7 @@ def make_ack(proposal_id: str = "proposal-1", **overrides) -> OrderAck:
 def test_real_file_pragmas_and_private_permissions(tmp_path):
     db_path = tmp_path / "private" / "execution.sqlite3"
 
-    with ExecutionLedger(db_path, busy_timeout_ms=2_500) as ledger:
+    with ExecutionLedger(db_path, busy_timeout_ms=2_500, workspace="uk") as ledger:
         pragmas = ledger.pragmas()
 
         assert pragmas == {
@@ -64,7 +65,7 @@ def test_intent_and_acknowledgement_persist_across_reopen_without_raw_payload(tm
     db_path = tmp_path / "execution.sqlite3"
     intent = make_intent()
 
-    with ExecutionLedger(db_path) as ledger:
+    with ExecutionLedger(db_path, workspace="uk") as ledger:
         created = ledger.register_intent(intent)
         assert created.state == "PENDING"
         assert ledger.claim(intent.proposal_id, intent).status is ClaimStatus.CLAIMED
@@ -75,7 +76,7 @@ def test_intent_and_acknowledgement_persist_across_reopen_without_raw_payload(tm
         assert ack.raw == {}
 
     assert b"must-not-survive" not in db_path.read_bytes()
-    with ExecutionLedger(db_path) as reopened:
+    with ExecutionLedger(db_path, workspace="uk") as reopened:
         order = reopened.get_order(intent.proposal_id)
         assert order is not None
         assert order.intent == intent.model_dump(mode="json")
@@ -87,17 +88,17 @@ def test_intent_and_acknowledgement_persist_across_reopen_without_raw_payload(tm
 
 def test_changed_intent_conflicts_after_restart(tmp_path):
     db_path = tmp_path / "execution.sqlite3"
-    with ExecutionLedger(db_path) as ledger:
+    with ExecutionLedger(db_path, workspace="uk") as ledger:
         ledger.register_intent(make_intent())
 
-    with ExecutionLedger(db_path) as reopened:
+    with ExecutionLedger(db_path, workspace="uk") as reopened:
         with pytest.raises(IntentConflict, match="changed intent"):
             reopened.register_intent(make_intent(quantity=Decimal("99")))
 
 
 def test_client_order_identity_cannot_be_reused_by_another_proposal(tmp_path):
     db_path = tmp_path / "execution.sqlite3"
-    with ExecutionLedger(db_path) as ledger:
+    with ExecutionLedger(db_path, workspace="uk") as ledger:
         ledger.register_intent(make_intent(client_order_id="stable-client-id"))
 
         with pytest.raises(IntentConflict, match="identity was reused"):
@@ -108,7 +109,7 @@ def test_client_order_identity_cannot_be_reused_by_another_proposal(tmp_path):
 
 def test_events_and_intents_are_immutable_by_database_trigger(tmp_path):
     db_path = tmp_path / "execution.sqlite3"
-    with ExecutionLedger(db_path) as ledger:
+    with ExecutionLedger(db_path, workspace="uk") as ledger:
         ledger.register_intent(make_intent())
 
         external = sqlite3.connect(db_path)
@@ -127,7 +128,7 @@ def test_events_and_intents_are_immutable_by_database_trigger(tmp_path):
 
 def test_concurrent_claims_create_exactly_one_dispatch_attempt(tmp_path):
     db_path = tmp_path / "execution.sqlite3"
-    with ExecutionLedger(db_path) as ledger:
+    with ExecutionLedger(db_path, workspace="uk") as ledger:
         intent = make_intent()
         ledger.register_intent(intent)
 
@@ -152,7 +153,7 @@ def test_concurrent_claims_create_exactly_one_dispatch_attempt(tmp_path):
 
 def test_acknowledgement_finalize_is_replay_safe(tmp_path):
     db_path = tmp_path / "execution.sqlite3"
-    with ExecutionLedger(db_path) as ledger:
+    with ExecutionLedger(db_path, workspace="uk") as ledger:
         intent = make_intent()
         ledger.claim_intent(intent)
         first = ledger.finalize(intent.proposal_id, make_ack())
@@ -174,11 +175,11 @@ def test_acknowledgement_finalize_is_replay_safe(tmp_path):
 def test_startup_recovers_abandoned_submission_to_unknown_without_retry(tmp_path):
     db_path = tmp_path / "execution.sqlite3"
     intent = make_intent()
-    with ExecutionLedger(db_path) as ledger:
+    with ExecutionLedger(db_path, workspace="uk") as ledger:
         ledger.claim_intent(intent)
         assert ledger.get_order(intent.proposal_id).state == "SUBMITTING"
 
-    with ExecutionLedger(db_path) as reopened:
+    with ExecutionLedger(db_path, workspace="uk") as reopened:
         order = reopened.get_order(intent.proposal_id)
         assert order is not None
         assert order.state == "UNKNOWN"
@@ -191,7 +192,7 @@ def test_startup_recovers_abandoned_submission_to_unknown_without_retry(tmp_path
 
 def test_reject_and_mark_unknown_are_atomic_terminal_transitions(tmp_path):
     db_path = tmp_path / "execution.sqlite3"
-    with ExecutionLedger(db_path) as ledger:
+    with ExecutionLedger(db_path, workspace="uk") as ledger:
         rejected = make_intent("rejected")
         ledger.register_intent(rejected)
         assert ledger.reject(rejected.proposal_id, "user declined").state == "REJECTED"
@@ -208,25 +209,25 @@ def test_reject_and_mark_unknown_are_atomic_terminal_transitions(tmp_path):
 
 def test_second_writer_fails_closed_until_first_releases_lock(tmp_path):
     db_path = tmp_path / "execution.sqlite3"
-    first = ExecutionLedger(db_path)
+    first = ExecutionLedger(db_path, workspace="uk")
     try:
         with pytest.raises(LedgerWriterUnavailable, match="already active"):
-            ExecutionLedger(db_path)
+            ExecutionLedger(db_path, workspace="uk")
     finally:
         first.close()
 
-    with ExecutionLedger(db_path) as replacement:
+    with ExecutionLedger(db_path, workspace="uk") as replacement:
         assert replacement.pragmas()["journal_mode"] == "wal"
 
 
 def test_close_is_idempotent_and_releases_resources(tmp_path):
     db_path = tmp_path / "execution.sqlite3"
-    ledger = ExecutionLedger(db_path)
+    ledger = ExecutionLedger(db_path, workspace="uk")
     ledger.close()
     ledger.close()
 
     assert os.path.exists(db_path)
-    with ExecutionLedger(db_path):
+    with ExecutionLedger(db_path, workspace="uk"):
         pass
 
 
@@ -237,7 +238,7 @@ def test_writer_authority_releases_when_owner_process_dies(tmp_path):
     environment["PYTHONPATH"] = backend_path
     code = (
         "from execution.ledger import ExecutionLedger; import sys; "
-        f"ledger=ExecutionLedger({str(db_path)!r}); "
+        f"ledger=ExecutionLedger({str(db_path)!r}, workspace='uk'); "
         "print('READY', flush=True); sys.stdin.read()"
     )
     owner = subprocess.Popen(
@@ -252,10 +253,10 @@ def test_writer_authority_releases_when_owner_process_dies(tmp_path):
         assert owner.stdout is not None
         assert owner.stdout.readline().strip() == "READY"
         with pytest.raises(LedgerWriterUnavailable):
-            ExecutionLedger(db_path)
+            ExecutionLedger(db_path, workspace="uk")
     finally:
         owner.terminate()
         owner.wait(timeout=5)
 
-    with ExecutionLedger(db_path) as replacement:
+    with ExecutionLedger(db_path, workspace="uk") as replacement:
         assert replacement.pragmas()["journal_mode"] == "wal"

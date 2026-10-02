@@ -68,7 +68,7 @@ def _record(ledger, order, *, requote_id="rq-1", key="parent:snapshot-1", candid
 
 
 def test_requote_candidate_is_immutable_and_idempotent(tmp_path):
-    with ExecutionLedger(tmp_path / "execution.sqlite3") as ledger:
+    with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
         order = _setup_acknowledged_parent(ledger)
         created = _record(ledger, order)
         replay = _record(ledger, order)
@@ -82,7 +82,7 @@ def test_requote_candidate_is_immutable_and_idempotent(tmp_path):
 
 
 def test_requote_blocks_locally_without_touching_parent_or_reservation(tmp_path):
-    with ExecutionLedger(tmp_path / "execution.sqlite3") as ledger:
+    with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
         order = _setup_acknowledged_parent(ledger)
         recorded = _record(ledger, order)
         blocked = ledger.block_requote(recorded.requote_id, "NO_MUTATION_CAPABILITY")
@@ -98,12 +98,12 @@ def test_requote_blocks_locally_without_touching_parent_or_reservation(tmp_path)
 
 def test_requote_recovery_requires_fresh_evidence_after_restart(tmp_path):
     path = tmp_path / "execution.sqlite3"
-    with ExecutionLedger(path) as ledger:
+    with ExecutionLedger(path, workspace="uk") as ledger:
         order = _setup_acknowledged_parent(ledger)
         recorded = _record(ledger, order)
         assert recorded.state == "EVALUATED"
 
-    with ExecutionLedger(path) as reopened:
+    with ExecutionLedger(path, workspace="uk") as reopened:
         recovered = reopened.get_requote("rq-1")
         assert recovered is not None
         assert recovered.state == "BLOCKED_RESTART_REQUIRES_FRESH_EVIDENCE"
@@ -111,7 +111,7 @@ def test_requote_recovery_requires_fresh_evidence_after_restart(tmp_path):
 
 
 def test_unknown_parent_and_workspace_control_fail_closed(tmp_path):
-    with ExecutionLedger(tmp_path / "execution.sqlite3") as ledger:
+    with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
         order = _setup_acknowledged_parent(ledger)
         assert order.acknowledgment is not None
         ledger.reconcile(
