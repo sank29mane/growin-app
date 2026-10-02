@@ -65,7 +65,7 @@ def _evidence():
 
 
 def test_coordinator_persists_candidate_then_stops_without_dispatch(tmp_path):
-    with ExecutionLedger(tmp_path / "execution.sqlite3") as ledger:
+    with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
         proposal = _setup_parent(ledger)
         coordinator = RequoteCoordinator(ledger)
 
@@ -85,7 +85,7 @@ def test_coordinator_persists_candidate_then_stops_without_dispatch(tmp_path):
 
 
 def test_identical_snapshot_replays_one_durable_candidate(tmp_path):
-    with ExecutionLedger(tmp_path / "execution.sqlite3") as ledger:
+    with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
         proposal = _setup_parent(ledger)
         coordinator = RequoteCoordinator(ledger)
         evidence = _evidence()

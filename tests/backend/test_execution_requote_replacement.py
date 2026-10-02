@@ -39,7 +39,7 @@ def _reconcile(service, status, quantity, notional, fingerprint):
 
 
 def test_partial_cancel_prepares_fresh_limit_intent_without_dispatch(tmp_path):
-    with ExecutionLedger(tmp_path / "execution.sqlite3") as ledger:
+    with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
         service, proposal = _parent(ledger)
         evaluated = _candidate(ledger, proposal)
         _reconcile(service, ReconciliationStatus.PARTIALLY_FILLED, "1", "10", "partial")
@@ -70,7 +70,7 @@ def test_partial_cancel_prepares_fresh_limit_intent_without_dispatch(tmp_path):
 
 
 def test_replacement_requires_cancelled_parent_and_unexpired_evidence(tmp_path):
-    with ExecutionLedger(tmp_path / "execution.sqlite3") as ledger:
+    with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
         service, proposal = _parent(ledger)
         evaluated = _candidate(ledger, proposal)
         _reconcile(service, ReconciliationStatus.UNKNOWN, "0", "0", "unknown")
@@ -78,7 +78,7 @@ def test_replacement_requires_cancelled_parent_and_unexpired_evidence(tmp_path):
             RequoteCoordinator(ledger).prepare_replacement(requote_id=evaluated.record.requote_id, replacement_proposal_id="blocked")
         assert ledger.get_reservation("parent").state == "ACTIVE"
 
-    with ExecutionLedger(tmp_path / "expired.sqlite3") as ledger:
+    with ExecutionLedger(tmp_path / "expired.sqlite3", workspace="uk") as ledger:
         service, proposal = _parent(ledger)
         observed_at = datetime.now(timezone.utc) - timedelta(seconds=31)
         # The candidate was valid when evaluated, but cannot survive its policy expiry.
@@ -93,7 +93,7 @@ def test_replacement_requires_cancelled_parent_and_unexpired_evidence(tmp_path):
     [(ReconciliationStatus.REJECTED, "0", "0"), (ReconciliationStatus.FILLED, "2", "20")],
 )
 def test_rejected_or_filled_parent_cannot_prepare_replacement(tmp_path, status, quantity, notional):
-    with ExecutionLedger(tmp_path / "execution.sqlite3") as ledger:
+    with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
         service, proposal = _parent(ledger)
         evaluated = _candidate(ledger, proposal)
         _reconcile(service, status, quantity, notional, status.value.lower())
