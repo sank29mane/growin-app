@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Growin India pilot: daily reference refresh (NSE bhavcopy, ASM and GSM, price bands).
+  launchd user agent, Monday to Friday. launchd runs a missed calendar job once after the Mac wakes
+  from sleep, but not for a day the Mac was powered off; the continuity check reports that gap.
+  Placeholders are filled by pilot_data.reference_refresh.render_launchd_plist.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.growin.pilot-reference-refresh</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{{UV_BIN}}</string>
+    <string>run</string>
+    <string>--project</string>
+    <string>{{REPO_ROOT}}/backend</string>
+    <string>--no-sync</string>
+    <string>python</string>
+    <string>-m</string>
+    <string>pilot_data.reference_refresh</string>
+    <string>run-daily</string>
+    <string>--root</string>
+    <string>{{DATA_ROOT}}</string>
+    <string>--workspace</string>
+    <string>india</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PYTHONPATH</key>
+    <string>{{REPO_ROOT}}/backend</string>
+  </dict>
+  <key>WorkingDirectory</key>
+  <string>{{REPO_ROOT}}</string>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict>
+      <key>Weekday</key>
+      <integer>1</integer>
+      <key>Hour</key>
+      <integer>{{HOUR}}</integer>
+      <key>Minute</key>
+      <integer>{{MINUTE}}</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key>
+      <integer>2</integer>
+      <key>Hour</key>
+      <integer>{{HOUR}}</integer>
+      <key>Minute</key>
+      <integer>{{MINUTE}}</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key>
+      <integer>3</integer>
+      <key>Hour</key>
+      <integer>{{HOUR}}</integer>
+      <key>Minute</key>
+      <integer>{{MINUTE}}</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key>
+      <integer>4</integer>
+      <key>Hour</key>
+      <integer>{{HOUR}}</integer>
+      <key>Minute</key>
+      <integer>{{MINUTE}}</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key>
+      <integer>5</integer>
+      <key>Hour</key>
+      <integer>{{HOUR}}</integer>
+      <key>Minute</key>
+      <integer>{{MINUTE}}</integer>
+    </dict>
+  </array>
+  <key>StandardOutPath</key>
+  <string>{{LOG_DIR}}/reference-refresh.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>{{LOG_DIR}}/reference-refresh.err.log</string>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>
