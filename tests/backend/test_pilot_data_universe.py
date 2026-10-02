@@ -11,7 +11,8 @@ import pytest
 
 from market_data.models import is_valid_isin
 from pilot_data import universe as universe_module
-from pilot_data.bhavcopy import ingest_udiff
+from pilot_data.bhavcopy import ingest_pr_zip, ingest_udiff
+from pilot_data.constituents import ingest_index_list
 from pilot_data.core import PilotDataError, SourceDescriptor, standard_caveats
 from pilot_data.models import QuarantineRecord
 from pilot_data.nse_ingest import _log_attempt
@@ -24,6 +25,8 @@ from pilot_data.universe import (
     NoTradingStatusSource,
     UniversePolicy,
     _evaluate_universe,
+    check_smallcap_exposure,
+    classify_smallcap,
     evaluate_universe,
     liquidity_check,
 )
@@ -449,3 +452,99 @@ def test_production_api_has_no_cutoff_parameter_and_no_other_caller_of_the_priva
                 if isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", "")) == "_evaluate_universe":
                     callers.append((path.name, fn.name))
     assert callers == [("universe.py", "evaluate_universe")]
+
+
+# ------------------------------------------------------------------ small caps and the 30 percent rule
+def lists(store, nifty_isins, small_isins):
+    def rows(isins, total, base):
+        extra = [make_isin(base + n) for n in range(total - len(isins))]
+        return [{"Company Name": f"C{i}", "Industry": "I", "Symbol": f"X{i}", "Series": "EQ", "ISIN Code": isin}
+                for i, isin in enumerate([*isins, *extra])]
+
+    desc = SourceDescriptor(source="nse_archive", kind="index_list_nifty500",
+                            locator="https://nsearchives.nseindia.com/l", fetched_at=FETCHED)
+    ingest_index_list(store, desc, kit.index_list_csv(rows(nifty_isins, 500, 50_000)), list_name="nifty500")
+    ingest_index_list(store, desc, kit.index_list_csv(rows(small_isins, 250, 60_000)), list_name="smallcap250")
+
+
+def member(kind, symbol, n):
+    return TargetMember(kind=kind, anchor_isin=make_isin(n), nse_symbol=symbol, stock_code=f"C{symbol}", token=n,
+                        company_name=symbol)
+
+
+def targets_of(*members):
+    return TargetUniverseResult(
+        workspace="india", caveats=standard_caveats(), as_of=D, members=tuple(members), exclusions=(), etf_rejected=(),
+        master_snapshot="m" * 64, nifty500_snapshot="n" * 64, target_sha256="t" * 64,
+    )
+
+
+def etf_info(store, *rows):
+    ingest_pr_zip(
+        store, SourceDescriptor(source="nse_archive", kind="pr_zip", locator="https://nsearchives.nseindia.com/pr",
+                                fetched_at=FETCHED),
+        kit.pr_zip(D, [kit.pd_index_row()], [], list(rows)), trade_date=D,
+    )
+
+
+def test_classification_follows_d08(store):
+    small, mid, odd = member("nifty500", "SMALLCO", 1), member("nifty500", "MIDCO", 2), member("nifty500", "ODDCO", 3)
+    etf_small = member("liquid_etf", "SMLETF", 4)
+    etf_other = member("liquid_etf", "BIGETF", 5)
+    etf_none = member("liquid_etf", "NOINFO", 6)
+    targets = targets_of(small, mid, odd, etf_small, etf_other, etf_none)
+    lists(store, [small.anchor_isin, mid.anchor_isin], [small.anchor_isin])
+    etf_info(store, kit.etf_row("SMLETF", "SMALL ETF", "Nifty Smallcap 250 TRI"),
+             kit.etf_row("BIGETF", "BIG ETF", "NIFTY 50"))
+    assert classify_smallcap(store, targets) == {
+        small.anchor_isin: "small", mid.anchor_isin: "not_small", odd.anchor_isin: "unclassified",
+        etf_small.anchor_isin: "small", etf_other.anchor_isin: "not_small", etf_none.anchor_isin: "unclassified",
+    }
+
+
+def test_microcap_underlying_counts_as_small(store):
+    etf = member("liquid_etf", "MICETF", 8)
+    lists(store, [], [])
+    etf_info(store, kit.etf_row("MICETF", "MICRO ETF", "NIFTY MICROCAP 250"))
+    assert classify_smallcap(store, targets_of(etf)) == {etf.anchor_isin: "small"}
+
+
+def test_a_missing_list_leaves_everything_unclassified_which_counts_toward_the_cap(tmp_path):
+    with PilotDataStore(tmp_path / "bare", workspace="india") as bare:
+        got = classify_smallcap(bare, targets_of(member("nifty500", "ANY", 9)))
+    assert got == {make_isin(9): "unclassified"}
+
+
+def exposure(values, classification):
+    return check_smallcap_exposure(values, capital=Decimal("50000"), classification=classification, policy=POLICY,
+                                   workspace="india")
+
+
+def test_exposure_cap_is_exactly_thirty_percent():
+    a, b, c = make_isin(1), make_isin(2), make_isin(3)
+    classes = {a: "small", b: "unclassified", c: "not_small"}
+    exact = exposure({a: Decimal("10000.00"), b: Decimal("5000.00"), c: Decimal("35000.00")}, classes)
+    assert exact.passed and exact.small_value == Decimal("15000.00") and exact.small_share == Decimal("0.3")
+    over = exposure({a: Decimal("10000.01"), b: Decimal("5000.00"), c: Decimal("34999.99")}, classes)
+    assert not over.passed and over.counted_isins == tuple(sorted([a, b]))
+    absent = exposure({make_isin(99): Decimal("15000.01")}, classes)
+    assert not absent.passed and absent.counted_isins == (make_isin(99),)
+
+
+def test_exposure_rejects_bad_inputs_and_carries_caveats():
+    with pytest.raises(PilotDataError) as capital:
+        check_smallcap_exposure({}, capital=Decimal("0"), classification={}, policy=POLICY, workspace="india")
+    assert capital.value.code == "exposure_capital_invalid"
+    with pytest.raises(PilotDataError) as value:
+        exposure({make_isin(1): Decimal("-1")}, {})
+    assert value.value.code == "exposure_value_invalid"
+    checked = exposure({make_isin(1): Decimal("1")}, {make_isin(1): "not_small"})
+    assert [c.code for c in checked.caveats][:2] == ["SURVIVORSHIP_BIAS", "HINDSIGHT_BIAS"] and checked.passed
+
+
+def test_decisions_carry_the_real_classification(store):
+    world = build(store, {"AAA": steady(), "BBB": steady()})
+    lists(store, [world.isins["AAA"], world.isins["BBB"]], [world.isins["BBB"]])
+    result = world.evaluate()
+    assert decision(result, world, "AAA").smallcap_class == "not_small"
+    assert decision(result, world, "BBB").smallcap_class == "small"
