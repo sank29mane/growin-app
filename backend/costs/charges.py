@@ -3,6 +3,20 @@
 ``price_trade_day`` prices every fill that settled on one trade date and one
 exchange. Charges depend only on traded value and the schedule: decision drift
 and execution slippage never enter a line or a total (review decision D11).
+
+Same-day handling (D-09), applied per ISIN:
+
+1. Only buys: delivery.
+2. Only sells: delivery, with DP debits.
+3. Buy quantity equals sell quantity (net zero): every order is intraday.
+4. Buys exceed sells: buy orders keep delivery brokerage, sell orders carry
+   none (``squared_off_no_brokerage``).
+5. Sells exceed buys: sell orders keep delivery brokerage, buy orders carry
+   none.
+
+Brokerage classification (``classify_same_day_brokerage``) and the matched
+quantity statutory split (``split_same_day_statutory``) are separate code
+paths that never call each other (review decision D12).
 """
 
 from __future__ import annotations
@@ -24,6 +38,16 @@ from .core import (
     seal,
 )
 from .schedule import ChargeSchedule, PricingBasis
+
+SAME_DAY_PARTIAL_STATUTORY_STATUS = (
+    "provisional, unvalidated: matched-quantity intraday statutory split for a partial same-day "
+    "square-off; validate against a real broker contract note"
+)
+PROVISIONAL_SAME_DAY_PARTIAL_STATUTORY = "same_day_partial_statutory_split"
+
+CLASS_DELIVERY = "delivery"
+CLASS_INTRADAY = "intraday"
+CLASS_SQUARED_OFF = "squared_off_no_brokerage"
 
 
 @dataclass(frozen=True)
@@ -64,6 +88,7 @@ class ContractNoteEstimate:
     buckets: TurnoverBuckets
     dp_debits: int
     provisional_flags: tuple[str, ...]
+    provisional_notes: tuple[str, ...]
     total: Decimal
     estimate_hash: str
 
@@ -72,6 +97,112 @@ class ContractNoteEstimate:
             if item.name == name:
                 return item.amount
         raise KeyError(name)
+
+
+@dataclass(frozen=True)
+class _Order:
+    order_id: str
+    isin: str
+    side: Side
+    quantity: int
+    value: Decimal
+
+
+def _quantum(schedule: ChargeSchedule, name: str) -> Decimal:
+    return schedule.rounding.line_quantum.get(name, schedule.rounding.default_quantum)
+
+
+def _orders(fills_for_isin: Sequence[TradeFill]) -> list[_Order]:
+    """Aggregate one ISIN's fills into orders sorted by order id."""
+    if not fills_for_isin:
+        raise CostModelError("an ISIN group needs at least one fill")
+    if len({fill.isin for fill in fills_for_isin}) != 1:
+        raise CostModelError("an ISIN group holds more than one ISIN")
+    per_order: dict[str, list[TradeFill]] = {}
+    for fill in fills_for_isin:
+        per_order.setdefault(fill.order_id, []).append(fill)
+    orders = []
+    for order_id in sorted(per_order):
+        rows = per_order[order_id]
+        if len({row.side for row in rows}) != 1:
+            raise CostModelError(f"order {order_id!r} mixes sides")
+        orders.append(
+            _Order(
+                order_id,
+                rows[0].isin,
+                rows[0].side,
+                sum(row.quantity for row in rows),
+                sum((row.quantity * row.price for row in rows), Decimal(0)),
+            )
+        )
+    return orders
+
+
+def _quantities(orders: Sequence[_Order]) -> tuple[int, int]:
+    bought = sum(order.quantity for order in orders if order.side is Side.BUY)
+    sold = sum(order.quantity for order in orders if order.side is Side.SELL)
+    return bought, sold
+
+
+def _classification(order: _Order, bought: int, sold: int) -> str:
+    if bought == 0 or sold == 0:
+        return CLASS_DELIVERY
+    if bought == sold:
+        return CLASS_INTRADAY
+    if bought > sold:
+        return CLASS_DELIVERY if order.side is Side.BUY else CLASS_SQUARED_OFF
+    return CLASS_DELIVERY if order.side is Side.SELL else CLASS_SQUARED_OFF
+
+
+def _exact_brokerage(classification: str, value: Decimal, schedule: ChargeSchedule) -> Decimal:
+    rates = schedule.brokerage
+    if classification == CLASS_DELIVERY:
+        return max(rates.delivery_rate * value, rates.delivery_min_per_order)
+    if classification == CLASS_INTRADAY:
+        return min(rates.intraday_cap_per_order, rates.intraday_rate * value)
+    return Decimal(0)
+
+
+def classify_same_day_brokerage(
+    fills_for_isin: Sequence[TradeFill], schedule: ChargeSchedule
+) -> tuple[OrderBrokerage, ...]:
+    """Per-order brokerage classification and amount for one ISIN (D-09 rules 1-5)."""
+    with decimal.localcontext(COST_CONTEXT):
+        orders = _orders(fills_for_isin)
+        bought, sold = _quantities(orders)
+        rows = []
+        for order in orders:
+            kind = _classification(order, bought, sold)
+            amount = round_money(_exact_brokerage(kind, order.value, schedule), _quantum(schedule, "brokerage"))
+            rows.append(OrderBrokerage(order.order_id, order.isin, order.side, order.value, kind, amount))
+        return tuple(rows)
+
+
+def split_same_day_statutory(fills_for_isin: Sequence[TradeFill]) -> TurnoverBuckets:
+    """Exact, unrounded turnover buckets for one ISIN.
+
+    Review decision D12 status: provisional, unvalidated: matched-quantity
+    intraday statutory split for a partial same-day square-off; validate
+    against a real broker contract note (SAME_DAY_PARTIAL_STATUTORY_STATUS).
+    The matched quantity is priced at the carried side's average price.
+    """
+    with decimal.localcontext(COST_CONTEXT):
+        orders = _orders(fills_for_isin)
+        bought, sold = _quantities(orders)
+        buy_value = sum((o.value for o in orders if o.side is Side.BUY), Decimal(0))
+        sell_value = sum((o.value for o in orders if o.side is Side.SELL), Decimal(0))
+        zero = Decimal(0)
+        if sold == 0:
+            return TurnoverBuckets(buy_value, zero, zero, zero)
+        if bought == 0:
+            return TurnoverBuckets(zero, sell_value, zero, zero)
+        if bought == sold:
+            return TurnoverBuckets(zero, zero, buy_value, sell_value)
+        if bought > sold:
+            matched_buy = (sold * buy_value) / bought
+            return TurnoverBuckets(buy_value - matched_buy, zero, matched_buy, sell_value)
+        matched_sell = (bought * sell_value) / sold
+        return TurnoverBuckets(zero, sell_value - matched_sell, buy_value, matched_sell)
 
 
 def price_trade_day(
@@ -117,58 +248,59 @@ def _price_trade_day(
             f"schedule {schedule.version} is not effective on {trade_date.isoformat()}"
         )
 
-    sides_by_isin: dict[str, set[Side]] = {}
+    by_isin: dict[str, list[TradeFill]] = {}
     for fill in fills:
-        sides_by_isin.setdefault(fill.isin, set()).add(fill.side)
-    if any(len(sides) > 1 for sides in sides_by_isin.values()):
-        raise CostModelError(
-            "an ISIN has both buys and sells on one day; the D-09 same-day classification lands in Plan 02 Task 2"
-        )
+        by_isin.setdefault(fill.isin, []).append(fill)
 
-    per_order: dict[str, list[TradeFill]] = {}
-    for fill in fills:
-        per_order.setdefault(fill.order_id, []).append(fill)
     brokerage_rows: list[OrderBrokerage] = []
-    buy_value = Decimal(0)
-    sell_value = Decimal(0)
+    exact_brokerage = Decimal(0)
+    delivery_buy = delivery_sell = intraday_buy = intraday_sell = Decimal(0)
     dp_debits = 0
-    for order_id in sorted(per_order):
-        rows = per_order[order_id]
-        if len({row.side for row in rows}) != 1 or len({row.isin for row in rows}) != 1:
-            raise CostModelError(f"order {order_id!r} mixes sides or ISINs")
-        value = sum((row.quantity * row.price for row in rows), Decimal(0))
-        side = rows[0].side
-        raw = max(schedule.brokerage.delivery_rate * value, schedule.brokerage.delivery_min_per_order)
-        brokerage_rows.append(
-            OrderBrokerage(order_id, rows[0].isin, side, value, "delivery", round_money(raw, schedule.rounding.default_quantum))
-        )
-        if side is Side.BUY:
-            buy_value += value
-        else:
-            sell_value += value
-            dp_debits += 1
-    turnover = buy_value + sell_value
-    stat = schedule.statutory
-    quantum = schedule.rounding.default_quantum
+    partial = False
+    for isin in sorted(by_isin):
+        group = by_isin[isin]
+        rows = classify_same_day_brokerage(group, schedule)
+        buckets = split_same_day_statutory(group)
+        brokerage_rows.extend(rows)
+        for row in rows:
+            exact_brokerage += _exact_brokerage(row.classification, row.traded_value, schedule)
+            if row.classification == CLASS_SQUARED_OFF:
+                partial = True
+        delivery_buy += buckets.delivery_buy
+        delivery_sell += buckets.delivery_sell
+        intraday_buy += buckets.intraday_buy
+        intraday_sell += buckets.intraday_sell
+        sell_debits = [r for r in rows if r.side is Side.SELL and r.classification == CLASS_DELIVERY]
+        if sell_debits:
+            dp_debits += len(sell_debits) if schedule.dp.basis == "per_sell_order" else 1
 
-    amounts = {
-        "brokerage": sum((row.amount for row in brokerage_rows), Decimal(0)),
-        "exchange_transaction": round_money(stat.exchange_transaction_rate * turnover, quantum),
-        "sebi_fee": round_money(stat.sebi_fee_rate * turnover, quantum),
-        "ipft": round_money(stat.ipft_rate * turnover, quantum),
-        "stt": round_money(stat.stt_delivery_rate * (buy_value + sell_value), quantum),
-        "stamp_duty": round_money(stat.stamp_delivery_buy_rate * buy_value, quantum),
+    turnover = delivery_buy + delivery_sell + intraday_buy + intraday_sell
+    stat = schedule.statutory
+    exact = {
+        "brokerage": exact_brokerage,
+        "exchange_transaction": stat.exchange_transaction_rate * turnover,
+        "sebi_fee": stat.sebi_fee_rate * turnover,
+        "ipft": stat.ipft_rate * turnover,
+        "stt": stat.stt_delivery_rate * (delivery_buy + delivery_sell) + stat.stt_intraday_sell_rate * intraday_sell,
+        "stamp_duty": stat.stamp_delivery_buy_rate * delivery_buy + stat.stamp_intraday_buy_rate * intraday_buy,
     }
-    gst_base = sum((amounts[name] for name in schedule.gst.applies_to), Decimal(0))
-    amounts["gst"] = round_money(schedule.gst.rate * gst_base, quantum)
-    dp_charge = schedule.dp.charge_per_debit * dp_debits
-    amounts["dp_charge"] = round_money(dp_charge, quantum)
-    amounts["dp_gst"] = (
-        round_money(schedule.gst.rate * amounts["dp_charge"], quantum) if schedule.dp.gst_applies else round_money(Decimal(0), quantum)
-    )
-    lines = tuple(ChargeLine(name, round_money(amounts[name], quantum)) for name in LINE_ORDER)
+    amounts = {
+        "brokerage": round_money(sum((row.amount for row in brokerage_rows), Decimal(0)), _quantum(schedule, "brokerage")),
+    }
+    for name in ("exchange_transaction", "sebi_fee", "ipft", "stt", "stamp_duty"):
+        amounts[name] = round_money(exact[name], _quantum(schedule, name))
+    source = amounts if schedule.gst.base == "rounded_lines" else exact
+    gst_base = sum((source[name] for name in schedule.gst.applies_to), Decimal(0))
+    amounts["gst"] = round_money(schedule.gst.rate * gst_base, _quantum(schedule, "gst"))
+    amounts["dp_charge"] = round_money(schedule.dp.charge_per_debit * dp_debits, _quantum(schedule, "dp_charge"))
+    if schedule.dp.gst_applies:
+        amounts["dp_gst"] = round_money(schedule.gst.rate * amounts["dp_charge"], _quantum(schedule, "dp_gst"))
+    else:
+        amounts["dp_gst"] = round_money(Decimal(0), _quantum(schedule, "dp_gst"))
+    lines = tuple(ChargeLine(name, amounts[name]) for name in LINE_ORDER)
     total = sum((line.amount for line in lines), Decimal(0))
 
+    display = schedule.rounding.default_quantum
     estimate = ContractNoteEstimate(
         workspace=workspace,
         currency=currency,
@@ -179,9 +311,15 @@ def _price_trade_day(
         pricing_basis=pricing_basis,
         order_brokerage=tuple(brokerage_rows),
         lines=lines,
-        buckets=TurnoverBuckets(buy_value, sell_value, Decimal(0), Decimal(0)),
+        buckets=TurnoverBuckets(
+            round_money(delivery_buy, display),
+            round_money(delivery_sell, display),
+            round_money(intraday_buy, display),
+            round_money(intraday_sell, display),
+        ),
         dp_debits=dp_debits,
-        provisional_flags=(),
+        provisional_flags=(PROVISIONAL_SAME_DAY_PARTIAL_STATUTORY,) if partial else (),
+        provisional_notes=(SAME_DAY_PARTIAL_STATUTORY_STATUS,) if partial else (),
         total=total,
         estimate_hash="",
     )
