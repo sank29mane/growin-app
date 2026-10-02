@@ -398,3 +398,45 @@ def asm_json(longterm_rows: Iterable[Mapping[str, object]], shortterm_rows: Iter
 
 def gsm_json(rows: Iterable[Mapping[str, object]]) -> bytes:
     return json.dumps(list(rows)).encode("utf-8")
+
+
+# --------------------------------------------------------------------------- NSE price band files (plan 59-10)
+SEC_LIST_HEADER_T = "Symbol,Series,Security Name,Band,Remarks".split(",")
+BAND_CHANGES_HEADER_T = "Sr. No,Symbol,Series,Security Name,From,To".split(",")
+
+SEC_LIST_CANBK = {"Symbol": "CANBK", "Series": "EQ", "Security Name": "CANARA BANK", "Band": "No Band", "Remarks": "-"}
+SEC_LIST_RELIANCE = {"Symbol": "RELIANCE", "Series": "EQ", "Security Name": "RELIANCE INDUSTRIES LIMITED",
+                     "Band": "No Band", "Remarks": "-"}
+SEC_LIST_NIFTYBEES = {"Symbol": "NIFTYBEES", "Series": "EQ", "Security Name": "NIPPON INDIA ETF NIFTY 50 BEES",
+                      "Band": "No Band", "Remarks": "-"}
+SEC_LIST_AGSTRA = {"Symbol": "AGSTRA", "Series": "BZ", "Security Name": "AGS TRANSACT TECHNOLOGIES LIMITED",
+                   "Band": "2", "Remarks": "GSM STAGE - 0"}
+BAND_CHANGE_ANANDRATHI = {"Sr. No": "1", "Symbol": "ANANDRATHI", "Series": "EQ", "Security Name": "ANAND RATHI",
+                          "From": "20", "To": "No Band"}
+
+
+def _csv_cell(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"' if any(ch in value for ch in ',"\n') else value
+
+
+def sec_list_csv(rows: Iterable[Mapping[str, str]], header: Iterable[str] = SEC_LIST_HEADER_T) -> bytes:
+    """Dated full band list; Remarks is always quoted, as in the real file."""
+    header = list(header)
+    lines = [",".join(header)]
+    for row in rows:
+        cells = []
+        for name in header:
+            value = str(row.get(name, ""))
+            cells.append('"' + value.replace('"', '""') + '"' if name == "Remarks" else _csv_cell(value))
+        lines.append(",".join(cells))
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def band_changes_csv(rows: Iterable[Mapping[str, str]], header: Iterable[str] = BAND_CHANGES_HEADER_T) -> bytes:
+    header = list(header)
+    lines = [",".join(header)]
+    for index, row in enumerate(rows, start=1):
+        merged = {"Sr. No": str(index)}
+        merged.update(row)
+        lines.append(",".join(_csv_cell(str(merged.get(name, ""))) for name in header))
+    return ("\n".join(lines) + "\n").encode("utf-8")
