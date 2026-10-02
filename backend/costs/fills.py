@@ -48,7 +48,10 @@ FILLED_AT_LIMIT = "FILLED_AT_LIMIT"
 PARTIAL_VOLUME_CAP = "PARTIAL_VOLUME_CAP"
 MISSED_THRESHOLD = "MISSED_THRESHOLD"
 MISSED_VOLUME_CAP_ZERO = "MISSED_VOLUME_CAP_ZERO"
-# D15 codes, declared here and used from Plan 03.
+REJECTED_OFF_TICK = "REJECTED_OFF_TICK"
+REJECTED_OUTSIDE_BAND = "REJECTED_OUTSIDE_BAND"
+MISSED_LOCKED_AT_BAND = "MISSED_LOCKED_AT_BAND"
+# D15 codes: unsupported simulation data, never a market miss.
 NO_FILL_BAND_UNAVAILABLE = "NO_FILL_BAND_UNAVAILABLE"
 NO_FILL_BAND_DATE_MISMATCH = "NO_FILL_BAND_DATE_MISMATCH"
 NO_FILL_AMBIGUOUS_SINGLE_PRICE = "NO_FILL_AMBIGUOUS_SINGLE_PRICE"
@@ -261,40 +264,31 @@ def _band_check(bar: SessionBar, order: LimitOrder) -> str:
     return "unchecked"
 
 
-def _simulate_session(
-    orders: Sequence[LimitOrder], bar: SessionBar, scenario: FillScenario
-) -> tuple[FillResult, ...]:
-    if not orders:
-        raise InputError("simulate_session needs at least one order")
-    if len(orders) > 1:
-        raise InputError(
-            "more than one order for one instrument and session; "
-            "D-10 aggregate participation lands in Plan 03 Task 2"
-        )
-    order = orders[0]
-    if (order.isin, order.exchange, order.session_date) != (bar.isin, bar.exchange, bar.session_date):
-        raise InputError(f"order {order.order_id!r} does not match the bar's isin, exchange and session date")
-    if order.tick is None:
+def _check_tick(order: LimitOrder, tick: TickSize | None) -> TickSize:
+    if tick is None:
         raise TickSizeUnavailable(f"order {order.order_id!r} has no tick size; nothing defaults")
-    tick = order.tick
-    offset = scenario.k_ticks * tick.value
-    if order.side is Side.BUY:
-        eligible = bar.low <= order.limit_price - offset
-    else:
-        eligible = bar.high >= order.limit_price + offset
-    cap = int(floor_to(Decimal(bar.volume) * scenario.volume_participation, Decimal(1)))
+    if tick.effective_from > order.session_date or (
+        tick.effective_to is not None and tick.effective_to < order.session_date
+    ):
+        raise TickSizeUnavailable(
+            f"order {order.order_id!r}: tick from {tick.source!r} is not effective on "
+            f"{order.session_date.isoformat()}"
+        )
+    return tick
 
-    if not eligible:
-        filled, outcome, reason = 0, FillOutcome.MISSED, MISSED_THRESHOLD
-    else:
-        filled = min(order.quantity, cap)
-        if filled == 0:
-            outcome, reason = FillOutcome.MISSED, MISSED_VOLUME_CAP_ZERO
-        elif filled < order.quantity:
-            outcome, reason = FillOutcome.PARTIAL, PARTIAL_VOLUME_CAP
-        else:
-            outcome, reason = FillOutcome.FILLED, FILLED_AT_LIMIT
 
+def _build_result(
+    order: LimitOrder,
+    bar: SessionBar,
+    scenario: FillScenario,
+    tick: TickSize,
+    *,
+    filled: int,
+    outcome: FillOutcome,
+    reason: str,
+    cap: int,
+    band_check: str,
+) -> FillResult:
     fill_price = order.limit_price if filled > 0 else None
     drift = drift_bps = slip = slip_bps = forgone = None
     drift_adverse = False
@@ -302,17 +296,14 @@ def _simulate_session(
         if order.side is Side.BUY:
             drift = fill_price - order.reference_price
             slip = fill_price - order.limit_price
+            forgone = max(Decimal(0), order.limit_price - bar.open)
         else:
             drift = order.reference_price - fill_price
             slip = order.limit_price - fill_price
+            forgone = max(Decimal(0), bar.open - order.limit_price)
         drift_bps = (drift / order.reference_price * 10000).quantize(_BPS, rounding=ROUND_HALF_UP)
         drift_adverse = drift > 0
         slip_bps = (slip / order.limit_price * 10000).quantize(_BPS, rounding=ROUND_HALF_UP)
-        if order.side is Side.BUY:
-            forgone = max(Decimal(0), order.limit_price - bar.open)
-        else:
-            forgone = max(Decimal(0), bar.open - order.limit_price)
-
     result = FillResult(
         order_id=order.order_id,
         isin=order.isin,
@@ -335,7 +326,7 @@ def _simulate_session(
         tick_source=tick.source,
         tick_source_hash=tick.source_hash,
         tick_effective_from=tick.effective_from,
-        band_check=_band_check(bar, order),
+        band_check=band_check,
         reference_price=order.reference_price,
         decision_drift_per_share=drift,
         decision_drift_bps=drift_bps,
@@ -345,4 +336,51 @@ def _simulate_session(
         forgone_improvement_per_share=forgone,
         result_hash="",
     )
-    return (seal(result, "result_hash", extra={"bar": canonical_value(bar)}),)
+    return seal(result, "result_hash", extra={"bar": canonical_value(bar)})
+
+
+def _simulate_session(
+    orders: Sequence[LimitOrder], bar: SessionBar, scenario: FillScenario
+) -> tuple[FillResult, ...]:
+    if not orders:
+        raise InputError("simulate_session needs at least one order")
+    if len(orders) > 1:
+        raise InputError(
+            "more than one order for one instrument and session; "
+            "D-10 aggregate participation lands in Plan 03 Task 2"
+        )
+    order = orders[0]
+    if (order.isin, order.exchange, order.session_date) != (bar.isin, bar.exchange, bar.session_date):
+        raise InputError(f"order {order.order_id!r} does not match the bar's isin, exchange and session date")
+    tick = _check_tick(order, order.tick)
+    cap = int(floor_to(Decimal(bar.volume) * scenario.volume_participation, Decimal(1)))
+    band_check = _band_check(bar, order)
+    if order.limit_price % tick.value != 0:
+        return (
+            _build_result(
+                order, bar, scenario, tick, filled=0, outcome=FillOutcome.REJECTED,
+                reason=REJECTED_OFF_TICK, cap=cap, band_check=band_check,
+            ),
+        )
+    offset = scenario.k_ticks * tick.value
+    if order.side is Side.BUY:
+        eligible = bar.low <= order.limit_price - offset
+    else:
+        eligible = bar.high >= order.limit_price + offset
+
+    if not eligible:
+        filled, outcome, reason = 0, FillOutcome.MISSED, MISSED_THRESHOLD
+    else:
+        filled = min(order.quantity, cap)
+        if filled == 0:
+            outcome, reason = FillOutcome.MISSED, MISSED_VOLUME_CAP_ZERO
+        elif filled < order.quantity:
+            outcome, reason = FillOutcome.PARTIAL, PARTIAL_VOLUME_CAP
+        else:
+            outcome, reason = FillOutcome.FILLED, FILLED_AT_LIMIT
+    return (
+        _build_result(
+            order, bar, scenario, tick, filled=filled, outcome=outcome, reason=reason,
+            cap=cap, band_check=band_check,
+        ),
+    )
