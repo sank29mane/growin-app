@@ -31,13 +31,14 @@ from .core import (
     COST_CONTEXT,
     LINE_ORDER,
     CostModelError,
+    InputError,
     ScheduleNotEffective,
     Side,
     TradeFill,
     round_money,
     seal,
 )
-from .schedule import ChargeSchedule, PricingBasis
+from .schedule import ChargeSchedule, PricingBasis, ScheduleSet
 
 SAME_DAY_PARTIAL_STATUTORY_STATUS = (
     "provisional, unvalidated: matched-quantity intraday statutory split for a partial same-day "
@@ -324,3 +325,65 @@ def _price_trade_day(
         estimate_hash="",
     )
     return seal(estimate, "estimate_hash")
+
+
+@dataclass(frozen=True)
+class RoundTripEstimate:
+    workspace: str
+    currency: str
+    isin: str
+    quantity: int
+    buy_day: ContractNoteEstimate
+    sell_day: ContractNoteEstimate
+    total: Decimal
+    cost_bps_of_buy_value: Decimal
+    estimate_hash: str
+
+
+def estimate_delivery_round_trip(
+    *,
+    workspace: str,
+    currency: str,
+    isin: str,
+    exchange: str,
+    quantity: int,
+    buy_price: Decimal,
+    sell_price: Decimal,
+    buy_date: date,
+    sell_date: date,
+    schedules: ScheduleSet,
+    pricing_basis: PricingBasis,
+) -> RoundTripEstimate:
+    """Full-cost delivery round trip: the STRAT-03 hurdle.
+
+    Takes no prepaid credit, no decision price, no drift and no slippage.
+    Backtests and the hurdle always use full 0.07% plus GST, and returns come
+    from fill prices that already contain the overnight move (D11).
+    """
+    with decimal.localcontext(COST_CONTEXT):
+        if sell_date <= buy_date:
+            raise InputError("sell_date must be after buy_date; a same-day round trip is an error path")
+        buy = TradeFill("rt-buy", isin, exchange, Side.BUY, quantity, buy_price, buy_date)
+        sell = TradeFill("rt-sell", isin, exchange, Side.SELL, quantity, sell_price, sell_date)
+        buy_day = price_trade_day(
+            [buy], schedules.resolve(buy_date, pricing_basis),
+            workspace=workspace, currency=currency, pricing_basis=pricing_basis,
+        )
+        sell_day = price_trade_day(
+            [sell], schedules.resolve(sell_date, pricing_basis),
+            workspace=workspace, currency=currency, pricing_basis=pricing_basis,
+        )
+        total = buy_day.total + sell_day.total
+        bps = round_money(total / (buy.quantity * buy.price) * 10000, Decimal("0.01"))
+        estimate = RoundTripEstimate(
+            workspace=workspace,
+            currency=currency,
+            isin=isin,
+            quantity=quantity,
+            buy_day=buy_day,
+            sell_day=sell_day,
+            total=total,
+            cost_bps_of_buy_value=bps,
+            estimate_hash="",
+        )
+        return seal(estimate, "estimate_hash")
