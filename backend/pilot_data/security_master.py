@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import csv
 import io
-import re
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Literal
 
+from market_data.models import is_valid_isin
 from pydantic import ValidationError
 
 from .core import (
@@ -155,9 +155,6 @@ def ingest_security_master(
     return MasterIngestOutcome(ref.source_sha256, snapshot_date, len(rows), outcome.inserted)
 
 
-_ISIN_SHAPE = re.compile(r"^IN[EF][A-Z0-9]{9}$")
-
-
 def _latest_snapshot_sha(store: PilotDataStore, as_of: date) -> str:
     ensure_master_tables(store)
     found = store.query(
@@ -191,8 +188,8 @@ def lineage_from_master(
     if len(found) > 1:
         raise PilotDataError("stock_code_ambiguous", "stock_code has more than one live EQ or BE row")
     token, series, isin, nse_symbol = found[0]
-    if not _ISIN_SHAPE.match(isin):
-        raise PilotDataError("isin_invalid", "master ISIN does not have the expected shape")
+    if not is_valid_isin(isin):
+        raise PilotDataError("isin_invalid", "master ISIN fails format or check-digit validation")
     return Lineage(
         workspace=workspace,
         anchor_isin=isin,
