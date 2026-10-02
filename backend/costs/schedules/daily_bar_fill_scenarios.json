@@ -1,0 +1,13 @@
+{
+  "schema": "growin.costs.fill_scenarios/1",
+  "version": "daily-bar-limit-fills-2026-10-01.r1",
+  "assumption_note": "Simulation assumptions, not evidence of actual fill probability.",
+  "fill_price_rule": "at_limit",
+  "validity": "active before the next session opens, expires at that session's close",
+  "submission_cutoff_ist": "09:00",
+  "scenarios": [
+    {"id": "base", "k_ticks": 1, "volume_participation": "0.01", "phase62_gate": false},
+    {"id": "adverse", "k_ticks": 2, "volume_participation": "0.005", "phase62_gate": false},
+    {"id": "pessimistic", "k_ticks": 3, "volume_participation": "0.0025", "phase62_gate": true}
+  ]
+}
