@@ -9,6 +9,11 @@ Apply its task-routing, safety, verification, token-efficiency, and Growin
 execution-integrity rules. For a small, isolated change, follow the cookbook's
 quick-task path; do not create unnecessary planning overhead.
 
+GSD is the project record and the quality gates, not a reason to split work.
+The roadmap sets each phase's workflow tier. Plan coarsely, execute by stage
+with one agent per stage (not one per plan), and have a different model verify
+the result. Details are in cookbook sections 2, 3, and 6.
+
 Non-negotiable rules:
 
 1. Do not work outside the current approved phase or task boundary. Capture
