@@ -6,9 +6,10 @@ from datetime import datetime
 from decimal import Decimal
 from hashlib import sha256
 import json
+import re
 from typing import Annotated, Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class IndiaInstrument(BaseModel):
@@ -193,3 +194,50 @@ class MarketSnapshot(BaseModel):
             separators=(",", ":"),
         ).encode("utf-8")
         return sha256(payload).hexdigest()
+
+
+_ISIN_SHAPE = re.compile(r"^IN[EF][A-Z0-9]{8}[0-9]$")
+
+
+def is_valid_isin(value: str) -> bool:
+    """Format check plus the ISO 6166 check digit (letters map to 10..35, then Luhn)."""
+    if not isinstance(value, str) or not _ISIN_SHAPE.match(value):
+        return False
+    digits = "".join(str(int(char, 36)) for char in value)
+    total = 0
+    for index, char in enumerate(reversed(digits)):
+        digit = int(char)
+        if index % 2 == 1:
+            digit *= 2
+            if digit > 9:
+                digit -= 9
+        total += digit
+    return total % 10 == 0
+
+
+class IndiaListedSecurity(BaseModel):
+    """A listed India/NSE cash security keyed by its validated ISIN and series."""
+
+    model_config = ConfigDict(str_strip_whitespace=True, frozen=True, extra="forbid")
+
+    workspace: Literal["india"]
+    venue: Literal["NSE"] = "NSE"
+    segment: Literal["CASH"] = "CASH"
+    symbol: str = Field(..., min_length=1, max_length=32, pattern=r"^[A-Z0-9&-]+$")
+    series: str = Field(..., pattern=r"^[A-Z0-9]{2}$")
+    isin: str
+    currency: Literal["INR"] = "INR"
+
+    @field_validator("isin")
+    @classmethod
+    def _isin_must_be_valid(cls, value: str) -> str:
+        if not is_valid_isin(value):
+            raise ValueError("invalid ISIN")
+        return value
+
+    @property
+    def key(self) -> str:
+        return f"{self.workspace}:{self.venue}:{self.segment}:{self.isin}:{self.series}"
+
+    def instrument(self) -> IndiaInstrument:
+        return IndiaInstrument(symbol=self.symbol)
