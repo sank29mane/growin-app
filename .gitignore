@@ -75,6 +75,9 @@ backend/*.pid
 .t212_cache.json
 backend/.t212_cache.json
 
+# Private trading edge (strategy params, live limits, research refs). Never tracked.
+/private/
+
 # Tooling artifacts (local only)
 graphify-out/
 

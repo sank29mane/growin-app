@@ -33,7 +33,7 @@ def prepare(service, ledger, pid, quantity="5"):
 
 
 def test_explicit_budget_is_required_and_reservation_is_decimal(tmp_path):
-    with ExecutionLedger(tmp_path / "execution.sqlite3") as ledger:
+    with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
         service = ExecutionService(PaperDispatcher(), ledger)
         prepare(service, ledger, "one")
         with pytest.raises(Exception, match="budget"):
@@ -45,7 +45,7 @@ def test_explicit_budget_is_required_and_reservation_is_decimal(tmp_path):
 
 
 def test_concurrent_buy_reservations_cannot_overallocate_budget(tmp_path):
-    with ExecutionLedger(tmp_path / "execution.sqlite3") as ledger:
+    with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
         service = ExecutionService(PaperDispatcher(), ledger)
         ledger.configure_paper_budget("invest", "GBP", "100")
         for pid in ("one", "two", "three"):

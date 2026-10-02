@@ -45,7 +45,7 @@ def evidence(service, value="2", **kwargs):
 def test_missing_or_denied_evidence_records_no_reservation_or_dispatch(tmp_path):
     dispatcher = MagicMock()
     dispatcher.dispatch = AsyncMock()
-    with ExecutionLedger(tmp_path / "execution.sqlite3") as ledger:
+    with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
         service = ExecutionService(dispatcher, ledger)
         denied = evidence(service, risk_evidence={"allowed": False, "scaled_size": 0})
         assert denied.decision is AdmissionDecision.DENIED
@@ -91,7 +91,7 @@ def policy_connection():
 def test_runtime_preflight_requires_context_and_rejects_before_dispatch(tmp_path):
     dispatcher = MagicMock()
     dispatcher.dispatch = AsyncMock()
-    with ExecutionLedger(tmp_path / "execution.sqlite3") as ledger:
+    with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
         service = preflight_service(dispatcher, ledger)
         denied = service.admit(intent("missing-context"), currency="GBP", price="100")
 
@@ -106,7 +106,7 @@ def test_runtime_preflight_requires_context_and_rejects_before_dispatch(tmp_path
 def test_runtime_preflight_uses_components_and_rejects_swarm_gate_failure(tmp_path):
     dispatcher = MagicMock()
     dispatcher.dispatch = AsyncMock()
-    with ExecutionLedger(tmp_path / "execution.sqlite3") as ledger:
+    with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
         connection = policy_connection()
         try:
             service = preflight_service(dispatcher, ledger)
@@ -135,7 +135,7 @@ def test_runtime_preflight_uses_components_and_rejects_swarm_gate_failure(tmp_pa
 def test_app_startup_uses_runtime_preflight_for_local_paper_uat(tmp_path):
     app_state = AppState()
     try:
-        assert app_state.start_execution(tmp_path / "execution.sqlite3")
+        assert app_state.start_execution(tmp_path / "execution.sqlite3", workspace="uk")
         proposal = app_state.create_paper_approval_check()
         admission = app_state._execution_ledger.get_admission(proposal["proposal_id"])
 
@@ -155,7 +155,7 @@ def test_app_startup_uses_runtime_preflight_for_local_paper_uat(tmp_path):
     ],
 )
 def test_non_finite_and_zero_simulator_values_deny(tmp_path, simulator_evidence):
-    with ExecutionLedger(tmp_path / "execution.sqlite3") as ledger:
+    with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
         service = ExecutionService(PaperDispatcher(), ledger)
         result = evidence(service, simulator_evidence=simulator_evidence)
         assert result.decision is AdmissionDecision.DENIED
@@ -163,7 +163,7 @@ def test_non_finite_and_zero_simulator_values_deny(tmp_path, simulator_evidence)
 
 
 def test_stale_and_sell_evidence_fail_closed(tmp_path):
-    with ExecutionLedger(tmp_path / "execution.sqlite3") as ledger:
+    with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
         service = ExecutionService(PaperDispatcher(), ledger)
         stale = evidence(
             service,
@@ -183,7 +183,7 @@ def test_stale_and_sell_evidence_fail_closed(tmp_path):
 
 
 def test_admitted_evidence_is_decimal_and_immutable(tmp_path):
-    with ExecutionLedger(tmp_path / "execution.sqlite3") as ledger:
+    with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
         service = ExecutionService(PaperDispatcher(), ledger)
         result = evidence(service, value="1.5")
         assert result.decision is AdmissionDecision.ADMITTED
