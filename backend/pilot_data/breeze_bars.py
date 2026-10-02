@@ -12,6 +12,8 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any
 
+from pydantic import BaseModel, ConfigDict
+
 from .bhavcopy import quarantines_from_inputs, validate_ohlc
 from .core import PilotDataError, SourceDescriptor, canonical_sha256, utc_naive
 from .models import BreezeDailyBar, DailyBarConvention, ParseQuarantineInput
@@ -191,4 +193,88 @@ def ingest_breeze_response(
     )
     return BreezeIngestOutcome(
         ref.source_sha256, outcome.inserted, outcome.identical, outcome.conflicts, quarantined
+    )
+
+
+class BreezeBarRow(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    trade_date: date
+    raw_datetime: str
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: int
+    source_sha256: str
+    row_sha256: str
+
+
+class BreezeConflict(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    trade_date: date
+    source_sha256s: tuple[str, ...]
+
+
+class BreezeBarsView(BaseModel):
+    """Stored Breeze bars for one stock_code: one bar per date, conflicts, and the requested coverage."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    stock_code: str
+    bars: tuple[BreezeBarRow, ...]
+    conflicts: tuple[BreezeConflict, ...]
+    covered_dates: tuple[tuple[date, date], ...]
+
+    def covers(self, day: date) -> bool:
+        return any(low <= day <= high for low, high in self.covered_dates)
+
+    def bar_on(self, day: date) -> BreezeBarRow | None:
+        return next((bar for bar in self.bars if bar.trade_date == day), None)
+
+    def conflict_on(self, day: date) -> BreezeConflict | None:
+        return next((item for item in self.conflicts if item.trade_date == day), None)
+
+
+def breeze_bars_for(store: PilotDataStore, stock_code: str, *, start: date, end: date) -> BreezeBarsView:
+    """Group stored rows by date: one distinct row hash is a bar, several are a conflict (never chosen between)."""
+    ensure_breeze_tables(store)
+    rows = store.query(
+        "SELECT trade_date, raw_datetime, open, high, low, close, volume, source_sha256, row_sha256 "
+        "FROM breeze_bars_raw WHERE stock_code = ? AND trade_date >= ? AND trade_date <= ? "
+        "ORDER BY trade_date, source_sha256",
+        [stock_code, start, end],
+    )
+    by_day: dict[date, list[tuple]] = {}
+    for row in rows:
+        by_day.setdefault(row[0], []).append(row)
+    bars: list[BreezeBarRow] = []
+    conflicts: list[BreezeConflict] = []
+    for day in sorted(by_day):
+        group = by_day[day]
+        if len({item[8] for item in group}) > 1:
+            conflicts.append(BreezeConflict(trade_date=day, source_sha256s=tuple(item[7] for item in group)))
+            continue
+        first = group[0]
+        bars.append(
+            BreezeBarRow(
+                trade_date=day, raw_datetime=first[1], open=first[2], high=first[3], low=first[4], close=first[5],
+                volume=int(first[6]), source_sha256=first[7], row_sha256=first[8],
+            )
+        )
+    ranges = sorted(
+        store.query(
+            "SELECT requested_from, requested_to FROM breeze_responses WHERE stock_code = ? ORDER BY requested_from",
+            [stock_code],
+        )
+    )
+    merged: list[tuple[date, date]] = []
+    for low, high in ranges:
+        if merged and low <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], high))
+        else:
+            merged.append((low, high))
+    return BreezeBarsView(
+        stock_code=stock_code, bars=tuple(bars), conflicts=tuple(conflicts), covered_dates=tuple(merged)
     )
