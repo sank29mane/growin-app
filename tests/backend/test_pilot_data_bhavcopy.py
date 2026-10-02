@@ -112,6 +112,20 @@ def test_pr_zip_skips_index_rows_and_keeps_g_series_rows():
     assert ("ABC", "BE") in names
 
 
+def test_pr_section_header_rows_are_skipped_but_unknown_mkt_securities_are_quarantined():
+    day = date(2024, 5, 2)
+    rows = [
+        {"MKT": "", "SERIES": "BT", "SECURITY": "TRADE FOR TRADE STOCKS", "IND_SEC": "N"},  # real section header
+        {"MKT": "", "SERIES": "", "SECURITY": "EXCHANGE TRADED FUND"},
+        kit.pd_row("CANBK", "EQ", "555.4", "569", "553.55", "566.55"),
+        kit.pd_row("ODD", "EQ", "10", "11", "9", "10", mkt="X"),
+        {"MKT": "N", "SERIES": "EQ", "SYMBOL": "", "OPEN_PRICE": "1"},
+    ]
+    bundle = parse_pr_zip(kit.pr_zip(day, rows, [], []), expected_trade_date=day)
+    assert [b.nse_symbol for b in bundle.pd_bars] == ["CANBK"]
+    assert sorted(q.reason_code for q in bundle.parse_quarantine_inputs) == ["invalid_ohlc", "invalid_row"]
+
+
 def test_pr_member_rules():
     day = date(2024, 5, 2)
     only_bc = kit._zip_bytes({kit.pr_member_names(day)[1]: kit.bc_csv_text([]).encode()})

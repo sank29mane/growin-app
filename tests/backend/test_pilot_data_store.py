@@ -166,6 +166,14 @@ def test_append_rows_requires_hashes_and_known_columns(root):
         )
         assert (outcome.inserted, outcome.conflicts) == (2, 1)
         assert store.query("SELECT k FROM probe_rows ORDER BY k") == [("a",), ("b",)]
+        with pytest.raises(PilotDataError) as no_source_key:
+            store.append_rows("probe_rows", [{"k": "z", "v": 9, "row_sha256": "h"}], check="probe")
+        assert no_source_key.value.code == "append_row_invalid"
+        # an attempt that produced no bytes may carry an explicit None source
+        none_source = store.append_rows(
+            "probe_rows", [{"k": "z", "v": 9, "row_sha256": "h", "source_sha256": None}], check="probe"
+        )
+        assert none_source.inserted == 1
 
 
 # ----------------------------------------------------------------------- NseHttp

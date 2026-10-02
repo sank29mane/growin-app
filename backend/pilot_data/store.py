@@ -293,9 +293,12 @@ class PilotDataStore:
             unknown = set(row) - set(columns)
             if unknown:
                 raise PilotDataError("append_column_unknown", f"{table}: unknown columns {sorted(unknown)}")
-            for needed in ("row_sha256", "source_sha256"):
-                if not isinstance(row.get(needed), str) or not row[needed]:
-                    raise PilotDataError("append_row_invalid", f"{table}: every row needs {needed}")
+            if not isinstance(row.get("row_sha256"), str) or not row["row_sha256"]:
+                raise PilotDataError("append_row_invalid", f"{table}: every row needs row_sha256")
+            if "source_sha256" not in row or not (row["source_sha256"] is None or (
+                    isinstance(row["source_sha256"], str) and row["source_sha256"])):
+                # source_sha256 must be present; None is allowed only for attempts that produced no bytes
+                raise PilotDataError("append_row_invalid", f"{table}: every row needs source_sha256")
             for key in key_columns:
                 if row.get(key) is None:
                     raise PilotDataError("append_row_invalid", f"{table}: key column {key} is missing")
@@ -413,5 +416,5 @@ class PilotDataStore:
             date_from=day,
             date_to=day,
             detail=detail,
-            evidence_sha256s=tuple(str(s) for s in sources),
+            evidence_sha256s=tuple(str(s) for s in sources if s is not None),
         )

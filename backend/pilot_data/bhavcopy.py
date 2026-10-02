@@ -408,6 +408,8 @@ def parse_pr_zip(content: bytes, *, expected_trade_date: date) -> PrBundle:
         row = {name: cell.strip() for name, cell in zip(PD_HEADER, raw)}
         if row["MKT"] == "Y":
             continue
+        if not row["SYMBOL"] and row["MKT"] not in {"N", "G"}:
+            continue  # section headers and separators in the real file carry no symbol and no MKT
         if row["MKT"] not in {"N", "G"}:
             quarantines.append(
                 ParseQuarantineInput(
