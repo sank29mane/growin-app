@@ -41,15 +41,7 @@ struct TradeApprovalReview: Identifiable, Sendable {
 
     var id: String { challenge.challengeId }
 
-    init(challenge: ApprovalChallengeResponse, expectedProposal: TradeProposalData) throws {
-        try self.init(challenge: challenge, expectedProposal: expectedProposal, expectedWorkspace: nil)
-    }
-
     init(challenge: ApprovalChallengeResponse, expectedProposal: TradeProposalData, expectedWorkspace: Workspace) throws {
-        try self.init(challenge: challenge, expectedProposal: expectedProposal, expectedWorkspace: Optional(expectedWorkspace))
-    }
-
-    private init(challenge: ApprovalChallengeResponse, expectedProposal: TradeProposalData, expectedWorkspace: Workspace?) throws {
         guard let bytes = Data(base64Encoded: challenge.signedPayloadB64) else {
             throw TradeApprovalReviewError.invalidEnvelope
         }
@@ -68,7 +60,7 @@ struct TradeApprovalReview: Identifiable, Sendable {
             payload.issuedAt == challenge.issuedAt,
             payload.expiresAt == challenge.expiresAt,
             payload.expiresAt > Int(Date().timeIntervalSince1970),
-            expectedWorkspace.map({ payload.workspace == $0.rawValue }) ?? true
+            payload.workspace == expectedWorkspace.rawValue
         else {
             throw TradeApprovalReviewError.invalidEnvelope
         }

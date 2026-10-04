@@ -32,23 +32,29 @@ final class KeychainStore: @unchecked Sendable {
     // MARK: Scoped API
 
     func data(for name: CredentialName, scope: KeychainScope) throws -> Data? {
-        try data(for: try scopedAccount(name, scope))
+        try rawData(account: try scopedAccount(name, scope))
     }
 
     func string(for name: CredentialName, scope: KeychainScope) throws -> String? {
-        try string(for: try scopedAccount(name, scope))
+        guard let data = try data(for: name, scope: scope) else {
+            return nil
+        }
+        guard let value = String(data: data, encoding: .utf8) else {
+            throw KeychainStoreError.unexpectedData
+        }
+        return value
     }
 
     func set(_ data: Data, for name: CredentialName, scope: KeychainScope) throws {
-        try set(data, for: try scopedAccount(name, scope))
+        try rawSet(data, account: try scopedAccount(name, scope))
     }
 
     func set(_ value: String, for name: CredentialName, scope: KeychainScope) throws {
-        try set(Data(value.utf8), for: try scopedAccount(name, scope))
+        try set(Data(value.utf8), for: name, scope: scope)
     }
 
     func remove(_ name: CredentialName, scope: KeychainScope) throws {
-        try remove(try scopedAccount(name, scope))
+        try rawRemove(account: try scopedAccount(name, scope))
     }
 
     /// The account is "<prefix>:<raw value>" once the policy check passes.
@@ -62,16 +68,16 @@ final class KeychainStore: @unchecked Sendable {
     // MARK: Legacy flat items (unprefixed account, same service)
 
     func legacyFlatData(for name: CredentialName) throws -> Data? {
-        try data(for: name.rawValue)
+        try rawData(account: name.rawValue)
     }
 
     func removeLegacyFlatItem(_ name: CredentialName) throws {
-        try remove(name.rawValue)
+        try rawRemove(account: name.rawValue)
     }
 
-    // MARK: Account-string API (LocalApprovalSigner only; removed by 58-09)
+    // MARK: Raw account access (private: callers can only reach scoped or legacy-flat accounts)
 
-    func data(for account: String) throws -> Data? {
+    private func rawData(account: String) throws -> Data? {
         var query = baseQuery(account: account)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -90,19 +96,9 @@ final class KeychainStore: @unchecked Sendable {
         return data
     }
 
-    func string(for account: String) throws -> String? {
-        guard let data = try data(for: account) else {
-            return nil
-        }
-        guard let value = String(data: data, encoding: .utf8) else {
-            throw KeychainStoreError.unexpectedData
-        }
-        return value
-    }
-
-    func set(_ data: Data, for account: String) throws {
+    private func rawSet(_ data: Data, account: String) throws {
         if data.isEmpty {
-            try remove(account)
+            try rawRemove(account: account)
             return
         }
 
@@ -126,11 +122,7 @@ final class KeychainStore: @unchecked Sendable {
         }
     }
 
-    func set(_ value: String, for account: String) throws {
-        try set(Data(value.utf8), for: account)
-    }
-
-    func remove(_ account: String) throws {
+    private func rawRemove(account: String) throws {
         let status = SecItemDelete(baseQuery(account: account) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw KeychainStoreError.status(status)

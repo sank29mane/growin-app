@@ -506,4 +506,88 @@ struct ApprovalWorkspaceTests {
             #expect(!source.contains("LocalApprovalSigner.shared.sign(review.signedBytes)"))
         }
     }
+
+    // MARK: Task 3: no unscoped API, per-workspace Secure Enclave tag
+
+    @Test func secureEnclaveTagsDifferPerWorkspace() {
+        let uk = SecureEnclaveApprovalSigner.keyTag(for: .uk)
+        let india = SecureEnclaveApprovalSigner.keyTag(for: .india)
+        #expect(uk != india)
+        #expect(String(decoding: uk, as: UTF8.self) == "san.Growin.approval-key.v1.uk")
+        #expect(String(decoding: india, as: UTF8.self) == "san.Growin.approval-key.v1.india")
+        for tag in [uk, india] {
+            #expect(String(decoding: tag, as: UTF8.self).hasPrefix("san.Growin.approval-key.v1."))
+        }
+    }
+
+    /// Every .swift file under Growin/, as (repo-relative path, contents).
+    private static func appSources() throws -> [(path: String, text: String)] {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let enumerator = try #require(
+            FileManager.default.enumerator(at: root.appendingPathComponent("Growin"), includingPropertiesForKeys: nil)
+        )
+        var sources: [(String, String)] = []
+        for case let url as URL in enumerator where url.pathExtension == "swift" {
+            let relative = String(url.path.dropFirst(root.path.count + 1))
+            sources.append((relative, try String(contentsOf: url, encoding: .utf8)))
+        }
+        return sources
+    }
+
+    /// Returns the argument text of each call matching `receiverPattern.name(`, balancing parentheses.
+    private static func callArguments(in text: String, pattern: String) throws -> [String] {
+        let regex = try NSRegularExpression(pattern: pattern)
+        let nsText = text as NSString
+        var results: [String] = []
+        for match in regex.matches(in: text, range: NSRange(location: 0, length: nsText.length)) {
+            var depth = 1
+            var index = match.range.location + match.range.length
+            let start = index
+            while index < nsText.length, depth > 0 {
+                let char = nsText.character(at: index)
+                if char == UInt16(UInt8(ascii: "(")) { depth += 1 }
+                if char == UInt16(UInt8(ascii: ")")) { depth -= 1 }
+                index += 1
+            }
+            results.append(nsText.substring(with: NSRange(location: start, length: max(0, index - 1 - start))))
+        }
+        return results
+    }
+
+    @Test func noUnscopedKeychainOrApprovalCallRemains() throws {
+        let sources = try Self.appSources()
+        #expect(sources.count > 10, "source probe found too few files")
+
+        let keychain = try #require(sources.first { $0.path == "Growin/Security/KeychainStore.swift" })
+        #expect(!keychain.text.contains("func data(for account: String)"))
+        #expect(!keychain.text.contains("func string(for account: String)"))
+        #expect(!keychain.text.contains("func remove(_ account: String)"))
+        #expect(!keychain.text.contains("func set(_ data: Data, for account: String)"))
+        #expect(!keychain.text.contains("func set(_ value: String, for account: String)"))
+
+        let approvalCall = #"\b(?:aiService|service|AIService\(\))\.(?:enrollApprovalKey|approvalStatus|createPaperApprovalCheck|createPaperRequoteCheck|verifyPaperRequoteCheck|requestTradeApproval|completeTradeApproval|approveTrade|rejectTrade)\("#
+        var offenders: [String] = []
+        var callCount = 0
+        for (path, text) in sources {
+            // A string-literal account on any KeychainStore call is an unscoped call.
+            for (index, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated()
+            where line.contains("KeychainStore.shared.") && line.contains("for: \"") {
+                offenders.append("\(path):\(index + 1) account-string Keychain call")
+            }
+            if path != "Growin/Security/Workspace.swift", text.contains("\"workspaces/uk/") {
+                offenders.append("\(path) hard-codes workspaces/uk/")
+            }
+            for arguments in try Self.callArguments(in: text, pattern: approvalCall) {
+                callCount += 1
+                if !arguments.contains("workspace:") {
+                    offenders.append("\(path): approval call without workspace: \(arguments.prefix(60))")
+                }
+            }
+        }
+        #expect(callCount >= 8, "approval call probe matched too few calls: \(callCount)")
+        #expect(offenders.isEmpty, "\(offenders)")
+    }
 }

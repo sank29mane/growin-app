@@ -41,19 +41,22 @@ struct ApprovalSignerIdentity: Equatable, Sendable {
 final class SecureEnclaveApprovalSigner: @unchecked Sendable {
     static let shared = SecureEnclaveApprovalSigner()
 
-    private let keyTag = Data("san.Growin.approval-key.v1".utf8)
-
     private init() {}
 
-    var isConfigured: Bool {
-        (try? loadPrivateKey(context: nil)) != nil
+    /// A Secure Enclave key cannot be copied, so each workspace's key is always new.
+    static func keyTag(for workspace: Workspace) -> Data {
+        Data("san.Growin.approval-key.v1.\(workspace.rawValue)".utf8)
+    }
+
+    func isConfigured(for workspace: Workspace) -> Bool {
+        (try? loadPrivateKey(context: nil, workspace: workspace)) != nil
     }
 
     /// Key creation is intentionally separate from signing. Call this only from
     /// the explicit enrollment action; approval never regenerates a missing key.
-    func createIdentityIfNeeded() throws -> ApprovalSignerIdentity {
-        if let existingKey = try loadPrivateKey(context: nil) {
-            return try identity(for: existingKey)
+    func createIdentityIfNeeded(for workspace: Workspace) throws -> ApprovalSignerIdentity {
+        if let existingKey = try loadPrivateKey(context: nil, workspace: workspace) {
+            return try makeIdentity(existingKey)
         }
 
         var accessError: Unmanaged<CFError>?
@@ -72,7 +75,7 @@ final class SecureEnclaveApprovalSigner: @unchecked Sendable {
             kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,
             kSecPrivateKeyAttrs as String: [
                 kSecAttrIsPermanent as String: true,
-                kSecAttrApplicationTag as String: keyTag,
+                kSecAttrApplicationTag as String: Self.keyTag(for: workspace),
                 kSecAttrAccessControl as String: access,
             ],
         ]
@@ -84,24 +87,24 @@ final class SecureEnclaveApprovalSigner: @unchecked Sendable {
             }
             throw ApprovalSignerError.unavailable
         }
-        return try identity(for: privateKey)
+        return try makeIdentity(privateKey)
     }
 
-    func identity() throws -> ApprovalSignerIdentity {
-        guard let privateKey = try loadPrivateKey(context: nil) else {
+    func identity(for workspace: Workspace) throws -> ApprovalSignerIdentity {
+        guard let privateKey = try loadPrivateKey(context: nil, workspace: workspace) else {
             throw ApprovalSignerError.notConfigured
         }
-        return try identity(for: privateKey)
+        return try makeIdentity(privateKey)
     }
 
     /// Signs the exact bytes supplied by the server. The caller must display and
     /// verify the decoded challenge before invoking this method.
-    func sign(_ payload: Data, reason: String) throws -> Data {
+    func sign(_ payload: Data, reason: String, for workspace: Workspace) throws -> Data {
         let context = LAContext()
         context.localizedReason = reason
         context.touchIDAuthenticationAllowableReuseDuration = 0
 
-        guard let privateKey = try loadPrivateKey(context: context) else {
+        guard let privateKey = try loadPrivateKey(context: context, workspace: workspace) else {
             throw ApprovalSignerError.notConfigured
         }
         var signError: Unmanaged<CFError>?
@@ -119,11 +122,11 @@ final class SecureEnclaveApprovalSigner: @unchecked Sendable {
         return signature
     }
 
-    private func loadPrivateKey(context: LAContext?) throws -> SecKey? {
+    private func loadPrivateKey(context: LAContext?, workspace: Workspace) throws -> SecKey? {
         var query: [String: Any] = [
             kSecClass as String: kSecClassKey,
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-            kSecAttrApplicationTag as String: keyTag,
+            kSecAttrApplicationTag as String: Self.keyTag(for: workspace),
             kSecReturnRef as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
@@ -146,7 +149,7 @@ final class SecureEnclaveApprovalSigner: @unchecked Sendable {
         return item as! SecKey?
     }
 
-    private func identity(for privateKey: SecKey) throws -> ApprovalSignerIdentity {
+    private func makeIdentity(_ privateKey: SecKey) throws -> ApprovalSignerIdentity {
         guard let publicKey = SecKeyCopyPublicKey(privateKey) else {
             throw ApprovalSignerError.invalidPublicKey
         }
