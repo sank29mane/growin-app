@@ -14,6 +14,7 @@ from .models import (
     PaperReservation,
     ReconciliationSnapshot,
     ReconciliationStatus,
+    Workspace,
     WorkspaceControl,
 )
 from .approval import (
@@ -30,8 +31,11 @@ from .ledger import (
     ExecutionLedger,
     LedgerError,
     LedgerRequote,
+    LedgerUnpinned,
     LedgerWriterUnavailable,
     RequoteConflict,
+    WorkspaceMismatch,
+    coerce_workspace,
     default_ledger_path,
 )
 from .paper_dispatcher import PaperDispatcher
@@ -75,6 +79,7 @@ __all__ = [
     "EnrollmentError",
     "LedgerError",
     "LedgerRequote",
+    "LedgerUnpinned",
     "LedgerWriterUnavailable",
     "OrderAck",
     "OrderIntent",
@@ -97,7 +102,10 @@ __all__ = [
     "RequoteValidationError",
     "ReplacementPreparation",
     "Trading212Dispatcher",
+    "Workspace",
     "WorkspaceControl",
+    "WorkspaceMismatch",
+    "coerce_workspace",
     "default_ledger_path",
     "evaluate_requote",
 ]
