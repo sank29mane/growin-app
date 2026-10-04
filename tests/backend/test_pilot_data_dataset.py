@@ -12,7 +12,7 @@ import pytest
 from pilot_data.bhavcopy import ingest_pr_zip
 from pilot_data.corporate_actions import derive_corporate_actions
 from pilot_data.core import PilotDataError, sha256_hex
-from pilot_data.dataset import _read_parquet, build_dataset_snapshot, main, verify_dataset
+from pilot_data.dataset import _read_parquet, _write_parquet, build_dataset_snapshot, main, verify_dataset
 from pilot_data.store import PilotDataStore
 
 import pilot_data_testkit as kit
@@ -151,6 +151,30 @@ def test_the_hash_is_stable_and_a_second_export_verifies_instead_of_overwriting(
     assert again.parquet_sha256 == published.parquet_sha256 and (target / "rows.parquet").stat().st_mtime_ns == stamp
     on_disk = json.loads((target / "manifest.json").read_text())
     assert on_disk["parquet_sha256"] == published.parquet_sha256 and on_disk["workspace"] == "india"
+
+
+@pytest.mark.parametrize("name", ["o'brien", "back\\slash", "new\nline", "x'); COPY rows TO '/tmp/pwn' --"])
+def test_export_roots_that_could_break_the_copy_statement_are_refused(store, tmp_path, name):
+    report = built_run(store)
+    export = tmp_path / name
+    with pytest.raises(PilotDataError) as caught:
+        snapshot(store, report, export)
+    assert caught.value.code == "dataset_export_path_unsafe"
+    assert not export.exists()  # refused before any directory was created
+    assert store.query("SELECT count(*) FROM dataset_snapshots")[0][0] == 0
+
+
+def test_a_parquet_destination_outside_the_export_root_is_refused(tmp_path):
+    export = tmp_path / "export"
+    export.mkdir()
+    with pytest.raises(PilotDataError) as caught:
+        _write_parquet([], tmp_path / "elsewhere.parquet", export)
+    assert caught.value.code == "dataset_export_path_unsafe"
+    link = export / "link"
+    link.symlink_to(tmp_path)  # a child by name, but it resolves outside the root
+    with pytest.raises(PilotDataError):
+        _write_parquet([], link / "rows.parquet", export)
+    assert not (tmp_path / "elsewhere.parquet").exists() and not (tmp_path / "rows.parquet").exists()
 
 
 def test_verify_detects_byte_flips_and_rewritten_values(store, tmp_path):

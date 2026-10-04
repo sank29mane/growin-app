@@ -131,7 +131,30 @@ def dataset_hash(rows: list[DatasetRow]) -> str:
     return canonical_sha256([row.payload() for row in rows])
 
 
-def _write_parquet(rows: list[DatasetRow], path: Path) -> None:
+_UNSAFE_PATH_CHARS = ("'", "\\", "\n", "\r", "\x00")
+
+
+def _checked_destination(path: Path, export_root: Path) -> str:
+    """The SQL-literal-safe text of a destination that is a resolved child of export_root.
+
+    DuckDB cannot bind the COPY TO target as a parameter, so the path is interpolated into the
+    statement. Anything that could break out of the literal, or that points outside the export
+    root (for example through a symlink), is refused before any statement is built.
+    """
+    resolved = Path(path).resolve()
+    root = Path(export_root).resolve()
+    for text in (str(path), str(resolved), str(root)):
+        if any(char in text for char in _UNSAFE_PATH_CHARS):
+            raise PilotDataError(
+                "dataset_export_path_unsafe", "export path contains a quote, backslash, newline or NUL character"
+            )
+    if root not in resolved.parents:
+        raise PilotDataError("dataset_export_path_unsafe", "export destination is not inside the export root")
+    return str(resolved)
+
+
+def _write_parquet(rows: list[DatasetRow], path: Path, export_root: Path) -> None:
+    destination = _checked_destination(path, export_root)
     con = duckdb.connect(":memory:")
     try:
         con.execute(_PARQUET_SQL)
@@ -140,7 +163,7 @@ def _write_parquet(rows: list[DatasetRow], path: Path) -> None:
             f"INSERT INTO rows VALUES ({', '.join('?' for _ in names)})",
             [[getattr(row, name) for name in names] for row in rows],
         )
-        con.execute(f"COPY (SELECT * FROM rows ORDER BY anchor_isin, trade_date) TO '{path}' (FORMAT PARQUET)")
+        con.execute(f"COPY (SELECT * FROM rows ORDER BY anchor_isin, trade_date) TO '{destination}' (FORMAT PARQUET)")
     finally:
         con.close()
 
@@ -290,11 +313,12 @@ def _export(rows: list[DatasetRow], manifest: DatasetManifest, export_root: Path
     target = export_root / manifest.dataset_sha256
     if target.exists():
         return verify_dataset(target, workspace=workspace)  # never overwrite a published directory
+    _checked_destination(target / "rows.parquet", export_root)  # refuse before creating any directory
     export_root.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(dir=export_root, prefix=".staging-"))
     try:
         parquet = staging / "rows.parquet"
-        _write_parquet(rows, parquet)
+        _write_parquet(rows, parquet, export_root)
         published = manifest.model_copy(update={"parquet_sha256": sha256_hex(parquet.read_bytes())})
         (staging / "manifest.json").write_text(
             json.dumps(published.model_dump(mode="json"), sort_keys=True, indent=2), encoding="utf-8"
