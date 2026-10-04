@@ -85,9 +85,10 @@ final class ApprovalWorkspaceURLProtocol: URLProtocol {
 struct ApprovalWorkspaceTests {
     // MARK: Fixtures
 
-    private static func makeSigner() -> (LocalApprovalSigner, KeychainStore) {
-        let store = KeychainStore(service: "san.Growin.credentials.v1.test.\(UUID().uuidString)")
-        return (LocalApprovalSigner(store: store), store)
+    private static func makeSigner() -> (LocalApprovalSigner, KeychainStore, String) {
+        let service = "san.Growin.credentials.v1.test.\(UUID().uuidString)"
+        let store = KeychainStore(service: service)
+        return (LocalApprovalSigner(store: store), store, service)
     }
 
     private static func cleanUp(_ store: KeychainStore) {
@@ -153,7 +154,7 @@ struct ApprovalWorkspaceTests {
     // MARK: Signer
 
     @Test func workspaceKeysDifferAndSignaturesVerifyOnlyWithTheirOwnKey() throws {
-        let (signer, store) = Self.makeSigner()
+        let (signer, store, _) = Self.makeSigner()
         defer { Self.cleanUp(store) }
 
         let uk = try signer.createIdentityIfNeeded(for: .uk)
@@ -171,7 +172,7 @@ struct ApprovalWorkspaceTests {
     }
 
     @Test func identityForMissingWorkspaceThrowsNotConfigured() throws {
-        let (signer, store) = Self.makeSigner()
+        let (signer, store, _) = Self.makeSigner()
         defer { Self.cleanUp(store) }
 
         _ = try signer.createIdentityIfNeeded(for: .uk)
@@ -295,7 +296,7 @@ struct ApprovalWorkspaceTests {
     }
 
     @Test func enrollAndUatRoutesNameTheWorkspace() async throws {
-        let (signer, store) = Self.makeSigner()
+        let (signer, store, _) = Self.makeSigner()
         defer { Self.cleanUp(store) }
         let identity = try signer.createIdentityIfNeeded(for: .india)
 
@@ -367,5 +368,142 @@ struct ApprovalWorkspaceTests {
         #expect(adapters.contains("identity(for: .india)"))
         #expect(adapters.contains("sign(payload, for: .india)"))
         #expect(!adapters.contains(".uk"))
+    }
+
+    // MARK: Task 2: selection, duplicate refusal, legacy adoption
+
+    @Test func workspaceSelectionStartsEmptyAndRoundTrips() throws {
+        let suite = "san.Growin.tests.selection.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        #expect(WorkspaceSelection.current(defaults) == nil)
+        WorkspaceSelection.set(.india, defaults)
+        #expect(WorkspaceSelection.current(defaults) == .india)
+        defaults.set("mars", forKey: WorkspaceSelection.defaultsKey)
+        #expect(WorkspaceSelection.current(defaults) == nil)
+        defaults.set("", forKey: WorkspaceSelection.defaultsKey)
+        #expect(WorkspaceSelection.current(defaults) == nil)
+        WorkspaceSelection.set(.uk, defaults)
+        WorkspaceSelection.set(nil, defaults)
+        #expect(WorkspaceSelection.current(defaults) == nil)
+    }
+
+    @Test func identicalKeyInBothWorkspacesIsRefused() throws {
+        let (signer, store, _) = Self.makeSigner()
+        defer { Self.cleanUp(store) }
+
+        let raw = P256.Signing.PrivateKey().rawRepresentation
+        try store.set(raw, for: .approvalSigningKey, scope: .workspace(.uk))
+        try store.set(raw, for: .approvalSigningKey, scope: .workspace(.india))
+
+        for workspace in Workspace.allCases {
+            do {
+                _ = try signer.identity(for: workspace)
+                Issue.record("Expected duplicateKeyAcrossWorkspaces for \(workspace)")
+            } catch LocalApprovalSignerError.duplicateKeyAcrossWorkspaces {
+            } catch {
+                Issue.record("Unexpected error: \(error)")
+            }
+            do {
+                _ = try signer.createIdentityIfNeeded(for: workspace)
+                Issue.record("Expected duplicateKeyAcrossWorkspaces for \(workspace)")
+            } catch LocalApprovalSignerError.duplicateKeyAcrossWorkspaces {
+            } catch {
+                Issue.record("Unexpected error: \(error)")
+            }
+            do {
+                _ = try signer.sign(Data("x".utf8), for: workspace)
+                Issue.record("Expected duplicateKeyAcrossWorkspaces for \(workspace)")
+            } catch LocalApprovalSignerError.duplicateKeyAcrossWorkspaces {
+            } catch {
+                Issue.record("Unexpected error: \(error)")
+            }
+        }
+    }
+
+    private static let legacyAccount = "approvalSoftwareP256PrivateKey.v1"
+
+    @Test func legacyAdoptionIsUkOnlyAndNeedsAMatchingKeyID() throws {
+        let (signer, store, service) = Self.makeSigner()
+        defer { Self.cleanUp(store) }
+        let raw = RawKeychain(service: service)
+
+        let legacyKey = P256.Signing.PrivateKey()
+        try raw.set(legacyKey.rawRepresentation, account: Self.legacyAccount)
+        let legacyKeyID = SHA256.hash(data: legacyKey.publicKey.x963Representation)
+            .map { String(format: "%02x", $0) }.joined()
+        #expect(signer.hasLegacyFlatKey())
+
+        // India never adopts the flat key.
+        do {
+            _ = try signer.adoptLegacyKey(into: .india, expectedKeyID: legacyKeyID)
+            Issue.record("Expected legacyAdoptionNotAllowed")
+        } catch LocalApprovalSignerError.legacyAdoptionNotAllowed {
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+
+        // A wrong key ID leaves the flat item in place.
+        do {
+            _ = try signer.adoptLegacyKey(into: .uk, expectedKeyID: "not-the-key")
+            Issue.record("Expected legacyKeyMismatch")
+        } catch LocalApprovalSignerError.legacyKeyMismatch {
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+        #expect(try raw.data(account: Self.legacyAccount) == legacyKey.rawRepresentation)
+        #expect(!signer.isConfigured(for: .uk))
+
+        // The right key ID moves it, and the flat item is gone.
+        let adopted = try signer.adoptLegacyKey(into: .uk, expectedKeyID: legacyKeyID)
+        #expect(adopted.keyID == legacyKeyID)
+        #expect(try signer.identity(for: .uk) == adopted)
+        #expect(try raw.data(account: Self.legacyAccount) == nil)
+        #expect(!signer.hasLegacyFlatKey())
+
+        // A second call has nothing to adopt.
+        do {
+            _ = try signer.adoptLegacyKey(into: .uk, expectedKeyID: legacyKeyID)
+            Issue.record("Expected noLegacyKey")
+        } catch LocalApprovalSignerError.noLegacyKey {
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+        // India is untouched and still has no key.
+        #expect(!signer.isConfigured(for: .india))
+    }
+
+    @Test func legacyAdoptionRefusesWhenAUkKeyAlreadyExists() throws {
+        let (signer, store, service) = Self.makeSigner()
+        defer { Self.cleanUp(store) }
+        let raw = RawKeychain(service: service)
+
+        _ = try signer.createIdentityIfNeeded(for: .uk)
+        let legacyKey = P256.Signing.PrivateKey()
+        try raw.set(legacyKey.rawRepresentation, account: Self.legacyAccount)
+        let legacyKeyID = SHA256.hash(data: legacyKey.publicKey.x963Representation)
+            .map { String(format: "%02x", $0) }.joined()
+
+        do {
+            _ = try signer.adoptLegacyKey(into: .uk, expectedKeyID: legacyKeyID)
+            Issue.record("Expected workspaceKeyExists")
+        } catch LocalApprovalSignerError.workspaceKeyExists {
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+        #expect(try raw.data(account: Self.legacyAccount) == legacyKey.rawRepresentation)
+    }
+
+    @Test func settingsHasNoHardCodedUkAndNoNoArgumentSignerUse() throws {
+        let settings = try PaperOperationsSourceProbe.contents("Growin/Views/SettingsView.swift")
+        #expect(!settings.contains("workspaces/uk/"))
+        #expect(settings.contains("WorkspaceSelection.defaultsKey"))
+        let chat = try PaperOperationsSourceProbe.contents("Growin/ViewModels/ChatViewModel.swift")
+        for source in [settings, chat] {
+            #expect(!source.contains("LocalApprovalSigner.shared.identity()"))
+            #expect(!source.contains("LocalApprovalSigner.shared.isConfigured\n"))
+            #expect(!source.contains("LocalApprovalSigner.shared.sign(review.signedBytes)"))
+        }
     }
 }

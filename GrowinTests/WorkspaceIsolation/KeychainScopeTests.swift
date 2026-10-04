@@ -51,7 +51,7 @@ struct KeychainScopeTests {
     }
 
     @Test func ukCredentialIsInvisibleToIndiaScopeAndRawIndiaAccount() {
-        let (store, _) = Self.makeStore()
+        let (store, service) = Self.makeStore()
         defer { Self.cleanUp(store) }
         Self.requireKeychain {
             try store.set("uk-secret", for: .trading212ApiKey, scope: .workspace(.uk))
@@ -67,8 +67,8 @@ struct KeychainScopeTests {
                 _ = try store.data(for: .trading212ApiKey, scope: .shared)
             }
             // The raw india: account does not exist in the real Keychain.
-            #expect(try store.data(for: "india:trading212ApiKey") == nil)
-            #expect(try store.data(for: "uk:trading212ApiKey") != nil)
+            #expect(try RawKeychain(service: service).data(account: "india:trading212ApiKey") == nil)
+            #expect(try RawKeychain(service: service).data(account: "uk:trading212ApiKey") != nil)
         }
     }
 
@@ -86,7 +86,7 @@ struct KeychainScopeTests {
     }
 
     @Test func sharedCredentialReadsOnlyWithSharedScope() {
-        let (store, _) = Self.makeStore()
+        let (store, service) = Self.makeStore()
         defer { Self.cleanUp(store) }
         Self.requireKeychain {
             try store.set("llm-key", for: .openaiApiKey, scope: .shared)
@@ -97,7 +97,7 @@ struct KeychainScopeTests {
             #expect(throws: KeychainStoreError.self) {
                 _ = try store.string(for: .openaiApiKey, scope: .workspace(.india))
             }
-            #expect(try store.data(for: "shared:openaiApiKey") != nil)
+            #expect(try RawKeychain(service: service).data(account: "shared:openaiApiKey") != nil)
         }
     }
 
@@ -129,13 +129,13 @@ struct KeychainScopeTests {
     }
 
     @Test func flatMigrationMovesSharedAndUkItemsAndIsIdempotent() {
-        let (store, _) = Self.makeStore()
+        let (store, service) = Self.makeStore()
         defer { Self.cleanUp(store) }
         Self.requireKeychain {
-            try store.set("shared-flat", for: CredentialName.openaiApiKey.rawValue)
-            try store.set("uk-flat", for: CredentialName.t212InvestKey.rawValue)
+            try RawKeychain(service: service).set(Data("shared-flat".utf8), account: CredentialName.openaiApiKey.rawValue)
+            try RawKeychain(service: service).set(Data("uk-flat".utf8), account: CredentialName.t212InvestKey.rawValue)
             let approval = Data(repeating: 9, count: 32)
-            try store.set(approval, for: CredentialName.approvalSigningKey.rawValue)
+            try RawKeychain(service: service).set(approval, account: CredentialName.approvalSigningKey.rawValue)
 
             let failures = store.migrateFlatItemsToScoped()
             #expect(failures.isEmpty)
@@ -158,11 +158,11 @@ struct KeychainScopeTests {
     }
 
     @Test func flatMigrationNeverOverwritesADifferingScopedValue() {
-        let (store, _) = Self.makeStore()
+        let (store, service) = Self.makeStore()
         defer { Self.cleanUp(store) }
         Self.requireKeychain {
             try store.set("scoped-new", for: .tavilyApiKey, scope: .shared)
-            try store.set("flat-old", for: CredentialName.tavilyApiKey.rawValue)
+            try RawKeychain(service: service).set(Data("flat-old".utf8), account: CredentialName.tavilyApiKey.rawValue)
 
             let failures = store.migrateFlatItemsToScoped()
             #expect(failures == [.tavilyApiKey])

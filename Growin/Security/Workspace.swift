@@ -104,3 +104,21 @@ nonisolated enum CredentialName: String, CaseIterable, Sendable {
         }
     }
 }
+
+/// The workspace the operator picked in Settings. Nothing is preselected: the
+/// value is absent until the operator chooses one.
+nonisolated enum WorkspaceSelection {
+    static let defaultsKey = "selectedWorkspace"
+
+    static func current(_ defaults: UserDefaults = .standard) -> Workspace? {
+        defaults.string(forKey: defaultsKey).flatMap(Workspace.init(rawValue:))
+    }
+
+    static func set(_ workspace: Workspace?, _ defaults: UserDefaults = .standard) {
+        if let workspace {
+            defaults.set(workspace.rawValue, forKey: defaultsKey)
+        } else {
+            defaults.removeObject(forKey: defaultsKey)
+        }
+    }
+}

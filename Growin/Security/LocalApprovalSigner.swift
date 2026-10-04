@@ -46,8 +46,6 @@ final class LocalApprovalSigner: @unchecked Sendable {
         self.store = store
     }
 
-    // MARK: Per-workspace API
-
     func isConfigured(for workspace: Workspace) -> Bool {
         (try? identity(for: workspace)) != nil
     }
@@ -55,7 +53,7 @@ final class LocalApprovalSigner: @unchecked Sendable {
     /// Creates the workspace key only during explicit enrollment. Approval never
     /// regenerates a missing or invalid key because that would change identity.
     func createIdentityIfNeeded(for workspace: Workspace) throws -> ApprovalSignerIdentity {
-        if let rawKey = try store.data(for: .approvalSigningKey, scope: .workspace(workspace)) {
+        if let rawKey = try storedKey(for: workspace) {
             return makeIdentity(try decodePrivateKey(rawKey))
         }
 
@@ -65,7 +63,7 @@ final class LocalApprovalSigner: @unchecked Sendable {
     }
 
     func identity(for workspace: Workspace) throws -> ApprovalSignerIdentity {
-        guard let rawKey = try store.data(for: .approvalSigningKey, scope: .workspace(workspace)) else {
+        guard let rawKey = try storedKey(for: workspace) else {
             throw LocalApprovalSignerError.notConfigured
         }
         return makeIdentity(try decodePrivateKey(rawKey))
@@ -73,47 +71,64 @@ final class LocalApprovalSigner: @unchecked Sendable {
 
     /// Signs the exact canonical bytes supplied and reviewed by the caller.
     func sign(_ payload: Data, for workspace: Workspace) throws -> Data {
-        guard let rawKey = try store.data(for: .approvalSigningKey, scope: .workspace(workspace)) else {
+        guard let rawKey = try storedKey(for: workspace) else {
             throw LocalApprovalSignerError.notConfigured
         }
         let privateKey = try decodePrivateKey(rawKey)
         return try privateKey.signature(for: payload).derRepresentation
     }
 
-    // MARK: Legacy no-workspace API (removed once Settings and Chat are converted)
+    // MARK: Legacy key adoption
 
-    private let keychainAccount = "approvalSoftwareP256PrivateKey.v1"
-
-    var isConfigured: Bool {
-        (try? identity()) != nil
+    func hasLegacyFlatKey() -> Bool {
+        ((try? store.legacyFlatData(for: .approvalSigningKey)) ?? nil) != nil
     }
 
-    func createIdentityIfNeeded() throws -> ApprovalSignerIdentity {
-        if let rawKey = try store.data(for: keychainAccount) {
-            return makeIdentity(try decodePrivateKey(rawKey))
+    /// Moves the pre-58 flat approval key into UK, and only into UK. The key must
+    /// be the one the UK ledger enrolled (`expectedKeyID`), because the ledger
+    /// cannot rotate an enrolled key. India always starts with a fresh key.
+    /// Copy, read back, compare, then delete the flat item.
+    func adoptLegacyKey(into workspace: Workspace, expectedKeyID: String) throws -> ApprovalSignerIdentity {
+        guard workspace == .uk else {
+            throw LocalApprovalSignerError.legacyAdoptionNotAllowed
         }
-
-        let privateKey = P256.Signing.PrivateKey()
-        try store.set(privateKey.rawRepresentation, for: keychainAccount)
-        return makeIdentity(privateKey)
-    }
-
-    func identity() throws -> ApprovalSignerIdentity {
-        guard let rawKey = try store.data(for: keychainAccount) else {
-            throw LocalApprovalSignerError.notConfigured
+        guard let flat = try store.legacyFlatData(for: .approvalSigningKey) else {
+            throw LocalApprovalSignerError.noLegacyKey
         }
-        return makeIdentity(try decodePrivateKey(rawKey))
-    }
-
-    func sign(_ payload: Data) throws -> Data {
-        guard let rawKey = try store.data(for: keychainAccount) else {
-            throw LocalApprovalSignerError.notConfigured
+        guard try store.data(for: .approvalSigningKey, scope: .workspace(workspace)) == nil else {
+            throw LocalApprovalSignerError.workspaceKeyExists
         }
-        let privateKey = try decodePrivateKey(rawKey)
-        return try privateKey.signature(for: payload).derRepresentation
+        let identity = makeIdentity(try decodePrivateKey(flat))
+        guard identity.keyID == expectedKeyID else {
+            throw LocalApprovalSignerError.legacyKeyMismatch
+        }
+        for other in Workspace.allCases where other != workspace {
+            if try store.data(for: .approvalSigningKey, scope: .workspace(other)) == flat {
+                throw LocalApprovalSignerError.duplicateKeyAcrossWorkspaces
+            }
+        }
+        try store.set(flat, for: .approvalSigningKey, scope: .workspace(workspace))
+        guard try store.data(for: .approvalSigningKey, scope: .workspace(workspace)) == flat else {
+            throw KeychainStoreError.unexpectedData
+        }
+        try store.removeLegacyFlatItem(.approvalSigningKey)
+        return identity
     }
 
     // MARK: Helpers
+
+    /// Reads a workspace key and refuses it when another workspace holds the same bytes.
+    private func storedKey(for workspace: Workspace) throws -> Data? {
+        guard let rawKey = try store.data(for: .approvalSigningKey, scope: .workspace(workspace)) else {
+            return nil
+        }
+        for other in Workspace.allCases where other != workspace {
+            if try store.data(for: .approvalSigningKey, scope: .workspace(other)) == rawKey {
+                throw LocalApprovalSignerError.duplicateKeyAcrossWorkspaces
+            }
+        }
+        return rawKey
+    }
 
     private func decodePrivateKey(_ rawKey: Data) throws -> P256.Signing.PrivateKey {
         guard let privateKey = try? P256.Signing.PrivateKey(rawRepresentation: rawKey) else {
