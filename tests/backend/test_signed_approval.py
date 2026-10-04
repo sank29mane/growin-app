@@ -19,6 +19,7 @@ from execution import (
     ExecutionLedger,
     ExecutionService,
     PaperDispatcher,
+    WorkspaceMismatch,
 )
 from execution.ledger import IntentConflict, LedgerUnpinned
 from execution.models import OrderIntent
@@ -78,7 +79,7 @@ def enroll(approval: ApprovalService, key, token: bytes = b"one-time-secret"):
     token_path = approval.enrollment_token_path
     token_path.write_bytes(token)
     os.chmod(token_path, 0o600)
-    enrolled = approval.enroll_key(public_x963(key), token)
+    enrolled = approval.enroll_key(public_x963(key), token, workspace="uk")
     assert not token_path.exists()
     return enrolled
 
@@ -101,20 +102,20 @@ def test_first_key_enrollment_requires_private_one_time_token_and_is_idempotent(
         token_path.write_bytes(b"correct")
         os.chmod(token_path, 0o644)
         with pytest.raises(EnrollmentError, match="0600"):
-            approval.enroll_key(public_x963(key), b"correct")
+            approval.enroll_key(public_x963(key), b"correct", workspace="uk")
         os.chmod(token_path, 0o600)
         with pytest.raises(EnrollmentError, match="does not match"):
-            approval.enroll_key(public_x963(key), b"wrong")
+            approval.enroll_key(public_x963(key), b"wrong", workspace="uk")
 
-        first = approval.enroll_key(public_x963(key), b"correct")
-        replay = approval.enroll_key(public_x963(key), b"token-is-gone")
+        first = approval.enroll_key(public_x963(key), b"correct", workspace="uk")
+        replay = approval.enroll_key(public_x963(key), b"token-is-gone", workspace="uk")
         assert replay == first
         assert not token_path.exists()
         ApprovalService(ledger)
         assert not token_path.exists()
         assert b"correct" not in ledger.path.read_bytes()
         with pytest.raises(EnrollmentError, match="rotation"):
-            approval.enroll_key(public_x963(private_key()), b"anything")
+            approval.enroll_key(public_x963(private_key()), b"anything", workspace="uk")
 
 
 @pytest.mark.asyncio
@@ -131,7 +132,7 @@ async def test_signed_payload_is_exact_and_success_replays_only_same_evidence(tm
             approval_service=approval,
         )
         admit_and_reserve(ledger, make_intent())
-        challenge = service.create_approval_challenge("signed-1", ttl_seconds=60)
+        challenge = service.create_approval_challenge("signed-1", workspace="uk", ttl_seconds=60)
         payload = json.loads(challenge.signed_payload)
 
         assert set(payload) == {
@@ -176,8 +177,8 @@ async def test_signed_payload_is_exact_and_success_replays_only_same_evidence(tm
         ).encode("utf-8") == challenge.signed_payload
 
         signature = sign(key, challenge.signed_payload)
-        first = await service.approve_signed("signed-1", challenge.challenge_id, signature)
-        replay = await service.approve_signed("signed-1", challenge.challenge_id, signature)
+        first = await service.approve_signed("signed-1", challenge.challenge_id, signature, workspace="uk")
+        replay = await service.approve_signed("signed-1", challenge.challenge_id, signature, workspace="uk")
 
         assert first.idempotent_replay is False
         assert replay.idempotent_replay is True
@@ -213,11 +214,14 @@ async def test_required_approval_blocks_legacy_and_invalid_signature(tmp_path):
         with pytest.raises(ExecutionDisabledError, match="Signed approval"):
             await service.approve(intent.proposal_id)
 
-        challenge = service.create_approval_challenge(intent.proposal_id)
+        challenge = service.create_approval_challenge(intent.proposal_id, workspace="uk")
         wrong_signature = sign(private_key(), challenge.signed_payload)
         with pytest.raises(ApprovalVerificationError, match="invalid"):
             await service.approve_signed(
-                intent.proposal_id, challenge.challenge_id, wrong_signature
+                intent.proposal_id,
+                challenge.challenge_id,
+                wrong_signature,
+                workspace="uk",
             )
         assert ledger.get_order(intent.proposal_id).state == "PENDING"
         assert ledger.approval_evidence_count(intent.proposal_id) == 0
@@ -243,7 +247,7 @@ async def test_concurrent_services_create_one_approval_and_dispatch(tmp_path):
         key = private_key()
         enroll(approval, key)
         admit_and_reserve(ledger, make_intent())
-        challenge = approval.create_challenge("signed-1")
+        challenge = approval.create_challenge("signed-1", workspace="uk")
         signature = sign(key, challenge.signed_payload)
         dispatcher = BlockingDispatcher()
         first_service = ExecutionService(
@@ -254,12 +258,12 @@ async def test_concurrent_services_create_one_approval_and_dispatch(tmp_path):
         )
 
         first = asyncio.create_task(
-            first_service.approve_signed("signed-1", challenge.challenge_id, signature)
+            first_service.approve_signed("signed-1", challenge.challenge_id, signature, workspace="uk")
         )
         await dispatcher.started.wait()
         with pytest.raises(ExecutionConflictError, match="before acknowledgement"):
             await second_service.approve_signed(
-                "signed-1", challenge.challenge_id, signature
+                "signed-1", challenge.challenge_id, signature, workspace="uk"
             )
         dispatcher.release.set()
         await first
@@ -276,23 +280,23 @@ def test_expired_and_replay_before_ack_fail_without_duplicate_evidence(tmp_path)
         key = private_key()
         enroll(approval, key)
         admit_and_reserve(ledger, make_intent("expired"))
-        expired = approval.create_challenge("expired", ttl_seconds=5)
+        expired = approval.create_challenge("expired", workspace="uk", ttl_seconds=5)
         expired_signature = sign(key, expired.signed_payload)
         clock.advance(seconds=6)
         with pytest.raises(ApprovalConflict, match="expired"):
-            approval.approve_signed("expired", expired.challenge_id, expired_signature)
+            approval.approve_signed("expired", expired.challenge_id, expired_signature, workspace="uk")
         assert ledger.approval_evidence_count("expired") == 0
 
         admit_and_reserve(ledger, make_intent("in-flight"))
-        current = approval.create_challenge("in-flight", ttl_seconds=60)
+        current = approval.create_challenge("in-flight", workspace="uk", ttl_seconds=60)
         current_signature = sign(key, current.signed_payload)
         first = approval.approve_signed(
-            "in-flight", current.challenge_id, current_signature
+            "in-flight", current.challenge_id, current_signature, workspace="uk"
         )
         assert first.claimed
         with pytest.raises(ApprovalConflict, match="before acknowledgement"):
             approval.approve_signed(
-                "in-flight", current.challenge_id, current_signature
+                "in-flight", current.challenge_id, current_signature, workspace="uk"
             )
         assert ledger.approval_evidence_count("in-flight") == 1
         assert len(ledger.list_attempts("in-flight")) == 1
@@ -304,7 +308,7 @@ def test_approval_and_claim_roll_back_together_on_event_failure(tmp_path, monkey
         key = private_key()
         enroll(approval, key)
         admit_and_reserve(ledger, make_intent())
-        challenge = approval.create_challenge("signed-1")
+        challenge = approval.create_challenge("signed-1", workspace="uk")
         signature = sign(key, challenge.signed_payload)
 
         def fail_event(*_args, **_kwargs):
@@ -312,7 +316,7 @@ def test_approval_and_claim_roll_back_together_on_event_failure(tmp_path, monkey
 
         monkeypatch.setattr(ledger, "_append_event", fail_event)
         with pytest.raises(RuntimeError, match="injected"):
-            approval.approve_signed("signed-1", challenge.challenge_id, signature)
+            approval.approve_signed("signed-1", challenge.challenge_id, signature, workspace="uk")
         assert ledger.get_order("signed-1").state == "PENDING"
         assert ledger.approval_evidence_count("signed-1") == 0
         assert ledger.list_attempts("signed-1") == []
@@ -330,7 +334,7 @@ def test_workspace_and_live_intents_fail_closed(tmp_path):
             make_intent("live", broker="trading212", mode="LIVE")
         )
         with pytest.raises(ApprovalConflict, match="live execution"):
-            approval.create_challenge("live")
+            approval.create_challenge("live", workspace="uk")
 
 
 def test_v1_database_is_refused_until_operator_confirms_ownership(tmp_path):
@@ -412,9 +416,12 @@ def test_approval_evidence_and_challenge_are_database_immutable(tmp_path):
         key = private_key()
         enroll(approval, key)
         admit_and_reserve(ledger, make_intent())
-        challenge = approval.create_challenge("signed-1")
+        challenge = approval.create_challenge("signed-1", workspace="uk")
         approval.approve_signed(
-            "signed-1", challenge.challenge_id, sign(key, challenge.signed_payload)
+            "signed-1",
+            challenge.challenge_id,
+            sign(key, challenge.signed_payload),
+            workspace="uk",
         )
         observer = sqlite3.connect(ledger.path)
         try:
@@ -425,3 +432,136 @@ def test_approval_evidence_and_challenge_are_database_immutable(tmp_path):
                 observer.execute("UPDATE execution_approvals SET key_id = 'changed'")
         finally:
             observer.close()
+
+
+# --- cross-workspace approvals (ISO-02), real P-256 signatures throughout ---
+
+
+def _workspace_stack(tmp_path, workspace: str, key):
+    """A pinned ledger with its own enrolled key and one admitted, reserved order."""
+
+    currency = "GBP" if workspace == "uk" else "INR"
+    ledger = ExecutionLedger(
+        tmp_path / f"{workspace}.sqlite3", require_approval=True, workspace=workspace
+    )
+    approval = ApprovalService(ledger, clock=MutableClock())
+    token_path = approval.enrollment_token_path
+    token_path.write_bytes(b"one-time-secret")
+    os.chmod(token_path, 0o600)
+    approval.enroll_key(public_x963(key), b"one-time-secret", workspace=workspace)
+    service = ExecutionService(
+        PaperDispatcher(), ledger, require_approval=True, approval_service=approval
+    )
+    intent = make_intent(workspace=workspace)
+    service.admit(
+        intent,
+        currency=currency,
+        price="100",
+        simulator_evidence={"simulated_fill_price": "100"},
+        risk_evidence={"scaled_size": str(intent.quantity)},
+    )
+    ledger.configure_paper_budget(intent.account, currency, "10000")
+    service.reserve(intent.proposal_id)
+    return ledger, approval, service
+
+
+@pytest.mark.asyncio
+async def test_challenge_and_signature_from_india_cannot_approve_on_uk(tmp_path):
+    uk_key, india_key = private_key(), private_key()
+    uk, uk_approval, uk_service = _workspace_stack(tmp_path, "uk", uk_key)
+    india, india_approval, _ = _workspace_stack(tmp_path, "india", india_key)
+    try:
+        india_challenge = india_approval.create_challenge("signed-1", workspace="india")
+        india_signature = sign(india_key, india_challenge.signed_payload)
+
+        with pytest.raises(ExecutionConflictError):
+            await uk_service.approve_signed(
+                "signed-1", india_challenge.challenge_id, india_signature, workspace="uk"
+            )
+
+        assert uk.list_attempts("signed-1") == []
+        assert uk.approval_evidence_count("signed-1") == 0
+        assert uk.get_order("signed-1").state == "PENDING"
+        assert india.list_attempts("signed-1") == []
+    finally:
+        uk.close()
+        india.close()
+
+
+def test_uk_key_signature_over_an_india_challenge_fails_india_verification(tmp_path):
+    uk_key, india_key = private_key(), private_key()
+    uk, _, _ = _workspace_stack(tmp_path, "uk", uk_key)
+    india, india_approval, _ = _workspace_stack(tmp_path, "india", india_key)
+    try:
+        india_challenge = india_approval.create_challenge("signed-1", workspace="india")
+        wrong_key_signature = sign(uk_key, india_challenge.signed_payload)
+
+        with pytest.raises(ApprovalVerificationError, match="invalid"):
+            india_approval.verify_signature(
+                "signed-1",
+                india_challenge.challenge_id,
+                wrong_key_signature,
+                workspace="india",
+            )
+        with pytest.raises(ApprovalVerificationError):
+            india_approval.approve_signed(
+                "signed-1",
+                india_challenge.challenge_id,
+                wrong_key_signature,
+                workspace="india",
+            )
+        assert india.list_attempts("signed-1") == []
+        assert india.approval_evidence_count("signed-1") == 0
+    finally:
+        uk.close()
+        india.close()
+
+
+def test_payload_with_altered_workspace_bytes_fails_even_when_correctly_signed(tmp_path):
+    uk_key = private_key()
+    uk, uk_approval, _ = _workspace_stack(tmp_path, "uk", uk_key)
+    try:
+        challenge = uk_approval.create_challenge("signed-1", workspace="uk")
+        original = challenge.signed_payload
+        assert b'"workspace":"uk"' in original
+        altered = original.replace(b'"workspace":"uk"', b'"workspace":"india"')
+        assert altered != original
+        # The right UK key signs the altered bytes; the stored challenge still
+        # holds the original bytes, so verification against it must fail.
+        signature = sign(uk_key, altered)
+
+        with pytest.raises(ApprovalVerificationError, match="invalid"):
+            uk_approval.approve_signed(
+                "signed-1", challenge.challenge_id, signature, workspace="uk"
+            )
+
+        assert uk.approval_evidence_count("signed-1") == 0
+        assert uk.list_attempts("signed-1") == []
+        assert uk.get_order("signed-1").state == "PENDING"
+    finally:
+        uk.close()
+
+
+def test_key_calls_for_another_workspace_raise_and_enroll_nothing(tmp_path):
+    with ExecutionLedger(
+        tmp_path / "execution.sqlite3", require_approval=True, workspace="uk"
+    ) as ledger:
+        approval = ApprovalService(ledger)
+        token = approval.enrollment_token_path.read_bytes()
+        key = private_key()
+
+        with pytest.raises(WorkspaceMismatch):
+            ledger.get_approval_key(workspace="india")
+        with pytest.raises(WorkspaceMismatch):
+            ledger.register_approval_key("k", public_x963(key), workspace="india")
+        with pytest.raises(WorkspaceMismatch):
+            approval.enroll_key(public_x963(key), token, workspace="india")
+        with pytest.raises(TypeError):
+            ledger.get_approval_key()
+        with pytest.raises(TypeError):
+            ledger.register_approval_key("k", public_x963(key))
+        with pytest.raises(TypeError):
+            approval.enroll_key(public_x963(key), token)
+
+        assert ledger.get_approval_key(workspace="uk") is None
+        assert approval.enrollment_token_path.read_bytes() == token

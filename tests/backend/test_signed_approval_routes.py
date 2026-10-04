@@ -108,7 +108,7 @@ async def test_enrollment_requires_local_one_time_token(signed_execution):
     )
 
     assert rejected.status_code == 403
-    assert ledger.get_approval_key() is None
+    assert ledger.get_approval_key(workspace="uk") is None
     assert service._approval_service.enrollment_token_path.exists()
 
 

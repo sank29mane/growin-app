@@ -137,7 +137,7 @@ class ExecutionService:
             raise ExecutionDisabledError("durable execution admission is unavailable")
         intent = proposal if isinstance(proposal, OrderIntent) else _intent_from_proposal(proposal)
         self._ledger.register_intent(intent)
-        if self._ledger.get_workspace_control().engaged:
+        if self._ledger.get_workspace_control(workspace=intent.workspace).engaged:
             raise ExecutionConflictError("workspace execution control is engaged")
         now = datetime.now(timezone.utc)
         observed_at = evidence_at or now
@@ -324,18 +324,26 @@ class ExecutionService:
             return await self._approve_in_memory(intent, mutable)
 
     def enroll_approval_key(
-        self, public_key_x963: bytes, enrollment_token: str | bytes
+        self,
+        public_key_x963: bytes,
+        enrollment_token: str | bytes,
+        *,
+        workspace: Union[Workspace, str],
     ):
-        if self._approval_service is None:
+        if self._approval_service is None or self._ledger is None:
             raise ExecutionDisabledError("Signed approval service is unavailable")
-        return self._approval_service.enroll_key(public_key_x963, enrollment_token)
+        self._ledger.require_workspace(workspace)
+        return self._approval_service.enroll_key(
+            public_key_x963, enrollment_token, workspace=workspace
+        )
 
-    def approval_key_id(self) -> Optional[str]:
+    def approval_key_id(self, *, workspace: Union[Workspace, str]) -> Optional[str]:
         """Return the enrolled public-key identifier without exposing key material."""
 
         if self._ledger is None:
             return None
-        enrolled = self._ledger.get_approval_key()
+        self._ledger.require_workspace(workspace)
+        enrolled = self._ledger.get_approval_key(workspace=workspace)
         return enrolled.key_id if enrolled is not None else None
 
     def create_approval_challenge(
@@ -349,18 +357,29 @@ class ExecutionService:
         )
 
     def verify_approval_signature_for_uat(
-        self, proposal_id: str, challenge_id: str, signature_der: bytes
+        self,
+        proposal_id: str,
+        challenge_id: str,
+        signature_der: bytes,
+        *,
+        workspace: Union[Workspace, str],
     ) -> ApprovalChallenge:
         """Verify local UAT signing evidence without claiming or dispatching."""
 
-        if self._approval_service is None:
+        if self._approval_service is None or self._ledger is None:
             raise ExecutionDisabledError("Signed approval service is unavailable")
+        self._ledger.require_workspace(workspace)
         return self._approval_service.verify_signature(
-            proposal_id, challenge_id, signature_der
+            proposal_id, challenge_id, signature_der, workspace=workspace
         )
 
     async def approve_signed(
-        self, proposal_id: str, challenge_id: str, signature_der: bytes
+        self,
+        proposal_id: str,
+        challenge_id: str,
+        signature_der: bytes,
+        *,
+        workspace: Union[Workspace, str],
     ) -> OrderAck:
         if self._dispatcher is None or self._ledger is None:
             raise ExecutionDisabledError(
@@ -368,6 +387,7 @@ class ExecutionService:
             )
         if not self._require_approval or self._approval_service is None:
             raise ExecutionDisabledError("Signed approval service is unavailable")
+        self._ledger.require_workspace(workspace)
         durable = self.get_proposal(proposal_id)
         if durable is None:
             raise ExecutionConflictError(f"Trade proposal {proposal_id} was not found")
@@ -377,7 +397,7 @@ class ExecutionService:
         async with self._lock_for(proposal_id):
             try:
                 claim = self._approval_service.approve_signed(
-                    proposal_id, challenge_id, signature_der
+                    proposal_id, challenge_id, signature_der, workspace=workspace
                 )
             except (ApprovalConflict, InvalidTransition, OrderNotFound) as exc:
                 raise ExecutionConflictError(str(exc)) from exc
@@ -388,20 +408,33 @@ class ExecutionService:
             raise ExecutionDisabledError("durable reconciliation is unavailable")
         return self._ledger.reconcile(snapshot)
 
-    def engage_workspace_control(self, reason_code: str = "MANUAL_KILL"):
+    def engage_workspace_control(
+        self, reason_code: str = "MANUAL_KILL", *, workspace: Union[Workspace, str]
+    ):
         if self._ledger is None:
             raise ExecutionDisabledError("durable workspace control is unavailable")
-        return self._ledger.engage_workspace_control(reason_code)
+        self._ledger.require_workspace(workspace)
+        return self._ledger.engage_workspace_control(reason_code, workspace=workspace)
 
-    def create_control_challenge(self, *, ttl_seconds: int = 60):
-        if self._approval_service is None:
+    def create_control_challenge(
+        self, *, workspace: Union[Workspace, str], ttl_seconds: int = 60
+    ):
+        if self._approval_service is None or self._ledger is None:
             raise ExecutionDisabledError("Signed approval service is unavailable")
-        return self._approval_service.create_control_challenge(ttl_seconds=ttl_seconds)
+        self._ledger.require_workspace(workspace)
+        return self._approval_service.create_control_challenge(
+            workspace=workspace, ttl_seconds=ttl_seconds
+        )
 
-    def clear_workspace_control(self, challenge, signature_der: bytes) -> None:
-        if self._approval_service is None:
+    def clear_workspace_control(
+        self, challenge, signature_der: bytes, *, workspace: Union[Workspace, str]
+    ) -> None:
+        if self._approval_service is None or self._ledger is None:
             raise ExecutionDisabledError("Signed approval service is unavailable")
-        self._approval_service.clear_workspace_control(challenge, signature_der)
+        self._ledger.require_workspace(workspace)
+        self._approval_service.clear_workspace_control(
+            challenge, signature_der, workspace=workspace
+        )
 
     async def _approve_durable(
         self, intent: OrderIntent, proposal: Optional[Dict[str, Any]]

@@ -82,7 +82,7 @@ async def enroll_trade_approval_key(request: ApprovalKeyEnrollmentRequest):
     public_key = _strict_b64(request.public_key_x963_b64, expected_length=65)
     try:
         enrolled = state.execution_service.enroll_approval_key(
-            public_key, request.enrollment_token
+            public_key, request.enrollment_token, workspace=request.workspace
         )
     except WorkspaceMismatch:
         raise HTTPException(status_code=409, detail=WORKSPACE_MISMATCH_DETAIL)
@@ -103,7 +103,7 @@ async def get_trade_approval_status(workspace: Workspace = Query(...)):
     """
     _reject_workspace_mismatch(workspace)
     ledger = state._execution_ledger
-    key_id = state.execution_service.approval_key_id()
+    key_id = state.execution_service.approval_key_id(workspace=workspace)
     return {
         "mode": "paper" if state.execution_authority else "disabled",
         "enrolled": key_id is not None,
@@ -193,7 +193,10 @@ async def complete_trade_approval(request: SignedApprovalRequest):
         )
     try:
         ack = await state.execution_service.approve_signed(
-            request.proposal_id, request.challenge_id, signature
+            request.proposal_id,
+            request.challenge_id,
+            signature,
+            workspace=request.workspace,
         )
     except WorkspaceMismatch:
         raise HTTPException(status_code=409, detail=WORKSPACE_MISMATCH_DETAIL)
@@ -249,7 +252,10 @@ async def verify_paper_requote_uat_signature(request: SignedApprovalRequest):
     signature = _strict_b64(request.signature_der_b64)
     try:
         state.execution_service.verify_approval_signature_for_uat(
-            request.proposal_id, request.challenge_id, signature
+            request.proposal_id,
+            request.challenge_id,
+            signature,
+            workspace=request.workspace,
         )
     except WorkspaceMismatch:
         raise HTTPException(status_code=409, detail=WORKSPACE_MISMATCH_DETAIL)

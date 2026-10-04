@@ -130,6 +130,6 @@ def test_unknown_parent_and_workspace_control_fail_closed(tmp_path):
             _record(ledger, order)
         assert ledger.get_reservation(order.proposal_id).state == "ACTIVE"
 
-        ledger.engage_workspace_control("REQUOTE_TEST")
+        ledger.engage_workspace_control("REQUOTE_TEST", workspace="uk")
         with pytest.raises(RequoteConflict, match="control"):
             _record(ledger, order, requote_id="rq-2", key="parent:snapshot-2")
