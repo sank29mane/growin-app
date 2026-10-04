@@ -446,8 +446,17 @@ def apply_migration(
         if integrity != "ok":
             raise MigrationRefused("INTEGRITY_FAILED", f"backup failed integrity_check: {integrity}")
         scan = _scan_tags(backup_connection)
+        backup_version = _classify_legacy(backup_connection)
+        backup_digest = _content_digest(backup_connection)
     finally:
         backup_connection.close()
+    # The staleness baseline comes from the hash-checked backup. The manifest's
+    # copies are not covered by the confirmed sha256, so they only have to agree.
+    if (
+        manifest["source_user_version"] != backup_version
+        or manifest["content_digest"] != backup_digest
+    ):
+        raise MigrationRefused("STALE_INSPECTION", "manifest does not match the backup")
     # Decide from the backup itself, not from the manifest's say-so.
     if scan["decision_required"] != manifest.get("decision_required"):
         raise MigrationRefused("STALE_INSPECTION", "manifest decision does not match the backup")
@@ -481,8 +490,8 @@ def apply_migration(
                 identity = _read_identity(connection)
                 if (
                     identity.kind != "unpinned"
-                    or identity.user_version != manifest["source_user_version"]
-                    or _content_digest(connection) != manifest["content_digest"]
+                    or identity.user_version != backup_version
+                    or _content_digest(connection) != backup_digest
                 ):
                     raise MigrationRefused(
                         "STALE_INSPECTION", "the ledger changed since it was inspected"
@@ -494,6 +503,17 @@ def apply_migration(
                     "operator-confirmed-migration",
                     _utc_iso(),
                 )
+                # Check the pin against the rows on this connection before the
+                # commit, so a mixed file is never left pinned.
+                distinct = {
+                    row[0]
+                    for row in connection.execute("SELECT DISTINCT workspace FROM order_intents")
+                }
+                if not distinct <= {confirm_workspace}:
+                    raise MigrationRefused(
+                        "CONFLICTING_TAGS",
+                        f"order_intents carry {sorted(map(str, distinct))}, pin is {confirm_workspace}",
+                    )
             except BaseException:
                 connection.execute("ROLLBACK")
                 raise
@@ -503,8 +523,17 @@ def apply_migration(
 
         manifest["confirmed_workspace"] = confirm_workspace
         manifest["applied_at"] = _utc_iso()
+        try:
+            report = _verify(ledger, manifest)
+        except MigrationRefused as exc:
+            # Still under the writer lock: no backend can open the pinned file
+            # before it is rebuilt from the backup.
+            restored = _restore_locked(ledger, manifest, backup)
+            raise MigrationRefused(
+                "VERIFY_FAILED",
+                f"{exc.message}; ledger restored from the backup, v6 files kept at {restored['aside']}",
+            ) from None
         _write_private_json(Path(manifest_path), manifest, exclusive=False)
-        report = _verify(ledger, manifest)
     report["status"] = "applied"
     return report
 
@@ -631,39 +660,45 @@ def restore_from_backup(
     backup = _verified_backup(manifest)
 
     with _writer_lock(ledger):
-        stamp = _utc_stamp()
-        aside: list[str] = []
-        for suffix in ("", "-wal", "-shm"):
-            current = ledger.with_name(f"{ledger.name}{suffix}")
-            if current.exists():
-                target = current.with_name(f"{current.name}.v6-aside-{stamp}")
-                if target.exists():
-                    raise MigrationRefused("BACKUP_EXISTS", f"{target} already exists")
-                os.rename(current, target)
-                aside.append(str(target))
+        return _restore_locked(ledger, manifest, backup)
 
-        fd = os.open(ledger, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        os.close(fd)
-        source = _open_ro(backup)
-        destination = sqlite3.connect(ledger)
-        try:
-            source.backup(destination)
-        finally:
-            destination.close()
-            source.close()
-        os.chmod(ledger, 0o600)
 
-        check = _open_ro(ledger)
-        try:
-            version = int(check.execute("PRAGMA user_version").fetchone()[0])
-            digest = _content_digest(check)
-        finally:
-            check.close()
-        if version != manifest["source_user_version"] or digest != manifest["content_digest"]:
-            raise MigrationRefused(
-                "VERIFY_FAILED",
-                f"restored ledger does not match the backup; v6 files kept at {aside}",
-            )
+def _restore_locked(ledger: Path, manifest: Mapping[str, Any], backup: Path) -> dict[str, Any]:
+    """Rebuild the ledger from the backup. The caller holds the writer lock."""
+
+    stamp = _utc_stamp()
+    aside: list[str] = []
+    for suffix in ("", "-wal", "-shm"):
+        current = ledger.with_name(f"{ledger.name}{suffix}")
+        if current.exists():
+            target = current.with_name(f"{current.name}.v6-aside-{stamp}")
+            if target.exists():
+                raise MigrationRefused("BACKUP_EXISTS", f"{target} already exists")
+            os.rename(current, target)
+            aside.append(str(target))
+
+    fd = os.open(ledger, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.close(fd)
+    source = _open_ro(backup)
+    destination = sqlite3.connect(ledger)
+    try:
+        source.backup(destination)
+    finally:
+        destination.close()
+        source.close()
+    os.chmod(ledger, 0o600)
+
+    check = _open_ro(ledger)
+    try:
+        version = int(check.execute("PRAGMA user_version").fetchone()[0])
+        digest = _content_digest(check)
+    finally:
+        check.close()
+    if version != manifest["source_user_version"] or digest != manifest["content_digest"]:
+        raise MigrationRefused(
+            "VERIFY_FAILED",
+            f"restored ledger does not match the backup; v6 files kept at {aside}",
+        )
     return {
         "status": "restored",
         "user_version": version,

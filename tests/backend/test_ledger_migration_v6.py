@@ -391,6 +391,87 @@ def test_ledger_changed_after_inspect_is_stale_and_rolls_back(ledger_path, backu
     assert_refused(apply(ledger_path, manifest, "uk"), "STALE_INSPECTION", ledger_path, before)
 
 
+def _insert_india_intent(ledger: Path) -> None:
+    connection = sqlite3.connect(ledger, isolation_level=None)
+    connection.execute(
+        "INSERT INTO order_intents VALUES ('stray', 'growin-stray', 'h', "
+        "'{\"proposal_id\":\"stray\",\"workspace\":\"india\"}', 't')"
+    )
+    connection.close()
+
+
+def test_rewritten_manifest_digest_cannot_bypass_staleness(ledger_path, backup_dir):
+    # Review repro: the manifest digest is not covered by the confirmed backup
+    # hash, so rewriting it to the live digest must still be refused.
+    manifest = inspect(ledger_path, backup_dir)
+    _insert_india_intent(ledger_path)
+    connection = ro_connect(ledger_path)
+    try:
+        live_digest = hashlib.sha256("\n".join(connection.iterdump()).encode("utf-8")).hexdigest()
+    finally:
+        connection.close()
+    manifest_path = Path(manifest["manifest_path"])
+    on_disk = json.loads(manifest_path.read_text(encoding="utf-8"))
+    on_disk["content_digest"] = live_digest
+    manifest_path.write_text(json.dumps(on_disk), encoding="utf-8")
+    before = dump(ledger_path)
+    assert_refused(apply(ledger_path, manifest, "uk"), "STALE_INSPECTION", ledger_path, before)
+    with pytest.raises(LedgerUnpinned):
+        ExecutionLedger(ledger_path, workspace="uk")
+
+
+def test_pin_is_checked_against_live_rows_before_commit(ledger_path, backup_dir, monkeypatch):
+    from execution import ledger_migration
+
+    manifest = inspect(ledger_path, backup_dir)
+    _insert_india_intent(ledger_path)
+    before = dump(ledger_path)
+    # Defeat the staleness digest so only the in-transaction pin check stands.
+    monkeypatch.setattr(ledger_migration, "_content_digest", lambda _connection: "same")
+    manifest_path = Path(manifest["manifest_path"])
+    on_disk = json.loads(manifest_path.read_text(encoding="utf-8"))
+    on_disk["content_digest"] = "same"
+    manifest_path.write_text(json.dumps(on_disk), encoding="utf-8")
+    with pytest.raises(ledger_migration.MigrationRefused) as info:
+        ledger_migration.apply_migration(
+            ledger_path,
+            manifest_path,
+            confirm_workspace="uk",
+            confirm_backup_sha256_prefix=manifest["backup_sha256"][:12],
+        )
+    assert info.value.code == "CONFLICTING_TAGS"
+    assert dump(ledger_path) == before
+    assert user_version(ledger_path) == 5
+
+
+def test_verify_failure_after_commit_restores_the_backup(ledger_path, backup_dir, monkeypatch):
+    from execution import ledger_migration
+
+    manifest = inspect(ledger_path, backup_dir)
+    before = dump(ledger_path)
+
+    def failing_verify(_ledger, _manifest):
+        raise ledger_migration.MigrationRefused("VERIFY_FAILED", "forced")
+
+    monkeypatch.setattr(ledger_migration, "_verify", failing_verify)
+    with pytest.raises(ledger_migration.MigrationRefused) as info:
+        ledger_migration.apply_migration(
+            ledger_path,
+            manifest["manifest_path"],
+            confirm_workspace="uk",
+            confirm_backup_sha256_prefix=manifest["backup_sha256"][:12],
+        )
+    assert info.value.code == "VERIFY_FAILED"
+    assert "restored from the backup" in info.value.message
+    assert dump(ledger_path) == before
+    assert user_version(ledger_path) == 5
+    assert list(ledger_path.parent.glob("*.v6-aside-*"))
+    on_disk = json.loads(Path(manifest["manifest_path"]).read_text(encoding="utf-8"))
+    assert "confirmed_workspace" not in on_disk
+    with pytest.raises(LedgerUnpinned):
+        ExecutionLedger(ledger_path, workspace="uk")
+
+
 def test_environment_never_supplies_ownership(ledger_path, backup_dir, monkeypatch):
     monkeypatch.setenv("GROWIN_WORKSPACE", "india")
     monkeypatch.setenv("GROWIN_EXECUTION_DB_PATH", str(ledger_path))
