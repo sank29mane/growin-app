@@ -1,9 +1,15 @@
 import re
 from typing import Any, Dict, List, Union
 
+
+def _normalize(key: Any) -> str:
+    """Lower-case a key and drop every non-alphanumeric character."""
+    return re.sub(r"[^a-z0-9]", "", str(key).lower())
+
+
 class SecretMasker:
     """Mask sensitive data in logs and error messages."""
-    
+
     # Patterns for common secrets in strings
     # Captures key followed by potential separator and value
     PATTERNS = [
@@ -13,8 +19,10 @@ class SecretMasker:
         (r"(secret['\"]?\s*[:=]\s*['\"]?)([^'\"\s,]+)", r"\1***MASKED***"),
         (r"(bearer\s+)([a-zA-Z0-9_-]+)", r"\1***MASKED***"),
     ]
-    
-    # Keys to mask in dictionaries (lowercase)
+
+    # Keys to mask in dictionaries. Matching is done on the normalized key
+    # (lower-case, non-alphanumerics removed), so "session_token",
+    # "SessionToken" and "X-SessionToken" are all caught by one entry.
     SENSITIVE_KEYS = {
         'api_key', 'apikey', 'api-key',
         'token', 'access_token', 'refresh_token',
@@ -23,28 +31,32 @@ class SecretMasker:
         'hf_token', 'openai_api_key', 'gemini_api_key',
         't212_api_key', 'alpaca_api_key', 'alpaca_secret_key',
         'news_api_key', 'tavily_api_key', 'auth_token',
-        'authorization', 'cookie'
+        'authorization', 'cookie',
+        # Breeze shapes (Phase 61)
+        'session_token', 'x_session_token', 'api_session', 'api_secret',
+        'secret_key', 'app_key', 'x_app_key', 'x_checksum', 'checksum',
     }
-    
+
+    _NORMALIZED_KEYS = frozenset(_normalize(k) for k in SENSITIVE_KEYS)
+
+    @classmethod
+    def _normalize_key(cls, key: Any) -> str:
+        return _normalize(key)
+
     @classmethod
     def mask_string(cls, text: str) -> str:
         """Mask secrets in a string using regex."""
         if not text:
             return text
-        
+
         result = text
         for pattern, replacement in cls.PATTERNS:
             result = re.sub(pattern, replacement, result, flags=re.IGNORECASE)
         return result
-    
+
     @classmethod
     def mask_value(cls, value: Any) -> Any:
-        """Mask a single value based on its type."""
-        if isinstance(value, str):
-            # If it looks like a long token (JWT, etc), mask all but last 4
-            if len(value) > 20: 
-                return '***' + value[-4:]
-            return '***MASKED***'
+        """Mask a single value. Never reveals any character of it."""
         return '***MASKED***'
 
     @classmethod
@@ -53,7 +65,7 @@ class SecretMasker:
         if isinstance(data, dict):
             masked = {}
             for key, value in data.items():
-                if key.lower() in cls.SENSITIVE_KEYS:
+                if cls._normalize_key(key) in cls._NORMALIZED_KEYS:
                     masked[key] = cls.mask_value(value)
                 else:
                     masked[key] = cls.mask_structure(value)

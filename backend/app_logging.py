@@ -55,8 +55,9 @@ class SecretMaskingFormatter(logging.Formatter):
                     SecretMasker.mask_structure(arg) for arg in record.args
                 )
         
-        # 3. Format using standard parent method
-        return super().format(record)
+        # 3. Format using standard parent method, then mask the final line so
+        #    anything %-formatting pulled in is covered too (masking is idempotent)
+        return SecretMasker.mask_string(super().format(record))
 
 def setup_logging(name: str = "growin_backend", level: int = logging.INFO) -> logging.Logger:
     """
