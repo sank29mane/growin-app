@@ -1,0 +1,37 @@
+{
+  "schema": "growin.costs.charge_schedule/1",
+  "versions": [
+    {
+      "version": "icici-prime9999-ivalue-nse-cash-2024-10-01.r1",
+      "effective_from": "2024-10-01",
+      "effective_to": null,
+      "workspace": "india",
+      "exchange": "NSE",
+      "segment": "cash",
+      "currency": "INR",
+      "plan": "ICICI Prime 9999 + iValue",
+      "status": "unconfirmed until matched to the operator's redacted contract notes",
+      "sources": [
+        "https://www.icicidirect.com/brokerage/ivalue-plan",
+        "https://www.icicidirect.com/services/brokerage/prime-plan",
+        "https://icicidirect.com/faqs/stocks/difference-between-prime-plan-and-ivalue-plan",
+        "https://icicidirect.com/faqs/stocks/what-is-demat-charge-of-rs-20"
+      ],
+      "brokerage": {"delivery_rate": "0.0007", "delivery_min_per_order": "0", "intraday_rate": "0.0005", "intraday_cap_per_order": "20"},
+      "statutory": {"stt_delivery_rate": "0.001", "stt_intraday_sell_rate": "0.00025", "stamp_delivery_buy_rate": "0.00015", "stamp_intraday_buy_rate": "0.00003", "exchange_transaction_rate": "0.0000297", "sebi_fee_rate": "0.000001", "ipft_rate": "0"},
+      "gst": {"rate": "0.18", "applies_to": ["brokerage", "exchange_transaction", "sebi_fee", "ipft"], "base": "rounded_lines"},
+      "dp": {"charge_per_debit": "20", "gst_applies": true, "basis": "per_sell_order"},
+      "rounding": {"default_quantum": "0.01", "line_quantum": {}},
+      "account_overhead": {
+        "amc_annual_ex_gst": "300",
+        "amc_gst_rate": "0.18",
+        "amc_note": "Demat AMC on this plan, reduced from 700. Disclosed in full; allocated to the pilot only if the pilot is the reason the account stays open (D-11).",
+        "plan_fees": [
+          {"item": "prime_9999_one_time_fee", "amount_ex_gst": null, "gst_rate": "0.18", "treatment": "excluded_from_hurdle_and_pilot_return"},
+          {"item": "ivalue_one_time_fee", "amount_ex_gst": "299", "gst_rate": null, "treatment": "excluded_from_hurdle_and_pilot_return"}
+        ]
+      },
+      "excluded_from_delivery_model": ["shares_as_margin_interest"]
+    }
+  ]
+}
