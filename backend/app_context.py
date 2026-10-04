@@ -24,6 +24,7 @@ from execution import (
     ReconciliationStatus,
     RequoteCoordinator,
     RequotePolicy,
+    Workspace,
     default_ledger_path,
 )
 from simulation import PreFlightSimulator, RiskSwarmGate
@@ -121,10 +122,13 @@ class AppState:
     def start_execution(self, db_path=None, workspace: str = "uk") -> bool:
         """Acquire local execution authority and enable paper-only dispatch."""
         self.close_execution()
-        path = db_path or default_ledger_path(workspace)
         try:
+            # Path resolution and the ledger open share one fail-closed handler:
+            # an unsupported workspace raises ValueError and must leave execution
+            # disabled, not abort startup.
+            path = db_path or default_ledger_path(workspace)
             ledger = ExecutionLedger(path, workspace=workspace, require_approval=True)
-        except (LedgerError, OSError, sqlite3.Error) as exc:
+        except (LedgerError, OSError, sqlite3.Error, ValueError) as exc:
             self._execution_service = ExecutionService()
             self.execution_authority = False
             self.execution_startup_error = str(exc)
@@ -222,7 +226,7 @@ class AppState:
             or self._preflight_policy_connection is None
         ):
             raise LedgerError("local paper execution authority is unavailable")
-        if self._execution_ledger.workspace != "india":
+        if self._execution_ledger.workspace != Workspace.INDIA:
             raise LedgerError("India market admission requires the India execution workspace")
         intent = self.execution_service.register_proposal(proposal)
         session = self._market_data_session
@@ -250,11 +254,16 @@ class AppState:
 
     def prepare_india_paper_local(self, *, symbol: str, quantity: str):
         """Create a server-owned PAPER intent; this stops before approval/dispatch."""
+        if self._execution_ledger is None:
+            raise LedgerError("local paper execution authority is unavailable")
         instrument = IndiaInstrument(symbol=symbol)
         proposal = {
             "proposal_id": str(uuid.uuid4()),
             "client_order_id": f"india-paper-local-{uuid.uuid4()}",
-            "workspace": "india", "account": "paper", "broker": "paper", "mode": "PAPER",
+            # Decision 2: the server stamps the workspace from the open ledger.
+            # A non-India ledger is then refused by admit_india_paper_proposal.
+            "workspace": self._execution_ledger.workspace.value,
+            "account": "paper", "broker": "paper", "mode": "PAPER",
             "ticker": instrument.execution_ticker, "action": "BUY", "quantity": quantity,
             "reasoning": "Explicit local India paper preparation. No broker is contacted.",
             "status": "PENDING",
@@ -307,11 +316,16 @@ class AppState:
 
         if not self.execution_authority or self._execution_ledger is None:
             raise LedgerError("local paper execution authority is unavailable")
+        # The UAT builder is UK-only (GBP budget): it must never write into an
+        # India ledger.
+        self._execution_ledger.require_workspace(Workspace.UK)
         # Re-open the frozen pending review rather than allocating another UAT
         # proposal. Older `paper-uat` entries are included for recovery from
         # the first implementation; neither path can reach a real broker.
         for account in ("paper-uat-v2", "paper-uat"):
-            pending_id = self._execution_ledger.find_active_pending_reservation(account)
+            pending_id = self._execution_ledger.find_active_pending_reservation(
+                account, workspace=Workspace.UK
+            )
             if pending_id is not None:
                 existing = self.get_trade_proposal(pending_id)
                 if existing is not None:
@@ -319,7 +333,7 @@ class AppState:
         proposal = {
             "proposal_id": str(uuid.uuid4()),
             "client_order_id": f"paper-approval-uat-{uuid.uuid4()}",
-            "workspace": self._execution_ledger.workspace,
+            "workspace": Workspace.UK.value,
             "account": "paper-uat-v2",
             "broker": "paper",
             "mode": "PAPER",
@@ -331,7 +345,9 @@ class AppState:
         }
         # This is an intentionally tiny, immutable UAT budget. It is distinct
         # from every user account and cannot authorize a real broker order.
-        self._execution_ledger.configure_paper_budget("paper-uat-v2", "GBP", "1")
+        self._execution_ledger.configure_paper_budget(
+            "paper-uat-v2", "GBP", "1", workspace=Workspace.UK
+        )
         admission = self.execution_service.prepare(
             proposal,
             currency="GBP",
@@ -354,8 +370,11 @@ class AppState:
 
         if not self.execution_authority or self._execution_ledger is None:
             raise LedgerError("local paper execution authority is unavailable")
+        self._execution_ledger.require_workspace(Workspace.UK)
         account = "paper-requote-uat-v1"
-        pending_id = self._execution_ledger.find_active_pending_reservation(account)
+        pending_id = self._execution_ledger.find_active_pending_reservation(
+            account, workspace=Workspace.UK
+        )
         if pending_id is not None:
             existing = self.get_trade_proposal(pending_id)
             if existing is not None:
@@ -366,7 +385,7 @@ class AppState:
         parent = {
             "proposal_id": parent_id,
             "client_order_id": f"paper-requote-parent-{uuid.uuid4()}",
-            "workspace": self._execution_ledger.workspace,
+            "workspace": Workspace.UK.value,
             "account": account,
             "broker": "paper",
             "mode": "PAPER",
@@ -378,7 +397,9 @@ class AppState:
         }
         # The cancelled parent releases its reservation before the replacement
         # takes one. This isolated budget cannot be used by a real account.
-        self._execution_ledger.configure_paper_budget(account, "GBP", "2")
+        self._execution_ledger.configure_paper_budget(
+            account, "GBP", "2", workspace=Workspace.UK
+        )
         admission = self.execution_service.prepare(
             parent,
             currency="GBP",

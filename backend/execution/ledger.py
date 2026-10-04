@@ -1053,8 +1053,14 @@ class ExecutionLedger:
         return self._admission_from_row(row) if row is not None else None
 
     def configure_paper_budget(
-        self, account: str, currency: str, amount: Decimal | str | int | float
+        self,
+        account: str,
+        currency: str,
+        amount: Decimal | str | int | float,
+        *,
+        workspace: Workspace | str,
     ) -> PaperBudget:
+        self.require_workspace(workspace)
         amount_decimal = _positive_decimal(amount, "budget amount")
         now = _now()
         with self._transaction() as connection:
@@ -1082,7 +1088,10 @@ class ExecutionLedger:
                 raise LedgerError("paper budget did not persist")
             return self._budget_from_row(row)
 
-    def get_paper_budget(self, account: str, currency: str) -> Optional[PaperBudget]:
+    def get_paper_budget(
+        self, account: str, currency: str, *, workspace: Workspace | str
+    ) -> Optional[PaperBudget]:
+        self.require_workspace(workspace)
         with self._mutex:
             row = self._require_connection().execute(
                 "SELECT * FROM paper_budgets WHERE workspace = ? AND account = ? AND currency = ?",
@@ -1193,9 +1202,12 @@ class ExecutionLedger:
             ).fetchone()
         return self._reservation_from_row(row) if row is not None else None
 
-    def find_active_pending_reservation(self, account: str) -> Optional[str]:
+    def find_active_pending_reservation(
+        self, account: str, *, workspace: Workspace | str
+    ) -> Optional[str]:
         """Return the newest pending proposal that still owns this account's reservation."""
 
+        self.require_workspace(workspace)
         with self._mutex:
             row = self._require_connection().execute(
                 """
@@ -2103,8 +2115,9 @@ class ExecutionLedger:
         )
 
     def get_paper_position(
-        self, account: str, currency: str, ticker: str
+        self, account: str, currency: str, ticker: str, *, workspace: Workspace | str
     ) -> Optional[Mapping[str, str]]:
+        self.require_workspace(workspace)
         with self._mutex:
             row = self._require_connection().execute(
                 "SELECT quantity, notional FROM paper_positions WHERE workspace = ? AND account = ? AND currency = ? AND ticker = ?",
