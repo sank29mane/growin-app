@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -132,10 +133,21 @@ class BhavcopyIngestOutcome:
     skipped_non_stk: int = 0
 
 
-def decode_text(data: bytes, *, code: str) -> str:
+def decode_text(data: bytes, *, code: str, cp1252_fallback: bool = False) -> str:
+    """Decode UTF-8; PR archive members may fall back to strict Windows-1252.
+
+    NSE's PR text members are Windows-1252 in places (from July 2025 the etf
+    member carries a 0x96 en dash in an index name). The fallback is strict, so
+    bytes undefined in Windows-1252 still fail closed.
+    """
     try:
         return data.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
+        if cp1252_fallback:
+            try:
+                return data.decode("cp1252")
+            except UnicodeDecodeError:
+                pass
         raise PilotDataError(code, "file is not valid UTF-8") from exc
 
 
@@ -382,13 +394,15 @@ def pr_stamp(day: date) -> str:
 
 
 def _parse_ddmmyyyy(text: str) -> date | None:
+    """PR Bc dates: dd/mm/yyyy until October 2025, yyyy-mm-dd from November 2025."""
     cleaned = text.strip()
     if not cleaned:
         return None
+    fmt = "%Y-%m-%d" if re.fullmatch(r"\d{4}-\d{2}-\d{2}", cleaned) else "%d/%m/%Y"
     try:
-        return datetime.strptime(cleaned, "%d/%m/%Y").date()
+        return datetime.strptime(cleaned, fmt).date()
     except ValueError as exc:
-        raise PilotDataError("date_invalid", "date is not dd/mm/yyyy") from exc
+        raise PilotDataError("date_invalid", "date is not dd/mm/yyyy or yyyy-mm-dd") from exc
 
 
 def _blank_to_none(text: str) -> str | None:
@@ -398,19 +412,25 @@ def _blank_to_none(text: str) -> str | None:
 
 def parse_pr_zip(content: bytes, *, expected_trade_date: date) -> PrBundle:
     members = read_zip_members(content)
-    stamp = pr_stamp(expected_trade_date)
-    wanted = {f"pd{stamp}.csv": "pd", f"bc{stamp}.csv": "bc", f"etf{stamp}.csv": "etf"}
+    # Member stamps are DDMMYY until October 2025 and DDMMYYYY (lower-case
+    # names) from November 2025. A zip carrying both forms of one member is
+    # ambiguous and refused.
+    wanted: dict[str, str] = {}
+    for stamp in (pr_stamp(expected_trade_date), f"{expected_trade_date:%d%m%Y}"):
+        wanted.update({f"pd{stamp}.csv": "pd", f"bc{stamp}.csv": "bc", f"etf{stamp}.csv": "etf"})
     found: dict[str, bytes] = {}
     for name, data in members.items():
         kind = wanted.get(name.lower())
         if kind is not None:
+            if kind in found:
+                raise PilotDataError("bhavcopy_schema_mismatch", f"PR zip has two {kind} members for the date")
             found[kind] = data
     if "pd" not in found:
         raise PilotDataError("pr_member_missing", "PR zip has no Pd member for the expected date")
     quarantines: list[ParseQuarantineInput] = []
     pd_bars: list[BhavcopyBar] = []
     reader = _read_csv(
-        decode_text(found["pd"], code="bhavcopy_schema_mismatch"), PD_HEADER, label="PR Pd", strip_header=True
+        decode_text(found["pd"], code="bhavcopy_schema_mismatch", cp1252_fallback=True), PD_HEADER, label="PR Pd", strip_header=True
     )
     for raw in reader:
         if not raw:
@@ -445,7 +465,7 @@ def parse_pr_zip(content: bytes, *, expected_trade_date: date) -> PrBundle:
     ca_rows: list[CorporateActionRaw] = []
     if "bc" in found:
         reader = _read_csv(
-            decode_text(found["bc"], code="bhavcopy_schema_mismatch"), BC_HEADER, label="PR Bc", strip_header=True
+            decode_text(found["bc"], code="bhavcopy_schema_mismatch", cp1252_fallback=True), BC_HEADER, label="PR Bc", strip_header=True
         )
         for raw in reader:
             if not raw:
@@ -475,7 +495,7 @@ def parse_pr_zip(content: bytes, *, expected_trade_date: date) -> PrBundle:
     etf_rows: list[EtfInfoRow] = []
     if "etf" in found:
         reader = _read_csv(
-            decode_text(found["etf"], code="bhavcopy_schema_mismatch"), ETF_HEADER, label="PR etf",
+            decode_text(found["etf"], code="bhavcopy_schema_mismatch", cp1252_fallback=True), ETF_HEADER, label="PR etf",
             strip_header=True,
         )
         for raw in reader:
