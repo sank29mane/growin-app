@@ -191,4 +191,45 @@ struct KeychainScopeTests {
         #expect(defaults.string(forKey: "geminiApiKey") == nil)
         #expect(defaults.string(forKey: "alpacaApiKey") == nil)
     }
+
+    // MARK: Source probe
+
+    /// Every .swift file under Growin/, as (repo-relative path, contents).
+    private static func appSources() throws -> [(path: String, text: String)] {
+        let testsFile = URL(fileURLWithPath: #filePath)
+        let repoRoot = testsFile
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let appRoot = repoRoot.appendingPathComponent("Growin")
+        let enumerator = try #require(FileManager.default.enumerator(at: appRoot, includingPropertiesForKeys: nil))
+        var sources: [(String, String)] = []
+        for case let url as URL in enumerator where url.pathExtension == "swift" {
+            let relative = String(url.path.dropFirst(repoRoot.path.count + 1))
+            sources.append((relative, try String(contentsOf: url, encoding: .utf8)))
+        }
+        return sources
+    }
+
+    @Test func everyCredentialCallSiteNamesAScope() throws {
+        let sources = try Self.appSources()
+        #expect(sources.count > 10, "source probe found too few files")
+        var unscoped: [String] = []
+        for (path, text) in sources {
+            for (index, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+                let location = "\(path):\(index + 1)"
+                if line.contains("@KeychainStorage(") && !line.contains("scope:") {
+                    unscoped.append(location)
+                }
+                if line.contains("KeychainStore.shared.") && !line.contains("scope:") {
+                    let isSigner = path == "Growin/Security/LocalApprovalSigner.swift"
+                    let isLaunchMigration = path == "Growin/GrowinApp.swift" && line.contains("migrate")
+                    if !isSigner && !isLaunchMigration {
+                        unscoped.append(location)
+                    }
+                }
+            }
+        }
+        #expect(unscoped.isEmpty, "Unscoped Keychain call sites: \(unscoped)")
+    }
 }

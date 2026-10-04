@@ -127,8 +127,8 @@ class ChatViewModel {
     func sendMessage() {
         guard !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
-        let openaiApiKey = (try? KeychainStore.shared.string(for: "openaiApiKey")) ?? ""
-        let geminiApiKey = (try? KeychainStore.shared.string(for: "geminiApiKey")) ?? ""
+        let openaiApiKey = (try? KeychainStore.shared.string(for: .openaiApiKey, scope: .shared)) ?? ""
+        let geminiApiKey = (try? KeychainStore.shared.string(for: .geminiApiKey, scope: .shared)) ?? ""
         let selectedProvider = defaults.string(forKey: "selectedProvider") ?? "mlx"
 
         if selectedProvider == "openai" && openaiApiKey.isEmpty {
