@@ -141,6 +141,30 @@ def test_credit_walks_days_in_date_order_regardless_of_input_order():
     assert forward == backward
 
 
+@pytest.mark.parametrize("same_estimate", [True, False])
+def test_credit_rejects_duplicate_days_before_calculating_credit(same_estimate, monkeypatch):
+    first = day("b", Side.BUY, date(2026, 10, 5))
+    duplicate = first if same_estimate else day("s", Side.SELL, first.trade_date)
+    schedules = load_schedule_set()
+
+    def unexpected_schedule_lookup(*args):
+        pytest.fail("duplicate estimates must be rejected before calculating credit")
+
+    monkeypatch.setattr(type(schedules), "get", unexpected_schedule_lookup)
+    with pytest.raises(InputError, match="duplicate estimate.*2026-10-05.*NSE"):
+        apply_prepaid_credit([first, worked_days()[1], duplicate], credit(), schedules=schedules)
+
+
+def test_credit_orders_unique_estimates_by_date_then_exchange():
+    nse_day, later_day = worked_days()
+    # Synthetic exchange variant to exercise the tie-breaker independently of pricing.
+    bse_day = dataclasses.replace(day("s", Side.SELL, nse_day.trade_date), exchange="BSE")
+    view = apply_prepaid_credit([later_day, nse_day, bse_day], credit("3.00"), schedules=load_schedule_set())
+    assert [row.trade_date for row in view.days] == [bse_day.trade_date, nse_day.trade_date, later_day.trade_date]
+    assert [row.full_total for row in view.days] == [bse_day.total, nse_day.total, later_day.total]
+    assert [row.credit_applied for row in view.days] == [D("3.00"), D("0.00"), D("0.00")]
+
+
 def test_credit_rejects_bad_inputs():
     with pytest.raises(CostModelError):
         credit("-1.00")

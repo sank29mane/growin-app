@@ -86,8 +86,14 @@ def brokerage_gst_attributable(estimate: ContractNoteEstimate, schedule: ChargeS
 def apply_prepaid_credit(
     days: Sequence[ContractNoteEstimate], credit: PrepaidCredit, *, schedules: ScheduleSet
 ) -> CreditedCashView:
-    """Report cash charges with the prepaid credit applied, oldest day first."""
+    """Report cash charges with prepaid credit, rejecting duplicate date/exchange estimates."""
     with decimal.localcontext(COST_CONTEXT):
+        seen: set[tuple[date, str]] = set()
+        for estimate in days:
+            key = (estimate.trade_date, estimate.exchange)
+            if key in seen:
+                raise InputError(f"duplicate estimate for {key[0].isoformat()} {key[1]}")
+            seen.add(key)
         remaining = credit.balance
         rows: list[CreditedDay] = []
         for estimate in sorted(days, key=lambda d: (d.trade_date, d.exchange)):
