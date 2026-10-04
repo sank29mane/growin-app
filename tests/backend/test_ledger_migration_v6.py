@@ -218,3 +218,327 @@ def test_ledger_tool_never_compares_against_a_plain_file_copy():
     source = (REPO_ROOT / "backend" / "execution" / "ledger_migration.py").read_text()
     assert ".backup(" in source
     assert "shutil.copy" not in source and "copyfile" not in source
+
+
+# ---------------------------------------------------------------------------
+# Task 2: refusals, restore round trip, v1 path, show
+# ---------------------------------------------------------------------------
+
+V1_DDL = """
+CREATE TABLE order_intents (
+    proposal_id TEXT PRIMARY KEY,
+    client_order_id TEXT NOT NULL UNIQUE,
+    intent_hash TEXT NOT NULL,
+    canonical_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE order_projection (
+    proposal_id TEXT PRIMARY KEY REFERENCES order_intents(proposal_id),
+    state TEXT NOT NULL,
+    acknowledgment_json TEXT,
+    rejection_notes TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE dispatch_attempts (
+    attempt_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    proposal_id TEXT NOT NULL UNIQUE REFERENCES order_intents(proposal_id),
+    state TEXT NOT NULL,
+    claimed_at TEXT NOT NULL,
+    completed_at TEXT,
+    acknowledgment_json TEXT
+);
+CREATE TABLE execution_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    proposal_id TEXT NOT NULL REFERENCES order_intents(proposal_id),
+    event_type TEXT NOT NULL,
+    from_state TEXT,
+    to_state TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+PRAGMA user_version = 1;
+"""
+
+
+def build_v1_ledger(path: Path, workspace: str) -> str:
+    """A rollback-journal v1 file with one legacy order; returns its intent hash."""
+
+    from execution.ledger import canonical_json
+    from execution.models import OrderIntent
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    intent = OrderIntent(
+        proposal_id="legacy",
+        workspace=workspace,
+        account="paper",
+        broker="paper",
+        mode="PAPER",
+        ticker="TQQQ",
+        side="BUY",
+        quantity="1",
+    )
+    snapshot = canonical_json(intent)
+    digest = hashlib.sha256(snapshot.encode()).hexdigest()
+    connection = sqlite3.connect(path)
+    connection.executescript(V1_DDL)
+    connection.execute(
+        "INSERT INTO order_intents VALUES (?, ?, ?, ?, ?)",
+        ("legacy", "growin-legacy", digest, snapshot, "before"),
+    )
+    connection.execute(
+        "INSERT INTO order_projection VALUES (?, 'PENDING', NULL, NULL, ?, ?)",
+        ("legacy", "before", "before"),
+    )
+    connection.commit()
+    connection.close()
+    return digest
+
+
+def assert_refused(outcome: tuple[int, dict], code: str, ledger: Path, before: list[str], version: int = 5) -> None:
+    exit_code, result = outcome
+    assert exit_code == 2, result
+    assert result["status"] == "refused"
+    assert result["code"] == code, result
+    assert dump(ledger) == before
+    assert user_version(ledger) == version
+
+
+def test_apply_refuses_missing_short_or_wrong_confirmation(ledger_path, backup_dir):
+    manifest = inspect(ledger_path, backup_dir)
+    before = dump(ledger_path)
+
+    assert_refused(apply(ledger_path, manifest, workspace=None), "CONFIRMATION_REQUIRED", ledger_path, before)
+    assert_refused(apply(ledger_path, manifest, "uk", prefix=None), "CONFIRMATION_REQUIRED", ledger_path, before)
+    assert_refused(apply(ledger_path, manifest, "uk", prefix="abc123"), "CONFIRMATION_REQUIRED", ledger_path, before)
+    wrong = "0" * 12 if not manifest["backup_sha256"].startswith("0" * 12) else "f" * 12
+    assert_refused(apply(ledger_path, manifest, "uk", prefix=wrong), "CONFIRMATION_MISMATCH", ledger_path, before)
+
+
+def test_apply_refuses_when_the_backup_file_was_altered(ledger_path, backup_dir):
+    manifest = inspect(ledger_path, backup_dir)
+    before = dump(ledger_path)
+    backup = Path(manifest["backup_path"])
+    with open(backup, "ab") as handle:
+        handle.write(b"x")
+    assert_refused(apply(ledger_path, manifest, "uk"), "BACKUP_HASH_MISMATCH", ledger_path, before)
+
+
+def test_conflicting_tags_are_blocked_whatever_the_confirmation(ledger_path, backup_dir):
+    connection = sqlite3.connect(ledger_path, isolation_level=None)
+    connection.execute(
+        "INSERT INTO order_intents VALUES ('stray', 'growin-stray', 'h', "
+        "'{\"proposal_id\":\"stray\",\"workspace\":\"india\"}', 't')"
+    )
+    connection.close()
+    manifest = inspect(ledger_path, backup_dir)
+    assert manifest["distinct_workspaces"] == ["india", "uk"]
+    assert manifest["decision_required"] == "blocked-conflict"
+    before = dump(ledger_path)
+    for workspace in ("uk", "india"):
+        assert_refused(apply(ledger_path, manifest, workspace), "CONFLICTING_TAGS", ledger_path, before)
+
+
+def test_unknown_tag_is_blocked(ledger_path, backup_dir):
+    connection = sqlite3.connect(ledger_path, isolation_level=None)
+    connection.execute(
+        "INSERT INTO execution_events (proposal_id, event_type, from_state, to_state, payload_json, created_at) "
+        "VALUES ('fixture-pending', 'X', NULL, 'PENDING', '{\"nested\": [{\"workspace\": \"mars\"}]}', 't')"
+    )
+    connection.close()
+    manifest = inspect(ledger_path, backup_dir)
+    assert manifest["decision_required"] == "blocked-unknown"
+    before = dump(ledger_path)
+    assert_refused(apply(ledger_path, manifest, "uk"), "UNKNOWN_TAG", ledger_path, before)
+
+
+def test_unparseable_payload_is_blocked(ledger_path, backup_dir):
+    connection = sqlite3.connect(ledger_path, isolation_level=None)
+    connection.execute(
+        "INSERT INTO execution_events (proposal_id, event_type, from_state, to_state, payload_json, created_at) "
+        "VALUES ('fixture-pending', 'X', NULL, 'PENDING', 'not json', 't')"
+    )
+    connection.close()
+    manifest = inspect(ledger_path, backup_dir)
+    assert manifest["decision_required"] == "blocked-unparseable"
+    assert manifest["unparseable"]
+    before = dump(ledger_path)
+    assert_refused(apply(ledger_path, manifest, "uk"), "UNPARSEABLE_PAYLOAD", ledger_path, before)
+
+
+def test_india_only_ledger_refuses_uk_and_accepts_india(tmp_path, backup_dir):
+    path = tmp_path / "ledgers" / "india" / "execution.sqlite3"
+    build_v1_ledger(path, "india")
+    manifest = inspect(path, backup_dir)
+    assert manifest["distinct_workspaces"] == ["india"]
+    before = dump(path)
+    assert_refused(apply(path, manifest, "uk"), "CONFIRMATION_MISMATCH", path, before, version=1)
+
+    code, report = apply(path, manifest, "india")
+    assert code == 0, report
+    assert report["workspace"] == "india"
+
+
+def test_ledger_changed_after_inspect_is_stale_and_rolls_back(ledger_path, backup_dir):
+    manifest = inspect(ledger_path, backup_dir)
+    connection = sqlite3.connect(ledger_path, isolation_level=None)
+    connection.execute(
+        "INSERT INTO execution_events (proposal_id, event_type, from_state, to_state, payload_json, created_at) "
+        "VALUES ('fixture-pending', 'LATE', NULL, 'PENDING', '{}', 't')"
+    )
+    connection.close()
+    before = dump(ledger_path)
+    assert_refused(apply(ledger_path, manifest, "uk"), "STALE_INSPECTION", ledger_path, before)
+
+
+def test_environment_never_supplies_ownership(ledger_path, backup_dir, monkeypatch):
+    monkeypatch.setenv("GROWIN_WORKSPACE", "india")
+    monkeypatch.setenv("GROWIN_EXECUTION_DB_PATH", str(ledger_path))
+    manifest = inspect(ledger_path, backup_dir)
+    assert manifest["decision_required"] == "confirm-one"
+    before = dump(ledger_path)
+    assert_refused(apply(ledger_path, manifest, "india"), "CONFIRMATION_MISMATCH", ledger_path, before)
+    assert_refused(apply(ledger_path, manifest, workspace=None), "CONFIRMATION_REQUIRED", ledger_path, before)
+    code, report = apply(ledger_path, manifest, "uk")
+    assert code == 0, report
+    assert report["workspace"] == "uk"
+
+
+def test_backup_dir_inside_the_repo_is_refused_and_not_created(ledger_path):
+    inside = REPO_ROOT / "tmp-ledger-backups-must-not-exist"
+    before = dump(ledger_path)
+    outcome = run_tool("inspect", "--ledger", ledger_path, "--backup-dir", inside)
+    assert_refused(outcome, "BACKUP_INSIDE_REPO", ledger_path, before)
+    assert not inside.exists()
+
+
+def test_inspect_of_a_pinned_ledger_is_refused(ledger_path, backup_dir, tmp_path):
+    manifest = inspect(ledger_path, backup_dir)
+    assert apply(ledger_path, manifest, "uk")[0] == 0
+    before = dump(ledger_path)
+    outcome = run_tool("inspect", "--ledger", ledger_path, "--backup-dir", tmp_path / "second")
+    assert_refused(outcome, "ALREADY_PINNED", ledger_path, before, version=6)
+
+
+def test_missing_ledger_and_symlink_are_refused(tmp_path, backup_dir, ledger_path):
+    code, result = run_tool("inspect", "--ledger", tmp_path / "nope.sqlite3", "--backup-dir", backup_dir)
+    assert (code, result["code"]) == (2, "LEDGER_MISSING")
+    link = tmp_path / "link.sqlite3"
+    link.symlink_to(ledger_path)
+    code, result = run_tool("inspect", "--ledger", link, "--backup-dir", backup_dir)
+    assert (code, result["code"]) == (2, "SYMLINK_REFUSED")
+
+
+def test_restore_round_trip_moves_aside_and_never_deletes(ledger_path, backup_dir):
+    manifest = inspect(ledger_path, backup_dir)
+    original_dump = dump(ledger_path)
+    assert apply(ledger_path, manifest, "uk")[0] == 0
+    assert user_version(ledger_path) == 6
+    v6_dump = dump(ledger_path)
+
+    # Without the flag nothing moves.
+    code, result = run_tool("restore", "--ledger", ledger_path, "--manifest", manifest["manifest_path"])
+    assert (code, result["code"]) == (2, "RESTORE_CONFIRMATION_REQUIRED")
+    assert dump(ledger_path) == v6_dump
+
+    present = [
+        p for p in (ledger_path, Path(f"{ledger_path}-wal"), Path(f"{ledger_path}-shm")) if p.exists()
+    ]
+    assert ledger_path in present
+    code, result = run_tool(
+        "restore", "--ledger", ledger_path, "--manifest", manifest["manifest_path"], "--confirm-restore"
+    )
+    assert code == 0, result
+    assert result["status"] == "restored"
+
+    assert len(result["aside"]) == len(present)
+    for moved in result["aside"]:
+        assert Path(moved).exists()
+        assert ".v6-aside-" in moved
+    aside_main = next(Path(m) for m in result["aside"] if m.split(".v6-aside-")[0] == str(ledger_path))
+    assert user_version(aside_main) == 6
+
+    assert user_version(ledger_path) == 5
+    assert dump(ledger_path) == original_dump
+    digest = hashlib.sha256("\n".join(dump(ledger_path)).encode("utf-8")).hexdigest()
+    assert digest == manifest["content_digest"]
+    assert stat.S_IMODE(ledger_path.stat().st_mode) == 0o600
+    with pytest.raises(LedgerUnpinned):
+        ExecutionLedger(ledger_path, workspace="uk")
+
+    # The same backup and manifest can pin the restored file again.
+    code, report = apply(ledger_path, manifest, "uk")
+    assert code == 0, report
+
+
+def test_restore_is_refused_while_a_writer_holds_the_lock(ledger_path, backup_dir):
+    manifest = inspect(ledger_path, backup_dir)
+    assert apply(ledger_path, manifest, "uk")[0] == 0
+    with ExecutionLedger(ledger_path, workspace="uk"):
+        code, result = run_tool(
+            "restore", "--ledger", ledger_path, "--manifest", manifest["manifest_path"], "--confirm-restore"
+        )
+    assert (code, result["code"]) == (2, "WRITER_ACTIVE")
+    assert user_version(ledger_path) == 6
+
+
+def test_v1_legacy_ledger_migrates_through_the_tool(tmp_path, backup_dir):
+    path = tmp_path / "ledgers" / "uk" / "execution.sqlite3"
+    digest = build_v1_ledger(path, "uk")
+    manifest = inspect(path, backup_dir)
+    assert manifest["source_user_version"] == 1
+    assert manifest["distinct_workspaces"] == ["uk"]
+    assert "execution_approvals" in manifest["absent_tables"]
+
+    code, report = apply(path, manifest, "uk")
+    assert code == 0, report
+    assert user_version(path) == 6
+
+    with ExecutionLedger(path, workspace="uk") as ledger:
+        assert ledger.get_order("legacy").intent_hash == digest
+        assert ledger.pragmas()["user_version"] == 6
+    columns = {row[1] for row in sqlite3.connect(path).execute("PRAGMA table_info(dispatch_attempts)")}
+    assert "approval_id" in columns
+
+
+def test_show_reads_a_pinned_ledger_while_a_writer_holds_it(ledger_path, backup_dir):
+    manifest = inspect(ledger_path, backup_dir)
+    assert apply(ledger_path, manifest, "uk")[0] == 0
+    with ExecutionLedger(ledger_path, workspace="uk"):
+        code, result = run_tool("show", "--ledger", ledger_path, "--workspace", "uk")
+        assert code == 0, result
+        assert result["pin"]["workspace"] == "uk"
+        assert result["pin"]["pinned_by"] == "operator-confirmed-migration"
+        assert {order["proposal_id"] for order in result["orders"]} == set(FIXTURE_ORDERS)
+
+        code, result = run_tool(
+            "show", "--ledger", ledger_path, "--workspace", "uk", "--proposal-id", "fixture-pending"
+        )
+        assert code == 0 and result["order_count"] == 1
+
+        code, result = run_tool("show", "--ledger", ledger_path, "--workspace", "india")
+        assert code in (1, 2)
+        assert result["error"] == "WorkspaceMismatch"
+
+
+def test_show_on_an_unpinned_ledger_names_ledger_unpinned(ledger_path):
+    before = dump(ledger_path)
+    code, result = run_tool("show", "--ledger", ledger_path, "--workspace", "uk")
+    assert code in (1, 2)
+    assert result["error"] == "LedgerUnpinned"
+    assert dump(ledger_path) == before
+
+
+@pytest.mark.parametrize("relative", ["backend/execution/ledger_migration.py", "scripts/ledger_tool.py"])
+def test_tool_sources_never_read_the_environment(relative):
+    tree = ast.parse((REPO_ROOT / relative).read_text(encoding="utf-8"))
+    banned = {"getenv", "environ", "environb", "getenvb"}
+    offenders = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr in banned:
+            offenders.append(node.attr)
+        elif isinstance(node, ast.Name) and node.id in banned:
+            offenders.append(node.id)
+        elif isinstance(node, ast.ImportFrom) and any(alias.name in banned for alias in node.names):
+            offenders.append(node.module or "")
+    assert offenders == []
