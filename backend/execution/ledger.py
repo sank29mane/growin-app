@@ -34,12 +34,13 @@ from .models import (
     PaperReservation,
     ReconciliationSnapshot,
     ReconciliationStatus,
+    Workspace,
     WorkspaceControl,
 )
 
 
-SCHEMA_VERSION = 5
-_WORKSPACE_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+SCHEMA_VERSION = 6
+LEGACY_SCHEMA_VERSIONS = range(1, 6)
 _REASON_CODE_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
 
@@ -166,18 +167,42 @@ class LedgerRequote:
     updated_at: str
 
 
-def default_ledger_path(workspace: str = "uk") -> Path:
+class WorkspaceMismatch(LedgerError):
+    """Raised when a request names a workspace that is not the ledger's pin."""
+
+
+class LedgerUnpinned(LedgerError):
+    """Raised when a ledger file has no workspace pin (legacy v1 to v5 or unmarked)."""
+
+
+def coerce_workspace(value: object) -> Workspace:
+    """Return the ``Workspace`` for ``value`` or raise ``ValueError``.
+
+    Accepts a plain string or any str-based enum member (so a ``Workspace``
+    imported through either ``execution`` or ``backend.execution`` works).
+    Nothing else is accepted: no None, no case folding, no whitespace trimming.
+    """
+
+    if not isinstance(value, str):
+        raise ValueError("workspace must be 'uk' or 'india'")
+    raw = value.value if isinstance(value, Enum) else str(value)
+    try:
+        return Workspace(raw)
+    except ValueError:
+        raise ValueError("workspace must be 'uk' or 'india'") from None
+
+
+def default_ledger_path(workspace: Workspace | str) -> Path:
     """Return the local macOS ledger path without creating it."""
 
-    if not _WORKSPACE_PATTERN.fullmatch(workspace):
-        raise ValueError("workspace must contain only letters, digits, '_' or '-'")
+    pinned = coerce_workspace(workspace)
     return (
         Path.home()
         / "Library"
         / "Application Support"
         / "Growin"
         / "workspaces"
-        / workspace
+        / pinned.value
         / "execution.sqlite3"
     )
 
@@ -202,6 +227,518 @@ def intent_hash(intent: OrderIntent) -> str:
     return hashlib.sha256(canonical_json(intent).encode("utf-8")).hexdigest()
 
 
+_BASE_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE IF NOT EXISTS order_intents (
+        proposal_id TEXT PRIMARY KEY,
+        client_order_id TEXT NOT NULL UNIQUE,
+        intent_hash TEXT NOT NULL,
+        canonical_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS order_projection (
+        proposal_id TEXT PRIMARY KEY REFERENCES order_intents(proposal_id),
+        state TEXT NOT NULL,
+        acknowledgment_json TEXT,
+        rejection_notes TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS dispatch_attempts (
+        attempt_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        proposal_id TEXT NOT NULL UNIQUE REFERENCES order_intents(proposal_id),
+        approval_id TEXT REFERENCES execution_approvals(approval_id),
+        state TEXT NOT NULL,
+        claimed_at TEXT NOT NULL,
+        completed_at TEXT,
+        acknowledgment_json TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS approval_keys (
+        workspace TEXT NOT NULL,
+        key_id TEXT NOT NULL,
+        public_key_x963 BLOB NOT NULL CHECK(length(public_key_x963) = 65),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (workspace, key_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS approval_challenges (
+        challenge_id TEXT PRIMARY KEY,
+        proposal_id TEXT NOT NULL REFERENCES order_intents(proposal_id),
+        workspace TEXT NOT NULL,
+        key_id TEXT NOT NULL,
+        intent_hash TEXT NOT NULL,
+        signed_payload BLOB NOT NULL,
+        issued_at_epoch INTEGER NOT NULL,
+        expires_at_epoch INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (workspace, key_id)
+            REFERENCES approval_keys(workspace, key_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS execution_approvals (
+        approval_id TEXT PRIMARY KEY,
+        challenge_id TEXT NOT NULL UNIQUE
+            REFERENCES approval_challenges(challenge_id),
+        proposal_id TEXT NOT NULL UNIQUE
+            REFERENCES order_intents(proposal_id),
+        workspace TEXT NOT NULL,
+        key_id TEXT NOT NULL,
+        intent_hash TEXT NOT NULL,
+        signed_payload_hash TEXT NOT NULL,
+        signature_der BLOB NOT NULL,
+        approved_at TEXT NOT NULL,
+        FOREIGN KEY (workspace, key_id)
+            REFERENCES approval_keys(workspace, key_id)
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS dispatch_attempt_approval_unique
+    ON dispatch_attempts(approval_id) WHERE approval_id IS NOT NULL
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS execution_events (
+        event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        proposal_id TEXT NOT NULL REFERENCES order_intents(proposal_id),
+        event_type TEXT NOT NULL,
+        from_state TEXT,
+        to_state TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS execution_admissions (
+        proposal_id TEXT PRIMARY KEY REFERENCES order_intents(proposal_id),
+        intent_hash TEXT NOT NULL,
+        workspace TEXT NOT NULL,
+        account TEXT NOT NULL,
+        currency TEXT NOT NULL,
+        ticker TEXT NOT NULL,
+        side TEXT NOT NULL,
+        original_quantity TEXT NOT NULL,
+        final_quantity TEXT NOT NULL,
+        price TEXT NOT NULL,
+        notional TEXT NOT NULL,
+        simulator_fill_price TEXT NOT NULL,
+        simulator_drawdown_pct TEXT NOT NULL,
+        risk_quantity TEXT NOT NULL,
+        current_spread_pct TEXT NOT NULL,
+        evidence_at TEXT NOT NULL,
+        evidence_hash TEXT NOT NULL,
+        decision TEXT NOT NULL,
+        reason_code TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        CHECK (decision IN ('ADMITTED', 'DENIED'))
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS paper_budgets (
+        workspace TEXT NOT NULL,
+        account TEXT NOT NULL,
+        currency TEXT NOT NULL,
+        amount TEXT NOT NULL,
+        reserved TEXT NOT NULL DEFAULT '0',
+        consumed TEXT NOT NULL DEFAULT '0',
+        released TEXT NOT NULL DEFAULT '0',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (workspace, account, currency)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS buying_power_reservations (
+        proposal_id TEXT PRIMARY KEY REFERENCES order_intents(proposal_id),
+        workspace TEXT NOT NULL,
+        account TEXT NOT NULL,
+        currency TEXT NOT NULL,
+        intent_hash TEXT NOT NULL,
+        reserved TEXT NOT NULL,
+        consumed TEXT NOT NULL DEFAULT '0',
+        released TEXT NOT NULL DEFAULT '0',
+        state TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS workspace_controls (
+        workspace TEXT PRIMARY KEY,
+        engaged INTEGER NOT NULL DEFAULT 0 CHECK (engaged IN (0, 1)),
+        version INTEGER NOT NULL DEFAULT 0,
+        reason_code TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS workspace_control_events (
+        event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        workspace TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        engaged INTEGER NOT NULL CHECK (engaged IN (0, 1)),
+        purpose TEXT NOT NULL,
+        reason_code TEXT NOT NULL,
+        evidence_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (workspace, version)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS reconciliation_evidence (
+        evidence_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        proposal_id TEXT NOT NULL REFERENCES order_intents(proposal_id),
+        broker_order_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        cumulative_quantity TEXT NOT NULL,
+        cumulative_notional TEXT NOT NULL,
+        status TEXT NOT NULL,
+        evidence_fingerprint TEXT NOT NULL,
+        observed_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (proposal_id, evidence_fingerprint)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS paper_positions (
+        workspace TEXT NOT NULL,
+        account TEXT NOT NULL,
+        currency TEXT NOT NULL,
+        ticker TEXT NOT NULL,
+        quantity TEXT NOT NULL DEFAULT '0',
+        notional TEXT NOT NULL DEFAULT '0',
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (workspace, account, currency, ticker)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS requote_intents (
+        requote_id TEXT PRIMARY KEY,
+        proposal_id TEXT NOT NULL REFERENCES order_intents(proposal_id),
+        parent_intent_hash TEXT NOT NULL,
+        parent_reconciliation_fingerprint TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        snapshot_hash TEXT NOT NULL,
+        candidate_json TEXT NOT NULL,
+        state TEXT NOT NULL,
+        reason_code TEXT NOT NULL DEFAULT '',
+        replacement_proposal_id TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS requote_intents_parent_state
+    ON requote_intents(proposal_id, state, created_at)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS requote_events (
+        event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        requote_id TEXT NOT NULL REFERENCES requote_intents(requote_id),
+        event_type TEXT NOT NULL,
+        from_state TEXT,
+        to_state TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS order_intents_no_update
+    BEFORE UPDATE ON order_intents
+    BEGIN
+        SELECT RAISE(ABORT, 'order_intents are immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS requote_intents_no_delete
+    BEFORE DELETE ON requote_intents
+    BEGIN
+        SELECT RAISE(ABORT, 'requote intents are immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS requote_events_no_update
+    BEFORE UPDATE ON requote_events
+    BEGIN
+        SELECT RAISE(ABORT, 'requote events are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS requote_events_no_delete
+    BEFORE DELETE ON requote_events
+    BEGIN
+        SELECT RAISE(ABORT, 'requote events are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS order_intents_no_delete
+    BEFORE DELETE ON order_intents
+    BEGIN
+        SELECT RAISE(ABORT, 'order_intents are immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS execution_events_no_update
+    BEFORE UPDATE ON execution_events
+    BEGIN
+        SELECT RAISE(ABORT, 'execution_events are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS execution_events_no_delete
+    BEFORE DELETE ON execution_events
+    BEGIN
+        SELECT RAISE(ABORT, 'execution_events are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS approval_keys_no_update
+    BEFORE UPDATE ON approval_keys
+    BEGIN
+        SELECT RAISE(ABORT, 'approval_keys are immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS approval_keys_no_delete
+    BEFORE DELETE ON approval_keys
+    BEGIN
+        SELECT RAISE(ABORT, 'approval_keys are immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS approval_challenges_no_update
+    BEFORE UPDATE ON approval_challenges
+    BEGIN
+        SELECT RAISE(ABORT, 'approval_challenges are immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS approval_challenges_no_delete
+    BEFORE DELETE ON approval_challenges
+    BEGIN
+        SELECT RAISE(ABORT, 'approval_challenges are immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS execution_approvals_no_update
+    BEFORE UPDATE ON execution_approvals
+    BEGIN
+        SELECT RAISE(ABORT, 'execution_approvals are immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS execution_approvals_no_delete
+    BEFORE DELETE ON execution_approvals
+    BEGIN
+        SELECT RAISE(ABORT, 'execution_approvals are immutable');
+    END
+    """,
+)
+
+
+@dataclass(frozen=True)
+class LedgerIdentity:
+    """What a ledger file says about its owner, read without any write."""
+
+    kind: str  # "fresh", "pinned", "unpinned" or "newer"
+    workspace: Optional[Workspace]
+    user_version: int
+
+
+def _require_sqlite_capabilities(connection: sqlite3.Connection) -> None:
+    """Fail closed on a SQLite build without generated columns or JSON1."""
+
+    if sqlite3.sqlite_version_info < (3, 31, 0):
+        raise LedgerError(
+            "SQLite 3.31.0 or newer is required for ledger workspace identity "
+            f"(found {sqlite3.sqlite_version})"
+        )
+    try:
+        value = connection.execute("SELECT json_extract('{\"a\": 1}', '$.a')").fetchone()[0]
+    except sqlite3.Error:
+        raise LedgerError(
+            "SQLite 3.31.0 or newer with JSON1 is required for ledger workspace identity"
+        ) from None
+    if value != 1:
+        raise LedgerError("SQLite json_extract returned an unexpected result")
+
+
+def _read_identity(connection: sqlite3.Connection) -> LedgerIdentity:
+    """Classify a ledger file. Read-only: it only runs SELECTs and a PRAGMA read."""
+
+    user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+    tables = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+    }
+    if user_version > SCHEMA_VERSION:
+        return LedgerIdentity("newer", None, user_version)
+    if user_version == 0 and not tables:
+        return LedgerIdentity("fresh", None, user_version)
+    if user_version == SCHEMA_VERSION and "ledger_identity" in tables:
+        row = connection.execute(
+            "SELECT workspace FROM ledger_identity WHERE singleton = 1"
+        ).fetchone()
+        if row is not None:
+            try:
+                return LedgerIdentity("pinned", Workspace(str(row[0])), user_version)
+            except ValueError:
+                pass
+    return LedgerIdentity("unpinned", None, user_version)
+
+
+def _apply_base_schema(connection: sqlite3.Connection, from_version: int) -> None:
+    """Create or upgrade the v1 to v5 table set. The caller owns the transaction."""
+
+    if from_version == 1:
+        columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(dispatch_attempts)").fetchall()
+        }
+        if "approval_id" not in columns:
+            connection.execute(
+                "ALTER TABLE dispatch_attempts ADD COLUMN approval_id TEXT "
+                "REFERENCES execution_approvals(approval_id)"
+            )
+    for statement in _BASE_SCHEMA_STATEMENTS:
+        connection.execute(statement)
+    if from_version < 3:
+        budget_columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(paper_budgets)").fetchall()
+        }
+        if budget_columns and "reserved" not in budget_columns:
+            connection.execute(
+                "ALTER TABLE paper_budgets ADD COLUMN reserved TEXT NOT NULL DEFAULT '0'"
+            )
+    if from_version < 5:
+        requote_columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(requote_intents)").fetchall()
+        }
+        if requote_columns and "replacement_proposal_id" not in requote_columns:
+            connection.execute(
+                "ALTER TABLE requote_intents ADD COLUMN replacement_proposal_id TEXT NOT NULL DEFAULT ''"
+            )
+
+
+_WORKSPACE_GUARD_MESSAGE = "workspace does not match ledger identity"
+_PIN_SUBQUERY = "(SELECT workspace FROM ledger_identity WHERE singleton = 1)"
+_INSERT_GUARDED_TABLES = (
+    "approval_keys",
+    "approval_challenges",
+    "execution_approvals",
+    "execution_admissions",
+    "paper_budgets",
+    "buying_power_reservations",
+    "workspace_controls",
+    "workspace_control_events",
+    "paper_positions",
+)
+_UPDATE_GUARDED_TABLES = (
+    "paper_budgets",
+    "buying_power_reservations",
+    "workspace_controls",
+    "workspace_control_events",
+    "paper_positions",
+    "execution_admissions",
+)
+
+
+def _install_identity(
+    connection: sqlite3.Connection,
+    workspace: Workspace,
+    pinned_by: str,
+    pinned_at: str,
+) -> None:
+    """Pin the file to ``workspace`` and arm the SQLite guards. Caller owns the transaction."""
+
+    pinned = coerce_workspace(workspace)
+    connection.execute(
+        """
+        CREATE TABLE ledger_identity (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            workspace TEXT NOT NULL CHECK (workspace IN ('uk', 'india')),
+            pinned_at TEXT NOT NULL,
+            pinned_by TEXT NOT NULL
+                CHECK (pinned_by IN ('first-open', 'operator-confirmed-migration'))
+        )
+        """
+    )
+    for event in ("UPDATE", "DELETE"):
+        connection.execute(
+            f"""
+            CREATE TRIGGER ledger_identity_no_{event.lower()}
+            BEFORE {event} ON ledger_identity
+            BEGIN
+                SELECT RAISE(ABORT, 'ledger identity is immutable');
+            END
+            """
+        )
+    connection.execute(
+        "INSERT INTO ledger_identity (singleton, workspace, pinned_at, pinned_by) "
+        "VALUES (1, ?, ?, ?)",
+        (pinned.value, pinned_at, pinned_by),
+    )
+    # A generated column needs no UPDATE, so the order_intents immutability
+    # triggers stay in place. It is hidden from table_info; look in table_xinfo.
+    order_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_xinfo(order_intents)").fetchall()
+    }
+    if "workspace" not in order_columns:
+        connection.execute(
+            "ALTER TABLE order_intents ADD COLUMN workspace TEXT "
+            "GENERATED ALWAYS AS (json_extract(canonical_json, '$.workspace')) VIRTUAL"
+        )
+    connection.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS order_intents_workspace_insert_guard
+        BEFORE INSERT ON order_intents
+        WHEN json_extract(NEW.canonical_json, '$.workspace') IS NOT {_PIN_SUBQUERY}
+        BEGIN
+            SELECT RAISE(ABORT, '{_WORKSPACE_GUARD_MESSAGE}');
+        END
+        """
+    )
+    for table in _INSERT_GUARDED_TABLES:
+        connection.execute(
+            f"""
+            CREATE TRIGGER IF NOT EXISTS {table}_workspace_insert_guard
+            BEFORE INSERT ON {table}
+            WHEN NEW.workspace IS NOT {_PIN_SUBQUERY}
+            BEGIN
+                SELECT RAISE(ABORT, '{_WORKSPACE_GUARD_MESSAGE}');
+            END
+            """
+        )
+    for table in _UPDATE_GUARDED_TABLES:
+        connection.execute(
+            f"""
+            CREATE TRIGGER IF NOT EXISTS {table}_workspace_update_guard
+            BEFORE UPDATE OF workspace ON {table}
+            WHEN NEW.workspace IS NOT OLD.workspace
+            BEGIN
+                SELECT RAISE(ABORT, '{_WORKSPACE_GUARD_MESSAGE}');
+            END
+            """
+        )
+    connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION:d}")
+
+
+def _ro_uri(path: Path) -> str:
+    """Read-only SQLite URI. as_uri percent-encodes spaces in the real ledger path."""
+
+    return path.resolve().as_uri() + "?mode=ro"
+
+
 class ExecutionLedger:
     """SQLite-backed execution authority for one local workspace."""
 
@@ -209,18 +746,16 @@ class ExecutionLedger:
         self,
         path: os.PathLike[str] | str | None = None,
         *,
-        workspace: str = "uk",
+        workspace: Workspace | str,
         busy_timeout_ms: int = 5_000,
         require_approval: bool = False,
     ) -> None:
         if not 1 <= busy_timeout_ms <= 60_000:
             raise ValueError("busy_timeout_ms must be between 1 and 60000")
 
-        if not _WORKSPACE_PATTERN.fullmatch(workspace):
-            raise ValueError("workspace must contain only letters, digits, '_' or '-'")
-        self.workspace = workspace
+        self.workspace: Workspace = coerce_workspace(workspace)
         self.require_approval = require_approval
-        self.path = Path(path) if path is not None else default_ledger_path(workspace)
+        self.path = Path(path) if path is not None else default_ledger_path(self.workspace)
         if self.path.exists() and self.path.is_symlink():
             raise LedgerError("ledger path must not be a symbolic link")
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -234,6 +769,13 @@ class ExecutionLedger:
         self._lock_fd: Optional[int] = None
         try:
             self._acquire_writer_lock()
+            # Decide ownership on a read-only connection before anything can
+            # write: _configure switches the journal mode, which rewrites the
+            # header of a rollback-journal file, so a refused open must never
+            # reach it.
+            identity = self._probe_identity()
+            if identity is not None:
+                self._enforce_identity(identity)
             self._connection = sqlite3.connect(
                 self.path,
                 timeout=busy_timeout_ms / 1_000,
@@ -241,8 +783,11 @@ class ExecutionLedger:
                 check_same_thread=False,
             )
             self._connection.row_factory = sqlite3.Row
+            if identity is None:
+                _require_sqlite_capabilities(self._connection)
             self._configure(busy_timeout_ms)
-            self._create_schema()
+            if identity is None or identity.kind == "fresh":
+                self._pin_fresh_file()
             os.chmod(self.path, 0o600)
             self.recover_abandoned_submissions()
             self.recover_pending_requotes()
@@ -255,6 +800,63 @@ class ExecutionLedger:
 
     def __exit__(self, *_exc: object) -> None:
         self.close()
+
+    def require_workspace(self, workspace: object) -> Workspace:
+        """Return the coerced workspace when it equals the pin, else raise."""
+
+        try:
+            requested = coerce_workspace(workspace)
+        except ValueError:
+            raise WorkspaceMismatch(
+                f"request names no valid workspace; ledger is pinned to {self.workspace.value}"
+            ) from None
+        if requested != self.workspace:
+            raise WorkspaceMismatch(
+                f"request names workspace {requested.value}; "
+                f"ledger is pinned to {self.workspace.value}"
+            )
+        return requested
+
+    def _probe_identity(self) -> Optional[LedgerIdentity]:
+        """Read the identity on a mode=ro connection. None means the file does not exist."""
+
+        if not self.path.exists():
+            return None
+        probe = sqlite3.connect(_ro_uri(self.path), uri=True)
+        try:
+            _require_sqlite_capabilities(probe)
+            return _read_identity(probe)
+        finally:
+            probe.close()
+
+    def _enforce_identity(self, identity: LedgerIdentity) -> None:
+        if identity.kind == "newer":
+            raise LedgerError(
+                f"ledger schema {identity.user_version} is newer than supported version "
+                f"{SCHEMA_VERSION}"
+            )
+        if identity.kind == "unpinned":
+            raise LedgerUnpinned(
+                f"ledger {self.path} (schema {identity.user_version}) has no workspace pin. "
+                "Ownership is never inferred. The operator must run "
+                "scripts/ledger_tool.py inspect and then apply with an explicit "
+                "confirmation."
+            )
+        if identity.kind == "pinned" and identity.workspace != self.workspace:
+            pinned = identity.workspace.value if identity.workspace else "unknown"
+            raise WorkspaceMismatch(
+                f"ledger {self.path} is pinned to workspace {pinned}; "
+                f"requested {self.workspace.value}"
+            )
+
+    def _pin_fresh_file(self) -> None:
+        with self._transaction() as connection:
+            # The writer lock is held, so this only guards a file created
+            # between the probe and this transaction.
+            if _read_identity(connection).kind != "fresh":
+                raise LedgerError("ledger file changed while it was being opened")
+            _apply_base_schema(connection, 0)
+            _install_identity(connection, self.workspace, "first-open", _now())
 
     def _acquire_writer_lock(self) -> None:
         flags = os.O_RDWR | os.O_CREAT
@@ -281,365 +883,6 @@ class ExecutionLedger:
             raise LedgerError("SQLite WAL mode is unavailable")
         connection.execute("PRAGMA synchronous = FULL")
         connection.execute("PRAGMA foreign_keys = ON")
-
-    def _create_schema(self) -> None:
-        current_version = int(
-            self._require_connection().execute("PRAGMA user_version").fetchone()[0]
-        )
-        if current_version > SCHEMA_VERSION:
-            raise LedgerError(
-                f"ledger schema {current_version} is newer than supported version "
-                f"{SCHEMA_VERSION}"
-            )
-        statements = (
-            """
-            CREATE TABLE IF NOT EXISTS order_intents (
-                proposal_id TEXT PRIMARY KEY,
-                client_order_id TEXT NOT NULL UNIQUE,
-                intent_hash TEXT NOT NULL,
-                canonical_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS order_projection (
-                proposal_id TEXT PRIMARY KEY REFERENCES order_intents(proposal_id),
-                state TEXT NOT NULL,
-                acknowledgment_json TEXT,
-                rejection_notes TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS dispatch_attempts (
-                attempt_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                proposal_id TEXT NOT NULL UNIQUE REFERENCES order_intents(proposal_id),
-                approval_id TEXT REFERENCES execution_approvals(approval_id),
-                state TEXT NOT NULL,
-                claimed_at TEXT NOT NULL,
-                completed_at TEXT,
-                acknowledgment_json TEXT
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS approval_keys (
-                workspace TEXT NOT NULL,
-                key_id TEXT NOT NULL,
-                public_key_x963 BLOB NOT NULL CHECK(length(public_key_x963) = 65),
-                created_at TEXT NOT NULL,
-                PRIMARY KEY (workspace, key_id)
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS approval_challenges (
-                challenge_id TEXT PRIMARY KEY,
-                proposal_id TEXT NOT NULL REFERENCES order_intents(proposal_id),
-                workspace TEXT NOT NULL,
-                key_id TEXT NOT NULL,
-                intent_hash TEXT NOT NULL,
-                signed_payload BLOB NOT NULL,
-                issued_at_epoch INTEGER NOT NULL,
-                expires_at_epoch INTEGER NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (workspace, key_id)
-                    REFERENCES approval_keys(workspace, key_id)
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS execution_approvals (
-                approval_id TEXT PRIMARY KEY,
-                challenge_id TEXT NOT NULL UNIQUE
-                    REFERENCES approval_challenges(challenge_id),
-                proposal_id TEXT NOT NULL UNIQUE
-                    REFERENCES order_intents(proposal_id),
-                workspace TEXT NOT NULL,
-                key_id TEXT NOT NULL,
-                intent_hash TEXT NOT NULL,
-                signed_payload_hash TEXT NOT NULL,
-                signature_der BLOB NOT NULL,
-                approved_at TEXT NOT NULL,
-                FOREIGN KEY (workspace, key_id)
-                    REFERENCES approval_keys(workspace, key_id)
-            )
-            """,
-            """
-            CREATE UNIQUE INDEX IF NOT EXISTS dispatch_attempt_approval_unique
-            ON dispatch_attempts(approval_id) WHERE approval_id IS NOT NULL
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS execution_events (
-                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                proposal_id TEXT NOT NULL REFERENCES order_intents(proposal_id),
-                event_type TEXT NOT NULL,
-                from_state TEXT,
-                to_state TEXT NOT NULL,
-                payload_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS execution_admissions (
-                proposal_id TEXT PRIMARY KEY REFERENCES order_intents(proposal_id),
-                intent_hash TEXT NOT NULL,
-                workspace TEXT NOT NULL,
-                account TEXT NOT NULL,
-                currency TEXT NOT NULL,
-                ticker TEXT NOT NULL,
-                side TEXT NOT NULL,
-                original_quantity TEXT NOT NULL,
-                final_quantity TEXT NOT NULL,
-                price TEXT NOT NULL,
-                notional TEXT NOT NULL,
-                simulator_fill_price TEXT NOT NULL,
-                simulator_drawdown_pct TEXT NOT NULL,
-                risk_quantity TEXT NOT NULL,
-                current_spread_pct TEXT NOT NULL,
-                evidence_at TEXT NOT NULL,
-                evidence_hash TEXT NOT NULL,
-                decision TEXT NOT NULL,
-                reason_code TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                CHECK (decision IN ('ADMITTED', 'DENIED'))
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS paper_budgets (
-                workspace TEXT NOT NULL,
-                account TEXT NOT NULL,
-                currency TEXT NOT NULL,
-                amount TEXT NOT NULL,
-                reserved TEXT NOT NULL DEFAULT '0',
-                consumed TEXT NOT NULL DEFAULT '0',
-                released TEXT NOT NULL DEFAULT '0',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY (workspace, account, currency)
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS buying_power_reservations (
-                proposal_id TEXT PRIMARY KEY REFERENCES order_intents(proposal_id),
-                workspace TEXT NOT NULL,
-                account TEXT NOT NULL,
-                currency TEXT NOT NULL,
-                intent_hash TEXT NOT NULL,
-                reserved TEXT NOT NULL,
-                consumed TEXT NOT NULL DEFAULT '0',
-                released TEXT NOT NULL DEFAULT '0',
-                state TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS workspace_controls (
-                workspace TEXT PRIMARY KEY,
-                engaged INTEGER NOT NULL DEFAULT 0 CHECK (engaged IN (0, 1)),
-                version INTEGER NOT NULL DEFAULT 0,
-                reason_code TEXT NOT NULL DEFAULT '',
-                updated_at TEXT NOT NULL
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS workspace_control_events (
-                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                workspace TEXT NOT NULL,
-                version INTEGER NOT NULL,
-                engaged INTEGER NOT NULL CHECK (engaged IN (0, 1)),
-                purpose TEXT NOT NULL,
-                reason_code TEXT NOT NULL,
-                evidence_id TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                UNIQUE (workspace, version)
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS reconciliation_evidence (
-                evidence_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                proposal_id TEXT NOT NULL REFERENCES order_intents(proposal_id),
-                broker_order_id TEXT NOT NULL,
-                source TEXT NOT NULL,
-                cumulative_quantity TEXT NOT NULL,
-                cumulative_notional TEXT NOT NULL,
-                status TEXT NOT NULL,
-                evidence_fingerprint TEXT NOT NULL,
-                observed_at TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                UNIQUE (proposal_id, evidence_fingerprint)
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS paper_positions (
-                workspace TEXT NOT NULL,
-                account TEXT NOT NULL,
-                currency TEXT NOT NULL,
-                ticker TEXT NOT NULL,
-                quantity TEXT NOT NULL DEFAULT '0',
-                notional TEXT NOT NULL DEFAULT '0',
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY (workspace, account, currency, ticker)
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS requote_intents (
-                requote_id TEXT PRIMARY KEY,
-                proposal_id TEXT NOT NULL REFERENCES order_intents(proposal_id),
-                parent_intent_hash TEXT NOT NULL,
-                parent_reconciliation_fingerprint TEXT NOT NULL,
-                idempotency_key TEXT NOT NULL UNIQUE,
-                snapshot_hash TEXT NOT NULL,
-                candidate_json TEXT NOT NULL,
-                state TEXT NOT NULL,
-                reason_code TEXT NOT NULL DEFAULT '',
-                replacement_proposal_id TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS requote_intents_parent_state
-            ON requote_intents(proposal_id, state, created_at)
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS requote_events (
-                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                requote_id TEXT NOT NULL REFERENCES requote_intents(requote_id),
-                event_type TEXT NOT NULL,
-                from_state TEXT,
-                to_state TEXT NOT NULL,
-                payload_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            """,
-            """
-            CREATE TRIGGER IF NOT EXISTS order_intents_no_update
-            BEFORE UPDATE ON order_intents
-            BEGIN
-                SELECT RAISE(ABORT, 'order_intents are immutable');
-            END
-            """,
-            """
-            CREATE TRIGGER IF NOT EXISTS requote_intents_no_delete
-            BEFORE DELETE ON requote_intents
-            BEGIN
-                SELECT RAISE(ABORT, 'requote intents are immutable');
-            END
-            """,
-            """
-            CREATE TRIGGER IF NOT EXISTS requote_events_no_update
-            BEFORE UPDATE ON requote_events
-            BEGIN
-                SELECT RAISE(ABORT, 'requote events are append-only');
-            END
-            """,
-            """
-            CREATE TRIGGER IF NOT EXISTS requote_events_no_delete
-            BEFORE DELETE ON requote_events
-            BEGIN
-                SELECT RAISE(ABORT, 'requote events are append-only');
-            END
-            """,
-            """
-            CREATE TRIGGER IF NOT EXISTS order_intents_no_delete
-            BEFORE DELETE ON order_intents
-            BEGIN
-                SELECT RAISE(ABORT, 'order_intents are immutable');
-            END
-            """,
-            """
-            CREATE TRIGGER IF NOT EXISTS execution_events_no_update
-            BEFORE UPDATE ON execution_events
-            BEGIN
-                SELECT RAISE(ABORT, 'execution_events are append-only');
-            END
-            """,
-            """
-            CREATE TRIGGER IF NOT EXISTS execution_events_no_delete
-            BEFORE DELETE ON execution_events
-            BEGIN
-                SELECT RAISE(ABORT, 'execution_events are append-only');
-            END
-            """,
-            """
-            CREATE TRIGGER IF NOT EXISTS approval_keys_no_update
-            BEFORE UPDATE ON approval_keys
-            BEGIN
-                SELECT RAISE(ABORT, 'approval_keys are immutable');
-            END
-            """,
-            """
-            CREATE TRIGGER IF NOT EXISTS approval_keys_no_delete
-            BEFORE DELETE ON approval_keys
-            BEGIN
-                SELECT RAISE(ABORT, 'approval_keys are immutable');
-            END
-            """,
-            """
-            CREATE TRIGGER IF NOT EXISTS approval_challenges_no_update
-            BEFORE UPDATE ON approval_challenges
-            BEGIN
-                SELECT RAISE(ABORT, 'approval_challenges are immutable');
-            END
-            """,
-            """
-            CREATE TRIGGER IF NOT EXISTS approval_challenges_no_delete
-            BEFORE DELETE ON approval_challenges
-            BEGIN
-                SELECT RAISE(ABORT, 'approval_challenges are immutable');
-            END
-            """,
-            """
-            CREATE TRIGGER IF NOT EXISTS execution_approvals_no_update
-            BEFORE UPDATE ON execution_approvals
-            BEGIN
-                SELECT RAISE(ABORT, 'execution_approvals are immutable');
-            END
-            """,
-            """
-            CREATE TRIGGER IF NOT EXISTS execution_approvals_no_delete
-            BEFORE DELETE ON execution_approvals
-            BEGIN
-                SELECT RAISE(ABORT, 'execution_approvals are immutable');
-            END
-            """,
-        )
-        with self._transaction() as connection:
-            if current_version == 1:
-                columns = {
-                    str(row[1])
-                    for row in connection.execute(
-                        "PRAGMA table_info(dispatch_attempts)"
-                    ).fetchall()
-                }
-                if "approval_id" not in columns:
-                    connection.execute(
-                        "ALTER TABLE dispatch_attempts ADD COLUMN approval_id TEXT "
-                        "REFERENCES execution_approvals(approval_id)"
-                    )
-            for statement in statements:
-                connection.execute(statement)
-            if current_version < 3:
-                budget_columns = {
-                    str(row[1])
-                    for row in connection.execute(
-                        "PRAGMA table_info(paper_budgets)"
-                    ).fetchall()
-                }
-                if budget_columns and "reserved" not in budget_columns:
-                    connection.execute(
-                        "ALTER TABLE paper_budgets ADD COLUMN reserved TEXT NOT NULL DEFAULT '0'"
-                    )
-            if current_version < 5:
-                requote_columns = {
-                    str(row[1])
-                    for row in connection.execute("PRAGMA table_info(requote_intents)").fetchall()
-                }
-                if requote_columns and "replacement_proposal_id" not in requote_columns:
-                    connection.execute(
-                        "ALTER TABLE requote_intents ADD COLUMN replacement_proposal_id TEXT NOT NULL DEFAULT ''"
-                    )
-            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION:d}")
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
@@ -2416,7 +2659,7 @@ class ExecutionLedger:
     def _find_identity(
         self, connection: sqlite3.Connection, proposal_id: str, client_order_id: str
     ) -> Optional[sqlite3.Row]:
-        return connection.execute(
+        row = connection.execute(
             """
             SELECT i.*, p.state, p.acknowledgment_json, p.updated_at
             FROM order_intents AS i
@@ -2425,11 +2668,13 @@ class ExecutionLedger:
             """,
             (proposal_id, client_order_id),
         ).fetchone()
+        self._check_row_workspace(row)
+        return row
 
     def _select_order(
         self, connection: sqlite3.Connection, proposal_id: str
     ) -> Optional[sqlite3.Row]:
-        return connection.execute(
+        row = connection.execute(
             """
             SELECT i.*, p.state, p.acknowledgment_json, p.updated_at
             FROM order_intents AS i
@@ -2438,6 +2683,17 @@ class ExecutionLedger:
             """,
             (proposal_id,),
         ).fetchone()
+        self._check_row_workspace(row)
+        return row
+
+    def _check_row_workspace(self, row: Optional[sqlite3.Row]) -> None:
+        """Defense in depth: a stored intent must carry this ledger's workspace."""
+
+        if row is not None and row["workspace"] != self.workspace.value:
+            raise WorkspaceMismatch(
+                f"stored order {row['proposal_id']!r} carries workspace "
+                f"{row['workspace']!r}; ledger is pinned to {self.workspace.value}"
+            )
 
     def _get_order_locked(
         self, connection: sqlite3.Connection, proposal_id: str
@@ -2558,6 +2814,228 @@ class ExecutionLedger:
         )
 
 
+class LedgerReader:
+    """Read-only view of a pinned ledger for inspection.
+
+    Opens the file with ``mode=ro``: no writer lock, no recovery, no PRAGMA
+    writes and no private config. It still refuses an unpinned file and a
+    workspace that differs from the pin, and it never inserts anything (a
+    missing workspace control reads as not engaged, version 0).
+    """
+
+    def __init__(self, path: os.PathLike[str] | str, *, workspace: Workspace | str) -> None:
+        self.workspace: Workspace = coerce_workspace(workspace)
+        self.path = Path(path)
+        if self.path.is_symlink():
+            raise LedgerError("ledger path must not be a symbolic link")
+        if not self.path.exists():
+            raise LedgerError(f"ledger {self.path} does not exist")
+        self._mutex = threading.RLock()
+        self._connection: Optional[sqlite3.Connection] = sqlite3.connect(
+            _ro_uri(self.path), uri=True, check_same_thread=False
+        )
+        try:
+            self._connection.row_factory = sqlite3.Row
+            _require_sqlite_capabilities(self._connection)
+            identity = _read_identity(self._connection)
+            if identity.kind == "newer":
+                raise LedgerError(
+                    f"ledger schema {identity.user_version} is newer than supported version "
+                    f"{SCHEMA_VERSION}"
+                )
+            if identity.kind in ("fresh", "unpinned"):
+                raise LedgerUnpinned(
+                    f"ledger {self.path} (schema {identity.user_version}) has no workspace pin"
+                )
+            if identity.workspace != self.workspace:
+                pinned = identity.workspace.value if identity.workspace else "unknown"
+                raise WorkspaceMismatch(
+                    f"ledger {self.path} is pinned to workspace {pinned}; "
+                    f"requested {self.workspace.value}"
+                )
+        except Exception:
+            self.close()
+            raise
+
+    def __enter__(self) -> "LedgerReader":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        with self._mutex:
+            if self._connection is not None:
+                self._connection.close()
+                self._connection = None
+
+    def require_workspace(self, workspace: object) -> Workspace:
+        try:
+            requested = coerce_workspace(workspace)
+        except ValueError:
+            raise WorkspaceMismatch(
+                f"request names no valid workspace; ledger is pinned to {self.workspace.value}"
+            ) from None
+        if requested != self.workspace:
+            raise WorkspaceMismatch(
+                f"request names workspace {requested.value}; "
+                f"ledger is pinned to {self.workspace.value}"
+            )
+        return requested
+
+    def _require_connection(self) -> sqlite3.Connection:
+        if self._connection is None:
+            raise LedgerError("ledger reader is closed")
+        return self._connection
+
+    def get_order(self, proposal_id: str) -> Optional[LedgerOrder]:
+        with self._mutex:
+            row = self._require_connection().execute(
+                """
+                SELECT i.*, p.state, p.acknowledgment_json, p.updated_at
+                FROM order_intents AS i
+                JOIN order_projection AS p USING (proposal_id)
+                WHERE i.proposal_id = ?
+                """,
+                (proposal_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        if row["workspace"] != self.workspace.value:
+            raise WorkspaceMismatch(
+                f"stored order {proposal_id!r} carries workspace {row['workspace']!r}; "
+                f"ledger is pinned to {self.workspace.value}"
+            )
+        return ExecutionLedger._order_from_row(row)
+
+    def get_admission(self, proposal_id: str) -> Optional[ExecutionAdmission]:
+        with self._mutex:
+            row = self._require_connection().execute(
+                "SELECT * FROM execution_admissions WHERE proposal_id = ?",
+                (proposal_id,),
+            ).fetchone()
+        return ExecutionLedger._admission_from_row(row) if row is not None else None
+
+    def get_reservation(self, proposal_id: str) -> Optional[PaperReservation]:
+        with self._mutex:
+            row = self._require_connection().execute(
+                "SELECT * FROM buying_power_reservations WHERE proposal_id = ?",
+                (proposal_id,),
+            ).fetchone()
+        return ExecutionLedger._reservation_from_row(row) if row is not None else None
+
+    def list_events(self, proposal_id: Optional[str] = None) -> list[ExecutionEvent]:
+        sql = "SELECT * FROM execution_events"
+        parameters: tuple[object, ...] = ()
+        if proposal_id is not None:
+            sql += " WHERE proposal_id = ?"
+            parameters = (proposal_id,)
+        sql += " ORDER BY event_id"
+        with self._mutex:
+            rows = self._require_connection().execute(sql, parameters).fetchall()
+        return [
+            ExecutionEvent(
+                event_id=int(row["event_id"]),
+                proposal_id=str(row["proposal_id"]),
+                event_type=str(row["event_type"]),
+                from_state=row["from_state"],
+                to_state=str(row["to_state"]),
+                payload=json.loads(str(row["payload_json"])),
+                created_at=str(row["created_at"]),
+            )
+            for row in rows
+        ]
+
+    def list_attempts(self, proposal_id: Optional[str] = None) -> list[DispatchAttempt]:
+        sql = "SELECT * FROM dispatch_attempts"
+        parameters: tuple[object, ...] = ()
+        if proposal_id is not None:
+            sql += " WHERE proposal_id = ?"
+            parameters = (proposal_id,)
+        sql += " ORDER BY attempt_id"
+        with self._mutex:
+            rows = self._require_connection().execute(sql, parameters).fetchall()
+        return [
+            DispatchAttempt(
+                attempt_id=int(row["attempt_id"]),
+                proposal_id=str(row["proposal_id"]),
+                state=str(row["state"]),
+                claimed_at=str(row["claimed_at"]),
+                completed_at=row["completed_at"],
+                acknowledgment=(
+                    _ack_from_json(str(row["acknowledgment_json"]))
+                    if row["acknowledgment_json"]
+                    else None
+                ),
+            )
+            for row in rows
+        ]
+
+    def list_requotes(self, proposal_id: Optional[str] = None) -> list[LedgerRequote]:
+        sql = "SELECT * FROM requote_intents"
+        parameters: tuple[object, ...] = ()
+        if proposal_id is not None:
+            sql += " WHERE proposal_id = ?"
+            parameters = (proposal_id,)
+        sql += " ORDER BY created_at, requote_id"
+        with self._mutex:
+            rows = self._require_connection().execute(sql, parameters).fetchall()
+        return [ExecutionLedger._requote_from_row(row) for row in rows]
+
+    def get_paper_budget(
+        self, account: str, currency: str, *, workspace: Workspace | str
+    ) -> Optional[PaperBudget]:
+        pinned = self.require_workspace(workspace)
+        with self._mutex:
+            row = self._require_connection().execute(
+                "SELECT * FROM paper_budgets WHERE workspace = ? AND account = ? AND currency = ?",
+                (pinned.value, account, currency),
+            ).fetchone()
+        return ExecutionLedger._budget_from_row(row) if row is not None else None
+
+    def get_paper_position(
+        self, account: str, currency: str, ticker: str, *, workspace: Workspace | str
+    ) -> Optional[Mapping[str, str]]:
+        pinned = self.require_workspace(workspace)
+        with self._mutex:
+            row = self._require_connection().execute(
+                "SELECT quantity, notional FROM paper_positions WHERE workspace = ? AND account = ? AND currency = ? AND ticker = ?",
+                (pinned.value, account, currency, ticker),
+            ).fetchone()
+        if row is None:
+            return None
+        return {"quantity": str(row["quantity"]), "notional": str(row["notional"])}
+
+    def get_workspace_control(self, *, workspace: Workspace | str) -> WorkspaceControl:
+        pinned = self.require_workspace(workspace)
+        with self._mutex:
+            row = self._require_connection().execute(
+                "SELECT * FROM workspace_controls WHERE workspace = ?", (pinned.value,)
+            ).fetchone()
+        if row is None:
+            return WorkspaceControl(
+                workspace=pinned.value,
+                engaged=False,
+                version=0,
+                updated_at=datetime.now(timezone.utc),
+            )
+        return WorkspaceControl(
+            workspace=str(row["workspace"]),
+            engaged=bool(row["engaged"]),
+            version=int(row["version"]),
+            reason_code=str(row["reason_code"]),
+            updated_at=datetime.fromisoformat(str(row["updated_at"])),
+        )
+
+    def get_approval_key(self, *, workspace: Workspace | str) -> Optional[LedgerApprovalKey]:
+        pinned = self.require_workspace(workspace)
+        with self._mutex:
+            row = self._require_connection().execute(
+                "SELECT * FROM approval_keys WHERE workspace = ?", (pinned.value,)
+            ).fetchone()
+        return ExecutionLedger._approval_key_from_row(row) if row is not None else None
+
+
 def _intent_identity(intent: OrderIntent) -> tuple[str, str, str, str]:
     snapshot = canonical_json(intent)
     data = json.loads(snapshot)
@@ -2632,19 +3110,27 @@ __all__ = [
     "ExecutionLedger",
     "IntentConflict",
     "InvalidTransition",
+    "LEGACY_SCHEMA_VERSIONS",
     "LedgerError",
     "LedgerApprovalChallenge",
     "LedgerApprovalKey",
+    "LedgerIdentity",
     "LedgerOrder",
+    "LedgerReader",
     "LedgerRequote",
+    "LedgerUnpinned",
     "LedgerWriterUnavailable",
     "OrderNotFound",
     "PaperBudget",
     "PaperReservation",
     "ReconciliationSnapshot",
     "RequoteConflict",
+    "SCHEMA_VERSION",
+    "Workspace",
     "WorkspaceControl",
+    "WorkspaceMismatch",
     "canonical_json",
+    "coerce_workspace",
     "default_ledger_path",
     "intent_hash",
 ]

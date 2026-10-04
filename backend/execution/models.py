@@ -2,10 +2,21 @@
 
 from datetime import datetime
 from decimal import Decimal
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Any, Dict, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+class Workspace(StrEnum):
+    """Execution workspaces. A ledger file is pinned to exactly one of these.
+
+    ``StrEnum`` keeps ``str(Workspace.INDIA) == "india"`` on Python 3.11 and
+    compares equal to its string value, so existing string comparisons still hold.
+    """
+
+    UK = "uk"
+    INDIA = "india"
 
 
 class OrderSide(str, Enum):

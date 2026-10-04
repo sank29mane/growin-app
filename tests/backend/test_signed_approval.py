@@ -20,7 +20,7 @@ from execution import (
     ExecutionService,
     PaperDispatcher,
 )
-from execution.ledger import IntentConflict
+from execution.ledger import IntentConflict, LedgerUnpinned
 from execution.models import OrderIntent
 
 
@@ -333,7 +333,7 @@ def test_workspace_and_live_intents_fail_closed(tmp_path):
             approval.create_challenge("live")
 
 
-def test_v1_database_migrates_without_losing_existing_order(tmp_path):
+def test_v1_database_is_refused_until_operator_confirms_ownership(tmp_path):
     db_path = tmp_path / "execution.sqlite3"
     connection = sqlite3.connect(db_path)
     connection.executescript(
@@ -390,16 +390,20 @@ def test_v1_database_migrates_without_losing_existing_order(tmp_path):
     connection.commit()
     connection.close()
 
-    with ExecutionLedger(db_path, workspace="uk") as ledger:
-        assert ledger.pragmas()["user_version"] == 5
-        assert ledger.get_order("legacy").intent_hash == digest
-        columns = {
-            row[1]
-            for row in sqlite3.connect(db_path).execute(
-                "PRAGMA table_info(dispatch_attempts)"
-            )
-        }
-        assert "approval_id" in columns
+    # Decision 4: ownership is never taken on open. The positive migration path
+    # (order preserved, approval_id added, user_version 6) is covered through the
+    # operator-confirmed tool in test_ledger_migration_v6.py.
+    with pytest.raises(LedgerUnpinned):
+        ExecutionLedger(db_path, workspace="uk")
+
+    check = sqlite3.connect(db_path)
+    try:
+        assert check.execute("SELECT * FROM order_intents").fetchall() == [
+            ("legacy", "growin-legacy", digest, snapshot, "before")
+        ]
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 1
+    finally:
+        check.close()
 
 
 def test_approval_evidence_and_challenge_are_database_immutable(tmp_path):

@@ -22,3 +22,12 @@ backend/routes/market_routes.py
 backend/routes/market_data_routes.py
 Growin/Security/*
 .github/*
+
+# Phase 58: fail-closed private config loader, startup authority, audit trail, UK-only credential gate, ledger tool, private edge
+backend/private_config/*
+backend/server.py
+backend/utils/audit_log.py
+backend/workspace_credentials.py
+scripts/ledger_tool.py
+private/*
+tests/backend/test_private_config.py
