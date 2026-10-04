@@ -1,0 +1,15 @@
+{
+  "gcp": {
+    "project": "<GCP_PROJECT_ID>",
+    "zone": "<GCP_ZONE>",
+    "instance": "<VM_INSTANCE_NAME>",
+    "daily_account": "<DAILY_ACCOUNT_EMAIL>"
+  },
+  "tunnel": {
+    "relay_port": 8443,
+    "ready_timeout_s": 30
+  },
+  "listener": {
+    "window_s": 120
+  }
+}
