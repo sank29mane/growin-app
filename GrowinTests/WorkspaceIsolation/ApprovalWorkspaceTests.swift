@@ -495,6 +495,49 @@ struct ApprovalWorkspaceTests {
         #expect(try raw.data(account: Self.legacyAccount) == legacyKey.rawRepresentation)
     }
 
+    @Test func legacyAdoptionRetryFinishesAFailedFlatDelete() throws {
+        // Review repro: the UK copy exists but the flat delete failed. A retry
+        // must remove the flat item, not throw workspaceKeyExists forever.
+        let (signer, store, service) = Self.makeSigner()
+        defer { Self.cleanUp(store) }
+        let raw = RawKeychain(service: service)
+
+        let legacyKey = P256.Signing.PrivateKey()
+        try raw.set(legacyKey.rawRepresentation, account: Self.legacyAccount)
+        try store.set(legacyKey.rawRepresentation, for: .approvalSigningKey, scope: .workspace(.uk))
+        let legacyKeyID = SHA256.hash(data: legacyKey.publicKey.x963Representation)
+            .map { String(format: "%02x", $0) }.joined()
+        #expect(signer.canAdoptLegacyKey(into: .uk))
+        #expect(!signer.canAdoptLegacyKey(into: .india))
+
+        // A wrong key ID still refuses and leaves both items.
+        do {
+            _ = try signer.adoptLegacyKey(into: .uk, expectedKeyID: "not-the-key")
+            Issue.record("Expected legacyKeyMismatch")
+        } catch LocalApprovalSignerError.legacyKeyMismatch {
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+        #expect(try raw.data(account: Self.legacyAccount) == legacyKey.rawRepresentation)
+
+        let adopted = try signer.adoptLegacyKey(into: .uk, expectedKeyID: legacyKeyID)
+        #expect(adopted.keyID == legacyKeyID)
+        #expect(try signer.identity(for: .uk) == adopted)
+        #expect(try raw.data(account: Self.legacyAccount) == nil)
+        #expect(!signer.canAdoptLegacyKey(into: .uk))
+        #expect(!signer.isConfigured(for: .india))
+    }
+
+    @Test func settingsHidesAdoptionWhenADifferentUkKeyExists() throws {
+        let (signer, store, service) = Self.makeSigner()
+        defer { Self.cleanUp(store) }
+        let raw = RawKeychain(service: service)
+
+        _ = try signer.createIdentityIfNeeded(for: .uk)
+        try raw.set(P256.Signing.PrivateKey().rawRepresentation, account: Self.legacyAccount)
+        #expect(!signer.canAdoptLegacyKey(into: .uk))
+    }
+
     @Test func settingsHasNoHardCodedUkAndNoNoArgumentSignerUse() throws {
         let settings = try PaperOperationsSourceProbe.contents("Growin/Views/SettingsView.swift")
         #expect(!settings.contains("workspaces/uk/"))

@@ -35,9 +35,8 @@ struct ApprovalSecuritySection: View {
     }
 
     private var canAdoptLegacyKey: Bool {
-        workspace == .uk
-            && LocalApprovalSigner.shared.hasLegacyFlatKey()
-            && !LocalApprovalSigner.shared.isConfigured(for: .uk)
+        guard let workspace else { return false }
+        return LocalApprovalSigner.shared.canAdoptLegacyKey(into: workspace)
     }
 
     /// Resolves the selected workspace and the signing identity that must match

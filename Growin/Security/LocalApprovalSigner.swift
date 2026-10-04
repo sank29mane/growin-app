@@ -84,6 +84,19 @@ final class LocalApprovalSigner: @unchecked Sendable {
         ((try? store.legacyFlatData(for: .approvalSigningKey)) ?? nil) != nil
     }
 
+    /// True while a flat key remains and the workspace either has no key yet or
+    /// already holds the same bytes (an adoption whose flat delete failed).
+    func canAdoptLegacyKey(into workspace: Workspace) -> Bool {
+        guard workspace == .uk,
+              let flat = (try? store.legacyFlatData(for: .approvalSigningKey)) ?? nil else {
+            return false
+        }
+        guard let existing = (try? store.data(for: .approvalSigningKey, scope: .workspace(workspace))) ?? nil else {
+            return true
+        }
+        return existing == flat
+    }
+
     /// Moves the pre-58 flat approval key into UK, and only into UK. The key must
     /// be the one the UK ledger enrolled (`expectedKeyID`), because the ledger
     /// cannot rotate an enrolled key. India always starts with a fresh key.
@@ -95,9 +108,6 @@ final class LocalApprovalSigner: @unchecked Sendable {
         guard let flat = try store.legacyFlatData(for: .approvalSigningKey) else {
             throw LocalApprovalSignerError.noLegacyKey
         }
-        guard try store.data(for: .approvalSigningKey, scope: .workspace(workspace)) == nil else {
-            throw LocalApprovalSignerError.workspaceKeyExists
-        }
         let identity = makeIdentity(try decodePrivateKey(flat))
         guard identity.keyID == expectedKeyID else {
             throw LocalApprovalSignerError.legacyKeyMismatch
@@ -106,6 +116,15 @@ final class LocalApprovalSigner: @unchecked Sendable {
             if try store.data(for: .approvalSigningKey, scope: .workspace(other)) == flat {
                 throw LocalApprovalSignerError.duplicateKeyAcrossWorkspaces
             }
+        }
+        if let existing = try store.data(for: .approvalSigningKey, scope: .workspace(workspace)) {
+            // A previous adoption copied the key but failed to delete the flat
+            // item. Finish that cleanup; a different workspace key is refused.
+            guard existing == flat else {
+                throw LocalApprovalSignerError.workspaceKeyExists
+            }
+            try store.removeLegacyFlatItem(.approvalSigningKey)
+            return identity
         }
         try store.set(flat, for: .approvalSigningKey, scope: .workspace(workspace))
         guard try store.data(for: .approvalSigningKey, scope: .workspace(workspace)) == flat else {
