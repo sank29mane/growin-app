@@ -34,6 +34,11 @@ growin.db
 .state.json
 *.log
 .env
+# Key and certificate material (Phase 61)
+*.pem
+*.key
+*.p12
+*.pfx
 backend/venv_forecast/
 
 # Models
