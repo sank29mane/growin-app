@@ -9,6 +9,7 @@ from mcp.client.stdio import stdio_client
 from mcp.client.sse import sse_client
 
 from resilience import get_circuit_breaker, CircuitBreakerOpenError
+from workspace_credentials import process_workspace, scrub_uk_only_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,9 @@ def build_mcp_subprocess_environment(config: Dict) -> Dict[str, str]:
     environment = {**os.environ.copy(), **custom_env}
     if is_trading212_server_config(config):
         environment[TRADING212_READ_ONLY_ENV] = "1"
-    return environment
+    # TRADING212_* and ALPACA_* are UK-only: a non-UK process hands none of
+    # them to any child, including ones set in the server's custom env.
+    return scrub_uk_only_credentials(environment)
 
 
 class MultiMCPManager:
@@ -115,6 +118,9 @@ class MultiMCPManager:
         server_type = config["type"]
         is_trading212 = is_trading212_server_config(config)
 
+        if is_trading212 and process_workspace() != "uk":
+            logger.warning("Trading 212 connection blocked: process workspace is not uk")
+            return False
         if is_trading212 and not trading212_read_access_enabled():
             logger.warning(
                 "Trading 212 connection blocked; set %s=true to explicitly enable broker reads",

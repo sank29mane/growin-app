@@ -3,7 +3,9 @@
 import json
 from typing import Any, Dict, Iterable
 
-from .models import OrderAck, OrderIntent
+from workspace_credentials import process_workspace
+
+from .models import OrderAck, OrderIntent, Workspace
 from .service import BrokerExecutionError, BrokerOutcomeUnknownError
 
 
@@ -15,6 +17,14 @@ class Trading212Dispatcher:
         self._mcp_client = mcp_client
 
     async def dispatch(self, intent: OrderIntent) -> OrderAck:
+        if (
+            process_workspace() != Workspace.UK.value
+            or intent.workspace != Workspace.UK
+            or intent.broker != "trading212"
+        ):
+            raise BrokerExecutionError(
+                "Trading 212 dispatcher accepts only UK trading212 intents in a UK process"
+            )
         result = await self._mcp_client.call_tool(
             "place_market_order",
             {
