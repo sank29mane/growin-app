@@ -31,6 +31,11 @@ UDIFF_HEADER: tuple[str, ...] = tuple(
         "TtlNbOfTxsExctd,SsnId,NewBrdLotQty,Rmks,Rsvd1,Rsvd2,Rsvd3,Rsvd4"
     ).split(",")
 )
+# NSE UDiFF files from January to June 2024 (sampled monthly) name the reserved
+# columns Rsvd01 to Rsvd04 and end the header line with a comma, while each data
+# row still has the same 34 fields. Only this exact variant is accepted besides
+# UDIFF_HEADER; the reserved columns are never read.
+UDIFF_HEADER_EARLY: tuple[str, ...] = UDIFF_HEADER[:-4] + ("Rsvd01", "Rsvd02", "Rsvd03", "Rsvd04", "")
 CM_LEGACY_HEADER: tuple[str, ...] = tuple(
     "SYMBOL,SERIES,OPEN,HIGH,LOW,CLOSE,LAST,PREVCLOSE,TOTTRDQTY,TOTTRDVAL,TIMESTAMP,TOTALTRADES,ISIN,".split(",")
 )  # 13 names plus the empty column the trailing comma creates
@@ -215,7 +220,14 @@ def _build_bar(
         return None
 
 
-def _read_csv(text: str, expected_header: tuple[str, ...], *, label: str, strip_header: bool = False):
+def _read_csv(
+    text: str,
+    expected_header: tuple[str, ...],
+    *,
+    label: str,
+    strip_header: bool = False,
+    also_accept: tuple[tuple[str, ...], ...] = (),
+):
     reader = csv.reader(io.StringIO(text))
     try:
         header = tuple(next(reader))
@@ -223,7 +235,7 @@ def _read_csv(text: str, expected_header: tuple[str, ...], *, label: str, strip_
         raise PilotDataError("bhavcopy_schema_mismatch", f"{label} file is empty") from exc
     if strip_header:
         header = tuple(cell.strip() for cell in header)
-    if header != expected_header:
+    if header != expected_header and header not in also_accept:
         raise PilotDataError("bhavcopy_schema_mismatch", f"{label} header differs from the verified header")
     return reader
 
@@ -234,7 +246,7 @@ def parse_udiff(content: bytes, *, expected_trade_date: date) -> UdiffParse:
     if list(members) != [expected_name]:
         raise PilotDataError("bhavcopy_member_unexpected", "zip must hold exactly the dated UDiFF member")
     text = decode_text(members[expected_name], code="bhavcopy_schema_mismatch")
-    reader = _read_csv(text, UDIFF_HEADER, label="UDiFF")
+    reader = _read_csv(text, UDIFF_HEADER, label="UDiFF", also_accept=(UDIFF_HEADER_EARLY,))
     bars: list[BhavcopyBar] = []
     quarantines: list[ParseQuarantineInput] = []
     skipped = 0
