@@ -95,6 +95,36 @@ def test_a_name_listed_mid_window_keeps_its_shorter_history_without_quarantine(s
     assert store.query("SELECT count(*) FROM quarantine_records")[0][0] == 0
 
 
+def manual_lineage(resolved_from):
+    return Lineage(
+        workspace="india", anchor_isin=ISIN, anchor_series="EQ", stock_code="RELIND",
+        segments=(IsinSegment(isin=ISIN, nse_symbol="RELIANCE", valid_from=resolved_from, valid_to=S7,
+                              link="anchor"),),
+        resolved_from=resolved_from, built_as_of=S7, basis="bhavcopy_walk",
+    )
+
+
+def test_a_covered_session_before_the_first_bar_is_a_quarantined_gap_not_a_listing(store):
+    load(store, {S3, S4, S5, S6, S7})
+    lin = manual_lineage(S1)  # the lineage says the name existed from S1, but S1 and S2 have no bar
+    report = span(store, lin)
+    assert report.first_session == S3 and report.short_history
+    assert not report.listed_within_window
+    assert [(g.start, g.end, g.sessions) for g in report.gap_ranges] == [(S1, S2, 2)]
+    assert (report.sessions_expected, report.sessions_present) == (7, 5)
+    (record,) = record_history_quarantines(store, lin, report, workspace="india")
+    assert (record.check, record.reason_code, record.scope, record.date_from, record.date_to) == (
+        "history_gap", "internal_gap", "both", S1, S2)
+
+
+def test_a_lineage_that_starts_before_the_window_with_a_late_first_bar_is_not_a_listing(store):
+    load(store, {S4, S5, S6, S7})
+    lin = manual_lineage(S1 - timedelta(days=30))
+    report = span(store, lin)
+    assert [(g.start, g.end) for g in report.gap_ranges] == [(S1, S3)]
+    assert not report.listed_within_window
+
+
 def test_trailing_gap_is_quarantined(store):
     load(store, {S1, S2, S3, S4})
     lin = lineage(store)

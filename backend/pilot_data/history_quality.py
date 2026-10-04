@@ -88,17 +88,29 @@ def compute_span(
     last_session = present[-1] if present else None
     internal: list[date] = []
     trailing: list[date] = []
+    leading_hole = False
     for day in covered:
         if day in present_days:
             continue
         if first_session is None:
             trailing.append(day)
-        elif first_session < day < last_session:  # type: ignore[operator]
+        elif day < first_session:
+            # The lineage already covers this session, so a missing bar is a hole, not a later listing.
+            if lineage.resolved_from < first_session:
+                internal.append(day)
+                leading_hole = True
+        elif day < last_session:  # type: ignore[operator]
             internal.append(day)
-        elif last_session is not None and day > last_session:
+        else:
             trailing.append(day)
     trailing_ranges = _merge(sessions, trailing)
     short_history = first_session is None or (bool(sessions) and first_session > sessions[0])
+    listed_within_window = (
+        short_history
+        and lineage.unresolved_before is None
+        and lineage.resolved_from >= window_start
+        and not leading_hole
+    )
     return SpanReport(
         workspace="india",
         caveats=standard_caveats(),
@@ -113,7 +125,7 @@ def compute_span(
         gap_ranges=tuple(_merge(sessions, internal)),
         trailing_gap=trailing_ranges[0] if trailing_ranges else None,
         short_history=short_history,
-        listed_within_window=short_history and lineage.unresolved_before is None,
+        listed_within_window=listed_within_window,
         unresolved_before=lineage.unresolved_before,
         lineage_sha256=lineage.content_sha256(),
     )
