@@ -2814,6 +2814,228 @@ class ExecutionLedger:
         )
 
 
+class LedgerReader:
+    """Read-only view of a pinned ledger for inspection.
+
+    Opens the file with ``mode=ro``: no writer lock, no recovery, no PRAGMA
+    writes and no private config. It still refuses an unpinned file and a
+    workspace that differs from the pin, and it never inserts anything (a
+    missing workspace control reads as not engaged, version 0).
+    """
+
+    def __init__(self, path: os.PathLike[str] | str, *, workspace: Workspace | str) -> None:
+        self.workspace: Workspace = coerce_workspace(workspace)
+        self.path = Path(path)
+        if self.path.is_symlink():
+            raise LedgerError("ledger path must not be a symbolic link")
+        if not self.path.exists():
+            raise LedgerError(f"ledger {self.path} does not exist")
+        self._mutex = threading.RLock()
+        self._connection: Optional[sqlite3.Connection] = sqlite3.connect(
+            _ro_uri(self.path), uri=True, check_same_thread=False
+        )
+        try:
+            self._connection.row_factory = sqlite3.Row
+            _require_sqlite_capabilities(self._connection)
+            identity = _read_identity(self._connection)
+            if identity.kind == "newer":
+                raise LedgerError(
+                    f"ledger schema {identity.user_version} is newer than supported version "
+                    f"{SCHEMA_VERSION}"
+                )
+            if identity.kind in ("fresh", "unpinned"):
+                raise LedgerUnpinned(
+                    f"ledger {self.path} (schema {identity.user_version}) has no workspace pin"
+                )
+            if identity.workspace != self.workspace:
+                pinned = identity.workspace.value if identity.workspace else "unknown"
+                raise WorkspaceMismatch(
+                    f"ledger {self.path} is pinned to workspace {pinned}; "
+                    f"requested {self.workspace.value}"
+                )
+        except Exception:
+            self.close()
+            raise
+
+    def __enter__(self) -> "LedgerReader":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        with self._mutex:
+            if self._connection is not None:
+                self._connection.close()
+                self._connection = None
+
+    def require_workspace(self, workspace: object) -> Workspace:
+        try:
+            requested = coerce_workspace(workspace)
+        except ValueError:
+            raise WorkspaceMismatch(
+                f"request names no valid workspace; ledger is pinned to {self.workspace.value}"
+            ) from None
+        if requested != self.workspace:
+            raise WorkspaceMismatch(
+                f"request names workspace {requested.value}; "
+                f"ledger is pinned to {self.workspace.value}"
+            )
+        return requested
+
+    def _require_connection(self) -> sqlite3.Connection:
+        if self._connection is None:
+            raise LedgerError("ledger reader is closed")
+        return self._connection
+
+    def get_order(self, proposal_id: str) -> Optional[LedgerOrder]:
+        with self._mutex:
+            row = self._require_connection().execute(
+                """
+                SELECT i.*, p.state, p.acknowledgment_json, p.updated_at
+                FROM order_intents AS i
+                JOIN order_projection AS p USING (proposal_id)
+                WHERE i.proposal_id = ?
+                """,
+                (proposal_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        if row["workspace"] != self.workspace.value:
+            raise WorkspaceMismatch(
+                f"stored order {proposal_id!r} carries workspace {row['workspace']!r}; "
+                f"ledger is pinned to {self.workspace.value}"
+            )
+        return ExecutionLedger._order_from_row(row)
+
+    def get_admission(self, proposal_id: str) -> Optional[ExecutionAdmission]:
+        with self._mutex:
+            row = self._require_connection().execute(
+                "SELECT * FROM execution_admissions WHERE proposal_id = ?",
+                (proposal_id,),
+            ).fetchone()
+        return ExecutionLedger._admission_from_row(row) if row is not None else None
+
+    def get_reservation(self, proposal_id: str) -> Optional[PaperReservation]:
+        with self._mutex:
+            row = self._require_connection().execute(
+                "SELECT * FROM buying_power_reservations WHERE proposal_id = ?",
+                (proposal_id,),
+            ).fetchone()
+        return ExecutionLedger._reservation_from_row(row) if row is not None else None
+
+    def list_events(self, proposal_id: Optional[str] = None) -> list[ExecutionEvent]:
+        sql = "SELECT * FROM execution_events"
+        parameters: tuple[object, ...] = ()
+        if proposal_id is not None:
+            sql += " WHERE proposal_id = ?"
+            parameters = (proposal_id,)
+        sql += " ORDER BY event_id"
+        with self._mutex:
+            rows = self._require_connection().execute(sql, parameters).fetchall()
+        return [
+            ExecutionEvent(
+                event_id=int(row["event_id"]),
+                proposal_id=str(row["proposal_id"]),
+                event_type=str(row["event_type"]),
+                from_state=row["from_state"],
+                to_state=str(row["to_state"]),
+                payload=json.loads(str(row["payload_json"])),
+                created_at=str(row["created_at"]),
+            )
+            for row in rows
+        ]
+
+    def list_attempts(self, proposal_id: Optional[str] = None) -> list[DispatchAttempt]:
+        sql = "SELECT * FROM dispatch_attempts"
+        parameters: tuple[object, ...] = ()
+        if proposal_id is not None:
+            sql += " WHERE proposal_id = ?"
+            parameters = (proposal_id,)
+        sql += " ORDER BY attempt_id"
+        with self._mutex:
+            rows = self._require_connection().execute(sql, parameters).fetchall()
+        return [
+            DispatchAttempt(
+                attempt_id=int(row["attempt_id"]),
+                proposal_id=str(row["proposal_id"]),
+                state=str(row["state"]),
+                claimed_at=str(row["claimed_at"]),
+                completed_at=row["completed_at"],
+                acknowledgment=(
+                    _ack_from_json(str(row["acknowledgment_json"]))
+                    if row["acknowledgment_json"]
+                    else None
+                ),
+            )
+            for row in rows
+        ]
+
+    def list_requotes(self, proposal_id: Optional[str] = None) -> list[LedgerRequote]:
+        sql = "SELECT * FROM requote_intents"
+        parameters: tuple[object, ...] = ()
+        if proposal_id is not None:
+            sql += " WHERE proposal_id = ?"
+            parameters = (proposal_id,)
+        sql += " ORDER BY created_at, requote_id"
+        with self._mutex:
+            rows = self._require_connection().execute(sql, parameters).fetchall()
+        return [ExecutionLedger._requote_from_row(row) for row in rows]
+
+    def get_paper_budget(
+        self, account: str, currency: str, *, workspace: Workspace | str
+    ) -> Optional[PaperBudget]:
+        pinned = self.require_workspace(workspace)
+        with self._mutex:
+            row = self._require_connection().execute(
+                "SELECT * FROM paper_budgets WHERE workspace = ? AND account = ? AND currency = ?",
+                (pinned.value, account, currency),
+            ).fetchone()
+        return ExecutionLedger._budget_from_row(row) if row is not None else None
+
+    def get_paper_position(
+        self, account: str, currency: str, ticker: str, *, workspace: Workspace | str
+    ) -> Optional[Mapping[str, str]]:
+        pinned = self.require_workspace(workspace)
+        with self._mutex:
+            row = self._require_connection().execute(
+                "SELECT quantity, notional FROM paper_positions WHERE workspace = ? AND account = ? AND currency = ? AND ticker = ?",
+                (pinned.value, account, currency, ticker),
+            ).fetchone()
+        if row is None:
+            return None
+        return {"quantity": str(row["quantity"]), "notional": str(row["notional"])}
+
+    def get_workspace_control(self, *, workspace: Workspace | str) -> WorkspaceControl:
+        pinned = self.require_workspace(workspace)
+        with self._mutex:
+            row = self._require_connection().execute(
+                "SELECT * FROM workspace_controls WHERE workspace = ?", (pinned.value,)
+            ).fetchone()
+        if row is None:
+            return WorkspaceControl(
+                workspace=pinned.value,
+                engaged=False,
+                version=0,
+                updated_at=datetime.now(timezone.utc),
+            )
+        return WorkspaceControl(
+            workspace=str(row["workspace"]),
+            engaged=bool(row["engaged"]),
+            version=int(row["version"]),
+            reason_code=str(row["reason_code"]),
+            updated_at=datetime.fromisoformat(str(row["updated_at"])),
+        )
+
+    def get_approval_key(self, *, workspace: Workspace | str) -> Optional[LedgerApprovalKey]:
+        pinned = self.require_workspace(workspace)
+        with self._mutex:
+            row = self._require_connection().execute(
+                "SELECT * FROM approval_keys WHERE workspace = ?", (pinned.value,)
+            ).fetchone()
+        return ExecutionLedger._approval_key_from_row(row) if row is not None else None
+
+
 def _intent_identity(intent: OrderIntent) -> tuple[str, str, str, str]:
     snapshot = canonical_json(intent)
     data = json.loads(snapshot)
@@ -2888,19 +3110,27 @@ __all__ = [
     "ExecutionLedger",
     "IntentConflict",
     "InvalidTransition",
+    "LEGACY_SCHEMA_VERSIONS",
     "LedgerError",
     "LedgerApprovalChallenge",
     "LedgerApprovalKey",
+    "LedgerIdentity",
     "LedgerOrder",
+    "LedgerReader",
     "LedgerRequote",
+    "LedgerUnpinned",
     "LedgerWriterUnavailable",
     "OrderNotFound",
     "PaperBudget",
     "PaperReservation",
     "ReconciliationSnapshot",
     "RequoteConflict",
+    "SCHEMA_VERSION",
+    "Workspace",
     "WorkspaceControl",
+    "WorkspaceMismatch",
     "canonical_json",
+    "coerce_workspace",
     "default_ledger_path",
     "intent_hash",
 ]
