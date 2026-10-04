@@ -472,6 +472,61 @@ def test_verify_failure_after_commit_restores_the_backup(ledger_path, backup_dir
         ExecutionLedger(ledger_path, workspace="uk")
 
 
+def _apply_in_process(ledger_migration, ledger, manifest):
+    with pytest.raises(ledger_migration.MigrationRefused) as info:
+        ledger_migration.apply_migration(
+            ledger,
+            manifest["manifest_path"],
+            confirm_workspace="uk",
+            confirm_backup_sha256_prefix=manifest["backup_sha256"][:12],
+        )
+    return info.value
+
+
+def test_two_failed_applies_in_one_second_both_restore(ledger_path, backup_dir, monkeypatch):
+    # Review repro: the second failure used to hit BACKUP_EXISTS after the
+    # pin was committed, leaving an openable v6 file.
+    from execution import ledger_migration
+
+    manifest = inspect(ledger_path, backup_dir)
+    before = dump(ledger_path)
+
+    def failing_verify(_ledger, _manifest):
+        raise ledger_migration.MigrationRefused("VERIFY_FAILED", "forced")
+
+    monkeypatch.setattr(ledger_migration, "_verify", failing_verify)
+    monkeypatch.setattr(ledger_migration, "_utc_stamp", lambda: "20261004T000000Z")
+    for _ in range(2):
+        error = _apply_in_process(ledger_migration, ledger_path, manifest)
+        assert error.code == "VERIFY_FAILED"
+        assert "restored from the backup" in error.message
+        assert dump(ledger_path) == before
+        assert user_version(ledger_path) == 5
+    with pytest.raises(LedgerUnpinned):
+        ExecutionLedger(ledger_path, workspace="uk")
+
+
+def test_restore_that_cannot_start_moves_nothing_and_says_so(ledger_path, backup_dir, monkeypatch):
+    from execution import ledger_migration
+
+    manifest = inspect(ledger_path, backup_dir)
+
+    def failing_verify(_ledger, _manifest):
+        raise ledger_migration.MigrationRefused("VERIFY_FAILED", "forced")
+
+    monkeypatch.setattr(ledger_migration, "_verify", failing_verify)
+    monkeypatch.setattr(ledger_migration, "_utc_stamp", lambda: "20261004T000000Z")
+    monkeypatch.setattr(ledger_migration, "_aside_token", lambda: "fixed")
+    blocker = ledger_path.with_name(f"{ledger_path.name}.v6-aside-20261004T000000Z-fixed")
+    blocker.write_bytes(b"")
+    error = _apply_in_process(ledger_migration, ledger_path, manifest)
+    assert error.code == "VERIFY_FAILED"
+    assert "automatic restore failed" in error.message
+    assert "restore --confirm-restore" in error.message
+    assert ledger_path.exists()
+    assert sorted(p.name for p in ledger_path.parent.glob("*.v6-aside-*")) == [blocker.name]
+
+
 def test_environment_never_supplies_ownership(ledger_path, backup_dir, monkeypatch):
     monkeypatch.setenv("GROWIN_WORKSPACE", "india")
     monkeypatch.setenv("GROWIN_EXECUTION_DB_PATH", str(ledger_path))

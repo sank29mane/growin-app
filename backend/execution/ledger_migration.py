@@ -23,6 +23,7 @@ import fcntl
 import hashlib
 import json
 import os
+import secrets
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -86,6 +87,10 @@ class MigrationRefused(LedgerError):
 
 def _utc_stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _aside_token() -> str:
+    return f"{datetime.now(timezone.utc):%f}{secrets.token_hex(4)}"
 
 
 def _utc_iso() -> str:
@@ -515,7 +520,13 @@ def apply_migration(
                         f"order_intents carry {sorted(map(str, distinct))}, pin is {confirm_workspace}",
                     )
             except BaseException:
-                connection.execute("ROLLBACK")
+                # SQLite may already have rolled back (SQLITE_FULL, IOERR).
+                # Never let a rollback error hide the original one.
+                if connection.in_transaction:
+                    try:
+                        connection.execute("ROLLBACK")
+                    except sqlite3.Error:
+                        pass
                 raise
             connection.execute("COMMIT")
         finally:
@@ -528,7 +539,14 @@ def apply_migration(
         except MigrationRefused as exc:
             # Still under the writer lock: no backend can open the pinned file
             # before it is rebuilt from the backup.
-            restored = _restore_locked(ledger, manifest, backup)
+            try:
+                restored = _restore_locked(ledger, manifest, backup)
+            except Exception as restore_exc:
+                raise MigrationRefused(
+                    "VERIFY_FAILED",
+                    f"{exc.message}; the v6 pin was committed and the automatic restore failed "
+                    f"({restore_exc}); run restore --confirm-restore before starting any backend",
+                ) from None
             raise MigrationRefused(
                 "VERIFY_FAILED",
                 f"{exc.message}; ledger restored from the backup, v6 files kept at {restored['aside']}",
@@ -666,16 +684,21 @@ def restore_from_backup(
 def _restore_locked(ledger: Path, manifest: Mapping[str, Any], backup: Path) -> dict[str, Any]:
     """Rebuild the ledger from the backup. The caller holds the writer lock."""
 
-    stamp = _utc_stamp()
-    aside: list[str] = []
+    # Microseconds plus a random token, so a retry in the same second cannot
+    # collide. Every target is checked before the first rename.
+    stamp = f"{_utc_stamp()}-{_aside_token()}"
+    moves: list[tuple[Path, Path]] = []
     for suffix in ("", "-wal", "-shm"):
         current = ledger.with_name(f"{ledger.name}{suffix}")
         if current.exists():
-            target = current.with_name(f"{current.name}.v6-aside-{stamp}")
-            if target.exists():
-                raise MigrationRefused("BACKUP_EXISTS", f"{target} already exists")
-            os.rename(current, target)
-            aside.append(str(target))
+            moves.append((current, current.with_name(f"{current.name}.v6-aside-{stamp}")))
+    for _current, target in moves:
+        if target.exists():
+            raise MigrationRefused("BACKUP_EXISTS", f"{target} already exists")
+    aside: list[str] = []
+    for current, target in moves:
+        os.rename(current, target)
+        aside.append(str(target))
 
     fd = os.open(ledger, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     os.close(fd)

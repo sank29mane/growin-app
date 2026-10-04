@@ -20,6 +20,7 @@ EXISTING_ENTRIES = (
     "backend/brokers/*",
     "backend/market_data/*",
     "backend/simulation/*",
+    "backend/costs/*",
     "backend/app_context.py",
     "backend/trading_loop.py",
     "backend/trading212_mcp_server.py",
@@ -69,7 +70,7 @@ def bash_matches(path: str, pattern: str) -> bool:
 
 def test_existing_entries_are_still_present():
     present = entries()
-    assert len(EXISTING_ENTRIES) == 20
+    assert len(EXISTING_ENTRIES) == 21
     for entry in EXISTING_ENTRIES:
         assert entry in present, f"{entry} was removed from .github/safety-paths.txt"
 
