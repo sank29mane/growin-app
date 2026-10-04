@@ -3,6 +3,7 @@
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum, StrEnum
+from types import MappingProxyType
 from typing import Any, Dict, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -17,6 +18,14 @@ class Workspace(StrEnum):
 
     UK = "uk"
     INDIA = "india"
+
+
+# Currency is not part of the trading edge, so the workspace-to-currency table
+# lives in code. Admission refuses a currency that does not match the intent's
+# workspace.
+WORKSPACE_CURRENCY: Mapping[Workspace, str] = MappingProxyType(
+    {Workspace.UK: "GBP", Workspace.INDIA: "INR"}
+)
 
 
 class OrderSide(str, Enum):
@@ -55,9 +64,9 @@ class OrderIntent(BaseModel):
     proposal_id: str = Field(..., min_length=1)
     client_order_id: str = Field(default="", max_length=96)
     intent_version: int = Field(default=1, ge=1)
-    workspace: str = Field(default="uk", min_length=1)
-    account: str = Field(default="invest", min_length=1)
-    broker: str = Field(default="trading212", min_length=1)
+    workspace: Workspace
+    account: str = Field(..., min_length=1)
+    broker: str = Field(..., min_length=1)
     mode: OrderMode = OrderMode.PAPER
     ticker: str = Field(..., min_length=1)
     side: OrderSide

@@ -28,6 +28,7 @@ from .models import (
     OrderSide,
     OrderState,
     ReconciliationSnapshot,
+    WORKSPACE_CURRENCY,
     Workspace,
 )
 
@@ -116,7 +117,7 @@ class ExecutionService:
         self,
         proposal: Proposal,
         *,
-        currency: str = "GBP",
+        currency: str,
         price: object = None,
         simulator_evidence: Optional[Mapping[str, Any]] = None,
         risk_evidence: Optional[Mapping[str, Any]] = None,
@@ -136,6 +137,8 @@ class ExecutionService:
         if self._ledger is None:
             raise ExecutionDisabledError("durable execution admission is unavailable")
         intent = proposal if isinstance(proposal, OrderIntent) else _intent_from_proposal(proposal)
+        if currency != WORKSPACE_CURRENCY[intent.workspace]:
+            raise ExecutionConflictError("admission currency does not match workspace")
         self._ledger.register_intent(intent)
         if self._ledger.get_workspace_control(workspace=intent.workspace).engaged:
             raise ExecutionConflictError("workspace execution control is engaged")
@@ -283,9 +286,9 @@ class ExecutionService:
             "client_order_id": order.client_order_id,
             "intent_hash": order.intent_hash,
             "intent_version": intent.get("intent_version", 1),
-            "workspace": intent.get("workspace", "uk"),
-            "account": intent.get("account", "invest"),
-            "broker": intent.get("broker", "paper"),
+            "workspace": intent["workspace"],
+            "account": intent["account"],
+            "broker": intent["broker"],
             "mode": intent.get("mode", OrderMode.PAPER.value),
             "ticker": intent.get("ticker"),
             "action": intent.get("side"),
@@ -602,16 +605,24 @@ class ExecutionService:
             mutable["rejection_notes"] = notes
 
 
+def _required_identity(proposal: Dict[str, Any], name: str) -> Any:
+    """Return an identity field; there is no fallback for a missing one."""
+
+    try:
+        return proposal[name]
+    except KeyError:
+        raise ValueError(f"proposal is missing required field '{name}'") from None
+
+
 def _intent_from_proposal(proposal: Dict[str, Any]) -> OrderIntent:
     mode = str(proposal.get("mode", OrderMode.PAPER.value)).upper()
-    default_broker = "paper" if mode == OrderMode.PAPER.value else "trading212"
     return OrderIntent(
         proposal_id=str(proposal.get("proposal_id", "")),
         client_order_id=str(proposal.get("client_order_id", "")),
         intent_version=proposal.get("intent_version", 1),
-        workspace=proposal.get("workspace", "uk"),
-        account=proposal.get("account", "invest"),
-        broker=proposal.get("broker", default_broker),
+        workspace=_required_identity(proposal, "workspace"),
+        account=_required_identity(proposal, "account"),
+        broker=_required_identity(proposal, "broker"),
         mode=mode,
         ticker=proposal.get("ticker"),
         side=str(proposal.get("action", proposal.get("side", ""))).upper(),
