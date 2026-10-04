@@ -82,7 +82,7 @@ def uk_routes(tmp_path):
         price="100",
         **state._local_paper_preflight(),
     )
-    ledger.configure_paper_budget("invest", "GBP", "10000")
+    ledger.configure_paper_budget("invest", "GBP", "10000", workspace="uk")
     service.reserve(proposal_id)
     state.trade_proposals[proposal_id] = proposal
     try:

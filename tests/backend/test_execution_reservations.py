@@ -38,22 +38,22 @@ def test_explicit_budget_is_required_and_reservation_is_decimal(tmp_path):
         prepare(service, ledger, "one")
         with pytest.raises(Exception, match="budget"):
             service.reserve("one")
-        ledger.configure_paper_budget("invest", "GBP", "100")
+        ledger.configure_paper_budget("invest", "GBP", "100", workspace="uk")
         reservation = service.reserve("one")
         assert reservation.reserved == Decimal("50")
-        assert ledger.get_paper_budget("invest", "GBP").available == Decimal("50")
+        assert ledger.get_paper_budget("invest", "GBP", workspace="uk").available == Decimal("50")
 
 
 def test_concurrent_buy_reservations_cannot_overallocate_budget(tmp_path):
     with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
         service = ExecutionService(PaperDispatcher(), ledger)
-        ledger.configure_paper_budget("invest", "GBP", "100")
+        ledger.configure_paper_budget("invest", "GBP", "100", workspace="uk")
         for pid in ("one", "two", "three"):
             prepare(service, ledger, pid)
         with ThreadPoolExecutor(max_workers=3) as pool:
             results = list(pool.map(lambda pid: _reserve(service, pid), ("one", "two", "three")))
         assert sum(result is not None for result in results) == 2
-        assert ledger.get_paper_budget("invest", "GBP").available == Decimal("0")
+        assert ledger.get_paper_budget("invest", "GBP", workspace="uk").available == Decimal("0")
 
 
 def _reserve(service, pid):
@@ -66,7 +66,7 @@ def _reserve(service, pid):
 def test_cross_workspace_and_sell_reservations_fail_closed(tmp_path):
     with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
         service = ExecutionService(PaperDispatcher(), ledger)
-        ledger.configure_paper_budget("invest", "GBP", "100")
+        ledger.configure_paper_budget("invest", "GBP", "100", workspace="uk")
         with pytest.raises(Exception, match="workspace"):
             ledger.register_intent(
                 OrderIntent(

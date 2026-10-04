@@ -34,7 +34,6 @@ from market_data import (
     MarketDataError,
     MarketDataSession,
     MarketDataSessionState,
-    RegimeEvidence,
     RegimeClassifier,
     ReplayMarketDataProvider,
     build_market_preflight_context,

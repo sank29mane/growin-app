@@ -56,7 +56,7 @@ def signed_execution(tmp_path):
         price="100",
         **state._local_paper_preflight(),
     )
-    ledger.configure_paper_budget("invest", "GBP", "10000")
+    ledger.configure_paper_budget("invest", "GBP", "10000", workspace="uk")
     service.reserve(proposal_id)
     state.trade_proposals[proposal_id] = proposal
     yield service, ledger, proposal
@@ -181,7 +181,7 @@ async def test_completed_uat_check_releases_only_its_bounded_reservation(signed_
     assert completed.status_code == 200
     assert "reservation released" in completed.json()["message"]
     assert ledger.get_reservation(proposal["proposal_id"]).state == "SETTLED"
-    assert ledger.get_paper_budget("paper-uat-v2", "GBP").available == 1
+    assert ledger.get_paper_budget("paper-uat-v2", "GBP", workspace="uk").available == 1
 
     next_check = await _post("/api/ai/trade/approval/uat-proposal", {"workspace": "uk"})
     assert next_check.status_code == 200

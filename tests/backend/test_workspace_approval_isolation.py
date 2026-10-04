@@ -81,7 +81,7 @@ def _admitted_service(ledger, workspace="uk"):
         price="100",
         **helper._local_paper_preflight(),
     )
-    ledger.configure_paper_budget("invest", currency, "10000")
+    ledger.configure_paper_budget("invest", currency, "10000", workspace=workspace)
     service.reserve(proposal["proposal_id"])
     return service, proposal, policy_connection
 
