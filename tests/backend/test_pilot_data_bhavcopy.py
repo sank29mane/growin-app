@@ -13,6 +13,7 @@ from pilot_data.bhavcopy import (
     ingest_udiff,
     parse_cm_legacy,
     parse_pr_zip,
+    parse_udiff,
     primary_bars_on,
 )
 from pilot_data.core import PilotDataError, SourceDescriptor
@@ -253,3 +254,40 @@ def test_ingest_registers_files_and_ca_rows(store):
     again = ingest_pr_zip(store, desc("pr_zip"), pr_bytes(day), trade_date=day)
     assert again.pd_inserted == 0 and again.pd_identical == 2
     assert store.query("SELECT count(*) FROM bhavcopy_ca_raw")[0][0] == 1
+
+
+# Early UDiFF header: Rsvd01..Rsvd04 plus a trailing comma, rows still 34 fields.
+# Row taken from the real BhavCopy_NSE_CM_0_0_0_20240101_F_0000.csv.
+_EARLY_HEADER_LINE = ",".join(kit.UDIFF_HEADER_T[:-4]) + ",Rsvd01,Rsvd02,Rsvd03,Rsvd04,"
+_EARLY_ROW_ZOTA = (
+    "2024-01-01,2024-01-01,CM,NSE,STK,11394,INE358U01012,ZOTA,EQ,,,,,ZOTA HEALTH CARE LIMITED,"
+    "473.00,483.95,471.45,480.60,480.95,472.45,,480.60,,,20854,9941670.15,1906,F1,1,,,,,"
+)
+
+
+def _early_udiff(header_line: str) -> bytes:
+    text = f"{header_line}\n{_EARLY_ROW_ZOTA}\n"
+    return kit._zip_bytes({kit.udiff_member_name(date(2024, 1, 1)): text.encode("utf-8")})
+
+
+def test_early_udiff_header_variant_parses():
+    assert len(_EARLY_ROW_ZOTA.split(",")) == len(kit.UDIFF_HEADER_T)
+    parsed = parse_udiff(_early_udiff(_EARLY_HEADER_LINE), expected_trade_date=date(2024, 1, 1))
+    (bar,) = parsed.bars
+    assert (bar.isin, bar.open, bar.high, bar.low, bar.close, bar.prev_close) == (
+        "INE358U01012", Decimal("473.00"), Decimal("483.95"), Decimal("471.45"), Decimal("480.60"), Decimal("472.45")
+    )
+
+
+@pytest.mark.parametrize(
+    "header_line",
+    [
+        _EARLY_HEADER_LINE.rstrip(","),  # padded names without the trailing comma
+        ",".join(kit.UDIFF_HEADER_T) + ",",  # current names with a trailing comma
+        _EARLY_HEADER_LINE.replace("Rsvd04", "Rsvd05"),
+    ],
+)
+def test_other_udiff_header_variants_still_fail_closed(header_line):
+    with pytest.raises(PilotDataError) as caught:
+        parse_udiff(_early_udiff(header_line), expected_trade_date=date(2024, 1, 1))
+    assert caught.value.code == "bhavcopy_schema_mismatch"
