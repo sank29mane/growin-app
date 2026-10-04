@@ -17,6 +17,7 @@ def proposal(proposal_id="durable-1", **overrides):
         "quantity": "2.5",
         "workspace": "uk",
         "account": "invest",
+        "broker": "paper",
         "mode": "PAPER",
         "status": "PENDING",
         **overrides,
@@ -27,10 +28,11 @@ def proposal(proposal_id="durable-1", **overrides):
 async def test_acknowledgement_replays_after_service_and_ledger_restart(tmp_path):
     db_path = tmp_path / "execution.sqlite3"
     original = proposal()
-    with ExecutionLedger(db_path) as ledger:
+    with ExecutionLedger(db_path, workspace="uk") as ledger:
         first_service = ExecutionService(PaperDispatcher(), ledger)
         first_service.admit(
             original,
+            currency="GBP",
             price="100",
             simulator_evidence={"simulated_fill_price": "100"},
             risk_evidence={"scaled_size": "2.5"},
@@ -42,7 +44,7 @@ async def test_acknowledgement_replays_after_service_and_ledger_restart(tmp_path
 
     dispatcher = MagicMock()
     dispatcher.dispatch = AsyncMock()
-    with ExecutionLedger(db_path) as reopened:
+    with ExecutionLedger(db_path, workspace="uk") as reopened:
         second_service = ExecutionService(dispatcher, reopened)
         with pytest.raises(ExecutionDisabledError, match="Signed approval"):
             await second_service.approve(proposal())
@@ -52,16 +54,16 @@ async def test_acknowledgement_replays_after_service_and_ledger_restart(tmp_path
 @pytest.mark.asyncio
 async def test_changed_intent_conflicts_after_service_restart(tmp_path):
     db_path = tmp_path / "execution.sqlite3"
-    with ExecutionLedger(db_path) as ledger:
+    with ExecutionLedger(db_path, workspace="uk") as ledger:
         service = ExecutionService(PaperDispatcher(), ledger)
         service.admit(
-            proposal(), price="100", simulator_evidence={"simulated_fill_price": "100"},
+            proposal(), currency="GBP", price="100", simulator_evidence={"simulated_fill_price": "100"},
             risk_evidence={"scaled_size": "2.5"}
         )
         ledger.configure_paper_budget("invest", "GBP", "1000")
         service.reserve("durable-1")
 
-    with ExecutionLedger(db_path) as reopened:
+    with ExecutionLedger(db_path, workspace="uk") as reopened:
         service = ExecutionService(PaperDispatcher(), reopened)
         with pytest.raises(ExecutionDisabledError, match="Signed approval"):
             await service.approve(proposal(quantity="99"))
@@ -72,10 +74,10 @@ async def test_cross_service_claims_dispatch_once_by_database_authority(tmp_path
     db_path = tmp_path / "execution.sqlite3"
     dispatcher = MagicMock()
     dispatcher.dispatch = AsyncMock()
-    with ExecutionLedger(db_path) as ledger:
+    with ExecutionLedger(db_path, workspace="uk") as ledger:
         first_service = ExecutionService(dispatcher, ledger)
         first_service.admit(
-            proposal(), price="100", simulator_evidence={"simulated_fill_price": "100"},
+            proposal(), currency="GBP", price="100", simulator_evidence={"simulated_fill_price": "100"},
             risk_evidence={"scaled_size": "2.5"}
         )
         ledger.configure_paper_budget("invest", "GBP", "1000")
@@ -89,10 +91,10 @@ async def test_cross_service_claims_dispatch_once_by_database_authority(tmp_path
 @pytest.mark.asyncio
 async def test_dispatch_wait_holds_no_sqlite_write_transaction(tmp_path):
     db_path = tmp_path / "execution.sqlite3"
-    with ExecutionLedger(db_path) as ledger:
+    with ExecutionLedger(db_path, workspace="uk") as ledger:
         service = ExecutionService(PaperDispatcher(), ledger)
         service.admit(
-            proposal(), price="100", simulator_evidence={"simulated_fill_price": "100"},
+            proposal(), currency="GBP", price="100", simulator_evidence={"simulated_fill_price": "100"},
             risk_evidence={"scaled_size": "2.5"}
         )
         ledger.configure_paper_budget("invest", "GBP", "1000")
@@ -119,12 +121,12 @@ def test_app_state_owns_one_local_paper_authority_and_reopens(tmp_path):
     first = AppState()
     second = AppState()
     try:
-        assert first.start_execution(db_path) is True
+        assert first.start_execution(db_path, workspace="uk") is True
         assert first.execution_authority is True
         assert first.execution_service.execution_enabled is True
         first.register_trade_proposal(proposal("state-owned"))
 
-        assert second.start_execution(db_path) is False
+        assert second.start_execution(db_path, workspace="uk") is False
         assert second.execution_authority is False
         assert second.execution_service.execution_enabled is False
     finally:
@@ -133,7 +135,7 @@ def test_app_state_owns_one_local_paper_authority_and_reopens(tmp_path):
 
     replacement = AppState()
     try:
-        assert replacement.start_execution(db_path) is True
+        assert replacement.start_execution(db_path, workspace="uk") is True
         restored = replacement.get_trade_proposal("state-owned")
         assert restored is not None
         assert restored["status"] == "PENDING"

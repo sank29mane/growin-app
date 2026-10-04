@@ -88,7 +88,7 @@ def sign(key, payload: bytes) -> bytes:
 
 
 def test_first_key_enrollment_requires_private_one_time_token_and_is_idempotent(tmp_path):
-    with ExecutionLedger(tmp_path / "execution.sqlite3", require_approval=True) as ledger:
+    with ExecutionLedger(tmp_path / "execution.sqlite3", require_approval=True, workspace="uk") as ledger:
         approval = ApprovalService(ledger)
         key = private_key()
         token_path = approval.enrollment_token_path
@@ -120,7 +120,7 @@ def test_first_key_enrollment_requires_private_one_time_token_and_is_idempotent(
 @pytest.mark.asyncio
 async def test_signed_payload_is_exact_and_success_replays_only_same_evidence(tmp_path):
     clock = MutableClock()
-    with ExecutionLedger(tmp_path / "execution.sqlite3", require_approval=True) as ledger:
+    with ExecutionLedger(tmp_path / "execution.sqlite3", require_approval=True, workspace="uk") as ledger:
         approval = ApprovalService(ledger, clock=clock)
         key = private_key()
         enrolled = enroll(approval, key)
@@ -200,7 +200,7 @@ async def test_signed_payload_is_exact_and_success_replays_only_same_evidence(tm
 
 @pytest.mark.asyncio
 async def test_required_approval_blocks_legacy_and_invalid_signature(tmp_path):
-    with ExecutionLedger(tmp_path / "execution.sqlite3", require_approval=True) as ledger:
+    with ExecutionLedger(tmp_path / "execution.sqlite3", require_approval=True, workspace="uk") as ledger:
         clock = MutableClock()
         approval = ApprovalService(ledger, clock=clock)
         key = private_key()
@@ -238,7 +238,7 @@ async def test_concurrent_services_create_one_approval_and_dispatch(tmp_path):
             await self.release.wait()
             return await PaperDispatcher().dispatch(intent)
 
-    with ExecutionLedger(tmp_path / "execution.sqlite3", require_approval=True) as ledger:
+    with ExecutionLedger(tmp_path / "execution.sqlite3", require_approval=True, workspace="uk") as ledger:
         approval = ApprovalService(ledger, clock=MutableClock())
         key = private_key()
         enroll(approval, key)
@@ -271,7 +271,7 @@ async def test_concurrent_services_create_one_approval_and_dispatch(tmp_path):
 
 def test_expired_and_replay_before_ack_fail_without_duplicate_evidence(tmp_path):
     clock = MutableClock()
-    with ExecutionLedger(tmp_path / "execution.sqlite3", require_approval=True) as ledger:
+    with ExecutionLedger(tmp_path / "execution.sqlite3", require_approval=True, workspace="uk") as ledger:
         approval = ApprovalService(ledger, clock=clock)
         key = private_key()
         enroll(approval, key)
@@ -299,7 +299,7 @@ def test_expired_and_replay_before_ack_fail_without_duplicate_evidence(tmp_path)
 
 
 def test_approval_and_claim_roll_back_together_on_event_failure(tmp_path, monkeypatch):
-    with ExecutionLedger(tmp_path / "execution.sqlite3", require_approval=True) as ledger:
+    with ExecutionLedger(tmp_path / "execution.sqlite3", require_approval=True, workspace="uk") as ledger:
         approval = ApprovalService(ledger, clock=MutableClock())
         key = private_key()
         enroll(approval, key)
@@ -323,7 +323,7 @@ def test_workspace_and_live_intents_fail_closed(tmp_path):
         with pytest.raises(IntentConflict, match="workspace"):
             ledger.register_intent(make_intent(workspace="india"))
 
-    with ExecutionLedger(tmp_path / "live.sqlite3", require_approval=True) as ledger:
+    with ExecutionLedger(tmp_path / "live.sqlite3", require_approval=True, workspace="uk") as ledger:
         approval = ApprovalService(ledger)
         enroll(approval, private_key())
         ledger.register_intent(
@@ -390,7 +390,7 @@ def test_v1_database_migrates_without_losing_existing_order(tmp_path):
     connection.commit()
     connection.close()
 
-    with ExecutionLedger(db_path) as ledger:
+    with ExecutionLedger(db_path, workspace="uk") as ledger:
         assert ledger.pragmas()["user_version"] == 5
         assert ledger.get_order("legacy").intent_hash == digest
         columns = {
@@ -403,7 +403,7 @@ def test_v1_database_migrates_without_losing_existing_order(tmp_path):
 
 
 def test_approval_evidence_and_challenge_are_database_immutable(tmp_path):
-    with ExecutionLedger(tmp_path / "execution.sqlite3", require_approval=True) as ledger:
+    with ExecutionLedger(tmp_path / "execution.sqlite3", require_approval=True, workspace="uk") as ledger:
         approval = ApprovalService(ledger, clock=MutableClock())
         key = private_key()
         enroll(approval, key)

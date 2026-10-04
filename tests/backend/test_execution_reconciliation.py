@@ -53,7 +53,7 @@ def snap(pid, status, qty, notional, fingerprint, broker_id=None):
 
 
 def test_partial_fill_then_cancel_releases_only_unfilled_amount(tmp_path):
-    with ExecutionLedger(tmp_path / "execution.sqlite3") as ledger:
+    with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
         service = setup_order(ledger)
         service.reconcile(snap("recon", "PARTIALLY_FILLED", 1, 10, "partial"))
         reservation = ledger.get_reservation("recon")
@@ -67,7 +67,7 @@ def test_partial_fill_then_cancel_releases_only_unfilled_amount(tmp_path):
 
 
 def test_full_fill_consumes_funds_and_updates_position_once(tmp_path):
-    with ExecutionLedger(tmp_path / "execution.sqlite3") as ledger:
+    with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
         service = setup_order(ledger)
         evidence = snap("recon", "FILLED", 2, 20, "filled")
         service.reconcile(evidence)
@@ -83,7 +83,7 @@ def test_full_fill_consumes_funds_and_updates_position_once(tmp_path):
 
 
 def test_overfill_non_monotonic_and_broker_id_mismatch_fail_closed(tmp_path):
-    with ExecutionLedger(tmp_path / "execution.sqlite3") as ledger:
+    with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
         service = setup_order(ledger)
         service.reconcile(snap("recon", "PARTIALLY_FILLED", 1, 10, "partial"))
         with pytest.raises(Exception, match="overfills"):
@@ -95,7 +95,7 @@ def test_overfill_non_monotonic_and_broker_id_mismatch_fail_closed(tmp_path):
 
 
 def test_unknown_retains_reservation_and_requires_evidence(tmp_path):
-    with ExecutionLedger(tmp_path / "execution.sqlite3") as ledger:
+    with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
         service = setup_order(ledger)
         service.reconcile(snap("recon", "UNKNOWN", 0, 0, "unknown"))
         assert ledger.get_reservation("recon").state == "ACTIVE"

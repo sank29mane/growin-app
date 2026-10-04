@@ -109,3 +109,88 @@ for module in MOCK_MODULES:
             sys.modules[module] = mock
     except Exception:
         pass
+
+
+# --- Phase 58: private config fixture (append-only block) ---
+import hashlib as _p58_hashlib
+import json as _p58_json
+from pathlib import Path as _P58Path
+
+
+def _p58_write_json(path, payload):
+    path.write_text(_p58_json.dumps(payload), encoding="utf-8")
+    os.chmod(path, 0o600)
+
+
+def _p58_canonical_hash(params):
+    encoded = _p58_json.dumps(
+        params, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    ).encode("utf-8")
+    return _p58_hashlib.sha256(encoded).hexdigest()
+
+
+def build_private_config(root: _P58Path) -> _P58Path:
+    """Create root/private with synthetic uk and india files; return root/private.
+
+    Every value below is a test-only synthetic value. None is a real limit.
+    Directories are 0700 and files 0600 because tmp_path inherits the umask.
+    """
+
+    private = root / "private"
+    private.mkdir()
+    os.chmod(private, 0o700)
+    uk = private / "uk"
+    india = private / "india"
+    for directory in (uk, india, india / "research", india / "holdout"):
+        directory.mkdir()
+        os.chmod(directory, 0o700)
+
+    # Test-only synthetic values.
+    _p58_write_json(uk / "manifest.json", {"schema_version": 1, "workspace": "uk", "currency": "GBP"})
+    _p58_write_json(
+        india / "limits.json",
+        {
+            "schema_version": 1,
+            "workspace": "india",
+            "currency": "INR",
+            "capital_cap": "1000.00",
+            "per_position_cap": "250.00",
+            "drawdown_halt": "-0.30",
+            "drawdown_flatten": "-0.45",
+            "position_stop": "-0.25",
+        },
+    )
+    research = india / "research" / "fixture-research.json"
+    holdout = india / "holdout" / "fixture-holdout.json"
+    _p58_write_json(research, {"fixture": "synthetic research result"})
+    _p58_write_json(holdout, {"fixture": "synthetic holdout result"})
+    params = {"fixture_label": "synthetic", "fixture_window": 3}
+    _p58_write_json(
+        india / "strategy.json",
+        {
+            "schema_version": 1,
+            "workspace": "india",
+            "strategy_params_version": "test-fixture-1",
+            "params": params,
+            "params_sha256": _p58_canonical_hash(params),
+            "research_refs": [
+                {
+                    "path": "research/fixture-research.json",
+                    "sha256": _p58_hashlib.sha256(research.read_bytes()).hexdigest(),
+                }
+            ],
+            "holdout_refs": [
+                {
+                    "path": "holdout/fixture-holdout.json",
+                    "sha256": _p58_hashlib.sha256(holdout.read_bytes()).hexdigest(),
+                }
+            ],
+        },
+    )
+    return private
+
+
+@pytest.fixture
+def private_config_dir(tmp_path):
+    """A valid synthetic private/ directory. Reads no environment variable."""
+    return build_private_config(tmp_path)
