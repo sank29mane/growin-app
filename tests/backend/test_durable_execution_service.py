@@ -115,17 +115,21 @@ async def test_dispatch_wait_holds_no_sqlite_write_transaction(tmp_path):
         assert state == "PENDING"
 
 
-def test_app_state_owns_one_local_paper_authority_and_reopens(tmp_path):
+def test_app_state_owns_one_local_paper_authority_and_reopens(tmp_path, private_config_dir):
     db_path = tmp_path / "execution.sqlite3"
     first = AppState()
     second = AppState()
     try:
-        assert first.start_execution(db_path, workspace="uk") is True
+        assert first.start_execution(
+            db_path, workspace="uk", private_dir=private_config_dir
+        ) is True
         assert first.execution_authority is True
         assert first.execution_service.execution_enabled is True
         first.register_trade_proposal(proposal("state-owned"))
 
-        assert second.start_execution(db_path, workspace="uk") is False
+        assert second.start_execution(
+            db_path, workspace="uk", private_dir=private_config_dir
+        ) is False
         assert second.execution_authority is False
         assert second.execution_service.execution_enabled is False
     finally:
@@ -134,7 +138,9 @@ def test_app_state_owns_one_local_paper_authority_and_reopens(tmp_path):
 
     replacement = AppState()
     try:
-        assert replacement.start_execution(db_path, workspace="uk") is True
+        assert replacement.start_execution(
+            db_path, workspace="uk", private_dir=private_config_dir
+        ) is True
         restored = replacement.get_trade_proposal("state-owned")
         assert restored is not None
         assert restored["status"] == "PENDING"

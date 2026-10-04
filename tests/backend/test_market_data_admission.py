@@ -193,12 +193,13 @@ async def test_stale_or_mismatched_regime_fails_closed():
 
 @pytest.mark.asyncio
 async def test_app_owned_india_entry_uses_market_session_and_durably_rejects_gaps(
-    tmp_path,
+    tmp_path, private_config_dir
 ):
     app_state = AppState()
     assert app_state.start_execution(
         tmp_path / "execution.sqlite3",
         workspace="india",
+        private_dir=private_config_dir,
     )
     try:
         await app_state.start_market_data_replay(
