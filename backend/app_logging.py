@@ -4,7 +4,6 @@ from collections import deque
 from utils.secret_masker import SecretMasker
 
 from contextvars import ContextVar
-import uuid
 
 # Python 3.13 fix for scipy spec issue during tests
 try:
@@ -38,25 +37,43 @@ class MemoryHandler(logging.Handler):
             self.handleError(record)
 
 class SecretMaskingFormatter(logging.Formatter):
-    """Custom formatter that masks secrets in log messages and args."""
-    
+    """Custom formatter that masks secrets in log messages and args.
+
+    It masks the message and args before %-formatting, then masks the final
+    line again, plus exception text and stack info. It never raises: a masking
+    failure yields a fixed suppression line, so logging.handleError never
+    prints the raw record.
+    """
+
+    SUPPRESSED = "<log record suppressed: masking failed>"
+
     def format(self, record):
-        # 1. Mask the main message string
-        if isinstance(record.msg, str):
-            record.msg = SecretMasker.mask_string(record.msg)
-        
-        # 2. Mask arguments if present (e.g. logger.info("User: %s", user_data))
-        if record.args:
-            # record.args can be a tuple or dict
-            if isinstance(record.args, dict):
-                record.args = SecretMasker.mask_structure(record.args)
-            elif isinstance(record.args, tuple):
-                record.args = tuple(
-                    SecretMasker.mask_structure(arg) for arg in record.args
-                )
-        
-        # 3. Format using standard parent method
-        return super().format(record)
+        try:
+            # 1. Mask the main message string
+            if isinstance(record.msg, str):
+                record.msg = SecretMasker.mask_string(record.msg)
+
+            # 2. Mask arguments if present (e.g. logger.info("User: %s", user_data))
+            if record.args:
+                # record.args can be a tuple or dict
+                if isinstance(record.args, dict):
+                    record.args = SecretMasker.mask_structure(record.args)
+                elif isinstance(record.args, tuple):
+                    record.args = tuple(
+                        SecretMasker.mask_structure(arg) for arg in record.args
+                    )
+
+            # 3. Format using standard parent method, then mask the final line so
+            #    anything %-formatting pulled in is covered too (masking is idempotent)
+            return SecretMasker.mask_string(super().format(record))
+        except Exception:
+            return self.SUPPRESSED
+
+    def formatException(self, ei):
+        return SecretMasker.mask_string(super().formatException(ei))
+
+    def formatStack(self, stack_info):
+        return SecretMasker.mask_string(super().formatStack(stack_info))
 
 def setup_logging(name: str = "growin_backend", level: int = logging.INFO) -> logging.Logger:
     """
@@ -97,6 +114,6 @@ def get_recent_logs():
     return list(log_buffer)
 
 # --- Audit Logging Facade ---
-from utils.audit_log import log_audit, AuditLogger
+from utils.audit_log import log_audit, AuditLogger  # noqa: E402
 
 __all__ = ["setup_logging", "get_recent_logs", "log_audit", "AuditLogger"]
