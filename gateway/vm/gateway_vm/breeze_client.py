@@ -281,3 +281,199 @@ class BreezeClient:
     def customer_details(self, *, app_key: str, api_session: str) -> CustomerDetails:
         raw = self.customer_details_raw(app_key=app_key, api_session=api_session)
         return parse_customer_details(normalize(raw.http_status, raw.body))
+
+    # --- v2 historical daily bars (no checksum, empty body) ---
+
+    def daily_bars_v2_raw(
+        self,
+        *,
+        app_key: str,
+        session_token: str,
+        stock_code: str,
+        exch_code: str,
+        from_iso: str,
+        to_iso: str,
+        interval: str = V2_DAILY_INTERVAL,
+    ) -> RawUpstream:
+        query = urlencode(
+            {
+                "stock_code": stock_code,
+                "exch_code": exch_code,
+                "from_date": from_iso,
+                "to_date": to_iso,
+                "interval": interval,
+                "product_type": "cash",
+            },
+            safe=":",
+        )
+        return self._send(
+            "GET",
+            f"{V2_HISTORICAL_URL}?{query}",
+            headers={
+                "Content-Type": "application/json",
+                "apikey": app_key,
+                "X-SessionToken": session_token,
+            },
+            body=None,
+        )
+
+    def daily_bars_v2(
+        self,
+        *,
+        app_key: str,
+        session_token: str,
+        stock_code: str,
+        exch_code: str,
+        from_iso: str,
+        to_iso: str,
+        interval: str = V2_DAILY_INTERVAL,
+    ) -> list:
+        raw = self.daily_bars_v2_raw(
+            app_key=app_key,
+            session_token=session_token,
+            stock_code=stock_code,
+            exch_code=exch_code,
+            from_iso=from_iso,
+            to_iso=to_iso,
+            interval=interval,
+        )
+        success = normalize(raw.http_status, raw.body)
+        if not isinstance(success, list):
+            raise BreezeError("UPSTREAM_SHAPE", http_status=raw.http_status)
+        return success
+
+    # --- checksummed v1 calls: the exact hashed string is the sent body ---
+
+    def _checksummed_get(
+        self,
+        endpoint: str,
+        payload: dict,
+        *,
+        app_key: str,
+        secret_key: str,
+        session_token: str,
+    ) -> RawUpstream:
+        body = compact_json(payload)
+        headers = checksum_headers(
+            app_key=app_key,
+            secret_key=secret_key,
+            session_token=session_token,
+            body=body,
+            now_utc=self.clock.now_utc(),
+        )
+        headers["User-Agent"] = SDK_USER_AGENT
+        return self._send("GET", V1_BASE + endpoint, headers=headers, body=body.encode("utf-8"))
+
+    def quote_raw(
+        self,
+        *,
+        app_key: str,
+        secret_key: str,
+        session_token: str,
+        stock_code: str,
+        exchange_code: str,
+    ) -> RawUpstream:
+        return self._checksummed_get(
+            "quotes",
+            {
+                "stock_code": stock_code,
+                "exchange_code": exchange_code,
+                "expiry_date": "",
+                "product_type": "cash",
+                "right": "",
+                "strike_price": "",
+            },
+            app_key=app_key,
+            secret_key=secret_key,
+            session_token=session_token,
+        )
+
+    def quote(
+        self,
+        *,
+        app_key: str,
+        secret_key: str,
+        session_token: str,
+        stock_code: str,
+        exchange_code: str,
+    ) -> object:
+        raw = self.quote_raw(
+            app_key=app_key,
+            secret_key=secret_key,
+            session_token=session_token,
+            stock_code=stock_code,
+            exchange_code=exchange_code,
+        )
+        return normalize(raw.http_status, raw.body)
+
+    def preview_order_raw(
+        self,
+        *,
+        app_key: str,
+        secret_key: str,
+        session_token: str,
+        stock_code: str,
+        exchange_code: str,
+        action: str,
+        quantity: int,
+        price: str,
+    ) -> RawUpstream:
+        # preview_order is a brokerage calculator, not an order. Validate first.
+        if action not in ("buy", "sell"):
+            raise ValueError("action must be buy or sell")
+        if not isinstance(quantity, int) or isinstance(quantity, bool) or quantity <= 0:
+            raise ValueError("quantity must be a positive int")
+        if not isinstance(price, str) or not _PRICE_RE.match(price) or float(price) <= 0:
+            raise ValueError("price must be a positive decimal string, at most 2 decimals")
+        return self._checksummed_get(
+            "preview_order",
+            {
+                "stock_code": stock_code,
+                "exchange_code": exchange_code,
+                "product": "cash",
+                "order_type": "limit",
+                "price": price,
+                "action": action,
+                "quantity": str(quantity),
+                "specialflag": "N",
+            },
+            app_key=app_key,
+            secret_key=secret_key,
+            session_token=session_token,
+        )
+
+    def preview_order(
+        self,
+        *,
+        app_key: str,
+        secret_key: str,
+        session_token: str,
+        stock_code: str,
+        exchange_code: str,
+        action: str,
+        quantity: int,
+        price: str,
+    ) -> object:
+        raw = self.preview_order_raw(
+            app_key=app_key,
+            secret_key=secret_key,
+            session_token=session_token,
+            stock_code=stock_code,
+            exchange_code=exchange_code,
+            action=action,
+            quantity=quantity,
+            price=price,
+        )
+        return normalize(raw.http_status, raw.body)
+
+    # --- security master: a zip, not JSON, so it never goes through normalize ---
+
+    def security_master_raw(self, url: str, *, timeouts: Timeouts, max_bytes: int) -> RawUpstream:
+        return self._send(
+            "GET",
+            url,
+            headers={"User-Agent": SDK_USER_AGENT},
+            body=None,
+            timeouts=timeouts,
+            max_bytes=max_bytes,
+        )
