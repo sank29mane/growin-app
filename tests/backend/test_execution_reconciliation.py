@@ -32,7 +32,7 @@ def setup_order(ledger, pid="recon", quantity="2"):
         simulator_evidence={"simulated_fill_price": "10"},
         risk_evidence={"scaled_size": quantity},
     )
-    ledger.configure_paper_budget("invest", "GBP", "100")
+    ledger.configure_paper_budget("invest", "GBP", "100", workspace="uk")
     service.reserve(pid)
     ledger.claim_intent(_intent_from_proposal(proposal))
     ledger.finalize(pid, OrderAck(proposal_id=pid, broker="paper", broker_order_id=f"bo-{pid}"))
@@ -63,7 +63,7 @@ def test_partial_fill_then_cancel_releases_only_unfilled_amount(tmp_path):
         reservation = ledger.get_reservation("recon")
         assert reservation.consumed == Decimal("10")
         assert reservation.released == Decimal("10")
-        assert ledger.get_paper_budget("invest", "GBP").available == Decimal("90")
+        assert ledger.get_paper_budget("invest", "GBP", workspace="uk").available == Decimal("90")
 
 
 def test_full_fill_consumes_funds_and_updates_position_once(tmp_path):
@@ -75,7 +75,7 @@ def test_full_fill_consumes_funds_and_updates_position_once(tmp_path):
         reservation = ledger.get_reservation("recon")
         assert reservation.consumed == Decimal("20")
         assert reservation.released == Decimal("0")
-        assert ledger.get_paper_position("invest", "GBP", "VUSA") == {
+        assert ledger.get_paper_position("invest", "GBP", "VUSA", workspace="uk") == {
             "quantity": "2",
             "notional": "20",
         }

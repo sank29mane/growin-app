@@ -37,7 +37,7 @@ async def test_acknowledgement_replays_after_service_and_ledger_restart(tmp_path
             simulator_evidence={"simulated_fill_price": "100"},
             risk_evidence={"scaled_size": "2.5"},
         )
-        ledger.configure_paper_budget("invest", "GBP", "1000")
+        ledger.configure_paper_budget("invest", "GBP", "1000", workspace="uk")
         first_service.reserve(original["proposal_id"])
         with pytest.raises(ExecutionDisabledError, match="Signed approval"):
             await first_service.approve(original)
@@ -60,7 +60,7 @@ async def test_changed_intent_conflicts_after_service_restart(tmp_path):
             proposal(), currency="GBP", price="100", simulator_evidence={"simulated_fill_price": "100"},
             risk_evidence={"scaled_size": "2.5"}
         )
-        ledger.configure_paper_budget("invest", "GBP", "1000")
+        ledger.configure_paper_budget("invest", "GBP", "1000", workspace="uk")
         service.reserve("durable-1")
 
     with ExecutionLedger(db_path, workspace="uk") as reopened:
@@ -80,7 +80,7 @@ async def test_cross_service_claims_dispatch_once_by_database_authority(tmp_path
             proposal(), currency="GBP", price="100", simulator_evidence={"simulated_fill_price": "100"},
             risk_evidence={"scaled_size": "2.5"}
         )
-        ledger.configure_paper_budget("invest", "GBP", "1000")
+        ledger.configure_paper_budget("invest", "GBP", "1000", workspace="uk")
         first_service.reserve("durable-1")
         with pytest.raises(ExecutionDisabledError, match="Signed approval"):
             await first_service.approve(proposal())
@@ -97,7 +97,7 @@ async def test_dispatch_wait_holds_no_sqlite_write_transaction(tmp_path):
             proposal(), currency="GBP", price="100", simulator_evidence={"simulated_fill_price": "100"},
             risk_evidence={"scaled_size": "2.5"}
         )
-        ledger.configure_paper_budget("invest", "GBP", "1000")
+        ledger.configure_paper_budget("invest", "GBP", "1000", workspace="uk")
         service.reserve("durable-1")
         with pytest.raises(ExecutionDisabledError, match="Signed approval"):
             await service.approve(proposal())
