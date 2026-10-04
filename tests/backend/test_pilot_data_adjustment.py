@@ -7,6 +7,7 @@ import pytest
 
 from pilot_data.adjustment import (
     AdjustmentPolicy,
+    AppliedFactor,
     adjusted_series,
     compute_factor_set,
     detect_unrecorded_actions,
@@ -214,9 +215,64 @@ def test_unexplained_jumps_are_flagged_at_the_boundaries():
     assert detect_unrecorded_actions(jump_bars("179.99"), [], POLICY) == ()
 
 
-def test_any_event_on_the_date_explains_the_jump():
-    for purpose in ("FVSPLT FRM RS 10 TO RS 2", "BONUS 1:1", "DEMERGER"):
-        assert detect_unrecorded_actions(jump_bars("30"), [event("CANBK", purpose, date(2024, 6, 4))], POLICY) == ()
+JUMP_DAY = date(2024, 6, 4)
+
+
+def applied_factor(price_factor, kind="split"):
+    return AppliedFactor(event_id="ev", ex_date=JUMP_DAY, kind=kind, price_factor=Decimal(price_factor),
+                         volume_factor=Decimal(1) / Decimal(price_factor), structural_factor=Decimal(price_factor))
+
+
+def jump_factor_set(open_after, purpose):
+    bars = jump_bars(open_after)
+    return factor_set(bars, [event("CANBK", purpose, JUMP_DAY)], JUMP_DAY), bars
+
+
+def test_only_an_applied_price_factor_explains_the_jump():
+    # 100 -> 30 is a 0.3 ratio; a 0.2 factor leaves a residual of 1.5, inside the band
+    assert detect_unrecorded_actions(jump_bars("30"), [applied_factor("0.2")], POLICY) == ()
+    assert len(detect_unrecorded_actions(jump_bars("30"), [applied_factor("0.99", "dividend")], POLICY)) == 1
+    assert len(detect_unrecorded_actions(jump_bars("30"), [], POLICY)) == 1
+
+
+def test_a_non_price_event_does_not_hide_a_crash():
+    fs, bars = jump_factor_set("30", "AGM")
+    assert fs.applied == ()
+    assert [u.reason for u in fs.unresolved] == ["price_jump_without_action"]
+    series = adjusted_series(bars, fs, as_of=JUMP_DAY, workspace="india")
+    assert [b.adjusted_quarantined for b in series.bars] == [True, False]
+
+
+def test_an_undersized_dividend_does_not_hide_a_big_drop():
+    fs, bars = jump_factor_set("30", "DIV - RS 1 PER SH")
+    assert [a.kind for a in fs.applied] == ["dividend"]
+    (flag,) = fs.unresolved
+    assert flag.reason == "price_jump_without_action" and flag.ex_date == JUMP_DAY
+    assert flag.detail["applied_price_factor"] == "0.9900"
+    series = adjusted_series(bars, fs, as_of=JUMP_DAY, workspace="india")
+    assert series.bars[0].adjusted_quarantined and series.bars[0].adj_close is None
+
+
+def test_a_bonus_with_an_extra_unexplained_drop_is_still_flagged():
+    fs, bars = jump_factor_set("25", "BONUS 1:1")  # bonus explains 0.5, the rest (0.5) is a crash
+    assert [a.kind for a in fs.applied] == ["bonus"]
+    (flag,) = fs.unresolved
+    assert flag.reason == "price_jump_without_action" and flag.detail["residual_after_factor"] == "0.5000"
+    series = adjusted_series(bars, fs, as_of=JUMP_DAY, workspace="india")
+    assert series.bars[0].adjusted_quarantined
+
+
+def test_a_correctly_explained_split_or_bonus_stays_clean():
+    for purpose, open_after in (("FVSPLT FRM RS 10 TO RS 2", "30"), ("FVSPLT FRM RS 10 TO RS 2", "20"),
+                                ("BONUS 1:1", "50"), ("BONUS 1:1", "45")):
+        fs, bars = jump_factor_set(open_after, purpose)
+        assert fs.unresolved == (), (purpose, open_after)
+        assert not adjusted_series(bars, fs, as_of=JUMP_DAY, workspace="india").bars[0].adjusted_quarantined
+
+
+def test_an_unadjustable_event_on_the_date_still_reports_the_jump_and_itself():
+    fs, _ = jump_factor_set("30", "DEMERGER")
+    assert {u.reason for u in fs.unresolved} == {"not_adjustable", "price_jump_without_action"}
 
 
 def test_a_jump_feeds_the_unresolved_list_and_withholds_earlier_adjusted_prices():

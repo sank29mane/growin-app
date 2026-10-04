@@ -177,25 +177,44 @@ def _reference_close_before(
 
 
 def detect_unrecorded_actions(
-    reference_bars: Sequence[RawDailyBar], events: Sequence[CorporateActionEvent], policy: AdjustmentPolicy
+    reference_bars: Sequence[RawDailyBar], applied: Sequence[AppliedFactor], policy: AdjustmentPolicy
 ) -> tuple[UnresolvedAction, ...]:
+    """Flag open/previous-close jumps that the applied price factors do not explain.
+
+    A jump outside the policy band is suppressed only when the price factor applied on that exact
+    date brings the ratio back inside the band. Events that apply no price factor (an AGM, an
+    unresolved or non-price purpose) never suppress it, and a residual still outside the band
+    after the factor is flagged, so earlier bars stay withheld.
+    """
     ordered = sorted(reference_bars, key=lambda bar: bar.trade_date)
-    ex_dates = {event.ex_date for event in events if event.ex_date is not None}
+    factor_by_date: dict[date, Decimal] = {}
+    for item in applied:
+        factor_by_date[item.ex_date] = factor_by_date.get(item.ex_date, Decimal(1)) * item.price_factor
+    quantum = Decimal("0.0001")
     flagged: list[UnresolvedAction] = []
     for previous, current in zip(ordered, ordered[1:]):
-        if current.trade_date in ex_dates:
-            continue
         low = current.open <= policy.jump_low * previous.close
         high = current.open >= policy.jump_high * previous.close
-        if low or high:
-            ratio = (current.open / previous.close).quantize(Decimal("0.0001"), rounding=ROUND_HALF_EVEN)
-            flagged.append(
-                UnresolvedAction(
-                    event_id=None, ex_date=current.trade_date, kind="suspected_unrecorded",
-                    reason="price_jump_without_action",
-                    detail={"open_over_previous_close": str(ratio), "previous_date": previous.trade_date.isoformat()},
-                )
+        if not (low or high):
+            continue
+        ratio = current.open / previous.close
+        factor = factor_by_date.get(current.trade_date)
+        detail = {
+            "open_over_previous_close": str(ratio.quantize(quantum, rounding=ROUND_HALF_EVEN)),
+            "previous_date": previous.trade_date.isoformat(),
+        }
+        if factor is not None and factor > 0:
+            residual = ratio / factor
+            if policy.jump_low < residual < policy.jump_high:
+                continue
+            detail["applied_price_factor"] = str(factor.quantize(quantum, rounding=ROUND_HALF_EVEN))
+            detail["residual_after_factor"] = str(residual.quantize(quantum, rounding=ROUND_HALF_EVEN))
+        flagged.append(
+            UnresolvedAction(
+                event_id=None, ex_date=current.trade_date, kind="suspected_unrecorded",
+                reason="price_jump_without_action", detail=detail,
             )
+        )
     return tuple(flagged)
 
 
@@ -278,7 +297,7 @@ def compute_factor_set(
                 price_factor=price, volume_factor=volume, structural_factor=structural,
             )
         )
-    unresolved.extend(detect_unrecorded_actions(bars, known, policy))
+    unresolved.extend(detect_unrecorded_actions(bars, applied, policy))
     unresolved.sort(key=lambda u: (u.ex_date is None, u.ex_date or date.max, u.event_id or "", u.reason))
     reference_sha = canonical_sha256(
         [[bar.trade_date.isoformat(), bar.isin, dec_str(bar.close), bar.source_sha256] for bar in bars]
