@@ -1,0 +1,27 @@
+{
+  "schema": "growin.costs.tick_sizes/1",
+  "source_id": "nse-cash-price-band-ticks",
+  "versions": [
+    {
+      "version": "nse-cash-ticks-2025-04-15.r1",
+      "effective_from": "2025-04-15",
+      "effective_to": null,
+      "exchange": "NSE",
+      "segment": "cash",
+      "status": "unconfirmed: conflicts with the Breeze security master ticksize column; confirm with a live quote in Phase 61",
+      "reference_price_rule": "caller supplies the price NSE uses to pick the band; secondary sources say the previous month-end close",
+      "sources": [
+        "https://zerodha.com/marketintel/bulletin/408151/revision-in-tick-size-for-nse-derivatives-and-cash-segment-from-april-15-2025",
+        "https://www.angelone.in/news/market-updates/nse-revises-tick-size-for-stocks-and-indices-from-april-15-what-traders-need-to-know"
+      ],
+      "bands": [
+        {"from": "0", "to": "250", "tick": "0.01"},
+        {"from": "250", "to": "1000", "tick": "0.05"},
+        {"from": "1000", "to": "5000", "tick": "0.10"},
+        {"from": "5000", "to": "10000", "tick": "0.50"},
+        {"from": "10000", "to": "20000", "tick": "1.00"},
+        {"from": "20000", "to": null, "tick": "5.00"}
+      ]
+    }
+  ]
+}

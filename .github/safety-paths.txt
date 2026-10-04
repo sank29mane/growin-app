@@ -5,6 +5,7 @@ backend/execution/*
 backend/brokers/*
 backend/market_data/*
 backend/simulation/*
+backend/costs/*
 backend/app_context.py
 backend/trading_loop.py
 backend/trading212_mcp_server.py
