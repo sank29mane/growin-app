@@ -4,7 +4,6 @@ from collections import deque
 from utils.secret_masker import SecretMasker
 
 from contextvars import ContextVar
-import uuid
 
 # Python 3.13 fix for scipy spec issue during tests
 try:
@@ -115,6 +114,6 @@ def get_recent_logs():
     return list(log_buffer)
 
 # --- Audit Logging Facade ---
-from utils.audit_log import log_audit, AuditLogger
+from utils.audit_log import log_audit, AuditLogger  # noqa: E402
 
 __all__ = ["setup_logging", "get_recent_logs", "log_audit", "AuditLogger"]
