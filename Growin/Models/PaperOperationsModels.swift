@@ -151,11 +151,11 @@ final class AIServicePaperTradeApprover: PaperTradeApproving {
     }
 
     func requestTradeApproval(proposal: TradeProposalData) async throws -> TradeApprovalReview {
-        try await service.requestTradeApproval(proposal: proposal)
+        try await service.requestTradeApproval(proposal: proposal, workspace: .india)
     }
 
     func completeTradeApproval(_ review: TradeApprovalReview, signature: Data) async throws -> ApprovalCompletionResponse {
-        try await service.completeTradeApproval(review, signature: signature)
+        try await service.completeTradeApproval(review, signature: signature, workspace: .india)
     }
 }
 
@@ -353,16 +353,17 @@ protocol PaperApprovalSigning: AnyObject {
     func sign(_ payload: Data) throws -> Data
 }
 
+/// Paper Operations is India-only, so this adapter always signs as India.
 final class LocalPaperApprovalSigner: PaperApprovalSigning {
     var isConfigured: Bool {
-        LocalApprovalSigner.shared.isConfigured
+        LocalApprovalSigner.shared.isConfigured(for: .india)
     }
 
     func identity() throws -> ApprovalSignerIdentity {
-        try LocalApprovalSigner.shared.identity()
+        try LocalApprovalSigner.shared.identity(for: .india)
     }
 
     func sign(_ payload: Data) throws -> Data {
-        try LocalApprovalSigner.shared.sign(payload)
+        try LocalApprovalSigner.shared.sign(payload, for: .india)
     }
 }

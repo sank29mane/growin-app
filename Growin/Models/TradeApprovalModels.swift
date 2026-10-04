@@ -42,6 +42,14 @@ struct TradeApprovalReview: Identifiable, Sendable {
     var id: String { challenge.challengeId }
 
     init(challenge: ApprovalChallengeResponse, expectedProposal: TradeProposalData) throws {
+        try self.init(challenge: challenge, expectedProposal: expectedProposal, expectedWorkspace: nil)
+    }
+
+    init(challenge: ApprovalChallengeResponse, expectedProposal: TradeProposalData, expectedWorkspace: Workspace) throws {
+        try self.init(challenge: challenge, expectedProposal: expectedProposal, expectedWorkspace: Optional(expectedWorkspace))
+    }
+
+    private init(challenge: ApprovalChallengeResponse, expectedProposal: TradeProposalData, expectedWorkspace: Workspace?) throws {
         guard let bytes = Data(base64Encoded: challenge.signedPayloadB64) else {
             throw TradeApprovalReviewError.invalidEnvelope
         }
@@ -59,7 +67,8 @@ struct TradeApprovalReview: Identifiable, Sendable {
             payload.intentHash == challenge.intentHash,
             payload.issuedAt == challenge.issuedAt,
             payload.expiresAt == challenge.expiresAt,
-            payload.expiresAt > Int(Date().timeIntervalSince1970)
+            payload.expiresAt > Int(Date().timeIntervalSince1970),
+            expectedWorkspace.map({ payload.workspace == $0.rawValue }) ?? true
         else {
             throw TradeApprovalReviewError.invalidEnvelope
         }
@@ -125,6 +134,7 @@ enum TradeApprovalReviewError: LocalizedError {
     case invalidEnvelope
     case proposalMismatch
     case signerMismatch
+    case workspaceMismatch
 
     var errorDescription: String? {
         switch self {
@@ -134,6 +144,8 @@ enum TradeApprovalReviewError: LocalizedError {
             return "The frozen approval fields do not match the selected trade proposal."
         case .signerMismatch:
             return "The enrolled approval key does not match this workspace."
+        case .workspaceMismatch:
+            return "The backend is running a different workspace."
         }
     }
 }
