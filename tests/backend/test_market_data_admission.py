@@ -208,7 +208,7 @@ async def test_app_owned_india_entry_uses_market_session_and_durably_rejects_gap
                 for sequence in (1, 2, 3)
             ),
         )
-        app_state._execution_ledger.configure_paper_budget("paper", "INR", "1000")
+        app_state._execution_ledger.configure_paper_budget("paper", "INR", "1000", workspace="india")
         proposal = intent(proposal_id="app-entry").model_dump(mode="json")
         admitted = app_state.admit_india_paper_proposal(
             proposal,

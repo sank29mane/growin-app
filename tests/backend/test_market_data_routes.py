@@ -193,7 +193,7 @@ async def test_paper_preparation_is_real_loopback_only_fail_closed_and_reserves_
         assert override.status_code == 422
 
         await request("POST", "/api/market-data/sessions", json=start_body())
-        state._execution_ledger.configure_paper_budget("paper", "INR", "1000")
+        state._execution_ledger.configure_paper_budget("paper", "INR", "1000", workspace="india")
         prepared = await request("POST", "/api/market-data/paper-preparations", json=body)
         assert prepared.status_code == 201, prepared.text
         assert prepared.json()["admission"]["decision"] == "ADMITTED"
@@ -284,7 +284,7 @@ async def test_paper_reconcile_persists_ack_evidence_without_fill(
     assert state.start_execution(tmp_path / "india.sqlite3", workspace="india")
     try:
         await request("POST", "/api/market-data/sessions", json=start_body())
-        state._execution_ledger.configure_paper_budget("paper", "INR", "1000")
+        state._execution_ledger.configure_paper_budget("paper", "INR", "1000", workspace="india")
         prepared = await request(
             "POST",
             "/api/market-data/paper-preparations",
@@ -308,7 +308,7 @@ async def test_paper_reconcile_persists_ack_evidence_without_fill(
         assert evidence.cumulative_quantity == 0
         assert evidence.broker_order_id == ack.broker_order_id
         ticker = dict(state._execution_ledger.get_order(proposal_id).intent)["ticker"]
-        assert state._execution_ledger.get_paper_position("paper", "INR", ticker) is None
+        assert state._execution_ledger.get_paper_position("paper", "INR", ticker, workspace="india") is None
         isolated_market_session.call_tool.assert_not_awaited()
     finally:
         state.close_execution()

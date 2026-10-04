@@ -71,7 +71,7 @@ def admit_and_reserve(ledger: ExecutionLedger, intent: OrderIntent) -> None:
         simulator_evidence={"simulated_fill_price": "100"},
         risk_evidence={"scaled_size": str(intent.quantity)},
     )
-    ledger.configure_paper_budget(intent.account, "GBP", "10000")
+    ledger.configure_paper_budget(intent.account, "GBP", "10000", workspace="uk")
     service.reserve(intent.proposal_id)
 
 
@@ -460,7 +460,7 @@ def _workspace_stack(tmp_path, workspace: str, key):
         simulator_evidence={"simulated_fill_price": "100"},
         risk_evidence={"scaled_size": str(intent.quantity)},
     )
-    ledger.configure_paper_budget(intent.account, currency, "10000")
+    ledger.configure_paper_budget(intent.account, currency, "10000", workspace=workspace)
     service.reserve(intent.proposal_id)
     return ledger, approval, service
 

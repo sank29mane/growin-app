@@ -43,7 +43,7 @@ def test_workspace_switch_isolated_and_clear_requires_purpose_bound_signature(tm
 
 def test_engaged_workspace_blocks_admission_and_reservation(tmp_path):
     with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
-        ledger.configure_paper_budget("invest", "GBP", "1000")
+        ledger.configure_paper_budget("invest", "GBP", "1000", workspace="uk")
         service = ExecutionService(PaperDispatcher(), ledger)
         ledger.engage_workspace_control("MANUAL_KILL", workspace="uk")
         with pytest.raises(Exception, match="control"):
