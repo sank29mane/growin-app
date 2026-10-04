@@ -17,6 +17,13 @@ import canonicaljson
 
 logger = logging.getLogger(__name__)
 
+# Workspace tags for audit records. "unscoped" is a deliberate telemetry marker
+# for chat activity that has no execution context. It is NOT a Workspace: nothing
+# outside this module may treat it as an execution workspace, and the proposal
+# and approval paths refuse it.
+AUDIT_UNSCOPED = "unscoped"
+AUDIT_WORKSPACES = frozenset({"uk", "india", AUDIT_UNSCOPED})
+
 def _prepare_for_canonical(data: Any) -> Any:
     """Recursively converts Decimals and datetimes to strings for canonical JSON."""
     if isinstance(data, dict):
@@ -37,6 +44,9 @@ class AuditEntry(BaseModel):
     actor: str
     details: Dict[str, Any]
     previous_hash: str
+    # None only so pre-change log lines still parse and verify; every new entry
+    # is written with an explicit value from AUDIT_WORKSPACES.
+    workspace: Optional[str] = None
     hash: str = ""
 
     def compute_hash(self) -> str:
@@ -49,6 +59,10 @@ class AuditEntry(BaseModel):
             "details": _prepare_for_canonical(self.details),
             "previous_hash": self.previous_hash
         }
+        # Legacy lines carry no workspace; adding the key only when present keeps
+        # every pre-change hash valid while new entries bind their workspace.
+        if self.workspace is not None:
+            payload["workspace"] = self.workspace
         # SOTA 2026: Use canonical JSON encoding for consistent hashing
         serialized = canonicaljson.encode_canonical_json(payload)
         return hashlib.sha256(serialized).hexdigest()
@@ -100,15 +114,24 @@ class AuditLogger:
             logger.error(f"Failed to read last audit hash: {e}")
             return self.GENESIS_HASH
 
-    def log_event(self, action: str, actor: str, details: Dict[str, Any]) -> str:
+    def log_event(
+        self, action: str, actor: str, details: Dict[str, Any], *, workspace: str
+    ) -> str:
         """
         Log an audit event. Returns the ID of the new entry.
+
+        ``workspace`` is required and must be one of AUDIT_WORKSPACES.
         """
+        if workspace not in AUDIT_WORKSPACES:
+            raise ValueError(
+                f"audit workspace must be one of {sorted(AUDIT_WORKSPACES)}"
+            )
         entry = AuditEntry(
             action=action,
             actor=actor,
             details=details,
-            previous_hash=self.last_hash
+            previous_hash=self.last_hash,
+            workspace=workspace,
         )
         entry.hash = entry.compute_hash()
         
@@ -188,6 +211,6 @@ def get_audit_logger() -> AuditLogger:
         _audit_logger = AuditLogger(log_path)
     return _audit_logger
 
-def log_audit(action: str, actor: str, details: Dict[str, Any]):
+def log_audit(action: str, actor: str, details: Dict[str, Any], *, workspace: str):
     """Convenience function to log an audit event."""
-    return get_audit_logger().log_event(action, actor, details)
+    return get_audit_logger().log_event(action, actor, details, workspace=workspace)

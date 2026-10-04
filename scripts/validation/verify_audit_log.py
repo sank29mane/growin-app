@@ -1,4 +1,4 @@
-from backend.utils.audit_log import log_audit, get_audit_logger
+from backend.utils.audit_log import AUDIT_UNSCOPED, log_audit, get_audit_logger
 from decimal import Decimal
 import os
 import json
@@ -11,9 +11,9 @@ if os.path.exists("backend/data/test_audit.log"):
 print("--- Testing Audit Log Chaining ---")
 
 # 1. Log some events
-log_audit("TEST_START", "system", {"msg": "Initializing audit test"})
-log_audit("FINANCIAL_OP", "trader", {"price": Decimal("123.45"), "qty": 10})
-log_audit("ACCOUNT_SWITCH", "user", {"from": "invest", "to": "isa"})
+log_audit("TEST_START", "system", {"msg": "Initializing audit test"}, workspace=AUDIT_UNSCOPED)
+log_audit("FINANCIAL_OP", "trader", {"price": Decimal("123.45"), "qty": 10}, workspace=AUDIT_UNSCOPED)
+log_audit("ACCOUNT_SWITCH", "user", {"from": "invest", "to": "isa"}, workspace=AUDIT_UNSCOPED)
 
 # 2. Verify integrity
 logger = get_audit_logger()

@@ -12,6 +12,7 @@ from chat_manager import ChatManager
 from rag_manager import RAGManager
 from mcp_client import Trading212MCPClient
 from execution import (
+    ExecutionDisabledError,
     ExecutionLedger,
     ExecutionService,
     LedgerError,
@@ -25,6 +26,7 @@ from execution import (
     RequoteCoordinator,
     RequotePolicy,
     Workspace,
+    WorkspaceMismatch,
     coerce_workspace,
     default_ledger_path,
 )
@@ -313,7 +315,21 @@ class AppState:
         }
 
     def register_trade_proposal(self, proposal: Dict[str, Any]) -> None:
-        """Persist executable fields before exposing a proposal to the UI."""
+        """Persist executable fields before exposing a proposal to the UI.
+
+        Decision 2: the server stamps the workspace from the open ledger and
+        rejects any mismatch. With no open ledger the proposal is rejected.
+        """
+        ledger = self._execution_ledger
+        if not self.execution_authority or ledger is None:
+            raise ExecutionDisabledError("no open execution ledger; proposal rejected")
+        if "workspace" not in proposal:
+            proposal["workspace"] = ledger.workspace.value
+        elif proposal["workspace"] != ledger.workspace:
+            # Includes the audit-only marker "unscoped" (D3): it is never a workspace.
+            raise WorkspaceMismatch(
+                f"proposal names a workspace other than the open ledger's ({ledger.workspace.value})"
+            )
         self.execution_service.register_proposal(proposal)
         self.trade_proposals[str(proposal["proposal_id"])] = proposal
 
