@@ -291,3 +291,81 @@ def test_other_udiff_header_variants_still_fail_closed(header_line):
     with pytest.raises(PilotDataError) as caught:
         parse_udiff(_early_udiff(header_line), expected_trade_date=date(2024, 1, 1))
     assert caught.value.code == "bhavcopy_schema_mismatch"
+
+
+# From July 2025 NSE's PR etf member carries a Windows-1252 en dash (0x96)
+# in an index name, e.g. "NIFTY 50 INDEX \x96 TRI".
+def _pr_with_etf_bytes(day: date, etf_bytes: bytes) -> bytes:
+    pd_name, bc_name, etf_name = kit.pr_member_names(day)
+    return kit._zip_bytes(
+        {
+            pd_name: kit.pd_csv_text([kit.pd_row("CANBK", "EQ", "555.4", "569", "553.55", "566.55")]).encode("utf-8"),
+            bc_name: kit.bc_csv_text([]).encode("utf-8"),
+            etf_name: etf_bytes,
+        }
+    )
+
+
+def test_pr_etf_member_in_windows_1252_parses():
+    day = date(2025, 7, 23)
+    text = kit.etf_csv_text([kit.etf_row("NIFTYBEES", "NIP IND ETF NIFTY BEES", "NIFTY 50 INDEX – TRI")])
+    bundle = parse_pr_zip(_pr_with_etf_bytes(day, text.encode("cp1252")), expected_trade_date=day)
+    assert [b.nse_symbol for b in bundle.pd_bars] == ["CANBK"]
+    assert [r.underlying for r in bundle.etf_rows] == ["NIFTY 50 INDEX – TRI"]
+
+
+def test_pr_member_neither_utf8_nor_windows_1252_still_fails_closed():
+    day = date(2025, 7, 23)
+    text = kit.etf_csv_text([kit.etf_row("NIFTYBEES", "NIP IND ETF NIFTY BEES", "X")]).encode("utf-8")
+    bad = text.replace(b",X", b",\x81\xff")  # 0x81 is undefined in Windows-1252
+    with pytest.raises(PilotDataError) as caught:
+        parse_pr_zip(_pr_with_etf_bytes(day, bad), expected_trade_date=day)
+    assert caught.value.code == "bhavcopy_schema_mismatch"
+
+
+# From November 2025 NSE names PR members in lower case with a four-digit year
+# (pd03112025.csv) and writes Bc dates as yyyy-mm-dd.
+_BC_HEADER_LINE = "SERIES,SYMBOL,SECURITY,RECORD_DT,BC_STRT_DT,BC_END_DT,EX_DT,ND_STRT_DT,ND_END_DT,PURPOSE"
+
+
+def _pr_nov2025(day: date, *, bc_line: str, extra: dict[str, bytes] | None = None) -> bytes:
+    stamp = f"{day:%d%m%Y}"
+    members = {
+        f"pd{stamp}.csv": kit.pd_csv_text([kit.pd_row("CANBK", "EQ", "555.4", "569", "553.55", "566.55")]).encode(),
+        f"bc{stamp}.csv": f"{_BC_HEADER_LINE}\n{bc_line}\n".encode(),
+        f"etf{stamp}.csv": kit.etf_csv_text([kit.etf_row("NIFTYBEES", "NIP IND ETF NIFTY BEES", "NIFTY 50")]).encode(),
+    }
+    members.update(extra or {})
+    return kit._zip_bytes(members)
+
+
+def test_pr_november_2025_member_names_and_iso_bc_dates_parse():
+    day = date(2025, 11, 3)
+    bc = "EQ,CANBK,Canara Bank,2025-11-14,,,2025-11-14,,,DIVIDEND - RS 4 PER SHARE"
+    bundle = parse_pr_zip(_pr_nov2025(day, bc_line=bc), expected_trade_date=day)
+    assert [b.nse_symbol for b in bundle.pd_bars] == ["CANBK"]
+    assert [r.underlying for r in bundle.etf_rows] == ["NIFTY 50"]
+    (ca,) = bundle.ca_rows
+    assert (ca.ex_date, ca.record_date) == (date(2025, 11, 14), date(2025, 11, 14))
+
+
+def test_pr_with_both_member_name_forms_is_refused():
+    day = date(2025, 11, 3)
+    old_pd = kit.pd_csv_text([kit.pd_row("CANBK", "EQ", "1", "1", "1", "1")]).encode()
+    content = _pr_nov2025(day, bc_line="EQ,CANBK,Canara Bank,,,,,,,AGM", extra={f"Pd{day:%d%m%y}.csv": old_pd})
+    with pytest.raises(PilotDataError) as caught:
+        parse_pr_zip(content, expected_trade_date=day)
+    assert caught.value.code == "bhavcopy_schema_mismatch"
+
+
+@pytest.mark.parametrize("bad", ["2025-13-01", "2025/11/14", "14-11-2025"])
+def test_pr_bc_bad_dates_are_not_parsed_as_dates(bad):
+    day = date(2025, 11, 3)
+    bc = f"EQ,CANBK,Canara Bank,{bad},,,{bad},,,DIVIDEND - RS 4 PER SHARE"
+    try:
+        bundle = parse_pr_zip(_pr_nov2025(day, bc_line=bc), expected_trade_date=day)
+    except PilotDataError as exc:
+        assert exc.code in {"date_invalid", "bhavcopy_schema_mismatch"}
+        return
+    # Rows with a bad date are quarantined, never stored with a guessed date.
+    assert bundle.ca_rows == () and bundle.parse_quarantine_inputs
