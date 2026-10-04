@@ -1053,8 +1053,14 @@ class ExecutionLedger:
         return self._admission_from_row(row) if row is not None else None
 
     def configure_paper_budget(
-        self, account: str, currency: str, amount: Decimal | str | int | float
+        self,
+        account: str,
+        currency: str,
+        amount: Decimal | str | int | float,
+        *,
+        workspace: Workspace | str,
     ) -> PaperBudget:
+        self.require_workspace(workspace)
         amount_decimal = _positive_decimal(amount, "budget amount")
         now = _now()
         with self._transaction() as connection:
@@ -1082,7 +1088,10 @@ class ExecutionLedger:
                 raise LedgerError("paper budget did not persist")
             return self._budget_from_row(row)
 
-    def get_paper_budget(self, account: str, currency: str) -> Optional[PaperBudget]:
+    def get_paper_budget(
+        self, account: str, currency: str, *, workspace: Workspace | str
+    ) -> Optional[PaperBudget]:
+        self.require_workspace(workspace)
         with self._mutex:
             row = self._require_connection().execute(
                 "SELECT * FROM paper_budgets WHERE workspace = ? AND account = ? AND currency = ?",
@@ -1193,9 +1202,12 @@ class ExecutionLedger:
             ).fetchone()
         return self._reservation_from_row(row) if row is not None else None
 
-    def find_active_pending_reservation(self, account: str) -> Optional[str]:
+    def find_active_pending_reservation(
+        self, account: str, *, workspace: Workspace | str
+    ) -> Optional[str]:
         """Return the newest pending proposal that still owns this account's reservation."""
 
+        self.require_workspace(workspace)
         with self._mutex:
             row = self._require_connection().execute(
                 """
@@ -1215,8 +1227,14 @@ class ExecutionLedger:
         return str(row["proposal_id"]) if row is not None else None
 
     def engage_workspace_control(
-        self, reason_code: str = "MANUAL_KILL", *, actor: str = "local", evidence_id: str = ""
+        self,
+        reason_code: str = "MANUAL_KILL",
+        *,
+        workspace: Workspace | str,
+        actor: str = "local",
+        evidence_id: str = "",
     ) -> WorkspaceControl:
+        self.require_workspace(workspace)
         if not _REASON_CODE_PATTERN.fullmatch(reason_code):
             raise ValueError("reason_code must be a short, non-sensitive code")
         now = _now()
@@ -1245,13 +1263,20 @@ class ExecutionLedger:
             )
             return self._workspace_control_locked(connection)
 
-    def get_workspace_control(self) -> WorkspaceControl:
+    def get_workspace_control(self, *, workspace: Workspace | str) -> WorkspaceControl:
+        self.require_workspace(workspace)
         with self._mutex:
             return self._workspace_control_locked(self._require_connection())
 
     def clear_workspace_control(
-        self, *, version: int, evidence_id: str, purpose: str = "growin.execution.control.clear"
+        self,
+        *,
+        workspace: Workspace | str,
+        version: int,
+        evidence_id: str,
+        purpose: str = "growin.execution.control.clear",
     ) -> WorkspaceControl:
+        self.require_workspace(workspace)
         if purpose != "growin.execution.control.clear":
             raise ApprovalConflict("control-clear purpose is invalid")
         now = _now()
@@ -1282,10 +1307,11 @@ class ExecutionLedger:
             return self._workspace_control_locked(connection)
 
     def register_approval_key(
-        self, key_id: str, public_key_x963: bytes
+        self, key_id: str, public_key_x963: bytes, *, workspace: Workspace | str
     ) -> LedgerApprovalKey:
         """Enroll the first workspace key; replacement requires a later phase."""
 
+        self.require_workspace(workspace)
         if not key_id or len(public_key_x963) != 65:
             raise ValueError("a key id and 65-byte X9.63 public key are required")
         now = _now()
@@ -1316,7 +1342,8 @@ class ExecutionLedger:
                 raise LedgerError("approval key enrollment did not persist")
             return self._approval_key_from_row(row)
 
-    def get_approval_key(self) -> Optional[LedgerApprovalKey]:
+    def get_approval_key(self, *, workspace: Workspace | str) -> Optional[LedgerApprovalKey]:
+        self.require_workspace(workspace)
         with self._mutex:
             row = self._require_connection().execute(
                 "SELECT * FROM approval_keys WHERE workspace = ?",
@@ -2088,8 +2115,9 @@ class ExecutionLedger:
         )
 
     def get_paper_position(
-        self, account: str, currency: str, ticker: str
+        self, account: str, currency: str, ticker: str, *, workspace: Workspace | str
     ) -> Optional[Mapping[str, str]]:
+        self.require_workspace(workspace)
         with self._mutex:
             row = self._require_connection().execute(
                 "SELECT quantity, notional FROM paper_positions WHERE workspace = ? AND account = ? AND currency = ? AND ticker = ?",

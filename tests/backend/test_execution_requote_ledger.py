@@ -27,7 +27,7 @@ def _setup_acknowledged_parent(ledger: ExecutionLedger, proposal_id: str = "pare
         simulator_evidence={"simulated_fill_price": "10"},
         risk_evidence={"scaled_size": "2"},
     )
-    ledger.configure_paper_budget("invest", "GBP", "100")
+    ledger.configure_paper_budget("invest", "GBP", "100", workspace="uk")
     service.reserve(proposal_id)
     intent = _intent_from_proposal(proposal)
     ledger.claim_intent(intent)
@@ -130,6 +130,6 @@ def test_unknown_parent_and_workspace_control_fail_closed(tmp_path):
             _record(ledger, order)
         assert ledger.get_reservation(order.proposal_id).state == "ACTIVE"
 
-        ledger.engage_workspace_control("REQUOTE_TEST")
+        ledger.engage_workspace_control("REQUOTE_TEST", workspace="uk")
         with pytest.raises(RequoteConflict, match="control"):
             _record(ledger, order, requote_id="rq-2", key="parent:snapshot-2")

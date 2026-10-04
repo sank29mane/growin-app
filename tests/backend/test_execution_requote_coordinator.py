@@ -36,7 +36,7 @@ def _setup_parent(ledger):
         simulator_evidence={"simulated_fill_price": "10"},
         risk_evidence={"scaled_size": "2"},
     )
-    ledger.configure_paper_budget("invest", "GBP", "100")
+    ledger.configure_paper_budget("invest", "GBP", "100", workspace="uk")
     service.reserve(proposal["proposal_id"])
     intent = _intent_from_proposal(proposal)
     ledger.claim_intent(intent)

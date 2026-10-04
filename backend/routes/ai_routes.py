@@ -21,6 +21,7 @@ from schemas import (
     ApprovalChallengeRequest,
     ApprovalKeyEnrollmentRequest,
     SignedApprovalRequest,
+    WorkspaceScopedRequest,
 )
 from execution import (
     ApprovalError,
@@ -34,6 +35,8 @@ from execution import (
     LedgerError,
     ReconciliationSnapshot,
     ReconciliationStatus,
+    Workspace,
+    WorkspaceMismatch,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,6 +47,22 @@ router = APIRouter(prefix="/api/ai", tags=["AI Intelligence"])
 STRATEGIES_MOCK = {}
 
 # --- HITL Trade Approval Endpoints ---
+
+
+WORKSPACE_MISMATCH_DETAIL = "Workspace does not match the open execution ledger"
+REJECTION_UNAVAILABLE_DETAIL = "Trade rejection is unavailable: no execution ledger is open"
+
+
+def _reject_workspace_mismatch(requested: Workspace) -> None:
+    """Refuse a request whose workspace is not the open ledger's pinned identity.
+
+    With no ledger open there is nothing to compare against; each route keeps
+    its own no-ledger behaviour.
+    """
+
+    ledger = state._execution_ledger
+    if ledger is not None and ledger.workspace != requested:
+        raise HTTPException(status_code=409, detail=WORKSPACE_MISMATCH_DETAIL)
 
 
 def _strict_b64(value: str, *, expected_length: int | None = None) -> bytes:
@@ -59,11 +78,14 @@ def _strict_b64(value: str, *, expected_length: int | None = None) -> bytes:
 @router.post("/trade/approval/enroll")
 async def enroll_trade_approval_key(request: ApprovalKeyEnrollmentRequest):
     """Enroll one Secure Enclave P-256 public key using a local one-time token."""
+    _reject_workspace_mismatch(request.workspace)
     public_key = _strict_b64(request.public_key_x963_b64, expected_length=65)
     try:
         enrolled = state.execution_service.enroll_approval_key(
-            public_key, request.enrollment_token
+            public_key, request.enrollment_token, workspace=request.workspace
         )
+    except WorkspaceMismatch:
+        raise HTTPException(status_code=409, detail=WORKSPACE_MISMATCH_DETAIL)
     except EnrollmentError:
         logger.warning("Rejected local approval-key enrollment")
         raise HTTPException(status_code=403, detail="Approval enrollment was rejected")
@@ -73,18 +95,27 @@ async def enroll_trade_approval_key(request: ApprovalKeyEnrollmentRequest):
 
 
 @router.get("/trade/approval/status")
-async def get_trade_approval_status():
-    """Return only non-secret local enrollment state for the settings UI."""
+async def get_trade_approval_status(workspace: Workspace = Query(...)):
+    """Return only non-secret local enrollment state for the settings UI.
+
+    ``workspace`` is the open ledger's pinned identity, or null when no ledger
+    is open, so the client can verify it is talking to the workspace it expects.
+    """
+    _reject_workspace_mismatch(workspace)
+    ledger = state._execution_ledger
+    key_id = state.execution_service.approval_key_id(workspace=workspace)
     return {
         "mode": "paper" if state.execution_authority else "disabled",
-        "enrolled": state.execution_service.approval_key_id() is not None,
-        "key_id": state.execution_service.approval_key_id(),
+        "enrolled": key_id is not None,
+        "key_id": key_id,
+        "workspace": None if ledger is None else ledger.workspace.value,
     }
 
 
 @router.post("/trade/approval/uat-proposal")
-async def create_paper_approval_uat_proposal():
+async def create_paper_approval_uat_proposal(request: WorkspaceScopedRequest):
     """Create an explicit local-only paper proposal for manual approval UAT."""
+    _reject_workspace_mismatch(request.workspace)
     try:
         proposal = state.create_paper_approval_check()
         # Do not expose the durable projection as an ad-hoc UI contract. Swift
@@ -97,13 +128,16 @@ async def create_paper_approval_uat_proposal():
             "reasoning": str(proposal.get("reasoning", "Local paper approval check")),
             "status": str(proposal.get("status", "PENDING")),
         }
+    except WorkspaceMismatch as exc:
+        raise HTTPException(status_code=409, detail=WORKSPACE_MISMATCH_DETAIL) from exc
     except (ExecutionDisabledError, LedgerError, ExecutionConflictError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/trade/requote/uat-proposal")
-async def create_paper_requote_uat_proposal():
+async def create_paper_requote_uat_proposal(request: WorkspaceScopedRequest):
     """Create a local cancelled-parent LIMIT replacement for manual UAT only."""
+    _reject_workspace_mismatch(request.workspace)
     try:
         proposal = state.create_paper_requote_check()
         return {
@@ -114,6 +148,8 @@ async def create_paper_requote_uat_proposal():
             "reasoning": str(proposal["reasoning"]),
             "status": str(proposal.get("status", "PENDING")),
         }
+    except WorkspaceMismatch as exc:
+        raise HTTPException(status_code=409, detail=WORKSPACE_MISMATCH_DETAIL) from exc
     except (ExecutionDisabledError, LedgerError, ExecutionConflictError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -121,10 +157,13 @@ async def create_paper_requote_uat_proposal():
 @router.post("/trade/approval/challenge")
 async def create_trade_approval_challenge(request: ApprovalChallengeRequest):
     """Return exact immutable bytes for native review and Touch ID signing."""
+    _reject_workspace_mismatch(request.workspace)
     try:
         challenge = state.execution_service.create_approval_challenge(
-            request.proposal_id
+            request.proposal_id, workspace=request.workspace
         )
+    except WorkspaceMismatch:
+        raise HTTPException(status_code=409, detail=WORKSPACE_MISMATCH_DETAIL)
     except ExecutionDisabledError:
         raise HTTPException(status_code=503, detail="Signed approval is unavailable")
     except (ApprovalError, ApprovalConflict, LedgerError):
@@ -145,6 +184,7 @@ async def create_trade_approval_challenge(request: ApprovalChallengeRequest):
 @router.post("/trade/approval/complete")
 async def complete_trade_approval(request: SignedApprovalRequest):
     """Verify Touch ID evidence, atomically authorize once, then dispatch paper."""
+    _reject_workspace_mismatch(request.workspace)
     signature = _strict_b64(request.signature_der_b64)
     if state.is_paper_requote_check(request.proposal_id):
         raise HTTPException(
@@ -153,8 +193,13 @@ async def complete_trade_approval(request: SignedApprovalRequest):
         )
     try:
         ack = await state.execution_service.approve_signed(
-            request.proposal_id, request.challenge_id, signature
+            request.proposal_id,
+            request.challenge_id,
+            signature,
+            workspace=request.workspace,
         )
+    except WorkspaceMismatch:
+        raise HTTPException(status_code=409, detail=WORKSPACE_MISMATCH_DETAIL)
     except ApprovalVerificationError:
         logger.warning("Rejected invalid signed trade approval")
         raise HTTPException(status_code=403, detail="Signed approval was rejected")
@@ -201,13 +246,19 @@ async def complete_trade_approval(request: SignedApprovalRequest):
 @router.post("/trade/requote/uat/verify")
 async def verify_paper_requote_uat_signature(request: SignedApprovalRequest):
     """Verify the fresh local signature without consuming approval or dispatching."""
+    _reject_workspace_mismatch(request.workspace)
     if not state.is_paper_requote_check(request.proposal_id):
         raise HTTPException(status_code=404, detail="Local re-quote UAT proposal was not found")
     signature = _strict_b64(request.signature_der_b64)
     try:
         state.execution_service.verify_approval_signature_for_uat(
-            request.proposal_id, request.challenge_id, signature
+            request.proposal_id,
+            request.challenge_id,
+            signature,
+            workspace=request.workspace,
         )
+    except WorkspaceMismatch:
+        raise HTTPException(status_code=409, detail=WORKSPACE_MISMATCH_DETAIL)
     except ApprovalVerificationError:
         logger.warning("Rejected invalid local re-quote UAT signature")
         raise HTTPException(status_code=403, detail="Local UAT signature was rejected")
@@ -234,7 +285,8 @@ async def approve_trade(request: TradeApprovalRequest):
     proposal = state.get_trade_proposal(proposal_id)
     if proposal is None:
         raise HTTPException(status_code=404, detail=f"Trade proposal {proposal_id} not found")
-    
+
+    _reject_workspace_mismatch(request.workspace)
     try:
         ack = await state.execution_service.approve(proposal)
         return {
@@ -242,6 +294,8 @@ async def approve_trade(request: TradeApprovalRequest):
             "message": f"Trade for {proposal['ticker']} acknowledged by {ack.broker}.",
             "execution_details": ack.model_dump(mode="json"),
         }
+    except WorkspaceMismatch:
+        raise HTTPException(status_code=409, detail=WORKSPACE_MISMATCH_DETAIL)
     except ExecutionDisabledError:
         logger.warning("Blocked trade approval because execution controls are not installed")
         raise HTTPException(status_code=503, detail="Broker execution is currently disabled")
@@ -266,6 +320,13 @@ async def reject_trade(request: TradeApprovalRequest):
     SOTA 2026 Phase 30: HITL Trade Rejection.
     Marks the proposal as rejected and stops execution.
     """
+    # D2: a rejection must never look recorded while it lives only in memory.
+    # Check first so that, with no ledger, the route neither mutates nor
+    # reveals an in-memory proposal.
+    if state._execution_ledger is None:
+        raise HTTPException(status_code=503, detail=REJECTION_UNAVAILABLE_DETAIL)
+    _reject_workspace_mismatch(request.workspace)
+
     proposal_id = request.proposal_id
     
     proposal = state.get_trade_proposal(proposal_id)
@@ -277,6 +338,8 @@ async def reject_trade(request: TradeApprovalRequest):
 
     try:
         await state.execution_service.reject(proposal, request.notes)
+    except WorkspaceMismatch:
+        raise HTTPException(status_code=409, detail=WORKSPACE_MISMATCH_DETAIL)
     except ExecutionConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     

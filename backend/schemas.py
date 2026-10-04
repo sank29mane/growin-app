@@ -1,6 +1,9 @@
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Dict, Any, Optional
+from datetime import datetime
 from decimal import Decimal
+
+from execution import Workspace
 
 # --- Goal Planning Models ---
 
@@ -111,9 +114,18 @@ class TradeProposalData(BaseModel):
     status: Optional[str] = "PENDING"
     timestamp: float = Field(default_factory=lambda: datetime.now().timestamp())
 
+class WorkspaceScopedRequest(BaseModel):
+    """Body for routes that carry nothing but the workspace they act on."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    workspace: Workspace
+
+
 class TradeApprovalRequest(BaseModel):
     proposal_id: str
     decision: str  # APPROVED, REJECTED
+    workspace: Workspace
     notes: Optional[str] = None
     signature: Optional[str] = None # For future HMAC/Security validation
 
@@ -121,13 +133,16 @@ class TradeApprovalRequest(BaseModel):
 class ApprovalKeyEnrollmentRequest(BaseModel):
     public_key_x963_b64: str = Field(..., min_length=88, max_length=88)
     enrollment_token: str = Field(..., min_length=16, max_length=4096)
+    workspace: Workspace
 
 
 class ApprovalChallengeRequest(BaseModel):
     proposal_id: str = Field(..., min_length=1, max_length=128)
+    workspace: Workspace
 
 
 class SignedApprovalRequest(BaseModel):
     proposal_id: str = Field(..., min_length=1, max_length=128)
     challenge_id: str = Field(..., min_length=36, max_length=36)
     signature_der_b64: str = Field(..., min_length=8, max_length=256)
+    workspace: Workspace

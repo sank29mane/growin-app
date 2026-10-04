@@ -9,7 +9,7 @@ from utils.error_handler import handle_error
 from typing import List, Dict, Any, Optional, TypedDict, Union
 from utils.ticker_utils import normalize_ticker
 from utils.currency_utils import CurrencyNormalizer
-from data_models import PriceData
+from workspace_credentials import CredentialScopeError, uk_credential
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -21,8 +21,8 @@ alpaca_circuit = get_circuit_breaker("alpaca", failure_threshold=5, recovery_tim
 finnhub_circuit = get_circuit_breaker("finnhub", failure_threshold=5, recovery_timeout=60.0)
 
 # --- Configuration ---
-API_KEY = os.getenv("ALPACA_API_KEY")
-API_SECRET = os.getenv("ALPACA_SECRET_KEY")
+# Alpaca keys are UK-only credentials: AlpacaClient reads them through
+# workspace_credentials.uk_credential, never at import time.
 
 # Dynamic Environment Switching
 USE_PAPER = (os.getenv("ALPACA_USE_PAPER", "true")).lower() == "true"
@@ -77,14 +77,21 @@ class AlpacaClient:
         self.trading_client = None
         self.data_client = None
 
-        if API_KEY and API_SECRET:
+        try:
+            api_key = uk_credential("ALPACA_API_KEY")
+            api_secret = uk_credential("ALPACA_SECRET_KEY")
+        except CredentialScopeError:
+            logger.info("AlpacaClient: Alpaca keys are UK-only; running in offline/mock mode.")
+            return
+
+        if api_key and api_secret:
             try:
                 from alpaca.trading.client import TradingClient
                 from alpaca.data.historical import StockHistoricalDataClient
 
                 # Explicit paper flag based on configuration
-                self.trading_client = TradingClient(API_KEY, API_SECRET, paper=USE_PAPER)
-                self.data_client = StockHistoricalDataClient(API_KEY, API_SECRET)
+                self.trading_client = TradingClient(api_key, api_secret, paper=USE_PAPER)
+                self.data_client = StockHistoricalDataClient(api_key, api_secret)
                 logger.info(f"AlpacaClient: Successfully connected to Alpaca API ({'Paper' if USE_PAPER else 'Live'}).")
             except Exception as e:
 

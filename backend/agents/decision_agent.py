@@ -20,7 +20,12 @@ from pydantic import BaseModel, Field
 from magentic import prompt as mag_prompt
 from langchain_core.messages import SystemMessage, HumanMessage
 from .llm_factory import LLMFactory
-from utils.audit_log import log_audit
+from utils.audit_log import AUDIT_UNSCOPED, log_audit
+from execution import (
+    ExecutionConflictError,
+    ExecutionDisabledError,
+    LedgerError,
+)
 from app_logging import correlation_id_ctx
 from resilience import get_circuit_breaker, CircuitBreakerOpenError
 from shared_types import SENSITIVE_TOOLS
@@ -324,11 +329,15 @@ class DecisionAgent:
             # SOTA 2026 Phase 30: Detect and extract Trade Proposals for HITL
             trade_proposal = self._extract_trade_proposal(recommendation, context)
             if trade_proposal:
-                from app_context import state
                 proposal_id = trade_proposal.get("proposal_id")
-                state.register_trade_proposal(trade_proposal)
-                context.user_context["pending_proposal"] = trade_proposal
-                logger.info(f"DecisionAgent: Detected trade proposal for {trade_proposal.get('ticker')} ({proposal_id}). Routing to HITL gate.")
+                if self._register_for_human_review(trade_proposal, context):
+                    context.user_context["pending_proposal"] = trade_proposal
+                    logger.info(f"DecisionAgent: Detected trade proposal for {trade_proposal.get('ticker')} ({proposal_id}). Routing to HITL gate.")
+                else:
+                    recommendation += (
+                        "\n\nTrade proposal not registered for review "
+                        "(TRADE_PROPOSAL_NOT_REGISTERED)."
+                    )
 
             status_manager.set_status("decision_agent", "ready", "Decision delivered", model=self.model_name)
 
@@ -352,7 +361,8 @@ class DecisionAgent:
                     "response_id": response_id,
                     "contradictions_count": len(contradictions) if contradictions else 0,
                     "quick_actions_count": len(quick_actions)
-                }
+                },
+                workspace=self._audit_workspace(),
             )
 
             return {
@@ -595,7 +605,8 @@ class DecisionAgent:
                     "intent": context.intent,
                     "correlation_id": correlation_id_ctx.get(),
                     "full_response_length": len(full_response)
-                }
+                },
+                workspace=self._audit_workspace(),
             )
             
         except Exception as e:
@@ -1202,6 +1213,31 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
         if not self._initialized:
             await self._initialize_llm()
         return await self._generate_draft("You are a helpful assistant.", prompt)
+
+    def _register_for_human_review(self, trade_proposal: Dict[str, Any], context: MarketContext) -> bool:
+        """Register a chat-generated proposal for HITL review without breaking the reply.
+
+        The server stamps the workspace from the open ledger. Chat proposals carry
+        no account or broker, so registration fails until a human-reviewed path
+        supplies them; that refusal is logged by code and the proposal dropped.
+        """
+        from app_context import state
+
+        try:
+            state.register_trade_proposal(trade_proposal)
+        except (ExecutionDisabledError, LedgerError, ExecutionConflictError, ValueError) as exc:
+            # pydantic's ValidationError is a ValueError. Log the code and the
+            # exception class only, never the proposal contents.
+            logger.warning("TRADE_PROPOSAL_NOT_REGISTERED: %s", type(exc).__name__)
+            return False
+        return True
+
+    def _audit_workspace(self) -> str:
+        """The open ledger's workspace, or the explicit audit-only marker."""
+        from app_context import state
+
+        ledger = state._execution_ledger
+        return ledger.workspace.value if ledger is not None else AUDIT_UNSCOPED
 
     def _extract_trade_proposal(self, text: str, context: MarketContext) -> Optional[Dict[str, Any]]:
         """

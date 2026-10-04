@@ -132,10 +132,12 @@ def test_runtime_preflight_uses_components_and_rejects_swarm_gate_failure(tmp_pa
         dispatcher.dispatch.assert_not_awaited()
 
 
-def test_app_startup_uses_runtime_preflight_for_local_paper_uat(tmp_path):
+def test_app_startup_uses_runtime_preflight_for_local_paper_uat(tmp_path, private_config_dir):
     app_state = AppState()
     try:
-        assert app_state.start_execution(tmp_path / "execution.sqlite3", workspace="uk")
+        assert app_state.start_execution(
+            tmp_path / "execution.sqlite3", workspace="uk", private_dir=private_config_dir
+        )
         proposal = app_state.create_paper_approval_check()
         admission = app_state._execution_ledger.get_admission(proposal["proposal_id"])
 

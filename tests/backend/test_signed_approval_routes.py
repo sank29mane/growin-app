@@ -56,7 +56,7 @@ def signed_execution(tmp_path):
         price="100",
         **state._local_paper_preflight(),
     )
-    ledger.configure_paper_budget("invest", "GBP", "10000")
+    ledger.configure_paper_budget("invest", "GBP", "10000", workspace="uk")
     service.reserve(proposal_id)
     state.trade_proposals[proposal_id] = proposal
     yield service, ledger, proposal
@@ -103,11 +103,12 @@ async def test_enrollment_requires_local_one_time_token(signed_execution):
         {
             "public_key_x963_b64": base64.b64encode(public_key).decode(),
             "enrollment_token": "not-the-local-bootstrap-token",
+            "workspace": "uk",
         },
     )
 
     assert rejected.status_code == 403
-    assert ledger.get_approval_key() is None
+    assert ledger.get_approval_key(workspace="uk") is None
     assert service._approval_service.enrollment_token_path.exists()
 
 
@@ -115,11 +116,16 @@ async def test_enrollment_requires_local_one_time_token(signed_execution):
 async def test_approval_status_and_explicit_uat_proposal_are_paper_only(signed_execution):
     service, ledger, _ = signed_execution
 
-    status = await _get("/api/ai/trade/approval/status")
+    status = await _get("/api/ai/trade/approval/status?workspace=uk")
     assert status.status_code == 200
-    assert status.json() == {"mode": "paper", "enrolled": False, "key_id": None}
+    assert status.json() == {
+        "mode": "paper",
+        "enrolled": False,
+        "key_id": None,
+        "workspace": "uk",
+    }
 
-    response = await _post("/api/ai/trade/approval/uat-proposal", {})
+    response = await _post("/api/ai/trade/approval/uat-proposal", {"workspace": "uk"})
     assert response.status_code == 200
     proposal = response.json()
     assert set(proposal) == {
@@ -134,7 +140,7 @@ async def test_approval_status_and_explicit_uat_proposal_are_paper_only(signed_e
     assert durable["status"] == "PENDING"
     assert ledger.get_admission(proposal["proposal_id"]).decision.value == "ADMITTED"
 
-    resumed = (await _post("/api/ai/trade/approval/uat-proposal", {})).json()
+    resumed = (await _post("/api/ai/trade/approval/uat-proposal", {"workspace": "uk"})).json()
     assert resumed["proposal_id"] == proposal["proposal_id"]
 
 
@@ -148,13 +154,15 @@ async def test_completed_uat_check_releases_only_its_bounded_reservation(signed_
         {
             "public_key_x963_b64": base64.b64encode(public_key).decode(),
             "enrollment_token": token,
+            "workspace": "uk",
         },
     )
     assert enrolled.status_code == 200
 
-    proposal = (await _post("/api/ai/trade/approval/uat-proposal", {})).json()
+    proposal = (await _post("/api/ai/trade/approval/uat-proposal", {"workspace": "uk"})).json()
     challenge = await _post(
-        "/api/ai/trade/approval/challenge", {"proposal_id": proposal["proposal_id"]}
+        "/api/ai/trade/approval/challenge",
+        {"proposal_id": proposal["proposal_id"], "workspace": "uk"},
     )
     assert challenge.status_code == 200
     challenge_body = challenge.json()
@@ -167,14 +175,15 @@ async def test_completed_uat_check_releases_only_its_bounded_reservation(signed_
             "proposal_id": proposal["proposal_id"],
             "challenge_id": challenge_body["challenge_id"],
             "signature_der_b64": base64.b64encode(signed).decode(),
+            "workspace": "uk",
         },
     )
     assert completed.status_code == 200
     assert "reservation released" in completed.json()["message"]
     assert ledger.get_reservation(proposal["proposal_id"]).state == "SETTLED"
-    assert ledger.get_paper_budget("paper-uat-v2", "GBP").available == 1
+    assert ledger.get_paper_budget("paper-uat-v2", "GBP", workspace="uk").available == 1
 
-    next_check = await _post("/api/ai/trade/approval/uat-proposal", {})
+    next_check = await _post("/api/ai/trade/approval/uat-proposal", {"workspace": "uk"})
     assert next_check.status_code == 200
 
 
@@ -188,11 +197,12 @@ async def test_requote_uat_verifies_fresh_limit_signature_without_dispatch(signe
         {
             "public_key_x963_b64": base64.b64encode(public_key).decode(),
             "enrollment_token": token,
+            "workspace": "uk",
         },
     )
     assert enrolled.status_code == 200
 
-    created = await _post("/api/ai/trade/requote/uat-proposal", {})
+    created = await _post("/api/ai/trade/requote/uat-proposal", {"workspace": "uk"})
     assert created.status_code == 200, created.text
     proposal = created.json()
     assert proposal["ticker"] == "PAPER-REQUOTE-UAT"
@@ -212,7 +222,8 @@ async def test_requote_uat_verifies_fresh_limit_signature_without_dispatch(signe
     assert ledger.get_reservation(proposal["proposal_id"]).state == "ACTIVE"
 
     challenge = await _post(
-        "/api/ai/trade/approval/challenge", {"proposal_id": proposal["proposal_id"]}
+        "/api/ai/trade/approval/challenge",
+        {"proposal_id": proposal["proposal_id"], "workspace": "uk"},
     )
     assert challenge.status_code == 200
     challenge_body = challenge.json()
@@ -231,6 +242,7 @@ async def test_requote_uat_verifies_fresh_limit_signature_without_dispatch(signe
             "proposal_id": proposal["proposal_id"],
             "challenge_id": challenge_body["challenge_id"],
             "signature_der_b64": base64.b64encode(signature).decode(),
+            "workspace": "uk",
         },
     )
     assert verified.status_code == 200
@@ -244,6 +256,7 @@ async def test_requote_uat_verifies_fresh_limit_signature_without_dispatch(signe
             "proposal_id": proposal["proposal_id"],
             "challenge_id": challenge_body["challenge_id"],
             "signature_der_b64": base64.b64encode(signature).decode(),
+            "workspace": "uk",
         },
     )
     assert blocked_dispatch.status_code == 409
@@ -276,6 +289,7 @@ async def test_signed_route_executes_exact_challenge_once(signed_execution):
         {
             "public_key_x963_b64": base64.b64encode(public_key).decode(),
             "enrollment_token": token,
+            "workspace": "uk",
         },
     )
     assert enrolled.status_code == 200
@@ -283,13 +297,13 @@ async def test_signed_route_executes_exact_challenge_once(signed_execution):
 
     unsigned = await _post(
         "/api/ai/trade/approve",
-        {"proposal_id": proposal["proposal_id"], "decision": "APPROVED"},
+        {"proposal_id": proposal["proposal_id"], "decision": "APPROVED", "workspace": "uk"},
     )
     assert unsigned.status_code == 503
 
     challenge = await _post(
         "/api/ai/trade/approval/challenge",
-        {"proposal_id": proposal["proposal_id"]},
+        {"proposal_id": proposal["proposal_id"], "workspace": "uk"},
     )
     assert challenge.status_code == 200
     challenge_body = challenge.json()
@@ -306,6 +320,7 @@ async def test_signed_route_executes_exact_challenge_once(signed_execution):
             "proposal_id": proposal["proposal_id"],
             "challenge_id": challenge_body["challenge_id"],
             "signature_der_b64": base64.b64encode(signature).decode(),
+            "workspace": "uk",
         },
     )
     assert completed.status_code == 200
@@ -318,6 +333,7 @@ async def test_signed_route_executes_exact_challenge_once(signed_execution):
             "proposal_id": proposal["proposal_id"],
             "challenge_id": challenge_body["challenge_id"],
             "signature_der_b64": base64.b64encode(signature).decode(),
+            "workspace": "uk",
         },
     )
     assert replay.status_code == 200
@@ -336,12 +352,13 @@ async def test_invalid_signature_does_not_consume_challenge(signed_execution):
         {
             "public_key_x963_b64": base64.b64encode(public_key).decode(),
             "enrollment_token": token,
+            "workspace": "uk",
         },
     )
     challenge = (
         await _post(
             "/api/ai/trade/approval/challenge",
-            {"proposal_id": proposal["proposal_id"]},
+            {"proposal_id": proposal["proposal_id"], "workspace": "uk"},
         )
     ).json()
     payload = base64.b64decode(challenge["signed_payload_b64"], validate=True)
@@ -353,6 +370,7 @@ async def test_invalid_signature_does_not_consume_challenge(signed_execution):
             "proposal_id": proposal["proposal_id"],
             "challenge_id": challenge["challenge_id"],
             "signature_der_b64": base64.b64encode(bad_signature).decode(),
+            "workspace": "uk",
         },
     )
     assert rejected.status_code == 403
@@ -365,6 +383,7 @@ async def test_invalid_signature_does_not_consume_challenge(signed_execution):
             "proposal_id": proposal["proposal_id"],
             "challenge_id": challenge["challenge_id"],
             "signature_der_b64": base64.b64encode(good_signature).decode(),
+            "workspace": "uk",
         },
     )
     assert accepted.status_code == 200

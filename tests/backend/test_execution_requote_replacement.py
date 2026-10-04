@@ -18,7 +18,7 @@ def _parent(ledger):
     proposal = {"proposal_id": "parent", "workspace": "uk", "account": "invest", "broker": "paper", "mode": "PAPER", "ticker": "VUSA", "action": "BUY", "quantity": "2"}
     service = ExecutionService(_DispatcherSentinel(), ledger)
     service.admit(proposal, currency="GBP", price="10", simulator_evidence={"simulated_fill_price": "10"}, risk_evidence={"scaled_size": "2"})
-    ledger.configure_paper_budget("invest", "GBP", "100")
+    ledger.configure_paper_budget("invest", "GBP", "100", workspace="uk")
     service.reserve("parent")
     ledger.claim_intent(_intent_from_proposal(proposal))
     ledger.finalize("parent", OrderAck(proposal_id="parent", broker="paper", broker_order_id="paper-parent"))

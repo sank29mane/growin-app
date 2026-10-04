@@ -1,8 +1,11 @@
 import pytest
+import hashlib
 import logging
 import json
 import os
 import uuid
+
+import canonicaljson
 from app_logging import setup_logging, correlation_id_ctx, CorrelationIdFilter
 from utils.audit_log import AuditLogger, AuditEntry
 
@@ -13,7 +16,7 @@ def audit_logger(tmp_path):
 
 def test_audit_log_creation(audit_logger):
     """Test that audit log entries are created and linked correctly."""
-    entry_id = audit_logger.log_event("TEST_ACTION", "user1", {"key": "value"})
+    entry_id = audit_logger.log_event("TEST_ACTION", "user1", {"key": "value"}, workspace="unscoped")
     
     assert os.path.exists(audit_logger.log_path)
     with open(audit_logger.log_path, 'r') as f:
@@ -28,8 +31,8 @@ def test_audit_log_creation(audit_logger):
 
 def test_audit_log_chaining(audit_logger):
     """Test that entries are cryptographically linked."""
-    id1 = audit_logger.log_event("ACTION_1", "user1", {})
-    id2 = audit_logger.log_event("ACTION_2", "user1", {})
+    id1 = audit_logger.log_event("ACTION_1", "user1", {}, workspace="unscoped")
+    id2 = audit_logger.log_event("ACTION_2", "user1", {}, workspace="unscoped")
     
     with open(audit_logger.log_path, 'r') as f:
         lines = [json.loads(l) for l in f.readlines()]
@@ -85,8 +88,8 @@ def test_correlation_id_logging(caplog):
 
 def test_tamper_evidence(audit_logger):
     """Test that tampering breaks the chain."""
-    audit_logger.log_event("ACTION_1", "user1", {})
-    audit_logger.log_event("ACTION_2", "user1", {})
+    audit_logger.log_event("ACTION_1", "user1", {}, workspace="unscoped")
+    audit_logger.log_event("ACTION_2", "user1", {}, workspace="unscoped")
     
     # Tamper with the first entry
     with open(audit_logger.log_path, 'r') as f:
@@ -112,3 +115,67 @@ def test_tamper_evidence(audit_logger):
     
     # And specifically, the chain is broken because entry2 points to the OLD hash
     # (In a real verification tool, we'd check if hash(entry1) == entry2.previous_hash)
+
+
+# --- ISO-01: every audit entry names its workspace ---
+
+
+def test_log_event_requires_a_workspace(audit_logger):
+    with pytest.raises(TypeError):
+        audit_logger.log_event("ACTION", "user1", {})  # type: ignore[call-arg]
+    assert os.path.getsize(audit_logger.log_path) == 0
+
+
+def test_log_event_rejects_an_unknown_workspace(audit_logger):
+    with pytest.raises(ValueError):
+        audit_logger.log_event("ACTION", "user1", {}, workspace="us")
+    assert os.path.getsize(audit_logger.log_path) == 0
+
+
+def test_log_event_writes_the_workspace_into_the_line(audit_logger):
+    audit_logger.log_event("ACTION", "user1", {}, workspace="india")
+
+    with open(audit_logger.log_path) as handle:
+        line = json.loads(handle.readline())
+    assert line["workspace"] == "india"
+    assert AuditEntry(**line).compute_hash() == line["hash"]
+
+
+def _legacy_line(previous_hash: str) -> dict:
+    """A pre-change line: hashed without any workspace key, independent of AuditEntry."""
+
+    entry = {
+        "id": str(uuid.uuid4()),
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "action": "LEGACY",
+        "actor": "old-code",
+        "details": {"k": "v"},
+        "previous_hash": previous_hash,
+    }
+    digest = hashlib.sha256(canonicaljson.encode_canonical_json(entry)).hexdigest()
+    return {**entry, "hash": digest}
+
+
+def test_legacy_lines_still_verify_and_new_lines_chain_after_them(tmp_path):
+    log_file = tmp_path / "legacy.log"
+    legacy = _legacy_line("0" * 64)
+    log_file.write_text(json.dumps(legacy) + "\n")
+    assert "workspace" not in legacy
+
+    logger = AuditLogger(str(log_file))
+    logger.log_event("NEW", "user1", {}, workspace="uk")
+    logger.log_event("NEW", "user1", {}, workspace="unscoped")
+
+    result = AuditLogger(str(log_file)).verify_integrity()
+    assert result["status"] == "success"
+    assert result["entries_checked"] == 3
+
+
+def test_changing_only_the_workspace_of_a_new_line_breaks_its_hash(audit_logger):
+    audit_logger.log_event("ACTION", "user1", {}, workspace="uk")
+    with open(audit_logger.log_path) as handle:
+        line = json.loads(handle.readline())
+
+    line["workspace"] = "india"
+
+    assert AuditEntry(**line).compute_hash() != line["hash"]

@@ -26,6 +26,7 @@ from .ledger import (
     OrderNotFound,
     canonical_json,
 )
+from .models import Workspace
 
 
 APPROVAL_PURPOSE = "growin.execution.dispatch"
@@ -90,7 +91,7 @@ class ApprovalService:
         """Create one private bootstrap token when the workspace has no key."""
 
         token_path = self.enrollment_token_path
-        if self._ledger.get_approval_key() is not None:
+        if self._ledger.get_approval_key(workspace=self._ledger.workspace) is not None:
             return token_path
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         if hasattr(os, "O_CLOEXEC"):
@@ -120,14 +121,19 @@ class ApprovalService:
         return token_path
 
     def enroll_key(
-        self, public_key_x963: bytes, enrollment_token: str | bytes
+        self,
+        public_key_x963: bytes,
+        enrollment_token: str | bytes,
+        *,
+        workspace: Workspace | str,
     ) -> LedgerApprovalKey:
         """Enroll exactly one key, authorized by a private one-time token file."""
 
+        pinned = self._ledger.require_workspace(workspace)
         _load_public_key(public_key_x963)
         normalized = bytes(public_key_x963)
         key_id = hashlib.sha256(normalized).hexdigest()
-        existing = self._ledger.get_approval_key()
+        existing = self._ledger.get_approval_key(workspace=pinned)
         if existing is not None:
             if existing.key_id == key_id and hmac.compare_digest(
                 existing.public_key_x963, normalized
@@ -166,7 +172,7 @@ class ApprovalService:
         finally:
             os.close(fd)
 
-        enrolled = self._ledger.register_approval_key(key_id, normalized)
+        enrolled = self._ledger.register_approval_key(key_id, normalized, workspace=pinned)
         try:
             token_path.unlink()
         except OSError as exc:
@@ -174,15 +180,16 @@ class ApprovalService:
         return enrolled
 
     def create_challenge(
-        self, proposal_id: str, *, ttl_seconds: int = 60
+        self, proposal_id: str, *, workspace: Workspace | str, ttl_seconds: int = 60
     ) -> ApprovalChallenge:
+        pinned = self._ledger.require_workspace(workspace)
         if not 5 <= ttl_seconds <= 300:
             raise ValueError("approval challenge TTL must be between 5 and 300 seconds")
         order = self._ledger.get_order(proposal_id)
         if order is None:
             raise OrderNotFound(f"order {proposal_id!r} was not found")
         intent = dict(order.intent)
-        if str(intent.get("workspace")) != self._ledger.workspace:
+        if str(intent.get("workspace")) != pinned.value:
             raise ApprovalConflict("order workspace does not match ledger workspace")
         if str(intent.get("mode", "")).upper() != "PAPER":
             raise ApprovalConflict("live execution remains disabled")
@@ -192,7 +199,7 @@ class ApprovalService:
         reservation = self._ledger.get_reservation(proposal_id)
         if reservation is None or reservation.state != "ACTIVE":
             raise ApprovalConflict("active paper reservation is required before approval")
-        key = self._ledger.get_approval_key()
+        key = self._ledger.get_approval_key(workspace=pinned)
         if key is None:
             raise ApprovalConflict("approval signer is not enrolled")
 
@@ -248,12 +255,20 @@ class ApprovalService:
         )
 
     def approve_signed(
-        self, proposal_id: str, challenge_id: str, signature_der: bytes
+        self,
+        proposal_id: str,
+        challenge_id: str,
+        signature_der: bytes,
+        *,
+        workspace: Workspace | str,
     ) -> ClaimResult:
         """Verify outside SQLite, then atomically consume and claim in the ledger."""
 
-        challenge = self.verify_signature(proposal_id, challenge_id, signature_der)
-        key = self._ledger.get_approval_key()
+        pinned = self._ledger.require_workspace(workspace)
+        challenge = self.verify_signature(
+            proposal_id, challenge_id, signature_der, workspace=pinned
+        )
+        key = self._ledger.get_approval_key(workspace=pinned)
         if key is None:
             # Kept for type narrowing; verify_signature has already enforced this.
             raise ApprovalConflict("approval signer is not enrolled")
@@ -268,7 +283,12 @@ class ApprovalService:
         )
 
     def verify_signature(
-        self, proposal_id: str, challenge_id: str, signature_der: bytes
+        self,
+        proposal_id: str,
+        challenge_id: str,
+        signature_der: bytes,
+        *,
+        workspace: Workspace | str,
     ) -> ApprovalChallenge:
         """Verify one fresh signature without consuming approval or dispatching.
 
@@ -276,12 +296,13 @@ class ApprovalService:
         not claim the order, write approval evidence, or alter the order
         state; normal execution must continue through ``approve_signed``.
         """
+        pinned = self._ledger.require_workspace(workspace)
         challenge = self._ledger.get_approval_challenge(challenge_id)
         if challenge is None or challenge.proposal_id != proposal_id:
             raise ApprovalConflict("approval challenge was not found")
         if _epoch(self._clock()) >= challenge.expires_at_epoch:
             raise ApprovalConflict("approval challenge is expired")
-        key = self._ledger.get_approval_key()
+        key = self._ledger.get_approval_key(workspace=pinned)
         if key is None or key.key_id != challenge.key_id:
             raise ApprovalConflict("approval signer is not enrolled")
         public_key = _load_public_key(key.public_key_x963)
@@ -303,13 +324,16 @@ class ApprovalService:
             expires_at_epoch=challenge.expires_at_epoch,
         )
 
-    def create_control_challenge(self, *, ttl_seconds: int = 60) -> ControlChallenge:
+    def create_control_challenge(
+        self, *, workspace: Workspace | str, ttl_seconds: int = 60
+    ) -> ControlChallenge:
+        pinned = self._ledger.require_workspace(workspace)
         if not 5 <= ttl_seconds <= 300:
             raise ValueError("control challenge TTL must be between 5 and 300 seconds")
-        control = self._ledger.get_workspace_control()
+        control = self._ledger.get_workspace_control(workspace=pinned)
         if not control.engaged:
             raise ApprovalConflict("workspace control is not engaged")
-        key = self._ledger.get_approval_key()
+        key = self._ledger.get_approval_key(workspace=pinned)
         if key is None:
             raise ApprovalConflict("approval signer is not enrolled")
         issued_at = _epoch(self._clock())
@@ -318,7 +342,7 @@ class ApprovalService:
             "version": 1,
             "purpose": CONTROL_CLEAR_PURPOSE,
             "challenge_id": challenge_id,
-            "workspace": self._ledger.workspace,
+            "workspace": pinned.value,
             "control_version": control.version,
             "nonce": secrets.token_urlsafe(32),
             "issued_at": issued_at,
@@ -328,7 +352,7 @@ class ApprovalService:
         signed_payload = canonical_json(payload).encode("utf-8")
         return ControlChallenge(
             challenge_id=challenge_id,
-            workspace=self._ledger.workspace,
+            workspace=pinned.value,
             version=control.version,
             key_id=key.key_id,
             signed_payload=signed_payload,
@@ -337,9 +361,16 @@ class ApprovalService:
         )
 
     def clear_workspace_control(
-        self, challenge: ControlChallenge, signature_der: bytes
+        self,
+        challenge: ControlChallenge,
+        signature_der: bytes,
+        *,
+        workspace: Workspace | str,
     ) -> None:
-        key = self._ledger.get_approval_key()
+        pinned = self._ledger.require_workspace(workspace)
+        if challenge.workspace != pinned.value:
+            raise ApprovalConflict("control challenge belongs to another workspace")
+        key = self._ledger.get_approval_key(workspace=pinned)
         if key is None or key.key_id != challenge.key_id:
             raise ApprovalConflict("approval signer is not enrolled")
         public_key = _load_public_key(key.public_key_x963)
@@ -353,13 +384,14 @@ class ApprovalService:
             raise ApprovalConflict("control challenge is malformed") from exc
         if (
             payload.get("purpose") != CONTROL_CLEAR_PURPOSE
-            or payload.get("workspace") != self._ledger.workspace
+            or payload.get("workspace") != pinned.value
             or payload.get("control_version") != challenge.version
             or payload.get("key_id") != key.key_id
             or _epoch(self._clock()) >= int(payload.get("expires_at", 0))
         ):
             raise ApprovalConflict("control challenge is invalid or expired")
         self._ledger.clear_workspace_control(
+            workspace=pinned,
             version=challenge.version,
             evidence_id=challenge.challenge_id,
             purpose=CONTROL_CLEAR_PURPOSE,

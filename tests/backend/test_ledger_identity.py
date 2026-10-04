@@ -419,9 +419,11 @@ def test_ledger_identity_is_immutable(uk_file, statement):
 
 def test_engage_and_clear_still_work_under_the_guards(tmp_path):
     with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
-        control = ledger.engage_workspace_control("MANUAL_KILL")
+        control = ledger.engage_workspace_control("MANUAL_KILL", workspace="uk")
         assert control.engaged is True
-        cleared = ledger.clear_workspace_control(version=control.version, evidence_id="e-1")
+        cleared = ledger.clear_workspace_control(
+            workspace="uk", version=control.version, evidence_id="e-1"
+        )
         assert cleared.engaged is False
 
 

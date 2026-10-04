@@ -42,7 +42,7 @@ async def post_approval(proposal_id: str, decision: str = "APPROVED"):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         return await client.post(
             "/api/ai/trade/approve",
-            json={"proposal_id": proposal_id, "decision": decision},
+            json={"proposal_id": proposal_id, "decision": decision, "workspace": "uk"},
         )
 
 
@@ -254,7 +254,9 @@ async def test_approval_endpoint_requires_approved_decision():
 
 
 @pytest.mark.asyncio
-async def test_reject_trade_success():
+async def test_reject_trade_without_open_ledger_is_503():
+    """D2: with no ledger open a rejection is refused, never held only in memory."""
+    assert state._execution_ledger is None
     proposal = add_proposal(quantity=20.0)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -263,12 +265,24 @@ async def test_reject_trade_success():
             json={
                 "proposal_id": proposal["proposal_id"],
                 "decision": "REJECTED",
+                "workspace": "uk",
                 "notes": "Too risky right now",
             },
         )
+        unknown = await client.post(
+            "/api/ai/trade/reject",
+            json={
+                "proposal_id": "does-not-exist",
+                "decision": "REJECTED",
+                "workspace": "uk",
+            },
+        )
 
-    assert response.status_code == 200
-    assert response.json()["status"] == "rejected"
-    assert proposal["status"] == "REJECTED"
-    assert proposal["rejection_notes"] == "Too risky right now"
-    assert "rejected_at" in proposal
+    assert response.status_code == 503
+    assert response.json()["detail"] == (
+        "Trade rejection is unavailable: no execution ledger is open"
+    )
+    assert proposal["status"] == "PENDING"
+    assert "rejection_notes" not in proposal
+    assert "rejected_at" not in proposal
+    assert unknown.status_code == 503

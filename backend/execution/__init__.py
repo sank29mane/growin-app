@@ -14,6 +14,7 @@ from .models import (
     PaperReservation,
     ReconciliationSnapshot,
     ReconciliationStatus,
+    WORKSPACE_CURRENCY,
     Workspace,
     WorkspaceControl,
 )
@@ -104,6 +105,7 @@ __all__ = [
     "RequoteValidationError",
     "ReplacementPreparation",
     "Trading212Dispatcher",
+    "WORKSPACE_CURRENCY",
     "Workspace",
     "WorkspaceControl",
     "WorkspaceMismatch",

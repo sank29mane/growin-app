@@ -28,6 +28,8 @@ from .models import (
     OrderSide,
     OrderState,
     ReconciliationSnapshot,
+    WORKSPACE_CURRENCY,
+    Workspace,
 )
 
 
@@ -115,7 +117,7 @@ class ExecutionService:
         self,
         proposal: Proposal,
         *,
-        currency: str = "GBP",
+        currency: str,
         price: object = None,
         simulator_evidence: Optional[Mapping[str, Any]] = None,
         risk_evidence: Optional[Mapping[str, Any]] = None,
@@ -135,8 +137,10 @@ class ExecutionService:
         if self._ledger is None:
             raise ExecutionDisabledError("durable execution admission is unavailable")
         intent = proposal if isinstance(proposal, OrderIntent) else _intent_from_proposal(proposal)
+        if currency != WORKSPACE_CURRENCY[intent.workspace]:
+            raise ExecutionConflictError("admission currency does not match workspace")
         self._ledger.register_intent(intent)
-        if self._ledger.get_workspace_control().engaged:
+        if self._ledger.get_workspace_control(workspace=intent.workspace).engaged:
             raise ExecutionConflictError("workspace execution control is engaged")
         now = datetime.now(timezone.utc)
         observed_at = evidence_at or now
@@ -282,9 +286,9 @@ class ExecutionService:
             "client_order_id": order.client_order_id,
             "intent_hash": order.intent_hash,
             "intent_version": intent.get("intent_version", 1),
-            "workspace": intent.get("workspace", "uk"),
-            "account": intent.get("account", "invest"),
-            "broker": intent.get("broker", "paper"),
+            "workspace": intent["workspace"],
+            "account": intent["account"],
+            "broker": intent["broker"],
             "mode": intent.get("mode", OrderMode.PAPER.value),
             "ticker": intent.get("ticker"),
             "action": intent.get("side"),
@@ -323,42 +327,62 @@ class ExecutionService:
             return await self._approve_in_memory(intent, mutable)
 
     def enroll_approval_key(
-        self, public_key_x963: bytes, enrollment_token: str | bytes
+        self,
+        public_key_x963: bytes,
+        enrollment_token: str | bytes,
+        *,
+        workspace: Union[Workspace, str],
     ):
-        if self._approval_service is None:
+        if self._approval_service is None or self._ledger is None:
             raise ExecutionDisabledError("Signed approval service is unavailable")
-        return self._approval_service.enroll_key(public_key_x963, enrollment_token)
+        self._ledger.require_workspace(workspace)
+        return self._approval_service.enroll_key(
+            public_key_x963, enrollment_token, workspace=workspace
+        )
 
-    def approval_key_id(self) -> Optional[str]:
+    def approval_key_id(self, *, workspace: Union[Workspace, str]) -> Optional[str]:
         """Return the enrolled public-key identifier without exposing key material."""
 
         if self._ledger is None:
             return None
-        enrolled = self._ledger.get_approval_key()
+        self._ledger.require_workspace(workspace)
+        enrolled = self._ledger.get_approval_key(workspace=workspace)
         return enrolled.key_id if enrolled is not None else None
 
     def create_approval_challenge(
-        self, proposal_id: str, *, ttl_seconds: int = 60
+        self, proposal_id: str, *, workspace: Union[Workspace, str], ttl_seconds: int = 60
     ) -> ApprovalChallenge:
-        if self._approval_service is None:
+        if self._approval_service is None or self._ledger is None:
             raise ExecutionDisabledError("Signed approval service is unavailable")
+        self._ledger.require_workspace(workspace)
         return self._approval_service.create_challenge(
-            proposal_id, ttl_seconds=ttl_seconds
+            proposal_id, workspace=workspace, ttl_seconds=ttl_seconds
         )
 
     def verify_approval_signature_for_uat(
-        self, proposal_id: str, challenge_id: str, signature_der: bytes
+        self,
+        proposal_id: str,
+        challenge_id: str,
+        signature_der: bytes,
+        *,
+        workspace: Union[Workspace, str],
     ) -> ApprovalChallenge:
         """Verify local UAT signing evidence without claiming or dispatching."""
 
-        if self._approval_service is None:
+        if self._approval_service is None or self._ledger is None:
             raise ExecutionDisabledError("Signed approval service is unavailable")
+        self._ledger.require_workspace(workspace)
         return self._approval_service.verify_signature(
-            proposal_id, challenge_id, signature_der
+            proposal_id, challenge_id, signature_der, workspace=workspace
         )
 
     async def approve_signed(
-        self, proposal_id: str, challenge_id: str, signature_der: bytes
+        self,
+        proposal_id: str,
+        challenge_id: str,
+        signature_der: bytes,
+        *,
+        workspace: Union[Workspace, str],
     ) -> OrderAck:
         if self._dispatcher is None or self._ledger is None:
             raise ExecutionDisabledError(
@@ -366,6 +390,7 @@ class ExecutionService:
             )
         if not self._require_approval or self._approval_service is None:
             raise ExecutionDisabledError("Signed approval service is unavailable")
+        self._ledger.require_workspace(workspace)
         durable = self.get_proposal(proposal_id)
         if durable is None:
             raise ExecutionConflictError(f"Trade proposal {proposal_id} was not found")
@@ -375,7 +400,7 @@ class ExecutionService:
         async with self._lock_for(proposal_id):
             try:
                 claim = self._approval_service.approve_signed(
-                    proposal_id, challenge_id, signature_der
+                    proposal_id, challenge_id, signature_der, workspace=workspace
                 )
             except (ApprovalConflict, InvalidTransition, OrderNotFound) as exc:
                 raise ExecutionConflictError(str(exc)) from exc
@@ -386,20 +411,33 @@ class ExecutionService:
             raise ExecutionDisabledError("durable reconciliation is unavailable")
         return self._ledger.reconcile(snapshot)
 
-    def engage_workspace_control(self, reason_code: str = "MANUAL_KILL"):
+    def engage_workspace_control(
+        self, reason_code: str = "MANUAL_KILL", *, workspace: Union[Workspace, str]
+    ):
         if self._ledger is None:
             raise ExecutionDisabledError("durable workspace control is unavailable")
-        return self._ledger.engage_workspace_control(reason_code)
+        self._ledger.require_workspace(workspace)
+        return self._ledger.engage_workspace_control(reason_code, workspace=workspace)
 
-    def create_control_challenge(self, *, ttl_seconds: int = 60):
-        if self._approval_service is None:
+    def create_control_challenge(
+        self, *, workspace: Union[Workspace, str], ttl_seconds: int = 60
+    ):
+        if self._approval_service is None or self._ledger is None:
             raise ExecutionDisabledError("Signed approval service is unavailable")
-        return self._approval_service.create_control_challenge(ttl_seconds=ttl_seconds)
+        self._ledger.require_workspace(workspace)
+        return self._approval_service.create_control_challenge(
+            workspace=workspace, ttl_seconds=ttl_seconds
+        )
 
-    def clear_workspace_control(self, challenge, signature_der: bytes) -> None:
-        if self._approval_service is None:
+    def clear_workspace_control(
+        self, challenge, signature_der: bytes, *, workspace: Union[Workspace, str]
+    ) -> None:
+        if self._approval_service is None or self._ledger is None:
             raise ExecutionDisabledError("Signed approval service is unavailable")
-        self._approval_service.clear_workspace_control(challenge, signature_der)
+        self._ledger.require_workspace(workspace)
+        self._approval_service.clear_workspace_control(
+            challenge, signature_der, workspace=workspace
+        )
 
     async def _approve_durable(
         self, intent: OrderIntent, proposal: Optional[Dict[str, Any]]
@@ -567,16 +605,24 @@ class ExecutionService:
             mutable["rejection_notes"] = notes
 
 
+def _required_identity(proposal: Dict[str, Any], name: str) -> Any:
+    """Return an identity field; there is no fallback for a missing one."""
+
+    try:
+        return proposal[name]
+    except KeyError:
+        raise ValueError(f"proposal is missing required field '{name}'") from None
+
+
 def _intent_from_proposal(proposal: Dict[str, Any]) -> OrderIntent:
     mode = str(proposal.get("mode", OrderMode.PAPER.value)).upper()
-    default_broker = "paper" if mode == OrderMode.PAPER.value else "trading212"
     return OrderIntent(
         proposal_id=str(proposal.get("proposal_id", "")),
         client_order_id=str(proposal.get("client_order_id", "")),
         intent_version=proposal.get("intent_version", 1),
-        workspace=proposal.get("workspace", "uk"),
-        account=proposal.get("account", "invest"),
-        broker=proposal.get("broker", default_broker),
+        workspace=_required_identity(proposal, "workspace"),
+        account=_required_identity(proposal, "account"),
+        broker=_required_identity(proposal, "broker"),
         mode=mode,
         ticker=proposal.get("ticker"),
         side=str(proposal.get("action", proposal.get("side", ""))).upper(),
