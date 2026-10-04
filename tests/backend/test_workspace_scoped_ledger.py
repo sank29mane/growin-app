@@ -207,11 +207,15 @@ def test_india_preparation_stamps_the_workspace_from_the_open_ledger(tmp_path):
 
 @pytest.mark.parametrize("workspace", ["us", "", None, 7])
 @pytest.mark.parametrize("use_path", [False, True])
-def test_start_execution_with_a_bad_workspace_stays_disabled(tmp_path, workspace, use_path):
+def test_start_execution_with_a_bad_workspace_stays_disabled(
+    tmp_path, private_config_dir, workspace, use_path
+):
     app_state = AppState()
     path = tmp_path / "execution.sqlite3" if use_path else None
 
-    started = app_state.start_execution(path, workspace=workspace)
+    started = app_state.start_execution(
+        path, workspace=workspace, private_dir=private_config_dir
+    )
 
     assert started is False
     assert app_state.execution_authority is False

@@ -3,6 +3,7 @@ Growin Backend Server - Main Application Entry Point
 """
 
 from datetime import datetime
+from pathlib import Path
 
 from app_logging import setup_logging
 
@@ -86,16 +87,28 @@ async def lifespan(app: FastAPI):
         logger.info("🧠 ANE Acceleration: DISABLED (Falling back to GPU/CPU)")
 
     execution_db_path = os.getenv("GROWIN_EXECUTION_DB_PATH")
+    # No default workspace: unset means execution authority stays disabled.
+    requested_workspace = os.getenv("GROWIN_WORKSPACE")
+    private_dir = os.getenv("GROWIN_PRIVATE_DIR") or str(
+        Path(__file__).resolve().parent.parent / "private"
+    )
     execution_started = False
     if not os.environ.get("PYTEST_CURRENT_TEST") or execution_db_path:
-        execution_started = state.start_execution(
-            execution_db_path,
-            workspace=os.getenv("GROWIN_WORKSPACE", "uk"),
-        )
-        if execution_started:
-            logger.info("✅ Local paper execution ledger: authority acquired")
+        if not requested_workspace:
+            logger.error("GROWIN_WORKSPACE is not set; execution authority stays disabled")
         else:
-            logger.error("⛔ Execution authority unavailable; remaining fail-closed")
+            execution_started = state.start_execution(
+                execution_db_path,
+                workspace=requested_workspace,
+                private_dir=private_dir,
+            )
+            if execution_started:
+                logger.info("✅ Local paper execution ledger: authority acquired")
+            else:
+                logger.error(
+                    "⛔ Execution authority unavailable; remaining fail-closed: %s",
+                    state.execution_startup_error,
+                )
     
     # 1. Ensure default MCP servers are configured
     def is_docker_available():

@@ -25,8 +25,10 @@ from execution import (
     RequoteCoordinator,
     RequotePolicy,
     Workspace,
+    coerce_workspace,
     default_ledger_path,
 )
+from private_config import PrivateConfigError, load_workspace_config
 from simulation import PreFlightSimulator, RiskSwarmGate
 from market_data import (
     IndiaInstrument,
@@ -70,6 +72,8 @@ class AppState:
         self._regime_classifier = None
         self.execution_authority = False
         self.execution_startup_error = None
+        # Loaded private WorkspaceConfig for Phases 62 and 63; None until a successful start.
+        self.workspace_config = None
         self.lm_studio_client = None  # Lazy init to avoid startup blocking
         self.start_time = time.time()
         # On-device ANE configuration (default off; auto-detect on startup)
@@ -118,19 +122,29 @@ class AppState:
     def execution_service(self, value: ExecutionService):
         self._execution_service = value
 
-    def start_execution(self, db_path=None, workspace: str = "uk") -> bool:
-        """Acquire local execution authority and enable paper-only dispatch."""
+    def start_execution(self, db_path, *, workspace, private_dir) -> bool:
+        """Acquire local execution authority and enable paper-only dispatch.
+
+        Every execution, paper included, needs valid private configuration for
+        its workspace (decision 1). The config loads before the ledger path is
+        resolved or opened, so a config failure never touches a ledger file.
+        ``db_path`` may be None, meaning ``default_ledger_path(workspace)``.
+        """
         self.close_execution()
         try:
-            # Path resolution and the ledger open share one fail-closed handler:
-            # an unsupported workspace raises ValueError and must leave execution
-            # disabled, not abort startup.
-            path = db_path or default_ledger_path(workspace)
-            ledger = ExecutionLedger(path, workspace=workspace, require_approval=True)
-        except (LedgerError, OSError, sqlite3.Error, ValueError) as exc:
+            # One fail-closed handler: an unsupported workspace (ValueError), bad
+            # private config, an unpinned or foreign ledger, or an I/O failure
+            # leaves execution disabled instead of aborting startup.
+            ws = coerce_workspace(workspace)
+            config = load_workspace_config(private_dir, ws.value)
+            path = db_path if db_path is not None else default_ledger_path(ws)
+            ledger = ExecutionLedger(path, workspace=ws, require_approval=True)
+        except (LedgerError, OSError, sqlite3.Error, ValueError, PrivateConfigError) as exc:
             self._execution_service = ExecutionService()
             self.execution_authority = False
-            self.execution_startup_error = str(exc)
+            self.workspace_config = None
+            # Error text carries codes, field names and paths, never config values.
+            self.execution_startup_error = f"{type(exc).__name__}: {exc}"
             return False
         self._execution_ledger = ledger
         self._preflight_policy_connection = self._local_preflight_policy_connection()
@@ -143,6 +157,7 @@ class AppState:
             require_runtime_preflight=True,
         )
         self.execution_authority = True
+        self.workspace_config = config
         self.execution_startup_error = None
         return True
 
@@ -155,6 +170,7 @@ class AppState:
         self._execution_ledger = None
         self._execution_service = None
         self.execution_authority = False
+        self.workspace_config = None
 
     def market_data_status(self) -> Dict[str, Any]:
         session = self._market_data_session

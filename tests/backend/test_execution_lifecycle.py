@@ -4,10 +4,13 @@ from app_context import state
 from server import app
 
 
-def test_lifespan_uses_explicit_test_ledger_and_closes_it(monkeypatch, tmp_path):
+def test_lifespan_uses_explicit_test_ledger_and_closes_it(
+    monkeypatch, tmp_path, private_config_dir
+):
     db_path = tmp_path / "execution.sqlite3"
     monkeypatch.setenv("GROWIN_EXECUTION_DB_PATH", str(db_path))
     monkeypatch.setenv("GROWIN_WORKSPACE", "uk")
+    monkeypatch.setenv("GROWIN_PRIVATE_DIR", str(private_config_dir))
 
     with TestClient(app) as client:
         response = client.get("/health")
