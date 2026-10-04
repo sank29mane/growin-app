@@ -13,6 +13,9 @@ struct GrowinApp: App {
         // Move legacy secrets out of UserDefaults before any view model reads them.
         // Failed items remain in UserDefaults so migration is lossless and retryable.
         _ = KeychainStore.shared.migrateLegacyUserDefaults()
+        // Then move flat Keychain items to their scoped accounts (copy, verify, delete).
+        // Failed items stay in place and retry on the next launch.
+        _ = KeychainStore.shared.migrateFlatItemsToScoped()
 
         // Initialize Notification Manager
         NotificationManager.shared.requestAuthorization()

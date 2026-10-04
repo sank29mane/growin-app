@@ -2,6 +2,14 @@ import Combine
 import Foundation
 import SwiftUI
 
+enum ChatWorkspaceError: LocalizedError {
+    case noWorkspaceSelected
+
+    var errorDescription: String? {
+        "Select a workspace in Settings before approving."
+    }
+}
+
 @Observable @MainActor
 class ChatViewModel {
     var messages: [ChatMessageModel] = []
@@ -32,7 +40,13 @@ class ChatViewModel {
 
     // MARK: - Phase 30: Trade HITL Actions
 
+    static let selectWorkspaceMessage = ChatWorkspaceError.noWorkspaceSelected.errorDescription ?? ""
+
     func approveTrade(id: String) {
+        guard let workspace = WorkspaceSelection.current() else {
+            errorMessage = Self.selectWorkspaceMessage
+            return
+        }
         Task {
             isProcessing = true
             streamingStatus = "Preparing immutable trade review..."
@@ -43,7 +57,8 @@ class ChatViewModel {
                     throw TradeApprovalReviewError.proposalMismatch
                 }
                 pendingTradeApproval = try await aiService.requestTradeApproval(
-                    proposal: proposal
+                    proposal: proposal,
+                    workspace: workspace
                 )
                 streamingStatus = nil
             } catch {
@@ -54,21 +69,28 @@ class ChatViewModel {
     }
 
     func completeTradeApproval(_ review: TradeApprovalReview) async throws {
-        let identity = try LocalApprovalSigner.shared.identity()
+        guard let workspace = WorkspaceSelection.current() else {
+            throw ChatWorkspaceError.noWorkspaceSelected
+        }
+        let identity = try LocalApprovalSigner.shared.identity(for: workspace)
         guard identity.keyID == review.payload.keyId else {
             throw TradeApprovalReviewError.signerMismatch
         }
-        let signature = try LocalApprovalSigner.shared.sign(review.signedBytes)
-        let result = try await aiService.completeTradeApproval(review, signature: signature)
+        let signature = try LocalApprovalSigner.shared.sign(review.signedBytes, for: workspace)
+        let result = try await aiService.completeTradeApproval(review, signature: signature, workspace: workspace)
         streamingStatus = result.message
         updateProposalStatus(id: review.payload.proposalId, status: "ACKNOWLEDGED")
         pendingTradeApproval = nil
     }
 
     func rejectTrade(id: String) {
+        guard let workspace = WorkspaceSelection.current() else {
+            errorMessage = Self.selectWorkspaceMessage
+            return
+        }
         Task {
             do {
-                _ = try await aiService.rejectTrade(id: id)
+                _ = try await aiService.rejectTrade(id: id, workspace: workspace)
                 updateProposalStatus(id: id, status: "REJECTED")
             } catch {
                 errorMessage = error.localizedDescription
@@ -127,8 +149,8 @@ class ChatViewModel {
     func sendMessage() {
         guard !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
-        let openaiApiKey = (try? KeychainStore.shared.string(for: "openaiApiKey")) ?? ""
-        let geminiApiKey = (try? KeychainStore.shared.string(for: "geminiApiKey")) ?? ""
+        let openaiApiKey = (try? KeychainStore.shared.string(for: .openaiApiKey, scope: .shared)) ?? ""
+        let geminiApiKey = (try? KeychainStore.shared.string(for: .geminiApiKey, scope: .shared)) ?? ""
         let selectedProvider = defaults.string(forKey: "selectedProvider") ?? "mlx"
 
         if selectedProvider == "openai" && openaiApiKey.isEmpty {

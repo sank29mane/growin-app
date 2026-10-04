@@ -15,6 +15,8 @@ struct SettingsView: View {
 }
 
 struct ApprovalSecuritySection: View {
+    /// Empty means no workspace is selected. Nothing is preselected.
+    @AppStorage(WorkspaceSelection.defaultsKey) private var selectedWorkspaceRaw = ""
     @State private var isEnrolling = false
     @State private var isRunningCheck = false
     @State private var isRunningRequoteCheck = false
@@ -23,22 +25,63 @@ struct ApprovalSecuritySection: View {
     @State private var pendingReview: TradeApprovalReview?
     @State private var pendingRequoteReview: TradeApprovalReview?
 
+    private var workspace: Workspace? {
+        Workspace(rawValue: selectedWorkspaceRaw)
+    }
+
+    private var isSelectedKeyConfigured: Bool {
+        guard let workspace else { return false }
+        return LocalApprovalSigner.shared.isConfigured(for: workspace)
+    }
+
+    private var canAdoptLegacyKey: Bool {
+        guard let workspace else { return false }
+        return LocalApprovalSigner.shared.canAdoptLegacyKey(into: workspace)
+    }
+
+    /// Resolves the selected workspace and the signing identity that must match
+    /// the review before anything is signed.
+    private func signingContext(for review: TradeApprovalReview) throws -> Workspace {
+        guard let workspace else {
+            throw ChatWorkspaceError.noWorkspaceSelected
+        }
+        guard review.payload.workspace == workspace.rawValue else {
+            throw TradeApprovalReviewError.workspaceMismatch
+        }
+        let identity = try LocalApprovalSigner.shared.identity(for: workspace)
+        guard identity.keyID == review.payload.keyId else {
+            throw TradeApprovalReviewError.signerMismatch
+        }
+        return workspace
+    }
+
     var body: some View {
         SettingsCard(title: "Trade Approval Security", icon: "key.fill") {
             VStack(alignment: .leading, spacing: 12) {
-                Label(
-                    LocalApprovalSigner.shared.isConfigured
-                        ? "Local signing key present in Keychain"
-                        : "Local paper approval is not configured",
-                    systemImage: LocalApprovalSigner.shared.isConfigured
-                        ? "checkmark.shield.fill"
-                        : "shield.slash"
-                )
-                .foregroundStyle(
-                    LocalApprovalSigner.shared.isConfigured ? .green : .secondary
-                )
+                Picker("Workspace", selection: $selectedWorkspaceRaw) {
+                    Text("Select a workspace").tag("")
+                    ForEach(Workspace.allCases, id: \.self) { workspace in
+                        Text(workspace.displayName).tag(workspace.rawValue)
+                    }
+                }
+                .pickerStyle(.menu)
 
-                Text("Paper orders require an explicit frozen review and a signature over those exact fields. The private key stays in this Mac's Keychain. Live execution remains disabled.")
+                if let workspace {
+                    Label(
+                        isSelectedKeyConfigured
+                            ? "\(workspace.displayName) signing key present in Keychain"
+                            : "Local paper approval is not configured for \(workspace.displayName)",
+                        systemImage: isSelectedKeyConfigured
+                            ? "checkmark.shield.fill"
+                            : "shield.slash"
+                    )
+                    .foregroundStyle(isSelectedKeyConfigured ? .green : .secondary)
+                } else {
+                    Label("Select a workspace to manage its approval key", systemImage: "shield.slash")
+                        .foregroundStyle(.secondary)
+                }
+
+                Text("Paper orders require an explicit frozen review and a signature over those exact fields. Each workspace has its own private key in this Mac's Keychain. Live execution remains disabled.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -59,7 +102,15 @@ struct ApprovalSecuritySection: View {
                         Label("Set up local paper approvals", systemImage: "key.fill")
                     }
                 }
-                .disabled(isEnrolling)
+                .disabled(workspace == nil || isEnrolling)
+
+                if canAdoptLegacyKey {
+                    Button { adoptLegacyKey() } label: {
+                        Label("Adopt existing local key for UK", systemImage: "arrow.down.to.line")
+                    }
+                    .disabled(isEnrolling)
+                    .help("Moves the pre-workspace key into UK only if it matches the key the UK ledger enrolled.")
+                }
 
                 Button { runPaperApprovalCheck() } label: {
                     if isRunningCheck {
@@ -68,7 +119,7 @@ struct ApprovalSecuritySection: View {
                         Label("Run paper approval check", systemImage: "checkmark.seal")
                     }
                 }
-                .disabled(isRunningCheck || isEnrolling)
+                .disabled(workspace == nil || isRunningCheck || isEnrolling)
                 .help("Creates one local-only paper proposal, then opens the frozen review sheet.")
 
                 Button { runPaperRequoteCheck() } label: {
@@ -78,18 +129,15 @@ struct ApprovalSecuritySection: View {
                         Label("Run paper replacement UAT", systemImage: "arrow.triangle.2.circlepath")
                     }
                 }
-                .disabled(isRunningCheck || isRunningRequoteCheck || isEnrolling)
+                .disabled(workspace == nil || isRunningCheck || isRunningRequoteCheck || isEnrolling)
                 .help("Creates a local cancelled parent and fresh LIMIT replacement, then verifies a signature without dispatching.")
             }
         }
         .sheet(item: $pendingReview) { review in
             TradeApprovalSheet(review: review) {
-                let identity = try LocalApprovalSigner.shared.identity()
-                guard identity.keyID == review.payload.keyId else {
-                    throw TradeApprovalReviewError.signerMismatch
-                }
-                let signature = try LocalApprovalSigner.shared.sign(review.signedBytes)
-                _ = try await AIService().completeTradeApproval(review, signature: signature)
+                let ws = try signingContext(for: review)
+                let signature = try LocalApprovalSigner.shared.sign(review.signedBytes, for: ws)
+                _ = try await AIService().completeTradeApproval(review, signature: signature, workspace: ws)
                 statusIsError = false
                 statusMessage = "Paper approval check acknowledged locally. No broker was contacted."
             }
@@ -101,12 +149,9 @@ struct ApprovalSecuritySection: View {
                 explanation: "This is a local cancelled-parent replacement. Your key signs the fresh frozen LIMIT fields, but this UAT only verifies the signature: it cannot dispatch an order.",
                 approveTitle: "Sign and verify locally"
             ) {
-                let identity = try LocalApprovalSigner.shared.identity()
-                guard identity.keyID == review.payload.keyId else {
-                    throw TradeApprovalReviewError.signerMismatch
-                }
-                let signature = try LocalApprovalSigner.shared.sign(review.signedBytes)
-                _ = try await AIService().verifyPaperRequoteCheck(review, signature: signature)
+                let ws = try signingContext(for: review)
+                let signature = try LocalApprovalSigner.shared.sign(review.signedBytes, for: ws)
+                _ = try await AIService().verifyPaperRequoteCheck(review, signature: signature, workspace: ws)
                 statusIsError = false
                 statusMessage = "Paper replacement signature verified locally. No order was dispatched and no broker was contacted."
             }
@@ -114,18 +159,19 @@ struct ApprovalSecuritySection: View {
     }
 
     private func enroll() {
+        guard let ws = workspace else { return }
         isEnrolling = true
         statusMessage = nil
         Task {
             do {
-                let identity = try LocalApprovalSigner.shared.createIdentityIfNeeded()
-                let approvalStatus = try await AIService().approvalStatus()
+                let identity = try LocalApprovalSigner.shared.createIdentityIfNeeded(for: ws)
+                let approvalStatus = try await AIService().approvalStatus(workspace: ws)
                 if approvalStatus.enrolled {
                     guard approvalStatus.keyId == identity.keyID else {
                         throw TradeApprovalReviewError.signerMismatch
                     }
                     statusIsError = false
-                    statusMessage = "Local paper approval is already enrolled for this workspace."
+                    statusMessage = "Local paper approval is already enrolled for the \(ws.displayName) workspace."
                     isEnrolling = false
                     return
                 }
@@ -134,12 +180,32 @@ struct ApprovalSecuritySection: View {
                                   userInfo: [NSLocalizedDescriptionKey: "Local paper execution is unavailable."])
                 }
                 let tokenURL = FileManager.default.homeDirectoryForCurrentUser
-                    .appendingPathComponent("Library/Application Support/Growin/workspaces/uk/execution.sqlite3.enrollment-token")
+                    .appendingPathComponent("Library/Application Support/Growin/workspaces/\(ws.rawValue)/execution.sqlite3.enrollment-token")
                 let token = try String(contentsOf: tokenURL, encoding: .utf8)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
-                _ = try await AIService().enrollApprovalKey(identity: identity, token: token)
+                _ = try await AIService().enrollApprovalKey(identity: identity, token: token, workspace: ws)
                 statusIsError = false
-                statusMessage = "Local paper approval is enrolled for the UK workspace."
+                statusMessage = "Local paper approval is enrolled for the \(ws.displayName) workspace."
+            } catch {
+                statusIsError = true
+                statusMessage = error.localizedDescription
+            }
+            isEnrolling = false
+        }
+    }
+
+    private func adoptLegacyKey() {
+        isEnrolling = true
+        statusMessage = nil
+        Task {
+            do {
+                let approvalStatus = try await AIService().approvalStatus(workspace: .uk)
+                guard approvalStatus.enrolled, let enrolledKeyID = approvalStatus.keyId else {
+                    throw LocalApprovalSignerError.legacyKeyMismatch
+                }
+                _ = try LocalApprovalSigner.shared.adoptLegacyKey(into: .uk, expectedKeyID: enrolledKeyID)
+                statusIsError = false
+                statusMessage = "The existing local key now belongs to the UK workspace."
             } catch {
                 statusIsError = true
                 statusMessage = error.localizedDescription
@@ -149,12 +215,14 @@ struct ApprovalSecuritySection: View {
     }
 
     private func runPaperApprovalCheck() {
+        guard let ws = workspace else { return }
         isRunningCheck = true
         statusMessage = nil
         Task {
             do {
-                let proposal = try await AIService().createPaperApprovalCheck()
-                pendingReview = try await AIService().requestTradeApproval(proposal: proposal)
+                let service = AIService()
+                let proposal = try await service.createPaperApprovalCheck(workspace: ws)
+                pendingReview = try await service.requestTradeApproval(proposal: proposal, workspace: ws)
             } catch {
                 statusIsError = true
                 statusMessage = error.localizedDescription
@@ -164,12 +232,14 @@ struct ApprovalSecuritySection: View {
     }
 
     private func runPaperRequoteCheck() {
+        guard let ws = workspace else { return }
         isRunningRequoteCheck = true
         statusMessage = nil
         Task {
             do {
-                let proposal = try await AIService().createPaperRequoteCheck()
-                pendingRequoteReview = try await AIService().requestTradeApproval(proposal: proposal)
+                let service = AIService()
+                let proposal = try await service.createPaperRequoteCheck(workspace: ws)
+                pendingRequoteReview = try await service.requestTradeApproval(proposal: proposal, workspace: ws)
             } catch {
                 statusIsError = true
                 statusMessage = error.localizedDescription
@@ -216,17 +286,17 @@ struct AIConfigSection: View {
     @AppStorage("selectedProvider") private var selectedProvider = "ollama"
     @AppStorage("selectedModel") private var selectedModel = "native-mlx"
     @AppStorage("selectedCoordinatorModel") private var selectedCoordinatorModel = "granite-tiny"
-    @KeychainStorage("openaiApiKey") private var openaiApiKey = ""
-    @KeychainStorage("geminiApiKey") private var geminiApiKey = ""
-    @KeychainStorage("finnhubApiKey") private var finnhubApiKey = ""
-    @KeychainStorage("trading212ApiKey") private var trading212ApiKey = ""
-    @KeychainStorage("trading212ApiSecret") private var trading212ApiSecret = ""
-    @KeychainStorage("trading212IsaApiKey") private var trading212IsaApiKey = ""
-    @KeychainStorage("trading212IsaApiSecret") private var trading212IsaApiSecret = ""
-    @KeychainStorage("alpacaApiKey") private var alpacaApiKey = ""
-    @KeychainStorage("alpacaSecretKey") private var alpacaSecretKey = ""
-    @KeychainStorage("newsApiKey") private var newsApiKey = ""
-    @KeychainStorage("tavilyApiKey") private var tavilyApiKey = ""
+    @KeychainStorage(.openaiApiKey, scope: .shared) private var openaiApiKey = ""
+    @KeychainStorage(.geminiApiKey, scope: .shared) private var geminiApiKey = ""
+    @KeychainStorage(.finnhubApiKey, scope: .shared) private var finnhubApiKey = ""
+    @KeychainStorage(.trading212ApiKey, scope: .workspace(.uk)) private var trading212ApiKey = ""
+    @KeychainStorage(.trading212ApiSecret, scope: .workspace(.uk)) private var trading212ApiSecret = ""
+    @KeychainStorage(.trading212IsaApiKey, scope: .workspace(.uk)) private var trading212IsaApiKey = ""
+    @KeychainStorage(.trading212IsaApiSecret, scope: .workspace(.uk)) private var trading212IsaApiSecret = ""
+    @KeychainStorage(.alpacaApiKey, scope: .workspace(.uk)) private var alpacaApiKey = ""
+    @KeychainStorage(.alpacaSecretKey, scope: .workspace(.uk)) private var alpacaSecretKey = ""
+    @KeychainStorage(.newsApiKey, scope: .shared) private var newsApiKey = ""
+    @KeychainStorage(.tavilyApiKey, scope: .shared) private var tavilyApiKey = ""
 
     @State private var lmStudioViewModel = LMStudioViewModel.shared
 
@@ -506,10 +576,10 @@ struct PersonaToggle: View {
 }
 
 struct TradingConfigSection: View {
-    @KeychainStorage("t212InvestKey") private var t212InvestKey = ""
-    @KeychainStorage("t212InvestSecret") private var t212InvestSecret = ""
-    @KeychainStorage("t212IsaKey") private var t212IsaKey = ""
-    @KeychainStorage("t212IsaSecret") private var t212IsaSecret = ""
+    @KeychainStorage(.t212InvestKey, scope: .workspace(.uk)) private var t212InvestKey = ""
+    @KeychainStorage(.t212InvestSecret, scope: .workspace(.uk)) private var t212InvestSecret = ""
+    @KeychainStorage(.t212IsaKey, scope: .workspace(.uk)) private var t212IsaKey = ""
+    @KeychainStorage(.t212IsaSecret, scope: .workspace(.uk)) private var t212IsaSecret = ""
     @AppStorage("t212AccountType") private var t212AccountType = "invest"
     @State private var isUpdatingConfig = false
     
