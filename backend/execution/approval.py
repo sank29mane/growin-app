@@ -26,6 +26,7 @@ from .ledger import (
     OrderNotFound,
     canonical_json,
 )
+from .models import Workspace
 
 
 APPROVAL_PURPOSE = "growin.execution.dispatch"
@@ -174,8 +175,9 @@ class ApprovalService:
         return enrolled
 
     def create_challenge(
-        self, proposal_id: str, *, ttl_seconds: int = 60
+        self, proposal_id: str, *, workspace: Workspace | str, ttl_seconds: int = 60
     ) -> ApprovalChallenge:
+        self._ledger.require_workspace(workspace)
         if not 5 <= ttl_seconds <= 300:
             raise ValueError("approval challenge TTL must be between 5 and 300 seconds")
         order = self._ledger.get_order(proposal_id)

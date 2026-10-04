@@ -160,7 +160,7 @@ async def create_trade_approval_challenge(request: ApprovalChallengeRequest):
     _reject_workspace_mismatch(request.workspace)
     try:
         challenge = state.execution_service.create_approval_challenge(
-            request.proposal_id
+            request.proposal_id, workspace=request.workspace
         )
     except WorkspaceMismatch:
         raise HTTPException(status_code=409, detail=WORKSPACE_MISMATCH_DETAIL)

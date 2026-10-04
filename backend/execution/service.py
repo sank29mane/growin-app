@@ -28,6 +28,7 @@ from .models import (
     OrderSide,
     OrderState,
     ReconciliationSnapshot,
+    Workspace,
 )
 
 
@@ -338,12 +339,13 @@ class ExecutionService:
         return enrolled.key_id if enrolled is not None else None
 
     def create_approval_challenge(
-        self, proposal_id: str, *, ttl_seconds: int = 60
+        self, proposal_id: str, *, workspace: Union[Workspace, str], ttl_seconds: int = 60
     ) -> ApprovalChallenge:
-        if self._approval_service is None:
+        if self._approval_service is None or self._ledger is None:
             raise ExecutionDisabledError("Signed approval service is unavailable")
+        self._ledger.require_workspace(workspace)
         return self._approval_service.create_challenge(
-            proposal_id, ttl_seconds=ttl_seconds
+            proposal_id, workspace=workspace, ttl_seconds=ttl_seconds
         )
 
     def verify_approval_signature_for_uat(
