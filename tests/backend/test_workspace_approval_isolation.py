@@ -3,13 +3,14 @@
 Real ledgers under tmp_path, real P-256 signatures, no mocked verifier.
 """
 
+import ast
 import base64
 import inspect
 import sqlite3
 import uuid
 
 import pytest
-from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from httpx import ASGITransport, AsyncClient
 
@@ -181,3 +182,39 @@ async def test_challenge_route_passes_the_workspace_through(uk_routes):
         )
 
     assert response.status_code == 200, response.text
+
+
+# --- every route call into the approval services names the workspace ---
+
+_WORKSPACE_REQUIRED_CALLS = {
+    "enroll_approval_key",
+    "approval_key_id",
+    "create_approval_challenge",
+    "verify_approval_signature_for_uat",
+    "approve_signed",
+    "engage_workspace_control",
+    "create_control_challenge",
+    "clear_workspace_control",
+}
+
+
+def test_every_route_call_into_the_approval_services_passes_workspace():
+    tree = ast.parse(inspect.getsource(ai_routes))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in _WORKSPACE_REQUIRED_CALLS
+    ]
+
+    assert {call.func.attr for call in calls} >= {
+        "enroll_approval_key",
+        "approval_key_id",
+        "create_approval_challenge",
+        "verify_approval_signature_for_uat",
+        "approve_signed",
+    }
+    for call in calls:
+        keywords = {keyword.arg for keyword in call.keywords}
+        assert "workspace" in keywords, f"{call.func.attr} at line {call.lineno}"
