@@ -216,17 +216,17 @@ struct AIConfigSection: View {
     @AppStorage("selectedProvider") private var selectedProvider = "ollama"
     @AppStorage("selectedModel") private var selectedModel = "native-mlx"
     @AppStorage("selectedCoordinatorModel") private var selectedCoordinatorModel = "granite-tiny"
-    @KeychainStorage("openaiApiKey") private var openaiApiKey = ""
-    @KeychainStorage("geminiApiKey") private var geminiApiKey = ""
-    @KeychainStorage("finnhubApiKey") private var finnhubApiKey = ""
-    @KeychainStorage("trading212ApiKey") private var trading212ApiKey = ""
-    @KeychainStorage("trading212ApiSecret") private var trading212ApiSecret = ""
-    @KeychainStorage("trading212IsaApiKey") private var trading212IsaApiKey = ""
-    @KeychainStorage("trading212IsaApiSecret") private var trading212IsaApiSecret = ""
-    @KeychainStorage("alpacaApiKey") private var alpacaApiKey = ""
-    @KeychainStorage("alpacaSecretKey") private var alpacaSecretKey = ""
-    @KeychainStorage("newsApiKey") private var newsApiKey = ""
-    @KeychainStorage("tavilyApiKey") private var tavilyApiKey = ""
+    @KeychainStorage(.openaiApiKey, scope: .shared) private var openaiApiKey = ""
+    @KeychainStorage(.geminiApiKey, scope: .shared) private var geminiApiKey = ""
+    @KeychainStorage(.finnhubApiKey, scope: .shared) private var finnhubApiKey = ""
+    @KeychainStorage(.trading212ApiKey, scope: .workspace(.uk)) private var trading212ApiKey = ""
+    @KeychainStorage(.trading212ApiSecret, scope: .workspace(.uk)) private var trading212ApiSecret = ""
+    @KeychainStorage(.trading212IsaApiKey, scope: .workspace(.uk)) private var trading212IsaApiKey = ""
+    @KeychainStorage(.trading212IsaApiSecret, scope: .workspace(.uk)) private var trading212IsaApiSecret = ""
+    @KeychainStorage(.alpacaApiKey, scope: .workspace(.uk)) private var alpacaApiKey = ""
+    @KeychainStorage(.alpacaSecretKey, scope: .workspace(.uk)) private var alpacaSecretKey = ""
+    @KeychainStorage(.newsApiKey, scope: .shared) private var newsApiKey = ""
+    @KeychainStorage(.tavilyApiKey, scope: .shared) private var tavilyApiKey = ""
 
     @State private var lmStudioViewModel = LMStudioViewModel.shared
 
@@ -506,10 +506,10 @@ struct PersonaToggle: View {
 }
 
 struct TradingConfigSection: View {
-    @KeychainStorage("t212InvestKey") private var t212InvestKey = ""
-    @KeychainStorage("t212InvestSecret") private var t212InvestSecret = ""
-    @KeychainStorage("t212IsaKey") private var t212IsaKey = ""
-    @KeychainStorage("t212IsaSecret") private var t212IsaSecret = ""
+    @KeychainStorage(.t212InvestKey, scope: .workspace(.uk)) private var t212InvestKey = ""
+    @KeychainStorage(.t212InvestSecret, scope: .workspace(.uk)) private var t212InvestSecret = ""
+    @KeychainStorage(.t212IsaKey, scope: .workspace(.uk)) private var t212IsaKey = ""
+    @KeychainStorage(.t212IsaSecret, scope: .workspace(.uk)) private var t212IsaSecret = ""
     @AppStorage("t212AccountType") private var t212AccountType = "invest"
     @State private var isUpdatingConfig = false
     

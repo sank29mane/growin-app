@@ -2,9 +2,9 @@ import SwiftUI
 
 struct ConfigView: View {
     @Environment(\.dismiss) var dismiss
-    @KeychainStorage("openaiApiKey") private var openaiApiKey = ""
-    @KeychainStorage("geminiApiKey") private var geminiApiKey = ""
-    @KeychainStorage("trading212ApiKey") private var trading212ApiKey = ""
+    @KeychainStorage(.openaiApiKey, scope: .shared) private var openaiApiKey = ""
+    @KeychainStorage(.geminiApiKey, scope: .shared) private var geminiApiKey = ""
+    @KeychainStorage(.trading212ApiKey, scope: .workspace(.uk)) private var trading212ApiKey = ""
     
     var provider: String? // Optional provider that triggered this
     
