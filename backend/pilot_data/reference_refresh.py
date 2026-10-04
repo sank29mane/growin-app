@@ -194,7 +194,7 @@ def _record_step(store: PilotDataStore, run_id: str, ist_date: date, started: da
 
 def run_daily(
     store: PilotDataStore, http: NseHttp, *, today_ist: date, workspace: Literal["india"],
-    clock: Callable[[], datetime] = utc_now,
+    clock: Callable[[], datetime] = utc_now, force: bool = False,
 ) -> RefreshRunReport:
     if workspace != store.workspace:
         raise PilotDataError("workspace_mismatch", "workspace differs from the store workspace")
@@ -212,6 +212,9 @@ def run_daily(
         _record_step(store, run_id, today_ist, started, outcome)
 
     def bhavcopy() -> StepOutcome:
+        if not force and day_status(store, today_ist) == "session":
+            return StepOutcome(step="bhavcopy_day", outcome="skipped", error_code="already_session",
+                               detail={"status": "session"})
         day = ingest_day(store, http, today_ist, workspace=workspace, clock=clock)
         detail = {"status": day.status, **{f"file_{kind}": result for kind, result in day.outcomes.items()}}
         if day.failed:
@@ -354,6 +357,7 @@ def main(argv: list[str] | None = None, *, client: httpx.Client | None = None) -
     run.add_argument("--root", required=True, type=Path)
     run.add_argument("--workspace", required=True, choices=["india"])
     run.add_argument("--min-interval-seconds", type=float, default=1.0)
+    run.add_argument("--force", action="store_true")
     fresh = sub.add_parser("check-freshness")
     fresh.add_argument("--root", required=True, type=Path)
     fresh.add_argument("--workspace", required=True, choices=["india"])
@@ -391,7 +395,7 @@ def main(argv: list[str] | None = None, *, client: httpx.Client | None = None) -
                 print(json.dumps({"caveats": _caveat_payload(), "continuity": report.model_dump(mode="json")}, indent=2))
                 return 0
             http = NseHttp(http_client, min_interval_seconds=args.min_interval_seconds)
-            report = run_daily(store, http, today_ist=today, workspace=args.workspace)
+            report = run_daily(store, http, today_ist=today, workspace=args.workspace, force=args.force)
     except PilotDataError as exc:
         print(json.dumps({"caveats": _caveat_payload(), "error_code": exc.code, "error": str(exc)}, indent=2))
         return 2

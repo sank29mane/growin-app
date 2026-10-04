@@ -173,6 +173,39 @@ def test_repeated_503_is_unknown_and_sessions_between_lists_the_date(store):
     assert caught.value.code == "calendar_unknown_dates"
 
 
+def test_an_ingested_session_survives_a_later_404_on_every_file(store):
+    site = Site()
+    site.udiff(TUE)
+    ingest_day(store, site.http(), TUE, workspace="india", clock=lambda: at(THU))
+    assert day_status(store, TUE) == "session"
+    del site.routes[udiff_url(TUE)]  # every file now answers 404
+    ingest_day(store, site.http(), TUE, workspace="india", clock=lambda: at(date(2024, 10, 8)))
+    assert day_status(store, TUE) == "session"
+    assert sessions_between(store, TUE, TUE) == (TUE,)
+
+
+def test_an_ingested_session_survives_a_later_transport_failure(store):
+    site = Site()
+    site.udiff(TUE)
+    ingest_day(store, site.http(), TUE, workspace="india", clock=lambda: at(THU))
+    for url in (pr_zip_url(TUE), udiff_url(TUE), cm_legacy_url(TUE)):
+        site.routes[url] = 503
+    later = ingest_day(store, site.http(), TUE, workspace="india", clock=lambda: at(date(2024, 10, 8)))
+    assert later.failed
+    assert day_status(store, TUE) == "session"
+    assert sessions_between(store, TUE, TUE) == (TUE,)
+
+
+def test_an_ingested_pr_file_is_not_undone_by_a_later_404(store):
+    site = Site()
+    site.pr(TUE)
+    ingest_day(store, site.http(), TUE, workspace="india", clock=lambda: at(THU))
+    assert day_status(store, TUE) == "inconsistent"
+    del site.routes[pr_zip_url(TUE)]
+    ingest_day(store, site.http(), TUE, workspace="india", clock=lambda: at(date(2024, 10, 8)))
+    assert day_status(store, TUE) == "inconsistent"  # never re-read as a plain holiday
+
+
 def test_resume_makes_no_requests_for_final_days_and_retries_the_rest(store):
     site = Site()
     site.udiff(TUE)

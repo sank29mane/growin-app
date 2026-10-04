@@ -25,7 +25,7 @@ from pilot_data.reference_refresh import (
     require_reference_freshness,
     run_daily,
 )
-from pilot_data.sessions import ensure_fetch_log
+from pilot_data.sessions import day_status, ensure_fetch_log
 from pilot_data.store import PilotDataStore
 from pilot_data.surveillance import ASM_URL, GSM_URL, ingest_surveillance
 
@@ -190,6 +190,27 @@ def test_run_daily_runs_every_step_in_order_and_never_asks_for_the_master(store)
     reports = list((store.root / "reports").glob("reference-refresh-2026-10-05-*.json"))
     assert len(reports) == 1 and stat.S_IMODE(reports[0].stat().st_mode) == 0o444
     assert list(json.loads(reports[0].read_text()))[0] == "caveats"
+
+
+def _fetch_log_count(store):
+    return store.query("SELECT count(*) FROM nse_fetch_log")[0][0]
+
+
+def test_run_daily_skips_the_bhavcopy_fetch_for_a_date_already_a_session(store):
+    mark_calendar(store, date(2026, 10, 3), date(2026, 10, 4), set())
+    _log_attempt(store, d=D5, kind="udiff", outcome="ingested", http_status=200, error_code=None,
+                 source_sha256=None, url="u", attempted_at=LATER)
+    before = _fetch_log_count(store)
+    site = today_site()
+    del site.routes[udiff_url(D5)]  # a refetch would log a 404 against an ingested session
+    report = run_daily(store, site.http(), today_ist=D5, workspace="india", clock=lambda: LATER)
+    steps = {s.step: s for s in report.steps}
+    assert (steps["bhavcopy_day"].outcome, steps["bhavcopy_day"].error_code) == ("skipped", "already_session")
+    assert _fetch_log_count(store) == before
+    forced = run_daily(store, site.http(), today_ist=D5, workspace="india", clock=lambda: LATER, force=True)
+    assert {s.step: s for s in forced.steps}["bhavcopy_day"].outcome == "ok"
+    assert _fetch_log_count(store) > before
+    assert day_status(store, D5) == "session"  # the forced 404 did not un-ingest it
 
 
 def test_one_failing_step_does_not_stop_the_others_and_the_cli_exits_two(tmp_path, capsys):

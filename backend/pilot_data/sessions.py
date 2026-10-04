@@ -34,7 +34,11 @@ def _ist_date(naive_utc: datetime) -> date:
 
 
 def _latest_attempts(store: PilotDataStore, start: date, end: date) -> dict[date, dict[str, tuple[str, date]]]:
-    """Latest (outcome, IST attempt date) per (trade date, file kind) within [start, end]."""
+    """Folded (outcome, IST attempt date) per (trade date, file kind) within [start, end].
+
+    The latest attempt wins, except that an `ingested` attempt is never overridden: once a file
+    for that kind is stored, a later 404 or transport failure cannot un-ingest it.
+    """
     ensure_fetch_log(store)
     rows = store.query(
         "SELECT trade_date, file_kind, outcome, attempted_at_utc FROM nse_fetch_log "
@@ -43,7 +47,10 @@ def _latest_attempts(store: PilotDataStore, start: date, end: date) -> dict[date
     )
     latest: dict[date, dict[str, tuple[str, date]]] = {}
     for trade_date, kind, outcome, attempted in rows:
-        latest.setdefault(trade_date, {})[kind] = (outcome, _ist_date(attempted))
+        kinds = latest.setdefault(trade_date, {})
+        if kinds.get(kind, ("", trade_date))[0] == "ingested":
+            continue
+        kinds[kind] = (outcome, _ist_date(attempted))
     return latest
 
 
