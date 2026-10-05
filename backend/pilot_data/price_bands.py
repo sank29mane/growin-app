@@ -5,6 +5,14 @@ required evaluation period and refuse to run when the report is missing or `phas
 is true. Phase 62 passes BandUnavailable to Phase 60 for every unknown (ISIN, session); Phase 60
 then records NO_ASSUMED_FILL, which is unsupported simulation data, not a market miss.
 
+`phase62_blocked` is permission to run, not evidence that coverage is sufficient. Only reasons in
+NONBLOCKING_ROW_DEFECTS (a row-local list/changes conflict, a symbol absent from the effective
+list) leave it false; they are listed one by one in `unavailable_bands` with their source hashes
+so Phase 62 can report affected entry and exit attempts by target and fold. Any other unknown
+reason blocks. A cross-check conflict is row-local only when it is proven small (at most
+MAX_ROW_CONFLICTS rows, outnumbered by agreeing moves); otherwise the whole session is unknown,
+and so is every session bridged from that session's list.
+
 Rules enforced here (review decision D15):
 - a band file is stored append-only with URL, fetch time, sha256 and file date;
 - a changes file applies only forward from a validated full-list baseline, never without one;
@@ -26,7 +34,7 @@ import os
 import tempfile
 import uuid
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -73,6 +81,12 @@ BandCategory = Literal["fixed", "no_band", "not_banded"]
 BandStatus = Literal["fixed", "no_band", "unknown"]
 Rule = Literal["next_session_after_file_date", "file_date"]
 MAX_LISTED_DATES = 50
+# A cross-check conflict stays row-local only while it is this small and outnumbered by agreeing moves.
+MAX_ROW_CONFLICTS = 3
+# Unknown reasons classified as row-level NSE file defects (59-10 amendment, 2026-10-05). They do not
+# block Phase 62, but each one is still BandUnavailable (NO_ASSUMED_FILL) and is listed in the report.
+# Every other reason, including any new one, blocks.
+NONBLOCKING_ROW_DEFECTS = frozenset({"band_crosscheck_row_conflict", "not_in_band_list"})
 
 PRICE_BAND_UNSUPPORTED_CAVEAT = Caveat(
     code="PRICE_BAND_UNSUPPORTED",
@@ -466,6 +480,15 @@ class _Basis:
     kind: Literal["list", "changes_chain"] | None
     reason: str | None
     sources: tuple[str, ...] = ()  # list source first, then the changes sources in order
+    # (symbol, series) rows proven to disagree between the lists and the changes file, with the
+    # three files as evidence. Only these rows are unknown; the rest of the session resolves.
+    conflicts: Mapping[tuple[str, str], tuple[str, ...]] = field(default_factory=dict)
+
+
+def _band_text(band: tuple[str, Decimal | None] | None) -> str:
+    if band is None:
+        return "absent"
+    return band[0] if band[1] is None else f"{band[0]}:{band[1]}"
 
 
 class BandResolver:
@@ -578,16 +601,20 @@ class BandResolver:
             if len(sources) > 1:
                 return _Basis(None, "band_list_ambiguous", tuple(sources))
             conflict = self._crosscheck_conflict(session, sources[0])
-            if conflict:
+            if conflict is None:
+                return _Basis("list", None, (sources[0],))
+            if isinstance(conflict, tuple):
                 return _Basis(None, "band_crosscheck_conflict", conflict)
-            return _Basis("list", None, (sources[0],))
+            return _Basis("list", None, (sources[0],), conflicts=conflict)
         earlier = [eff for eff in self._lists_by_eff if eff < session]
         if not earlier:
             return _Basis(None, "band_no_baseline")
         baseline_day = max(earlier)
-        baseline_sources = sorted({source for _, source in self._lists_by_eff[baseline_day]})
-        if len(baseline_sources) > 1:
-            return _Basis(None, "band_list_ambiguous", tuple(baseline_sources))
+        baseline = self.basis(baseline_day)
+        if baseline.kind is None:
+            # a chain inherits its baseline list's problems (ambiguous list, session-wide conflict)
+            return _Basis(None, baseline.reason, baseline.sources)
+        baseline_sources = list(baseline.sources)
         chain: list[str] = []
         for day in sessions_between(self.store, baseline_day, session):
             if day == baseline_day:
@@ -596,10 +623,20 @@ class BandResolver:
             if len(files) != 1:
                 return _Basis(None, "band_chain_gap")
             chain.append(files[0])
-        return _Basis("changes_chain", None, (baseline_sources[0], *chain))
+        # rows that conflicted on the baseline session stay unknown on every session bridged from it
+        inherited = {key: (*evidence, *chain) for key, evidence in baseline.conflicts.items()}
+        return _Basis("changes_chain", None, (baseline_sources[0], *chain), conflicts=inherited)
 
-    def _crosscheck_conflict(self, session: date, source: str) -> tuple[str, ...] | None:
-        """Consecutive lists plus the changes file for the later session must agree with each other."""
+    def _crosscheck_conflict(
+        self, session: date, source: str
+    ) -> tuple[str, ...] | dict[tuple[str, str], tuple[str, ...]] | None:
+        """Consecutive lists plus the changes file for the later session must agree with each other.
+
+        None when they agree. A dict of the disagreeing (symbol, series) rows when the defect is proven
+        row-local: at most MAX_ROW_CONFLICTS rows disagree and more rows agree than disagree, so the
+        files are the right ones for the session. Otherwise the evidence tuple: the whole session is
+        unknown, because the affected scope cannot be established.
+        """
         previous = self._previous_session(session)
         if previous is None:
             return None
@@ -609,20 +646,34 @@ class BandResolver:
             return None  # the cross-check needs both lists and the changes file to exist
         old_rows, new_rows = self._list_rows(before[0]), self._list_rows(source)
         change_rows = self._change_rows(changes[0])
-        disagree = False
+        disagree: set[tuple[str, str]] = set()
+        agree: set[tuple[str, str]] = set()
         for key in set(old_rows) & set(new_rows):
             if old_rows[key] != new_rows[key]:
                 moves = change_rows.get(key)
                 if not moves or moves[0][0] != old_rows[key] or moves[-1][1] != new_rows[key]:
-                    disagree = True
+                    disagree.add(key)
+                else:
+                    agree.add(key)
         for key, moves in change_rows.items():
             if key in old_rows and key in new_rows and (moves[0][0] != old_rows[key] or moves[-1][1] != new_rows[key]):
-                disagree = True
+                disagree.add(key)
         if not disagree:
             return None
         evidence = (before[0], source, changes[0])
-        self._quarantine("band_crosscheck_conflict", session, evidence)
-        return evidence
+        if len(disagree) > MAX_ROW_CONFLICTS or len(agree) <= len(disagree):
+            self._quarantine("band_crosscheck_conflict", session, evidence,
+                             detail={"disagreeing_rows": str(len(disagree)), "agreeing_moves": str(len(agree))})
+            return evidence
+        for symbol, series in sorted(disagree):
+            moves = change_rows.get((symbol, series), [])
+            self._quarantine(
+                "band_crosscheck_row_conflict", session, evidence, symbol=symbol, series=series,
+                detail={"list_before": _band_text(old_rows.get((symbol, series))),
+                        "list_after": _band_text(new_rows.get((symbol, series))),
+                        "changes": ";".join(f"{_band_text(a)}>{_band_text(b)}" for a, b in moves) or "absent"},
+            )
+        return {key: evidence for key in disagree}
 
     # -- per-target observation
     def _bars_on(self, session: date) -> dict[str, list[tuple[str, str]]]:
@@ -657,6 +708,8 @@ class BandResolver:
         if basis.kind is None:
             return unknown(basis.reason or "band_unsupported", symbol, series, basis.sources)
         key = (symbol, series)
+        if key in basis.conflicts:
+            return unknown("band_crosscheck_row_conflict", symbol, series, basis.conflicts[key])
         baseline = self._list_rows(basis.sources[0]).get(key)
         moves = [self._change_rows(source).get(key, []) for source in basis.sources[1:]]
         if baseline is None:
@@ -820,6 +873,20 @@ def latest_archive_depth(store: PilotDataStore) -> ArchiveDepth | None:
 
 
 # --------------------------------------------------------------------------- coverage
+class UnavailableBand(BaseModel):
+    """One target-session whose band is unknown for a non-blocking reason. Phase 62 maps it to folds and attempts."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    stock_code: str
+    isin: str
+    session: date
+    nse_symbol: str | None
+    series: str | None
+    reason: str
+    source_sha256s: tuple[str, ...]
+
+
 class BandCoverageReport(CaveatedResult):
     period_start: date
     period_end: date
@@ -836,6 +903,10 @@ class BandCoverageReport(CaveatedResult):
     archive_depth: ArchiveDepth | None
     phase62_blocked: bool
     blocked_reasons: tuple[str, ...]
+    # Non-blocking unknowns (NONBLOCKING_ROW_DEFECTS): permission to run, not evidence of coverage.
+    row_conflict_sessions: tuple[date, ...]
+    nonblocking_reasons: tuple[str, ...]
+    unavailable_bands: tuple[UnavailableBand, ...]
     report_sha256: str
 
 
@@ -864,8 +935,12 @@ def build_band_coverage(
     unknown_by_reason: dict[str, int] = {}
     unknown_sessions: dict[str, list[date]] = {}
     target_unknown: dict[str, int] = {}
+    row_conflict_sessions: list[date] = []
+    unavailable: list[UnavailableBand] = []
     for session in sessions:
         basis = resolver.basis(session)
+        if basis.conflicts:
+            row_conflict_sessions.append(session)
         if basis.kind is None:
             unsupported.append(session)
             by_status["unsupported"] = by_status.get("unsupported", 0) + 1
@@ -887,14 +962,20 @@ def build_band_coverage(
                 unknown_by_reason[reason] = unknown_by_reason.get(reason, 0) + 1
                 unknown_sessions.setdefault(reason, []).append(session)
                 target_unknown[member.stock_code] = target_unknown.get(member.stock_code, 0) + 1
+                if reason in NONBLOCKING_ROW_DEFECTS:
+                    unavailable.append(UnavailableBand(
+                        stock_code=member.stock_code, isin=isin, session=session, nse_symbol=observation.nse_symbol,
+                        series=observation.series, reason=reason, source_sha256s=observation.source_sha256s))
     blocked: list[str] = []
+    nonblocking: list[str] = []
     for reason, days in sorted(session_reasons.items()):
         blocked.append(f"{reason}: {len(days)} sessions, first {MAX_LISTED_DATES}: {_listed(days)}")
     for reason, days in sorted(unknown_sessions.items()):
         if reason in session_reasons and reason == "band_convention_unverified":
             continue
-        blocked.append(f"target-sessions unknown ({reason}): {unknown_by_reason[reason]}, first {MAX_LISTED_DATES} "
-                       f"sessions: {_listed(sorted(set(days)))}")
+        line = (f"target-sessions unknown ({reason}): {unknown_by_reason[reason]}, first {MAX_LISTED_DATES} "
+                f"sessions: {_listed(sorted(set(days)))}")
+        (nonblocking if reason in NONBLOCKING_ROW_DEFECTS else blocked).append(line)
     convention = resolver.convention
     if convention is None and not any(r.startswith("band_convention_unverified") for r in blocked):
         blocked.append("band_convention_unverified")
@@ -905,13 +986,20 @@ def build_band_coverage(
         target_unknown_counts=dict(sorted(target_unknown.items())), fixed_count=fixed, no_band_count=no_band,
         unknown_count=unknown, unknown_by_reason=dict(sorted(unknown_by_reason.items())), convention=convention,
         archive_depth=latest_archive_depth(store), phase62_blocked=bool(blocked), blocked_reasons=tuple(blocked),
+        row_conflict_sessions=tuple(row_conflict_sessions), nonblocking_reasons=tuple(nonblocking),
+        unavailable_bands=tuple(unavailable),
     )
-    digest_payload = {
-        key: (value.model_dump(mode="json") if isinstance(value, BaseModel)
-              else [d.isoformat() for d in value] if key == "unsupported_sessions"
-              else value.isoformat() if isinstance(value, date) else list(value) if isinstance(value, tuple) else value)
-        for key, value in fields.items()
-    }
+
+    def jsonable(value):
+        if isinstance(value, BaseModel):
+            return value.model_dump(mode="json")
+        if isinstance(value, date):
+            return value.isoformat()
+        if isinstance(value, tuple):
+            return [jsonable(item) for item in value]
+        return value
+
+    digest_payload = {key: jsonable(value) for key, value in fields.items()}
     digest = canonical_sha256({"fields": digest_payload, "targets": targets.target_sha256,
                                "caveats": [c.code for c in caveats]})
     report = BandCoverageReport(workspace="india", caveats=caveats, report_sha256=digest, **fields)
@@ -1061,6 +1149,9 @@ def main(argv: list[str] | None = None, *, client: httpx.Client | None = None) -
                 path = write_coverage_report(args.root, report)
                 payload = {"report_path": str(path), "report_sha256": report.report_sha256,
                            "phase62_blocked": report.phase62_blocked, "blocked_reasons": list(report.blocked_reasons),
+                           "nonblocking_reasons": list(report.nonblocking_reasons),
+                           "row_conflict_sessions": [d.isoformat() for d in report.row_conflict_sessions],
+                           "unavailable_band_count": len(report.unavailable_bands),
                            "unknown_count": report.unknown_count, "fixed_count": report.fixed_count,
                            "no_band_count": report.no_band_count,
                            "archive_depth": report.archive_depth.model_dump(mode="json") if report.archive_depth else None}

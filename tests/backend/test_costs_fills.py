@@ -361,6 +361,15 @@ def test_missing_or_wrong_date_band_gives_no_assumed_fill():
     assert result.to_trade_fill() is None
 
 
+def test_an_unavailable_band_blocks_an_exit_too():
+    # Phase 59 passes BandUnavailable for row-level NSE defects as well; a sell (an exit) gets no fill either.
+    unavailable = BandUnavailable("band_crosscheck_row_conflict")
+    sell = make_order("s1", side=Side.SELL, limit="399.00", reference="401.00")
+    result = one(sell, make_bar(band=unavailable))
+    assert result.outcome is FillOutcome.NO_ASSUMED_FILL and result.reason_code == NO_FILL_BAND_UNAVAILABLE
+    assert result.filled_quantity == 0 and result.fill_price is None and result.to_trade_fill() is None
+
+
 def test_no_assumed_fill_consumes_no_cap_and_differs_from_a_miss():
     unavailable = one(make_order(), make_bar(band=BandUnavailable("no band source for 2026-10-06")))
     missed = one(make_order(), make_bar(low="400.00"))
