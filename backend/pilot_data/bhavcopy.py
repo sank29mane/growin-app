@@ -674,6 +674,11 @@ def primary_bars_on(store: PilotDataStore, trade_date: date) -> list[BhavcopyBar
     return [bar for bar, _ in _bars_with_sources(store, trade_date, kind)]
 
 
+# Series that share the stock's ISIN but are not its normal-market price: BL is
+# the block-deal window (one negotiated print) and T0 the T+0 settlement segment
+# (from 2024-03-28). NSE's price band lists never carry either.
+NON_REGULAR_SERIES = frozenset({"BL", "T0"})
+
 _CENT = Decimal("0.01")
 
 

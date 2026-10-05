@@ -31,6 +31,7 @@ from .core import (
     canonical_sha256,
     standard_caveats,
 )
+from .corporate_actions import EVENTS_TABLE
 from .history_quality import compute_span, record_history_quarantines
 from .lineage import lineage_for_target, primary_bars_for_lineage
 from .sessions import day_status, ensure_fetch_log, pr_missing_sessions, sessions_between
@@ -201,8 +202,8 @@ def run_part1(
         )
     }
     ca_kinds: Counter[str] = Counter()
-    if store.table_exists("corporate_action_events"):
-        for (parts_json,) in store.query("SELECT parts_json FROM corporate_action_events"):
+    if store.table_exists(EVENTS_TABLE):
+        for (parts_json,) in store.query(f"SELECT parts_json FROM {EVENTS_TABLE}"):
             for part in json.loads(parts_json):
                 ca_kinds[part["kind"]] += 1
     exclusions = Counter(e.reason for e in targets.exclusions)

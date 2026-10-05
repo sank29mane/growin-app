@@ -93,6 +93,7 @@ def ingest_day(
         raise PilotDataError("workspace_mismatch", "workspace differs from the store workspace")
     ensure_fetch_log(store)
     outcomes: dict[str, str] = {}
+    errors: dict[str, str] = {}
 
     def attempt(kind: str, url: str, descriptor_kind: str, ingest) -> str:
         attempted_at = clock()
@@ -115,6 +116,7 @@ def ingest_day(
             _log_attempt(store, d=d, kind=kind, outcome="failed", http_status=fetched.status, error_code=exc.code,
                          source_sha256=digest, url=url, attempted_at=attempted_at)
             outcomes[kind] = "failed"
+            errors[kind] = exc.code
             return "failed"
         _log_attempt(store, d=d, kind=kind, outcome="ingested", http_status=fetched.status, error_code=None,
                      source_sha256=digest, url=url, attempted_at=attempted_at)
@@ -123,7 +125,11 @@ def ingest_day(
 
     weekend = d.weekday() >= 5
     pr = attempt("pr", pr_zip_url(d), "pr_zip", ingest_pr_zip)
-    proceed = not (weekend and pr != "ingested")
+    # NSE has published misdated weekend PR zips (PR060424.zip holds the
+    # 4 June 2024 members). When a weekend PR zip has no member for the date,
+    # ask for the primary files too, so a confirmed absence settles the day.
+    misdated_pr = pr == "failed" and errors.get("pr") == "pr_member_missing"
+    proceed = not weekend or pr == "ingested" or misdated_pr
     if proceed:
         udiff = attempt("udiff", udiff_url(d), "udiff_cm", ingest_udiff)
         if udiff == "no_file":

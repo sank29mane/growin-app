@@ -251,6 +251,10 @@ def compute_factor_set(
             continue
         if event.ex_date > as_of:
             continue
+        if bars and event.ex_date < bars[0].trade_date:
+            # Ex-date before the first bar in range: a backward adjustment only
+            # changes bars before the ex-date, so it cannot affect this series.
+            continue
         if not event.adjustable:
             unresolved.append(
                 UnresolvedAction(

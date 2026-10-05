@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Literal
 
-from .bhavcopy import ensure_bhavcopy_tables
+from .bhavcopy import NON_REGULAR_SERIES, ensure_bhavcopy_tables
 from .core import PilotDataError
 from .corporate_actions import events_for_symbol
 from .models import IsinSegment, Lineage, RawDailyBar
@@ -254,6 +254,8 @@ def primary_bars_for_lineage(
         )
         for day, kind, series, symbol, o, h, l, c, volume, value, source in rows:
             if (kind == "udiff") != (day in udiff_dates):
+                continue
+            if series in NON_REGULAR_SERIES:
                 continue
             rank = 0 if series == lineage.anchor_series else 1
             if day in out and out[day][0] <= rank:

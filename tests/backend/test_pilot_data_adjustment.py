@@ -345,3 +345,14 @@ def test_two_segment_lineage_uses_raw_closes_across_the_isin_change():
     fs = compute_factor_set(lin, bars, [CANBK_EVENT], as_of=D15, policy=POLICY)
     series = adjusted_series(bars, fs, as_of=D15, workspace="india")
     assert series.bars[0].isin == OLD and series.bars[0].adj_close == Decimal("113.3100")
+
+
+def test_events_before_the_first_bar_in_range_are_ignored():
+    # Part 1 passes bars from the window start; a dividend that went ex before it
+    # changes no bar in range and must not be reported as dividend_reference_missing.
+    flat = [bar(D14, "100"), bar(D15, "100")]
+    early = event("CANBK", "DIV - RS 5 PER SH", date(2024, 5, 10))
+    fs = factor_set(flat, [early], D15)
+    assert fs.unresolved == () and fs.applied == ()
+    on_first_bar = event("CANBK", "DIV - RS 5 PER SH", D14)  # no earlier close: still reported, never guessed
+    assert [u.reason for u in factor_set(flat, [on_first_bar], D15).unresolved] == ["dividend_reference_missing"]

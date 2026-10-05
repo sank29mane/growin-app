@@ -246,3 +246,15 @@ def test_primary_bars_follow_the_isin_on_each_date_and_prefer_udiff(store):
     assert [(b.trade_date, b.isin, str(b.close), b.source_kind) for b in bars] == [
         (D1, OLD, "101.0000", "bhavcopy"), (D2, NEW, "103.0000", "bhavcopy"), (D3, NEW, "104.0000", "bhavcopy")]
     assert [b.trade_date for b in primary_bars_for_lineage(store, lineage, start=D2, end=D2)] == [D2]
+
+
+def test_block_deal_and_t0_series_never_enter_the_price_series(store):
+    # BL (block-deal window) and T0 (T+0 segment) share the stock's ISIN. On a day
+    # without a normal-market bar the series must have a gap, not a block print.
+    udiff(store, D1, [urow(D1, "CANBK", NEW, 3, close="103"), urow(D1, "CANBK", NEW, 3, series="BL", close="150")])
+    udiff(store, D2, [urow(D2, "CANBK", NEW, 3, series="BL", close="150"), urow(D2, "CANBK", NEW, 3, series="T0", close="99")])
+    udiff(store, D3, [urow(D3, "CANBK", NEW, 3, close="104")])
+    mark_calendar(store, D1, D3, {D1, D2, D3})
+    lineage = build(store, as_of=D3)
+    bars = primary_bars_for_lineage(store, lineage, start=D1, end=D3)
+    assert [(b.trade_date, b.series, str(b.close)) for b in bars] == [(D1, "EQ", "103.0000"), (D3, "EQ", "104.0000")]
