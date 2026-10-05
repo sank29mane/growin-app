@@ -35,7 +35,7 @@ from typing import Callable, Literal, Mapping
 import httpx
 from pydantic import BaseModel, ConfigDict
 
-from .bhavcopy import primary_bars_on
+from .bhavcopy import NON_REGULAR_SERIES, primary_bars_on
 from .core import (
     CaveatedResult,
     Caveat,
@@ -591,7 +591,7 @@ class BandResolver:
         if session not in self._bars_cache:
             by_isin: dict[str, list[tuple[str, str]]] = {}
             for bar in primary_bars_on(self.store, session):
-                if bar.isin is not None:
+                if bar.isin is not None and bar.series not in NON_REGULAR_SERIES:
                     pair = (bar.nse_symbol, bar.series)
                     if pair not in by_isin.setdefault(bar.isin, []):
                         by_isin[bar.isin].append(pair)
@@ -653,6 +653,10 @@ class ConventionCheck(CaveatedResult):
     explained_by_same_date: int
     explained_by_previous_date: int
     explained_by_both: int
+    # NSE data 2021-2026: a list dated D already holds the bands for the next
+    # session after D, and the changes file dated that session lists the moves
+    # (changes effective on their own file date).
+    explained_by_next_session_after_newer: int
     explained_by_neither: int
     missing_changes_files: int
     rows: tuple[dict[str, str], ...]
@@ -679,7 +683,7 @@ def check_band_convention(store: PilotDataStore, *, start: date, end: date) -> C
         return all(key in rows and rows[key][-1][0] == old and rows[key][-1][1] == new
                    for key, (old, new) in moves.items())
 
-    counts = {"same": 0, "previous": 0, "both": 0, "neither": 0, "missing": 0}
+    counts = {"same": 0, "previous": 0, "both": 0, "next_session": 0, "neither": 0, "missing": 0}
     table: list[dict[str, str]] = []
     for (prev_date, prev_source), (date_q, source_q) in zip(lists, lists[1:]):
         old_rows, new_rows = resolver._list_rows(prev_source), resolver._list_rows(source_q)
@@ -688,26 +692,33 @@ def check_band_convention(store: PilotDataStore, *, start: date, end: date) -> C
             continue
         previous = explains(changes.get(prev_date), moves)
         same = explains(changes.get(date_q), moves)
-        if previous is None and same is None:
-            counts["missing"] += 1
+        next_day = resolver._effective(date_q, "next_session_after_file_date")
+        following = explains(changes.get(next_day), moves) if next_day is not None else None
+        if not previous and not same and following is None:
+            counts["missing"] += 1  # the deciding file (next session's changes) is not stored yet
         elif previous and same:
             counts["both"] += 1
         elif previous:
             counts["previous"] += 1
         elif same:
             counts["same"] += 1
+        elif following:
+            counts["next_session"] += 1
         else:
             counts["neither"] += 1
         if len(table) < 25:
             table.append({"older_list": prev_date.isoformat(), "newer_list": date_q.isoformat(),
                           "differences": str(len(moves)), "explained_by_older_date_changes": str(previous),
-                          "explained_by_newer_date_changes": str(same)})
+                          "explained_by_newer_date_changes": str(same),
+                          "next_session_after_newer": next_day.isoformat() if next_day else "",
+                          "explained_by_next_session_changes": str(following)})
     evidence = canonical_sha256({"counts": counts, "pairs": [list(t.values()) for t in table],
                                  "start": start.isoformat(), "end": end.isoformat()})
     return ConventionCheck(
         workspace="india", caveats=standard_caveats(), pairs_examined=sum(counts.values()),
         explained_by_same_date=counts["same"], explained_by_previous_date=counts["previous"],
-        explained_by_both=counts["both"], explained_by_neither=counts["neither"],
+        explained_by_both=counts["both"], explained_by_next_session_after_newer=counts["next_session"],
+        explained_by_neither=counts["neither"],
         missing_changes_files=counts["missing"], rows=tuple(table), evidence_sha256=evidence,
     )
 

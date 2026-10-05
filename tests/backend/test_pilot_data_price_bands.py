@@ -362,6 +362,28 @@ def test_report_hash_is_stable_and_follows_the_band_rows(tmp_path):
         assert coverage(two).fixed_count == 1  # only RELIANCE on S3 has a fixed band
 
 
+def test_block_deal_and_t0_bars_do_not_make_the_band_ambiguous(store):
+    # NSE lists never carry BL or T0; a block deal on the stock's ISIN used to
+    # turn the session unknown (band_isin_ambiguous).
+    bars(store, instruments=[("RELIANCE", "EQ", RELIANCE), ("RELIANCE", "BL", RELIANCE), ("CANBK", "EQ", CANBK),
+                             ("CANBK", "T0", CANBK), ("AGSTRA", "BZ", AGSTRA)])
+    with_convention(store)
+    for session in SESS:
+        put_list(store, FILE_FOR[session])
+    report = coverage(store)
+    assert report.unknown_count == 0 and report.phase62_blocked is False
+
+
+def test_two_regular_series_on_one_isin_stay_ambiguous(store):
+    bars(store, instruments=[("RELIANCE", "EQ", RELIANCE), ("RELIANCE", "BE", RELIANCE), ("CANBK", "EQ", CANBK),
+                             ("AGSTRA", "BZ", AGSTRA)])
+    with_convention(store)
+    for session in SESS:
+        put_list(store, FILE_FOR[session])
+    report = coverage(store)
+    assert report.unknown_by_reason.get("band_isin_ambiguous", 0) > 0 and report.phase62_blocked is True
+
+
 def test_check_convention_reports_which_file_explains_the_differences(store):
     bars(store)
     put_list(store, S1)
@@ -372,6 +394,20 @@ def test_check_convention_reports_which_file_explains_the_differences(store):
     assert (check.pairs_examined, check.explained_by_previous_date, check.explained_by_same_date) == (1, 1, 0)
     assert len(check.evidence_sha256) == 64 and check.rows[0]["older_list"] == S1.isoformat()
     assert store.query("SELECT count(*) FROM price_band_conventions")[0][0] == 0  # reading records nothing
+
+
+def test_check_convention_sees_the_next_session_changes_file(store):
+    # NSE 2021-2026: list D already carries the bands for the next session, and
+    # the changes file dated that next session lists the move.
+    bars(store)
+    put_list(store, S1)
+    put_list(store, S2, rows=[dict(kit.SEC_LIST_RELIANCE, Band="10"), kit.SEC_LIST_CANBK, kit.SEC_LIST_AGSTRA])
+    put_changes(store, S3, [{"Symbol": "RELIANCE", "Series": "EQ", "Security Name": "R", "From": "No Band", "To": "10"}])
+    check = check_band_convention(store, start=S1, end=S2)
+    assert (check.pairs_examined, check.explained_by_previous_date, check.explained_by_same_date) == (1, 0, 0)
+    assert (check.explained_by_next_session_after_newer, check.explained_by_neither) == (1, 0)
+    assert check.rows[0]["next_session_after_newer"] == S3.isoformat()
+    assert check.rows[0]["explained_by_next_session_changes"] == "True"
 
 
 # --------------------------------------------------------------------------- CLI

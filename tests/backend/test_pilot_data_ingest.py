@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from pilot_data.core import PilotDataError
+from pilot_data.corporate_actions import EVENTS_TABLE
 from pilot_data.nse_http import NseHttp
 from pilot_data.nse_ingest import (
     cm_legacy_url,
@@ -310,7 +311,7 @@ def test_consistency_runs_per_day_and_corporate_actions_after_the_range(store):
     )
     outcome = ingest_range(store, site.http(), TUE, TUE, workspace="india", clock=lambda: at(THU), min_free_bytes=0)
     assert outcome.quarantines_by_reason == {"pd_primary_mismatch": 1}
-    assert store.query("SELECT purpose_norm FROM corporate_action_events") == [("BONUS 1:1",)]
+    assert store.query(f"SELECT purpose_norm FROM {EVENTS_TABLE}") == [("BONUS 1:1",)]
 
 
 def test_previous_sessions_and_pr_missing(store):

@@ -168,3 +168,43 @@ def test_events_for_symbol_filters_by_ex_date_and_includes_null_ex_dates(store):
     found = events_for_symbol(store, "ABC", ex_from=date(2024, 1, 1), ex_to=date(2024, 12, 31))
     assert [(e.ex_date, e.parts[0].kind) for e in found] == [(None, "demerger"), (date(2024, 6, 3), "bonus")]
     assert found[0].ex_date is None and not found[0].adjustable
+
+
+# Wordings seen in NSE Bc files 2021-2026 that the first classifier missed.
+@pytest.mark.parametrize(
+    "purpose,expected",
+    [
+        ("FV SPLT FRM RS 2 TO RE 1", [("split", "2", "1")]),
+        ("FV SPLIT FRM RS 5 TO RE 1", [("split", "5", "1")]),
+        ("FVSPLT FRM RS 10 TO RS 2", [("split", "10", "2")]),
+        ("AGM/DIV-RS 2.50 PER SH", [("non_price", None, None), ("dividend", "2.50", None)]),
+        ("DIV-RE 0.50 PER SH", [("dividend", "0.50", None)]),
+        ("DIVIDEND - RS 4 PER SHARE", [("dividend", "4", None)]),
+        ("BUY BACK", [("non_price", None, None)]),
+        ("BUYBACK", [("non_price", None, None)]),
+        ("INT PAYMENT/REDEMPTION", [("non_price", None, None), ("non_price", None, None)]),
+        ("INTEREST PAYMENT/REDEMPTI", [("non_price", None, None), ("non_price", None, None)]),
+        ("INT PAYMENT/REDEMPTN", [("non_price", None, None), ("non_price", None, None)]),
+        ("INTDIV - RS 8 PR SH", [("dividend", "8", None)]),
+        ("AGM/DIV- RS 12.5 PR SH", [("non_price", None, None), ("dividend", "12.5", None)]),
+        ("INT DIV - RS 7.50 PR SH", [("dividend", "7.50", None)]),
+        ("BONUS- 1:2", [("bonus", None, None)]),
+        ("RGHTS 11:64@PRM RS 473/-", [("rights", None, None)]),
+        ("EOGM", [("non_price", None, None)]),
+        ("FULL REDEMPTION", [("non_price", None, None)]),
+        ("PARTREDEMP-RS 12.5 TO 10", [("non_price", None, None)]),
+        ("INT PYMNT/PART RDMPTION", [("non_price", None, None), ("non_price", None, None)]),
+    ],
+)
+def test_real_nse_purpose_wordings_classify(purpose, expected):
+    got = []
+    for part in parse_purpose(purpose):
+        amount = part.dividend_per_share if part.kind == "dividend" else part.old_fv
+        got.append((part.kind, None if amount is None else str(amount), None if part.new_fv is None else str(part.new_fv)))
+    assert got == expected
+
+
+@pytest.mark.parametrize("purpose", ["INTERIM DIVIDEND", "DIVRS 5", "REDEMPTIONS", "FV SPLT FRM RS 2 TO RS 2"])
+def test_purposes_without_usable_terms_stay_unknown(purpose):
+    # No amount, an unknown shape or a no-op split: never guessed.
+    assert [part.kind for part in parse_purpose(purpose)] == ["unknown"] * len(parse_purpose(purpose))

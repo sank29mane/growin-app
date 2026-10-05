@@ -25,35 +25,53 @@ ActionKind = Literal[
 ]
 
 _NUM = r"(\d+(?:\.\d+)?)"
-_FV_SPLIT = re.compile(rf"^FVSPLT FRM (?:RS|RE) {_NUM} TO (?:RS|RE) {_NUM}$")
+# NSE writes FVSPLT, FV SPLT and FV SPLIT (seen in 2021-2026 Bc files).
+_FV_SPLIT = re.compile(rf"^FV ?SPLI?T FRM (?:RS|RE)\.? ?{_NUM} TO (?:RS|RE)\.? ?{_NUM}$")
 _FV_SPLIT_LONG = re.compile(
     rf"^FACE VALUE SPLIT(?: \(SUB-DIVISION\))?(?: -)? FROM (?:RS|RE)\.? ?{_NUM}(?: PER SHARE)? "
     rf"TO (?:RS|RE)\.? ?{_NUM}(?: PER SHARE)?$"
 )
-_BONUS = re.compile(r"^BONUS (\d+):(\d+)$")
+_BONUS = re.compile(r"^BONUS ?-? ?(\d+):(\d+)$")
 _DIVIDEND = re.compile(
-    rf"^(?:(?:INT|INTERIM|FIN|FNL|FINAL|SPL|SPECIAL) ?)?(?:DIV|DIVIDEND)(?: -)? (?:RS|RE)\.? ?{_NUM}"
-    r"(?: PER SH(?:ARE)?)?$"
+    rf"^(?:(?:INT|INTERIM|FIN|FNL|FINAL|SPL|SPECIAL) ?)?(?:DIV|DIVIDEND)(?: ?- ?| )(?:RS|RE)\.? ?{_NUM}"
+    r"(?: PE?R SH(?:ARE)?)?$"
 )
 _MERGER = re.compile(r"^(?:MERGER|AMALGAMATION)$")
+# Bc PURPOSE is cut at 25 characters, so REDEMPTION arrives as REDEMPTN or REDEMPTI.
+_REDEMPTION_TRUNCATED = re.compile(r"^REDEMPT[A-Z]{0,3}$")
+# Debenture purposes on the issuer's symbol (interest, part or full redemption).
+_DEBT_PURPOSE = re.compile(
+    r"^(?:INT PYMNT|PART ?RDMPTION|PART ?REDEMP(?:TION)?(?:-(?:RS|RE) [0-9.]+ TO [0-9.]+)?|FULL REDEMPTION)$"
+)
 _OTHER_PRICE = re.compile(r"^(?:CAPITAL REDUCTION|SCHEME OF ARRANGEMENT)$")
 NON_PRICE_ALLOWLIST = frozenset(
     {
         "AGM", "ANNUAL GENERAL MEETING", "EGM", "EXTRA ORDINARY GENERAL MEETING", "INTEREST PAYMENT",
         "REDEMPTION", "STP",
+        # Debt-series and buyback purposes: no adjustment to the equity price.
+        "INT PAYMENT", "INTEREST", "BUY BACK", "BUYBACK", "BUY-BACK", "EOGM",
     }
 )
 PRICE_PART_KINDS = frozenset({"split", "consolidation", "bonus", "dividend"})
 ADJUSTABLE_KINDS = frozenset({"split", "consolidation", "bonus", "dividend", "non_price"})
 
+# Derived tables carry the classifier version. The store is append-only, so a
+# classifier change writes new tables (rebuilt from bhavcopy_ca_raw by the next
+# ingest) instead of conflicting with rows derived by the old rules. Older
+# tables stay as history and are never read.
+# Store table names allow only [a-z_], so revisions are letters (a was unsuffixed).
+CLASSIFIER_REVISION = "b"
+EVENTS_TABLE = f"corporate_action_events_rev_{CLASSIFIER_REVISION}"
+SIGHTINGS_TABLE = f"corporate_action_sightings_rev_{CLASSIFIER_REVISION}"
+
 EVENTS_DDL = (
-    "CREATE TABLE IF NOT EXISTS corporate_action_events("
+    f"CREATE TABLE IF NOT EXISTS {EVENTS_TABLE}("
     "event_id VARCHAR PRIMARY KEY, nse_symbol VARCHAR NOT NULL, ex_date DATE, record_date DATE, "
     "purpose_norm VARCHAR NOT NULL, parts_json VARCHAR NOT NULL, adjustable BOOLEAN NOT NULL, "
     "row_sha256 VARCHAR NOT NULL, source_sha256 VARCHAR NOT NULL)"
 )
 SIGHTINGS_DDL = (
-    "CREATE TABLE IF NOT EXISTS corporate_action_sightings("
+    f"CREATE TABLE IF NOT EXISTS {SIGHTINGS_TABLE}("
     "event_id VARCHAR NOT NULL, file_date DATE NOT NULL, series VARCHAR NOT NULL, "
     "source_sha256 VARCHAR NOT NULL, row_sha256 VARCHAR NOT NULL, PRIMARY KEY(event_id, file_date, series))"
 )
@@ -96,9 +114,9 @@ class DeriveOutcome:
 
 
 def ensure_ca_tables(store: PilotDataStore) -> None:
-    store.ensure_table("corporate_action_events", EVENTS_DDL, key_columns=("event_id",))
+    store.ensure_table(EVENTS_TABLE, EVENTS_DDL, key_columns=("event_id",))
     store.ensure_table(
-        "corporate_action_sightings", SIGHTINGS_DDL, key_columns=("event_id", "file_date", "series")
+        SIGHTINGS_TABLE, SIGHTINGS_DDL, key_columns=("event_id", "file_date", "series")
     )
 
 
@@ -128,7 +146,7 @@ def _classify(part: str) -> ActionPart:
     if match:
         amount = _positive(match.group(1))
         return ActionPart(kind="dividend", dividend_per_share=amount) if amount else ActionPart(kind="unknown")
-    if part.startswith("RIGHTS"):
+    if part.startswith(("RIGHTS", "RGHTS")):
         return ActionPart(kind="rights")
     if part == "DEMERGER":
         return ActionPart(kind="demerger")
@@ -136,7 +154,7 @@ def _classify(part: str) -> ActionPart:
         return ActionPart(kind="merger")
     if _OTHER_PRICE.match(part):
         return ActionPart(kind="other_price_affecting")
-    if part in NON_PRICE_ALLOWLIST:
+    if part in NON_PRICE_ALLOWLIST or _REDEMPTION_TRUNCATED.match(part) or _DEBT_PURPOSE.match(part):
         return ActionPart(kind="non_price")
     return ActionPart(kind="unknown")
 
@@ -145,7 +163,7 @@ def parse_purpose(purpose: str) -> tuple[ActionPart, ...]:
     norm = normalise_purpose(purpose).replace("/-", "")
     if not norm:
         return (ActionPart(kind="unknown"),)
-    if norm.startswith("RIGHTS"):
+    if norm.startswith(("RIGHTS", "RGHTS")):
         return (ActionPart(kind="rights"),)
     pieces = [piece.strip() for piece in re.split(r"/| \+ | AND ", norm) if piece.strip()]
     parts = [_classify(piece) for piece in pieces]
@@ -214,8 +232,8 @@ def derive_corporate_actions(store: PilotDataStore, *, workspace: Literal["india
             {"event_id": event_id, "file_date": file_date, "series": series, "source_sha256": source,
              "row_sha256": row_hash}
         )
-    event_outcome = store.append_rows("corporate_action_events", list(events.values()), check="corporate_action_events")
-    sighting_outcome = store.append_rows("corporate_action_sightings", sightings, check="corporate_action_sightings")
+    event_outcome = store.append_rows(EVENTS_TABLE, list(events.values()), check="corporate_action_events")
+    sighting_outcome = store.append_rows(SIGHTINGS_TABLE, sightings, check="corporate_action_sightings")
     return DeriveOutcome(
         events_inserted=event_outcome.inserted, events_identical=event_outcome.identical,
         sightings_inserted=sighting_outcome.inserted,
@@ -227,7 +245,7 @@ def _events_from_rows(store: PilotDataStore, rows: list[tuple]) -> tuple[Corpora
     out: list[CorporateActionEvent] = []
     for event_id, symbol, ex_date, record_date, purpose_norm, parts_json, adjustable in rows:
         seen = store.query(
-            "SELECT series, file_date, source_sha256 FROM corporate_action_sightings WHERE event_id = ? "
+            f"SELECT series, file_date, source_sha256 FROM {SIGHTINGS_TABLE} WHERE event_id = ? "
             "ORDER BY file_date, series",
             [event_id],
         )
@@ -252,7 +270,7 @@ def events_for_symbol(
     ensure_ca_tables(store)
     rows = store.query(
         "SELECT event_id, nse_symbol, ex_date, record_date, purpose_norm, parts_json, adjustable "
-        "FROM corporate_action_events WHERE nse_symbol = ? AND (ex_date IS NULL OR (ex_date >= ? AND ex_date <= ?)) "
+        f"FROM {EVENTS_TABLE} WHERE nse_symbol = ? AND (ex_date IS NULL OR (ex_date >= ? AND ex_date <= ?)) "
         "ORDER BY ex_date NULLS FIRST, purpose_norm",
         [nse_symbol, ex_from, ex_to],
     )
