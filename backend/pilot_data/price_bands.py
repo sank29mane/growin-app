@@ -61,9 +61,15 @@ SEC_LIST_DATED_URL = "https://nsearchives.nseindia.com/content/equities/sec_list
 BAND_CHANGES_URL = "https://nsearchives.nseindia.com/content/equities/eq_band_changes_{ddmmyyyy}.csv"
 SEC_LIST_HEADER = ("Symbol", "Series", "Security Name", "Band", "Remarks")
 BAND_CHANGES_HEADER = ("Sr. No", "Symbol", "Series", "Security Name", "From", "To")
+# Some changes files (e.g. 2024-07-05) add a Remarks column, which is ignored.
+BAND_CHANGES_HEADER_REMARKS = (*BAND_CHANGES_HEADER, "Remarks")
 FIXED_BAND_PERCENTS = (Decimal("2"), Decimal("5"), Decimal("10"), Decimal("20"), Decimal("40"))
 NO_BAND_TEXT = "No Band"
-BandCategory = Literal["fixed", "no_band"]
+# Both spellings occur in NSE lists (sec_list_30122021.csv has 9 "No band" rows).
+NO_BAND_SPELLINGS = (NO_BAND_TEXT, "No band")
+# not_banded appears only in changes files: a blank From (newly banded) or To 0
+# (leaving banded trading, e.g. suspended BE/BZ names). It never resolves a band.
+BandCategory = Literal["fixed", "no_band", "not_banded"]
 BandStatus = Literal["fixed", "no_band", "unknown"]
 Rule = Literal["next_session_after_file_date", "file_date"]
 MAX_LISTED_DATES = 50
@@ -176,7 +182,7 @@ class BandChangeRow(BaseModel):
 
 def parse_band_value(text: str) -> tuple[BandCategory, Decimal | None]:
     cleaned = text.strip()
-    if cleaned == NO_BAND_TEXT:
+    if cleaned in NO_BAND_SPELLINGS:
         return "no_band", None
     try:
         percent = parse_decimal(cleaned, field="band")
@@ -187,7 +193,9 @@ def parse_band_value(text: str) -> tuple[BandCategory, Decimal | None]:
     return "fixed", percent
 
 
-def _rows_of(content: bytes, header: tuple[str, ...], code: str) -> list[list[str]]:
+def _rows_of(
+    content: bytes, header: tuple[str, ...], code: str, *, also_accept: tuple[tuple[str, ...], ...] = ()
+) -> list[list[str]]:
     try:
         text = content.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
@@ -197,13 +205,14 @@ def _rows_of(content: bytes, header: tuple[str, ...], code: str) -> list[list[st
         first = tuple(cell.strip() for cell in next(reader))
     except StopIteration as exc:
         raise PilotDataError(code, "band file is empty") from exc
-    if first != header:
+    if first != header and first not in also_accept:
         raise PilotDataError(code, "band file header differs from the verified header")
+    width = len(first)
     rows = []
     for raw in reader:
         if not raw:
             continue
-        if len(raw) != len(header):
+        if len(raw) != width:
             raise PilotDataError(code, "band file row has the wrong field count")
         rows.append([cell.strip() for cell in raw])
     return rows
@@ -228,14 +237,25 @@ def parse_sec_list(content: bytes) -> tuple[BandListRow, ...]:
     return tuple(parsed)
 
 
+def _parse_change_value(text: str, *, blank_ok: bool) -> tuple[BandCategory, Decimal | None]:
+    cleaned = text.strip()
+    if (blank_ok and cleaned == "") or cleaned == "0":
+        return "not_banded", None
+    return parse_band_value(cleaned)
+
+
 def parse_band_changes(content: bytes) -> tuple[BandChangeRow, ...]:
-    rows = _rows_of(content, BAND_CHANGES_HEADER, "band_changes_schema_mismatch")
+    rows = _rows_of(content, BAND_CHANGES_HEADER, "band_changes_schema_mismatch",
+                    also_accept=(BAND_CHANGES_HEADER_REMARKS,))
+    # A day without changes is published as one "Nil" (or "NIL") row with empty fields.
+    if len(rows) == 1 and rows[0][0].casefold() == "nil" and not any(rows[0][1:]):
+        return ()
     parsed: list[BandChangeRow] = []
-    for serial, symbol, series, name, old, new in rows:
+    for serial, symbol, series, name, old, new, *_remarks in rows:
         if not serial.isdigit():
             raise PilotDataError("band_changes_schema_mismatch", "serial is not an integer")
-        from_category, from_percent = parse_band_value(old)
-        to_category, to_percent = parse_band_value(new)
+        from_category, from_percent = _parse_change_value(old, blank_ok=True)
+        to_category, to_percent = _parse_change_value(new, blank_ok=False)
         parsed.append(
             BandChangeRow(serial=int(serial), nse_symbol=symbol, series=series, security_name=name,
                           from_category=from_category, from_percent=from_percent, to_category=to_category,
@@ -346,6 +366,12 @@ def fetch_band_files(store: PilotDataStore, http: NseHttp, file_date: date, *, w
         try:
             fetched = http.fetch(url, expect="csv")
         except PilotDataError as exc:
+            if exc.code == "nse_empty_file":
+                # Published but empty: settled as no usable file, never retried or guessed.
+                _log(store, file_date=file_date, kind=kind, outcome="no_file", status=200, code=exc.code,
+                     source=None, url=url)
+                outcomes[kind] = "no_file"
+                continue
             _log(store, file_date=file_date, kind=kind, outcome="failed", status=None, code=exc.code, source=None,
                  url=url)
             outcomes[kind] = "failed"
@@ -636,6 +662,9 @@ class BandResolver:
                                                             "actual_from": f"{old[0]}:{old[1]}"})
                     return unknown("band_change_from_mismatch", symbol, series, basis.sources)
                 current = new
+        if current[0] == "not_banded":
+            # Left banded trading (To 0, e.g. suspended): there is no band to report.
+            return unknown("band_not_banded", symbol, series, basis.sources)
         return BandObservation(
             isin=isin, session=session, status=current[0], percent=current[1], nse_symbol=symbol, series=series,
             source_kind=basis.kind, source_sha256s=basis.sources, reason=None,
