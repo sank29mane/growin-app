@@ -31,19 +31,37 @@ def test_invalid_isins_fail(isin):
     assert not is_valid_isin(isin)
 
 
-# Real NSE DVR ISINs (Future Enterprises, Jain Irrigation, Tata Motors); IN9 prefix, valid ISO 6166 check digit.
-DVR = ["IN9623B01058", "IN9175A01010", "IN9155A01020"]
+# IN9 ISINs present in the ICICI security master: two DVRs (TATAMTRDVR, JISLDVREQS) and a non-DVR IN9
+# (GUJNREDVR preference share), so IN9 is accepted by prefix and check digit, not by instrument type.
+DVR = ["IN9155A01020", "IN9175A01010"]
+IN9_NON_DVR = "IN9110D01011"
+IN9_ALL = [*DVR, IN9_NON_DVR]
 
 
-@pytest.mark.parametrize("isin", DVR)
-def test_dvr_in9_isins_pass(isin):
+def flip_check_digit(isin: str) -> str:
+    return isin[:-1] + str((int(isin[-1]) + 1) % 10)
+
+
+@pytest.mark.parametrize("isin", IN9_ALL)
+def test_in9_isins_pass(isin):
     assert is_valid_isin(isin)
 
 
-@pytest.mark.parametrize("isin", ["IN9623B01059", "IN9175A01011", "IN9155A01021", "IN9155A0102", "IN9155A010200",
-                                  "in9155a01020", "IN8155A01020", "IN7155A01020", "IN0155A01020", "INA155A01020"])
-def test_in9_with_bad_check_digit_or_other_prefix_fails(isin):
+@pytest.mark.parametrize("isin", [flip_check_digit(i) for i in IN9_ALL])
+def test_in9_with_bad_check_digit_fails(isin):
     assert not is_valid_isin(isin)
+
+
+@pytest.mark.parametrize("isin", ["IN9155A0102", "IN9155A010200", "in9155a01020", "IN8155A01020", "IN7155A01020",
+                                  "IN0155A01020", "INA155A01020"])
+def test_in9_wrong_length_case_or_other_prefix_fails(isin):
+    assert not is_valid_isin(isin)
+
+
+@pytest.mark.parametrize("isin", ["IN9155A01020\n", "INE002A01018\n", " IN9155A01020", "IN9155A01020 ",
+                                  "\nINE002A01018", "IN9155A01020\r\n"])
+def test_surrounding_whitespace_is_invalid_and_never_raises(isin):
+    assert is_valid_isin(isin) is False
 
 
 def test_non_string_isin_is_invalid():
@@ -69,14 +87,20 @@ def test_listed_security_rejects_invalid_isin(isin):
         security(isin=isin)
 
 
-@pytest.mark.parametrize("isin", DVR)
-def test_listed_security_accepts_dvr_isin(isin):
+@pytest.mark.parametrize("isin", IN9_ALL)
+def test_listed_security_accepts_in9_isin(isin):
     assert security(symbol="TATAMTRDVR", isin=isin).key == f"india:NSE:CASH:{isin}:EQ"
 
 
-def test_listed_security_rejects_dvr_isin_with_bad_check_digit():
+def test_listed_security_rejects_in9_isin_with_bad_check_digit():
     with pytest.raises(ValidationError, match="invalid ISIN"):
-        security(symbol="TATAMTRDVR", isin="IN9155A01021")
+        security(symbol="TATAMTRDVR", isin=flip_check_digit("IN9155A01020"))
+
+
+@pytest.mark.parametrize("raw", ["IN9155A01020\n", " INE002A01018 "])
+def test_listed_security_strips_whitespace_before_validating(raw):
+    # str_strip_whitespace runs before the ISIN validator, so padded input is accepted and stored stripped.
+    assert security(isin=raw).isin == raw.strip()
 
 
 def test_listed_security_requires_workspace_and_is_frozen():

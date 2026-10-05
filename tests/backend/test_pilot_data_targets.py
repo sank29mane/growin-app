@@ -45,6 +45,9 @@ def etf_isin(n: int) -> str:
     return isin_with_prefix("INF", n)
 
 
+IN9_ISIN = "IN9155A01020"
+
+
 def desc(kind: str, source="local_file", locator="fixture") -> SourceDescriptor:
     return SourceDescriptor(source=source, kind=kind, locator=locator, fetched_at=FETCHED)
 
@@ -81,6 +84,8 @@ def populate(store, *, days=60, with_lists=True, with_master=True):
     master_rows[1] = dict(master_rows[1], ExchangeCode="OTHERSYM")  # member 3: symbol differs from list
     for index, (name, (isin, _)) in enumerate(ETFS.items()):
         master_rows.append(kit.master_row(9000 + index, name, "EQ", f"{name} ETF", "0.01", "10", isin, name))
+    # An IN9 (DVR) line with a live token and ETF-passing turnover must never become a liquid-ETF candidate.
+    master_rows.append(kit.master_row(9500, "TATADVR", "EQ", "TATA MOTORS DVR", "0.01", "2", IN9_ISIN, "TATAMTRDVR"))
     master_rows.append(kit.master_row(0, "DEADETF", "EQ", "Dead ETF", "0.01", "10", etf_isin(9), "DEADETF"))
     if with_master:
         ingest_security_master(store, desc("security_master"), kit.security_master_bytes(master_rows),
@@ -90,6 +95,8 @@ def populate(store, *, days=60, with_lists=True, with_master=True):
                           kit.index_list_csv(list_members + [kit.DUMMY_INDEX_ROW]), list_name="nifty500")
     for index, day in enumerate(trading_dates(days)):
         rows = [kit.udiff_row("SYM9", "EQ", stock_isin(500 + 9), "10", "11", "9", "10", trade_date=day)]
+        rows.append(kit.udiff_row("TATAMTRDVR", "EQ", IN9_ISIN, "100", "101", "99", "100", trade_date=day,
+                                  value="90000000.00"))
         for name, (isin, pattern) in ETFS.items():
             value = pattern(index)
             if value is not None:
@@ -146,6 +153,13 @@ def test_etf_liquidity_boundary_and_d7_observation_rules(built):
     assert mix.eligibility_median == Decimal("10000000") and mix.known_median == Decimal("90000000")
     assert mix.known_dates == 40
     assert ETF_MIN_MEDIAN_TRADED_VALUE == Decimal("50000000")
+
+
+def test_in9_isin_is_not_a_liquid_etf_candidate(built):
+    assert is_valid_isin(IN9_ISIN)
+    names = {m.nse_symbol for m in built.members} | {r.nse_symbol for r in built.etf_rejected}
+    assert "TATAMTRDVR" not in names
+    assert IN9_ISIN not in {m.anchor_isin for m in built.members}
 
 
 def test_dead_token_etfs_are_not_candidates(built):

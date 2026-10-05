@@ -206,6 +206,21 @@ def test_series_and_missing_bar_rules(store):
     assert decision(result, world, "NOBAR").reasons == ("no_bar_on_date",)
 
 
+def test_in9_isins_follow_the_same_series_rules_as_ine(store):
+    def last_day(series):
+        return lambda day: {"close": "100.00", "value": "100000000.00", "series": series if day == D else "EQ"}
+
+    world = World(store, {"DVREQ": steady(), "DVRBE": last_day("BE"), "DVRBZ": last_day("BZ")})
+    world.isins.update({"DVREQ": "IN9155A01020", "DVRBE": "IN9175A01010", "DVRBZ": "IN9110D01011"})
+    world.load(SESSIONS)
+    surveil(store, D)
+    result = world.evaluate()
+    assert decision(result, world, "DVREQ").eligible and decision(result, world, "DVREQ").reasons == ()
+    assert decision(result, world, "DVRBE").reasons == ("trade_for_trade",)
+    assert decision(result, world, "DVRBZ").reasons == ("trade_for_trade",)
+    assert result.eligible_isins == ("IN9155A01020",)
+
+
 # ------------------------------------------------------------------ D7
 def test_d7_known_session_count_and_unknown_never_zero(store):
     world = build(store, {"K39": windowed(lambda i: None if i < 21 else "100000000.00")})

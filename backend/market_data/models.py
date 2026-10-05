@@ -196,13 +196,15 @@ class MarketSnapshot(BaseModel):
         return sha256(payload).hexdigest()
 
 
-# INE = equities, INF = funds/ETFs, IN9 = differential-voting-rights (DVR) shares (FELDVR, TATAMTRDVR).
-_ISIN_SHAPE = re.compile(r"^IN[EF9][A-Z0-9]{8}[0-9]$")
+# INE = equities, INF = funds/ETFs. IN9 includes DVR ISINs (and other issuer-type-9 instruments); this checks
+# shape and check digit only and does not classify instrument type. Used with fullmatch: `$` would accept a
+# trailing newline.
+_ISIN_SHAPE = re.compile(r"IN[EF9][A-Z0-9]{8}[0-9]")
 
 
 def is_valid_isin(value: str) -> bool:
     """Format check plus the ISO 6166 check digit (letters map to 10..35, then Luhn)."""
-    if not isinstance(value, str) or not _ISIN_SHAPE.match(value):
+    if not isinstance(value, str) or not _ISIN_SHAPE.fullmatch(value):
         return False
     digits = "".join(str(int(char, 36)) for char in value)
     total = 0

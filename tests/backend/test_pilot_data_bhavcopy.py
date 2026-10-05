@@ -227,6 +227,25 @@ def test_consistency_records_every_disagreement(store):
     assert mismatch.detail["fields"] == "close"
 
 
+def test_in9_isin_is_checked_like_any_other_in_bhavcopy_consistency(store):
+    ingest_udiff(
+        store, desc("udiff_cm"),
+        kit.udiff_zip(
+            D,
+            [
+                u("DVRGOOD", "EQ", "IN9155A01020", "100", "110", "90", "105"),
+                u("DVRBAD", "EQ", "IN9155A01021", "100", "110", "90", "105"),
+                u("DVRBE", "BE", "IN9175A01010", "100", "110", "90", "105"),
+                u("DVRBEBAD", "BE", "IN9175A01011", "100", "110", "90", "105"),
+            ],
+        ),
+        trade_date=D,
+    )
+    records = check_same_date_consistency(store, D, workspace="india")
+    assert reasons(records) == sorted([("isin_invalid", "DVRBAD"), ("isin_invalid", "DVRBEBAD")])
+    assert {r.isin for r in records} == {"IN9155A01021", "IN9175A01011"}
+
+
 def test_consistency_rerun_inserts_nothing_new(store):
     consistency_store(store)
     check_same_date_consistency(store, D, workspace="india")
