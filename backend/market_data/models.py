@@ -196,7 +196,8 @@ class MarketSnapshot(BaseModel):
         return sha256(payload).hexdigest()
 
 
-_ISIN_SHAPE = re.compile(r"^IN[EF][A-Z0-9]{8}[0-9]$")
+# INE = equities, INF = funds/ETFs, IN9 = differential-voting-rights (DVR) shares (FELDVR, TATAMTRDVR).
+_ISIN_SHAPE = re.compile(r"^IN[EF9][A-Z0-9]{8}[0-9]$")
 
 
 def is_valid_isin(value: str) -> bool:

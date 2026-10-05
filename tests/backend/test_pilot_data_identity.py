@@ -31,6 +31,21 @@ def test_invalid_isins_fail(isin):
     assert not is_valid_isin(isin)
 
 
+# Real NSE DVR ISINs (Future Enterprises, Jain Irrigation, Tata Motors); IN9 prefix, valid ISO 6166 check digit.
+DVR = ["IN9623B01058", "IN9175A01010", "IN9155A01020"]
+
+
+@pytest.mark.parametrize("isin", DVR)
+def test_dvr_in9_isins_pass(isin):
+    assert is_valid_isin(isin)
+
+
+@pytest.mark.parametrize("isin", ["IN9623B01059", "IN9175A01011", "IN9155A01021", "IN9155A0102", "IN9155A010200",
+                                  "in9155a01020", "IN8155A01020", "IN7155A01020", "IN0155A01020", "INA155A01020"])
+def test_in9_with_bad_check_digit_or_other_prefix_fails(isin):
+    assert not is_valid_isin(isin)
+
+
 def test_non_string_isin_is_invalid():
     assert not is_valid_isin(None)  # type: ignore[arg-type]
 
@@ -52,6 +67,16 @@ def test_listed_security_accepts_valid_isin_and_builds_key():
 def test_listed_security_rejects_invalid_isin(isin):
     with pytest.raises(ValidationError, match="invalid ISIN"):
         security(isin=isin)
+
+
+@pytest.mark.parametrize("isin", DVR)
+def test_listed_security_accepts_dvr_isin(isin):
+    assert security(symbol="TATAMTRDVR", isin=isin).key == f"india:NSE:CASH:{isin}:EQ"
+
+
+def test_listed_security_rejects_dvr_isin_with_bad_check_digit():
+    with pytest.raises(ValidationError, match="invalid ISIN"):
+        security(symbol="TATAMTRDVR", isin="IN9155A01021")
 
 
 def test_listed_security_requires_workspace_and_is_frozen():
