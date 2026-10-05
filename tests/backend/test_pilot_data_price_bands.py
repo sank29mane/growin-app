@@ -266,6 +266,112 @@ def test_disagreeing_consecutive_lists_and_changes_are_a_conflict(store):
     assert band(store, RELIANCE, S3).percent == Decimal("5")
 
 
+def change(symbol, old, new, series="EQ"):
+    return {"Symbol": symbol, "Series": series, "Security Name": symbol, "From": old, "To": new}
+
+
+def extra(symbol, value):
+    return dict(kit.SEC_LIST_CANBK, Symbol=symbol, **{"Security Name": symbol, "Band": value})
+
+
+def row_conflict_world(store, *, agreeing=2, conflicting=1):
+    """S2's lists and changes agree on every row except RELIANCE (and any further conflicting rows).
+
+    S3 has no list, so it is bridged from S2's list by an empty changes file. S4 and S5 have lists.
+    """
+    bars(store)
+    with_convention(store)
+    movers = [f"XA{i}" for i in range(agreeing)]
+    breakers = [f"XB{i}" for i in range(conflicting - 1)]
+    before = [*STANDARD, *(extra(s, "20") for s in movers + breakers)]
+    after = [dict(kit.SEC_LIST_RELIANCE, Band="10"), kit.SEC_LIST_CANBK, kit.SEC_LIST_AGSTRA,
+             *(extra(s, "10") for s in movers + breakers)]
+    lists = {S1: put_list(store, F0, rows=before), S2: put_list(store, S1, rows=after)}
+    changes = put_changes(store, S1, [change("RELIANCE", "No Band", "20"),  # the newer list says 10
+                                      *(change(s, "20", "10") for s in movers),
+                                      *(change(s, "20", "5") for s in breakers)])
+    bridge = put_changes(store, S2, [])  # S3: no list, nothing moves
+    put_list(store, S3, rows=after)
+    put_list(store, S4, rows=after)
+    return lists, changes, bridge
+
+
+def test_a_small_cross_check_conflict_is_confined_to_its_row_and_what_depends_on_it(store):
+    lists, changes, bridge = row_conflict_world(store)
+    evidence = (lists[S1].source_sha256, lists[S2].source_sha256, changes.source_sha256)
+    got = band(store, RELIANCE, S2)
+    assert (got.status, got.reason, got.nse_symbol, got.series) == (
+        "unknown", "band_crosscheck_row_conflict", "RELIANCE", "EQ")
+    assert got.source_sha256s == evidence
+    neighbour = band(store, CANBK, S2)
+    assert (neighbour.status, neighbour.source_kind) == ("no_band", "list")
+    # S3 is bridged from S2's list, so the conflicting row stays unknown there and carries the bridge file too
+    bridged = band(store, RELIANCE, S3)
+    assert (bridged.status, bridged.reason) == ("unknown", "band_crosscheck_row_conflict")
+    assert bridged.source_sha256s == (*evidence, bridge.source_sha256)
+    assert (band(store, CANBK, S3).status, band(store, CANBK, S3).source_kind) == ("no_band", "changes_chain")
+    # S4 has its own list and no conflicting changes file: RELIANCE resolves again
+    assert (band(store, RELIANCE, S4).status, band(store, RELIANCE, S4).percent) == ("fixed", Decimal("10"))
+    stored = store.query(
+        "SELECT DISTINCT reason_code, nse_symbol, series, date_from, detail_json FROM quarantine_records "
+        "WHERE check_name = 'price_band'")
+    assert [row[:4] for row in stored] == [("band_crosscheck_row_conflict", "RELIANCE", "EQ", S2)]
+    assert json.loads(stored[0][4]) == {"list_before": "no_band", "list_after": "fixed:10.00",
+                                        "changes": "no_band>fixed:20.00"}
+
+
+def test_a_row_level_conflict_does_not_block_but_is_reported_row_by_row(store):
+    lists, changes, bridge = row_conflict_world(store)
+    report = coverage(store)
+    assert report.phase62_blocked is False and report.blocked_reasons == ()
+    assert report.unknown_by_reason == {"band_crosscheck_row_conflict": 2}
+    assert report.unsupported_sessions == () and report.row_conflict_sessions == (S2, S3)
+    assert report.target_unknown_counts == {"RELIND": 2}
+    assert [(u.stock_code, u.isin, u.session, u.reason) for u in report.unavailable_bands] == [
+        ("RELIND", RELIANCE, S2, "band_crosscheck_row_conflict"), ("RELIND", RELIANCE, S3, "band_crosscheck_row_conflict")]
+    assert report.unavailable_bands[1].source_sha256s[-1] == bridge.source_sha256
+    assert len(report.nonblocking_reasons) == 1 and "band_crosscheck_row_conflict" in report.nonblocking_reasons[0]
+    assert report.fixed_count + report.no_band_count + report.unknown_count == 10
+
+
+@pytest.mark.parametrize("agreeing, conflicting", [(0, 1), (1, 1), (9, 4)])
+def test_a_conflict_whose_scope_is_not_proven_blocks_the_session_and_its_bridges(store, agreeing, conflicting):
+    row_conflict_world(store, agreeing=agreeing, conflicting=conflicting)
+    for session in (S2, S3):  # S3 is bridged from S2's list
+        got = band(store, CANBK, session)
+        assert (got.status, got.reason) == ("unknown", "band_crosscheck_conflict")
+    report = coverage(store)
+    assert report.phase62_blocked is True and report.unsupported_sessions == (S2, S3)
+    assert report.blocked_reasons[0].startswith("band_crosscheck_conflict: 2 sessions")
+    assert report.unknown_by_reason == {"band_crosscheck_conflict": 4} and report.unavailable_bands == ()
+
+
+def test_only_classified_row_defects_are_nonblocking():
+    from pilot_data.price_bands import NONBLOCKING_ROW_DEFECTS
+
+    # Widening this set changes what Phase 62 may run on: it needs an amendment to 59-10 and 62-CONTEXT.
+    assert NONBLOCKING_ROW_DEFECTS == frozenset({"band_crosscheck_row_conflict", "not_in_band_list"})
+
+
+def test_a_symbol_absent_from_the_list_flows_but_a_from_mismatch_blocks(tmp_path):
+    with PilotDataStore(tmp_path / "absent", workspace="india") as absent:
+        bars(absent)
+        with_convention(absent)
+        for session in SESS:
+            put_list(absent, FILE_FOR[session], rows=[kit.SEC_LIST_RELIANCE, kit.SEC_LIST_AGSTRA])
+        report = coverage(absent)
+        assert report.phase62_blocked is False and report.unknown_by_reason == {"not_in_band_list": 5}
+        assert {u.stock_code for u in report.unavailable_bands} == {"CANBAN"} and len(report.unavailable_bands) == 5
+    with PilotDataStore(tmp_path / "mismatch", workspace="india") as mismatch:
+        bars(mismatch)
+        with_convention(mismatch)
+        put_list(mismatch, F0)
+        put_changes(mismatch, S1, [change("RELIANCE", "10", "20")])  # From disagrees with the baseline
+        report = build_band_coverage(mismatch, start=S1, end=S2, targets=TARGETS, workspace="india")
+        assert report.unknown_by_reason == {"band_change_from_mismatch": 1} and report.phase62_blocked is True
+        assert report.unavailable_bands == ()
+
+
 def test_todays_bands_are_never_substituted_for_a_historical_date(store):
     late = date(2026, 10, 1)
     session = date(2026, 9, 30)
@@ -365,11 +471,11 @@ def test_report_hash_is_stable_and_follows_the_band_rows(tmp_path):
         assert coverage(two).fixed_count == 1  # only RELIANCE on S3 has a fixed band
 
 
-def test_block_deal_and_t0_bars_do_not_make_the_band_ambiguous(store):
-    # NSE lists never carry BL or T0; a block deal on the stock's ISIN used to
-    # turn the session unknown (band_isin_ambiguous).
+def test_block_deal_t0_and_buyback_bars_do_not_make_the_band_ambiguous(store):
+    # NSE lists never carry BL, T0 or BO; a block deal or a buyback window on the
+    # stock's ISIN used to turn the session unknown (band_isin_ambiguous).
     bars(store, instruments=[("RELIANCE", "EQ", RELIANCE), ("RELIANCE", "BL", RELIANCE), ("CANBK", "EQ", CANBK),
-                             ("CANBK", "T0", CANBK), ("AGSTRA", "BZ", AGSTRA)])
+                             ("CANBK", "T0", CANBK), ("CANBK", "BO", CANBK), ("AGSTRA", "BZ", AGSTRA)])
     with_convention(store)
     for session in SESS:
         put_list(store, FILE_FOR[session])
