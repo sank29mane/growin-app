@@ -153,6 +153,48 @@ def test_saturday_404_is_weekend_after_one_request_and_200_triggers_primary(stor
     assert udiff_url(SUN) in special.calls
 
 
+def _misdated_pr(real_day: date) -> bytes:
+    # A zip whose members are dated real_day, served under another date's URL.
+    return kit.pr_zip(real_day, [kit.pd_index_row()], [], [])
+
+
+def test_saturday_with_a_misdated_pr_and_no_primaries_is_weekend(store):
+    # Real case: PR060424.zip (Saturday 6 April 2024) holds the 4 June 2024 members.
+    sat = date(2024, 4, 6)
+    site = Site()
+    site.routes[pr_zip_url(sat)] = _misdated_pr(date(2024, 6, 4))
+    outcome = ingest_day(store, site.http(), sat, workspace="india", clock=lambda: at(date(2024, 4, 8)))
+    assert outcome.failed  # the PR attempt itself is still recorded as failed
+    assert site.calls == [pr_zip_url(sat), udiff_url(sat), cm_legacy_url(sat)]
+    assert day_status(store, sat) == "weekend_no_session"
+
+
+def test_saturday_with_a_misdated_pr_but_a_bhavcopy_is_a_session(store):
+    sat = date(2024, 4, 6)
+    site = Site()
+    site.routes[pr_zip_url(sat)] = _misdated_pr(date(2024, 6, 4))
+    site.udiff(sat)
+    ingest_day(store, site.http(), sat, workspace="india", clock=lambda: at(date(2024, 4, 8)))
+    assert day_status(store, sat) == "session"
+
+
+def test_saturday_with_a_misdated_pr_checked_same_day_stays_unsettled(store):
+    sat = date(2024, 4, 6)
+    site = Site()
+    site.routes[pr_zip_url(sat)] = _misdated_pr(date(2024, 6, 4))
+    ingest_day(store, site.http(), sat, workspace="india", clock=lambda: at(sat))
+    assert day_status(store, sat) not in {"weekend_no_session", "holiday", "session"}
+
+
+def test_saturday_pr_transport_failure_stays_unknown_without_primary_requests(store):
+    sat = date(2024, 4, 6)
+    site = Site()
+    site.routes[pr_zip_url(sat)] = 503
+    ingest_day(store, site.http(), sat, workspace="india", clock=lambda: at(date(2024, 4, 8)))
+    assert udiff_url(sat) not in site.calls
+    assert day_status(store, sat) == "unknown"
+
+
 def test_pr_200_with_both_primaries_404_is_inconsistent(store):
     site = Site()
     site.pr(TUE)

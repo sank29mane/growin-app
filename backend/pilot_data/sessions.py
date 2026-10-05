@@ -68,6 +68,13 @@ def _status_from(day: date, attempts: dict[str, tuple[str, date]] | None) -> Day
             return "weekend_no_session" if pr[1] > day else "pending"
         if pr[0] == "ingested":
             return _after_pr_ingested(attempts)
+        # A failed weekend PR settles nothing by itself. Primaries are only asked
+        # for after a misdated PR zip; both confirmed absent after the day means
+        # no weekend session.
+        if pr[0] == "failed" and all(
+            kind in attempts and attempts[kind][0] == "no_file" and attempts[kind][1] > day for kind in PRIMARY_KINDS
+        ):
+            return "weekend_no_session"
         return "unknown"
     if pr is not None and pr[0] == "ingested":
         return _after_pr_ingested(attempts)
