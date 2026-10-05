@@ -142,6 +142,10 @@ class NseHttp:
 
     @staticmethod
     def _validate(body: bytes, expect: str) -> None:
+        if not body:
+            # NSE sometimes publishes a 0-byte archive file (sec_list_09122021.csv).
+            # Its own code lets a caller record "published empty" without guessing.
+            raise PilotDataError("nse_empty_file", "200 body is empty")
         ok = False
         if expect == "zip":
             ok = body.startswith(ZIP_MAGIC)

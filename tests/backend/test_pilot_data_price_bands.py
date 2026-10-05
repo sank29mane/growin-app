@@ -10,6 +10,7 @@ import pytest
 
 from pilot_data.bhavcopy import ingest_udiff
 from pilot_data.core import PilotDataError, SourceDescriptor, standard_caveats, utc_naive
+from pilot_data.nse_http import NseHttp
 from pilot_data.nse_ingest import _log_attempt
 from pilot_data.price_bands import (
     BAND_CHANGES_URL,
@@ -21,6 +22,7 @@ from pilot_data.price_bands import (
     current_band_convention,
     ingest_band_changes,
     ingest_band_list,
+    ingest_range,
     main,
     parse_band_changes,
     parse_band_value,
@@ -107,7 +109,8 @@ def test_parse_band_value_is_a_closed_set():
     assert parse_band_value("20") == ("fixed", Decimal("20"))
     assert parse_band_value("5") == ("fixed", Decimal("5"))
     assert parse_band_value("No Band") == ("no_band", None)
-    for bad in ("15", "", "-", "No band ", "20.5", "NO BAND", "abc"):
+    assert parse_band_value("No band") == ("no_band", None)  # the second spelling NSE publishes
+    for bad in ("15", "", "-", "20.5", "NO BAND", "no band", "abc"):
         with pytest.raises(PilotDataError) as caught:
             parse_band_value(bad)
         assert caught.value.code == "band_value_unrecognized"
@@ -511,3 +514,51 @@ def test_cli_exit_codes_for_unblocked_coverage_and_errors(tmp_path, capsys):
     assert main(["coverage", "--root", str(tmp_path / "none"), "--workspace", "india", "--start", S1.isoformat(),
                  "--end", S5.isoformat()]) == 2
     assert json.loads(capsys.readouterr().out)["error_code"] == "target_universe_missing"
+
+
+# ------------------------------------------------- real NSE variants seen in the five-year band run (2021-2026)
+def test_nil_changes_file_means_no_changes():
+    assert parse_band_changes(b"Sr. No,Symbol,Series,Security Name,From,To\r\nNil,,,,,\r\n") == ()
+    assert parse_band_changes(b"Sr. No,Symbol,Series,Security Name,From,To\r\nNIL,,,,,\r\n") == ()
+    with pytest.raises(PilotDataError):  # a Nil row that carries data is not a no-change file
+        parse_band_changes(b"Sr. No,Symbol,Series,Security Name,From,To\nNil,X,EQ,X,5,10\n")
+
+
+def test_changes_file_with_a_remarks_column_parses():
+    content = (b"Sr. No,Symbol,Series,Security Name,From,To,Remarks\n"
+               b"1,GRPLTD,BE,GRP LIMITED,10,5,ASM\n2,MOTOGENFIN,EQ,THE MOTOR & GENERAL FINANCE LIMITED,10,5,Daily PB\n")
+    rows = parse_band_changes(content)
+    assert [(r.nse_symbol, r.from_percent, r.to_percent) for r in rows] == [
+        ("GRPLTD", Decimal("10"), Decimal("5")), ("MOTOGENFIN", Decimal("10"), Decimal("5"))]
+
+
+def test_blank_from_and_zero_to_are_not_banded():
+    content = (b"Sr. No,Symbol,Series,Security Name,From,To\n"
+               b"1,BLUECHIP,BE,BLUE CHIP INDIA LIMITED,,2\n2,GFSTEELS,BE,GRAND FOUNDRY LIMITED,5,0\n")
+    entering, leaving = parse_band_changes(content)
+    assert (entering.from_category, entering.to_category, entering.to_percent) == ("not_banded", "fixed", Decimal("2"))
+    assert (leaving.from_category, leaving.to_category, leaving.to_percent) == ("fixed", "not_banded", None)
+    with pytest.raises(PilotDataError):  # a blank To is not a valid move
+        parse_band_changes(b"Sr. No,Symbol,Series,Security Name,From,To\n1,X,EQ,X,5,\n")
+
+
+def test_lower_case_no_band_in_a_list_is_no_band():
+    content = b'Symbol,Series,Security Name,Band,Remarks\nABC,EQ,ABC LTD,No band,"-"\nDEF,EQ,DEF LTD,No Band,"-"\n'
+    assert [r.category for r in parse_sec_list(content)] == ["no_band", "no_band"]
+
+
+def test_an_empty_published_list_is_settled_and_not_retried(tmp_path):
+    root = tmp_path / "root"
+    with PilotDataStore(root, workspace="india") as store:
+        bars(store)
+        routes = {SEC_LIST_DATED_URL.format(ddmmyyyy=ddmmyyyy(S1)): b"",
+                  BAND_CHANGES_URL.format(ddmmyyyy=ddmmyyyy(S1)): kit.band_changes_csv([])}
+        client = mock_client(routes)
+        http = NseHttp(client, min_interval_seconds=0.0)
+        first = ingest_range(store, http, S1, S1, workspace="india", min_free_bytes=0)
+        assert first["failed"] == 0
+        assert store.query("SELECT file_kind, outcome, error_code FROM price_band_fetch_log ORDER BY file_kind") == [
+            ("changes", "ingested", None), ("list", "no_file", "nse_empty_file")]
+        calls = len(client.calls)
+        assert ingest_range(store, http, S1, S1, workspace="india", min_free_bytes=0)["skipped_final"] == 1
+        assert len(client.calls) == calls
