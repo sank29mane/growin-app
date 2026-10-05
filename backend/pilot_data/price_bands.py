@@ -237,6 +237,15 @@ def parse_sec_list(content: bytes) -> tuple[BandListRow, ...]:
     return tuple(parsed)
 
 
+def _is_nil_changes_file(content: bytes) -> bool:
+    try:
+        lines = content.decode("utf-8-sig").splitlines()
+    except UnicodeDecodeError:
+        return False
+    data = [line for line in lines[1:] if line.strip()]
+    return len(data) == 1 and data[0].replace(",", " ").strip().casefold() == "nil"
+
+
 def _parse_change_value(text: str, *, blank_ok: bool) -> tuple[BandCategory, Decimal | None]:
     cleaned = text.strip()
     if (blank_ok and cleaned == "") or cleaned == "0":
@@ -245,11 +254,14 @@ def _parse_change_value(text: str, *, blank_ok: bool) -> tuple[BandCategory, Dec
 
 
 def parse_band_changes(content: bytes) -> tuple[BandChangeRow, ...]:
+    # A day without changes is published as one "Nil"/"NIL" line: "Nil,,,,," or a bare
+    # "Nil" with optional trailing spaces (Jan-Mar 2023). The header is still checked.
+    if _is_nil_changes_file(content):
+        _rows_of(content.splitlines()[0] + b"\n", BAND_CHANGES_HEADER, "band_changes_schema_mismatch",
+                 also_accept=(BAND_CHANGES_HEADER_REMARKS,))
+        return ()
     rows = _rows_of(content, BAND_CHANGES_HEADER, "band_changes_schema_mismatch",
                     also_accept=(BAND_CHANGES_HEADER_REMARKS,))
-    # A day without changes is published as one "Nil" (or "NIL") row with empty fields.
-    if len(rows) == 1 and rows[0][0].casefold() == "nil" and not any(rows[0][1:]):
-        return ()
     parsed: list[BandChangeRow] = []
     for serial, symbol, series, name, old, new, *_remarks in rows:
         if not serial.isdigit():
