@@ -520,6 +520,11 @@ def test_cli_exit_codes_for_unblocked_coverage_and_errors(tmp_path, capsys):
 def test_nil_changes_file_means_no_changes():
     assert parse_band_changes(b"Sr. No,Symbol,Series,Security Name,From,To\r\nNil,,,,,\r\n") == ()
     assert parse_band_changes(b"Sr. No,Symbol,Series,Security Name,From,To\r\nNIL,,,,,\r\n") == ()
+    # Jan-Mar 2023 form: a bare "Nil" with no commas, sometimes with trailing spaces.
+    assert parse_band_changes(b"Sr. No,Symbol,Series,Security Name,From,To\nNil      ") == ()
+    assert parse_band_changes(b"Sr. No,Symbol,Series,Security Name,From,To\r\nNil\r\n") == ()
+    with pytest.raises(PilotDataError):  # the header is still verified on a Nil file
+        parse_band_changes(b"Sr. No,Symbol,Series,Name,From,To\nNil\n")
     with pytest.raises(PilotDataError):  # a Nil row that carries data is not a no-change file
         parse_band_changes(b"Sr. No,Symbol,Series,Security Name,From,To\nNil,X,EQ,X,5,10\n")
 
