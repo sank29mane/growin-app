@@ -14,7 +14,9 @@ Money, prices and ratios are ``Decimal`` built from strings. Trigger edges are
 inclusive, as in Phase 62's ``update_risk``. Ticks come from the Mac's own resolver,
 ``costs.ticks.resolve_nse_cash_tick``, never from the VM's vendored copy. The band
 reference is ``Quote.tick_reference`` (the previous month's last close), not the
-quote's ``previous_close``; a missing or zero one is ``tick_reference_unavailable``.
+quote's ``previous_close``. It must carry ``Quote.tick_reference_month`` in the calendar
+month before the session date; a missing, zero, undated, stale or wrong-month one is
+``tick_reference_unavailable``.
 """
 
 from __future__ import annotations
@@ -175,6 +177,12 @@ class Quote:
     # calendar month (or the exchange's dated tick reference). It comes from a separate
     # source than the quote, and None means that source could not supply it (fail closed).
     tick_reference: Decimal | None = None
+    # The date the reference is a close of: any date in its calendar month (the last
+    # trading day is the natural value). It must fall in the calendar month BEFORE the
+    # order's session date, which is how the VM keys the reference,
+    # ``band_reference(isin, session_date)``. None, a stale cached value from an earlier
+    # month, or a current-month value all fail closed as tick_reference_unavailable.
+    tick_reference_month: date | None = None
     bid: Decimal | None = None  # best bid at the quote time; a sell is measured against it
     ask: Decimal | None = None  # best ask at the quote time; a buy is measured against it
 
@@ -250,8 +258,19 @@ def position_costs(account: Account, ledger_cost: Mapping[str, Decimal]) -> dict
     return costs
 
 
-def _tick_reference_usable(reference: Decimal | None) -> bool:
-    return isinstance(reference, Decimal) and reference.is_finite() and reference > ZERO
+def previous_month(session: date) -> tuple[int, int]:
+    """(year, month) of the calendar month before ``session``; January rolls to the prior December."""
+    return (session.year - 1, 12) if session.month == 1 else (session.year, session.month - 1)
+
+
+def _tick_reference_usable(quote: Quote, session: date) -> bool:
+    """A positive finite reference that is dated, and dated to the previous calendar month."""
+    reference, month = quote.tick_reference, quote.tick_reference_month
+    if not (isinstance(reference, Decimal) and reference.is_finite() and reference > ZERO):
+        return False
+    if not isinstance(month, date):
+        return False  # undated: nothing says which month this close is from
+    return (month.year, month.month) == previous_month(session)
 
 
 def _on_tick(quote: Quote, session: date, price: Decimal) -> bool:
@@ -324,7 +343,7 @@ def evaluate(
         elif quote.series not in SUPPORTED_SERIES:
             codes.append("instrument_unsupported")
         else:
-            if not _tick_reference_usable(quote.tick_reference):
+            if not _tick_reference_usable(quote, now_ist.date()):
                 codes.append("tick_reference_unavailable")  # never a guess from previous_close
             elif not _on_tick(quote, now_ist.date(), price):
                 codes.append("off_tick")

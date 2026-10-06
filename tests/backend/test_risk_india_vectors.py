@@ -19,6 +19,7 @@ import pytest
 from costs.core import InputError
 from costs.ticks import InstrumentClass
 from risk_india import rules
+from risk_india_support import reference_month_for
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "tests" / "backend" / "fixtures" / "relay_orders"
@@ -55,9 +56,17 @@ def _account(raw: dict) -> rules.Account:
     )
 
 
-def _quote(raw: dict | None, tick_reference: str | None) -> rules.Quote | None:
+def _quote(
+    raw: dict | None, tick_reference: str | None, tick_reference_month: str | None = None
+) -> rules.Quote | None:
     if raw is None:
         return None
+    session = date.fromisoformat(raw["session_date"])
+    month = (
+        date.fromisoformat(tick_reference_month)
+        if tick_reference_month
+        else reference_month_for(session)  # Mac-only default: the vectors carry no month yet
+    )
     return rules.Quote(
         stock_code=raw["stock_code"],
         isin=raw["isin"],
@@ -66,8 +75,9 @@ def _quote(raw: dict | None, tick_reference: str | None) -> rules.Quote | None:
         lower_circuit=Decimal(raw["lower_circuit"]),
         upper_circuit=Decimal(raw["upper_circuit"]),
         previous_close=Decimal(raw["previous_close"]),
-        session_date=date.fromisoformat(raw["session_date"]),
+        session_date=session,
         tick_reference=None if tick_reference is None else Decimal(tick_reference),
+        tick_reference_month=month,
     )
 
 
@@ -86,7 +96,7 @@ def run_case(case: dict) -> rules.Decision:
         rules.Limits.from_fields(LV["limits"]),
         _flags(case["flags"]),
         _account(case["account"]),
-        _quote(case["quote"], case["tick_reference"]),
+        _quote(case["quote"], case["tick_reference"], case.get("tick_reference_month")),
         datetime.fromisoformat(case["now_ist"]),
         _order(case["intent"]),
         kill_enabled=case["kill_enabled"],
@@ -336,3 +346,81 @@ def test_risk_india_is_decimal_only_with_no_float_and_no_io():
                     path.name,
                     node.lineno,
                 )
+
+
+# ---------------------------------------------------- the reference is dated (63-02 r2)
+
+
+def _codes_with_reference(reference: str | None, month: date | None, *, session: str = "2026-10-08",
+                          price: str = "100.01") -> tuple[str, ...]:
+    """buy_ok on ``session`` at ``price`` with the given tick reference and its date."""
+    case = next(c for c in CASES if c["name"] == "buy_ok")
+    quote = _quote({**case["quote"], "session_date": session}, reference)
+    assert quote is not None
+    quote = dataclasses.replace(quote, tick_reference_month=month)
+    return rules.evaluate(
+        rules.Limits.from_fields(LV["limits"]), _flags(case["flags"]), _account(case["account"]), quote,
+        datetime.fromisoformat(f"{session}T10:00:00+05:30"),
+        _order({**case["intent"], "limit_price": price}), kill_enabled=True,
+    ).codes
+
+
+def test_the_harness_default_month_is_the_previous_calendar_month_and_the_rows_still_match():
+    assert reference_month_for(date(2026, 10, 8)) == date(2026, 9, 1)
+    assert reference_month_for(date(2027, 1, 4)) == date(2026, 12, 1)
+    assert _codes_with_reference("250.00", date(2026, 9, 30), price="100.05") == ()
+
+
+def test_a_stale_cached_reference_cannot_turn_off_tick_into_allowed():
+    # The current reference is 250.00 (tick 0.05), so 100.01 is off tick. A cached 249.99 (tick
+    # 0.01) would let it through; it is from August, so it is refused instead of used.
+    assert _codes_with_reference("250.00", date(2026, 9, 30)) == ("off_tick",)
+    assert _codes_with_reference("249.99", date(2026, 8, 31)) == ("tick_reference_unavailable",)
+    # And the cached value really would have allowed it, so the date is the only guard.
+    assert _codes_with_reference("249.99", date(2026, 9, 30)) == ()
+
+
+def test_an_undated_reference_is_refused():
+    assert _codes_with_reference("249.99", None) == ("tick_reference_unavailable",)
+    assert _codes_with_reference("250.00", None, price="100.05") == ("tick_reference_unavailable",)
+
+
+@pytest.mark.parametrize(
+    "month",
+    [date(2026, 10, 1), date(2026, 10, 7), date(2026, 8, 31), date(2025, 9, 30), date(2026, 11, 30)],
+    ids=["current_month_first", "current_month", "two_months_back", "a_year_back", "future_month"],
+)
+def test_a_reference_from_the_wrong_month_is_refused(month):
+    assert _codes_with_reference("250.00", month, price="100.05") == ("tick_reference_unavailable",)
+
+
+@pytest.mark.parametrize("day", [1, 15, 30])
+def test_a_reference_in_the_previous_month_is_accepted_on_any_day_of_it(day):
+    assert _codes_with_reference("250.00", date(2026, 9, day), price="100.05") == ()
+
+
+def test_the_month_boundary_in_both_directions_and_across_the_new_year():
+    # First session of a month: the previous month is the month just ended.
+    assert _codes_with_reference("250.00", date(2026, 9, 30), session="2026-10-01", price="100.05") == ()
+    assert _codes_with_reference("250.00", date(2026, 10, 1), session="2026-10-01", price="100.05") == (
+        "tick_reference_unavailable",
+    )
+    # Last session of a month: the previous month is still the one before it, not the month ending.
+    assert _codes_with_reference("250.00", date(2026, 9, 30), session="2026-10-30", price="100.05") == ()
+    assert _codes_with_reference("250.00", date(2026, 10, 29), session="2026-10-30", price="100.05") == (
+        "tick_reference_unavailable",
+    )
+    # January looks back to December of the previous year, and not to month 0.
+    assert _codes_with_reference("250.00", date(2026, 12, 31), session="2027-01-04", price="100.05") == ()
+    assert _codes_with_reference("250.00", date(2027, 1, 4), session="2027-01-04", price="100.05") == (
+        "tick_reference_unavailable",
+    )
+    assert _codes_with_reference("250.00", date(2025, 12, 31), session="2027-01-04", price="100.05") == (
+        "tick_reference_unavailable",
+    )
+
+
+def test_a_vector_row_may_carry_its_own_reference_month():
+    case = dict(next(c for c in CASES if c["name"] == "buy_ok"))
+    assert run_case({**case, "tick_reference_month": "2026-09-30"}).codes == ()
+    assert run_case({**case, "tick_reference_month": "2026-08-31"}).codes == ("tick_reference_unavailable",)

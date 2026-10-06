@@ -25,6 +25,7 @@ from strategy_india.portfolio import Book, PendingOrder
 from strategy_india.ticks import EQUITY, resolve_tick
 
 from risk_india import drawdown, exits, rules
+from risk_india_support import reference_month_for
 from test_strategy_india_support import (
     SCHEDULE_VERSION,
     SESSION_START,
@@ -175,7 +176,8 @@ def buy_codes(state: drawdown.RiskState) -> tuple[str, ...]:
         rules.Quote(q["stock_code"], q["isin"], q["series"], Decimal(q["ltp"]),
                     Decimal(q["lower_circuit"]), Decimal(q["upper_circuit"]),
                     Decimal(q["previous_close"]), date.fromisoformat(q["session_date"]),
-                    tick_reference=Decimal(case["tick_reference"])),
+                    tick_reference=Decimal(case["tick_reference"]),
+                    tick_reference_month=reference_month_for(date.fromisoformat(q["session_date"]))),
         datetime.fromisoformat(case["now_ist"]),
         rules.OrderRequest("buy", "TESTCO", "INE000A01012", 10, Decimal("100.00")),
         kill_enabled=True,

@@ -8,8 +8,19 @@ because the sort is stable. The shared vectors carry neither today.
 
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 from typing import Any, Sequence
+
+
+def reference_month_for(session: date) -> date:
+    """First day of the calendar month before ``session``: the month a valid tick reference carries.
+
+    Mac-only harness default. The shared VM vectors carry a ``tick_reference`` but no month,
+    so the Mac harnesses date it as the previous month of the row's session. A row that
+    does carry ``tick_reference_month`` (ISO date) overrides this.
+    """
+    return date(session.year - 1, 12, 1) if session.month == 1 else date(session.year, session.month - 1, 1)
 
 
 class FillOrderError(ValueError):
