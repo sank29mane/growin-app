@@ -227,7 +227,7 @@ def test_zero_coverage_denominator_is_rejected_and_report_degrades(tmp_path, pai
 
 @pytest.mark.parametrize("payload", [
     '{"schema":1,"tests":{"total":' + '9' * 400 + ',"failed":0,"skipped":0,"duration_s":1}}',
-    '{"schema":1,"nested":' + '[' * 2000 + '0' + ']' * 2000 + '}',
+    '{"schema":1,"nested":' + '[' * 200000 + '0' + ']' * 200000 + '}',
 ])
 def test_numeric_overflow_and_deep_json_produce_degraded_comment(tmp_path, payload):
     with pytest.raises(pri.MetricsError):

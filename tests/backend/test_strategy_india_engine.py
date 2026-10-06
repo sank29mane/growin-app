@@ -301,3 +301,15 @@ def test_the_peek_guard_allows_reads_up_to_the_decision_date():
 
     ctx.provider = Today()
     assert _segment(ctx).entries > 0
+
+
+def test_a_name_in_a_non_eq_series_on_the_execution_session_is_not_filled():
+    base = _segment(make_context(ROWS, HOLDOUT))
+    first = min(base.fills, key=lambda f: f.result.session_date)
+    anchor, session = first.anchor_isin, first.result.session_date
+    rows = [r.model_copy(update={"series": "BE"}) if (r.anchor_isin, r.trade_date) == (anchor, session) else r
+            for r in ROWS]
+    seg = _segment(make_context(rows, HOLDOUT))
+    hit = [a for a in seg.attempts if a.anchor_isin == anchor and a.session == session and a.outcome == "TICK_UNAVAILABLE"]
+    assert hit and all(a.affected for a in hit)
+    assert not [f for f in seg.fills if f.anchor_isin == anchor and f.result.session_date == session]

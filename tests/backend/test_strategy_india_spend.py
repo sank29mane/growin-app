@@ -564,6 +564,34 @@ def test_cli_reports_an_interrupted_open_even_with_a_stale_pin(tmp_path, monkeyp
     assert reg.entries() == before
 
 
+def test_a_failed_head_write_after_the_verdict_heals_on_the_next_run_and_a_foreign_hash_is_refused(tmp_path, monkeypatch):
+    inputs, head = _registered(tmp_path)
+    reg = inputs.registry
+    original = study.write_head_file
+    calls = 0
+
+    def fail_after_verdict(registry):
+        nonlocal calls
+        calls += 1
+        if calls >= 2:
+            raise OSError("disk full")
+        return original(registry)
+
+    monkeypatch.setattr(study, "write_head_file", fail_after_verdict)
+    with pytest.raises(HoldoutInvalid):
+        study.run_holdout(inputs, expected_head=head)
+    monkeypatch.setattr(study, "write_head_file", original)
+    verified = reg.head_hash()
+    assert study.head_file_path(reg).read_text().strip() != verified  # the repro: file on a provisional head
+    study.check_pin_fresh(reg, verified)  # the verified chain head pin heals it
+    assert study.head_file_path(reg).read_text().strip() == verified
+    study.head_file_path(reg).write_text(sha("foreign") + "\n")  # a file hash absent from the chain stays refused
+    with pytest.raises(StrategyIndiaError) as err:
+        study.check_pin_fresh(reg, verified)
+    assert err.value.code == "registry_head_stale"
+    assert study.head_file_path(reg).read_text().strip() == sha("foreign")
+
+
 def test_successful_verdict_supersedes_provisional_invalid(tmp_path):
     inputs, head = _registered(tmp_path)
     outcome = study.run_holdout(inputs, expected_head=head)

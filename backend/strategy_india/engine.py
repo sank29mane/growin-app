@@ -221,6 +221,17 @@ def _execute(ctx: RunContext, book: Book, session: date, index: int, today: Mapp
         if bar is None:
             bars[p.anchor_isin] = None
             continue
+        try:  # the execution session's own series decides, not the decision session's
+            resolve_tick(ctx.ticks, session_date=session, band_reference_price=p.reference_price,
+                         instrument_class=EQUITY, series=bar.series)
+        except TickSizeUnavailable:
+            book.record_attempt(outcome=TICK_UNAVAILABLE, reason_code=TICK_UNAVAILABLE, affected=True, session=session,
+                                decision_date=p.decision_date, anchor=p.anchor_isin, stock_code=p.stock_code,
+                                kind=p.kind, reason=p.reason)
+            book.pending.remove(p)
+            if p.kind == "exit" and p.anchor_isin in book.positions:
+                book.positions[p.anchor_isin].blocked_exit_sessions += 1
+            continue
         prev = ctx.view.previous_bar(p.anchor_isin, session)
         bars[p.anchor_isin] = session_bar_for(
             bar,
