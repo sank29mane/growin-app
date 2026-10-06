@@ -8,7 +8,7 @@ import json
 import logging
 import pandas as pd
 import numpy as np
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 # Configure logging to stderr so it doesn't interfere with JSON output on stdout
 logging.basicConfig(
@@ -103,7 +103,27 @@ def _calculate_ttm_residuals(pipeline, df_scaled, channels) -> np.ndarray:
         logger.warning(f"Failed to calculate residuals: {e}")
         return np.zeros((96, len(channels)))
 
-def run_forecast(ohlcv_data: List[Dict[str, Any]], prediction_steps: int, timeframe: str = "1Hour", ticker: str = None) -> Dict[str, Any]:
+MAX_MODEL_ID_CHARS = 256
+
+
+def validate_forecast_request(request: Dict[str, Any]) -> Dict[str, Any]:
+    """Return ``{"model": str, "revision": str | None}`` from a bridge request.
+
+    The model id comes from the registry's forecaster role through the caller;
+    this module has no default model. Raises ``ValueError("MODEL_REQUIRED")``
+    for a missing or non-string model and ``ValueError("REVISION_INVALID")`` for
+    a bad revision. Imports no model library, so it is cheap to test.
+    """
+    model = request.get("model") if isinstance(request, dict) else None
+    if not isinstance(model, str) or not model.strip() or len(model) > MAX_MODEL_ID_CHARS:
+        raise ValueError("MODEL_REQUIRED")
+    revision = request.get("revision")
+    if revision is not None and (not isinstance(revision, str) or not revision.strip()):
+        raise ValueError("REVISION_INVALID")
+    return {"model": model, "revision": revision}
+
+
+def run_forecast(ohlcv_data: List[Dict[str, Any]], prediction_steps: int, timeframe: str = "1Hour", ticker: str = None, *, model: str, revision: Optional[str] = None) -> Dict[str, Any]:
     """Execute TTM-R2 forecasting with scaling and frequency awareness"""
     try:
         from tsfm_public.models.tinytimemixer import TinyTimeMixerForPrediction
@@ -130,12 +150,13 @@ def run_forecast(ohlcv_data: List[Dict[str, Any]], prediction_steps: int, timefr
 
         # Load model
         # TTM-R2 is a Zero-Shot model by default. We load it in evaluation mode.
-        model = TinyTimeMixerForPrediction.from_pretrained(
-            "ibm-granite/granite-timeseries-ttm-r2",
+        ttm_model = TinyTimeMixerForPrediction.from_pretrained(
+            model,
+            revision=revision,
             context_length=512,
             prediction_length=96
         )
-        model.eval() # Ensure deterministic inference (Zero-Shot)
+        ttm_model.eval() # Ensure deterministic inference (Zero-Shot)
         
         # 2. Extract and Scale Data
         # documentation says: "Users have to externally standard scale their data before feeding it to the model"
@@ -262,7 +283,7 @@ def run_forecast(ohlcv_data: List[Dict[str, Any]], prediction_steps: int, timefr
         df_scaled['synthetic_time'] = start_date + (syn_delta * np.arange(len(df_scaled)))
         
         pipeline = TimeSeriesForecastingPipeline(
-            model=model,
+            model=ttm_model,
             freq=pipeline_freq,
             timestamp_column='synthetic_time',
             id_columns=['id'],
@@ -314,9 +335,9 @@ def run_forecast(ohlcv_data: List[Dict[str, Any]], prediction_steps: int, timefr
             "forecast": forecast[:prediction_steps],
             "prediction_steps": len(forecast[:prediction_steps]),
             "confidence": 0.85,
-            "model_used": "TTM-R2.1",
+            "model_used": model,
             "frequency_used": "Integer-Synthetic",
-            "note": "Using IBM Granite TTM-R2.1 with Robust Median/IQR Scaling",
+            "note": f"Using {model} with Robust Median/IQR Scaling",
             "debug_scaling": {
                 "residuals": residuals.tolist() if residuals is not None else None,
                 "center": float(robust_center),
@@ -336,12 +357,16 @@ if __name__ == "__main__":
     # Read input from stdin
     try:
         input_data = json.load(sys.stdin)
+        forecast_model = validate_forecast_request(input_data)
         ohlcv = input_data.get("ohlcv_data", [])
         steps = input_data.get("prediction_steps", 96)
         timeframe = input_data.get("timeframe", "1Hour")
         ticker = input_data.get("ticker")
         
-        result = run_forecast(ohlcv, steps, timeframe=timeframe, ticker=ticker)
+        result = run_forecast(
+            ohlcv, steps, timeframe=timeframe, ticker=ticker,
+            model=forecast_model["model"], revision=forecast_model["revision"],
+        )
         
         # Write result to stdout
         # Inline sanitization to ensure JSON safe output (NaN -> 0.0) without external deps

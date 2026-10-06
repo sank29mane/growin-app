@@ -11,10 +11,21 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from app_context import state, ChatMessage
 from chat_manager import ChatManager
 from routes.chat_routes import chat_message, list_conversations, get_conversation_history
+import model_registry_testkit as kit
+import tempfile
+import secrets
 
 class TestChatEndpoints(unittest.IsolatedAsyncioTestCase):
     
     def setUp(self):
+        # Models come from the registry (Phase 67); the stub URL is never contacted
+        # because the orchestrator is mocked below.
+        self._tmp = tempfile.TemporaryDirectory()
+        self._old_key = os.environ.get(kit.XAI_KEY_ENV)
+        os.environ[kit.XAI_KEY_ENV] = "stubkey-" + secrets.token_hex(8)
+        from pathlib import Path
+        kit.activate(kit.make_registry(Path(self._tmp.name), "http://127.0.0.1:9"))
+
         # Use in-memory DB for testing
         self.chat_manager = ChatManager(db_path=":memory:")
         state.chat_manager = self.chat_manager
@@ -41,12 +52,18 @@ class TestChatEndpoints(unittest.IsolatedAsyncioTestCase):
         })
 
     def tearDown(self):
+        kit.activate(None)
+        if self._old_key is None:
+            os.environ.pop(kit.XAI_KEY_ENV, None)
+        else:
+            os.environ[kit.XAI_KEY_ENV] = self._old_key
+        self._tmp.cleanup()
         self.chat_manager.close()
         self.orchestrator_patcher.stop()
 
     async def test_chat_message_success_and_timestamp(self):
         """Test that chat_message returns success and valid ISO timestamp"""
-        request = ChatMessage(message="Hello", model_name="test-model")
+        request = ChatMessage(message="Hello")
         
         # Mock update_conversation_title_if_needed to do nothing or return success
         with patch('routes.chat_routes.update_conversation_title_if_needed') as mock_title:
@@ -98,12 +115,12 @@ class TestChatEndpoints(unittest.IsolatedAsyncioTestCase):
         import re
         self.assertTrue(re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", ts), f"Timestamp {ts} format incorrect")
 
-    async def test_error_handling_native_mlx(self):
+    async def test_error_handling_generic_failure(self):
         """Test that specific error messages are raised"""
-        request = ChatMessage(message="Crash me", model_name="native-mlx")
-        
-        # Make Orchestrator raise an exception mimicking the fallback failure
-        err_msg = "Total failure... native-mlx fallback failed."
+        request = ChatMessage(message="Crash me")
+
+        # Make Orchestrator raise an exception mimicking a total failure
+        err_msg = "Total failure... model could not be initialized."
         self.mock_orchestrator_instance.run.side_effect = RuntimeError(err_msg)
         
         from fastapi import HTTPException

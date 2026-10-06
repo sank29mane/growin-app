@@ -1,265 +1,31 @@
 """
-LLM Factory - Handles initialization of various LLM providers.
-Refactored from DecisionAgent to reduce complexity.
+LLM Factory - builds the chat model for a role.
+
+Phase 67: a role resolves to one provider and one model from the model role
+registry (``private/models.json``). Nothing here inspects a model or provider
+name, probes a server, or falls back to another model. A role that is not
+configured raises ``ModelRoleMissing``; a failing provider raises
+``ProviderError``.
 """
 
 import logging
-import os
-from utils.error_handler import handle_error
-from typing import Dict
+
+from model_registry.provider import RoleChatModel, chat_model_for_role
 
 logger = logging.getLogger(__name__)
 
 
-
 class LLMFactory:
-    """Factory for creating LLM instances based on model name and configuration."""
+    """Factory for role-bound chat models."""
 
     @staticmethod
-    async def create_llm(model_name: str, api_keys: Dict[str, str] = None):
-        """
-        Initialize and return an LLM instance.
-        """
-        # Python 3.13 fix for scipy spec issue in some environments
-        try:
-            import scipy
-            if not hasattr(scipy, "__spec__") or scipy.__spec__ is None:
-                import importlib.util
-                scipy.__spec__ = importlib.util.find_spec("scipy")
-        except ImportError:
-            pass
-
-        api_keys = api_keys or {}
-
-        from model_config import get_model_info
-        info = get_model_info(model_name)
-        provider = (info.get("provider") or "").lower()
-
-        # Normalization and Provider Detection
-        model_lower = (model_name or "").lower()
-        
-        # CRITICAL: Detect HuggingFace-style model IDs (contain '/') that come
-        # from LM Studio's model list. These MUST be routed to LM Studio before
-        # any heuristic matching, because substrings like "gemma", "mistral",
-        # "granite" would incorrectly match Ollama/MLX/Google providers.
-        is_hf_style_id = "/" in model_lower and provider == ""
-        
-        try:
-            llm_instance = None
-            
-            # 0. HuggingFace-style ID → Always LM Studio
-            if is_hf_style_id:
-                logger.info(f"LLM Factory: Detected HF-style model ID '{model_name}', routing to LM Studio")
-                try:
-                    llm_instance = await LLMFactory._create_lmstudio(model_name)
-                except Exception as lm_err:
-
-                    handle_error(lm_err, "LLM Factory: LM Studio creation failed for HF-style ID {model_name}", logger, raise_error=False)
-            
-
-
-            if not llm_instance:
-                is_lmstudio_hint = "lmstudio" in model_lower or "nemotron" in model_lower
-                if provider == "lmstudio" or (not provider and is_lmstudio_hint):
-                    try:
-                        llm_instance = await LLMFactory._create_lmstudio(model_name)
-                    except Exception as lm_err:
-
-                        handle_error(lm_err, "LM Factory: LM Studio creation failed for {model_name}", logger, raise_error=False)
-                    # If provider was explicitly lmstudio, we should probably fall through to auto-detect later
-                    # but if it was just a hint, we keep going to other providers
-
-            if not llm_instance:
-                if provider == "openai" or (not provider and "gpt" in model_lower and "oss" not in model_lower):
-                    llm_instance = LLMFactory._create_openai(model_name, api_keys)
-
-                elif provider == "anthropic" or (not provider and "claude" in model_lower):
-                    llm_instance = LLMFactory._create_anthropic(model_name, api_keys)
-
-                elif provider == "google" or (not provider and "gemini" in model_lower):
-                    llm_instance = LLMFactory._create_google(model_name, api_keys)
-
-                elif provider == "mlx" or (not provider and ("mlx" in model_lower or "granite" in model_lower) and "lmstudio" not in model_lower):
-                    llm_instance = LLMFactory._create_mlx(model_name)
-
-                elif provider == "ollama" or (not provider and ("gemma" in model_lower or "mistral" in model_lower)):
-                    llm_instance = LLMFactory._create_ollama(model_name)
-
-            if not llm_instance:
-                # Last resort: Try auto-detecting ANY loaded model in LM Studio
-                logger.info("LLM Factory: Attempting last-resort auto-detection in LM Studio")
-                try:
-                    llm_instance = await LLMFactory._create_lmstudio("lmstudio-auto")
-                except Exception:
-                    pass
-
-            if not llm_instance:
-                raise ValueError(f"Unsupported model or provider failed to return instance: {model_name}")
-            
-            logger.info(f"LLM Factory: Successfully initialized {model_name} (Type: {type(llm_instance).__name__})")
-            return llm_instance
-
-        except Exception as e:
-
-
-            handle_error(e, "LLM Factory: Failed to initialize {model_name}", logger, raise_error=False)
-
-            # Safe Fallback Strategy
-            if "native-mlx" in model_name:
-                 raise RuntimeError(f"Native MLX Model failed to load and no fallbacks available: {e}")
-
-            # Attempt Native MLX fallback ONLY if hardware is likely to support it (Apple Silicon)
-            import platform
-            if platform.processor() == "arm" and platform.system() == "Darwin":
-                try:
-                    logger.info("Attempting fallback to Native MLX (Apple Silicon detected)...")
-                    return LLMFactory._create_mlx("native-mlx")
-                except Exception as fallback_error:
-
-                    handle_error(fallback_error, "MLX Fallback failed", logger, raise_error=False)
-
-            raise RuntimeError(f"Total failure: Model {model_name} could not be initialized and no suitable fallbacks found. Error: {e}")
+    def for_role(role: str) -> RoleChatModel:
+        """Build the chat model for ``role`` from the active registry."""
+        llm = chat_model_for_role(role)
+        logger.info("LLM Factory: role %s bound to model %s", role, llm.model_id)
+        return llm
 
     @staticmethod
-    def _create_openai(model_name: str, api_keys: Dict[str, str]):
-        from langchain_openai import ChatOpenAI
-        key = api_keys.get("openai") or os.getenv("OPENAI_API_KEY")
-        if not key:
-            raise ValueError("OpenAI API Key required")
-        return ChatOpenAI(model=model_name, temperature=0, openai_api_key=key)
-
-    @staticmethod
-    def _create_anthropic(model_name: str, api_keys: Dict[str, str]):
-        from langchain_anthropic import ChatAnthropic
-        key = api_keys.get("anthropic") or os.getenv("ANTHROPIC_API_KEY")
-        if not key:
-            raise ValueError("Anthropic API Key required")
-        return ChatAnthropic(model=model_name, anthropic_api_key=key)
-
-    @staticmethod
-    def _create_google(model_name: str, api_keys: Dict[str, str]):
-        from langchain_google_genai import ChatGoogleGenerativeAI
-        key = api_keys.get("gemini") or os.getenv("GOOGLE_API_KEY")
-        if not key:
-            raise ValueError("Google API Key required")
-        return ChatGoogleGenerativeAI(model=model_name, google_api_key=key)
-
-    @staticmethod
-    def _create_mlx(model_name: str):
-        from mlx_langchain import ChatMLX
-        logger.info(f"Initializing Native MLX Model: {model_name}")
-        return ChatMLX(model_name=model_name)
-
-    @staticmethod
-    def _create_ollama(model_name: str):
-        from langchain_ollama import ChatOllama
-        return ChatOllama(model=model_name, base_url="http://127.0.0.1:11434")
-
-    @staticmethod
-    async def _create_lmstudio(model_name: str):
-        from lm_studio_client import LMStudioClient
-        from model_config import get_model_info
-        from status_manager import status_manager
-
-        info = get_model_info(model_name)
-        client = LMStudioClient()
-
-        # If specific model_id is fixed in config, use it
-        target_model_id = info.get("model_id") if info else None
-
-        # If model_id in config is "lmstudio-auto", it means we want auto-detection.
-        # But if there's no info (not in config), and model_name is not "lmstudio-auto",
-        # then treat model_name itself as the target model ID (like direct HuggingFace ID).
-        if not info and model_name != "lmstudio-auto":
-            target_model_id = model_name
-        elif target_model_id == "lmstudio-auto":
-            target_model_id = None
-
-        # Check connection
-        if not await client.check_connection():
-            status_manager.set_status("lmstudio", "error", "LM Studio not reachable")
-            raise ConnectionError("LM Studio server not reachable")
-
-        if target_model_id:
-            logger.info(f"LM Studio: Ensuring model loaded: {target_model_id}")
-            try:
-                # 1. Start loading but don't set 'ready' yet
-                status_manager.set_status("lmstudio", "working", f"Loading {target_model_id}...")
-                await client.ensure_model_loaded(target_model_id)
-                
-                # 2. SOTA: Hardening - wait for initialization to complete
-                is_ready = await client.wait_until_ready(target_model_id, timeout=30)
-                if not is_ready:
-                    logger.warning(f"LM Studio: Model {target_model_id} failed to initialize in time.")
-                    status_manager.set_status("lmstudio", "error", f"Model {target_model_id} timeout")
-                    raise TimeoutError(f"Model {target_model_id} failed to initialize in time")
-                else:
-                    # 3. Only set ready once confirmed
-                    client.active_model_id = target_model_id 
-                    status_manager.set_status("lmstudio", "ready", f"Model {target_model_id} active")
-                
-                return client
-            except Exception as e:
-
-                handle_error(e, "Failed to load requested model {target_model_id}", logger, raise_error=False)
-                status_manager.set_status("lmstudio", "error", f"Load failed: {target_model_id}")
-                logger.info("Falling back to auto-detected model...")
-
-        # Auto-detect currently loaded model (filter out embeddings)
-        status_manager.set_status("lmstudio", "working", "Auto-detecting loaded model...")
-        
-        from cache_manager import cache
-        cache_key = "lmstudio_autodetect_id"
-        cached_id = cache.get(cache_key)
-        
-        if cached_id:
-            logger.info(f"LM Studio: Using cached auto-detected LLM: {cached_id}")
-            client.active_model_id = cached_id
-            status_manager.set_status("lmstudio", "ready", f"Model {cached_id} active (cached)")
-            return client
-
-        models = await client.list_models(management=True)
-        if models:
-            llm_candidates = []
-            for m in models:
-                # Handle both 'key' (Native V1) and 'id' (OpenAI)
-                m_id = m.get("key") if m.get("key") is not None else m.get("id")
-                if not m_id: continue
-                
-                m_id_str = str(m_id).lower()
-                # SOTA Safety: Do not auto-load behemoths (>30B) to prevent system freeze
-                is_giant = "40b" in m_id_str or "70b" in m_id_str
-                
-                if "embed" not in m_id_str and "nomic" not in m_id_str and not is_giant:
-                    llm_candidates.append(m_id)
-
-            if llm_candidates:
-                # SOTA Priority Logic: User Preferred -> Popular Stable -> Others
-                nemotron = [c for c in llm_candidates if "nemotron" in str(c).lower()]
-                gpt_oss = [c for c in llm_candidates if "gpt-oss" in str(c).lower() or "oss-20b" in str(c).lower()]
-                stable = [c for c in llm_candidates if "llama" in str(c).lower() or "gemma" in str(c).lower()]
-                
-                if nemotron:
-                    loaded_id = nemotron[0]
-                elif gpt_oss:
-                    loaded_id = gpt_oss[0]
-                elif stable:
-                    loaded_id = stable[0]
-                else:
-                    loaded_id = llm_candidates[0]
-                
-                logger.info(f"LM Studio: Auto-detected priority LLM: {loaded_id}")
-                client.active_model_id = loaded_id
-                status_manager.set_status("lmstudio", "ready", f"Model {loaded_id} active")
-                # Cache for 5 minutes as models don't change frequently
-                cache.set(cache_key, loaded_id, ttl=300)
-                return client
-            elif models:
-                first_id = models[0].get("key") or models[0].get("id") or "unknown"
-                logger.warning(f"LM Studio: Only embedding models found. Using first: {first_id}")
-                client.active_model_id = first_id
-                return client
-
-        status_manager.set_status("lmstudio", "error", "No models available")
-        raise ValueError("No models available in LM Studio")
-
+    async def create_llm(role: str) -> RoleChatModel:
+        """Async form of ``for_role`` for callers that already await a factory."""
+        return LLMFactory.for_role(role)

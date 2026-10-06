@@ -24,6 +24,7 @@ from status_manager import status_manager
 from app_logging import correlation_id_ctx
 from utils.audit_log import log_audit
 from .llm_factory import LLMFactory
+from model_registry import ROLE_COORDINATOR
 from price_validation import PriceValidator
 
 # Import specialist agents (as used in CoordinatorAgent)
@@ -42,12 +43,10 @@ class OrchestratorAgent:
     - Support for 8-bit AFFINE local inference optimization
     """
     
-    def __init__(self, mcp_client=None, chat_manager=None, model_name: str = "native-mlx", api_keys: Optional[Dict[str, str]] = None):
+    def __init__(self, mcp_client=None, chat_manager=None):
         from app_context import state
-        self.model_name = model_name
         self.mcp_client = mcp_client or state.mcp_client
         self.chat_manager = chat_manager or state.chat_manager
-        self.api_keys = api_keys or {}
         
         # Core Components
         self.data_fabricator = DataFabricator()
@@ -64,10 +63,10 @@ class OrchestratorAgent:
 
         # Risk Agent (Critic)
         from .risk_agent import RiskAgent
-        self.risk_agent = RiskAgent(model_name=model_name)
+        self.risk_agent = RiskAgent()
 
         # Decision logic container (reusing DecisionAgent's internal logic)
-        self.decision_engine = DecisionAgent(model_name=model_name, api_keys=api_keys, mcp_client=self.mcp_client)
+        self.decision_engine = DecisionAgent(mcp_client=self.mcp_client)
         
         from utils.ticker_utils import TickerResolver
         self.ticker_resolver = TickerResolver()
@@ -75,30 +74,21 @@ class OrchestratorAgent:
         self.routing_llm = None
         self._initialized = False
         
-        logger.info(f"OrchestratorAgent initialized with model: {model_name}")
+        logger.info("OrchestratorAgent initialized (models come from the role registry)")
+
+    @property
+    def model_name(self) -> Optional[str]:
+        """The decision role's model id, for status and telemetry."""
+        return self.decision_engine.model_name
 
     async def _initialize(self):
         """Initialize LLMs and providers"""
         if self._initialized:
             return
             
-        # Initialize routing LLM (lightweight)
-        # If the user's selected model is from LM Studio (HF-style ID with '/'),
-        # use lmstudio-auto for routing too, to avoid dependencies on missing local models.
-        is_lmstudio_model = "/" in (self.model_name or "")
-        routing_model = "lmstudio-auto" if is_lmstudio_model else "granite-tiny"
-        
-        try:
-            self.routing_llm = await LLMFactory.create_llm(routing_model)
-        except Exception as e:
-
-            handle_error(e, "Routing LLM ({routing_model}) failed. Falling back to lmstudio-auto.", logger, raise_error=False)
-            try:
-                self.routing_llm = await LLMFactory.create_llm("lmstudio-auto")
-            except Exception as e2:
-
-                handle_error(e2, "Routing LLM fallback also failed. Routing will use heuristics only.", logger, raise_error=False)
-                self.routing_llm = None
+        # Routing LLM: the registry's coordinator role. A role that is not
+        # configured raises ModelRoleMissing; there is no fallback model.
+        self.routing_llm = await LLMFactory.create_llm(ROLE_COORDINATOR)
         
         # Initialize decision engine (reasoning model)
         await self.decision_engine._initialize_llm()

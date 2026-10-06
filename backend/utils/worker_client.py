@@ -10,6 +10,8 @@ import logging
 from typing import Dict, Any, Optional, List
 from pathlib import Path
 
+from model_registry import ROLE_FORECASTER, resolve_role
+
 logger = logging.getLogger("WorkerClient")
 
 class WorkerClient:
@@ -129,20 +131,29 @@ class WorkerClient:
         })
         return response.get("status") == "success"
 
-    async def load_ttm_model(self, model_id: str = "ibm-granite/granite-timeseries-ttm-r2") -> bool:
-        """Tell the worker to pin the TTM model in memory"""
+    async def load_ttm_model(self) -> bool:
+        """Tell the worker to pin the forecaster role's model in memory.
+
+        The role resolves first: no forecaster role means ModelRoleMissing and
+        no worker is started.
+        """
+        role = resolve_role(ROLE_FORECASTER)
         await self._ensure_worker()
         response = await self._send_request({
             "action": "load_ttm",
-            "model_id": model_id
+            "model": role.model,
+            "revision": role.revision
         })
         return response.get("status") == "success"
 
     async def forecast_fused(self, ohlcv_data: List[Dict[str, Any]], prediction_steps: int = 96, timeframe: str = "1Hour", returns_data: Optional[List[List[float]]] = None, ticker: str = None) -> Dict[str, Any]:
         """Perform Fused TTM-JMCE forecasting via the worker"""
+        role = resolve_role(ROLE_FORECASTER)
         await self._ensure_worker()
         response = await self._send_request({
             "action": "forecast_fused",
+            "model": role.model,
+            "revision": role.revision,
             "ohlcv_data": ohlcv_data,
             "prediction_steps": prediction_steps,
             "timeframe": timeframe,

@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional
 import sqlite3
 import uuid
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from chat_manager import ChatManager
 from rag_manager import RAGManager
 from mcp_client import Trading212MCPClient
@@ -31,6 +31,12 @@ from execution import (
     default_ledger_path,
 )
 from private_config import PrivateConfigError, load_workspace_config
+from model_registry import (
+    ModelRegistry,
+    active_registry_error,
+    active_registry_or_none,
+    set_active_registry,
+)
 from simulation import PreFlightSimulator, RiskSwarmGate
 from market_data import (
     IndiaInstrument,
@@ -44,17 +50,10 @@ from market_data import (
 )
 
 import time
-import os
 
-# SOTA 2026: Route default OpenAI-compatible clients (e.g. magentic) to local LM Studio
-# when no explicit OpenAI key is set in .env
-if not os.getenv("OPENAI_API_KEY"):
-    os.environ["OPENAI_API_KEY"] = "lmstudio-local"
-if not os.getenv("OPENAI_BASE_URL"):
-    os.environ["OPENAI_BASE_URL"] = "http://127.0.0.1:1234/v1"
-
-
-
+# Phase 67 (P8): no OPENAI_* environment mutation here. Every LLM call takes its
+# endpoint, key and model from the model role registry, so ambient OPENAI_* and
+# MAGENTIC_* variables cannot redirect a role.
 
 
 class ANEConfig(BaseModel):
@@ -82,6 +81,37 @@ class AppState:
         self.ane_config = ANEConfig()
         # Phase 30: High-Velocity Trade Proposals (HITL)
         self.trade_proposals: Dict[str, Any] = {}
+
+    @property
+    def model_registry(self) -> Optional[ModelRegistry]:
+        """The loaded model role registry, or None when none is valid.
+
+        Held by ``model_registry`` so call sites that must not import this
+        module can read it. Independent of execution authority (P6): nothing in
+        ``start_execution`` reads or waits on it.
+        """
+        return active_registry_or_none()
+
+    @model_registry.setter
+    def model_registry(self, value: Optional[ModelRegistry]) -> None:
+        set_active_registry(value)
+
+    @property
+    def model_registry_error(self) -> Optional[str]:
+        """Stable code of the last registry load failure, or None."""
+        return active_registry_error()
+
+    def load_model_registry(self, private_dir) -> bool:
+        """Load ``private/models.json`` once. A failure leaves AI routes at 503."""
+        from model_registry import ModelRegistryError, load_registry
+
+        try:
+            registry = load_registry(private_dir)
+        except ModelRegistryError as exc:
+            set_active_registry(None, exc.code)
+            return False
+        set_active_registry(registry)
+        return True
 
     @property
     def chat_manager(self) -> ChatManager:
@@ -536,19 +566,19 @@ account_context = AccountContext()
 
 # Request Models
 class ChatMessage(BaseModel):
+    """Chat request. No model, provider or key fields: the registry decides (P9)."""
+
+    model_config = ConfigDict(extra="forbid")
+
     message: str
     conversation_id: Optional[str] = None
-    model_name: Optional[str] = "native-mlx"
-    coordinator_model: Optional[str] = "granite-tiny"
-    api_keys: Optional[Dict[str, str]] = None
     account_type: Optional[str] = None  # None = ask user interactively
     images: Optional[List[str]] = None
 
 class AnalyzeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     query: str
-    model_name: str = "native-mlx"
-    coordinator_model: Optional[str] = "granite-tiny"
-    api_keys: Optional[Dict[str, str]] = None
     account_type: Optional[str] = None  # None = ask user interactively
 
 class AgentResponse(BaseModel):

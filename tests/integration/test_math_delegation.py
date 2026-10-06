@@ -20,7 +20,7 @@ async def test_decision_agent_math():
     
     # Initialize DecisionAgent with a mock/lite model if possible, 
     # but here we just want to see if the delegation code is reached.
-    agent = DecisionAgent(model_name="gpt-4o") # Or any model
+    agent = DecisionAgent()  # model comes from the registry decision role
     
     # We need to mock the LLM factory to avoid real API calls if we just want to test logic
     # But actually, the task says "check logs for delegation". 

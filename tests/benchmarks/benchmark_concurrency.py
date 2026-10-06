@@ -46,7 +46,7 @@ async def simulate_load(concurrent_users: int = 5):
         start_time = time.perf_counter()
         
         for i in range(concurrent_users):
-            req = ChatMessage(message=f"User {i} query", model_name="native-mlx")
+            req = ChatMessage(message=f"User {i} query")
             tasks.append(chat_message(req, accept="application/json"))
             
         print(f"Dispatching {concurrent_users} concurrent requests...")

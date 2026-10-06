@@ -4,10 +4,11 @@ import os
 from utils.error_handler import handle_error
 from typing import List, Dict, Any, Optional, Tuple
 from pydantic_ai import Agent, RunContext
-from pydantic_ai.models.openai import OpenAIModel
 from pydantic import BaseModel
 from utils.hardware_guard import hardware_guard
 from .swarm_utils import ContextBuffer, AgentResult, summarize_specialist_data
+from model_registry import ROLE_COORDINATOR, get_active_registry
+from model_registry.provider import role_pydantic_ai_model
 
 logger = logging.getLogger(__name__)
 
@@ -30,20 +31,16 @@ class SwarmOrchestrator:
     
     def __init__(
         self, 
-        model_name: str = "nemotron-3-30b-moe-jang-q4_k_m",
         reflex_timeout: float = 0.4,
         synthesis_timeout: float = 1.5
     ):
-        self.model_name = model_name
+        # The swarm runs on the registry's coordinator role. A missing role
+        # raises ModelRoleMissing here; there is no default model.
+        resolved = get_active_registry().resolve(ROLE_COORDINATOR)
+        self.model_name = resolved.model
         self.reflex_timeout = reflex_timeout
         self.synthesis_timeout = synthesis_timeout
-        # Initialize OpenAI-compatible model for LM Studio
-        lm_studio_url = os.getenv("LM_STUDIO_URL", "http://127.0.0.1:1234")
-        self.model = OpenAIModel(
-            model_name,
-            base_url=f"{lm_studio_url}/v1",
-            api_key="lmstudio-token"
-        )
+        self.model = role_pydantic_ai_model(resolved)
         self.agent = Agent(
             self.model,
             system_prompt=(

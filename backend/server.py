@@ -92,6 +92,16 @@ async def lifespan(app: FastAPI):
     private_dir = os.getenv("GROWIN_PRIVATE_DIR") or str(
         Path(__file__).resolve().parent.parent / "private"
     )
+    # Phase 67: load the model role registry once, from the same private root.
+    # Independent of execution authority: a missing or invalid models.json
+    # leaves AI routes at 503 and never touches the execution startup below.
+    if state.load_model_registry(private_dir):
+        logger.info("✅ Model role registry loaded")
+    else:
+        logger.error(
+            "⛔ Model role registry unavailable; AI routes answer 503: %s",
+            state.model_registry_error,
+        )
     execution_started = False
     if not os.environ.get("PYTEST_CURRENT_TEST") or execution_db_path:
         if not requested_workspace:

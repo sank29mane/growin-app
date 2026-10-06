@@ -62,7 +62,7 @@ def uk_state(tmp_path, private_config_dir):
 
 
 def _agent():
-    return DecisionAgent(model_name="native-mlx", mcp_client=MagicMock())
+    return DecisionAgent(mcp_client=MagicMock())
 
 
 def _chat_proposal(agent, ticker="AAPL"):

@@ -16,15 +16,15 @@ class StatusManager:
             if cls._instance is None:
                 cls._instance = super(StatusManager, cls).__new__(cls)
                 cls._instance.statuses = {
-                    "coordinator": {"status": "ready", "detail": "Idle", "model": "Granite 4.0 Tiny", "timestamp": datetime.now().isoformat()},
-                    "decision_agent": {"status": "ready", "detail": "Idle", "model": "LFM 2.5B (Native)", "timestamp": datetime.now().isoformat()},
+                    "coordinator": {"status": "ready", "detail": "Idle", "model": "Unknown", "timestamp": datetime.now().isoformat()},
+                    "decision_agent": {"status": "ready", "detail": "Idle", "model": "Unknown", "timestamp": datetime.now().isoformat()},
                     "quant_agent": {"status": "ready", "detail": "Monitoring markets", "model": "TA-Lib", "timestamp": datetime.now().isoformat()},
                     "portfolio_agent": {"status": "ready", "detail": "Synced", "model": "Trading212 API", "timestamp": datetime.now().isoformat()},
-                    "forecasting_agent": {"status": "ready", "detail": "Models loaded", "model": "TTM-R2", "timestamp": datetime.now().isoformat()},
+                    "forecasting_agent": {"status": "ready", "detail": "Models loaded", "model": "Unknown", "timestamp": datetime.now().isoformat()},
                     "research_agent": {"status": "ready", "detail": "Idle", "model": "NewsAPI", "timestamp": datetime.now().isoformat()},
                     "social_agent": {"status": "ready", "detail": "Monitoring feeds", "model": "Tavily + VADER", "timestamp": datetime.now().isoformat()},
                     "whale_agent": {"status": "ready", "detail": "Monitoring trades", "model": "Alpaca Trades", "timestamp": datetime.now().isoformat()},
-                    "lmstudio": {"status": "ready", "detail": "Idle", "model": "LM Studio v1", "timestamp": datetime.now().isoformat()},
+                    "lmstudio": {"status": "ready", "detail": "Idle", "model": "LM Studio", "timestamp": datetime.now().isoformat()},
                 }
                 cls._instance.reasoning_steps = {} # step_id -> {name, content, status}
             return cls._instance

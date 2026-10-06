@@ -17,7 +17,6 @@ from langchain_core.messages import (
 from langchain_core.outputs import ChatGeneration, ChatResult
 
 from mlx_engine import get_mlx_engine
-from model_config import DECISION_MODELS, COORDINATOR_MODELS
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +26,8 @@ class ChatMLX(BaseChatModel):
     Targeting specific interaction with the specialized MLXInferenceEngine.
     """
     
-    model_name: str = "mlx-model"
+    # The checkpoint path or Hugging Face repo id. Required: no default model.
+    model_name: str
     temperature: float = 0.0  # Default to deterministic
     max_tokens: int = 2048
     top_p: float = 1.0
@@ -37,15 +37,7 @@ class ChatMLX(BaseChatModel):
         return "mlx-chat"
 
     def _resolve_model_path(self, target_model: str) -> str:
-        """Resolve friendly model name to actual path."""
-        if target_model == "mlx-model":
-            return "mlx-community/Mistral-7B-Instruct-v0.3-4bit"
-
-        for config in [DECISION_MODELS, COORDINATOR_MODELS]:
-            if target_model in config:
-                info = config[target_model]
-                return info.get("model_path") or info.get("model_id", target_model)
-        
+        """The model path is whatever the caller supplied; there is no alias table."""
         return target_model
 
     def _build_chatml_prompt(self, messages: List[BaseMessage]) -> str:

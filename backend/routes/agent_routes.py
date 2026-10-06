@@ -2,7 +2,7 @@
 Agent status and health check endpoints
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 import logging
 import asyncio
 import httpx
@@ -52,56 +52,25 @@ async def get_agents_status():
     return response
 
 
-@router.get("/api/models/available")
-async def get_available_models():
+@router.get("/api/models/roles")
+async def get_model_roles():
     """
-    Get list of available LLM models for Decision and Coordinator agents.
-    
-    Returns models from OpenAI, Anthropic, Google, Ollama, and LM Studio
-    with their descriptions and API key requirements.
-    
-    Returns:
-        Dict with decision_models and coordinator_models lists
+    Non-secret summary of the model role registry for the app.
+
+    Returns the role, provider id, kind, model id and whether the provider's
+    key is configured. No URL, environment variable name or key value is
+    exposed. Answers 503 MODEL_REGISTRY_UNAVAILABLE when no valid registry is
+    loaded.
     """
-    from model_config import DECISION_MODELS, COORDINATOR_MODELS
-    from lm_studio_client import LMStudioClient
-    from cache_manager import cache
-    
-    cache_key = "models_available_info"
-    cached = cache.get(cache_key)
-    if cached:
-        return cached
+    from app_context import state
 
-    # Attempt to enrich with currently loaded LM Studio model for 'lmstudio-auto'
-    try:
-        lms = LMStudioClient()
-        loaded = await lms.list_loaded_models()
-        if loaded:
-             # Update common models list if needed or just provide as info
-             pass
-    except (RuntimeError, httpx.RequestError):
-        pass
-
-    result = {
-        "decision_models": [
-            {
-                "name": name,
-                **info
-            }
-            for name, info in DECISION_MODELS.items()
-        ],
-        "coordinator_models": [
-            {
-                "name": name,
-                **info
-            }
-            for name, info in COORDINATOR_MODELS.items()
-        ]
-    }
-    
-    # Cache for 60 seconds to reduce polling pressure
-    cache.set(cache_key, result, ttl=60)
-    return result
+    registry = state.model_registry
+    if registry is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "MODEL_REGISTRY_UNAVAILABLE", "reason": state.model_registry_error},
+        )
+    return registry.describe_roles()
 
 @router.get("/api/models/lmstudio")
 async def get_lmstudio_models():

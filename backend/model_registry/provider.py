@@ -129,7 +129,10 @@ def _build_openai_compatible(
     if resolved.temperature is not None:
         params["temperature"] = resolved.temperature
     if resolved.max_tokens is not None:
-        params["max_tokens"] = resolved.max_tokens
+        # langchain-openai renames max_tokens to max_completion_tokens, which
+        # LM Studio and Ollama may ignore. extra_body sends the classic field
+        # every OpenAI-compatible server accepts.
+        params["extra_body"] = {"max_tokens": resolved.max_tokens}
     if resolved.top_p is not None:
         params["top_p"] = resolved.top_p
     if isinstance(http_client, httpx.AsyncClient):
@@ -189,6 +192,28 @@ def role_magentic_model(resolved: ResolvedRole) -> Any:
     if resolved.max_tokens is not None:
         kwargs["max_tokens"] = resolved.max_tokens
     return OpenaiChatModel(resolved.model, **kwargs)
+
+
+def role_pydantic_ai_model(resolved: ResolvedRole) -> Any:
+    """A pydantic-ai ``OpenAIModel`` bound to the role (the swarm uses this).
+
+    The ``AsyncOpenAI`` client gets the endpoint and key explicitly, with
+    retries off, so ``OPENAI_BASE_URL`` and ``OPENAI_API_KEY`` are never read.
+    """
+
+    import openai
+    from pydantic_ai.models.openai import OpenAIModel
+    from pydantic_ai.providers.openai import OpenAIProvider
+
+    if resolved.kind != KIND_OPENAI_COMPATIBLE:
+        raise ProviderError("PROVIDER_KIND_UNSUPPORTED", resolved.role)
+    client = openai.AsyncOpenAI(
+        base_url=resolved.base_url,
+        api_key=_require_key(resolved),
+        timeout=resolved.timeout_s,
+        max_retries=0,
+    )
+    return OpenAIModel(resolved.model, provider=OpenAIProvider(openai_client=client))
 
 
 async def run_magentic(role: str, func: Callable[..., Any], *args: Any) -> Any:

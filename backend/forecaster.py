@@ -14,6 +14,8 @@ from typing import List, Dict, Any
 from sklearn.preprocessing import StandardScaler
 import datetime
 
+from model_registry import ModelRegistryError
+
 logger = logging.getLogger(__name__)
 
 
@@ -270,10 +272,14 @@ class TTMForecaster:
                 else:
                     result["clears_hurdle"] = True
 
-            result["algorithm"] = "IBM Granite TTM-R2.1 + Neural JMCE"
+            result["algorithm"] = f"{result.get('model_used', 'forecaster')} + Neural JMCE"
             result["is_fallback"] = False
             return result
             
+        except ModelRegistryError:
+            # No forecaster role: fail closed. forecast() reports the code and
+            # returns no forecast; no other model is tried.
+            raise
         except Exception as e:
             logger.error(f"Fused forecasting failed: {e}. Falling back.")
             return await asyncio.get_event_loop().run_in_executor(None, self._statistical_forecast, ohlcv_data, prediction_steps, timeframe, f"Fused Exe Error: {str(e)}")

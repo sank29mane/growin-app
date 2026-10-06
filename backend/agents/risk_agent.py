@@ -16,6 +16,8 @@ from magentic import prompt as mag_prompt
 from .base_agent import BaseAgent, AgentResponse, AgentConfig
 from market_context import MarketContext
 from utils.financial_math import create_decimal
+from model_registry import ROLE_RISK_CRITIC, active_registry_or_none
+from model_registry.provider import run_magentic
 
 logger = logging.getLogger(__name__)
 
@@ -78,10 +80,17 @@ class RiskAgent(BaseAgent):
     Uses high-precision models and magentic for structured Pydantic outputs.
     """
     
-    def __init__(self, model_name: str = "granite-tiny"):
+    def __init__(self):
         config = AgentConfig(name="RiskAgent", timeout=15.0)
         super().__init__(config)
-        self.model_name = model_name
+
+    @property
+    def model_name(self) -> Optional[str]:
+        """The risk_critic role's model id for lineage display, or None."""
+        registry = active_registry_or_none()
+        if registry is None or not registry.has_role(ROLE_RISK_CRITIC):
+            return None
+        return registry.resolve(ROLE_RISK_CRITIC).model
 
     async def analyze(self, context_dict: Dict[str, Any]) -> AgentResponse:
         """
@@ -108,7 +117,8 @@ class RiskAgent(BaseAgent):
             # Execute structured audit via Magentic
             portfolio_val = market_context.portfolio.total_value if market_context.portfolio else "Unknown"
             
-            audit_result = await asyncio.to_thread(
+            audit_result = await run_magentic(
+                ROLE_RISK_CRITIC,
                 conduct_risk_audit,
                 market_context.ticker,
                 market_context.intent,

@@ -27,7 +27,7 @@ async def test_risk_gate():
         )
     )
 
-    agent = RiskAgent(model_name="mistral")
+    agent = RiskAgent()
     res_normal = await agent.review(context_normal, "Suggest buying 100 shares of AAPL.")
     print(f"\n[NORMAL CASE (10 bps)]\nSuccess: {res_normal.get('decision', 'N/A')}\nContent: {res_normal.get('feedback', '')[:200]}...")
 

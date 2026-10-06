@@ -6,7 +6,7 @@ from utils.rstitch_engine import RStitchEngine
 @pytest.mark.asyncio
 async def test_rstitch_speedup_benchmark():
     """Verify R-Stitch achieves >3x speedup over full LLM trajectories."""
-    engine = RStitchEngine(entropy_threshold=0.7)
+    engine = RStitchEngine(slm_model="slm-id", llm_model="llm-id", entropy_threshold=0.7)
     
     # Simulate Full LLM (always high entropy)
     start_llm = time.time()

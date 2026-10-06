@@ -1,79 +1,56 @@
-import asyncio
+"""CoordinatorAgent takes its LLM from the registry's coordinator role."""
+
 import pytest
 
-import logging
-import sys
-import os
-import json
-from dotenv import load_dotenv
+import model_registry_testkit as kit
+from agents.coordinator_agent import CoordinatorAgent
+from model_registry import ModelRegistryUnavailable, ModelRoleMissing, set_active_registry
+from model_registry_testkit import offline_registry  # noqa: F401
 
-# Add backend to path
-sys.path.append(os.path.join(os.getcwd(), 'backend'))
 
-# Load env vars
-load_dotenv(os.path.join(os.getcwd(), 'backend', '.env'))
+class MockMCP:
+    pass
 
-logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger("CoordinatorTest")
 
-@pytest.mark.asyncio
-async def test_coordinator_guardrails():
-    logger.info("--- Testing Coordinator Agent Guardrails ---")
+def test_coordinator_binds_the_coordinator_role(offline_registry):
+    agent = CoordinatorAgent(mcp_client=MockMCP())
+
+    assert agent.llm.role == "coordinator"
+    assert agent.llm.model_id == kit.model_id_for("coordinator")
+    # Temperature and other sampling fields come from the registry, never a literal.
+    assert agent.llm.resolved.temperature is None
+
+
+def test_coordinator_sampling_comes_from_the_registry(tmp_path, monkeypatch):
+    monkeypatch.setenv(kit.XAI_KEY_ENV, "stubkey-test")
+    registry = kit.make_registry(
+        tmp_path, "http://127.0.0.1:9", role_extra={"coordinator": {"temperature": 0.0}}
+    )
+    kit.activate(registry)
     try:
-        from backend.agents.coordinator_agent import CoordinatorAgent
-        
-        # Mock MCP client
-        class MockMCP:
-            pass
-            
-        agent = CoordinatorAgent(MockMCP(), model_name="granite-tiny")
-        
-        # Test 1: Model Loading & Config
-        logger.info(f"Model Name: {agent.model_name}")
-        if hasattr(agent.llm, "temperature"):
-            logger.info(f"LLM Temperature: {agent.llm.temperature} (Expected: 0.0)")
-            assert agent.llm.temperature == 0.0, "Temperature guardrail failed!"
-        
-        # Test 2: Analytical Intent (Structured Output)
-        query = "How is Apple stock performing today?"
-        logger.info(f"\nTesting Analytical Query: '{query}'")
-        intent = await agent._get_routing_decision(query)
-        logger.info(f"Result: {json.dumps(intent, indent=2)}")
-        
-        assert intent.get("intent") == "analytical", "Classification failed for analytical query"
-        assert "quant" in intent.get("required_agents", []), "Missing quant need for stock query"
-        
-        # Test 3: Educational Intent with Grounding
-        query = "What is the difference between RSI and MACD?"
-        logger.info(f"\nTesting Educational Query: '{query}'")
-        intent = await agent._get_routing_decision(query)
-        logger.info(f"Result: {json.dumps(intent, indent=2)}")
-        
-        assert intent.get("intent") == "educational", "Classification failed for educational query"
-        
-        # Test 4: Hardware Check (Account Context)
-        query = "How is my ISA doing?"
-        logger.info(f"\nTesting Account Query: '{query}'")
-        intent = await agent._get_routing_decision(query)
-        logger.info(f"Result: {json.dumps(intent, indent=2)}")
-        
-        # Note: The system prompt might capture account in 'account' field if supported
-        if "isa" in intent.get("account", "").lower():
-             logger.info("✅ Account correctly identified in JSON output")
-        
-        # Test 5: Input Sanitization (Long query)
-        long_query = "test " * 1000
-        logger.info("\nTesting Input Sanitization (Long Query)")
-        # We just want to ensure it doesn't crash and returns valid JSON
-        intent = await agent._get_routing_decision(long_query)
-        logger.info("Sanitization check passed (returned valid JSON)")
-        
-        logger.info("\n✅ All Coordinator Guardrail Tests Passed!")
-        
-    except Exception as e:
-        logger.error(f"Coordinator Test Failed: {e}")
-        import traceback
-        traceback.print_exc()
+        agent = CoordinatorAgent(mcp_client=MockMCP())
+        assert agent.llm.resolved.temperature == 0.0
+        assert agent.llm.inner.temperature == 0.0
+    finally:
+        set_active_registry(None)
 
-if __name__ == "__main__":
-    asyncio.run(test_coordinator_guardrails())
+
+def test_coordinator_fails_closed_without_a_registry():
+    set_active_registry(None)
+    with pytest.raises(ModelRegistryUnavailable):
+        CoordinatorAgent(mcp_client=MockMCP())
+
+
+def test_coordinator_fails_closed_without_its_role(tmp_path, monkeypatch):
+    monkeypatch.setenv(kit.XAI_KEY_ENV, "stubkey-test")
+    kit.activate(kit.make_registry(tmp_path, "http://127.0.0.1:9", roles=["decision"]))
+    try:
+        with pytest.raises(ModelRoleMissing):
+            CoordinatorAgent(mcp_client=MockMCP())
+    finally:
+        set_active_registry(None)
+
+
+def test_injected_llm_is_used_as_is(offline_registry):
+    sentinel = object()
+    assert CoordinatorAgent(mcp_client=MockMCP(), llm=sentinel).llm is sentinel

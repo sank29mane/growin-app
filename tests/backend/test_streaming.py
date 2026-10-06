@@ -10,9 +10,10 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app_context import state, ChatMessage
 from market_context import MarketContext
 from routes.chat_routes import stream_chat_generator, extract_ticker_from_text
+from model_registry_testkit import offline_registry  # noqa: F401
 
 @pytest.mark.asyncio
-async def test_stream_chat_generator():
+async def test_stream_chat_generator(offline_registry):
     """Test the stream_chat_generator function directly."""
 
     # Save original state properties to avoid test leakage
@@ -57,7 +58,7 @@ async def test_stream_chat_generator():
             orchestrator_instance.run_stream = mock_run_stream
 
             # Test Input
-            request = ChatMessage(message="Analyze AAPL", model_name="test-model")
+            request = ChatMessage(message="Analyze AAPL")
 
             # Mock the LLM factory to prevent libmlx crashes in test
             with patch('agents.llm_factory.LLMFactory.create_llm', new_callable=AsyncMock) as MockFactory:

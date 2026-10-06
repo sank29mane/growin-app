@@ -14,8 +14,11 @@ import socket
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+import secrets
+
 import pytest
 
+from model_stub_server import ModelStubServer
 from model_registry import (
     CHAT_ROLES,
     ROLE_FORECASTER,
@@ -160,3 +163,90 @@ def install_network_guard(monkeypatch: pytest.MonkeyPatch) -> NetworkGuard:
     monkeypatch.setattr(socket.socket, "connect_ex", guarded_connect_ex)
     monkeypatch.setattr(socket, "getaddrinfo", guarded_getaddrinfo)
     return guard
+
+
+# --- fixtures (import into a test module to use) -----------------------------------
+
+
+@pytest.fixture
+def stub():
+    server = ModelStubServer().start()
+    try:
+        yield server
+    finally:
+        server.stop()
+
+
+@pytest.fixture
+def key_env(monkeypatch):
+    """A generated key value in the env var the xai provider names."""
+
+    value = "stubkey-" + secrets.token_hex(12)
+    monkeypatch.setenv(XAI_KEY_ENV, value)
+    return value
+
+
+@pytest.fixture
+def offline_registry(tmp_path, monkeypatch):
+    """An active registry whose endpoints nothing listens on.
+
+    For unit tests that replace the LLM call itself: the role still resolves,
+    and any request that escaped the mocks would fail on the closed port.
+    """
+
+    monkeypatch.setenv(XAI_KEY_ENV, "stubkey-" + secrets.token_hex(12))
+    registry = make_registry(tmp_path / "private", "http://127.0.0.1:9")
+    activate(registry)
+    try:
+        yield registry
+    finally:
+        set_active_registry(None)
+
+
+@pytest.fixture
+def private_dir_registry(tmp_path, monkeypatch):
+    """A private root holding a valid models.json, found through GROWIN_PRIVATE_DIR.
+
+    The app lifespan loads the registry from this directory, so tests that use
+    ``with TestClient(app)`` exercise the real startup path.
+    """
+
+    monkeypatch.setenv(XAI_KEY_ENV, "stubkey-" + secrets.token_hex(12))
+    private_dir = tmp_path / "private_root"
+    write_registry(private_dir, registry_document("http://127.0.0.1:9"))
+    monkeypatch.setenv("GROWIN_PRIVATE_DIR", str(private_dir))
+    try:
+        yield private_dir
+    finally:
+        set_active_registry(None)
+
+
+def fake_replies(*texts: str):
+    """A stand-in role chat model: ``ainvoke`` returns each text in turn."""
+
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    llm = MagicMock()
+    llm.ainvoke = AsyncMock(side_effect=[SimpleNamespace(content=t) for t in texts])
+    return llm
+
+
+@pytest.fixture
+def network_guard(monkeypatch):
+    return install_network_guard(monkeypatch)
+
+
+@pytest.fixture
+def registry_factory(tmp_path, stub, key_env):
+    """Build a registry aimed at the stub and make it the active registry."""
+
+    def build(**kwargs: Any) -> ModelRegistry:
+        registry = make_registry(tmp_path / "private", stub.url, **kwargs)
+        activate(registry)
+        return registry
+
+    try:
+        yield build
+    finally:
+        set_active_registry(None)

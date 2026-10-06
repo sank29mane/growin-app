@@ -4,24 +4,24 @@ from utils.rstitch_engine import RStitchEngine
 @pytest.mark.asyncio
 async def test_rstitch_delegation_high_entropy():
     """Verify that high-entropy prompts delegate to the LLM."""
-    engine = RStitchEngine(entropy_threshold=0.5)
-    
+    engine = RStitchEngine(slm_model="slm-id", llm_model="llm-id", entropy_threshold=0.5)
+
     # "risk" is a keyword in our mock that triggers high entropy
     result = await engine.generate_step("Assess the risk of this portfolio", {})
-    
-    assert result["model"] == "native-mlx"
+
+    assert result["model"] == "llm-id"
     assert result["stitched"] == True
     assert result["entropy"] > 0.5
 
 @pytest.mark.asyncio
 async def test_rstitch_delegation_low_entropy():
     """Verify that low-entropy prompts stay on the SLM."""
-    engine = RStitchEngine(entropy_threshold=0.8)
-    
+    engine = RStitchEngine(slm_model="slm-id", llm_model="llm-id", entropy_threshold=0.8)
+
     # Generic prompt triggers low entropy in our mock
     result = await engine.generate_step("Hello how are you", {})
-    
-    assert result["model"] == "granite-tiny"
+
+    assert result["model"] == "slm-id"
     assert result["stitched"] == False
     assert result["entropy"] < 0.8
 
@@ -31,7 +31,7 @@ async def test_rstitch_threshold_boundary():
     # Custom mock to force exact entropy
     class ExactEntropyEngine(RStitchEngine):
         def __init__(self, forced_entropy, threshold):
-            super().__init__(threshold)
+            super().__init__("slm-id", "llm-id", threshold)
             self.forced_entropy = forced_entropy
         async def generate_step(self, prompt, context):
             res = await super().generate_step(prompt, context)

@@ -8,10 +8,12 @@ class RStitchEngine:
     R-Stitch (Dynamic Trajectory Stitching) Engine.
     Delegates between SLM and LLM based on token entropy.
     """
-    def __init__(self, entropy_threshold: float = 0.7):
+    def __init__(self, slm_model: str, llm_model: str, entropy_threshold: float = 0.7):
+        # Model ids are supplied by the caller (from the model registry); the
+        # engine has no default model.
         self.entropy_threshold = entropy_threshold
-        self.slm_model = "granite-tiny"
-        self.llm_model = "native-mlx"
+        self.slm_model = slm_model
+        self.llm_model = llm_model
 
     async def generate_step(self, prompt: str, context: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -54,6 +56,3 @@ class RStitchEngine:
             "latency_ms": latency,
             "stitched": is_high_entropy
         }
-
-# Singleton instance
-rstitch_engine = RStitchEngine()

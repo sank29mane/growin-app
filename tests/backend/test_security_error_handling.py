@@ -5,8 +5,9 @@ from fastapi.testclient import TestClient
 
 from server import app
 from app_context import state
+from model_registry_testkit import private_dir_registry  # noqa: F401
 
-def test_chat_error_handling_sanitization():
+def test_chat_error_handling_sanitization(private_dir_registry):
     """Test that chat endpoint sanitizes exception details."""
     # Ensure DB is open (fix for shared state issues)
     from app_context import state
@@ -39,7 +40,7 @@ def test_chat_error_handling_sanitization():
             if response.status_code == 500:
                 assert "Internal Server Error" in detail
 
-def test_analyze_error_handling_sanitization():
+def test_analyze_error_handling_sanitization(private_dir_registry):
     """Test that analyze endpoint sanitizes exception details."""
     with TestClient(app) as client:
         state.mcp_client.primary_session_name = "mock"

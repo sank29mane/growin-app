@@ -13,7 +13,6 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent.absolute()))
 
 from backend.utils.worker_client import get_worker_client
-from backend.model_config import DECISION_MODELS
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("VerifyWorker")
@@ -32,8 +31,10 @@ async def test_worker():
         status = await client.get_status()
         logger.info(f"Worker status after start: {status}")
 
-    # 2. Test MLX Loading (using the native-mlx path)
-    model_path = DECISION_MODELS["native-mlx"]["model_path"]
+    # 2. Test MLX Loading (the checkpoint path is passed on the command line)
+    if len(sys.argv) < 2:
+        raise SystemExit("usage: verify_worker_service.py <mlx-model-path>")
+    model_path = sys.argv[1]
     logger.info(f"Attempting to load MLX model: {model_path}")
     
     success = await client.load_mlx_model(model_path)
