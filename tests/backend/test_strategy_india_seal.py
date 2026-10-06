@@ -183,9 +183,9 @@ def test_an_empty_list_is_allowed_only_when_it_was_sealed_empty(tmp_path):
 # ---- fix 4 and 5: events against row tags, both directions ---------------------------------------------
 def _with_tags(inputs, **changes):
     inputs.rows = [r.model_copy(update={k: v(r) for k, v in changes.items()}) for r in inputs.rows]
-    from pilot_data.dataset import dataset_hash
+    from strategy_india.data import dataset_digest
 
-    inputs.dataset_sha256 = dataset_hash(sorted(inputs.rows, key=lambda r: (r.anchor_isin, r.trade_date)))
+    inputs.dataset_sha256 = dataset_digest(inputs.rows, inputs.events)
 
 
 def test_rows_tagged_with_no_listed_events_are_refused_at_register_and_run(tmp_path):
@@ -212,10 +212,10 @@ def test_a_flagged_ex_date_that_no_event_lists_is_refused(tmp_path):
         study.prepare(inputs)
 
 
-def test_a_listed_anchor_with_no_tagged_row_is_refused(tmp_path):
+def test_rows_before_an_event_must_be_tagged(tmp_path):
     inputs = study_inputs(tmp_path, events=DividendEvents([EV]))
     _with_tags(inputs, dividend_amount_unknown=lambda r: False)
-    with pytest.raises(DataError, match="no row is tagged"):
+    with pytest.raises(DataError, match="must be True"):
         study.prepare(inputs)
 
 
@@ -431,3 +431,32 @@ def test_tracked_code_carries_no_criteria_values_and_a_study_without_criteria_re
     with pytest.raises(RegistryMismatch) as err:
         study.run_holdout(inputs, expected_head=head)
     assert err.value.field == "holdout_criteria_sha256" and inputs.registry.holdout_events() == ()
+
+
+@pytest.mark.parametrize("anchor", [ANCHOR, "INE999A01000"])
+def test_a_listed_event_without_tagged_history_registers_like_pr542(tmp_path, anchor):
+    events = DividendEvents([DividendUnknownEvent(anchor, "before_history", date(2021, 1, 1))])
+    inputs = study_inputs(tmp_path, events=events)
+    assert not any(row.dividend_amount_unknown for row in inputs.rows)
+    study.prepare(inputs)
+    entry = study.register(inputs, hypothesis="short history")
+    assert entry.payload["dividend_events_sha256"] == events.sealed_sha256()
+    assert not inputs.registry.holdout_events()
+
+
+def test_event_bound_dataset_hash_passes_preflight_and_row_only_hash_refuses(tmp_path):
+    from pilot_data.dataset import dataset_hash
+    from test_strategy_india_support import make_context
+
+    inputs, entry, head = _registered(tmp_path, events=DividendEvents([EV]))
+    prep = study.prepare(inputs)
+    ctx = make_context(inputs.rows, prep.holdout)
+    kwargs = dict(etf_anchor=entry.payload["benchmark_ids"][0], dev_ctx=ctx)
+    study.preflight_holdout(inputs, prep, inputs.criteria, **kwargs)
+    inputs.dataset_sha256 = dataset_hash(sorted(inputs.rows, key=lambda r: (r.anchor_isin, r.trade_date)))
+    with pytest.raises(StrategyIndiaError, match="dataset_sha256") as caught:
+        study.preflight_holdout(inputs, prep, inputs.criteria, **kwargs)
+    assert caught.value.code == "holdout_unrunnable"
+    assert inputs.registry.head_hash() == head
+    assert not inputs.registry.holdout_events()
+    assert not study.spent_ledger_path(inputs.registry).exists()

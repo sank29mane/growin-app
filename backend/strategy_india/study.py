@@ -28,7 +28,7 @@ from costs.schedule import PricingBasis, ScheduleSet
 from private_config.schemas import IndiaLimits
 
 from .benchmark import EtfChoice, EtfResult, TriSeries, TriUnavailable, choose_etf, etf_buy_and_hold, load_tri
-from .data import BandSource, DatasetView, DividendEvents, EligibilitySource, check_events_against_rows
+from .data import BandSource, DatasetView, DividendEvents, EligibilitySource, check_events_against_rows, dataset_digest
 from .engine import RunContext, fit_fold_components, run_holdout_segment, run_walk_forward
 from .errors import HoldoutInvalid, HoldoutSpent, RegistryError, RegistryMismatch, StrategyIndiaError
 from .folds import FoldRules
@@ -385,9 +385,7 @@ def preflight_holdout(inputs: StudyInputs, prep: Prepared, criteria: Mapping[str
     sealed_factor(inputs, criteria)
     if not inputs.rows or not all(hasattr(row, "payload") for row in inputs.rows):
         raise unrunnable("the dataset rows cannot be verified against dataset_sha256")
-    from pilot_data.dataset import dataset_hash
-
-    if dataset_hash(sorted(inputs.rows, key=lambda r: (r.anchor_isin, r.trade_date))) != inputs.dataset_sha256:
+    if dataset_digest(inputs.rows, inputs.events) != inputs.dataset_sha256:
         raise unrunnable("the dataset rows do not reproduce dataset_sha256")
     days = [day for day in prep.sessions if prep.holdout.contains(day)]
     if len(days) < 2:

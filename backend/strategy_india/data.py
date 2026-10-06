@@ -397,41 +397,45 @@ class UniverseEligibility:
 
 
 def check_events_against_rows(events: DividendEvents, rows: Iterable[Any]) -> None:
-    """D-20 cross-check of the event list against the row tags, in both directions (defence in depth: 59 ``verify_dataset``
-    does the same for a published dataset, but a caller can build ``StudyInputs`` directly).
+    """Require the exact Phase 59 D-20 tags on every accepted row.
 
-    * a name with any ``dividend_amount_unknown`` row must have a listed event, and a listed name needs a tagged row;
-    * a row flagged as an ex-date must sit on a listed ex-date of its anchor;
-    * a listed ex-date that has a row must have that row flagged as the ex-date.
+    The amount-unknown tag covers dates through the last listed ex-date, including
+    quarantined rows. The ex-date flag is exact membership. Events without an
+    accepted bar, or with only later history, do not require a tagged row.
     """
-    tagged: set[str] = set()
-    flagged: set[tuple[str, date]] = set()
-    present: set[tuple[str, date]] = set()
+    dates = {anchor: events.ex_dates(anchor) for anchor in {e.anchor_isin for e in events.all()}}
+    last = {anchor: max(found) for anchor, found in dates.items()}
     for row in rows:
         anchor, day = row.anchor_isin, getattr(row, "trade_date", None) or row.session
-        present.add((anchor, day))
-        if getattr(row, "dividend_amount_unknown", False):
-            tagged.add(anchor)
-        if getattr(row, "dividend_amount_unknown_ex_date", False):
-            flagged.add((anchor, day))
-    listed = {(e.anchor_isin, e.ex_date) for e in events.all()}
-    listed_anchors = {anchor for anchor, _ in listed}
+        want_tag = anchor in last and day <= last[anchor]
+        if getattr(row, "dividend_amount_unknown", False) != want_tag:
+            raise DataError(
+                f"row {anchor} {day.isoformat()} dividend_amount_unknown must be {want_tag}",
+                code="events_mismatch",
+            )
+        want_ex = day in dates.get(anchor, ())
+        if getattr(row, "dividend_amount_unknown_ex_date", False) != want_ex:
+            reason = "has a bar on its ex-date that is not flagged" if want_ex else "is flagged as an ex-date that no event lists"
+            raise DataError(f"row {anchor} {day.isoformat()} {reason}", code="events_mismatch")
 
-    def fail(message: str) -> DataError:
-        return DataError(message, code="events_mismatch")
 
-    if tagged - listed_anchors:
-        raise fail(f"rows are tagged dividend_amount_unknown for {sorted(tagged - listed_anchors)[0]} but no event is listed")
-    if listed_anchors - tagged:
-        raise fail(f"events are listed for {sorted(listed_anchors - tagged)[0]} but no row is tagged")
-    unlisted_flags = flagged - listed
-    if unlisted_flags:
-        anchor, day = sorted(unlisted_flags)[0]
-        raise fail(f"row {anchor} {day.isoformat()} is flagged as an amount-unknown ex-date that no event lists")
-    unflagged = {key for key in listed if key in present and key not in flagged}
-    if unflagged:
-        anchor, day = sorted(unflagged)[0]
-        raise fail(f"event {anchor} {day.isoformat()} has a bar on its ex-date that is not flagged")
+def dataset_digest(rows: Iterable[Any], events: DividendEvents) -> str:
+    """Reproduce Phase 59's event-bound dataset hash without a dependency on its newer API.
+
+    PR #542 adds the manifest events to the hash only when non-empty. This adapter
+    uses that canonical form so preflight can verify those exports after #542 merges,
+    while the row-only digest of datasets without events stays unchanged.
+    """
+    from pilot_data.core import canonical_sha256
+
+    payloads = [row.payload() for row in sorted(rows, key=lambda r: (r.anchor_isin, r.trade_date))]
+    if not events:
+        return canonical_sha256(payloads)
+    listed: dict[str, list[list[str]]] = {}
+    for event in events.all():
+        listed.setdefault(event.anchor_isin, []).append([event.ex_date.isoformat(), event.event_id])
+    return canonical_sha256({"rows": payloads, "dividend_amount_unknown_events":
+                             {anchor: sorted(found) for anchor, found in sorted(listed.items())}})
 
 
 def events_from_manifest(manifest: Any) -> DividendEvents:

@@ -164,15 +164,20 @@ def _published(tmp_path, rows, events):
     from pilot_data.core import standard_caveats as caveats
     from pilot_data.dataset import DatasetManifest, DividendAmountUnknownEvent, _export, dataset_hash
 
+    from inspect import signature
+
     rows = sorted(rows, key=lambda r: (r.anchor_isin, r.trade_date))
-    digest = dataset_hash(rows)
+    event_map = {a: tuple(DividendAmountUnknownEvent(event_id=i, ex_date=d) for i, d in evs)
+                 for a, evs in events.items()}
+    # #542 is approved but not merged into this branch yet. Both APIs are exercised.
+    kwargs = {"events": event_map} if "events" in signature(dataset_hash).parameters else {}
+    digest = dataset_hash(rows, **kwargs)
     manifest = DatasetManifest(
         workspace="india", caveats=caveats(), dataset_sha256=digest, row_count=len(rows), anchor_count=2,
         window_start=rows[0].trade_date, window_end=rows[-1].trade_date, as_of=rows[-1].trade_date,
         crosscheck_run_id="r", report_sha256=sha("r"), targets_sha256=sha("t"), lineage_hashes={}, factor_set_hashes={},
         spans={}, quarantine_totals={}, rawness_counts={}, created_at_utc="2026-10-01T00:00:00+00:00",
-        dividend_amount_unknown_events={a: tuple(DividendAmountUnknownEvent(event_id=i, ex_date=d) for i, d in evs)
-                                        for a, evs in events.items()},
+        dividend_amount_unknown_events=event_map,
     )
     _export(rows, manifest, tmp_path / "exports", "india")
     return tmp_path / "exports" / digest
@@ -186,7 +191,7 @@ def test_dividend_events_are_built_from_the_manifest_and_cross_checked_against_r
     sessions = weekday_sessions(SESSION_START, 12)
     ex = sessions[6]
     base = make_rows(sessions, default_names(2))
-    tagged = [r.model_copy(update={"dividend_amount_unknown": r.anchor_isin == "INE000A01000" and r.trade_date < ex,
+    tagged = [r.model_copy(update={"dividend_amount_unknown": r.anchor_isin == "INE000A01000" and r.trade_date <= ex,
                                    "dividend_amount_unknown_ex_date": r.anchor_isin == "INE000A01000" and r.trade_date == ex})
               for r in base]
     path = _published(tmp_path, tagged, {"INE000A01000": [("EV1", ex)]})
@@ -297,7 +302,7 @@ def test_a_valid_dataset_with_a_different_hash_than_the_registered_one_is_refuse
     sessions = weekday_sessions(SESSION_START, 12)
     ex = sessions[6]
     base = make_rows(sessions, default_names(2))
-    tagged = [r.model_copy(update={"dividend_amount_unknown": r.anchor_isin == "INE000A01000" and r.trade_date < ex,
+    tagged = [r.model_copy(update={"dividend_amount_unknown": r.anchor_isin == "INE000A01000" and r.trade_date <= ex,
                                    "dividend_amount_unknown_ex_date": r.anchor_isin == "INE000A01000" and r.trade_date == ex})
               for r in base]
     registered_dir = _published(tmp_path / "a", tagged, {"INE000A01000": [("EV1", ex)]})
@@ -322,3 +327,40 @@ def test_a_valid_dataset_with_a_different_hash_than_the_registered_one_is_refuse
     with pytest.raises(DataError):  # an explicit hash in the config is enforced even for a registration
         study.load_bound_dataset({**config, "dataset_dir": str(other_dir), "dataset_sha256": manifest.dataset_sha256},
                                  bind_to_registration=False)
+
+
+@pytest.mark.parametrize("event_id, expected", [
+    (None, "c6a014f7b569b0ddaea7c4f7ae9efdfaf6dc60a791f39bb9d79c2e9656764407"),
+    ("EV1", "80b273b235dd60221af315b3d29122a44821787e8ba8a40f3f2e06a4a485068a"),
+    ("EV2", "56eb29d802ced87a416f0d96b46b6a3ab289cbf3456042bbd9ed3ff57a606286"),
+])
+def test_dataset_digest_matches_golden_hashes_from_approved_pr542(event_id, expected):
+    # Golden values computed by PR #542's actual dataset_hash at d13c5fb.
+    from strategy_india.data import DividendUnknownEvent, dataset_digest
+
+    rows = make_rows(weekday_sessions(SESSION_START, 5), default_names(2))
+    events = DividendEvents([] if event_id is None else [
+        DividendUnknownEvent("INE000A01000", event_id, date(2025, 4, 29))
+    ])
+    assert dataset_digest(rows, events) == expected
+    assert dataset_digest(reversed(rows), events) == expected
+
+
+@pytest.mark.parametrize("quarantined", [False, True])
+def test_d20_row_tags_are_exact_through_last_ex_date_including_quarantined_rows(quarantined):
+    from strategy_india.data import DividendUnknownEvent, check_events_against_rows
+    from strategy_india.errors import DataError
+    from test_strategy_india_support import tag_rows
+
+    sessions = weekday_sessions(SESSION_START, 5)
+    events = DividendEvents([DividendUnknownEvent("INE000A01000", "EV1", sessions[1]),
+                             DividendUnknownEvent("INE000A01000", "EV2", sessions[3])])
+    rows = tag_rows(make_rows(sessions, default_names(2)), events)
+    rows = [row.model_copy(update={"adjusted_quarantined": quarantined}) for row in rows]
+    check_events_against_rows(events, rows)
+    for row in rows:
+        for field in ("dividend_amount_unknown", "dividend_amount_unknown_ex_date"):
+            wrong = row.model_copy(update={field: not getattr(row, field)})
+            with pytest.raises(DataError) as caught:
+                check_events_against_rows(events, [wrong])
+            assert caught.value.code == "events_mismatch"

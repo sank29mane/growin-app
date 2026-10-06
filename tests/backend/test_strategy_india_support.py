@@ -293,7 +293,7 @@ def study_inputs(
     criteria: Mapping | None = None,
 ):
     """A complete synthetic study: dataset, gate report, registry path, every 60 input."""
-    from pilot_data.dataset import dataset_hash
+    from strategy_india.data import dataset_digest
     from strategy_india.folds import FoldRules
     from strategy_india.registry import Registry
     from strategy_india.study import StudyInputs
@@ -308,7 +308,7 @@ def study_inputs(
     raw.update(params_overrides or {})
     eligible = sorted({row.anchor_isin for row in rows} - set(ETF_ISINS))
     return StudyInputs(
-        rows=rows, dataset_sha256=dataset_hash(sorted(rows, key=lambda r: (r.anchor_isin, r.trade_date))),
+        rows=rows, dataset_sha256=dataset_digest(rows, events or DividendEvents()),
         params_raw=raw, limits=limits(), coverage_path=cov_path, eligibility=StaticEligibility(eligible),
         universe_policy=UniversePolicy(), bands=bands or StaticBands(), scenarios=scenarios, schedules=schedules,
         schedule_version=SCHEDULE_VERSION, ticks=ticks or tick_obj,
