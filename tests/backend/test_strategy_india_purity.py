@@ -101,8 +101,10 @@ def _ticks_violation(node: ast.AST, filename: str, costs_names: set[str]) -> str
             part in EVAL_NAMES for part in _strings(*node.args)
         ):
             return "exec/eval/compile is banned in strategy_india"
-        parts = _strings(*node.args, *(k.value for k in node.keywords)) if call else _strings(node.slice)
-        stripped = {part.strip(".") for part in parts}
+        parts = [_norm(part) for part in (
+            _strings(*node.args, *(k.value for k in node.keywords)) if call else _strings(node.slice)
+        )]
+        stripped = {_norm(part.strip(".")) for part in parts}
         if any("costs.ticks" in part or part in DYNAMIC_IMPORT_NAMES for part in parts) or (
             call and {"costs", "ticks"} <= stripped
         ):
@@ -224,6 +226,10 @@ def test_package_is_pure():
         ("m = lookup('costs.ticks')", "ticks.py", "string naming the module"),
         ("m = lookup('ticks', 'costs')", "ticks.py", "string naming the module"),
         ("m = lookup('.ticks', package='costs')", "ticks.py", "string naming the module"),
+        ("m = lookup('backend.costs', 'ticks')", "ticks.py", "string naming the module"),
+        ("m = lookup('.ticks', package='backend.costs')", "ticks.py", "string naming the module"),
+        ("m = lookup('ticks', package='backend.costs')", "ticks.py", "string naming the module"),
+        ("import sys\nm = sys.modules['backend.costs.ticks']", "ticks.py", "string naming the module"),
         ("import importlib", "ticks.py", "importlib is banned"),
         ("import importlib.util", "ticks.py", "importlib is banned"),
         ("from importlib import util", "ticks.py", "importlib is banned"),
