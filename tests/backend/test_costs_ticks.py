@@ -30,20 +30,22 @@ from costs.ticks import (
 
 D = Decimal
 TABLE_PATH = Path(__file__).resolve().parents[2] / "backend" / "costs" / "schedules" / "nse_cash_tick_sizes.json"
-TABLE_VERSION = "nse-cash-ticks-2025-04-15.r1"
+TABLE_VERSION = "nse-cash-ticks-2025-04-15.r2"
 FLAT_VERSION = "nse-cash-ticks-2021-01-01.r1"
 TWO_BAND_VERSION = "nse-cash-ticks-2024-06-10.r1"
 ETF_VERSION = "nse-cash-etf-ticks-2021-01-01.r1"
+ETF_2026_VERSION = "nse-cash-etf-ticks-2026-09-07.r1"
 SESSION = date(2026, 10, 6)
 
 # Any change to a committed tick version needs a new version id and a new literal
 # here, in the same commit.
-EXPECTED_TICK_TABLE_HASH = "c8d6fb8b7412903d942e2d6de347a4f6a424cf63f982c955e2513edd861c4543"
+EXPECTED_TICK_TABLE_HASH = "73311d339eb6d01ca81589b0510a873146a425b7e8cf75352ee78cb11becdacc"
 EXPECTED_VERSION_HASHES = {
     FLAT_VERSION: "9cfb9c95c6ecc244cc94b9813eefbd4dd6a29d3e0f46c7329ef70eb7a059f80f",
-    TWO_BAND_VERSION: "fb0eba98d796afd48d5e2fd4da5cec752f97e5a041e186443f9e838f55d17022",
+    TWO_BAND_VERSION: "e2262cd5bcaab22488e7ba0e6e2b587f84fcc9a3f940156717cccb92eac57159",
     TABLE_VERSION: EXPECTED_TICK_TABLE_HASH,
     ETF_VERSION: "219c90b126ece971802eb2641e8eb4f45c37725988469955e35dc223b618b04c",
+    ETF_2026_VERSION: "ab4d5464043b4530c2b1bf64be4a1e033419f5e4c6e40a6d032fb64a45a0f5da",
 }
 
 
@@ -62,22 +64,49 @@ def version_by_id(table, version_id):
     return version
 
 
+# NSE/CMTR/67133 rows: Below 250; >= 250 to 1,000; > 1,000 to 5,000; > 5,000 to 10,000; > 10,000 to 20,000; > 20,000.
+# Only 250 opens its band; 1,000, 5,000, 10,000 and 20,000 close the band below them.
 @pytest.mark.parametrize(
     "reference, tick",
     [
+        ("0.01", "0.01"),
         ("249.99", "0.01"),
         ("250.00", "0.05"),
-        ("999.95", "0.05"),
-        ("1000.00", "0.10"),
-        ("4999.90", "0.10"),
-        ("5000.00", "0.50"),
-        ("10000.00", "1.00"),
-        ("20000.00", "5.00"),
+        ("250.01", "0.05"),
+        ("999.99", "0.05"),
+        ("1000.00", "0.05"),
+        ("1000.01", "0.10"),
+        ("4999.99", "0.10"),
+        ("5000.00", "0.10"),
+        ("5000.01", "0.50"),
+        ("9999.99", "0.50"),
+        ("10000.00", "0.50"),
+        ("10000.01", "1.00"),
+        ("19999.99", "1.00"),
+        ("20000.00", "1.00"),
+        ("20000.01", "5.00"),
         ("75000.00", "5.00"),
     ],
 )
-def test_band_edges_are_lower_inclusive_upper_exclusive(reference, tick):
+def test_2025_band_edges_follow_the_circular_markers(reference, tick):
     assert resolve(reference).value == D(tick)
+    # The same answer on the first day and on a later day of the version.
+    assert resolve(reference, date(2025, 4, 15)).value == D(tick)
+
+
+@pytest.mark.parametrize("session", [date(2024, 6, 10), date(2025, 4, 14)])
+@pytest.mark.parametrize("reference, tick", [("249.99", "0.01"), ("250.00", "0.05"), ("250.01", "0.05")])
+def test_2024_two_band_edge_at_250_is_regular_tick(session, reference, tick):
+    # NSE/CMTR/62174: below Rs 250 is Rs 0.01; the reference price "less than Rs 250" else the regular Rs 0.05.
+    assert resolve(reference, session).value == D(tick)
+
+
+def test_upper_inclusive_defaults_to_false_so_other_versions_keep_lower_inclusive_edges():
+    table = load_tick_table()
+    for version_id in (FLAT_VERSION, TWO_BAND_VERSION):
+        assert not any(band.upper_inclusive for band in version_by_id(table, version_id).bands)
+    r2 = version_by_id(table, TABLE_VERSION)
+    assert [band.upper_inclusive for band in r2.bands] == [False, True, True, True, True, False]
 
 
 def test_resolved_tick_carries_table_evidence():
@@ -148,11 +177,20 @@ def test_non_gold_etf_tick_is_flat_one_paisa(session, reference):
     assert resolved.effective_to == date(2025, 4, 14)
 
 
-def test_etf_table_does_not_cover_the_price_band_era_or_before_2021():
-    with pytest.raises(TickSizeUnavailable):
-        resolve_etf("400.00", date(2025, 4, 15))
-    with pytest.raises(TickSizeUnavailable):
-        resolve_etf("400.00", date(2020, 12, 31))
+def test_etf_table_does_not_cover_the_gap_or_before_2021():
+    for session in (date(2020, 12, 31), date(2025, 4, 15), date(2025, 10, 1), date(2026, 9, 6)):
+        with pytest.raises(TickSizeUnavailable):
+            resolve_etf("400.00", session)
+
+
+@pytest.mark.parametrize("session", [date(2026, 9, 7), date(2026, 10, 6)])
+@pytest.mark.parametrize("reference", ["1.00", "249.99", "250.00", "5000.00", "75000.00"])
+def test_non_gold_etf_tick_from_2026_09_07_cites_cmtr_76101(session, reference):
+    resolved = resolve_etf(reference, session)
+    assert resolved.value == D("0.01")
+    assert resolved.source == f"nse-cash-non-gold-etf-ticks:{ETF_2026_VERSION}"
+    assert resolved.effective_from == date(2026, 9, 7)
+    assert resolved.effective_to is None
 
 
 def test_etf_and_equity_ticks_differ_on_the_same_day():
@@ -163,19 +201,21 @@ def test_etf_and_equity_ticks_differ_on_the_same_day():
 
 
 def test_etf_table_declares_that_gold_etfs_are_not_covered():
-    (version,) = load_tick_table(NON_GOLD_ETF_TICK_TABLE_PATH).versions
-    assert "NOT covered" in version.status
-    assert "Gold" in version.status
+    versions = load_tick_table(NON_GOLD_ETF_TICK_TABLE_PATH).versions
+    assert [v.version for v in versions] == [ETF_VERSION, ETF_2026_VERSION]
+    for version in versions:
+        assert "NOT covered" in version.status
+        assert "Gold" in version.status
 
 
 @pytest.mark.parametrize("path", [TABLE_PATH, NON_GOLD_ETF_TICK_TABLE_PATH])
 def test_every_sourced_version_cites_a_dated_nse_circular(path):
     for version in load_tick_table(path).versions:
-        if version.version == TABLE_VERSION:
-            continue  # the 2025-04-15 version predates this citation format and stays unconfirmed
-        assert version.status.startswith("sourced from NSE circulars")
+        assert version.status.startswith("sourced from NSE")
         assert version.sources
-        for source in version.sources:
+        # r2 keeps two secondary news links after its circulars, as corroboration only.
+        circulars = version.sources[:2] if version.version == TABLE_VERSION else version.sources
+        for source in circulars:
             assert "NSE/CMTR/" in source
             assert "https://nsearchives.nseindia.com/content/circulars/CMTR" in source
             assert "dated 20" in source
@@ -260,6 +300,9 @@ BAD_TABLES = {
     "empty bands": lambda d: edit_bands(d, []),
     "wrong schema": lambda d: d.update(schema="growin.costs.tick_sizes/2"),
     "wrong exchange": lambda d: d["versions"][0].update(exchange="BSE"),
+    "upper_inclusive as a string": lambda d: d["versions"][-1]["bands"][1].update(upper_inclusive="true"),
+    "upper_inclusive as a number": lambda d: d["versions"][-1]["bands"][1].update(upper_inclusive=1),
+    "upper_inclusive on the open-ended band": lambda d: d["versions"][-1]["bands"][-1].update(upper_inclusive=True),
 }
 
 

@@ -55,9 +55,16 @@ _VERSION_KEYS = (
 
 @dataclass(frozen=True)
 class TickBand:
+    """A price band. The lower bound belongs to the band unless the previous band is upper-inclusive.
+
+    ``upper_inclusive`` puts a price exactly at ``upper`` in this band instead of the next one. It is
+    optional in the file and defaults to False, so a version that does not set it resolves as before.
+    """
+
     lower: Decimal
     upper: Decimal | None
     tick: Decimal
+    upper_inclusive: bool = False
 
 
 @dataclass(frozen=True)
@@ -135,7 +142,12 @@ def _parse_bands(raw: Any, path: str) -> tuple[TickBand, ...]:
     for n, item in enumerate(raw):
         band_path = f"{path}[{n}]"
         band = _mapping(item, band_path)
-        _exact(band, ("from", "to", "tick"), band_path)
+        _exact({k: v for k, v in band.items() if k != "upper_inclusive"}, ("from", "to", "tick"), band_path)
+        upper_inclusive = band.get("upper_inclusive", False)
+        if not isinstance(upper_inclusive, bool):
+            raise ScheduleError(f"{band_path}.upper_inclusive: expected a JSON boolean")
+        if upper_inclusive and band["to"] is None:
+            raise ScheduleError(f"{band_path}.upper_inclusive: an open-ended band has no upper bound")
         lower = _dec(band, "from", band_path)
         upper = None if band["to"] is None else _dec(band, "to", band_path)
         tick = _dec(band, "tick", band_path)
@@ -143,7 +155,7 @@ def _parse_bands(raw: Any, path: str) -> tuple[TickBand, ...]:
             raise ScheduleError(f"{band_path}.tick: must be greater than zero")
         if lower < 0 or (upper is not None and upper <= lower):
             raise ScheduleError(f"{band_path}: band bounds are not increasing")
-        bands.append(TickBand(lower, upper, tick))
+        bands.append(TickBand(lower, upper, tick, upper_inclusive))
     if bands[0].lower != 0:
         raise ScheduleError(f"{path}[0].from: the first band must start at 0")
     for n, (earlier, later) in enumerate(zip(bands, bands[1:])):
@@ -215,7 +227,10 @@ def resolve_tick_from_table(table: TickTable, *, session_date: date, band_refere
             if not version.covers(session_date):
                 continue
             for band in version.bands:
-                if reference >= band.lower and (band.upper is None or reference < band.upper):
+                # Bands are contiguous from 0 and tried in order, so the lower edge is implied by the
+                # previous band's upper edge: exclusive upper hands the edge price to the next band,
+                # inclusive upper keeps it.
+                if band.upper is None or reference < band.upper or (band.upper_inclusive and reference == band.upper):
                     return TickSize(
                         value=band.tick,
                         effective_from=version.effective_from,
