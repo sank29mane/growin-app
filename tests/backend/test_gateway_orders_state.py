@@ -615,6 +615,182 @@ def test_audit_chain_break_and_truncation_are_detected(tmp_path):
         audit.verify()
 
 
+# ------------------------------------- audit anchor: deletion and tail truncation
+
+
+def _anchored(tmp_path: Path, entries: int = 0):
+    """A state store plus an audit log anchored in it, with `entries` entries written."""
+    store = _store(tmp_path)
+    store.load_or_init(LIMITS, audit_has_entries=False)
+    audit = AuditLog(store.directory / "audit.jsonl", anchor=store)
+    for n in range(entries):
+        audit.append({"decision": "EVALUATED", "route": "test", "codes": [f"c{n}"]})
+    return store, audit
+
+
+def test_anchor_follows_every_append_inside_the_state_file(tmp_path):
+    store, audit = _anchored(tmp_path)
+    assert store.audit_anchor() == (0, "0" * 64)
+    for n in range(1, 4):
+        entry = audit.append({"decision": "EVALUATED", "route": "test"})
+        assert store.audit_anchor() == (n, entry["entry_sha256"])
+        assert StateStore(store.directory).audit_anchor() == (n, entry["entry_sha256"])
+    assert audit.verify() == (3, entry["entry_sha256"])
+
+
+def test_a_deleted_log_is_refused_not_read_as_an_empty_chain(tmp_path):
+    store, audit = _anchored(tmp_path, 3)
+    plain = AuditLog(audit.path)  # no anchor: this is the weakness being closed
+    audit.path.unlink()
+    assert plain.verify() == (0, "0" * 64)
+    with pytest.raises(AuditBroken, match="shorter than its anchor"):
+        audit.verify()
+    with pytest.raises(AuditBroken):
+        audit.append({"decision": "EVALUATED", "route": "test"})
+    assert not audit.path.exists()  # a refused append does not quietly start a new chain
+
+
+@pytest.mark.parametrize("keep", [0, 1, 2])
+def test_dropping_whole_tail_lines_is_refused(tmp_path, keep):
+    store, audit = _anchored(tmp_path, 3)
+    lines = audit.path.read_bytes().splitlines(keepends=True)
+    audit.path.write_bytes(b"".join(lines[:keep]))  # a valid, shorter chain
+    assert AuditLog(audit.path).verify()[0] == keep  # the chain alone still verifies
+    with pytest.raises(AuditBroken, match="shorter than its anchor"):
+        audit.verify()
+    with pytest.raises(AuditBroken):
+        audit.append({"decision": "EVALUATED", "route": "test"})
+    assert audit.path.read_bytes() == b"".join(lines[:keep])
+
+
+def test_a_rewritten_chain_of_the_same_length_is_refused(tmp_path):
+    store, audit = _anchored(tmp_path, 3)
+    other = AuditLog(tmp_path / "other.jsonl")
+    for n in range(3):
+        other.append({"decision": "REFUSED", "route": "forged", "codes": [f"x{n}"]})
+    audit.path.write_bytes(other.path.read_bytes())
+    assert AuditLog(audit.path).verify()[0] == 3
+    with pytest.raises(AuditBroken, match="does not match its anchor"):
+        audit.verify()
+
+
+def test_a_log_one_entry_ahead_of_its_anchor_is_the_crash_window_and_heals(tmp_path, monkeypatch):
+    store, audit = _anchored(tmp_path, 2)
+    real_set = store.set_audit_anchor
+    monkeypatch.setattr(store, "set_audit_anchor", lambda *a: (_ for _ in ()).throw(OSError("crash")))
+    with pytest.raises(AuditBroken, match="anchor could not be written"):
+        audit.append({"decision": "EVALUATED", "route": "test"})  # entry 3 on disk, never acknowledged
+    monkeypatch.setattr(store, "set_audit_anchor", real_set)
+    assert store.audit_anchor()[0] == 2
+    assert audit.verify()[0] == 3  # tolerated: exactly one beyond the anchor
+    entry = audit.append({"decision": "EVALUATED", "route": "test"})
+    assert entry["seq"] == 4 and store.audit_anchor() == (4, entry["entry_sha256"])
+    assert audit.verify()[0] == 4
+
+
+def test_a_log_two_entries_ahead_of_its_anchor_is_refused(tmp_path):
+    store, audit = _anchored(tmp_path, 1)
+    old_state = store.path.read_bytes()  # anchor at 1
+    audit.append({"decision": "EVALUATED", "route": "test"})
+    audit.append({"decision": "EVALUATED", "route": "test"})
+    store.path.write_bytes(old_state)  # state rolled back behind the log
+    with pytest.raises(AuditBroken, match="ahead of its anchor"):
+        audit.verify()
+
+
+def test_torn_tail_from_a_crash_is_tolerated_once_and_removed_by_the_next_append(tmp_path):
+    store, audit = _anchored(tmp_path, 2)
+    good = audit.path.read_bytes()
+    audit.path.write_bytes(good + b'{"seq":3,"prev_sha256":"ab')  # crash mid-write, no newline
+    assert audit.verify()[0] == 2 and audit.has_torn_tail()
+    with pytest.raises(AuditBroken):  # without an anchor nothing proves it is a crash artifact
+        AuditLog(audit.path).verify()
+    entry = audit.append({"decision": "EVALUATED", "route": "test"})
+    assert entry["seq"] == 3
+    raw = audit.path.read_bytes()
+    assert raw.startswith(good) and raw.endswith(b"\n") and b'"seq":3,"prev_sha256":"ab' not in raw
+    assert audit.verify() == (3, entry["entry_sha256"]) and not audit.has_torn_tail()
+
+
+def test_torn_tail_cannot_hide_a_dropped_entry(tmp_path):
+    store, audit = _anchored(tmp_path, 3)
+    lines = audit.path.read_bytes().splitlines(keepends=True)
+    # Entry 3 cut in half: the prefix holds 2 entries, the anchor says 3.
+    audit.path.write_bytes(lines[0] + lines[1] + lines[2][:40])
+    with pytest.raises(AuditBroken, match="shorter than its anchor"):
+        audit.verify()
+    with pytest.raises(AuditBroken):
+        audit.append({"decision": "EVALUATED", "route": "test"})
+
+
+def test_only_one_torn_tail_line_is_tolerated(tmp_path):
+    store, audit = _anchored(tmp_path, 2)
+    good = audit.path.read_bytes()
+    audit.path.write_bytes(good + b"{garbage\n" + b'{"seq":4')  # a terminated bad line, then a torn one
+    with pytest.raises(AuditBroken):
+        audit.verify()
+    with pytest.raises(AuditBroken):
+        audit.append({"decision": "EVALUATED", "route": "test"})
+
+
+def test_an_anchored_audit_needs_the_order_state_to_exist(tmp_path):
+    store = _store(tmp_path)  # no state.json yet
+    audit = AuditLog(store.directory / "audit.jsonl", anchor=store)
+    assert audit.verify() == (0, "0" * 64)
+    with pytest.raises(AuditBroken, match="state must exist"):
+        audit.append({"decision": "EVALUATED", "route": "test"})
+    assert not audit.path.exists()
+    AuditLog(audit.path).append({"decision": "EVALUATED", "route": "test"})  # entries without any state
+    with pytest.raises(AuditBroken, match="no anchor"):
+        audit.verify()
+
+
+def test_unreadable_state_keeps_its_own_503_when_the_audit_is_checked(tmp_path):
+    store, audit = _anchored(tmp_path, 1)
+    store.path.write_text("{corrupt")
+    with pytest.raises(OrderRefusal) as err:
+        audit.verify()
+    assert (err.value.status, err.value.code) == (503, "state_unreadable")
+
+
+def test_saving_stale_state_never_moves_the_anchor_back(tmp_path):
+    store, audit = _anchored(tmp_path)
+    stale = store.load()  # what the admin CLI holds while it audits
+    entry = audit.append({"decision": "RESET", "route": "admin"})
+    store.save(stale)
+    assert store.audit_anchor() == (1, entry["entry_sha256"])
+    assert audit.verify()[0] == 1
+
+
+def test_set_audit_anchor_is_checked_and_monotonic(tmp_path):
+    store, audit = _anchored(tmp_path, 2)
+    seq, head = store.audit_anchor()
+    for args in ((1, head), (seq, "zz"), (-1, head), (True, head), (0, head), (3, "0" * 64)):
+        with pytest.raises((ValueError, TypeError)):
+            store.set_audit_anchor(*args)
+    assert store.audit_anchor() == (seq, head)
+
+
+def test_the_anchor_is_covered_by_the_state_hash(tmp_path):
+    store, _ = _anchored(tmp_path, 2)
+    wrapper = json.loads(store.path.read_text())
+    wrapper["audit_anchor"]["seq"] = 0
+    wrapper["audit_anchor"]["head_sha256"] = "0" * 64  # try to make the log look unanchored
+    store.path.write_text(json.dumps(wrapper))
+    with pytest.raises(OrderRefusal) as err:
+        store.load()
+    assert err.value.code == "state_unreadable"
+
+
+def test_state_wrapper_without_an_anchor_is_unreadable(tmp_path):
+    store, _ = _anchored(tmp_path, 1)
+    wrapper = json.loads(store.path.read_text())
+    del wrapper["audit_anchor"]
+    store.path.write_text(json.dumps(wrapper))
+    with pytest.raises(OrderRefusal):
+        store.load()
+
+
 # ------------------------------------------------------------ session-end alert
 
 
@@ -729,7 +905,9 @@ def _seeded(tmp_path: Path) -> StateStore:
     state = _stopped_state()
     state.halt = state.mac_halt = state.account_mismatch = True
     store.save(state)
-    AuditLog(store.directory / "audit.jsonl").append({"decision": "EVALUATED", "route": "seed"})
+    AuditLog(store.directory / "audit.jsonl", anchor=store).append(
+        {"decision": "EVALUATED", "route": "seed"}
+    )
     return store
 
 
@@ -793,7 +971,72 @@ def test_admin_reset_fails_closed_on_corrupt_state(tmp_path):
 def test_admin_verify_audit_ok(tmp_path):
     store = _seeded(tmp_path)
     code, out, _ = _run(store.directory, "verify-audit")
-    assert code == 0 and json.loads(out)["entries"] == 1
+    assert code == 0 and json.loads(out)["entries"] == 1 and json.loads(out)["torn_tail"] is False
+
+
+def _entries(store: StateStore) -> int:
+    return AuditLog(store.directory / "audit.jsonl", anchor=store).verify()[0]
+
+
+@pytest.mark.parametrize("damage", ["deleted", "emptied"])
+def test_admin_refuses_every_command_that_trusts_the_log_when_it_is_gone(tmp_path, damage):
+    store = _seeded(tmp_path)
+    audit_path = store.directory / "audit.jsonl"
+    before_state = store.path.read_bytes()
+    if damage == "deleted":
+        audit_path.unlink()
+    else:
+        audit_path.write_bytes(b"")
+    code, _, err = _run(store.directory, "reset", "--latch", "halt")
+    assert code == 1 and "audit" in err
+    assert store.path.read_bytes() == before_state  # no latch cleared, nothing rewritten
+    assert (audit_path.read_bytes() if audit_path.exists() else b"") == b""  # not restarted
+    assert _run(store.directory, "verify-audit")[0] == 1
+    code, out, _ = _run(store.directory, "status")
+    assert code == 1 and json.loads(out)["audit_ok"] is False
+    assert _run(store.directory, "session-end-check", clock=Clock("2026-10-12T15:30:00+05:30"), port=Port())[0] == 1
+
+
+def test_admin_refuses_reset_when_whole_tail_lines_were_dropped(tmp_path):
+    store = _seeded(tmp_path)
+    assert _run(store.directory, "reset", "--latch", "mac_halt")[0] == 0  # a second entry, anchored
+    audit_path = store.directory / "audit.jsonl"
+    first = audit_path.read_bytes().splitlines(keepends=True)[0]
+    audit_path.write_bytes(first)  # drop the RESET entry: a valid prefix
+    before = store.path.read_bytes()
+    code, _, err = _run(store.directory, "reset", "--latch", "account_mismatch")
+    assert code == 1 and "audit" in err
+    assert store.path.read_bytes() == before
+
+
+def test_admin_reset_keeps_the_anchor_in_step_with_the_log(tmp_path):
+    store = _seeded(tmp_path)
+    for latch in ("mac_halt", "account_mismatch", "halt"):
+        assert _run(store.directory, "reset", "--latch", latch)[0] == 0
+    assert store.audit_anchor()[0] == 4 == _entries(store)
+    assert _run(store.directory, "verify-audit")[0] == 0
+
+
+def test_admin_session_end_check_keeps_the_anchor_in_step_with_the_log(tmp_path):
+    store = _seeded(tmp_path)
+    clock = Clock("2026-10-12T15:30:00+05:30")
+    assert _run(store.directory, "session-end-check", clock=clock, port=Port())[0] == 0
+    # The alert path audits, then saves state that was loaded before the audit.
+    assert store.audit_anchor()[0] == 2 == _entries(store)
+    assert _run(store.directory, "verify-audit")[0] == 0
+
+
+def test_admin_verify_audit_reports_and_recovers_a_torn_tail(tmp_path):
+    store = _seeded(tmp_path)
+    audit_path = store.directory / "audit.jsonl"
+    audit_path.write_bytes(audit_path.read_bytes() + b'{"seq":2,"prev')
+    code, out, _ = _run(store.directory, "verify-audit")
+    assert code == 0 and json.loads(out)["torn_tail"] is True and json.loads(out)["entries"] == 1
+    assert _run(store.directory, "reset", "--latch", "mac_halt")[0] == 0  # next append truncates it
+    assert audit_path.read_bytes().endswith(b"\n")
+    code, out, _ = _run(store.directory, "verify-audit")
+    body = json.loads(out)
+    assert (body["ok"], body["entries"], body["torn_tail"]) == (True, 2, False)
 
 
 def test_admin_session_end_check_sends_records_and_does_not_repeat(tmp_path):

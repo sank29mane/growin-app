@@ -81,7 +81,11 @@ wins and this file is wrong.
 - **Kill switch.** The reader asks the instance metadata server for `growin-order-relay` on every check and passes
   only the exact body `enabled`. It never reads a project-level key.
 - **State.** `state.json` and `audit.jsonl` live in the systemd StateDirectory. Unreadable or corrupt state blocks
-  every order (503 `state_unreadable`); a failed audit write blocks it (503 `audit_broken`).
+  every order (503 `state_unreadable`); a failed audit write blocks it (503 `audit_broken`). The audit
+  log is anchored: `state.json` carries the expected entry count and head hash, written after each entry is fsynced.
+  A missing log, a log shorter than the anchor, or a rewritten history refuses every mint, authorize and admin reset
+  (503 `audit_broken`); one log entry beyond the anchor and one unterminated tail line are crash artifacts and are
+  tolerated, the tail being dropped by the next append.
 - **Admin.** `python -m gateway_vm.orders.admin STATE_DIR status | verify-audit | reset --latch NAME | session-end-check`,
   run from the VM shell in an admin window. No HTTP route does any of it.
 - **Vectors.** `tests/backend/fixtures/relay_orders/signing_vectors.json` (canonical bytes, signatures, negatives) and

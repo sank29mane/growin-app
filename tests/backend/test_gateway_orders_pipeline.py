@@ -668,7 +668,7 @@ class RealRig:
         self.tick_reference = FakeTickReference()
         self.forward = RefusalForward()
         self.store = StateStore(self.dir)
-        self.audit = AuditLog(self.dir / "audit.jsonl", clock=self.clock)
+        self.audit = AuditLog(self.dir / "audit.jsonl", clock=self.clock, anchor=self.store)
         self.key = PinnedKey(bytes.fromhex(PRIMARY["public_key_x963_hex"]), allow_test_key=True)
         # First start: initialise the state once (peak = capital_cap). The server
         # does this at startup; a missing state file after that is refused.
@@ -676,6 +676,12 @@ class RealRig:
         self.pipeline = self.build(self.store)
 
     def build(self, store: StateStore) -> OrderPipeline:
+        # A restart builds new store and audit objects over the same files.
+        audit = (
+            self.audit
+            if store is self.store
+            else AuditLog(self.dir / "audit.jsonl", clock=self.clock, anchor=store)
+        )
         guard = RuleGuard(
             limits=LIMITS,
             kill=self.kill,
@@ -683,14 +689,14 @@ class RealRig:
             account=self.account,
             market=self.market,
             tick_reference=self.tick_reference,
-            audit=self.audit,
+            audit=audit,
         )
         return OrderPipeline(
             key=self.key,
             limits_sha256=LIMITS.sha256,
             intents=store,
             guard=guard,
-            audit=self.audit,
+            audit=audit,
             clock=self.clock,
             forward=self.forward,
             ids=self.ids,
@@ -786,9 +792,66 @@ def test_corrupt_state_after_mint_answers_503_at_authorize(real: RealRig):
     assert real.forward.calls == 0
 
 
+def test_deleted_audit_log_refuses_mint_with_no_side_effects(real: RealRig):
+    real.mint()
+    real.audit.path.unlink()
+    consumed_before = real.state().consumed_intents
+    with pytest.raises(OrderRefusal) as err:
+        real.mint(intent_id="intent-test-0002")
+    expect(err, 503, "ORDERS_UNAVAILABLE", "audit_broken")
+    assert real.reads() == (1, 1, 1)  # no further broker-side reads
+    assert not real.audit.path.exists()  # no fresh chain started
+    assert real.state().consumed_intents == consumed_before
+    assert real.forward.calls == 0
+
+
+def test_deleted_audit_log_refuses_authorize_without_burning_anything(real: RealRig):
+    minted = real.mint()
+    sig = real.signed(minted)
+    saved = real.audit.path.read_bytes()
+    real.audit.path.unlink()
+    with pytest.raises(OrderRefusal) as err:
+        real.pipeline.authorize(minted.challenge_id, sig)
+    expect(err, 503, "ORDERS_UNAVAILABLE", "audit_broken")
+    assert real.state().consumed_intents == []  # the intent was not consumed
+    assert real.forward.calls == 0
+    real.audit.path.write_bytes(saved)  # the operator restores the log from backup
+    assert real.pipeline.authorize(minted.challenge_id, sig).decision == "VERIFIED_NOT_FORWARDED"
+
+
+@pytest.mark.parametrize("keep", [0, 1])
+def test_tail_truncated_audit_log_refuses_mint_and_authorize(real: RealRig, keep):
+    first = real.mint()
+    second = real.mint(intent_id="intent-test-0002")
+    lines = real.audit.path.read_bytes().splitlines(keepends=True)
+    real.audit.path.write_bytes(b"".join(lines[:keep]))  # a valid, shorter chain
+    for call in (
+        lambda: real.pipeline.authorize(second.challenge_id, real.signed(second)),
+        lambda: real.mint(intent_id="intent-test-0003"),
+    ):
+        with pytest.raises(OrderRefusal) as err:
+            call()
+        expect(err, 503, "ORDERS_UNAVAILABLE", "audit_broken")
+    assert real.state().consumed_intents == []
+    assert real.forward.calls == 0
+    assert first.challenge_id != second.challenge_id
+
+
+def test_torn_audit_tail_after_a_crash_is_recovered_by_the_next_mint(real: RealRig):
+    real.mint()
+    real.audit.path.write_bytes(real.audit.path.read_bytes() + b'{"seq":2,"prev_sha256":"0')
+    again = real.mint(intent_id="intent-test-0002")
+    assert again.challenge_id
+    raw = real.audit.path.read_bytes()
+    assert raw.endswith(b"\n") and raw.count(b'"seq":2,') == 1
+    assert real.audit.verify()[0] == 2 and real.store.audit_anchor()[0] == 2
+    assert real.pipeline.authorize(again.challenge_id, real.signed(again)).decision == "VERIFIED_NOT_FORWARDED"
+
+
 def test_broken_audit_blocks_the_next_mint_with_503(real: RealRig):
     real.mint()
-    real.audit.path.write_bytes(real.audit.path.read_bytes() + b"{trunc")
+    # A complete line that is not an entry: tampering, not a crash artifact.
+    real.audit.path.write_bytes(real.audit.path.read_bytes() + b"{trunc\n")
     with pytest.raises(OrderRefusal) as err:
         real.mint(intent_id="intent-test-0002")
     expect(err, 503, "ORDERS_UNAVAILABLE", "audit_broken")
@@ -874,6 +937,18 @@ def test_rule_guard_requires_a_tick_reference_port(real: RealRig):
             limits=LIMITS, kill=real.kill, store=real.store, account=real.account,
             market=real.market, audit=real.audit,
         )
+
+
+def test_rule_guard_refuses_an_unanchored_audit_log(real: RealRig):
+    for audit in (
+        AuditLog(real.dir / "audit.jsonl"),  # no anchor at all
+        AuditLog(real.dir / "audit.jsonl", anchor=StateStore(real.dir)),  # another store object
+    ):
+        with pytest.raises(TypeError):
+            RuleGuard(
+                limits=LIMITS, kill=real.kill, store=real.store, account=real.account,
+                market=real.market, tick_reference=real.tick_reference, audit=audit,
+            )
 
 
 # ---------------------------------------------------- kill switch (real reader)

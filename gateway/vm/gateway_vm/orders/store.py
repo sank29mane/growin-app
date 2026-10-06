@@ -1,7 +1,8 @@
 """Durable order state under the systemd StateDirectory (D-02, T-63-05).
 
 One file, state.json: the derived risk state, the fill ledger, consumed intent
-ids and sent-alert keys, wrapped with its own sha256. Numbers and identifiers
+ids and sent-alert keys, plus the audit anchor (expected audit entry count and
+head hash, see audit.py), wrapped with its own sha256. Numbers and identifiers
 only; no market data. Writes are write-temp, fsync, rename, fsync-directory,
 mode 0600. Any read problem (missing while an audit exists, corrupt JSON, a
 self-hash mismatch, loose permissions, a symlink) raises state_unreadable, and
@@ -22,12 +23,14 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import stat
 import threading
 from pathlib import Path
 from typing import Any
 
 from . import refusal
+from .audit import GENESIS
 from .limits import Limits
 from .risk import OrderState, StateInvalid, initial_state
 
@@ -35,6 +38,9 @@ STATE_FILE = "state.json"
 AUDIT_FILE = "audit.jsonl"
 LOCK_FILE = ".order.lock"
 _MAX_STATE_BYTES = 8 * 1024 * 1024
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+Anchor = tuple[int, str]
+_NO_ANCHOR: Anchor = (0, GENESIS)
 
 
 def _canonical(value: Any) -> bytes:
@@ -96,6 +102,16 @@ class StateStore:
         return os.path.lexists(self.path)
 
     def load(self) -> OrderState:
+        return self._read()[0]
+
+    def audit_anchor(self) -> Anchor | None:
+        """The durable audit anchor; None if no state exists yet (a first start)."""
+        with self._lock:
+            if not self.exists():
+                return None
+            return self._read()[1]
+
+    def _read(self) -> tuple[OrderState, Anchor]:
         try:
             st = os.lstat(self.path)
             if not stat.S_ISREG(st.st_mode):
@@ -105,11 +121,15 @@ class StateStore:
             if st.st_size > _MAX_STATE_BYTES:
                 raise ValueError("state file is too large")
             wrapper = _strict_loads(self.path.read_text(encoding="ascii"))
-            if not isinstance(wrapper, dict) or set(wrapper) != {"state", "state_sha256"}:
+            if not isinstance(wrapper, dict) or set(wrapper) != {
+                "state",
+                "audit_anchor",
+                "state_sha256",
+            }:
                 raise ValueError("state wrapper keys")
-            if hashlib.sha256(_canonical(wrapper["state"])).hexdigest() != wrapper["state_sha256"]:
+            if _wrapper_hash(wrapper["state"], wrapper["audit_anchor"]) != wrapper["state_sha256"]:
                 raise ValueError("state self-hash mismatch")
-            return OrderState.from_json(wrapper["state"])
+            return OrderState.from_json(wrapper["state"]), _parse_anchor(wrapper["audit_anchor"])
         except (OSError, ValueError, StateInvalid):
             raise refusal("state_unreadable") from None
 
@@ -126,8 +146,33 @@ class StateStore:
     # -- write -----------------------------------------------------------
 
     def save(self, state: OrderState) -> None:
+        """Persist the risk state. The audit anchor on disk is carried over
+        unchanged: a caller holding an older copy of the state can never move
+        the anchor back."""
+        with self._lock:
+            anchor = self._read()[1] if self.exists() else _NO_ANCHOR
+            self._write(state, anchor)
+
+    def set_audit_anchor(self, seq: int, head_sha256: str) -> None:
+        """Atomically replace the anchor, keeping the state. Never moves backwards."""
+        if isinstance(seq, bool) or not isinstance(seq, int) or seq < 0:
+            raise ValueError("anchor seq")
+        if _HEX64.fullmatch(head_sha256) is None or (seq == 0) != (head_sha256 == GENESIS):
+            raise ValueError("anchor head")
+        with self._lock:
+            state, (current, _) = self._read()
+            if seq < current:
+                raise ValueError("the audit anchor never moves backwards")
+            self._write(state, (seq, head_sha256))
+
+    def _write(self, state: OrderState, anchor: Anchor) -> None:
         body = state.to_json()
-        wrapper = {"state": body, "state_sha256": hashlib.sha256(_canonical(body)).hexdigest()}
+        anchor_json = {"seq": anchor[0], "head_sha256": anchor[1]}
+        wrapper = {
+            "state": body,
+            "audit_anchor": anchor_json,
+            "state_sha256": _wrapper_hash(body, anchor_json),
+        }
         data = _canonical(wrapper) + b"\n"
         tmp = self.directory / f"{STATE_FILE}.tmp-{os.getpid()}"
         try:
@@ -167,6 +212,21 @@ class StateStore:
             if intent_id not in state.consumed_intents:
                 state.consumed_intents.append(intent_id)
                 self.save(state)
+
+
+def _wrapper_hash(body: Any, anchor: Any) -> str:
+    return hashlib.sha256(_canonical({"state": body, "audit_anchor": anchor})).hexdigest()
+
+
+def _parse_anchor(raw: Any) -> Anchor:
+    if not isinstance(raw, dict) or set(raw) != {"seq", "head_sha256"}:
+        raise ValueError("audit anchor keys")
+    seq, head = raw["seq"], raw["head_sha256"]
+    if isinstance(seq, bool) or not isinstance(seq, int) or seq < 0:
+        raise ValueError("audit anchor seq")
+    if not isinstance(head, str) or _HEX64.fullmatch(head) is None or (seq == 0) != (head == GENESIS):
+        raise ValueError("audit anchor head")
+    return seq, head
 
 
 def _strict_loads(text: str) -> Any:

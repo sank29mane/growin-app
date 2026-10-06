@@ -211,6 +211,17 @@ class OrderPipeline:
             )
         return fields
 
+    def _require_audit(self) -> None:
+        """Refuse before any side effect if the audit log does not verify.
+
+        With an anchored log this is where a deleted log, a log shorter than its
+        anchor, or a rewritten history stops a mint or authorize (T-63-07).
+        """
+        try:
+            self._audit.verify()
+        except AuditBroken:
+            raise refusal("audit_broken") from None
+
     def _append(self, fields: dict[str, Any]) -> dict[str, Any]:
         try:
             return self._audit.append(fields)
@@ -237,6 +248,7 @@ class OrderPipeline:
     def mint(self, raw_body: bytes | str) -> MintResult:
         intent = parse_intent(raw_body)
         with self._lock:
+            self._require_audit()
             now, epoch = self._now()
             if intent.limits_sha256 != self._limits_sha256:
                 raise self._refuse("intents", intent, ["limits_hash_mismatch"])
@@ -290,6 +302,7 @@ class OrderPipeline:
         if not isinstance(signature_der, (bytes, bytearray)):
             raise intent_invalid("bad_signature_type")
         with self._lock:
+            self._require_audit()
             now, epoch = self._now()
             # O5: known, then clock, then consume (single use), then verify.
             challenge = self._challenges.take(challenge_id)
@@ -387,6 +400,9 @@ class RuleGuard:
         audit: AuditLog,
         tick_table: TickTable | None = None,
     ) -> None:
+        if getattr(audit, "anchor", None) is not store:
+            # An unanchored log cannot see its own deletion or truncation.
+            raise TypeError("the audit log must be anchored in the same state store")
         self._limits = limits
         self._kill = kill
         self._store = store

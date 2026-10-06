@@ -75,12 +75,20 @@ def main(
         return 2 if exc.code not in (0, None) else 0
 
     store = StateStore(args.state_dir)
-    audit = AuditLog(Path(args.state_dir) / AUDIT_FILE, clock=clock)
+    audit = AuditLog(Path(args.state_dir) / AUDIT_FILE, clock=clock, anchor=store)
 
     try:
         if args.command == "verify-audit":
             count, last = audit.verify()
-            _print(out, {"ok": True, "entries": count, "last_sha256": last})
+            _print(
+                out,
+                {
+                    "ok": True,
+                    "entries": count,
+                    "last_sha256": last,
+                    "torn_tail": audit.has_torn_tail(),
+                },
+            )
             return 0
 
         if args.command == "status":
