@@ -295,7 +295,9 @@ class Quote:
     ltp: Decimal
     lower_circuit: Decimal
     upper_circuit: Decimal
-    previous_close: Decimal  # tick band reference, and the A2 mark check
+    # Yesterday's close: the A2 mark check only. It is NOT the tick band
+    # reference (that is the previous month's last close, see ``tick_reference``).
+    previous_close: Decimal
     session_date: date  # IST session the quote belongs to
 
 
@@ -345,9 +347,17 @@ def evaluate(
     intent: Intent,
     *,
     kill_enabled: bool,
+    tick_reference: Decimal | None,
     tick_table: TickTable | None = None,
 ) -> tuple[str, ...]:
     """Ordered reason codes; empty means every rule passes.
+
+    ``tick_reference`` is the band reference price the tick table asks for: the
+    closing price on the last trading day of the previous calendar month (or the
+    exchange's dated tick reference), supplied by an injected port. It is not
+    the quote's previous close: a stock that crosses Rs 250 mid-month keeps the
+    band its month-end price chose. None means the port could not supply it, and
+    the answer is ``tick_reference_unavailable`` (fail closed), never a guess.
 
     Precedence: hard blocks (kill, mac_halt, account_mismatch, pilot_ended),
     then stop_open, halt_latch, session_closed, then data and price rules, then
@@ -394,14 +404,17 @@ def evaluate(
         elif quote.series not in SUPPORTED_SERIES:
             codes.append("instrument_unsupported")
         else:
-            try:
-                tick = (tick_table or load_tick_table()).resolve(
-                    now_ist.date(), quote.series, quote.previous_close
-                )
-                if price % tick != ZERO:
+            if tick_reference is None or not tick_reference > ZERO:
+                codes.append("tick_reference_unavailable")
+            else:
+                try:
+                    tick = (tick_table or load_tick_table()).resolve(
+                        now_ist.date(), quote.series, tick_reference
+                    )
+                    if price % tick != ZERO:
+                        codes.append("off_tick")
+                except (TickUnavailable, LimitsError):
                     codes.append("off_tick")
-            except (TickUnavailable, LimitsError):
-                codes.append("off_tick")
             if not quote.lower_circuit <= price <= quote.upper_circuit:
                 codes.append("circuit_band")
             if abs(price - quote.ltp) > limits.fat_finger_collar * quote.ltp:

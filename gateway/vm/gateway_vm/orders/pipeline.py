@@ -19,7 +19,8 @@ import re
 import threading
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from typing import Any, Callable, Protocol, Sequence
 
 from . import (
@@ -349,6 +350,19 @@ class MarketPort(Protocol):
     def quote(self, stock_code: str) -> Quote: ...
 
 
+class TickReferencePort(Protocol):
+    """The band reference price for the tick table (D-09).
+
+    NSE picks a stock's tick from its closing price on the last trading day of
+    the PREVIOUS calendar month (or a dated reference the exchange publishes),
+    not from yesterday's close. Return that price as a Decimal for the ISIN and
+    session date. Raise when it is not known: the guard then answers
+    ``tick_reference_unavailable`` and refuses. Bound to real data in 63-05.
+    """
+
+    def band_reference(self, isin: str, session_date: date) -> Decimal: ...
+
+
 class RuleGuard:
     """Guard over the real modules: kill reader, durable state, account and
     market ports, and the pure evaluator.
@@ -369,6 +383,7 @@ class RuleGuard:
         store: StateStore,
         account: AccountPort,
         market: MarketPort,
+        tick_reference: TickReferencePort,
         audit: AuditLog,
         tick_table: TickTable | None = None,
     ) -> None:
@@ -377,6 +392,7 @@ class RuleGuard:
         self._store = store
         self._account = account
         self._market = market
+        self._tick_reference = tick_reference
         self._audit = audit
         self._tick_table = tick_table
 
@@ -407,6 +423,7 @@ class RuleGuard:
                 quote: Quote | None = self._market.quote(intent.stock_code)
             except Exception:
                 quote = None
+            reference = self._band_reference(quote)
             codes = evaluate(
                 self._limits,
                 state.flags(),
@@ -415,9 +432,22 @@ class RuleGuard:
                 to_ist(now),
                 intent,
                 kill_enabled=kill.enabled,
+                tick_reference=reference,
                 tick_table=self._tick_table,
             )
             return GuardResult(codes=codes, kill=kill.label, latches=state.latch_names())
+
+    def _band_reference(self, quote: Quote | None) -> Decimal | None:
+        """Fresh band reference for this quote, or None (fail closed) on any problem."""
+        if quote is None:
+            return None
+        try:
+            value = self._tick_reference.band_reference(quote.isin, quote.session_date)
+        except Exception:
+            return None
+        if not isinstance(value, Decimal) or not value.is_finite() or not value > 0:
+            return None
+        return value
 
     def set_mac_halt(self) -> tuple[str, ...]:
         with self._store.lock():

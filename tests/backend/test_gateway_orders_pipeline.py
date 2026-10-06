@@ -640,6 +640,22 @@ class FakeMarket:
         return self.quotes[stock_code]
 
 
+class FakeTickReference:
+    """Month-end close port. Defaults to the same price as the quote's previous close."""
+
+    def __init__(self) -> None:
+        self.values: dict[str, object] = {}
+        self.default: object = D("99.80")
+        self.reads: list[tuple[str, date]] = []
+        self.fail = False
+
+    def band_reference(self, isin: str, session_date: date):
+        self.reads.append((isin, session_date))
+        if self.fail:
+            raise RuntimeError("month-end close unknown")
+        return self.values.get(isin, self.default)
+
+
 class RealRig:
     def __init__(self, tmp_path: Path, *, kill=None) -> None:
         self.dir = tmp_path / "state"
@@ -649,6 +665,7 @@ class RealRig:
         self.kill = kill or FakeKill()
         self.account = FakeAccount()
         self.market = FakeMarket()
+        self.tick_reference = FakeTickReference()
         self.forward = RefusalForward()
         self.store = StateStore(self.dir)
         self.audit = AuditLog(self.dir / "audit.jsonl", clock=self.clock)
@@ -665,6 +682,7 @@ class RealRig:
             store=store,
             account=self.account,
             market=self.market,
+            tick_reference=self.tick_reference,
             audit=self.audit,
         )
         return OrderPipeline(
@@ -788,6 +806,74 @@ def test_account_and_quote_read_failures_fail_closed(real: RealRig):
         real.mint()
     expect(err, 503, "ORDERS_UNAVAILABLE", "quote_unavailable")
     assert real.forward.calls == 0
+
+
+# ------------------------------------------- tick band reference (monthly, not daily)
+
+
+def test_tick_band_comes_from_the_reference_port_not_the_quote_previous_close(real: RealRig):
+    # The stock crossed Rs 250 mid-month. Yesterday's close is 251, so a daily
+    # reference would pick the 0.05 tick; the previous month's last close was
+    # 249, which keeps the 0.01 tick. A price of 100.01 sits on the 0.01 tick only.
+    real.market.quotes["TESTCO"] = quote_for(
+        ltp="100.00", previous_close=D("251.00")
+    )
+    real.tick_reference.default = D("249.00")
+    minted = real.mint(limit_price="100.01")
+    assert minted.challenge_id
+    assert real.tick_reference.reads == [(ISIN_A, date(2026, 10, 8))]
+    real.tick_reference.default = D("251.00")  # now the month-end close is above 250
+    with pytest.raises(OrderRefusal) as err:
+        real.mint(intent_id="intent-test-0002", limit_price="100.01")
+    expect(err, 409, "LIMIT_REJECTED", "off_tick")
+    assert real.forward.calls == 0
+
+
+def test_daily_below_250_does_not_hide_a_month_end_reference_above_it(real: RealRig):
+    real.market.quotes["TESTCO"] = quote_for(previous_close=D("249.00"))
+    real.tick_reference.default = D("250.00")
+    with pytest.raises(OrderRefusal) as err:
+        real.mint(limit_price="100.01")
+    expect(err, 409, "LIMIT_REJECTED", "off_tick")
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [None, "249.00", 249, 249.0, D("0"), D("-1"), D("NaN"), D("Infinity")],
+    ids=repr,
+)
+def test_unusable_tick_reference_refuses_with_a_typed_503(real: RealRig, bad):
+    real.tick_reference.default = bad
+    with pytest.raises(OrderRefusal) as err:
+        real.mint()
+    expect(err, 503, "ORDERS_UNAVAILABLE", "tick_reference_unavailable")
+    assert real.decisions() == [("REFUSED", ["tick_reference_unavailable"])]
+    assert real.forward.calls == 0
+
+
+def test_failing_tick_reference_port_refuses_at_mint_and_at_authorize(real: RealRig):
+    minted = real.mint()
+    real.tick_reference.fail = True
+    real.refused_authorize(minted, "tick_reference_unavailable", 503, "ORDERS_UNAVAILABLE")
+    with pytest.raises(OrderRefusal) as err:
+        real.mint(intent_id="intent-test-0002")
+    expect(err, 503, "ORDERS_UNAVAILABLE", "tick_reference_unavailable")
+
+
+def test_no_quote_means_no_reference_read_and_the_quote_code_wins(real: RealRig):
+    real.market.fail = True
+    with pytest.raises(OrderRefusal) as err:
+        real.mint()
+    expect(err, 503, "ORDERS_UNAVAILABLE", "quote_unavailable")
+    assert real.tick_reference.reads == []
+
+
+def test_rule_guard_requires_a_tick_reference_port(real: RealRig):
+    with pytest.raises(TypeError):
+        RuleGuard(
+            limits=LIMITS, kill=real.kill, store=real.store, account=real.account,
+            market=real.market, audit=real.audit,
+        )
 
 
 # ---------------------------------------------------- kill switch (real reader)

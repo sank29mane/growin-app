@@ -275,6 +275,7 @@ def run_case(case: dict) -> tuple[str, ...]:
         vm.to_ist(datetime.fromisoformat(case["now_ist"])),
         _intent(case["intent"]),
         kill_enabled=case["kill_enabled"],
+        tick_reference=None if case["tick_reference"] is None else Decimal(case["tick_reference"]),
     )
 
 
@@ -314,6 +315,12 @@ def test_vector_file_covers_the_required_edges():
         "mac_halt_refuses_sell",
         "account_mismatch_refuses_sell",
         "kill_disabled_blocks",
+        "tick_ref_monthly_below_250_daily_above_allows_001",
+        "tick_ref_monthly_above_250_daily_below_refuses_001",
+        "tick_ref_monthly_above_250_daily_below_allows_005",
+        "tick_ref_monthly_above_1000_daily_at_1000_refuses_005",
+        "tick_ref_unavailable_fails_closed",
+        "tick_ref_zero_is_unavailable",
     }
     assert required <= names
     assert {d["name"] for d in LV["drawdown_cases"]} >= {

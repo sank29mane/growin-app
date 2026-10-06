@@ -393,7 +393,7 @@ def test_capital_cap_and_stop_results_are_identical_before_and_after_a_reload(tm
     def decide(state):
         return vm_limits.evaluate(
             LIMITS, state.flags(), AccountSnapshot(), quote, now, intent,
-            kill_enabled=True,
+            kill_enabled=True, tick_reference=Decimal("99.80"),
         )
 
     state = risk.initial_state(LIMITS)

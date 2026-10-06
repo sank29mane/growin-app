@@ -37,7 +37,7 @@ wins and this file is wrong.
   `instrument_unsupported`, `sell_exceeds_holding`); 423 ORDERS_BLOCKED (`kill_switch`, `halt_latch`, `pilot_ended`, `stop_open`, `mac_halt`,
   `account_mismatch`, `session_closed`, `live_disabled`); 403 SIGNATURE_INVALID; 429 CHALLENGE_CAPACITY; 503
   ORDERS_UNAVAILABLE (`config_invalid`, `state_unreadable`, `state_unwritable`, `audit_broken`, `quote_unavailable`,
-  `account_read_failed`); plus the inherited 401, 403, 400, 422 and 503 session, egress and budget codes.
+  `tick_reference_unavailable`, `account_read_failed`); plus the inherited 401, 403, 400, 422 and 503 session, egress and budget codes.
 - **O7 Audit entry.** seq, prev_sha256, entry_sha256, at_utc, route, intent_id, proposal_id, intent_sha256, key_id,
   side, stock_code, isin, quantity, limit_price, reason, batch_id, decision (`CHALLENGED`, `REFUSED`,
   `VERIFIED_NOT_FORWARDED`, `HALTED`, `RESET`, `EVALUATED`), codes, limits_sha256, kill, latches. No quote values,
@@ -56,7 +56,8 @@ wins and this file is wrong.
   with their O6 code even though mint passed.
 - **Reason codes.** A check returns every applicable code in a fixed order; the first is the answer and all of them
   are audited. Order: `kill_switch`, `mac_halt`, `account_mismatch`, `pilot_ended`, `stop_open`, `halt_latch`,
-  `session_closed`, then `quote_unavailable`, `instrument_unsupported`, `isin_mismatch`, `off_tick`, `circuit_band`,
+  `session_closed`, then `quote_unavailable`, `instrument_unsupported`, `isin_mismatch`, `tick_reference_unavailable`
+  or `off_tick`, `circuit_band`,
   `collar`, then `capital_cap`, `per_position_cap` (buys) or `sell_exceeds_holding` (sells).
 - **Codes with no extra name.** The two O6 categories without a sub-code carry their own name as the code, in
   lower case: `signature_invalid` (403 SIGNATURE_INVALID) and `challenge_capacity` (429 CHALLENGE_CAPACITY). A body
@@ -73,6 +74,10 @@ wins and this file is wrong.
   pending notional + this order. The cost basis of a position is the larger of the broker holding and the VM fill
   ledger, because holdings lag fills by a day. A sell is never refused for being over a cap; it is refused only when
   it exceeds the held quantity minus open sells.
+- **Tick band reference.** The tick table is keyed by the closing price on the last trading day of the previous calendar
+  month (or the exchange's dated tick reference), not the quote's previous close. The guard reads it from an injected
+  `TickReferencePort` on every check; if the port cannot supply it the answer is 503 `tick_reference_unavailable`.
+  Every evaluator vector carries a `tick_reference` field (null means unavailable).
 - **Kill switch.** The reader asks the instance metadata server for `growin-order-relay` on every check and passes
   only the exact body `enabled`. It never reads a project-level key.
 - **State.** `state.json` and `audit.jsonl` live in the systemd StateDirectory. Unreadable or corrupt state blocks
