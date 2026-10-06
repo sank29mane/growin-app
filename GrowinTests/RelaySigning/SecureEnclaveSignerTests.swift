@@ -219,6 +219,173 @@ final class SecureEnclaveSignerTests: XCTestCase {
         XCTAssertThrowsError(try backend.publicKeyX963(blob: Data(repeating: 7, count: 64)))
     }
 
+    // MARK: Guards before Touch ID (Task 2)
+
+    private func goldenBytes() throws -> Data {
+        try XCTUnwrap(RelayVectors.rows().first).bytes
+    }
+
+    private func paperBytes(keyId: String, mode: String = "PAPER", workspace: String = "india") -> Data {
+        CanonicalJSON.data([
+            "version": 1, "purpose": "growin.execution.dispatch", "challenge_id": "c-1",
+            "proposal_id": "p-1", "client_order_id": "co-1", "intent_hash": "ih",
+            "workspace": workspace, "account": "paper", "broker": "local-paper", "mode": mode,
+            "ticker": "RELIANCE", "side": "BUY", "quantity": "10", "order_type": "LIMIT",
+            "limit_price": "2500.50", "nonce": "n", "issued_at": 1, "expires_at": 2, "key_id": keyId,
+        ] as [String: Any])
+    }
+
+    private func clearBytes(keyId: String) -> Data {
+        CanonicalJSON.data([
+            "version": 1, "purpose": "growin.execution.control.clear", "challenge_id": "c-2",
+            "workspace": "india", "control_version": 3, "nonce": "n", "issued_at": 1,
+            "expires_at": 2, "key_id": keyId,
+        ] as [String: Any])
+    }
+
+    /// Break-proof 1: a reuse window of 10 s makes this fail.
+    func testEverySignatureGetsAFreshContextWithNoReuseWindowAndNamesTheOrder() throws {
+        _ = try fixture.signer.createIdentityIfNeeded(for: .india)
+        let bytes = try goldenBytes()
+        _ = try fixture.signer.sign(bytes, flow: .relayOrder, for: .india)
+        _ = try fixture.signer.sign(bytes, flow: .relayOrder, for: .india)
+
+        let contexts = fixture.backend.contexts
+        XCTAssertEqual(contexts.count, 2, "one prompt context per signature")
+        XCTAssertEqual(fixture.contexts.reasons.count, 2)
+        XCTAssertFalse(contexts[0] === contexts[1], "a context must never be reused across signatures")
+        for context in contexts {
+            XCTAssertEqual(context.touchIDAuthenticationAllowableReuseDuration, 0, "no authentication reuse window")
+            for word in ["BUY", "10", "TESTCO", "100.05"] {
+                XCTAssertTrue(context.localizedReason.contains(word), "prompt must name \(word): \(context.localizedReason)")
+            }
+        }
+    }
+
+    /// Break-proof 2: skipping the purpose check makes this fail.
+    func testPurposesAreRefusedAcrossFlowsBeforeAnyPrompt() throws {
+        let identity = try fixture.signer.createIdentityIfNeeded(for: .india)
+        let relay = try goldenBytes()
+        let paper = paperBytes(keyId: identity.keyID)
+        let clear = clearBytes(keyId: identity.keyID)
+        fixture.backend.resetCounters()
+
+        let refused: [(String, Data, ApprovalSigningFlow)] = [
+            ("relay bytes on the paper flow", relay, .paperApproval),
+            ("relay bytes on the control flow", relay, .controlClear),
+            ("paper bytes on the relay flow", paper, .relayOrder),
+            ("paper bytes on the control flow", paper, .controlClear),
+            ("control bytes on the relay flow", clear, .relayOrder),
+            ("control bytes on the paper flow", clear, .paperApproval),
+        ]
+        for (name, bytes, flow) in refused {
+            XCTAssertThrowsError(try fixture.signer.sign(bytes, flow: flow, for: .india), name) { error in
+                guard case ApprovalSignerError.purposeNotAllowed = error else {
+                    return XCTFail("\(name): expected purposeNotAllowed, got \(error)")
+                }
+            }
+        }
+        XCTAssertEqual(fixture.backend.signs, 0, "no signature may be made for a refused purpose")
+        XCTAssertTrue(fixture.contexts.reasons.isEmpty, "no Touch ID prompt may be built for a refused purpose")
+
+        // The matching flow does sign (so the refusals above are about purpose, not a broken fixture).
+        XCTAssertNoThrow(try fixture.signer.sign(paper, flow: .paperApproval, for: .india))
+        XCTAssertNoThrow(try fixture.signer.sign(clear, flow: .controlClear, for: .india))
+        XCTAssertNoThrow(try fixture.signer.sign(relay, flow: .relayOrder, for: .india))
+        XCTAssertEqual(fixture.backend.signs, 3)
+    }
+
+    /// Break-proof 3: skipping the key_id check makes this fail.
+    func testBytesNamingAForeignKeyAreRefusedBeforeAnyPrompt() throws {
+        let other = try RelayVectors.key("other")
+        let foreign = SignerFixture(scalar: other.scalar)
+        defer { foreign.cleanUp() }
+        let identity = try foreign.signer.createIdentityIfNeeded(for: .india)
+        XCTAssertEqual(identity.keyID, other.keyId)
+        foreign.backend.resetCounters()
+
+        // Golden bytes name the primary test key; this signer holds the other one.
+        XCTAssertThrowsError(try foreign.signer.sign(try goldenBytes(), flow: .relayOrder, for: .india)) { error in
+            guard case ApprovalSignerError.keyMismatch = error else {
+                return XCTFail("expected keyMismatch, got \(error)")
+            }
+        }
+        let primaryId = try RelayVectors.key("primary").keyId
+        XCTAssertThrowsError(try foreign.signer.sign(paperBytes(keyId: primaryId), flow: .paperApproval, for: .india))
+        XCTAssertEqual(foreign.backend.signs, 0)
+        XCTAssertTrue(foreign.contexts.reasons.isEmpty)
+    }
+
+    func testPaperBytesForAnotherWorkspaceOrModeAreRefused() throws {
+        let identity = try fixture.signer.createIdentityIfNeeded(for: .india)
+        fixture.backend.resetCounters()
+        XCTAssertThrowsError(try fixture.signer.sign(paperBytes(keyId: identity.keyID, workspace: "uk"), flow: .paperApproval, for: .india)) { error in
+            guard case ApprovalSignerError.workspaceMismatch = error else { return XCTFail("\(error)") }
+        }
+        for mode in ["PRACTICE", "LIVE", "SHADOW"] {
+            XCTAssertThrowsError(try fixture.signer.sign(paperBytes(keyId: identity.keyID, mode: mode), flow: .paperApproval, for: .india), mode) { error in
+                guard case ApprovalSignerError.modeNotAllowed = error else { return XCTFail("\(mode): \(error)") }
+            }
+        }
+        XCTAssertEqual(fixture.backend.signs, 0)
+    }
+
+    func testTheSecureEnclaveSignerIsIndiaOnly() throws {
+        XCTAssertThrowsError(try fixture.signer.createIdentityIfNeeded(for: .uk)) { error in
+            guard case ApprovalSignerError.indiaOnly = error else { return XCTFail("\(error)") }
+        }
+        XCTAssertThrowsError(try fixture.signer.sign(try goldenBytes(), flow: .relayOrder, for: .uk))
+        XCTAssertFalse(fixture.signer.isConfigured(for: .uk))
+        XCTAssertThrowsError(try fixture.store.set(Data([1]), for: .approvalSecureEnclaveKey, scope: .workspace(.uk)))
+        XCTAssertEqual(fixture.backend.keyAccessCount, 0)
+    }
+
+    func testEnrolmentCreatesTheKeyOnceWithoutAPromptAndStoresItForIndiaOnly() throws {
+        XCTAssertFalse(fixture.signer.isConfigured(for: .india))
+        XCTAssertThrowsError(try fixture.signer.identity(for: .india)) { error in
+            guard case ApprovalSignerError.notConfigured = error else { return XCTFail("\(error)") }
+        }
+        let first = try fixture.signer.createIdentityIfNeeded(for: .india)
+        let second = try fixture.signer.createIdentityIfNeeded(for: .india)
+        XCTAssertEqual(first, second)
+        XCTAssertEqual(fixture.backend.creates, 1, "enrolment must not regenerate an existing key")
+        XCTAssertTrue(fixture.contexts.reasons.isEmpty, "creating the key must not prompt")
+        XCTAssertNotNil(try fixture.store.data(for: .approvalSecureEnclaveKey, scope: .workspace(.india)))
+        XCTAssertNil(try fixture.store.data(for: .approvalSigningKey, scope: .workspace(.india)), "no software key for India")
+        XCTAssertTrue(fixture.signer.isConfigured(for: .india))
+    }
+
+    /// A signature that does not verify against the key must never leave the signer.
+    func testASignatureThatDoesNotVerifyIsNotReturned() throws {
+        struct WrongSignatureBackend: ApprovalKeyBackend {
+            let inner: SoftwareTestKeyBackend
+            func createKeyBlob() throws -> Data { try inner.createKeyBlob() }
+            func publicKeyX963(blob: Data) throws -> Data { try inner.publicKeyX963(blob: blob) }
+            func signDER(blob: Data, payload: Data, context: LAContext) throws -> Data {
+                try inner.signDER(blob: blob, payload: payload + Data([0]), context: context)
+            }
+        }
+        let backend = WrongSignatureBackend(inner: SoftwareTestKeyBackend(scalar: try RelayVectors.key("primary").scalar))
+        let signer = SecureEnclaveApprovalSigner(store: fixture.store, backend: backend, contexts: fixture.contexts)
+        _ = try signer.createIdentityIfNeeded(for: .india)
+        XCTAssertThrowsError(try signer.sign(try goldenBytes(), flow: .relayOrder, for: .india)) { error in
+            guard case ApprovalSignerError.invalidSignatureProduced = error else { return XCTFail("\(error)") }
+        }
+    }
+
+    func testAppShipsNoSoftwareKeyBackendAndNoSecKeyPath() throws {
+        let source = try PaperOperationsSourceProbe.contents("Growin/Security/SecureEnclaveApprovalSigner.swift")
+        let softwareKey = try NSRegularExpression(pattern: "(?<!SecureEnclave\\.)P256\\.Signing\\.PrivateKey\\(")
+        let range = NSRange(source.startIndex..., in: source)
+        XCTAssertNil(softwareKey.firstMatch(in: source, range: range), "a software P-256 key in the app signer")
+        XCTAssertFalse(source.contains("rawRepresentation"))
+        XCTAssertFalse(source.contains("SecKeyCreateRandomKey"))
+        XCTAssertFalse(source.contains("kSecAttrIsPermanent"))
+        XCTAssertFalse(source.contains("Apple development team"), "the team-signing message is gone")
+        XCTAssertTrue(source.contains("[.privateKeyUsage, .biometryCurrentSet]"))
+        XCTAssertTrue(source.contains("touchIDAuthenticationAllowableReuseDuration = 0"))
+    }
+
     // MARK: Operator UAT (needs a fingerprint; skipped unless asked for)
 
     /// Signs with the app's REAL India Secure Enclave key. Touch ID is pressed once.

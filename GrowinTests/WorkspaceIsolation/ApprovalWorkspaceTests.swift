@@ -366,7 +366,7 @@ struct ApprovalWorkspaceTests {
         let adapters = String(tail[tail.startIndex..<end.upperBound])
         #expect(adapters.contains("isConfigured(for: .india)"))
         #expect(adapters.contains("identity(for: .india)"))
-        #expect(adapters.contains("sign(payload, for: .india)"))
+        #expect(adapters.contains("sign(payload, for: .india, flow: .paperApproval)"))
         #expect(!adapters.contains(".uk"))
     }
 
