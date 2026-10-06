@@ -229,10 +229,10 @@ class AppState:
                 db_path, workspace=ws, require_approval=True, venue=binding
             )
             if binding is not None and caps is not None:
-                # The practice budget equals capital_cap and stays immutable
-                # (changing caps later means a new practice ledger).
-                ledger.configure_paper_budget(
-                    binding.account_id, binding.currency, caps.capital_cap, workspace=ws
+                # Both caps are stored once, and the budget equals capital_cap. A
+                # change to either cap later is refused (a new ledger is needed).
+                ledger.configure_venue_limits(
+                    caps.capital_cap, caps.per_position_cap, workspace=ws
                 )
             dispatcher = factory(
                 VenueContext(workspace=ws, venue=venue, binding=binding, caps=caps)

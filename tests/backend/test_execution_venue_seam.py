@@ -1062,6 +1062,110 @@ def test_start_execution_never_turns_the_real_uk_path_into_a_practice_ledger(
         paper.close_execution()
 
 
+def _stored_limits(path: Path) -> tuple:
+    connection = sqlite3.connect(path)
+    try:
+        return connection.execute(
+            "SELECT capital_cap, per_position_cap FROM ledger_venue_limits"
+        ).fetchall()
+    finally:
+        connection.close()
+
+
+def test_both_practice_caps_are_stored_with_the_ledger_and_cannot_be_rewritten(
+    tmp_path, private_config_dir, uk_process
+):
+    write_practice_files(private_config_dir)
+    path = tmp_path / "p.sqlite3"
+    app_state = AppState()
+    assert app_state.start_execution(
+        path, workspace="uk", private_dir=private_config_dir,
+        dispatcher_factories=_factories(CountingFactory()),
+    )
+    app_state.close_execution()
+
+    assert _stored_limits(path) == [("900.00", "300.00")]
+    raw = sqlite3.connect(path)
+    try:
+        for statement in (
+            "UPDATE ledger_venue_limits SET per_position_cap = '999'",
+            "DELETE FROM ledger_venue_limits",
+        ):
+            with pytest.raises(sqlite3.DatabaseError, match="immutable"):
+                raw.execute(statement)
+    finally:
+        raw.close()
+
+
+def test_changing_only_the_per_position_cap_cannot_restart_a_practice_ledger(
+    tmp_path, private_config_dir, uk_process
+):
+    write_practice_files(private_config_dir)
+    path = tmp_path / "p.sqlite3"
+    counting = CountingFactory()
+    first = AppState()
+    assert first.start_execution(
+        path, workspace="uk", private_dir=private_config_dir,
+        dispatcher_factories=_factories(counting),
+    )
+    first.close_execution()
+    before = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    write_json(
+        private_config_dir / "uk" / "limits.json", {**SYNTH_LIMITS, "per_position_cap": "299.00"}
+    )
+    changed = AppState()
+    started = changed.start_execution(
+        path, workspace="uk", private_dir=private_config_dir,
+        dispatcher_factories=_factories(counting),
+    )
+
+    assert started is False
+    _assert_disabled(changed, "ApprovalConflict")
+    assert counting.calls == 1
+    assert _stored_limits(path) == [("900.00", "300.00")]
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+
+    # The unchanged caps still start it.
+    write_json(private_config_dir / "uk" / "limits.json", dict(SYNTH_LIMITS))
+    again = AppState()
+    assert again.start_execution(
+        path, workspace="uk", private_dir=private_config_dir,
+        dispatcher_factories=_factories(counting),
+    )
+    again.close_execution()
+
+
+def test_a_changed_cap_pair_writes_nothing(stack_factory):
+    stack = stack_factory("practice")
+    first = stack.ledger.configure_venue_limits("900", "300", workspace="uk")
+    assert first.amount == Decimal("900")
+    for capital, per_position in (("900", "299"), ("901", "300"), ("901", "299"), ("950", "300")):
+        with pytest.raises(ApprovalConflict, match="immutable"):
+            stack.ledger.configure_venue_limits(capital, per_position, workspace="uk")
+    assert _stored_limits(stack.ledger.path) == [("900", "300")]
+    assert stack.ledger.get_paper_budget(SYNTH_ACCOUNT, "GBP", workspace="uk").amount == Decimal("900")
+    # The same pair, in any decimal spelling, is accepted.
+    assert stack.ledger.configure_venue_limits("900.00", "300.0", workspace="uk").amount == Decimal("900")
+
+
+def test_venue_limits_exist_only_in_a_bound_ledger_and_stay_ordered(stack_factory):
+    paper = stack_factory("paper")
+    with pytest.raises(ApprovalConflict, match="bound-venue"):
+        paper.ledger.configure_venue_limits("900", "300", workspace="uk")
+    tables = {
+        row[0]
+        for row in sqlite3.connect(paper.ledger.path).execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    assert "ledger_venue_limits" not in tables
+    practice = stack_factory("practice")
+    with pytest.raises(ApprovalConflict, match="exceeds"):
+        practice.ledger.configure_venue_limits("300", "900", workspace="uk")
+    assert practice.ledger.get_paper_budget(SYNTH_ACCOUNT, "GBP", workspace="uk") is None
+
+
 def test_start_execution_with_no_path_uses_the_practice_path_and_leaves_the_real_one_absent(
     private_config_dir, uk_process, home_with_real_uk_path
 ):

@@ -682,6 +682,37 @@ def _venue_binding_check() -> str:
     return " OR ".join(pairs) if pairs else "0"
 
 
+_VENUE_LIMITS_TABLE = "ledger_venue_limits"
+
+
+def _install_venue_limits_table(connection: sqlite3.Connection) -> None:
+    """Create the empty, write-once caps table. Idempotent; caller owns the transaction.
+
+    It exists only in a bound-venue ledger. One row, never updated or deleted.
+    """
+
+    connection.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {_VENUE_LIMITS_TABLE} (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            capital_cap TEXT NOT NULL,
+            per_position_cap TEXT NOT NULL,
+            configured_at TEXT NOT NULL
+        )
+        """
+    )
+    for event in ("UPDATE", "DELETE"):
+        connection.execute(
+            f"""
+            CREATE TRIGGER IF NOT EXISTS {_VENUE_LIMITS_TABLE}_no_{event.lower()}
+            BEFORE {event} ON {_VENUE_LIMITS_TABLE}
+            BEGIN
+                SELECT RAISE(ABORT, 'ledger venue limits are immutable');
+            END
+            """
+        )
+
+
 def _install_venue_binding(
     connection: sqlite3.Connection, binding: VenueBinding, bound_at: str
 ) -> None:
@@ -717,6 +748,7 @@ def _install_venue_binding(
         "VALUES (1, ?, ?, ?, ?)",
         (binding.venue, binding.account_id, binding.currency, bound_at),
     )
+    _install_venue_limits_table(connection)
 
 
 def _apply_base_schema(connection: sqlite3.Connection, from_version: int) -> None:
@@ -1240,29 +1272,88 @@ class ExecutionLedger:
         amount_decimal = _positive_decimal(amount, "budget amount")
         now = _now()
         with self._transaction() as connection:
+            return self._upsert_paper_budget(connection, account, currency, amount_decimal, now)
+
+    def _upsert_paper_budget(
+        self,
+        connection: sqlite3.Connection,
+        account: str,
+        currency: str,
+        amount_decimal: Decimal,
+        now: str,
+    ) -> PaperBudget:
+        """Insert the budget or confirm it is unchanged. The caller owns the transaction."""
+
+        row = connection.execute(
+            "SELECT * FROM paper_budgets WHERE workspace = ? AND account = ? AND currency = ?",
+            (self.workspace, account, currency),
+        ).fetchone()
+        if row is not None:
+            if _decimal(row["amount"]) != amount_decimal:
+                raise ApprovalConflict("paper budget is immutable once configured")
+            return self._budget_from_row(row)
+        connection.execute(
+            """
+            INSERT INTO paper_budgets
+                (workspace, account, currency, amount, reserved, consumed, released, created_at, updated_at)
+            VALUES (?, ?, ?, ?, '0', '0', '0', ?, ?)
+            """,
+            (self.workspace, account, currency, _decimal_str(amount_decimal), now, now),
+        )
+        row = connection.execute(
+            "SELECT * FROM paper_budgets WHERE workspace = ? AND account = ? AND currency = ?",
+            (self.workspace, account, currency),
+        ).fetchone()
+        if row is None:
+            raise LedgerError("paper budget did not persist")
+        return self._budget_from_row(row)
+
+    def configure_venue_limits(
+        self,
+        capital_cap: Decimal | str | int | float,
+        per_position_cap: Decimal | str | int | float,
+        *,
+        workspace: Workspace | str,
+    ) -> PaperBudget:
+        """Persist both venue caps once and set the bound budget to the capital cap.
+
+        Bound-venue ledgers only (D-03). The first call stores both caps and the
+        budget in one transaction. Every later call must pass the same two
+        values: a change to either cap, not only the capital cap, raises
+        ``ApprovalConflict`` and writes nothing. Changing caps means a new
+        ledger. This stores the per-position cap; enforcing it is a later plan.
+        """
+
+        self.require_workspace(workspace)
+        binding = self.venue_binding
+        if binding is None:
+            raise ApprovalConflict("venue limits exist only in a bound-venue ledger")
+        capital = _positive_decimal(capital_cap, "capital cap")
+        per_position = _positive_decimal(per_position_cap, "per-position cap")
+        if per_position > capital:
+            raise ApprovalConflict("per-position cap exceeds the capital cap")
+        now = _now()
+        with self._transaction() as connection:
+            _install_venue_limits_table(connection)
             row = connection.execute(
-                "SELECT * FROM paper_budgets WHERE workspace = ? AND account = ? AND currency = ?",
-                (self.workspace, account, currency),
-            ).fetchone()
-            if row is not None:
-                if _decimal(row["amount"]) != amount_decimal:
-                    raise ApprovalConflict("paper budget is immutable once configured")
-                return self._budget_from_row(row)
-            connection.execute(
-                """
-                INSERT INTO paper_budgets
-                    (workspace, account, currency, amount, reserved, consumed, released, created_at, updated_at)
-                VALUES (?, ?, ?, ?, '0', '0', '0', ?, ?)
-                """,
-                (self.workspace, account, currency, _decimal_str(amount_decimal), now, now),
-            )
-            row = connection.execute(
-                "SELECT * FROM paper_budgets WHERE workspace = ? AND account = ? AND currency = ?",
-                (self.workspace, account, currency),
+                f"SELECT capital_cap, per_position_cap FROM {_VENUE_LIMITS_TABLE} "
+                "WHERE singleton = 1"
             ).fetchone()
             if row is None:
-                raise LedgerError("paper budget did not persist")
-            return self._budget_from_row(row)
+                connection.execute(
+                    f"INSERT INTO {_VENUE_LIMITS_TABLE} "
+                    "(singleton, capital_cap, per_position_cap, configured_at) "
+                    "VALUES (1, ?, ?, ?)",
+                    (_decimal_str(capital), _decimal_str(per_position), now),
+                )
+            elif (
+                _decimal(row["capital_cap"]) != capital
+                or _decimal(row["per_position_cap"]) != per_position
+            ):
+                raise ApprovalConflict("venue limits are immutable once configured")
+            return self._upsert_paper_budget(
+                connection, binding.account_id, binding.currency, capital, now
+            )
 
     def get_paper_budget(
         self, account: str, currency: str, *, workspace: Workspace | str
