@@ -15,7 +15,7 @@ from magentic import prompt as mag_prompt
 
 from .critic_binding import clear_review, proposal_identity, _bind_successful_review
 from .base_agent import BaseAgent, AgentResponse, AgentConfig
-from market_context import MarketContext
+from market_context import MarketContext, RiskGovernanceData
 from utils.financial_math import create_decimal
 from model_registry import ROLE_RISK_CRITIC, ModelRegistryError, ProviderError, active_registry_or_none
 from model_registry.provider import run_magentic
@@ -39,14 +39,51 @@ class RiskAssessment(BaseModel):
     "- Intent: {intent}\n"
     "- Portfolio Value: £{portfolio_value}\n"
     "- Wash Sale Risk Alert: {wash_sale_alert}\n\n"
+    "Liquidity and Risk Governance (structured figures from the market context):\n"
+    "{risk_governance}\n\n"
     "Proposed Strategy/Action:\n"
     "{suggestion}\n\n"
     "Risk Protocols:\n"
     "{protocols}\n\n"
     "Audit this strategy and return a structured RiskAssessment."
 )
-def conduct_risk_audit(ticker: str, intent: str, portfolio_value: str, wash_sale_alert: bool, suggestion: str, protocols: str) -> RiskAssessment:
+def conduct_risk_audit(ticker: str, intent: str, portfolio_value: str, wash_sale_alert: bool, risk_governance: str, suggestion: str, protocols: str) -> RiskAssessment:
     ...
+
+
+_UNAVAILABLE = "unavailable"
+
+
+def _figure(value: Optional[Decimal]) -> str:
+    """A figure as plain text; an unset one is 'unavailable', never zero."""
+    if value is None:
+        return _UNAVAILABLE
+    try:
+        return format(Decimal(value), "f")
+    except Exception:
+        return str(value)
+
+
+def format_risk_governance(risk_governance: Optional[RiskGovernanceData]) -> str:
+    """The five liquidity figures the critic is shown (P-17).
+
+    Text only. The critic is advisory; the deterministic gate is the slippage check
+    in ``risk_india.rules`` and admission, not this prompt.
+    """
+    if risk_governance is None:
+        return (
+            f"- slippage_bps, liquidity_status, pov_participation, adv_30d, systemic_risk_level: {_UNAVAILABLE} "
+            "(not computed for this request; an unavailable figure is not zero)"
+        )
+    return "\n".join(
+        (
+            f"- slippage_bps: {_figure(risk_governance.slippage_bps)}",
+            f"- liquidity_status: {risk_governance.liquidity_status}",
+            f"- pov_participation: {_figure(risk_governance.pov_participation)}",
+            f"- adv_30d: {_figure(risk_governance.adv_30d)}",
+            f"- systemic_risk_level: {risk_governance.systemic_risk_level}",
+        )
+    )
 
 RISK_SYSTEM_PROMPT = """
 You are the Risk Agent (The Critic). Your job is to audit trade recommendations for risk, compliance, and suitability.
@@ -125,6 +162,7 @@ class RiskAgent(BaseAgent):
                 market_context.intent,
                 str(portfolio_val),
                 wash_sale_alert,
+                format_risk_governance(market_context.risk_governance),
                 suggestion,
                 RISK_SYSTEM_PROMPT
             )
