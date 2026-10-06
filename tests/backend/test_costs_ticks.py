@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from datetime import date, datetime, time
 from decimal import Decimal
@@ -21,15 +22,20 @@ from costs.fills import (
     simulate_session,
 )
 from costs.ticks import (
+    EQUITY_TICK_TABLE_PATH,
     NON_GOLD_ETF_TICK_TABLE_PATH,
+    InstrumentClass,
+    NseCashTickResolution,
     align_limit,
     is_on_tick,
     load_tick_table,
+    resolve_nse_cash_tick,
     resolve_tick_from_table,
 )
 
 D = Decimal
 TABLE_PATH = Path(__file__).resolve().parents[2] / "backend" / "costs" / "schedules" / "nse_cash_tick_sizes.json"
+assert TABLE_PATH == EQUITY_TICK_TABLE_PATH
 TABLE_VERSION = "nse-cash-ticks-2025-04-15.r2"
 FLAT_VERSION = "nse-cash-ticks-2021-01-01.r1"
 TWO_BAND_VERSION = "nse-cash-ticks-2024-06-10.r1"
@@ -39,18 +45,18 @@ SESSION = date(2026, 10, 6)
 
 # Any change to a committed tick version needs a new version id and a new literal
 # here, in the same commit.
-EXPECTED_TICK_TABLE_HASH = "73311d339eb6d01ca81589b0510a873146a425b7e8cf75352ee78cb11becdacc"
+EXPECTED_TICK_TABLE_HASH = "1c94d89c6257ca8153cbc6ad3f29e3f7e9b2b06bf34efc7e61891801e9ad2e55"
 EXPECTED_VERSION_HASHES = {
-    FLAT_VERSION: "9cfb9c95c6ecc244cc94b9813eefbd4dd6a29d3e0f46c7329ef70eb7a059f80f",
-    TWO_BAND_VERSION: "e2262cd5bcaab22488e7ba0e6e2b587f84fcc9a3f940156717cccb92eac57159",
+    FLAT_VERSION: "54db4b485871903045c5204391fe7ea06acfe67429be315e6313abbfe501723e",
+    TWO_BAND_VERSION: "2e49d416e00c3accba960bc9f190e898dc43baee20235c165043880aeec82c04",
     TABLE_VERSION: EXPECTED_TICK_TABLE_HASH,
-    ETF_VERSION: "219c90b126ece971802eb2641e8eb4f45c37725988469955e35dc223b618b04c",
-    ETF_2026_VERSION: "ab4d5464043b4530c2b1bf64be4a1e033419f5e4c6e40a6d032fb64a45a0f5da",
+    ETF_VERSION: "01e74a55b531254fcc31c544fc6698ce2f79088cd209cc0279c04f0a829777d9",
+    ETF_2026_VERSION: "e5eb060b9b468d498362246b4c2f28bd9fe20db1f6ae4276ec104969341e8e57",
 }
 
 
 def resolve(reference, session=SESSION):
-    return resolve_tick_from_table(load_tick_table(), session_date=session, band_reference_price=D(reference))
+    return resolve_tick_from_table(load_tick_table(TABLE_PATH), session_date=session, band_reference_price=D(reference))
 
 
 def resolve_etf(reference, session):
@@ -102,7 +108,7 @@ def test_2024_two_band_edge_at_250_is_regular_tick(session, reference, tick):
 
 
 def test_upper_inclusive_defaults_to_false_so_other_versions_keep_lower_inclusive_edges():
-    table = load_tick_table()
+    table = load_tick_table(TABLE_PATH)
     for version_id in (FLAT_VERSION, TWO_BAND_VERSION):
         assert not any(band.upper_inclusive for band in version_by_id(table, version_id).bands)
     r2 = version_by_id(table, TABLE_VERSION)
@@ -110,7 +116,7 @@ def test_upper_inclusive_defaults_to_false_so_other_versions_keep_lower_inclusiv
 
 
 def test_resolved_tick_carries_table_evidence():
-    table = load_tick_table()
+    table = load_tick_table(TABLE_PATH)
     tick = resolve("400.00")
     assert tick.effective_from == date(2025, 4, 15)
     assert tick.source == f"nse-cash-price-band-ticks:{TABLE_VERSION}"
@@ -158,7 +164,7 @@ def test_dated_equity_tick_history(session, reference, tick, version, effective_
 
 
 def test_equity_versions_are_contiguous_from_2021():
-    versions = load_tick_table().versions
+    versions = load_tick_table(TABLE_PATH).versions
     assert versions[0].effective_from == date(2021, 1, 1)
     assert [v.version for v in versions] == [FLAT_VERSION, TWO_BAND_VERSION, TABLE_VERSION]
     for earlier, later in zip(versions, versions[1:]):
@@ -230,11 +236,11 @@ def test_non_positive_reference_price_raises(bad):
 
 def test_float_reference_price_raises():
     with pytest.raises(InputError):
-        resolve_tick_from_table(load_tick_table(), session_date=SESSION, band_reference_price=400.0)
+        resolve_tick_from_table(load_tick_table(TABLE_PATH), session_date=SESSION, band_reference_price=400.0)
 
 
 def test_table_hash_is_pinned():
-    table = load_tick_table()
+    table = load_tick_table(TABLE_PATH)
     assert version_by_id(table, TABLE_VERSION).version_hash == EXPECTED_TICK_TABLE_HASH
     etf = load_tick_table(NON_GOLD_ETF_TICK_TABLE_PATH)
     actual = {v.version: v.version_hash for v in (*table.versions, *etf.versions)}
@@ -256,6 +262,149 @@ def test_is_on_tick():
     assert is_on_tick(D("400.03"), D("0.05")) is False
     wrapped = TickSize(D("0.05"), date(2025, 4, 15), "test-explicit", sha256_hex("test-explicit"))
     assert is_on_tick(D("400.10"), wrapped) is True
+
+
+# ---- routing: instrument class and series -------------------------------------
+
+
+def routed(session, reference, instrument_class, series):
+    return resolve_nse_cash_tick(
+        session_date=session, band_reference_price=D(reference), instrument_class=instrument_class, series=series
+    )
+
+
+def test_routing_picks_the_table_from_the_instrument_class_and_returns_provenance():
+    session = date(2023, 1, 2)
+    equity = routed(session, "400.00", InstrumentClass.EQUITY, "EQ")
+    assert isinstance(equity, NseCashTickResolution)
+    assert isinstance(equity.tick, TickSize)
+    assert equity.tick.value == D("0.05")
+    assert equity.version_id == FLAT_VERSION
+    assert equity.version_hash == EXPECTED_VERSION_HASHES[FLAT_VERSION]
+    assert equity.tick.source == f"nse-cash-price-band-ticks:{FLAT_VERSION}"
+    assert equity.tick.source_hash == equity.version_hash
+    assert (equity.instrument_class, equity.series) == (InstrumentClass.EQUITY, "EQ")
+    etf = routed(session, "400.00", InstrumentClass.NON_GOLD_ETF, "EQ")
+    assert etf.tick.value == D("0.01")
+    assert etf.version_id == ETF_VERSION
+    assert etf.version_hash == EXPECTED_VERSION_HASHES[ETF_VERSION]
+
+
+def test_routing_returns_what_the_low_level_resolver_returns():
+    for session, reference in [(date(2021, 1, 1), "1.00"), (date(2024, 6, 10), "250.00"), (date(2026, 10, 6), "1000.00")]:
+        assert routed(session, reference, InstrumentClass.EQUITY, "EQ").tick == resolve(reference, session)
+
+
+@pytest.mark.parametrize("session", [date(2020, 12, 31), date(2021, 1, 1), date(2024, 6, 10), date(2025, 6, 1), date(2026, 10, 6)])
+@pytest.mark.parametrize("series", ["EQ", "BE", "BL", "SM"])
+def test_gold_etf_raises_for_every_date_and_series(session, series):
+    with pytest.raises(TickSizeUnavailable, match="Gold ETF"):
+        routed(session, "400.00", InstrumentClass.GOLD_ETF, series)
+
+
+def test_the_old_path_would_have_priced_a_gold_etf():
+    # Why the classifier exists: the low-level resolver on the non-Gold ETF table returns Rs 0.01 for any
+    # ETF, Gold included, although NSE sets Gold ETF ticks one by one (Rs 0.05 or Rs 0.01).
+    old_path = resolve_tick_from_table(
+        load_tick_table(NON_GOLD_ETF_TICK_TABLE_PATH), session_date=date(2023, 1, 2), band_reference_price=D("400.00")
+    )
+    assert old_path.value == D("0.01")
+    with pytest.raises(TickSizeUnavailable):
+        routed(date(2023, 1, 2), "400.00", InstrumentClass.GOLD_ETF, "EQ")
+
+
+def test_an_etf_passed_as_equity_resolves_from_the_equity_table():
+    # Classification is the caller's duty. ETFs trade in series EQ, so series cannot separate them from
+    # stocks: an ETF classed as EQUITY gets the equity tick. The explicit instrument_class argument is
+    # what makes that choice visible at the call site.
+    wrong = routed(date(2023, 1, 2), "400.00", InstrumentClass.EQUITY, "EQ")
+    right = routed(date(2023, 1, 2), "400.00", InstrumentClass.NON_GOLD_ETF, "EQ")
+    assert wrong.tick.value == D("0.05") and right.tick.value == D("0.01")
+    assert wrong.version_id != right.version_id
+
+
+@pytest.mark.parametrize("session", [date(2025, 4, 15), date(2025, 6, 1), date(2026, 9, 6)])
+def test_non_gold_etf_gap_after_the_2025_price_table_raises(session):
+    with pytest.raises(TickSizeUnavailable):
+        routed(session, "400.00", InstrumentClass.NON_GOLD_ETF, "EQ")
+
+
+def test_non_gold_etf_resumes_on_2026_09_07():
+    resolved = routed(date(2026, 9, 7), "400.00", InstrumentClass.NON_GOLD_ETF, "EQ")
+    assert resolved.tick.value == D("0.01")
+    assert resolved.version_id == ETF_2026_VERSION
+
+
+@pytest.mark.parametrize("instrument_class", [InstrumentClass.EQUITY, InstrumentClass.NON_GOLD_ETF])
+@pytest.mark.parametrize("session", [date(2021, 6, 1), date(2024, 12, 2), date(2026, 10, 6)])
+@pytest.mark.parametrize("series", ["SM", "ST", "SZ"])
+def test_sme_series_raise(instrument_class, session, series):
+    with pytest.raises(TickSizeUnavailable, match="not covered"):
+        routed(session, "100.00", instrument_class, series)
+
+
+SERIES_CASES = [
+    # (session, class, covering version, listed series)
+    (date(2023, 1, 2), InstrumentClass.EQUITY, FLAT_VERSION, ["EQ", "BE"]),
+    (date(2024, 12, 2), InstrumentClass.EQUITY, TWO_BAND_VERSION, ["EQ", "BE", "BZ", "BO", "RL", "AF", "BL", "T0"]),
+    (date(2025, 6, 1), InstrumentClass.EQUITY, TABLE_VERSION, ["EQ", "T0", "BE", "BZ", "BO", "RL", "AF", "BL"]),
+    (date(2023, 1, 2), InstrumentClass.NON_GOLD_ETF, ETF_VERSION, ["EQ"]),
+    (date(2026, 10, 6), InstrumentClass.NON_GOLD_ETF, ETF_2026_VERSION, ["EQ"]),
+]
+NEVER_LISTED = ["", "eq", "Eq", " EQ", "SM", "ST", "SZ", "GB", "IV", "TB", "N1", "P1"]
+
+
+@pytest.mark.parametrize("session, instrument_class, version, listed", SERIES_CASES)
+def test_series_allow_list_per_version(session, instrument_class, version, listed):
+    path = TABLE_PATH if instrument_class is InstrumentClass.EQUITY else NON_GOLD_ETF_TICK_TABLE_PATH
+    assert list(version_by_id(load_tick_table(path), version).series) == listed
+    for series in listed:
+        assert routed(session, "400.00", instrument_class, series).version_id == version
+    candidates = [*NEVER_LISTED, "BE", "BZ", "BO", "RL", "AF", "BL", "T0"]
+    for series in (c for c in candidates if c not in listed):
+        with pytest.raises(TickSizeUnavailable, match="not covered"):
+            routed(session, "400.00", instrument_class, series)
+
+
+@pytest.mark.parametrize("series", [None, 1, b"EQ", ("EQ",), ["EQ"]])
+def test_non_string_series_raises(series):
+    with pytest.raises(TickSizeUnavailable):
+        routed(date(2025, 6, 1), "400.00", InstrumentClass.EQUITY, series)
+
+
+@pytest.mark.parametrize("bad", ["EQUITY", "equity", "gold_etf", None, 1, InstrumentClass.EQUITY.value])
+def test_non_enum_instrument_class_raises(bad):
+    with pytest.raises(TickSizeUnavailable, match="InstrumentClass"):
+        routed(date(2025, 6, 1), "400.00", bad, "EQ")
+
+
+@pytest.mark.parametrize("instrument_class", [InstrumentClass.EQUITY, InstrumentClass.NON_GOLD_ETF])
+def test_unsourced_dates_still_raise_through_the_router(instrument_class):
+    with pytest.raises(TickSizeUnavailable):
+        routed(date(2020, 12, 31), "400.00", instrument_class, "EQ")
+
+
+def test_r2_band_edges_through_the_router():
+    for reference, tick in [("1000.00", "0.05"), ("1000.01", "0.10"), ("250.00", "0.05"), ("249.99", "0.01")]:
+        assert routed(date(2025, 6, 1), reference, InstrumentClass.EQUITY, "EQ").tick.value == D(tick)
+
+
+def test_router_has_no_default_for_any_argument_and_the_loader_requires_a_path():
+    parameters = inspect.signature(resolve_nse_cash_tick).parameters
+    assert list(parameters) == ["session_date", "band_reference_price", "instrument_class", "series"]
+    for parameter in parameters.values():
+        assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+        assert parameter.default is inspect.Parameter.empty
+    assert inspect.signature(load_tick_table).parameters["path"].default is inspect.Parameter.empty
+    with pytest.raises(TypeError):
+        load_tick_table()  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        resolve_nse_cash_tick(session_date=date(2025, 6, 1), band_reference_price=D("400"), series="EQ")  # type: ignore[call-arg]
+
+
+def test_non_positive_reference_price_raises_through_the_router():
+    with pytest.raises(InputError):
+        routed(date(2025, 6, 1), "0", InstrumentClass.EQUITY, "EQ")
 
 
 # ---- table strictness --------------------------------------------------------
@@ -300,6 +449,11 @@ BAD_TABLES = {
     "empty bands": lambda d: edit_bands(d, []),
     "wrong schema": lambda d: d.update(schema="growin.costs.tick_sizes/2"),
     "wrong exchange": lambda d: d["versions"][0].update(exchange="BSE"),
+    "series missing": lambda d: d["versions"][0].pop("series"),
+    "series empty": lambda d: d["versions"][0].update(series=[]),
+    "series duplicate": lambda d: d["versions"][0].update(series=["EQ", "EQ"]),
+    "series not strings": lambda d: d["versions"][0].update(series=[1]),
+    "series padded": lambda d: d["versions"][0].update(series=["EQ "]),
     "upper_inclusive as a string": lambda d: d["versions"][-1]["bands"][1].update(upper_inclusive="true"),
     "upper_inclusive as a number": lambda d: d["versions"][-1]["bands"][1].update(upper_inclusive=1),
     "upper_inclusive on the open-ended band": lambda d: d["versions"][-1]["bands"][-1].update(upper_inclusive=True),

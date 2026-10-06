@@ -1,11 +1,15 @@
 """Dated NSE cash tick-size table and limit alignment.
 
 The tick size is an explicit, dated input. Each table version cites the NSE
-circulars it comes from; a date no version covers (before 2021-01-01, and any
-period NSE sets per security, such as Gold ETFs) is not encoded and fails
+circulars it comes from and lists the exchange series its circular covers; a
+date no version covers (before 2021-01-01), a series a version does not list,
+and any instrument NSE sets per security (Gold ETFs) are not encoded and fail
 closed. Equities and ETFs live in separate tables because the version model
-has no instrument class: a caller picks the table for the instrument. The
-Breeze security master shows a different tick for some names, so neither
+has no instrument class. Use ``resolve_nse_cash_tick``: the caller states the
+instrument class and the series, and the table is chosen from them. The
+class is the caller's duty: ETFs trade in series EQ, so nothing here can tell
+an ETF from a stock; an ETF passed as EQUITY resolves from the equity table.
+The Breeze security master shows a different tick for some names, so neither
 source is trusted until a live quote settles it (Phase 61); every resolved
 tick records which table version it came from and that version's hash.
 
@@ -18,6 +22,8 @@ import decimal
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
+from enum import Enum
+from functools import lru_cache
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from pathlib import Path
 from typing import Any
@@ -36,7 +42,7 @@ from .core import (
 from .fills import TickSize
 
 TICK_SCHEMA = "growin.costs.tick_sizes/1"
-DEFAULT_TICK_TABLE_PATH = Path(__file__).parent / "schedules" / "nse_cash_tick_sizes.json"
+EQUITY_TICK_TABLE_PATH = Path(__file__).parent / "schedules" / "nse_cash_tick_sizes.json"
 # Exchange Traded Funds other than Gold ETFs. Never use it for a Gold ETF: NSE sets those one by one.
 NON_GOLD_ETF_TICK_TABLE_PATH = Path(__file__).parent / "schedules" / "nse_cash_etf_tick_sizes.json"
 
@@ -48,6 +54,7 @@ _VERSION_KEYS = (
     "segment",
     "status",
     "reference_price_rule",
+    "series",
     "sources",
     "bands",
 )
@@ -76,6 +83,7 @@ class TickTableVersion:
     segment: str
     status: str
     reference_price_rule: str
+    series: tuple[str, ...]
     sources: tuple[str, ...]
     bands: tuple[TickBand, ...]
     version_hash: str
@@ -178,11 +186,20 @@ def _parse_version(raw: Any, index: int) -> TickTableVersion:
     sources = top["sources"]
     if not isinstance(sources, list) or not all(isinstance(item, str) and item for item in sources):
         raise ScheduleError(f"{path}.sources: expected a list of non-empty strings")
+    series = top["series"]
+    if (
+        not isinstance(series, list)
+        or not series
+        or not all(isinstance(item, str) and item and item == item.strip() for item in series)
+        or len(set(series)) != len(series)
+    ):
+        raise ScheduleError(f"{path}.series: expected a non-empty list of distinct series codes")
     effective_from = _date(top, "effective_from", path)
     effective_to = None if top["effective_to"] is None else _date(top, "effective_to", path)
     if effective_to is not None and effective_to < effective_from:
         raise ScheduleError(f"{path}.effective_to: precedes effective_from")
     return TickTableVersion(
+        series=tuple(series),
         version=_text(top, "version", path),
         effective_from=effective_from,
         effective_to=effective_to,
@@ -196,8 +213,9 @@ def _parse_version(raw: Any, index: int) -> TickTableVersion:
     )
 
 
-def load_tick_table(path: Path | None = None) -> TickTable:
-    source = DEFAULT_TICK_TABLE_PATH if path is None else Path(path)
+def load_tick_table(path: Path) -> TickTable:
+    """Load one tick table file. The path is required: there is deliberately no default table."""
+    source = Path(path)
     with decimal.localcontext(COST_CONTEXT):
         raw = _mapping(load_strict_json(source.read_text(encoding="utf-8"), ScheduleError, source.name), "$")
         _exact(raw, ("schema", "source_id", "versions"), "$")
@@ -219,28 +237,110 @@ def load_tick_table(path: Path | None = None) -> TickTable:
     return TickTable(raw["schema"], source_id, tuple(versions))
 
 
+def _covering_version(table: TickTable, session_date: date) -> TickTableVersion:
+    for version in table.versions:
+        if version.covers(session_date):
+            return version
+    raise TickSizeUnavailable(
+        f"no tick table version covers {session_date.isoformat()}; that date has no sourced tick version (not guessed)"
+    )
+
+
+def _tick_from_version(table: TickTable, version: TickTableVersion, reference: Decimal) -> TickSize:
+    for band in version.bands:
+        # Bands are contiguous from 0 and tried in order, so the lower edge is implied by the
+        # previous band's upper edge: exclusive upper hands the edge price to the next band,
+        # inclusive upper keeps it.
+        if band.upper is None or reference < band.upper or (band.upper_inclusive and reference == band.upper):
+            return TickSize(
+                value=band.tick,
+                effective_from=version.effective_from,
+                source=f"{table.source_id}:{version.version}",
+                source_hash=version.version_hash,
+                effective_to=version.effective_to,
+            )
+    raise TickSizeUnavailable(f"{version.version}: no band holds the reference price")  # unreachable: last band is open
+
+
 def resolve_tick_from_table(table: TickTable, *, session_date: date, band_reference_price: Decimal) -> TickSize:
-    """Pick the dated tick for a session from the band holding the reference price."""
+    """Pick the dated tick for a session from the band holding the reference price.
+
+    Low level: it does not know the instrument class or the series. Production callers use
+    ``resolve_nse_cash_tick``.
+    """
     with decimal.localcontext(COST_CONTEXT):
         reference = positive_decimal(band_reference_price, "band_reference_price")
-        for version in table.versions:
-            if not version.covers(session_date):
-                continue
-            for band in version.bands:
-                # Bands are contiguous from 0 and tried in order, so the lower edge is implied by the
-                # previous band's upper edge: exclusive upper hands the edge price to the next band,
-                # inclusive upper keeps it.
-                if band.upper is None or reference < band.upper or (band.upper_inclusive and reference == band.upper):
-                    return TickSize(
-                        value=band.tick,
-                        effective_from=version.effective_from,
-                        source=f"{table.source_id}:{version.version}",
-                        source_hash=version.version_hash,
-                        effective_to=version.effective_to,
-                    )
-        raise TickSizeUnavailable(
-            f"no tick table version covers {session_date.isoformat()}; that date has no sourced tick version (not guessed)"
-        )
+        return _tick_from_version(table, _covering_version(table, session_date), reference)
+
+
+class InstrumentClass(Enum):
+    """What kind of NSE cash instrument a tick is wanted for. The caller classifies; nothing here can."""
+
+    EQUITY = "equity"
+    NON_GOLD_ETF = "non_gold_etf"
+    GOLD_ETF = "gold_etf"
+
+
+@dataclass(frozen=True)
+class NseCashTickResolution:
+    """A resolved tick plus the provenance a caller records: table version id, its hash, class and series."""
+
+    tick: TickSize
+    version_id: str
+    version_hash: str
+    instrument_class: InstrumentClass
+    series: str
+
+
+_TABLE_PATHS = {
+    InstrumentClass.EQUITY: EQUITY_TICK_TABLE_PATH,
+    InstrumentClass.NON_GOLD_ETF: NON_GOLD_ETF_TICK_TABLE_PATH,
+}
+
+
+@lru_cache(maxsize=None)
+def _committed_table(instrument_class: InstrumentClass) -> TickTable:
+    return load_tick_table(_TABLE_PATHS[instrument_class])
+
+
+def resolve_nse_cash_tick(
+    *,
+    session_date: date,
+    band_reference_price: Decimal,
+    instrument_class: InstrumentClass,
+    series: str,
+) -> NseCashTickResolution:
+    """Resolve the NSE cash tick for a session, instrument class and series. No argument has a default.
+
+    The table is chosen from ``instrument_class``. Fails closed with ``TickSizeUnavailable`` for
+    GOLD_ETF (NSE sets those per security and there is no per-security source), for any value that
+    is not an ``InstrumentClass``, for a date no version covers, and for a series the covering
+    version does not list. Classifying the instrument is the caller's duty: an ETF passed as
+    EQUITY resolves from the equity table, because ETFs trade in series EQ.
+    """
+    if not isinstance(instrument_class, InstrumentClass):
+        raise TickSizeUnavailable(f"instrument_class must be an InstrumentClass, got {instrument_class!r}")
+    if instrument_class is InstrumentClass.GOLD_ETF:
+        raise TickSizeUnavailable("Gold ETF ticks are set per security by NSE and are not encoded")
+    if not isinstance(series, str):
+        raise TickSizeUnavailable(f"series must be a string, got {series!r}")
+    table = _committed_table(instrument_class)
+    with decimal.localcontext(COST_CONTEXT):
+        reference = positive_decimal(band_reference_price, "band_reference_price")
+        version = _covering_version(table, session_date)
+        if series not in version.series:
+            raise TickSizeUnavailable(
+                f"series {series!r} is not covered by {version.version} for {instrument_class.value} "
+                f"(covered: {', '.join(version.series)})"
+            )
+        tick = _tick_from_version(table, version, reference)
+    return NseCashTickResolution(
+        tick=tick,
+        version_id=version.version,
+        version_hash=version.version_hash,
+        instrument_class=instrument_class,
+        series=series,
+    )
 
 
 def _tick_value(tick: TickSize | Decimal) -> Decimal:
