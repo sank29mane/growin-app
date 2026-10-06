@@ -3,8 +3,14 @@
 A venue kind is bound to one workspace, one currency and a closed set of order
 modes. Every guard (the order-mode rule, the ledger open checks, the ledger DDL,
 the private-config loader and the dispatcher lookup) reads its facts from
-``VENUE_SPECS`` through the functions below. Adding a venue means adding one
-spec here and one dispatcher factory; no guard function changes.
+the sealed registry through the functions below. Adding a venue means adding
+one spec here and one dispatcher factory; no guard function changes.
+
+The registry is built and validated once at import and held privately. The
+public ``VENUE_SPECS`` name is a read-only view of it: reassigning that module
+attribute at runtime changes nothing the readers see. Tests that need another
+spec use ``override_venue_specs``, which validates its input and restores the
+sealed registry on exit.
 
 This module imports only the standard library, so the execution package and the
 private-config package can both read it without importing each other. Import it
@@ -17,16 +23,22 @@ LIVE is not an allowed mode of any spec: the constructor refuses it.
 from __future__ import annotations
 
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Callable, Mapping, Optional
+from typing import Callable, Iterator, Mapping, Optional
 
 VENUE_PAPER = "paper"
 VENUE_T212_PRACTICE = "t212_practice"
 
 KNOWN_WORKSPACES = frozenset({"uk", "india"})
 LIVE_MODE = "LIVE"
+# The non-LIVE order modes a spec may allow: ``execution.models.OrderMode``
+# minus LIVE. This module cannot import it, so a test pins the two together.
+KNOWN_ORDER_MODES = frozenset({"PAPER", "PRACTICE"})
+# The currency each workspace may bind a venue in.
+WORKSPACE_CURRENCIES: Mapping[str, str] = MappingProxyType({"uk": "GBP", "india": "INR"})
 
 _KIND_RE = re.compile(r"^[a-z][a-z0-9]*(_[a-z0-9]+)*$")
 _MODE_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
@@ -60,6 +72,8 @@ class VenueSpec:
             raise ValueError("a venue spec names at least one upper-case order mode")
         if LIVE_MODE in modes:
             raise ValueError("no venue spec may allow LIVE")
+        if not modes <= KNOWN_ORDER_MODES:
+            raise ValueError("a venue spec names only known order modes")
         object.__setattr__(self, "modes", modes)
         if not callable(self.ledger_path):
             raise ValueError("a venue spec needs a default ledger path function")
@@ -94,11 +108,91 @@ T212_PRACTICE_SPEC = VenueSpec(
     dispatcher_key=VENUE_T212_PRACTICE,
 )
 
-# The production registry. A test replaces this name to exercise another spec;
-# every reader below looks it up at call time.
-VENUE_SPECS: Mapping[str, VenueSpec] = MappingProxyType(
-    {T212_PRACTICE_SPEC.kind: T212_PRACTICE_SPEC}
-)
+def _validated_copy(kind: object, spec: object) -> VenueSpec:
+    """A fresh, fully re-validated copy of one registry entry, or ValueError.
+
+    Re-running the constructor on a copy means a spec whose fields were forced
+    after construction cannot enter the registry, and nothing the caller still
+    holds can change the sealed entry later.
+    """
+
+    if type(spec) is not VenueSpec:
+        raise ValueError("a registry entry is a VenueSpec")
+    if not isinstance(kind, str) or spec.kind != kind:
+        raise ValueError("a registry key is its spec's kind")
+    copy = VenueSpec(
+        kind=spec.kind,
+        workspace=spec.workspace,
+        currency=spec.currency,
+        modes=spec.modes,
+        ledger_path=spec.ledger_path,
+        dispatcher_key=spec.dispatcher_key,
+    )
+    if WORKSPACE_CURRENCIES.get(copy.workspace) != copy.currency:
+        raise ValueError("a venue spec's currency is its workspace's currency")
+    return copy
+
+
+def _seal(entries: Mapping[object, object]) -> Mapping[str, VenueSpec]:
+    """Validate every entry and return a read-only mapping of fresh copies."""
+
+    if not isinstance(entries, Mapping):
+        raise ValueError("a registry is a mapping of kind to VenueSpec")
+    sealed = {}
+    for kind, spec in entries.items():
+        copy = _validated_copy(kind, spec)
+        sealed[copy.kind] = copy
+    return MappingProxyType(sealed)
+
+
+class _Registry:
+    """The one private holder every reader goes through."""
+
+    __slots__ = ("specs",)
+
+    def __init__(self, specs: Mapping[str, VenueSpec]) -> None:
+        self.specs = specs
+
+
+class _SpecsView(Mapping):
+    """A read-only live view of the sealed registry, kept for readers of the old name."""
+
+    __slots__ = ()
+
+    def __getitem__(self, kind: str) -> VenueSpec:
+        return _REGISTRY.specs[kind]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(_REGISTRY.specs)
+
+    def __len__(self) -> int:
+        return len(_REGISTRY.specs)
+
+
+# Built and validated once, at import. Everything below reads _REGISTRY.specs,
+# never a public name, so reassigning VENUE_SPECS or T212_PRACTICE_SPEC at
+# runtime cannot register, replace or remove a venue.
+_REGISTRY = _Registry(_seal({T212_PRACTICE_SPEC.kind: T212_PRACTICE_SPEC}))
+VENUE_SPECS: Mapping[str, VenueSpec] = _SpecsView()
+
+
+@contextmanager
+def override_venue_specs(extra: Mapping[str, VenueSpec]) -> Iterator[None]:
+    """Test seam: add or replace specs for the duration of a ``with`` block.
+
+    ``extra`` is merged over the registry in force and the merge is validated
+    exactly as the import-time registry was. A malformed entry raises
+    ``ValueError`` before anything changes. The previous registry is restored on
+    exit, however the block ends. Not for production code.
+    """
+
+    candidate = _seal({**_REGISTRY.specs, **dict(extra)})
+    previous = _REGISTRY.specs
+    _REGISTRY.specs = candidate
+    try:
+        yield
+    finally:
+        _REGISTRY.specs = previous
 
 
 def spec_for(kind: object) -> Optional[VenueSpec]:
@@ -106,13 +200,13 @@ def spec_for(kind: object) -> Optional[VenueSpec]:
 
     if not isinstance(kind, str):
         return None
-    return VENUE_SPECS.get(kind)
+    return _REGISTRY.specs.get(kind)
 
 
 def registered_kinds() -> tuple[str, ...]:
     """The bound venue kinds, sorted. ``paper`` is not among them."""
 
-    return tuple(sorted(VENUE_SPECS))
+    return tuple(sorted(_REGISTRY.specs))
 
 
 def known_venues() -> tuple[str, ...]:
@@ -122,14 +216,17 @@ def known_venues() -> tuple[str, ...]:
 
 
 __all__ = [
+    "KNOWN_ORDER_MODES",
     "KNOWN_WORKSPACES",
     "LIVE_MODE",
     "T212_PRACTICE_SPEC",
     "VENUE_PAPER",
     "VENUE_SPECS",
     "VENUE_T212_PRACTICE",
+    "WORKSPACE_CURRENCIES",
     "VenueSpec",
     "known_venues",
+    "override_venue_specs",
     "registered_kinds",
     "spec_for",
     "venue_ledger_path",

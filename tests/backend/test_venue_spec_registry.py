@@ -2,7 +2,7 @@
 
 One ``VenueSpec`` per venue kind carries workspace, currency, order modes, the
 default ledger path and the dispatcher key. These tests register a fake second
-spec (india, INR, SHADOW only) in a test-only registry and prove that the guards
+spec (india, INR, PRACTICE only) in a test-only registry and prove that the guards
 apply it with no guard code changed: they never name a venue kind.
 """
 
@@ -36,13 +36,16 @@ from execution.venue import (
     resolve_factory,
 )
 from private_config import PrivateConfigError, load_workspace_config
-from venue_registry import VenueSpec
+from venue_registry import VenueSpec, override_venue_specs
 from venue_seam_testkit import write_json
 
 FAKE_KIND = "fake_india_shadow"
 FAKE_ACCOUNT = "acct-fake-india-0001"
 # Deliberately not the kind: the factory lookup must follow the spec.
 FAKE_KEY = "fake_shadow_factory"
+# The registry only admits known non-LIVE order modes, so the fake venue is an
+# india practice venue: its facts differ from the real one in every field.
+FAKE_MODE = "PRACTICE"
 
 
 def _fake_spec(tmp_path: Path) -> VenueSpec:
@@ -50,23 +53,19 @@ def _fake_spec(tmp_path: Path) -> VenueSpec:
         kind=FAKE_KIND,
         workspace="india",
         currency="INR",
-        modes=frozenset({"SHADOW"}),
+        modes=frozenset({FAKE_MODE}),
         ledger_path=lambda: tmp_path / "fake-india" / "execution.sqlite3",
         dispatcher_key=FAKE_KEY,
     )
 
 
 @pytest.fixture
-def with_fake_spec(monkeypatch, tmp_path):
+def with_fake_spec(tmp_path):
     """The production registry plus the fake spec, for this test only."""
 
     spec = _fake_spec(tmp_path)
-    monkeypatch.setattr(
-        venue_registry,
-        "VENUE_SPECS",
-        {**venue_registry.VENUE_SPECS, FAKE_KIND: spec},
-    )
-    return spec
+    with override_venue_specs({FAKE_KIND: spec}):
+        yield spec
 
 
 def _fake_binding() -> VenueBinding:
@@ -91,12 +90,12 @@ def test_the_fake_spec_binding_takes_its_own_currency(with_fake_spec):
 
 def test_fake_spec_intents_in_other_modes_are_refused(with_fake_spec):
     binding = _fake_binding()
-    assert allowed_modes(binding) == frozenset({"SHADOW"})
-    assert intent_refusal("SHADOW", FAKE_KIND, FAKE_ACCOUNT, binding) is None
-    for other in ("PAPER", "PRACTICE", "shadowx", ""):
+    assert allowed_modes(binding) == frozenset({FAKE_MODE})
+    assert intent_refusal(FAKE_MODE, FAKE_KIND, FAKE_ACCOUNT, binding) is None
+    for other in ("PAPER", "SHADOW", "practicex", ""):
         assert intent_refusal(other, FAKE_KIND, FAKE_ACCOUNT, binding) == MODE_VENUE_MISMATCH
-    assert intent_refusal("SHADOW", "paper", FAKE_ACCOUNT, binding) == BROKER_VENUE_MISMATCH
-    assert intent_refusal("SHADOW", FAKE_KIND, "acct-other", binding) == ACCOUNT_BINDING_MISMATCH
+    assert intent_refusal(FAKE_MODE, "paper", FAKE_ACCOUNT, binding) == BROKER_VENUE_MISMATCH
+    assert intent_refusal(FAKE_MODE, FAKE_KIND, "acct-other", binding) == ACCOUNT_BINDING_MISMATCH
 
 
 @pytest.mark.parametrize("mode", ["LIVE", "live", "Live"])
@@ -158,11 +157,11 @@ def test_the_fake_spec_opens_its_own_workspace_ledger_and_applies_its_modes(
     with ExecutionLedger(workspace="india", venue=binding) as ledger:
         # No path given: the spec's default ledger path function decides.
         assert ledger.path == with_fake_spec.ledger_path()
-        assert ledger.allowed_modes == frozenset({"SHADOW"})
+        assert ledger.allowed_modes == frozenset({FAKE_MODE})
         ledger._require_intent_allowed(
-            {"mode": "SHADOW", "broker": FAKE_KIND, "account": FAKE_ACCOUNT}
+            {"mode": FAKE_MODE, "broker": FAKE_KIND, "account": FAKE_ACCOUNT}
         )
-        for other in ("PAPER", "PRACTICE", "LIVE"):
+        for other in ("PAPER", "SHADOW", "LIVE"):
             with pytest.raises(ApprovalConflict):
                 ledger._require_intent_allowed(
                     {"mode": other, "broker": FAKE_KIND, "account": FAKE_ACCOUNT}
@@ -178,28 +177,23 @@ def test_an_unbound_ledger_accepts_paper_only_so_the_fake_mode_is_refused(
     with_fake_spec, tmp_path
 ):
     assert allowed_modes(None) == frozenset({"PAPER"})
-    assert intent_refusal("SHADOW", FAKE_KIND, FAKE_ACCOUNT, None) == MODE_VENUE_MISMATCH
+    assert intent_refusal(FAKE_MODE, FAKE_KIND, FAKE_ACCOUNT, None) == MODE_VENUE_MISMATCH
     with ExecutionLedger(tmp_path / "paper.sqlite3", workspace="india") as ledger:
         with pytest.raises(ApprovalConflict):
             ledger._require_intent_allowed(
-                {"mode": "SHADOW", "broker": FAKE_KIND, "account": FAKE_ACCOUNT}
+                {"mode": FAKE_MODE, "broker": FAKE_KIND, "account": FAKE_ACCOUNT}
             )
 
 
-def test_an_unregistered_venue_fails_closed_everywhere(monkeypatch, tmp_path):
-    with monkeypatch.context() as scope:
-        scope.setattr(
-            venue_registry,
-            "VENUE_SPECS",
-            {**venue_registry.VENUE_SPECS, FAKE_KIND: _fake_spec(tmp_path)},
-        )
+def test_an_unregistered_venue_fails_closed_everywhere(tmp_path):
+    with override_venue_specs({FAKE_KIND: _fake_spec(tmp_path)}):
         binding = _fake_binding()
         resolve_factory(FAKE_KIND, {FAKE_KEY: lambda _ctx: None})
     # Registry back to production: the same binding value is now unregistered.
     assert venue_registry.spec_for(FAKE_KIND) is None
     assert allowed_modes(binding) == frozenset()
+    assert intent_refusal(FAKE_MODE, FAKE_KIND, FAKE_ACCOUNT, binding) == MODE_VENUE_MISMATCH
     assert intent_refusal("SHADOW", FAKE_KIND, FAKE_ACCOUNT, binding) == MODE_VENUE_MISMATCH
-    assert intent_refusal("PRACTICE", FAKE_KIND, FAKE_ACCOUNT, binding) == MODE_VENUE_MISMATCH
     with pytest.raises(VenueError) as refused:
         resolve_factory(FAKE_KIND, {FAKE_KEY: lambda _ctx: None})
     assert refused.value.code == "VENUE_UNKNOWN"
@@ -268,25 +262,149 @@ def test_a_bound_venue_never_opens_the_workspace_real_ledger(
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     real = default_ledger_path("india")
     for path in (real, None):
-        monkeypatch.setattr(
-            venue_registry,
-            "VENUE_SPECS",
-            {
-                **venue_registry.VENUE_SPECS,
-                FAKE_KIND: VenueSpec(
-                    kind=FAKE_KIND,
-                    workspace="india",
-                    currency="INR",
-                    modes=frozenset({"SHADOW"}),
-                    # A badly declared spec: its default path IS the real ledger.
-                    ledger_path=lambda: real,
-                    dispatcher_key=FAKE_KEY,
-                ),
-            },
+        # A badly declared spec: its default path IS the real ledger.
+        bad = VenueSpec(
+            kind=FAKE_KIND,
+            workspace="india",
+            currency="INR",
+            modes=frozenset({FAKE_MODE}),
+            ledger_path=lambda: real,
+            dispatcher_key=FAKE_KEY,
         )
-        with pytest.raises(LedgerVenueMismatch):
-            ExecutionLedger(path, workspace="india", venue=_fake_binding())
-        assert not real.exists() and not real.parent.exists()
+        with override_venue_specs({FAKE_KIND: bad}):
+            with pytest.raises(LedgerVenueMismatch):
+                ExecutionLedger(path, workspace="india", venue=_fake_binding())
+            assert not real.exists() and not real.parent.exists()
+
+
+def test_the_registry_modes_are_the_non_live_order_modes():
+    """The registry cannot import OrderMode, so this pins its mode list to it."""
+
+    from execution.models import OrderMode
+
+    assert venue_registry.KNOWN_ORDER_MODES == {
+        mode.value for mode in OrderMode if mode is not OrderMode.LIVE
+    }
+
+
+def test_reassigning_the_public_registry_names_changes_nothing(monkeypatch, tmp_path):
+    spec = _fake_spec(tmp_path)
+    with override_venue_specs({FAKE_KIND: spec}):
+        binding = _fake_binding()  # a binding value for a kind that is then unregistered
+    practice = VenueBinding(venue=VENUE_T212_PRACTICE, account_id=FAKE_ACCOUNT, currency="GBP")
+    refused_before = intent_refusal("PAPER", VENUE_T212_PRACTICE, FAKE_ACCOUNT, practice)
+    assert refused_before == MODE_VENUE_MISMATCH
+    check_before = _venue_binding_check()
+
+    # A new venue by reassigning the public name: not registered, not accepted.
+    monkeypatch.setattr(venue_registry, "VENUE_SPECS", {FAKE_KIND: spec})
+    assert venue_registry.spec_for(FAKE_KIND) is None
+    assert venue_registry.registered_kinds() == (VENUE_T212_PRACTICE,)
+    assert venue_registry.known_venues() == ("paper", VENUE_T212_PRACTICE)
+    assert allowed_modes(binding) == frozenset()
+    assert intent_refusal(FAKE_MODE, FAKE_KIND, FAKE_ACCOUNT, binding) == MODE_VENUE_MISMATCH
+    with pytest.raises(VenueError):
+        resolve_factory(FAKE_KIND, {FAKE_KEY: lambda _ctx: None})
+    with pytest.raises(ValueError):
+        VenueBinding(venue=FAKE_KIND, account_id=FAKE_ACCOUNT, currency="INR")
+    assert _venue_binding_check() == check_before
+
+    # Swapping the practice spec for an unvalidated object: still refused.
+    class Unvalidated:
+        kind = VENUE_T212_PRACTICE
+        workspace = "uk"
+        currency = "GBP"
+        modes = frozenset({"PAPER", "PRACTICE"})
+        dispatcher_key = VENUE_T212_PRACTICE
+
+    monkeypatch.setattr(venue_registry, "VENUE_SPECS", {VENUE_T212_PRACTICE: Unvalidated()})
+    monkeypatch.setattr(venue_registry, "T212_PRACTICE_SPEC", Unvalidated())
+    assert type(venue_registry.spec_for(VENUE_T212_PRACTICE)) is VenueSpec
+    assert allowed_modes(practice) == frozenset({"PRACTICE"})
+    assert intent_refusal("PAPER", VENUE_T212_PRACTICE, FAKE_ACCOUNT, practice) == (
+        MODE_VENUE_MISMATCH
+    )
+    assert _venue_binding_check() == check_before
+
+
+def test_the_public_registry_view_is_read_only_and_follows_the_sealed_registry(tmp_path):
+    view = venue_registry.VENUE_SPECS
+    assert list(view) == [VENUE_T212_PRACTICE]
+    with pytest.raises(TypeError):
+        view["x"] = _fake_spec(tmp_path)  # type: ignore[index]
+    with override_venue_specs({FAKE_KIND: _fake_spec(tmp_path)}):
+        assert FAKE_KIND in view
+    assert FAKE_KIND not in view
+
+
+def test_the_override_restores_the_registry_on_exit_and_on_error(tmp_path):
+    with pytest.raises(RuntimeError):
+        with override_venue_specs({FAKE_KIND: _fake_spec(tmp_path)}):
+            assert venue_registry.spec_for(FAKE_KIND) is not None
+            raise RuntimeError("boom")
+    assert venue_registry.registered_kinds() == (VENUE_T212_PRACTICE,)
+
+
+def _forced(spec: VenueSpec, **fields) -> VenueSpec:
+    """A spec whose fields were forced after construction, skipping its checks."""
+
+    clone = VenueSpec(
+        kind=spec.kind,
+        workspace=spec.workspace,
+        currency=spec.currency,
+        modes=spec.modes,
+        ledger_path=spec.ledger_path,
+        dispatcher_key=spec.dispatcher_key,
+    )
+    for name, value in fields.items():
+        object.__setattr__(clone, name, value)
+    return clone
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        pytest.param(lambda spec: object(), id="not-a-spec"),
+        pytest.param(lambda spec: {"kind": FAKE_KIND}, id="a-dict"),
+        pytest.param(lambda spec: None, id="none"),
+        pytest.param(lambda spec: _forced(spec, modes=frozenset({"LIVE"})), id="live-mode"),
+        pytest.param(lambda spec: _forced(spec, modes=frozenset()), id="no-modes"),
+        pytest.param(lambda spec: _forced(spec, modes=frozenset({"SHADOW"})), id="unknown-mode"),
+        pytest.param(lambda spec: _forced(spec, currency="GBP"), id="currency-vs-workspace"),
+        pytest.param(lambda spec: _forced(spec, workspace="uk"), id="workspace-vs-currency"),
+        pytest.param(lambda spec: _forced(spec, workspace="mars"), id="unknown-workspace"),
+        pytest.param(lambda spec: _forced(spec, ledger_path=None), id="no-ledger-path"),
+        pytest.param(lambda spec: _forced(spec, dispatcher_key=""), id="no-dispatcher-key"),
+        pytest.param(lambda spec: _forced(spec, kind="other_kind"), id="key-is-not-kind"),
+    ],
+)
+def test_a_malformed_spec_passed_to_the_override_is_refused(tmp_path, build):
+    before = venue_registry.registered_kinds()
+    with pytest.raises(ValueError):
+        with override_venue_specs({FAKE_KIND: build(_fake_spec(tmp_path))}):
+            pytest.fail("a malformed spec must never be registered")
+    assert venue_registry.registered_kinds() == before
+    assert venue_registry.spec_for(FAKE_KIND) is None
+
+
+def test_the_override_refuses_a_replacement_of_the_practice_spec_by_an_unvalidated_object():
+    class Impostor:
+        kind = VENUE_T212_PRACTICE
+        workspace = "uk"
+        currency = "GBP"
+        modes = frozenset({"PAPER"})
+
+    with pytest.raises(ValueError):
+        with override_venue_specs({VENUE_T212_PRACTICE: Impostor()}):
+            pytest.fail("an impostor must never be registered")
+    assert venue_registry.spec_for(VENUE_T212_PRACTICE).modes == frozenset({"PRACTICE"})
+
+
+def test_a_spec_held_by_the_caller_cannot_change_the_sealed_entry(tmp_path):
+    spec = _fake_spec(tmp_path)
+    with override_venue_specs({FAKE_KIND: spec}):
+        object.__setattr__(spec, "modes", frozenset({"LIVE"}))
+        assert venue_registry.spec_for(FAKE_KIND).modes == frozenset({FAKE_MODE})
 
 
 def _fake_execution_payload(workspace: str) -> dict:
