@@ -7,24 +7,56 @@ All limit values are synthetic.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
+import sqlite3
+import time
+import uuid
+from decimal import Decimal
+from pathlib import Path
+
 import pytest
 
 from app_context import AppState
-from execution import ExecutionLedger, OrderMode
+from execution import (
+    ApprovalConflict,
+    ApprovalService,
+    ExecutionDisabledError,
+    ExecutionLedger,
+    ExecutionService,
+    OrderIntent,
+    OrderMode,
+    PaperDispatcher,
+    VenueBinding,
+    default_ledger_path,
+    practice_ledger_path,
+)
+from execution.ledger import canonical_json
 from execution.venue import (
+    ACCOUNT_BINDING_MISMATCH,
+    BROKER_VENUE_MISMATCH,
+    LIVE_DISABLED,
+    MODE_VENUE_MISMATCH,
     VENUE_PAPER,
     VENUE_T212_PRACTICE,
+    VenueError,
+    execution_mode_label,
     production_dispatcher_factories,
+    refusal_text,
 )
 from venue_seam_testkit import (
     SYNTH_ACCOUNT,
+    SYNTH_LIMITS,
     RecordingDispatcher,
     enroll,
+    practice_execution_payload,
     practice_factories,
     practice_proposal,
     prepare,
     private_key,
     sign,
+    write_json,
     write_practice_files,
 )
 
@@ -92,3 +124,749 @@ async def test_tracer_signed_practice_intent_reaches_the_seam_double_once(
         assert app_state.execution_mode == "practice"
     finally:
         app_state.close_execution()
+
+
+# --- mode / venue matrix (D-08) ------------------------------------------------
+
+BINDING = VenueBinding(venue=VENUE_T212_PRACTICE, account_id=SYNTH_ACCOUNT, currency="GBP")
+
+
+def _intent(proposal_id: str, *, mode: str, broker: str, account: str) -> OrderIntent:
+    extra = {}
+    if mode == "PRACTICE":
+        extra = {"order_type": "LIMIT", "limit_price": Decimal("50")}
+    return OrderIntent(
+        proposal_id=proposal_id,
+        workspace="uk",
+        account=account,
+        broker=broker,
+        mode=mode,
+        ticker="VODl_EQ",
+        side="BUY",
+        quantity=Decimal("2"),
+        **extra,
+    )
+
+
+# (id, ledger kind, mode, broker, account, refusal code or None)
+MATRIX = [
+    ("paper-paper", "paper", "PAPER", "paper", "invest", None),
+    ("paper-practice", "paper", "PRACTICE", VENUE_T212_PRACTICE, SYNTH_ACCOUNT, MODE_VENUE_MISMATCH),
+    ("paper-live", "paper", "LIVE", "trading212", "invest", LIVE_DISABLED),
+    ("practice-practice", "practice", "PRACTICE", VENUE_T212_PRACTICE, SYNTH_ACCOUNT, None),
+    ("practice-paper", "practice", "PAPER", "paper", SYNTH_ACCOUNT, MODE_VENUE_MISMATCH),
+    ("practice-live", "practice", "LIVE", VENUE_T212_PRACTICE, SYNTH_ACCOUNT, LIVE_DISABLED),
+    (
+        "practice-other-account",
+        "practice",
+        "PRACTICE",
+        VENUE_T212_PRACTICE,
+        "acct-other-0002",
+        ACCOUNT_BINDING_MISMATCH,
+    ),
+    (
+        "practice-other-broker",
+        "practice",
+        "PRACTICE",
+        "paper",
+        SYNTH_ACCOUNT,
+        BROKER_VENUE_MISMATCH,
+    ),
+]
+MATRIX_IDS = [row[0] for row in MATRIX]
+MATRIX_ARGS = ("case", "kind", "mode", "broker", "account", "code")
+
+
+class _Stack:
+    """A hand-built ledger, service and key. It does not use start_execution."""
+
+    def __init__(self, tmp_path: Path, kind: str, double: RecordingDispatcher) -> None:
+        self.ledger = ExecutionLedger(
+            tmp_path / f"{kind}.sqlite3",
+            workspace="uk",
+            require_approval=True,
+            venue=BINDING if kind == "practice" else None,
+        )
+        self.approval = ApprovalService(self.ledger)
+        self.key = private_key()
+        enroll(self.approval, self.key)
+        self.double = double
+        self.service = ExecutionService(
+            double,
+            self.ledger,
+            require_approval=True,
+            approval_service=self.approval,
+        )
+
+    def close(self) -> None:
+        self.ledger.close()
+
+    def register(self, intent: OrderIntent) -> None:
+        self.ledger.register_intent(intent)
+
+    def admit_and_reserve(self, intent: OrderIntent) -> None:
+        self.service.admit(
+            intent,
+            currency="GBP",
+            price="50",
+            simulator_evidence={"simulated_fill_price": "50"},
+            risk_evidence={"scaled_size": str(intent.quantity)},
+        )
+        self.ledger.configure_paper_budget(intent.account, "GBP", "1000", workspace="uk")
+        self.service.reserve(intent.proposal_id)
+
+    def forge_challenge(self, proposal_id: str) -> str:
+        """Store a well-formed challenge directly, bypassing the approval layer.
+
+        The ledger claim guard must hold even if the approval layer is skipped.
+        """
+
+        order = self.ledger.get_order(proposal_id)
+        intent = dict(order.intent)
+        key = self.ledger.get_approval_key(workspace="uk")
+        issued = int(time.time())
+        challenge_id = str(uuid.uuid4())
+        payload = {
+            "version": 1,
+            "purpose": "growin.execution.dispatch",
+            "challenge_id": challenge_id,
+            "proposal_id": proposal_id,
+            "client_order_id": order.client_order_id,
+            "intent_hash": order.intent_hash,
+            "workspace": intent["workspace"],
+            "account": intent["account"],
+            "broker": intent["broker"],
+            "mode": intent["mode"],
+            "ticker": intent["ticker"],
+            "side": intent["side"],
+            "quantity": intent["quantity"],
+            "order_type": intent.get("order_type"),
+            "limit_price": intent.get("limit_price"),
+            "replaces_proposal_id": "",
+            "requote_id": "",
+            "nonce": "forged-nonce",
+            "issued_at": issued,
+            "expires_at": issued + 60,
+            "key_id": key.key_id,
+        }
+        signed = canonical_json(payload).encode("utf-8")
+        raw = sqlite3.connect(self.ledger.path)
+        try:
+            raw.execute(
+                "INSERT INTO approval_challenges (challenge_id, proposal_id, workspace, key_id, "
+                "intent_hash, signed_payload, issued_at_epoch, expires_at_epoch, created_at) "
+                "VALUES (?, ?, 'uk', ?, ?, ?, ?, ?, 'forged')",
+                (challenge_id, proposal_id, key.key_id, order.intent_hash, signed, issued, issued + 60),
+            )
+            raw.commit()
+        finally:
+            raw.close()
+        self._signed = signed
+        return challenge_id
+
+    def signature(self) -> bytes:
+        return sign(self.key, self._signed)
+
+
+@pytest.fixture
+def stack_factory(tmp_path):
+    stacks: list[_Stack] = []
+
+    def build(kind: str, double: RecordingDispatcher | None = None) -> _Stack:
+        stack = _Stack(tmp_path, kind, double or RecordingDispatcher())
+        stacks.append(stack)
+        return stack
+
+    yield build
+    for stack in stacks:
+        stack.close()
+
+
+@pytest.mark.parametrize(MATRIX_ARGS, MATRIX, ids=MATRIX_IDS)
+def test_challenge_accepts_only_the_mode_the_ledger_venue_allows(
+    stack_factory, case, kind, mode, broker, account, code
+):
+    stack = stack_factory(kind)
+    intent = _intent(f"m-{case}", mode=mode, broker=broker, account=account)
+    stack.register(intent)
+    if code is None:
+        stack.admit_and_reserve(intent)
+        challenge = stack.service.create_approval_challenge(intent.proposal_id, workspace="uk")
+        assert json.loads(challenge.signed_payload)["mode"] == mode
+        return
+    with pytest.raises(ApprovalConflict) as refused:
+        stack.service.create_approval_challenge(intent.proposal_id, workspace="uk")
+    assert str(refused.value) == refusal_text(code)
+    assert SYNTH_ACCOUNT not in str(refused.value)
+    assert stack.ledger.list_attempts(intent.proposal_id) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(MATRIX_ARGS, MATRIX, ids=MATRIX_IDS)
+async def test_claim_refuses_a_wrong_mode_even_with_a_valid_signature(
+    stack_factory, case, kind, mode, broker, account, code
+):
+    """The ledger claim is the dispatch gate; it must not trust the approval layer."""
+
+    stack = stack_factory(kind)
+    intent = _intent(f"c-{case}", mode=mode, broker=broker, account=account)
+    stack.register(intent)
+    challenge_id = stack.forge_challenge(intent.proposal_id)
+    signature = stack.signature()
+    if code is None:
+        # Allowed mode: the claim gets past the mode gate and stops at the
+        # missing admission, which proves the gate did not refuse it.
+        with pytest.raises(ApprovalConflict, match="admitted evidence"):
+            stack.approval.approve_signed(
+                intent.proposal_id, challenge_id, signature, workspace="uk"
+            )
+        return
+    with pytest.raises(ApprovalConflict) as refused:
+        stack.approval.approve_signed(
+            intent.proposal_id, challenge_id, signature, workspace="uk"
+        )
+    assert str(refused.value) == refusal_text(code)
+    assert stack.ledger.get_order(intent.proposal_id).state == "PENDING"
+    assert stack.ledger.list_attempts(intent.proposal_id) == []
+    assert stack.ledger.approval_evidence_count(intent.proposal_id) == 0
+    assert stack.double.intents == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    MATRIX_ARGS, [row for row in MATRIX if row[5] is not None], ids=[r[0] for r in MATRIX if r[5]]
+)
+async def test_service_refuses_a_wrong_mode_before_any_dispatch(
+    stack_factory, case, kind, mode, broker, account, code
+):
+    stack = stack_factory(kind)
+    intent = _intent(f"s-{case}", mode=mode, broker=broker, account=account)
+    stack.register(intent)
+    with pytest.raises(ExecutionDisabledError) as refused:
+        await stack.service.approve_signed(
+            intent.proposal_id, str(uuid.uuid4()), b"signature", workspace="uk"
+        )
+    expected = "Live execution remains disabled" if code == LIVE_DISABLED else refusal_text(code)
+    assert str(refused.value) == expected
+    assert stack.double.intents == []
+
+
+@pytest.mark.parametrize(MATRIX_ARGS, MATRIX, ids=MATRIX_IDS)
+def test_unsigned_claim_path_applies_the_same_mode_rule(
+    tmp_path, case, kind, mode, broker, account, code
+):
+    ledger = ExecutionLedger(
+        tmp_path / "unsigned.sqlite3",
+        workspace="uk",
+        venue=BINDING if kind == "practice" else None,
+    )
+    try:
+        intent = _intent(f"u-{case}", mode=mode, broker=broker, account=account)
+        if code is None:
+            assert ledger.claim_intent(intent).claimed
+            return
+        with pytest.raises(ApprovalConflict) as refused:
+            ledger.claim_intent(intent)
+        assert str(refused.value) == refusal_text(code)
+        assert ledger.list_attempts(intent.proposal_id) == []
+    finally:
+        ledger.close()
+
+
+def test_the_allowed_mode_follows_the_ledger_binding(stack_factory):
+    assert stack_factory("paper").ledger.allowed_mode is OrderMode.PAPER
+    assert stack_factory("practice").ledger.allowed_mode is OrderMode.PRACTICE
+
+
+def test_live_is_in_no_venue_row():
+    from execution.venue import VENUE_MODE
+
+    assert OrderMode.LIVE not in set(VENUE_MODE.values())
+
+
+def test_practice_budget_is_only_for_the_bound_account(stack_factory):
+    stack = stack_factory("practice")
+    with pytest.raises(ApprovalConflict, match="bound account"):
+        stack.ledger.configure_paper_budget("acct-other-0002", "GBP", "100", workspace="uk")
+    with pytest.raises(ApprovalConflict, match="bound account"):
+        stack.ledger.configure_paper_budget(SYNTH_ACCOUNT, "INR", "100", workspace="uk")
+    assert stack.ledger.configure_paper_budget(
+        SYNTH_ACCOUNT, "GBP", "100", workspace="uk"
+    ).amount == Decimal("100")
+
+
+def test_execution_mode_label_is_the_one_status_vocabulary():
+    assert execution_mode_label(False, None) == "disabled"
+    assert execution_mode_label(False, BINDING) == "disabled"
+    assert execution_mode_label(True, None) == "paper"
+    assert execution_mode_label(True, BINDING) == "practice"
+
+
+# --- fail-closed venue selection at start (D-03, D-21, D-23) -------------------
+
+SECRET_SENTINEL = "sentinel-config-value-7731"
+
+
+class CountingFactory:
+    """A registered factory that records how many dispatchers it built."""
+
+    def __init__(self) -> None:
+        self.double = RecordingDispatcher()
+        self.calls = 0
+
+    def __call__(self, context):
+        self.calls += 1
+        return self.double
+
+
+def _factories(counting: CountingFactory) -> dict:
+    return {**production_dispatcher_factories(), VENUE_T212_PRACTICE: counting}
+
+
+def _assert_disabled(app_state: AppState, code: str) -> None:
+    assert app_state.execution_authority is False
+    assert app_state.execution_service.execution_enabled is False
+    assert app_state._execution_ledger is None
+    assert app_state.workspace_config is None
+    assert app_state.execution_mode == "disabled"
+    assert code in app_state.execution_startup_error
+    assert SECRET_SENTINEL not in app_state.execution_startup_error
+    assert SYNTH_ACCOUNT not in app_state.execution_startup_error
+
+
+def test_no_execution_file_means_paper_on_the_default_ledger_exactly_as_before(
+    tmp_path, private_config_dir, monkeypatch
+):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    app_state = AppState()
+    assert app_state.start_execution(None, workspace="uk", private_dir=private_config_dir)
+    try:
+        assert isinstance(app_state.execution_service._dispatcher, PaperDispatcher)
+        assert app_state._execution_ledger.path == default_ledger_path("uk")
+        assert app_state._execution_ledger.venue_binding is None
+        assert app_state.execution_mode == "paper"
+        assert app_state.workspace_config.venue == "paper"
+    finally:
+        app_state.close_execution()
+
+
+def test_practice_venue_uses_its_own_ledger_path_never_the_real_one(
+    tmp_path, private_config_dir, monkeypatch, uk_process
+):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    write_practice_files(private_config_dir)
+    counting = CountingFactory()
+    app_state = AppState()
+    assert app_state.start_execution(
+        None, workspace="uk", private_dir=private_config_dir,
+        dispatcher_factories=_factories(counting),
+    ), app_state.execution_startup_error
+    try:
+        assert app_state._execution_ledger.path == practice_ledger_path()
+        assert app_state._execution_ledger.path != default_ledger_path("uk")
+        assert not default_ledger_path("uk").exists()
+        assert counting.calls == 1
+    finally:
+        app_state.close_execution()
+
+
+def test_factory_receives_the_binding_and_caps_without_leaking_them_in_repr(
+    tmp_path, private_config_dir, uk_process
+):
+    write_practice_files(private_config_dir)
+    seen = []
+
+    def factory(context):
+        seen.append(context)
+        return RecordingDispatcher()
+
+    app_state = AppState()
+    assert app_state.start_execution(
+        tmp_path / "p.sqlite3", workspace="uk", private_dir=private_config_dir,
+        dispatcher_factories={**production_dispatcher_factories(), VENUE_T212_PRACTICE: factory},
+    )
+    try:
+        (context,) = seen
+        assert context.venue == VENUE_T212_PRACTICE
+        assert context.binding.account_id == SYNTH_ACCOUNT
+        assert context.caps.capital_cap == Decimal("900.00")
+        assert context.caps.per_position_cap == Decimal("300.00")
+        assert "900" not in repr(context) and SYNTH_ACCOUNT not in repr(context)
+    finally:
+        app_state.close_execution()
+
+
+def test_practice_budget_equals_capital_cap_and_stays_immutable(
+    tmp_path, private_config_dir, uk_process
+):
+    write_practice_files(private_config_dir)
+    path = tmp_path / "p.sqlite3"
+    counting = CountingFactory()
+    first = AppState()
+    assert first.start_execution(
+        path, workspace="uk", private_dir=private_config_dir,
+        dispatcher_factories=_factories(counting),
+    )
+    try:
+        budget = first._execution_ledger.get_paper_budget(SYNTH_ACCOUNT, "GBP", workspace="uk")
+        assert budget.amount == Decimal("900.00")
+    finally:
+        first.close_execution()
+
+    # Same ledger, same caps: starts again.
+    again = AppState()
+    assert again.start_execution(
+        path, workspace="uk", private_dir=private_config_dir,
+        dispatcher_factories=_factories(counting),
+    )
+    again.close_execution()
+
+    # Changed caps: the budget is immutable, so start fails closed.
+    write_json(
+        private_config_dir / "uk" / "limits.json", {**SYNTH_LIMITS, "capital_cap": "901.00"}
+    )
+    changed = AppState()
+    assert changed.start_execution(
+        path, workspace="uk", private_dir=private_config_dir,
+        dispatcher_factories=_factories(counting),
+    ) is False
+    _assert_disabled(changed, "ApprovalConflict")
+
+
+@pytest.mark.parametrize(
+    ("overrides", "code"),
+    [
+        ({"venue": "t212_live"}, "VENUE_UNKNOWN"),
+        ({"venue": SECRET_SENTINEL}, "VENUE_UNKNOWN"),
+        ({"surprise": SECRET_SENTINEL}, "SCHEMA_INVALID"),
+        ({"account_id": 1.5}, "FLOAT_NOT_ALLOWED"),
+        ({"currency": "USD"}, "CURRENCY_MISMATCH"),
+        ({"workspace": "india"}, "WORKSPACE_MISMATCH"),
+    ],
+)
+def test_invalid_execution_file_disables_execution_and_never_falls_back_to_paper(
+    tmp_path, private_config_dir, uk_process, overrides, code
+):
+    write_practice_files(private_config_dir, execution=practice_execution_payload(**overrides))
+    counting = CountingFactory()
+    ledger_dir = tmp_path / "ledger"
+    app_state = AppState()
+
+    started = app_state.start_execution(
+        ledger_dir / "execution.sqlite3", workspace="uk", private_dir=private_config_dir,
+        dispatcher_factories=_factories(counting),
+    )
+
+    assert started is False
+    _assert_disabled(app_state, code)
+    assert not ledger_dir.exists()
+    assert counting.calls == 0
+
+
+@pytest.mark.parametrize("mode", [0o644, 0o666])
+def test_open_permissions_on_execution_json_disable_execution(
+    tmp_path, private_config_dir, uk_process, mode
+):
+    write_practice_files(private_config_dir)
+    os.chmod(private_config_dir / "uk" / "execution.json", mode)
+    app_state = AppState()
+    assert app_state.start_execution(
+        tmp_path / "x.sqlite3", workspace="uk", private_dir=private_config_dir,
+        dispatcher_factories=_factories(CountingFactory()),
+    ) is False
+    _assert_disabled(app_state, "PERMISSIONS_TOO_OPEN")
+
+
+def test_a_symlinked_execution_json_disables_execution(tmp_path, private_config_dir, uk_process):
+    write_practice_files(private_config_dir)
+    link = private_config_dir / "uk" / "execution.json"
+    real = private_config_dir / "uk" / "elsewhere.json"
+    link.rename(real)
+    link.symlink_to(real)
+    app_state = AppState()
+    assert app_state.start_execution(
+        tmp_path / "x.sqlite3", workspace="uk", private_dir=private_config_dir,
+        dispatcher_factories=_factories(CountingFactory()),
+    ) is False
+    _assert_disabled(app_state, "SYMLINK_REFUSED")
+
+
+@pytest.mark.parametrize(
+    ("limits", "code"),
+    [
+        (None, "FILE_MISSING"),
+        ({"capital_cap": 900}, "SCHEMA_INVALID"),
+        ({"capital_cap": 900.5}, "FLOAT_NOT_ALLOWED"),
+        ({"per_position_cap": "901.00"}, "LIMIT_ORDER_INVALID"),
+        ({"per_position_cap": "0"}, "LIMIT_ORDER_INVALID"),
+    ],
+)
+def test_missing_or_invalid_limits_disable_the_practice_venue(
+    tmp_path, private_config_dir, uk_process, limits, code
+):
+    write_practice_files(private_config_dir)
+    limits_path = private_config_dir / "uk" / "limits.json"
+    if limits is None:
+        limits_path.unlink()
+    else:
+        write_json(limits_path, {**SYNTH_LIMITS, **limits})
+    counting = CountingFactory()
+    ledger_dir = tmp_path / "ledger"
+    app_state = AppState()
+
+    started = app_state.start_execution(
+        ledger_dir / "execution.sqlite3", workspace="uk", private_dir=private_config_dir,
+        dispatcher_factories=_factories(counting),
+    )
+
+    assert started is False
+    _assert_disabled(app_state, code)
+    assert not ledger_dir.exists()
+    assert counting.calls == 0
+
+
+def test_practice_venue_with_no_registered_factory_is_disabled_never_paper(
+    tmp_path, private_config_dir, uk_process
+):
+    write_practice_files(private_config_dir)
+    ledger_dir = tmp_path / "ledger"
+    app_state = AppState()
+
+    # No dispatcher_factories: the production map, which holds paper only.
+    started = app_state.start_execution(
+        ledger_dir / "execution.sqlite3", workspace="uk", private_dir=private_config_dir
+    )
+
+    assert started is False
+    _assert_disabled(app_state, "VENUE_UNAVAILABLE")
+    assert not ledger_dir.exists()
+    assert not isinstance(app_state.execution_service._dispatcher, PaperDispatcher)
+
+
+@pytest.mark.parametrize("process", [None, "india", "us", "UK"])
+def test_practice_venue_cannot_start_outside_a_uk_process(
+    tmp_path, private_config_dir, monkeypatch, process
+):
+    if process is None:
+        monkeypatch.delenv("GROWIN_WORKSPACE", raising=False)
+    else:
+        monkeypatch.setenv("GROWIN_WORKSPACE", process)
+    write_practice_files(private_config_dir)
+    counting = CountingFactory()
+    app_state = AppState()
+
+    started = app_state.start_execution(
+        tmp_path / "x.sqlite3", workspace="uk", private_dir=private_config_dir,
+        dispatcher_factories=_factories(counting),
+    )
+
+    assert started is False
+    _assert_disabled(app_state, "VENUE_WORKSPACE_MISMATCH")
+    assert counting.calls == 0
+    assert not (tmp_path / "x.sqlite3").exists()
+
+
+def test_an_india_execution_file_naming_trading212_cannot_start(
+    tmp_path, private_config_dir, monkeypatch
+):
+    monkeypatch.setenv("GROWIN_WORKSPACE", "india")
+    write_json(
+        private_config_dir / "india" / "execution.json",
+        {
+            "schema_version": 1,
+            "workspace": "india",
+            "venue": VENUE_T212_PRACTICE,
+            "account_id": SYNTH_ACCOUNT,
+            "currency": "GBP",
+        },
+    )
+    counting = CountingFactory()
+    app_state = AppState()
+
+    started = app_state.start_execution(
+        tmp_path / "india.sqlite3", workspace="india", private_dir=private_config_dir,
+        dispatcher_factories=_factories(counting),
+    )
+
+    assert started is False
+    _assert_disabled(app_state, "VENUE_NOT_ALLOWED")
+    assert counting.calls == 0
+    assert not (tmp_path / "india.sqlite3").exists()
+
+
+def test_india_paper_execution_file_starts_on_paper(tmp_path, private_config_dir):
+    write_json(
+        private_config_dir / "india" / "execution.json",
+        {"schema_version": 1, "workspace": "india", "venue": "paper"},
+    )
+    app_state = AppState()
+    assert app_state.start_execution(
+        tmp_path / "india.sqlite3", workspace="india", private_dir=private_config_dir
+    )
+    try:
+        assert isinstance(app_state.execution_service._dispatcher, PaperDispatcher)
+        assert app_state.execution_mode == "paper"
+    finally:
+        app_state.close_execution()
+
+
+def test_practice_ledger_reopened_with_another_account_id_cannot_start(
+    tmp_path, private_config_dir, uk_process
+):
+    write_practice_files(private_config_dir)
+    path = tmp_path / "p.sqlite3"
+    counting = CountingFactory()
+    first = AppState()
+    assert first.start_execution(
+        path, workspace="uk", private_dir=private_config_dir,
+        dispatcher_factories=_factories(counting),
+    )
+    first.close_execution()
+    before = hashlib.sha256(path.read_bytes()).hexdigest()
+    write_practice_files(
+        private_config_dir, execution=practice_execution_payload(account_id="acct-other-0002")
+    )
+    second = AppState()
+
+    started = second.start_execution(
+        path, workspace="uk", private_dir=private_config_dir,
+        dispatcher_factories=_factories(counting),
+    )
+
+    assert started is False
+    _assert_disabled(second, "LedgerVenueMismatch")
+    assert "acct-other-0002" not in second.execution_startup_error
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+
+
+def test_the_real_uk_ledger_is_never_started_as_practice(
+    tmp_path, private_config_dir, uk_process
+):
+    real = tmp_path / "real-uk.sqlite3"
+    with ExecutionLedger(real, workspace="uk") as ledger:
+        ledger.register_intent(
+            _intent("real-1", mode="PAPER", broker="paper", account="invest")
+        )
+    before = hashlib.sha256(real.read_bytes()).hexdigest()
+    write_practice_files(private_config_dir)
+    counting = CountingFactory()
+    app_state = AppState()
+
+    started = app_state.start_execution(
+        real, workspace="uk", private_dir=private_config_dir,
+        dispatcher_factories=_factories(counting),
+    )
+
+    assert started is False
+    _assert_disabled(app_state, "LedgerVenueMismatch")
+    assert counting.calls == 0
+    assert hashlib.sha256(real.read_bytes()).hexdigest() == before
+
+
+def test_a_practice_ledger_is_never_started_as_paper(tmp_path, private_config_dir, uk_process):
+    write_practice_files(private_config_dir)
+    path = tmp_path / "p.sqlite3"
+    first = AppState()
+    assert first.start_execution(
+        path, workspace="uk", private_dir=private_config_dir,
+        dispatcher_factories=_factories(CountingFactory()),
+    )
+    first.close_execution()
+    (private_config_dir / "uk" / "execution.json").unlink()
+    second = AppState()
+
+    started = second.start_execution(path, workspace="uk", private_dir=private_config_dir)
+
+    assert started is False
+    _assert_disabled(second, "LedgerVenueMismatch")
+
+
+def test_a_failing_factory_leaves_execution_disabled_and_releases_the_ledger(
+    tmp_path, private_config_dir, uk_process
+):
+    write_practice_files(private_config_dir)
+    path = tmp_path / "p.sqlite3"
+
+    def broken(_context):
+        raise VenueError("VENUE_BUILD_FAILED", VENUE_T212_PRACTICE)
+
+    app_state = AppState()
+    started = app_state.start_execution(
+        path, workspace="uk", private_dir=private_config_dir,
+        dispatcher_factories={**production_dispatcher_factories(), VENUE_T212_PRACTICE: broken},
+    )
+    assert started is False
+    _assert_disabled(app_state, "VENUE_BUILD_FAILED")
+    # The writer lock was released, so the same file opens again.
+    again = AppState()
+    assert again.start_execution(
+        path, workspace="uk", private_dir=private_config_dir,
+        dispatcher_factories=_factories(CountingFactory()),
+    )
+    again.close_execution()
+
+
+def test_uat_builders_refuse_a_practice_ledger(tmp_path, private_config_dir, uk_process):
+    write_practice_files(private_config_dir)
+    app_state = AppState()
+    assert app_state.start_execution(
+        tmp_path / "p.sqlite3", workspace="uk", private_dir=private_config_dir,
+        dispatcher_factories=_factories(CountingFactory()),
+    )
+    try:
+        with pytest.raises(Exception, match="practice ledger"):
+            app_state.create_paper_approval_check()
+        with pytest.raises(Exception, match="practice ledger"):
+            app_state.create_paper_requote_check()
+    finally:
+        app_state.close_execution()
+
+
+# --- one shared mode function across the three status surfaces ------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("venue_kind", ["practice", "paper", "disabled"])
+async def test_status_surfaces_report_the_same_mode(
+    tmp_path, private_config_dir, monkeypatch, venue_kind
+):
+    from unittest.mock import MagicMock
+
+    from httpx import ASGITransport, AsyncClient
+
+    from app_context import state
+    from server import app
+
+    monkeypatch.setenv("GROWIN_WORKSPACE", "uk")
+    monkeypatch.setattr(state, "_chat_manager", MagicMock())
+    state.close_execution()
+    try:
+        if venue_kind == "practice":
+            write_practice_files(private_config_dir)
+            assert state.start_execution(
+                tmp_path / "p.sqlite3", workspace="uk", private_dir=private_config_dir,
+                dispatcher_factories=_factories(CountingFactory()),
+            )
+        elif venue_kind == "paper":
+            assert state.start_execution(
+                tmp_path / "x.sqlite3", workspace="uk", private_dir=private_config_dir
+            )
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            system = (await client.get("/api/system/status")).json()["execution"]["mode"]
+            health = (await client.get("/health")).json()["execution_mode"]
+            approval = (
+                await client.get("/api/ai/trade/approval/status", params={"workspace": "uk"})
+            ).json()["mode"]
+        assert system == health == approval == venue_kind == state.execution_mode
+    finally:
+        state.close_execution()
+
+
+def test_no_trading_212_host_string_in_execution_or_app_context():
+    root = Path(__file__).resolve().parents[2] / "backend"
+    hits = []
+    for path in [*(root / "execution").rglob("*.py"), root / "app_context.py"]:
+        text = path.read_text(encoding="utf-8")
+        if "trading212.com" in text:
+            hits.append(str(path.relative_to(root)))
+    assert hits == []

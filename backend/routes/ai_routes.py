@@ -105,7 +105,7 @@ async def get_trade_approval_status(workspace: Workspace = Query(...)):
     ledger = state._execution_ledger
     key_id = state.execution_service.approval_key_id(workspace=workspace)
     return {
-        "mode": "paper" if state.execution_authority else "disabled",
+        "mode": state.execution_mode,
         "enrolled": key_id is not None,
         "key_id": key_id,
         "workspace": None if ledger is None else ledger.workspace.value,

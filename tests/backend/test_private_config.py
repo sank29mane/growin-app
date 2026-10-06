@@ -748,3 +748,194 @@ def test_private_dir_is_gitignored_and_untracked():
     )
     assert tracked.returncode == 0, tracked.stderr
     assert tracked.stdout.strip() == "", "files under private/ are tracked"
+
+
+# --- Phase 66: UK execution.json and limits.json --------------------------------
+
+from venue_seam_testkit import (  # noqa: E402
+    SYNTH_ACCOUNT,
+    SYNTH_LIMITS,
+    practice_execution_payload,
+    write_json,
+    write_practice_files,
+)
+
+VALUE_SENTINEL = "sentinel-secret-value-9931"
+
+
+def _uk(private: Path, name: str) -> Path:
+    return private / "uk" / name
+
+
+def test_venue_ids_match_the_execution_package():
+    from execution.venue import KNOWN_VENUES, PRACTICE_VENUES
+    from private_config.schemas import KNOWN_VENUES as CONFIG_VENUES
+    from private_config.schemas import PRACTICE_VENUE_IDS
+
+    assert CONFIG_VENUES == KNOWN_VENUES
+    assert PRACTICE_VENUE_IDS == PRACTICE_VENUES
+
+
+def test_uk_with_no_execution_file_is_venue_paper(private_config_dir: Path):
+    config = load_workspace_config(private_config_dir, "uk")
+    assert config.venue == "paper"
+    assert config.execution is None
+    assert config.uk_limits is None
+
+
+def test_uk_paper_execution_file_loads(private_config_dir: Path):
+    write_json(
+        _uk(private_config_dir, "execution.json"),
+        {"schema_version": 1, "workspace": "uk", "venue": "paper"},
+    )
+    config = load_workspace_config(private_config_dir, "uk")
+    assert config.venue == "paper"
+    assert config.uk_limits is None
+
+
+def test_uk_paper_never_reads_limits_json(private_config_dir: Path):
+    # A broken limits.json is irrelevant until the venue is a practice venue.
+    _uk(private_config_dir, "limits.json").write_text("not json")
+    os.chmod(_uk(private_config_dir, "limits.json"), 0o600)
+    assert load_workspace_config(private_config_dir, "uk").venue == "paper"
+
+
+def test_uk_practice_files_load(private_config_dir: Path):
+    write_practice_files(private_config_dir)
+    config = load_workspace_config(private_config_dir, "uk")
+    assert config.venue == "t212_practice"
+    assert config.execution.account_id == SYNTH_ACCOUNT
+    assert config.execution.currency == "GBP"
+    assert config.uk_limits.capital_cap == Decimal("900.00")
+    assert config.uk_limits.per_position_cap == Decimal("300.00")
+    assert SYNTH_ACCOUNT not in repr(config)
+    assert "900.00" not in repr(config) and "900.00" not in repr(config.uk_limits)
+
+
+def test_uk_practice_fingerprint_covers_both_files(private_config_dir: Path):
+    write_practice_files(private_config_dir)
+    before = load_workspace_config(private_config_dir, "uk").fingerprint
+    write_json(_uk(private_config_dir, "limits.json"), {**SYNTH_LIMITS, "capital_cap": "901.00"})
+    assert load_workspace_config(private_config_dir, "uk").fingerprint != before
+
+
+@pytest.mark.parametrize(
+    ("overrides", "code"),
+    [
+        ({"venue": "t212_live"}, "VENUE_UNKNOWN"),
+        ({"venue": VALUE_SENTINEL}, "VENUE_UNKNOWN"),
+        ({"venue": 7}, "VENUE_UNKNOWN"),
+        ({"surprise": VALUE_SENTINEL}, "SCHEMA_INVALID"),
+        ({"account_id": 1.5}, "FLOAT_NOT_ALLOWED"),
+        ({"account_id": 12345}, "SCHEMA_INVALID"),
+        ({"account_id": "has space " + VALUE_SENTINEL}, "SCHEMA_INVALID"),
+        ({"currency": "USD"}, "CURRENCY_MISMATCH"),
+        ({"workspace": "india"}, "WORKSPACE_MISMATCH"),
+    ],
+)
+def test_invalid_uk_execution_file_is_refused_without_a_value(
+    private_config_dir: Path, overrides, code
+):
+    write_practice_files(private_config_dir, execution=practice_execution_payload(**overrides))
+    with pytest.raises(PrivateConfigError) as info:
+        load_workspace_config(private_config_dir, "uk")
+    assert info.value.code == code
+    assert VALUE_SENTINEL not in str(info.value)
+    assert VALUE_SENTINEL not in repr(info.value.args)
+    assert VALUE_SENTINEL not in repr(info.value.__context__)
+
+
+@pytest.mark.parametrize("missing", ["account_id", "currency"])
+def test_practice_execution_file_needs_account_and_currency(private_config_dir: Path, missing):
+    payload = practice_execution_payload()
+    del payload[missing]
+    write_practice_files(private_config_dir, execution=payload)
+    error = _load_error(private_config_dir, "uk")
+    assert (error.code, error.field) == ("SCHEMA_INVALID", missing)
+
+
+@pytest.mark.parametrize("extra", ["account_id", "currency"])
+def test_paper_execution_file_takes_no_account_or_currency(private_config_dir: Path, extra):
+    payload = {"schema_version": 1, "workspace": "uk", "venue": "paper"}
+    payload[extra] = SYNTH_ACCOUNT if extra == "account_id" else "GBP"
+    write_json(_uk(private_config_dir, "execution.json"), payload)
+    assert _load_error(private_config_dir, "uk").code == "SCHEMA_INVALID"
+
+
+def test_execution_file_with_open_permissions_is_refused(private_config_dir: Path):
+    write_practice_files(private_config_dir)
+    os.chmod(_uk(private_config_dir, "execution.json"), 0o644)
+    assert _load_error(private_config_dir, "uk").code == "PERMISSIONS_TOO_OPEN"
+
+
+def test_execution_file_symlink_is_refused(private_config_dir: Path):
+    write_practice_files(private_config_dir)
+    real = private_config_dir / "uk" / "real-execution.json"
+    _uk(private_config_dir, "execution.json").rename(real)
+    _uk(private_config_dir, "execution.json").symlink_to(real)
+    assert _load_error(private_config_dir, "uk").code == "SYMLINK_REFUSED"
+
+
+def test_a_dangling_execution_symlink_is_not_treated_as_absent(private_config_dir: Path):
+    # lexists, not exists: a broken link must fail, never fall back to paper.
+    _uk(private_config_dir, "execution.json").symlink_to(private_config_dir / "nowhere.json")
+    assert _load_error(private_config_dir, "uk").code in {"SYMLINK_REFUSED", "FILE_MISSING"}
+
+
+def test_practice_venue_without_limits_file_is_refused(private_config_dir: Path):
+    write_practice_files(private_config_dir)
+    _uk(private_config_dir, "limits.json").unlink()
+    error = _load_error(private_config_dir, "uk")
+    assert (error.code, error.field) == ("FILE_MISSING", "limits.json")
+
+
+@pytest.mark.parametrize(
+    ("limits", "code", "field"),
+    [
+        ({"capital_cap": 900}, "SCHEMA_INVALID", "capital_cap"),
+        ({"per_position_cap": 300}, "SCHEMA_INVALID", "per_position_cap"),
+        ({"capital_cap": 900.5}, "FLOAT_NOT_ALLOWED", "limits.json"),
+        ({"per_position_cap": "901.00"}, "LIMIT_ORDER_INVALID", "per_position_cap"),
+        ({"per_position_cap": "0"}, "LIMIT_ORDER_INVALID", "per_position_cap"),
+        ({"capital_cap": "0", "per_position_cap": "0"}, "LIMIT_ORDER_INVALID", "capital_cap"),
+        ({"capital_cap": "-1"}, "LIMIT_ORDER_INVALID", "capital_cap"),
+        ({"currency": "INR"}, "CURRENCY_MISMATCH", "currency"),
+        ({"workspace": "india"}, "WORKSPACE_MISMATCH", "workspace"),
+        ({"surprise": "1"}, "SCHEMA_INVALID", "surprise"),
+    ],
+)
+def test_invalid_uk_limits_leave_a_practice_venue_unloadable(
+    private_config_dir: Path, limits, code, field
+):
+    write_practice_files(private_config_dir, limits={**SYNTH_LIMITS, **limits})
+    error = _load_error(private_config_dir, "uk")
+    assert error.code == code
+    assert error.field == field
+    assert "900" not in str(error) and "300" not in str(error)
+
+
+def test_india_execution_file_naming_trading212_is_refused(private_config_dir: Path):
+    write_json(
+        private_config_dir / "india" / "execution.json",
+        {
+            "schema_version": 1,
+            "workspace": "india",
+            "venue": "t212_practice",
+            "account_id": SYNTH_ACCOUNT,
+            "currency": "GBP",
+        },
+    )
+    error = _load_error(private_config_dir, "india")
+    assert (error.code, error.field) == ("VENUE_NOT_ALLOWED", "venue")
+
+
+def test_india_paper_execution_file_loads_and_changes_nothing_else(private_config_dir: Path):
+    before = load_workspace_config(private_config_dir, "india")
+    write_json(
+        private_config_dir / "india" / "execution.json",
+        {"schema_version": 1, "workspace": "india", "venue": "paper"},
+    )
+    after = load_workspace_config(private_config_dir, "india")
+    assert after.venue == "paper"
+    assert after.limits == before.limits
+    assert after.fingerprint != before.fingerprint

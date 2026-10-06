@@ -306,7 +306,7 @@ async def health_check():
         "status": "healthy",
         "database": "connected" if state.chat_manager.conn else "error",
         "execution_authority": state.execution_authority,
-        "execution_mode": "paper" if state.execution_authority else "disabled",
+        "execution_mode": state.execution_mode,
     }
 
 if __name__ == "__main__":
