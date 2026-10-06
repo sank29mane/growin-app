@@ -101,7 +101,7 @@ def etf_buy_and_hold(
     # unknown (fold-level missing evidence, holdout INCONCLUSIVE). Nothing defaults.
     for bar in (first, last):
         resolve_tick(ticks, session_date=bar.session, band_reference_price=bar.raw_close,
-                     instrument_class=NON_GOLD_ETF, series=bar.series)
+                     instrument_class=NON_GOLD_ETF, series=bar.series, security=anchor)
     shares = int(capital // first.raw_close)
     if shares < 1:
         raise DataError("the capital cannot buy one ETF share")

@@ -442,10 +442,13 @@ def preflight_holdout(inputs: StudyInputs, prep: Prepared, criteria: Mapping[str
     for instrument_class in (EQUITY, NON_GOLD_ETF):
         if instrument_class not in inputs.ticks.classes():
             raise unrunnable(f"no tick table is registered for instrument class {instrument_class}")
-        gaps = [day for day in days if not inputs.ticks.covers(instrument_class, day, series="EQ")]
+        security = etf_anchor if instrument_class == NON_GOLD_ETF else None  # only the benchmark ETF may use an inferred tick
+        gaps = [day for day in days if not inputs.ticks.covers(instrument_class, day, series="EQ", security=security)]
         if gaps:
+            why = inputs.ticks.uncovered_reason(instrument_class, gaps[0], security=security)
             raise unrunnable(
                 f"the {instrument_class} tick table does not cover {len(gaps)} holdout sessions, first {gaps[0].isoformat()}"
+                + (f" (inferred tick unavailable: {why})" if why else "")
             )
     # The registered ETF benchmark must exist on EVERY holdout session, or it would be silently truncated or fail later.
     etf_rows = {row.trade_date: row for row in inputs.rows if row.anchor_isin == etf_anchor}
@@ -457,7 +460,7 @@ def preflight_holdout(inputs: StudyInputs, prep: Prepared, criteria: Mapping[str
         if row.trade_date not in day_set or row.anchor_isin != etf_anchor:
             continue
         instrument_class = NON_GOLD_ETF
-        if not inputs.ticks.covers(instrument_class, row.trade_date, series=row.series):
+        if not inputs.ticks.covers(instrument_class, row.trade_date, series=row.series, security=etf_anchor):
             raise unrunnable(
                 f"the {instrument_class} tick table does not cover series {row.series!r} "
                 f"on {row.trade_date.isoformat()} for {row.anchor_isin}"
@@ -672,6 +675,9 @@ def build_inputs(config: Mapping[str, Any], *, bind_to_registration: bool = True
     ref = config["criteria"]
     criteria = load_criteria_file(workspace_dir, ref.get("path", ""), ref.get("sha256"))
     manifest, rows = load_bound_dataset(config, bind_to_registration=bind_to_registration)
+    # A5: the configured benchmark candidates get an inferred ETF tick for the uncovered window. The inference
+    # provenance is part of tick_table_sha256, which the registration seals.
+    benchmark_isins = parse_params(cfg.strategy.params).benchmark.candidate_isins
     store = PilotDataStore(Path(config["store_root"]), workspace="india", read_only=True)
     targets = latest_target_universe(store, workspace="india")
     if targets is None:
@@ -695,7 +701,7 @@ def build_inputs(config: Mapping[str, Any], *, bind_to_registration: bool = True
         coverage_path=Path(config["coverage_report"]),
         eligibility=UniverseEligibility(store, targets, UniversePolicy(), mode="research"),
         universe_policy=UniversePolicy(), bands=_Bands(), scenarios=load_fill_scenarios(), schedules=schedules,
-        schedule_version=config.get("schedule_version", schedules.versions[-1].version), ticks=load_default_tables(),
+        schedule_version=config.get("schedule_version", schedules.versions[-1].version), ticks=load_default_tables(rows=rows, benchmark_isins=benchmark_isins),
         fold_rules=FoldRules(**config["fold_rules"]), git_commit=config["git_commit"],
         parameter_budget_n=int(config["parameter_budget_n"]), registry=Registry(Path(config["registry"])),
         targets_sha256=targets.target_sha256, criteria=criteria, events=events,
@@ -720,6 +726,7 @@ def cli_register(config: Mapping[str, Any]) -> dict[str, Any]:
     entry = register(inputs, hypothesis=config.get("hypothesis", "cross-sectional momentum with a swing exit"),
                      expected_head=pin)
     return {"registered": entry.entry_hash, "registry_head": inputs.registry.head_hash(),
+            "etf_tick_inference": inputs.ticks.inference_provenance(),
             "next": f"pin this head in {HEAD_REF_NAME} (holdout_refs) or pass --registry-head"}
 
 
