@@ -23,6 +23,11 @@ backend/routes/market_data_routes.py
 Growin/Security/*
 .github/*
 
+# Phase 63: VM order guards (all depths) and the Mac India risk module (all depths).
+# Kept above the Phase 58 block: test_safety_paths_manifest pins that block as the last seven entries.
+gateway/vm/gateway_vm/orders/*
+backend/risk_india/*
+
 # Phase 58: fail-closed private config loader, startup authority, audit trail, UK-only credential gate, ledger tool, private edge
 backend/private_config/*
 backend/server.py
@@ -31,7 +36,3 @@ backend/workspace_credentials.py
 scripts/ledger_tool.py
 private/*
 tests/backend/test_private_config.py
-
-# Phase 63: VM order guards (all depths) and the Mac India risk module (all depths)
-gateway/vm/gateway_vm/orders/*
-backend/risk_india/*
