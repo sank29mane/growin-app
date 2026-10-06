@@ -26,6 +26,8 @@ from datetime import date
 from decimal import Decimal
 from typing import Protocol
 
+from costs.core import LookaheadError
+
 from .data import Bar, DatasetView, DecisionView, DividendEvents
 from .params import StrategyParams
 
@@ -220,10 +222,18 @@ def zscores(raw: Mapping[str, Decimal]) -> dict[str, Decimal]:
 
 @dataclass(frozen=True)
 class DecisionContext:
+    """What a provider sees at one decision date. Reads of later dates raise ``LookaheadError``."""
+
     as_of: date
     eligible: frozenset[str]
     view: DecisionView
-    table: SignalTable
+    _table: SignalTable
+
+    def raw_score(self, anchor: str, day: date | None = None) -> Decimal | None:
+        when = day if day is not None else self.as_of
+        if when > self.as_of:
+            raise LookaheadError(f"{when.isoformat()} is after the decision date {self.as_of.isoformat()}")
+        return self._table.raw_score(anchor, when)
 
 
 class SignalProvider(Protocol):
@@ -236,7 +246,7 @@ class MomentumProvider:
     def scores(self, ctx: DecisionContext) -> Mapping[str, Decimal]:
         out: dict[str, Decimal] = {}
         for anchor in sorted(ctx.eligible):
-            value = ctx.table.raw_score(anchor, ctx.as_of)
+            value = ctx.raw_score(anchor)
             if value is not None:
                 out[anchor] = value
         return out

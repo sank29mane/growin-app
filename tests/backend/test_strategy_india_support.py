@@ -255,6 +255,7 @@ def study_inputs(
     bands: StaticBands | None = None,
     registry_name: str = "registry.jsonl",
     ticks: TickTables | None = None,
+    start: date = SESSION_START,
 ):
     """A complete synthetic study: dataset, gate report, registry path, every 60 input."""
     from pilot_data.dataset import dataset_hash
@@ -262,7 +263,7 @@ def study_inputs(
     from strategy_india.registry import Registry
     from strategy_india.study import StudyInputs
 
-    sessions = weekday_sessions(SESSION_START, sessions_n)
+    sessions = weekday_sessions(start, sessions_n)
     names = default_names(n_names) + etf_names()
     rows = rows if rows is not None else make_rows(sessions, names, ex_gaps=ex_gaps)
     cov_root = tmp_path / "cov"
