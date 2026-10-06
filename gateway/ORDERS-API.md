@@ -91,6 +91,10 @@ wins and this file is wrong.
 - **Tick band reference.** The tick table is keyed by the closing price on the last trading day of the previous calendar
   month (or the exchange's dated tick reference), not the quote's previous close. The guard reads it from an injected
   `TickReferencePort` on every check; if the port cannot supply it the answer is 503 `tick_reference_unavailable`.
+  The port returns a frozen `DatedTickReference(price: Decimal, month: date)`, never a bare Decimal. The guard itself
+  requires `month` to fall in the calendar month before the quote's session date (a January session wants December)
+  and `price` to be a positive finite Decimal; a stale or wrong month, an undated, malformed or bare-Decimal return,
+  or a port that raises all answer `tick_reference_unavailable`.
   Every evaluator vector carries a `tick_reference` field (null means unavailable) and a `tick_reference_month` (ISO
   date the reference was taken; it must fall in the calendar month before the session, so a stale or wrong-month
   value is `tick_reference_unavailable`, never used).

@@ -452,17 +452,36 @@ class MarketPort(Protocol):
     def quote(self, stock_code: str) -> Quote: ...
 
 
-class TickReferencePort(Protocol):
-    """The band reference price for the tick table (D-09).
+@dataclass(frozen=True)
+class DatedTickReference:
+    """A band reference price and the calendar month it was taken in.
 
-    NSE picks a stock's tick from its closing price on the last trading day of
-    the PREVIOUS calendar month (or a dated reference the exchange publishes),
-    not from yesterday's close. Return that price as a Decimal for the ISIN and
-    session date. Raise when it is not known: the guard then answers
-    ``tick_reference_unavailable`` and refuses. Bound to real data in 63-05.
+    ``month`` is any date inside that month (the last trading day is the natural
+    choice). The guard, not the port, decides whether the month is the right one.
     """
 
-    def band_reference(self, isin: str, session_date: date) -> Decimal: ...
+    price: Decimal
+    month: date
+
+
+def previous_month(session: date) -> tuple[int, int]:
+    """(year, month) of the calendar month before ``session``; January rolls to the prior December."""
+    return (session.year - 1, 12) if session.month == 1 else (session.year, session.month - 1)
+
+
+class TickReferencePort(Protocol):
+    """The dated band reference price for the tick table (D-09).
+
+    NSE picks a stock's tick from its closing price on the last trading day of the
+    PREVIOUS calendar month, not from yesterday's close. Return a
+    ``DatedTickReference`` carrying that price and the month it was taken in, for the
+    ISIN and session date. Raise when it is not known. The guard checks the month
+    itself: a stale or wrong month, an undated value, a bare Decimal or anything
+    malformed answers ``tick_reference_unavailable`` and refuses. Bound to real data
+    in 63-05.
+    """
+
+    def band_reference(self, isin: str, session_date: date) -> DatedTickReference: ...
 
 
 class RuleGuard:
@@ -550,9 +569,16 @@ class RuleGuard:
             value = self._tick_reference.band_reference(quote.isin, quote.session_date)
         except Exception:
             return None
-        if not isinstance(value, Decimal) or not value.is_finite() or not value > 0:
+        if not isinstance(value, DatedTickReference):
+            return None  # a bare Decimal says nothing about which month it is from
+        price, month = value.price, value.month
+        if not isinstance(price, Decimal) or not price.is_finite() or not price > 0:
             return None
-        return value
+        if not isinstance(month, date) or isinstance(month, datetime):
+            return None
+        if (month.year, month.month) != previous_month(quote.session_date):
+            return None  # stale or wrong month: never used
+        return price
 
     def set_mac_halt(self) -> tuple[str, ...]:
         with self._store.lock():

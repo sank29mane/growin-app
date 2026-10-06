@@ -6,6 +6,7 @@ read here, not duplicated inline, so the Mac suite (63-02) runs the same ones.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
@@ -27,7 +28,7 @@ from backend.private_config.schemas import IndiaLimits  # noqa: E402
 from backend.private_config.loader import PrivateConfigError  # noqa: E402
 from gateway_vm.orders import limits as vm  # noqa: E402
 from gateway_vm.orders.intent import parse_intent  # noqa: E402
-from gateway_vm.orders.pipeline import RuleGuard  # noqa: E402
+from gateway_vm.orders.pipeline import DatedTickReference, RuleGuard  # noqa: E402
 
 FIXTURES = ROOT / "tests" / "backend" / "fixtures" / "relay_orders"
 LV = json.loads((FIXTURES / "limits_vectors.json").read_text(encoding="utf-8"))
@@ -270,22 +271,18 @@ def _quote(raw: dict | None) -> vm.Quote | None:
 class VectorTickReference:
     """``TickReferencePort`` over one vector row: the reference and the month it was taken in.
 
-    The port contract (D-09) is the close on the last trading day of the calendar month
-    BEFORE the session. A reference dated to any other month, or undated, is one the port
-    cannot supply for this session, so it raises, as a real port must.
+    The port only reports what it holds. It does not judge the month: that is the production
+    guard's job (``RuleGuard._band_reference``), so the vectors exercise the real check.
     """
 
     def __init__(self, reference: str | None, month: str | None) -> None:
         self._reference = None if reference is None else Decimal(reference)
         self._month = None if month is None else date.fromisoformat(month)
 
-    def band_reference(self, isin: str, session_date: date) -> Decimal:
+    def band_reference(self, isin: str, session_date: date) -> DatedTickReference:
         if self._reference is None or self._month is None:
             raise LookupError("no dated reference")
-        wanted = (session_date.year - 1, 12) if session_date.month == 1 else (session_date.year, session_date.month - 1)
-        if (self._month.year, self._month.month) != wanted:
-            raise LookupError("reference is from the wrong month")
-        return self._reference
+        return DatedTickReference(self._reference, self._month)
 
 
 def band_reference_for(case: dict, quote: vm.Quote | None) -> Decimal | None:
@@ -332,6 +329,19 @@ def test_a_stale_or_wrong_month_reference_is_refused_and_never_used(name):
     assert band_reference_for(case, _quote(case["quote"])) is None
 
 
+def _guard_answer(port_result, session: str = "2026-10-08") -> Decimal | None:
+    """What the PRODUCTION ``RuleGuard._band_reference`` returns for whatever a port hands back."""
+
+    class Port:
+        def band_reference(self, isin, session_date):
+            if isinstance(port_result, Exception):
+                raise port_result
+            return port_result
+
+    quote = dataclasses.replace(_quote(CASES[0]["quote"]), session_date=date.fromisoformat(session))
+    return RuleGuard._band_reference(SimpleNamespace(_tick_reference=Port()), quote)  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize(
     "month, session, usable",
     [
@@ -340,18 +350,37 @@ def test_a_stale_or_wrong_month_reference_is_refused_and_never_used(name):
         ("2026-10-01", "2026-10-08", False),
         ("2026-08-31", "2026-10-08", False),
         ("2026-12-31", "2027-01-04", True),
+        ("2026-12-01", "2027-01-04", True),
         ("2027-01-04", "2027-01-04", False),
+        ("2026-11-30", "2027-01-04", False),
         ("2025-12-31", "2027-01-04", False),
-        (None, "2026-10-08", False),
+        ("2026-01-31", "2026-02-02", True),
     ],
 )
-def test_the_port_harness_accepts_only_the_previous_calendar_month(month, session, usable):
-    port = VectorTickReference("250.00", month)
-    if usable:
-        assert port.band_reference("INE000A01012", date.fromisoformat(session)) == Decimal("250.00")
-    else:
-        with pytest.raises(LookupError):
-            port.band_reference("INE000A01012", date.fromisoformat(session))
+def test_production_accepts_only_the_previous_calendar_month(month, session, usable):
+    answer = _guard_answer(DatedTickReference(Decimal("250.00"), date.fromisoformat(month)), session)
+    assert answer == (Decimal("250.00") if usable else None)
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        Decimal("250.00"),
+        "250.00",
+        250,
+        (Decimal("250.00"), date(2026, 9, 30)),
+        DatedTickReference(Decimal("250.00"), None),  # type: ignore[arg-type]
+        DatedTickReference(Decimal("250.00"), "2026-09-30"),  # type: ignore[arg-type]
+        DatedTickReference(Decimal("250.00"), datetime(2026, 9, 30)),  # type: ignore[arg-type]
+        DatedTickReference("250.00", date(2026, 9, 30)),  # type: ignore[arg-type]
+        DatedTickReference(Decimal("0"), date(2026, 9, 30)),
+        DatedTickReference(Decimal("NaN"), date(2026, 9, 30)),
+        LookupError("unknown"),
+    ],
+    ids=repr,
+)
+def test_production_refuses_a_bare_malformed_or_failed_port_result(result):
+    assert _guard_answer(result) is None
 
 
 def test_vector_file_covers_the_required_edges():
