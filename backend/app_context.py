@@ -224,7 +224,9 @@ class AppState:
             if db_path is not None:
                 path = db_path
             else:
-                path = practice_ledger_path(ws) if binding else default_ledger_path(ws)
+                path = (
+                    practice_ledger_path() if binding is not None else default_ledger_path(ws)
+                )
             ledger = ExecutionLedger(
                 path, workspace=ws, require_approval=True, venue=binding
             )

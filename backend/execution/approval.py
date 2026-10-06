@@ -194,8 +194,8 @@ class ApprovalService:
             raise ApprovalConflict("order workspace does not match ledger workspace")
         refusal = intent_refusal(
             intent.get("mode", ""),
-            intent.get("broker", ""),
-            intent.get("account", ""),
+            intent["broker"],
+            intent["account"],
             self._ledger.venue_binding,
         )
         if refusal is not None:

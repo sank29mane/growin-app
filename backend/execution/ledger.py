@@ -220,23 +220,20 @@ def default_ledger_path(workspace: Workspace | str) -> Path:
     )
 
 
-def practice_ledger_path(workspace: Workspace | str = Workspace.UK) -> Path:
-    """Return the local practice-ledger path without creating it.
+def practice_ledger_path() -> Path:
+    """Return the local practice-ledger path (uk only) without creating it.
 
     It is never ``default_ledger_path``: practice code must not open, read or
     migrate the real ledger of the same workspace (Phase 66 D-01).
     """
 
-    pinned = coerce_workspace(workspace)
-    if pinned is not Workspace.UK:
-        raise ValueError("a practice ledger exists only for the uk workspace")
     return (
         Path.home()
         / "Library"
         / "Application Support"
         / "Growin"
         / "workspaces"
-        / f"{pinned.value}-t212-practice"
+        / f"{Workspace.UK.value}-t212-practice"
         / "execution.sqlite3"
     )
 
@@ -2855,8 +2852,8 @@ class ExecutionLedger:
 
         refusal = intent_refusal(
             intent.get("mode", ""),
-            intent.get("broker", ""),
-            intent.get("account", ""),
+            intent["broker"],
+            intent["account"],
             self.venue_binding,
         )
         if refusal is not None:

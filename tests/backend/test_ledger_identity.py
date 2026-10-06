@@ -702,8 +702,6 @@ def test_practice_ledger_path_is_not_the_real_uk_ledger_path(tmp_path, monkeypat
     assert practice != real
     assert practice.parent != real.parent
     assert tmp_path in practice.parents
-    with pytest.raises(ValueError):
-        practice_ledger_path("india")
 
 
 def test_a_v6_ledger_written_before_66_opens_with_no_structural_change(tmp_path):

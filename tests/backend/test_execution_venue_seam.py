@@ -70,6 +70,26 @@ def test_production_factory_map_holds_only_paper():
     assert set(production_dispatcher_factories()) == {VENUE_PAPER}
 
 
+@pytest.mark.parametrize("venue", ["t212_live", "", "PAPER", "breeze_relay", None])
+def test_resolving_an_unknown_venue_raises_and_never_returns_the_paper_factory(venue):
+    from execution.venue import resolve_factory, select_dispatcher, VenueContext
+
+    with pytest.raises(VenueError) as refused:
+        resolve_factory(venue)
+    assert refused.value.code == "VENUE_UNKNOWN"
+    with pytest.raises(VenueError):
+        select_dispatcher(VenueContext(workspace="uk", venue=venue))
+
+
+def test_resolving_a_known_but_unregistered_venue_raises_unavailable():
+    from execution.venue import resolve_factory
+
+    with pytest.raises(VenueError) as refused:
+        resolve_factory(VENUE_T212_PRACTICE)
+    assert refused.value.code == "VENUE_UNAVAILABLE"
+    assert resolve_factory(VENUE_PAPER)(None).__class__.__name__ == "PaperDispatcher"
+
+
 @pytest.mark.asyncio
 async def test_tracer_signed_practice_intent_reaches_the_seam_double_once(
     tmp_path, private_config_dir, uk_process
@@ -814,9 +834,9 @@ def test_uat_builders_refuse_a_practice_ledger(tmp_path, private_config_dir, uk_
         dispatcher_factories=_factories(CountingFactory()),
     )
     try:
-        with pytest.raises(Exception, match="practice ledger"):
+        with pytest.raises(Exception, match="unavailable in a practice ledger"):
             app_state.create_paper_approval_check()
-        with pytest.raises(Exception, match="practice ledger"):
+        with pytest.raises(Exception, match="unavailable in a practice ledger"):
             app_state.create_paper_requote_check()
     finally:
         app_state.close_execution()
