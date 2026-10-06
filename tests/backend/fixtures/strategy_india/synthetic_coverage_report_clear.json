@@ -1,0 +1,70 @@
+{
+  "caveats": [
+    {
+      "code": "SURVIVORSHIP_BIAS",
+      "text": "Survivorship bias: the universe is today's Nifty 500 plus ETFs that are liquid today. Securities that left the index, were delisted, or merged before today are missing, so historical results overstate what a point-in-time universe would have produced."
+    },
+    {
+      "code": "HINDSIGHT_BIAS",
+      "text": "Hindsight: index membership, liquid-ETF selection, small-cap classification (today's Nifty Smallcap 250) and the ISIN lineage used to follow each name back in time come from today's data, not from what was known on each historical date."
+    }
+  ],
+  "workspace": "india",
+  "period_start": "2025-05-01",
+  "period_end": "2026-03-31",
+  "sessions": 100,
+  "sessions_by_status": {
+    "list": 100
+  },
+  "unsupported_sessions": [],
+  "targets_checked": 10,
+  "target_unknown_counts": {},
+  "fixed_count": 900,
+  "no_band_count": 0,
+  "unknown_count": 3,
+  "unknown_by_reason": {
+    "band_crosscheck_row_conflict": 3
+  },
+  "convention": null,
+  "archive_depth": null,
+  "phase62_blocked": false,
+  "blocked_reasons": [],
+  "row_conflict_sessions": [],
+  "nonblocking_reasons": [],
+  "unavailable_bands": [
+    {
+      "stock_code": "AAA",
+      "isin": "INE000A01000",
+      "session": "2025-06-02",
+      "nse_symbol": "AAA",
+      "series": "EQ",
+      "reason": "band_crosscheck_row_conflict",
+      "source_sha256s": [
+        "65f15ce8fee25b248445eedc63cd9a82094e35965e4ed552e195029a9311d474"
+      ]
+    },
+    {
+      "stock_code": "BBB",
+      "isin": "INE000A01001",
+      "session": "2025-07-01",
+      "nse_symbol": "BBB",
+      "series": "EQ",
+      "reason": "band_crosscheck_row_conflict",
+      "source_sha256s": [
+        "65f15ce8fee25b248445eedc63cd9a82094e35965e4ed552e195029a9311d474"
+      ]
+    },
+    {
+      "stock_code": "AAA",
+      "isin": "INE000A01000",
+      "session": "2025-09-03",
+      "nse_symbol": "AAA",
+      "series": "EQ",
+      "reason": "band_crosscheck_row_conflict",
+      "source_sha256s": [
+        "65f15ce8fee25b248445eedc63cd9a82094e35965e4ed552e195029a9311d474"
+      ]
+    }
+  ],
+  "report_sha256": "aa9363af45d86942277c315c6068be70ad8fdfb78f28550737ac15dd0e3741f3"
+}

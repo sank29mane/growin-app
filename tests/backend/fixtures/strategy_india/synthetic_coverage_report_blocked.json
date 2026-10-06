@@ -1,0 +1,36 @@
+{
+  "caveats": [
+    {
+      "code": "SURVIVORSHIP_BIAS",
+      "text": "Survivorship bias: the universe is today's Nifty 500 plus ETFs that are liquid today. Securities that left the index, were delisted, or merged before today are missing, so historical results overstate what a point-in-time universe would have produced."
+    },
+    {
+      "code": "HINDSIGHT_BIAS",
+      "text": "Hindsight: index membership, liquid-ETF selection, small-cap classification (today's Nifty Smallcap 250) and the ISIN lineage used to follow each name back in time come from today's data, not from what was known on each historical date."
+    }
+  ],
+  "workspace": "india",
+  "period_start": "2025-05-01",
+  "period_end": "2026-03-31",
+  "sessions": 100,
+  "sessions_by_status": {
+    "list": 100
+  },
+  "unsupported_sessions": [],
+  "targets_checked": 10,
+  "target_unknown_counts": {},
+  "fixed_count": 900,
+  "no_band_count": 0,
+  "unknown_count": 0,
+  "unknown_by_reason": {},
+  "convention": null,
+  "archive_depth": null,
+  "phase62_blocked": true,
+  "blocked_reasons": [
+    "band_convention_unverified"
+  ],
+  "row_conflict_sessions": [],
+  "nonblocking_reasons": [],
+  "unavailable_bands": [],
+  "report_sha256": "71a769cfff059187b5a280a2830b5336ffd911a545bff17e56499e543019ed31"
+}
