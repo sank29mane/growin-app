@@ -68,6 +68,20 @@ def test_editing_any_entry_breaks_verification(tmp_path):
     reg.verify()
 
 
+def test_an_edit_with_a_recomputed_entry_hash_still_breaks_the_chain_at_the_next_entry(tmp_path):
+    from strategy_india.registry import _entry_hash
+
+    reg = _registry(tmp_path)
+    reg.register(registration_record())
+    reg.register(registration_record(seed=8))
+    first, second = (json.loads(line) for line in _lines(reg))
+    first["payload"]["seed"] = 999
+    first["entry_hash"] = _entry_hash(first["seq"], first["kind"], first["payload"], first["prev_hash"])
+    reg.path.write_text(json.dumps(first) + "\n" + json.dumps(second) + "\n")
+    with pytest.raises(RegistryError, match="hash chain"):
+        reg.verify()
+
+
 def test_deleting_any_entry_breaks_verification(tmp_path):
     reg = _registry(tmp_path)
     for seed in (1, 2, 3):
