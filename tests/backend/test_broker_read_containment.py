@@ -6,6 +6,7 @@ import pytest
 from fastapi import HTTPException
 
 import trading212_mcp_server
+from brokers.trading212.governor import Governor
 from app_context import state
 from mcp_client import (
     MultiMCPManager,
@@ -14,6 +15,13 @@ from mcp_client import (
 )
 from routes.market_routes import get_live_portfolio
 from shared_types import SENSITIVE_TOOLS
+from t212_testkit import FakeClock, Recorder, install_no_real_network
+
+
+@pytest.fixture(autouse=True)
+def _no_real_network(monkeypatch, tmp_path):
+    install_no_real_network(monkeypatch)
+    monkeypatch.chdir(tmp_path)
 
 
 @pytest.mark.asyncio
@@ -136,36 +144,40 @@ async def test_portfolio_poll_does_not_call_mcp_without_trading212_session():
 
 
 @pytest.mark.asyncio
-async def test_trading212_429_retry_uses_defined_logger(monkeypatch):
-    request = httpx.Request("GET", "https://live.trading212.com/api/v0/equity/account/cash")
-    throttled_response = httpx.Response(429, request=request)
-    throttled = httpx.HTTPStatusError(
-        "rate limited",
-        request=request,
-        response=throttled_response,
+async def test_trading212_429_retry_uses_defined_logger():
+    clock = FakeClock()
+    throttled = httpx.Response(
+        429,
+        headers={"x-ratelimit-remaining": "0", "x-ratelimit-reset": str(int(clock.now) + 5)},
+        text="Limited: 1 / 5s",
     )
-    success_response = httpx.Response(200, request=request, json={"free": 100.0})
+    success_response = httpx.Response(200, json={"cash": {"availableToTrade": 100.0}})
+    answers = iter([throttled, success_response])
+    recorder = Recorder(lambda request: next(answers))
 
-    budgeter = MagicMock()
-    budgeter.acquire = AsyncMock()
-    monkeypatch.setattr(trading212_mcp_server, "get_t212_budgeter", lambda: budgeter)
-    monkeypatch.setattr(trading212_mcp_server.asyncio, "sleep", AsyncMock())
-
-    client = trading212_mcp_server.Trading212Client("key", "secret")
-    client.client.request = AsyncMock(side_effect=[throttled, success_response])
-
-    result = await client._request("GET", "equity/account/cash")
+    client = trading212_mcp_server.Trading212Client(
+        "key",
+        "secret",
+        True,
+        governor=Governor(clock=clock, sleep=clock.sleep),
+        transport=recorder.transport,
+    )
+    result = await client._request("GET", "equity/account/summary")
     await client.close()
 
     assert isinstance(trading212_mcp_server.logger, logging.Logger)
-    assert result == {"free": 100.0}
-    assert client.client.request.await_count == 2
+    assert result == {"cash": {"availableToTrade": 100.0}}
+    assert recorder.count == 2
 
 
 @pytest.mark.asyncio
-async def test_read_only_transport_rejects_mutation_before_network(monkeypatch):
-    monkeypatch.setenv("GROWIN_TRADING212_READ_ONLY", "1")
-    client = trading212_mcp_server.Trading212Client("key", "secret")
+@pytest.mark.parametrize("flag", [None, "1"])
+async def test_read_only_transport_rejects_mutation_before_network(monkeypatch, flag):
+    if flag is None:
+        monkeypatch.delenv("GROWIN_TRADING212_READ_ONLY", raising=False)
+    else:
+        monkeypatch.setenv("GROWIN_TRADING212_READ_ONLY", flag)
+    client = trading212_mcp_server.Trading212Client("key", "secret", True)
     client.client.request = AsyncMock()
 
     with pytest.raises(PermissionError, match="read-only transport"):
@@ -176,8 +188,12 @@ async def test_read_only_transport_rejects_mutation_before_network(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_read_only_server_hides_and_rejects_all_sensitive_tools(monkeypatch):
-    monkeypatch.setenv("GROWIN_TRADING212_READ_ONLY", "1")
+@pytest.mark.parametrize("flag", [None, "1"])
+async def test_read_only_server_hides_and_rejects_all_sensitive_tools(monkeypatch, flag):
+    if flag is None:
+        monkeypatch.delenv("GROWIN_TRADING212_READ_ONLY", raising=False)
+    else:
+        monkeypatch.setenv("GROWIN_TRADING212_READ_ONLY", flag)
 
     advertised_names = {tool.name for tool in await trading212_mcp_server.list_tools()}
     assert advertised_names.isdisjoint(SENSITIVE_TOOLS)

@@ -1,0 +1,62 @@
+{
+  "_fixture": {
+    "spec": "Trading 212 public API v0, https://docs.trading212.com/_bundle/api.json?download",
+    "spec_sha256": "a272f70a…c4fc041d",
+    "provenance": "Shape taken from 66-RESEARCH sections 2-5 (spec read 2026-10-06). Values are invented. No Trading 212 request was made to write this file, and the file was not byte-diffed against the spec in 66-02.",
+    "endpoint": "GET /equity/history/orders"
+  },
+  "request": {
+    "method": "GET",
+    "path": "/api/v0/equity/history/orders?ticker=AAPL_US_EQ&limit=20"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "x-ratelimit-limit": "20",
+      "x-ratelimit-period": "60",
+      "x-ratelimit-remaining": "19",
+      "x-ratelimit-used": "1",
+      "x-ratelimit-reset": "@NOW+60"
+    },
+    "body": {
+      "items": [
+        {
+          "order": {
+            "id": 4400110010,
+            "type": "LIMIT",
+            "strategy": "QUANTITY",
+            "status": "FILLED",
+            "ticker": "AAPL_US_EQ",
+            "instrument": {
+              "ticker": "AAPL_US_EQ",
+              "name": "Apple",
+              "isin": "US0378331005",
+              "currency": "USD"
+            },
+            "quantity": 1.0,
+            "filledQuantity": 1.0,
+            "limitPrice": 180.0,
+            "extendedHours": false,
+            "initiatedFrom": "API",
+            "createdAt": "2026-10-06T14:02:00.000+00:00"
+          },
+          "fill": {
+            "id": 770011,
+            "filledAt": "2026-10-06T14:02:03.000+00:00",
+            "price": 172.9,
+            "quantity": 1.0,
+            "type": "TRADE",
+            "walletImpact": {
+              "currency": "GBP",
+              "netValue": 128.4,
+              "fxRate": 0.7427,
+              "taxes": [],
+              "realisedProfitLoss": 0.0
+            }
+          }
+        }
+      ],
+      "nextPagePath": null
+    }
+  }
+}

@@ -1,0 +1,66 @@
+{
+  "_fixture": {
+    "spec": "Trading 212 public API v0, https://docs.trading212.com/_bundle/api.json?download",
+    "spec_sha256": "a272f70a…c4fc041d",
+    "provenance": "Shape taken from 66-RESEARCH sections 2-5 (spec read 2026-10-06). Values are invented. No Trading 212 request was made to write this file, and the file was not byte-diffed against the spec in 66-02.",
+    "endpoint": "GET /equity/positions"
+  },
+  "request": {
+    "method": "GET",
+    "path": "/api/v0/equity/positions"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "x-ratelimit-limit": "1",
+      "x-ratelimit-period": "1",
+      "x-ratelimit-remaining": "0",
+      "x-ratelimit-used": "1",
+      "x-ratelimit-reset": "@NOW+1"
+    },
+    "body": [
+      {
+        "instrument": {
+          "ticker": "AAPL_US_EQ",
+          "name": "Apple",
+          "isin": "US0378331005",
+          "currency": "USD"
+        },
+        "quantity": 3.0,
+        "quantityAvailableForTrading": 3.0,
+        "quantityInPies": 0.0,
+        "averagePricePaid": 150.25,
+        "currentPrice": 172.4,
+        "createdAt": "2026-03-02T09:30:00.000+00:00",
+        "walletImpact": {
+          "currency": "GBP",
+          "totalCost": 356.1,
+          "currentValue": 401.2,
+          "unrealizedProfitLoss": 45.1,
+          "fxImpact": -2.3
+        }
+      },
+      {
+        "instrument": {
+          "ticker": "VODl_EQ",
+          "name": "Vodafone",
+          "isin": "GB00BH4HKS39",
+          "currency": "GBX"
+        },
+        "quantity": 100.0,
+        "quantityAvailableForTrading": 80.0,
+        "quantityInPies": 20.0,
+        "averagePricePaid": 71.5,
+        "currentPrice": 73.2,
+        "createdAt": "2026-04-11T08:05:00.000+00:00",
+        "walletImpact": {
+          "currency": "GBP",
+          "totalCost": 71.5,
+          "currentValue": 73.2,
+          "unrealizedProfitLoss": 1.7,
+          "fxImpact": 0.0
+        }
+      }
+    ]
+  }
+}
