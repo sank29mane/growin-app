@@ -1,0 +1,44 @@
+{
+  "adv_window": 20,
+  "benchmark": {
+    "candidate_isins": [
+      "INF000000ETF1",
+      "INF000000ETF2"
+    ],
+    "min_completeness": "0.95"
+  },
+  "edge_map": {
+    "min_obs": 5,
+    "mode": "fixed",
+    "ridge": "1",
+    "slope": "0.01"
+  },
+  "halt_release": "-0.04",
+  "hold_rank_cutoff": 8,
+  "limit_offset_bps": "20",
+  "liquidity_adv_fraction": "0.05",
+  "lookback_sessions": 20,
+  "max_hold_sessions": 15,
+  "max_positions": 5,
+  "min_hold_sessions": 2,
+  "min_positions": 5,
+  "min_universe_for_entry": 8,
+  "no_trade_band": "0.001",
+  "rebalance_every": 2,
+  "regime": {
+    "breadth_window": 20,
+    "drawdown_window": 60,
+    "enter_cash": "0.8",
+    "exit_cash": "0.4",
+    "min_component_weight": "0.05",
+    "min_dwell": 2,
+    "n_init": 3,
+    "reg_covar": "0.000001",
+    "vol_window": 10
+  },
+  "seed": 7,
+  "skip_sessions": 1,
+  "turnover_budget_swaps_per_week": "1",
+  "vol_adjusted": true,
+  "vol_window": 10
+}
