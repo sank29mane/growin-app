@@ -257,7 +257,7 @@ final class RelayOrderReviewTests: XCTestCase {
         XCTAssertNotNil(try ukStore.data(for: .approvalSigningKey, scope: .workspace(.uk)))
         XCTAssertNil(try ukStore.data(for: .approvalSecureEnclaveKey, scope: .workspace(.india)))
 
-        let payload = Data("uk-paper-approval-bytes".utf8)
+        let payload = ukPaperBytes(keyId: identity.keyID)
         let der = try router.sign(payload, for: .uk, flow: .paperApproval)
         let publicKey = try P256.Signing.PublicKey(x963Representation: identity.publicKeyX963)
         XCTAssertTrue(publicKey.isValidSignature(try P256.Signing.ECDSASignature(derRepresentation: der), for: payload))
@@ -268,6 +268,85 @@ final class RelayOrderReviewTests: XCTestCase {
             XCTAssertEqual(error as? ApprovalSignerRouterError, .relayIsIndiaOnly)
         }
         XCTAssertFalse(router.canAdoptLegacyKey(into: .india), "India never adopts the flat software key")
+    }
+
+    // MARK: Software signer is gated by the bytes, not the flow label (P2, #558)
+
+    private func ukPaperBytes(keyId: String, workspace: String = "uk") -> Data {
+        CanonicalJSON.data([
+            "version": 1, "purpose": "growin.execution.dispatch", "challenge_id": "c-1",
+            "proposal_id": "p-1", "client_order_id": "co-1", "intent_hash": "ih",
+            "workspace": workspace, "account": "paper", "broker": "local-paper", "mode": "PAPER",
+            "ticker": "VOD.L", "side": "BUY", "quantity": "10", "order_type": "LIMIT",
+            "limit_price": "70.50", "replaces_proposal_id": "", "evidence_hash": "eh",
+            "nonce": "n", "issued_at": 1, "expires_at": 2, "key_id": keyId,
+        ] as [String: Any])
+    }
+
+    /// Break-proof: removing the payload check in requireSoftwareSignable makes the
+    /// India relay, mismatch and unparseable cases sign with the UK key.
+    func testSoftwareSignerRefusesIndiaRelayBytesLabelledAsPaperApprovalSyncAndAsync() async throws {
+        _ = try router.createIdentityIfNeeded(for: .uk)
+        let indiaRelay = try XCTUnwrap(RelayVectors.rows().first).bytes
+        XCTAssertThrowsError(try router.sign(indiaRelay, for: .uk, flow: .paperApproval)) { error in
+            XCTAssertEqual(error as? ApprovalSignerRouterError, .relayIsIndiaOnly)
+        }
+        do {
+            _ = try await router.signAsync(indiaRelay, for: .uk, flow: .paperApproval)
+            XCTFail("India relay bytes were signed with the UK software key")
+        } catch {
+            XCTAssertEqual(error as? ApprovalSignerRouterError, .relayIsIndiaOnly)
+        }
+        XCTAssertThrowsError(try router.sign(indiaRelay, for: .uk, flow: .controlClear)) { error in
+            XCTAssertEqual(error as? ApprovalSignerRouterError, .softwareFlowNotAllowed)
+        }
+        XCTAssertEqual(fixture.backend.keyAccessCount, 0)
+    }
+
+    func testSoftwareSignerRefusesPurposeAndWorkspaceMismatchSyncAndAsync() async throws {
+        let identity = try router.createIdentityIfNeeded(for: .uk)
+        let wrongWorkspace = ukPaperBytes(keyId: identity.keyID, workspace: "india")
+        let wrongPurpose = CanonicalJSON.data([
+            "version": 1, "purpose": "growin.execution.control.clear", "challenge_id": "c-2",
+            "workspace": "uk", "control_version": 3, "nonce": "n", "issued_at": 1,
+            "expires_at": 2, "key_id": identity.keyID,
+        ] as [String: Any])
+        for bytes in [wrongWorkspace, wrongPurpose] {
+            XCTAssertThrowsError(try router.sign(bytes, for: .uk, flow: .paperApproval))
+            do {
+                _ = try await router.signAsync(bytes, for: .uk, flow: .paperApproval)
+                XCTFail("mismatched bytes were signed")
+            } catch {}
+        }
+        XCTAssertThrowsError(try router.sign(wrongWorkspace, for: .uk, flow: .paperApproval)) { error in
+            guard case .workspaceMismatch? = error as? ApprovalSignerError else { return XCTFail("\(error)") }
+        }
+        XCTAssertThrowsError(try router.sign(wrongPurpose, for: .uk, flow: .paperApproval)) { error in
+            guard case .purposeNotAllowed? = error as? ApprovalSignerError else { return XCTFail("\(error)") }
+        }
+    }
+
+    func testSoftwareSignerRefusesUnparseableBytesSyncAndAsync() async throws {
+        _ = try router.createIdentityIfNeeded(for: .uk)
+        for bytes in [Data("uk-paper-approval-bytes".utf8), Data(), Data(#"{"purpose":"growin.execution.dispatch"}"#.utf8)] {
+            XCTAssertThrowsError(try router.sign(bytes, for: .uk, flow: .paperApproval)) { error in
+                XCTAssertTrue(error is SignedPayloadInspectionError, "\(error)")
+            }
+            do {
+                _ = try await router.signAsync(bytes, for: .uk, flow: .paperApproval)
+                XCTFail("unparseable bytes were signed")
+            } catch {
+                XCTAssertTrue(error is SignedPayloadInspectionError, "\(error)")
+            }
+        }
+    }
+
+    func testSoftwareSignerStillSignsALegitimatePaperApprovalAsync() async throws {
+        let identity = try router.createIdentityIfNeeded(for: .uk)
+        let payload = ukPaperBytes(keyId: identity.keyID)
+        let der = try await router.signAsync(payload, for: .uk, flow: .paperApproval)
+        let publicKey = try P256.Signing.PublicKey(x963Representation: identity.publicKeyX963)
+        XCTAssertTrue(publicKey.isValidSignature(try P256.Signing.ECDSASignature(derRepresentation: der), for: payload))
     }
 
     func testOnlyTheRouterReachesTheSoftwareSignerInAppSources() throws {

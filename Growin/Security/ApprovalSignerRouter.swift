@@ -10,12 +10,15 @@ enum ApprovalSignerRoute: Equatable, Sendable {
 
 enum ApprovalSignerRouterError: LocalizedError, Equatable {
     case relayIsIndiaOnly
+    case softwareFlowNotAllowed
     case indiaLedgerKeyMismatch
 
     var errorDescription: String? {
         switch self {
         case .relayIsIndiaOnly:
             return "Relay orders are signed in the India workspace only."
+        case .softwareFlowNotAllowed:
+            return "The software approval key only signs paper approvals. Nothing was signed."
         case .indiaLedgerKeyMismatch:
             return "The India ledger already has a different approval key enrolled. Keys cannot be replaced, so India needs a fresh ledger path before this Secure Enclave key can be enrolled. Ask for the fresh-ledger steps in the runbook; nothing was changed."
         }
@@ -82,8 +85,8 @@ final class ApprovalSignerRouter: @unchecked Sendable {
         case .secureEnclave:
             return try india.sign(payload, flow: flow, for: workspace)
         case .localSoftware:
-            // UK behaves exactly as before. Relay orders do not exist for UK.
-            guard flow != .relayOrder else { throw ApprovalSignerRouterError.relayIsIndiaOnly }
+            // UK behaves as before for real paper approvals. Relay orders do not exist for UK.
+            try requireSoftwareSignable(payload, for: workspace, flow: flow)
             return try uk.sign(payload, for: workspace)
         }
     }
@@ -94,8 +97,29 @@ final class ApprovalSignerRouter: @unchecked Sendable {
         case .secureEnclave:
             return try await india.signAsync(payload, flow: flow, for: workspace)
         case .localSoftware:
-            guard flow != .relayOrder else { throw ApprovalSignerRouterError.relayIsIndiaOnly }
+            try requireSoftwareSignable(payload, for: workspace, flow: flow)
             return try uk.sign(payload, for: workspace)
+        }
+    }
+
+    /// The software key has no Touch ID, so the router cannot trust the caller's flow
+    /// label (P2 on #558). The signed bytes decide: they must parse, carry the paper
+    /// approval purpose, and name this workspace. Relay bytes never get through,
+    /// whatever label they arrive under. Runs before the software key is read.
+    private func requireSoftwareSignable(_ payload: Data, for workspace: Workspace, flow: ApprovalSigningFlow) throws {
+        guard flow == .paperApproval else {
+            throw flow == .relayOrder ? ApprovalSignerRouterError.relayIsIndiaOnly : ApprovalSignerRouterError.softwareFlowNotAllowed
+        }
+        // Unparseable bytes throw here, before the key is touched.
+        let inspected = try SignedPayloadInspector.inspect(payload)
+        guard inspected.purpose != .relayOrder else {
+            throw ApprovalSignerRouterError.relayIsIndiaOnly
+        }
+        guard inspected.purpose == flow.allowedPurpose else {
+            throw ApprovalSignerError.purposeNotAllowed
+        }
+        guard inspected.workspace == workspace.rawValue else {
+            throw ApprovalSignerError.workspaceMismatch
         }
     }
 
