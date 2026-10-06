@@ -792,6 +792,50 @@ def test_corrupt_state_after_mint_answers_503_at_authorize(real: RealRig):
     assert real.forward.calls == 0
 
 
+def _guard_for(real: RealRig) -> RuleGuard:
+    return RuleGuard(
+        limits=LIMITS, kill=real.kill, store=real.store, account=real.account,
+        market=real.market, tick_reference=real.tick_reference, audit=real.audit,
+    )
+
+
+def test_corrupt_state_at_mint_answers_503_and_is_not_rewritten(real: RealRig):
+    real.store.path.write_text("{corrupt")
+    before = real.store.path.read_bytes()
+    with pytest.raises(OrderRefusal) as err:
+        real.mint()
+    expect(err, 503, "ORDERS_UNAVAILABLE", "state_unreadable")
+    assert real.store.path.read_bytes() == before  # no quiet re-init that would clear the latches
+    assert real.reads() == (0, 0, 0) and real.forward.calls == 0
+    assert not real.audit.path.exists()  # nothing was audited, nothing started
+
+
+def test_rule_guard_refuses_corrupt_state_without_re_initialising_it(real: RealRig):
+    """The guard's own load_or_init path, reached without the pipeline's audit check in front."""
+    intent = parse_intent(intent_body())
+    guard = _guard_for(real)
+    for damage in (b"{corrupt", b"", b'{"state":{},"state_sha256":"x"}'):
+        real.store.path.write_bytes(damage)
+        real.store.path.chmod(0o600)
+        with pytest.raises(OrderRefusal) as err:
+            guard.check(intent, T0)
+        expect(err, 503, "ORDERS_UNAVAILABLE", "state_unreadable")
+        with pytest.raises(OrderRefusal) as err:
+            guard.set_mac_halt()
+        expect(err, 503, "ORDERS_UNAVAILABLE", "state_unreadable")
+        assert real.store.path.read_bytes() == damage
+    assert real.account.reads == 0 and real.market.reads == 0
+
+
+def test_rule_guard_refuses_a_missing_state_file_beside_an_audit_log(real: RealRig):
+    real.mint()  # the log now has an entry
+    real.store.path.unlink()
+    with pytest.raises(OrderRefusal) as err:
+        _guard_for(real).check(parse_intent(intent_body(intent_id="intent-test-0002")), T0)
+    expect(err, 503, "ORDERS_UNAVAILABLE", "state_unreadable")
+    assert not real.store.path.exists()  # not re-created with fresh latches
+
+
 def test_deleted_audit_log_refuses_mint_with_no_side_effects(real: RealRig):
     real.mint()
     real.audit.path.unlink()
