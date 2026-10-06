@@ -12,6 +12,8 @@ import re
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
+from venue_registry import known_venues, spec_for
+
 from pydantic import (
     BaseModel,
     BeforeValidator,
@@ -126,19 +128,16 @@ class UkManifest(BaseModel):
     currency: Literal["GBP"]
 
 
-# The venue ids are duplicated here on purpose: this package imports nothing
-# from ``execution``. A test keeps the two lists equal.
-KNOWN_VENUES = ("paper", "t212_practice")
-PRACTICE_VENUE_IDS = frozenset({"t212_practice"})
 ACCOUNT_ID_PATTERN = r"^[A-Za-z0-9._-]{1,64}$"
 
 
 class WorkspaceExecution(BaseModel):
     """``private/<workspace>/execution.json``: which venue this workspace trades on.
 
-    ``paper`` carries no account. A practice venue names the broker account id
-    and currency its ledger is bound to. The venue is a plain string here and
-    the loader turns an unknown one into VENUE_UNKNOWN before this runs.
+    ``paper`` carries no account. A bound venue (one with a ``VenueSpec`` in
+    ``venue_registry``) names the broker account id and the currency its ledger
+    is bound to, which must be the spec's currency. The venue is a plain string
+    here and the loader turns an unknown one into VENUE_UNKNOWN before this runs.
     """
 
     model_config = _STRICT_MODEL
@@ -151,15 +150,18 @@ class WorkspaceExecution(BaseModel):
     account_id: Annotated[str, StringConstraints(pattern=ACCOUNT_ID_PATTERN)] | None = Field(
         default=None, repr=False
     )
-    currency: Literal["GBP"] | None = None
+    currency: Annotated[str, StringConstraints(pattern=r"^[A-Z]{3}$")] | None = None
 
     @model_validator(mode="after")
     def _venue_shape(self) -> "WorkspaceExecution":
-        if self.venue not in KNOWN_VENUES:
+        if self.venue not in known_venues():
             raise ValueError("venue is unknown")
-        if self.venue in PRACTICE_VENUE_IDS:
+        spec = spec_for(self.venue)
+        if spec is not None:
             if self.account_id is None or self.currency is None:
-                raise ValueError("a practice venue needs account_id and currency")
+                raise ValueError("a bound venue needs account_id and currency")
+            if self.currency != spec.currency:
+                raise ValueError("currency is not the venue's currency")
         elif {"account_id", "currency"} & self.model_fields_set:
             raise ValueError("the paper venue takes no account_id or currency")
         return self

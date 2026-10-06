@@ -38,10 +38,14 @@ from .models import (
     WorkspaceControl,
 )
 from .venue import (
+    VENUE_T212_PRACTICE,
     VenueBinding,
     allowed_mode,
+    allowed_modes,
     intent_refusal,
     refusal_text,
+    registered_kinds,
+    spec_for,
 )
 
 
@@ -221,21 +225,30 @@ def default_ledger_path(workspace: Workspace | str) -> Path:
 
 
 def practice_ledger_path() -> Path:
-    """Return the local practice-ledger path (uk only) without creating it.
+    """Return the Trading 212 practice-ledger path (uk only) without creating it.
 
-    It is never ``default_ledger_path``: practice code must not open, read or
-    migrate the real ledger of the same workspace (Phase 66 D-01).
+    It is the ``t212_practice`` spec's default ledger path, and it is never
+    ``default_ledger_path``: practice code must not open, read or migrate the
+    real ledger of the same workspace (Phase 66 D-01).
     """
 
-    return (
-        Path.home()
-        / "Library"
-        / "Application Support"
-        / "Growin"
-        / "workspaces"
-        / f"{Workspace.UK.value}-t212-practice"
-        / "execution.sqlite3"
-    )
+    spec = spec_for(VENUE_T212_PRACTICE)
+    if spec is None:
+        raise LedgerVenueMismatch("the practice venue is not registered")
+    return spec.ledger_path()
+
+
+def _same_file_path(candidate: Path, canonical: Path) -> bool:
+    """True when two paths can name one file: same real path, case-folded, or same inode."""
+
+    left = os.path.realpath(candidate)
+    right = os.path.realpath(canonical)
+    if left == right or left.casefold() == right.casefold():
+        return True
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return False
 
 
 def canonical_json(value: Any) -> str:
@@ -653,6 +666,22 @@ def _read_binding(
         raise LedgerVenueMismatch("ledger venue binding is invalid") from None
 
 
+def _venue_binding_check() -> str:
+    """The binding CHECK, enumerated from the registered specs and nothing wider.
+
+    One (venue, currency) pair per registered kind. Kind and currency are
+    validated by ``VenueSpec`` to ``[a-z0-9_]`` and ``[A-Z]{3}``, so they are
+    safe to inline here.
+    """
+
+    pairs = []
+    for kind in registered_kinds():
+        spec = spec_for(kind)
+        if spec is not None:
+            pairs.append(f"(venue = '{spec.kind}' AND currency = '{spec.currency}')")
+    return " OR ".join(pairs) if pairs else "0"
+
+
 def _install_venue_binding(
     connection: sqlite3.Connection, binding: VenueBinding, bound_at: str
 ) -> None:
@@ -665,10 +694,11 @@ def _install_venue_binding(
         f"""
         CREATE TABLE {_VENUE_BINDING_TABLE} (
             singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-            venue TEXT NOT NULL CHECK (venue IN ('t212_practice')),
+            venue TEXT NOT NULL,
             account_id TEXT NOT NULL CHECK (length(account_id) BETWEEN 1 AND 64),
-            currency TEXT NOT NULL CHECK (currency = 'GBP'),
-            bound_at TEXT NOT NULL
+            currency TEXT NOT NULL,
+            bound_at TEXT NOT NULL,
+            CHECK ({_venue_binding_check()})
         )
         """
     )
@@ -852,13 +882,30 @@ class ExecutionLedger:
         if venue is not None:
             if not isinstance(venue, VenueBinding):
                 raise ValueError("venue must be a VenueBinding")
-            if self.workspace is not Workspace.UK:
-                raise LedgerVenueMismatch("a practice ledger exists only for the uk workspace")
-        # None means a paper ledger. A practice ledger is only ever created or
+            spec = spec_for(venue.venue)
+            if spec is None:
+                raise LedgerVenueMismatch("the ledger venue is not registered")
+            if self.workspace.value != spec.workspace:
+                raise LedgerVenueMismatch(
+                    f"this venue's ledger exists only for the {spec.workspace} workspace"
+                )
+        # None means a paper ledger. A bound ledger is only ever created or
         # reopened by passing the binding it was created with.
         self.venue_binding: Optional[VenueBinding] = venue
         self.require_approval = require_approval
-        self.path = Path(path) if path is not None else default_ledger_path(self.workspace)
+        if path is not None:
+            self.path = Path(path)
+        elif venue is not None:
+            self.path = spec.ledger_path()
+        else:
+            self.path = default_ledger_path(self.workspace)
+        if venue is not None and _same_file_path(self.path, default_ledger_path(self.workspace)):
+            # D-01: a bound ledger is never the workspace's real ledger, even
+            # when that file is absent or empty. Refused before any file, lock
+            # or directory is created or opened.
+            raise LedgerVenueMismatch(
+                "a bound venue ledger must not use the workspace's real ledger path"
+            )
         if self.path.exists() and self.path.is_symlink():
             raise LedgerError("ledger path must not be a symbolic link")
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -2861,9 +2908,15 @@ class ExecutionLedger:
 
     @property
     def allowed_mode(self):
-        """The one order mode this ledger accepts."""
+        """The one order mode this ledger accepts (single-mode venues and paper)."""
 
         return allowed_mode(self.venue_binding)
+
+    @property
+    def allowed_modes(self) -> frozenset[str]:
+        """Every order mode this ledger accepts."""
+
+        return allowed_modes(self.venue_binding)
 
     def _check_row_workspace(self, row: Optional[sqlite3.Row]) -> None:
         """Defense in depth: a stored intent must carry this ledger's workspace."""

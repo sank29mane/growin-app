@@ -1,7 +1,8 @@
 """Fail-closed loader for ``private/<workspace>/`` configuration.
 
 The caller always passes ``private_dir``. This module reads no environment
-variable and imports nothing from the execution package.
+variable and imports nothing from the execution package. The only venue facts
+it reads come from the stdlib-only ``venue_registry``.
 
 Every failure raises ``PrivateConfigError`` with a stable code and a field
 name. No value read from a private file is ever placed in an error.
@@ -20,11 +21,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
+from venue_registry import known_venues, spec_for
 
 from .errors import PrivateConfigError, schema_error_from_validation_error
 from .schemas import (
-    KNOWN_VENUES,
-    PRACTICE_VENUE_IDS,
     FileRef,
     IndiaLimits,
     IndiaStrategy,
@@ -359,10 +359,11 @@ def _load_execution(
     raw = _read_config_file(path, EXECUTION_FILE)
     data = _parse_object(raw, EXECUTION_FILE)
     venue = data.get("venue")
-    if not isinstance(venue, str) or venue not in KNOWN_VENUES:
+    if not isinstance(venue, str) or venue not in known_venues():
         raise PrivateConfigError("VENUE_UNKNOWN", "venue")
-    if venue in PRACTICE_VENUE_IDS:
-        if workspace != "uk":
+    spec = spec_for(venue)
+    if spec is not None:
+        if workspace != spec.workspace:
             raise PrivateConfigError("VENUE_NOT_ALLOWED", "venue")
         for name in ("account_id", "currency"):
             if name not in data:
@@ -430,7 +431,8 @@ def load_workspace_config(
 
     execution = _load_execution(workspace_dir, workspace, raw_files)
     uk_limits: UkLimits | None = None
-    if execution is not None and execution.venue in PRACTICE_VENUE_IDS:
+    execution_spec = None if execution is None else spec_for(execution.venue)
+    if execution_spec is not None and execution_spec.workspace == "uk":
         uk_limits = _load_uk_limits(workspace_dir, raw_files)
 
     return WorkspaceConfig(

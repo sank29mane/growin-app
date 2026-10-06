@@ -398,10 +398,12 @@ def test_the_allowed_mode_follows_the_ledger_binding(stack_factory):
     assert stack_factory("practice").ledger.allowed_mode is OrderMode.PRACTICE
 
 
-def test_live_is_in_no_venue_row():
-    from execution.venue import VENUE_MODE
+def test_live_is_in_no_venue_spec():
+    from execution.venue import allowed_modes, registered_kinds, spec_for
 
-    assert OrderMode.LIVE not in set(VENUE_MODE.values())
+    assert allowed_modes(None) == frozenset({"PAPER"})
+    for kind in registered_kinds():
+        assert "LIVE" not in spec_for(kind).modes
 
 
 def test_practice_budget_is_only_for_the_bound_account(stack_factory):

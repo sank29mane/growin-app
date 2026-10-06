@@ -27,11 +27,8 @@ from execution import (
     Workspace,
     WorkspaceMismatch,
     coerce_workspace,
-    default_ledger_path,
-    practice_ledger_path,
 )
 from execution.venue import (
-    PRACTICE_VENUES,
     PracticeCaps,
     VenueBinding,
     VenueContext,
@@ -39,6 +36,7 @@ from execution.venue import (
     DispatcherFactoryMap,
     execution_mode_label,
     resolve_factory,
+    spec_for,
 )
 from private_config import PrivateConfigError, load_workspace_config
 from workspace_credentials import process_workspace
@@ -206,31 +204,31 @@ class AppState:
             venue = config.venue
             binding = None
             caps = None
-            if venue in PRACTICE_VENUES:
-                if ws.value != "uk" or process_workspace() != "uk":
+            spec = spec_for(venue)
+            if spec is not None:
+                # A bound venue runs only in its spec's workspace, in a process
+                # of that workspace.
+                if ws.value != spec.workspace or process_workspace() != spec.workspace:
                     raise VenueError("VENUE_WORKSPACE_MISMATCH", venue)
                 binding = VenueBinding(
                     venue=venue,
                     account_id=config.execution.account_id,
                     currency=config.execution.currency,
                 )
-                caps = PracticeCaps(
-                    capital_cap=config.uk_limits.capital_cap,
-                    per_position_cap=config.uk_limits.per_position_cap,
-                )
+                if config.uk_limits is not None:
+                    caps = PracticeCaps(
+                        capital_cap=config.uk_limits.capital_cap,
+                        per_position_cap=config.uk_limits.per_position_cap,
+                    )
             # Resolve the factory before any ledger is opened: an unregistered
             # venue must not create or touch a ledger file.
             factory = resolve_factory(venue, dispatcher_factories)
-            if db_path is not None:
-                path = db_path
-            else:
-                path = (
-                    practice_ledger_path() if binding is not None else default_ledger_path(ws)
-                )
+            # db_path None means the ledger's own default: the venue spec's path
+            # for a bound venue, the workspace's real ledger for paper.
             ledger = ExecutionLedger(
-                path, workspace=ws, require_approval=True, venue=binding
+                db_path, workspace=ws, require_approval=True, venue=binding
             )
-            if binding is not None:
+            if binding is not None and caps is not None:
                 # The practice budget equals capital_cap and stays immutable
                 # (changing caps later means a new practice ledger).
                 ledger.configure_paper_budget(

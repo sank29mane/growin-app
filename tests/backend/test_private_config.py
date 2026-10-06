@@ -767,13 +767,13 @@ def _uk(private: Path, name: str) -> Path:
     return private / "uk" / name
 
 
-def test_venue_ids_match_the_execution_package():
-    from execution.venue import KNOWN_VENUES, PRACTICE_VENUES
-    from private_config.schemas import KNOWN_VENUES as CONFIG_VENUES
-    from private_config.schemas import PRACTICE_VENUE_IDS
+def test_loader_and_execution_read_the_one_venue_registry():
+    import venue_registry
+    from execution import venue as execution_venue
 
-    assert CONFIG_VENUES == KNOWN_VENUES
-    assert PRACTICE_VENUE_IDS == PRACTICE_VENUES
+    assert execution_venue.known_venues() == venue_registry.known_venues()
+    assert execution_venue.known_venues() == ("paper", "t212_practice")
+    assert execution_venue.spec_for is venue_registry.spec_for
 
 
 def test_uk_with_no_execution_file_is_venue_paper(private_config_dir: Path):

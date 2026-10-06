@@ -6,10 +6,12 @@ orders. This module holds the venue ids, the immutable ledger binding, the one
 mode rule every gate shares, and the dispatcher factory map that
 ``AppState.start_execution`` selects from.
 
-It imports only ``models`` so the ledger, approval and service layers can all
-use it without a cycle. It contacts no broker, and the production map holds
-only ``paper``: a practice dispatcher is registered by tests, or by a later
-plan, never here.
+It imports only ``models`` and the stdlib-only ``venue_registry`` so the
+ledger, approval and service layers can all use it without a cycle. Which venue
+kinds exist, and what each one is bound to, is declared once in
+``venue_registry.VENUE_SPECS``; nothing here names a venue kind in guard logic.
+It contacts no broker, and the production map holds only ``paper``: a practice
+dispatcher is registered by tests, or by a later plan, never here.
 """
 
 from __future__ import annotations
@@ -17,23 +19,22 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from decimal import Decimal
-from types import MappingProxyType
 from typing import Any, Callable, Mapping, Optional, Protocol
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+
+import venue_registry
+from venue_registry import (
+    VENUE_PAPER,
+    VENUE_T212_PRACTICE,
+    VenueSpec,
+    known_venues,
+    registered_kinds,
+    spec_for,
+)
 
 from .models import OrderAck, OrderIntent, OrderMode, Workspace
 
-VENUE_PAPER = "paper"
-VENUE_T212_PRACTICE = "t212_practice"
-KNOWN_VENUES: tuple[str, ...] = (VENUE_PAPER, VENUE_T212_PRACTICE)
-
-# The one place a venue maps to the order mode it accepts. LIVE is in no row.
-VENUE_MODE: Mapping[str, OrderMode] = MappingProxyType(
-    {VENUE_PAPER: OrderMode.PAPER, VENUE_T212_PRACTICE: OrderMode.PRACTICE}
-)
-PRACTICE_VENUES: frozenset[str] = frozenset({VENUE_T212_PRACTICE})
-PRACTICE_CURRENCY = "GBP"
 ACCOUNT_ID_PATTERN = r"^[A-Za-z0-9._-]{1,64}$"
 _ACCOUNT_ID_RE = re.compile(ACCOUNT_ID_PATTERN)
 
@@ -64,7 +65,11 @@ class VenueError(RuntimeError):
 
 
 class VenueBinding(BaseModel):
-    """What a practice ledger is bound to at creation. Never changes afterwards."""
+    """What a bound ledger is tied to at creation. Never changes afterwards.
+
+    ``venue`` must be a registered kind and ``currency`` must be that kind's
+    currency; both come from its ``VenueSpec``.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -74,9 +79,9 @@ class VenueBinding(BaseModel):
 
     @field_validator("venue")
     @classmethod
-    def _practice_venue_only(cls, value: str) -> str:
-        if value not in PRACTICE_VENUES:
-            raise ValueError("a ledger binding names a practice venue")
+    def _registered_venue_only(cls, value: str) -> str:
+        if spec_for(value) is None:
+            raise ValueError("a ledger binding names a registered venue")
         return value
 
     @field_validator("account_id")
@@ -86,21 +91,36 @@ class VenueBinding(BaseModel):
             raise ValueError("account id is malformed")
         return value
 
-    @field_validator("currency")
-    @classmethod
-    def _gbp_only(cls, value: str) -> str:
-        if value != PRACTICE_CURRENCY:
-            raise ValueError("practice currency must be GBP")
-        return value
+    @model_validator(mode="after")
+    def _currency_is_the_specs(self) -> "VenueBinding":
+        spec = spec_for(self.venue)
+        if spec is None or self.currency != spec.currency:
+            raise ValueError("binding currency must be the venue's currency")
+        return self
 
     def __repr__(self) -> str:
         return f"VenueBinding(venue={self.venue!r})"
 
 
-def allowed_mode(binding: Optional[VenueBinding]) -> OrderMode:
-    """The one mode a ledger accepts: its venue's, or PAPER when it has no binding."""
+def allowed_modes(binding: Optional[VenueBinding]) -> frozenset[str]:
+    """The order modes a ledger accepts: its venue spec's, or PAPER with no binding.
 
-    return OrderMode.PAPER if binding is None else VENUE_MODE[binding.venue]
+    A binding whose venue is no longer registered accepts nothing.
+    """
+
+    if binding is None:
+        return frozenset({OrderMode.PAPER.value})
+    spec = spec_for(binding.venue)
+    return frozenset() if spec is None else spec.modes
+
+
+def allowed_mode(binding: Optional[VenueBinding]) -> OrderMode:
+    """The one mode a single-mode ledger accepts. Raises when its spec has several."""
+
+    modes = allowed_modes(binding)
+    if len(modes) != 1:
+        raise VenueError("VENUE_MODE_NOT_SINGLE", "" if binding is None else binding.venue)
+    return OrderMode(next(iter(modes)))
 
 
 def intent_refusal(
@@ -112,15 +132,15 @@ def intent_refusal(
     """Return a refusal code when a ledger may not accept this order, else None.
 
     LIVE is refused first and in every ledger. A paper ledger (no binding)
-    accepts PAPER only, with the same checks it had before this seam. A
-    practice ledger accepts PRACTICE only, from its own venue, on its own
-    bound account.
+    accepts PAPER only, with the same checks it had before this seam. A bound
+    ledger accepts only the modes its venue spec lists, from its own venue, on
+    its own bound account. The rule reads the spec; it names no venue kind.
     """
 
     text = str(getattr(mode, "value", mode)).upper()
-    if text == OrderMode.LIVE.value:
+    if text == venue_registry.LIVE_MODE:
         return LIVE_DISABLED
-    if text != allowed_mode(binding).value:
+    if text not in allowed_modes(binding):
         return MODE_VENUE_MISMATCH
     if binding is None:
         return None
@@ -188,10 +208,15 @@ def resolve_factory(
 ) -> DispatcherFactory:
     """Return the factory for ``venue`` or raise. There is no fallback to paper."""
 
-    if venue not in KNOWN_VENUES:
-        raise VenueError("VENUE_UNKNOWN", str(venue)[:40])
+    if venue == VENUE_PAPER:
+        key = VENUE_PAPER
+    else:
+        spec = spec_for(venue)
+        if spec is None:
+            raise VenueError("VENUE_UNKNOWN", str(venue)[:40])
+        key = spec.dispatcher_key
     table = production_dispatcher_factories() if factories is None else factories
-    factory = table.get(venue)
+    factory = table.get(key)
     if factory is None:
         raise VenueError("VENUE_UNAVAILABLE", venue)
     return factory
@@ -210,24 +235,25 @@ __all__ = [
     "BROKER_VENUE_MISMATCH",
     "DispatcherFactory",
     "DispatcherFactoryMap",
-    "KNOWN_VENUES",
     "LIVE_DISABLED",
     "MODE_VENUE_MISMATCH",
-    "PRACTICE_CURRENCY",
-    "PRACTICE_VENUES",
     "PracticeCaps",
-    "VENUE_MODE",
     "VENUE_PAPER",
     "VENUE_T212_PRACTICE",
     "VenueBinding",
     "VenueContext",
     "VenueDispatcher",
     "VenueError",
+    "VenueSpec",
     "allowed_mode",
+    "allowed_modes",
     "execution_mode_label",
     "intent_refusal",
+    "known_venues",
     "production_dispatcher_factories",
     "refusal_text",
+    "registered_kinds",
     "resolve_factory",
     "select_dispatcher",
+    "spec_for",
 ]
