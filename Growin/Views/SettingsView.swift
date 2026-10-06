@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 struct SettingsView: View {
     var body: some View {
@@ -283,176 +284,70 @@ struct SettingsCard<Content: View>: View {
 }
 
 struct AIConfigSection: View {
-    @AppStorage("selectedProvider") private var selectedProvider = "ollama"
-    @AppStorage("selectedModel") private var selectedModel = "native-mlx"
-    @AppStorage("selectedCoordinatorModel") private var selectedCoordinatorModel = "granite-tiny"
-    @KeychainStorage(.openaiApiKey, scope: .shared) private var openaiApiKey = ""
-    @KeychainStorage(.geminiApiKey, scope: .shared) private var geminiApiKey = ""
-    @KeychainStorage(.finnhubApiKey, scope: .shared) private var finnhubApiKey = ""
-    @KeychainStorage(.trading212ApiKey, scope: .workspace(.uk)) private var trading212ApiKey = ""
-    @KeychainStorage(.trading212ApiSecret, scope: .workspace(.uk)) private var trading212ApiSecret = ""
-    @KeychainStorage(.trading212IsaApiKey, scope: .workspace(.uk)) private var trading212IsaApiKey = ""
-    @KeychainStorage(.trading212IsaApiSecret, scope: .workspace(.uk)) private var trading212IsaApiSecret = ""
-    @KeychainStorage(.alpacaApiKey, scope: .workspace(.uk)) private var alpacaApiKey = ""
-    @KeychainStorage(.alpacaSecretKey, scope: .workspace(.uk)) private var alpacaSecretKey = ""
-    @KeychainStorage(.newsApiKey, scope: .shared) private var newsApiKey = ""
-    @KeychainStorage(.tavilyApiKey, scope: .shared) private var tavilyApiKey = ""
-
-    @State private var lmStudioViewModel = LMStudioViewModel.shared
+    @State private var roles: ModelRolesResponse?
+    @State private var isLoading = false
 
     var body: some View {
         SettingsCard(title: "AI Core Config", icon: "brain") {
-            VStack(spacing: 20) {
-                // Decision Agent Provider
-                HStack {
-                    Label("Reasoning Platform", systemImage: "server.rack")
-                    Spacer()
-                    Picker("Reasoning Platform", selection: $selectedProvider) {
-                        Text("Ollama").tag("ollama")
-                        Text("LM Studio").tag("lmstudio")
-                        Text("OpenAI").tag("openai")
-                        Text("Gemini").tag("gemini")
-                        Text("MLX (Local)").tag("mlx")
+            VStack(spacing: 14) {
+                if let roles {
+                    ForEach(roles.roles) { role in
+                        roleRow(role)
                     }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .accessibilityLabel("Reasoning Platform")
-                    .accessibilityHint("Selects the AI provider for decision making")
-                    .onChange(of: selectedProvider) { _, newValue in
-                        if newValue == "lmstudio" {
-                            lmStudioViewModel.fetchModels()
-                        }
+                    if !roles.missingRoles.isEmpty {
+                        Label("Not configured: \(roles.missingRoles.joined(separator: ", "))", systemImage: "exclamationmark.triangle")
+                            .font(.caption2)
+                            .foregroundColor(.stitchNeonYellow)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                }
-                
-                // Decision Agent Model
-                HStack {
-                    Label("Decision Engine", systemImage: "brain.head.profile")
-                    Spacer()
-                    
-                    if selectedProvider == "lmstudio" {
-                        if lmStudioViewModel.isLoadingModel {
-                            HStack(spacing: 8) {
-                                ProgressView().controlSize(.small)
-                                Text(lmStudioViewModel.loadingStatus)
-                                    .font(.caption2)
-                                    .foregroundColor(.stitchNeonYellow)
-                            }
-                        } else if let current = lmStudioViewModel.currentModel, !current.isEmpty {
-                            // SOTA: High-Fidelity Active Indicator
-                            HStack(spacing: 6) {
-                                StatusLight(color: .stitchNeonGreen, isAnimated: true)
-                                Text("Active")
-                                    .font(.system(size: 10, weight: .bold))
-                                    .foregroundColor(.stitchNeonGreen)
-                            }
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Color.stitchNeonGreen.opacity(0.1))
-                            .cornerRadius(6)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .stroke(Color.stitchNeonGreen.opacity(0.3), lineWidth: 0.5)
-                            )
-                            .padding(.trailing, 4)
-                        }
-                    }
-                    
-                    Picker("Decision Agent Model", selection: $selectedModel) {
-                        modelOptions
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .accessibilityLabel("Decision Agent Model")
-                    .accessibilityHint("Selects the specific AI model to use")
-                    .disabled(selectedProvider == "lmstudio" && lmStudioViewModel.isLoadingModel)
-                    .onChange(of: selectedModel) { _, newValue in
-                        if selectedProvider == "lmstudio" && newValue != "lmstudio-auto" {
-                            lmStudioViewModel.loadModel(newValue)
-                        }
-                    }
+                } else if isLoading {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Label("Model registry unavailable. AI features answer 503 until a valid private/models.json is loaded.", systemImage: "bolt.slash.fill")
+                        .font(.caption2)
+                        .foregroundColor(.red)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
                 Divider().background(Color.secondary.opacity(0.1))
 
-                // Coordinator Model (Internal - Static for Stability)
                 HStack {
-                    Label("Expert Coordinator", systemImage: "cpu")
-                    Spacer()
-                    Text("IBM Granite 4.0 Tiny")
-                        .font(.system(size: 13, weight: .bold, design: .monospaced))
+                    Text("Models are set in private/models.json on the backend, not in the app.")
+                        .font(.caption2)
                         .foregroundColor(.secondary)
+                    Spacer()
+                    Button("Refresh") {
+                        Task { await load() }
+                    }
+                    .font(.system(size: 10, weight: .bold))
+                    .accessibilityLabel("Refresh model roles")
+                    .accessibilityHint("Reloads the model roles from the backend")
                 }
-                
-                if selectedProvider == "openai" {
-                    SecureField("OpenAI API Key", text: $openaiApiKey)
-                        .textFieldStyle(.plain)
-                        .padding(10)
-                        .background(Color.secondary.opacity(0.1))
-                        .clipShape(.rect(cornerRadius: 8))
-                        .accessibilityLabel("OpenAI API Key")
-                        .accessibilityHint("Enter your OpenAI API key")
-                }
-                
-                if selectedProvider == "gemini" {
-                    SecureField("Gemini API Key", text: $geminiApiKey)
-                        .textFieldStyle(.plain)
-                        .padding(10)
-                        .background(Color.secondary.opacity(0.1))
-                        .clipShape(.rect(cornerRadius: 8))
-                        .accessibilityLabel("Gemini API Key")
-                        .accessibilityHint("Enter your Gemini API key")
-                }
-                
-                statusNote
             }
         }
-        .onAppear {
-            if selectedProvider == "lmstudio" {
-                lmStudioViewModel.fetchModels()
-            }
-        }
-    }
-    
-    private var statusNote: some View {
-        Group {
-            if selectedProvider == "lmstudio" {
-                Label(lmStudioViewModel.isOnline ? "LM Studio active on port 1234" : "LM Studio not reachable", systemImage: lmStudioViewModel.isOnline ? "bolt.fill" : "bolt.slash.fill")
-                    .font(.caption2)
-                    .foregroundColor(lmStudioViewModel.isOnline ? .stitchNeonCyan : .red)
-            } else if selectedProvider == "mlx" {
-                Label("Hardware accelerated via Apple GPU", systemImage: "sparkles")
-                    .font(.caption2)
-                    .foregroundColor(.stitchNeonPurple)
-            }
-        }
+        .task { await load() }
     }
 
-    @ViewBuilder
-    private var modelOptions: some View {
-        switch selectedProvider {
-        case "ollama":
-            Text("Mistral").tag("mistral")
-            Text("Llama 3").tag("llama3")
-            Text("Gemma").tag("gemma")
-        case "lmstudio":
-            Text("Auto-Detect").tag("lmstudio-auto")
-            ForEach(lmStudioViewModel.availableModels, id: \.self) { model in
-                Text(model).tag(model)
+    private func roleRow(_ role: ModelRole) -> some View {
+        HStack {
+            Label(role.role.replacingOccurrences(of: "_", with: " ").capitalized, systemImage: "cpu")
+            Spacer()
+            if role.keyConfigured == false {
+                Text("Key missing")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.red)
             }
-        case "openai":
-            Text("GPT-4o").tag("gpt-4o")
-            Text("GPT-4 Turbo").tag("gpt-4-turbo")
-        case "gemini":
-            Text("Gemini 1.5 Pro").tag("gemini-1.5-pro")
-            Text("Gemini 1.5 Flash").tag("gemini-1.5-flash")
-        case "mlx":
-            Text("LFM 2.5B (Native)").tag("native-mlx")
-            Text("Mistral 7B").tag("mlx-community/Mistral-7B-v0.1-4bit-mlx")
-            Text("Llama 3 8B").tag("mlx-community/Llama-3-8B-4bit-mlx")
-        default:
-            Text("Mistral").tag("mistral")
+            Text("\(role.provider) / \(role.model)")
+                .font(.system(size: 13, weight: .bold, design: .monospaced))
+                .foregroundColor(.secondary)
         }
+        .accessibilityElement(children: .combine)
+    }
+
+    private func load() async {
+        isLoading = true
+        roles = await AgentClient().fetchModelRoles()
+        isLoading = false
     }
 }
 
@@ -460,8 +355,6 @@ struct HFModelHubSection: View {
     @State private var hfSearchQuery = "mlx"
     @State private var hfModels: [HFModel] = []
     @State private var isSearching = false
-    @AppStorage("selectedProvider") private var selectedProvider = "ollama"
-    @AppStorage("selectedModel") private var selectedModel = "mistral"
     
     var body: some View {
         SettingsCard(title: "Model Repository", icon: "square.stack.3d.up.fill") {
@@ -501,9 +394,9 @@ struct HFModelHubSection: View {
                                         .foregroundColor(.secondary)
                                 }
                                 Spacer()
-                                Button("Deploy") {
-                                    selectedProvider = "mlx"
-                                    selectedModel = model.id
+                                Button("Copy ID") {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(model.id, forType: .string)
                                 }
                                 .font(.system(size: 10, weight: .bold))
                                 .padding(.horizontal, 12)
@@ -511,8 +404,8 @@ struct HFModelHubSection: View {
                                 .background(Color.accentColor)
                                 .foregroundColor(.white)
                                 .clipShape(.rect(cornerRadius: 8))
-                                .accessibilityLabel("Deploy \(model.id)")
-                                .accessibilityHint("Selects and deploys this HuggingFace model")
+                                .accessibilityLabel("Copy \(model.id)")
+                                .accessibilityHint("Copies the model id so it can be set in private/models.json")
                                 .accessibilityAddTraits(.isButton)
                             }
                         }

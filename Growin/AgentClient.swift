@@ -83,7 +83,7 @@ struct AgentClient {
     private let config = AppConfig.shared
     
     /// SOTA: Implementing robust SSE streaming with AsyncStream
-    func streamMessage(query: String, conversationId: String? = nil, model: String? = nil, accountType: String? = nil, images: [String]? = nil) -> AsyncStream<AgentStreamEvent> {
+    func streamMessage(query: String, conversationId: String? = nil, accountType: String? = nil, images: [String]? = nil) -> AsyncStream<AgentStreamEvent> {
         AsyncStream { continuation in
             let url = URL(string: "\(config.baseURL)/api/chat/message")!
             var request = URLRequest(url: url)
@@ -96,8 +96,6 @@ struct AgentClient {
             var body: [String: Any] = [
                 "message": query,
                 "conversation_id": conversationId as Any,
-                "model_name": model ?? "native-mlx",
-                "coordinator_model": defaults.string(forKey: "selectedCoordinatorModel") ?? "granite-tiny",
                 "account_type": accountType ?? defaults.string(forKey: "t212AccountType") ?? "invest"
             ]
             if let images = images {
@@ -184,15 +182,31 @@ struct AgentClient {
         }
     }
     
+    /// Non-secret summary of the backend's model roles (`GET /api/models/roles`).
+    /// Returns nil when the registry is unavailable (HTTP 503) or the call fails.
+    func fetchModelRoles() async -> ModelRolesResponse? {
+        guard let url = URL(string: "\(config.baseURL)/api/models/roles") else { return nil }
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+                return nil
+            }
+            return try JSONDecoder().decode(ModelRolesResponse.self, from: data)
+        } catch {
+            print("AgentClient roles error: \(error)")
+            return nil
+        }
+    }
+
     func analyzePortfolio(query: String) async -> AgentResponse? {
         let url = URL(string: "\(config.baseURL)/agent/analyze")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         
+        // The backend picks every model from its role registry; the app sends none.
         let body: [String: Any] = [
-            "query": query,
-            "model_name": "native-mlx"
+            "query": query
         ]
         
         do {

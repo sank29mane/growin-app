@@ -142,28 +142,8 @@ class ChatViewModel {
         }
     }
 
-    private var effectiveModelName: String {
-        defaults.string(forKey: "selectedModel") ?? "native-mlx"
-    }
-
     func sendMessage() {
         guard !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-
-        let openaiApiKey = (try? KeychainStore.shared.string(for: .openaiApiKey, scope: .shared)) ?? ""
-        let geminiApiKey = (try? KeychainStore.shared.string(for: .geminiApiKey, scope: .shared)) ?? ""
-        let selectedProvider = defaults.string(forKey: "selectedProvider") ?? "mlx"
-
-        if selectedProvider == "openai" && openaiApiKey.isEmpty {
-            missingConfigProvider = "OpenAI"
-            showConfigPrompt = true
-            return
-        }
-
-        if selectedProvider == "gemini" && geminiApiKey.isEmpty {
-            missingConfigProvider = "Gemini"
-            showConfigPrompt = true
-            return
-        }
 
         let userMessage = inputText
         inputText = ""
@@ -220,7 +200,7 @@ class ChatViewModel {
             toolCalls: nil,
             toolCallId: nil,
             agentName: "DecisionAgent",
-            modelName: effectiveModelName,
+            modelName: nil,
             data: nil,
             quickActions: nil,
             images: nil
@@ -232,7 +212,6 @@ class ChatViewModel {
         let stream = agentClient.streamMessage(
             query: message,
             conversationId: selectedConversationId,
-            model: effectiveModelName,
             accountType: selectedAccountType,
             images: currentImages
         )
@@ -425,10 +404,7 @@ class ChatViewModel {
     }
 
     func generateTitle(for conversationId: String) async {
-        var components = URLComponents(string: "\(config.baseURL)/conversations/\(conversationId)/generate-title")
-        components?.queryItems = [URLQueryItem(name: "model_name", value: effectiveModelName)]
-
-        guard let url = components?.url else { return }
+        guard let url = URL(string: "\(config.baseURL)/conversations/\(conversationId)/generate-title") else { return }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
 
