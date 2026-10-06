@@ -11,6 +11,8 @@ enum ApprovalSignerRoute: Equatable, Sendable {
 enum ApprovalSignerRouterError: LocalizedError, Equatable {
     case relayIsIndiaOnly
     case softwareFlowNotAllowed
+    case softwarePayloadNotCanonical
+    case softwareModeNotPaper
     case indiaLedgerKeyMismatch
 
     var errorDescription: String? {
@@ -19,6 +21,10 @@ enum ApprovalSignerRouterError: LocalizedError, Equatable {
             return "Relay orders are signed in the India workspace only."
         case .softwareFlowNotAllowed:
             return "The software approval key only signs paper approvals. Nothing was signed."
+        case .softwarePayloadNotCanonical:
+            return "The bytes to sign are not an exact paper approval, so the software key refused to sign them. Nothing was signed."
+        case .softwareModeNotPaper:
+            return "The software approval key only signs PAPER mode approvals. Nothing was signed."
         case .indiaLedgerKeyMismatch:
             return "The India ledger already has a different approval key enrolled. Keys cannot be replaced, so India needs a fresh ledger path before this Secure Enclave key can be enrolled. Ask for the fresh-ledger steps in the runbook; nothing was changed."
         }
@@ -120,6 +126,65 @@ final class ApprovalSignerRouter: @unchecked Sendable {
         }
         guard inspected.workspace == workspace.rawValue else {
             throw ApprovalSignerError.workspaceMismatch
+        }
+        try requireCanonicalPaperApproval(payload)
+    }
+
+    /// Exact key set of the backend paper approval (backend/execution/approval.py,
+    /// `payload = {...}` in the dispatch challenge). The software gate is an allowlist:
+    /// one key more or less and the key stays unused. `SignedPayloadInspector` is
+    /// deliberately lenient about extra keys, so it cannot be the gate on its own.
+    private static let canonicalPaperKeys: Set<String> = [
+        "version", "purpose", "challenge_id", "proposal_id", "client_order_id", "intent_hash",
+        "workspace", "account", "broker", "mode", "ticker", "side", "quantity", "order_type",
+        "limit_price", "replaces_proposal_id", "requote_id", "admitted_quantity", "currency",
+        "price", "notional", "evidence_hash", "nonce", "issued_at", "expires_at", "key_id",
+    ]
+
+    /// Keys that only exist on India relay envelopes (growin-orders/1 O4). Seeing one
+    /// anywhere, at any depth, is a relay order in a paper costume.
+    private static let relayOnlyKeys: Set<String> = [
+        "limits_sha256", "params_sha256", "intent", "intent_id", "isin", "stock_code",
+        "exchange", "product", "validity", "batch_id",
+    ]
+
+    private static func containsRelayKey(_ value: StrictJSONValue) -> Bool {
+        switch value {
+        case .object(let object):
+            return object.contains { relayOnlyKeys.contains($0.key) || Self.containsRelayKey($0.value) }
+        case .array(let items):
+            return items.contains(where: Self.containsRelayKey)
+        default:
+            return false
+        }
+    }
+
+    /// Strict allowlist for the UK software key: exact canonical paper schema, flat
+    /// scalar values only, mode PAPER. Refuses PRACTICE and LIVE on this branch.
+    /// NOTE for rebase: PR #557 adds a separate biometric-gated practice path. Practice
+    /// signing belongs there, behind Touch ID, and is reconciled when #557 lands. It must
+    /// not be opened up here by widening this software gate.
+    private func requireCanonicalPaperApproval(_ payload: Data) throws {
+        guard case .object(let object) = try StrictJSONParser.parse(payload) else {
+            throw SignedPayloadInspectionError.malformed
+        }
+        for value in object.values where Self.containsRelayKey(value) {
+            throw ApprovalSignerRouterError.relayIsIndiaOnly
+        }
+        if !Set(object.keys).isDisjoint(with: Self.relayOnlyKeys) {
+            throw ApprovalSignerRouterError.relayIsIndiaOnly
+        }
+        guard Set(object.keys) == Self.canonicalPaperKeys else {
+            throw ApprovalSignerRouterError.softwarePayloadNotCanonical
+        }
+        for value in object.values {
+            switch value {
+            case .string, .integer, .null: continue
+            default: throw ApprovalSignerRouterError.softwarePayloadNotCanonical
+            }
+        }
+        guard case .string("PAPER")? = object["mode"] else {
+            throw ApprovalSignerRouterError.softwareModeNotPaper
         }
     }
 

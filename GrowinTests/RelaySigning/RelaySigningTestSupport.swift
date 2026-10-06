@@ -90,6 +90,8 @@ enum CanonicalJSON {
         case let dict as [String: Any]:
             let body = dict.keys.sorted().map { "\(quote($0)):\(string(dict[$0]!))" }
             return "{" + body.joined(separator: ",") + "}"
+        case let items as [Any]:
+            return "[" + items.map { string($0) }.joined(separator: ",") + "]"
         case let text as String:
             return quote(text)
         case let number as Int:
