@@ -31,6 +31,7 @@ IST = timezone(timedelta(hours=5, minutes=30))  # no DST: a fixed offset is exac
 SESSION_OPEN = time(9, 15)
 ORDER_CUTOFF = time(15, 10)  # D-11: closing auction, no new orders at or after
 TICK_TABLE_PATH = Path(__file__).parent / "data" / "nse_cash_tick_sizes.json"
+DEFAULT_LIMITS_PATH = "/etc/growin-gateway/limits.json"
 SUPPORTED_SERIES = frozenset({"EQ", "BE"})
 
 LIMIT_KEYS = (

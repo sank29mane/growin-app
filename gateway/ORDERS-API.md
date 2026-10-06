@@ -69,7 +69,11 @@ wins and this file is wrong.
   open, every buy on every ISIN is refused `stop_open`; the latch clears when the trade list shows the exit fill, with
   no admin reset. A verified sell never clears `halt` or a stop. An exit still open at 15:30 IST raises an operator
   alert through the same channel as halt and kill-switch alerts. `mac_halt` and `account_mismatch` refuse everything.
-  Only the admin CLI clears `halt`, `stop`, `mac_halt` and `account_mismatch`; it refuses `ended`.
+  Only the admin CLI clears `halt`, `stop`, `mac_halt` and `account_mismatch`; it refuses `ended`. It also refuses
+  `reset --latch halt` while drawdown is at or below -8%, because the halt would latch again at the next close.
+  `--rebase-halt-anchor` overrides that: it sets a separate halt anchor (equity at the last evaluated close) that
+  only the -8% test reads, and writes `rebase_halt_anchor` into the RESET audit entry. The true peak never moves,
+  so the -15% end is still measured from the real high-water mark.
 - **Caps.** Only buys count toward `capital_cap` and `per_position_cap`: deployed = position cost basis + open buy
   pending notional + this order. The cost basis of a position is the larger of the broker holding and the VM fill
   ledger, because holdings lag fills by a day. A sell is never refused for being over a cap; it is refused only when
@@ -86,7 +90,7 @@ wins and this file is wrong.
   A missing log, a log shorter than the anchor, or a rewritten history refuses every mint, authorize and admin reset
   (503 `audit_broken`); one log entry beyond the anchor and one unterminated tail line are crash artifacts and are
   tolerated, the tail being dropped by the next append.
-- **Admin.** `python -m gateway_vm.orders.admin STATE_DIR status | verify-audit | reset --latch NAME | session-end-check`,
+- **Admin.** `python -m gateway_vm.orders.admin STATE_DIR status | verify-audit | reset --latch NAME [--rebase-halt-anchor] | session-end-check`,
   run from the VM shell in an admin window. No HTTP route does any of it.
 - **Vectors.** `tests/backend/fixtures/relay_orders/signing_vectors.json` (canonical bytes, signatures, negatives) and
   `limits_vectors.json` (rule decisions with expected codes, drawdown paths, `limits_sha256`). Both are TEST ONLY.

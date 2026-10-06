@@ -147,7 +147,10 @@ def test_halt_latch_survives_a_verified_sell_and_a_sell_fill():
     # Even a full exit does not clear halt; only the admin reset does.
     risk.apply_trades(state, [Trade("s2", ISIN, "sell", 50, Decimal("460"), Decimal("0"))])
     assert state.halt
-    risk.reset_latch(state, "halt")
+    with pytest.raises(risk.ResetRefused):  # still at -8%: it would only latch again
+        risk.reset_latch(state, "halt", limits=LIMITS)
+    assert state.halt
+    risk.reset_latch(state, "halt", limits=LIMITS, rebase_halt_anchor=True)
     assert not state.halt
 
 
@@ -229,6 +232,105 @@ def test_reset_semantics():
     with pytest.raises(risk.ResetRefused):
         risk.reset_latch(state, "ended")
     assert state.ended
+
+
+# ------------------------------------------------ halt reset and the halt anchor
+
+
+def _halted_state() -> risk.OrderState:
+    """Peak 50000, 100 shares, close 460: equity 46000, exactly -8%, halt latched."""
+    state = risk.initial_state(LIMITS)
+    risk.apply_trades(state, [Trade("b1", ISIN, "buy", 100, Decimal("500"), Decimal("0"))])
+    risk.evaluate_session(state, LIMITS, date(2026, 10, 9), {ISIN: Decimal("460")})
+    assert state.halt and state.drawdown == Decimal("-0.08") and state.last_equity == Decimal("46000")
+    return state
+
+
+def _close(state: risk.OrderState, day: int, price: str) -> None:
+    risk.evaluate_session(state, LIMITS, date(2026, 10, day), {ISIN: Decimal(price)})
+
+
+def test_halt_reset_refuses_at_or_below_the_threshold_and_needs_limits():
+    state = _halted_state()
+    for kwargs in ({"limits": LIMITS}, {}):
+        with pytest.raises(risk.ResetRefused):
+            risk.reset_latch(state, "halt", **kwargs)
+    assert state.halt and state.halt_anchor is None
+    state.drawdown = Decimal("-0.080001")  # below the threshold too
+    with pytest.raises(risk.ResetRefused):
+        risk.reset_latch(state, "halt", limits=LIMITS)
+    state.drawdown = Decimal("-0.079999")  # just above: an ordinary reset
+    assert risk.reset_latch(state, "halt", limits=LIMITS) is False
+    assert not state.halt and state.halt_anchor is None
+
+
+def test_rebase_flag_is_for_the_halt_latch_only():
+    state = _halted_state()
+    state.mac_halt = True
+    with pytest.raises(risk.ResetRefused):
+        risk.reset_latch(state, "mac_halt", limits=LIMITS, rebase_halt_anchor=True)
+    assert state.mac_halt
+
+
+def test_rebase_sets_a_separate_anchor_and_leaves_the_true_peak_alone():
+    state = _halted_state()
+    assert risk.reset_latch(state, "halt", limits=LIMITS, rebase_halt_anchor=True) is True
+    assert (state.halt, state.halt_anchor) == (False, Decimal("46000"))
+    assert state.peak == Decimal("50000") and state.drawdown == Decimal("-0.08")
+
+
+def test_after_a_rebase_the_next_close_does_not_latch_halt_again():
+    state = _halted_state()
+    risk.reset_latch(state, "halt", limits=LIMITS, rebase_halt_anchor=True)
+    _close(state, 12, "460")  # same equity: still -8% from the true peak
+    assert not state.halt and not state.ended
+    _close(state, 13, "450")  # -10% from the peak, -2.2% from the anchor
+    assert not state.halt and not state.ended and state.halt_anchor == Decimal("46000")
+    # Contrast: the same unlatched state with no anchor re-latches at once.
+    plain = _halted_state()
+    plain.halt = False
+    _close(plain, 12, "460")
+    assert plain.halt
+
+
+def test_the_minus_15_end_is_still_measured_from_the_real_peak():
+    state = _halted_state()
+    risk.reset_latch(state, "halt", limits=LIMITS, rebase_halt_anchor=True)
+    _close(state, 12, "425.01")  # 42501: above 50000 x 0.85
+    assert not state.ended and not state.halt
+    _close(state, 13, "425")  # 42500 = exactly -15% from the peak, only -7.6% from the anchor
+    assert state.ended and state.halt  # a rebase did not rebase the end
+    assert state.peak == Decimal("50000")
+
+
+def test_the_halt_anchor_follows_equity_up_and_halts_8_pct_below_that_high():
+    state = _halted_state()
+    risk.reset_latch(state, "halt", limits=LIMITS, rebase_halt_anchor=True)
+    _close(state, 12, "480")  # 48000: anchor ratchets, still under the 50000 peak
+    assert state.halt_anchor == Decimal("48000") and not state.halt
+    _close(state, 13, "441.61")  # 44161: above 48000 x 0.92 = 44160
+    assert not state.halt
+    _close(state, 14, "441.60")  # 44160: exactly -8% from the anchor's high
+    assert state.halt and not state.ended
+
+
+def test_the_halt_anchor_is_dropped_once_equity_regains_the_true_peak():
+    state = _halted_state()
+    risk.reset_latch(state, "halt", limits=LIMITS, rebase_halt_anchor=True)
+    _close(state, 12, "505")  # 50500: new peak
+    assert state.halt_anchor is None and state.peak == Decimal("50500")
+    _close(state, 13, "464.6")  # 46460 = -8.0% from the real new peak
+    assert state.halt
+
+
+def test_halt_anchor_and_last_equity_survive_a_restart(tmp_path):
+    state = _halted_state()
+    risk.reset_latch(state, "halt", limits=LIMITS, rebase_halt_anchor=True)
+    store = _store(tmp_path)
+    store.save(state)
+    reloaded = StateStore(store.directory).load()
+    assert (reloaded.halt_anchor, reloaded.last_equity) == (Decimal("46000"), Decimal("46000"))
+    assert reloaded.to_json() == state.to_json()
 
 
 def test_flags_view_carries_latches_and_ledger_cost():
@@ -594,8 +696,8 @@ def test_state_json_shape_has_numbers_and_ids_only(tmp_path):
     body = json.loads(store.path.read_text())["state"]
     assert set(body) == {
         "schema_version", "workspace", "start_equity", "cash", "peak", "peak_date",
-        "last_evaluated_session", "drawdown", "halt", "ended", "mac_halt",
-        "account_mismatch", "stops", "fills", "consumed_intents", "alerts_sent",
+        "last_evaluated_session", "drawdown", "last_equity", "halt_anchor", "halt", "ended",
+        "mac_halt", "account_mismatch", "stops", "fills", "consumed_intents", "alerts_sent",
     }
 
 
@@ -889,9 +991,9 @@ def test_session_end_alert_goes_out_even_if_the_audit_is_broken(tmp_path):
 # --------------------------------------------------------------------- admin
 
 
-def _run(directory: Path, *argv: str, clock=None, port=None):
+def _run(directory: Path, *argv: str, clock=None, port=None, limits=LIMITS):
     out, err = io.StringIO(), io.StringIO()
-    kwargs = {}
+    kwargs = {"limits": limits}
     if clock is not None:
         kwargs["clock"] = clock
     if port is not None:
@@ -966,6 +1068,77 @@ def test_admin_reset_fails_closed_on_corrupt_state(tmp_path):
     store.path.write_text("{broken")
     assert _run(store.directory, "reset", "--latch", "halt")[0] == 1
     assert _run(store.directory, "status")[0] == 1
+
+
+def _halted_store(tmp_path: Path) -> StateStore:
+    store = _store(tmp_path)
+    store.save(_halted_state())
+    AuditLog(store.directory / "audit.jsonl", anchor=store).append(
+        {"decision": "EVALUATED", "route": "seed"}
+    )
+    return store
+
+
+def test_admin_halt_reset_refuses_while_drawdown_is_at_the_threshold(tmp_path):
+    store = _halted_store(tmp_path)
+    before_state, before_audit = store.path.read_bytes(), (store.directory / "audit.jsonl").read_bytes()
+    code, out, err = _run(store.directory, "reset", "--latch", "halt")
+    assert code == 1 and out == "" and "--rebase-halt-anchor" in err
+    assert store.path.read_bytes() == before_state  # nothing cleared, anchor not touched
+    assert (store.directory / "audit.jsonl").read_bytes() == before_audit  # and not audited as a reset
+    assert store.load().halt is True
+
+
+def test_admin_halt_reset_with_the_flag_sets_the_anchor_and_audits_it(tmp_path):
+    store = _halted_store(tmp_path)
+    code, out, _ = _run(store.directory, "reset", "--latch", "halt", "--rebase-halt-anchor")
+    assert code == 0 and json.loads(out)["halt_anchor_rebased"] is True
+    state = store.load()
+    assert state.halt is False and state.halt_anchor == Decimal("46000") and state.peak == Decimal("50000")
+    last = AuditLog(store.directory / "audit.jsonl").entries_after(0)[-1]
+    assert (last["decision"], last["route"], last["codes"]) == ("RESET", "admin", ["halt", "rebase_halt_anchor"])
+    assert last["limits_sha256"] == LIMITS.sha256
+    code, out, _ = _run(store.directory, "status")
+    assert json.loads(out)["halt_anchor"] == "46000" and json.loads(out)["latches"] == []
+    # The next evaluated close, from the persisted state, does not latch it again.
+    _close(state, 12, "455")
+    assert not state.halt
+    assert _run(store.directory, "verify-audit")[0] == 0
+
+
+def test_admin_plain_halt_reset_above_the_threshold_records_no_anchor(tmp_path):
+    store = _halted_store(tmp_path)
+    state = store.load()
+    state.drawdown = Decimal("-0.05")
+    store.save(state)
+    code, out, _ = _run(store.directory, "reset", "--latch", "halt")
+    assert code == 0 and json.loads(out)["halt_anchor_rebased"] is False
+    assert store.load().halt_anchor is None
+    last = AuditLog(store.directory / "audit.jsonl").entries_after(0)[-1]
+    assert last["codes"] == ["halt"]
+
+
+def test_admin_rebase_flag_on_another_latch_is_refused(tmp_path):
+    store = _seeded(tmp_path)
+    code, _, err = _run(store.directory, "reset", "--latch", "mac_halt", "--rebase-halt-anchor")
+    assert code == 1 and "halt only" in err and store.load().mac_halt is True
+
+
+def test_admin_reset_without_a_readable_limits_file_is_refused(tmp_path):
+    store = _seeded(tmp_path)
+    missing = tmp_path / "no-limits.json"
+    code, _, err = _run(store.directory, "reset", "--latch", "mac_halt", limits=None)
+    assert code == 1 and "limits" in err and store.load().mac_halt is True
+    out, errs = io.StringIO(), io.StringIO()
+    assert admin.main([str(store.directory), "reset", "--latch", "mac_halt", "--limits", str(missing)], out=out, err=errs) == 1
+    assert store.load().mac_halt is True
+
+
+def test_admin_reset_audit_entry_carries_the_real_limits_hash(tmp_path):
+    store = _seeded(tmp_path)
+    assert _run(store.directory, "reset", "--latch", "mac_halt")[0] == 0
+    last = AuditLog(store.directory / "audit.jsonl").entries_after(0)[-1]
+    assert last["limits_sha256"] == LIMITS.sha256
 
 
 def test_admin_verify_audit_ok(tmp_path):

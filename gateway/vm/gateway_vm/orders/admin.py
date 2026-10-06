@@ -3,11 +3,20 @@
     python -m gateway_vm.orders.admin STATE_DIR status
     python -m gateway_vm.orders.admin STATE_DIR verify-audit
     python -m gateway_vm.orders.admin STATE_DIR reset --latch halt|stop|mac_halt|account_mismatch [--isin ISIN]
+        [--rebase-halt-anchor] [--limits PATH]
     python -m gateway_vm.orders.admin STATE_DIR session-end-check
+
+`--limits` defaults to /etc/growin-gateway/limits.json (root-owned). `reset` reads it for
+the halt threshold and so its audit entry carries the real limits_sha256.
 
 There is no HTTP route that does any of this: no route clears a latch. The
 `ended` latch is terminal and `reset` refuses it. `reset` refuses while the
 audit chain is broken, because a reset that cannot be recorded must not happen.
+`reset --latch halt` also refuses while drawdown is at or below the halt threshold, since
+the halt would latch again at the next close. `--rebase-halt-anchor` overrides that: it
+sets a separate halt anchor (the equity at the last evaluated close) read only by the -8%
+test, records `rebase_halt_anchor` in the RESET audit entry, and leaves the true peak, and
+so the -15% end, alone.
 `session-end-check` reads persisted state only; it may over-alert on a stale
 ledger and never suppresses an alert. It exits non-zero if an alert or its
 audit entry failed. The alert port defaults to an unbound one that fails
@@ -28,6 +37,7 @@ from typing import Any, Callable, TextIO
 
 from . import OrderRefusal
 from .audit import AuditBroken, AuditLog
+from .limits import DEFAULT_LIMITS_PATH, Limits, LimitsError, load_limits
 from .risk import (
     AlertPort,
     ResetRefused,
@@ -44,6 +54,11 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _need_limits(given: Limits | None, path: str) -> Limits:
+    """The injected limits (tests), else the root-owned file. Raises LimitsError."""
+    return given if given is not None else load_limits(path)
+
+
 def _print(out: TextIO, payload: dict[str, Any]) -> None:
     out.write(json.dumps(payload, sort_keys=True) + "\n")
 
@@ -53,6 +68,7 @@ def main(
     *,
     clock: Callable[[], datetime] = _utc_now,
     alert_port: AlertPort | None = None,
+    limits: Limits | None = None,
     out: TextIO | None = None,
     err: TextIO | None = None,
 ) -> int:
@@ -69,6 +85,8 @@ def main(
         "--latch", required=True, choices=("halt", "stop", "mac_halt", "account_mismatch", "ended")
     )
     reset.add_argument("--isin")
+    reset.add_argument("--rebase-halt-anchor", action="store_true")
+    reset.add_argument("--limits", default=DEFAULT_LIMITS_PATH)
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
@@ -106,6 +124,7 @@ def main(
                     "stops": sorted(state.stops),
                     "drawdown": format(state.drawdown, "f"),
                     "peak": format(state.peak, "f"),
+                    "halt_anchor": None if state.halt_anchor is None else format(state.halt_anchor, "f"),
                     "peak_date": state.peak_date,
                     "last_evaluated_session": state.last_evaluated_session,
                     "consumed_intents": len(state.consumed_intents),
@@ -122,22 +141,40 @@ def main(
             if args.isin is not None and (args.latch != "stop" or _ISIN.fullmatch(args.isin) is None):
                 err.write("refused: --isin applies to --latch stop and must be a valid ISIN\n")
                 return 1
+            if args.rebase_halt_anchor and args.latch != "halt":
+                err.write("refused: --rebase-halt-anchor applies to --latch halt only\n")
+                return 1
+            needed = _need_limits(limits, args.limits)
             with store.lock():
                 audit.verify()  # raises AuditBroken: no reset on a broken chain
                 state = store.load()
-                reset_latch(state, args.latch, args.isin)
+                rebased = reset_latch(
+                    state,
+                    args.latch,
+                    args.isin,
+                    limits=needed,
+                    rebase_halt_anchor=args.rebase_halt_anchor,
+                )
                 # Record first: a reset that cannot be audited must not happen.
                 audit.append(
                     {
                         "route": "admin",
                         "decision": "RESET",
-                        "codes": [args.latch],
+                        "codes": [args.latch, *(["rebase_halt_anchor"] if rebased else [])],
                         "isin": args.isin,
+                        "limits_sha256": needed.sha256,
                         "latches": list(state.latch_names()),
                     }
                 )
                 store.save(state)
-            _print(out, {"reset": args.latch, "latches": list(state.latch_names())})
+            _print(
+                out,
+                {
+                    "reset": args.latch,
+                    "latches": list(state.latch_names()),
+                    "halt_anchor_rebased": rebased,
+                },
+            )
             return 0
 
         if args.command == "session-end-check":
@@ -157,6 +194,9 @@ def main(
                 },
             )
             return 0 if result.ok else 1
+    except LimitsError:
+        err.write("refused: the limits file is missing, unsafe or invalid\n")
+        return 1
     except AuditBroken:
         err.write("refused: the audit chain is broken or unwritable\n")
         return 1

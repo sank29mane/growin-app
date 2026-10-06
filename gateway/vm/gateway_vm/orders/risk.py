@@ -15,8 +15,13 @@ Latch rules (each pinned by a test):
   the exit filled. A verified sell does not clear it; the fill does.
 - mac_halt and account_mismatch: everything refused until the admin reset.
 
-Latches never clear on recovery. A reset of halt does not rebase the peak, so a
-reset while still at or below -8% re-latches at the next evaluated close.
+Latches never clear on recovery. The true drawdown peak is never rebased, so the
+-15% end is always measured from the real high-water mark. `reset halt` refuses
+while drawdown is at or below the halt threshold, because it would re-latch at
+the next evaluated close. With the explicit rebase flag the operator sets a
+separate halt anchor (the equity at the last evaluated close) that only the -8%
+test reads: the halt fires again at 8% below the anchor, or below the anchor's
+own running high, and the anchor drops away once equity regains the true peak.
 """
 
 from __future__ import annotations
@@ -121,6 +126,11 @@ class OrderState:
     peak_date: str | None = None
     last_evaluated_session: str | None = None
     drawdown: Decimal = ZERO
+    # Equity at the last evaluated close (exact, unlike the rounded drawdown).
+    last_equity: Decimal | None = None
+    # Operator-set reference for the -8% halt test only (see reset_latch). None
+    # means the halt test measures from the true peak. Never read by the -15% end.
+    halt_anchor: Decimal | None = None
     halt: bool = False
     ended: bool = False
     mac_halt: bool = False
@@ -163,6 +173,8 @@ class OrderState:
             "peak_date": self.peak_date,
             "last_evaluated_session": self.last_evaluated_session,
             "drawdown": _d(self.drawdown),
+            "last_equity": None if self.last_equity is None else _d(self.last_equity),
+            "halt_anchor": None if self.halt_anchor is None else _d(self.halt_anchor),
             "halt": self.halt,
             "ended": self.ended,
             "mac_halt": self.mac_halt,
@@ -188,8 +200,9 @@ class OrderState:
     def from_json(cls, raw: Any) -> "OrderState":
         keys = {
             "schema_version", "workspace", "start_equity", "cash", "peak", "peak_date",
-            "last_evaluated_session", "drawdown", "halt", "ended", "mac_halt",
-            "account_mismatch", "stops", "fills", "consumed_intents", "alerts_sent",
+            "last_evaluated_session", "drawdown", "last_equity", "halt_anchor", "halt",
+            "ended", "mac_halt", "account_mismatch", "stops", "fills", "consumed_intents",
+            "alerts_sent",
         }
         try:
             if not isinstance(raw, dict) or set(raw) != keys:
@@ -261,6 +274,8 @@ class OrderState:
                 peak_date=raw["peak_date"],
                 last_evaluated_session=raw["last_evaluated_session"],
                 drawdown=_parse_d(raw["drawdown"]),
+                last_equity=None if raw["last_equity"] is None else _parse_d(raw["last_equity"]),
+                halt_anchor=None if raw["halt_anchor"] is None else _parse_d(raw["halt_anchor"]),
                 halt=raw["halt"],
                 ended=raw["ended"],
                 mac_halt=raw["mac_halt"],
@@ -409,6 +424,11 @@ def evaluate_session(
     no-op. Equity = cash + net quantity x close. Peak starts at the capital cap
     and only rises. Triggers are inclusive: equity <= peak x (1 + threshold).
     A gap straight through -15% sets halt and ended together.
+
+    The -15% end is always measured from the true peak. The -8% halt is measured
+    from the true peak too, unless the operator rebased the halt anchor (see
+    reset_latch): then it is measured from the anchor, which follows equity up
+    and is dropped once it reaches the true peak.
     """
     iso = session.isoformat()
     if state.last_evaluated_session is not None and iso <= state.last_evaluated_session:
@@ -422,10 +442,16 @@ def evaluate_session(
         state.peak = equity
         state.peak_date = iso
     state.drawdown = (equity / state.peak - ONE).quantize(Decimal("0.000001"))
+    if state.halt_anchor is not None:
+        if equity > state.halt_anchor:
+            state.halt_anchor = equity
+        if state.halt_anchor >= state.peak:
+            state.halt_anchor = None  # back at the true high-water mark: ordinary rules
+    halt_reference = state.peak if state.halt_anchor is None else state.halt_anchor
     if equity <= state.peak * (ONE + limits.drawdown_flatten):
         state.halt = True
         state.ended = True
-    elif equity <= state.peak * (ONE + limits.drawdown_halt):
+    elif equity <= halt_reference * (ONE + limits.drawdown_halt):
         state.halt = True
     cost = ledger_cost(state)
     for isin, quantity in net.items():
@@ -434,6 +460,7 @@ def evaluate_session(
         if quantity * closes[isin] <= cost.get(isin, ZERO) * (ONE + limits.position_stop):
             state.stops[isin] = {"session": iso, "quantity": quantity}
     state.last_evaluated_session = iso
+    state.last_equity = equity
 
 
 def assert_marks_agree(
@@ -449,12 +476,44 @@ def assert_marks_agree(
             raise MarkMismatch(isin)
 
 
-def reset_latch(state: OrderState, latch: str, isin: str | None = None) -> None:
-    """Admin reset (VM shell, admin window). ended is terminal and refused."""
+def reset_latch(
+    state: OrderState,
+    latch: str,
+    isin: str | None = None,
+    *,
+    limits: Limits | None = None,
+    rebase_halt_anchor: bool = False,
+) -> bool:
+    """Admin reset (VM shell, admin window). ended is terminal and refused.
+
+    Resetting halt is refused while drawdown is at or below the halt threshold:
+    the next evaluated close would only latch it again. The operator may pass
+    ``rebase_halt_anchor`` to accept the loss and restart the -8% test from the
+    current equity. That sets ``state.halt_anchor``; it never touches the peak,
+    so the -15% end is still measured from the real high-water mark. Returns True
+    when the halt anchor was rebased (the admin CLI audits it).
+    """
     if latch == "ended":
         raise ResetRefused("the pilot-ended latch is terminal")
     if latch not in RESETTABLE:
         raise ResetRefused("unknown latch")
+    if rebase_halt_anchor and latch != "halt":
+        raise ResetRefused("the halt anchor applies to the halt latch only")
+    rebased = False
+    if latch == "halt":
+        if limits is None:
+            raise ResetRefused("the limits are required to reset the halt latch")
+        if state.drawdown <= limits.drawdown_halt:
+            if not rebase_halt_anchor:
+                raise ResetRefused(
+                    "drawdown is still at or below the halt threshold: the halt would latch "
+                    "again at the next close; pass --rebase-halt-anchor to restart the -8% "
+                    "test from the current equity"
+                )
+            if state.last_equity is None or not state.last_equity > ZERO:
+                raise ResetRefused("no evaluated close to anchor the halt test to")
+            state.halt_anchor = state.last_equity
+            rebased = True
     if latch == "stop":
         if isin is None:
             state.stops.clear()
@@ -464,6 +523,7 @@ def reset_latch(state: OrderState, latch: str, isin: str | None = None) -> None:
             raise ResetRefused("no stop latch for that ISIN")
     else:
         setattr(state, latch, False)
+    return rebased
 
 
 # ----------------------------------------------------------- session-end alert
