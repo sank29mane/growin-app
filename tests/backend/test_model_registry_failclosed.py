@@ -360,47 +360,149 @@ async def test_chat_route_is_503_when_risk_critic_is_missing(tmp_path, stub, key
     assert stub.count == 0
 
 
-async def test_risk_provider_failure_after_registration_voids_the_proposal(
+async def _run_orchestrator_with_real_decision(
+    orchestrator, stub, events, *, context_intent="analytical", authority_fields=True
+):
+    """Drive OrchestratorAgent.run with the real DecisionAgent against the stub.
+
+    Routing, data fabrication and price validation are replaced (they would need
+    the network); the decision and risk steps are real. ``events`` records, in
+    order, "register" (human-review registration) and "broadcast" (the
+    rebalance_proposal message), each with the models the stub had seen so far.
+    """
+    stub.reply_text = "BUY 1 share of AAPL."
+    context = _context(intent=context_intent)
+    orchestrator._classify_intent = AsyncMock(
+        return_value={"type": "price_check", "needs": [], "primary_ticker": "AAPL", "reason": "test"}
+    )
+    orchestrator.data_fabricator.fabricate_context = AsyncMock(return_value=context)
+
+    real_register = DecisionAgent._register_for_human_review
+    real_extract = DecisionAgent._extract_trade_proposal
+
+    def spy_register(self, proposal, ctx):
+        events.append(("register", [r.model for r in stub.snapshot()]))
+        return real_register(self, proposal, ctx)
+
+    def extract_with_identity(self, text, ctx):
+        proposal = real_extract(self, text, ctx)
+        if proposal is not None and authority_fields:
+            # Chat proposals carry no account or broker and are refused today; supply
+            # them so registration can really succeed.
+            proposal.update({"account": "invest", "broker": "paper", "mode": "PAPER"})
+        return proposal
+
+    real_send = orchestrator.messenger.send_message
+
+    async def spy_send(message):
+        if message.subject == "rebalance_proposal":
+            events.append(("broadcast", [r.model for r in stub.snapshot()]))
+        return await real_send(message)
+
+    orchestrator.messenger.send_message = spy_send
+    with patch.object(DecisionAgent, "_register_for_human_review", spy_register), patch.object(
+        DecisionAgent, "_extract_trade_proposal", extract_with_identity
+    ), patch.object(DecisionAgent, "_inject_context_layers", lambda self, p, q: p), patch(
+        "agents.decision_agent.PriceValidator.validate_trade_price",
+        new=AsyncMock(return_value={"action": "allow"}),
+    ):
+        return await orchestrator.run(query="Buy AAPL", ticker="AAPL"), context
+
+
+async def test_risk_provider_failure_registers_and_broadcasts_nothing(tmp_path, stub, key_env):
+    _activate(tmp_path, stub, role_provider={"risk_critic": "ollama"}, base_urls=DEAD_RISK)
+    orchestrator = OrchestratorAgent(mcp_client=MagicMock(), chat_manager=MagicMock())
+    events = []
+    before = dict(state.trade_proposals)
+
+    with pytest.raises(ProviderError) as caught:
+        await _run_orchestrator_with_real_decision(orchestrator, stub, events)
+
+    assert caught.value.role == "risk_critic"
+    # The decision ran (it produced a BUY) but nothing was registered or announced.
+    assert kit.model_id_for("decision") in [r.model for r in stub.snapshot()]
+    assert events == []
+    assert state.trade_proposals == before
+
+
+async def test_rebuttal_failure_registers_and_broadcasts_nothing(tmp_path, stub, key_env):
+    """A FLAGGED review triggers a rebuttal from the decision role. If that fails, nothing is registered."""
+    _activate(tmp_path, stub)
+    stub.tool_arguments["return_riskassessment"] = {
+        **kit.STUB_TOOL_ARGUMENTS["return_riskassessment"],
+        "status": "FLAGGED",
+    }
+    orchestrator = OrchestratorAgent(mcp_client=MagicMock(), chat_manager=MagicMock())
+    events = []
+    calls = {"n": 0}
+
+    async def failing_rebuttal(prompt):
+        calls["n"] += 1
+        raise ProviderError("PROVIDER_UNREACHABLE", "decision")
+
+    orchestrator.decision_engine.generate_response = failing_rebuttal
+    with pytest.raises(ProviderError):
+        await _run_orchestrator_with_real_decision(orchestrator, stub, events)
+    assert calls["n"] == 1
+    assert events == []
+
+
+async def test_after_a_successful_review_the_proposal_is_registered_then_broadcast(
     tmp_path, stub, key_env, private_config_dir
 ):
-    """make_decision registers the proposal before the risk review runs. If the
-    risk_critic provider then fails, the proposal is rejected and the error raised."""
-    _activate(tmp_path, stub, role_provider={"risk_critic": "ollama"}, base_urls=DEAD_RISK)
-    stub.reply_text = "INTENT: price_check\nTICKER: NONE\nREASON: stub"
+    _activate(tmp_path, stub)
     assert state.start_execution(
         tmp_path / "execution.sqlite3", workspace="uk", private_dir=private_config_dir
     )
     try:
         orchestrator = OrchestratorAgent(mcp_client=MagicMock(), chat_manager=MagicMock())
-        context = _context()
-        orchestrator.data_fabricator.fabricate_context = AsyncMock(return_value=context)
+        events = []
+        result, context = await _run_orchestrator_with_real_decision(orchestrator, stub, events)
 
-        registered = {}
-
-        async def decide_and_register(ctx, query, images=None):
-            agent = DecisionAgent(mcp_client=MagicMock())
-            proposal = agent._extract_trade_proposal("BUY 1 share of AAPL.", ctx)
-            assert proposal is not None
-            # Chat proposals carry no account or broker and are refused today; supply
-            # them so this test exercises a proposal that really is registered.
-            proposal.update({"account": "invest", "broker": "paper", "mode": "PAPER"})
-            assert agent._register_for_human_review(proposal, ctx)
-            ctx.user_context["pending_proposal"] = proposal
-            registered["id"] = proposal["proposal_id"]
-            return {"content": "BUY 1 share of AAPL.", "response_id": None, "quick_actions": []}
-
-        orchestrator.decision_engine.make_decision = AsyncMock(side_effect=decide_and_register)
-
-        with pytest.raises(ProviderError) as caught:
-            await orchestrator.run(query="Buy AAPL", ticker="AAPL")
-
-        assert caught.value.role == "risk_critic"
-        assert "id" in registered, "the decision step must have run and registered a proposal"
-        stored = state.get_trade_proposal(registered["id"])
-        assert str(stored["status"]).upper() == "REJECTED"
-        assert "pending_proposal" not in context.user_context
+        assert [name for name, _ in events] == ["register", "broadcast"]
+        risk_model = kit.model_id_for("risk_critic")
+        # The critic had already answered when the proposal was registered and announced.
+        assert all(risk_model in models for _name, models in events)
+        proposal = context.user_context["pending_proposal"]
+        assert f"[ACTION_REQUIRED:APPROVE_TRADE({proposal['proposal_id']})]" in result["content"]
+        assert str(state.get_trade_proposal(proposal["proposal_id"])["status"]).upper() == "PENDING"
     finally:
         state.close_execution()
+
+
+async def test_a_refused_registration_is_reported_in_the_reply_and_not_broadcast(tmp_path, stub, key_env):
+    _activate(tmp_path, stub)
+    orchestrator = OrchestratorAgent(mcp_client=MagicMock(), chat_manager=MagicMock())
+    events = []
+    result, context = await _run_orchestrator_with_real_decision(
+        orchestrator, stub, events, authority_fields=False
+    )
+    assert [name for name, _ in events] == ["register"]  # attempted once, refused (no ledger)
+    assert "TRADE_PROPOSAL_NOT_REGISTERED" in result["content"]
+    assert "pending_proposal" not in context.user_context
+
+
+async def test_conversational_replies_release_the_proposal_without_a_risk_review(tmp_path, stub, key_env):
+    _activate(tmp_path, stub)
+    orchestrator = OrchestratorAgent(mcp_client=MagicMock(), chat_manager=MagicMock())
+    events = []
+    result, _context_after = await _run_orchestrator_with_real_decision(
+        orchestrator, stub, events, context_intent="conversational", authority_fields=False
+    )
+    assert [name for name, _ in events] == ["register"]
+    assert kit.model_id_for("risk_critic") not in [r.model for r in stub.snapshot()]
+    assert result["content"]
+
+
+async def test_no_reject_path_remains_to_swallow_a_failure():
+    """With the critic first, a failed review leaves nothing registered, so nothing to reject."""
+    import inspect
+
+    import agents.orchestrator_agent as orchestrator_module
+
+    source = inspect.getsource(orchestrator_module)
+    assert "_void_pending_proposal" not in source
+    assert "execution_service.reject" not in source
 
 
 # --- 4: research provider failures are not a basic query ----------------------------------------
@@ -414,6 +516,46 @@ async def test_research_provider_failure_is_not_a_basic_query(tmp_path, stub, ke
         await ResearchAgent()._generate_smart_query("AAPL")
     assert caught.value.role == "research"
     assert stub.count == 0
+
+
+async def test_newsdata_fetch_does_not_turn_a_provider_failure_into_an_empty_list(tmp_path, stub, key_env, monkeypatch):
+    from agents.research_agent import ResearchAgent
+
+    monkeypatch.setenv("NEWSDATA_API_KEY", "valid_key_length_greater_than_10")
+    _activate(tmp_path, stub, base_urls=kit.dead_provider_urls("ollama"))
+    agent = ResearchAgent()
+    with pytest.raises(ProviderError) as caught:
+        await agent._fetch_newsdata("AAPL", "Apple")
+    assert caught.value.role == "research"
+    assert stub.count == 0
+
+
+async def test_research_analysis_fails_instead_of_reporting_neutral_news(tmp_path, stub, key_env, monkeypatch):
+    from agents.research_agent import ResearchAgent
+
+    monkeypatch.setenv("NEWSDATA_API_KEY", "valid_key_length_greater_than_10")
+    monkeypatch.delenv("NEWSAPI_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    _activate(tmp_path, stub, base_urls=kit.dead_provider_urls("ollama"))
+    agent = ResearchAgent()
+    agent._fetch_regulatory_news = AsyncMock(return_value=[])
+    response = await agent.execute({"ticker": "AAPL"})
+    assert response.success is False
+    assert "PROVIDER_UNREACHABLE" in (response.error or "")
+
+
+async def test_newsdata_still_returns_an_empty_list_for_a_plain_http_failure(tmp_path, stub, key_env, monkeypatch):
+    """The external news API is not a model: its failures stay soft."""
+    from agents.research_agent import ResearchAgent
+
+    monkeypatch.setenv("NEWSDATA_API_KEY", "valid_key_length_greater_than_10")
+    _activate(tmp_path, stub)
+    agent = ResearchAgent()
+    with patch(
+        "agents.research_agent.agent_http_client.execute_with_breaker",
+        new=AsyncMock(side_effect=RuntimeError("news api down")),
+    ):
+        assert await agent._fetch_newsdata("AAPL", "Apple") == []
 
 
 async def test_research_still_degrades_on_a_non_model_error(tmp_path, stub, key_env):

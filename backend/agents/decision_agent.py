@@ -152,6 +152,11 @@ class DecisionAgent:
     # separately authorized execution path outside the reasoning loop.
     INTERCEPTED_TOOLS = frozenset(SENSITIVE_TOOLS)
 
+    PROPOSAL_NOT_REGISTERED_NOTE = (
+        "\n\nTrade proposal not registered for review "
+        "(TRADE_PROPOSAL_NOT_REGISTERED)."
+    )
+
     def __init__(self, mcp_client=None):
         from app_context import state
         self.mcp_client = mcp_client or state.mcp_client
@@ -195,10 +200,15 @@ class DecisionAgent:
             handle_error(e, "DecisionAgent initialization failed", logger, raise_error=False)
             raise
 
-    async def make_decision(self, context: MarketContext, query: str, previous_response_id: Optional[str] = None, images: Optional[List[str]] = None) -> Dict[str, Any]:
+    async def make_decision(self, context: MarketContext, query: str, previous_response_id: Optional[str] = None, images: Optional[List[str]] = None, defer_proposal: bool = False) -> Dict[str, Any]:
         """
         Make a trading decision based on aggregated market context.
         Returns a dict with 'content' and 'response_id'.
+
+        With ``defer_proposal`` the trade proposal is extracted but neither
+        registered nor exposed: the caller registers it with
+        ``register_deferred_proposal`` once the risk review has finished, so a
+        failed review leaves nothing registered.
         """
         if not self._initialized:
             await self._initialize_llm()
@@ -323,16 +333,15 @@ class DecisionAgent:
 
             # SOTA 2026 Phase 30: Detect and extract Trade Proposals for HITL
             trade_proposal = self._extract_trade_proposal(recommendation, context)
-            if trade_proposal:
+            if trade_proposal and defer_proposal:
+                context.user_context["deferred_proposal"] = trade_proposal
+            elif trade_proposal:
                 proposal_id = trade_proposal.get("proposal_id")
                 if self._register_for_human_review(trade_proposal, context):
                     context.user_context["pending_proposal"] = trade_proposal
                     logger.info(f"DecisionAgent: Detected trade proposal for {trade_proposal.get('ticker')} ({proposal_id}). Routing to HITL gate.")
                 else:
-                    recommendation += (
-                        "\n\nTrade proposal not registered for review "
-                        "(TRADE_PROPOSAL_NOT_REGISTERED)."
-                    )
+                    recommendation += self.PROPOSAL_NOT_REGISTERED_NOTE
 
             status_manager.set_status("decision_agent", "ready", "Decision delivered", model=self.model_name)
 
@@ -1147,6 +1156,26 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
         sections.append(structured_template.format(**tmpl_vars))
 
         return "\n".join(sections)
+
+    def register_deferred_proposal(self, context: MarketContext) -> Optional[str]:
+        """Register the proposal ``make_decision(defer_proposal=True)`` held back.
+
+        Returns None when there was nothing to register or registration worked
+        (the proposal is then in ``context.user_context["pending_proposal"]``),
+        and the "not registered" note to append to the reply when the human
+        review gate refused it.
+        """
+        proposal = context.user_context.pop("deferred_proposal", None)
+        if proposal is None:
+            return None
+        if self._register_for_human_review(proposal, context):
+            context.user_context["pending_proposal"] = proposal
+            logger.info(
+                f"DecisionAgent: Registered trade proposal for {proposal.get('ticker')} "
+                f"({proposal.get('proposal_id')}) after risk review. Routing to HITL gate."
+            )
+            return None
+        return self.PROPOSAL_NOT_REGISTERED_NOTE
 
     async def generate_response(self, prompt: str) -> str:
         """Utility generation"""

@@ -4,14 +4,18 @@
 and a model or provider expression. These rules close the gaps found in review:
 
 * R1  a string literal passed as ``model=``, ``model_name=``, ``model_id=`` or
-      ``llm_id=``, a literal first argument to a model client constructor, or a
-      literal assigned to a model variable or attribute;
+      ``llm_id=``, a literal first argument to a model client constructor, a
+      literal assigned to a model variable or attribute, a dict with a literal
+      ``"model"``/``"model_name"`` value, ``**{"model": ...}`` into a client
+      constructor, a literal parameter default on a model-named parameter, and a
+      ``getenv``/``dict.get``/``getattr`` fallback literal for a model-named key;
 * R2  a module-level string constant named like a model, or whose value looks
       like a model id;
-* R3  any comparison, ``startswith``/``endswith``/``find``, ``or "literal"``
-      default, dict lookup (``X[model]``, ``X.get(model)``) on a variable named
-      ``model``, ``model_name``, ``model_id`` or ``llm_id``, including local
-      aliases of one;
+* R3  any comparison, ``match`` statement, ``startswith``/``endswith``/``find``,
+      ``or "literal"`` default, dict lookup (``X[model]``, ``X.get(model)``) on a
+      variable named ``model``, ``model_name``, ``model_id``, ``model_path`` or
+      ``llm_id``, including local aliases of one. ``len(model) > LIMIT`` against
+      a numeric constant is not a name comparison and is ignored;
 * R4  a magentic prompt function (``@prompt``, ``@mag_prompt``, ``@chatprompt``)
       used anywhere except as the function argument of ``run_magentic``.
 
@@ -76,20 +80,35 @@ SURFACE_GLOBS = (
     "backend/utils/rstitch_engine.py",
 )
 
-# Explicit allow-list: (repo-relative path, rule, text that must appear in the
-# flagged source segment) -> reason. Nothing else is exempt.
+# Explicit allow-list: (repo-relative path, rule, EXACT flagged source text) ->
+# reason. An entry exempts only that comparison in that file; a new hit with
+# different text, or in another file, is reported.
 ALLOWLIST: Dict[Tuple[str, str, str], str] = {
-    ("backend/mlx_engine.py", "R3", "model_path"): (
+    ("backend/mlx_engine.py", "R3", '"gemma-4" in model_path.lower()'): (
         "deferred by the phase brief (mlx_engine.py:142): in-process MLX checkpoint "
         "path handling is not a registry role"
     ),
-    ("backend/mlx_vlm_engine.py", "R3", "model_path"): (
+    ("backend/mlx_engine.py", "R3", '"vlm" in model_path.lower()'): (
+        "deferred by the phase brief (mlx_engine.py:142): same line, second operand"
+    ),
+    ("backend/mlx_vlm_engine.py", "R3", '"/" in model_path'): (
         "deferred by the phase brief (mlx_vlm_engine.py:44): VLM checkpoint path "
         "handling is not a registry role"
     ),
-    ("backend/routes/market_routes.py", "R3", "model_name.split"): (
+    ("backend/routes/market_routes.py", "R3", 'model_name.split(" ")[0].lower() in (algorithm or "").lower()'): (
         "display label (market_routes.py:625): matches a printed algorithm name in a "
         "forecast response; it selects no model"
+    ),
+    ("backend/forecaster.py", "R1", '"XGBoost (ML)"'): (
+        "display label of the built-in XGBoost baseline in auxiliary_forecasts; "
+        "not a registry model and not a model selection"
+    ),
+    ("backend/forecaster.py", "R1", '"Holt-Winters (Statistical)"'): (
+        "display label of the built-in Holt-Winters baseline in auxiliary_forecasts; "
+        "not a registry model and not a model selection"
+    ),
+    ("backend/routes/market_routes.py", "R1", 'a.get("model", "Unknown")'): (
+        "display fallback next to market_routes.py:625 when an auxiliary forecast has no label"
     ),
     ("backend/lm_studio_client.py", "R3", "model_id in loaded"): (
         "operator LM Studio management tool (load/unload): membership check of the "
@@ -167,6 +186,34 @@ def _collect_aliases(tree: ast.AST) -> Set[str]:
     return aliases
 
 
+_CONSTANT_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+
+def _is_numeric_limit(node: ast.AST) -> bool:
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+        return True
+    return isinstance(node, ast.Name) and bool(_CONSTANT_NAME.match(node.id))
+
+
+def _is_length_limit_check(node: ast.Compare, aliases: Set[str]) -> bool:
+    """``len(<model var>) <op> LIMIT``: a size check, not a comparison of names."""
+
+    if len(node.comparators) != 1:
+        return False
+    left, right = node.left, node.comparators[0]
+    for measured, limit in ((left, right), (right, left)):
+        if (
+            isinstance(measured, ast.Call)
+            and isinstance(measured.func, ast.Name)
+            and measured.func.id == "len"
+            and len(measured.args) == 1
+            and _involves_model_var(measured.args[0], aliases)
+            and _is_numeric_limit(limit)
+        ):
+            return True
+    return False
+
+
 def _call_name(func: ast.AST) -> str:
     if isinstance(func, ast.Name):
         return func.id
@@ -217,6 +264,32 @@ def scan_literals_and_comparisons(source: str, relpath: str = "<planted>") -> Li
                     add("R1", node)
             if _call_name(node.func) in MODEL_CONSTRUCTORS and node.args and _is_str_const(node.args[0]):
                 add("R1", node)
+        if isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values):
+                if key is not None and _is_str_const(key) and key.value in MODEL_KWARGS and _is_str_const(value) and value.value:
+                    add("R1", value)
+        if isinstance(node, ast.Call):
+            for kw in node.keywords:
+                if kw.arg is None and isinstance(kw.value, ast.Dict) and _call_name(node.func) in MODEL_CONSTRUCTORS:
+                    if any(k is not None and _is_str_const(k) and k.value in MODEL_KWARGS for k in kw.value.keys):
+                        add("R1", node)
+            name = _call_name(node.func)
+            args = node.args
+            if name in {"getenv", "get"} and len(args) >= 2:
+                if _is_str_const(args[0]) and "model" in args[0].value.lower() and _is_str_const(args[1]) and args[1].value:
+                    add("R1", node)
+            if name == "getattr" and len(args) >= 3:
+                if _is_str_const(args[1]) and "model" in args[1].value.lower() and _is_str_const(args[2]) and args[2].value:
+                    add("R1", node)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            spec = node.args
+            positional = list(spec.posonlyargs) + list(spec.args)
+            for arg, default in zip(positional[len(positional) - len(spec.defaults):], spec.defaults):
+                if arg.arg in MODEL_VARS and _is_str_const(default) and default.value:
+                    add("R1", default)
+            for arg, default in zip(spec.kwonlyargs, spec.kw_defaults):
+                if default is not None and arg.arg in MODEL_VARS and _is_str_const(default) and default.value:
+                    add("R1", default)
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
             value = node.value
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
@@ -230,8 +303,10 @@ def scan_literals_and_comparisons(source: str, relpath: str = "<planted>") -> Li
             if any(_involves_model_var(op, aliases) for op in operands):
                 identity_only = all(isinstance(op, (ast.Is, ast.IsNot)) for op in node.ops)
                 none_check = any(_is_none_const(op) for op in operands)
-                if not identity_only and not none_check:
+                if not identity_only and not none_check and not _is_length_limit_check(node, aliases):
                     add("R3", node)
+        if isinstance(node, ast.Match) and _involves_model_var(node.subject, aliases):
+            add("R3", node.subject)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
             if node.func.attr in STRING_PREDICATES and _involves_model_var(node.func.value, aliases):
                 add("R3", node)
@@ -313,10 +388,17 @@ def surface_files() -> List[Path]:
 
 
 def _allowed(relpath: str, rule: str, segment: str) -> bool:
-    return any(
-        relpath == path and rule == allowed_rule and needle in segment
-        for (path, allowed_rule, needle) in ALLOWLIST
-    )
+    """Exact match on file, rule and flagged text."""
+    return (relpath, rule, segment.strip()) in ALLOWLIST
+
+
+def surface_findings(relpath: str, source: str) -> List[str]:
+    """R1 to R3 findings for one surface file, allow-list applied."""
+    return [
+        f"{relpath}:{line}: {rule}: {segment[:100]!r}"
+        for rule, line, segment in scan_literals_and_comparisons(source, relpath)
+        if not _allowed(relpath, rule, segment)
+    ]
 
 
 def scan_tree() -> List[str]:
@@ -363,7 +445,7 @@ def test_every_allowlist_entry_has_a_reason_and_still_matches_something():
         hits = [
             segment
             for r, _line, segment in scan_literals_and_comparisons(sources[path], path)
-            if r == rule and needle in segment
+            if r == rule and segment.strip() == needle
         ]
         assert hits, f"stale allow-list entry: {(path, rule, needle)}"
 
@@ -392,6 +474,20 @@ PLANTED_R3 = [
     ('x = request.model_name or "fallback-model"', "R3"),
     ('ok = model.endswith("-mini")', "R3"),
     ('ok = model_name != other', "R3"),
+    ('ok = len(model) > limit', "R3"),
+    ('ok = len(model) == len(other_model_name)', "R3"),
+    ('ok = len(model) > 4 and model == "x"', "R3"),
+]
+PLANTED_GAP_B = [
+    ('m = os.getenv("X_MODEL", "grok-4")', "R1"),
+    ('cfg = {"model": "gpt-4o"}', "R1"),
+    ('cfg = {"model_name": "mistral"}', "R1"),
+    ('match model_name:\n    case "gpt-4o":\n        pass', "R3"),
+    ('def build(prompt, model="llama-3.1-8b"): ...', "R1"),
+    ('async def build(prompt, *, model_name="mistral"): ...', "R1"),
+    ('m = getattr(s, "model_name", "mistral")', "R1"),
+    ('llm = ChatOpenAI(**{"model": resolved_name})', "R1"),
+    ('m = settings.get("model", "gemma")', "R1"),
 ]
 PLANTED_R4 = [
     ('@mag_prompt("hi")\ndef ask(x: str) -> str: ...\nresult = ask("a")', "R4"),
@@ -404,7 +500,7 @@ def _scan_all(source: str):
     return scan_literals_and_comparisons(source) + scan_prompt_usage(source, prompt_function_names(source))
 
 
-@pytest.mark.parametrize("planted,rule", PLANTED_R1 + PLANTED_R2 + PLANTED_R3 + PLANTED_R4)
+@pytest.mark.parametrize("planted,rule", PLANTED_R1 + PLANTED_R2 + PLANTED_R3 + PLANTED_GAP_B + PLANTED_R4)
 def test_planted_case_is_caught_by_its_rule(planted, rule):
     assert rule in {r for r, _line, _seg in _scan_all(planted)}, planted
 
@@ -426,6 +522,13 @@ def test_planted_case_is_caught_by_its_rule(planted, rule):
         "ok = provider is KIND",
         '@mag_prompt("hi")\ndef ask(x: str) -> str: ...\nvalue = await run_magentic("decision", ask, "a")',
         "client = ChatOpenAI(model=resolved.model)",
+        "bad = len(model) > MAX_MODEL_ID_CHARS",
+        "bad = len(self.model_name) > 256",
+        'v = os.getenv("LOG_LEVEL", "info")',
+        'x = getattr(obj, "name", "plain")',
+        'cfg = {"role": "decision"}',
+        "def build(prompt, model=None): ...",
+        "match role:\n    case 'decision':\n        pass",
     ],
 )
 def test_ordinary_code_is_not_flagged_by_the_new_rules(clean):
@@ -433,7 +536,25 @@ def test_ordinary_code_is_not_flagged_by_the_new_rules(clean):
 
 
 def test_allowlist_matches_only_its_own_file_rule_and_text():
-    assert _allowed("backend/mlx_engine.py", "R3", "x == model_path")
-    assert not _allowed("backend/other.py", "R3", "x == model_path")
-    assert not _allowed("backend/mlx_engine.py", "R1", "x == model_path")
-    assert not _allowed("backend/mlx_engine.py", "R3", "x == something_else")
+    text = '"vlm" in model_path.lower()'
+    assert _allowed("backend/mlx_engine.py", "R3", text)
+    assert not _allowed("backend/other.py", "R3", text)
+    assert not _allowed("backend/mlx_engine.py", "R1", text)
+    assert not _allowed("backend/mlx_engine.py", "R3", '"qwen" in model_path.lower()')
+    # Exact text, not a substring: a longer or different expression is not exempt.
+    assert not _allowed("backend/mlx_engine.py", "R3", text + " or True")
+
+
+def test_a_new_hit_in_an_allow_listed_file_is_not_exempted():
+    path = BACKEND / "mlx_engine.py"
+    source = path.read_text(encoding="utf-8")
+    assert surface_findings("backend/mlx_engine.py", source) == []
+    for added in (
+        'if "qwen" in model_path.lower():\n    pass\n',
+        'if model_path == other:\n    pass\n',
+        'DEFAULT_MODEL = "llama-3.1-8b"\n',
+    ):
+        findings = surface_findings("backend/mlx_engine.py", source + "\n" + added)
+        assert findings, added
+    source = (BACKEND / "mlx_vlm_engine.py").read_text(encoding="utf-8")
+    assert surface_findings("backend/mlx_vlm_engine.py", source + '\nx = "abc" in model_path\n')

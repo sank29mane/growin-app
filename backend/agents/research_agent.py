@@ -248,6 +248,10 @@ class ResearchAgent(BaseAgent):
             
         except ImportError:
             return self._neutral_response(ticker, error="Missing dependencies")
+        except (ModelRegistryError, ProviderError):
+            # Surface to BaseAgent.execute: the specialist fails instead of
+            # reporting neutral sentiment as if it had run.
+            raise
         except Exception as e:
 
             handle_error(e, "Research analysis failed", logger, raise_error=False)
@@ -473,6 +477,10 @@ class ResearchAgent(BaseAgent):
             logger.info(f"NewsData.io returned {len(articles)} articles")
             return articles
             
+        except (ModelRegistryError, ProviderError):
+            # The smart query uses the research role. A missing role or failing
+            # provider is a failed research step, not an empty article list.
+            raise
         except Exception as e:
 
 

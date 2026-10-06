@@ -456,6 +456,24 @@ async def test_bridge_validator_rejects_missing_or_bad_models():
     assert validate_forecast_request({"model": "m"}) == {"model": "m", "revision": None}
 
 
+async def test_bridge_validator_caps_the_model_id_at_256_characters():
+    sys.path.insert(0, str(BACKEND))
+    from forecast_bridge import MAX_MODEL_ID_CHARS, validate_forecast_request
+
+    assert MAX_MODEL_ID_CHARS == 256
+    assert validate_forecast_request({"model": "m" * 256})["model"] == "m" * 256
+    with pytest.raises(ValueError, match="MODEL_REQUIRED"):
+        validate_forecast_request({"model": "m" * 257})
+
+
+async def test_worker_rejects_an_oversize_model_id():
+    sys.path.insert(0, str(BACKEND))
+    from utils.worker_service import ModelWorker
+
+    result = ModelWorker().handle_request({"action": "load_ttm", "model": "m" * 257})
+    assert result["status"] == "error"
+
+
 async def test_bridge_validator_imports_no_model_library():
     code = (
         "import sys; sys.path.insert(0, 'backend'); import forecast_bridge\n"

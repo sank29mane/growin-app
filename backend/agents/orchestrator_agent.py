@@ -107,21 +107,29 @@ class OrchestratorAgent:
         
         self._initialized = True
 
-    async def _void_pending_proposal(self, context: MarketContext, reason: str) -> None:
-        """Reject the proposal make_decision registered when the risk step cannot finish.
+    async def _release_proposal(self, context: MarketContext, recommendation: str, c_id: Optional[str]) -> str:
+        """Register and announce the held-back proposal. Runs after the risk review.
 
-        Uses the execution service's existing reject path. A reply that skipped
-        its risk review must not leave an approvable proposal behind.
+        make_decision(defer_proposal=True) only extracts the proposal. It is
+        registered with the human review gate, broadcast and tagged here, so a
+        risk_critic or rebuttal failure earlier in ``run`` means nothing was
+        ever registered or announced.
         """
-        from app_context import state
-
-        proposal = context.user_context.pop("pending_proposal", None)
-        if not proposal:
-            return
-        try:
-            await state.execution_service.reject(proposal, reason)
-        except Exception as exc:
-            logger.error("Could not void proposal %s: %s", proposal.get("proposal_id"), type(exc).__name__)
+        note = self.decision_engine.register_deferred_proposal(context)
+        if note:
+            recommendation += note
+        proposal = context.user_context.get("pending_proposal")
+        if proposal:
+            await self.messenger.send_message(AgentMessage(
+                sender="OrchestratorAgent",
+                recipient="broadcast",
+                subject="rebalance_proposal",
+                payload=proposal,
+                correlation_id=c_id
+            ))
+            # Manual approval tag for the reply text
+            recommendation += f"\n\n[ACTION_REQUIRED:APPROVE_TRADE({proposal.get('proposal_id')})]"
+        return recommendation
 
     async def _classify_intent(self, query: str) -> Dict[str, Any]:
         """Classify user intent using routing LLM (reused from Coordinator)"""
@@ -425,25 +433,15 @@ Query: "{clean_query}"
         tlh_prompt = f"\n[TAX-LOSS HARVESTING OPPORTUNITIES]\n{json.dumps(tlh_candidates)}\n"
         full_query = query + alpha_prompt + tlh_prompt + f"\n[STITCHED NARRATIVE]\n{stitched_narrative}\n"
         
-        decision_result = await self.decision_engine.make_decision(context, full_query, images=images)
+        # The trade proposal is held back (defer_proposal) until the risk review is done.
+        decision_result = await self.decision_engine.make_decision(context, full_query, images=images, defer_proposal=True)
         recommendation = decision_result.get("content", "")
         quick_actions = decision_result.get("quick_actions", [])
-        
-        # SOTA 2026 Phase 30: Emit Rebalance Proposal for HITL UI
-        if "pending_proposal" in context.user_context:
-            proposal = context.user_context["pending_proposal"]
-            await self.messenger.send_message(AgentMessage(
-                sender="OrchestratorAgent",
-                recipient="broadcast",
-                subject="rebalance_proposal",
-                payload=proposal,
-                correlation_id=c_id
-            ))
-            # Also append manual approval tag to text
-            recommendation += f"\n\n[ACTION_REQUIRED:APPROVE_TRADE({proposal.get('proposal_id')})]"
 
         # --- SOTA 2026: ADVERSARIAL DEBATE LOOP ---
         if context.intent in ["conversational", "educational"]:
+            # No risk review on this path: release the proposal as before.
+            recommendation = await self._release_proposal(context, recommendation, c_id)
             return {
                 "content": recommendation, 
                 "response_id": decision_result.get("response_id"), 
@@ -470,11 +468,7 @@ Query: "{clean_query}"
                 correlation_id=c_id
             ))
             
-            try:
-                risk_review = await self.risk_agent.review(context, recommendation)
-            except (ModelRegistryError, ProviderError):
-                await self._void_pending_proposal(context, "RISK_CRITIC_UNAVAILABLE")
-                raise
+            risk_review = await self.risk_agent.review(context, recommendation)
             debate_trace.append({"turn": turn, "status": risk_review.get("status"), "refutation": risk_review.get("debate_refutation")})
 
             if risk_review.get("status") == "APPROVED" or turn >= max_debate_turns:
@@ -490,12 +484,12 @@ Query: "{clean_query}"
             Stitched Context: {stitched_narrative}
             """
             # Use decision engine to generate rebuttal
-            try:
-                rebuttal_result = await self.decision_engine.generate_response(rebuttal_prompt)
-            except (ModelRegistryError, ProviderError):
-                await self._void_pending_proposal(context, "DECISION_REBUTTAL_UNAVAILABLE")
-                raise
+            rebuttal_result = await self.decision_engine.generate_response(rebuttal_prompt)
             recommendation = rebuttal_result
+
+        # The risk review finished: only now register and announce the proposal.
+        recommendation = await self._release_proposal(context, recommendation, c_id)
+        quick_actions = self.decision_engine._get_quick_actions(context)
 
         # Calculate final ACE Score using dedicated component
         ace_score = ace_evaluator.calculate_score(debate_trace, risk_review.get("status"))

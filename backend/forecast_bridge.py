@@ -103,6 +103,9 @@ def _calculate_ttm_residuals(pipeline, df_scaled, channels) -> np.ndarray:
         logger.warning(f"Failed to calculate residuals: {e}")
         return np.zeros((96, len(channels)))
 
+MAX_MODEL_ID_CHARS = 256
+
+
 def validate_forecast_request(request: Dict[str, Any]) -> Dict[str, Any]:
     """Return ``{"model": str, "revision": str | None}`` from a bridge request.
 
@@ -112,7 +115,7 @@ def validate_forecast_request(request: Dict[str, Any]) -> Dict[str, Any]:
     a bad revision. Imports no model library, so it is cheap to test.
     """
     model = request.get("model") if isinstance(request, dict) else None
-    if not isinstance(model, str) or not model.strip():
+    if not isinstance(model, str) or not model.strip() or len(model) > MAX_MODEL_ID_CHARS:
         raise ValueError("MODEL_REQUIRED")
     revision = request.get("revision")
     if revision is not None and (not isinstance(revision, str) or not revision.strip()):
