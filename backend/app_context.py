@@ -29,6 +29,8 @@ from execution import (
     coerce_workspace,
 )
 from execution.venue import (
+    ADMISSIBLE_PRICE_SOURCES,
+    PRICE_SOURCE_OPERATOR_RECORDED,
     PracticeCaps,
     VenueBinding,
     VenueContext,
@@ -55,8 +57,18 @@ from market_data import (
     MarketDataSessionState,
     RegimeClassifier,
     ReplayMarketDataProvider,
+    TopOfBook,
+    UkInstrument,
     build_market_preflight_context,
 )
+from market_data.admission import (
+    RecordedQuoteReading,
+    parse_max_slippage_bps,
+    practice_notional,
+    slippage_denial,
+)
+import re
+from typing import Sequence
 
 import time
 
@@ -410,6 +422,250 @@ class AppState:
             risk_db_connection=self._preflight_policy_connection,
             **context.execution_kwargs(),
         )
+
+    # --- UK practice admission (Phase 66-04, D-02, D-03, D-18, D-19, D-20, D-26) -----
+
+    # The recorded-quote freshness window. It is the same 30 s the execution service
+    # applies to any admission evidence: there is no wider window for operator quotes.
+    UK_PRACTICE_MAX_AGE_SECONDS = 30
+    UK_PRACTICE_MAX_READINGS = 20
+    _UK_TICKER = re.compile(r"^[A-Za-z0-9._-]{1,32}$")
+
+    async def admit_uk_practice_proposal(
+        self,
+        *,
+        ticker: str,
+        side: str,
+        quantity: int,
+        limit_price: Decimal,
+        readings: Sequence[RecordedQuoteReading],
+        price_source: str = PRICE_SOURCE_OPERATOR_RECORDED,
+        now: Optional[datetime] = None,
+    ):
+        """Admit one UK practice order from a recorded-quote replay, or record a denial.
+
+        Server-owned: workspace, account, broker and mode are stamped from the open
+        ledger's binding and never come from the caller. The price evidence is a
+        replay of the operator's recorded readings (D-02); the order passes the same
+        PreFlightSimulator, RiskSwarmGate and RegimeClassifier India uses. Every
+        refusal is recorded as a DENIED admission with a stable reason code and
+        creates no reservation. Returns ``(proposal, admission)``.
+        """
+
+        ledger = self._execution_ledger
+        binding = self.execution_venue_binding
+        adapter = self.venue_adapter
+        if (
+            not self.execution_authority
+            or ledger is None
+            or binding is None
+            or self._preflight_policy_connection is None
+            or ledger.workspace != Workspace.UK
+        ):
+            raise LedgerError("practice execution authority is unavailable")
+        if getattr(adapter, "execution_ready", True) is False:
+            raise LedgerError("the practice account is not verified")
+        side = str(side).upper()
+        if side not in ("BUY", "SELL"):
+            raise ValueError("side must be BUY or SELL")
+        if not isinstance(quantity, int) or isinstance(quantity, bool) or quantity <= 0:
+            raise ValueError("quantity must be a whole number of shares")
+        if not isinstance(ticker, str) or self._UK_TICKER.fullmatch(ticker) is None:
+            raise ValueError("ticker is not a Trading 212 ticker")
+        limit_price = Decimal(limit_price)
+        if not limit_price.is_finite() or limit_price <= 0:
+            raise ValueError("limit price must be positive")
+        checked_now = now or datetime.now(timezone.utc)
+
+        proposal = {
+            "proposal_id": str(uuid.uuid4()),
+            "client_order_id": f"uk-practice-{uuid.uuid4()}",
+            # Decision 2: stamped from the ledger and its venue binding, never the caller.
+            "workspace": ledger.workspace.value,
+            "account": binding.account_id,
+            "broker": binding.venue,
+            "mode": "PRACTICE",
+            "ticker": ticker,
+            "action": side,
+            "quantity": str(quantity),
+            "order_type": "LIMIT",
+            "limit_price": format(limit_price, "f"),
+            "reasoning": (
+                "UK practice order from operator-recorded quotes. Approval with Touch ID "
+                "sends one LIMIT DAY order to the Trading 212 demo account."
+            ),
+            "status": "PENDING",
+        }
+        intent = self.execution_service.register_proposal(proposal)
+        self.trade_proposals[proposal["proposal_id"]] = proposal
+
+        denial, kwargs = await self._uk_practice_preflight(
+            intent, readings=readings, price_source=price_source, now=checked_now
+        )
+        if denial is not None:
+            admission = self.execution_service.admit(
+                proposal,
+                currency="GBP",
+                deny_reason=denial,
+                price_source=price_source,
+                max_age_seconds=self.UK_PRACTICE_MAX_AGE_SECONDS,
+            )
+            return proposal, admission
+        admission = self.execution_service.prepare(proposal, currency="GBP", **kwargs)
+        return proposal, admission
+
+    async def _uk_practice_preflight(
+        self,
+        intent,
+        *,
+        readings: Sequence[RecordedQuoteReading],
+        price_source: str,
+        now: datetime,
+    ):
+        """Every UK practice check that precedes the shared simulator and risk gate.
+
+        Returns ``(denial_code, None)`` or ``(None, admit_kwargs)``. Nothing here
+        reserves anything; the reservation transaction re-checks the caps itself.
+        """
+
+        ledger = self._execution_ledger
+        binding = self.execution_venue_binding
+        adapter = self.venue_adapter
+        side = intent.side.value
+        if price_source not in ADMISSIBLE_PRICE_SOURCES:
+            return "PRICE_SOURCE_NOT_ADMISSIBLE", None
+
+        metadata = getattr(adapter, "metadata", None)
+        if metadata is None:
+            return "METADATA_UNAVAILABLE", None
+        try:
+            await metadata.refresh_if_stale()
+        except Exception:  # noqa: BLE001 - an unreadable cache is a denial, not a crash
+            pass
+        if not metadata.fresh():
+            return "METADATA_UNAVAILABLE", None
+        info = metadata.instrument(intent.ticker)
+        if info is None:
+            return "INSTRUMENT_UNKNOWN", None
+        if info.currency_code not in ("GBP", "GBX"):
+            return "CURRENCY_NOT_ADMISSIBLE", None
+        if info.max_open_quantity is None or intent.quantity > info.max_open_quantity:
+            return "QUANTITY_OVER_MAX_OPEN", None
+        if not metadata.exchange_open(info.working_schedule_id):
+            return "EXCHANGE_CLOSED", None
+        instrument = UkInstrument(symbol=intent.ticker, currency=info.currency_code)
+
+        if not readings or len(readings) > self.UK_PRACTICE_MAX_READINGS:
+            return "REGIME_WINDOW_INSUFFICIENT", None
+        if any(reading.bid is None or reading.ask is None for reading in readings):
+            return "SLIPPAGE_QUOTE_UNAVAILABLE", None
+        ordered = sorted(readings, key=lambda reading: reading.observed_at)
+        stamps = [reading.observed_at for reading in ordered]
+        if len(set(stamps)) != len(stamps):
+            # Three copies of one reading are not three readings.
+            return "QUOTE_READINGS_NOT_DISTINCT", None
+        try:
+            events = tuple(
+                TopOfBook(
+                    instrument=instrument,
+                    source=price_source,
+                    observed_at=reading.observed_at,
+                    received_at=reading.observed_at,
+                    bid=reading.bid,
+                    ask=reading.ask,
+                    sequence=index,
+                )
+                for index, reading in enumerate(ordered, start=1)
+            )
+        except ValueError:
+            return "QUOTE_INVALID", None
+
+        session = MarketDataSession(
+            ReplayMarketDataProvider(events, name=price_source),
+            max_age_seconds=self.UK_PRACTICE_MAX_AGE_SECONDS,
+            clock=lambda: now,
+        )
+        try:
+            await session.start((instrument,))
+            while await session.poll_once() is not None:
+                pass
+            classifier = self._regime_classifier or RegimeClassifier()
+            self._regime_classifier = classifier
+            regime = classifier.evidence(session, instrument, now=now)
+            context = build_market_preflight_context(
+                session,
+                intent=intent,
+                instrument=instrument,
+                regime=regime,
+                now=now,
+                max_regime_age_seconds=float(self.UK_PRACTICE_MAX_AGE_SECONDS),
+            )
+        except MarketDataError as exc:
+            return exc.code, None
+        finally:
+            await session.stop()
+
+        # D-26: side-adjusted slippage against the recorded quote. A missing cap or
+        # quote denies. The cap is private config, parsed here at admission.
+        execution_config = getattr(self.workspace_config, "execution", None)
+        cap = parse_max_slippage_bps(getattr(execution_config, "max_slippage_bps", None))
+        denial = slippage_denial(
+            side, intent.limit_price, context.snapshot.bid, context.snapshot.ask, cap
+        )
+        if denial is not None:
+            return denial, None
+
+        limits = ledger.get_venue_limits()
+        if limits is None:
+            return "VENUE_LIMITS_UNAVAILABLE", None
+        capital_cap, per_position_cap = limits
+        divisor = instrument.price_divisor
+        notional = practice_notional(intent.quantity, intent.limit_price, divisor)
+        headroom = ledger.practice_headroom(binding.account_id, binding.currency, intent.ticker)
+        broker_available = None
+        if side == "BUY":
+            held = headroom["held_notional"] + headroom["open_buy_notional"]
+            if held + notional > per_position_cap:
+                return "PER_POSITION_CAP_EXCEEDED", None
+            if notional > headroom["budget_available"]:
+                return "BUDGET_EXHAUSTED", None
+        else:
+            if headroom["held_quantity"] - headroom["open_sell_quantity"] < intent.quantity:
+                return "POSITION_UNAVAILABLE", None
+            reader = getattr(adapter, "broker_available_quantity", None)
+            if not callable(reader):
+                return "BROKER_POSITION_UNAVAILABLE", None
+            try:
+                broker_available = await reader(intent.ticker)
+            except Exception:  # noqa: BLE001 - a failed read denies, it never guesses
+                return "BROKER_POSITION_UNAVAILABLE", None
+            if broker_available < intent.quantity:
+                return "BROKER_QUANTITY_INSUFFICIENT", None
+
+        scale = float(divisor)
+        window = {
+            name: [value / scale for value in values]
+            for name, values in context.tick_window.items()
+        }
+        # The simulator and risk gate see pounds, matching the price and the notional.
+        window["spread"] = list(context.tick_window["spread"])
+        kwargs = {
+            "price": intent.limit_price / divisor,
+            "price_source": price_source,
+            "tick_window": window,
+            "regime_id": context.regime.regime_id,
+            "current_spread_pct": context.snapshot.spread_pct,
+            "evidence_at": context.evidence_at,
+            "portfolio_state": {
+                "equity": float(capital_cap),
+                "peak_equity": float(capital_cap),
+            },
+            "risk_db_connection": self._preflight_policy_connection,
+            "max_age_seconds": self.UK_PRACTICE_MAX_AGE_SECONDS,
+        }
+        if broker_available is not None:
+            kwargs["broker_available_quantity"] = broker_available
+        return None, kwargs
 
     def prepare_india_paper_local(self, *, symbol: str, quantity: str):
         """Create a server-owned PAPER intent; this stops before approval/dispatch."""

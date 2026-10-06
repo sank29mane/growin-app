@@ -7,11 +7,13 @@ from .admission import (
 )
 from .models import (
     IndiaInstrument,
+    Instrument,
     MarketDataEvent,
     MarketDataSubscription,
     MarketSnapshot,
     TopOfBook,
     TradeTick,
+    UkInstrument,
 )
 from .provider import ReadOnlyMarketDataProvider
 from .replay import ReplayMarketDataProvider
@@ -24,6 +26,7 @@ from .session import (
 
 __all__ = [
     "IndiaInstrument",
+    "Instrument",
     "MarketDataError",
     "MarketDataEvent",
     "MarketDataSubscription",
@@ -37,5 +40,6 @@ __all__ = [
     "ReplayMarketDataProvider",
     "TopOfBook",
     "TradeTick",
+    "UkInstrument",
     "build_market_preflight_context",
 ]

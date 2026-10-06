@@ -59,6 +59,14 @@ class PracticeOrderRefused(BrokerExecutionError):
         self.reason_code = code
 
 
+class BrokerReadError(Exception):
+    """A broker read that admission depends on failed or was unusable. Fail closed."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
 class PracticePinError(Exception):
     """The practice account could not be proven to be the bound one."""
 
@@ -199,6 +207,42 @@ class T212PracticeDispatcher:
             raise PracticePinError("PIN_CURRENCY_MISMATCH")
         self._pinned = True
 
+    # --- admission reads -----------------------------------------------------
+
+    async def broker_available_quantity(self, ticker: str) -> Decimal:
+        """The broker's ``quantityAvailableForTrading`` for one ticker (D-19).
+
+        Zero when the broker lists no such position. Any failed or malformed read
+        raises ``BrokerReadError``, so a SELL is never admitted on a guess.
+        """
+
+        try:
+            response = await self.transport.get("/equity/positions", params={"ticker": ticker})
+        except PracticeTransportError:
+            raise BrokerReadError("BROKER_POSITION_UNAVAILABLE") from None
+        if response.status_code != 200:
+            raise BrokerReadError("BROKER_POSITION_UNAVAILABLE")
+        try:
+            body = response.json()
+        except ValueError:
+            raise BrokerReadError("BROKER_POSITION_UNAVAILABLE") from None
+        if not isinstance(body, list):
+            raise BrokerReadError("BROKER_POSITION_UNAVAILABLE")
+        for item in body:
+            instrument = item.get("instrument") if isinstance(item, Mapping) else None
+            if isinstance(instrument, Mapping) and instrument.get("ticker") == ticker:
+                raw = item.get("quantityAvailableForTrading")
+                if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+                    raise BrokerReadError("BROKER_POSITION_UNAVAILABLE")
+                try:
+                    value = Decimal(str(raw))
+                except InvalidOperation:
+                    raise BrokerReadError("BROKER_POSITION_UNAVAILABLE") from None
+                if not value.is_finite() or value < 0:
+                    raise BrokerReadError("BROKER_POSITION_UNAVAILABLE")
+                return value
+        return Decimal("0")
+
     # --- dispatch ------------------------------------------------------------
 
     def _check_scope(self, intent: OrderIntent) -> None:
@@ -320,6 +364,7 @@ def practice_factory(
 
 
 __all__ = [
+    "BrokerReadError",
     "CancelResult",
     "PRACTICE_KEY_NAME",
     "PRACTICE_SECRET_NAME",

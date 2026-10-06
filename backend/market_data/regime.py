@@ -12,7 +12,7 @@ from coreml.fast_gmm import fast_gmm_predict_proba
 from coreml.gmm_loader import load_gmm_params
 
 from .admission import RegimeEvidence
-from .models import IndiaInstrument
+from .models import Instrument
 from .session import MarketDataError, MarketDataSession
 
 
@@ -37,7 +37,7 @@ class RegimeClassifier:
     def evidence(
         self,
         session: MarketDataSession,
-        instrument: IndiaInstrument,
+        instrument: Instrument,
         *,
         now: datetime | None = None,
     ) -> RegimeEvidence:

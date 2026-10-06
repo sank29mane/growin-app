@@ -9,6 +9,7 @@ from typing import Callable
 
 from .models import (
     IndiaInstrument,
+    Instrument,
     MarketDataEvent,
     MarketDataSubscription,
     MarketSnapshot,
@@ -58,7 +59,7 @@ class MarketDataSession:
         self._max_future_skew = timedelta(seconds=max_future_skew_seconds)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._state = MarketDataSessionState.STOPPED
-        self._instruments: dict[str, IndiaInstrument] = {}
+        self._instruments: dict[str, Instrument] = {}
         self._subscription: MarketDataSubscription | None = None
         self._last_sequence: dict[str, int] = {}
         self._quotes: dict[str, TopOfBook] = {}
@@ -76,20 +77,22 @@ class MarketDataSession:
         return self._provider.name
 
     @property
-    def instruments(self) -> tuple[IndiaInstrument, ...]:
+    def instruments(self) -> tuple[Instrument, ...]:
         return tuple(self._instruments.values())
 
     @property
     def subscription(self) -> MarketDataSubscription | None:
         return self._subscription
 
-    async def start(self, instruments: tuple[IndiaInstrument, ...]) -> None:
+    async def start(self, instruments: tuple[Instrument, ...]) -> None:
         if self._state is not MarketDataSessionState.STOPPED:
             raise MarketDataError("SESSION_STATE_CONFLICT", "market-data session is not stopped")
         if not instruments:
             raise MarketDataError("NO_INSTRUMENTS", "at least one instrument is required")
         try:
-            subscription = MarketDataSubscription(instruments=instruments)
+            subscription = MarketDataSubscription(
+                workspace=instruments[0].workspace, instruments=instruments
+            )
         except ValueError as exc:
             raise MarketDataError("INVALID_SUBSCRIPTION", "market-data subscription is invalid") from exc
         keys = [item.key for item in subscription.instruments]
@@ -170,7 +173,7 @@ class MarketDataSession:
 
     def snapshot(
         self,
-        instrument: IndiaInstrument,
+        instrument: Instrument,
         *,
         now: datetime | None = None,
     ) -> MarketSnapshot:
@@ -207,7 +210,7 @@ class MarketDataSession:
 
     def tick_window(
         self,
-        instrument: IndiaInstrument,
+        instrument: Instrument,
         *,
         now: datetime | None = None,
     ) -> dict[str, list[float]]:
@@ -227,7 +230,7 @@ class MarketDataSession:
         if self._state is not MarketDataSessionState.RUNNING:
             raise MarketDataError("SESSION_NOT_RUNNING", "market-data session is not running")
 
-    def _require_instrument(self, instrument: IndiaInstrument) -> str:
+    def _require_instrument(self, instrument: Instrument) -> str:
         key = instrument.key
         configured = self._instruments.get(key)
         if configured is None or configured != instrument:
