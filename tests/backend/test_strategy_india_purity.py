@@ -25,6 +25,13 @@ TICK_ADAPTER = "ticks.py"
 DYNAMIC_IMPORT_NAMES = {"importlib", "__import__", "import_module"}
 EVAL_NAMES = {"exec", "eval", "compile"}
 SYS_MODULES_RULE = "sys.modules is banned in strategy_india: any lookup reaches a banned module without an import"
+SYS_FILES = {"__main__.py"}  # the only file that may name `sys`
+SYS_ATTRS_ALLOWED = {"argv", "exit", "stdout", "stderr", "stdin"}
+REFLECTION_NAMES = {"globals", "locals", "vars"}
+REFLECTION_ATTRS = {"__dict__", "__globals__"}
+SYS_IMPORT_RULE = "sys may only be imported (plainly, as 'import sys') by __main__.py"
+SYS_USE_RULE = "the bare name sys may only appear as sys.argv, sys.exit, sys.stdout, sys.stderr or sys.stdin"
+REFLECTION_RULE = "globals/locals/vars and __dict__/__globals__ are banned in strategy_india: they reach sys and banned modules"
 IMPORT_RULE = "costs.ticks is reachable only as 'from costs.ticks import <public names>'"
 
 
@@ -133,6 +140,47 @@ def _binding_violation(node: ast.AST, sys_names: set[str]) -> str | None:
     return None
 
 
+def _sys_violation(node: ast.AST, filename: str, sanctioned: set[int]) -> str | None:
+    """Structural sys rule: no import outside __main__.py; there, only direct reads of an allowlisted attribute."""
+    in_main = filename in SYS_FILES
+    if isinstance(node, ast.Import):
+        for alias in node.names:
+            if alias.name == "sys" or alias.name.startswith("sys."):
+                if not in_main or alias.name != "sys" or alias.asname:
+                    return SYS_IMPORT_RULE
+    elif isinstance(node, ast.ImportFrom):
+        if node.level == 0 and node.module and (node.module == "sys" or node.module.startswith("sys.")):
+            return "'from sys import ...' is banned in strategy_india"
+        if any(alias.name == "sys" for alias in node.names):
+            return "'from <module> import sys' binds the sys module: banned in strategy_india"
+    elif isinstance(node, ast.Attribute) and node.attr == "sys":
+        return "an attribute named sys (for example os.sys) reaches the sys module: banned in strategy_india"
+    elif isinstance(node, ast.Name) and node.id == "sys":
+        if not in_main:
+            return SYS_IMPORT_RULE
+        if id(node) not in sanctioned:
+            return SYS_USE_RULE
+    elif isinstance(node, (ast.Global, ast.Nonlocal)) and "sys" in node.names:
+        return SYS_USE_RULE
+    elif isinstance(node, ast.Constant) and node.value == "sys":
+        return "the string 'sys' (getattr/import by name) is banned in strategy_india"
+    return None
+
+
+def _reflection_violation(node: ast.AST) -> str | None:
+    """globals/locals/vars and .__dict__ hand back the namespace that holds sys: ban them package-wide."""
+    if isinstance(node, ast.Name) and node.id in REFLECTION_NAMES:
+        return REFLECTION_RULE
+    if isinstance(node, ast.Attribute):
+        if node.attr in REFLECTION_ATTRS:
+            return REFLECTION_RULE
+        if node.attr in REFLECTION_NAMES and isinstance(node.value, ast.Name) and node.value.id in {"builtins", "__builtins__"}:
+            return REFLECTION_RULE
+    if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value in REFLECTION_NAMES | REFLECTION_ATTRS:
+        return REFLECTION_RULE  # getattr(x, '__dict__'), getattr(__builtins__, 'vars')
+    return None
+
+
 def scan_source(source: str, filename: str) -> list[str]:
     out: list[str] = []
     tree = ast.parse(source, filename=filename)
@@ -143,6 +191,11 @@ def scan_source(source: str, filename: str) -> list[str]:
     sys_names = {"sys"} | {
         alias.asname for node in ast.walk(tree) if isinstance(node, ast.Import)
         for alias in node.names if alias.name == "sys" and alias.asname
+    }
+    sanctioned = {
+        id(node.value) for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr in SYS_ATTRS_ALLOWED and isinstance(node.ctx, ast.Load)
+        and isinstance(node.value, ast.Name) and node.value.id == "sys"
     }
     heavy_ok = filename in FLOAT_ALLOWED
     for node in ast.walk(tree):
@@ -164,6 +217,12 @@ def scan_source(source: str, filename: str) -> list[str]:
         if problem:
             out.append(f"{filename}:{line}: {problem}")
         problem = _binding_violation(node, sys_names)
+        if problem:
+            out.append(f"{filename}:{line}: {problem}")
+        problem = _sys_violation(node, filename, sanctioned)
+        if problem:
+            out.append(f"{filename}:{line}: {problem}")
+        problem = _reflection_violation(node)
         if problem:
             out.append(f"{filename}:{line}: {problem}")
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div) and not heavy_ok:
@@ -340,6 +399,68 @@ def test_package_is_pure():
         ("from sys import modules", "engine.py", "sys.modules is banned"),
         ("from sys import *", "engine.py", "sys.modules is banned"),
         ("import sys.modules", "engine.py", "sys.modules is banned"),
+        # sys, structurally: no import outside __main__.py (every Codex bypass form dies at the import)
+        ("import sys", "engine.py", "sys may only be imported"),
+        ("import sys as s", "engine.py", "sys may only be imported"),
+        ("import os, sys", "engine.py", "sys may only be imported"),
+        ("import sys.modules", "engine.py", "sys may only be imported"),
+        ("from sys import argv", "engine.py", "'from sys import ...' is banned"),
+        ("from sys import modules", "__main__.py", "'from sys import ...' is banned"),
+        ("from sys import exit as leave", "__main__.py", "'from sys import ...' is banned"),
+        ("from os import sys", "engine.py", "'from <module> import sys'"),
+        ("from os import sys as s", "__main__.py", "'from <module> import sys'"),
+        ("import os\nx = os.sys", "engine.py", "an attribute named sys"),
+        ("import os\nx = os.sys.modules", "__main__.py", "an attribute named sys"),
+        ("x = getattr(os, 'sys')", "engine.py", "the string 'sys'"),
+        ("import sys\nm = globals()['sys'].modules['costs.ticks']", "engine.py", "sys may only be imported"),
+        ("import sys\nm = getattr(sys, 'modules')['costs.ticks']", "engine.py", "sys may only be imported"),
+        ("import sys\nm = vars(sys)['modules']", "engine.py", "sys may only be imported"),
+        ("import sys\nm = sys.__dict__['modules']", "engine.py", "sys may only be imported"),
+        ("import sys\ns = sys\nm = s.modules['costs.ticks']", "engine.py", "sys may only be imported"),
+        ("x = f(sys)", "engine.py", "sys may only be imported"),  # name reached without an import statement here
+        ("x = sys.argv", "engine.py", "sys may only be imported"),
+        # in __main__.py: the bare name sys only as a direct read of argv/exit/stdout/stderr/stdin
+        ("import sys\nm = globals()['sys'].modules['costs.ticks']", "__main__.py", "globals/locals/vars"),
+        ("import sys\nm = getattr(sys, 'modules')['costs.ticks']", "__main__.py", "the bare name sys may only"),
+        ("import sys\nm = vars(sys)['modules']", "__main__.py", "the bare name sys may only"),
+        ("import sys\nm = sys.__dict__['modules']", "__main__.py", "globals/locals/vars"),
+        ("import sys\ns = sys\nm = s.modules['costs.ticks']", "__main__.py", "the bare name sys may only"),
+        ("import sys\nm = sys.modules['costs.ticks']", "__main__.py", "sys.modules is banned"),
+        ("import sys\nm = sys.modules", "__main__.py", "the bare name sys may only"),
+        ("import sys\nm = sys.path", "__main__.py", "the bare name sys may only"),
+        ("import sys\nf(sys)", "__main__.py", "the bare name sys may only"),
+        ("import sys\nf(x=sys)", "__main__.py", "the bare name sys may only"),
+        ("import sys\nx = sys['modules']", "__main__.py", "the bare name sys may only"),
+        ("import sys\nx = [sys][0].modules", "__main__.py", "the bare name sys may only"),
+        ("import sys\nx = {'k': sys}", "__main__.py", "the bare name sys may only"),
+        ("import sys\nx = getattr(sys, name)", "__main__.py", "the bare name sys may only"),
+        ("import sys\nsys = other", "__main__.py", "the bare name sys may only"),
+        ("import sys\nsys.exit = other", "__main__.py", "the bare name sys may only"),
+        ("import sys\ndel sys", "__main__.py", "the bare name sys may only"),
+        ("import sys\nwith open(p) as sys:\n    pass", "__main__.py", "the bare name sys may only"),
+        ("import sys\ndef f():\n    global sys", "__main__.py", "the bare name sys may only"),
+        ("import sys as s\nx = s.argv", "__main__.py", "sys may only be imported"),
+        ("import sys.modules", "__main__.py", "sys may only be imported"),
+        ("import os, sys as s", "__main__.py", "sys may only be imported"),
+        # globals/locals/vars and __dict__/__globals__, package-wide and without exceptions
+        ("x = globals()", "engine.py", "globals/locals/vars"),
+        ("x = globals()['k']", "__main__.py", "globals/locals/vars"),
+        ("x = locals()", "engine.py", "globals/locals/vars"),
+        ("x = vars(row)", "engine.py", "globals/locals/vars"),
+        ("x = vars()", "metrics.py", "globals/locals/vars"),
+        ("x = vars(object=row)", "metrics.py", "globals/locals/vars"),
+        ("g = globals\nx = g()", "engine.py", "globals/locals/vars"),
+        ("import builtins\nx = builtins.vars(row)", "engine.py", "globals/locals/vars"),
+        ("x = __builtins__.globals()", "engine.py", "globals/locals/vars"),
+        ("x = getattr(__builtins__, 'vars')(row)", "engine.py", "globals/locals/vars"),
+        ("x = row.__dict__", "report.py", "globals/locals/vars"),
+        ("x = row.__dict__.items()", "report.py", "globals/locals/vars"),
+        ("x = row.__dict__['k']", "engine.py", "globals/locals/vars"),
+        ("x = getattr(row, '__dict__')", "engine.py", "globals/locals/vars"),
+        ("x = hasattr(row, '__dict__')", "engine.py", "globals/locals/vars"),
+        ("x = type(row).__dict__", "engine.py", "globals/locals/vars"),
+        ("x = f.__globals__['sys']", "engine.py", "globals/locals/vars"),
+        ("x = getattr(f, '__globals__')", "engine.py", "globals/locals/vars"),
         # exec, eval, compile
         ("exec('x = 1')", "engine.py", "exec is banned"),
         ("x = eval(s)", "engine.py", "eval is banned"),
@@ -356,10 +477,18 @@ def test_planted_violation_is_caught(source, filename, fragment):
     assert found and any(fragment in item for item in found), found
 
 
-def test_from_imports_of_allowed_packages_and_other_sys_attributes_stay_allowed():
-    ok = ("import sys\nfrom backend.utils import helper\nfrom backend import utils\nfrom backend.strategy_india import engine\n"
-          "d = sys.argv['x']\ne = other.modules[0]\nf = sys.exit\n")
+def test_from_imports_of_allowed_packages_stay_allowed():
+    ok = ("from backend.utils import helper\nfrom backend import utils\nfrom backend.strategy_india import engine\n"
+          "e = other.modules[0]\nf = other.sys_like\n")
     assert scan_source(ok, "engine.py") == []
+
+
+def test_sys_in_main_is_allowed_only_as_a_direct_read_of_the_allowlist():
+    ok = ("import sys\nimport os\n"
+          "a = sys.argv[1:]\nb = sys.stdout.write('x')\nc = sys.stderr\nd = sys.stdin.read()\n"
+          "def main(argv=None):\n    return 0\n"
+          "sys.exit(main())\n")
+    assert scan_source(ok, "__main__.py") == []
 
 
 def test_decimal_division_is_not_flagged():
@@ -380,7 +509,7 @@ def test_unrelated_reflection_and_attributes_stay_allowed():
     ok = ("from costs.core import Side\nfrom costs import schedule\nfrom .errors import X\nfrom . import metrics\n"
           "import re\nr = re.compile('a')\n"
           "d = self._cache\ne = other._hidden\nf = row.ticks\ng = getattr(row, name)\nh = hasattr(self, name)\n"
-          "i = vars(row)\nj = row.__dict__['k']\nk = getattr(row, 'align_limit', None)\nl = core.IST\n"
+          "k = getattr(row, 'align_limit', None)\nl = core.IST\n"
           "m = fmt('tick table for {}', cls)\n")
     assert scan_source(ok, "engine.py") == []
 
