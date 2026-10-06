@@ -84,6 +84,7 @@ class FakeDemoBroker:
         self.orders: dict[int, dict[str, Any]] = {}
         self.fills: dict[int, list[dict[str, Any]]] = {}
         self.positions: dict[str, Decimal] = {}
+        self.available: dict[str, Decimal] = {}  # quantityAvailableForTrading overrides
         self.instruments = [dict(item) for item in LSE_INSTRUMENTS]
         self.summary_override: Optional[Callable[[], httpx.Response]] = None
         self.post_override: Optional[Callable[[httpx.Request], httpx.Response]] = None
@@ -281,7 +282,7 @@ class FakeDemoBroker:
                 {
                     "instrument": {"ticker": name, "currency": self.instrument(name)["currencyCode"]},
                     "quantity": float(quantity),
-                    "quantityAvailableForTrading": float(quantity),
+                    "quantityAvailableForTrading": float(self.available.get(name, quantity)),
                     "averagePricePaid": 70.0,
                     "currentPrice": 71.0,
                 }
