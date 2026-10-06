@@ -1222,6 +1222,36 @@ def test_admin_session_end_check_sends_records_and_does_not_repeat(tmp_path):
     assert store.load().alerts_sent == [f"2026-10-12:{ISIN}"]
 
 
+def test_admin_session_end_check_audits_the_real_limits_hash(tmp_path):
+    store = _seeded(tmp_path)
+    code, out, _ = _run(store.directory, "session-end-check",
+                        clock=Clock("2026-10-12T15:30:00+05:30"), port=Port())
+    assert code == 0 and json.loads(out)["limits_ok"] is True
+    last = AuditLog(store.directory / "audit.jsonl").entries_after(0)[-1]
+    assert (last["route"], last["codes"]) == ("session_end", ["stop_exit_open"])
+    assert last["limits_sha256"] == LIMITS.sha256 and last["limits_sha256"] is not None
+
+
+def test_admin_session_end_check_audits_the_hash_on_a_failed_alert_too(tmp_path):
+    store = _seeded(tmp_path)
+    code, _, _ = _run(store.directory, "session-end-check",
+                      clock=Clock("2026-10-12T15:30:00+05:30"), port=Port(fail=True))
+    assert code == 1
+    last = AuditLog(store.directory / "audit.jsonl").entries_after(0)[-1]
+    assert last["codes"] == ["alert_failed"] and last["limits_sha256"] == LIMITS.sha256
+
+
+def test_admin_session_end_check_alerts_even_when_the_limits_cannot_be_read(tmp_path):
+    store = _seeded(tmp_path)
+    port = Port()
+    code, out, _ = _run(store.directory, "session-end-check", clock=Clock("2026-10-12T15:30:00+05:30"),
+                        port=port, limits=None)  # no limits file on this machine
+    assert code == 1 and json.loads(out)["limits_ok"] is False  # loud, but the alert still went out
+    assert len(port.alerts) == 1
+    last = AuditLog(store.directory / "audit.jsonl").entries_after(0)[-1]
+    assert last["limits_sha256"] is None
+
+
 def test_admin_session_end_check_exits_nonzero_when_the_alert_fails(tmp_path):
     store = _seeded(tmp_path)
     clock = Clock("2026-10-12T15:30:00+05:30")

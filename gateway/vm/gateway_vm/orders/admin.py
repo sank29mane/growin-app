@@ -4,10 +4,12 @@
     python -m gateway_vm.orders.admin STATE_DIR verify-audit
     python -m gateway_vm.orders.admin STATE_DIR reset --latch halt|stop|mac_halt|account_mismatch [--isin ISIN]
         [--rebase-halt-anchor] [--limits PATH]
-    python -m gateway_vm.orders.admin STATE_DIR session-end-check
+    python -m gateway_vm.orders.admin STATE_DIR session-end-check [--limits PATH]
 
 `--limits` defaults to /etc/growin-gateway/limits.json (root-owned). `reset` reads it for
-the halt threshold and so its audit entry carries the real limits_sha256.
+the halt threshold, and `reset` and `session-end-check` both put its real limits_sha256 in
+their audit entries. `reset` refuses without it. `session-end-check` never suppresses an
+alert: if the limits cannot be read it still alerts, audits a null hash, and exits non-zero.
 
 There is no HTTP route that does any of this: no route clears a latch. The
 `ended` latch is terminal and `reset` refuses it. `reset` refuses while the
@@ -79,7 +81,8 @@ def main(
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status")
     sub.add_parser("verify-audit")
-    sub.add_parser("session-end-check")
+    session_end = sub.add_parser("session-end-check")
+    session_end.add_argument("--limits", default=DEFAULT_LIMITS_PATH)
     reset = sub.add_parser("reset")
     reset.add_argument(
         "--latch", required=True, choices=("halt", "stop", "mac_halt", "account_mismatch", "ended")
@@ -178,10 +181,18 @@ def main(
             return 0
 
         if args.command == "session-end-check":
+            try:
+                limits_sha256: str | None = _need_limits(limits, args.limits).sha256
+            except LimitsError:
+                limits_sha256 = None  # an open stop exit is still alerted; see the docstring
             with store.lock():
                 state = store.load()
                 result = session_end_check(
-                    state, clock, alert_port or UnboundAlertPort(), audit=audit
+                    state,
+                    clock,
+                    alert_port or UnboundAlertPort(),
+                    audit=audit,
+                    limits_sha256=limits_sha256,
                 )
                 if result.sent:
                     store.save(state)
@@ -191,9 +202,10 @@ def main(
                     "alerts_sent": len(result.sent),
                     "alerts_failed": len(result.failed),
                     "audit_failed": result.audit_failed,
+                    "limits_ok": limits_sha256 is not None,
                 },
             )
-            return 0 if result.ok else 1
+            return 0 if result.ok and limits_sha256 is not None else 1
     except LimitsError:
         err.write("refused: the limits file is missing, unsafe or invalid\n")
         return 1
