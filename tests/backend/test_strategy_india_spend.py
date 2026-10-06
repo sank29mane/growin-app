@@ -592,6 +592,48 @@ def test_a_failed_head_write_after_the_verdict_heals_on_the_next_run_and_a_forei
     assert study.head_file_path(reg).read_text().strip() == sha("foreign")
 
 
+def _fail_head_writes(monkeypatch, failing):
+    """Make study.write_head_file raise OSError on the numbered calls in `failing`; return the original."""
+    original = study.write_head_file
+    calls = 0
+
+    def flaky(registry):
+        nonlocal calls
+        calls += 1
+        if calls in failing:
+            raise OSError("disk full")
+        return original(registry)
+
+    monkeypatch.setattr(study, "write_head_file", flaky)
+    return original
+
+
+def test_a_stale_pre_open_pin_is_refused_and_not_healed_when_the_file_is_also_stale(tmp_path, monkeypatch):
+    inputs, head = _registered(tmp_path)
+    reg = inputs.registry
+    _fail_head_writes(monkeypatch, {2, 3})  # the verdict write and its retry both fail
+    with pytest.raises(HoldoutInvalid):
+        study.run_holdout(inputs, expected_head=head)
+    path = study.head_file_path(reg)
+    stale = path.read_text()
+    assert stale.strip() != reg.head_hash()  # the file sits on an earlier chain entry
+    assert stale.strip() != head  # ... and is not the pre-open pin either
+    with pytest.raises(StrategyIndiaError) as err:
+        study.check_pin_fresh(reg, head)  # replay the pre-open pin: the heal must not accept it
+    assert err.value.code == "registry_head_stale"
+    assert path.read_text() == stale  # nothing was rewritten
+
+
+def test_one_failed_verdict_head_write_is_retried_so_the_file_matches_the_chain_head(tmp_path, monkeypatch):
+    inputs, head = _registered(tmp_path)
+    reg = inputs.registry
+    _fail_head_writes(monkeypatch, {2})  # only the write right after the verdict fails
+    with pytest.raises(HoldoutInvalid):
+        study.run_holdout(inputs, expected_head=head)
+    # No check_pin_fresh heal in between: the retry inside run_holdout must already have fixed the file.
+    assert study.head_file_path(reg).read_text().strip() == reg.head_hash()
+
+
 def test_successful_verdict_supersedes_provisional_invalid(tmp_path):
     inputs, head = _registered(tmp_path)
     outcome = study.run_holdout(inputs, expected_head=head)

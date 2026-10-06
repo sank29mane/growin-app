@@ -37,9 +37,40 @@ def _int_like(node: ast.AST) -> bool:
     return False
 
 
+TICKS_RECEIVERS = {"costs_ticks", "_costs_ticks", "ticks"}
+
+
+def _ticks_aliases(tree: ast.AST) -> set[str]:
+    """Names this file binds to the costs.ticks module, whatever the import form."""
+    names = set(TICKS_RECEIVERS)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "costs.ticks" and alias.asname:
+                    names.add(alias.asname)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == "costs":
+            for alias in node.names:
+                if alias.name == "ticks":
+                    names.add(alias.asname or alias.name)
+    return names
+
+
+def _is_ticks_module(node: ast.AST, aliases: set[str]) -> bool:
+    """A bound alias name, or the dotted chain costs.ticks."""
+    if isinstance(node, ast.Name):
+        return node.id in aliases
+    return (isinstance(node, ast.Attribute) and node.attr == "ticks"
+            and isinstance(node.value, ast.Name) and node.value.id == "costs")
+
+
+def _private(name: str) -> bool:
+    return name.startswith("_") and not name.startswith("__")
+
+
 def scan_source(source: str, filename: str) -> list[str]:
     out: list[str] = []
     tree = ast.parse(source, filename=filename)
+    aliases = _ticks_aliases(tree)
     heavy_ok = filename in FLOAT_ALLOWED
     for node in ast.walk(tree):
         line = getattr(node, "lineno", 0)
@@ -62,9 +93,13 @@ def scan_source(source: str, filename: str) -> list[str]:
             for alias in node.names:
                 if alias.name.startswith("_") and (node.module == "costs.ticks" or alias.name == "_ticks"):
                     out.append(f"{filename}:{line}: private costs.ticks name {alias.name}")
-        if isinstance(node, ast.Attribute) and node.attr.startswith("_") and not node.attr.startswith("__"):
-            if isinstance(node.value, ast.Name) and node.value.id in ("costs_ticks", "_costs_ticks", "ticks"):
-                out.append(f"{filename}:{line}: private costs.ticks name {node.attr}")
+        if isinstance(node, ast.Attribute) and _private(node.attr) and _is_ticks_module(node.value, aliases):
+            out.append(f"{filename}:{line}: private costs.ticks name {node.attr}")
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr"
+                and len(node.args) >= 2 and _is_ticks_module(node.args[0], aliases)
+                and isinstance(node.args[1], ast.Constant) and isinstance(node.args[1].value, str)
+                and _private(node.args[1].value)):
+            out.append(f"{filename}:{line}: private costs.ticks name {node.args[1].value} via getattr")
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div) and not heavy_ok:
             if _int_like(node.left) and _int_like(node.right):
                 out.append(f"{filename}:{line}: int/int true division yields a float; use Decimal")
@@ -120,6 +155,13 @@ def test_package_is_pure():
         ("from costs.ticks import _resolve_tick_from_table", "ticks.py", "private costs.ticks name"),
         ("import costs.ticks as _costs_ticks\nx = _costs_ticks._resolve_tick_from_table(t)", "ticks.py",
          "private costs.ticks name"),
+        ("import costs.ticks as ct\nx = ct._resolve_tick_from_table(t)", "ticks.py", "private costs.ticks name"),
+        ("from costs import ticks as ct\nx = ct._resolve_tick_from_table(t)", "ticks.py", "private costs.ticks name"),
+        ("import costs.ticks\nx = costs.ticks._resolve_tick_from_table(t)", "ticks.py", "private costs.ticks name"),
+        ("from costs import ticks as _costs_ticks\nx = getattr(_costs_ticks, '_resolve_tick_from_table')", "ticks.py",
+         "private costs.ticks name"),
+        ("import costs.ticks\nx = getattr(costs.ticks, '_resolve_tick_from_table')", "ticks.py",
+         "private costs.ticks name"),
     ],
 )
 def test_planted_violation_is_caught(source, filename, fragment):
@@ -130,6 +172,13 @@ def test_planted_violation_is_caught(source, filename, fragment):
 def test_decimal_division_is_not_flagged():
     ok = "from decimal import Decimal\nx = Decimal(1) / 3\ny = total / len(items)\nz = a // b\nw = sum(v) / len(v)\n"
     assert scan_source(ok, "metrics.py") == []
+
+
+def test_public_costs_ticks_use_and_unrelated_privates_stay_allowed():
+    ok = ("from costs import ticks as _costs_ticks\nimport costs.ticks as ct\n"
+          "a = _costs_ticks.committed_tick_table(c)\nb = ct.align_limit(p, t, s)\nc = getattr(ct, 'align_limit')\n"
+          "d = self._cache\ne = other._hidden\nf = ct.__name__\n")
+    assert scan_source(ok, "ticks.py") == []
 
 
 def test_allowed_places_stay_allowed():
