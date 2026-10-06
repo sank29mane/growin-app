@@ -720,3 +720,28 @@ async def test_chat_research_failure_returns_typed_http_error(tmp_path, stub, ke
     finally:
         state.chat_manager, state.mcp_client = previous
         manager.close()
+
+
+@pytest.mark.parametrize("intent", ["analytical", "conversational", "educational"])
+@pytest.mark.parametrize("review", [None, {}])
+async def test_release_helper_refuses_unreviewed_proposal_before_any_side_effect(intent, review):
+    orchestrator = OrchestratorAgent(mcp_client=MagicMock(), chat_manager=MagicMock())
+    context = _context(intent=intent)
+    held = {"ticker": "AAPL", "action": "BUY", "quantity": 1}
+    context.user_context["deferred_proposal"] = held
+    if review is not None:
+        context.user_context["risk_review"] = review
+    orchestrator.decision_engine.register_deferred_proposal = MagicMock(return_value=None)
+    orchestrator.messenger.send_message = AsyncMock()
+    before = dict(state.trade_proposals)
+
+    with pytest.raises(ModelRegistryError) as caught:
+        await orchestrator._release_proposal(context, "held response", "sweep")
+
+    assert caught.value.code == "RISK_REVIEW_REQUIRED"
+    assert caught.value.field == "risk_critic"
+    orchestrator.decision_engine.register_deferred_proposal.assert_not_called()
+    orchestrator.messenger.send_message.assert_not_awaited()
+    assert state.trade_proposals == before
+    assert context.user_context["deferred_proposal"] == held
+    assert "pending_proposal" not in context.user_context
