@@ -91,7 +91,9 @@ wins and this file is wrong.
 - **Tick band reference.** The tick table is keyed by the closing price on the last trading day of the previous calendar
   month (or the exchange's dated tick reference), not the quote's previous close. The guard reads it from an injected
   `TickReferencePort` on every check; if the port cannot supply it the answer is 503 `tick_reference_unavailable`.
-  Every evaluator vector carries a `tick_reference` field (null means unavailable).
+  Every evaluator vector carries a `tick_reference` field (null means unavailable) and a `tick_reference_month` (ISO
+  date the reference was taken; it must fall in the calendar month before the session, so a stale or wrong-month
+  value is `tick_reference_unavailable`, never used).
 - **Kill switch.** The reader asks the instance metadata server for `growin-order-relay` on every check and passes
   only the exact body `enabled`. It never reads a project-level key.
 - **State.** `state.json` and `audit.jsonl` live in the systemd StateDirectory. Unreadable or corrupt state blocks
