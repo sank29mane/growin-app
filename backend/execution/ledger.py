@@ -2634,6 +2634,10 @@ class ExecutionLedger:
                 raise InvalidTransition("reconciliation exceeds the admitted notional")
             if snapshot.cumulative_quantity > 0 and snapshot.cumulative_notional <= 0:
                 raise InvalidTransition("filled quantity requires positive notional")
+            if (snapshot.cumulative_quantity > prior_quantity) != (
+                snapshot.cumulative_notional > prior_notional
+            ):
+                raise InvalidTransition("fill quantity and notional must advance together")
             state = str(row["state"])
             legal = {
                 "ACKNOWLEDGED": {"ACKNOWLEDGED", "PARTIALLY_FILLED", "FILLED", "CANCELLED", "REJECTED", "UNKNOWN"},
@@ -2668,7 +2672,10 @@ class ExecutionLedger:
                 self._apply_quantity_reconciliation_locked(
                     connection, reservation, snapshot, delta_quantity, now
                 )
-                if target in {"FILLED", "PARTIALLY_FILLED"} and delta_quantity > 0:
+                # Every validated positive fill delta moves the position, whatever
+                # status carries it: a first-seen CANCELLED or UNKNOWN snapshot
+                # that already shows a partial fill still consumed that quantity.
+                if delta_quantity > 0:
                     self._apply_position_sell_locked(connection, admission, delta_quantity, now)
             else:
                 self._apply_reservation_reconciliation_locked(
@@ -2679,7 +2686,7 @@ class ExecutionLedger:
                     delta_notional,
                     now,
                 )
-                if target in {"FILLED", "PARTIALLY_FILLED"} and delta_notional > 0:
+                if delta_quantity > 0 and delta_notional > 0:
                     self._apply_position_fill_locked(
                         connection, admission, delta_quantity, delta_notional, now
                     )
