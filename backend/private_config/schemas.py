@@ -19,6 +19,7 @@ from pydantic import (
     Field,
     StringConstraints,
     field_validator,
+    model_validator,
 )
 
 DECIMAL_STRING_PATTERN = r"^-?(0|[1-9][0-9]*)(\.[0-9]+)?$"
@@ -116,10 +117,61 @@ class IndiaStrategy(BaseModel):
 
 
 class UkManifest(BaseModel):
-    """UK needs only a manifest until Phase 66."""
+    """UK paper needs only a manifest. A practice venue also needs execution and limits."""
 
     model_config = _STRICT_MODEL
 
     schema_version: SchemaVersion
     workspace: Literal["uk"]
     currency: Literal["GBP"]
+
+
+# The venue ids are duplicated here on purpose: this package imports nothing
+# from ``execution``. A test keeps the two lists equal.
+KNOWN_VENUES = ("paper", "t212_practice")
+PRACTICE_VENUE_IDS = frozenset({"t212_practice"})
+ACCOUNT_ID_PATTERN = r"^[A-Za-z0-9._-]{1,64}$"
+
+
+class WorkspaceExecution(BaseModel):
+    """``private/<workspace>/execution.json``: which venue this workspace trades on.
+
+    ``paper`` carries no account. A practice venue names the broker account id
+    and currency its ledger is bound to. The venue is a plain string here and
+    the loader turns an unknown one into VENUE_UNKNOWN before this runs.
+    """
+
+    model_config = _STRICT_MODEL
+
+    schema_version: SchemaVersion
+    workspace: Literal["uk", "india"]
+    venue: str
+    # These two are the only fields with a default: None means "absent", and the
+    # validator below decides per venue whether absence is allowed.
+    account_id: Annotated[str, StringConstraints(pattern=ACCOUNT_ID_PATTERN)] | None = Field(
+        default=None, repr=False
+    )
+    currency: Literal["GBP"] | None = None
+
+    @model_validator(mode="after")
+    def _venue_shape(self) -> "WorkspaceExecution":
+        if self.venue not in KNOWN_VENUES:
+            raise ValueError("venue is unknown")
+        if self.venue in PRACTICE_VENUE_IDS:
+            if self.account_id is None or self.currency is None:
+                raise ValueError("a practice venue needs account_id and currency")
+        elif {"account_id", "currency"} & self.model_fields_set:
+            raise ValueError("the paper venue takes no account_id or currency")
+        return self
+
+
+class UkLimits(BaseModel):
+    """UK practice caps. Decimal strings only; the values live in private/ alone."""
+
+    model_config = _STRICT_MODEL
+
+    schema_version: SchemaVersion
+    workspace: Literal["uk"]
+    currency: Literal["GBP"]
+    capital_cap: DecimalStr = Field(repr=False)
+    per_position_cap: DecimalStr = Field(repr=False)

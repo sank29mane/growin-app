@@ -27,6 +27,7 @@ from .ledger import (
     canonical_json,
 )
 from .models import Workspace
+from .venue import intent_refusal, refusal_text
 
 
 APPROVAL_PURPOSE = "growin.execution.dispatch"
@@ -191,8 +192,14 @@ class ApprovalService:
         intent = dict(order.intent)
         if str(intent.get("workspace")) != pinned.value:
             raise ApprovalConflict("order workspace does not match ledger workspace")
-        if str(intent.get("mode", "")).upper() != "PAPER":
-            raise ApprovalConflict("live execution remains disabled")
+        refusal = intent_refusal(
+            intent.get("mode", ""),
+            intent.get("broker", ""),
+            intent.get("account", ""),
+            self._ledger.venue_binding,
+        )
+        if refusal is not None:
+            raise ApprovalConflict(refusal_text(refusal))
         admission = self._ledger.get_admission(proposal_id)
         if admission is None or admission.decision.value != "ADMITTED":
             raise ApprovalConflict("admitted evidence is required before approval")

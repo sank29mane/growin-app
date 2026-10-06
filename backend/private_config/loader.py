@@ -22,7 +22,16 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from .errors import PrivateConfigError, schema_error_from_validation_error
-from .schemas import FileRef, IndiaLimits, IndiaStrategy, UkManifest
+from .schemas import (
+    KNOWN_VENUES,
+    PRACTICE_VENUE_IDS,
+    FileRef,
+    IndiaLimits,
+    IndiaStrategy,
+    UkLimits,
+    UkManifest,
+    WorkspaceExecution,
+)
 
 SUPPORTED_WORKSPACES = frozenset({"uk", "india"})
 WORKSPACE_CURRENCY = {"uk": "GBP", "india": "INR"}
@@ -44,6 +53,15 @@ class WorkspaceConfig:
     strategy: IndiaStrategy | None
     manifest: UkManifest | None
     fingerprint: str
+    # Phase 66. ``execution`` is None when the workspace has no execution.json,
+    # which means venue ``paper`` exactly as before. ``uk_limits`` is loaded
+    # only for a practice venue.
+    execution: WorkspaceExecution | None = None
+    uk_limits: UkLimits | None = None
+
+    @property
+    def venue(self) -> str:
+        return "paper" if self.execution is None else self.execution.venue
 
     def __repr__(self) -> str:
         return f"WorkspaceConfig(workspace={self.workspace!r}, fingerprint={self.fingerprint!r})"
@@ -220,15 +238,20 @@ def _check_bound_identity(parsed: Any, workspace: str) -> None:
         raise PrivateConfigError("CURRENCY_MISMATCH", "currency")
 
 
-def _check_india_limits(limits: IndiaLimits) -> None:
+def _check_caps(limits: IndiaLimits | UkLimits) -> None:
     # Ordering only. No ceiling and no expected value: limits are operator
     # inputs and stay out of tracked code.
     zero = Decimal(0)
-    minus_one = Decimal(-1)
     if not limits.capital_cap > zero:
         raise PrivateConfigError("LIMIT_ORDER_INVALID", "capital_cap")
     if not zero < limits.per_position_cap <= limits.capital_cap:
         raise PrivateConfigError("LIMIT_ORDER_INVALID", "per_position_cap")
+
+
+def _check_india_limits(limits: IndiaLimits) -> None:
+    zero = Decimal(0)
+    minus_one = Decimal(-1)
+    _check_caps(limits)
     if not limits.drawdown_halt < zero:
         raise PrivateConfigError("LIMIT_ORDER_INVALID", "drawdown_halt")
     if not minus_one < limits.drawdown_flatten < limits.drawdown_halt:
@@ -317,6 +340,51 @@ def _fingerprint(raw_files: dict[str, bytes]) -> str:
     return digest.hexdigest()
 
 
+EXECUTION_FILE = "execution.json"
+UK_LIMITS_FILE = "limits.json"
+
+
+def _load_execution(
+    workspace_dir: Path, workspace: str, raw_files: dict[str, bytes]
+) -> WorkspaceExecution | None:
+    """Read the optional execution.json. Absent means venue paper, as before.
+
+    A present file that is invalid, names an unknown venue, or names a Trading
+    212 venue in India is an error: it never falls back to paper.
+    """
+
+    path = workspace_dir / EXECUTION_FILE
+    if not os.path.lexists(path):
+        return None
+    raw = _read_config_file(path, EXECUTION_FILE)
+    data = _parse_object(raw, EXECUTION_FILE)
+    venue = data.get("venue")
+    if not isinstance(venue, str) or venue not in KNOWN_VENUES:
+        raise PrivateConfigError("VENUE_UNKNOWN", "venue")
+    if venue in PRACTICE_VENUE_IDS:
+        if workspace != "uk":
+            raise PrivateConfigError("VENUE_NOT_ALLOWED", "venue")
+        for name in ("account_id", "currency"):
+            if name not in data:
+                raise PrivateConfigError("SCHEMA_INVALID", name)
+    _check_identity(data, workspace)
+    execution = _validate_model(WorkspaceExecution, data)
+    _check_bound_identity(execution, workspace)
+    raw_files[EXECUTION_FILE] = raw
+    return execution
+
+
+def _load_uk_limits(workspace_dir: Path, raw_files: dict[str, bytes]) -> UkLimits:
+    raw = _read_config_file(workspace_dir / UK_LIMITS_FILE, UK_LIMITS_FILE)
+    data = _parse_object(raw, UK_LIMITS_FILE)
+    _check_identity(data, "uk")
+    limits = _validate_model(UkLimits, data)
+    _check_bound_identity(limits, "uk")
+    _check_caps(limits)
+    raw_files[UK_LIMITS_FILE] = raw
+    return limits
+
+
 def load_workspace_config(
     private_dir: str | os.PathLike[str] | None, workspace: str
 ) -> WorkspaceConfig:
@@ -360,6 +428,11 @@ def load_workspace_config(
         manifest = _validate_model(UkManifest, parsed_files["manifest.json"])
         _check_bound_identity(manifest, workspace)
 
+    execution = _load_execution(workspace_dir, workspace, raw_files)
+    uk_limits: UkLimits | None = None
+    if execution is not None and execution.venue in PRACTICE_VENUE_IDS:
+        uk_limits = _load_uk_limits(workspace_dir, raw_files)
+
     return WorkspaceConfig(
         workspace=workspace,
         currency=WORKSPACE_CURRENCY[workspace],
@@ -367,4 +440,6 @@ def load_workspace_config(
         strategy=strategy,
         manifest=manifest,
         fingerprint=_fingerprint(raw_files),
+        execution=execution,
+        uk_limits=uk_limits,
     )

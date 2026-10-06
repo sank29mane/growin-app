@@ -7,7 +7,14 @@ from .loader import (
     WorkspaceConfig,
     load_workspace_config,
 )
-from .schemas import FileRef, IndiaLimits, IndiaStrategy, UkManifest
+from .schemas import (
+    FileRef,
+    IndiaLimits,
+    IndiaStrategy,
+    UkLimits,
+    UkManifest,
+    WorkspaceExecution,
+)
 
 __all__ = [
     "SUPPORTED_WORKSPACES",
@@ -16,7 +23,9 @@ __all__ = [
     "IndiaLimits",
     "IndiaStrategy",
     "PrivateConfigError",
+    "UkLimits",
     "UkManifest",
+    "WorkspaceExecution",
     "WorkspaceConfig",
     "load_workspace_config",
 ]
