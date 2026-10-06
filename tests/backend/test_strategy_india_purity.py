@@ -181,8 +181,12 @@ def _reflection_violation(node: ast.AST) -> str | None:
     return None
 
 
-def _private(name: str) -> bool:
-    return name.startswith("_") and not (name.startswith("__") and name.endswith("__"))
+def _not_public(name: str) -> bool:
+    """Only plain public identifiers pass a from-import allowlist: no underscore prefix, so no dunders either.
+
+    `from pilot_data.dataset import __dict__` binds the module dict, which holds the private readers.
+    """
+    return name.startswith("_")
 
 
 PILOT_RULE = "pilot_data is reachable only as 'from pilot_data.<module> import <public names>'"
@@ -208,9 +212,9 @@ def _pilot_data_violation(node: ast.AST) -> str | None:
             return None
         if len(parts) == 1:
             return f"{PILOT_RULE}, not 'from {node.module} import ...' (that binds a module)"
-        if any(_private(part) for part in parts):
+        if any(_not_public(part) for part in parts):
             return f"{PILOT_RULE}, not a private module in 'from {node.module} import ...'"
-        bad = [alias.name for alias in node.names if _private(alias.name) or alias.name == "*"]
+        bad = [alias.name for alias in node.names if _not_public(alias.name) or alias.name == "*"]
         if bad:
             return f"private pilot_data name {', '.join(bad)}"
     elif isinstance(node, ast.Attribute):
@@ -354,6 +358,8 @@ def test_package_is_pure():
         ("import costs.ticks as ct\nx = getattr(ct, '__dict__')[k]", "ticks.py", "not import costs.ticks"),
         ("import costs.ticks as ct\nx = ct.__dict__[name]", "ticks.py", "not import costs.ticks"),
         ("import costs.ticks as ct\nx = vars(ct)['_resolve_tick_from_table']", "ticks.py", "not import costs.ticks"),
+        ("from costs.ticks import __dict__", "ticks.py", "private costs.ticks name"),
+        ("from costs.ticks import __dict__ as d", "ticks.py", "private costs.ticks name"),
         ("import costs.ticks as ct\nx = vars(object=ct)[k]", "ticks.py", "not import costs.ticks"),
         ("import costs\nx = getattr(costs.ticks, name=n)", "ticks.py", "attribute chain"),
         ("import costs\nx = vars(object=costs.ticks)", "ticks.py", "attribute chain"),
@@ -529,6 +535,9 @@ def test_package_is_pure():
         ("from pilot_data.dataset import _read_parquet as read", "data.py", "private pilot_data name"),
         ("from pilot_data.dataset import *", "data.py", "private pilot_data name"),
         ("from backend.pilot_data.dataset import _read_parquet", "data.py", "private pilot_data name"),
+        # dunders bind the module dict or loader, so they are as forbidden as single-underscore names
+        ("from pilot_data.dataset import __dict__", "data.py", "private pilot_data name"),
+        ("from pilot_data.dataset import __loader__", "data.py", "private pilot_data name"),
         # Grok's reflection forms: each needs the module object, which the allowlist never lets anyone bind
         ("from pilot_data import dataset as d\nf = getattr(d, '_read_parquet')", "data.py", "that binds a module"),
         ("from pilot_data import dataset as d\nf = getattr(d, name='_read_parquet')", "data.py", "that binds a module"),
