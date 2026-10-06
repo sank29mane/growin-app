@@ -870,3 +870,72 @@ def test_no_trading_212_host_string_in_execution_or_app_context():
         if "trading212.com" in text:
             hits.append(str(path.relative_to(root)))
     assert hits == []
+
+
+# --- the LIMIT-as-market dispatcher is gone (D-10c) ------------------------------
+
+import ast
+
+ORDER_TOOL_NAMES = (
+    "place_market_order",
+    "place_limit_order",
+    "place_stop_order",
+    "place_stop_limit_order",
+    "cancel_order",
+    "create_investment_pie",
+    "update_investment_pie",
+    "delete_investment_pie",
+    "update_pie",
+    "switch_account",
+)
+BACKEND = Path(__file__).resolve().parents[2] / "backend"
+
+
+def _order_tool_offences(paths) -> list[str]:
+    """Every call_tool call and every order or cancel tool name in these files."""
+
+    offences = []
+    for path in paths:
+        tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func = node.func
+                name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+                if name == "call_tool":
+                    offences.append(f"{Path(path).name}:{node.lineno} call_tool")
+            if isinstance(node, ast.Constant) and node.value in ORDER_TOOL_NAMES:
+                offences.append(f"{Path(path).name}:{node.lineno} {node.value}")
+    return offences
+
+
+def test_trading212_dispatcher_is_gone():
+    with pytest.raises(ImportError):
+        from execution import Trading212Dispatcher  # noqa: F401
+    with pytest.raises(ImportError):
+        import execution.t212_dispatcher  # noqa: F401
+    import execution
+
+    assert not hasattr(execution, "Trading212Dispatcher")
+    assert "Trading212Dispatcher" not in execution.__all__
+    assert not (BACKEND / "execution" / "t212_dispatcher.py").exists()
+
+
+def test_no_execution_or_app_context_code_calls_an_mcp_order_tool():
+    sources = [*(BACKEND / "execution").rglob("*.py"), BACKEND / "app_context.py"]
+    assert len(sources) > 5
+    assert _order_tool_offences(sources) == []
+
+
+def test_the_order_tool_scan_catches_a_planted_call(tmp_path):
+    """The scan above is only evidence if it can fail."""
+
+    planted = tmp_path / "planted.py"
+    planted.write_text(
+        "async def go(client):\n"
+        "    await client.call_tool('place_market_order', {'ticker': 'X'})\n",
+        encoding="utf-8",
+    )
+    assert _order_tool_offences([planted]) == [
+        "planted.py:2 call_tool",
+        "planted.py:2 place_market_order",
+    ]

@@ -58,7 +58,6 @@ from .venue import (
     VenueError,
     production_dispatcher_factories,
 )
-from .t212_dispatcher import Trading212Dispatcher
 from .requote import (
     LocalPaperVenue,
     QuoteEvidence,
@@ -120,7 +119,6 @@ __all__ = [
     "VenueBinding",
     "VenueContext",
     "VenueError",
-    "Trading212Dispatcher",
     "WORKSPACE_CURRENCY",
     "Workspace",
     "WorkspaceControl",
