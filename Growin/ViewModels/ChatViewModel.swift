@@ -72,11 +72,13 @@ class ChatViewModel {
         guard let workspace = WorkspaceSelection.current() else {
             throw ChatWorkspaceError.noWorkspaceSelected
         }
-        let identity = try LocalApprovalSigner.shared.identity(for: workspace)
+        let identity = try ApprovalSignerRouter.shared.identity(for: workspace)
         guard identity.keyID == review.payload.keyId else {
             throw TradeApprovalReviewError.signerMismatch
         }
-        let signature = try LocalApprovalSigner.shared.sign(review.signedBytes, for: workspace)
+        let signature = try await ApprovalSignerRouter.shared.signAsync(
+            review.signedBytes, for: workspace, flow: .paperApproval
+        )
         let result = try await aiService.completeTradeApproval(review, signature: signature, workspace: workspace)
         streamingStatus = result.message
         updateProposalStatus(id: review.payload.proposalId, status: "ACKNOWLEDGED")
