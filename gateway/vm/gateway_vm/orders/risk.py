@@ -22,8 +22,9 @@ reset while still at or below -8% re-latches at the next evaluated close.
 from __future__ import annotations
 
 import copy
+import re
 from dataclasses import dataclass, field
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
@@ -91,6 +92,25 @@ class Fill:
     quantity: int
     price: Decimal
     charges: Decimal
+    # Chronology, persisted explicitly: never inferred from dict or JSON key
+    # order, and never from trade-id spelling. executed_at is the exchange time
+    # as a fixed-width UTC string, so string order is time order; seq is the
+    # arrival number and breaks ties. A trade with no time inherits the latest
+    # time already in the ledger ("" if none), so it orders by arrival.
+    executed_at: str = ""
+    seq: int = 0
+
+
+_STAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z")
+
+
+def _stamp(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def chronological_fills(state: "OrderState") -> list[tuple[str, Fill]]:
+    """Every fill as (trade_id, Fill) in execution order: exchange time, then arrival."""
+    return sorted(state.fills.items(), key=lambda item: (item[1].executed_at, item[1].seq))
 
 
 @dataclass
@@ -155,8 +175,10 @@ class OrderState:
                     "quantity": f.quantity,
                     "price": _d(f.price),
                     "charges": _d(f.charges),
+                    "executed_at": f.executed_at,
+                    "seq": f.seq,
                 }
-                for tid, f in self.fills.items()
+                for tid, f in chronological_fills(self)
             },
             "consumed_intents": list(self.consumed_intents),
             "alerts_sent": list(self.alerts_sent),
@@ -198,23 +220,37 @@ class OrderState:
             fills: dict[str, Fill] = {}
             if not isinstance(raw["fills"], dict):
                 raise StateInvalid("fills")
+            seen_seq: set[int] = set()
             for tid, rec in raw["fills"].items():
                 if (
                     not isinstance(rec, dict)
-                    or set(rec) != {"isin", "side", "quantity", "price", "charges"}
+                    or set(rec) != {"isin", "side", "quantity", "price", "charges", "executed_at", "seq"}
                     or rec["side"] not in ("buy", "sell")
                     or isinstance(rec["quantity"], bool)
                     or not isinstance(rec["quantity"], int)
                     or rec["quantity"] <= 0
+                    or isinstance(rec["seq"], bool)
+                    or not isinstance(rec["seq"], int)
+                    or rec["seq"] < 0
+                    or rec["seq"] in seen_seq
+                    or not isinstance(rec["executed_at"], str)
+                    or (rec["executed_at"] != "" and _STAMP.fullmatch(rec["executed_at"]) is None)
                 ):
                     raise StateInvalid("fill record")
+                seen_seq.add(rec["seq"])
                 fills[tid] = Fill(
                     isin=str(rec["isin"]),
                     side=rec["side"],
                     quantity=rec["quantity"],
                     price=_parse_d(rec["price"]),
                     charges=_parse_d(rec["charges"]),
+                    executed_at=rec["executed_at"],
+                    seq=rec["seq"],
                 )
+            # Whatever order the JSON listed them in, the ledger is chronological.
+            fills = dict(
+                sorted(fills.items(), key=lambda item: (item[1].executed_at, item[1].seq))
+            )
             for name in ("consumed_intents", "alerts_sent"):
                 if not isinstance(raw[name], list) or not all(isinstance(x, str) for x in raw[name]):
                     raise StateInvalid(name)
@@ -266,17 +302,21 @@ def initial_state(limits: Limits) -> OrderState:
 
 def net_quantities(state: OrderState) -> dict[str, int]:
     net: dict[str, int] = {}
-    for fill in state.fills.values():
+    for _, fill in chronological_fills(state):
         delta = fill.quantity if fill.side == "buy" else -fill.quantity
         net[fill.isin] = net.get(fill.isin, 0) + delta
     return net
 
 
 def ledger_cost(state: OrderState) -> dict[str, Decimal]:
-    """Average-cost basis per ISIN from the fill ledger (charges excluded, P-09)."""
+    """Average-cost basis per ISIN from the fill ledger (charges excluded, P-09).
+
+    Fills are replayed in execution order (exchange time, then arrival): a sell
+    shrinks the cost of what was held at that moment, so order changes the answer.
+    """
     qty: dict[str, int] = {}
     cost: dict[str, Decimal] = {}
-    for fill in state.fills.values():
+    for _, fill in chronological_fills(state):
         held = qty.get(fill.isin, 0)
         if fill.side == "buy":
             qty[fill.isin] = held + fill.quantity
@@ -300,17 +340,34 @@ def apply_trades(state: OrderState, trades: Sequence[Trade]) -> bool:
     below zero cannot have come from this ledger, so it latches account_mismatch.
     """
     changed = False
-    for trade in trades:
-        if trade.trade_id in state.fills:
-            continue
+    # Unseen trades only (idempotent by trade_id, also within one batch), applied
+    # in exchange-time order so a snapshot that lists a later fill first cannot
+    # make a sell look larger than the holding. Untimed trades go last, in
+    # arrival order.
+    batch: dict[str, tuple[int, Trade]] = {}
+    for index, trade in enumerate(trades):
+        if trade.trade_id not in state.fills and trade.trade_id not in batch:
+            batch[trade.trade_id] = (index, trade)
+    ordered = sorted(
+        batch.values(),
+        key=lambda item: (
+            item[1].executed_at is None,
+            _stamp(item[1].executed_at) if item[1].executed_at is not None else "",
+            item[0],
+        ),
+    )
+    for _, trade in ordered:
         value = trade.quantity * trade.price
         charges = trade.charges if trade.charges is not None else charge_bound(trade.side, value)
+        latest = max((f.executed_at for f in state.fills.values()), default="")
         state.fills[trade.trade_id] = Fill(
             isin=trade.isin,
             side=trade.side,
             quantity=trade.quantity,
             price=trade.price,
             charges=charges,
+            executed_at=_stamp(trade.executed_at) if trade.executed_at is not None else latest,
+            seq=max((f.seq for f in state.fills.values()), default=-1) + 1,
         )
         if trade.side == "buy":
             state.cash -= value + charges

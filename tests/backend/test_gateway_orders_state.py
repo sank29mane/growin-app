@@ -6,11 +6,12 @@ from __future__ import annotations
 
 import hashlib
 import io
+import itertools
 import json
 import os
 import stat
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -25,13 +26,17 @@ from backend.costs.core import Side, TradeFill  # noqa: E402
 from backend.costs.schedule import PricingBasis, load_schedule_set  # noqa: E402
 from gateway_vm.orders import OrderRefusal  # noqa: E402
 from gateway_vm.orders import admin, risk  # noqa: E402
+from gateway_vm.orders import limits as vm_limits  # noqa: E402
 from gateway_vm.orders import store as store_mod  # noqa: E402
 from gateway_vm.orders.audit import AuditBroken, AuditLog  # noqa: E402
 from gateway_vm.orders.limits import (  # noqa: E402
+    AccountSnapshot,
     Holding,
     Limits,
+    Quote,
     Trade,
 )
+from gateway_vm.orders.intent import parse_intent  # noqa: E402
 from gateway_vm.orders.store import StateStore  # noqa: E402
 
 FIXTURES = ROOT / "tests" / "backend" / "fixtures" / "relay_orders"
@@ -244,6 +249,182 @@ def test_ledger_cost_is_average_cost_and_shrinks_on_sells():
     assert risk.ledger_cost(state)[ISIN] == Decimal("1100")  # 20 sh at 110 avg, 10 sold
     risk.apply_trades(state, [Trade("s2", ISIN, "sell", 10, Decimal("130"), Decimal("0"))])
     assert ISIN not in risk.ledger_cost(state)
+
+
+# ------------------------------------- fill chronology survives a reload (#552 P1)
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _at(minute: int) -> datetime:
+    return datetime(2026, 10, 8, 10, minute, 0, tzinfo=IST)
+
+
+def _round_trip(z_id="z", y_id="y", a_id="a", *, timed=True):
+    """buy 10 x 100, sell all 10, buy 10 x 200. Trade ids sort the opposite way to time."""
+    def mk(tid, side, price, minute):
+        return Trade(tid, ISIN, side, 10, Decimal(price), Decimal("0"), _at(minute) if timed else None)
+
+    return [mk(z_id, "buy", "100", 0), mk(y_id, "sell", "100", 1), mk(a_id, "buy", "200", 2)]
+
+
+def _evaluated(state: risk.OrderState) -> risk.OrderState:
+    risk.evaluate_session(state, LIMITS, date(2026, 10, 9), {ISIN: Decimal("170")})
+    return state
+
+
+def _summary(state: risk.OrderState) -> dict:
+    return {
+        "cost": risk.ledger_cost(state),
+        "net": risk.net_quantities(state),
+        "stops": sorted(state.stops),
+        "flags": state.flags(),
+        "latches": state.latch_names(),
+    }
+
+
+def test_persisted_fills_replay_in_execution_order_not_trade_id_order(tmp_path):
+    state = risk.initial_state(LIMITS)
+    risk.apply_trades(state, _round_trip())
+    assert risk.ledger_cost(state) == {ISIN: Decimal("2000")}
+    _evaluated(state)
+    assert list(state.stops) == [ISIN]  # 10 x 170 = 1700 <= 2000 x 0.88 = 1760
+    store = _store(tmp_path)
+    store.save(state)
+    reloaded = StateStore(store.directory).load()
+    assert risk.ledger_cost(reloaded) == {ISIN: Decimal("2000")}  # was 1000 when ids were sorted
+    assert _summary(reloaded) == _summary(state)
+    assert [tid for tid, _ in risk.chronological_fills(reloaded)] == ["z", "y", "a"]
+    assert list(reloaded.fills) == ["z", "y", "a"]
+
+
+@pytest.mark.parametrize("order", list(itertools.permutations(range(3))))
+def test_shuffled_snapshot_order_and_trade_ids_give_the_same_ledger(tmp_path, order):
+    reference = risk.initial_state(LIMITS)
+    risk.apply_trades(reference, _round_trip())
+    _evaluated(reference)
+    for ids in (("z", "y", "a"), ("a", "y", "z"), ("m1", "k9", "b2")):
+        trades = _round_trip(*ids)
+        shuffled = [trades[i] for i in order]
+        state = risk.initial_state(LIMITS)
+        risk.apply_trades(state, shuffled)
+        _evaluated(state)
+        store = _store(tmp_path)
+        store.save(state)
+        reloaded = StateStore(store.directory).load()
+        for candidate in (state, reloaded):
+            assert risk.ledger_cost(candidate) == {ISIN: Decimal("2000")}
+            assert sorted(candidate.stops) == [ISIN]
+            assert candidate.account_mismatch is False  # a sell listed first is not a short
+            assert candidate.cash == reference.cash
+
+
+def test_json_key_order_is_irrelevant_to_replay(tmp_path):
+    state = risk.initial_state(LIMITS)
+    risk.apply_trades(state, _round_trip())
+    body = state.to_json()
+    body["fills"] = dict(sorted(body["fills"].items()))  # a, y, z: what sorted ids would give
+    assert list(body["fills"]) == ["a", "y", "z"]
+    assert risk.ledger_cost(risk.OrderState.from_json(body)) == {ISIN: Decimal("2000")}
+    body["fills"] = dict(reversed(list(body["fills"].items())))
+    assert risk.ledger_cost(risk.OrderState.from_json(body)) == {ISIN: Decimal("2000")}
+
+
+def test_equal_exchange_times_fall_back_to_arrival_order_and_survive_reload(tmp_path):
+    state = risk.initial_state(LIMITS)
+    same = datetime(2026, 10, 8, 10, 0, 0, tzinfo=IST)
+    for tid, side, price in (("z", "buy", "100"), ("y", "sell", "100"), ("a", "buy", "200")):
+        risk.apply_trades(state, [Trade(tid, ISIN, side, 10, Decimal(price), Decimal("0"), same)])
+    store = _store(tmp_path)
+    store.save(state)
+    reloaded = StateStore(store.directory).load()
+    assert risk.ledger_cost(reloaded) == risk.ledger_cost(state) == {ISIN: Decimal("2000")}
+
+
+def test_untimed_trades_keep_arrival_order_across_a_reload(tmp_path):
+    state = risk.initial_state(LIMITS)
+    for trade in _round_trip(timed=False):
+        risk.apply_trades(state, [trade])
+    store = _store(tmp_path)
+    store.save(state)
+    reloaded = StateStore(store.directory).load()
+    assert risk.ledger_cost(reloaded) == {ISIN: Decimal("2000")}
+    assert [tid for tid, _ in risk.chronological_fills(reloaded)] == ["z", "y", "a"]
+
+
+def test_a_late_arriving_earlier_fill_is_replayed_at_its_exchange_time(tmp_path):
+    z, y, a = _round_trip()
+    state = risk.initial_state(LIMITS)
+    risk.apply_trades(state, [y, a])  # the buy z shows up on a later poll
+    risk.apply_trades(state, [z])
+    assert [tid for tid, _ in risk.chronological_fills(state)] == ["z", "y", "a"]
+    assert risk.ledger_cost(state) == {ISIN: Decimal("2000")}
+    store = _store(tmp_path)
+    store.save(state)
+    assert risk.ledger_cost(StateStore(store.directory).load()) == {ISIN: Decimal("2000")}
+
+
+def test_exchange_time_is_normalised_so_zone_offsets_do_not_reorder(tmp_path):
+    utc = timezone.utc
+    state = risk.initial_state(LIMITS)
+    # 04:31 UTC is 10:01 IST: the sell. Written with a different offset than the buys.
+    risk.apply_trades(state, [
+        Trade("a", ISIN, "buy", 10, Decimal("200"), Decimal("0"), datetime(2026, 10, 8, 4, 32, tzinfo=utc)),
+        Trade("y", ISIN, "sell", 10, Decimal("100"), Decimal("0"), datetime(2026, 10, 8, 10, 1, tzinfo=IST)),
+        Trade("z", ISIN, "buy", 10, Decimal("100"), Decimal("0"), datetime(2026, 10, 8, 4, 30, tzinfo=utc)),
+    ])
+    assert [tid for tid, _ in risk.chronological_fills(state)] == ["z", "y", "a"]
+    assert risk.ledger_cost(state) == {ISIN: Decimal("2000")}
+
+
+def test_naive_exchange_time_is_refused():
+    with pytest.raises(ValueError):
+        Trade("t", ISIN, "buy", 1, Decimal("1"), Decimal("0"), datetime(2026, 10, 8, 10, 0))
+
+
+def test_capital_cap_and_stop_results_are_identical_before_and_after_a_reload(tmp_path):
+    sv = json.loads((FIXTURES / "signing_vectors.json").read_text(encoding="utf-8"))
+    body = dict(sv["rows"][0]["payload"]["intent"], quantity=485, limit_price="100.05")
+    intent = parse_intent(json.dumps(body))
+    quote = Quote("TESTCO", ISIN, "EQ", Decimal("100.00"), Decimal("90.00"), Decimal("110.00"),
+                  Decimal("99.80"), date(2026, 10, 8))
+    now = vm_limits.to_ist(datetime(2026, 10, 8, 10, 0, tzinfo=IST))
+
+    def decide(state):
+        return vm_limits.evaluate(
+            LIMITS, state.flags(), AccountSnapshot(), quote, now, intent,
+            kill_enabled=True,
+        )
+
+    state = risk.initial_state(LIMITS)
+    risk.apply_trades(state, _round_trip())
+    _evaluated(state)
+    before = decide(state)
+    # 485 x 100.05 on top of a 2000 position is over 50000; on 1000 it would pass.
+    assert "capital_cap" in before and "stop_open" in before
+    store = _store(tmp_path)
+    store.save(state)
+    after = decide(StateStore(store.directory).load())
+    assert after == before
+
+
+def test_fill_records_are_validated_on_load():
+    state = risk.initial_state(LIMITS)
+    risk.apply_trades(state, _round_trip())
+    good = state.to_json()
+
+    def broken(mutate):
+        body = json.loads(json.dumps(good))
+        mutate(body)
+        with pytest.raises(risk.StateInvalid):
+            risk.OrderState.from_json(body)
+
+    broken(lambda b: b["fills"]["z"].pop("seq"))
+    broken(lambda b: b["fills"]["z"].update(seq=True))
+    broken(lambda b: b["fills"]["z"].update(seq=-1))
+    broken(lambda b: b["fills"]["y"].update(seq=b["fills"]["z"]["seq"]))  # duplicate sequence
+    broken(lambda b: b["fills"]["z"].update(executed_at="2026-10-08 10:00:00"))
+    broken(lambda b: b["fills"]["z"].update(executed_at=5))
 
 
 # --------------------------------------------------------------- charge bound

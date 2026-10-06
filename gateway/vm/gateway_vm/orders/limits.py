@@ -269,6 +269,15 @@ class Trade:
     quantity: int
     price: Decimal
     charges: Decimal | None = None  # None: trade detail not populated yet
+    # Exchange execution time, timezone-aware. The ledger replays fills in
+    # (executed_at, arrival) order, so average cost never depends on trade-id
+    # spelling or on the order a snapshot happens to list them in. None means
+    # the trade detail has no time: the fill is ordered by arrival alone.
+    executed_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if self.executed_at is not None and self.executed_at.tzinfo is None:
+            raise ValueError("trade executed_at must be timezone-aware")
 
 
 @dataclass(frozen=True)
