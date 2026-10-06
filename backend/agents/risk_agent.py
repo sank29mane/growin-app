@@ -13,6 +13,7 @@ from decimal import Decimal
 from pydantic import BaseModel, Field
 from magentic import prompt as mag_prompt
 
+from .critic_binding import clear_review, proposal_identity, _bind_successful_review
 from .base_agent import BaseAgent, AgentResponse, AgentConfig
 from market_context import MarketContext
 from utils.financial_math import create_decimal
@@ -154,7 +155,15 @@ class RiskAgent(BaseAgent):
 
     async def review(self, context: MarketContext, suggestion: str) -> Dict[str, Any]:
         """Convenience method for Orchestrator integration"""
-        context.user_context.pop("risk_review_succeeded", None)
+        clear_review(context)
+        proposal = context.user_context.get("deferred_proposal")
+        if proposal:
+            # Bind the server-stamped workspace too; registration must not change
+            # the reviewed payload when the ledger supplies this field.
+            from app_context import state
+            if state._execution_ledger is not None and "workspace" not in proposal:
+                proposal["workspace"] = state._execution_ledger.workspace.value
+        identity = proposal_identity(proposal) if proposal else None
         res = await self.execute({"context": context, "suggestion": suggestion})
         if not res.success:
             raise ProviderError("CRITIC_OUTPUT_INVALID", ROLE_RISK_CRITIC)
@@ -162,5 +171,8 @@ class RiskAgent(BaseAgent):
             review = RiskAssessment.model_validate(res.data).model_dump()
         except (ValueError, TypeError):
             raise ProviderError("CRITIC_OUTPUT_INVALID", ROLE_RISK_CRITIC) from None
-        context.user_context["risk_review_succeeded"] = True
+        if identity is not None:
+            if context.user_context.get("deferred_proposal") is not proposal or proposal_identity(proposal) != identity:
+                raise ModelRegistryError("RISK_REVIEW_REQUIRED", ROLE_RISK_CRITIC)
+            _bind_successful_review(context, identity)
         return review

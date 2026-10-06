@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 
 from .base_agent import BaseAgent, AgentResponse
 from .coordinator_agent import COORDINATOR_SYSTEM_PROMPT
+from .critic_binding import clear_review, require_review, consume_broadcast
 from .decision_agent import DecisionAgent
 from .messenger import AgentMessage, get_messenger
 from market_context import MarketContext
@@ -115,13 +116,18 @@ class OrchestratorAgent:
         risk_critic or rebuttal failure earlier in ``run`` means nothing was
         ever registered or announced.
         """
-        if (context.user_context.get("deferred_proposal") or context.user_context.get("pending_proposal")) and context.user_context.get("risk_review_succeeded") is not True:
-            raise ModelRegistryError("RISK_REVIEW_REQUIRED", ROLE_RISK_CRITIC)
+        held = context.user_context.get("deferred_proposal")
+        pending = context.user_context.get("pending_proposal")
+        if held:
+            require_review(context, held)
+        elif pending:
+            require_review(context, pending, "registered")
         note = self.decision_engine.register_deferred_proposal(context)
         if note:
             recommendation += note
         proposal = context.user_context.get("pending_proposal")
         if proposal:
+            consume_broadcast(context, proposal)
             await self.messenger.send_message(AgentMessage(
                 sender="OrchestratorAgent",
                 recipient="broadcast",
@@ -704,7 +710,7 @@ Query: "{clean_query}"
         # Extract without registering; hold proposal text until the critic has reviewed it.
         proposal = self.decision_engine._extract_trade_proposal(full_response, context)
         if proposal:
-            context.user_context.pop("risk_review_succeeded", None)
+            clear_review(context)
             context.user_context["deferred_proposal"] = proposal
 
         # 4. Governance Phase (Risk Review)

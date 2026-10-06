@@ -19,8 +19,9 @@ from decimal import Decimal
 from pydantic import BaseModel, Field
 from magentic import prompt as mag_prompt
 from langchain_core.messages import SystemMessage, HumanMessage
+from .critic_binding import clear_review, consume_registration
 from .llm_factory import LLMFactory
-from model_registry import ROLE_RISK_CRITIC, ROLE_DECISION, ModelRegistryError, ProviderError
+from model_registry import ROLE_DECISION, ModelRegistryError, ProviderError
 from model_registry.provider import image_message_content, run_magentic
 from utils.audit_log import AUDIT_UNSCOPED, log_audit
 from execution import (
@@ -337,7 +338,7 @@ class DecisionAgent:
             # SOTA 2026 Phase 30: Detect and extract Trade Proposals for HITL
             trade_proposal = self._extract_trade_proposal(recommendation, context)
             if trade_proposal:
-                context.user_context.pop("risk_review_succeeded", None)
+                clear_review(context)
                 context.user_context["deferred_proposal"] = trade_proposal
 
             status_manager.set_status("decision_agent", "ready", "Decision delivered", model=self.model_name)
@@ -1189,18 +1190,21 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
         no account or broker, so registration fails until a human-reviewed path
         supplies them; that refusal is logged by code and the proposal dropped.
         """
-        if context.user_context.get("risk_review_succeeded") is not True:
-            raise ModelRegistryError("RISK_REVIEW_REQUIRED", ROLE_RISK_CRITIC)
+        consume_registration(context, trade_proposal)
 
         from app_context import state
 
         try:
             state.register_trade_proposal(trade_proposal)
         except (ExecutionDisabledError, LedgerError, ExecutionConflictError, ValueError) as exc:
+            clear_review(context)
             # pydantic's ValidationError is a ValueError. Log the code and the
             # exception class only, never the proposal contents.
             logger.warning("TRADE_PROPOSAL_NOT_REGISTERED: %s", type(exc).__name__)
             return False
+        except Exception:
+            clear_review(context)
+            raise
         return True
 
     def _audit_workspace(self) -> str:

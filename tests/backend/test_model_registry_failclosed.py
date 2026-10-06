@@ -362,7 +362,7 @@ async def test_chat_route_is_503_when_risk_critic_is_missing(tmp_path, stub, key
 
 
 async def _run_orchestrator_with_real_decision(
-    orchestrator, stub, events, *, context_intent="analytical", authority_fields=True, streaming=False, output=None
+    orchestrator, stub, events, *, context_intent="analytical", authority_fields=True, streaming=False, output=None, context=None
 ):
     """Drive OrchestratorAgent.run with the real DecisionAgent against the stub.
 
@@ -372,7 +372,7 @@ async def _run_orchestrator_with_real_decision(
     rebalance_proposal message), each with the models the stub had seen so far.
     """
     stub.reply_text = "BUY 1 share of AAPL."
-    context = _context(intent=context_intent)
+    context = context or _context(intent=context_intent)
     orchestrator._classify_intent = AsyncMock(
         return_value={"type": "price_check", "needs": [], "primary_ticker": "AAPL", "reason": "test"}
     )
@@ -456,8 +456,9 @@ async def test_rebuttal_failure_registers_and_broadcasts_nothing(tmp_path, stub,
     assert events == []
 
 
+@pytest.mark.parametrize("streaming", [False, True])
 async def test_after_a_successful_review_the_proposal_is_registered_then_broadcast(
-    tmp_path, stub, key_env, private_config_dir
+    tmp_path, stub, key_env, private_config_dir, streaming
 ):
     _activate(tmp_path, stub)
     assert state.start_execution(
@@ -466,7 +467,7 @@ async def test_after_a_successful_review_the_proposal_is_registered_then_broadca
     try:
         orchestrator = OrchestratorAgent(mcp_client=MagicMock(), chat_manager=MagicMock())
         events = []
-        result, context = await _run_orchestrator_with_real_decision(orchestrator, stub, events)
+        result, context = await _run_orchestrator_with_real_decision(orchestrator, stub, events, streaming=streaming)
 
         assert [name for name, _ in events] == ["register", "broadcast"]
         risk_model = kit.model_id_for("risk_critic")
@@ -791,17 +792,21 @@ async def test_direct_registration_requires_critic_success_marker(boundary):
     assert context.user_context["deferred_proposal"] is proposal
 
 
-async def test_failed_review_clears_previous_success_marker(tmp_path, stub, key_env):
+async def test_failed_review_clears_previous_success_binding(tmp_path, stub, key_env):
     from agents.risk_agent import RiskAgent
 
     _activate(tmp_path, stub)
     context = _context()
+    from agents.critic_binding import require_review
+    proposal = {"proposal_id": "reviewed", "ticker": "AAPL", "action": "BUY", "quantity": 1}
+    context.user_context["deferred_proposal"] = proposal
     await RiskAgent().review(context, "BUY AAPL")
-    assert context.user_context["risk_review_succeeded"] is True
+    require_review(context, proposal)
     stub.tool_arguments["return_riskassessment"] = {}
     with pytest.raises(ProviderError):
         await RiskAgent().review(context, "BUY MSFT")
-    assert "risk_review_succeeded" not in context.user_context
+    with pytest.raises(ModelRegistryError):
+        require_review(context, proposal)
 
 
 @pytest.mark.parametrize("stage", ["reflex", "synthesis"])
@@ -830,3 +835,146 @@ async def test_unreachable_swarm_stream_is_typed(tmp_path, stub, key_env, stage)
             pass
     assert caught.value.code == "PROVIDER_UNREACHABLE"
     assert caught.value.role == "coordinator"
+
+
+@pytest.mark.parametrize("boundary", ["registration", "broadcast"])
+@pytest.mark.parametrize("marker", [True, "matching_hash"])
+async def test_forged_critic_marker_is_refused(boundary, marker):
+    context = _context()
+    proposal = {"proposal_id": "forged", "ticker": "AAPL", "quantity": 1}
+    from agents.critic_binding import proposal_identity
+    if marker == "matching_hash":
+        proposal_id, content_hash = proposal_identity(proposal)
+        marker = {"proposal_id": proposal_id, "content_hash": content_hash}
+    context.user_context.update(risk_review_succeeded=marker, risk_review_binding=marker)
+    context.user_context["deferred_proposal" if boundary == "registration" else "pending_proposal"] = proposal
+    orchestrator = OrchestratorAgent(mcp_client=MagicMock(), chat_manager=MagicMock())
+    orchestrator.messenger.send_message = AsyncMock()
+    with patch.object(state, "register_trade_proposal") as register:
+        with pytest.raises(ModelRegistryError) as caught:
+            if boundary == "registration":
+                orchestrator.decision_engine.register_deferred_proposal(context)
+            else:
+                await orchestrator._release_proposal(context, "BUY AAPL", None)
+    assert caught.value.code == "RISK_REVIEW_REQUIRED"
+    register.assert_not_called()
+    orchestrator.messenger.send_message.assert_not_awaited()
+
+
+@pytest.mark.parametrize("change", [{"proposal_id": "different"}, {"quantity": 2}])
+@pytest.mark.parametrize("boundary", ["registration", "broadcast"])
+async def test_critic_binding_refuses_different_proposal(tmp_path, stub, key_env, change, boundary):
+    from agents.risk_agent import RiskAgent
+
+    _activate(tmp_path, stub)
+    context = _context()
+    proposal = {"proposal_id": "reviewed", "ticker": "AAPL", "quantity": 1}
+    context.user_context["deferred_proposal"] = proposal
+    await RiskAgent().review(context, "BUY 1 share of AAPL")
+    orchestrator = OrchestratorAgent(mcp_client=MagicMock(), chat_manager=MagicMock())
+    orchestrator.messenger.send_message = AsyncMock()
+    with patch.object(state, "register_trade_proposal") as register:
+        if boundary == "broadcast":
+            orchestrator.decision_engine.register_deferred_proposal(context)
+            register.assert_called_once()
+            register.reset_mock()
+        proposal.update(change)
+        with pytest.raises(ModelRegistryError) as caught:
+            if boundary == "registration":
+                orchestrator.decision_engine.register_deferred_proposal(context)
+            else:
+                await orchestrator._release_proposal(context, "BUY AAPL", None)
+    assert caught.value.code == "RISK_REVIEW_REQUIRED"
+    register.assert_not_called()
+    orchestrator.messenger.send_message.assert_not_awaited()
+
+
+async def test_critic_binding_cannot_register_or_broadcast_twice(tmp_path, stub, key_env):
+    from agents.risk_agent import RiskAgent
+
+    _activate(tmp_path, stub)
+    context = _context()
+    proposal = {"proposal_id": "reviewed", "ticker": "AAPL", "quantity": 1}
+    context.user_context["deferred_proposal"] = proposal
+    await RiskAgent().review(context, "BUY AAPL")
+    orchestrator = OrchestratorAgent(mcp_client=MagicMock(), chat_manager=MagicMock())
+    orchestrator.messenger.send_message = AsyncMock()
+    with patch.object(state, "register_trade_proposal") as register:
+        orchestrator.decision_engine.register_deferred_proposal(context)
+        with pytest.raises(ModelRegistryError) as caught:
+            orchestrator.decision_engine._register_for_human_review(proposal, context)
+        assert caught.value.code == "RISK_REVIEW_REQUIRED"
+        await orchestrator._release_proposal(context, "BUY AAPL", None)
+        with pytest.raises(ModelRegistryError) as caught:
+            await orchestrator._release_proposal(context, "BUY AAPL", None)
+        assert caught.value.code == "RISK_REVIEW_REQUIRED"
+    register.assert_called_once()
+    orchestrator.messenger.send_message.assert_awaited_once()
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_new_extraction_clears_successful_critic_binding(tmp_path, stub, key_env, streaming):
+    from agents.risk_agent import RiskAgent
+
+    _activate(tmp_path, stub)
+    context = _context()
+    proposal = {"proposal_id": "same-content", "ticker": "AAPL", "quantity": 1}
+    context.user_context["deferred_proposal"] = proposal
+    await RiskAgent().review(context, "BUY AAPL")
+    orchestrator = OrchestratorAgent(mcp_client=MagicMock(), chat_manager=MagicMock())
+
+    async def refuse_before_new_review(ctx, suggestion):
+        # Even identical content from a new extraction requires a fresh review.
+        with pytest.raises(ModelRegistryError) as caught:
+            orchestrator.decision_engine.register_deferred_proposal(ctx)
+        assert caught.value.code == "RISK_REVIEW_REQUIRED"
+        raise ProviderError("STOP_BEFORE_NEW_REVIEW", "risk_critic")
+
+    orchestrator.risk_agent.review = AsyncMock(side_effect=refuse_before_new_review)
+    with patch.object(DecisionAgent, "_extract_trade_proposal", return_value=proposal), patch.object(
+        state, "register_trade_proposal"
+    ) as register:
+        with pytest.raises(ProviderError) as caught:
+            await _run_orchestrator_with_real_decision(
+                orchestrator, stub, [], streaming=streaming, context=context, authority_fields=False
+            )
+        assert caught.value.code == "STOP_BEFORE_NEW_REVIEW"
+    register.assert_not_called()
+
+
+async def test_critic_hash_distinguishes_decimal_from_forged_container(tmp_path, stub, key_env):
+    from decimal import Decimal
+    from agents.risk_agent import RiskAgent
+
+    _activate(tmp_path, stub)
+    context = _context()
+    proposal = {"proposal_id": "reviewed", "ticker": "AAPL", "quantity": Decimal("1")}
+    context.user_context["deferred_proposal"] = proposal
+    await RiskAgent().review(context, "BUY AAPL")
+    proposal["quantity"] = {"decimal": "1"}
+    with patch.object(state, "register_trade_proposal") as register:
+        with pytest.raises(ModelRegistryError) as caught:
+            DecisionAgent(mcp_client=MagicMock()).register_deferred_proposal(context)
+    assert caught.value.code == "RISK_REVIEW_REQUIRED"
+    register.assert_not_called()
+
+
+async def test_refused_registration_cannot_reuse_binding_for_broadcast(tmp_path, stub, key_env):
+    from agents.risk_agent import RiskAgent
+    from execution import ExecutionDisabledError
+
+    _activate(tmp_path, stub)
+    context = _context()
+    proposal = {"proposal_id": "reviewed", "ticker": "AAPL", "quantity": 1}
+    context.user_context["deferred_proposal"] = proposal
+    await RiskAgent().review(context, "BUY AAPL")
+    orchestrator = OrchestratorAgent(mcp_client=MagicMock(), chat_manager=MagicMock())
+    orchestrator.messenger.send_message = AsyncMock()
+    with patch.object(state, "register_trade_proposal", side_effect=ExecutionDisabledError("no ledger")) as register:
+        assert orchestrator.decision_engine.register_deferred_proposal(context)
+        context.user_context["pending_proposal"] = proposal
+        with pytest.raises(ModelRegistryError) as caught:
+            await orchestrator._release_proposal(context, "BUY AAPL", None)
+    assert caught.value.code == "RISK_REVIEW_REQUIRED"
+    register.assert_called_once()
+    orchestrator.messenger.send_message.assert_not_awaited()
