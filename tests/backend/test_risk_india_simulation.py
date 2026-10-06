@@ -215,7 +215,7 @@ def test_minus_8_halts_entries_and_prebuilds_a_pro_rata_halve_batch(scenario):
     sim.close_session(D[5], {A: "130", B: "130"})
     assert sim.book.drawdown() == 0 and sim.state.drawdown == 0
     assert sim.state.halt and "halt_latch" in buy_codes(sim.state)
-    released = drawdown.reset(sim.state, "halt", "operator")
+    released = drawdown.reset(sim.state, "halt", "operator", limits=LIMITS)
     assert "halt_latch" not in buy_codes(released)
 
 

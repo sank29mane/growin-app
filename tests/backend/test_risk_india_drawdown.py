@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from risk_india import drawdown, exits, rules
+from risk_india_support import FillOrderError, in_execution_order, replay_fills
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "tests" / "backend" / "fixtures" / "relay_orders"
@@ -61,18 +62,7 @@ def replay(case: dict) -> drawdown.RiskState:
     if "start" in case:
         state = dataclasses.replace(state, peak=Decimal(case["start"]["peak"]))
         cash = Decimal(case["start"]["cash"])
-    held: dict[str, list] = {}  # isin -> [quantity, cost]
-    for fill in case["fills"]:
-        quantity, price, charges = fill["quantity"], Decimal(fill["price"]), Decimal(fill["charges"])
-        entry = held.setdefault(fill["isin"], [0, Decimal(0)])
-        if fill["side"] == "buy":
-            entry[0] += quantity
-            entry[1] += quantity * price
-            cash -= quantity * price + charges
-        else:
-            entry[1] = entry[1] * (entry[0] - quantity) / entry[0]
-            entry[0] -= quantity
-            cash += quantity * price - charges
+    cash, held = replay_fills(case["fills"], cash)
     positions = [pos(isin, q, str(c)) for isin, (q, c) in held.items() if q > 0]
     steps = case["sessions"] or [{"session": "2026-10-09", "closes": {}}]
     for item in steps:
@@ -93,6 +83,49 @@ def test_mac_drawdown_matches_the_vm_vector(case):
     assert state.halt is case["expected"]["halt"]
     assert state.ended is case["expected"]["ended"]
     assert sorted(state.stops) == sorted(case["expected"]["stops"])
+
+
+# ---------------------------------------------------------- fill ordering
+
+BUY = {"trade_id": "t1", "isin": A, "side": "buy", "quantity": 100, "price": "500", "charges": "0"}
+SELL = {"trade_id": "t2", "isin": A, "side": "sell", "quantity": 40, "price": "520", "charges": "0"}
+
+
+def _case(fills: list[dict], close: str = "480") -> dict:
+    return {"name": "ordering", "fills": fills, "sessions": [{"session": "2026-10-09", "closes": {A: close}}]}
+
+
+def test_a_sell_listed_before_its_buy_is_replayed_by_its_execution_time():
+    sell = {**SELL, "executed_at": "2026-10-09T05:01:00.000000Z"}
+    buy = {**BUY, "executed_at": "2026-10-09T05:00:00.000000Z"}
+    cash, held = replay_fills([sell, buy], CAP)  # listed sell first: no ZeroDivisionError
+    assert held == {A: (60, Decimal("30000"))}
+    assert cash == Decimal("50000") - 50000 + 40 * Decimal("520")
+    state = replay(_case([sell, buy]))
+    assert state.last_equity == cash + 60 * Decimal("480")
+
+
+def test_seq_breaks_a_tie_on_the_same_instant():
+    stamp = "2026-10-09T05:00:00.000000Z"
+    sell = {**SELL, "executed_at": stamp, "seq": 2}
+    buy = {**BUY, "executed_at": stamp, "seq": 1}
+    assert [f["trade_id"] for f in in_execution_order([sell, buy])] == ["t1", "t2"]
+    assert replay_fills([sell, buy], CAP)[1] == {A: (60, Decimal("30000"))}
+
+
+def test_a_sell_with_no_order_evidence_before_its_buy_is_a_clear_error_not_a_zero_division():
+    with pytest.raises(FillOrderError, match="sell 40 of INE000A01012 with 0 held"):
+        replay_fills([SELL, BUY], CAP)
+    with pytest.raises(FillOrderError):
+        replay(_case([SELL, BUY]))
+    with pytest.raises(FillOrderError):  # more sold than held
+        replay_fills([BUY, {**SELL, "quantity": 101}], CAP)
+
+
+def test_the_shared_vectors_are_replayed_in_their_listed_order_because_they_carry_no_stamps():
+    assert all("executed_at" not in f and "seq" not in f for c in DD for f in c["fills"])
+    for case in DD:
+        assert in_execution_order(case["fills"]) == case["fills"]
 
 
 # --------------------------------------------------------- halt and halve
@@ -324,22 +357,114 @@ def test_latches_never_clear_on_recovery():
     assert A in healed.state.stops
 
 
-def test_only_an_explicit_reset_with_an_actor_clears_halt():
+def _recovered_halt() -> drawdown.RiskState:
+    """Halted at -8%, then equity regained the old peak: a reset is an ordinary one."""
     halted = one_position("460").state
-    released = drawdown.reset(halted, "halt", "operator@admin-window")
+    back = step(halted, D2, positions=[pos(A, 100, "50000")], closes={A: "700"}).state
+    assert back.halt and back.drawdown == 0 and back.peak == Decimal("70000")
+    return back
+
+
+def test_only_an_explicit_reset_with_an_actor_clears_halt():
+    recovered = _recovered_halt()
+    released = drawdown.reset(recovered, "halt", "operator@admin-window", limits=LIMITS)
     assert released.halt is False and released.ended is False
     assert released.resets == (drawdown.ResetRecord("halt", "operator@admin-window", None),)
-    assert released.peak == halted.peak  # no rebase
+    assert released.peak == recovered.peak and released.halt_anchor is None  # no rebase
     for actor in ("", "   ", None, 7):
         with pytest.raises(drawdown.ResetRefused):
-            drawdown.reset(halted, "halt", actor)  # type: ignore[arg-type]
+            drawdown.reset(recovered, "halt", actor, limits=LIMITS)  # type: ignore[arg-type]
 
 
-def test_reset_without_a_rebased_peak_latches_again_while_still_below_minus_8():
-    halted = one_position("460").state
-    released = drawdown.reset(halted, "halt", "op")
-    again = step(released, D2, positions=[pos(A, 100, "50000")], closes={A: "460"})
-    assert again.state.halt is True
+def _halted_at_minus_8() -> drawdown.RiskState:
+    """Peak 50000, 100 shares, close 460: equity 46000, exactly -8%, halt latched."""
+    state = one_position("460").state
+    assert state.halt and state.drawdown == Decimal("-0.08") and state.last_equity == Decimal("46000")
+    return state
+
+
+def _close(state, day: int, price: str) -> drawdown.RiskState:
+    return step(state, date(2026, 10, day), positions=[pos(A, 100, "50000")], closes={A: price}).state
+
+
+def test_halt_reset_refuses_at_or_below_the_threshold_and_needs_the_limits():
+    halted = _halted_at_minus_8()
+    for kwargs in ({"limits": LIMITS}, {}):
+        with pytest.raises(drawdown.ResetRefused):
+            drawdown.reset(halted, "halt", "op", **kwargs)
+    deeper = dataclasses.replace(halted, drawdown=Decimal("-0.080001"))
+    with pytest.raises(drawdown.ResetRefused):
+        drawdown.reset(deeper, "halt", "op", limits=LIMITS)
+    assert halted.halt and halted.halt_anchor is None and halted.resets == ()
+    just_above = dataclasses.replace(halted, drawdown=Decimal("-0.079999"))
+    released = drawdown.reset(just_above, "halt", "op", limits=LIMITS)
+    assert released.halt is False and released.halt_anchor is None
+
+
+def test_a_refused_reset_would_have_latched_again_at_the_next_close():
+    """Why the refusal exists: the unrefused release re-latches at once."""
+    halted = _halted_at_minus_8()
+    released = dataclasses.replace(halted, halt=False)  # what the old reset did
+    assert _close(released, 12, "460").halt is True
+
+
+def test_rebase_sets_a_separate_anchor_and_leaves_the_true_peak_alone():
+    halted = _halted_at_minus_8()
+    released = drawdown.reset(halted, "halt", "op", limits=LIMITS, rebase_halt_anchor=True)
+    assert (released.halt, released.halt_anchor) == (False, Decimal("46000"))
+    assert released.peak == Decimal("50000") and released.drawdown == Decimal("-0.08")
+    assert released.resets == (drawdown.ResetRecord("halt", "op", None, True),)
+
+
+def test_after_a_rebase_the_next_close_does_not_latch_halt_again():
+    state = drawdown.reset(_halted_at_minus_8(), "halt", "op", limits=LIMITS, rebase_halt_anchor=True)
+    state = _close(state, 12, "460")  # same equity: still -8% from the true peak
+    assert not state.halt and not state.ended
+    state = _close(state, 13, "450")  # -10% from the peak, -2.2% from the anchor
+    assert not state.halt and not state.ended and state.halt_anchor == Decimal("46000")
+
+
+def test_the_minus_15_end_is_still_measured_from_the_real_peak():
+    state = drawdown.reset(_halted_at_minus_8(), "halt", "op", limits=LIMITS, rebase_halt_anchor=True)
+    state = _close(state, 12, "425.01")  # 42501: above 50000 x 0.85
+    assert not state.ended and not state.halt
+    state = _close(state, 13, "425")  # 42500: exactly -15% from the peak, only -7.6% from the anchor
+    assert state.ended and state.halt and state.peak == Decimal("50000")
+
+
+def test_the_halt_anchor_follows_equity_up_and_halts_8_pct_below_that_high():
+    state = drawdown.reset(_halted_at_minus_8(), "halt", "op", limits=LIMITS, rebase_halt_anchor=True)
+    state = _close(state, 12, "480")  # 48000: the anchor ratchets, still under the 50000 peak
+    assert state.halt_anchor == Decimal("48000") and not state.halt
+    state = _close(state, 13, "441.61")  # 44161: above 48000 x 0.92 = 44160
+    assert not state.halt
+    state = _close(state, 14, "441.60")  # 44160: exactly -8% from the anchor's high
+    assert state.halt and not state.ended
+
+
+def test_the_halt_anchor_is_dropped_once_equity_regains_the_true_peak():
+    state = drawdown.reset(_halted_at_minus_8(), "halt", "op", limits=LIMITS, rebase_halt_anchor=True)
+    state = _close(state, 12, "505")  # 50500: a new peak
+    assert state.halt_anchor is None and state.peak == Decimal("50500")
+    assert _close(state, 13, "464.6").halt  # 46460 = -8.0% from the real new peak
+
+
+def test_the_rebase_flag_is_for_the_halt_latch_only_and_is_a_no_op_above_the_threshold():
+    stopped = step(
+        drawdown.initial_state(LIMITS), D1, cash="40000", positions=[pos(A, 20, "10000")], closes={A: "440"}
+    ).state
+    with pytest.raises(drawdown.ResetRefused):
+        drawdown.reset(stopped, "stop", "op", limits=LIMITS, rebase_halt_anchor=True)
+    assert A in stopped.stops
+    ordinary = drawdown.reset(_recovered_halt(), "halt", "op", limits=LIMITS, rebase_halt_anchor=True)
+    assert ordinary.halt_anchor is None  # nothing to rebase: drawdown is above -8%
+    assert ordinary.resets[-1].rebase_halt_anchor is False
+
+
+def test_a_rebase_needs_an_evaluated_close():
+    bare = dataclasses.replace(drawdown.initial_state(LIMITS), halt=True, drawdown=Decimal("-0.1"))
+    with pytest.raises(drawdown.ResetRefused):
+        drawdown.reset(bare, "halt", "op", limits=LIMITS, rebase_halt_anchor=True)
 
 
 def test_ended_cannot_be_reset_and_halt_cannot_be_released_while_ended():
@@ -347,7 +472,7 @@ def test_ended_cannot_be_reset_and_halt_cannot_be_released_while_ended():
     with pytest.raises(drawdown.ResetRefused):
         drawdown.reset(ended, "ended", "op")
     with pytest.raises(drawdown.ResetRefused):
-        drawdown.reset(ended, "halt", "op")
+        drawdown.reset(ended, "halt", "op", limits=LIMITS, rebase_halt_anchor=True)
     assert ended.ended and ended.halt
 
 
@@ -355,7 +480,7 @@ def test_reset_refuses_unknown_and_unset_latches():
     clean = drawdown.initial_state(LIMITS)
     for latch in ("halt", "stop"):
         with pytest.raises(drawdown.ResetRefused):
-            drawdown.reset(clean, latch, "op")
+            drawdown.reset(clean, latch, "op", limits=LIMITS)
     for latch in ("mac_halt", "account_mismatch", "kill", ""):
         with pytest.raises(drawdown.ResetRefused):
             drawdown.reset(clean, latch, "op")

@@ -18,9 +18,14 @@ Rules, each pinned by a test:
   explicit actor (the admin window). ``ended`` cannot be reset. A stop also clears
   when the exit fill leaves the position at zero (``apply_exit_fill``), which is
   fill evidence, not a reset. A partial fill does not clear it.
-- A halt reset does not rebase the peak, so a reset while equity is still at or
-  below -8% of the old peak latches again at the next evaluated close (the VM does
-  the same; the operator decides in 63-06 whether to rebase).
+- The true peak is never rebased, so the -15% ``ended`` test is always measured from
+  the real high-water mark. ``reset halt`` is refused while drawdown is at or below
+  -8%, because the halt would only latch again at the next evaluated close. With the
+  explicit ``rebase_halt_anchor`` flag the operator accepts the loss and sets a
+  separate ``halt_anchor`` (the equity at the last evaluated close) that only the -8%
+  test reads: the halt fires again at 8% below the anchor, the anchor follows equity
+  up, and it is dropped once equity regains the true peak. The VM does the same
+  (``gateway_vm.orders.risk``); the two are kept in step by tests, not shared code.
 - An exit that misses (a Phase 60 limit fill that does not fill) stays in
   ``open_exits`` with its latch until a fill reduces it. ``pending_batches`` rebuilds
   it for the next session. It is never dropped on a miss.
@@ -89,6 +94,7 @@ class ResetRecord:
     latch: str
     actor: str
     isin: str | None
+    rebase_halt_anchor: bool = False
 
 
 @dataclass(frozen=True)
@@ -101,6 +107,11 @@ class RiskState:
     stops: Mapping[str, StopLatch] = field(default_factory=lambda: _frozen({}))
     open_exits: Mapping[str, OpenExit] = field(default_factory=lambda: _frozen({}))
     resets: tuple[ResetRecord, ...] = ()
+    # Equity at the last evaluated close (exact, unlike the rounded drawdown).
+    last_equity: Decimal | None = None
+    # Operator-set reference for the -8% halt test only (see ``reset``). None means the
+    # halt test measures from the true peak. Never read by the -15% ``ended`` test.
+    halt_anchor: Decimal | None = None
 
     def latch_names(self) -> tuple[str, ...]:
         names = [n for n in ("halt", "ended") if getattr(self, n)]
@@ -193,8 +204,15 @@ def evaluate_session(
             raise MarkMissing(position.isin)
     equity = cash + sum((p.quantity * closes[p.isin] for p in positions), ZERO)
     peak = max(state.peak, equity)
-    flatten_hit = equity <= peak * (ONE + limits.drawdown_flatten)
-    halt_hit = equity <= peak * (ONE + limits.drawdown_halt)
+    anchor = state.halt_anchor
+    if anchor is not None:
+        if equity > anchor:
+            anchor = equity
+        if anchor >= peak:
+            anchor = None  # back at the true high-water mark: ordinary rules
+    halt_reference = peak if anchor is None else anchor
+    flatten_hit = equity <= peak * (ONE + limits.drawdown_flatten)  # always the true peak
+    halt_hit = equity <= halt_reference * (ONE + limits.drawdown_halt)
 
     config_errors: list[str] = []
     stops = dict(state.stops)
@@ -247,6 +265,8 @@ def evaluate_session(
         ended=state.ended or flatten_hit,
         stops=_frozen(stops),
         open_exits=_frozen(open_exits),
+        last_equity=equity,
+        halt_anchor=anchor,
     )
     return SessionResult(new_state, tuple(batches), tuple(config_errors))
 
@@ -307,11 +327,25 @@ def pending_batches(
     return tuple(batches)
 
 
-def reset(state: RiskState, latch: str, actor: str, *, isin: str | None = None) -> RiskState:
+def reset(
+    state: RiskState,
+    latch: str,
+    actor: str,
+    *,
+    isin: str | None = None,
+    limits: Limits | None = None,
+    rebase_halt_anchor: bool = False,
+) -> RiskState:
     """Admin release (D-05). The only way a halt or a stop clears without a fill.
 
-    ``ended`` is terminal and refused. The peak is not rebased, and open exits are
-    left in place (a reset releases the buy block, it does not cancel a sell).
+    ``ended`` is terminal and refused. The true peak is never rebased, and open exits
+    are left in place (a reset releases the buy block, it does not cancel a sell).
+
+    A halt reset is refused while drawdown is at or below the halt threshold: the next
+    evaluated close would only latch it again. ``rebase_halt_anchor`` accepts the loss
+    and restarts the -8% test from the equity at the last evaluated close, by setting
+    ``halt_anchor``; the -15% end is still measured from the real peak. ``limits`` is
+    required to reset a halt, as on the VM.
     """
     if not isinstance(actor, str) or not actor.strip():
         raise ResetRefused("a reset needs a named actor")
@@ -319,12 +353,28 @@ def reset(state: RiskState, latch: str, actor: str, *, isin: str | None = None) 
         raise ResetRefused("the pilot-ended latch is terminal")
     if latch not in RESETTABLE:
         raise ResetRefused("unknown latch")
+    if rebase_halt_anchor and latch != "halt":
+        raise ResetRefused("the halt anchor applies to the halt latch only")
+    rebased = False
     if latch == "halt":
         if state.ended:
             raise ResetRefused("halt cannot be released while the pilot is ended")
         if not state.halt:
             raise ResetRefused("halt is not set")
+        if limits is None:
+            raise ResetRefused("the limits are required to reset the halt latch")
         new = replace(state, halt=False)
+        if state.drawdown <= limits.drawdown_halt:
+            if not rebase_halt_anchor:
+                raise ResetRefused(
+                    "drawdown is still at or below the halt threshold: the halt would latch "
+                    "again at the next close; pass rebase_halt_anchor to restart the -8% "
+                    "test from the current equity"
+                )
+            if state.last_equity is None or not state.last_equity > ZERO:
+                raise ResetRefused("no evaluated close to anchor the halt test to")
+            new = replace(new, halt_anchor=state.last_equity)
+            rebased = True
     else:
         stops = dict(state.stops)
         if isin is None:
@@ -336,4 +386,6 @@ def reset(state: RiskState, latch: str, actor: str, *, isin: str | None = None) 
         else:
             raise ResetRefused("no stop latch for that ISIN")
         new = replace(state, stops=_frozen(stops))
-    return replace(new, resets=state.resets + (ResetRecord(latch, actor.strip(), isin),))
+    return replace(
+        new, resets=state.resets + (ResetRecord(latch, actor.strip(), isin, rebased),)
+    )

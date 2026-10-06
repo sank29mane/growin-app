@@ -23,6 +23,7 @@ from strategy_india.portfolio import Book
 from strategy_india.portfolio import Position as BookPosition
 
 from risk_india import drawdown, exits, rules
+from risk_india_support import in_execution_order
 from test_strategy_india_support import limits, params, weekday_sessions
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -62,7 +63,7 @@ def _setup(case: dict):
     peak = Decimal(case["start"]["peak"]) if "start" in case else CAP
     held: dict[str, tuple[int, Decimal]] = {}
     costs: dict[str, Decimal] = {}
-    for fill in case["fills"]:
+    for fill in in_execution_order(case["fills"]):
         assert fill["side"] == "buy" and Decimal(fill["charges"]) == 0  # the paths are buy-and-hold
         price = Decimal(fill["price"])
         quantity = fill["quantity"]
@@ -190,4 +191,4 @@ def test_halt_release_differs_on_purpose_62_releases_on_recovery_the_mac_does_no
         state, LIMITS, DAYS[1], cash=Decimal(0), positions=[position], closes={A_ISIN: Decimal("700")}
     ).state
     assert state.halt is True, "live: admin-only release (D-05)"
-    assert drawdown.reset(state, "halt", "operator").halt is False
+    assert drawdown.reset(state, "halt", "operator", limits=LIMITS).halt is False
