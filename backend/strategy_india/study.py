@@ -45,7 +45,7 @@ from .holdout import (
 )
 from .hurdle import hurdle_map_sha256
 from .params import StrategyParams, params_sha256, parse_params
-from .registry import Entry, LIVE_CHECKED_FIELDS, Registry, check_live_inputs, criteria_hash
+from .registry import Entry, LIVE_CHECKED_FIELDS, Registry, canonical_sha256, check_live_inputs, criteria_hash
 from .report import Unit, StudyReport, build_report, holdout_evidence, write_report
 from .signals import MODE_BASE
 from .ticks import EQUITY, NON_GOLD_ETF, TickTables
@@ -231,11 +231,20 @@ HEAD_LATEST_NAME = "registry_head_latest.txt"  # written by the tool after every
 def _private_append(path: Path, line: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    size_before = os.fstat(fd).st_size
     try:
         data = memoryview((line + "\n").encode("utf-8"))
         while data:
             data = data[os.write(fd, data):]
         os.fsync(fd)
+    except OSError:
+        # A failed reservation must not leave a partial or complete ledger line.
+        os.ftruncate(fd, size_before)
+        try:
+            os.fsync(fd)
+        except OSError:
+            pass
+        raise
     finally:
         os.close(fd)
 
@@ -265,7 +274,15 @@ def write_head_file(registry: Registry) -> str:
 def check_pin_fresh(registry: Registry, pin: str) -> None:
     """Refuse a pin that is not the head the tool last wrote (a pre-open pin replayed after the event was deleted)."""
     path = head_file_path(registry)
-    if path.exists() and path.read_text(encoding="utf-8").strip() != pin:
+    try:
+        if not path.exists():
+            if registry.path.exists() and registry.entries():
+                raise StrategyIndiaError("a non-empty registry has no recorded head", code="registry_head_stale")
+            return
+        recorded = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError) as exc:
+        raise StrategyIndiaError("the recorded registry head is unreadable", code="registry_head_stale") from exc
+    if recorded != pin:
         raise StrategyIndiaError(
             "the pinned registry head is stale: it is not the head this tool last recorded", code="registry_head_stale"
         )
@@ -276,7 +293,11 @@ def _ledger_ranges(registry: Registry) -> list[HoldoutRange]:
     if not path.exists():
         return []
     out: list[HoldoutRange] = []
-    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise StrategyIndiaError("spent-holdouts ledger is unreadable", code="ledger_invalid") from exc
+    for number, line in enumerate(lines, start=1):
         try:
             out.append(HoldoutRange.from_payload(json.loads(line)["holdout_range"]))
         except (ValueError, KeyError, TypeError) as exc:
@@ -291,12 +312,17 @@ def check_ledger_clear(registry: Registry, holdout: HoldoutRange) -> None:
             raise HoldoutSpent("the private spent-holdouts ledger lists this holdout as spent")
 
 
-def record_spent(registry: Registry, entry: Entry, holdout: HoldoutRange, event_hash: str) -> None:
-    _private_append(
-        spent_ledger_path(registry),
-        json.dumps({"holdout_range": holdout.as_payload(), "registration_entry_hash": entry.entry_hash,
-                    "holdout_open_event_hash": event_hash}, sort_keys=True),
-    )
+def record_spent(registry: Registry, entry: Entry, holdout: HoldoutRange) -> None:
+    """Reserve the range durably before appending the open event or reading holdout data."""
+    try:
+        _private_append(
+            spent_ledger_path(registry),
+            json.dumps({"holdout_range": holdout.as_payload(), "registration_entry_hash": entry.entry_hash},
+                       sort_keys=True),
+        )
+    except OSError as exc:
+        raise StrategyIndiaError("spent-holdouts ledger cannot be written; the holdout stays sealed",
+                                 code="ledger_invalid") from exc
 
 
 def _registered(inputs: StudyInputs, registration_hash: str | None, what: str) -> Entry:
@@ -404,15 +430,18 @@ class HoldoutOutcome:
     report: StudyReport
     verdict: HoldoutVerdict
     event_hash: str
+    report_path: Path | None = None
 
 
 def run_holdout(inputs: StudyInputs, *, expected_head: str, logged_at: str | None = None,
-                registration_hash: str | None = None) -> HoldoutOutcome:
+                registration_hash: str | None = None, report_root: Path | None = None) -> HoldoutOutcome:
     """Open the holdout once (logged in the registry) and judge it against the sealed D-19 criteria."""
     require_head(expected_head)
-    prep = prepare(inputs)
     reg = inputs.registry
     entry = _registered(inputs, registration_hash, "the holdout stays sealed")
+    check_ledger_clear(reg, HoldoutRange.from_payload(entry.payload["holdout_range"]))
+    check_pin_fresh(reg, expected_head)
+    prep = prepare(inputs)
     criteria = required_criteria(inputs)
     window = (prep.sessions[0], prep.sessions[-1])
     gate = _gate_for_registration(inputs, prep, entry, window)
@@ -422,11 +451,18 @@ def run_holdout(inputs: StudyInputs, *, expected_head: str, logged_at: str | Non
     dev_ctx = _context(inputs, prep, gate, prep.view, criteria)
     preflight_holdout(inputs, prep, criteria, etf_anchor=etf_anchor, dev_ctx=dev_ctx)  # nothing after this can be known in advance
     gate_scenario = inputs.scenarios.gate()
-    grant = open_holdout(reg, criteria=criteria, expected_head=expected_head, registration_hash=entry.entry_hash,
-                         logged_at=logged_at)
-    record_spent(reg, entry, grant.holdout, grant.event_hash)
-    write_head_file(reg)
+    entries_before_open = reg.entries(expected_head=expected_head)
+    for event in entries_before_open:
+        if event.kind == "holdout_open" and (
+            event.payload["registration_entry_hash"] == entry.entry_hash
+            or prep.holdout.overlaps(HoldoutRange.from_payload(event.payload["holdout_range"]))
+        ):
+            raise HoldoutSpent("the registry already records this holdout as spent")
+    record_spent(reg, entry, prep.holdout)
     try:
+        grant = open_holdout(reg, criteria=criteria, expected_head=expected_head, registration_hash=entry.entry_hash,
+                             logged_at=logged_at)
+        write_head_file(reg)
         opened = prep.view.open(grant)
         ctx = _context(inputs, prep, gate, opened, criteria)
         run = run_holdout_segment(ctx, grant.holdout)
@@ -446,16 +482,34 @@ def run_holdout(inputs: StudyInputs, *, expected_head: str, logged_at: str | Non
             dividend_events=inputs.events, sensitivity_factor=ctx.sensitivity_factor, verdict=verdict,
             holdout_evidence_={"evidence": base, "sensitivity_evidence": sens},
         )
-    except Exception as exc:  # the holdout is already spent: record a typed INVALID verdict, never a silent spend
-        reg.append_holdout_invalid({
+        verdict_payload = report.holdout_verdict
+        reg.append_holdout_verdict({
             "holdout_open_event_hash": grant.event_hash, "registration_entry_hash": entry.entry_hash,
-            "error_type": type(exc).__name__, "error_code": getattr(exc, "code", "unexpected_error"),
+            "verdict": verdict.verdict, "verdict_payload": verdict_payload,
+            "verdict_sha256": canonical_sha256(verdict_payload),
         })
         write_head_file(reg)
+        report_path = write_report(report_root, report) if report_root is not None else None
+    except Exception as exc:  # the holdout is already spent: record a typed INVALID verdict, never a silent spend
+        # An append can succeed before its caller raises. Recover the durable open in that case.
+        opened_events = [event for event in reg.holdout_events()
+                         if event.seq >= len(entries_before_open)
+                         and event.payload["registration_entry_hash"] == entry.entry_hash]
+        if not opened_events:
+            raise StrategyIndiaError("the ledger reserved the holdout but its open could not be recorded",
+                                     code="holdout_invalid") from exc
+        reg.append_holdout_invalid({
+            "holdout_open_event_hash": opened_events[-1].entry_hash, "registration_entry_hash": entry.entry_hash,
+            "error_type": type(exc).__name__, "error_code": getattr(exc, "code", "unexpected_error"),
+        })
+        try:
+            write_head_file(reg)
+        except OSError:
+            pass  # INVALID is already durable; a head-write failure must not mask it.
         raise HoldoutInvalid(
             f"the holdout was opened and then failed ({type(exc).__name__}); INVALID was recorded in the registry"
         ) from exc
-    return HoldoutOutcome(report, verdict, grant.event_hash)
+    return HoldoutOutcome(report, verdict, grant.event_hash, report_path)
 
 
 # ---- CLI wiring ---------------------------------------------------------------------
@@ -607,8 +661,17 @@ def cli_run(config: Mapping[str, Any]) -> dict[str, Any]:
 def cli_holdout(config: Mapping[str, Any], *, logged_at: str) -> dict[str, Any]:
     inputs, pin = build_inputs(config)
     check_pin_fresh(inputs.registry, _need_pin(pin))
-    outcome = run_holdout(inputs, expected_head=_need_pin(pin), logged_at=logged_at)
-    path = write_report(Path(config["report_root"]), outcome.report)
+    try:
+        outcome = run_holdout(inputs, expected_head=_need_pin(pin), logged_at=logged_at,
+                              report_root=Path(config["report_root"]))
+    except HoldoutInvalid as exc:
+        raise HoldoutInvalid(f"{exc}; {_anchor_instruction(inputs.registry)}") from exc
+    path = outcome.report_path
     return {"report": str(path), "verdict": outcome.verdict.verdict, "holdout_event": outcome.event_hash,
             "registry_head": inputs.registry.head_hash(),
-            "next": f"the holdout is spent; pin the new head in {HEAD_REF_NAME} or pass --registry-head"}
+            "next": _anchor_instruction(inputs.registry)}
+
+
+def _anchor_instruction(registry: Registry) -> str:
+    return (f"the holdout is spent; record post-open registry head {registry.head_hash()} in Phase 58 holdout_refs "
+            f"via {HEAD_REF_NAME}, and have the orchestrator record its hash in the phase SUMMARY")

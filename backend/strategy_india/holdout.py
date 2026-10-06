@@ -13,6 +13,13 @@
 * ``open_holdout`` is the only way to obtain a ``HoldoutGrant``. It refuses a
   missing or changed criteria set, a pinned-head mismatch and a second open,
   and it logs the open event in the registry before any holdout data is read.
+Threat model: the registry, spent-holdouts ledger and head file protect an
+honest but fallible operator or agent from accidental reuse and crashes. They
+do not protect against deliberate editing of several private files on the same
+machine. The external anchor covers that case: after an open, the operator
+records the post-open head in Phase 58 ``holdout_refs``, and the orchestrator
+records its hash in the phase SUMMARY. The CLI prints this instruction.
+
 * ``evaluate_verdict`` returns PASS, FAIL or INCONCLUSIVE. INCONCLUSIVE counts
   as not passed and spends the holdout like any other outcome.
 """
@@ -72,7 +79,9 @@ def parse_criteria(raw: Any) -> dict[str, Any]:
             raise RegistryError(f"D-19 criteria {key} must be {kind.__name__}")
     for key in ("max_drawdown_floor", "max_annualised_swaps", "dividend_sensitivity_factor"):
         try:
-            Decimal(raw[key])
+            value = Decimal(raw[key])
+            if not value.is_finite():
+                raise InvalidOperation
         except InvalidOperation:
             raise RegistryError(f"D-19 criteria {key} is not a decimal string") from None
     if not Decimal(0) < Decimal(raw["dividend_sensitivity_factor"]) < Decimal(1):
@@ -284,6 +293,8 @@ def check_supported(criteria: Mapping[str, Any]) -> None:
         floor, swaps = Decimal(criteria["max_drawdown_floor"]), Decimal(criteria["max_annualised_swaps"])
     except (KeyError, InvalidOperation, TypeError):
         raise bad("max_drawdown_floor and max_annualised_swaps must be decimal strings") from None
+    if not floor.is_finite() or not swaps.is_finite():
+        raise bad("decimal criteria must be finite")
     if not Decimal(-1) < floor < Decimal(0):
         raise bad("max_drawdown_floor must lie between -1 and 0")
     if swaps < 0:

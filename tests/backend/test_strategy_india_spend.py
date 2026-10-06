@@ -20,7 +20,7 @@ from strategy_india import __main__ as cli
 from strategy_india import data, study
 from strategy_india.data import DividendEvents
 from strategy_india.errors import HoldoutInvalid, HoldoutSpent, RegistryError, StrategyIndiaError
-from strategy_india.holdout import check_supported, parse_criteria
+from strategy_india.holdout import check_supported, load_criteria_file, parse_criteria
 
 from test_strategy_india_support import (
     ETF_ISINS,
@@ -172,7 +172,7 @@ def test_a_spent_holdout_writes_the_ledger_and_the_head_file_0600(tmp_path):
     outcome = study.run_holdout(inputs, expected_head=head)
     ledger = study.spent_ledger_path(reg)
     lines = [json.loads(line) for line in ledger.read_text().splitlines()]
-    assert len(lines) == 1 and lines[0]["holdout_open_event_hash"] == outcome.event_hash
+    assert len(lines) == 1 and lines[0]["registration_entry_hash"] == outcome.report.registration_entry_hash
     assert lines[0]["holdout_range"] == study.prepare(inputs).holdout.as_payload()
     assert study.head_file_path(reg).read_text().strip() == reg.head_hash() != head
     for path in (ledger, study.head_file_path(reg)):
@@ -278,3 +278,231 @@ def test_a_failure_after_the_open_is_recorded_as_a_typed_invalid_never_silent(tm
     monkeypatch.undo()
     with pytest.raises(HoldoutSpent):
         study.run_holdout(inputs, expected_head=reg.head_hash())  # the spend stands
+
+
+# Review round 3: durable spends and results, shared freshness checks, typed refusals.
+def _cli_config(tmp_path, inputs, head, monkeypatch):
+    monkeypatch.setattr(study, "build_inputs", lambda *_a, **_k: (inputs, head))
+    config = tmp_path / "cli.json"
+    config.write_text(json.dumps({"private_dir": "x", "dataset_dir": "x", "store_root": "x",
+                                  "coverage_report": "x", "registry": "x", "report_root": str(tmp_path / "out"),
+                                  "git_commit": "b" * 40, "fold_rules": {}, "parameter_budget_n": 1, "criteria": {}}))
+    return config
+
+
+@pytest.mark.parametrize("step", ["open_return", "write_head_file", "view_open", "context",
+                                   "run_holdout_segment", "_etf", "holdout_evidence", "evaluate_verdict",
+                                   "choose_etf", "_tri", "build_report", "append_holdout_verdict", "verdict_head"])
+def test_each_post_open_failure_leaves_durable_spend_and_invalid(tmp_path, monkeypatch, step):
+    inputs, head = _registered(tmp_path)
+    reg = inputs.registry
+
+    def crash(*_a, **_k):
+        raise OSError("injected post-open crash")
+
+    if step == "open_return":
+        original = study.open_holdout
+        def open_then_crash(*a, **k):
+            original(*a, **k)
+            crash()
+        monkeypatch.setattr(study, "open_holdout", open_then_crash)
+    elif step == "view_open":
+        monkeypatch.setattr(data.DatasetView, "open", crash)
+    elif step == "append_holdout_verdict":
+        monkeypatch.setattr(reg, "append_holdout_verdict", crash)
+    elif step in ("context", "verdict_head"):
+        name = "_context" if step == "context" else "write_head_file"
+        original = getattr(study, name)
+        calls = 0
+        def fail_second(*a, **k):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                crash()
+            return original(*a, **k)
+        monkeypatch.setattr(study, name, fail_second)
+    else:
+        monkeypatch.setattr(study, step, crash)
+    with pytest.raises(HoldoutInvalid):
+        study.run_holdout(inputs, expected_head=head)
+    assert len(study.spent_ledger_path(reg).read_text().splitlines()) == 1
+    assert len(reg.holdout_events()) == len(reg.invalid_events()) == 1
+    assert reg.invalid_events()[0].payload["holdout_open_event_hash"] == reg.holdout_events()[0].entry_hash
+
+
+def test_read_only_ledger_refuses_before_open(tmp_path, monkeypatch):
+    inputs, head = _registered(tmp_path)
+    ledger = study.spent_ledger_path(inputs.registry)
+    ledger.touch(mode=0o600)
+    ledger.chmod(0o400)
+    real_open = os.open
+    def deny_write(path, flags, *a, **k):
+        # Inject the OS refusal too, so the test remains meaningful when run as root.
+        if path == ledger and flags & os.O_WRONLY:
+            raise PermissionError("ledger is read-only")
+        return real_open(path, flags, *a, **k)
+    monkeypatch.setattr(os, "open", deny_write)
+    with pytest.raises(StrategyIndiaError, match="cannot be written"):
+        study.run_holdout(inputs, expected_head=head)
+    assert ledger.read_text() == ""
+    assert inputs.registry.head_hash() == head
+    assert inputs.registry.holdout_events() == ()
+
+
+def test_report_failure_preserves_registry_verdict_and_prints_anchor(tmp_path, monkeypatch, capsys):
+    inputs, head = _registered(tmp_path)
+    config = _cli_config(tmp_path, inputs, head, monkeypatch)
+    def fail_report(*a, **k):
+        verdicts = [e for e in inputs.registry.entries() if e.kind == "holdout_verdict"]
+        assert len(verdicts) == 1  # ordering: verdict is durable before the attempted report write
+        raise OSError("report directory is read-only")
+    monkeypatch.setattr(study, "write_report", fail_report)
+    assert cli.main(["holdout", "--config", str(config)]) == 2
+    output = capsys.readouterr().out
+    assert "holdout_invalid" in output and "Phase 58 holdout_refs" in output and "phase SUMMARY" in output
+    verdict = next(e for e in inputs.registry.entries() if e.kind == "holdout_verdict")
+    from strategy_india.registry import canonical_sha256
+    assert verdict.payload["verdict"] in {"PASS", "FAIL", "INCONCLUSIVE"}
+    assert verdict.payload["verdict_sha256"] == canonical_sha256(verdict.payload["verdict_payload"])
+    assert len(study.spent_ledger_path(inputs.registry).read_text().splitlines()) == 1
+    assert len(inputs.registry.invalid_events()) == 1
+
+
+def test_library_refuses_deleted_open_and_deleted_ledger_with_stale_head(tmp_path):
+    inputs, head = _registered(tmp_path)
+    study.run_holdout(inputs, expected_head=head)
+    inputs.registry.path.write_text(inputs.registry.path.read_text().splitlines()[0] + "\n")
+    study.spent_ledger_path(inputs.registry).unlink()
+    with pytest.raises(StrategyIndiaError) as err:
+        study.run_holdout(inputs, expected_head=head)
+    assert err.value.code == "registry_head_stale"
+    assert inputs.registry.holdout_events() == ()
+
+
+def test_cli_refuses_nonempty_registry_with_missing_head(tmp_path, monkeypatch, capsys):
+    inputs, head = _registered(tmp_path)
+    study.head_file_path(inputs.registry).unlink()
+    config = _cli_config(tmp_path, inputs, head, monkeypatch)
+    assert cli.main(["holdout", "--config", str(config)]) == 2
+    assert "registry_head_stale" in capsys.readouterr().out
+    _unspent(inputs, head)
+
+
+@pytest.mark.parametrize("kind", ["unreadable", "directory"])
+def test_cli_ledger_io_errors_are_typed_refusals(tmp_path, monkeypatch, capsys, kind):
+    inputs, head = _registered(tmp_path)
+    ledger = study.spent_ledger_path(inputs.registry)
+    if kind == "directory":
+        ledger.mkdir()
+    else:
+        ledger.touch()
+        original = type(ledger).read_text
+        def unreadable(path, *a, **k):
+            if path == ledger:
+                raise PermissionError("unreadable ledger")
+            return original(path, *a, **k)
+        monkeypatch.setattr(type(ledger), "read_text", unreadable)
+    config = _cli_config(tmp_path, inputs, head, monkeypatch)
+    assert cli.main(["holdout", "--config", str(config)]) == 2
+    assert "ledger_invalid" in capsys.readouterr().out
+    assert inputs.registry.holdout_events() == ()
+    assert inputs.registry.head_hash() == head
+
+
+@pytest.mark.parametrize("value", ["NaN", "sNaN"])
+@pytest.mark.parametrize("key", ["max_drawdown_floor", "max_annualised_swaps", "dividend_sensitivity_factor"])
+def test_cli_nonfinite_criteria_are_typed_refusals(tmp_path, monkeypatch, capsys, key, value):
+    inputs, head = _registered(tmp_path)
+    inputs.criteria[key] = value
+    with pytest.raises(RegistryError, match="decimal string"):
+        parse_criteria(dict(inputs.criteria))
+    config = _cli_config(tmp_path, inputs, head, monkeypatch)
+    import hashlib
+    criteria_file = tmp_path / "criteria.json"
+    criteria_file.write_text(json.dumps(inputs.criteria))
+    digest = hashlib.sha256(criteria_file.read_bytes()).hexdigest()
+    def build_with_real_criteria_loader(*_a, **_k):
+        inputs.criteria = load_criteria_file(tmp_path, criteria_file.name, digest)
+        return inputs, head
+    monkeypatch.setattr(study, "build_inputs", build_with_real_criteria_loader)
+    assert cli.main(["holdout", "--config", str(config)]) == 2
+    assert "registry_error" in capsys.readouterr().out
+    _unspent(inputs, head)
+
+
+def test_partially_overlapping_spent_ledger_range_refuses_library_open(tmp_path):
+    inputs, head = _registered(tmp_path)
+    from strategy_india.holdout import HoldoutRange
+    partial = HoldoutRange(SESSIONS[-70], HOLDOUT_DAYS[10])
+    registered = HoldoutRange(HOLDOUT_DAYS[0], HOLDOUT_DAYS[-1])
+    assert partial != registered and partial.overlaps(registered)
+    ledger = study.spent_ledger_path(inputs.registry)
+    ledger.write_text(json.dumps({"holdout_range": partial.as_payload()}) + "\n")
+    with pytest.raises(HoldoutSpent, match="ledger"):
+        study.run_holdout(inputs, expected_head=head)
+    assert inputs.registry.holdout_events() == ()
+    assert inputs.registry.head_hash() == head
+    assert len(ledger.read_text().splitlines()) == 1
+
+
+def test_successful_cli_open_prints_external_anchor_and_records_verdict(tmp_path, monkeypatch, capsys):
+    inputs, head = _registered(tmp_path)
+    config = _cli_config(tmp_path, inputs, head, monkeypatch)
+    assert cli.main(["holdout", "--config", str(config)]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert "Phase 58 holdout_refs" in summary["next"] and "phase SUMMARY" in summary["next"]
+    assert inputs.registry.head_hash() in summary["next"]
+    assert inputs.registry.entries()[-1].kind == "holdout_verdict"
+    assert study.head_file_path(inputs.registry).read_text().strip() == inputs.registry.head_hash()
+
+
+@pytest.mark.parametrize("step", ["partial_write", "fsync"])
+def test_failed_ledger_reservation_leaves_nothing_spent(tmp_path, monkeypatch, step):
+    inputs, head = _registered(tmp_path)
+    ledger = study.spent_ledger_path(inputs.registry)
+    ledger.touch()
+    original_write, original_fsync = os.write, os.fsync
+    def is_ledger(fd):
+        return os.fstat(fd).st_ino == ledger.stat().st_ino
+    def broken_write(fd, data):
+        if is_ledger(fd):
+            original_write(fd, data[:10])
+            raise OSError("partial ledger write")
+        return original_write(fd, data)
+    def broken_fsync(fd):
+        if is_ledger(fd):
+            raise OSError("ledger fsync failed")
+        return original_fsync(fd)
+    monkeypatch.setattr(os, "write" if step == "partial_write" else "fsync",
+                        broken_write if step == "partial_write" else broken_fsync)
+    with pytest.raises(StrategyIndiaError, match="cannot be written"):
+        study.run_holdout(inputs, expected_head=head)
+    assert ledger.read_text() == ""
+    assert inputs.registry.head_hash() == head
+    assert inputs.registry.holdout_events() == ()
+
+
+@pytest.mark.parametrize("value", ["NaN", "sNaN"])
+@pytest.mark.parametrize("key", ["max_drawdown_floor", "max_annualised_swaps"])
+def test_supported_criteria_refuses_nonfinite_threshold_without_decimal_trap(key, value):
+    criteria = default_criteria()
+    criteria[key] = value
+    with pytest.raises(StrategyIndiaError, match="finite"):
+        check_supported(criteria)
+
+
+
+def test_deleted_ledger_rerun_does_not_invalidate_the_original_verdict(tmp_path):
+    inputs, head = _registered(tmp_path)
+    study.run_holdout(inputs, expected_head=head)
+    reg = inputs.registry
+    original_head = reg.head_hash()
+    original_entries = reg.entries()
+    ledger = study.spent_ledger_path(reg)
+    ledger.unlink()  # one accidentally deleted file, with registry and head intact
+    with pytest.raises(HoldoutSpent, match="registry"):
+        study.run_holdout(inputs, expected_head=original_head)
+    assert reg.entries() == original_entries
+    assert reg.head_hash() == original_head
+    assert reg.invalid_events() == ()
+    assert not ledger.exists()

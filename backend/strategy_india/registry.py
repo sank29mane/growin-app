@@ -31,6 +31,7 @@ GENESIS = "0" * 64
 KIND_REGISTRATION = "registration"
 KIND_HOLDOUT_OPEN = "holdout_open"
 KIND_HOLDOUT_INVALID = "holdout_invalid"
+KIND_HOLDOUT_VERDICT = "holdout_verdict"
 
 HASH_FIELDS = (
     "params_sha256",
@@ -272,6 +273,10 @@ class Registry:
 
     def append_holdout_open(self, payload: Mapping[str, Any]) -> Entry:
         return self._append(KIND_HOLDOUT_OPEN, payload)
+
+    def append_holdout_verdict(self, payload: Mapping[str, Any]) -> Entry:
+        """Durably record PASS, FAIL or INCONCLUSIVE before exporting a report."""
+        return self._append(KIND_HOLDOUT_VERDICT, payload)
 
     def append_holdout_invalid(self, payload: Mapping[str, Any]) -> Entry:
         """A typed INVALID verdict for an opened holdout whose evaluation failed."""
