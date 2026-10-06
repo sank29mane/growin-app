@@ -46,6 +46,12 @@ FAR_FACTOR = Decimal("0.8")  # a far buy limit is at most 80% of the recorded bi
 READINGS_PER_ORDER = 3
 TERMINAL_STATES = frozenset({"FILLED", "CANCELLED", "REJECTED", "FAILED", "UNKNOWN"})
 NOT_SENT_STATES = frozenset({"PENDING"})
+# Reconcile codes that mean the evidence is consistent (or simply not there yet).
+# Anything else is an anomaly and stops the run: fail closed on unknown codes.
+HEALTHY_RECONCILE_CODES = frozenset(
+    {"ADOPTED", "APPLIED", "UNCHANGED", "NOT_VISIBLE", "FILL_EVIDENCE_PENDING", "NO_MATCH", "NOT_RECONCILABLE"}
+)
+HEALTHY_POSITION_CHECKS = frozenset({"OK", "SKIPPED"})
 STEP_ORDER = ("buy-1", "buy-2", "buy-3", "cancel", "buy-q1", "sell")
 
 PREPARE = "/api/t212-practice/preparations"
@@ -146,7 +152,7 @@ class Evidence:
             lines.append(f"## {index}. {step.get('step')} - {step.get('ticker', '')}")
             for key in (
                 "side", "quantity", "limit_price", "confirmation", "proposal_id", "admission",
-                "reason_code", "touch_id", "states", "result", "note",
+                "reason_code", "touch_id", "states", "result", "note", "anomaly",
             ):
                 if key in step:
                     lines.append(f"- {key}: {step[key]}")
@@ -318,9 +324,36 @@ class Smoke:
         return states
 
     def _reconcile(self, proposal_id: str) -> dict[str, Any]:
-        return self._call(
+        """Every reconcile goes through here, so every step is validated the same way."""
+
+        result = self._call(
             "POST", RECONCILE, {"confirmation": "RECONCILE_T212_PRACTICE", "proposal_id": proposal_id}
         )
+        self._check_reconcile(proposal_id, result)
+        return result
+
+    def _check_reconcile(self, proposal_id: str, result: Any) -> None:
+        """Stop on any anomaly code or failed position check, and persist what was seen."""
+
+        body = result if isinstance(result, dict) else {}
+        code = str(body.get("code"))
+        position_check = str(body.get("position_check", "SKIPPED"))
+        problems = []
+        if code not in HEALTHY_RECONCILE_CODES:
+            problems.append(f"{body.get('state')}/{code}")
+        if position_check not in HEALTHY_POSITION_CHECKS:
+            problems.append(f"position check {position_check}")
+        if not problems:
+            return
+        note = "; ".join(problems)
+        anomaly = {"code": code, "position_check": position_check, "state": str(body.get("state"))}
+        for step in self.evidence.steps:
+            if step.get("proposal_id") == proposal_id and step.get("step") != "anomaly":
+                step["anomaly"] = anomaly
+        self.evidence.add(
+            {"step": "anomaly", "proposal_id": proposal_id, "result": str(body.get("state")), "note": note}
+        )
+        raise SmokeError(f"reconcile anomaly ({note}). Stopped; nothing further was sent.")
 
     def _reconcile_until(self, record: dict[str, Any], wanted: str) -> str:
         seen: list[str] = []

@@ -57,6 +57,7 @@ class StubBackend:
         self.deny: dict[str, str] = {}  # ticker -> reason
         self.reconcile_script: dict[str, list[str]] = {}  # proposal_id -> states per call
         self.cancelled: set[str] = set()
+        self.reconcile_extra: dict[str, dict] = {}  # proposal_id -> extra reconcile response fields
         self.counter = itertools.count(1)
         self.never_approve = False
 
@@ -92,7 +93,9 @@ class StubBackend:
                 state = script.pop(0) if len(script) > 1 else script[0]
             else:
                 state = self._default_state(pid)
-            return 200, {"proposal_id": pid, "state": state, "code": "APPLIED"}
+            return 200, {
+                "proposal_id": pid, "state": state, "code": "APPLIED", **self.reconcile_extra.get(pid, {})
+            }
         if path == smoke.CANCEL:
             self.cancelled.add(payload["proposal_id"])
             return 200, {"proposal_id": payload["proposal_id"], "cancel": {"outcome": "REQUESTED", "code": "HTTP_200"}}
@@ -570,3 +573,67 @@ def test_last_four_redaction_helper():
     assert smoke.last_four("20260001") == "****0001"
     assert smoke.last_four("ab-12") == "****ab12"
     assert smoke.last_four("") == "????"
+
+
+# --- reconcile anomalies and the position check stop the run (PR #557 fix 3) ------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"state": "ACKNOWLEDGED", "code": "FILL_VALUE_MISMATCH"},
+        {"code": "OVERFILL"},
+        {"code": "AMBIGUOUS_MATCH"},
+        {"code": "SOMETHING_NEW"},
+        {"position_check": "POSITION_MISMATCH"},
+        {"position_check": "POSITION_CHECK_FAILED"},
+    ],
+)
+def test_an_anomaly_code_or_failed_position_check_after_a_far_buy_stops_before_the_next_step(tmp_path, extra):
+    backend = StubBackend()
+    backend.reconcile_extra["prop-1"] = extra
+    run, backend, ask, said, evidence = build(tmp_path, far("VODl_EQ") + far("LLOYl_EQ"), backend)
+    run.preflight()
+    with pytest.raises(smoke.SmokeError, match="anomaly"):
+        run.buy_far(1)
+    assert run.far_tickers == [], "the step did not count as done"
+    assert len(backend.posts_to(smoke.PREPARE)) == 1, "nothing further was prepared"
+    anomaly = evidence.steps[-1]
+    assert anomaly["step"] == "anomaly" and anomaly["proposal_id"] == "prop-1"
+    assert evidence.steps[0]["anomaly"]["code"] == extra.get("code", "APPLIED")
+    assert "anomaly" in evidence.md_path.read_text(encoding="utf-8")
+    assert "anomaly" in evidence.json_path.read_text(encoding="utf-8")
+
+
+def test_the_full_run_aborts_at_the_first_anomaly_and_never_reaches_q1(tmp_path):
+    backend = StubBackend()
+    backend.reconcile_extra["prop-2"] = {"state": "ACKNOWLEDGED", "code": "FILL_VALUE_MISMATCH"}
+    run, backend, ask, said, evidence = build(tmp_path, FULL, backend)
+    with pytest.raises(smoke.SmokeError, match="FILL_VALUE_MISMATCH"):
+        run.run()
+    assert [p[2]["ticker"] for p in backend.posts_to(smoke.PREPARE)] == ["VODl_EQ", "LLOYl_EQ"]
+    assert backend.posts_to(smoke.CANCEL) == []
+
+
+def test_an_anomaly_on_the_q1_fill_or_the_position_check_stops_before_the_sell(tmp_path):
+    backend = StubBackend()
+    backend.reconcile_extra["prop-1"] = {"position_check": "POSITION_MISMATCH"}
+    run, backend, ask, said, evidence = build(tmp_path, q1("MARKETABLEl_EQ") + sell("MARKETABLEl_EQ"), backend)
+    run.preflight()
+    with pytest.raises(smoke.SmokeError, match="position check POSITION_MISMATCH"):
+        run.buy_q1()
+    assert len(backend.posts_to(smoke.PREPARE)) == 1
+
+
+def test_an_anomaly_while_reconciling_the_far_buys_next_day_stops_and_is_persisted(tmp_path):
+    backend = StubBackend()
+    run, backend, ask, said, evidence = build(tmp_path, FULL, backend)
+    run.run()
+    backend.requests.clear()
+    first = next(s["proposal_id"] for s in evidence.steps if s.get("step") == "buy-1")
+    backend.reconcile_extra[first] = {"code": "NON_MONOTONIC"}
+    again = smoke.Smoke(backend, ScriptedInput(["RECONCILE ALL"]), said.append, evidence, clock=Clock(), sleep=lambda s: None)
+    with pytest.raises(smoke.SmokeError, match="NON_MONOTONIC"):
+        again.reconcile_all()
+    assert len(backend.posts_to(smoke.RECONCILE)) == 1, "stopped at the first anomaly"
+    assert evidence.steps[-1]["step"] == "anomaly"
