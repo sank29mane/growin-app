@@ -52,8 +52,9 @@ class EndpointLimit:
 
 
 # Pinned from the official v0 spec as recorded in 66-RESEARCH section 3.
-# The two pies reads are not in that table; 1 per 30 s is a conservative pin
-# for deprecated endpoints (66-CONTEXT "Deferred": pies reads stay as they are).
+# The spec does publish the pies limits (the 66-02 review read GET /equity/pies/{id}
+# as 1 per 5 s). Both pies reads stay pinned at 1 per 30 s: for {id} that is
+# stricter than the spec, which only slows deprecated reads (66-CONTEXT "Deferred").
 LIMIT_TABLE: Mapping[str, EndpointLimit] = {
     "POST /equity/orders/limit": EndpointLimit(1, 2.0),
     "POST /equity/orders/stop": EndpointLimit(1, 2.0),

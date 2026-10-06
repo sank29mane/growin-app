@@ -2069,8 +2069,15 @@ class ExecutionLedger:
                 raise ApprovalConflict("admitted evidence is required before approval")
             if str(admission["intent_hash"]) != str(order["intent_hash"]):
                 raise ApprovalConflict("approval admission does not match the immutable intent")
+            sell_in_bound = (
+                self.venue_binding is not None and str(intent.get("side")) == OrderSide.SELL.value
+            )
             reservation = connection.execute(
-                "SELECT state, intent_hash FROM buying_power_reservations WHERE proposal_id = ?",
+                (
+                    f"SELECT state, intent_hash FROM {_QUANTITY_TABLE} WHERE proposal_id = ?"
+                    if sell_in_bound
+                    else "SELECT state, intent_hash FROM buying_power_reservations WHERE proposal_id = ?"
+                ),
                 (proposal_id,),
             ).fetchone()
             if reservation is None or str(reservation["state"]) != "ACTIVE":
