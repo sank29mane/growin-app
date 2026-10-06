@@ -620,6 +620,10 @@ class AppState:
             return "VENUE_LIMITS_UNAVAILABLE", None
         capital_cap, per_position_cap = limits
         divisor = instrument.price_divisor
+        # The worst case an order can cost is its LIMIT, never the mid or the simulator
+        # fill. One pinned price feeds both this pre-check and the admission, so the
+        # ledger's own cap check reserves exactly what is checked here.
+        pinned_price = intent.limit_price / divisor
         notional = practice_notional(intent.quantity, intent.limit_price, divisor)
         headroom = ledger.practice_headroom(binding.account_id, binding.currency, intent.ticker)
         broker_available = None
@@ -650,7 +654,7 @@ class AppState:
         # The simulator and risk gate see pounds, matching the price and the notional.
         window["spread"] = list(context.tick_window["spread"])
         kwargs = {
-            "price": intent.limit_price / divisor,
+            "price": pinned_price,
             "price_source": price_source,
             "tick_window": window,
             "regime_id": context.regime.regime_id,

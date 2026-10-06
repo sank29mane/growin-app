@@ -26,6 +26,7 @@ from .models import (
     OrderAck,
     OrderIntent,
     OrderMode,
+    OrderType,
     OrderSide,
     OrderState,
     ReconciliationSnapshot,
@@ -219,6 +220,10 @@ class ExecutionService:
             )
             risk_value = risk_evidence.get("admitted_quantity", risk_evidence.get("scaled_size"))
             risk_quantity = _finite_decimal(risk_value, "risk quantity")
+            if bound and intent.order_type is OrderType.LIMIT and price is None:
+                # A bound venue's notional is the LIMIT price. Falling back to the
+                # simulator fill would reserve and cap-check a lower, unpinned figure.
+                raise ValueError("PRICE_NOT_PINNED_TO_LIMIT")
             price_decimal = _finite_decimal(
                 price if price is not None else simulator_fill, "price"
             )

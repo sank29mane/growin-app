@@ -750,3 +750,37 @@ async def test_pending_practice_proposals_are_listed_and_readable_by_id_over_loo
             ).status_code == 403
     finally:
         stack.close()
+
+
+@pytest.mark.asyncio
+async def test_the_cap_pre_check_is_pinned_to_the_limit_price_not_the_mid(
+    tmp_path, private_config_dir, monkeypatch, regime_zero
+):
+    """PR #557 fix 5. A wide spread puts the mid below the limit.
+
+    421 shares at limit 71.3 pence is GBP 300.173 against a GBP 300 cap. Valued at
+    the mid (70.65) it is 297.44 and would fit. The cap is on what the order can
+    cost, which is the limit.
+    """
+
+    stack = await stack_with(tmp_path, private_config_dir, monkeypatch)
+    try:
+        per_position = Decimal(SYNTH_LIMITS["per_position_cap"])
+        bid, ask, limit, quantity = Decimal("70.0"), Decimal("71.3"), Decimal("71.3"), 421
+        mid = (bid + ask) / 2
+        assert limit > mid
+        assert practice_notional(Decimal(quantity), mid, Decimal(100)) <= per_position, "mid would fit"
+        assert practice_notional(Decimal(quantity), limit, Decimal(100)) > per_position, "limit does not"
+        result = await prepare(
+            stack, monkeypatch, quantity=quantity, limit_price=str(limit), readings=readings(str(bid), str(ask))
+        )
+        assert_denied(stack, result, "PER_POSITION_CAP_EXCEEDED")
+        # One share fewer is GBP 299.46 at the limit: admitted, and recorded at the limit.
+        fits = await prepare(
+            stack, monkeypatch, quantity=quantity - 1, limit_price=str(limit),
+            readings=readings(str(bid), str(ask)),
+        )
+        assert fits["admitted"] is True, fits
+        assert Decimal(fits["admission"]["notional"]) == Decimal(quantity - 1) * limit / 100
+    finally:
+        stack.close()
