@@ -1335,6 +1335,44 @@ def test_authorize_whose_reads_end_exactly_at_the_last_valid_second_passes(real:
     assert real.pipeline.authorize(minted.challenge_id, real.signed(minted)).decision == "VERIFIED_NOT_FORWARDED"
 
 
+def slow_success_append(real: RealRig, monkeypatch, seconds: float) -> None:
+    """Make the VERIFIED_NOT_FORWARDED audit write take `seconds` of VM time."""
+    original = real.audit.append
+
+    def slow(fields):
+        entry = original(fields)
+        if fields["decision"] == "VERIFIED_NOT_FORWARDED":
+            real.clock.advance(seconds)
+        return entry
+
+    monkeypatch.setattr(real.audit, "append", slow)
+
+
+def test_authorize_audit_write_crossing_the_cutoff_is_refused(real: RealRig, monkeypatch):
+    real.clock.now = CUTOFF_MINUS_1S - timedelta(seconds=1)  # 15:09:58
+    minted = real.mint()
+    real.clock.advance(1)  # 15:09:59: every deadline check before the write passes
+    slow_success_append(real, monkeypatch, 2)  # the write ends at 15:10:01
+    real.refused_authorize(minted, "session_closed", 423, "ORDERS_BLOCKED")
+    assert real.decisions()[-1] == ("REFUSED", ["session_closed"])
+    assert real.forward.calls == 0
+
+
+def test_authorize_audit_write_crossing_challenge_expiry_is_refused(real: RealRig, monkeypatch):
+    minted = real.mint()  # issued 10:00:00, expires 10:01:00
+    real.clock.advance(59)  # 10:00:59: live before the write
+    slow_success_append(real, monkeypatch, 2)  # the write ends at 10:01:01
+    real.refused_authorize(minted, "challenge_expired", 409, "REPLAY")
+    assert real.decisions()[-1] == ("REFUSED", ["challenge_expired"])
+
+
+def test_authorize_audit_write_ending_inside_both_deadlines_still_passes(real: RealRig, monkeypatch):
+    minted = real.mint()
+    real.clock.advance(58)
+    slow_success_append(real, monkeypatch, 1)  # ends 10:00:59, expiry is 10:01:00
+    assert real.pipeline.authorize(minted.challenge_id, real.signed(minted)).decision == "VERIFIED_NOT_FORWARDED"
+
+
 def test_recheck_account_mismatch_unexplained_isin_after_mint(real: RealRig):
     minted = real.mint()
     real.account.snap = AccountSnapshot(holdings=(Holding(ISIN_B, 5, D("500")),))

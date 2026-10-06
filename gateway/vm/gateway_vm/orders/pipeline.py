@@ -328,6 +328,15 @@ class OrderPipeline:
             entry = self._append(
                 self._entry("authorize", intent, "VERIFIED_NOT_FORWARDED", [], result)
             )
+            # The audit write is blocking too. Sample once more, immediately
+            # before success is returned: a write that finished after 15:10 or
+            # after the challenge died is answered with an audited refusal, never
+            # success. (63 forwards nothing, so the success entry above sends
+            # nothing; the refusal that follows is the last word on the intent.)
+            final, _ = self._now()
+            late = self._late_codes(final, challenge.expires_at)
+            if late:
+                raise self._refuse("authorize", intent, late, result)
             return AuthorizeResult(
                 decision="VERIFIED_NOT_FORWARDED",
                 intent_id=intent.intent_id,
