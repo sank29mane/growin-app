@@ -16,10 +16,15 @@ from collections.abc import Mapping
 from datetime import date
 from decimal import Decimal
 
-from costs import ticks as _costs_ticks
 from costs.core import Side, TickSizeUnavailable
 from costs.fills import TickSize
-from costs.ticks import InstrumentClass
+from costs.ticks import (
+    InstrumentClass,
+    TickTable,
+    committed_tick_table,
+    resolve_nse_cash_tick,
+)
+from costs.ticks import align_limit as _align_limit
 
 from .registry import canonical_sha256
 
@@ -33,11 +38,11 @@ _COSTS_CLASS = {EQUITY: InstrumentClass.EQUITY, NON_GOLD_ETF: InstrumentClass.NO
 class TickTables:
     """Tick tables keyed by instrument class. A class without a table fails closed."""
 
-    def __init__(self, tables: Mapping[str, _costs_ticks.TickTable]) -> None:
+    def __init__(self, tables: Mapping[str, TickTable]) -> None:
         for name, table in tables.items():
             if name not in SUPPORTED_CLASSES:
                 raise TickSizeUnavailable(f"instrument class {name!r} is not supported")
-            if table != _costs_ticks.committed_tick_table(_COSTS_CLASS[name]):
+            if table != committed_tick_table(_COSTS_CLASS[name]):
                 raise TickSizeUnavailable(f"tick table for {name} differs from the committed schedule")
         self._tables = dict(tables)
 
@@ -61,7 +66,7 @@ class TickTables:
             return False
         return any(version.covers(day) and series in version.series for version in table.versions)
 
-    def table_for(self, instrument_class: str) -> _costs_ticks.TickTable:
+    def table_for(self, instrument_class: str) -> TickTable:
         if instrument_class not in SUPPORTED_CLASSES:
             raise TickSizeUnavailable(f"instrument class {instrument_class!r} is not supported; nothing defaults")
         table = self._tables.get(instrument_class)
@@ -72,7 +77,7 @@ class TickTables:
 
 def load_default_tables() -> TickTables:
     """The committed equity and non-Gold ETF tables, read as provenance data only."""
-    return TickTables({name: _costs_ticks.committed_tick_table(cls) for name, cls in _COSTS_CLASS.items()})
+    return TickTables({name: committed_tick_table(cls) for name, cls in _COSTS_CLASS.items()})
 
 
 def resolve_tick(
@@ -86,7 +91,7 @@ def resolve_tick(
     if series not in SUPPORTED_SERIES:
         raise TickSizeUnavailable(f"series {series!r} is out of scope for tick lookup")
     tables.table_for(instrument_class)  # the class must be registered; nothing defaults
-    return _costs_ticks.resolve_nse_cash_tick(
+    return resolve_nse_cash_tick(
         session_date=session_date,
         band_reference_price=band_reference_price,
         instrument_class=_COSTS_CLASS[instrument_class],
@@ -96,4 +101,4 @@ def resolve_tick(
 
 def align_limit(price: Decimal, tick: TickSize, side: Side) -> Decimal:
     """Floor a buy limit and ceil a sell limit to the tick."""
-    return _costs_ticks.align_limit(price, tick, side)
+    return _align_limit(price, tick, side)
