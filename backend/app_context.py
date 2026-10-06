@@ -85,6 +85,10 @@ class AppState:
         # Phase 66: the ledger's venue binding while authority is held; None for a
         # paper ledger and whenever execution is disabled.
         self.execution_venue_binding: Optional[VenueBinding] = None
+        # Phase 66: the bound venue's dispatcher (the practice adapter), kept so
+        # the practice routes can reach its transport, metadata cache and
+        # reconciler. None for paper and whenever execution is disabled.
+        self.venue_adapter: Any = None
         # Loaded private WorkspaceConfig for Phases 62 and 63; None until a successful start.
         self.workspace_config = None
         self.lm_studio_client = None  # Lazy init to avoid startup blocking
@@ -250,12 +254,17 @@ class AppState:
             self._execution_service = ExecutionService()
             self.execution_authority = False
             self.execution_venue_binding = None
+            self.venue_adapter = None
             self.workspace_config = None
             # Error text carries codes, field names and paths, never config values.
             self.execution_startup_error = f"{type(exc).__name__}: {exc}"
             return False
         self._execution_ledger = ledger
         self.execution_venue_binding = binding
+        self.venue_adapter = dispatcher if binding is not None else None
+        attach = getattr(dispatcher, "attach", None)
+        if binding is not None and callable(attach):
+            attach(ledger)
         self._preflight_policy_connection = self._local_preflight_policy_connection()
         self._execution_service = ExecutionService(
             dispatcher,
@@ -280,7 +289,32 @@ class AppState:
         self._execution_service = None
         self.execution_authority = False
         self.execution_venue_binding = None
+        self.venue_adapter = None
         self.workspace_config = None
+
+    async def verify_execution_ready(self) -> bool:
+        """Prove the broker account behind a bound venue (D-13); disable execution if it fails.
+
+        Paper and test doubles have nothing to prove and return True. A practice
+        adapter must see ``account/summary`` name the bound account id and
+        currency. On any failure the ledger is closed and execution stays
+        disabled with the stable code in ``execution_startup_error``; approve then
+        answers 503 because no dispatcher is installed.
+        """
+
+        adapter = self.venue_adapter
+        verify = getattr(adapter, "verify_account", None)
+        if adapter is None or not callable(verify):
+            return True
+        try:
+            await verify()
+        except Exception as exc:  # noqa: BLE001 - any failure leaves execution disabled
+            code = getattr(exc, "code", "PIN_FAILED")
+            self.close_execution()
+            self._execution_service = ExecutionService()
+            self.execution_startup_error = f"PracticePinError: {code}"
+            return False
+        return True
 
     def market_data_status(self) -> Dict[str, Any]:
         session = self._market_data_session

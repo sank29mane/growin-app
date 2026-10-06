@@ -113,7 +113,11 @@ async def lifespan(app: FastAPI):
                 private_dir=private_dir,
             )
             if execution_started:
-                logger.info("✅ Local paper execution ledger: authority acquired")
+                # Phase 66 (D-13): a practice venue proves its broker account before
+                # it keeps authority. Paper has nothing to prove.
+                execution_started = await state.verify_execution_ready()
+            if execution_started:
+                logger.info("✅ Local %s execution ledger: authority acquired", state.execution_mode)
             else:
                 logger.error(
                     "⛔ Execution authority unavailable; remaining fail-closed: %s",
@@ -270,12 +274,14 @@ from routes import (
     market_routes,
     mcp_routes,
     status_routes,
+    t212_practice_routes,
 )
 
 app.include_router(chat_routes.router)
 app.include_router(agent_routes.router)
 app.include_router(market_routes.router)
 app.include_router(market_data_routes.router)
+app.include_router(t212_practice_routes.router)
 app.include_router(mcp_routes.router)
 app.include_router(status_routes.router) # Detailed health & agent status
 app.include_router(chart_routes.router)  # Chart data and visualization

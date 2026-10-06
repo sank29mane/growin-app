@@ -17,6 +17,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 
 from execution import OrderAck, OrderIntent
 from execution.venue import (
+    PRICE_SOURCE_TEST_REPLAY,
     VENUE_PAPER,
     VENUE_T212_PRACTICE,
     production_dispatcher_factories,
@@ -160,5 +161,8 @@ def prepare(app_state: Any, proposal: dict[str, Any], *, price: str = "50") -> A
         proposal,
         currency="GBP",
         price=price,
+        # A bound venue admits only from a recorded-quote replay (D-02); this is
+        # the fixture replay. A paper ledger ignores it.
+        price_source=PRICE_SOURCE_TEST_REPLAY,
         **app_state._local_paper_preflight(),
     )

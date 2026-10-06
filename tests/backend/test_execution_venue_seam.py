@@ -38,6 +38,7 @@ from execution.venue import (
     BROKER_VENUE_MISMATCH,
     LIVE_DISABLED,
     MODE_VENUE_MISMATCH,
+    PRICE_SOURCE_TEST_REPLAY,
     VENUE_PAPER,
     VENUE_T212_PRACTICE,
     VenueError,
@@ -66,8 +67,10 @@ def uk_process(monkeypatch):
     monkeypatch.setenv("GROWIN_WORKSPACE", "uk")
 
 
-def test_production_factory_map_holds_only_paper():
-    assert set(production_dispatcher_factories()) == {VENUE_PAPER}
+def test_production_factory_map_holds_paper_and_the_demo_only_practice_adapter():
+    # 66-03: the map gained the practice adapter, which can reach the demo host only.
+    # It is still not a live-capable entry: no other venue id is in the map.
+    assert set(production_dispatcher_factories()) == {VENUE_PAPER, VENUE_T212_PRACTICE}
 
 
 @pytest.mark.parametrize("venue", ["t212_live", "", "PAPER", "breeze_relay", None])
@@ -85,7 +88,8 @@ def test_resolving_a_known_but_unregistered_venue_raises_unavailable():
     from execution.venue import resolve_factory
 
     with pytest.raises(VenueError) as refused:
-        resolve_factory(VENUE_T212_PRACTICE)
+        # An injected map without the entry: no fallback to paper.
+        resolve_factory(VENUE_T212_PRACTICE, {VENUE_PAPER: production_dispatcher_factories()[VENUE_PAPER]})
     assert refused.value.code == "VENUE_UNAVAILABLE"
     assert resolve_factory(VENUE_PAPER)(None).__class__.__name__ == "PaperDispatcher"
 
@@ -231,7 +235,11 @@ class _Stack:
             price="50",
             simulator_evidence={"simulated_fill_price": "50"},
             risk_evidence={"scaled_size": str(intent.quantity)},
+            price_source=PRICE_SOURCE_TEST_REPLAY,
         )
+        if self.ledger.venue_binding is not None:
+            # 66-03: a bound ledger reserves only against stored venue limits.
+            self.ledger.configure_venue_limits("1000", "1000", workspace="uk")
         self.ledger.configure_paper_budget(intent.account, "GBP", "1000", workspace="uk")
         self.service.reserve(intent.proposal_id)
 
@@ -654,9 +662,13 @@ def test_practice_venue_with_no_registered_factory_is_disabled_never_paper(
     ledger_dir = tmp_path / "ledger"
     app_state = AppState()
 
-    # No dispatcher_factories: the production map, which holds paper only.
+    # An injected map that holds paper only (the production map now also holds the
+    # demo-only practice adapter): the practice venue has no factory, so no ledger.
     started = app_state.start_execution(
-        ledger_dir / "execution.sqlite3", workspace="uk", private_dir=private_config_dir
+        ledger_dir / "execution.sqlite3",
+        workspace="uk",
+        private_dir=private_config_dir,
+        dispatcher_factories={VENUE_PAPER: production_dispatcher_factories()[VENUE_PAPER]},
     )
 
     assert started is False
