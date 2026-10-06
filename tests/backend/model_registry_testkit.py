@@ -168,9 +168,25 @@ def install_network_guard(monkeypatch: pytest.MonkeyPatch) -> NetworkGuard:
 # --- fixtures (import into a test module to use) -----------------------------------
 
 
+# Arguments the stub returns when magentic forces a structured-output tool.
+STUB_TOOL_ARGUMENTS = {
+    "return_list_of_toolcall": {"value": []},
+    "return_riskassessment": {
+        "status": "APPROVED",
+        "confidence_score": 0.5,
+        "risk_assessment": "stub",
+        "compliance_notes": "stub",
+        "recommendation_adjustment": "none",
+        "debate_refutation": "stub",
+        "requires_hitl": False,
+    },
+    "return_newsdataqueryparams": {"q": "stub query"},
+}
+
+
 @pytest.fixture
 def stub():
-    server = ModelStubServer().start()
+    server = ModelStubServer(tool_arguments=dict(STUB_TOOL_ARGUMENTS)).start()
     try:
         yield server
     finally:
