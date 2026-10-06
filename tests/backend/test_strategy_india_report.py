@@ -105,9 +105,9 @@ def test_a_band_outside_every_test_window_is_counted_apart(tmp_path):
     assert cov.total_in_run_window == 1 and cov.outside_test_windows == 1 and set(cov.by_fold.values()) == {0}
 
 
-def test_ticks_before_the_2025_revision_surface_as_fold_level_unknown(tmp_path):
-    revision = date(2025, 4, 15)  # no tick table is encoded before this date (F1)
-    inputs = study_inputs(tmp_path, start=date(2024, 1, 1))
+def test_ticks_before_encoded_history_surface_as_fold_level_unknown(tmp_path):
+    revision = date(2021, 1, 1)  # neither class has encoded tick evidence before this date
+    inputs = study_inputs(tmp_path, start=date(2019, 1, 1))
     study.register(inputs, hypothesis="h")
     report = study.run_research(inputs)
     pre = [u for u in report.units if u.test_end < revision]

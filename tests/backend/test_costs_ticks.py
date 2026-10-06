@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import inspect
 import json
 from datetime import date, datetime, time
@@ -27,11 +28,15 @@ from costs.ticks import (
     InstrumentClass,
     NseCashTickResolution,
     align_limit,
+    committed_tick_table,
     is_on_tick,
-    load_tick_table,
     resolve_nse_cash_tick,
-    resolve_tick_from_table,
 )
+# The table-level tests below use the private loader and low-level resolver on purpose: they test the
+# table file format and band maths. Nothing under backend/ other than costs/ticks.py may import them
+# (see test_only_ticks_py_imports_the_low_level_resolver_and_loader).
+from costs.ticks import _load_tick_table as load_tick_table
+from costs.ticks import _resolve_tick_from_table as resolve_tick_from_table
 
 D = Decimal
 TABLE_PATH = Path(__file__).resolve().parents[2] / "backend" / "costs" / "schedules" / "nse_cash_tick_sizes.json"
@@ -405,6 +410,96 @@ def test_router_has_no_default_for_any_argument_and_the_loader_requires_a_path()
 def test_non_positive_reference_price_raises_through_the_router():
     with pytest.raises(InputError):
         routed(date(2025, 6, 1), "0", InstrumentClass.EQUITY, "EQ")
+
+
+# ---- hardening: private low-level API, session_date type ----------------------
+
+BACKEND_ROOT = Path(__file__).resolve().parents[2] / "backend"
+TICKS_PY = BACKEND_ROOT / "costs" / "ticks.py"
+PRIVATE_NAMES = {"load_tick_table", "_load_tick_table", "resolve_tick_from_table", "_resolve_tick_from_table"}
+
+
+def private_name_uses(source: str) -> list[str]:
+    """Every import, name, attribute or string literal that mentions the low-level loader or resolver."""
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ImportFrom):
+            found += [f"import {alias.name}" for alias in node.names if alias.name in PRIVATE_NAMES]
+        elif isinstance(node, ast.Name) and node.id in PRIVATE_NAMES:
+            found.append(f"name {node.id}")
+        elif isinstance(node, ast.Attribute) and node.attr in PRIVATE_NAMES:
+            found.append(f"attribute {node.attr}")
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value in PRIVATE_NAMES:
+            found.append(f"string {node.value}")
+    return found
+
+
+def backend_python_files():
+    for path in BACKEND_ROOT.rglob("*.py"):
+        parts = set(path.relative_to(BACKEND_ROOT).parts)
+        if parts & {".venv", "venv", "__pycache__", "node_modules", "site-packages"}:
+            continue
+        yield path
+
+
+def test_only_ticks_py_imports_the_low_level_resolver_and_loader():
+    files = [path for path in backend_python_files() if path != TICKS_PY]
+    assert any(path.name == "ticks.py" and path.parent.name == "strategy_india" for path in files)  # the scan sees real callers
+    offenders = {
+        str(path.relative_to(BACKEND_ROOT)): uses
+        for path in files
+        if (uses := private_name_uses(path.read_text(encoding="utf-8")))
+    }
+    assert offenders == {}
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from costs.ticks import _resolve_tick_from_table",
+        "from costs.ticks import _load_tick_table as loader",
+        "from costs.ticks import load_tick_table",
+        "import costs.ticks as t\nt._resolve_tick_from_table(a, b)",
+        "from costs import ticks\nticks.resolve_tick_from_table(a)",
+        "import costs.ticks as t\ngetattr(t, '_load_tick_table')",
+    ],
+)
+def test_the_scan_catches_a_stray_import(source):
+    assert private_name_uses(source)
+    assert private_name_uses("from costs.ticks import resolve_nse_cash_tick, InstrumentClass") == []
+
+
+def test_the_low_level_names_are_not_public():
+    import costs.ticks as ticks_module
+
+    for name in ("load_tick_table", "resolve_tick_from_table", "DEFAULT_TICK_TABLE_PATH"):
+        assert not hasattr(ticks_module, name)
+
+
+def test_committed_tick_table_is_provenance_only_and_fails_closed():
+    equity = committed_tick_table(InstrumentClass.EQUITY)
+    assert [v.version for v in equity.versions] == [FLAT_VERSION, TWO_BAND_VERSION, TABLE_VERSION]
+    assert [v.version for v in committed_tick_table(InstrumentClass.NON_GOLD_ETF).versions] == [ETF_VERSION, ETF_2026_VERSION]
+    for bad in (InstrumentClass.GOLD_ETF, "EQUITY", None):
+        with pytest.raises(TickSizeUnavailable):
+            committed_tick_table(bad)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [datetime(2025, 6, 2, 9, 15), "2025-06-02", None, 20250602, 1.5],
+    ids=["datetime", "str", "None", "int", "float"],
+)
+@pytest.mark.parametrize("instrument_class", [InstrumentClass.EQUITY, InstrumentClass.NON_GOLD_ETF])
+def test_a_non_date_session_date_raises_a_typed_error_not_a_type_error(bad, instrument_class):
+    with pytest.raises(TickSizeUnavailable, match="session_date"):
+        routed(bad, "400.00", instrument_class, "EQ")
+
+
+@pytest.mark.parametrize("bad", [datetime(2025, 6, 2, 9, 15), "2025-06-02", None], ids=["datetime", "str", "None"])
+def test_the_private_resolver_guards_the_session_date_too(bad):
+    with pytest.raises(TickSizeUnavailable, match="session_date"):
+        resolve_tick_from_table(load_tick_table(TABLE_PATH), session_date=bad, band_reference_price=D("400"))
 
 
 # ---- table strictness --------------------------------------------------------

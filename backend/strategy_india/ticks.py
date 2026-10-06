@@ -1,16 +1,12 @@
 """The single tick-size adapter (the only module in this package that may import ``costs.ticks``).
 
-``costs.ticks`` has no instrument classification: ``load_tick_table()`` with no path
-silently loads the equity table and the series is not an input. This adapter makes both
-explicit. Every lookup names an instrument class (``EQUITY`` for universe stocks,
-``NON_GOLD_ETF`` for the benchmark ETF) and a series, there are no defaults, and anything
-else raises ``TickSizeUnavailable``. A table is registered per class; today only the equity
-table is encoded, so a ``NON_GOLD_ETF`` lookup fails closed. Any ``TickSizeUnavailable``
-(including ETF dates no circular covers) surfaces as a recorded attempt, fold-level
-unknown or an INCONCLUSIVE verdict, never as a default tick.
-
-When PR #539 adds the public resolver (``resolve_nse_cash_tick``), the swap is the body of
-``resolve_tick`` and ``load_default_tables`` below.
+``resolve_nse_cash_tick`` takes an explicit
+``InstrumentClass`` and series, has no defaults, and fails closed for Gold ETFs, unlisted
+series and dates no circular covers. This adapter maps this package's class names onto that
+enum (``EQUITY`` for universe stocks, ``NON_GOLD_ETF`` for the benchmark ETF) and keeps the
+registered tables only for gating and the registration hash. Any ``TickSizeUnavailable``
+(including ETF dates no circular covers, such as 2025-04-15 to 2026-09-06) surfaces as a
+recorded attempt, fold-level unknown or an INCONCLUSIVE verdict, never as a default tick.
 """
 
 from __future__ import annotations
@@ -22,6 +18,7 @@ from decimal import Decimal
 from costs import ticks as _costs_ticks
 from costs.core import Side, TickSizeUnavailable
 from costs.fills import TickSize
+from costs.ticks import InstrumentClass
 
 from .registry import canonical_sha256
 
@@ -29,8 +26,7 @@ EQUITY = "EQUITY"
 NON_GOLD_ETF = "NON_GOLD_ETF"
 SUPPORTED_CLASSES = (EQUITY, NON_GOLD_ETF)
 SUPPORTED_SERIES = ("EQ",)
-# Explicit path: the no-argument default of load_tick_table() is never used.
-EQUITY_TABLE_PATH = _costs_ticks.DEFAULT_TICK_TABLE_PATH
+_COSTS_CLASS = {EQUITY: InstrumentClass.EQUITY, NON_GOLD_ETF: InstrumentClass.NON_GOLD_ETF}
 
 
 class TickTables:
@@ -62,8 +58,8 @@ class TickTables:
 
 
 def load_default_tables() -> TickTables:
-    """Today's main: only the equity table exists. Loaded from an explicit path."""
-    return TickTables({EQUITY: _costs_ticks.load_tick_table(EQUITY_TABLE_PATH)})
+    """The committed equity and non-Gold ETF tables, read as provenance data only."""
+    return TickTables({name: _costs_ticks.committed_tick_table(cls) for name, cls in _COSTS_CLASS.items()})
 
 
 def resolve_tick(
@@ -76,10 +72,13 @@ def resolve_tick(
 ) -> TickSize:
     if series not in SUPPORTED_SERIES:
         raise TickSizeUnavailable(f"series {series!r} is out of scope for tick lookup")
-    table = tables.table_for(instrument_class)
-    return _costs_ticks.resolve_tick_from_table(
-        table, session_date=session_date, band_reference_price=band_reference_price
-    )
+    tables.table_for(instrument_class)  # the class must be registered; nothing defaults
+    return _costs_ticks.resolve_nse_cash_tick(
+        session_date=session_date,
+        band_reference_price=band_reference_price,
+        instrument_class=_COSTS_CLASS[instrument_class],
+        series=series,
+    ).tick
 
 
 def align_limit(price: Decimal, tick: TickSize, side: Side) -> Decimal:

@@ -17,7 +17,7 @@ from strategy_india.data import DatasetView
 from strategy_india.errors import DataError
 from strategy_india.holdout import HoldoutRange
 from strategy_india.report import write_report
-from strategy_india.ticks import EQUITY, NON_GOLD_ETF, TickTables, load_default_tables
+from strategy_india.ticks import EQUITY, NON_GOLD_ETF, TickTables, load_default_tables, resolve_tick
 
 from test_strategy_india_support import (
     ETF_ISINS,
@@ -81,7 +81,7 @@ def test_etf_buy_and_hold_prices_one_round_trip_with_the_60_estimator():
 
 def test_etf_dates_with_no_tick_table_are_unknown_not_defaulted():
     ctx = make_context(make_rows(SESSIONS, default_names(3) + etf_names()), FAR)
-    equity_only = TickTables({EQUITY: load_default_tables().table_for(EQUITY)})  # today's main has no ETF table
+    equity_only = TickTables({EQUITY: load_default_tables().table_for(EQUITY)})  # deliberately leave the ETF class unregistered
     with pytest.raises(TickSizeUnavailable):
         benchmark.etf_buy_and_hold(ctx.view, ETF_ISINS[0], start=SESSIONS[0], end=SESSIONS[-1], capital=Decimal(50000),
                                    ticks=equity_only, schedules=ctx.schedules, pricing_basis=ctx.pricing_basis)
@@ -134,3 +134,26 @@ def test_written_report_and_fixtures_hold_no_tri_values(tmp_path):
     for fixture in FIXTURES.iterdir():
         text = fixture.read_text()
         assert "Total Returns Index" not in text and "NIFTY 500," not in text
+
+
+@pytest.mark.parametrize("day", [date(2025, 4, 15), date(2026, 9, 4)])
+def test_committed_etf_table_gap_is_unknown_not_defaulted(day):
+    sessions = weekday_sessions(day, 2)
+    ctx = make_context(make_rows(sessions, default_names(3) + etf_names()), FAR)
+    with pytest.raises(TickSizeUnavailable):
+        benchmark.etf_buy_and_hold(
+            ctx.view, ETF_ISINS[0], start=sessions[0], end=sessions[-1], capital=Decimal(50000),
+            ticks=ctx.ticks, schedules=ctx.schedules, pricing_basis=ctx.pricing_basis,
+        )
+
+
+@pytest.mark.parametrize("instrument_class, expected", [(EQUITY, "0.05"), (NON_GOLD_ETF, "0.01")])
+def test_adapter_returns_the_public_resolution_with_version_provenance(instrument_class, expected):
+    from costs.ticks import InstrumentClass, resolve_nse_cash_tick
+
+    arguments = dict(session_date=SESSION_START, band_reference_price=Decimal("400"), series="EQ")
+    resolution = resolve_nse_cash_tick(**arguments, instrument_class=InstrumentClass[instrument_class])
+    tick = resolve_tick(tick_tables(), **arguments, instrument_class=instrument_class)
+    assert tick == resolution.tick and tick.value == Decimal(expected)
+    assert tick.source.endswith(f":{resolution.version_id}")
+    assert tick.source_hash == resolution.version_hash

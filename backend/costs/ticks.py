@@ -21,7 +21,7 @@ from __future__ import annotations
 import decimal
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from enum import Enum
 from functools import lru_cache
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
@@ -213,7 +213,7 @@ def _parse_version(raw: Any, index: int) -> TickTableVersion:
     )
 
 
-def load_tick_table(path: Path) -> TickTable:
+def _load_tick_table(path: Path) -> TickTable:
     """Load one tick table file. The path is required: there is deliberately no default table."""
     source = Path(path)
     with decimal.localcontext(COST_CONTEXT):
@@ -238,6 +238,10 @@ def load_tick_table(path: Path) -> TickTable:
 
 
 def _covering_version(table: TickTable, session_date: date) -> TickTableVersion:
+    # A datetime is a date subclass but is not a session date; a str or None would otherwise
+    # surface as a bare TypeError from the comparison below.
+    if not isinstance(session_date, date) or isinstance(session_date, datetime):
+        raise TickSizeUnavailable(f"session_date must be a datetime.date, got {type(session_date).__name__}")
     for version in table.versions:
         if version.covers(session_date):
             return version
@@ -262,11 +266,12 @@ def _tick_from_version(table: TickTable, version: TickTableVersion, reference: D
     raise TickSizeUnavailable(f"{version.version}: no band holds the reference price")  # unreachable: last band is open
 
 
-def resolve_tick_from_table(table: TickTable, *, session_date: date, band_reference_price: Decimal) -> TickSize:
+def _resolve_tick_from_table(table: TickTable, *, session_date: date, band_reference_price: Decimal) -> TickSize:
     """Pick the dated tick for a session from the band holding the reference price.
 
-    Low level: it does not know the instrument class or the series. Production callers use
-    ``resolve_nse_cash_tick``.
+    Private on purpose: it does not know the instrument class or the series, so a Gold ETF resolved
+    through the non-Gold ETF table would silently get Rs 0.01. Production callers use
+    ``resolve_nse_cash_tick``; a test that scans ``backend/`` fails if any other module imports this.
     """
     with decimal.localcontext(COST_CONTEXT):
         reference = positive_decimal(band_reference_price, "band_reference_price")
@@ -300,7 +305,20 @@ _TABLE_PATHS = {
 
 @lru_cache(maxsize=None)
 def _committed_table(instrument_class: InstrumentClass) -> TickTable:
-    return load_tick_table(_TABLE_PATHS[instrument_class])
+    return _load_tick_table(_TABLE_PATHS[instrument_class])
+
+
+def committed_tick_table(instrument_class: InstrumentClass) -> TickTable:
+    """The committed table for a class, as read-only provenance data (versions, hashes, sources).
+
+    It carries no resolver: resolving a tick goes through ``resolve_nse_cash_tick``, which adds the
+    class and series checks. GOLD_ETF and any non-enum value raise ``TickSizeUnavailable``.
+    """
+    if not isinstance(instrument_class, InstrumentClass):
+        raise TickSizeUnavailable(f"instrument_class must be an InstrumentClass, got {instrument_class!r}")
+    if instrument_class is InstrumentClass.GOLD_ETF:
+        raise TickSizeUnavailable("Gold ETF ticks are set per security by NSE and are not encoded")
+    return _committed_table(instrument_class)
 
 
 def resolve_nse_cash_tick(
