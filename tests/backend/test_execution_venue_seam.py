@@ -32,7 +32,7 @@ from execution import (
     default_ledger_path,
     practice_ledger_path,
 )
-from execution.ledger import canonical_json
+from execution.ledger import LedgerVenueMismatch, canonical_json
 from execution.venue import (
     ACCOUNT_BINDING_MISMATCH,
     BROKER_VENUE_MISMATCH,
@@ -961,3 +961,119 @@ def test_the_order_tool_scan_catches_a_planted_call(tmp_path):
         "planted.py:2 call_tool",
         "planted.py:2 place_market_order",
     ]
+
+
+# --- a practice ledger never touches the real UK ledger path (D-01) -------------
+
+
+def _real_uk_ledger_traces(real: Path) -> list[str]:
+    """Everything the real path could leave behind: file, lock, parent directory."""
+
+    names = [real, real.with_name(real.name + ".lock"), real.parent]
+    return [str(path) for path in names if os.path.lexists(path)]
+
+
+@pytest.fixture
+def home_with_real_uk_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    return default_ledger_path("uk")
+
+
+def test_a_practice_binding_with_no_path_opens_the_practice_ledger_not_the_real_one(
+    home_with_real_uk_path,
+):
+    real = home_with_real_uk_path
+    with ExecutionLedger(workspace="uk", venue=BINDING) as ledger:
+        assert ledger.path == practice_ledger_path()
+        assert ledger.path != real
+        assert ledger.venue_binding == BINDING
+    assert _real_uk_ledger_traces(real) == []
+
+
+@pytest.mark.parametrize("state", ["absent", "empty"])
+def test_a_practice_binding_refuses_the_real_uk_path_before_touching_it(
+    home_with_real_uk_path, state
+):
+    real = home_with_real_uk_path
+    if state == "empty":
+        real.parent.mkdir(parents=True)
+        real.write_bytes(b"")
+        before = (real.stat().st_size, real.stat().st_mtime_ns)
+    with pytest.raises(LedgerVenueMismatch):
+        ExecutionLedger(real, workspace="uk", venue=BINDING)
+    if state == "absent":
+        assert _real_uk_ledger_traces(real) == []
+    else:
+        assert (real.stat().st_size, real.stat().st_mtime_ns) == before
+        assert real.read_bytes() == b""
+        assert not real.with_name(real.name + ".lock").exists()
+
+
+def test_a_practice_binding_refuses_aliases_of_the_real_uk_path(
+    home_with_real_uk_path, tmp_path
+):
+    real = home_with_real_uk_path
+    link = tmp_path / "alias.sqlite3"
+    link.symlink_to(real)
+    dotted = real.parent / ".." / real.parent.name / real.name
+    # macOS file systems are case-insensitive: a recased name can be the real file.
+    recased = real.with_name(real.name.upper())
+    for alias in (link, dotted, recased):
+        with pytest.raises(LedgerVenueMismatch):
+            ExecutionLedger(alias, workspace="uk", venue=BINDING)
+    assert _real_uk_ledger_traces(real) == []
+    assert not link.with_name(link.name + ".lock").exists()
+
+
+@pytest.mark.parametrize("state", ["absent", "empty"])
+def test_start_execution_never_turns_the_real_uk_path_into_a_practice_ledger(
+    tmp_path, private_config_dir, uk_process, home_with_real_uk_path, state
+):
+    real = home_with_real_uk_path
+    if state == "empty":
+        real.parent.mkdir(parents=True)
+        real.write_bytes(b"")
+    write_practice_files(private_config_dir)
+    counting = CountingFactory()
+    app_state = AppState()
+
+    started = app_state.start_execution(
+        real, workspace="uk", private_dir=private_config_dir,
+        dispatcher_factories=_factories(counting),
+    )
+
+    assert started is False
+    _assert_disabled(app_state, "LedgerVenueMismatch")
+    assert counting.calls == 0
+    if state == "absent":
+        assert _real_uk_ledger_traces(real) == []
+    else:
+        assert real.read_bytes() == b""
+        assert not real.with_name(real.name + ".lock").exists()
+    # The next paper startup still owns that path: it pins it as a paper ledger.
+    (private_config_dir / "uk" / "execution.json").unlink()
+    (private_config_dir / "uk" / "limits.json").unlink()
+    paper = AppState()
+    assert paper.start_execution(None, workspace="uk", private_dir=private_config_dir)
+    try:
+        assert paper._execution_ledger.path == real
+        assert paper._execution_ledger.venue_binding is None
+    finally:
+        paper.close_execution()
+
+
+def test_start_execution_with_no_path_uses_the_practice_path_and_leaves_the_real_one_absent(
+    private_config_dir, uk_process, home_with_real_uk_path
+):
+    real = home_with_real_uk_path
+    write_practice_files(private_config_dir)
+    app_state = AppState()
+    assert app_state.start_execution(
+        None, workspace="uk", private_dir=private_config_dir,
+        dispatcher_factories=_factories(CountingFactory()),
+    ), app_state.execution_startup_error
+    try:
+        assert app_state._execution_ledger.path == practice_ledger_path()
+    finally:
+        app_state.close_execution()
+    assert _real_uk_ledger_traces(real) == []
