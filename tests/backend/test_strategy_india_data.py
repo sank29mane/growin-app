@@ -8,11 +8,11 @@ from decimal import Decimal
 import pytest
 
 from costs.fills import BandUnavailable, PriceBand
-from pilot_data import universe as pd_universe
 from pilot_data.core import standard_caveats
 from pilot_data.price_bands import BandObservation
 from pilot_data.universe import UniverseDecision, UniversePolicy, UniverseResult
 
+from strategy_india import data
 from strategy_india.data import (
     Bar,
     DatasetView,
@@ -254,7 +254,7 @@ def test_each_rebalance_calls_evaluate_universe_with_as_of_equal_to_the_decision
         assert kwargs["workspace"] == "india" and kwargs["mode"] == "research"
         return _universe_result(as_of, {n.anchor for n in names}, names)
 
-    monkeypatch.setattr(pd_universe, "evaluate_universe", spy)
+    monkeypatch.setattr(data, "evaluate_universe", spy)
     eligibility = UniverseEligibility(object(), object(), UniversePolicy())
     ctx = make_context(rows, HOLDOUT, eligibility=eligibility)
     dev = ctx.view.sessions()
@@ -268,7 +268,7 @@ def test_each_rebalance_calls_evaluate_universe_with_as_of_equal_to_the_decision
 
 def test_a_late_as_of_from_the_universe_is_refused(monkeypatch):
     names = default_names(2)
-    monkeypatch.setattr(pd_universe, "evaluate_universe",
+    monkeypatch.setattr(data, "evaluate_universe",
                         lambda store, *, as_of, **kw: _universe_result(date(2030, 1, 1), set(), names))
     from costs.core import LookaheadError
 
@@ -280,7 +280,7 @@ def test_unknown_eligibility_excludes_the_name(monkeypatch):
     names = default_names(8)
     rows = make_rows(SESSIONS, names + etf_names())
     top = names[0].anchor  # the strongest trend, so it would be bought first if eligible
-    monkeypatch.setattr(pd_universe, "evaluate_universe",
+    monkeypatch.setattr(data, "evaluate_universe",
                         lambda store, *, as_of, **kw: _universe_result(as_of, {n.anchor for n in names[1:]}, names))
     ctx = make_context(rows, HOLDOUT, params_obj=params(min_universe_for_entry=5),
                        eligibility=UniverseEligibility(object(), object(), UniversePolicy()))

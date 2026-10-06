@@ -78,7 +78,7 @@ def _equity_gap(tmp_path):
 
 def _eligibility_missing(tmp_path, monkeypatch):
     inputs = _case(tmp_path)
-    monkeypatch.setattr(data._surveillance, "snapshot_for", lambda store, kind, day: None)
+    monkeypatch.setattr(data, "snapshot_for", lambda store, kind, day: None)
     inputs.eligibility = data.UniverseEligibility(object(), object(), object())
     return inputs
 

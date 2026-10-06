@@ -263,7 +263,7 @@ def test_universe_eligibility_reports_a_missing_surveillance_snapshot(monkeypatc
         seen.append((kind, day))
         return None if kind == "gsm" else object()
 
-    monkeypatch.setattr(data._surveillance, "snapshot_for", snapshot_for)
+    monkeypatch.setattr(data, "snapshot_for", snapshot_for)
     source = data.UniverseEligibility(object(), object(), object())
     assert "GSM" in source.inputs_available(date(2026, 1, 5))
     relaxed = data.UniverseEligibility(object(), object(), object(), allow_missing_surveillance_before=date(2027, 1, 1))

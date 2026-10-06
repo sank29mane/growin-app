@@ -25,9 +25,9 @@ from typing import Any, Protocol
 
 from costs.core import LookaheadError
 from costs.fills import BandUnavailable, PriceBand, SessionBar, TickSize
-from pilot_data import surveillance as _surveillance
-from pilot_data import universe as _universe
 from pilot_data.price_bands import BandObservation
+from pilot_data.surveillance import snapshot_for
+from pilot_data.universe import NoTradingStatusSource, evaluate_universe
 
 from .errors import DataError, HoldoutViolation
 from .holdout import HoldoutGrant, HoldoutRange, is_grant
@@ -370,20 +370,20 @@ class UniverseEligibility:
         self.policy = policy
         self._mode = mode
         self._allow = allow_missing_surveillance_before
-        self._status = status_source if status_source is not None else _universe.NoTradingStatusSource()
+        self._status = status_source if status_source is not None else NoTradingStatusSource()
 
     def inputs_available(self, day: date) -> str | None:
         """Why ``snapshot(day)`` would fail for a missing input, or None. Looks for stored snapshots only, not prices."""
         needs_surveillance = not (self._mode == "research" and self._allow is not None and day < self._allow)
         if needs_surveillance:
             for kind in ("asm", "gsm"):
-                if _surveillance.snapshot_for(self._store, kind, day) is None:
+                if snapshot_for(self._store, kind, day) is None:
                     # D-12: the reason reaches the operator in a holdout refusal, so it carries no date
                     return f"no {kind.upper()} surveillance snapshot is effective on a decision date"
         return None
 
     def snapshot(self, as_of: date) -> EligibilitySnapshot:
-        result = _universe.evaluate_universe(
+        result = evaluate_universe(
             self._store, as_of=as_of, targets=self._targets, policy=self.policy, mode=self._mode,
             allow_missing_surveillance_before=self._allow, workspace="india", status_source=self._status,
         )

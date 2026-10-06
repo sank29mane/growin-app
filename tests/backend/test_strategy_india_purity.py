@@ -185,49 +185,51 @@ def _private(name: str) -> bool:
     return name.startswith("_") and not (name.startswith("__") and name.endswith("__"))
 
 
-def _pilot_data_bindings(tree: ast.AST) -> set[str]:
-    """Every local name bound to a pilot_data package or module, by import or from-import."""
-    bound: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            bound |= {a.asname or a.name.split(".")[0] for a in node.names if a.name.split(".")[0] == "pilot_data"}
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module and node.module.split(".")[0] == "pilot_data":
-            bound |= {a.asname or a.name for a in node.names}
-    return bound
+PILOT_RULE = "pilot_data is reachable only as 'from pilot_data.<module> import <public names>'"
 
 
-def _pilot_data_violation(node: ast.AST, bound: set[str]) -> str | None:
-    """Phase 59 is reachable only through its public names: no leading-underscore module, import or attribute."""
-    rule = "pilot_data is reachable only through public names"
+def _pilot_data_violation(node: ast.AST) -> str | None:
+    """Allowlist for pilot_data: only `from pilot_data.<module> import <public names>`.
+
+    No module object can be bound that way, so aliasing, getattr, vars(), __dict__ and __getattribute__
+    on it cannot happen. Everything else that names the package is a violation.
+    """
     if isinstance(node, ast.Import):
         for alias in node.names:
-            parts = alias.name.split(".")
-            if parts[0] == "pilot_data" and any(_private(part) for part in parts):
-                return f"{rule}, not import {alias.name}"
-    elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module and node.module.split(".")[0] == "pilot_data":
-        if any(_private(part) for part in node.module.split(".")):
-            return f"{rule}, not 'from {node.module} import ...'"
+            if alias.name.removeprefix("backend.").split(".")[0] == "pilot_data":
+                return f"{PILOT_RULE}, not import {alias.name}"
+    elif isinstance(node, ast.ImportFrom):
+        if any(alias.name == "pilot_data" for alias in node.names):
+            return f"{PILOT_RULE}, not pilot_data imported as a name"
+        if node.level != 0 or not node.module:
+            return None
+        parts = node.module.removeprefix("backend.").split(".")
+        if parts[0] != "pilot_data":
+            return None
+        if len(parts) == 1:
+            return f"{PILOT_RULE}, not 'from {node.module} import ...' (that binds a module)"
+        if any(_private(part) for part in parts):
+            return f"{PILOT_RULE}, not a private module in 'from {node.module} import ...'"
         bad = [alias.name for alias in node.names if _private(alias.name) or alias.name == "*"]
         if bad:
             return f"private pilot_data name {', '.join(bad)}"
-    elif isinstance(node, ast.Attribute) and _private(node.attr):
+    elif isinstance(node, ast.Attribute):
         root = node.value
         while isinstance(root, ast.Attribute):
             root = root.value
-        if isinstance(root, ast.Name) and root.id in bound:
-            return f"private pilot_data attribute {node.attr}"
-    elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in {"getattr", "hasattr"}:
-        if node.args and isinstance(node.args[0], ast.Name) and node.args[0].id in bound and any(
-            _private(text) for text in _strings(*node.args[1:])
-        ):
-            return "private pilot_data attribute read by name"
+        if isinstance(root, ast.Name) and root.id == "pilot_data":
+            return f"{PILOT_RULE}, not a pilot_data attribute chain"
+    elif isinstance(node, (ast.Call, ast.Subscript)):
+        call = isinstance(node, ast.Call)
+        parts = _strings(*node.args, *(k.value for k in node.keywords)) if call else _strings(node.slice)
+        if any(part.strip(".").split(".")[0] == "pilot_data" for part in parts):
+            return f"{PILOT_RULE}, not a string naming the package"
     return None
 
 
 def scan_source(source: str, filename: str) -> list[str]:
     out: list[str] = []
     tree = ast.parse(source, filename=filename)
-    pilot_bound = _pilot_data_bindings(tree)
     costs_names = {"costs"} | {
         alias.asname for node in ast.walk(tree) if isinstance(node, ast.Import)
         for alias in node.names if _norm(alias.name) == "costs" and alias.asname
@@ -269,7 +271,7 @@ def scan_source(source: str, filename: str) -> list[str]:
         problem = _reflection_violation(node)
         if problem:
             out.append(f"{filename}:{line}: {problem}")
-        problem = _pilot_data_violation(node, pilot_bound)
+        problem = _pilot_data_violation(node)
         if problem:
             out.append(f"{filename}:{line}: {problem}")
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div) and not heavy_ok:
@@ -508,17 +510,39 @@ def test_package_is_pure():
         ("x = type(row).__dict__", "engine.py", "globals/locals/vars"),
         ("x = f.__globals__['sys']", "engine.py", "globals/locals/vars"),
         ("x = getattr(f, '__globals__')", "engine.py", "globals/locals/vars"),
-        # Phase 59 private names (the public dataset reader replaced _read_parquet)
-        ("from pilot_data import dataset as d\nrows = d._read_parquet(p)", "data.py", "private pilot_data attribute"),
-        ("from pilot_data import dataset\nrows = dataset._read_parquet(p)", "data.py", "private pilot_data attribute"),
-        ("import pilot_data.dataset as d\nrows = d._read_parquet(p)", "data.py", "private pilot_data attribute"),
-        ("import pilot_data\nrows = pilot_data.dataset._read_parquet(p)", "data.py", "private pilot_data attribute"),
+        # Phase 59: only 'from pilot_data.<module> import <public names>'; no module object can be bound
+        ("import pilot_data", "data.py", "not import pilot_data"),
+        ("import pilot_data as pd", "data.py", "not import pilot_data"),
+        ("import pilot_data.dataset", "data.py", "not import pilot_data.dataset"),
+        ("import pilot_data.dataset as d\nrows = d._read_parquet(p)", "data.py", "not import pilot_data.dataset"),
+        ("import backend.pilot_data.dataset as d", "data.py", "not import backend.pilot_data.dataset"),
+        ("import pilot_data._internal", "data.py", "not import pilot_data._internal"),
+        ("from pilot_data import dataset", "data.py", "that binds a module"),
+        ("from pilot_data import dataset as d\nrows = d._read_parquet(p)", "data.py", "that binds a module"),
+        ("from pilot_data import *", "data.py", "that binds a module"),
+        ("from backend.pilot_data import dataset", "data.py", "that binds a module"),
+        ("from backend import pilot_data", "data.py", "imported as a name"),
+        ("from . import pilot_data", "data.py", "imported as a name"),
+        ("from .. import pilot_data", "data.py", "imported as a name"),
+        ("from pilot_data._internal import thing", "data.py", "private module"),
         ("from pilot_data.dataset import _read_parquet", "data.py", "private pilot_data name"),
         ("from pilot_data.dataset import _read_parquet as read", "data.py", "private pilot_data name"),
         ("from pilot_data.dataset import *", "data.py", "private pilot_data name"),
-        ("from pilot_data._internal import thing", "data.py", "not 'from pilot_data._internal"),
-        ("import pilot_data._internal", "data.py", "not import pilot_data._internal"),
-        ("from pilot_data import dataset as d\nf = getattr(d, '_read_parquet')", "data.py", "read by name"),
+        ("from backend.pilot_data.dataset import _read_parquet", "data.py", "private pilot_data name"),
+        # Grok's reflection forms: each needs the module object, which the allowlist never lets anyone bind
+        ("from pilot_data import dataset as d\nf = getattr(d, '_read_parquet')", "data.py", "that binds a module"),
+        ("from pilot_data import dataset as d\nf = getattr(d, name='_read_parquet')", "data.py", "that binds a module"),
+        ("from pilot_data import dataset as d\nf = hasattr(d, name='_read_parquet')", "data.py", "that binds a module"),
+        ("from pilot_data import dataset as d\nf = vars(d)['_read_parquet']", "data.py", "that binds a module"),
+        ("from pilot_data import dataset as d\nf = d.__dict__['_read_parquet']", "data.py", "that binds a module"),
+        ("from pilot_data import dataset as d\nf = d.__getattribute__('_read_parquet')", "data.py", "that binds a module"),
+        ("import pilot_data.dataset as d\nf = d.__getattribute__('_read_parquet')", "data.py", "not import pilot_data.dataset"),
+        # the package named without an import statement
+        ("x = pilot_data.dataset.read_dataset_rows(p)", "data.py", "attribute chain"),
+        ("x = pilot_data.dataset._read_parquet(p)", "data.py", "attribute chain"),
+        ("f = lookup('pilot_data.dataset')", "data.py", "string naming the package"),
+        ("f = lookup(name='pilot_data')", "data.py", "string naming the package"),
+        ("import importlib\nm = importlib.import_module('pilot_data.dataset')", "data.py", "string naming the package"),
         # exec, eval, compile
         ("exec('x = 1')", "engine.py", "exec is banned"),
         ("x = eval(s)", "engine.py", "eval is banned"),
@@ -608,9 +632,20 @@ def test_adapter_detector_ignores_unrelated_imports():
     assert not _imports_ticks("from costs.core import Side\nfrom backend.costs import schedule")
 def test_public_pilot_data_names_stay_allowed():
     ok = ("from pilot_data.dataset import read_dataset_rows, verify_dataset\n"
-          "from pilot_data import dataset as _dataset\nfrom pilot_data.core import canonical_sha256\n"
-          "rows = read_dataset_rows(p)\nm = verify_dataset(p, workspace='india')\nx = _dataset.verify_dataset\n"
-          "y = other._private_thing\nz = getattr(other, '_x')\nw = _dataset.__name__\n")
+          "from pilot_data.core import canonical_sha256 as _sha, PilotDataError\n"
+          "from pilot_data.surveillance import snapshot_for\n"
+          "rows = read_dataset_rows(p)\nm = verify_dataset(p, workspace='india')\nh = _sha(rows)\n"
+          "y = other._private_thing\nz = getattr(other, '_x')\nw = verify_dataset.__name__\n")
+    assert scan_source(ok, "data.py") == []
+
+
+def test_parameter_shadowing_a_from_imported_name_is_not_a_violation():
+    # vars() and __dict__ stay out: the reflection rule bans them package-wide, shadowed or not
+    ok = ("from pilot_data.core import PilotDataError, canonical_sha256\n"
+          "def handle(err):\n    return err._code, err._detail\n"
+          "def hash_it(canonical_sha256):\n    return canonical_sha256._cache\n"
+          "def wrap(PilotDataError):\n    return getattr(PilotDataError, '_code'), PilotDataError._hint\n"
+          "try:\n    pass\nexcept PilotDataError as err:\n    code = err._code\n")
     assert scan_source(ok, "data.py") == []
 
 
