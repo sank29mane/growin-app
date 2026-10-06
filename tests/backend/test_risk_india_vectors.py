@@ -8,6 +8,7 @@ a cross-check between two codebases, not a re-run of one.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import json
 from datetime import date, datetime
 from decimal import Decimal
@@ -54,7 +55,7 @@ def _account(raw: dict) -> rules.Account:
     )
 
 
-def _quote(raw: dict | None) -> rules.Quote | None:
+def _quote(raw: dict | None, tick_reference: str | None) -> rules.Quote | None:
     if raw is None:
         return None
     return rules.Quote(
@@ -66,6 +67,7 @@ def _quote(raw: dict | None) -> rules.Quote | None:
         upper_circuit=Decimal(raw["upper_circuit"]),
         previous_close=Decimal(raw["previous_close"]),
         session_date=date.fromisoformat(raw["session_date"]),
+        tick_reference=None if tick_reference is None else Decimal(tick_reference),
     )
 
 
@@ -84,7 +86,7 @@ def run_case(case: dict) -> rules.Decision:
         rules.Limits.from_fields(LV["limits"]),
         _flags(case["flags"]),
         _account(case["account"]),
-        _quote(case["quote"]),
+        _quote(case["quote"], case["tick_reference"]),
         datetime.fromisoformat(case["now_ist"]),
         _order(case["intent"]),
         kill_enabled=case["kill_enabled"],
@@ -241,7 +243,49 @@ def test_ticks_resolve_through_the_mac_resolver_not_the_vm_copy(monkeypatch):
     assert run_case(case).codes == ("off_tick",)
     assert calls and calls[0]["instrument_class"] is InstrumentClass.EQUITY
     assert calls[0]["series"] == "EQ"
-    assert calls[0]["band_reference_price"] == Decimal("99.80")  # previous_close, as on the VM
+    assert calls[0]["band_reference_price"] == Decimal(case["tick_reference"])
+
+
+def test_the_band_reference_is_the_tick_reference_never_previous_close(monkeypatch):
+    """The monthly reference and the daily close sit on opposite sides of Rs 250 in these rows."""
+    seen: list[Decimal] = []
+    real = rules.resolve_nse_cash_tick
+
+    def spy(**kwargs):
+        seen.append(kwargs["band_reference_price"])
+        return real(**kwargs)
+
+    monkeypatch.setattr(rules, "resolve_nse_cash_tick", spy)
+    case = next(c for c in CASES if c["name"] == "tick_ref_monthly_below_250_daily_above_allows_001")
+    assert Decimal(case["quote"]["previous_close"]) >= 250 > Decimal(case["tick_reference"])
+    assert run_case(case).codes == ()
+    assert seen == [Decimal(case["tick_reference"])]
+
+
+def test_the_tick_reference_vector_rows_the_vm_added_are_all_present():
+    names = {c["name"] for c in CASES}
+    assert {
+        "tick_ref_monthly_below_250_daily_above_allows_001",
+        "tick_ref_monthly_above_250_daily_below_refuses_001",
+        "tick_ref_monthly_above_250_daily_below_allows_005",
+        "tick_ref_monthly_above_1000_daily_at_1000_refuses_005",
+        "tick_ref_unavailable_fails_closed",
+        "tick_ref_zero_is_unavailable",
+    } <= names
+    assert all("tick_reference" in c for c in CASES)
+
+
+@pytest.mark.parametrize("reference", [None, Decimal("0"), Decimal("-1"), Decimal("NaN"), Decimal("Infinity")])
+def test_a_missing_or_unusable_tick_reference_refuses_with_its_own_code(reference):
+    case = next(c for c in CASES if c["name"] == "buy_ok")
+    quote = _quote(case["quote"], case["tick_reference"])
+    assert quote is not None
+    quote = dataclasses.replace(quote, tick_reference=reference)
+    codes = rules.evaluate(
+        rules.Limits.from_fields(LV["limits"]), _flags(case["flags"]), _account(case["account"]), quote,
+        datetime.fromisoformat(case["now_ist"]), _order(case["intent"]), kill_enabled=True,
+    ).codes
+    assert codes == ("tick_reference_unavailable",)
 
 
 def test_a_quote_dated_outside_the_tick_table_fails_closed_as_off_tick():

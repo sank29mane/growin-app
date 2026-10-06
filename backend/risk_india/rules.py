@@ -12,7 +12,9 @@ is the answer and the rest are detail. The names are the O6 reason names of
 
 Money, prices and ratios are ``Decimal`` built from strings. Trigger edges are
 inclusive, as in Phase 62's ``update_risk``. Ticks come from the Mac's own resolver,
-``costs.ticks.resolve_nse_cash_tick``, never from the VM's vendored copy.
+``costs.ticks.resolve_nse_cash_tick``, never from the VM's vendored copy. The band
+reference is ``Quote.tick_reference`` (the previous month's last close), not the
+quote's ``previous_close``; a missing or zero one is ``tick_reference_unavailable``.
 """
 
 from __future__ import annotations
@@ -165,8 +167,14 @@ class Quote:
     ltp: Decimal
     lower_circuit: Decimal
     upper_circuit: Decimal
-    previous_close: Decimal  # the tick band reference
+    previous_close: Decimal  # the A2 mark check; NOT the tick band reference
     session_date: date  # the IST session the quote belongs to
+    # The tick table's band reference: the close on the last trading day of the previous
+    # calendar month (or the exchange's dated tick reference). It comes from a separate
+    # source than the quote, and None means that source could not supply it (fail closed).
+    tick_reference: Decimal | None = None
+    bid: Decimal | None = None  # best bid at the quote time; a sell is measured against it
+    ask: Decimal | None = None  # best ask at the quote time; a buy is measured against it
 
 
 @dataclass(frozen=True)
@@ -240,11 +248,15 @@ def position_costs(account: Account, ledger_cost: Mapping[str, Decimal]) -> dict
     return costs
 
 
+def _tick_reference_usable(reference: Decimal | None) -> bool:
+    return isinstance(reference, Decimal) and reference.is_finite() and reference > ZERO
+
+
 def _on_tick(quote: Quote, session: date, price: Decimal) -> bool:
     try:
         resolution = resolve_nse_cash_tick(
             session_date=session,
-            band_reference_price=quote.previous_close,
+            band_reference_price=quote.tick_reference,
             instrument_class=InstrumentClass.EQUITY,
             series=quote.series,
         )
@@ -310,7 +322,9 @@ def evaluate(
         elif quote.series not in SUPPORTED_SERIES:
             codes.append("instrument_unsupported")
         else:
-            if not _on_tick(quote, now_ist.date(), price):
+            if not _tick_reference_usable(quote.tick_reference):
+                codes.append("tick_reference_unavailable")  # never a guess from previous_close
+            elif not _on_tick(quote, now_ist.date(), price):
                 codes.append("off_tick")
             if not quote.lower_circuit <= price <= quote.upper_circuit:
                 codes.append("circuit_band")

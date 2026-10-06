@@ -504,6 +504,7 @@ def _buy_codes(flags: rules.RiskFlags, case_name: str = "buy_ok", **overrides) -
             upper_circuit=Decimal(case["quote"]["upper_circuit"]),
             previous_close=Decimal(case["quote"]["previous_close"]),
             session_date=date.fromisoformat(case["quote"]["session_date"]),
+            tick_reference=Decimal(case["tick_reference"]),
         ),
         datetime.fromisoformat(case["now_ist"]),
         rules.OrderRequest(
@@ -529,7 +530,7 @@ def test_open_stop_exit_blocks_buys_on_any_isin_until_the_exit_fill_arrives():
         rules.Account(holdings=(rules.Holding(B, 20, Decimal("10000")),)),
         rules.Quote(
             "STOPCO", B, "EQ", Decimal("100"), Decimal("90"), Decimal("110"),
-            Decimal("99.80"), date(2026, 10, 8),
+            Decimal("99.80"), date(2026, 10, 8), tick_reference=Decimal("99.80"),
         ),
         datetime.fromisoformat("2026-10-08T10:00:00+05:30"),
         rules.OrderRequest("sell", "STOPCO", B, 20, Decimal("100.00")),
