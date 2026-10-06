@@ -842,3 +842,69 @@ def test_the_request_model_and_the_market_order_handler_no_longer_exist():
     assert not hasattr(app_context, "T212ConfigRequest")
     assert not hasattr(t212_handlers, "handle_market_order")
     assert "T212ConfigRequest" not in (BACKEND / "routes" / "mcp_routes.py").read_text(encoding="utf-8")
+
+
+# --- main(): practice names dropped after .env loads, bad environment keeps the server up ---
+
+
+@pytest.mark.asyncio
+async def test_main_drops_practice_names_and_builds_no_client_on_a_bad_environment(monkeypatch):
+    import os
+    from contextlib import asynccontextmanager
+    from unittest.mock import AsyncMock
+
+    @asynccontextmanager
+    async def fake_stdio():
+        yield (None, None)
+
+    monkeypatch.setattr(server, "load_dotenv", lambda *a, **k: True)
+    monkeypatch.setattr(server, "stdio_server", fake_stdio)
+    run = AsyncMock()
+    monkeypatch.setattr(server.app, "run", run)
+    monkeypatch.setattr(server, "clients", {"stale": object()})
+    monkeypatch.setattr(server, "startup_error", None)  # restored on teardown
+    monkeypatch.setattr(server, "active_account_type", "invest")
+    monkeypatch.delenv(ENV_NAME, raising=False)
+    monkeypatch.setenv("TRADING212_API_KEY", "k")
+    monkeypatch.setenv("TRADING212_API_SECRET", "s")
+    monkeypatch.setenv("TRADING212_PRACTICE_API_KEY", "practice-key-canary")
+    monkeypatch.setenv("TRADING212_PRACTICE_API_SECRET", "practice-secret-canary")
+
+    await server.main()
+
+    assert [name for name in os.environ if name.upper().startswith("TRADING212_PRACTICE_")] == []
+    assert server.clients == {}
+    assert ENV_NAME in (server.startup_error or "")
+    run.assert_awaited_once()  # the server stays up for its non-broker tools
+    with pytest.raises(ValueError, match=ENV_NAME):
+        server.get_active_client()
+
+
+@pytest.mark.asyncio
+async def test_a_429_with_only_a_reset_header_still_waits_for_that_reset():
+    clock = FakeClock()
+    reset = int(clock.now) + 9
+    answers = iter(
+        [
+            httpx.Response(429, headers={"x-ratelimit-reset": str(reset)}, text="Limited: 1 / 1s"),
+            Fixture("positions").response(clock),
+        ]
+    )
+    recorder = Recorder(lambda request: next(answers))
+    async with reader(recorder, clock=clock) as (client, _):
+        await client.get_all_positions()
+    assert recorder.count == 2
+    assert clock.sleeps == [pytest.approx(9.0)]
+
+
+@pytest.mark.asyncio
+async def test_a_429_with_no_rate_headers_waits_one_full_period_of_that_endpoint():
+    clock = FakeClock()
+    answers = iter(
+        [httpx.Response(429, text="Limited"), Fixture("history_orders").response(clock)]
+    )
+    recorder = Recorder(lambda request: next(answers))
+    async with reader(recorder, clock=clock) as (client, _):
+        await client.get_historical_orders(limit=20)
+    assert recorder.count == 2
+    assert clock.sleeps == [pytest.approx(60.0)]  # the history period, not its 3 s spacing
