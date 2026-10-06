@@ -92,6 +92,27 @@ def test_excess_of_3_6_percent_before_exit_costs_and_under_3_5_after_must_fail()
     assert not after.passed
 
 
+def test_exit_costs_on_the_last_curve_point_can_push_max_drawdown_past_the_floor():
+    sessions = weekday_sessions(SESSION_START, 250)
+    start = Decimal(50000)
+    seg = _bare_segment(sessions, start=start, end=Decimal(54060), exit_costs=Decimal(0))
+    # Peak 60000, then the curve ends at 54060: -9.9 percent, inside the -10 percent floor.
+    curve = ((sessions[10], Decimal(60000)), (sessions[-1], Decimal(54060)))
+    seg = replace(seg, curve=curve)
+    etf = SimpleNamespace(net_return=Decimal(0))
+    criteria = default_criteria()
+    assert Decimal(criteria["max_drawdown_floor"]) == Decimal("-0.10")
+    before = evaluate_verdict(criteria, holdout_evidence(seg, etf))
+    assert before.verdict == PASS and not before.breaches
+    # Closing the open positions costs 100 rupees: the last point becomes 53960, -10.07 percent from the peak.
+    seg = replace(seg, exit_costs_at_end=Decimal(100))
+    ev = holdout_evidence(seg, etf)
+    assert ev.max_drawdown == Decimal(53960) / Decimal(60000) - 1 < Decimal("-0.10")
+    after = evaluate_verdict(criteria, ev)
+    assert after.verdict == FAIL and after.breaches == ("max_drawdown_at_or_below_floor",)
+    assert not after.passed
+
+
 def _bare_segment(sessions, *, start, end, exit_costs):
     """A real segment shell (so every field has its true type) with the money figures set by hand."""
     ctx_sessions = weekday_sessions(SESSION_START, 160)
@@ -110,7 +131,10 @@ def _bare_segment(sessions, *, start, end, exit_costs):
     decimal.Context(prec=120, rounding=decimal.ROUND_FLOOR),
 ])
 def test_annualisation_digits_do_not_depend_on_the_ambient_decimal_context(ambient):
-    ev = SimpleNamespace(net_return=Decimal("0.0816"), benchmark_net_return=Decimal("0.0404"), holdout_sessions=137)
+    # 36 significant digits: the "1 + r" growth step alone differs under a 5-digit ambient context if it is not
+    # routed through the fixed context (a short input such as 0.0816 is exact at any precision and proves nothing).
+    ev = SimpleNamespace(net_return=Decimal("0.081634567890123456789012345678901234"),
+                         benchmark_net_return=Decimal("0.040412345678901234567890123456789012"), holdout_sessions=137)
     reference = (annualised_return(ev.net_return, 137, 250), annualised_excess_return(ev, 250), annualised_swaps(33, 137, 250))
     with decimal.localcontext(ambient):
         assert (annualised_return(ev.net_return, 137, 250), annualised_excess_return(ev, 250),
