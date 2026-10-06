@@ -66,6 +66,50 @@ def _is_ticks_module(node: ast.AST, aliases: set[str]) -> bool:
 def _private(name: str) -> bool:
     return name.startswith("_") and not name.startswith("__")
 
+ATTR_FUNCS = {"getattr", "hasattr", "setattr", "delattr"}
+IMPORT_FUNCS = {"import_module", "__import__"}
+
+
+def _call_name(node: ast.Call) -> str | None:
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id
+    return func.attr if isinstance(func, ast.Attribute) else None
+
+
+def _dynamic_attr_violation(node: ast.AST, aliases: set[str]) -> str | None:
+    """getattr/hasattr/setattr/delattr on costs.ticks with a name the scanner cannot read."""
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ATTR_FUNCS
+            and len(node.args) >= 2 and _is_ticks_module(node.args[0], aliases)
+            and not (isinstance(node.args[1], ast.Constant) and isinstance(node.args[1].value, str))):
+        return f"non-literal {node.func.id}() on costs.ticks"
+    return None
+
+
+def _dynamic_import_violation(node: ast.AST) -> str | None:
+    """importlib.import_module / __import__ reaching costs.ticks, or a name that cannot be checked."""
+    if not (isinstance(node, ast.Call) and _call_name(node) in IMPORT_FUNCS):
+        return None
+    target = node.args[0] if node.args else next((k.value for k in node.keywords if k.arg == "name"), None)
+    if target is None:
+        return None
+    if not (isinstance(target, ast.Constant) and isinstance(target.value, str)):
+        return f"dynamic import with a non-literal name ({_call_name(node)})"
+    name = target.value
+    if name in ("costs", "costs.ticks", ".ticks") or name.startswith("costs.ticks."):
+        return f"dynamic import of costs.ticks via {_call_name(node)}"
+    return None
+
+
+def _dict_introspection_violation(node: ast.AST, aliases: set[str]) -> str | None:
+    """ct.__dict__ (index, .get, anything) and vars(ct) read private names without naming them."""
+    if isinstance(node, ast.Attribute) and node.attr == "__dict__" and _is_ticks_module(node.value, aliases):
+        return "costs.ticks __dict__ access"
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "vars"
+            and node.args and _is_ticks_module(node.args[0], aliases)):
+        return "vars() on costs.ticks"
+    return None
+
 
 def scan_source(source: str, filename: str) -> list[str]:
     out: list[str] = []
@@ -95,11 +139,18 @@ def scan_source(source: str, filename: str) -> list[str]:
                     out.append(f"{filename}:{line}: private costs.ticks name {alias.name}")
         if isinstance(node, ast.Attribute) and _private(node.attr) and _is_ticks_module(node.value, aliases):
             out.append(f"{filename}:{line}: private costs.ticks name {node.attr}")
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr"
+        for check in (_dynamic_attr_violation, _dict_introspection_violation):
+            problem = check(node, aliases)
+            if problem:
+                out.append(f"{filename}:{line}: {problem}")
+        problem = _dynamic_import_violation(node)
+        if problem:
+            out.append(f"{filename}:{line}: {problem}")
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ATTR_FUNCS
                 and len(node.args) >= 2 and _is_ticks_module(node.args[0], aliases)
                 and isinstance(node.args[1], ast.Constant) and isinstance(node.args[1].value, str)
                 and _private(node.args[1].value)):
-            out.append(f"{filename}:{line}: private costs.ticks name {node.args[1].value} via getattr")
+            out.append(f"{filename}:{line}: private costs.ticks name {node.args[1].value} via {node.func.id}")
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div) and not heavy_ok:
             if _int_like(node.left) and _int_like(node.right):
                 out.append(f"{filename}:{line}: int/int true division yields a float; use Decimal")
@@ -162,6 +213,25 @@ def test_package_is_pure():
          "private costs.ticks name"),
         ("import costs.ticks\nx = getattr(costs.ticks, '_resolve_tick_from_table')", "ticks.py",
          "private costs.ticks name"),
+        ("import costs.ticks as ct\nx = getattr(ct, name)", "ticks.py", "non-literal getattr"),
+        ("import costs.ticks as ct\nx = getattr(ct, '_' + n)", "ticks.py", "non-literal getattr"),
+        ("from costs import ticks as ct\nx = hasattr(ct, name)", "ticks.py", "non-literal hasattr"),
+        ("import costs.ticks\nsetattr(costs.ticks, name, v)", "ticks.py", "non-literal setattr"),
+        ("import costs.ticks as ct\nx = getattr(ct, *args)", "ticks.py", "non-literal getattr"),
+        ("from costs import ticks as ct\nx = hasattr(ct, '_resolve_tick_from_table')", "ticks.py",
+         "private costs.ticks name"),
+        ("import importlib\nm = importlib.import_module('costs.ticks')\nx = m._resolve_tick_from_table(t)", "ticks.py",
+         "dynamic import of costs.ticks"),
+        ("from importlib import import_module\nm = import_module('costs.ticks')", "ticks.py",
+         "dynamic import of costs.ticks"),
+        ("m = __import__('costs.ticks')", "ticks.py", "dynamic import of costs.ticks"),
+        ("m = __import__('costs', fromlist=['ticks'])", "ticks.py", "dynamic import of costs.ticks"),
+        ("import importlib\nm = importlib.import_module(name)", "ticks.py", "non-literal name"),
+        ("import costs.ticks as ct\nx = ct.__dict__['_resolve_tick_from_table']", "ticks.py", "__dict__ access"),
+        ("import costs.ticks as ct\nx = ct.__dict__.get('_resolve_tick_from_table')", "ticks.py", "__dict__ access"),
+        ("import costs.ticks\nx = costs.ticks.__dict__[name]", "ticks.py", "__dict__ access"),
+        ("import costs.ticks as ct\nx = vars(ct)['_resolve_tick_from_table']", "ticks.py", "vars() on costs.ticks"),
+        ("from costs import ticks as ct\nx = vars(ct).get(name)", "ticks.py", "vars() on costs.ticks"),
     ],
 )
 def test_planted_violation_is_caught(source, filename, fragment):
@@ -177,7 +247,9 @@ def test_decimal_division_is_not_flagged():
 def test_public_costs_ticks_use_and_unrelated_privates_stay_allowed():
     ok = ("from costs import ticks as _costs_ticks\nimport costs.ticks as ct\n"
           "a = _costs_ticks.committed_tick_table(c)\nb = ct.align_limit(p, t, s)\nc = getattr(ct, 'align_limit')\n"
-          "d = self._cache\ne = other._hidden\nf = ct.__name__\n")
+          "d = self._cache\ne = other._hidden\nf = ct.__name__\n"
+          "g = getattr(row, name)\nh = hasattr(self, name)\ni = vars(row)\nj = row.__dict__['k']\n"
+          "k = importlib.import_module('decimal')\nl = getattr(ct, 'align_limit', None)\n")
     assert scan_source(ok, "ticks.py") == []
 
 
