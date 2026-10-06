@@ -537,8 +537,8 @@ def test_a_hidden_one_for_two_bonus_gap_is_not_read_as_a_dividend():
 
 @pytest.mark.parametrize(
     "open_after,lifted",
-    [("79", False), ("79.99", False), ("80", True), ("81", True), ("98", True), ("100", True), ("119", True),
-     ("120", True), ("121", False), ("150", False)],
+    [("79", False), ("80", False), ("84", False), ("84.9", False), ("84.99", False), ("85", True), ("85.1", True),
+     ("98", True), ("100", True), ("114.9", True), ("115", True), ("115.1", False), ("116", False), ("150", False)],
 )
 def test_the_ex_date_gap_must_stay_within_the_policy_threshold_either_way(open_after, lifted):
     fs, _ = gap_set(open_after)
@@ -550,14 +550,32 @@ def test_the_ex_date_gap_must_stay_within_the_policy_threshold_either_way(open_a
         assert fs.unresolved[0].detail["nearby"].startswith("gap:")
 
 
+@pytest.mark.parametrize(
+    "open_after,lifted",
+    [("85.1", True), ("84.9", False), ("114.9", True), ("115.1", False)],  # 14.9 percent in, 15.1 percent out, both ways
+)
+def test_the_d20_gap_guard_sits_at_fifteen_percent(open_after, lifted):
+    fs, _ = gap_set(open_after)
+    assert (len(fs.unknown_dividend_events()) == 1) is lifted
+
+
+@pytest.mark.parametrize("open_after,nearby", [("83.33", "gap:0.8333"), ("80", "gap:0.8000")])
+def test_a_hidden_one_for_five_bonus_gap_is_not_read_as_a_dividend(open_after, nearby):
+    # 1:5 bonus: six shares for five, price opens at 5/6 = 0.8333 of the previous close (about -16.7 percent).
+    # The earlier 20 percent guard let this through; 15 percent does not. A 1:4 bonus opens at 0.80.
+    fs, _ = gap_set(open_after)
+    assert fs.unknown_dividend_events() == ()
+    assert [(u.reason, u.detail["nearby"]) for u in fs.unresolved] == [("dividend_amount_unknown_conflict", nearby)]
+
+
 def test_the_gap_threshold_is_policy_and_changes_the_factor_set_hash():
-    assert POLICY.unknown_dividend_max_gap == Decimal("0.20")
+    assert POLICY.unknown_dividend_max_gap == Decimal("0.15")
     bars = flat_bars(J3, J4, J5, open_by_day={J4: "85"})
     default = compute_factor_set(lineage(), bars, [interim(J4)], as_of=J5, policy=POLICY)
     tight = compute_factor_set(lineage(), bars, [interim(J4)], as_of=J5,
                                policy=AdjustmentPolicy(unknown_dividend_max_gap=Decimal("0.10")))
     assert len(default.unknown_dividend_events()) == 1 and tight.unknown_dividend_events() == ()
-    assert default.unknown_dividend_params["max_gap"] == "0.2"
+    assert default.unknown_dividend_params["max_gap"] == "0.15"
     assert default.unknown_dividend_params["policy"] == "unknown_zero/1"
     same_outcome = compute_factor_set(lineage(), flat_bars(J3, J4, J5), [interim(J4)], as_of=J5,
                                       policy=AdjustmentPolicy(unknown_dividend_max_gap=Decimal("0.30")))
@@ -608,7 +626,9 @@ def test_bars_are_tagged_even_when_a_later_unresolved_action_withholds_their_val
         (True, True), (True, True), (True, False), (True, False), (False, False)]
 
 
-def test_the_hidden_bonus_case_keeps_the_factor_set_hash_it_had_on_main():
-    # The conflict label is part of the hashed factor set; pilot-adjust/2 has shipped, so it must not drift.
+def test_the_hidden_bonus_case_hash_is_pinned():
+    # The conflict label and max_gap are part of the hashed factor set, so the hash must not drift silently.
+    # It changed once on purpose when the operator moved the D-20 guard from 0.20 to 0.15 (2026-10-07);
+    # the old hash was 0f15f9f39964fbb84a8e0f6714569f6b8622d610f72fe2aad63d3066a473e27a.
     fs, _ = gap_set("66.7")
-    assert fs.factor_set_sha256 == "0f15f9f39964fbb84a8e0f6714569f6b8622d610f72fe2aad63d3066a473e27a"
+    assert fs.factor_set_sha256 == "84d2b80c41735325e4f1bb92b1275161c2922d9131871cec4e7700c40630952b"

@@ -65,8 +65,11 @@ class AdjustmentPolicy(_Frozen):
     unknown_dividend_policy: Literal["unknown_zero/1"] = "unknown_zero/1"
     unknown_dividend_conflict_days: int = Field(default=7, ge=0)  # calendar days either side of the ex-date
     # Largest ex-date open gap (open over previous close, as a fraction either way) still read as a
-    # dividend. Tighter than the jump band on purpose: a hidden 1:2 bonus gaps -33 percent.
-    unknown_dividend_max_gap: Decimal = Field(default=Decimal("0.20"), gt=0, lt=1)
+    # dividend. Tighter than the jump band on purpose: a hidden 1:2 bonus opens at 2/3 of the previous close
+    # (-33 percent) and a hidden 1:5 bonus at 5/6 (-16.7 percent). 0.15 catches both; the earlier 0.20 let the
+    # 1:5 bonus through (any 1:N bonus with N >= 4 gaps no more than 20 percent). A 1:6 bonus (-14.3 percent)
+    # still reads as a dividend.
+    unknown_dividend_max_gap: Decimal = Field(default=Decimal("0.15"), gt=0, lt=1)
     quantum: Decimal = Decimal("0.0001")
     rounding: Literal["ROUND_HALF_EVEN"] = "ROUND_HALF_EVEN"
     jump_low: Decimal = Decimal("0.55")

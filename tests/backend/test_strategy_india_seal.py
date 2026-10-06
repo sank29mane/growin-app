@@ -397,9 +397,15 @@ def test_criteria_load_by_path_plus_sha256_and_refuse_every_deviation(tmp_path):
     ws2, digest2 = _file_with(tmp_path / "b", broken)
     with pytest.raises(RegistryError, match="keys"):
         load_criteria_file(ws2, holdout.CRITERIA_FILE_NAME, digest2)
+    # D-19 operator answer 2026-10-07: the excess-return bar is a required key, so a file without it is refused.
+    no_excess = default_criteria()
+    del no_excess["min_annualised_excess_return"]
+    ws3, digest3 = _file_with(tmp_path / "d", no_excess)
+    with pytest.raises(RegistryError, match="min_annualised_excess_return"):
+        load_criteria_file(ws3, holdout.CRITERIA_FILE_NAME, digest3)
     floaty = tmp_path / "c" / "private" / "india"
     floaty.mkdir(parents=True)
-    text = json.dumps(default_criteria()).replace('"-0.15"', "-0.15")
+    text = json.dumps(default_criteria()).replace('"-0.10"', "-0.10")
     (floaty / holdout.CRITERIA_FILE_NAME).write_text(text)
     with pytest.raises(RegistryError):
         load_criteria_file(floaty, holdout.CRITERIA_FILE_NAME, hashlib.sha256(text.encode()).hexdigest())

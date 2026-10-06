@@ -1,4 +1,4 @@
-"""AC-4 (holdout seal, D-12) and AC-5 (D-19 verdict, PROPOSED)."""
+"""AC-4 (holdout seal, D-12) and AC-5 (D-19 verdict, CONFIRMED)."""
 
 from __future__ import annotations
 
@@ -194,15 +194,15 @@ def test_holdout_range_and_digest():
 
 # ---- AC-5: the D-19 verdict ------------------------------------------------------------------
 GOOD = HoldoutEvidence(
-    net_return=Decimal("0.08"), benchmark_net_return=Decimal("0.05"), max_drawdown=Decimal("-0.06"),
+    net_return=Decimal("0.09"), benchmark_net_return=Decimal("0.05"), max_drawdown=Decimal("-0.06"),
     flatten_events=0, swaps=40, holdout_sessions=250, no_assumed_fill_attempts=0,
 )
 
 
-def test_template_is_the_proposed_d19_set_and_hashes_stably():
+def test_template_is_the_confirmed_d19_set_and_hashes_stably():
     t = default_criteria()
-    assert t["status"] == "PROPOSED"
-    assert (t["gate_k_ticks"], t["max_drawdown_floor"], t["max_annualised_swaps"]) == (3, "-0.15", "65")
+    assert (t["gate_k_ticks"], t["max_drawdown_floor"], t["min_annualised_excess_return"], t["max_annualised_swaps"]) == (
+        3, "-0.10", "0.035", "65")
     assert criteria_sha256(t) == criteria_sha256(copy.deepcopy(t))
 
 
@@ -226,6 +226,7 @@ def test_pass_only_when_every_criterion_holds_and_records_the_criteria_hash():
     [
         ({"net_return": Decimal("0.05")}, "net_return_not_above_benchmark"),  # equal is not above
         ({"net_return": Decimal("0.01")}, "net_return_not_above_benchmark"),
+        ({"max_drawdown": Decimal("-0.10")}, "max_drawdown_at_or_below_floor"),  # at the floor is a breach
         ({"max_drawdown": Decimal("-0.15")}, "max_drawdown_at_or_below_floor"),
         ({"max_drawdown": Decimal("-0.2")}, "max_drawdown_at_or_below_floor"),
         ({"flatten_events": 1}, "flatten_event"),
@@ -236,6 +237,65 @@ def test_each_single_breach_fails(change, breach):
     verdict = evaluate_verdict(default_criteria(), replace(GOOD, **change))
     assert verdict.verdict == FAIL and not verdict.passed
     assert breach in verdict.breaches
+
+
+def test_drawdown_floor_is_ten_percent():
+    assert evaluate_verdict(default_criteria(), replace(GOOD, max_drawdown=Decimal("-0.099"))).verdict == PASS
+    fail = evaluate_verdict(default_criteria(), replace(GOOD, max_drawdown=Decimal("-0.101")))
+    assert fail.verdict == FAIL and fail.breaches == ("max_drawdown_at_or_below_floor",)
+
+
+@pytest.mark.parametrize(
+    "strategy, verdict",
+    [("0.084", FAIL),   # beats the ETF by 3.4 percent
+     ("0.085", PASS),   # exactly the 3.5 percent bar passes (the breach is "below")
+     ("0.086", PASS)],  # beats it by 3.6 percent
+)
+def test_strategy_must_beat_the_etf_by_the_annualised_minimum(strategy, verdict):
+    ev = replace(GOOD, net_return=Decimal(strategy), benchmark_net_return=Decimal("0.05"))
+    out = evaluate_verdict(default_criteria(), ev)
+    assert out.verdict == verdict and out.passed is (verdict == PASS)
+    if verdict == FAIL:
+        assert out.breaches == ("excess_return_below_minimum",)  # still above the ETF, so only the new code fires
+        assert out.annualised_excess_return == Decimal("0.034")
+    else:
+        assert out.breaches == ()
+
+
+def test_excess_return_is_compared_annualised_not_raw():
+    # 125 sessions: 4 percent vs 2 percent raw is a 2.0 point gap, which would fail 3.5. Annualised it is
+    # 1.04**2 - 1.02**2 = 0.0816 - 0.0404 = 4.12 points, which passes.
+    ev = replace(GOOD, net_return=Decimal("0.04"), benchmark_net_return=Decimal("0.02"), holdout_sessions=125, swaps=20)
+    out = evaluate_verdict(default_criteria(), ev)
+    assert out.verdict == PASS and out.annualised_excess_return == Decimal("0.0412")
+    # 500 sessions: the raw gap is 4.12 points, which would pass 3.5, but annualised (square root) it is
+    # 4.0 - 2.0 = 2.0 points, which fails.
+    slow = replace(GOOD, net_return=Decimal("0.0816"), benchmark_net_return=Decimal("0.0404"), holdout_sessions=500, swaps=100)
+    out = evaluate_verdict(default_criteria(), slow)
+    assert out.verdict == FAIL and out.breaches == ("excess_return_below_minimum",)
+    assert out.annualised_excess_return < Decimal("0.035")
+
+
+def test_annualised_return_edges():
+    from strategy_india.holdout import annualised_return
+    assert annualised_return(Decimal("0.07"), 250, 250) == Decimal("0.07")
+    assert annualised_return(Decimal("-1"), 125, 250) == Decimal(-1)
+    assert annualised_return(Decimal("-1.5"), 125, 250) == Decimal(-1)
+    with pytest.raises(StrategyIndiaError):
+        annualised_return(Decimal("0.1"), 0, 250)
+
+
+def test_unknown_benchmark_cannot_pass_even_when_the_net_return_flag_is_off():
+    crit = default_criteria()
+    crit["require_net_return_above_benchmark"] = False
+    out = evaluate_verdict(crit, replace(GOOD, benchmark_net_return=None))
+    assert out.verdict == INCONCLUSIVE and out.annualised_excess_return is None
+
+
+def test_excess_return_flip_under_sensitivity_is_inconclusive():
+    sens = replace(GOOD, net_return=Decimal("0.07"))  # 2 points over the ETF in the sensitivity run
+    out = evaluate_verdict(default_criteria(), GOOD, sens)
+    assert out.verdict == INCONCLUSIVE and out.sensitivity_flips == ("excess_return_below_minimum",)
 
 
 def test_swap_budget_boundary_and_annualisation():

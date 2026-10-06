@@ -1,4 +1,4 @@
-"""AC-18: D-20 engine side (PROPOSED). Events tagged dividend_amount_unknown, price return across the ex-date."""
+"""AC-18: D-20 engine side (operator-confirmed 2026-10-07). Events tagged dividend_amount_unknown, price return across the ex-date."""
 
 from __future__ import annotations
 

@@ -159,7 +159,9 @@ def test_end_to_end_register_walk_forward_holdout_report_twice_is_byte_identical
     assert len(research.units) == 3 and research.registration_entry_hash == entry.entry_hash
     assert outcome.verdict.verdict in (PASS, FAIL, INCONCLUSIVE)
     assert outcome.verdict.criteria_sha256 == entry.payload["holdout_criteria_sha256"]
-    assert outcome.report.holdout_verdict["criteria_status"].startswith("PROPOSED")
+    sealed = outcome.report.holdout_verdict
+    assert sealed["criteria_status"].startswith("CONFIRMED") and "2026-10-07" in sealed["criteria_status"]
+    assert "PROPOSED" not in json.dumps(sealed), "the sealed D-19 verdict still carries the stale PROPOSED label"
     assert outcome.report.kind == "holdout" and [u.label for u in outcome.report.units] == ["holdout"]
     for path in (research_path, holdout_path):
         assert stat.S_IMODE(os.stat(path).st_mode) == 0o444
