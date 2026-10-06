@@ -37,14 +37,39 @@ jobs:
         timeout-minutes: 10
         run: |
           export PYTHONPATH=$PYTHONPATH:$(pwd)/backend
-          uv run --project backend pytest tests/backend/
+          mkdir -p pr-impact
+          uv run --project backend pytest tests/backend/ \
+            --junitxml=pr-impact/tests-junit.xml \
+            --cov --cov-config=.github/pr-impact.coveragerc \
+            --cov-report=json:pr-impact/coverage.json
 
       - name: Run Performance Benchmarks
         timeout-minutes: 5
         run: |
           export PYTHONPATH=$PYTHONPATH:$(pwd)/backend
-          uv run --project backend pytest tests/backend/test_performance_benchmarks.py
-          
+          uv run --project backend pytest tests/backend/test_performance_benchmarks.py \
+            --junitxml=pr-impact/bench-junit.xml
+
+      # Reduce the raw reports to one small metrics.json. The PR Impact
+      # workflow reads only this file, never the raw reports.
+      - name: Collect PR impact metrics
+        if: always()
+        run: |
+          python3 -I .github/scripts/pr_impact.py collect \
+            --junit pr-impact/tests-junit.xml \
+            --bench-junit pr-impact/bench-junit.xml \
+            --coverage pr-impact/coverage.json \
+            --out pr-impact/metrics.json
+
+      - name: Upload PR impact metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-impact-metrics
+          path: pr-impact/metrics.json
+          retention-days: 30
+          if-no-files-found: ignore
+
       - name: DeepEval Reasoning Audit
         run: |
           # Placeholder for DeepEval logic

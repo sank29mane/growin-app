@@ -1,0 +1,13 @@
+# Coverage scope for the PR impact report. Measure the backend tree only.
+[run]
+source = backend
+omit =
+    */.venv/*
+    */venv_forecast/*
+    */growin_core_src/*
+    */__pycache__/*
+
+[report]
+# Many backend folders have no __init__.py. Without this, files nothing imports
+# would be missing from the report and coverage would read higher than it is.
+include_namespace_packages = true

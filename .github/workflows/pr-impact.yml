@@ -1,0 +1,131 @@
+name: PR Impact
+
+# Posts one sticky comment per PR comparing its CI metrics with the latest
+# successful run on main: test counts and time, benchmark time, and line
+# coverage (overall and for the Safety Guard paths).
+#
+# workflow_run executes this file as it exists on the default branch, so a PR
+# cannot rewrite the report, its budget, or its path list.
+# SECURITY: never check out or execute PR code here. The only PR-controlled
+# input is the pr-impact-metrics artifact, which pr_impact.py validates as data.
+on:
+  workflow_run:
+    workflows: [ "Growin Backend CI" ]
+    types: [ completed ]
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: pr-impact-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: true
+
+jobs:
+  report:
+    name: PR Impact
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      CI_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+    steps:
+      - name: Check out the report files from the default branch only
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          sparse-checkout: |
+            .github/scripts/pr_impact.py
+            .github/pr-impact-budget.json
+            .github/safety-paths.txt
+          sparse-checkout-cone-mode: false
+
+      - name: Find the pull request
+        id: pr
+        run: |
+          pr=$(gh api "repos/$REPO/commits/$HEAD_SHA/pulls" \
+            --jq '[.[] | select(.state=="open")][0].number // empty')
+          if [[ -z "$pr" ]]; then
+            echo "::notice::No open pull request for $HEAD_SHA. Nothing to report."
+            echo "found=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          current=$(gh api "repos/$REPO/pulls/$pr" --jq .head.sha)
+          if [[ "$current" != "$HEAD_SHA" ]]; then
+            echo "::notice::PR #$pr has newer commits than $HEAD_SHA. Skipping the stale report."
+            echo "found=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "number=$pr" >> "$GITHUB_OUTPUT"
+          echo "found=true" >> "$GITHUB_OUTPUT"
+
+      - name: Download this PR's metrics
+        if: steps.pr.outputs.found == 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/head"
+          gh run download "$RUN_ID" --repo "$REPO" -n pr-impact-metrics -D "$RUNNER_TEMP/head" \
+            || echo "::warning::No pr-impact-metrics artifact on run $RUN_ID."
+
+      - name: Download the latest main baseline
+        id: base
+        if: steps.pr.outputs.found == 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/base"
+          base=$(gh run list --repo "$REPO" --workflow ci.yml --branch main --event push \
+            --status success --limit 10 --json databaseId,headSha \
+            --jq '.[] | "\(.databaseId) \(.headSha)"' | while read -r id sha; do
+              if gh run download "$id" --repo "$REPO" -n pr-impact-metrics -D "$RUNNER_TEMP/base" 2>/dev/null; then
+                echo "$sha"; break
+              fi
+            done || true)
+          if [[ -z "$base" ]]; then
+            echo "::notice::No main run with a pr-impact-metrics artifact yet."
+            rm -f "$RUNNER_TEMP/base/metrics.json"
+          fi
+          echo "sha=$base" >> "$GITHUB_OUTPUT"
+
+      - name: Build the report
+        id: render
+        if: steps.pr.outputs.found == 'true'
+        env:
+          BASE_SHA: ${{ steps.base.outputs.sha }}
+        run: |
+          rc=0
+          python3 -I .github/scripts/pr_impact.py report \
+            --head "$RUNNER_TEMP/head/metrics.json" \
+            --base "$RUNNER_TEMP/base/metrics.json" \
+            --budget .github/pr-impact-budget.json \
+            --safety-paths .github/safety-paths.txt \
+            --head-sha "$HEAD_SHA" \
+            --base-sha "$BASE_SHA" \
+            --ci-conclusion "$CI_CONCLUSION" \
+            --out "$RUNNER_TEMP/comment.md" || rc=$?
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          cat "$RUNNER_TEMP/comment.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+
+      - name: Post or update the comment
+        if: steps.pr.outputs.found == 'true'
+        env:
+          PR: ${{ steps.pr.outputs.number }}
+        run: |
+          if [[ ! -s "$RUNNER_TEMP/comment.md" ]]; then
+            echo "::error::The report step produced no comment."; exit 1
+          fi
+          id=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
+            --jq '.[] | select(.user.login=="github-actions[bot]" and (.body | startswith("<!-- growin-pr-impact -->"))) | .id' | tail -n 1)
+          if [[ -n "$id" ]]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@"$RUNNER_TEMP/comment.md" >/dev/null
+          else
+            gh api -X POST "repos/$REPO/issues/$PR/comments" -F body=@"$RUNNER_TEMP/comment.md" >/dev/null
+          fi
+
+      - name: Fail when an enforced budget is exceeded
+        if: steps.pr.outputs.found == 'true' && steps.render.outputs.rc != '0'
+        run: |
+          echo "::error::PR impact budget check failed (exit ${{ steps.render.outputs.rc }}). See the PR comment."
+          exit 1
