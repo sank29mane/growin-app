@@ -4,18 +4,22 @@ NSE circulars for 2025-04-15 to 2026-09-06 say only "Rs 0.01 / Rs 0.05 as per re
 committed non-Gold ETF table leaves that window uncovered on purpose. For ONE named security the tick can
 instead be read off the grid its prices sit on, and only inside such an uncovered window:
 
-* any open, high, low or close that is not a multiple of 0.05 proves the tick is 0.01;
-* a large enough sample in which every price is a multiple of 0.05 gives 0.05, because a 0.01-tick
-  security would land on the 0.05 grid with probability 0.2 per distinct price (at least 50 distinct
-  prices bound that below 1e-34);
+* a sample in which every price is a multiple of 0.05 gives 0.05, because a 0.01-tick security would
+  land on the 0.05 grid with probability 0.2 per distinct price (at least 50 distinct prices bound that
+  below 1e-34);
+* a sample in which at least half of ALL prices, and at least half of the prices in EVERY block of
+  ``BLOCK_SESSIONS`` consecutive sessions, are off the 0.05 grid gives 0.01. A real 0.01 security puts
+  about 80% of its prices off that grid, so a block of 20 sessions (80 prices) falls below 50% with
+  probability near 1e-9, while a 0.05 security with a few corrupted prints sits near 1% off the grid and a
+  security whose tick changed inside the window has whole blocks that are aligned. Those refuse; so does
+  anything between "nothing off the grid" and "half of every block off the grid";
 * everything else is unavailable and the caller refuses, as it does for an uncovered date today.
 
 Unavailable is the answer for: too few sessions, prices or distinct prices; a missing, non-Decimal or
 non-positive price; a price off the 0.01 grid (not an as-traded price); a duplicate session; and a mixed
-sample (some prices prove 0.01, yet a run of more than ``MAX_ALIGNED_RUN`` consecutive sessions has every
-price on the 0.05 grid, which a single 0.01-tick regime does not produce, so the tick may have changed
-inside the window). 0.05 is the pessimistic answer for k-tick costs; 0.01 is the optimistic one, so a
-sample that cannot rule out 0.05 never resolves to 0.01 by default.
+sample (some prices are off the 0.05 grid, yet not half of all of them, or not half of every block). 0.05
+is the pessimistic answer for k-tick costs; 0.01 is the optimistic one, so a sample that cannot rule out
+0.05 never resolves to 0.01 by default.
 
 The schedule rows stay authoritative: ``uncovered_windows`` only ever returns dates NO version covers,
 and ``InferredTickSource`` answers only inside its window. Every result, available or not, carries
@@ -36,18 +40,20 @@ from .core import COST_CONTEXT, TickSizeUnavailable, canonical_json, sha256_hex
 from .fills import TickSize
 from .ticks import TickTable
 
-METHOD = "price-grid-inference/1"
+METHOD = "price-grid-inference/2"
 COARSE_GRID = Decimal("0.05")
 FINE_GRID = Decimal("0.01")
 MIN_SESSIONS = 100
 MIN_PRICES = 400
 MIN_DISTINCT_PRICES = 50
-MAX_ALIGNED_RUN = 20
+BLOCK_SESSIONS = 20  # rolling window; also the longest tick change at the end of the sample that still refuses
+MIN_OFF_GRID_PERCENT = 50  # of a 0.01 tick security's prices (about 80% of them are off the 0.05 grid)
 THRESHOLDS = {
     "min_sessions": MIN_SESSIONS,
     "min_prices": MIN_PRICES,
     "min_distinct_prices": MIN_DISTINCT_PRICES,
-    "max_aligned_run": MAX_ALIGNED_RUN,
+    "block_sessions": BLOCK_SESSIONS,
+    "min_off_0_05_percent": MIN_OFF_GRID_PERCENT,
 }
 INFERRED = "inferred"
 UNAVAILABLE = "unavailable"
@@ -93,6 +99,19 @@ def _on_grid(price: Decimal, grid: Decimal) -> bool:
             return price % grid == 0
     except decimal.InvalidOperation:
         return False  # a price too large to test is not an as-traded price: it counts as off the grid
+
+
+def _worst_block(session_off: Sequence[int], session_n: Sequence[int]) -> tuple[int, int]:
+    """(off-grid prices, prices) of the block with the smallest share off the 0.05 grid, over every run of
+    ``BLOCK_SESSIONS`` consecutive sessions (all sessions when there are fewer). Every window is checked, so
+    a change in the first or the last 20 sessions is seen however the sample is cut. Integers only."""
+    size = min(BLOCK_SESSIONS, len(session_off))
+    worst = (1, 1)
+    for i in range(len(session_off) - size + 1):
+        off, total = sum(session_off[i:i + size]), sum(session_n[i:i + size])
+        if off * worst[1] < worst[0] * total:
+            worst = (off, total)
+    return worst
 
 
 @dataclass(frozen=True)
@@ -173,7 +192,8 @@ def infer_tick(
     )
     reason: str | None = None
     prices: list[Decimal] = []
-    aligned_run = longest_run = 0
+    session_off: list[int] = []  # prices off the 0.05 grid, per session
+    session_n: list[int] = []
     sessions = [obs.session for obs in sample]
     if len(set(sessions)) != len(sessions):
         reason = "a session appears more than once in the sample"
@@ -184,14 +204,12 @@ def infer_tick(
             reason = f"missing, non-Decimal or non-positive price on {obs.session.isoformat()}"
             break
         prices.extend(obs.prices)
-        if all(_on_grid(p, COARSE_GRID) for p in obs.prices):
-            aligned_run += 1
-            longest_run = max(longest_run, aligned_run)
-        else:
-            aligned_run = 0
+        session_off.append(sum(1 for p in obs.prices if not _on_grid(p, COARSE_GRID)))
+        session_n.append(len(obs.prices))
     off_fine = 0 if reason else sum(1 for p in prices if not _on_grid(p, FINE_GRID))
     off_coarse = 0 if reason else sum(1 for p in prices if not _on_grid(p, COARSE_GRID))
     distinct = len(set(prices))
+    worst_block = _worst_block(session_off, session_n) if not reason else (1, 1)
     tick: Decimal | None = None
     if reason is None and off_fine:
         reason = f"{off_fine} prices are not multiples of 0.01, so they are not as-traded prices"
@@ -200,10 +218,15 @@ def infer_tick(
             f"sample too small: {len(sample)} sessions, {len(prices)} prices, {distinct} distinct prices "
             f"(need {MIN_SESSIONS}, {MIN_PRICES}, {MIN_DISTINCT_PRICES})"
         )
-    elif reason is None and off_coarse and longest_run > MAX_ALIGNED_RUN:
+    elif reason is None and off_coarse and not (
+        off_coarse * 100 >= MIN_OFF_GRID_PERCENT * len(prices)
+        and worst_block[0] * 100 >= MIN_OFF_GRID_PERCENT * worst_block[1]
+    ):
         reason = (
-            f"mixed sample: {off_coarse} prices prove 0.01 but {longest_run} consecutive sessions sit on the "
-            f"0.05 grid, so the tick may have changed inside the window"
+            f"mixed sample: {off_coarse} of {len(prices)} prices are off the 0.05 grid and the worst block of "
+            f"{BLOCK_SESSIONS} sessions has {worst_block[0]} of {worst_block[1]} off it (0.01 needs at least "
+            f"{MIN_OFF_GRID_PERCENT}% overall and in every block), so the tick may have changed inside the "
+            f"window or some prints are corrupted"
         )
     elif reason is None:
         tick = FINE_GRID if off_coarse else COARSE_GRID
@@ -221,7 +244,7 @@ def infer_tick(
         "distinct_prices": distinct,
         "prices_off_0_05": off_coarse,
         "prices_off_0_01": off_fine,
-        "longest_run_on_0_05": longest_run,
+        "worst_block_off_0_05": f"{worst_block[0]}/{worst_block[1]}",
         "thresholds": dict(THRESHOLDS),
         "input_rows_sha256": input_rows_sha256,
     }

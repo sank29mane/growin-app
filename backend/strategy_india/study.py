@@ -419,9 +419,12 @@ def preflight_holdout(inputs: StudyInputs, prep: Prepared, criteria: Mapping[str
     """Everything that can be known before the holdout is opened. Any failure refuses WITHOUT spending it.
 
     The contract is that nothing that can be checked in advance may fail after the open. Uses session dates,
-    table coverage, stored-input availability and development data only; the only holdout prices read are the
-    ETF's first and last raw close (a validity check, not an outcome). The registry, gate, D-19 criteria hash
-    and D-20 event hash were already checked against the registration by the caller.
+    table coverage, stored-input availability and development data only, with two holdout price reads: the
+    ETF's first and last raw close (a validity check, not an outcome), and, for the A5 ETF tick inference, the
+    benchmark ETF's open, high, low and close on every session of the uncovered window, holdout sessions
+    included (done when the tick tables are built, before this runs). Only the inferred tick, the method and
+    the provenance hash reach the operator output, never a count or a price from those sessions. The
+    registry, gate, D-19 criteria hash and D-20 event hash were already checked against the registration by the caller.
     """
     try:
         parse_criteria(criteria)  # every policy value must be one the verdict logic honours
@@ -726,7 +729,10 @@ def cli_register(config: Mapping[str, Any]) -> dict[str, Any]:
     entry = register(inputs, hypothesis=config.get("hypothesis", "cross-sectional momentum with a swing exit"),
                      expected_head=pin)
     return {"registered": entry.entry_hash, "registry_head": inputs.registry.head_hash(),
-            "etf_tick_inference": inputs.ticks.inference_provenance(),
+            "etf_tick_inference": [  # D-12: no sample counts, they are computed over holdout sessions too
+                {key: record[key] for key in ("security", "status", "tick", "method", "provenance_sha256")}
+                for record in inputs.ticks.inference_provenance()
+            ],
             "next": f"pin this head in {HEAD_REF_NAME} (holdout_refs) or pass --registry-head"}
 
 

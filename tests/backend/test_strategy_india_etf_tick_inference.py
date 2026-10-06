@@ -15,7 +15,7 @@ from strategy_india import study
 from strategy_india.errors import RegistryMismatch, StrategyIndiaError
 from strategy_india.ticks import load_default_tables
 
-from test_strategy_india_support import ETF_ISINS, study_inputs
+from test_strategy_india_support import ETF_ISINS, TARGETS_SHA, default_criteria, limits, study_inputs
 
 IN_GAP = date(2024, 1, 1)  # 500 weekday sessions end in late 2025; the 60-session holdout sits inside the window
 
@@ -90,7 +90,7 @@ def test_changed_benchmark_rows_break_the_seal_even_when_the_dataset_hash_is_lef
     assert err.value.field == "tick_table_sha256" and inputs.registry.holdout_events() == ()
 
 
-def test_cli_register_prints_the_inference_provenance(tmp_path, monkeypatch, capsys):
+def test_cli_register_prints_only_the_tick_the_method_and_the_provenance_hash(tmp_path, monkeypatch, capsys):
     inputs = _inferred_inputs(tmp_path)
     monkeypatch.setattr(study, "build_inputs", lambda config, **_kw: (inputs, config.get("registry_head_sha256")))
     config = tmp_path / "config.json"
@@ -101,4 +101,45 @@ def test_cli_register_prints_the_inference_provenance(tmp_path, monkeypatch, cap
     assert cli.main(["register", "--config", str(config)]) == 0
     printed = json.loads(capsys.readouterr().out)
     (record,) = printed["etf_tick_inference"]
-    assert record["tick"] == "0.01" and record["method"] and record["input_rows_sha256"] and record["provenance_sha256"]
+    assert record["tick"] == "0.01" and record["method"] and record["provenance_sha256"]
+    # D-12: the inference reads holdout sessions, so no sample count, price or input hash is printed.
+    assert set(record) == {"security", "status", "tick", "method", "provenance_sha256"}
+
+
+def test_build_inputs_wires_the_inferred_etf_tick_into_the_tick_tables(tmp_path, monkeypatch):
+    """The production ``build_inputs`` path, not a hand-built StudyInputs. Reverting its ``load_default_tables``
+    call to the plain one leaves the window uncovered and fails every assertion below."""
+    from types import SimpleNamespace
+
+    import pilot_data.price_bands as bands_mod
+    import pilot_data.store as store_mod
+    import pilot_data.targets as targets_mod
+    import private_config.loader as loader_mod
+    from strategy_india import data as data_mod
+    from strategy_india import holdout as holdout_mod
+    from strategy_india.data import DividendEvents
+    from strategy_india.params import placeholder_params
+    from strategy_india.ticks import NON_GOLD_ETF
+
+    synthetic = study_inputs(tmp_path / "src", sessions_n=500, start=IN_GAP)
+    cfg = SimpleNamespace(strategy=SimpleNamespace(params=placeholder_params(), holdout_refs=()), limits=limits())
+    monkeypatch.setattr(loader_mod, "load_workspace_config", lambda *_a, **_k: cfg)
+    monkeypatch.setattr(study, "load_bound_dataset", lambda *_a, **_k: (SimpleNamespace(dataset_sha256=synthetic.dataset_sha256), synthetic.rows))
+    monkeypatch.setattr(store_mod, "PilotDataStore", lambda *_a, **_k: object())
+    monkeypatch.setattr(targets_mod, "latest_target_universe", lambda *_a, **_k: SimpleNamespace(target_sha256=TARGETS_SHA))
+    monkeypatch.setattr(bands_mod, "BandResolver", lambda *_a, **_k: object())
+    monkeypatch.setattr(data_mod, "events_from_manifest", lambda _manifest: DividendEvents())
+    monkeypatch.setattr(holdout_mod, "load_criteria_file", lambda *_a, **_k: default_criteria())
+    config = {
+        "private_dir": str(tmp_path), "dataset_dir": "unused", "store_root": str(tmp_path), "coverage_report": str(tmp_path / "cov.json"),
+        "registry": str(tmp_path / "registry.jsonl"), "git_commit": "b" * 40, "parameter_budget_n": 12,
+        "fold_rules": {"n_folds": 3, "test_sessions": 50, "min_train_sessions": 120}, "criteria": {"path": "x", "sha256": "x"},
+    }
+    inputs, _pin = study.build_inputs(config, bind_to_registration=False)
+
+    records = inputs.ticks.inference_provenance()  # both configured benchmark candidates
+    assert [r["security"] for r in records] == sorted(ETF_ISINS)
+    assert {(r["status"], r["tick"]) for r in records} == {("inferred", "0.01")}
+    assert inputs.ticks.covers(NON_GOLD_ETF, date(2025, 8, 1), series="EQ", security=ETF_ISINS[0])
+    assert inputs.ticks.sha256() == load_default_tables(rows=synthetic.rows, benchmark_isins=ETF_ISINS).sha256()
+    assert inputs.ticks.sha256() != load_default_tables().sha256()

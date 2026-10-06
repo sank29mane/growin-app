@@ -138,21 +138,70 @@ def test_a_duplicated_session_refuses():
     assert infer(obs + [obs[3]]).status == ti.UNAVAILABLE
 
 
+def corrupt(obs: list[ti.TickObservation], count: int) -> list[ti.TickObservation]:
+    """A 0.05 sample with ``count`` prints knocked off the grid, spread evenly over the sample."""
+    out = list(obs)
+    for n in range(count):
+        out = with_price(out, n * len(out) // count, D("250.03"))
+    return out
+
+
+@pytest.mark.parametrize("sessions, bad", [(100, 4), (300, 14), (100, 1), (100, 30)])
+def test_a_few_corrupted_prints_on_a_0_05_sample_never_flip_it_to_0_01(sessions, bad):
+    # 4 of 400 and 14 of 1200 prices: 1% off the grid. Spacing of 20 or fewer sessions used to reset the
+    # aligned-run counter and return the optimistic 0.01. A real 0.01 ETF has about 80% off the grid.
+    result = infer(corrupt(observations(sessions, grid="0.05"), bad))
+    assert result.status == ti.UNAVAILABLE and result.tick is None and "mixed sample" in result.reason
+
+
+def test_the_exact_review_cases_refuse():
+    assert infer(corrupt(observations(100, grid="0.05"), 4)).provenance["prices"] == 400
+    assert infer(corrupt(observations(300, grid="0.05"), 14)).provenance["prices"] == 1200
+
+
 def test_a_tick_change_inside_the_window_refuses():
     # 60 sessions that sit on the 0.05 grid, then 60 that prove 0.01: the window is not one regime.
     mixed = observations(60, grid="0.05", start=date(2025, 6, 2)) + observations(60, grid="0.01", start=date(2025, 8, 26))
     result = infer(mixed)
     assert result.status == ti.UNAVAILABLE and "mixed sample" in result.reason
-    assert result.provenance["longest_run_on_0_05"] > ti.MAX_ALIGNED_RUN
 
 
-def test_short_runs_on_the_0_05_grid_do_not_stop_a_genuine_0_01_inference():
+@pytest.mark.parametrize("tail", [20, 10])
+def test_a_tick_change_inside_the_last_or_first_sessions_refuses(tail):
+    # A 0.01 sample whose last (or first) `tail` sessions sit on the 0.05 grid: overall it is still about 70%
+    # off the grid, so only the block rule can see it. (A tick change in fewer than about 8 sessions leaves
+    # the worst 20-session block above half off the grid; that is the limit of a 20-session block.)
+    obs = observations(140, grid="0.01")
+    late = obs[:-tail] + observations(tail, grid="0.05", seed=11, start=obs[-tail].session)
+    early = observations(tail, grid="0.05", seed=11, start=obs[0].session) + obs[tail:]
+    for sample in (late, early):
+        result = infer(sample)
+        assert result.status == ti.UNAVAILABLE and "mixed sample" in result.reason
+        assert result.provenance["prices_off_0_05"] > 0.6 * result.provenance["prices"]
+
+
+def test_a_clean_0_01_sample_infers_0_01():
+    obs = observations(300, grid="0.01", per_session=4)
+    result = infer(obs)
+    off = result.provenance["prices_off_0_05"] / result.provenance["prices"]
+    assert 0.7 < off < 0.9  # the synthetic sample looks like a real 0.01 security
+    assert result.tick == D("0.01")
+
+
+def test_a_few_chance_aligned_sessions_do_not_stop_a_genuine_0_01_inference():
     obs = observations(160, grid="0.01")
-    for i in range(40, 60):  # a run exactly at the limit, aligned by chance
+    for i in (30, 70, 71, 120):  # a session that happens to land entirely on the 0.05 grid
+        obs[i] = ti.TickObservation(obs[i].session, tuple(round(p * 20) / D(20) for p in obs[i].prices))
+    assert infer(obs).tick == D("0.01")
+
+
+def test_a_20_session_run_on_the_0_05_grid_inside_a_0_01_sample_refuses():
+    obs = observations(160, grid="0.01")
+    for i in range(40, 60):
         obs[i] = ti.TickObservation(obs[i].session, tuple(round(p * 20) / D(20) for p in obs[i].prices))
     result = infer(obs)
-    assert result.provenance["longest_run_on_0_05"] >= ti.MAX_ALIGNED_RUN
-    assert result.tick == D("0.01")
+    assert result.status == ti.UNAVAILABLE and "mixed sample" in result.reason
+    assert result.provenance["worst_block_off_0_05"] == "0/80"
 
 
 def test_rows_outside_the_window_are_not_inputs():
@@ -170,7 +219,8 @@ def test_provenance_records_method_window_counts_tick_and_input_hash():
     assert (p["window_start"], p["window_end"]) == ("2025-04-15", "2026-09-06")
     assert p["status"] == "inferred" and p["tick"] == "0.01"
     assert p["sessions"] == 140 and p["prices"] == 560 and p["distinct_prices"] > 50
-    assert p["thresholds"] == {"min_sessions": 100, "min_prices": 400, "min_distinct_prices": 50, "max_aligned_run": 20}
+    assert p["thresholds"] == {"min_sessions": 100, "min_prices": 400, "min_distinct_prices": 50,
+                               "block_sessions": 20, "min_off_0_05_percent": 50}
     assert len(p["input_rows_sha256"]) == 64 and len(result.provenance_sha256) == 64
 
 

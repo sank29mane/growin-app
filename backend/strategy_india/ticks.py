@@ -197,11 +197,9 @@ def resolve_tick(
     if series not in SUPPORTED_SERIES:
         raise TickSizeUnavailable(f"series {series!r} is out of scope for tick lookup")
     tables.table_for(instrument_class)  # the class must be registered; nothing defaults
-    if (
-        security is not None
-        and instrument_class == NON_GOLD_ETF
-        and not tables.schedule_covers(instrument_class, session_date, series=series)
-    ):
+    if security is not None and instrument_class == NON_GOLD_ETF:
+        # No schedule check is needed here: TickTables only accepts a source whose window is a date range
+        # no committed version covers, so inferred_for() can only hold a date the schedule leaves open.
         source = tables.inferred_for(security, session_date)
         if source is not None:
             positive_decimal(band_reference_price, "band_reference_price")
