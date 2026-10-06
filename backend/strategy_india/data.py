@@ -386,6 +386,18 @@ class UniverseEligibility:
         )
 
 
+def events_from_manifest(manifest: Any) -> DividendEvents:
+    """D-20 events come from ``manifest.dividend_amount_unknown_events`` (anchor to event id and ex-date), never
+    from the per-bar ex-date flag: a row carries that flag only when an accepted bar falls on the ex-date.
+    59 ``verify_dataset`` has already cross-checked the list against the row tags.
+    """
+    return DividendEvents(
+        DividendUnknownEvent(anchor, event.event_id, event.ex_date)
+        for anchor, events in sorted(getattr(manifest, "dividend_amount_unknown_events", {}).items())
+        for event in events
+    )
+
+
 def load_dataset_rows(path: Path, *, expected_dataset_sha256: str | None = None) -> tuple[Any, list[Any]]:
     """Verify a published 59 dataset directory and read its rows (read-only)."""
     from pilot_data import dataset as _dataset

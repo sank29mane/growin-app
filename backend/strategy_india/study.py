@@ -386,7 +386,7 @@ def build_inputs(config: Mapping[str, Any]) -> tuple[StudyInputs, str | None]:
     from pilot_data.universe import UniversePolicy
     from private_config.loader import load_workspace_config
 
-    from .data import DividendUnknownEvent, UniverseEligibility, load_dataset_rows
+    from .data import UniverseEligibility, events_from_manifest, load_dataset_rows
     from .holdout import load_criteria_file
     from .ticks import load_default_tables
 
@@ -407,10 +407,7 @@ def build_inputs(config: Mapping[str, Any]) -> tuple[StudyInputs, str | None]:
             return resolver.observe(isin, session)
 
     schedules = load_schedule_set()
-    events = DividendEvents(
-        DividendUnknownEvent(item["anchor_isin"], item["event_id"], date.fromisoformat(item["ex_date"]))
-        for item in config.get("dividend_unknown_events", [])
-    )
+    events = events_from_manifest(manifest)  # sealed as dividend_events_sha256 by the registration
     try:
         pin: str | None = resolve_registry_head(config, cfg.strategy.holdout_refs, workspace_dir)
     except StrategyIndiaError as exc:

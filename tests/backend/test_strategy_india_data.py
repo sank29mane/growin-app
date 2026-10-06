@@ -160,6 +160,52 @@ def test_published_dataset_directory_loads_through_verify_dataset(tmp_path):
         load_dataset_rows(tmp_path / "exports" / digest, expected_dataset_sha256=sha("other"))
 
 
+def _published(tmp_path, rows, events):
+    from pilot_data.core import standard_caveats as caveats
+    from pilot_data.dataset import DatasetManifest, DividendAmountUnknownEvent, _export, dataset_hash
+
+    rows = sorted(rows, key=lambda r: (r.anchor_isin, r.trade_date))
+    digest = dataset_hash(rows)
+    manifest = DatasetManifest(
+        workspace="india", caveats=caveats(), dataset_sha256=digest, row_count=len(rows), anchor_count=2,
+        window_start=rows[0].trade_date, window_end=rows[-1].trade_date, as_of=rows[-1].trade_date,
+        crosscheck_run_id="r", report_sha256=sha("r"), targets_sha256=sha("t"), lineage_hashes={}, factor_set_hashes={},
+        spans={}, quarantine_totals={}, rawness_counts={}, created_at_utc="2026-10-01T00:00:00+00:00",
+        dividend_amount_unknown_events={a: tuple(DividendAmountUnknownEvent(event_id=i, ex_date=d) for i, d in evs)
+                                        for a, evs in events.items()},
+    )
+    _export(rows, manifest, tmp_path / "exports", "india")
+    return tmp_path / "exports" / digest
+
+
+def test_dividend_events_are_built_from_the_manifest_and_cross_checked_against_row_tags(tmp_path):
+    from pilot_data.core import PilotDataError
+
+    from strategy_india.data import events_from_manifest
+
+    sessions = weekday_sessions(SESSION_START, 12)
+    ex = sessions[6]
+    base = make_rows(sessions, default_names(2))
+    tagged = [r.model_copy(update={"dividend_amount_unknown": r.anchor_isin == "INE000A01000" and r.trade_date < ex,
+                                   "dividend_amount_unknown_ex_date": r.anchor_isin == "INE000A01000" and r.trade_date == ex})
+              for r in base]
+    path = _published(tmp_path, tagged, {"INE000A01000": [("EV1", ex)]})
+    manifest, rows = load_dataset_rows(path)
+    events = events_from_manifest(manifest)
+    assert [(e.anchor_isin, e.event_id, e.ex_date) for e in events.all()] == [("INE000A01000", "EV1", ex)]
+    assert events.ex_dates("INE000A01000") == frozenset({ex}) and events.sealed_sha256() != DividendEvents().sealed_sha256()
+    # a dataset with no tagged events gives an empty list, which seals as empty
+    plain = _published(tmp_path / "plain", base, {})
+    assert not events_from_manifest(load_dataset_rows(plain)[0])
+    # a manifest event with no tagged row, or a flagged ex-date the manifest does not list, is refused by 59 verify
+    with pytest.raises(PilotDataError):
+        load_dataset_rows(_published(tmp_path / "bad1", base, {"INE000A01000": [("EV1", ex)]}))
+    other = [r.model_copy(update={"dividend_amount_unknown_ex_date": r.anchor_isin == "INE000A01000" and r.trade_date == ex})
+             for r in base]
+    with pytest.raises(PilotDataError):
+        load_dataset_rows(_published(tmp_path / "bad2", other, {}))
+
+
 # ---- AC-7 ----------------------------------------------------------------------------------------
 def _universe_result(as_of: date, eligible: set[str], names, smallcap=None) -> UniverseResult:
     decisions = tuple(
