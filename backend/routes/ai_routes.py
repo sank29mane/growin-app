@@ -247,7 +247,11 @@ async def complete_trade_approval(request: SignedApprovalRequest):
             "Paper approval check acknowledged locally and its test reservation released. "
             "No broker was contacted."
             if is_local_uat
-            else f"{state.execution_mode.capitalize()} trade acknowledged by {ack.broker}."
+            else (
+                f"{state.execution_mode.capitalize()} order acknowledged by {ack.broker}. Reconcile to confirm its state."
+                if state.execution_venue_binding is not None
+                else f"{state.execution_mode.capitalize()} trade acknowledged by {ack.broker}."
+            )
         ),
         "execution_details": ack.model_dump(mode="json"),
     }

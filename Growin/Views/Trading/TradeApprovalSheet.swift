@@ -31,9 +31,17 @@ struct TradeApprovalSheet: View {
                 Label(title, systemImage: "checkmark.shield")
                     .font(.title2.bold())
                 Spacer()
-                Text("PAPER ONLY")
+                Text(isPractice ? "PRACTICE · DEMO" : "PAPER ONLY")
                     .font(.caption.bold())
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(isPractice ? .blue : .orange)
+            }
+
+            if isPractice {
+                PracticeBanner(
+                    broker: review.payload.broker,
+                    limitPrice: review.payload.limitPrice,
+                    orderType: review.payload.orderType
+                )
             }
 
             Text(explanation)
@@ -52,6 +60,9 @@ struct TradeApprovalSheet: View {
                 }
                 if let limitPrice = review.payload.limitPrice {
                     row("Limit price", limitPrice)
+                }
+                if isPractice {
+                    row("Valid for", "DAY (until midnight, exchange time)")
                 }
                 if let parent = review.payload.replacesProposalId, !parent.isEmpty {
                     row("Replaces", String(parent.prefix(16)) + "…")
@@ -99,6 +110,10 @@ struct TradeApprovalSheet: View {
             Text(label).foregroundStyle(.secondary)
             Text(value).font(.body.monospaced())
         }
+    }
+
+    private var isPractice: Bool {
+        review.payload.mode == PracticeApprovalPolicy.mode
     }
 
     private var isExpired: Bool {
