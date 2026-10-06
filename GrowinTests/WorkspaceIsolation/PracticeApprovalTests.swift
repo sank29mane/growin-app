@@ -227,6 +227,8 @@ struct PracticeApprovalTests {
         #expect(Self.rejects { try Self.review(broker: "paper") })
         #expect(Self.rejects { try Self.review(payloadWorkspace: "india") })
         #expect(Self.rejects { try Self.review(workspace: .india) })
+        // A practice order for the India workspace is refused even when payload and workspace agree.
+        #expect(Self.rejects { try Self.review(workspace: .india, payloadWorkspace: "india") })
         #expect(Self.rejects { try Self.review(ticker: "LLOYl_EQ") })
         #expect(Self.rejects { try Self.review(side: "SELL") })
         #expect(Self.rejects { try Self.review(quantity: "3") })

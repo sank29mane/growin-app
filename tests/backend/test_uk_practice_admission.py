@@ -273,7 +273,7 @@ async def test_a_quote_in_the_future_is_denied(
         ({"ticker": "NOSUCH_EQ"}, "INSTRUMENT_UNKNOWN"),
         ({"ticker": "AAPL_US_EQ"}, "CURRENCY_NOT_ADMISSIBLE"),
         ({"ticker": "GBPXl_EQ", "quantity": 2000, "limit_price": "71.3"}, "QUANTITY_OVER_MAX_OPEN"),
-        ({"quantity": 500}, "PER_POSITION_CAP_EXCEEDED"),
+        ({"quantity": 520}, "PER_POSITION_CAP_EXCEEDED"),
     ],
     ids=["closed-exchange", "unknown-ticker", "usd-instrument", "over-max-open", "per-position-cap"],
 )
@@ -668,8 +668,8 @@ async def test_the_reservation_transaction_itself_enforces_the_position_cap_and_
 
     stack = await stack_with(tmp_path, private_config_dir, monkeypatch)
     try:
-        # 500 shares x 71.3p = GBP 356.5, over the 300 cap, forced past the pre-check.
-        proposal = practice_proposal_dict("forced-cap", quantity="500", limit_price="71.3")
+        # 520 shares x 71.3p = GBP 370.76, over the 300 cap, forced past the pre-check.
+        proposal = practice_proposal_dict("forced-cap", quantity="520", limit_price="71.3")
         admission = stack.service.admit(
             proposal, currency="GBP", price="0.713", price_source=PRICE_SOURCE_TEST_REPLAY,
             **stack.app._local_paper_preflight(),
