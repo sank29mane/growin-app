@@ -6,6 +6,13 @@ demergers, mergers, unknown purposes, missing ex-dates, unusable dividend refere
 unexplained price jumps) withholds adjusted prices before it and is quarantined with scope
 `adjusted`. NSE does not adjust previous-close columns on ex-dates, so previous-close ratios
 are never used to infer a factor.
+
+D-20 (Phase 62): a lone amount-less "INTERIM DIVIDEND" event is applied as dividend amount unknown,
+treated as zero. The price factor is 1 (a price-return series across it), the event and every bar
+whose value depends on the assumption carry the `dividend_amount_unknown` tag, and the quarantine
+is lifted only for that event. It is not lifted when any split, bonus, other unresolved action or
+unexplained price jump sits on or within `unknown_dividend_conflict_days` of its ex-date, and a
+factor of 1 never explains a jump, so a hidden split is still flagged.
 """
 
 from __future__ import annotations
@@ -31,8 +38,12 @@ from .models import Lineage, QuarantineRecord, RawDailyBar
 from .store import PilotDataStore
 
 STRUCTURAL_KINDS = ("split", "consolidation", "bonus")
+DIVIDEND_AMOUNT_UNKNOWN = "dividend_amount_unknown"
 SPECIFIC_REASONS = frozenset(
-    {"dividend_reference_missing", "dividend_exceeds_price", "price_jump_without_action", "missing_ex_date"}
+    {
+        "dividend_reference_missing", "dividend_exceeds_price", "price_jump_without_action", "missing_ex_date",
+        "dividend_amount_unknown_conflict",
+    }
 )
 
 FACTOR_SETS_DDL = (
@@ -48,7 +59,10 @@ class _Frozen(BaseModel):
 
 
 class AdjustmentPolicy(_Frozen):
-    version: Literal["pilot-adjust/1"] = "pilot-adjust/1"
+    version: Literal["pilot-adjust/2"] = "pilot-adjust/2"
+    # pilot-adjust/2 adds the D-20 rule for amount-less interim dividends (see the module docstring).
+    unknown_dividend_policy: Literal["unknown_zero/1"] = "unknown_zero/1"
+    unknown_dividend_conflict_days: int = Field(default=7, ge=0)  # calendar days either side of the ex-date
     quantum: Decimal = Decimal("0.0001")
     rounding: Literal["ROUND_HALF_EVEN"] = "ROUND_HALF_EVEN"
     jump_low: Decimal = Decimal("0.55")
@@ -63,6 +77,7 @@ class AppliedFactor(_Frozen):
     price_factor: Decimal
     volume_factor: Decimal
     structural_factor: Decimal  # split, consolidation and bonus parts only (rawness checks use this)
+    tags: tuple[str, ...] = ()  # "dividend_amount_unknown" when the factor rests on the zero assumption
 
 
 class UnresolvedAction(_Frozen):
@@ -84,6 +99,10 @@ class FactorSet(_Frozen):
     reference_sha256: str
     factor_set_sha256: str
 
+    def unknown_dividend_events(self) -> tuple[AppliedFactor, ...]:
+        """Applied events resting on the D-20 zero assumption, in ex-date order."""
+        return tuple(item for item in self.applied if DIVIDEND_AMOUNT_UNKNOWN in item.tags)
+
 
 class AdjustedBar(_Frozen):
     trade_date: date
@@ -100,6 +119,10 @@ class AdjustedBar(_Frozen):
     adj_volume: int | None
     cumulative_price_factor: Decimal
     adjusted_quarantined: bool
+    # D-20: the adjusted value depends on an amount-unknown dividend (bar on or before its ex-date).
+    dividend_amount_unknown: bool = False
+    # D-20: this bar is the ex-date of an amount-unknown dividend; its open gap is not a signal.
+    dividend_amount_unknown_ex_date: bool = False
 
 
 class AdjustedSeries(CaveatedResult):
@@ -225,6 +248,59 @@ def _first_blocking_kind(event: CorporateActionEvent) -> str:
     return "unknown"
 
 
+def _resolve_unknown_dividends(
+    candidates: Sequence[CorporateActionEvent],
+    bars: Sequence[RawDailyBar],
+    applied: list[AppliedFactor],
+    unresolved: list[UnresolvedAction],
+    policy: AdjustmentPolicy,
+) -> None:
+    """D-20: apply each amount-less interim dividend as factor 1 unless something else is nearby.
+
+    Mutates `applied` and `unresolved`. A conflict is any unresolved action with no ex-date or an
+    ex-date within the policy window, any unexplained price jump in that window, or any applied
+    event in that window that carries a structural factor (split, consolidation, bonus). A
+    conflicted event stays unresolved, so the bars before it keep being withheld.
+    """
+    window = timedelta(days=policy.unknown_dividend_conflict_days)
+    # Jumps are found without the factor-1 events: a factor of 1 never explains one.
+    jumps = detect_unrecorded_actions(bars, applied, policy)
+    others = [*unresolved, *jumps]
+    lifted: list[AppliedFactor] = []
+    for event in candidates:
+        assert event.ex_date is not None
+        near = sorted(
+            {
+                f"{item.reason}:{item.ex_date.isoformat() if item.ex_date else 'no_ex_date'}"
+                for item in others
+                if item.ex_date is None or abs(item.ex_date - event.ex_date) <= window
+            }
+            | {
+                f"structural_{item.kind}:{item.ex_date.isoformat()}"
+                for item in applied
+                if item.structural_factor != 1 and abs(item.ex_date - event.ex_date) <= window
+            }
+        )
+        if near:
+            unresolved.append(
+                UnresolvedAction(
+                    event_id=event.event_id, ex_date=event.ex_date, kind=DIVIDEND_AMOUNT_UNKNOWN,
+                    reason="dividend_amount_unknown_conflict", detail={"nearby": ",".join(near)},
+                    evidence_sha256s=event.evidence_sha256s,
+                )
+            )
+            continue
+        lifted.append(
+            AppliedFactor(
+                event_id=event.event_id, ex_date=event.ex_date, kind=DIVIDEND_AMOUNT_UNKNOWN,
+                price_factor=Decimal(1), volume_factor=Decimal(1), structural_factor=Decimal(1),
+                tags=(DIVIDEND_AMOUNT_UNKNOWN,),
+            )
+        )
+    applied.extend(lifted)
+    applied.sort(key=lambda item: (item.ex_date, item.event_id))
+
+
 def compute_factor_set(
     lineage: Lineage,
     reference_bars: Sequence[RawDailyBar],
@@ -237,7 +313,20 @@ def compute_factor_set(
     known = [event for event in events if event.first_seen_file_date <= as_of]
     applied: list[AppliedFactor] = []
     unresolved: list[UnresolvedAction] = []
+    unknown_dividends: list[CorporateActionEvent] = []
     for event in sorted(known, key=lambda e: (e.ex_date is None, e.ex_date or date.max, e.event_id)):
+        is_unknown_dividend = any(part.kind == DIVIDEND_AMOUNT_UNKNOWN for part in event.parts)
+        if is_unknown_dividend and event.adjustable:
+            if event.ex_date is None:
+                unresolved.append(
+                    UnresolvedAction(
+                        event_id=event.event_id, ex_date=None, kind=DIVIDEND_AMOUNT_UNKNOWN,
+                        reason="missing_ex_date", evidence_sha256s=event.evidence_sha256s,
+                    )
+                )
+            elif event.ex_date <= as_of and not (bars and event.ex_date < bars[0].trade_date):
+                unknown_dividends.append(event)
+            continue
         price_parts = [part for part in event.parts if part.kind in (*STRUCTURAL_KINDS, "dividend")]
         if event.ex_date is None:
             if not event.adjustable or price_parts:
@@ -301,6 +390,8 @@ def compute_factor_set(
                 price_factor=price, volume_factor=volume, structural_factor=structural,
             )
         )
+    if unknown_dividends:
+        _resolve_unknown_dividends(unknown_dividends, bars, applied, unresolved, policy)
     unresolved.extend(detect_unrecorded_actions(bars, applied, policy))
     unresolved.sort(key=lambda u: (u.ex_date is None, u.ex_date or date.max, u.event_id or "", u.reason))
     reference_sha = canonical_sha256(
@@ -333,6 +424,8 @@ def adjusted_series(
     ordered = sorted((bar for bar in bars if bar.trade_date <= as_of), key=lambda bar: bar.trade_date)
     unresolved_dates = [u.ex_date for u in factor_set.unresolved if u.ex_date is not None]
     quarantine_all = any(u.ex_date is None for u in factor_set.unresolved)
+    unknown_ex_dates = {item.ex_date for item in factor_set.unknown_dividend_events() if item.ex_date <= as_of}
+    last_unknown = max(unknown_ex_dates, default=None)
     out: list[AdjustedBar] = []
     for bar in ordered:
         later = [item for item in factor_set.applied if item.ex_date > bar.trade_date and item.ex_date <= as_of]
@@ -358,6 +451,8 @@ def adjusted_series(
                 raw_close=bar.close, raw_volume=bar.volume, adj_open=adj[0], adj_high=adj[1], adj_low=adj[2],
                 adj_close=adj[3], adj_volume=adj[4], cumulative_price_factor=price_factor,
                 adjusted_quarantined=withheld,
+                dividend_amount_unknown=(not withheld and last_unknown is not None and bar.trade_date <= last_unknown),
+                dividend_amount_unknown_ex_date=bar.trade_date in unknown_ex_dates,
             )
         )
     basis = (

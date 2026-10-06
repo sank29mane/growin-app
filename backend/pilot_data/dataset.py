@@ -49,13 +49,15 @@ SNAPSHOTS_DDL = (
     "crosscheck_run_id VARCHAR NOT NULL, manifest_json VARCHAR NOT NULL, created_at_utc TIMESTAMP NOT NULL, "
     "row_sha256 VARCHAR NOT NULL, source_sha256 VARCHAR NOT NULL)"
 )
+_OPTIONAL_TAG_COLUMNS = ("dividend_amount_unknown", "dividend_amount_unknown_ex_date")
 _DECIMAL_COLUMNS = ("raw_open", "raw_high", "raw_low", "raw_close", "adj_open", "adj_high", "adj_low", "adj_close")
 _PARQUET_SQL = (
     "CREATE TEMP TABLE rows(workspace VARCHAR, anchor_isin VARCHAR, isin VARCHAR, nse_symbol VARCHAR, "
     "series VARCHAR, stock_code VARCHAR, trade_date DATE, raw_open DECIMAL(18,4), raw_high DECIMAL(18,4), "
     "raw_low DECIMAL(18,4), raw_close DECIMAL(18,4), raw_volume BIGINT, adj_open DECIMAL(18,4), "
     "adj_high DECIMAL(18,4), adj_low DECIMAL(18,4), adj_close DECIMAL(18,4), adj_volume BIGINT, "
-    "adjusted_quarantined BOOLEAN, raw_adjustment_basis VARCHAR, adjusted_basis VARCHAR, source VARCHAR, "
+    "adjusted_quarantined BOOLEAN, dividend_amount_unknown BOOLEAN, dividend_amount_unknown_ex_date BOOLEAN, "
+    "raw_adjustment_basis VARCHAR, adjusted_basis VARCHAR, source VARCHAR, "
     "source_sha256 VARCHAR, fetched_at_utc VARCHAR, bhavcopy_source_sha256 VARCHAR, crosscheck_run_id VARCHAR)"
 )
 
@@ -85,6 +87,9 @@ class DatasetRow(BaseModel):
     adj_close: Decimal | None
     adj_volume: int | None
     adjusted_quarantined: bool
+    # D-20 tags. False for every row of a dataset built before the policy existed.
+    dividend_amount_unknown: bool = False
+    dividend_amount_unknown_ex_date: bool = False
     raw_adjustment_basis: str
     adjusted_basis: str
     source: str
@@ -98,6 +103,8 @@ class DatasetRow(BaseModel):
         out: dict[str, object] = {}
         for name in type(self).model_fields:
             value = getattr(self, name)
+            if name in _OPTIONAL_TAG_COLUMNS and not value:
+                continue  # keeps the hash of a pre-D-20 dataset reproducible
             if isinstance(value, Decimal):
                 out[name] = dec_str(value)
             elif isinstance(value, date):
@@ -105,6 +112,13 @@ class DatasetRow(BaseModel):
             else:
                 out[name] = value
         return out
+
+
+class DividendAmountUnknownEvent(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    event_id: str
+    ex_date: date
 
 
 class DatasetManifest(CaveatedResult):
@@ -125,6 +139,11 @@ class DatasetManifest(CaveatedResult):
     rawness_counts: dict[str, int]
     created_at_utc: str
     parquet_sha256: str | None = None
+    # D-20: the adjustment policy the rows were built under. None on a dataset built before it.
+    adjustment_policy_version: str | None = None
+    unknown_dividend_policy: str | None = None
+    # anchor ISIN -> amount-unknown interim dividend events (event id, ex-date), for the 2% sensitivity.
+    dividend_amount_unknown_events: dict[str, tuple[DividendAmountUnknownEvent, ...]] = {}
 
 
 def dataset_hash(rows: list[DatasetRow]) -> str:
@@ -171,7 +190,9 @@ def _write_parquet(rows: list[DatasetRow], path: Path, export_root: Path) -> Non
 def _read_parquet(path: Path) -> list[DatasetRow]:
     con = duckdb.connect(":memory:")
     try:
-        names = list(DatasetRow.model_fields)
+        present = {row[0] for row in con.execute("DESCRIBE SELECT * FROM read_parquet(?)", [str(path)]).fetchall()}
+        # A pre-D-20 file has no tag columns; those fields take their False default.
+        names = [name for name in DatasetRow.model_fields if name in present or name not in _OPTIONAL_TAG_COLUMNS]
         found = con.execute(
             f"SELECT {', '.join(names)} FROM read_parquet(?) ORDER BY anchor_isin, trade_date", [str(path)]
         ).fetchall()
@@ -209,6 +230,7 @@ def build_dataset_snapshot(
     lineage_hashes: dict[str, str] = {}
     factor_hashes: dict[str, str] = {}
     spans: dict[str, dict[str, object]] = {}
+    unknown_events: dict[str, tuple[DividendAmountUnknownEvent, ...]] = {}
     for stock_code in sorted({bar.stock_code for bar in accepted}):
         member = members[stock_code]
         mine = [bar for bar in accepted if bar.stock_code == stock_code]
@@ -263,6 +285,8 @@ def build_dataset_snapshot(
                     raw_open=adj.raw_open, raw_high=adj.raw_high, raw_low=adj.raw_low, raw_close=adj.raw_close,
                     raw_volume=adj.raw_volume, adj_open=adj.adj_open, adj_high=adj.adj_high, adj_low=adj.adj_low,
                     adj_close=adj.adj_close, adj_volume=adj.adj_volume, adjusted_quarantined=adj.adjusted_quarantined,
+                    dividend_amount_unknown=adj.dividend_amount_unknown,
+                    dividend_amount_unknown_ex_date=adj.dividend_amount_unknown_ex_date,
                     raw_adjustment_basis=basis, adjusted_basis=series.adjustment_basis, source=ROW_SOURCE,
                     source_sha256=accepted_bar.breeze_source_sha256,
                     fetched_at_utc=fetched[accepted_bar.breeze_source_sha256],
@@ -271,6 +295,11 @@ def build_dataset_snapshot(
             )
         lineage_hashes[member.anchor_isin] = lineage.content_sha256()
         factor_hashes[member.anchor_isin] = factor_set.factor_set_sha256
+        found_unknown = factor_set.unknown_dividend_events()
+        if found_unknown:
+            unknown_events[member.anchor_isin] = tuple(
+                DividendAmountUnknownEvent(event_id=item.event_id, ex_date=item.ex_date) for item in found_unknown
+            )
         span = compute_span(store, lineage, window_start=report.window_start, window_end=report.window_end,
                             workspace=workspace)
         spans[member.anchor_isin] = {
@@ -289,6 +318,8 @@ def build_dataset_snapshot(
         lineage_hashes=dict(sorted(lineage_hashes.items())), factor_set_hashes=dict(sorted(factor_hashes.items())),
         spans=dict(sorted(spans.items())), quarantine_totals=dict(report.totals_by_reason),
         rawness_counts=dict(report.rawness_counts),
+        adjustment_policy_version=policy.version, unknown_dividend_policy=policy.unknown_dividend_policy,
+        dividend_amount_unknown_events=dict(sorted(unknown_events.items())),
         created_at_utc=datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
     )
     if export_root is not None:

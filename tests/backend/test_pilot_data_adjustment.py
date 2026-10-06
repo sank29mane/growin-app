@@ -165,7 +165,7 @@ def test_adjustment_basis_and_factor_set_hash_are_stable():
     assert first.factor_set_sha256 == second.factor_set_sha256 and len(first.factor_set_sha256) == 64
     series = adjusted_series(CANBK_BARS, first, as_of=D15, workspace="india")
     assert series.adjustment_basis == (
-        f"back_adjusted:as_of=2024-05-15:factor_set={first.factor_set_sha256}:policy=pilot-adjust/1")
+        f"back_adjusted:as_of=2024-05-15:factor_set={first.factor_set_sha256}:policy=pilot-adjust/2")
     other = factor_set(CANBK_BARS[:1], [], D15)
     assert other.factor_set_sha256 != first.factor_set_sha256
     assert [c.code for c in series.caveats][:2] == ["SURVIVORSHIP_BIAS", "HINDSIGHT_BIAS"]
@@ -356,3 +356,163 @@ def test_events_before_the_first_bar_in_range_are_ignored():
     assert fs.unresolved == () and fs.applied == ()
     on_first_bar = event("CANBK", "DIV - RS 5 PER SH", D14)  # no earlier close: still reported, never guessed
     assert [u.reason for u in factor_set(flat, [on_first_bar], D15).unresolved] == ["dividend_reference_missing"]
+
+
+# ------------------------------------------------------------------ D-20: amount-less interim dividends
+J3, J4, J5, J6 = date(2024, 6, 3), date(2024, 6, 4), date(2024, 6, 5), date(2024, 6, 6)
+UNKNOWN = "dividend_amount_unknown"
+
+
+def flat_bars(*days, open_by_day=None, close="100"):
+    open_by_day = open_by_day or {}
+    return [bar(day, close, open_=open_by_day.get(day, close), high="120", low="20") for day in days]
+
+
+def interim(day, symbol="CANBK"):
+    return event(symbol, "INTERIM DIVIDEND", day)
+
+
+def test_policy_is_versioned_and_names_the_unknown_dividend_rule():
+    assert (POLICY.version, POLICY.unknown_dividend_policy) == ("pilot-adjust/2", "unknown_zero/1")
+    fs = factor_set(flat_bars(J3, J4), [interim(J4)], J4)
+    assert fs.policy_version == "pilot-adjust/2"
+
+
+def test_an_amountless_interim_dividend_is_resolved_as_factor_one_and_tagged():
+    bars = flat_bars(J3, J4, J5, open_by_day={J4: "98"})  # a 2 percent open gap is a plausible dividend
+    fs = factor_set(bars, [interim(J4)], J5)
+    assert fs.unresolved == ()
+    (item,) = fs.applied
+    assert (item.ex_date, item.kind, item.price_factor, item.volume_factor, item.structural_factor) == (
+        J4, UNKNOWN, Decimal(1), Decimal(1), Decimal(1))
+    assert item.tags == (UNKNOWN,) and fs.unknown_dividend_events() == (item,)
+    series = adjusted_series(bars, fs, as_of=J5, workspace="india")
+    before, ex_day, after = series.bars
+    assert not before.adjusted_quarantined and before.adj_close == before.raw_close  # price return: no scaling
+    assert (before.dividend_amount_unknown, before.dividend_amount_unknown_ex_date) == (True, False)
+    assert (ex_day.dividend_amount_unknown, ex_day.dividend_amount_unknown_ex_date) == (True, True)
+    assert (after.dividend_amount_unknown, after.dividend_amount_unknown_ex_date) == (False, False)
+    assert not any(b.adjusted_quarantined for b in series.bars)
+
+
+def test_a_final_or_special_dividend_with_no_amount_is_out_of_scope_and_still_withholds():
+    bars = flat_bars(J3, J4, J5)
+    fs = factor_set(bars, [event("CANBK", "FINAL DIVIDEND", J4)], J5)
+    assert fs.applied == () and [(u.kind, u.reason) for u in fs.unresolved] == [("unknown", "not_adjustable")]
+    assert adjusted_series(bars, fs, as_of=J5, workspace="india").bars[0].adjusted_quarantined
+
+
+def test_an_event_after_as_of_or_without_an_ex_date_is_not_lifted():
+    bars = flat_bars(J3, J4)
+    early = factor_set(bars[:1], [interim(J4)], J3)
+    assert early.applied == () and early.unresolved == ()
+    series = adjusted_series(bars[:1], early, as_of=J3, workspace="india")
+    assert (series.bars[0].dividend_amount_unknown, series.bars[0].dividend_amount_unknown_ex_date) == (False, False)
+    undated = factor_set(bars, [event("CANBK", "INTERIM DIVIDEND", None)], J4)
+    assert [(u.kind, u.reason) for u in undated.unresolved] == [(UNKNOWN, "missing_ex_date")]
+    assert all(b.adjusted_quarantined for b in adjusted_series(bars, undated, as_of=J4, workspace="india").bars)
+
+
+@pytest.mark.parametrize(
+    "other,purpose,open_after",
+    [
+        ("same-day bonus", "BONUS 1:1", "50"),
+        ("same-day split", "FVSPLT FRM RS 10 TO RS 2", "20"),
+        ("next-day bonus", "BONUS 1:1", "50"),
+        ("same-day rights", "RIGHTS 1:1 @ PRM RS 3/-", "100"),
+        ("same-day demerger", "DEMERGER", "100"),
+    ],
+)
+def test_an_amountless_dividend_next_to_a_split_bonus_or_unresolved_action_is_not_lifted(other, purpose, open_after):
+    other_day = J5 if other.startswith("next-day") else J4
+    bars = flat_bars(J3, J4, J5, J6, open_by_day={other_day: open_after})
+    fs = factor_set(bars, [interim(J4), event("CANBK", purpose, other_day)], J6)
+    assert [a.kind for a in fs.applied if UNKNOWN in a.tags] == []
+    (conflict,) = [u for u in fs.unresolved if u.reason == "dividend_amount_unknown_conflict"]
+    assert conflict.ex_date == J4 and conflict.kind == UNKNOWN and conflict.detail["nearby"]
+    series = adjusted_series(bars, fs, as_of=J6, workspace="india")
+    assert series.bars[0].adjusted_quarantined and series.bars[0].adj_close is None
+    assert not any(b.dividend_amount_unknown or b.dividend_amount_unknown_ex_date for b in series.bars)
+
+
+def test_a_bonus_and_an_amountless_dividend_in_one_purpose_is_not_lifted():
+    bars = flat_bars(J3, J4)
+    fs = factor_set(bars, [event("CANBK", "BONUS 1:1/INTERIM DIVIDEND", J4)], J4)
+    assert fs.applied == () and [(u.kind, u.reason) for u in fs.unresolved] == [(UNKNOWN, "not_adjustable")]
+
+
+def test_a_distant_split_does_not_block_the_lift_but_still_applies():
+    days = [date(2024, 6, 3), date(2024, 6, 4), date(2024, 7, 15), date(2024, 7, 16)]
+    bars = flat_bars(*days, open_by_day={days[3]: "50"})
+    fs = factor_set(bars, [interim(days[1]), event("CANBK", "BONUS 1:1", days[3])], days[3])
+    assert fs.unresolved == ()
+    assert sorted(a.kind for a in fs.applied) == sorted([UNKNOWN, "bonus"])
+    assert [a.ex_date for a in fs.applied] == sorted(a.ex_date for a in fs.applied)
+
+
+def test_an_amount_known_dividend_nearby_does_not_block_the_lift():
+    bars = flat_bars(J3, J4, J5, J6)
+    fs = factor_set(bars, [interim(J4), event("CANBK", "DIV - RS 5 PER SH", J5)], J6)
+    assert fs.unresolved == ()
+    by_kind = {a.kind: a for a in fs.applied}
+    assert by_kind[UNKNOWN].tags == (UNKNOWN,) and by_kind["dividend"].tags == ()
+
+
+def test_a_large_unexplained_gap_on_the_ex_date_is_still_flagged():
+    bars = flat_bars(J3, J4, J5, open_by_day={J4: "30"})  # open at 0.30 of the previous close
+    fs = factor_set(bars, [interim(J4)], J5)
+    reasons = {u.reason for u in fs.unresolved}
+    assert reasons == {"price_jump_without_action", "dividend_amount_unknown_conflict"}
+    (jump,) = [u for u in fs.unresolved if u.reason == "price_jump_without_action"]
+    assert jump.ex_date == J4 and jump.detail["open_over_previous_close"] == "0.3000"
+    assert fs.unknown_dividend_events() == ()
+    series = adjusted_series(bars, fs, as_of=J5, workspace="india")
+    assert series.bars[0].adjusted_quarantined and series.bars[0].adj_close is None
+    assert not series.bars[1].adjusted_quarantined
+    # the same gap just inside the band is the case D-20 accepts
+    inside = factor_set(flat_bars(J3, J4, J5, open_by_day={J4: "56"}), [interim(J4)], J5)
+    assert inside.unresolved == () and len(inside.unknown_dividend_events()) == 1
+
+
+def test_an_amount_known_dividend_is_unchanged_and_untagged():
+    bars = [bar(date(2024, 5, 6), "1358.80"), bar(date(2024, 5, 7), "1340")]
+    fs = factor_set(bars, [event("HCLTECH", "INTDIV - RS 18 PER SH", date(2024, 5, 7))], date(2024, 5, 7))
+    (item,) = fs.applied
+    assert item.price_factor == Decimal(1) - Decimal(18) / Decimal("1358.80") and item.tags == ()
+    assert fs.unknown_dividend_events() == () and fs.unresolved == ()
+    series = adjusted_series(bars, fs, as_of=date(2024, 5, 7), workspace="india")
+    assert not any(b.dividend_amount_unknown or b.dividend_amount_unknown_ex_date for b in series.bars)
+    assert series.bars[0].adj_close == (Decimal("1358.80") * item.price_factor).quantize(Decimal("0.0001"))
+
+
+def test_two_amountless_dividends_close_together_are_both_lifted():
+    bars = flat_bars(J3, J4, J5, J6)
+    fs = factor_set(bars, [interim(J4), interim(J6)], J6)
+    assert fs.unresolved == () and [a.ex_date for a in fs.unknown_dividend_events()] == [J4, J6]
+
+
+def test_the_factor_set_with_an_amountless_dividend_is_deterministic_and_persists_once(store):
+    bars = flat_bars(J3, J4, J5)
+    lin = lineage(start=J3)
+    first = factor_set(bars, [interim(J4)], J5, lin)
+    second = factor_set(bars, [interim(J4)], J5, lin)
+    assert first.factor_set_sha256 == second.factor_set_sha256
+    assert first.factor_set_sha256 != factor_set(bars, [], J5, lin).factor_set_sha256
+    persist_factor_set(store, first, workspace="india")
+    persist_factor_set(store, second, workspace="india")
+    assert store.query("SELECT count(*) FROM adjustment_factor_sets")[0][0] == 1
+    assert quarantine_unresolved(store, lin, first, workspace="india") == ()  # nothing left to quarantine
+    assert store.query("SELECT count(*) FROM quarantine_records")[0][0] == 0
+    assert adjusted_series(bars, first, as_of=J5, workspace="india") == adjusted_series(
+        bars, second, as_of=J5, workspace="india")
+
+
+def test_a_conflict_quarantines_with_its_own_reason_code_and_is_idempotent(store):
+    bars = flat_bars(J3, J4, J5, open_by_day={J4: "50"})
+    lin = lineage(start=J3)
+    fs = factor_set(bars, [interim(J4), event("CANBK", "RIGHTS 1:1 @ PRM RS 3/-", J4)], J5, lin)
+    first = quarantine_unresolved(store, lin, fs, workspace="india")
+    quarantine_unresolved(store, lin, fs, workspace="india")
+    assert "ca_unresolved_dividend_amount_unknown_conflict" in {r.reason_code for r in first}
+    count = store.query("SELECT count(*) FROM quarantine_records WHERE check_name = 'corporate_action'")[0][0]
+    assert count == len(first)
