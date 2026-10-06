@@ -7,8 +7,9 @@ Two separate things, kept separate on purpose:
   systemic level) as prompt text, next to the decision's own wording. It still decides
   nothing: whatever it returns is returned, and no LLM-side rule gates on a figure.
 * The gate is deterministic: ``risk_india.rules.slippage_check``, a pure Decimal function
-  with the cap passed in. Phase 63-04 wires it into India admission with
-  ``max_slippage_bps = 25`` (operator answer 2026-10-07). It is India only; the UK
+  with the cap passed in. A buy is measured against the quote's ask and a sell against its
+  bid; a missing side refuses (SLIPPAGE_QUOTE_UNAVAILABLE). Phase 63-04 wires it into India
+  admission with ``max_slippage_bps = 25`` (operator answer 2026-10-07). It is India only; the UK
   gate belongs to Phase 66 and nothing for it lives here.
 
 History: this file used to characterise the gap (the critic saw no ``risk_governance``
@@ -23,6 +24,7 @@ import os
 import re
 import sys
 import textwrap
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -215,8 +217,24 @@ async def test_the_critic_stays_advisory_and_does_not_gate_on_a_figure(stub, reg
 REF = Decimal("10000")
 
 
+def _book(bid=None, ask=None, ltp="10100") -> rules.Quote:
+    """A quote whose only interesting fields are the book; ltp is deliberately far from both."""
+    return rules.Quote(
+        stock_code="TESTCO", isin="INE000A01012", series="EQ", ltp=Decimal(ltp),
+        lower_circuit=Decimal("9000"), upper_circuit=Decimal("11000"), previous_close=Decimal("10000"),
+        session_date=date(2026, 10, 8), tick_reference=Decimal("10000"), bid=bid, ask=ask,
+    )
+
+
+def _check(side: str, reference, fill, cap):
+    """The reference sits on the side the order takes; the other side is a decoy."""
+    if side == "buy":
+        return rules.slippage_check(side, _book(bid=Decimal("1"), ask=reference), fill, cap)
+    return rules.slippage_check(side, _book(bid=reference, ask=Decimal("1000000")), fill, cap)
+
+
 def _ok(side: str, fill: str, cap=INDIA_MAX_SLIPPAGE_BPS, ref=REF) -> rules.SlippageResult:
-    return rules.slippage_check(side, ref, Decimal(fill), cap)
+    return _check(side, ref, Decimal(fill), cap)
 
 
 def test_buy_at_exactly_25_bps_above_the_reference_passes_and_25_01_fails():
@@ -253,40 +271,100 @@ def test_the_edge_is_exact_at_other_reference_prices(side):
         step = reference * Decimal("25") / Decimal("10000")
         exact = reference + step if side == "buy" else reference - step
         just_over = (reference + step * Decimal("1.0001")) if side == "buy" else (reference - step * Decimal("1.0001"))
-        assert rules.slippage_check(side, reference, exact, INDIA_MAX_SLIPPAGE_BPS).ok, (side, ref)
-        assert not rules.slippage_check(side, reference, just_over, INDIA_MAX_SLIPPAGE_BPS).ok, (side, ref)
+        assert _check(side, reference, exact, INDIA_MAX_SLIPPAGE_BPS).ok, (side, ref)
+        assert not _check(side, reference, just_over, INDIA_MAX_SLIPPAGE_BPS).ok, (side, ref)
+
+
+# ---- the reference is the side of the book the order takes (bid for a sell, ask for a buy)
+
+BID, ASK = Decimal("9980.00"), Decimal("10000.00")  # a 20 point spread, ltp 10100 is far from both
+
+
+def test_a_buy_is_measured_against_the_ask_and_a_sell_against_the_bid():
+    quote = _book(bid=BID, ask=ASK)
+    # exactly 25 bps above the ask (10025.00) and 25 bps below the bid (9955.05)
+    buy_edge = rules.slippage_check("buy", quote, Decimal("10025.00"), INDIA_MAX_SLIPPAGE_BPS)
+    sell_edge = rules.slippage_check("sell", quote, Decimal("9955.05"), INDIA_MAX_SLIPPAGE_BPS)
+    assert buy_edge.ok and buy_edge.slippage_bps == Decimal("25")
+    assert sell_edge.ok and sell_edge.slippage_bps == Decimal("25")
+    # one hundredth of a basis point worse, on each side
+    assert not rules.slippage_check("buy", quote, Decimal("10025.01"), INDIA_MAX_SLIPPAGE_BPS).ok
+    assert not rules.slippage_check("sell", quote, Decimal("9955.04"), INDIA_MAX_SLIPPAGE_BPS).ok
+
+
+def test_the_other_side_of_the_book_and_the_last_price_are_never_the_reference():
+    quote = _book(bid=BID, ask=ASK, ltp="10100")
+    # 10025.00 is 25 bps over the ask but 45 bps over the bid and under ltp: only the ask matters.
+    assert rules.slippage_check("buy", quote, Decimal("10025.00"), INDIA_MAX_SLIPPAGE_BPS).ok
+    assert not rules.slippage_check("buy", quote, Decimal("10025.00"), "10").ok  # 25 bps over a 10 bps cap
+    # 9955.05 is 25 bps under the bid but 45 bps under the ask: only the bid matters.
+    assert rules.slippage_check("sell", quote, Decimal("9955.05"), INDIA_MAX_SLIPPAGE_BPS).ok
+    # A buy at the bid is "better than the ask"; a sell at the ask is "better than the bid".
+    assert rules.slippage_check("buy", quote, BID, INDIA_MAX_SLIPPAGE_BPS).slippage_bps < 0
+    assert rules.slippage_check("sell", quote, ASK, INDIA_MAX_SLIPPAGE_BPS).slippage_bps < 0
+
+
+def test_a_missing_side_of_the_book_refuses_with_a_typed_code():
+    buy = rules.slippage_check("buy", _book(bid=BID, ask=None), ASK, INDIA_MAX_SLIPPAGE_BPS)
+    sell = rules.slippage_check("sell", _book(bid=None, ask=ASK), BID, INDIA_MAX_SLIPPAGE_BPS)
+    for result, reason in ((buy, "ask_missing"), (sell, "bid_missing")):
+        assert not result.ok and result.code == rules.SLIPPAGE_QUOTE_UNAVAILABLE
+        assert result.code != rules.SLIPPAGE_LIMIT and result.reason == reason
+        assert result.slippage_bps is None
+    # Only the order's own side is needed: a buy does not need a bid, a sell does not need an ask.
+    assert rules.slippage_check("buy", _book(bid=None, ask=ASK), ASK, INDIA_MAX_SLIPPAGE_BPS).ok
+    assert rules.slippage_check("sell", _book(bid=BID, ask=None), BID, INDIA_MAX_SLIPPAGE_BPS).ok
+
+
+def test_a_quote_with_no_book_at_all_never_falls_back_to_ltp():
+    bare = rules.Quote(  # bid and ask left at their defaults
+        "TESTCO", "INE000A01012", "EQ", Decimal("10000"), Decimal("9000"), Decimal("11000"),
+        Decimal("10000"), date(2026, 10, 8), tick_reference=Decimal("10000"),
+    )
+    for side in ("buy", "sell"):
+        result = rules.slippage_check(side, bare, Decimal("10000"), INDIA_MAX_SLIPPAGE_BPS)
+        assert not result.ok and result.code == rules.SLIPPAGE_QUOTE_UNAVAILABLE
+        none = rules.slippage_check(side, None, Decimal("10000"), INDIA_MAX_SLIPPAGE_BPS)
+        assert not none.ok and none.code == rules.SLIPPAGE_QUOTE_UNAVAILABLE
+    for notquote in (REF, "10000", {"ask": REF, "bid": REF}):
+        assert rules.slippage_check("buy", notquote, REF, INDIA_MAX_SLIPPAGE_BPS).code == (  # type: ignore[arg-type]
+            rules.SLIPPAGE_QUOTE_UNAVAILABLE
+        )
 
 
 @pytest.mark.parametrize("side", ["buy", "sell"])
-def test_a_missing_or_unusable_reference_or_price_fails_closed(side):
-    for reference, price in (
-        (None, "10000"), ("", "10000"), (Decimal("0"), Decimal("10000")), (Decimal("-1"), Decimal("10000")),
-        (Decimal("NaN"), Decimal("10000")), (10000.0, Decimal("10000")), (True, Decimal("10000")),
-        (REF, None), (REF, Decimal("0")), (REF, Decimal("Infinity")), (REF, 10000.0),
+def test_an_unusable_reference_or_a_missing_price_fails_closed(side):
+    for reference in (
+        None, "", Decimal("0"), Decimal("-1"), Decimal("NaN"), Decimal("Infinity"), 10000.0, True,
     ):
-        result = rules.slippage_check(side, reference, price, INDIA_MAX_SLIPPAGE_BPS)  # type: ignore[arg-type]
-        assert not result.ok and result.code == "SLIPPAGE_LIMIT", (reference, price)
+        result = _check(side, reference, Decimal("10000"), INDIA_MAX_SLIPPAGE_BPS)
+        assert not result.ok and result.code == rules.SLIPPAGE_QUOTE_UNAVAILABLE, reference
+        assert result.slippage_bps is None
+    for price in (None, Decimal("0"), Decimal("Infinity"), Decimal("NaN"), 10000.0, ""):
+        result = _check(side, REF, price, INDIA_MAX_SLIPPAGE_BPS)  # type: ignore[arg-type]
+        assert not result.ok and result.code == "SLIPPAGE_LIMIT" and result.reason == "price_missing", price
         assert result.slippage_bps is None
 
 
 def test_a_missing_cap_fails_closed_and_a_zero_or_negative_cap_is_refused():
-    missing = rules.slippage_check("buy", REF, REF, None)
+    missing = rules.slippage_check("buy", _book(ask=REF), REF, None)
     assert not missing.ok and missing.code == "SLIPPAGE_LIMIT" and missing.reason == "cap_missing"
     for bad in (Decimal("0"), Decimal("-25"), Decimal("-0.01"), "0", "-5", Decimal("NaN"), 25.0, True, ""):
         with pytest.raises(rules.RiskConfigError):
-            rules.slippage_check("buy", REF, REF, bad)  # type: ignore[arg-type]
+            rules.slippage_check("buy", _book(ask=REF), REF, bad)  # type: ignore[arg-type]
 
 
 def test_cap_arrives_as_a_decimal_string_and_the_function_has_no_default_cap():
-    assert rules.slippage_check("buy", REF, Decimal("10025.00"), "25").ok
-    assert not rules.slippage_check("buy", REF, Decimal("10025.01"), "25").ok
+    quote = _book(bid=REF, ask=REF)
+    assert rules.slippage_check("buy", quote, Decimal("10025.00"), "25").ok
+    assert not rules.slippage_check("buy", quote, Decimal("10025.01"), "25").ok
     parameters = inspect.signature(rules.slippage_check).parameters
     assert [p.default for p in parameters.values()] == [inspect.Parameter.empty] * len(parameters)
     tree = ast.parse(textwrap.dedent(inspect.getsource(rules.slippage_check)))
     constants = [n.value for n in ast.walk(tree) if isinstance(n, ast.Constant)]
     assert 25 not in constants and "25" not in constants  # the India value is the caller's, not hidden here
     with pytest.raises(rules.RiskConfigError):
-        rules.slippage_check("hold", REF, REF, INDIA_MAX_SLIPPAGE_BPS)
+        rules.slippage_check("hold", quote, REF, INDIA_MAX_SLIPPAGE_BPS)
 
 
 def test_a_tighter_and_a_looser_cap_move_the_edge():
@@ -295,8 +373,9 @@ def test_a_tighter_and_a_looser_cap_move_the_edge():
 
 
 def test_the_check_is_pure():
-    a = rules.slippage_check("buy", REF, Decimal("10025.01"), INDIA_MAX_SLIPPAGE_BPS)
-    assert a == rules.slippage_check("buy", REF, Decimal("10025.01"), INDIA_MAX_SLIPPAGE_BPS)
+    quote = _book(bid=REF, ask=REF)
+    a = rules.slippage_check("buy", quote, Decimal("10025.01"), INDIA_MAX_SLIPPAGE_BPS)
+    assert a == rules.slippage_check("buy", quote, Decimal("10025.01"), INDIA_MAX_SLIPPAGE_BPS)
 
 
 # -------------------------------------------------------------- India only here

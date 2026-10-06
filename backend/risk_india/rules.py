@@ -54,6 +54,8 @@ _DECIMAL_KEYS = LIMIT_KEYS[3:]
 _DECIMAL_RE = re.compile(r"-?(0|[1-9][0-9]*)(\.[0-9]+)?")
 
 SLIPPAGE_LIMIT = "SLIPPAGE_LIMIT"
+# The bid or ask for the order's side is absent or unusable: refused, never guessed from ltp.
+SLIPPAGE_QUOTE_UNAVAILABLE = "SLIPPAGE_QUOTE_UNAVAILABLE"
 
 
 class RiskConfigError(ValueError):
@@ -360,7 +362,7 @@ def evaluate(
 @dataclass(frozen=True)
 class SlippageResult:
     ok: bool
-    code: str | None  # SLIPPAGE_LIMIT when not ok
+    code: str | None  # SLIPPAGE_LIMIT or SLIPPAGE_QUOTE_UNAVAILABLE when not ok
     reason: str  # "within_cap", "over_cap" or why the check failed closed
     slippage_bps: Decimal | None  # side-adjusted, positive means worse than the reference
 
@@ -379,20 +381,28 @@ def _positive_decimal(value: Any) -> Decimal | None:
 
 def slippage_check(
     side: str,
-    reference_price: Decimal | str | None,
+    quote: Quote | None,
     fill_price: Decimal | str | None,
     max_slippage_bps: Decimal | str | None,
 ) -> SlippageResult:
     """P-16: deny ``SLIPPAGE_LIMIT`` when the side-adjusted slippage exceeds the cap.
 
-    A buy is worse the further the price is above the reference; a sell is worse
-    the further it is below. A price better than the reference is never a breach.
-    The cap is passed in (India: 25 bps, from ``IndiaExecution``); this function has
-    no default. The comparison is done in cross-multiplied form, so the edge is
-    exact: exactly the cap passes and a hundredth of a basis point more fails.
+    The reference is the side of the book the order would take: a BUY is measured
+    against ``quote.ask`` and a SELL against ``quote.bid``. Neither the last traded
+    price nor the other side is ever used, so a wide spread cannot hide a bad fill. A
+    buy is worse the further the price is above the ask; a sell is worse the further it
+    is below the bid. A price better than the reference is never a breach.
 
-    A missing or unusable reference, price or cap fails closed. A cap of zero or
-    below is a configuration error and is refused, never read as "no limit".
+    A missing, zero, negative or non-finite bid or ask for the order's side, or no
+    quote at all, fails closed with the typed code ``SLIPPAGE_QUOTE_UNAVAILABLE`` and
+    reason ``ask_missing`` or ``bid_missing``. A missing fill price or cap fails closed
+    as ``SLIPPAGE_LIMIT``. The cap is passed in (India: 25 bps, from ``IndiaExecution``);
+    this function has no default. The comparison is done in cross-multiplied form, so
+    the edge is exact: exactly the cap passes and a hundredth of a basis point more
+    fails. A cap of zero or below is a configuration error and is refused, never read
+    as "no limit".
+
+    Quote freshness is the caller's to check before calling (63-04 admission).
     """
     if side not in ("buy", "sell"):
         raise RiskConfigError("side must be buy or sell")
@@ -402,12 +412,13 @@ def slippage_check(
             raise RiskConfigError("max_slippage_bps must be a positive Decimal")
     else:
         cap = None
-    reference = _positive_decimal(reference_price)
+    book_side = "ask" if side == "buy" else "bid"
+    reference = _positive_decimal(getattr(quote, book_side, None)) if isinstance(quote, Quote) else None
     fill = _positive_decimal(fill_price)
     if cap is None:
         return SlippageResult(False, SLIPPAGE_LIMIT, "cap_missing", None)
     if reference is None:
-        return SlippageResult(False, SLIPPAGE_LIMIT, "reference_missing", None)
+        return SlippageResult(False, SLIPPAGE_QUOTE_UNAVAILABLE, f"{book_side}_missing", None)
     if fill is None:
         return SlippageResult(False, SLIPPAGE_LIMIT, "price_missing", None)
     adverse = fill - reference if side == "buy" else reference - fill
