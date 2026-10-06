@@ -8,12 +8,13 @@ unreadable, inconsistent, too short for the run window or ``phase62_blocked``.
 sufficient: every ``unavailable_bands`` entry is handed to the fill model as a
 ``BandUnavailable`` and surfaces as missing evidence in the report.
 
-``report_sha256`` in the file cannot be recomputed here (59 mixes in the target
-universe hash, which the file does not carry). Tamper detection therefore uses
-four anchors: the sha the registration recorded, the sha prefix in the file
-name, the raw file sha256 the registration recorded, and internal consistency
-between the blocked flag and the reasons and between the unavailable list and
-its per-reason counts.
+``report_sha256`` is recomputed here exactly the way 59 ``build_band_coverage``
+derives it: canonical sha256 over the report fields, the target universe hash
+(``TargetUniverseResult.target_sha256``, which the caller supplies from the 59
+store because the file does not carry it) and the caveat codes. The file name
+must follow 59 ``write_coverage_report`` (period dates plus the first 12 hex of
+the hash) and agree with the report. The registration's recorded report hash and
+raw file hash are checked as well when supplied.
 """
 
 from __future__ import annotations
@@ -27,11 +28,14 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from pydantic import BaseModel
+
+from pilot_data.core import canonical_sha256
 from pilot_data.price_bands import NONBLOCKING_ROW_DEFECTS, BandCoverageReport, UnavailableBand
 
 from .errors import GateRefused
 
-_NAME_RE = re.compile(r"^band-coverage-\d{4}-\d{2}-\d{2}-\d{4}-\d{2}-\d{2}-([0-9a-f]{12})\.json$")
+_NAME_RE = re.compile(r"^band-coverage-(\d{4}-\d{2}-\d{2})-(\d{4}-\d{2}-\d{2})-([0-9a-f]{12})\.json$")
 
 
 @dataclass(frozen=True)
@@ -51,11 +55,37 @@ class GateResult:
         return {(item.isin, item.session): item.reason for item in self.unavailable}
 
 
+_DIGEST_FIELDS = (
+    "period_start", "period_end", "sessions", "sessions_by_status", "unsupported_sessions", "targets_checked",
+    "target_unknown_counts", "fixed_count", "no_band_count", "unknown_count", "unknown_by_reason", "convention",
+    "archive_depth", "phase62_blocked", "blocked_reasons", "row_conflict_sessions", "nonblocking_reasons",
+    "unavailable_bands",
+)
+
+
+def _jsonable(value):
+    """Same conversion 59 uses before hashing."""
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, tuple):
+        return [_jsonable(item) for item in value]
+    return value
+
+
+def recompute_report_sha256(report: BandCoverageReport, targets_sha256: str) -> str:
+    """The 59 derivation of ``report_sha256`` (``build_band_coverage``), reproduced from the report and the targets hash."""
+    fields = {name: _jsonable(getattr(report, name)) for name in _DIGEST_FIELDS}
+    return canonical_sha256({"fields": fields, "targets": targets_sha256, "caveats": [c.code for c in report.caveats]})
+
+
 def load_coverage_report(
     path: Path,
     *,
     run_start: date,
     run_end: date,
+    targets_sha256: str,
     expected_report_sha256: str | None = None,
     expected_file_sha256: str | None = None,
 ) -> GateResult:
@@ -78,8 +108,15 @@ def load_coverage_report(
     if expected_report_sha256 is not None and report.report_sha256 != expected_report_sha256:
         raise GateRefused("band coverage report_sha256 differs from the registered hash", code="report_tampered")
     named = _NAME_RE.match(path.name)
-    if named is not None and not report.report_sha256.startswith(named.group(1)):
-        raise GateRefused("band coverage report_sha256 does not match its file name", code="report_tampered")
+    if named is None:
+        raise GateRefused("band coverage report file name does not follow band-coverage-<start>-<end>-<sha12>.json",
+                          code="report_tampered")
+    if (named.group(1), named.group(2)) != (report.period_start.isoformat(), report.period_end.isoformat()) \
+            or not report.report_sha256.startswith(named.group(3)):
+        raise GateRefused("band coverage report differs from its file name", code="report_tampered")
+    if recompute_report_sha256(report, targets_sha256) != report.report_sha256:
+        raise GateRefused("band coverage report_sha256 does not match its content and the target universe",
+                          code="report_tampered")
     _check_consistency(report)
 
     if report.phase62_blocked:

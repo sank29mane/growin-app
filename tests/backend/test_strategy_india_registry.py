@@ -10,7 +10,6 @@ import pytest
 
 from strategy_india import study
 from strategy_india.errors import HoldoutSpent, RegistryError, RegistryMismatch
-from strategy_india.holdout import default_criteria
 from strategy_india.registry import (
     HASH_FIELDS,
     LIVE_CHECKED_FIELDS,
@@ -20,7 +19,7 @@ from strategy_india.registry import (
     criteria_hash,
 )
 
-from test_strategy_india_support import registration_record, sha
+from test_strategy_india_support import default_criteria, registration_record, sha
 
 REGISTRY_SRC = Path(__file__).resolve().parents[2] / "backend" / "strategy_india" / "registry.py"
 
@@ -158,11 +157,11 @@ def test_run_refused_when_record_missing(tmp_path):
     record = registration_record()
     live = {name: record[name] for name in LIVE_CHECKED_FIELDS}
     with pytest.raises(RegistryError):
-        study.require_registration(Registry(tmp_path / "none.jsonl"), live, expected_head=None)
+        study.require_registration(Registry(tmp_path / "none.jsonl"), live, expected_head="0" * 64)
     empty = Registry(tmp_path / "empty.jsonl")
     empty.path.write_text("")
     with pytest.raises(RegistryError, match="no registration"):
-        study.require_registration(empty, live, expected_head=None)
+        study.require_registration(empty, live, expected_head="0" * 64)
 
 
 @pytest.mark.parametrize("field", LIVE_CHECKED_FIELDS)
@@ -171,10 +170,11 @@ def test_run_refused_when_any_live_input_differs(tmp_path, field):
     record = registration_record()
     reg.register(record)
     live = {name: record[name] for name in LIVE_CHECKED_FIELDS}
-    assert study.require_registration(reg, live, expected_head=None).payload["seed"] == 7
+    head = reg.verify()
+    assert study.require_registration(reg, live, expected_head=head).payload["seed"] == 7
     live[field] = _different(record[field])
     with pytest.raises(RegistryMismatch):
-        study.require_registration(reg, live, expected_head=None)
+        study.require_registration(reg, live, expected_head=head)
 
 
 def test_new_registration_must_cite_spent_events_and_not_overlap(tmp_path):
@@ -207,3 +207,29 @@ def test_registry_imports_neither_pilot_data_nor_costs():
 def test_registry_refuses_floats():
     with pytest.raises(RegistryError):
         criteria_hash({"x": 0.5})
+
+
+def test_an_unpinned_run_refuses(tmp_path):
+    reg = _registry(tmp_path)
+    reg.register(registration_record())
+    record = registration_record()
+    live = {name: record[name] for name in LIVE_CHECKED_FIELDS}
+    for missing in (None, ""):
+        with pytest.raises(RegistryError, match="pinned registry head"):
+            study.require_registration(reg, live, expected_head=missing)
+    with pytest.raises(RegistryError, match="pinned registry head"):
+        study.require_head(None)
+
+
+def test_a_truncated_chain_with_an_older_pinned_head_refuses(tmp_path):
+    reg = _registry(tmp_path)
+    reg.register(registration_record())
+    reg.register(registration_record(seed=8))
+    pinned = reg.verify()
+    lines = _lines(reg)
+    reg.path.write_text(lines[0] + "\n")  # the newest entry is removed; the remaining chain is internally valid
+    reg.verify()
+    record = registration_record()
+    live = {name: record[name] for name in LIVE_CHECKED_FIELDS}
+    with pytest.raises(RegistryError, match="head"):
+        study.require_registration(reg, live, expected_head=pinned)

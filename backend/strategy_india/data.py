@@ -81,26 +81,41 @@ class DividendUnknownEvent:
     """A 59 event tagged ``dividend_amount_unknown`` (D-20). ``ex_date`` is the first ex-dividend session."""
 
     anchor_isin: str
+    event_id: str
     ex_date: date
 
 
 class DividendEvents:
     def __init__(self, events: Iterable[DividendUnknownEvent] = ()) -> None:
         by_anchor: dict[str, set[date]] = {}
+        listed: dict[tuple[str, str], DividendUnknownEvent] = {}
         for event in events:
+            if not event.event_id:
+                raise DataError("a dividend_amount_unknown event needs an event_id")
+            key = (event.anchor_isin, event.event_id)
+            if key in listed and listed[key] != event:
+                raise DataError("two different dividend events share an anchor and event_id")
+            listed[key] = event
             by_anchor.setdefault(event.anchor_isin, set()).add(event.ex_date)
         self._by_anchor = {key: frozenset(value) for key, value in by_anchor.items()}
+        self._events = tuple(sorted(listed.values(), key=lambda e: (e.anchor_isin, e.event_id, e.ex_date)))
+
+    def sealed_sha256(self) -> str:
+        """Hash of the canonical, sorted (anchor_isin, event_id, ex_date) list. An empty list has a hash too."""
+        from .registry import canonical_sha256
+
+        return canonical_sha256(
+            [[e.anchor_isin, e.event_id, e.ex_date.isoformat()] for e in self._events]
+        )
 
     def ex_dates(self, anchor_isin: str) -> frozenset[date]:
         return self._by_anchor.get(anchor_isin, frozenset())
 
     def all(self) -> tuple[DividendUnknownEvent, ...]:
-        return tuple(
-            DividendUnknownEvent(anchor, day) for anchor in sorted(self._by_anchor) for day in sorted(self._by_anchor[anchor])
-        )
+        return self._events
 
     def __bool__(self) -> bool:
-        return bool(self._by_anchor)
+        return bool(self._events)
 
 
 class DatasetView:

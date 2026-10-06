@@ -40,7 +40,6 @@ from .data import DividendEvents
 from .engine import SegmentResult
 from .holdout import HoldoutEvidence, HoldoutVerdict
 from .params import StrategyParams
-from .signals import SENSITIVITY_FACTOR
 
 ZERO = Decimal(0)
 ONE = Decimal(1)
@@ -157,9 +156,11 @@ class AggregateReport(BaseModel):
     evidence_units: list[str]
     missing_evidence_units: list[str]
     units_beating_etf: int  # evidence units only
-    net_return_compounded: Decimal
+    units_excluded_from_aggregates: int  # missing-evidence units: left out of every figure below
+    aggregates_basis: str
+    net_return_compounded: Decimal | None  # evidence units only; None when there are none
     complete: bool  # false while any unit is missing evidence
-    max_drawdown_concatenated: Decimal
+    max_drawdown_concatenated: Decimal | None
     survivorship_haircut_rows: list[dict[str, Decimal]]
     significance: SignificanceReport
 
@@ -178,6 +179,7 @@ class BenchmarkReport(BaseModel):
 
 class DividendSection(BaseModel):
     events_tagged_dividend_amount_unknown: list[dict[str, str]]
+    events_sha256: str
     sensitivity_factor: Decimal
     sensitivity_run_present: bool
 
@@ -347,45 +349,53 @@ def _daily(seg: SegmentResult) -> list[Decimal]:
 
 
 def _aggregate(units: Sequence[Unit], reports: Sequence[UnitReport], params: StrategyParams, trials: int) -> AggregateReport:
+    """Aggregates use evidence units only. Missing-evidence units are counted, listed and left out."""
+    kept = [u for u, r in zip(units, reports) if r.status == "evidence"]
     compounded = ONE
     returns: list[Decimal] = []
     etf_returns: list[Decimal] = []
     excess: list[Decimal] = []
     chain = [ONE]
-    for unit in units:
+    etf_complete = True
+    for unit in kept:
         seg = unit.scenarios[GATE_ID]
         daily = _daily(seg)
         returns += daily
         for r in daily:
             chain.append(chain[-1] * (ONE + r))
         compounded *= ONE + seg.net_return
-        if unit.etf is not None:
-            etf_daily = metrics.daily_returns([c for _, c in unit.etf.curve])
-            if len(etf_daily) == len(daily):
-                etf_returns += etf_daily
-                excess += [a - b for a, b in zip(daily, etf_daily)]
+        etf_daily = metrics.daily_returns([c for _, c in unit.etf.curve]) if unit.etf is not None else None
+        if etf_daily is not None and len(etf_daily) == len(daily):
+            etf_returns += etf_daily
+            excess += [a - b for a, b in zip(daily, etf_daily)]
+        else:
+            etf_complete = False
     sig = metrics.significance(returns, trials=trials, trial_sd_annual=TRIAL_SHARPE_SD_ANNUAL, confidence=CONFIDENCE)
     psr_etf = None
-    if sig.per_bar_sharpe is not None and len(etf_returns) == len(returns) and len(returns) >= 4:
+    if etf_complete and sig.per_bar_sharpe is not None and len(etf_returns) == len(returns) and len(returns) >= 4:
         etf_sr = metrics.sharpe_per_bar(etf_returns)
         if etf_sr is not None:
             skew, kurt = metrics.skew_kurtosis(returns)
             psr_etf = metrics.psr(sig.per_bar_sharpe, etf_sr, len(returns), skew, kurt)
-    interval = metrics.stationary_bootstrap_interval(
-        excess, seed=params.seed, resamples=1000, mean_block=5, lower=Decimal("0.025"), upper=Decimal("0.975")
-    )
-    sessions = sum(len(u.scenarios[GATE_ID].sessions) for u in units)
-    net = compounded - ONE
+    interval = None
+    if etf_complete and excess:
+        interval = metrics.stationary_bootstrap_interval(
+            excess, seed=params.seed, resamples=1000, mean_block=5, lower=Decimal("0.025"), upper=Decimal("0.975")
+        )
+    sessions = sum(len(u.scenarios[GATE_ID].sessions) for u in kept)
+    net = compounded - ONE if kept else None
     haircuts = [
         {"haircut_points_per_year": h, "net_return_after_haircut": net - h * Decimal(sessions) / Decimal(metrics.SESSIONS_PER_YEAR)}
         for h in HAIRCUTS
-    ]
+    ] if net is not None else []
     evidence = [r.label for r in reports if r.status == "evidence"]
     missing = [r.label for r in reports if r.status == "missing_evidence"]
     return AggregateReport(
         units=len(units), evidence_units=evidence, missing_evidence_units=missing,
-        units_beating_etf=sum(1 for r in reports if r.beats_etf is True), net_return_compounded=net,
-        complete=not missing, max_drawdown_concatenated=metrics.max_drawdown(chain), survivorship_haircut_rows=haircuts,
+        units_beating_etf=sum(1 for r in reports if r.beats_etf is True), units_excluded_from_aggregates=len(missing),
+        aggregates_basis="evidence units only", net_return_compounded=net,
+        complete=not missing, max_drawdown_concatenated=metrics.max_drawdown(chain) if kept else None,
+        survivorship_haircut_rows=haircuts,
         significance=SignificanceReport(
             bars=sig.bars, per_bar_sharpe=sig.per_bar_sharpe, annual_sharpe=sig.annual_sharpe, psr_vs_zero=sig.psr_vs_zero,
             psr_vs_etf=psr_etf, min_trl_bars=sig.min_trl_bars, dsr=sig.dsr, registered_trials=trials,
@@ -418,6 +428,7 @@ def build_report(
     schedule: ChargeSchedule,
     trials: int,
     dividend_events: DividendEvents,
+    sensitivity_factor: Decimal,
     verdict: HoldoutVerdict | None = None,
     holdout_evidence_: Mapping[str, HoldoutEvidence | None] | None = None,
 ) -> StudyReport:
@@ -442,7 +453,8 @@ def build_report(
         tri_sha256=tri.sha256 if isinstance(tri, TriSeries) else None,
         tri_unavailable_reason=None if tri_available else tri.reason,
     )
-    events = [{"anchor_isin": e.anchor_isin, "ex_date": e.ex_date.isoformat()} for e in dividend_events.all()
+    events = [{"anchor_isin": e.anchor_isin, "event_id": e.event_id, "ex_date": e.ex_date.isoformat()}
+              for e in dividend_events.all()
               if run_window[0] <= e.ex_date <= run_window[1]]
     body = dict(
         workspace="india", caveats=standard_caveats(*EXTRA_CAVEATS), kind=kind,
@@ -452,7 +464,8 @@ def build_report(
         run_window_end=run_window[1], unknown_band_coverage=_coverage(reports, unavailable, run_window), units=reports,
         aggregate=_aggregate(units, reports, params, trials), benchmark=benchmark,
         dividend=DividendSection(
-            events_tagged_dividend_amount_unknown=events, sensitivity_factor=SENSITIVITY_FACTOR,
+            events_tagged_dividend_amount_unknown=events, events_sha256=dividend_events.sealed_sha256(),
+            sensitivity_factor=sensitivity_factor,
             sensitivity_run_present=any(u.sensitivity is not None for u in units),
         ),
         holdout_verdict=verdict_payload,

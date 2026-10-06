@@ -30,7 +30,8 @@ from strategy_india.data import (
 from strategy_india.engine import RunContext
 from strategy_india.ticks import TickTables as _TT  # noqa: F401
 from strategy_india.holdout import HoldoutRange
-from strategy_india.ticks import EQUITY, NON_GOLD_ETF, TickTables, load_default_tables
+from strategy_india.ticks import EQUITY, NON_GOLD_ETF, TickTables, load_default_tables, load_table
+from strategy_india.gate import recompute_report_sha256
 from strategy_india.params import StrategyParams, parse_params, placeholder_params
 
 SCHEDULE_VERSION = "icici-prime9999-ivalue-nse-cash-2024-10-01.r1"
@@ -182,25 +183,40 @@ def coverage_report(
                         reason="band_crosscheck_row_conflict", source_sha256s=(sha("band"),))
         for code, isin, day in unavailable
     )
-    return BandCoverageReport(
+    report = BandCoverageReport(
         workspace="india", caveats=standard_caveats(), period_start=start, period_end=end, sessions=100,
         sessions_by_status={"list": 100}, unsupported_sessions=(), targets_checked=10, target_unknown_counts={},
         fixed_count=900, no_band_count=0, unknown_count=len(items),
         unknown_by_reason={"band_crosscheck_row_conflict": len(items)} if items else {},
         convention=None, archive_depth=None, phase62_blocked=bool(blocked), blocked_reasons=tuple(blocked),
         row_conflict_sessions=(), nonblocking_reasons=(), unavailable_bands=items,
-        report_sha256=digest or sha(f"coverage-{start}-{end}-{len(items)}-{len(blocked)}"),
+        report_sha256="0" * 64,
     )
+    real = recompute_report_sha256(report, TARGETS_SHA)  # the way 59 derives it
+    return report.model_copy(update={"report_sha256": digest or real})
 
 
 def write_coverage(root: Path, report: BandCoverageReport) -> Path:
     return write_coverage_report(root, report)
 
 
+FIXTURE_DIR = Path(__file__).parent / "fixtures" / "strategy_india"
+TARGETS_SHA = sha("synthetic-target-universe")
+
+
+def default_criteria() -> dict:
+    """The tracked EXAMPLE D-19 criteria (a fixture, not a default in code)."""
+    import json
+
+    return json.loads((FIXTURE_DIR / "d19_criteria_example.json").read_text())
+
+
 def tick_tables(with_etf: bool = True) -> TickTables:
-    """Test-only: the equity table doubles as the ETF table so the benchmark can resolve ticks."""
-    equity = load_default_tables().table_for(EQUITY)
-    return TickTables({EQUITY: equity, NON_GOLD_ETF: equity} if with_etf else {EQUITY: equity})
+    """Equity from the encoded table. The ETF class gets its OWN synthetic table, never an alias of the equity one."""
+    tables = {EQUITY: load_default_tables().table_for(EQUITY)}
+    if with_etf:
+        tables[NON_GOLD_ETF] = load_table(FIXTURE_DIR / "synthetic_etf_tick_table.json")
+    return TickTables(tables)
 
 
 def costs_inputs() -> tuple[FillScenarioSet, ScheduleSet, TickTables, PricingBasis]:
@@ -256,6 +272,7 @@ def study_inputs(
     registry_name: str = "registry.jsonl",
     ticks: TickTables | None = None,
     start: date = SESSION_START,
+    criteria: Mapping | None = None,
 ):
     """A complete synthetic study: dataset, gate report, registry path, every 60 input."""
     from pilot_data.dataset import dataset_hash
@@ -280,7 +297,8 @@ def study_inputs(
         fold_rules=FoldRules(n_folds=3, test_sessions=50, min_train_sessions=120), git_commit=GIT_COMMIT,
         parameter_budget_n=12, registry=Registry(tmp_path / "private" / registry_name),
         events=events or DividendEvents(), tri_path=tri[0] if tri else None, tri_sha256=tri[1] if tri else None,
-        provider=provider, holdout_sessions=holdout_sessions,
+        provider=provider, holdout_sessions=holdout_sessions, targets_sha256=TARGETS_SHA,
+        criteria=criteria if criteria is not None else default_criteria(),
     )
 
 
@@ -297,7 +315,6 @@ def write_tri(path: Path, sessions: Sequence[date], base: Decimal = Decimal("912
 
 def registration_record(**overrides):
     """A valid registration payload with distinct synthetic hashes."""
-    from strategy_india.holdout import default_criteria
     from strategy_india.registry import HASH_FIELDS, criteria_hash
 
     criteria = default_criteria()

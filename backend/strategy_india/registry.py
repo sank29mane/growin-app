@@ -40,6 +40,7 @@ HASH_FIELDS = (
     "charge_schedule_sha256",
     "tick_table_sha256",
     "hurdle_map_sha256",
+    "dividend_events_sha256",
     "holdout_sha256",
     "holdout_criteria_sha256",
 )

@@ -39,7 +39,7 @@ def _block(days):
 def _run(tmp_path, **kw):
     inputs = study_inputs(tmp_path, **kw)
     study.register(inputs, hypothesis="h")
-    return inputs, study.run_research(inputs)
+    return inputs, study.run_research(inputs, expected_head=inputs.registry.head_hash())
 
 
 # ---- AC-10 -----------------------------------------------------------------------------------------
@@ -76,9 +76,32 @@ def test_missing_evidence_folds_are_never_neutral_or_wins(tmp_path):
     assert agg.complete is False
     clean_inputs = study_inputs(tmp_path / "clean")
     study.register(clean_inputs, hypothesis="h")
-    clean = study.run_research(clean_inputs)
+    clean = study.run_research(clean_inputs, expected_head=clean_inputs.registry.head_hash())
     assert clean.aggregate.complete and clean.aggregate.missing_evidence_units == []
     assert clean.unknown_band_coverage.total_in_run_window == 0
+
+
+def test_aggregates_use_evidence_units_only_and_report_the_excluded_count(tmp_path):
+    unknown = _block(FOLD1[10:30]) + _block(FOLD3[10:30])
+    _, report = _run(tmp_path, unavailable=unknown)
+    agg = report.aggregate
+    only = {u.label: u for u in report.units}["2"]
+    gate = only.scenarios["pessimistic"]
+    assert agg.units_excluded_from_aggregates == 2 and agg.aggregates_basis == "evidence units only"
+    assert agg.net_return_compounded == gate.net_return, "fold 2 alone; folds 1 and 3 are left out"
+    assert agg.significance.bars == len(FOLD2) - 1
+    assert abs(agg.max_drawdown_concatenated - gate.max_drawdown) < Decimal("1e-20")
+    everything = [u.scenarios["pessimistic"].net_return for u in report.units]
+    assert agg.net_return_compounded != (1 + everything[0]) * (1 + everything[1]) * (1 + everything[2]) - 1
+
+
+def test_with_no_evidence_unit_the_aggregates_are_empty_not_computed_from_missing_evidence(tmp_path):
+    _, report = _run(tmp_path / "all", unavailable=_block(SESSIONS[190:340]))
+    agg = report.aggregate
+    assert agg.evidence_units == [] and agg.units_excluded_from_aggregates == 3
+    assert agg.net_return_compounded is None and agg.max_drawdown_concatenated is None
+    assert agg.significance.bars == 0 and agg.significance.dsr is None and agg.survivorship_haircut_rows == []
+    assert agg.units_beating_etf == 0 and agg.complete is False
 
 
 def test_an_unknown_band_with_no_attempt_still_marks_the_fold(tmp_path):
@@ -109,7 +132,7 @@ def test_ticks_before_the_2025_revision_surface_as_fold_level_unknown(tmp_path):
     revision = date(2025, 4, 15)  # no tick table is encoded before this date (F1)
     inputs = study_inputs(tmp_path, start=date(2024, 1, 1))
     study.register(inputs, hypothesis="h")
-    report = study.run_research(inputs)
+    report = study.run_research(inputs, expected_head=inputs.registry.head_hash())
     pre = [u for u in report.units if u.test_end < revision]
     assert len(pre) >= 2
     for unit in pre:
@@ -129,7 +152,7 @@ def full(tmp_path_factory):
     digest = write_tri(tri, SESSIONS)
     inputs = study_inputs(tmp, tri=(tri, digest))
     study.register(inputs, hypothesis="h")
-    return inputs, study.run_research(inputs), tmp
+    return inputs, study.run_research(inputs, expected_head=inputs.registry.head_hash()), tmp
 
 
 def test_result_is_a_caveated_result_with_survivorship_and_hindsight_caveats(full):
