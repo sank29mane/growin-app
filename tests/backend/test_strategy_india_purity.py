@@ -27,6 +27,11 @@ EVAL_NAMES = {"exec", "eval", "compile"}
 IMPORT_RULE = "costs.ticks is reachable only as 'from costs.ticks import <public names>'"
 
 
+def _norm(name: str) -> str:
+    """Strip one leading `backend.`: tests/backend/conftest.py lets the runtime import `backend.<pkg>`."""
+    return name[len("backend."):] if name.startswith("backend.") else name
+
+
 def _int_like(node: ast.AST) -> bool:
     """An expression that is certainly an int: a literal, len(), int() or integer arithmetic on those."""
     if isinstance(node, ast.Constant):
@@ -52,11 +57,14 @@ def _ticks_violation(node: ast.AST, filename: str, costs_names: set[str]) -> str
     """
     if isinstance(node, ast.Import):
         for alias in node.names:
-            if alias.name.split(".")[0] == "importlib":
+            name = _norm(alias.name)
+            if name == "backend":
+                return "bare 'import backend' is banned in strategy_india"
+            if name.split(".")[0] == "importlib":
                 return "importlib is banned in strategy_india"
-            if alias.name.startswith("costs.ticks"):
+            if name.startswith("costs.ticks"):
                 return f"{IMPORT_RULE}, not import {alias.name}"
-            if alias.name.split(".")[0] == "costs":
+            if name.split(".")[0] == "costs":
                 return f"costs is reachable only through 'from costs.<submodule> import <names>', not import {alias.name}"
     elif isinstance(node, ast.ImportFrom):
         if node.level >= 2:
@@ -65,11 +73,12 @@ def _ticks_violation(node: ast.AST, filename: str, costs_names: set[str]) -> str
             return "costs may not be imported as a name: use 'from costs.<submodule> import <names>'"
         if node.level != 0 or not node.module:
             return None
-        if node.module.split(".")[0] == "importlib":
+        module = _norm(node.module)
+        if module.split(".")[0] == "importlib":
             return "importlib is banned in strategy_india"
-        if node.module == "costs" and any(alias.name in ("ticks", "*") for alias in node.names):
+        if module == "costs" and any(alias.name in ("ticks", "*") for alias in node.names):
             return f"{IMPORT_RULE}, not 'from costs import ticks'"
-        if node.module == "costs.ticks":
+        if module == "costs.ticks":
             if filename != TICK_ADAPTER:
                 return "costs.ticks may only be imported by ticks.py"
             bad = [alias.name for alias in node.names if alias.name.startswith("_") or alias.name == "*"]
@@ -92,12 +101,38 @@ def _ticks_violation(node: ast.AST, filename: str, costs_names: set[str]) -> str
             part in EVAL_NAMES for part in _strings(*node.args)
         ):
             return "exec/eval/compile is banned in strategy_india"
-        parts = _strings(*node.args, *(k.value for k in node.keywords)) if call else _strings(node.slice)
-        stripped = {part.strip(".") for part in parts}
+        parts = [_norm(part) for part in (
+            _strings(*node.args, *(k.value for k in node.keywords)) if call else _strings(node.slice)
+        )]
+        stripped = {_norm(part.strip(".")) for part in parts}
         if any("costs.ticks" in part or part in DYNAMIC_IMPORT_NAMES for part in parts) or (
             call and {"costs", "ticks"} <= stripped
         ):
             return f"{IMPORT_RULE}, not a string naming the module"
+    return None
+
+
+def _is_sys_modules(node: ast.AST) -> bool:
+    """`sys.modules` under any alias of sys, or a from-imported `modules`."""
+    return (isinstance(node, ast.Attribute) and node.attr == "modules") or (
+        isinstance(node, ast.Name) and node.id == "modules"
+    )
+
+
+def _binding_violation(node: ast.AST) -> str | None:
+    """Ways to reach a banned module without a from-import that the other rules can see."""
+    if isinstance(node, ast.Import):
+        for alias in node.names:
+            if alias.name.startswith("backend."):
+                return f"plain 'import {alias.name}' binds the name backend: use from-imports"
+    elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == "backend":
+        if any(alias.name == "*" for alias in node.names):
+            return "'from backend import *' binds every backend package: use named from-imports"
+    elif isinstance(node, ast.Subscript) and _is_sys_modules(node.value):
+        for part in _strings(node.slice):
+            name = _norm(part.strip("."))
+            if name in {"backend", "costs", "costs.ticks"} or name.split(".")[0] in BANNED_ROOTS:
+                return f"sys.modules['{part}'] reaches a banned module without an import"
     return None
 
 
@@ -106,7 +141,7 @@ def scan_source(source: str, filename: str) -> list[str]:
     tree = ast.parse(source, filename=filename)
     costs_names = {"costs"} | {
         alias.asname for node in ast.walk(tree) if isinstance(node, ast.Import)
-        for alias in node.names if alias.name == "costs" and alias.asname
+        for alias in node.names if _norm(alias.name) == "costs" and alias.asname
     }
     heavy_ok = filename in FLOAT_ALLOWED
     for node in ast.walk(tree):
@@ -116,13 +151,18 @@ def scan_source(source: str, filename: str) -> list[str]:
             modules = [alias.name for alias in node.names]
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
             modules = [node.module]  # relative imports of level 1 stay in the package; level >= 2 is banned below
+            if node.module == "backend":
+                modules += [f"backend.{alias.name}" for alias in node.names]  # `from backend import execution`
         for name in modules:
-            root = name.split(".")[0]
+            root = _norm(name).split(".")[0]
             if root in BANNED_ROOTS:
                 out.append(f"{filename}:{line}: banned import {name}")
             if root in HEAVY_ROOTS and not heavy_ok:
                 out.append(f"{filename}:{line}: {name} is allowed only in regime.py")
         problem = _ticks_violation(node, filename, costs_names)
+        if problem:
+            out.append(f"{filename}:{line}: {problem}")
+        problem = _binding_violation(node)
         if problem:
             out.append(f"{filename}:{line}: {problem}")
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div) and not heavy_ok:
@@ -213,6 +253,10 @@ def test_package_is_pure():
         ("m = lookup('costs.ticks')", "ticks.py", "string naming the module"),
         ("m = lookup('ticks', 'costs')", "ticks.py", "string naming the module"),
         ("m = lookup('.ticks', package='costs')", "ticks.py", "string naming the module"),
+        ("m = lookup('backend.costs', 'ticks')", "ticks.py", "string naming the module"),
+        ("m = lookup('.ticks', package='backend.costs')", "ticks.py", "string naming the module"),
+        ("m = lookup('ticks', package='backend.costs')", "ticks.py", "string naming the module"),
+        ("import sys\nm = sys.modules['backend.costs.ticks']", "ticks.py", "string naming the module"),
         ("import importlib", "ticks.py", "importlib is banned"),
         ("import importlib.util", "ticks.py", "importlib is banned"),
         ("from importlib import util", "ticks.py", "importlib is banned"),
@@ -250,6 +294,42 @@ def test_package_is_pure():
         ("from .. import costs", "engine.py", "relative import leaves"),
         ("from backend import costs as c", "engine.py", "may not be imported as a name"),
         ("from costs import costs", "engine.py", "may not be imported as a name"),
+        # a leading `backend.` is the same module: every rule applies to it too
+        ("from backend.costs.ticks import resolve_tick_from_table", "engine.py", "ticks.py"),
+        ("from backend.costs.ticks import _resolve_tick_from_table", "ticks.py", "private costs.ticks name"),
+        ("from backend.costs import ticks", "ticks.py", "not 'from costs import ticks'"),
+        ("from backend.costs import ticks", "engine.py", "not 'from costs import ticks'"),
+        ("import backend.costs.ticks as ct", "ticks.py", "not import backend.costs.ticks"),
+        ("import backend.costs.ticks", "ticks.py", "not import backend.costs.ticks"),
+        ("import backend.costs as c", "engine.py", "not import backend.costs"),
+        ("import backend.costs as c\nx = c.ticks._x", "ticks.py", "attribute chain"),
+        ("import backend", "engine.py", "bare 'import backend' is banned"),
+        ("import backend as b", "engine.py", "bare 'import backend' is banned"),
+        ("from backend.execution import X", "engine.py", "banned import backend.execution"),
+        ("from backend.execution.ledger import canonical_json", "engine.py", "banned import"),
+        ("import backend.execution", "engine.py", "banned import backend.execution"),
+        ("from backend import execution", "engine.py", "banned import backend.execution"),
+        ("from backend.gateway import client", "engine.py", "banned import"),
+        ("from backend.importlib import util", "engine.py", "importlib is banned"),
+        ("from backend.statistics import NormalDist", "report.py", "only in regime.py"),
+        # plain `import backend.X` binds the name backend, so backend.execution.f() would scan clean
+        ("import backend.utils", "engine.py", "plain 'import backend.utils' binds"),
+        ("import backend.utils\nbackend.execution.f()", "engine.py", "plain 'import backend.utils' binds"),
+        ("import backend.strategy_india.engine", "engine.py", "plain 'import backend.strategy_india.engine' binds"),
+        ("import backend.utils as u", "engine.py", "plain 'import backend.utils' binds"),
+        ("import os, backend.utils", "engine.py", "plain 'import backend.utils' binds"),
+        ("from backend import *", "engine.py", "'from backend import *'"),
+        ("from backend import *\nexecution.f()", "engine.py", "'from backend import *'"),
+        # sys.modules lookups of costs, costs.ticks, backend or a banned root
+        ("import sys\nx = sys.modules['costs'].ticks.f", "ticks.py", "sys.modules['costs']"),
+        ("import sys\nx = sys.modules['backend.costs'].ticks", "ticks.py", "sys.modules['backend.costs']"),
+        ("import sys\nx = sys.modules['costs.ticks']._x", "ticks.py", "sys.modules['costs.ticks']"),
+        ("import sys\nx = sys.modules['backend.costs.ticks'].f", "ticks.py", "sys.modules['backend.costs.ticks']"),
+        ("import sys as s\nx = s.modules['execution'].f()", "engine.py", "sys.modules['execution']"),
+        ("import sys\nx = sys.modules['backend.execution.ledger']", "engine.py", "sys.modules['backend.execution.ledger']"),
+        ("import sys\nx = sys.modules['gateway']", "engine.py", "sys.modules['gateway']"),
+        ("import sys\nx = sys.modules['backend'].execution", "engine.py", "sys.modules['backend']"),
+        ("from sys import modules\nx = modules['time']", "engine.py", "sys.modules['time']"),
         # exec, eval, compile
         ("exec('x = 1')", "engine.py", "exec is banned"),
         ("x = eval(s)", "engine.py", "eval is banned"),
@@ -264,6 +344,12 @@ def test_package_is_pure():
 def test_planted_violation_is_caught(source, filename, fragment):
     found = scan_source(source, filename)
     assert found and any(fragment in item for item in found), found
+
+
+def test_sys_modules_and_from_imports_of_allowed_packages_stay_allowed():
+    ok = ("import sys\nfrom backend.utils import helper\nfrom backend import utils\nfrom backend.strategy_india import engine\n"
+          "a = sys.modules['decimal']\nb = sys.modules.get(name)\nc = sys.modules[name]\nd = sys.argv['x']\n")
+    assert scan_source(ok, "engine.py") == []
 
 
 def test_decimal_division_is_not_flagged():
@@ -295,6 +381,39 @@ def test_allowed_places_stay_allowed():
     assert scan_source("from costs.ticks import load_tick_table", "ticks.py") == []
 
 
+def _imports_ticks(source: str) -> bool:
+    """True if the source imports costs.ticks in any form, with or without a `backend.` prefix."""
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import) and any(_norm(a.name).startswith("costs.ticks") for a in node.names):
+            return True
+        if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            module = _norm(node.module)
+            if module.startswith("costs.ticks") or (module == "costs" and any(a.name == "ticks" for a in node.names)):
+                return True
+    return False
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from costs.ticks import x",
+        "from backend.costs.ticks import x",
+        "from backend.costs import ticks",
+        "from costs import ticks",
+        "import backend.costs.ticks as ct",
+    ],
+)
+def test_adapter_detector_sees_every_form(source):
+    assert _imports_ticks(source)
+
+
+def test_adapter_detector_ignores_unrelated_imports():
+    assert not _imports_ticks("from costs.core import Side\nfrom backend.costs import schedule")
+
+
 def test_only_the_tick_adapter_touches_costs_ticks():
-    users = [p.name for p in PKG.glob("*.py") if "costs.ticks" in p.read_text()]
+    users = [
+        p.name for p in PKG.glob("*.py")
+        if "costs.ticks" in p.read_text(encoding="utf-8") or _imports_ticks(p.read_text(encoding="utf-8"))
+    ]
     assert users == [TICK_ADAPTER]
