@@ -439,6 +439,7 @@ def build_report(
             "verdict": verdict.verdict, "criteria_sha256": verdict.criteria_sha256, "breaches": list(verdict.breaches),
             "missing_evidence": list(verdict.missing_evidence), "sensitivity_flips": list(verdict.sensitivity_flips),
             "annualised_swaps": str(verdict.annualised_swaps), "passed": verdict.passed,
+            "annualised_excess_return": None if verdict.annualised_excess_return is None else str(verdict.annualised_excess_return),
             "criteria_status": "PROPOSED (D-19) until the operator confirms",
         }
         for name, ev in (holdout_evidence_ or {}).items():

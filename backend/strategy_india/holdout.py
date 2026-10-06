@@ -1,4 +1,9 @@
-"""Sealed holdout (D-12) and the D-19 pass criteria (PROPOSED, awaiting operator confirmation).
+"""Sealed holdout (D-12) and the D-19 pass criteria (operator answers of 2026-10-07 applied).
+
+D-19 as confirmed: max drawdown no worse than -10 percent, the strategy beats the Nifty ETF
+buy-and-hold benchmark by at least 3.5 percent annualised net of k=3 (``min_annualised_excess_return``),
+at most 65 annualised swaps, no flatten event, one shot, and a missing price band is INCONCLUSIVE (a fail).
+The numbers themselves stay in the private criteria file.
 
 * ``HoldoutRange`` is the most recent ~250 sessions of the 59 window. Its range
   and hash are registered before development.
@@ -26,6 +31,7 @@ records its hash in the phase SUMMARY. The CLI prints this instruction.
 
 from __future__ import annotations
 
+import decimal
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
@@ -43,6 +49,8 @@ FAIL = "FAIL"
 INCONCLUSIVE = "INCONCLUSIVE"
 
 HOLDOUT_SESSIONS = 250
+_ONE = Decimal(1)
+_CTX = decimal.Context(prec=60, rounding=decimal.ROUND_HALF_EVEN)  # fixed context: the same inputs always give the same digits
 
 # Key names and value types only. No threshold appears here.
 CRITERIA_SCHEMA: dict[str, type] = {
@@ -53,6 +61,7 @@ CRITERIA_SCHEMA: dict[str, type] = {
     "benchmark": str,
     "require_net_return_above_benchmark": bool,
     "max_drawdown_floor": str,
+    "min_annualised_excess_return": str,
     "flatten_event_fails": bool,
     "max_annualised_swaps": str,
     "annualisation_sessions": int,
@@ -77,7 +86,7 @@ def parse_criteria(raw: Any) -> dict[str, Any]:
         value = raw[key]
         if isinstance(value, bool) != (kind is bool) or not isinstance(value, kind):
             raise RegistryError(f"D-19 criteria {key} must be {kind.__name__}")
-    for key in ("max_drawdown_floor", "max_annualised_swaps", "dividend_sensitivity_factor"):
+    for key in ("max_drawdown_floor", "min_annualised_excess_return", "max_annualised_swaps", "dividend_sensitivity_factor"):
         try:
             value = Decimal(raw[key])
             if not value.is_finite():
@@ -244,12 +253,34 @@ class HoldoutVerdict:
     sensitivity_flips: tuple[str, ...]
     annualised_swaps: Decimal
     passed: bool
+    annualised_excess_return: Decimal | None = None  # strategy minus benchmark, both annualised; None when the benchmark is unknown
 
 
 def annualised_swaps(swaps: int, sessions: int, annualisation_sessions: int) -> Decimal:
     if sessions <= 0:
         raise StrategyIndiaError("holdout sessions must be positive")
     return Decimal(swaps) * Decimal(annualisation_sessions) / Decimal(sessions)
+
+
+def annualised_return(net_return: Decimal, sessions: int, annualisation_sessions: int) -> Decimal:
+    """Compound a holdout net return to a year: (1 + r) ** (annualisation_sessions / sessions) - 1.
+
+    A loss of 100 percent or worse annualises to -1. Over exactly ``annualisation_sessions`` the result is ``net_return``.
+    """
+    if sessions <= 0:
+        raise StrategyIndiaError("holdout sessions must be positive")
+    growth = _ONE + net_return
+    if growth <= 0:
+        return Decimal(-1)
+    return _CTX.power(growth, _CTX.divide(Decimal(annualisation_sessions), Decimal(sessions))) - _ONE
+
+
+def annualised_excess_return(ev: "HoldoutEvidence", annualisation_sessions: int) -> Decimal | None:
+    """Strategy annualised return minus the ETF benchmark's, or None when the benchmark is unknown."""
+    if ev.benchmark_net_return is None:
+        return None
+    return (annualised_return(ev.net_return, ev.holdout_sessions, annualisation_sessions)
+            - annualised_return(ev.benchmark_net_return, ev.holdout_sessions, annualisation_sessions))
 
 
 def _breaches(criteria: Mapping[str, Any], ev: HoldoutEvidence) -> list[str]:
@@ -262,6 +293,9 @@ def _breaches(criteria: Mapping[str, Any], ev: HoldoutEvidence) -> list[str]:
         out.append("net_return_not_above_benchmark")
     if not ev.max_drawdown > Decimal(criteria["max_drawdown_floor"]):
         out.append("max_drawdown_at_or_below_floor")
+    excess = annualised_excess_return(ev, criteria["annualisation_sessions"])
+    if excess is not None and excess < Decimal(criteria["min_annualised_excess_return"]):
+        out.append("excess_return_below_minimum")
     if criteria["flatten_event_fails"] and ev.flatten_events > 0:
         out.append("flatten_event")
     swaps = annualised_swaps(ev.swaps, ev.holdout_sessions, criteria["annualisation_sessions"])
@@ -296,14 +330,17 @@ def check_supported(criteria: Mapping[str, Any]) -> None:
         raise bad("gate_k_ticks must be an int of at least 1")
     try:
         floor, swaps = Decimal(criteria["max_drawdown_floor"]), Decimal(criteria["max_annualised_swaps"])
+        excess = Decimal(criteria["min_annualised_excess_return"])
     except (KeyError, InvalidOperation, TypeError):
-        raise bad("max_drawdown_floor and max_annualised_swaps must be decimal strings") from None
-    if not floor.is_finite() or not swaps.is_finite():
+        raise bad("max_drawdown_floor, min_annualised_excess_return and max_annualised_swaps must be decimal strings") from None
+    if not floor.is_finite() or not swaps.is_finite() or not excess.is_finite():
         raise bad("decimal criteria must be finite")
     if not Decimal(-1) < floor < Decimal(0):
         raise bad("max_drawdown_floor must lie between -1 and 0")
     if swaps < 0:
         raise bad("max_annualised_swaps must not be negative")
+    if excess < 0:
+        raise bad("min_annualised_excess_return must not be negative; a negative bar would let a lagging strategy pass")
 
 
 def check_gate_scenario(criteria: Mapping[str, Any], *, k_ticks: int, phase62_gate: bool) -> None:
@@ -321,7 +358,7 @@ def evaluate_verdict(
     check_supported(criteria)
     breaches = _breaches(criteria, base)
     missing: list[str] = []
-    if criteria["require_net_return_above_benchmark"] and base.benchmark_net_return is None:
+    if base.benchmark_net_return is None:  # the excess-return criterion is always required, so an unknown benchmark is never a pass
         missing.append("benchmark_unavailable")
     if base.no_assumed_fill_attempts > 0:
         missing.append("no_assumed_fill_attempt")
@@ -332,6 +369,7 @@ def evaluate_verdict(
         sens = _breaches(criteria, sensitivity)
         flips = [name for name in sens if name not in breaches]
     swaps = annualised_swaps(base.swaps, base.holdout_sessions, criteria["annualisation_sessions"])
+    excess_return = annualised_excess_return(base, criteria["annualisation_sessions"])
     if breaches:
         verdict = FAIL
     elif missing or flips:
@@ -346,4 +384,5 @@ def evaluate_verdict(
         sensitivity_flips=tuple(flips),
         annualised_swaps=swaps,
         passed=verdict == PASS,
+        annualised_excess_return=excess_return,
     )

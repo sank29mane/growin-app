@@ -68,6 +68,8 @@ BAD_POLICY = [
     ("max_drawdown_floor", "0.15"),
     ("max_drawdown_floor", "-1"),
     ("max_annualised_swaps", "-1"),
+    ("min_annualised_excess_return", "-0.01"),
+    ("min_annualised_excess_return", "x"),
 ]
 
 
@@ -98,6 +100,31 @@ def test_unsupported_policy_values_are_refused_at_preflight_without_spending(tmp
         study.run_holdout(inputs, expected_head=head)
     assert err.value.code == "holdout_unrunnable" and "NOT spent" in str(err.value)
     _unspent(inputs, head)
+
+
+def test_a_criteria_set_without_the_excess_return_bar_is_refused_before_the_holdout_opens(tmp_path, monkeypatch):
+    missing = default_criteria()
+    del missing["min_annualised_excess_return"]
+    with pytest.raises(RegistryError, match="min_annualised_excess_return"):
+        parse_criteria(missing)
+    with pytest.raises(StrategyIndiaError):
+        check_supported(missing)
+    # at register: nothing is sealed
+    inputs = study_inputs(tmp_path / "a", criteria=missing)
+    with pytest.raises(RegistryError, match="min_annualised_excess_return"):
+        study.register(inputs, hypothesis="h")
+    assert not inputs.registry.path.exists()
+    # a registration sealed under the old schema (forced past the register check) is refused at the pre-flight
+    legacy = study_inputs(tmp_path / "b", criteria=missing)
+    monkeypatch.setattr(study, "parse_criteria", lambda criteria: dict(criteria))
+    study.register(legacy, hypothesis="h")
+    monkeypatch.undo()
+    head = legacy.registry.head_hash()
+    with pytest.raises(StrategyIndiaError) as err:
+        study.run_holdout(legacy, expected_head=head)
+    assert err.value.code == "holdout_unrunnable" and "NOT spent" in str(err.value)
+    assert "min_annualised_excess_return" in str(err.value)
+    _unspent(legacy, head)
 
 
 def test_zero_annualisation_sessions_can_no_longer_pass_a_spent_holdout(tmp_path):
@@ -416,7 +443,8 @@ def test_cli_ledger_io_errors_are_typed_refusals(tmp_path, monkeypatch, capsys, 
 
 
 @pytest.mark.parametrize("value", ["NaN", "sNaN"])
-@pytest.mark.parametrize("key", ["max_drawdown_floor", "max_annualised_swaps", "dividend_sensitivity_factor"])
+@pytest.mark.parametrize(
+    "key", ["max_drawdown_floor", "min_annualised_excess_return", "max_annualised_swaps", "dividend_sensitivity_factor"])
 def test_cli_nonfinite_criteria_are_typed_refusals(tmp_path, monkeypatch, capsys, key, value):
     inputs, head = _registered(tmp_path)
     inputs.criteria[key] = value
@@ -489,7 +517,7 @@ def test_failed_ledger_reservation_leaves_nothing_spent(tmp_path, monkeypatch, s
 
 
 @pytest.mark.parametrize("value", ["NaN", "sNaN"])
-@pytest.mark.parametrize("key", ["max_drawdown_floor", "max_annualised_swaps"])
+@pytest.mark.parametrize("key", ["max_drawdown_floor", "min_annualised_excess_return", "max_annualised_swaps"])
 def test_supported_criteria_refuses_nonfinite_threshold_without_decimal_trap(key, value):
     criteria = default_criteria()
     criteria[key] = value
