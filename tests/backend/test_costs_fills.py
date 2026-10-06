@@ -34,7 +34,11 @@ from costs.fills import (
 )
 from costs.run import simulate_and_price
 from costs.schedule import PricingBasis, load_schedule_set
-from costs.ticks import load_tick_table, resolve_tick_from_table
+from costs.ticks import InstrumentClass, resolve_nse_cash_tick
+
+# Deliberately private: the provenance test below edits a copy of the tick file and resolves from it.
+from costs.ticks import _load_tick_table as load_tick_table
+from costs.ticks import _resolve_tick_from_table as resolve_tick_from_table
 
 D = Decimal
 ISIN = "INE0TEST0001"
@@ -393,19 +397,26 @@ def run_with(tick, scenario):
     )
 
 
+def committed_resolution():
+    return resolve_nse_cash_tick(
+        session_date=SESSION, band_reference_price=D("400.00"), instrument_class=InstrumentClass.EQUITY, series="EQ"
+    )
+
+
 def committed_tick():
-    return resolve_tick_from_table(load_tick_table(), session_date=SESSION, band_reference_price=D("400.00"))
+    return committed_resolution().tick
 
 
 def test_tick_and_scenario_files_flow_into_fill_and_run_hashes(tmp_path):
     base = run_with(committed_tick(), scenarios().get("base"))
     (fill,) = base.fills
-    assert fill.tick_source_hash == load_tick_table().versions[0].version_hash
+    assert fill.tick_source_hash == committed_resolution().version_hash  # the 2025-04-15 version covers SESSION
+    assert fill.tick_source_hash == load_tick_table(TICKS_PATH).versions[-1].version_hash
     assert fill.scenarios_hash == scenarios().scenarios_hash
     assert fill.tick_size == D("0.05")
 
     document = json.loads(TICKS_PATH.read_text(encoding="utf-8"))
-    document["versions"][0]["status"] = "unconfirmed: edited for the provenance test"
+    document["versions"][-1]["status"] = "unconfirmed: edited for the provenance test"
     ticks_path = tmp_path / "ticks.json"
     ticks_path.write_text(json.dumps(document), encoding="utf-8")
     edited_tick = resolve_tick_from_table(load_tick_table(ticks_path), session_date=SESSION, band_reference_price=D("400.00"))

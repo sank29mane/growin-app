@@ -177,7 +177,7 @@ def test_new_registration_overlapping_a_spent_holdout_is_refused(tmp_path):
     reg = _registry(tmp_path)
     open_holdout(reg, criteria=default_criteria(), expected_head=reg.verify())
     spent = [e.entry_hash for e in reg.holdout_events()]
-    overlapping = HoldoutRange(SESSIONS[-10], date(2027, 1, 1)).as_payload()
+    overlapping = HoldoutRange(SESSIONS[-10], SESSIONS[-1]).as_payload()
     with pytest.raises(HoldoutSpent):
         reg.register(registration_record(holdout_range=overlapping, spent_holdout_event_hashes=spent))
 
