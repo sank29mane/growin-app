@@ -330,3 +330,50 @@ def test_a_dataset_exported_before_the_tag_columns_still_verifies(store, tmp_pat
     legacy = verify_dataset(target, workspace="india")
     assert legacy.dataset_sha256 == manifest.dataset_sha256 and legacy.adjustment_policy_version is None
     assert all(not r.dividend_amount_unknown for r in _read_parquet(parquet))
+
+
+def test_verify_cross_checks_the_manifest_event_list_against_the_row_tags(store, tmp_path):
+    report = steady_run(store, "INTERIM DIVIDEND")
+    manifest = snapshot(store, report, tmp_path / "export")
+    target = tmp_path / "export" / manifest.dataset_sha256
+    assert verify_dataset(target, workspace="india") == manifest
+    os.chmod(target, 0o755)
+    manifest_file = target / "manifest.json"
+    os.chmod(manifest_file, 0o644)
+    original = json.loads(manifest_file.read_text())
+    anchor = STEADY_MEMBER.anchor_isin
+    (event,) = original["dividend_amount_unknown_events"][anchor]
+
+    def tampered(events):
+        body = json.loads(json.dumps(original))
+        body["dividend_amount_unknown_events"] = events
+        manifest_file.write_text(json.dumps(body))
+        with pytest.raises(PilotDataError) as caught:
+            verify_dataset(target, workspace="india")
+        return caught.value
+
+    # rows are flagged as an ex-date, but the manifest lists nothing for them
+    assert tampered({}).code == "dataset_integrity"
+    # the manifest lists an anchor that has no tagged rows at all
+    fabricated = tampered({anchor: [event], "INE999Z01011": [event]})
+    assert fabricated.code == "dataset_integrity" and "INE999Z01011" in str(fabricated)
+    # the listed ex-date is not the flagged row's date
+    moved = tampered({anchor: [{**event, "ex_date": D3.isoformat()}]})
+    assert moved.code == "dataset_integrity" and "does not list" in str(moved)
+    manifest_file.write_text(json.dumps(original))
+    assert verify_dataset(target, workspace="india").dataset_sha256 == manifest.dataset_sha256
+
+
+def test_a_listed_ex_date_without_an_accepted_bar_is_allowed(store, tmp_path):
+    # D-20 keeps the manifest as the source of ex-dates: a row flag exists only when a bar trades that day.
+    report = steady_run(store, "INTERIM DIVIDEND")
+    manifest = snapshot(store, report, tmp_path / "export")
+    target = tmp_path / "export" / manifest.dataset_sha256
+    os.chmod(target, 0o755)
+    manifest_file = target / "manifest.json"
+    os.chmod(manifest_file, 0o644)
+    body = json.loads(manifest_file.read_text())
+    body["dividend_amount_unknown_events"][STEADY_MEMBER.anchor_isin].append(
+        {"event_id": "e" * 64, "ex_date": "2025-03-08"})  # the Saturday
+    manifest_file.write_text(json.dumps(body))
+    assert verify_dataset(target, workspace="india").dataset_sha256 == manifest.dataset_sha256

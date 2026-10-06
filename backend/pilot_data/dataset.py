@@ -143,6 +143,8 @@ class DatasetManifest(CaveatedResult):
     adjustment_policy_version: str | None = None
     unknown_dividend_policy: str | None = None
     # anchor ISIN -> amount-unknown interim dividend events (event id, ex-date), for the 2% sensitivity.
+    # Phase 62 must take ex-dates from here, not from the per-bar ex-date flag: a row carries that flag
+    # only when an accepted bar falls on the ex-date.
     dividend_amount_unknown_events: dict[str, tuple[DividendAmountUnknownEvent, ...]] = {}
 
 
@@ -389,7 +391,32 @@ def verify_dataset(path: Path, *, workspace: str) -> DatasetManifest:
         raise PilotDataError("dataset_integrity", "rows.parquet could not be read") from exc
     if dataset_hash(rows) != manifest.dataset_sha256 or len(rows) != manifest.row_count:
         raise PilotDataError("dataset_integrity", "rows do not reproduce the dataset hash")
+    _check_unknown_dividend_tags(rows, manifest)
     return manifest
+
+
+def _check_unknown_dividend_tags(rows: list[DatasetRow], manifest: DatasetManifest) -> None:
+    """D-20 cross-check between the manifest event list and the per-row tags.
+
+    Manifest to rows, bar tag only: every listed anchor needs at least one dividend_amount_unknown row.
+    Rows to manifest, ex-date flag: every flagged row must sit on a listed ex-date of its anchor. A
+    listed ex-date may have no flagged row (no accepted bar that day), so that direction is not checked.
+    """
+    listed = {anchor: {event.ex_date for event in events}
+              for anchor, events in manifest.dividend_amount_unknown_events.items()}
+    tagged = {row.anchor_isin for row in rows if row.dividend_amount_unknown}
+    missing = sorted(set(listed) - tagged)
+    if missing:
+        raise PilotDataError(
+            "dataset_integrity", f"manifest lists amount-unknown dividend events for {missing[0]} but no row is tagged"
+        )
+    for row in rows:
+        if row.dividend_amount_unknown_ex_date and row.trade_date not in listed.get(row.anchor_isin, set()):
+            raise PilotDataError(
+                "dataset_integrity",
+                f"row {row.anchor_isin} {row.trade_date.isoformat()} is flagged as an amount-unknown ex-date "
+                "that the manifest does not list",
+            )
 
 
 def _caveat_payload() -> list[dict[str, str]]:

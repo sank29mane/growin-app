@@ -469,9 +469,11 @@ def test_a_large_unexplained_gap_on_the_ex_date_is_still_flagged():
     series = adjusted_series(bars, fs, as_of=J5, workspace="india")
     assert series.bars[0].adjusted_quarantined and series.bars[0].adj_close is None
     assert not series.bars[1].adjusted_quarantined
-    # the same gap just inside the band is the case D-20 accepts
+    # a 0.56 ratio is inside 59's jump band but far too big for a dividend: still not lifted
     inside = factor_set(flat_bars(J3, J4, J5, open_by_day={J4: "56"}), [interim(J4)], J5)
-    assert inside.unresolved == () and len(inside.unknown_dividend_events()) == 1
+    assert [(u.reason, u.detail["nearby"]) for u in inside.unresolved] == [
+        ("dividend_amount_unknown_conflict", "gap:0.5600")]
+    assert inside.unknown_dividend_events() == ()
 
 
 def test_an_amount_known_dividend_is_unchanged_and_untagged():
@@ -516,3 +518,91 @@ def test_a_conflict_quarantines_with_its_own_reason_code_and_is_idempotent(store
     assert "ca_unresolved_dividend_amount_unknown_conflict" in {r.reason_code for r in first}
     count = store.query("SELECT count(*) FROM quarantine_records WHERE check_name = 'corporate_action'")[0][0]
     assert count == len(first)
+
+
+def gap_set(open_after, *, events=None, days=(J3, J4, J5)):
+    bars = flat_bars(*days, open_by_day={J4: open_after})
+    return factor_set(bars, events or [interim(J4)], days[-1]), bars
+
+
+def test_a_hidden_one_for_two_bonus_gap_is_not_read_as_a_dividend():
+    fs, bars = gap_set("66.7")  # a hidden 1:2 bonus opens at 2/3 of the previous close
+    assert fs.unknown_dividend_events() == ()
+    assert [(u.reason, u.detail["nearby"]) for u in fs.unresolved] == [
+        ("dividend_amount_unknown_conflict", "gap:0.6670")]
+    series = adjusted_series(bars, fs, as_of=J5, workspace="india")
+    assert series.bars[0].adjusted_quarantined and series.bars[0].adj_close is None
+    assert not any(b.dividend_amount_unknown or b.dividend_amount_unknown_ex_date for b in series.bars)
+
+
+@pytest.mark.parametrize(
+    "open_after,lifted",
+    [("79", False), ("79.99", False), ("80", True), ("81", True), ("98", True), ("100", True), ("119", True),
+     ("120", True), ("121", False), ("150", False)],
+)
+def test_the_ex_date_gap_must_stay_within_the_policy_threshold_either_way(open_after, lifted):
+    fs, _ = gap_set(open_after)
+    assert (len(fs.unknown_dividend_events()) == 1) is lifted
+    if lifted:
+        assert fs.unresolved == ()
+    else:
+        assert [u.reason for u in fs.unresolved] == ["dividend_amount_unknown_conflict"]
+        assert fs.unresolved[0].detail["nearby"].startswith("gap:")
+
+
+def test_the_gap_threshold_is_policy_and_changes_the_factor_set_hash():
+    assert POLICY.unknown_dividend_max_gap == Decimal("0.20")
+    bars = flat_bars(J3, J4, J5, open_by_day={J4: "85"})
+    default = compute_factor_set(lineage(), bars, [interim(J4)], as_of=J5, policy=POLICY)
+    tight = compute_factor_set(lineage(), bars, [interim(J4)], as_of=J5,
+                               policy=AdjustmentPolicy(unknown_dividend_max_gap=Decimal("0.10")))
+    assert len(default.unknown_dividend_events()) == 1 and tight.unknown_dividend_events() == ()
+    assert default.unknown_dividend_params["max_gap"] == "0.2"
+    assert default.unknown_dividend_params["policy"] == "unknown_zero/1"
+    same_outcome = compute_factor_set(lineage(), flat_bars(J3, J4, J5), [interim(J4)], as_of=J5,
+                                      policy=AdjustmentPolicy(unknown_dividend_max_gap=Decimal("0.30")))
+    base = compute_factor_set(lineage(), flat_bars(J3, J4, J5), [interim(J4)], as_of=J5, policy=POLICY)
+    assert same_outcome.factor_set_sha256 != base.factor_set_sha256  # the threshold is hashed
+
+
+def test_a_missing_ex_date_bar_or_previous_bar_fails_closed():
+    no_ex_bar = factor_set(flat_bars(J3, J5), [interim(J4)], J5)  # nothing traded on the ex-date
+    assert no_ex_bar.unknown_dividend_events() == ()
+    assert [(u.reason, u.detail["nearby"]) for u in no_ex_bar.unresolved] == [
+        ("dividend_amount_unknown_conflict", "gap:unmeasurable")]
+    # the ex-date is the first bar: nothing earlier to measure against
+    no_previous = factor_set(flat_bars(J4, J5), [interim(J4)], J5)
+    assert no_previous.unknown_dividend_events() == ()
+    assert [u.detail["nearby"] for u in no_previous.unresolved] == ["gap:unmeasurable"]
+
+
+def test_a_different_undated_unresolved_action_blocks_a_dated_interim_dividend():
+    fs = factor_set(flat_bars(J3, J4, J5), [interim(J4), event("CANBK", "DEMERGER", None)], J5)
+    assert fs.unknown_dividend_events() == ()
+    assert {u.reason for u in fs.unresolved} == {"missing_ex_date", "dividend_amount_unknown_conflict"}
+    (conflict,) = [u for u in fs.unresolved if u.reason == "dividend_amount_unknown_conflict"]
+    assert "missing_ex_date:no_ex_date" in conflict.detail["nearby"]
+
+
+def test_an_ex_date_before_the_first_bar_is_ignored():
+    fs = factor_set(flat_bars(J3, J4), [interim(date(2024, 6, 1))], J4)
+    assert fs.applied == () and fs.unresolved == ()
+
+
+def test_the_conflict_window_edge_is_seven_calendar_days_inclusive():
+    june_11, june_12 = date(2024, 6, 11), date(2024, 6, 12)
+    days = [J3, J4, date(2024, 6, 10), june_11, june_12]
+    for bonus_day, blocked in ((june_11, True), (june_12, False)):  # 7 and 8 days after the 4th
+        bars = [bar(d, "100", open_="50" if d == bonus_day else "100", high="120", low="20") for d in days]
+        fs = factor_set(bars, [interim(J4), event("CANBK", "BONUS 1:1", bonus_day)], june_12)
+        assert [a.kind for a in fs.applied if UNKNOWN in a.tags] == ([] if blocked else [UNKNOWN]), bonus_day
+        assert any(u.reason == "dividend_amount_unknown_conflict" for u in fs.unresolved) is blocked, bonus_day
+
+
+def test_bars_are_tagged_even_when_a_later_unresolved_action_withholds_their_values():
+    days = [J3, J4, J5, date(2024, 7, 15), date(2024, 7, 16)]
+    fs = factor_set(flat_bars(*days), [interim(J4), event("CANBK", "RIGHTS 1:1 @ PRM RS 3/-", days[4])], days[4])
+    assert len(fs.unknown_dividend_events()) == 1  # 42 days apart: not a conflict
+    series = adjusted_series(flat_bars(*days), fs, as_of=days[4], workspace="india")
+    assert [(b.adjusted_quarantined, b.dividend_amount_unknown) for b in series.bars] == [
+        (True, True), (True, True), (True, False), (True, False), (False, False)]

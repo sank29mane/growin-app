@@ -11,8 +11,9 @@ D-20 (Phase 62): a lone amount-less "INTERIM DIVIDEND" event is applied as divid
 treated as zero. The price factor is 1 (a price-return series across it), the event and every bar
 whose value depends on the assumption carry the `dividend_amount_unknown` tag, and the quarantine
 is lifted only for that event. It is not lifted when any split, bonus, other unresolved action or
-unexplained price jump sits on or within `unknown_dividend_conflict_days` of its ex-date, and a
-factor of 1 never explains a jump, so a hidden split is still flagged.
+unexplained price jump sits on or within `unknown_dividend_conflict_days` of its ex-date, or when
+the ex-date open gap exceeds `unknown_dividend_max_gap` either way (or cannot be measured). A factor
+of 1 never explains a jump, so a hidden split is still flagged.
 """
 
 from __future__ import annotations
@@ -63,6 +64,9 @@ class AdjustmentPolicy(_Frozen):
     # pilot-adjust/2 adds the D-20 rule for amount-less interim dividends (see the module docstring).
     unknown_dividend_policy: Literal["unknown_zero/1"] = "unknown_zero/1"
     unknown_dividend_conflict_days: int = Field(default=7, ge=0)  # calendar days either side of the ex-date
+    # Largest ex-date open gap (open over previous close, as a fraction either way) still read as a
+    # dividend. Tighter than the jump band on purpose: a hidden 1:2 bonus gaps -33 percent.
+    unknown_dividend_max_gap: Decimal = Field(default=Decimal("0.20"), gt=0, lt=1)
     quantum: Decimal = Decimal("0.0001")
     rounding: Literal["ROUND_HALF_EVEN"] = "ROUND_HALF_EVEN"
     jump_low: Decimal = Decimal("0.55")
@@ -98,6 +102,7 @@ class FactorSet(_Frozen):
     lineage_sha256: str
     reference_sha256: str
     factor_set_sha256: str
+    unknown_dividend_params: dict[str, str] = Field(default_factory=dict)
 
     def unknown_dividend_events(self) -> tuple[AppliedFactor, ...]:
         """Applied events resting on the D-20 zero assumption, in ex-date order."""
@@ -119,7 +124,8 @@ class AdjustedBar(_Frozen):
     adj_volume: int | None
     cumulative_price_factor: Decimal
     adjusted_quarantined: bool
-    # D-20: the adjusted value depends on an amount-unknown dividend (bar on or before its ex-date).
+    # D-20: the bar is on or before the ex-date of an amount-unknown dividend, so its adjusted value
+    # (if not withheld) depends on the zero assumption. Set whether or not the value is withheld.
     dividend_amount_unknown: bool = False
     # D-20: this bar is the ex-date of an amount-unknown dividend; its open gap is not a signal.
     dividend_amount_unknown_ex_date: bool = False
@@ -248,6 +254,15 @@ def _first_blocking_kind(event: CorporateActionEvent) -> str:
     return "unknown"
 
 
+def _ex_date_gap(bars: Sequence[RawDailyBar], by_day: dict[date, RawDailyBar], ex_date: date) -> Decimal | None:
+    """Ex-date open over the previous accepted close, or None when either bar is missing."""
+    current = by_day.get(ex_date)
+    earlier = [bar for bar in bars if bar.trade_date < ex_date]
+    if current is None or not earlier or max(earlier, key=lambda bar: bar.trade_date).close <= 0:
+        return None
+    return current.open / max(earlier, key=lambda bar: bar.trade_date).close
+
+
 def _resolve_unknown_dividends(
     candidates: Sequence[CorporateActionEvent],
     bars: Sequence[RawDailyBar],
@@ -259,10 +274,14 @@ def _resolve_unknown_dividends(
 
     Mutates `applied` and `unresolved`. A conflict is any unresolved action with no ex-date or an
     ex-date within the policy window, any unexplained price jump in that window, or any applied
-    event in that window that carries a structural factor (split, consolidation, bonus). A
+    event in that window that carries a structural factor (split, consolidation, bonus). The
+    ex-date open gap must also sit within `unknown_dividend_max_gap` of the previous close, and a
+    gap that cannot be measured (no ex-date bar or no earlier bar) fails closed. A
     conflicted event stays unresolved, so the bars before it keep being withheld.
     """
     window = timedelta(days=policy.unknown_dividend_conflict_days)
+    max_gap = policy.unknown_dividend_max_gap
+    by_day = {bar.trade_date: bar for bar in bars}
     # Jumps are found without the factor-1 events: a factor of 1 never explains one.
     jumps = detect_unrecorded_actions(bars, applied, policy)
     others = [*unresolved, *jumps]
@@ -281,6 +300,11 @@ def _resolve_unknown_dividends(
                 if item.structural_factor != 1 and abs(item.ex_date - event.ex_date) <= window
             }
         )
+        gap = _ex_date_gap(bars, by_day, event.ex_date)
+        if gap is None:
+            near.append("gap:unmeasurable")
+        elif not (1 - max_gap <= gap <= 1 + max_gap):
+            near.append(f"gap:{gap.quantize(Decimal('0.0001'), rounding=ROUND_HALF_EVEN)}")
         if near:
             unresolved.append(
                 UnresolvedAction(
@@ -397,6 +421,10 @@ def compute_factor_set(
     reference_sha = canonical_sha256(
         [[bar.trade_date.isoformat(), bar.isin, dec_str(bar.close), bar.source_sha256] for bar in bars]
     )
+    unknown_params = {
+        "policy": policy.unknown_dividend_policy, "conflict_days": str(policy.unknown_dividend_conflict_days),
+        "max_gap": dec_str(policy.unknown_dividend_max_gap),
+    }
     content = {
         "anchor_isin": lineage.anchor_isin,
         "as_of": as_of.isoformat(),
@@ -405,10 +433,12 @@ def compute_factor_set(
         "unresolved": [item.model_dump(mode="json") for item in unresolved],
         "lineage_sha256": lineage.content_sha256(),
         "reference_sha256": reference_sha,
+        "unknown_dividend_params": unknown_params,
     }
     return FactorSet(
         anchor_isin=lineage.anchor_isin, as_of=as_of, policy_version=policy.version, applied=tuple(applied),
         unresolved=tuple(unresolved), lineage_sha256=content["lineage_sha256"], reference_sha256=reference_sha,
+        unknown_dividend_params=unknown_params,
         factor_set_sha256=canonical_sha256(content),
     )
 
@@ -451,7 +481,7 @@ def adjusted_series(
                 raw_close=bar.close, raw_volume=bar.volume, adj_open=adj[0], adj_high=adj[1], adj_low=adj[2],
                 adj_close=adj[3], adj_volume=adj[4], cumulative_price_factor=price_factor,
                 adjusted_quarantined=withheld,
-                dividend_amount_unknown=(not withheld and last_unknown is not None and bar.trade_date <= last_unknown),
+                dividend_amount_unknown=(last_unknown is not None and bar.trade_date <= last_unknown),
                 dividend_amount_unknown_ex_date=bar.trade_date in unknown_ex_dates,
             )
         )
