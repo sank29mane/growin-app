@@ -157,3 +157,22 @@ def test_adapter_returns_the_public_resolution_with_version_provenance(instrumen
     assert tick == resolution.tick and tick.value == Decimal(expected)
     assert tick.source.endswith(f":{resolution.version_id}")
     assert tick.source_hash == resolution.version_hash
+
+
+@pytest.mark.parametrize("instrument_class", [EQUITY, NON_GOLD_ETF])
+@pytest.mark.parametrize("change", ["band", "version_hash", "source_id"])
+def test_adapter_rejects_registration_that_differs_from_resolved_schedule(instrument_class, change):
+    from dataclasses import replace
+
+    table = load_default_tables().table_for(instrument_class)
+    version = table.versions[-1]
+    if change == "band":
+        band = replace(version.bands[0], tick=Decimal("9"))
+        version = replace(version, bands=(band,) + version.bands[1:])
+        altered = replace(table, versions=table.versions[:-1] + (version,))
+    elif change == "version_hash":
+        altered = replace(table, versions=table.versions[:-1] + (replace(version, version_hash="0" * 64),))
+    else:
+        altered = replace(table, source_id="injected")
+    with pytest.raises(TickSizeUnavailable, match="differs from the committed schedule"):
+        TickTables({instrument_class: altered})

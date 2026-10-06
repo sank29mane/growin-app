@@ -4,7 +4,8 @@
 ``InstrumentClass`` and series, has no defaults, and fails closed for Gold ETFs, unlisted
 series and dates no circular covers. This adapter maps this package's class names onto that
 enum (``EQUITY`` for universe stocks, ``NON_GOLD_ETF`` for the benchmark ETF) and keeps the
-registered tables only for gating and the registration hash. Any ``TickSizeUnavailable``
+registered tables for gating and the registration hash. Registrations must match the committed
+schedules used by the public resolver. Any ``TickSizeUnavailable``
 (including ETF dates no circular covers, such as 2025-04-15 to 2026-09-06) surfaces as a
 recorded attempt, fold-level unknown or an INCONCLUSIVE verdict, never as a default tick.
 """
@@ -33,9 +34,11 @@ class TickTables:
     """Tick tables keyed by instrument class. A class without a table fails closed."""
 
     def __init__(self, tables: Mapping[str, _costs_ticks.TickTable]) -> None:
-        for name in tables:
+        for name, table in tables.items():
             if name not in SUPPORTED_CLASSES:
                 raise TickSizeUnavailable(f"instrument class {name!r} is not supported")
+            if table != _costs_ticks.committed_tick_table(_COSTS_CLASS[name]):
+                raise TickSizeUnavailable(f"tick table for {name} differs from the committed schedule")
         self._tables = dict(tables)
 
     def classes(self) -> tuple[str, ...]:
