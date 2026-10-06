@@ -48,7 +48,6 @@ PRACTICE_SECRET_NAME = "TRADING212_PRACTICE_API_SECRET"
 _TICKER_RE = re.compile(r"^[A-Za-z0-9._-]{1,32}$")
 _ACK_RAW_KEYS = ("id", "status", "ticker", "type", "quantity", "limitPrice", "createdAt")
 _FAILED_STATUSES = frozenset({400, 401, 403})
-_UNKNOWN_STATUSES = frozenset({408, 429})
 
 
 class PracticeOrderRefused(BrokerExecutionError):
@@ -253,8 +252,7 @@ class T212PracticeDispatcher:
             )
         if status in _FAILED_STATUSES:
             raise _failed(f"HTTP_{status}")
-        if status in _UNKNOWN_STATUSES or 500 <= status <= 599:
-            raise _unknown(f"HTTP_{status}")
+        # 408, 429, every 5xx and any status the table does not name: unknown.
         raise _unknown(f"HTTP_{status}")
 
     # --- cancel --------------------------------------------------------------

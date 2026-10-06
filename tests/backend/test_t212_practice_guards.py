@@ -671,6 +671,115 @@ async def test_a_sell_posts_a_negative_quantity_while_the_ledger_keeps_it_positi
         stack.close()
 
 
+@pytest.mark.asyncio
+async def test_the_dispatcher_itself_refuses_an_unpinned_account_with_no_request(
+    tmp_path, private_config_dir, monkeypatch
+):
+    stack = await start_practice_stack(tmp_path, private_config_dir, monkeypatch, verify=False)
+    try:
+        intent = OrderIntent(
+            proposal_id="direct-1", workspace="uk", account=PRACTICE_ACCOUNT, broker="t212_practice",
+            mode="PRACTICE", ticker="VODl_EQ", side="BUY", quantity=Decimal("1"),
+            order_type="LIMIT", limit_price=Decimal("50"),
+        )
+        with pytest.raises(BrokerExecutionError) as refused:
+            await stack.adapter.dispatch(intent)
+        assert refused.value.code == "ACCOUNT_NOT_PINNED"
+        assert stack.broker.requests == []
+        assert (await stack.adapter.cancel("1")).outcome == "REFUSED"
+        assert stack.broker.requests == []
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"workspace": "india"},
+        {"broker": "paper"},
+        {"mode": "PAPER"},
+        {"account": "someone-else"},
+    ],
+)
+async def test_the_dispatcher_refuses_an_intent_outside_its_scope_with_no_request(
+    overrides, tmp_path, private_config_dir, monkeypatch
+):
+    stack = await start_practice_stack(tmp_path, private_config_dir, monkeypatch)
+    try:
+        fields = dict(
+            proposal_id="scope-1", workspace="uk", account=PRACTICE_ACCOUNT, broker="t212_practice",
+            mode="PRACTICE", ticker="VODl_EQ", side="BUY", quantity=Decimal("1"),
+            order_type="LIMIT", limit_price=Decimal("50"),
+        )
+        fields.update(overrides)
+        before = len(stack.broker.requests)
+        with pytest.raises(BrokerExecutionError) as refused:
+            await stack.adapter.dispatch(OrderIntent(**fields))
+        assert refused.value.code == "SCOPE_REFUSED"
+        assert len(stack.broker.requests) == before
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_an_india_process_dispatcher_refuses_even_a_well_formed_practice_intent(
+    tmp_path, private_config_dir, monkeypatch
+):
+    stack = await start_practice_stack(tmp_path, private_config_dir, monkeypatch)
+    try:
+        monkeypatch.setenv("GROWIN_WORKSPACE", "india")
+        intent = OrderIntent(
+            proposal_id="proc-1", workspace="uk", account=PRACTICE_ACCOUNT, broker="t212_practice",
+            mode="PRACTICE", ticker="VODl_EQ", side="BUY", quantity=Decimal("1"),
+            order_type="LIMIT", limit_price=Decimal("50"),
+        )
+        before = len(stack.broker.requests)
+        with pytest.raises(BrokerExecutionError) as refused:
+            await stack.adapter.dispatch(intent)
+        assert refused.value.code == "SCOPE_REFUSED" and len(stack.broker.requests) == before
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        "https://live.trading212.com/api/v0/equity/history/orders",
+        "//live.trading212.com/api/v0/equity/history/orders",
+        "/api/v0/equity/history/../../../x",
+        "/equity/pies",
+        "/equity/orders/limit/../market",
+        "equity/orders",
+    ],
+)
+async def test_a_get_path_that_is_absolute_foreign_or_not_a_listed_read_is_refused_unsent(path):
+    clock = FakeClock()
+    broker = FakeDemoBroker(clock)
+    transport = PracticeTransport(
+        KEY_CANARY, SECRET_CANARY, clock=clock, sleep=clock.sleep, transport=httpx.MockTransport(broker)
+    )
+    with pytest.raises(PracticeTransportError) as refused:
+        await transport.get(path)
+    assert refused.value.sent is False and broker.requests == []
+    await transport.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [0, -1, True, "7", 1.5, None])
+async def test_a_delete_needs_a_positive_integer_order_id(bad):
+    clock = FakeClock()
+    broker = FakeDemoBroker(clock)
+    transport = PracticeTransport(
+        KEY_CANARY, SECRET_CANARY, clock=clock, sleep=clock.sleep, transport=httpx.MockTransport(broker)
+    )
+    with pytest.raises(PracticeTransportError):
+        await transport.delete_order(bad)
+    assert broker.requests == []
+    await transport.aclose()
+
+
 # --- one in-flight order per ticker (D-16) ---------------------------------------------------
 
 
@@ -775,6 +884,38 @@ async def test_two_concurrent_approvals_on_one_ticker_cannot_both_dispatch(
         assert len(refused) == 1 and len(results) == 2
     finally:
         stack.close()
+
+
+def test_the_in_flight_rule_also_holds_on_the_unsigned_claim_path_of_a_bound_ledger(tmp_path):
+    from execution import ApprovalConflict, ExecutionLedger, VenueBinding
+
+    binding = VenueBinding(venue="t212_practice", account_id=PRACTICE_ACCOUNT, currency="GBP")
+    with ExecutionLedger(tmp_path / "unsigned.sqlite3", workspace="uk", venue=binding) as ledger:
+        def intent(proposal_id: str, ticker: str) -> OrderIntent:
+            return OrderIntent(
+                proposal_id=proposal_id, workspace="uk", account=PRACTICE_ACCOUNT,
+                broker="t212_practice", mode="PRACTICE", ticker=ticker, side="BUY",
+                quantity=Decimal("1"), order_type="LIMIT", limit_price=Decimal("50"),
+            )
+
+        first, same, other = intent("u-1", "VODl_EQ"), intent("u-2", "VODl_EQ"), intent("u-3", "LLOYl_EQ")
+        assert ledger.claim_intent(first).claimed
+        with pytest.raises(ApprovalConflict):
+            ledger.claim_intent(same)
+        assert ledger.claim_intent(other).claimed, "a different ticker is not blocked"
+        assert ledger.get_order("u-2") is None, "the refused claim committed nothing"
+
+
+def test_a_paper_ledger_keeps_its_old_claim_behaviour_with_two_orders_on_one_ticker(tmp_path):
+    from execution import ExecutionLedger
+
+    with ExecutionLedger(tmp_path / "paper.sqlite3", workspace="uk") as ledger:
+        for pid in ("a", "b"):
+            order = OrderIntent(
+                proposal_id=pid, workspace="uk", account="invest", broker="paper", mode="PAPER",
+                ticker="VUSA", side="BUY", quantity=Decimal("1"),
+            )
+            assert ledger.claim_intent(order).claimed
 
 
 # --- governor on every request (UKT-03, D-14) ------------------------------------------------

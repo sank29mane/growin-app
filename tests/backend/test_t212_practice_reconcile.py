@@ -675,6 +675,28 @@ async def test_a_delete_timeout_is_not_resent_and_leaves_the_order_for_reconcile
 
 
 @pytest.mark.asyncio
+async def test_two_cancel_requests_for_one_still_open_order_send_only_one_delete(
+    tmp_path, private_config_dir, monkeypatch
+):
+    stack = await start_practice_stack(tmp_path, private_config_dir, monkeypatch)
+    try:
+        await place(stack, "twice-1")
+        stack.broker.cancel_removes_order = False  # still open (CANCELLING) after the first
+        async with route_client(stack, monkeypatch) as client:
+            first = await client.post(
+                "/api/t212-practice/cancellations", json={**CANCEL, "proposal_id": "twice-1"}
+            )
+            second = await client.post(
+                "/api/t212-practice/cancellations", json={**CANCEL, "proposal_id": "twice-1"}
+            )
+        assert first.status_code == 200 and second.status_code == 409
+        assert stack.ledger.get_order("twice-1").state == "ACKNOWLEDGED"
+        assert len([r for r in stack.broker.requests if r.method == "DELETE"]) == 1
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("status,outcome", [(404, "REFUSED"), (403, "REFUSED"), (500, "UNKNOWN")])
 async def test_a_cancel_the_broker_does_not_take_is_reported_not_resent(
     status, outcome, tmp_path, private_config_dir, monkeypatch
