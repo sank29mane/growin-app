@@ -22,7 +22,7 @@ import json
 import os
 import tempfile
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -449,7 +449,7 @@ def build_report(
         }
         for name, ev in (holdout_evidence_ or {}).items():
             if ev is not None:
-                verdict_payload[name] = {k: str(v) if v is not None else None for k, v in ev.__dict__.items()}
+                verdict_payload[name] = {k: str(v) if v is not None else None for k, v in ((f.name, getattr(ev, f.name)) for f in fields(ev))}
     tri_available = isinstance(tri, TriSeries)
     benchmark = BenchmarkReport(
         etf_anchor_isin=etf_choice.anchor_isin, etf_stock_code=etf_choice.stock_code,
