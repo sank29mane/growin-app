@@ -1,0 +1,241 @@
+"""AC-6 (data mapping, D-05) and AC-7 (eligibility, D-07)."""
+
+from __future__ import annotations
+
+from datetime import date
+from decimal import Decimal
+
+import pytest
+
+from costs.fills import BandUnavailable, PriceBand
+from pilot_data import universe as pd_universe
+from pilot_data.core import standard_caveats
+from pilot_data.price_bands import BandObservation
+from pilot_data.universe import UniverseDecision, UniversePolicy, UniverseResult
+
+from strategy_india.data import (
+    Bar,
+    DatasetView,
+    DividendEvents,
+    UniverseEligibility,
+    band_for_session,
+    bar_from_row,
+    load_dataset_rows,
+    session_bar_for,
+)
+from strategy_india.engine import simulate_segment
+from strategy_india.holdout import HoldoutRange
+from strategy_india.signals import SignalTable
+from strategy_india.ticks import EQUITY, resolve_tick
+
+from test_strategy_india_support import (
+    SESSION_START,
+    StaticBands,
+    default_names,
+    etf_names,
+    make_context,
+    make_rows,
+    params,
+    sha,
+    tick_tables,
+    weekday_sessions,
+)
+
+SESSIONS = weekday_sessions(SESSION_START, 140)
+HOLDOUT = HoldoutRange(SESSIONS[-20], SESSIONS[-1])
+
+
+def _tick(price="100", day=date(2025, 6, 2)):
+    return resolve_tick(tick_tables(), session_date=day, band_reference_price=Decimal(price),
+                        instrument_class=EQUITY, series="EQ")
+
+
+def _bar(**kw) -> Bar:
+    base = dict(anchor_isin="A", isin="A", stock_code="A", session=date(2025, 6, 2), series="EQ",
+                raw_open=Decimal("100"), raw_high=Decimal("103"), raw_low=Decimal("99"), raw_close=Decimal("101"),
+                raw_volume=1000, adj_open=Decimal("50"), adj_high=Decimal("51"), adj_low=Decimal("49.5"),
+                adj_close=Decimal("50.5"), quarantined=False)
+    base.update(kw)
+    return Bar(**base)
+
+
+def _obs(status="fixed", percent="20", reason=None, kind="list"):
+    return BandObservation(isin="A", session=date(2025, 6, 2), status=status, percent=Decimal(percent) if percent else None,
+                           nse_symbol="A", series="EQ", source_kind=kind, source_sha256s=(sha("b"),), reason=reason)
+
+
+# ---- AC-6 ----------------------------------------------------------------------------------------
+def test_signals_read_adjusted_prices_and_fills_read_raw():
+    # raw prices are flat, adjusted prices trend: only the adjusted series can produce a momentum signal
+    sessions = weekday_sessions(SESSION_START, 40)
+    bars = []
+    for i, day in enumerate(sessions):
+        bars.append(_bar(session=day, raw_open=Decimal("100"), raw_high=Decimal("100.5"), raw_low=Decimal("99.5"),
+                         raw_close=Decimal("100"), adj_open=Decimal(50 + i), adj_high=Decimal(51 + i),
+                         adj_low=Decimal(49 + i), adj_close=Decimal(50 + i)))
+    view = DatasetView.from_rows(bars, holdout=HoldoutRange(date(2030, 1, 1), date(2030, 2, 1)))
+    table = SignalTable(view, params(vol_adjusted=False), DividendEvents())
+    assert table.raw_score("A", sessions[-1]) > Decimal("0.25")
+    sb = session_bar_for(bars[-1], previous_raw_close=Decimal("100"), observation=_obs(), unavailable_reason=None,
+                         tick=_tick())
+    assert (sb.open, sb.high, sb.low, sb.close) == (Decimal("100"), Decimal("100.5"), Decimal("99.5"), Decimal("100"))
+    assert sb.price_basis == "raw" and sb.volume == 1000
+
+
+def test_quarantined_row_yields_no_signal():
+    sessions = weekday_sessions(SESSION_START, 80)
+    names = default_names(3)
+    rows = make_rows(sessions, names, quarantined=[("INE000A01000", sessions[40])])
+    assert next(r for r in rows if r.anchor_isin == "INE000A01000" and r.trade_date == sessions[40]).adjusted_quarantined
+    view = DatasetView.from_rows(rows, holdout=HoldoutRange(date(2030, 1, 1), date(2030, 2, 1)))
+    table = SignalTable(view, params(), DividendEvents())
+    anchor = "INE000A01000"
+    assert table.raw_score(anchor, sessions[39]) is not None
+    assert table.raw_score(anchor, sessions[40]) is None  # the quarantined session itself
+    for day in sessions[41:51]:  # any window that still touches it
+        assert table.raw_score(anchor, day) is None
+    assert table.raw_score(anchor, sessions[70]) is not None  # clean windows return
+    assert bar_from_row(next(r for r in rows if r.trade_date == sessions[40] and r.anchor_isin == anchor)).adj_close is None
+    assert table.raw_score("INE000A01001", sessions[45]) is not None
+
+
+def test_fixed_band_maps_percent_and_previous_raw_close_to_a_price_band():
+    band = band_for_session(_bar(), previous_raw_close=Decimal("100"), observation=_obs(percent="20"),
+                            unavailable_reason=None, tick=_tick())
+    assert isinstance(band, PriceBand) and band.category == "fixed"
+    assert (band.lower, band.upper) == (Decimal("80.00"), Decimal("120.00"))
+    assert band.effective_date == date(2025, 6, 2) and band.source_hash
+
+
+def test_fixed_band_is_widened_outward_to_the_tick_grid():
+    band = band_for_session(_bar(), previous_raw_close=Decimal("101.03"), observation=_obs(percent="10"),
+                            unavailable_reason=None, tick=_tick())
+    assert (band.lower, band.upper) == (Decimal("90.92"), Decimal("111.14"))  # 90.927 floored, 111.133 ceiled
+
+
+def test_no_band_maps_to_a_no_band_price_band():
+    band = band_for_session(_bar(), previous_raw_close=Decimal("100"), observation=_obs(status="no_band", percent=None),
+                            unavailable_reason=None, tick=_tick())
+    assert isinstance(band, PriceBand) and band.category == "no_band" and band.lower is None and band.upper is None
+
+
+@pytest.mark.parametrize(
+    "observation, reason, previous, expected",
+    [
+        (_obs(status="unknown", percent=None, reason="band_convention_unverified", kind=None), None, Decimal("100"),
+         "band_convention_unverified"),
+        (_obs(status="unknown", percent=None, reason=None, kind=None), None, Decimal("100"), "band_unknown"),
+        (_obs(), "band_crosscheck_row_conflict", Decimal("100"), "band_crosscheck_row_conflict"),  # UnavailableBand row
+        (None, None, Decimal("100"), "band_observation_missing"),
+        (_obs(), None, None, "band_percent_or_previous_close_missing"),
+        (_obs(percent=None), None, Decimal("100"), "band_percent_or_previous_close_missing"),
+    ],
+)
+def test_every_unknown_maps_to_band_unavailable(observation, reason, previous, expected):
+    band = band_for_session(_bar(), previous_raw_close=previous, observation=observation, unavailable_reason=reason,
+                            tick=_tick())
+    assert isinstance(band, BandUnavailable) and band.reason == expected
+
+
+# ---- the real parquet adapter, on a synthetic published dataset ----------------------------------
+def test_published_dataset_directory_loads_through_verify_dataset(tmp_path):
+    from pilot_data.core import standard_caveats as caveats
+    from pilot_data.dataset import DatasetManifest, _export, dataset_hash
+
+    rows = sorted(make_rows(weekday_sessions(SESSION_START, 5), default_names(2)), key=lambda r: (r.anchor_isin, r.trade_date))
+    digest = dataset_hash(rows)
+    manifest = DatasetManifest(
+        workspace="india", caveats=caveats(), dataset_sha256=digest, row_count=len(rows), anchor_count=2,
+        window_start=rows[0].trade_date, window_end=rows[-1].trade_date, as_of=rows[-1].trade_date,
+        crosscheck_run_id="r", report_sha256=sha("r"), targets_sha256=sha("t"), lineage_hashes={}, factor_set_hashes={},
+        spans={}, quarantine_totals={}, rawness_counts={}, created_at_utc="2026-10-01T00:00:00+00:00",
+    )
+    published = _export(rows, manifest, tmp_path / "exports", "india")
+    loaded_manifest, loaded = load_dataset_rows(tmp_path / "exports" / digest, expected_dataset_sha256=digest)
+    assert loaded_manifest.dataset_sha256 == published.dataset_sha256 == digest
+    assert len(loaded) == len(rows)
+    from strategy_india.errors import DataError
+
+    with pytest.raises(DataError):
+        load_dataset_rows(tmp_path / "exports" / digest, expected_dataset_sha256=sha("other"))
+
+
+# ---- AC-7 ----------------------------------------------------------------------------------------
+def _universe_result(as_of: date, eligible: set[str], names, smallcap=None) -> UniverseResult:
+    decisions = tuple(
+        UniverseDecision(
+            anchor_isin=n.anchor, isin_on_date=n.anchor, stock_code=n.code, eligible=n.anchor in eligible,
+            reasons=() if n.anchor in eligible else ("liquidity_unknown",), close=Decimal("500"),
+            median_traded_value=None, eligibility_median_traded_value=None, known_sessions=60, unknown_sessions=0,
+            excluded_prelisting_sessions=0, smallcap_class=(smallcap or {}).get(n.anchor, "not_small"),
+        )
+        for n in names
+    )
+    return UniverseResult(
+        workspace="india", caveats=standard_caveats(), as_of=as_of, mode="research", policy_sha256=sha("p"),
+        decisions=decisions, eligible_isins=tuple(sorted(eligible)), exclusions_by_reason={}, input_hashes={},
+        result_sha256=sha(f"u-{as_of}"),
+    )
+
+
+def test_each_rebalance_calls_evaluate_universe_with_as_of_equal_to_the_decision_date(monkeypatch):
+    names = default_names(8)
+    rows = make_rows(SESSIONS, names + etf_names())
+    seen: list[date] = []
+
+    def spy(store, *, as_of, **kwargs):
+        seen.append(as_of)
+        assert kwargs["workspace"] == "india" and kwargs["mode"] == "research"
+        return _universe_result(as_of, {n.anchor for n in names}, names)
+
+    monkeypatch.setattr(pd_universe, "evaluate_universe", spy)
+    eligibility = UniverseEligibility(object(), object(), UniversePolicy())
+    ctx = make_context(rows, HOLDOUT, eligibility=eligibility)
+    dev = ctx.view.sessions()
+    result = simulate_segment(ctx, sessions=dev, scenario=ctx.scenarios.gate(), slope=Decimal("0.01"), regime_cash=None,
+                              mode="base", fold="x")
+    every_other = dev[:-1][:: ctx.params.rebalance_every]
+    assert seen == every_other  # one call per rebalance decision date, none later than the decision
+    assert all(day <= dev[-1] for day in seen) and max(seen) < dev[-1]
+    assert result.entries > 0
+
+
+def test_a_late_as_of_from_the_universe_is_refused(monkeypatch):
+    names = default_names(2)
+    monkeypatch.setattr(pd_universe, "evaluate_universe",
+                        lambda store, *, as_of, **kw: _universe_result(date(2030, 1, 1), set(), names))
+    from costs.core import LookaheadError
+
+    with pytest.raises(LookaheadError):
+        UniverseEligibility(object(), object(), UniversePolicy()).snapshot(date(2025, 6, 2))
+
+
+def test_unknown_eligibility_excludes_the_name(monkeypatch):
+    names = default_names(8)
+    rows = make_rows(SESSIONS, names + etf_names())
+    top = names[0].anchor  # the strongest trend, so it would be bought first if eligible
+    monkeypatch.setattr(pd_universe, "evaluate_universe",
+                        lambda store, *, as_of, **kw: _universe_result(as_of, {n.anchor for n in names[1:]}, names))
+    ctx = make_context(rows, HOLDOUT, params_obj=params(min_universe_for_entry=5),
+                       eligibility=UniverseEligibility(object(), object(), UniversePolicy()))
+    dev = ctx.view.sessions()
+    res = simulate_segment(ctx, sessions=dev, scenario=ctx.scenarios.gate(), slope=Decimal("0.01"), regime_cash=None,
+                           mode="base", fold="x")
+    touched = {t.anchor_isin for t in res.closed} | {p.anchor_isin for p in res.open_positions} | {a.anchor_isin for a in res.attempts}
+    assert top not in touched and res.entries > 0
+
+
+def test_small_cap_exposure_stays_within_thirty_percent():
+    names = default_names(8)
+    rows = make_rows(SESSIONS, names + etf_names())
+    small = {n.anchor: "small" for n in names}
+    ctx = make_context(rows, HOLDOUT, smallcap=small)
+    dev = ctx.view.sessions()
+    capped = simulate_segment(ctx, sessions=dev, scenario=ctx.scenarios.gate(), slope=Decimal("0.01"), regime_cash=None,
+                              mode="base", fold="x")
+    assert capped.smallcap_rejections > 0
+    assert max(v for _, v in capped.exposure) <= Decimal("0.34")  # one 10k position of a 50k book, plus drift
+    free = simulate_segment(make_context(rows, HOLDOUT), sessions=dev, scenario=ctx.scenarios.gate(),
+                            slope=Decimal("0.01"), regime_cash=None, mode="base", fold="x")
+    assert max(v for _, v in free.exposure) > Decimal("0.6")
+    assert free.smallcap_rejections == 0

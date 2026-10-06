@@ -204,7 +204,37 @@ def test_real_nse_purpose_wordings_classify(purpose, expected):
     assert got == expected
 
 
-@pytest.mark.parametrize("purpose", ["INTERIM DIVIDEND", "DIVRS 5", "REDEMPTIONS", "FV SPLT FRM RS 2 TO RS 2"])
+@pytest.mark.parametrize(
+    "purpose",
+    ["FINAL DIVIDEND", "SPECIAL DIVIDEND", "DIVIDEND", "INTERIM DIVIDEND RS 0", "DIVRS 5", "REDEMPTIONS",
+     "FV SPLT FRM RS 2 TO RS 2"],
+)
 def test_purposes_without_usable_terms_stay_unknown(purpose):
     # No amount, an unknown shape or a no-op split: never guessed.
     assert [part.kind for part in parse_purpose(purpose)] == ["unknown"] * len(parse_purpose(purpose))
+
+
+def test_a_lone_amountless_interim_dividend_is_typed_and_adjustable():
+    # D-20: only the exact bare phrase is typed; the case and spacing are normalised first.
+    for purpose in ("INTERIM DIVIDEND", "interim  dividend"):
+        parts = parse_purpose(purpose)
+        assert [part.kind for part in parts] == ["dividend_amount_unknown"]
+        assert parts[0].dividend_per_share is None and is_adjustable(parts)
+
+
+@pytest.mark.parametrize("purpose", ["BONUS 1:1/INTERIM DIVIDEND", "INTERIM DIVIDEND/DIV - RS 5", "INTERIM DIVIDEND/AGM"])
+def test_an_amountless_interim_dividend_with_a_companion_part_is_not_adjustable(purpose):
+    parts = parse_purpose(purpose)
+    assert any(part.kind == "dividend_amount_unknown" for part in parts) and not is_adjustable(parts)
+
+
+def test_derive_types_an_amountless_interim_dividend_in_the_current_revision_tables(store):
+    from pilot_data.corporate_actions import CLASSIFIER_REVISION, EVENTS_TABLE, event_id_for
+
+    ex = date(2024, 6, 3)
+    ingest_pr(store, date(2024, 5, 2), [kit.bc_row("EQ", "ABC", "ABC LTD", "INTERIM DIVIDEND", ex_date=ex)])
+    derive_corporate_actions(store, workspace="india")
+    assert CLASSIFIER_REVISION == "c" and EVENTS_TABLE == "corporate_action_events_rev_c"
+    (event,) = events_for_symbol(store, "ABC", ex_from=date(2024, 1, 1), ex_to=date(2024, 12, 31))
+    assert [p.kind for p in event.parts] == ["dividend_amount_unknown"] and event.adjustable
+    assert event.event_id == event_id_for("ABC", ex, "INTERIM DIVIDEND")  # ids do not depend on the classifier
