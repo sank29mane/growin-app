@@ -23,10 +23,6 @@ actor PortfolioDataService {
         ])
     }
     
-    func switchAccountConfig(config: TradingConfig) async throws {
-        try await post(endpoint: "/mcp/trading212/config", body: config)
-    }
-    
     func syncAccount(accountType: String) async throws {
         try await post(endpoint: "/account/active", body: ["account_type": accountType])
     }

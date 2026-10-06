@@ -95,22 +95,6 @@ struct PortfolioHistoryPoint: Codable, Identifiable, Sendable {
     }
 }
 
-struct TradingConfig: Codable, Sendable {
-    let accountType: String
-    let investKey: String
-    let investSecret: String
-    let isaKey: String
-    let isaSecret: String
-    
-    enum CodingKeys: String, CodingKey {
-        case accountType = "account_type"
-        case investKey = "invest_key"
-        case investSecret = "invest_secret"
-        case isaKey = "isa_key"
-        case isaSecret = "isa_secret"
-    }
-}
-
 // MARK: - Chart Models
 
 struct ChartResponse: Codable, Sendable {

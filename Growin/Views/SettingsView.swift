@@ -469,12 +469,7 @@ struct PersonaToggle: View {
 }
 
 struct TradingConfigSection: View {
-    @KeychainStorage(.t212InvestKey, scope: .workspace(.uk)) private var t212InvestKey = ""
-    @KeychainStorage(.t212InvestSecret, scope: .workspace(.uk)) private var t212InvestSecret = ""
-    @KeychainStorage(.t212IsaKey, scope: .workspace(.uk)) private var t212IsaKey = ""
-    @KeychainStorage(.t212IsaSecret, scope: .workspace(.uk)) private var t212IsaSecret = ""
     @AppStorage("t212AccountType") private var t212AccountType = "invest"
-    @State private var isUpdatingConfig = false
     
     var body: some View {
         SettingsCard(title: "Trading 212 API", icon: "dollarsign.circle.fill") {
@@ -488,72 +483,18 @@ struct TradingConfigSection: View {
                 .accessibilityLabel("Trading 212 Account Type")
                 .accessibilityHint("Selects between Invest and ISA account types")
                 
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("LIVE API CREDENTIALS").font(.system(size: 10, weight: .bold))
-                    
-                    VStack(spacing: 8) {
-                        SecureField("API Key", text: $t212InvestKey)
-                            .accessibilityLabel("Trading 212 Live API Key")
-                            .accessibilityHint("Enter your live Trading 212 API key")
-                        SecureField("Secret", text: $t212InvestSecret)
-                            .accessibilityLabel("Trading 212 Live API Secret")
-                            .accessibilityHint("Enter your live Trading 212 API secret")
-                    }
-                    .textFieldStyle(.plain)
-                    .padding(10)
-                    .background(Color.secondary.opacity(0.1))
-                    .clipShape(.rect(cornerRadius: 8))
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("API CREDENTIALS").font(.system(size: 10, weight: .bold))
+                    Text("Trading 212 keys come from the backend's launch environment. This app never sends them to the backend.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityLabel("Trading 212 keys come from the backend's launch environment")
                 }
-                
-                Button(action: updateT212Config) {
-                    HStack {
-                        if isUpdatingConfig {
-                            ProgressView().controlSize(.small)
-                        } else {
-                            Image(systemName: "arrow.triangle.2.circlepath")
-                            Text("UPDATE ARCHITECTURE")
-                                .font(.system(size: 12, weight: .bold))
-                        }
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding()
-                    .background(Color.accentColor)
-                    .foregroundColor(.white)
-                    .clipShape(.rect(cornerRadius: 12))
-                }
-                .buttonStyle(.plain)
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel(isUpdatingConfig ? "Updating Architecture" : "Update Architecture")
-                .accessibilityHint("Updates the Trading 212 configuration")
-                .accessibilityAddTraits(.isButton)
-                .accessibilityValue(isUpdatingConfig ? "Loading" : "")
-            }
-        }
-    }
-    
-    private func updateT212Config() {
-        isUpdatingConfig = true
-        Task {
-            let config: [String: Any] = [
-                "account_type": t212AccountType,
-                "invest_key": t212InvestKey,
-                "invest_secret": t212InvestSecret,
-                "isa_key": t212IsaKey,
-                "isa_secret": t212IsaSecret
-            ]
-            
-            guard let url = URL(string: "\(AppConfig.shared.baseURL)/mcp/trading212/config") else { return }
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try? JSONSerialization.data(withJSONObject: config)
-            
-            do {
-                let (_, _) = try await URLSession.shared.data(for: request)
-                self.isUpdatingConfig = false
-            } catch {
-                print("Update T212 Config error: \(error)")
-                await MainActor.run { self.isUpdatingConfig = false }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(10)
+                .background(Color.secondary.opacity(0.1))
+                .clipShape(.rect(cornerRadius: 8))
             }
         }
     }
