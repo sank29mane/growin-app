@@ -20,20 +20,46 @@ from costs.fills import (
     TickSize,
     simulate_session,
 )
-from costs.ticks import align_limit, is_on_tick, load_tick_table, resolve_tick_from_table
+from costs.ticks import (
+    NON_GOLD_ETF_TICK_TABLE_PATH,
+    align_limit,
+    is_on_tick,
+    load_tick_table,
+    resolve_tick_from_table,
+)
 
 D = Decimal
 TABLE_PATH = Path(__file__).resolve().parents[2] / "backend" / "costs" / "schedules" / "nse_cash_tick_sizes.json"
 TABLE_VERSION = "nse-cash-ticks-2025-04-15.r1"
+FLAT_VERSION = "nse-cash-ticks-2021-01-01.r1"
+TWO_BAND_VERSION = "nse-cash-ticks-2024-06-10.r1"
+ETF_VERSION = "nse-cash-etf-ticks-2021-01-01.r1"
 SESSION = date(2026, 10, 6)
 
-# Any change to the committed tick table needs a new version id and a new literal
+# Any change to a committed tick version needs a new version id and a new literal
 # here, in the same commit.
 EXPECTED_TICK_TABLE_HASH = "c8d6fb8b7412903d942e2d6de347a4f6a424cf63f982c955e2513edd861c4543"
+EXPECTED_VERSION_HASHES = {
+    FLAT_VERSION: "9cfb9c95c6ecc244cc94b9813eefbd4dd6a29d3e0f46c7329ef70eb7a059f80f",
+    TWO_BAND_VERSION: "fb0eba98d796afd48d5e2fd4da5cec752f97e5a041e186443f9e838f55d17022",
+    TABLE_VERSION: EXPECTED_TICK_TABLE_HASH,
+    ETF_VERSION: "219c90b126ece971802eb2641e8eb4f45c37725988469955e35dc223b618b04c",
+}
 
 
 def resolve(reference, session=SESSION):
     return resolve_tick_from_table(load_tick_table(), session_date=session, band_reference_price=D(reference))
+
+
+def resolve_etf(reference, session):
+    return resolve_tick_from_table(
+        load_tick_table(NON_GOLD_ETF_TICK_TABLE_PATH), session_date=session, band_reference_price=D(reference)
+    )
+
+
+def version_by_id(table, version_id):
+    (version,) = [v for v in table.versions if v.version == version_id]
+    return version
 
 
 @pytest.mark.parametrize(
@@ -59,13 +85,101 @@ def test_resolved_tick_carries_table_evidence():
     tick = resolve("400.00")
     assert tick.effective_from == date(2025, 4, 15)
     assert tick.source == f"nse-cash-price-band-ticks:{TABLE_VERSION}"
-    assert tick.source_hash == table.versions[0].version_hash
+    assert tick.source_hash == version_by_id(table, TABLE_VERSION).version_hash
     assert isinstance(tick, TickSize)
 
 
-def test_pre_revision_dates_fail_closed():
+@pytest.mark.parametrize("session", [date(2020, 12, 31), date(2019, 6, 3), date(2000, 1, 1)])
+def test_dates_before_the_sourced_window_fail_closed(session):
     with pytest.raises(TickSizeUnavailable):
-        resolve("400.00", date(2025, 4, 14))
+        resolve("400.00", session)
+    with pytest.raises(TickSizeUnavailable):
+        resolve_etf("400.00", session)
+
+
+# (session, reference price, tick, version id, version effective_from, version effective_to)
+HISTORY_CASES = [
+    (date(2021, 1, 1), "100.00", "0.05", FLAT_VERSION, date(2021, 1, 1), date(2024, 6, 9)),
+    (date(2021, 10, 1), "1.00", "0.05", FLAT_VERSION, date(2021, 1, 1), date(2024, 6, 9)),
+    (date(2023, 6, 30), "49999.00", "0.05", FLAT_VERSION, date(2021, 1, 1), date(2024, 6, 9)),
+    # The day before the 2024-06-10 revision is still the flat tick, even below Rs 250.
+    (date(2024, 6, 9), "100.00", "0.05", FLAT_VERSION, date(2021, 1, 1), date(2024, 6, 9)),
+    (date(2024, 6, 10), "100.00", "0.01", TWO_BAND_VERSION, date(2024, 6, 10), date(2025, 4, 14)),
+    (date(2024, 6, 10), "249.99", "0.01", TWO_BAND_VERSION, date(2024, 6, 10), date(2025, 4, 14)),
+    (date(2024, 6, 10), "250.00", "0.05", TWO_BAND_VERSION, date(2024, 6, 10), date(2025, 4, 14)),
+    (date(2024, 12, 2), "1000.00", "0.05", TWO_BAND_VERSION, date(2024, 6, 10), date(2025, 4, 14)),
+    (date(2024, 12, 2), "25000.00", "0.05", TWO_BAND_VERSION, date(2024, 6, 10), date(2025, 4, 14)),
+    # The last day before the price-band table: a Rs 1,000+ reference still ticks at 0.05.
+    (date(2025, 4, 14), "1500.00", "0.05", TWO_BAND_VERSION, date(2024, 6, 10), date(2025, 4, 14)),
+    (date(2025, 4, 14), "249.99", "0.01", TWO_BAND_VERSION, date(2024, 6, 10), date(2025, 4, 14)),
+    # The day of the price-band table: the same reference now ticks at 0.10.
+    (date(2025, 4, 15), "1500.00", "0.10", TABLE_VERSION, date(2025, 4, 15), None),
+    (date(2025, 4, 15), "249.99", "0.01", TABLE_VERSION, date(2025, 4, 15), None),
+]
+
+
+@pytest.mark.parametrize("session, reference, tick, version, effective_from, effective_to", HISTORY_CASES)
+def test_dated_equity_tick_history(session, reference, tick, version, effective_from, effective_to):
+    resolved = resolve(reference, session)
+    assert resolved.value == D(tick)
+    assert resolved.source == f"nse-cash-price-band-ticks:{version}"
+    assert resolved.source_hash == EXPECTED_VERSION_HASHES[version]
+    assert resolved.effective_from == effective_from
+    assert resolved.effective_to == effective_to
+
+
+def test_equity_versions_are_contiguous_from_2021():
+    versions = load_tick_table().versions
+    assert versions[0].effective_from == date(2021, 1, 1)
+    assert [v.version for v in versions] == [FLAT_VERSION, TWO_BAND_VERSION, TABLE_VERSION]
+    for earlier, later in zip(versions, versions[1:]):
+        assert (later.effective_from - earlier.effective_to).days == 1
+    assert versions[-1].effective_to is None
+
+
+@pytest.mark.parametrize("reference", ["1.00", "249.99", "250.00", "5000.00", "75000.00"])
+@pytest.mark.parametrize("session", [date(2021, 1, 1), date(2023, 6, 30), date(2024, 6, 10), date(2025, 4, 14)])
+def test_non_gold_etf_tick_is_flat_one_paisa(session, reference):
+    resolved = resolve_etf(reference, session)
+    assert resolved.value == D("0.01")
+    assert resolved.source == f"nse-cash-non-gold-etf-ticks:{ETF_VERSION}"
+    assert resolved.source_hash == EXPECTED_VERSION_HASHES[ETF_VERSION]
+    assert resolved.effective_from == date(2021, 1, 1)
+    assert resolved.effective_to == date(2025, 4, 14)
+
+
+def test_etf_table_does_not_cover_the_price_band_era_or_before_2021():
+    with pytest.raises(TickSizeUnavailable):
+        resolve_etf("400.00", date(2025, 4, 15))
+    with pytest.raises(TickSizeUnavailable):
+        resolve_etf("400.00", date(2020, 12, 31))
+
+
+def test_etf_and_equity_ticks_differ_on_the_same_day():
+    session = date(2023, 1, 2)
+    assert resolve("400.00", session).value == D("0.05")
+    assert resolve_etf("400.00", session).value == D("0.01")
+    assert resolve("400.00", session).source != resolve_etf("400.00", session).source
+
+
+def test_etf_table_declares_that_gold_etfs_are_not_covered():
+    (version,) = load_tick_table(NON_GOLD_ETF_TICK_TABLE_PATH).versions
+    assert "NOT covered" in version.status
+    assert "Gold" in version.status
+
+
+@pytest.mark.parametrize("path", [TABLE_PATH, NON_GOLD_ETF_TICK_TABLE_PATH])
+def test_every_sourced_version_cites_a_dated_nse_circular(path):
+    for version in load_tick_table(path).versions:
+        if version.version == TABLE_VERSION:
+            continue  # the 2025-04-15 version predates this citation format and stays unconfirmed
+        assert version.status.startswith("sourced from NSE circulars")
+        assert version.sources
+        for source in version.sources:
+            assert "NSE/CMTR/" in source
+            assert "https://nsearchives.nseindia.com/content/circulars/CMTR" in source
+            assert "dated 20" in source
+            assert "fetched 2026-10-06" in source
 
 
 @pytest.mark.parametrize("bad", ["0", "-1", "0.00"])
@@ -80,7 +194,11 @@ def test_float_reference_price_raises():
 
 
 def test_table_hash_is_pinned():
-    assert load_tick_table().versions[0].version_hash == EXPECTED_TICK_TABLE_HASH
+    table = load_tick_table()
+    assert version_by_id(table, TABLE_VERSION).version_hash == EXPECTED_TICK_TABLE_HASH
+    etf = load_tick_table(NON_GOLD_ETF_TICK_TABLE_PATH)
+    actual = {v.version: v.version_hash for v in (*table.versions, *etf.versions)}
+    assert actual == EXPECTED_VERSION_HASHES
 
 
 def test_align_limit_floors_buys_and_ceils_sells():
@@ -114,7 +232,7 @@ def write(tmp_path, document) -> Path:
 
 
 def edit_bands(document, bands):
-    document["versions"][0]["bands"] = bands
+    document["versions"][-1]["bands"] = bands  # the open-ended 2025-04-15 version
 
 
 GOOD_BANDS = [
@@ -180,8 +298,18 @@ def test_minimal_good_table_loads(tmp_path):
 
 def test_changing_the_table_changes_its_hash(tmp_path):
     document = raw_table()
-    document["versions"][0]["status"] = "unconfirmed: edited for the hash test"
-    assert load_tick_table(write(tmp_path, document)).versions[0].version_hash != EXPECTED_TICK_TABLE_HASH
+    document["versions"][-1]["status"] = "unconfirmed: edited for the hash test"
+    edited = load_tick_table(write(tmp_path, document))
+    assert version_by_id(edited, TABLE_VERSION).version_hash != EXPECTED_TICK_TABLE_HASH
+    # Editing one version leaves the other versions' hashes alone.
+    assert version_by_id(edited, FLAT_VERSION).version_hash == EXPECTED_VERSION_HASHES[FLAT_VERSION]
+
+
+def test_overlapping_versions_are_rejected(tmp_path):
+    document = raw_table()
+    document["versions"][0]["effective_to"] = "2024-06-10"
+    with pytest.raises(CostModelError):
+        load_tick_table(write(tmp_path, document))
 
 
 # ---- fill-model tick checks --------------------------------------------------

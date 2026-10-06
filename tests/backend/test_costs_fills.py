@@ -400,12 +400,12 @@ def committed_tick():
 def test_tick_and_scenario_files_flow_into_fill_and_run_hashes(tmp_path):
     base = run_with(committed_tick(), scenarios().get("base"))
     (fill,) = base.fills
-    assert fill.tick_source_hash == load_tick_table().versions[0].version_hash
+    assert fill.tick_source_hash == load_tick_table().versions[-1].version_hash  # the 2025-04-15 version covers SESSION
     assert fill.scenarios_hash == scenarios().scenarios_hash
     assert fill.tick_size == D("0.05")
 
     document = json.loads(TICKS_PATH.read_text(encoding="utf-8"))
-    document["versions"][0]["status"] = "unconfirmed: edited for the provenance test"
+    document["versions"][-1]["status"] = "unconfirmed: edited for the provenance test"
     ticks_path = tmp_path / "ticks.json"
     ticks_path.write_text(json.dumps(document), encoding="utf-8")
     edited_tick = resolve_tick_from_table(load_tick_table(ticks_path), session_date=SESSION, band_reference_price=D("400.00"))

@@ -1,7 +1,10 @@
 """Dated NSE cash tick-size table and limit alignment.
 
-The tick size is an explicit, dated input. The pre-2025-04-15 table is not in
-any source artifact, so it is not encoded: those dates fail closed. The
+The tick size is an explicit, dated input. Each table version cites the NSE
+circulars it comes from; a date no version covers (before 2021-01-01, and any
+period NSE sets per security, such as Gold ETFs) is not encoded and fails
+closed. Equities and ETFs live in separate tables because the version model
+has no instrument class: a caller picks the table for the instrument. The
 Breeze security master shows a different tick for some names, so neither
 source is trusted until a live quote settles it (Phase 61); every resolved
 tick records which table version it came from and that version's hash.
@@ -34,6 +37,8 @@ from .fills import TickSize
 
 TICK_SCHEMA = "growin.costs.tick_sizes/1"
 DEFAULT_TICK_TABLE_PATH = Path(__file__).parent / "schedules" / "nse_cash_tick_sizes.json"
+# Exchange Traded Funds other than Gold ETFs. Never use it for a Gold ETF: NSE sets those one by one.
+NON_GOLD_ETF_TICK_TABLE_PATH = Path(__file__).parent / "schedules" / "nse_cash_etf_tick_sizes.json"
 
 _VERSION_KEYS = (
     "version",
@@ -219,7 +224,7 @@ def resolve_tick_from_table(table: TickTable, *, session_date: date, band_refere
                         effective_to=version.effective_to,
                     )
         raise TickSizeUnavailable(
-            f"no tick table version covers {session_date.isoformat()}; the pre-2025-04-15 table is not encoded"
+            f"no tick table version covers {session_date.isoformat()}; that date has no sourced tick version (not guessed)"
         )
 
 
