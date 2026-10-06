@@ -17,11 +17,24 @@ BANNED_ROOTS = {
     BROKER_SDK, "alpaca", "gateway", "execution", "simulation", "routes", "httpx", "requests", "socket",
     "urllib", "subprocess", "random", "uuid", "time",
 }
-HEAVY_ROOTS = {"numpy", "sklearn"}
+HEAVY_ROOTS = {"numpy", "sklearn", "math", "statistics"}  # float maths: regime.py only
 BANNED_CALLS = {"now", "utcnow", "today", "fromtimestamp", "utcfromtimestamp"}
 FLOAT_ALLOWED = {"regime.py"}
 CLOCK_ALLOWED = {"__main__.py"}
 TICK_ADAPTER = "ticks.py"
+
+
+def _int_like(node: ast.AST) -> bool:
+    """An expression that is certainly an int: a literal, len(), int() or integer arithmetic on those."""
+    if isinstance(node, ast.Constant):
+        return isinstance(node.value, int) and not isinstance(node.value, bool)
+    if isinstance(node, ast.Call):
+        return isinstance(node.func, ast.Name) and node.func.id in {"len", "int"}
+    if isinstance(node, ast.UnaryOp):
+        return _int_like(node.operand)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.FloorDiv, ast.Mod, ast.Pow)):
+        return _int_like(node.left) and _int_like(node.right)
+    return False
 
 
 def scan_source(source: str, filename: str) -> list[str]:
@@ -45,6 +58,9 @@ def scan_source(source: str, filename: str) -> list[str]:
                 out.append(f"{filename}:{line}: {name} is allowed only in regime.py")
             if name in ("costs.ticks",) and filename != TICK_ADAPTER:
                 out.append(f"{filename}:{line}: costs.ticks may only be imported by ticks.py")
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div) and not heavy_ok:
+            if _int_like(node.left) and _int_like(node.right):
+                out.append(f"{filename}:{line}: int/int true division yields a float; use Decimal")
         if isinstance(node, ast.Constant) and isinstance(node.value, float) and not heavy_ok:
             out.append(f"{filename}:{line}: float literal outside regime.py")
         if isinstance(node, ast.Call):
@@ -83,6 +99,12 @@ def test_package_is_pure():
         ("import numpy as np", "portfolio.py", "only in regime.py"),
         ("from sklearn.mixture import GaussianMixture", "engine.py", "only in regime.py"),
         ("x = 0.5", "metrics.py", "float literal"),
+        ("import math", "metrics.py", "only in regime.py"),
+        ("from statistics import NormalDist", "report.py", "only in regime.py"),
+        ("x = 1 / 3", "hurdle.py", "int/int true division"),
+        ("x = len(a) / 2", "portfolio.py", "int/int true division"),
+        ("x = int(a) / len(b)", "portfolio.py", "int/int true division"),
+        ("x = (len(a) + 1) / 4", "engine.py", "int/int true division"),
         ("x = float('1')", "engine.py", "float()"),
         ("import datetime\nx = datetime.datetime.now()", "engine.py", ".now()"),
         ("import datetime\nx = datetime.date.today()", "report.py", ".today()"),
@@ -95,8 +117,13 @@ def test_planted_violation_is_caught(source, filename, fragment):
     assert found and any(fragment in item for item in found), found
 
 
+def test_decimal_division_is_not_flagged():
+    ok = "from decimal import Decimal\nx = Decimal(1) / 3\ny = total / len(items)\nz = a // b\nw = sum(v) / len(v)\n"
+    assert scan_source(ok, "metrics.py") == []
+
+
 def test_allowed_places_stay_allowed():
-    assert scan_source("import numpy as np\nx = 0.5\ny = float(1)", "regime.py") == []
+    assert scan_source("import numpy as np\nimport math\nx = 0.5\ny = float(1)\nz = 1 / 3", "regime.py") == []
     assert scan_source("import datetime\nx = datetime.datetime.now()", "__main__.py") == []
     assert scan_source("from costs.ticks import load_tick_table", "ticks.py") == []
 

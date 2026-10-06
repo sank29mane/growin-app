@@ -179,7 +179,7 @@ def test_the_holdout_is_spent_after_one_evaluation(tmp_path):
 def test_research_report_never_touches_the_holdout_sessions(tmp_path):
     inputs = study_inputs(tmp_path, sessions_n=780, holdout_sessions=125)
     study.register(inputs, hypothesis="h")
-    report = study.run_research(inputs)
+    report = study.run_research(inputs, expected_head=inputs.registry.head_hash())
     holdout_start = study.prepare(inputs).holdout.start
     assert report.run_window_end < holdout_start and all(u.test_end < holdout_start for u in report.units)
     assert inputs.registry.holdout_events() == ()
@@ -224,14 +224,14 @@ def test_a_tampered_coverage_report_refuses_before_any_evaluation(tmp_path):
     body["sessions"] = 999
     inputs.coverage_path.write_text(json.dumps(body))
     with pytest.raises(GateRefused) as err:
-        study.run_research(inputs)
+        study.run_research(inputs, expected_head=inputs.registry.head_hash())
     assert err.value.code == "report_tampered"
 
 
 def test_a_missing_registry_refuses_to_run(tmp_path):
     inputs = study_inputs(tmp_path)
     with pytest.raises(Exception, match="registry file is missing"):
-        study.run_research(inputs)
+        study.run_research(inputs, expected_head=inputs.registry.head_hash())
     with pytest.raises(Exception, match="registry file is missing"):
         study.run_holdout(inputs, expected_head="0" * 64)
 
@@ -265,6 +265,31 @@ def test_cli_refuses_a_missing_or_incomplete_config_with_exit_2(tmp_path, capsys
     partial.write_text(json.dumps({"private_dir": "x"}))
     assert cli.main(["holdout", "--config", str(partial)]) == 2
     assert "config_invalid" in capsys.readouterr().out
+
+
+def test_band_limits_come_from_the_previous_sessions_raw_close_not_the_fill_days(monkeypatch):
+    from strategy_india import engine
+
+    seen = []
+    real = engine.session_bar_for
+
+    def spy(bar, **kw):
+        sb = real(bar, **kw)
+        seen.append((bar, kw["previous_raw_close"], sb.price_band))
+        return sb
+
+    monkeypatch.setattr(engine, "session_bar_for", spy)
+    ctx = make_context(ROWS, HOLDOUT)
+    _segment(ctx)
+    assert len(seen) > 20
+    off_from_fill_day = 0
+    for bar, previous, band in seen:
+        assert previous == ctx.view.previous_bar(bar.anchor_isin, bar.session).raw_close
+        assert abs(band.lower - previous * Decimal("0.8")) < Decimal("0.2")  # 20 percent, widened by under a tick
+        assert abs(band.upper - previous * Decimal("1.2")) < Decimal("0.2")
+        if abs(band.lower - bar.raw_close * Decimal("0.8")) > Decimal("0.2"):
+            off_from_fill_day += 1
+    assert off_from_fill_day > 0, "a band built on the fill day's own close would have passed the tolerance above"
 
 
 def test_the_peek_guard_allows_reads_up_to_the_decision_date():

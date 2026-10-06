@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 from collections.abc import Mapping, Sequence
@@ -30,6 +31,8 @@ from .errors import HoldoutSpent, RegistryError, RegistryMismatch
 GENESIS = "0" * 64
 KIND_REGISTRATION = "registration"
 KIND_HOLDOUT_OPEN = "holdout_open"
+KIND_HOLDOUT_INVALID = "holdout_invalid"
+KIND_HOLDOUT_VERDICT = "holdout_verdict"
 
 HASH_FIELDS = (
     "params_sha256",
@@ -40,6 +43,7 @@ HASH_FIELDS = (
     "charge_schedule_sha256",
     "tick_table_sha256",
     "hurdle_map_sha256",
+    "dividend_events_sha256",
     "holdout_sha256",
     "holdout_criteria_sha256",
 )
@@ -94,6 +98,23 @@ def canonical_sha256(obj: Any) -> str:
 def criteria_hash(criteria: Mapping[str, Any]) -> str:
     """The ``holdout_criteria_sha256`` of a D-19 criteria mapping."""
     return canonical_sha256(dict(criteria))
+
+
+def durable_jsonl(path: Path) -> bytes:
+    """Read the newline-committed prefix, retaining records before a torn append."""
+    data = path.read_bytes()
+    if data and not data.endswith(b"\n"):
+        logging.getLogger(__name__).warning("Ignoring incomplete final line in %s", path)
+        data = data[:data.rfind(b"\n") + 1]
+    return data
+
+
+def trim_incomplete_tail(fd: int, path: Path) -> None:
+    """Discard only an uncommitted tail before the next append, under single-writer ownership."""
+    size = len(durable_jsonl(path))
+    if os.fstat(fd).st_size != size:
+        os.ftruncate(fd, size)
+        os.fsync(fd)
 
 
 @dataclass(frozen=True)
@@ -182,8 +203,8 @@ class Registry:
         if not self.path.exists():
             raise RegistryError("registry file is missing")
         try:
-            text = self.path.read_text(encoding="utf-8")
-        except OSError as exc:
+            text = durable_jsonl(self.path).decode("utf-8")
+        except (OSError, UnicodeError) as exc:
             raise RegistryError("registry file is unreadable") from exc
         entries: list[Entry] = []
         prev = GENESIS
@@ -197,12 +218,17 @@ class Registry:
                 raise RegistryError(f"registry line {number} is malformed") from exc
             if set(raw) != {"seq", "kind", "payload", "prev_hash", "entry_hash"}:
                 raise RegistryError(f"registry line {number} has unexpected keys")
+            if (type(entry.seq) is not int or not isinstance(entry.kind, str)
+                    or not isinstance(entry.payload, dict) or not isinstance(entry.prev_hash, str)
+                    or not isinstance(entry.entry_hash, str)):
+                raise RegistryError(f"registry line {number} has invalid field types")
             if entry.seq != number - 1:
                 raise RegistryError(f"registry line {number} breaks the sequence")
             if entry.prev_hash != prev:
                 raise RegistryError(f"registry line {number} breaks the hash chain")
             if _entry_hash(entry.seq, entry.kind, entry.payload, entry.prev_hash) != entry.entry_hash:
                 raise RegistryError(f"registry line {number} was edited")
+            self._validate_entry(entry, entries)
             entries.append(entry)
             prev = entry.entry_hash
         if expected_head is not None and prev != expected_head:
@@ -234,13 +260,66 @@ class Registry:
     def holdout_events(self) -> tuple[Entry, ...]:
         return tuple(entry for entry in self.entries() if entry.kind == KIND_HOLDOUT_OPEN)
 
+    def holdout_results(self) -> tuple[Entry, ...]:
+        """First final outcome per open; only an in-progress INVALID can be superseded."""
+        results: dict[str, Entry] = {}
+        for entry in self.entries():
+            if entry.kind == KIND_HOLDOUT_OPEN:
+                results[entry.entry_hash] = entry
+            elif entry.kind in (KIND_HOLDOUT_INVALID, KIND_HOLDOUT_VERDICT):
+                opened = entry.payload["holdout_open_event_hash"]
+                current = results[opened]
+                if current.kind == KIND_HOLDOUT_OPEN or (
+                    current.kind == KIND_HOLDOUT_INVALID and current.payload["reason"] == "in_progress"
+                ):
+                    results[opened] = entry
+        return tuple(results.values())
+
+    @staticmethod
+    def _validate_entry(entry: Entry, existing: Sequence[Entry]) -> None:
+        """Check semantic links as well as the enclosing chain digest."""
+        payload = entry.payload
+        if entry.kind == KIND_REGISTRATION:
+            validate_registration(payload)
+            return
+        if entry.kind not in (KIND_HOLDOUT_OPEN, KIND_HOLDOUT_INVALID, KIND_HOLDOUT_VERDICT):
+            raise RegistryError("unknown registry entry kind")
+        registrations = {e.entry_hash: e for e in existing if e.kind == KIND_REGISTRATION}
+        registration = registrations.get(payload.get("registration_entry_hash")) if isinstance(
+            payload.get("registration_entry_hash"), str) else None
+        if registration is None:
+            raise RegistryError("holdout record must link to an existing registration")
+        if entry.kind == KIND_HOLDOUT_OPEN:
+            if payload.get("holdout_range") != registration.payload["holdout_range"]:
+                raise RegistryError("holdout open range differs from its registration")
+            return
+        opens = {e.entry_hash: e for e in existing if e.kind == KIND_HOLDOUT_OPEN}
+        opened = opens.get(payload.get("holdout_open_event_hash")) if isinstance(
+            payload.get("holdout_open_event_hash"), str) else None
+        if opened is None or opened.payload["registration_entry_hash"] != registration.entry_hash:
+            raise RegistryError("holdout outcome must link to the matching registration and open")
+        if entry.kind == KIND_HOLDOUT_INVALID:
+            if not isinstance(payload.get("reason"), str) or not payload["reason"]:
+                raise RegistryError("holdout INVALID must have a reason")
+        else:
+            verdict = payload.get("verdict")
+            body = payload.get("verdict_payload")
+            if (verdict not in ("PASS", "FAIL", "INCONCLUSIVE") or not isinstance(body, dict)
+                    or body.get("verdict") != verdict
+                    or body.get("criteria_sha256") != registration.payload["holdout_criteria_sha256"]
+                    or payload.get("verdict_sha256") != canonical_sha256(body)):
+                raise RegistryError("holdout verdict payload or digest is invalid")
+
     # ---- appending -----------------------------------------------------------
     def _append(self, kind: str, payload: Mapping[str, Any]) -> Entry:
+        if not isinstance(payload, Mapping):
+            raise RegistryError("registry payload must be a mapping")
         existing = self.entries() if self.path.exists() else ()
         prev = existing[-1].entry_hash if existing else GENESIS
         seq = len(existing)
         body = json.loads(canonical_json(dict(payload)))
         entry = Entry(seq, kind, body, prev, _entry_hash(seq, kind, body, prev))
+        self._validate_entry(entry, existing)
         line = canonical_json(
             {"seq": entry.seq, "kind": entry.kind, "payload": entry.payload, "prev_hash": entry.prev_hash,
              "entry_hash": entry.entry_hash}
@@ -248,6 +327,7 @@ class Registry:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         try:
+            trim_incomplete_tail(fd, self.path)
             data = memoryview((line + "\n").encode("utf-8"))
             while data:
                 data = data[os.write(fd, data):]
@@ -270,6 +350,18 @@ class Registry:
 
     def append_holdout_open(self, payload: Mapping[str, Any]) -> Entry:
         return self._append(KIND_HOLDOUT_OPEN, payload)
+
+    def append_holdout_verdict(self, payload: Mapping[str, Any]) -> Entry:
+        """Durably record PASS, FAIL or INCONCLUSIVE before exporting a report."""
+        return self._append(KIND_HOLDOUT_VERDICT, payload)
+
+    def append_holdout_invalid(self, payload: Mapping[str, Any]) -> Entry:
+        """A typed INVALID verdict for an opened holdout whose evaluation failed."""
+        return self._append(KIND_HOLDOUT_INVALID, payload)
+
+    def invalid_events(self) -> tuple[Entry, ...]:
+        """Effective INVALID records, excluding ones superseded by a later verdict."""
+        return tuple(entry for entry in self.holdout_results() if entry.kind == KIND_HOLDOUT_INVALID)
 
 
 def spent_ranges(entries: Sequence[Entry]) -> list[tuple[date, date]]:

@@ -160,6 +160,57 @@ def test_published_dataset_directory_loads_through_verify_dataset(tmp_path):
         load_dataset_rows(tmp_path / "exports" / digest, expected_dataset_sha256=sha("other"))
 
 
+def _published(tmp_path, rows, events):
+    from pilot_data.core import standard_caveats as caveats
+    from pilot_data.dataset import DatasetManifest, DividendAmountUnknownEvent, _export, dataset_hash
+
+    from inspect import signature
+
+    rows = sorted(rows, key=lambda r: (r.anchor_isin, r.trade_date))
+    event_map = {a: tuple(DividendAmountUnknownEvent(event_id=i, ex_date=d) for i, d in evs)
+                 for a, evs in events.items()}
+    # #542 is approved but not merged into this branch yet. Both APIs are exercised.
+    kwargs = {"events": event_map} if "events" in signature(dataset_hash).parameters else {}
+    digest = dataset_hash(rows, **kwargs)
+    manifest = DatasetManifest(
+        workspace="india", caveats=caveats(), dataset_sha256=digest, row_count=len(rows), anchor_count=2,
+        window_start=rows[0].trade_date, window_end=rows[-1].trade_date, as_of=rows[-1].trade_date,
+        crosscheck_run_id="r", report_sha256=sha("r"), targets_sha256=sha("t"), lineage_hashes={}, factor_set_hashes={},
+        spans={}, quarantine_totals={}, rawness_counts={}, created_at_utc="2026-10-01T00:00:00+00:00",
+        dividend_amount_unknown_events=event_map,
+    )
+    _export(rows, manifest, tmp_path / "exports", "india")
+    return tmp_path / "exports" / digest
+
+
+def test_dividend_events_are_built_from_the_manifest_and_cross_checked_against_row_tags(tmp_path):
+    from pilot_data.core import PilotDataError
+
+    from strategy_india.data import events_from_manifest
+
+    sessions = weekday_sessions(SESSION_START, 12)
+    ex = sessions[6]
+    base = make_rows(sessions, default_names(2))
+    tagged = [r.model_copy(update={"dividend_amount_unknown": r.anchor_isin == "INE000A01000" and r.trade_date <= ex,
+                                   "dividend_amount_unknown_ex_date": r.anchor_isin == "INE000A01000" and r.trade_date == ex})
+              for r in base]
+    path = _published(tmp_path, tagged, {"INE000A01000": [("EV1", ex)]})
+    manifest, rows = load_dataset_rows(path)
+    events = events_from_manifest(manifest)
+    assert [(e.anchor_isin, e.event_id, e.ex_date) for e in events.all()] == [("INE000A01000", "EV1", ex)]
+    assert events.ex_dates("INE000A01000") == frozenset({ex}) and events.sealed_sha256() != DividendEvents().sealed_sha256()
+    # a dataset with no tagged events gives an empty list, which seals as empty
+    plain = _published(tmp_path / "plain", base, {})
+    assert not events_from_manifest(load_dataset_rows(plain)[0])
+    # a manifest event with no tagged row, or a flagged ex-date the manifest does not list, is refused by 59 verify
+    with pytest.raises(PilotDataError):
+        load_dataset_rows(_published(tmp_path / "bad1", base, {"INE000A01000": [("EV1", ex)]}))
+    other = [r.model_copy(update={"dividend_amount_unknown_ex_date": r.anchor_isin == "INE000A01000" and r.trade_date == ex})
+             for r in base]
+    with pytest.raises(PilotDataError):
+        load_dataset_rows(_published(tmp_path / "bad2", other, {}))
+
+
 # ---- AC-7 ----------------------------------------------------------------------------------------
 def _universe_result(as_of: date, eligible: set[str], names, smallcap=None) -> UniverseResult:
     decisions = tuple(
@@ -239,3 +290,77 @@ def test_small_cap_exposure_stays_within_thirty_percent():
                             slope=Decimal("0.01"), regime_cash=None, mode="base", fold="x")
     assert max(v for _, v in free.exposure) > Decimal("0.6")
     assert free.smallcap_rejections == 0
+
+
+def test_a_valid_dataset_with_a_different_hash_than_the_registered_one_is_refused_before_any_evaluation(tmp_path):
+    from strategy_india import study
+    from strategy_india.errors import DataError, StrategyIndiaError
+    from strategy_india.registry import Registry
+
+    from test_strategy_india_support import registration_record
+
+    sessions = weekday_sessions(SESSION_START, 12)
+    ex = sessions[6]
+    base = make_rows(sessions, default_names(2))
+    tagged = [r.model_copy(update={"dividend_amount_unknown": r.anchor_isin == "INE000A01000" and r.trade_date <= ex,
+                                   "dividend_amount_unknown_ex_date": r.anchor_isin == "INE000A01000" and r.trade_date == ex})
+              for r in base]
+    registered_dir = _published(tmp_path / "a", tagged, {"INE000A01000": [("EV1", ex)]})
+    # the same data edited and re-hashed: valid in itself, published in a new directory under a new hash
+    shifted = [r.model_copy(update={"raw_volume": r.raw_volume + 1}) if r.trade_date == sessions[2] else r for r in tagged]
+    other_dir = _published(tmp_path / "b", shifted, {"INE000A01000": [("EV1", ex)]})
+    assert registered_dir.name != other_dir.name
+    manifest, _ = load_dataset_rows(registered_dir)  # both verify on their own
+    load_dataset_rows(other_dir)
+    registry = Registry(tmp_path / "private" / "registry.jsonl")
+    registry.register(registration_record(dataset_sha256=manifest.dataset_sha256))
+    config = {"registry": str(registry.path), "dataset_dir": str(registered_dir)}
+    assert study.load_bound_dataset(config, bind_to_registration=True)[0].dataset_sha256 == manifest.dataset_sha256
+    with pytest.raises(DataError, match="dataset_sha256"):
+        study.load_bound_dataset({**config, "dataset_dir": str(other_dir)}, bind_to_registration=True)
+    with pytest.raises(StrategyIndiaError) as err:  # the configured hash must agree with the registered one as well
+        study.load_bound_dataset({**config, "dataset_sha256": sha("x")}, bind_to_registration=True)
+    assert err.value.code == "dataset_mismatch"
+    # a first registration has nothing registered, so it can load a new dataset
+    assert study.load_bound_dataset({**config, "dataset_dir": str(other_dir)}, bind_to_registration=False)[0].dataset_sha256 \
+        == load_dataset_rows(other_dir)[0].dataset_sha256
+    with pytest.raises(DataError):  # an explicit hash in the config is enforced even for a registration
+        study.load_bound_dataset({**config, "dataset_dir": str(other_dir), "dataset_sha256": manifest.dataset_sha256},
+                                 bind_to_registration=False)
+
+
+@pytest.mark.parametrize("event_id, expected", [
+    (None, "c7f4f443361b25c792bc60db26915f7d42149ba286a7c8a380d2292f9b47752c"),
+    ("EV1", "449c92b11a31d10bb8dc6b43a242b2694b3b0ce159072ee02acd9bd5cb4df8b5"),
+    ("EV2", "2787d414fd5d54328b5f7f6671864f8e7634fd87ea12d2a609bed0d9d5ce3624"),
+])
+def test_dataset_digest_matches_golden_hashes_from_approved_pr542(event_id, expected):
+    # Golden values re-derived from main 101d3b4's event-bound dataset_hash.
+    from strategy_india.data import DividendUnknownEvent, dataset_digest
+
+    rows = make_rows(weekday_sessions(SESSION_START, 5), default_names(2))
+    events = DividendEvents([] if event_id is None else [
+        DividendUnknownEvent("INE000A01000", event_id, date(2025, 4, 29))
+    ])
+    assert dataset_digest(rows, events) == expected
+    assert dataset_digest(reversed(rows), events) == expected
+
+
+@pytest.mark.parametrize("quarantined", [False, True])
+def test_d20_row_tags_are_exact_through_last_ex_date_including_quarantined_rows(quarantined):
+    from strategy_india.data import DividendUnknownEvent, check_events_against_rows
+    from strategy_india.errors import DataError
+    from test_strategy_india_support import tag_rows
+
+    sessions = weekday_sessions(SESSION_START, 5)
+    events = DividendEvents([DividendUnknownEvent("INE000A01000", "EV1", sessions[1]),
+                             DividendUnknownEvent("INE000A01000", "EV2", sessions[3])])
+    rows = tag_rows(make_rows(sessions, default_names(2)), events)
+    rows = [row.model_copy(update={"adjusted_quarantined": quarantined}) for row in rows]
+    check_events_against_rows(events, rows)
+    for row in rows:
+        for field in ("dividend_amount_unknown", "dividend_amount_unknown_ex_date"):
+            wrong = row.model_copy(update={field: not getattr(row, field)})
+            with pytest.raises(DataError) as caught:
+                check_events_against_rows(events, [wrong])
+            assert caught.value.code == "events_mismatch"

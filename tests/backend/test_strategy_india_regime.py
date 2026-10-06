@@ -139,6 +139,22 @@ def test_same_inputs_give_identical_model_hashes_and_records():
     assert {"k", "seed", "model_sha256"} <= set(record) and record["seed"] == 11
 
 
+def test_regime_flags_use_the_train_scaler_and_never_refit_on_the_rows_being_scored():
+    model = fit_regime(TWO, spec=SPEC, seed=5)
+    stress_only = features([(STRESS, 25)], seed=9)
+    raw = np.array([[float(r.volatility), float(r.drawdown), float(r.breadth)] for r in stress_only])
+    by_train = model.gmm.predict_proba((raw - model.scaler_mean) / model.scaler_scale)[:, model.cash_component]
+    assert np.allclose(model.cash_posterior(stress_only), by_train)
+    refit_on_test = model.gmm.predict_proba((raw - raw.mean(axis=0)) / np.where(raw.std(axis=0) > 0, raw.std(axis=0), 1.0))[:, model.cash_component]
+    assert by_train.min() > 0.95 and refit_on_test.min() < 0.05 and refit_on_test.mean() < 0.8, "the two scalers disagree, so this test can tell them apart"
+    flags = regime_flags(model, stress_only, replace_hysteresis(SPEC, 1))
+    assert all(list(flags.values())[1:])
+    shifted = [replace(r, volatility=r.volatility * 3) for r in stress_only]  # scoring rows never feed back into the scaler
+    mean_before = model.scaler_mean.copy()
+    regime_flags(model, shifted, SPEC)
+    assert np.array_equal(model.scaler_mean, mean_before)
+
+
 def _engine_setup():
     sessions = weekday_sessions(SESSION_START, 330)
     rows = make_rows(sessions, default_names(8) + etf_names())

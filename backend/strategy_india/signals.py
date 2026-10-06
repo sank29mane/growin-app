@@ -10,7 +10,7 @@ supplied):
   (previous close to ex-date open) counts as zero in signal and volatility
   returns.
 * ``sens2pct``: adjusted prices before each ex-date are multiplied by the
-  sensitivity factor (0.98) and the gap is not zeroed, which is the "assume a 2%
+  sealed sensitivity factor (D-19 criteria, 0.98 in the proposal; never a literal here) and the gap is not zeroed, which is the "assume a 2%
   dividend" alternative.
 
 With no events, every mode is the same plain adjusted-price return series.
@@ -33,7 +33,6 @@ from .params import StrategyParams
 
 MODE_BASE = "base"
 MODE_SENSITIVITY = "sens2pct"
-SENSITIVITY_FACTOR = Decimal("0.98")
 _CTX = decimal.Context(prec=40, rounding=decimal.ROUND_HALF_EVEN)
 _ONE = Decimal(1)
 _ZERO = Decimal(0)
@@ -64,12 +63,13 @@ class _Series:
             self.ps[i] = self.ps[i - 1] + self.price[i]
 
 
-def _factor_for(session: date, events: Sequence[date]) -> Decimal:
+def _factor_for(session: date, events: Sequence[date], factor: Decimal) -> Decimal:
     count = len(events) - bisect.bisect_right(events, session)
-    return SENSITIVITY_FACTOR ** count if count else _ONE
+    return factor**count if count else _ONE
 
 
-def _returns(bars: tuple[Bar, ...], calendar_index: Mapping[date, int], ex_dates: frozenset[date], mode: str) -> list[Decimal | None]:
+def _returns(bars: tuple[Bar, ...], calendar_index: Mapping[date, int], ex_dates: frozenset[date], mode: str,
+             factor: Decimal | None) -> list[Decimal | None]:
     events = sorted(ex_dates)
     out: list[Decimal | None] = [None] * len(bars)
     for i in range(1, len(bars)):
@@ -79,7 +79,8 @@ def _returns(bars: tuple[Bar, ...], calendar_index: Mapping[date, int], ex_dates
         if calendar_index[cur.session] - calendar_index[prev.session] != 1:
             continue
         if mode == MODE_SENSITIVITY and events:
-            out[i] = cur.adj_close * _factor_for(cur.session, events) / (prev.adj_close * _factor_for(prev.session, events)) - _ONE
+            assert factor is not None
+            out[i] = cur.adj_close * _factor_for(cur.session, events, factor) / (prev.adj_close * _factor_for(prev.session, events, factor)) - _ONE
         elif mode == MODE_BASE and cur.session in ex_dates:
             if cur.adj_open is None or cur.adj_open <= 0:
                 continue
@@ -100,7 +101,10 @@ class FeatureRow:
 class SignalTable:
     """Precomputed signal state for one view, parameter set and dividend mode."""
 
-    def __init__(self, view: DatasetView, params: StrategyParams, events: DividendEvents, *, mode: str = MODE_BASE) -> None:
+    def __init__(self, view: DatasetView, params: StrategyParams, events: DividendEvents, *, mode: str = MODE_BASE,
+                 sensitivity_factor: Decimal | None = None) -> None:
+        if mode == MODE_SENSITIVITY and (sensitivity_factor is None or not _ZERO < sensitivity_factor < _ONE):
+            raise ValueError("the sensitivity run needs the sealed factor, strictly between 0 and 1")
         self.params = params
         self.mode = mode
         sessions = view.sessions()
@@ -111,7 +115,7 @@ class SignalTable:
         with decimal.localcontext(_CTX):
             for anchor in view.anchors():
                 bars = view.series(anchor)
-                self._series[anchor] = _Series(bars, _returns(bars, cal_index, events.ex_dates(anchor), mode))
+                self._series[anchor] = _Series(bars, _returns(bars, cal_index, events.ex_dates(anchor), mode, sensitivity_factor))
 
     # ---- per-name -------------------------------------------------------------
     def _locate(self, anchor: str, day: date) -> tuple[_Series, int] | None:

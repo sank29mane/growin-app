@@ -25,7 +25,6 @@ from strategy_india.holdout import (
     HoldoutRange,
     check_gate_scenario,
     criteria_sha256,
-    default_criteria,
     evaluate_verdict,
     holdout_digest,
     holdout_range_for,
@@ -37,6 +36,7 @@ from strategy_india.signals import SignalTable
 from strategy_india.data import DividendEvents
 
 from test_strategy_india_support import (
+    default_criteria,
     ETF_ISINS,
     SESSION_START,
     default_names,

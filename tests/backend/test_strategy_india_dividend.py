@@ -13,7 +13,7 @@ from strategy_india import study
 from strategy_india.data import DatasetView, DividendEvents, DividendUnknownEvent
 from strategy_india.engine import simulate_segment
 from strategy_india.holdout import HoldoutRange
-from strategy_india.signals import MODE_BASE, MODE_SENSITIVITY, SENSITIVITY_FACTOR, SignalTable
+from strategy_india.signals import MODE_BASE, MODE_SENSITIVITY, SignalTable
 
 from test_strategy_india_portfolio import new_book, order, run, sbar, with_position, D
 from test_strategy_india_support import (
@@ -33,8 +33,9 @@ SESSIONS = weekday_sessions(SESSION_START, 150)
 ANCHOR = "INE000A01000"
 EX = SESSIONS[100]
 GAP = {(ANCHOR, EX): Decimal("-0.15")}
-EVENTS = DividendEvents([DividendUnknownEvent(ANCHOR, EX)])
+EVENTS = DividendEvents([DividendUnknownEvent(ANCHOR, "EV1", EX)])
 TOL = Decimal("1e-20")
+FACTOR = Decimal("0.98")  # the sealed D-19 factor in the example criteria fixture
 
 
 def _view(rows):
@@ -67,9 +68,8 @@ def test_pre_ex_date_bars_give_signals_and_the_ex_date_gap_is_zero_in_signal_ret
 def test_the_sensitivity_run_assumes_a_two_percent_dividend_on_adjusted_prices_before_the_ex_date():
     rows = make_rows(SESSIONS, default_names(5), ex_gaps=GAP)
     by_day = _bars(rows)
-    sens = SignalTable(_view(rows), params(), EVENTS, mode=MODE_SENSITIVITY)
-    expected = by_day[EX].adj_close / (SENSITIVITY_FACTOR * by_day[SESSIONS[99]].adj_close) - 1
-    assert SENSITIVITY_FACTOR == Decimal("0.98")
+    sens = SignalTable(_view(rows), params(), EVENTS, mode=MODE_SENSITIVITY, sensitivity_factor=FACTOR)
+    expected = by_day[EX].adj_close / (FACTOR * by_day[SESSIONS[99]].adj_close) - 1
     assert abs(sens.last_gap_neutral_return(ANCHOR, EX) - expected) < TOL
     plain_step = _bars(rows)[SESSIONS[50]].adj_close / by_day[SESSIONS[49]].adj_close - 1
     assert abs(sens.last_gap_neutral_return(ANCHOR, SESSIONS[50]) - plain_step) < TOL  # before the ex-date nothing moves
@@ -139,7 +139,7 @@ def test_engine_does_not_stop_out_a_name_on_its_ex_date_gap_but_does_without_the
         return hit[0].exit_reason if hit else None
 
     assert exit_reason(DividendEvents()) == "stop"
-    tagged = exit_reason(DividendEvents([DividendUnknownEvent(trade.anchor_isin, ex)]))
+    tagged = exit_reason(DividendEvents([DividendUnknownEvent(trade.anchor_isin, "EV1", ex)]))
     assert tagged != "stop"
 
 
@@ -148,11 +148,12 @@ def test_report_carries_the_sensitivity_rerun_beside_the_base_run_and_lists_the_
     sessions = weekday_sessions(SESSION_START, 400)
     ex = sessions[250]  # inside the last fold's test window
     gaps = {(ANCHOR, ex): Decimal("-0.06")}
-    inputs = study_inputs(tmp_path, ex_gaps=gaps, events=DividendEvents([DividendUnknownEvent(ANCHOR, ex)]))
+    inputs = study_inputs(tmp_path, ex_gaps=gaps, events=DividendEvents([DividendUnknownEvent(ANCHOR, "EV1", ex)]))
     study.register(inputs, hypothesis="h")
-    report = study.run_research(inputs)
+    report = study.run_research(inputs, expected_head=inputs.registry.head_hash())
     assert report.dividend.sensitivity_factor == Decimal("0.98") and report.dividend.sensitivity_run_present
-    assert report.dividend.events_tagged_dividend_amount_unknown == [{"anchor_isin": ANCHOR, "ex_date": ex.isoformat()}]
+    assert report.dividend.events_tagged_dividend_amount_unknown == [
+        {"anchor_isin": ANCHOR, "event_id": "EV1", "ex_date": ex.isoformat()}]
     for unit in report.units:
         assert unit.dividend_sensitivity is not None and unit.dividend_sensitivity.mode == "sens2pct"
         assert unit.scenarios["pessimistic"].mode == "base"
@@ -163,6 +164,6 @@ def test_report_carries_the_sensitivity_rerun_beside_the_base_run_and_lists_the_
 def test_without_tagged_events_the_report_has_no_sensitivity_run(tmp_path):
     inputs = study_inputs(tmp_path)
     study.register(inputs, hypothesis="h")
-    report = study.run_research(inputs)
+    report = study.run_research(inputs, expected_head=inputs.registry.head_hash())
     assert not report.dividend.sensitivity_run_present and report.dividend.events_tagged_dividend_amount_unknown == []
     assert all(unit.dividend_sensitivity is None for unit in report.units)

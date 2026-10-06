@@ -19,6 +19,9 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
+from costs.core import CostModelError
+from pilot_data.core import PilotDataError
+
 from .errors import GateRefused, StrategyIndiaError
 from .gate import load_coverage_report
 
@@ -29,7 +32,7 @@ def _print(payload: dict) -> None:
 
 def _check_gate(args: argparse.Namespace) -> int:
     result = load_coverage_report(
-        args.coverage_report, run_start=args.run_start, run_end=args.run_end,
+        args.coverage_report, run_start=args.run_start, run_end=args.run_end, targets_sha256=args.targets_sha256,
         expected_report_sha256=args.expected_report_sha256, expected_file_sha256=args.expected_file_sha256,
     )
     _print({"gate": "open", "report_sha256": result.report_sha256, "file_sha256": result.file_sha256,
@@ -41,6 +44,8 @@ def _study_command(args: argparse.Namespace) -> int:
     from . import study  # imported late: pulls in numpy and scikit-learn
 
     config = study.load_config(args.config)
+    if getattr(args, "registry_head", None):
+        config["registry_head_sha256"] = args.registry_head
     if args.command == "register":
         summary = study.cli_register(config)
     elif args.command == "run":
@@ -58,11 +63,13 @@ def build_parser() -> argparse.ArgumentParser:
     gate.add_argument("--coverage-report", required=True, type=Path)
     gate.add_argument("--run-start", required=True, type=date.fromisoformat)
     gate.add_argument("--run-end", required=True, type=date.fromisoformat)
+    gate.add_argument("--targets-sha256", required=True, help="59 TargetUniverseResult.target_sha256")
     gate.add_argument("--expected-report-sha256")
     gate.add_argument("--expected-file-sha256")
     for name in ("register", "run", "holdout"):
         cmd = sub.add_parser(name)
         cmd.add_argument("--config", required=True, type=Path)
+        cmd.add_argument("--registry-head", help="the pinned registry head sha256 (overrides or confirms holdout_refs)")
     return parser
 
 
@@ -76,6 +83,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         _print({"refused": exc.code, "error": str(exc)})
         return exc.exit_code
     except StrategyIndiaError as exc:
+        _print({"refused": exc.code, "error": str(exc)})
+        return 2
+    except CostModelError as exc:  # a 60 input error (for example a non-positive price) is a typed refusal too
+        _print({"refused": "cost_model_error", "error": str(exc)})
+        return 2
+    except PilotDataError as exc:
         _print({"refused": exc.code, "error": str(exc)})
         return 2
 

@@ -2,24 +2,37 @@
 
 * ``HoldoutRange`` is the most recent ~250 sessions of the 59 window. Its range
   and hash are registered before development.
-* ``D19_TEMPLATE`` holds the PROPOSED criteria as data. A registration seals a
-  copy and its ``holdout_criteria_sha256``. Changing a number later is a
-  one-line edit of the template plus a new registration. No verdict logic
-  carries a literal threshold.
+* The D-19 criteria VALUES never live in tracked code. They are read from a private
+  file by path plus sha256 (``load_criteria_file``; the expected place is
+  ``private/india/holdout_criteria.json``, listed with its hash in the operator's
+  config, consistent with 58). A registration seals a copy and its
+  ``holdout_criteria_sha256``. Tracked code holds only ``CRITERIA_SCHEMA`` (key
+  names and types) and the verdict logic, which carries no literal threshold.
+  A tracked EXAMPLE file with the proposed numbers lives under
+  ``tests/backend/fixtures/strategy_india/`` and is a fixture, not a default.
 * ``open_holdout`` is the only way to obtain a ``HoldoutGrant``. It refuses a
   missing or changed criteria set, a pinned-head mismatch and a second open,
   and it logs the open event in the registry before any holdout data is read.
+Threat model: the registry, spent-holdouts ledger and head file protect an
+honest but fallible operator or agent from accidental reuse and crashes. They
+do not protect against deliberate editing of several private files on the same
+machine. The external anchor covers that case: after an open, the operator
+records the post-open head in Phase 58 ``holdout_refs``, and the orchestrator
+records its hash in the phase SUMMARY. The CLI prints this instruction.
+
 * ``evaluate_verdict`` returns PASS, FAIL or INCONCLUSIVE. INCONCLUSIVE counts
   as not passed and spends the holdout like any other outcome.
 """
 
 from __future__ import annotations
 
-import copy
+import hashlib
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .errors import HoldoutSpent, HoldoutViolation, RegistryError, StrategyIndiaError
@@ -31,30 +44,75 @@ INCONCLUSIVE = "INCONCLUSIVE"
 
 HOLDOUT_SESSIONS = 250
 
-# PROPOSED (D-19). The operator has not confirmed these values. Edit a value here,
-# then register again: the sealed copy in every earlier registration stays as it was.
-D19_TEMPLATE: dict[str, Any] = {
-    "version": "d19-proposed-1",
-    "status": "PROPOSED",
-    "gate_scenario": "phase62_gate",
-    "gate_k_ticks": 3,
-    "benchmark": "liquid_etf_buy_and_hold_one_round_trip",
-    "require_net_return_above_benchmark": True,
-    "max_drawdown_floor": "-0.15",
-    "flatten_event_fails": True,
-    "max_annualised_swaps": "65",
-    "annualisation_sessions": 250,
-    "exclude_first_build": True,
-    "missing_evidence": "inconclusive",
-    "dividend_sensitivity_factor": "0.98",
-    "dividend_sensitivity_flip": "inconclusive",
-    "one_shot": True,
+# Key names and value types only. No threshold appears here.
+CRITERIA_SCHEMA: dict[str, type] = {
+    "version": str,
+    "status": str,
+    "gate_scenario": str,
+    "gate_k_ticks": int,
+    "benchmark": str,
+    "require_net_return_above_benchmark": bool,
+    "max_drawdown_floor": str,
+    "flatten_event_fails": bool,
+    "max_annualised_swaps": str,
+    "annualisation_sessions": int,
+    "exclude_first_build": bool,
+    "missing_evidence": str,
+    "dividend_sensitivity_factor": str,
+    "dividend_sensitivity_flip": str,
+    "one_shot": bool,
 }
+CRITERIA_FILE_NAME = "holdout_criteria.json"  # under private/india/
 
 
-def default_criteria() -> dict[str, Any]:
-    """A fresh copy of the PROPOSED D-19 template."""
-    return copy.deepcopy(D19_TEMPLATE)
+def parse_criteria(raw: Any) -> dict[str, Any]:
+    """Strict shape check of a criteria mapping: exact keys, exact types, decimal strings parse."""
+    if not isinstance(raw, dict):
+        raise RegistryError("D-19 criteria must be a JSON object")
+    unknown = sorted(set(raw) - set(CRITERIA_SCHEMA))
+    missing = sorted(set(CRITERIA_SCHEMA) - set(raw))
+    if unknown or missing:
+        raise RegistryError(f"D-19 criteria keys differ from the schema (unknown {unknown}, missing {missing})")
+    for key, kind in CRITERIA_SCHEMA.items():
+        value = raw[key]
+        if isinstance(value, bool) != (kind is bool) or not isinstance(value, kind):
+            raise RegistryError(f"D-19 criteria {key} must be {kind.__name__}")
+    for key in ("max_drawdown_floor", "max_annualised_swaps", "dividend_sensitivity_factor"):
+        try:
+            value = Decimal(raw[key])
+            if not value.is_finite():
+                raise InvalidOperation
+        except InvalidOperation:
+            raise RegistryError(f"D-19 criteria {key} is not a decimal string") from None
+    if not Decimal(0) < Decimal(raw["dividend_sensitivity_factor"]) < Decimal(1):
+        raise RegistryError("D-19 criteria dividend_sensitivity_factor must lie between 0 and 1")
+    check_supported(raw)  # the verdict logic must be able to honour every policy value, or nothing can be sealed
+    return dict(raw)
+
+
+def load_criteria_file(private_dir: Path, relative: str, expected_sha256: str | None) -> dict[str, Any]:
+    """Load criteria by path plus sha256 from the private directory. Absent, unhashed or changed refuses."""
+    if not relative or expected_sha256 is None:
+        raise RegistryError("D-19 criteria file reference (path and sha256) is absent; the holdout stays sealed")
+    posix = PurePosixPath(relative)
+    if posix.is_absolute() or ".." in posix.parts or "\\" in relative:
+        raise RegistryError("D-19 criteria path must be relative and stay inside the private directory")
+    path = Path(private_dir) / posix
+    if path.is_symlink() or not path.is_file():
+        raise RegistryError("D-19 criteria file is missing; the holdout stays sealed")
+    raw = path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != expected_sha256:
+        raise RegistryError("D-19 criteria file hash differs from its reference; the holdout stays sealed")
+    try:
+        return parse_criteria(json.loads(raw.decode("utf-8"), parse_float=_no_float))
+    except ValueError as exc:
+        if isinstance(exc, StrategyIndiaError):
+            raise
+        raise RegistryError("D-19 criteria file is not valid JSON") from exc
+
+
+def _no_float(token: str) -> Any:
+    raise RegistryError(f"D-19 criteria hold no bare floats ({token}); write numerics as strings")
 
 
 def criteria_sha256(criteria: Mapping[str, Any]) -> str:
@@ -155,6 +213,11 @@ def open_holdout(
         "logged_at": logged_at,
     }
     event = registry.append_holdout_open(payload)
+    # _append fsyncs this provisional outcome before a grant can expose any data.
+    registry.append_holdout_invalid({
+        "holdout_open_event_hash": event.entry_hash, "registration_entry_hash": reg.entry_hash,
+        "reason": "in_progress",
+    })
     return HoldoutGrant(reg.entry_hash, event.entry_hash, holdout, payload["criteria_sha256"], _ISSUER)
 
 
@@ -208,12 +271,39 @@ def _breaches(criteria: Mapping[str, Any], ev: HoldoutEvidence) -> list[str]:
 
 
 def check_supported(criteria: Mapping[str, Any]) -> None:
-    """The verdict logic implements one policy for missing evidence and flips. Refuse anything else."""
+    """Refuse any criteria the verdict logic cannot honour. Called at parse, at registration and at the
+    holdout pre-flight, so an unsupported value can never be discovered after the holdout is spent."""
+
+    def bad(message: str) -> StrategyIndiaError:
+        return StrategyIndiaError(f"criteria {message}", code="criteria_unsupported")
+
     for key in ("missing_evidence", "dividend_sensitivity_flip"):
         if criteria.get(key) != "inconclusive":
-            raise StrategyIndiaError(f"criteria {key} must be 'inconclusive'; no other policy is implemented")
+            raise bad(f"{key} must be 'inconclusive'; no other policy is implemented")
     if criteria.get("one_shot") is not True:
-        raise StrategyIndiaError("criteria one_shot must be true")
+        raise bad("one_shot must be true")
+    if criteria.get("exclude_first_build") is not True:
+        raise bad("exclude_first_build must be true; the first build is excluded structurally")
+    if criteria.get("gate_scenario") != "phase62_gate":
+        raise bad("gate_scenario must be phase62_gate")
+    if criteria.get("benchmark") != "liquid_etf_buy_and_hold_one_round_trip":
+        raise bad("benchmark must be liquid_etf_buy_and_hold_one_round_trip")
+    sessions = criteria.get("annualisation_sessions")
+    if isinstance(sessions, bool) or not isinstance(sessions, int) or sessions <= 0:
+        raise bad("annualisation_sessions must be a positive int (zero would hide every swap)")
+    k = criteria.get("gate_k_ticks")
+    if isinstance(k, bool) or not isinstance(k, int) or k < 1:
+        raise bad("gate_k_ticks must be an int of at least 1")
+    try:
+        floor, swaps = Decimal(criteria["max_drawdown_floor"]), Decimal(criteria["max_annualised_swaps"])
+    except (KeyError, InvalidOperation, TypeError):
+        raise bad("max_drawdown_floor and max_annualised_swaps must be decimal strings") from None
+    if not floor.is_finite() or not swaps.is_finite():
+        raise bad("decimal criteria must be finite")
+    if not Decimal(-1) < floor < Decimal(0):
+        raise bad("max_drawdown_floor must lie between -1 and 0")
+    if swaps < 0:
+        raise bad("max_annualised_swaps must not be negative")
 
 
 def check_gate_scenario(criteria: Mapping[str, Any], *, k_ticks: int, phase62_gate: bool) -> None:

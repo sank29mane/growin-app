@@ -109,7 +109,7 @@ def test_tri_loads_only_by_path_and_matching_sha256(tmp_path):
 def test_tri_unavailable_never_substitutes_a_price_index(tmp_path):
     inputs = study_inputs(tmp_path, tri=(tmp_path / "nope.csv", "0" * 64))
     study.register(inputs, hypothesis="h")
-    report = study.run_research(inputs)
+    report = study.run_research(inputs, expected_head=inputs.registry.head_hash())
     assert report.benchmark.tri_label == "TRI unavailable" and not report.benchmark.tri_available
     assert report.benchmark.tri_sha256 is None
     assert all(unit.excess_vs_tri is None for unit in report.units)  # no substitute number appears
@@ -122,7 +122,7 @@ def test_written_report_and_fixtures_hold_no_tri_values(tmp_path):
     digest = write_tri(tri_path, sessions)
     inputs = study_inputs(tmp_path, tri=(tri_path, digest))
     study.register(inputs, hypothesis="h")
-    report = study.run_research(inputs)
+    report = study.run_research(inputs, expected_head=inputs.registry.head_hash())
     assert report.benchmark.tri_available and report.benchmark.tri_sha256 == digest
     assert all(unit.excess_vs_tri is not None for unit in report.units)
     written = write_report(tmp_path / "out", report).read_text()
@@ -131,7 +131,7 @@ def test_written_report_and_fixtures_hold_no_tri_values(tmp_path):
         assert level not in written, "a TRI index level leaked into the report"
     assert "91234" not in written and "Total Returns Index" not in written
     assert digest in written  # path plus sha256 is the only TRI reference
-    for fixture in FIXTURES.iterdir():
+    for fixture in (f for f in FIXTURES.rglob("*") if f.is_file()):
         text = fixture.read_text()
         assert "Total Returns Index" not in text and "NIFTY 500," not in text
 

@@ -51,6 +51,16 @@ class TickTables:
         }
         return canonical_sha256(body)
 
+    def covers(self, instrument_class: str, day: date, *, series: str) -> bool:
+        """Check class, series and session coverage without reading a price."""
+        if series not in SUPPORTED_SERIES:
+            return False
+        try:
+            table = self.table_for(instrument_class)
+        except TickSizeUnavailable:
+            return False
+        return any(version.covers(day) and series in version.series for version in table.versions)
+
     def table_for(self, instrument_class: str) -> _costs_ticks.TickTable:
         if instrument_class not in SUPPORTED_CLASSES:
             raise TickSizeUnavailable(f"instrument class {instrument_class!r} is not supported; nothing defaults")

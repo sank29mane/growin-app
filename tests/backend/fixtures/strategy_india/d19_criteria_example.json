@@ -1,0 +1,17 @@
+{
+  "version": "d19-example-1",
+  "status": "PROPOSED",
+  "gate_scenario": "phase62_gate",
+  "gate_k_ticks": 3,
+  "benchmark": "liquid_etf_buy_and_hold_one_round_trip",
+  "require_net_return_above_benchmark": true,
+  "max_drawdown_floor": "-0.15",
+  "flatten_event_fails": true,
+  "max_annualised_swaps": "65",
+  "annualisation_sessions": 250,
+  "exclude_first_build": true,
+  "missing_evidence": "inconclusive",
+  "dividend_sensitivity_factor": "0.98",
+  "dividend_sensitivity_flip": "inconclusive",
+  "one_shot": true
+}

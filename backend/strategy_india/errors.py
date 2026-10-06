@@ -59,3 +59,9 @@ class DataError(StrategyIndiaError):
     """A dataset row or an input series is unusable."""
 
     code = "data_error"
+
+
+class HoldoutInvalid(HoldoutViolation):
+    """The holdout was opened and then the evaluation failed. The spend is recorded in the registry, never silent."""
+
+    code = "holdout_invalid"

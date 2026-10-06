@@ -82,11 +82,13 @@ class RunContext:
     pricing_basis: PricingBasis
     ticks: TickTables
     provider: SignalProvider = field(default_factory=MomentumProvider)
+    sensitivity_factor: Decimal | None = None  # the sealed D-19 dividend sensitivity factor
     _tables: dict[str, SignalTable] = field(default_factory=dict)
 
     def table(self, mode: str) -> SignalTable:
         if mode not in self._tables:
-            self._tables[mode] = SignalTable(self.view, self.params, self.events, mode=mode)
+            self._tables[mode] = SignalTable(self.view, self.params, self.events, mode=mode,
+                                             sensitivity_factor=self.sensitivity_factor)
         return self._tables[mode]
 
 
