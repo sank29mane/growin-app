@@ -115,6 +115,8 @@ class OrchestratorAgent:
         risk_critic or rebuttal failure earlier in ``run`` means nothing was
         ever registered or announced.
         """
+        if context.user_context.get("deferred_proposal") and not context.user_context.get("risk_review"):
+            raise ModelRegistryError("RISK_REVIEW_REQUIRED", ROLE_RISK_CRITIC)
         note = self.decision_engine.register_deferred_proposal(context)
         if note:
             recommendation += note
@@ -402,6 +404,8 @@ Query: "{clean_query}"
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
             for res in results:
+                if isinstance(res, (ModelRegistryError, ProviderError)):
+                    raise res
                 if isinstance(res, AgentResponse) and res.success:
                     await self._merge_result(context, res)
 
@@ -440,7 +444,8 @@ Query: "{clean_query}"
 
         # --- SOTA 2026: ADVERSARIAL DEBATE LOOP ---
         if context.intent in ["conversational", "educational"]:
-            # No risk review on this path: release the proposal as before.
+            if context.user_context.get("deferred_proposal"):
+                context.user_context["risk_review"] = await self.risk_agent.review(context, recommendation)
             recommendation = await self._release_proposal(context, recommendation, c_id)
             return {
                 "content": recommendation, 
@@ -487,10 +492,6 @@ Query: "{clean_query}"
             rebuttal_result = await self.decision_engine.generate_response(rebuttal_prompt)
             recommendation = rebuttal_result
 
-        # The risk review finished: only now register and announce the proposal.
-        recommendation = await self._release_proposal(context, recommendation, c_id)
-        quick_actions = self.decision_engine._get_quick_actions(context)
-
         # Calculate final ACE Score using dedicated component
         ace_score = ace_evaluator.calculate_score(debate_trace, risk_review.get("status"))
         robustness_label = ace_evaluator.get_robustness_label(ace_score)
@@ -527,7 +528,9 @@ Query: "{clean_query}"
             db.calculate_agent_alpha(c_id)
         
         asyncio.create_task(delayed_alpha())
-        
+
+        quick_actions = self.decision_engine._get_quick_actions(context)
+        recommendation = await self._release_proposal(context, recommendation, c_id)
         return {
             "content": recommendation,
             "response_id": decision_result.get("response_id"),
@@ -561,6 +564,8 @@ Query: "{clean_query}"
                     correlation_id=c_id
                 ))
             return result
+        except (ModelRegistryError, ProviderError):
+            raise
         except Exception as e:
 
             handle_error(e, "Orchestrator specialist failed ({agent_name})", logger, raise_error=False)
@@ -674,6 +679,8 @@ Query: "{clean_query}"
             status_manager.set_status("orchestrator", "working", f"Executing Swarm ({len(tasks)} agents)...")
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for res in results:
+                if isinstance(res, (ModelRegistryError, ProviderError)):
+                    raise res
                 if isinstance(res, AgentResponse) and res.success:
                     await self._merge_result(context, res)
 
@@ -693,10 +700,15 @@ Query: "{clean_query}"
         full_response = ""
         async for chunk in self.decision_engine.make_decision_stream(context, query, images=images):
             full_response += chunk
-            yield chunk
+
+        # Extract without registering; hold proposal text until the critic has reviewed it.
+        proposal = self.decision_engine._extract_trade_proposal(full_response, context)
+        if proposal:
+            context.user_context["deferred_proposal"] = proposal
 
         # 4. Governance Phase (Risk Review)
-        if context.intent in ["conversational", "educational"]:
+        if context.intent in ["conversational", "educational"] and not proposal:
+             yield full_response
              # Yield final context for route handler metadata
              from pydantic import BaseModel
              class FinalEvent(BaseModel):
@@ -714,7 +726,7 @@ Query: "{clean_query}"
             warning = f"\n\n⚠️ **RISK WARNING**: {risk_review.get('risk_assessment')}"
             if risk_review.get("requires_hitl"):
                 warning += "\n\n[ACTION_REQUIRED:TRADE_APPROVAL]"
-            yield warning
+            full_response += warning
 
         # Yield final context for route handler metadata
         from pydantic import BaseModel
@@ -722,4 +734,8 @@ Query: "{clean_query}"
             market_context: MarketContext
             quick_actions: List[Dict[str, str]]
         
-        yield FinalEvent(market_context=context, quick_actions=self.decision_engine._get_quick_actions(context))
+        quick_actions = self.decision_engine._get_quick_actions(context)
+        final_event = FinalEvent(market_context=context, quick_actions=quick_actions)
+        full_response = await self._release_proposal(context, full_response, c_id)
+        yield full_response
+        yield final_event

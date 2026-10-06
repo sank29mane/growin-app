@@ -204,6 +204,7 @@ def test_no_name_based_model_or_provider_guessing_in_the_runtime_surface():
         'ok = "gpt" in info["provider"]',
         'ok = "oss" not in cfg.get("model_id")',
         'import re\nok = re.match("^lm", model_name)',
+        'import re\nok = re.search("mini", s.model_name)',
         'for key in ("granite", "gemma"):\n    if key in model_name:\n        pass',
     ],
 )

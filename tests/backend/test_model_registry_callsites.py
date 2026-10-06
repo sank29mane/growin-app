@@ -91,14 +91,14 @@ async def test_orchestrator_without_coordinator_role_fails_closed(stub, registry
     assert stub.count == 0
 
 
-async def test_math_without_its_role_reports_failure_and_sends_nothing(stub, registry_factory):
+async def test_math_without_its_role_raises_typed_error_and_sends_nothing(stub, registry_factory):
     registry_factory(roles=["decision"])
     from agents.math_generator_agent import MathGeneratorAgent
 
     agent = MathGeneratorAgent()
-    response = await agent.analyze({"query": "simulate", "context_data": {}, "required_stats": []})
-    assert response.success is False
-    assert "ROLE_MISSING" in (response.error or "")
+    with pytest.raises(ModelRoleMissing) as caught:
+        await agent.analyze({"query": "simulate", "context_data": {}, "required_stats": []})
+    assert caught.value.field == "math_codegen"
     assert stub.count == 0
 
 

@@ -186,7 +186,7 @@ class ForecastingAgent(BaseAgent):
                 forecast_7d=forecast_7d,
                 confidence=result.get("confidence", 0.5) > 0.7 and "HIGH" or "MEDIUM",
                 trend=trend,
-                algorithm=result.get("algorithm") or result.get("model_used") or "Unknown",
+                algorithm=result.get("algorithm", result.get("model_used", "Unknown")),
                 is_fallback=result.get("is_fallback", False),
                 note=result.get("note"),
                 raw_series=forecast_bars, # Already matches TimeSeriesItem structure

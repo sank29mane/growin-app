@@ -55,6 +55,8 @@ class MathGeneratorAgent(BaseAgent):
                 data=response_data.model_dump(),
                 latency_ms=0  # BaseAgent.execute will overwrite this
             )
+        except (ModelRegistryError, ProviderError):
+            raise
         except Exception as e:
 
             handle_error(e, "MathGeneratorAgent analysis failed", self.logger, raise_error=False)

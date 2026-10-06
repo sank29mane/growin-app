@@ -258,7 +258,7 @@ class DecisionAgent:
                     "query": query,
                     "context_data": {
                         "ticker": context.ticker,
-                        "price": context.price.price if context.price else 0,
+                        "price": context.price.current_price if context.price else 0,
                         "rsi": context.quant.rsi if context.quant else 0,
                         "portfolio_value": context.portfolio.total_value if context.portfolio else 0,
                         "cash": context.portfolio.cash_balance.get('total', 0) if context.portfolio and isinstance(context.portfolio.cash_balance, dict) else 0
@@ -315,6 +315,8 @@ class DecisionAgent:
                         logger.warning(f"DecisionAgent: Math execution failed: {exec_result.get('error')}")
                 else:
                     logger.warning(f"DecisionAgent: Math generation failed: {math_response.error}")
+            except (ModelRegistryError, ProviderError):
+                raise
             except Exception as me:
 
                 handle_error(me, "DecisionAgent: Math delegation workflow failed", logger, raise_error=False)

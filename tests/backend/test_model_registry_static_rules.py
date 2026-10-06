@@ -84,6 +84,18 @@ SURFACE_GLOBS = (
 # reason. An entry exempts only that comparison in that file; a new hit with
 # different text, or in another file, is reported.
 ALLOWLIST: Dict[Tuple[str, str, str], str] = {
+    ("backend/mlx_langchain.py", "R3", "current_path != target_path"): (
+        "compares the loaded checkpoint with the registry path to avoid reloading it; no name inference"
+    ),
+    ("backend/status_manager.py", "R1", 'update_data["model"] = "Unknown"'): (
+        "status display placeholder when no model lineage was provided; selects no model"
+    ),
+    ("backend/agents/forecasting_agent.py", "R1", 'result.get("model_used", "Unknown")'): (
+        "display label for forecast metadata when the source omits its label; selects no model"
+    ),
+    ("backend/forecaster.py", "R1", "result.get('model_used', 'forecaster')"): (
+        "display label appended to the forecast algorithm description; selects no model"
+    ),
     ("backend/mlx_engine.py", "R3", '"gemma-4" in model_path.lower()'): (
         "deferred by the phase brief (mlx_engine.py:142): in-process MLX checkpoint "
         "path handling is not a registry role"
@@ -138,6 +150,12 @@ def _model_var_name(node: ast.AST, aliases: Set[str]) -> bool:
         return node.id in MODEL_VARS or node.id in aliases
     if isinstance(node, ast.Attribute):
         return node.attr in MODEL_VARS
+    if isinstance(node, ast.Subscript) and _is_str_const(node.slice):
+        return "model" in node.slice.value.lower() or node.slice.value in MODEL_VARS
+    if isinstance(node, ast.Call) and _call_name(node.func) in {"get", "getenv", "getattr"}:
+        key_index = 1 if _call_name(node.func) == "getattr" else 0
+        if len(node.args) > key_index and _is_str_const(node.args[key_index]):
+            return "model" in node.args[key_index].value.lower() or node.args[key_index].value in MODEL_VARS
     return False
 
 
@@ -297,6 +315,15 @@ def scan_literals_and_comparisons(source: str, relpath: str = "<planted>") -> Li
                 for target in targets:
                     if _model_var_name(target, set()):
                         add("R1", node)
+            if value is not None and any(_model_var_name(t, aliases) for t in targets):
+                if isinstance(value, ast.BoolOp) and isinstance(value.op, ast.Or) and any(
+                    _is_str_const(v) and v.value for v in value.values
+                ):
+                    add("R1", value)
+                if isinstance(value, ast.IfExp) and any(
+                    _is_str_const(v) and v.value for v in (value.body, value.orelse)
+                ):
+                    add("R1", value)
         # R3: comparisons and string predicates on a model variable.
         if isinstance(node, ast.Compare):
             operands = [node.left, *node.comparators]
@@ -311,6 +338,14 @@ def scan_literals_and_comparisons(source: str, relpath: str = "<planted>") -> Li
             if node.func.attr in STRING_PREDICATES and _involves_model_var(node.func.value, aliases):
                 add("R3", node)
             if node.func.attr == "get" and node.args and _involves_model_var(node.args[0], aliases):
+                add("R3", node)
+        if isinstance(node, ast.IfExp) and _involves_model_var(node, aliases):
+            if any(_is_str_const(v) and v.value for v in (node.body, node.orelse)):
+                add("R3", node)
+        if isinstance(node, ast.Call) and _call_name(node.func) in {"search", "match", "fullmatch"}:
+            if any(_is_str_const(a) for a in node.args) and any(
+                _involves_model_var(a, aliases) for a in node.args
+            ):
                 add("R3", node)
         if isinstance(node, ast.Subscript) and _involves_model_var(node.slice, aliases):
             add("R3", node)
@@ -558,3 +593,16 @@ def test_a_new_hit_in_an_allow_listed_file_is_not_exempted():
         assert findings, added
     source = (BACKEND / "mlx_vlm_engine.py").read_text(encoding="utf-8")
     assert surface_findings("backend/mlx_vlm_engine.py", source + '\nx = "abc" in model_path\n')
+
+
+@pytest.mark.parametrize("planted", [
+    'v = cfg.get("model_name") or "grok-4"',
+    'v = cfg.get("model_used") or "literal"',
+    'model_name = cfg.get("chosen") or "literal"',
+    'v = "grok-4" if not s.model_name else s.model_name',
+    'v = s.model_name if cond else "literal"',
+    'model_name = x if cond else "literal"',
+    'import re\nok = re.search("mini", s.model_name)',
+])
+def test_round4_planted_defaults_and_regex_are_caught(planted):
+    assert scan_literals_and_comparisons(planted), planted

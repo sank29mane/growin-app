@@ -272,7 +272,7 @@ class TTMForecaster:
                 else:
                     result["clears_hurdle"] = True
 
-            result["algorithm"] = f"{result.get('model_used') or 'forecaster'} + Neural JMCE"
+            result["algorithm"] = f"{result.get('model_used', 'forecaster')} + Neural JMCE"
             result["is_fallback"] = False
             return result
             

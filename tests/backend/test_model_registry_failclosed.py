@@ -361,7 +361,7 @@ async def test_chat_route_is_503_when_risk_critic_is_missing(tmp_path, stub, key
 
 
 async def _run_orchestrator_with_real_decision(
-    orchestrator, stub, events, *, context_intent="analytical", authority_fields=True
+    orchestrator, stub, events, *, context_intent="analytical", authority_fields=True, streaming=False, output=None
 ):
     """Drive OrchestratorAgent.run with the real DecisionAgent against the stub.
 
@@ -406,6 +406,14 @@ async def _run_orchestrator_with_real_decision(
         "agents.decision_agent.PriceValidator.validate_trade_price",
         new=AsyncMock(return_value={"action": "allow"}),
     ):
+        if streaming:
+            chunks = []
+            async for event in orchestrator.run_stream(query="Buy AAPL", ticker="AAPL"):
+                if isinstance(event, str):
+                    chunks.append(event)
+                    if output is not None:
+                        output.append(event)
+            return {"content": "".join(chunks)}, context
         return await orchestrator.run(query="Buy AAPL", ticker="AAPL"), context
 
 
@@ -482,7 +490,7 @@ async def test_a_refused_registration_is_reported_in_the_reply_and_not_broadcast
     assert "pending_proposal" not in context.user_context
 
 
-async def test_conversational_replies_release_the_proposal_without_a_risk_review(tmp_path, stub, key_env):
+async def test_conversational_proposal_requires_a_risk_review(tmp_path, stub, key_env):
     _activate(tmp_path, stub)
     orchestrator = OrchestratorAgent(mcp_client=MagicMock(), chat_manager=MagicMock())
     events = []
@@ -490,7 +498,7 @@ async def test_conversational_replies_release_the_proposal_without_a_risk_review
         orchestrator, stub, events, context_intent="conversational", authority_fields=False
     )
     assert [name for name, _ in events] == ["register"]
-    assert kit.model_id_for("risk_critic") not in [r.model for r in stub.snapshot()]
+    assert all(kit.model_id_for("risk_critic") in models for _, models in events)
     assert result["content"]
 
 
@@ -539,9 +547,10 @@ async def test_research_analysis_fails_instead_of_reporting_neutral_news(tmp_pat
     _activate(tmp_path, stub, base_urls=kit.dead_provider_urls("ollama"))
     agent = ResearchAgent()
     agent._fetch_regulatory_news = AsyncMock(return_value=[])
-    response = await agent.execute({"ticker": "AAPL"})
-    assert response.success is False
-    assert "PROVIDER_UNREACHABLE" in (response.error or "")
+    with pytest.raises(ProviderError) as caught:
+        await agent.execute({"ticker": "AAPL"})
+    assert caught.value.code == "PROVIDER_UNREACHABLE"
+    assert caught.value.role == "research"
 
 
 async def test_newsdata_still_returns_an_empty_list_for_a_plain_http_failure(tmp_path, stub, key_env, monkeypatch):
@@ -565,3 +574,149 @@ async def test_research_still_degrades_on_a_non_model_error(tmp_path, stub, key_
     with patch("agents.research_agent.run_magentic", new=AsyncMock(side_effect=ValueError("bad output"))):
         params = await ResearchAgent()._generate_smart_query("AAPL")
     assert params["q"] == "AAPL stock market news"
+
+
+@pytest.mark.parametrize("intent", ["conversational", "educational"])
+async def test_conversational_unreachable_critic_leaves_no_registration(tmp_path, stub, key_env, intent):
+    _activate(tmp_path, stub, role_provider={"risk_critic": "ollama"}, base_urls=DEAD_RISK)
+    orchestrator = OrchestratorAgent(mcp_client=MagicMock(), chat_manager=MagicMock())
+    events = []
+    with pytest.raises(ProviderError):
+        await _run_orchestrator_with_real_decision(orchestrator, stub, events, context_intent=intent)
+    assert events == []
+
+
+async def test_conversational_approved_critic_registers_once_after_review(
+    tmp_path, stub, key_env, private_config_dir
+):
+    _activate(tmp_path, stub)
+    assert state.start_execution(tmp_path / "execution.sqlite3", workspace="uk", private_dir=private_config_dir)
+    try:
+        events = []
+        orchestrator = OrchestratorAgent(mcp_client=MagicMock(), chat_manager=MagicMock())
+        await _run_orchestrator_with_real_decision(orchestrator, stub, events, context_intent="conversational")
+        assert [name for name, _ in events] == ["register", "broadcast"]
+        assert all(kit.model_id_for("risk_critic") in models for _, models in events)
+    finally:
+        state.close_execution()
+
+
+async def test_ace_failure_leaves_no_registration(tmp_path, stub, key_env):
+    _activate(tmp_path, stub)
+    orchestrator = OrchestratorAgent(mcp_client=MagicMock(), chat_manager=MagicMock())
+    events = []
+    with patch("agents.ace_evaluator.ACEEvaluator.calculate_score", side_effect=RuntimeError("ACE failed")):
+        with pytest.raises(RuntimeError, match="ACE failed"):
+            await _run_orchestrator_with_real_decision(orchestrator, stub, events)
+    assert events == []
+
+
+@pytest.mark.parametrize("failure", ["missing", "unreachable"])
+async def test_decision_requesting_math_fails_closed(tmp_path, stub, key_env, failure):
+    from agents.math_generator_agent import MathGeneratorAgent
+
+    kwargs = {"roles": ["decision", "coordinator", "risk_critic"]} if failure == "missing" else {
+        "base_urls": DEAD_COORDINATOR
+    }
+    _activate(tmp_path, stub, **kwargs)
+    expected = ModelRoleMissing if failure == "missing" else ProviderError
+    agent = MathGeneratorAgent()
+    with pytest.raises(expected) as caught:
+        await agent.execute({"query": "calculate", "context_data": {}, "required_stats": []})
+    assert caught.value.role == "math_codegen"
+    decision = DecisionAgent(mcp_client=MagicMock())
+    decision._run_agentic_loop = AsyncMock(return_value={"content": "must not run"})
+    with patch.object(DecisionAgent, "_inject_context_layers", lambda self, p, q: p):
+        with pytest.raises(expected):
+            await decision.make_decision(_context(), "calculate a projection", defer_proposal=True)
+    decision._run_agentic_loop.assert_not_awaited()
+    assert stub.count == 0
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("failure", ["missing", "unreachable"])
+async def test_research_typed_error_survives_both_orchestration_paths(
+    tmp_path, stub, key_env, monkeypatch, streaming, failure
+):
+    from agents.research_agent import ResearchAgent
+
+    monkeypatch.setenv("NEWSDATA_API_KEY", "valid_key_length_greater_than_10")
+    monkeypatch.delenv("NEWSAPI_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    kwargs = {"roles": ["coordinator", "decision", "risk_critic"]} if failure == "missing" else {
+        "base_urls": kit.dead_provider_urls("ollama")
+    }
+    _activate(tmp_path, stub, **kwargs)
+    orchestrator = OrchestratorAgent(mcp_client=MagicMock(), chat_manager=MagicMock())
+    orchestrator.research_agent = ResearchAgent()
+    orchestrator.research_agent._fetch_regulatory_news = AsyncMock(return_value=[])
+    orchestrator._classify_intent = AsyncMock(return_value={"type": "conversational", "needs": ["research"], "reason": "test"})
+    orchestrator.data_fabricator.fabricate_context = AsyncMock(return_value=_context(intent="conversational"))
+    expected = ModelRoleMissing if failure == "missing" else ProviderError
+    with pytest.raises(expected) as caught:
+        if streaming:
+            async for _ in orchestrator.run_stream("news", account_type="invest"):
+                pass
+        else:
+            await orchestrator.run("news", account_type="invest")
+    assert caught.value.code == ("ROLE_MISSING" if failure == "missing" else "PROVIDER_UNREACHABLE")
+    assert stub.count == 0
+
+
+@pytest.mark.parametrize("intent", ["analytical", "conversational", "educational"])
+@pytest.mark.parametrize("unreachable", [False, True])
+async def test_stream_proposal_is_reviewed_before_registration_or_output(
+    tmp_path, stub, key_env, private_config_dir, intent, unreachable
+):
+    _activate(tmp_path, stub, **({"role_provider": {"risk_critic": "ollama"}, "base_urls": DEAD_RISK} if unreachable else {}))
+    assert state.start_execution(tmp_path / "execution.sqlite3", workspace="uk", private_dir=private_config_dir)
+    try:
+        orchestrator = OrchestratorAgent(mcp_client=MagicMock(), chat_manager=MagicMock())
+        events = []
+        if unreachable:
+            output = []
+            with pytest.raises(ProviderError):
+                await _run_orchestrator_with_real_decision(orchestrator, stub, events, context_intent=intent, streaming=True, output=output)
+            assert events == []
+            assert output == []
+        else:
+            result, context = await _run_orchestrator_with_real_decision(orchestrator, stub, events, context_intent=intent, streaming=True)
+            assert [name for name, _ in events] == ["register", "broadcast"]
+            assert all(kit.model_id_for("risk_critic") in models for _, models in events)
+            assert context.user_context["pending_proposal"]["proposal_id"] in result["content"]
+    finally:
+        state.close_execution()
+
+
+@pytest.mark.parametrize("failure", ["missing", "unreachable"])
+async def test_chat_research_failure_returns_typed_http_error(tmp_path, stub, key_env, monkeypatch, failure):
+    from chat_manager import ChatManager
+    from routes.chat_routes import chat_message
+    from agents.research_agent import ResearchAgent
+
+    monkeypatch.setenv("NEWSDATA_API_KEY", "valid_key_length_greater_than_10")
+    monkeypatch.delenv("NEWSAPI_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    _activate(tmp_path, stub, **({"roles": ["coordinator", "decision", "risk_critic"]} if failure == "missing" else {
+        "base_urls": kit.dead_provider_urls("ollama")
+    }))
+    orchestrator = OrchestratorAgent(mcp_client=MagicMock(), chat_manager=MagicMock())
+    orchestrator.research_agent = ResearchAgent()
+    orchestrator.research_agent._fetch_regulatory_news = AsyncMock(return_value=[])
+    orchestrator._classify_intent = AsyncMock(return_value={"type": "conversational", "needs": ["research"], "reason": "test"})
+    orchestrator.data_fabricator.fabricate_context = AsyncMock(return_value=_context(intent="conversational"))
+    manager = ChatManager(db_path=":memory:")
+    previous = (state.chat_manager, state.mcp_client)
+    state.chat_manager, state.mcp_client = manager, MagicMock()
+    try:
+        with patch("agents.orchestrator_agent.OrchestratorAgent", return_value=orchestrator):
+            with pytest.raises(HTTPException) as caught:
+                await chat_message(ChatMessage(message="news", account_type="invest"), accept="application/json")
+        assert caught.value.status_code == (503 if failure == "missing" else 502)
+        assert caught.value.detail == ({"code": "ROLE_MISSING", "field": "research"} if failure == "missing" else {
+            "code": "PROVIDER_UNREACHABLE", "role": "research"
+        })
+        assert all(m["role"] != "assistant" for m in manager.load_history(manager.list_conversations()[0]["id"]))
+    finally:
+        state.chat_manager, state.mcp_client = previous
+        manager.close()
