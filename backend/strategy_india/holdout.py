@@ -164,7 +164,7 @@ class HoldoutEvidence:
     """What a holdout evaluation measured under one dividend assumption. All Decimal."""
 
     net_return: Decimal
-    benchmark_net_return: Decimal
+    benchmark_net_return: Decimal | None  # None: the ETF benchmark is unknown (for example no tick table covers its dates)
     max_drawdown: Decimal
     flatten_events: int
     swaps: int  # filled position exits, the first portfolio build is not a swap
@@ -191,7 +191,11 @@ def annualised_swaps(swaps: int, sessions: int, annualisation_sessions: int) -> 
 
 def _breaches(criteria: Mapping[str, Any], ev: HoldoutEvidence) -> list[str]:
     out: list[str] = []
-    if criteria["require_net_return_above_benchmark"] and not ev.net_return > ev.benchmark_net_return:
+    if (
+        criteria["require_net_return_above_benchmark"]
+        and ev.benchmark_net_return is not None
+        and not ev.net_return > ev.benchmark_net_return
+    ):
         out.append("net_return_not_above_benchmark")
     if not ev.max_drawdown > Decimal(criteria["max_drawdown_floor"]):
         out.append("max_drawdown_at_or_below_floor")
@@ -227,6 +231,8 @@ def evaluate_verdict(
     check_supported(criteria)
     breaches = _breaches(criteria, base)
     missing: list[str] = []
+    if criteria["require_net_return_above_benchmark"] and base.benchmark_net_return is None:
+        missing.append("benchmark_unavailable")
     if base.no_assumed_fill_attempts > 0:
         missing.append("no_assumed_fill_attempt")
     flips: list[str] = []

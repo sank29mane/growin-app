@@ -233,3 +233,27 @@ def make_context(
         events=events or DividendEvents(),
         scenarios=scenarios, schedules=schedules, pricing_basis=basis, ticks=ticks,
     )
+
+
+def registration_record(**overrides):
+    """A valid registration payload with distinct synthetic hashes."""
+    from strategy_india.holdout import default_criteria
+    from strategy_india.registry import HASH_FIELDS, criteria_hash
+
+    criteria = default_criteria()
+    record = {name: sha(name) for name in HASH_FIELDS}
+    record.update(
+        hypothesis="synthetic cross-sectional momentum with a swing exit",
+        parameter_budget_n=12,
+        git_commit="a" * 40,
+        seed=7,
+        benchmark_ids=["INF000000ETF1", "nifty500_tri"],
+        charge_schedule_version=SCHEDULE_VERSION,
+        fold_rules={"scheme": "expanding", "n_folds": 3, "test_sessions": 40, "min_train_sessions": 60},
+        holdout_range={"start": "2026-01-01", "end": "2026-06-30"},
+        holdout_criteria=criteria,
+        holdout_criteria_sha256=criteria_hash(criteria),
+        spent_holdout_event_hashes=[],
+    )
+    record.update(overrides)
+    return record
