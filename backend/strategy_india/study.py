@@ -424,7 +424,9 @@ def preflight_holdout(inputs: StudyInputs, prep: Prepared, criteria: Mapping[str
     benchmark ETF's open, high, low and close on every session of the uncovered window, holdout sessions
     included (done when the tick tables are built, before this runs). Only the inferred tick, the method and
     the provenance hash reach the operator output, plus, when the inference refuses, a failure category with no digit
-    in it; never a count, a price or a date from those sessions (the counts stay in the sealed provenance). The
+    in it; never a count, a price or a date from those sessions (the counts stay in the sealed provenance). Every
+    refusal below is held to the same rule (D-12): its message names a category, never a holdout date, count or
+    series. The
     registry, gate, D-19 criteria hash and D-20 event hash were already checked against the registration by the caller.
     """
     try:
@@ -450,25 +452,25 @@ def preflight_holdout(inputs: StudyInputs, prep: Prepared, criteria: Mapping[str
         gaps = [day for day in days if not inputs.ticks.covers(instrument_class, day, series="EQ", security=security)]
         if gaps:
             why = inputs.ticks.uncovered_reason(instrument_class, gaps[0], security=security)
-            if why:  # a category only: the count and first date of the gap come from the same holdout sample
+            # D-12: a category only. The count and first date of the gap are holdout-session facts and stay out of
+            # the message; nothing is kept for debugging because the sealed registry and the tick table already
+            # say which sessions the table covers.
+            if why:
                 raise unrunnable(f"the {instrument_class} tick table does not cover the holdout (inferred tick unavailable: {why})")
-            raise unrunnable(
-                f"the {instrument_class} tick table does not cover {len(gaps)} holdout sessions, first {gaps[0].isoformat()}"
-            )
+            raise unrunnable(f"the {instrument_class} tick table does not cover every holdout session")
     # The registered ETF benchmark must exist on EVERY holdout session, or it would be silently truncated or fail later.
     etf_rows = {row.trade_date: row for row in inputs.rows if row.anchor_isin == etf_anchor}
     absent = [day for day in days if day not in etf_rows]
     if absent:
-        raise unrunnable(f"the benchmark ETF has no bar on {len(absent)} of {len(days)} holdout sessions, first {absent[0].isoformat()}")
+        raise unrunnable("the benchmark ETF has no bar on at least one holdout session")  # D-12: no count, no date
     # The benchmark must remain runnable. Universe series changes become ineligibility or missed fills.
     for row in inputs.rows:
         if row.trade_date not in day_set or row.anchor_isin != etf_anchor:
             continue
         instrument_class = NON_GOLD_ETF
         if not inputs.ticks.covers(instrument_class, row.trade_date, series=row.series, security=etf_anchor):
-            raise unrunnable(
-                f"the {instrument_class} tick table does not cover series {row.series!r} "
-                f"on {row.trade_date.isoformat()} for {row.anchor_isin}"
+            raise unrunnable(  # D-12: neither the session date nor the series the holdout row carries
+                f"the {instrument_class} tick table does not cover the benchmark ETF's series on a holdout session"
             )
     first, last = etf_rows[days[0]], etf_rows[days[-1]]
     if first.raw_close <= 0 or last.raw_close <= 0:

@@ -154,10 +154,10 @@ ETF = ETF_ISINS[0]
 @pytest.mark.parametrize(
     "case, build, message",
     [
-        ("bars_stop_30_sessions_early", lambda: {"drop": [(ETF, d) for d in HOLDOUT_DAYS[-30:]]}, "no bar on 30 of 60"),
-        ("no_holdout_bars", lambda: {"drop": [(ETF, d) for d in HOLDOUT_DAYS]}, "no bar on 60 of 60"),
-        ("one_bar_only", lambda: {"drop": [(ETF, d) for d in HOLDOUT_DAYS[1:]]}, "no bar on 59 of 60"),
-        ("one_missing_in_the_middle", lambda: {"drop": [(ETF, HOLDOUT_DAYS[20])]}, "no bar on 1 of 60"),
+        ("bars_stop_30_sessions_early", lambda: {"drop": [(ETF, d) for d in HOLDOUT_DAYS[-30:]]}, "no bar on at least one holdout session"),
+        ("no_holdout_bars", lambda: {"drop": [(ETF, d) for d in HOLDOUT_DAYS]}, "no bar on at least one holdout session"),
+        ("one_bar_only", lambda: {"drop": [(ETF, d) for d in HOLDOUT_DAYS[1:]]}, "no bar on at least one holdout session"),
+        ("one_missing_in_the_middle", lambda: {"drop": [(ETF, HOLDOUT_DAYS[20])]}, "no bar on at least one holdout session"),
         ("non_positive_first_close", lambda: {"updates": lambda r: {"raw_close": Decimal(0)} if (r.anchor_isin == ETF and r.trade_date == HOLDOUT_DAYS[0]) else None}, "non-positive"),
         ("non_positive_last_close", lambda: {"updates": lambda r: {"raw_close": Decimal(0)} if (r.anchor_isin == ETF and r.trade_date == HOLDOUT_DAYS[-1]) else None}, "non-positive"),
         ("capital_buys_no_share", lambda: {"capital": "100"}, "cannot buy one"),
@@ -679,7 +679,7 @@ def test_successful_verdict_supersedes_provisional_invalid(tmp_path):
 def test_unsupported_benchmark_series_refuses_before_open(tmp_path, anchor, offset, series):
     inputs, head = _etf_case(tmp_path, updates=lambda r: {"series": series}
                              if r.anchor_isin == anchor and r.trade_date == HOLDOUT_DAYS[offset] else None)
-    with pytest.raises(StrategyIndiaError, match=f"series '{series}'") as err:
+    with pytest.raises(StrategyIndiaError, match="does not cover the benchmark ETF's series") as err:
         study.run_holdout(inputs, expected_head=head)
     assert err.value.code == "holdout_unrunnable"
     _unspent(inputs, head)

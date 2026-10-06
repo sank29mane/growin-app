@@ -378,7 +378,8 @@ class UniverseEligibility:
         if needs_surveillance:
             for kind in ("asm", "gsm"):
                 if _surveillance.snapshot_for(self._store, kind, day) is None:
-                    return f"no {kind.upper()} surveillance snapshot is effective exactly {day.isoformat()}"
+                    # D-12: the reason reaches the operator in a holdout refusal, so it carries no date
+                    return f"no {kind.upper()} surveillance snapshot is effective on a decision date"
         return None
 
     def snapshot(self, as_of: date) -> EligibilitySnapshot:
