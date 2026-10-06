@@ -420,3 +420,425 @@ def test_the_server_loads_the_governor_and_nothing_else_from_the_brokers_package
     assert done.returncode == 0, done.stderr[-500:]
     loaded = json.loads(done.stdout.strip().splitlines()[-1])
     assert loaded == ["brokers", "brokers.trading212", "brokers.trading212.governor"]
+
+
+# =================================================================================
+# Task 2: no mutation surface, no POST retries, explicit environment, scrubbed child
+# =================================================================================
+
+FORBIDDEN_METHODS = ["POST", "DELETE", "PUT", "PATCH", "post", "Delete", "OPTIONS", "HEAD"]
+BODY = {"ticker": "AAPL_US_EQ", "quantity": 1, "limitPrice": 1.0, "timeValidity": "DAY"}
+
+
+def test_the_client_has_no_method_that_writes():
+    public = {name for name in dir(server.Trading212Client) if not name.startswith("_")}
+    assert public, "client has no public methods?"
+    offenders = {name for name in public if not (name.startswith("get_") or name == "close")}
+    assert offenders == set()
+    assert not any(
+        re.match(r"(post|put|patch|delete|place|cancel|create|update|switch)", name)
+        for name in public
+    )
+
+
+def test_the_server_source_holds_no_write_method_literal():
+    tree = ast.parse(SERVER_SOURCE.read_text(encoding="utf-8"))
+    literals = [
+        (node.lineno, node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and node.value.upper() in {"POST", "DELETE", "PUT", "PATCH"}
+    ]
+    assert literals == []
+
+
+@pytest.mark.parametrize("method", FORBIDDEN_METHODS)
+@pytest.mark.parametrize("use_demo", [True, False])
+@pytest.mark.asyncio
+async def test_request_refuses_every_method_but_get_before_the_network(method, use_demo):
+    recorder = Recorder(ok_router)
+    clock = FakeClock()
+    governor = RecordingGovernor(clock=clock, sleep=clock.sleep)
+    async with reader(recorder, use_demo=use_demo, clock=clock, governor=governor) as (client, _):
+        with pytest.raises(PermissionError, match="read-only transport"):
+            await client._request(method, "equity/orders/limit", json=BODY)
+    assert recorder.count == 0
+    assert governor.acquired == []  # refused before it even took a rate slot
+
+
+@pytest.mark.parametrize("keyword", ["json", "data", "content", "files"])
+@pytest.mark.asyncio
+async def test_a_get_may_not_carry_a_request_body(keyword):
+    recorder = Recorder(ok_router)
+    async with reader(recorder) as (client, _):
+        with pytest.raises(PermissionError, match="no request body"):
+            await client._request("GET", "equity/orders", **{keyword: BODY if keyword == "json" else b"{}"})
+    assert recorder.count == 0
+
+
+# --- 429, timeouts and 5xx: at most one retry, only for a GET's first 429 ----------
+
+
+@pytest.mark.asyncio
+async def test_a_get_429_waits_until_the_reset_and_retries_exactly_once():
+    clock = FakeClock()
+    reset = int(clock.now) + 7
+    answers = iter(
+        [
+            Fixture("rate_limited_429").response(clock, headers={"x-ratelimit-reset": str(reset)}),
+            Fixture("positions").response(clock),
+        ]
+    )
+    recorder = Recorder(lambda request: next(answers))
+    async with reader(recorder, clock=clock) as (client, _):
+        positions = await client.get_all_positions()
+
+    assert recorder.count == 2
+    assert [p["ticker"] for p in positions] == ["AAPL_US_EQ", "VODl_EQ"]
+    assert clock.now >= reset
+    assert clock.sleeps == [pytest.approx(7.0)]
+
+
+@pytest.mark.asyncio
+async def test_a_second_429_raises_with_no_third_attempt():
+    clock = FakeClock()
+    recorder = Recorder(lambda request: Fixture("rate_limited_429").response(clock))
+    async with reader(recorder, clock=clock) as (client, _):
+        with pytest.raises(httpx.HTTPStatusError) as caught:
+            await client.get_account_summary()
+    assert caught.value.response.status_code == 429
+    assert recorder.count == 2
+
+
+@pytest.mark.parametrize("status", [408, 500, 502, 503, 504, 401, 403, 404])
+@pytest.mark.asyncio
+async def test_any_other_status_raises_after_one_attempt(status):
+    recorder = Recorder(lambda request: httpx.Response(status, text="no"))
+    async with reader(recorder) as (client, _):
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.get_all_orders()
+    assert recorder.count == 1
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ReadTimeout("slow"),
+        httpx.ConnectTimeout("slow"),
+        httpx.ConnectError("down"),
+        httpx.RemoteProtocolError("cut"),
+    ],
+    ids=lambda e: type(e).__name__,
+)
+@pytest.mark.asyncio
+async def test_a_transport_error_raises_after_one_attempt(error):
+    def router(request: httpx.Request) -> httpx.Response:
+        raise error
+
+    recorder = Recorder(router)
+    async with reader(recorder) as (client, _):
+        with pytest.raises(type(error)):
+            await client.get_all_positions()
+    assert recorder.count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_redirect_is_never_followed():
+    def router(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(307, headers={"location": f"{LIVE_BASE}/equity/orders/limit"})
+
+    recorder = Recorder(router)
+    async with reader(recorder, use_demo=True) as (client, _):
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.get_all_orders()
+    assert recorder.count == 1
+    assert recorder.methods == ["GET"]
+
+
+# --- operator rule: the live host is read with GET only ---------------------------
+
+LIVE_ENV = {
+    ENV_NAME: "false",
+    "TRADING212_API_KEY": "live-key-canary",
+    "TRADING212_API_SECRET": "live-secret-canary",
+}
+
+
+@pytest.mark.parametrize("method", ["POST", "DELETE", "PUT", "PATCH", "OPTIONS", "HEAD"])
+@pytest.mark.asyncio
+async def test_a_non_get_request_to_the_live_host_is_refused_before_sending(method):
+    recorder = Recorder(ok_router)
+    built = server.build_clients(LIVE_ENV, transport=recorder.transport)
+    client = built["invest"]
+    try:
+        assert client.base_url == LIVE_BASE
+
+        # 1. the MCP request path
+        with pytest.raises(PermissionError):
+            await client._request(method, "equity/orders/limit", json=BODY)
+        # 2. the httpx client underneath, bypassing _request
+        with pytest.raises(PermissionError):
+            await client.client.request(method, f"{LIVE_BASE}/equity/orders/limit", json=BODY)
+        # 3. a request object built by hand and sent
+        built_request = client.client.build_request(method, f"{LIVE_BASE}/equity/orders/limit")
+        with pytest.raises(PermissionError):
+            await client.client.send(built_request)
+        # 4. the verb helpers
+        if method in {"POST", "PUT", "PATCH"}:
+            helper = getattr(client.client, method.lower())
+            with pytest.raises(PermissionError):
+                await helper(f"{LIVE_BASE}/equity/orders/limit", json=BODY)
+        if method == "DELETE":
+            with pytest.raises(PermissionError):
+                await client.client.delete(f"{LIVE_BASE}/equity/orders/1")
+
+        assert recorder.count == 0
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_every_read_on_the_live_host_is_a_bodyless_get_to_the_live_host_only():
+    clock = FakeClock()
+    recorder = Recorder(_generic_router)
+    built = server.build_clients(LIVE_ENV, transport=recorder.transport)
+    client = built["invest"]
+    client.governor = Governor(clock=clock, sleep=clock.sleep)
+    try:
+        for method_name, args, _ in READ_CALLS:
+            await getattr(client, method_name)(*args)
+    finally:
+        await client.close()
+
+    assert recorder.count == len(READ_CALLS)
+    assert set(recorder.methods) == {"GET"}
+    assert {request.url.host for request in recorder.requests} == {"live.trading212.com"}
+    assert all(request.content == b"" for request in recorder.requests)
+
+
+@pytest.mark.asyncio
+async def test_the_hook_also_stops_a_non_get_on_the_demo_host():
+    recorder = Recorder(ok_router)
+    async with reader(recorder, use_demo=True) as (client, _):
+        with pytest.raises(PermissionError):
+            await client.client.request("POST", f"{DEMO_BASE}/equity/orders/limit", json=BODY)
+    assert recorder.count == 0
+
+
+# --- explicit environment: no default, one helper for the server and the status ----
+
+BAD_VALUES = [None, "", "yes", "1", "0", "TRUE", "True", "FALSE", " true", "true ", "demo", "live"]
+
+
+@pytest.mark.parametrize("value", BAD_VALUES)
+def test_an_unset_empty_or_unrecognised_environment_builds_no_client_and_names_the_variable(
+    monkeypatch, value
+):
+    constructed = []
+    monkeypatch.setattr(server, "Trading212Client", lambda *a, **k: constructed.append(a))
+    real_init = httpx.AsyncClient.__init__
+    http_clients = []
+
+    def counting_init(self, *a, **k):
+        http_clients.append(1)
+        real_init(self, *a, **k)
+
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", counting_init)
+    environ = {"TRADING212_API_KEY": "k", "TRADING212_API_SECRET": "s"}
+    if value is not None:
+        environ[ENV_NAME] = value
+
+    with pytest.raises(Trading212EnvironmentError, match=ENV_NAME):
+        server.build_clients(environ)
+
+    assert constructed == [] and http_clients == []
+
+
+def test_true_selects_the_demo_base_url_and_false_selects_the_live_one():
+    base = {"TRADING212_API_KEY": "k", "TRADING212_API_SECRET": "s"}
+    demo = server.build_clients({**base, ENV_NAME: "true"})
+    live = server.build_clients({**base, ENV_NAME: "false"})
+    assert demo["invest"].base_url == DEMO_BASE
+    assert live["invest"].base_url == LIVE_BASE
+
+
+@pytest.mark.parametrize(
+    "value,reported",
+    [(None, "unset"), ("", "unset"), ("yes", "invalid"), ("true", "demo"), ("false", "live")],
+)
+@pytest.mark.asyncio
+async def test_the_status_route_reports_the_value_the_server_acts_on(monkeypatch, value, reported):
+    from routes.status_routes import get_system_status
+
+    if value is None:
+        monkeypatch.delenv(ENV_NAME, raising=False)
+    else:
+        monkeypatch.setenv(ENV_NAME, value)
+
+    status = await get_system_status()
+
+    assert status["environment"]["trading212"] == reported
+    assert reported == resolve_trading212_environment()
+    environ = {"TRADING212_API_KEY": "k", "TRADING212_API_SECRET": "s"}
+    if value is not None:
+        environ[ENV_NAME] = value
+    if reported in {"demo", "live"}:
+        built = server.build_clients(environ)
+        acts_on = DEMO_BASE if reported == "demo" else LIVE_BASE
+        assert built["invest"].base_url == acts_on
+    else:
+        with pytest.raises(Trading212EnvironmentError):
+            server.build_clients(environ)
+
+
+def test_the_status_route_has_no_default_environment_of_its_own():
+    source = (BACKEND / "routes" / "status_routes.py").read_text(encoding="utf-8")
+    assert "TRADING212_USE_DEMO" not in source
+    assert "resolve_trading212_environment" in source
+
+
+@pytest.mark.asyncio
+async def test_a_server_started_with_a_bad_environment_answers_broker_tools_with_the_variable_name(
+    monkeypatch,
+):
+    monkeypatch.setattr(server, "clients", {})
+    monkeypatch.setattr(
+        server,
+        "startup_error",
+        str(Trading212EnvironmentError(f"{ENV_NAME} must be exactly 'true' or 'false'")),
+    )
+    with pytest.raises(ValueError, match=ENV_NAME):
+        server.get_active_client()
+
+
+# --- credentials: Basic only, practice names never held ---------------------------
+
+
+def test_a_key_without_a_secret_builds_no_client():
+    env = {ENV_NAME: "true", "TRADING212_API_KEY": "only-a-key"}
+    assert server.build_clients(env) == {}
+    with pytest.raises(ValueError):
+        server.Trading212Client("only-a-key", "", True)
+    with pytest.raises(ValueError):
+        server.Trading212Client("", "only-a-secret", True)
+
+
+def test_an_isa_key_without_a_secret_does_not_build_an_isa_client():
+    env = {
+        ENV_NAME: "true",
+        "TRADING212_API_KEY_INVEST": "ik",
+        "TRADING212_API_SECRET_INVEST": "is",
+        "TRADING212_API_KEY_ISA": "ak",
+    }
+    built = server.build_clients(env)
+    assert set(built) == {"invest"}
+
+
+@pytest.mark.asyncio
+async def test_authorization_is_always_basic_with_key_and_secret():
+    recorder = Recorder(ok_router)
+    async with reader(recorder) as (client, _):
+        await client.get_all_orders()
+    header = recorder.requests[0].headers["authorization"]
+    expected = "Basic " + base64.b64encode(b"key-canary:secret-canary").decode()
+    assert header == expected
+    assert header != "key-canary"
+
+
+def test_the_practice_credential_names_are_never_read_by_the_server():
+    env = {
+        ENV_NAME: "true",
+        "TRADING212_PRACTICE_API_KEY": "practice-key-canary",
+        "TRADING212_PRACTICE_API_SECRET": "practice-secret-canary",
+    }
+    assert server.build_clients(env) == {}
+    with_live = {**env, "TRADING212_API_KEY": "lk", "TRADING212_API_SECRET": "ls"}
+    built = server.build_clients(with_live)
+    assert built["invest"].api_key == "lk" and built["invest"].api_secret == "ls"
+
+
+def test_drop_practice_credentials_removes_every_practice_name_and_only_those():
+    environ = {
+        "TRADING212_PRACTICE_API_KEY": "a",
+        "trading212_practice_api_secret": "b",
+        "TRADING212_API_KEY": "live",
+        "TRADING212_USE_DEMO": "true",
+    }
+    removed = server.drop_practice_credentials(environ)
+    assert sorted(removed) == ["TRADING212_PRACTICE_API_KEY", "trading212_practice_api_secret"]
+    assert environ == {"TRADING212_API_KEY": "live", "TRADING212_USE_DEMO": "true"}
+
+
+@pytest.mark.parametrize("workspace", ["uk", "india", None])
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"name": "Trading 212", "command": "python3", "args": ["trading212_mcp_server.py"]},
+        {"name": "Local Research", "command": "python3", "args": ["research_mcp_server.py"]},
+    ],
+    ids=["trading212", "other"],
+)
+def test_the_mcp_child_environment_never_contains_a_practice_credential(
+    monkeypatch, workspace, config
+):
+    from mcp_client import build_mcp_subprocess_environment
+
+    if workspace is None:
+        monkeypatch.delenv("GROWIN_WORKSPACE", raising=False)
+    else:
+        monkeypatch.setenv("GROWIN_WORKSPACE", workspace)
+    monkeypatch.setenv("TRADING212_PRACTICE_API_KEY", "practice-key-canary")
+    monkeypatch.setenv("TRADING212_PRACTICE_API_SECRET", "practice-secret-canary")
+    environment = build_mcp_subprocess_environment(
+        {**config, "env": {"trading212_practice_api_key": "custom-canary", "OTHER": "kept"}}
+    )
+    assert [k for k in environment if k.upper().startswith("TRADING212_PRACTICE_")] == []
+    assert "practice-key-canary" not in environment.values()
+    assert "custom-canary" not in environment.values()
+    assert environment.get("OTHER") == "kept"
+
+
+def test_the_live_key_still_reaches_a_uk_trading212_child(monkeypatch):
+    from mcp_client import build_mcp_subprocess_environment
+
+    monkeypatch.setenv("GROWIN_WORKSPACE", "uk")
+    monkeypatch.setenv("TRADING212_API_KEY", "live-key-canary")
+    environment = build_mcp_subprocess_environment(
+        {"name": "Trading 212", "command": "python3", "args": ["trading212_mcp_server.py"]}
+    )
+    assert environment["TRADING212_API_KEY"] == "live-key-canary"
+
+
+# --- the route, the request model and the handler are gone ------------------------
+
+
+def test_the_config_route_returns_404_or_405_and_forwards_nothing(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from fastapi.testclient import TestClient
+
+    from app_context import state
+    from server import app
+
+    forward = AsyncMock()
+    monkeypatch.setattr(state._mcp_client, "call_tool", forward, raising=False)
+    with TestClient(app) as client:
+        response = client.post(
+            "/mcp/trading212/config",
+            json={"account_type": "invest", "invest_key": "k-canary", "invest_secret": "s-canary"},
+        )
+    assert response.status_code in {404, 405}
+    assert "k-canary" not in response.text and "s-canary" not in response.text
+    forward.assert_not_awaited()
+    paths = {getattr(route, "path", "") for route in app.routes}
+    assert "/mcp/trading212/config" not in paths
+
+
+def test_the_request_model_and_the_market_order_handler_no_longer_exist():
+    import app_context
+    import t212_handlers
+
+    assert not hasattr(app_context, "T212ConfigRequest")
+    assert not hasattr(t212_handlers, "handle_market_order")
+    assert "T212ConfigRequest" not in (BACKEND / "routes" / "mcp_routes.py").read_text(encoding="utf-8")

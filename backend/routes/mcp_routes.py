@@ -4,7 +4,7 @@ MCP Routes - Server management and tool execution
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel
-from app_context import state, T212ConfigRequest
+from app_context import state
 from utils.mcp_validation import validate_mcp_config
 from shared_types import SENSITIVE_TOOLS
 import logging
@@ -41,50 +41,6 @@ async def get_mcp_status():
         return {"servers": sanitized_servers}
     except Exception as e:
         logger.error(f"Error fetching MCP status: {e}", exc_info=True)
-        # Sentinel: Generic error message
-        raise HTTPException(status_code=500, detail="Internal Server Error")
-
-@router.post("/mcp/trading212/config")
-async def update_t212_config(request: T212ConfigRequest):
-    """
-    Update Trading212 API configuration and switch account type.
-    
-    Allows switching between Invest and ISA accounts and updating API keys.
-    Credentials are used only for the current local MCP session and are never
-    persisted to the chat database.
-    
-    Args:
-        request: T212ConfigRequest with account_type and optional API keys
-        
-    Returns:
-        Success status with message
-        
-    Raises:
-        HTTPException: If server not found or switch operation fails
-    """
-    try:
-        # Forward only the selected account's credentials to the already-local
-        # MCP session. Nothing is written to SQLite or process environment.
-        tool_args = {"account_type": request.account_type}
-        if request.account_type == "invest":
-            tool_args["key"] = request.invest_key
-            tool_args["secret"] = request.invest_secret
-        else:
-            tool_args["key"] = request.isa_key
-            tool_args["secret"] = request.isa_secret
-
-
-        if "Trading 212" in state.mcp_client.sessions:
-            result = await state.mcp_client.call_tool("switch_account", tool_args)
-            return {"status": "success", "message": str(result)}
-        raise HTTPException(
-            status_code=503,
-            detail="Trading 212 MCP is not connected; credentials were not stored",
-        )
-    except HTTPException:
-        raise
-    except Exception:
-        logger.error("Error updating T212 config", exc_info=True)
         # Sentinel: Generic error message
         raise HTTPException(status_code=500, detail="Internal Server Error")
 

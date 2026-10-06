@@ -248,41 +248,6 @@ async def handle_analyze_portfolio(
     ]
 
 
-async def handle_market_order(
-    arguments: Dict[str, Any],
-    client: Any  # Trading212Client
-) -> List[TextContent]:
-    """Handle place_market_order with price validation."""
-    try:
-        from price_validation import PriceValidator
-        validation = await PriceValidator.validate_trade_price(arguments["ticker"])
-        if validation["action"] == "block":
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps({
-                        "error": "Trade blocked due to price variance > 3%",
-                        "details": validation["message"],
-                        "recommended_price": validation.get("recommended_price")
-                    })
-                )
-            ]
-    except Exception as e:
-        print(f"Warning: Price validation skipped/failed: {e}", file=sys.stderr)
-
-    result = await client.place_market_order(
-        ticker=arguments["ticker"],
-        quantity=arguments["quantity"],
-        order_type=arguments["order_type"],
-    )
-    return [
-        TextContent(
-            type="text",
-            text=f"Market order placed successfully:\n{json.dumps(result, separators=(',', ':'))}",
-        )
-    ]
-
-
 async def handle_get_price_history(
     arguments: Dict[str, Any]
 ) -> List[TextContent]:

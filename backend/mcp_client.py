@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 TRADING212_SERVER_NAME = "Trading 212"
 TRADING212_READ_ACCESS_ENV = "GROWIN_ENABLE_TRADING212_READS"
 TRADING212_READ_ONLY_ENV = "GROWIN_TRADING212_READ_ONLY"
+# The practice account's keys belong to the execution adapter alone (66 D-07).
+PRACTICE_CREDENTIAL_PREFIX = "TRADING212_PRACTICE_"
 
 
 def trading212_read_access_enabled() -> bool:
@@ -55,6 +57,13 @@ def build_mcp_subprocess_environment(config: Dict) -> Dict[str, str]:
     environment = {**os.environ.copy(), **custom_env}
     if is_trading212_server_config(config):
         environment[TRADING212_READ_ONLY_ENV] = "1"
+    # TRADING212_PRACTICE_* never reaches any MCP child, in a UK process too,
+    # including names set in the server's custom env.
+    environment = {
+        key: value
+        for key, value in environment.items()
+        if not key.upper().startswith(PRACTICE_CREDENTIAL_PREFIX)
+    }
     # TRADING212_* and ALPACA_* are UK-only: a non-UK process hands none of
     # them to any child, including ones set in the server's custom env.
     return scrub_uk_only_credentials(environment)

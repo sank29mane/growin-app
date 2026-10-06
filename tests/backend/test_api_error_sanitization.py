@@ -55,22 +55,18 @@ def test_mcp_status_sanitization():
             assert detail == "Internal Server Error"
             assert "ENV_VAR_LEAK" not in str(response.content)
 
-def test_update_t212_config_sanitization():
-    """Test that config update sanitizes errors."""
+def test_update_t212_config_route_is_gone_and_leaks_nothing():
+    """The key-push route was removed in 66-02 (D-05, D-07): no handler, so no error path to leak."""
     with TestClient(app) as client:
-        # Create a mock connection
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
         mock_cursor.execute.side_effect = Exception("API_KEY_LEAK_IN_TRACEBACK")
         mock_conn.cursor.return_value = mock_cursor
 
-        # Patch the conn attribute of chat_manager
         with patch.object(state.chat_manager, 'conn', mock_conn):
             response = client.post("/mcp/trading212/config", json={"account_type": "invest"})
 
-            assert response.status_code == 503
-            detail = response.json().get("detail")
-            assert detail == "Trading 212 MCP is not connected; credentials were not stored"
+            assert response.status_code in (404, 405)
             assert "API_KEY_LEAK_IN_TRACEBACK" not in str(response.content)
             mock_conn.cursor.assert_not_called()
 
