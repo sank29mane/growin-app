@@ -122,6 +122,7 @@ def test_agent_registration_without_a_ledger_returns_false_and_logs_the_code(
     agent = _agent()
     proposal, context = _chat_proposal(agent)
 
+    context.user_context["risk_review_succeeded"] = True
     with caplog.at_level(logging.WARNING):
         registered = agent._register_for_human_review(proposal, context)
 
@@ -139,6 +140,7 @@ def test_agent_registration_on_a_uk_ledger_is_refused_for_missing_account_and_br
     agent = _agent()
     proposal, context = _chat_proposal(agent)
 
+    context.user_context["risk_review_succeeded"] = True
     with caplog.at_level(logging.WARNING):
         registered = agent._register_for_human_review(proposal, context)
 
@@ -150,7 +152,8 @@ def test_agent_registration_on_a_uk_ledger_is_refused_for_missing_account_and_br
 
 
 @pytest.mark.asyncio
-async def test_chat_reply_survives_a_refused_registration(monkeypatch, caplog):
+@pytest.mark.parametrize("kwargs", [{}, {"defer_proposal": False}])
+async def test_chat_reply_survives_a_refused_registration(monkeypatch, caplog, kwargs):
     monkeypatch.setattr(app_context, "state", AppState())
     audits = []
     monkeypatch.setattr(
@@ -166,7 +169,11 @@ async def test_chat_reply_survives_a_refused_registration(monkeypatch, caplog):
     context = MarketContext(query="Buy AAPL", intent="analytical", ticker="AAPL")
 
     with caplog.at_level(logging.WARNING):
-        result = await agent.make_decision(context, "Buy AAPL")
+        result = await agent.make_decision(context, "Buy AAPL", **kwargs)
+        assert "pending_proposal" not in context.user_context
+        assert "deferred_proposal" in context.user_context
+        context.user_context["risk_review_succeeded"] = True
+        result["content"] += agent.register_deferred_proposal(context)
 
     assert result["content"].startswith("BUY 2 shares of AAPL now.")
     assert "Trade proposal not registered for review (TRADE_PROPOSAL_NOT_REGISTERED)." in (

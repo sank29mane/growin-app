@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from magentic import prompt as mag_prompt
 from langchain_core.messages import SystemMessage, HumanMessage
 from .llm_factory import LLMFactory
-from model_registry import ROLE_DECISION, ModelRegistryError, ProviderError
+from model_registry import ROLE_RISK_CRITIC, ROLE_DECISION, ModelRegistryError, ProviderError
 from model_registry.provider import image_message_content, run_magentic
 from utils.audit_log import AUDIT_UNSCOPED, log_audit
 from execution import (
@@ -200,12 +200,13 @@ class DecisionAgent:
             handle_error(e, "DecisionAgent initialization failed", logger, raise_error=False)
             raise
 
-    async def make_decision(self, context: MarketContext, query: str, previous_response_id: Optional[str] = None, images: Optional[List[str]] = None, defer_proposal: bool = False) -> Dict[str, Any]:
+    async def make_decision(self, context: MarketContext, query: str, previous_response_id: Optional[str] = None, images: Optional[List[str]] = None, defer_proposal: bool = True) -> Dict[str, Any]:
         """
         Make a trading decision based on aggregated market context.
         Returns a dict with 'content' and 'response_id'.
 
-        With ``defer_proposal`` the trade proposal is extracted but neither
+        Proposals are always deferred, including for legacy callers passing False.
+        The trade proposal is extracted but neither
         registered nor exposed: the caller registers it with
         ``register_deferred_proposal`` once the risk review has finished, so a
         failed review leaves nothing registered.
@@ -335,15 +336,9 @@ class DecisionAgent:
 
             # SOTA 2026 Phase 30: Detect and extract Trade Proposals for HITL
             trade_proposal = self._extract_trade_proposal(recommendation, context)
-            if trade_proposal and defer_proposal:
+            if trade_proposal:
+                context.user_context.pop("risk_review_succeeded", None)
                 context.user_context["deferred_proposal"] = trade_proposal
-            elif trade_proposal:
-                proposal_id = trade_proposal.get("proposal_id")
-                if self._register_for_human_review(trade_proposal, context):
-                    context.user_context["pending_proposal"] = trade_proposal
-                    logger.info(f"DecisionAgent: Detected trade proposal for {trade_proposal.get('ticker')} ({proposal_id}). Routing to HITL gate.")
-                else:
-                    recommendation += self.PROPOSAL_NOT_REGISTERED_NOTE
 
             status_manager.set_status("decision_agent", "ready", "Decision delivered", model=self.model_name)
 
@@ -1167,16 +1162,18 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
         and the "not registered" note to append to the reply when the human
         review gate refused it.
         """
-        proposal = context.user_context.pop("deferred_proposal", None)
+        proposal = context.user_context.get("deferred_proposal")
         if proposal is None:
             return None
         if self._register_for_human_review(proposal, context):
+            context.user_context.pop("deferred_proposal", None)
             context.user_context["pending_proposal"] = proposal
             logger.info(
                 f"DecisionAgent: Registered trade proposal for {proposal.get('ticker')} "
                 f"({proposal.get('proposal_id')}) after risk review. Routing to HITL gate."
             )
             return None
+        context.user_context.pop("deferred_proposal", None)
         return self.PROPOSAL_NOT_REGISTERED_NOTE
 
     async def generate_response(self, prompt: str) -> str:
@@ -1192,6 +1189,9 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
         no account or broker, so registration fails until a human-reviewed path
         supplies them; that refusal is logged by code and the proposal dropped.
         """
+        if context.user_context.get("risk_review_succeeded") is not True:
+            raise ModelRegistryError("RISK_REVIEW_REQUIRED", ROLE_RISK_CRITIC)
+
         from app_context import state
 
         try:

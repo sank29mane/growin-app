@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from utils.hardware_guard import hardware_guard
 from .swarm_utils import ContextBuffer, AgentResult, summarize_specialist_data
 from model_registry import ROLE_COORDINATOR, get_active_registry
-from model_registry.provider import role_pydantic_ai_model
+from model_registry.provider import map_exception, role_pydantic_ai_model
 
 logger = logging.getLogger(__name__)
 
@@ -130,11 +130,17 @@ class SwarmOrchestrator:
             yield "=== STAGE 1: REFLEX ===\n"
             
             history = []
-            async with self.agent.run_stream(prompt) as reflex_result:
-                async for token in reflex_result.stream_text():
-                    yield token
-                # Fetch messages to continue the conversation
-                history = reflex_result.new_messages()
+            try:
+                async with self.agent.run_stream(prompt) as reflex_result:
+                    async for token in reflex_result.stream_text():
+                        yield token
+                    # Fetch messages to continue the conversation
+                    history = reflex_result.new_messages()
+            except Exception as exc:
+                mapped = map_exception(exc, ROLE_COORDINATOR)
+                if mapped is exc:
+                    raise
+                raise mapped from None
 
         # Stage 2: Synthesis - release GPU lock while waiting for slow data
         all_results = await self.buffer.get_all()
@@ -165,9 +171,15 @@ class SwarmOrchestrator:
             # Re-acquire GPU lock for the synthesis stage
             async with hardware_guard.heavy_inference():
                 yield "\n=== STAGE 2: SYNTHESIS ===\n"
-                async with self.agent.run_stream(synthesis_prompt, message_history=history) as synthesis_result:
-                    async for token in synthesis_result.stream_text():
-                        yield token
+                try:
+                    async with self.agent.run_stream(synthesis_prompt, message_history=history) as synthesis_result:
+                        async for token in synthesis_result.stream_text():
+                            yield token
+                except Exception as exc:
+                    mapped = map_exception(exc, ROLE_COORDINATOR)
+                    if mapped is exc:
+                        raise
+                    raise mapped from None
         else:
             logger.info("⚠️ No slow data received within timeout, skipping Stage 2.")
 

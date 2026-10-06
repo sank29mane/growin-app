@@ -115,7 +115,7 @@ class OrchestratorAgent:
         risk_critic or rebuttal failure earlier in ``run`` means nothing was
         ever registered or announced.
         """
-        if context.user_context.get("deferred_proposal") and not context.user_context.get("risk_review"):
+        if (context.user_context.get("deferred_proposal") or context.user_context.get("pending_proposal")) and context.user_context.get("risk_review_succeeded") is not True:
             raise ModelRegistryError("RISK_REVIEW_REQUIRED", ROLE_RISK_CRITIC)
         note = self.decision_engine.register_deferred_proposal(context)
         if note:
@@ -704,6 +704,7 @@ Query: "{clean_query}"
         # Extract without registering; hold proposal text until the critic has reviewed it.
         proposal = self.decision_engine._extract_trade_proposal(full_response, context)
         if proposal:
+            context.user_context.pop("risk_review_succeeded", None)
             context.user_context["deferred_proposal"] = proposal
 
         # 4. Governance Phase (Risk Review)

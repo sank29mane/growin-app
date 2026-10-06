@@ -144,12 +144,7 @@ class RiskAgent(BaseAgent):
                 latency_ms=0 # Managed by execution loop
             )
                 
-        except (ModelRegistryError, ProviderError) as e:
-            # Fail closed: record the typed error for review() and raise. A model
-            # failure must never become a FLAGGED review that lets the decision through.
-            sink = context_dict.get("_model_errors")
-            if isinstance(sink, list):
-                sink.append(e)
+        except (ModelRegistryError, ProviderError):
             raise
         except Exception as e:
 
@@ -159,17 +154,13 @@ class RiskAgent(BaseAgent):
 
     async def review(self, context: MarketContext, suggestion: str) -> Dict[str, Any]:
         """Convenience method for Orchestrator integration"""
-        model_errors: List[Exception] = []
-        res = await self.execute({"context": context, "suggestion": suggestion, "_model_errors": model_errors})
-        if model_errors:
-            # BaseAgent.execute turns exceptions into failed responses. Re-raise the
-            # typed registry or provider error so it is never mapped to FLAGGED.
-            raise model_errors[0]
-        if res.success:
-            return res.data
-        return {
-            "status": "FLAGGED",
-            "confidence_score": 0.0,
-            "risk_assessment": f"Risk Agent Error: {res.error}",
-            "requires_hitl": True
-        }
+        context.user_context.pop("risk_review_succeeded", None)
+        res = await self.execute({"context": context, "suggestion": suggestion})
+        if not res.success:
+            raise ProviderError("CRITIC_OUTPUT_INVALID", ROLE_RISK_CRITIC)
+        try:
+            review = RiskAssessment.model_validate(res.data).model_dump()
+        except (ValueError, TypeError):
+            raise ProviderError("CRITIC_OUTPUT_INVALID", ROLE_RISK_CRITIC) from None
+        context.user_context["risk_review_succeeded"] = True
+        return review

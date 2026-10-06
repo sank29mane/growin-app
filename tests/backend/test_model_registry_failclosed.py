@@ -324,14 +324,15 @@ async def test_risk_analyze_raises_typed_errors_directly(tmp_path, stub, key_env
         await RiskAgent().analyze({"context": _context(), "suggestion": "BUY 1 share of AAPL"})
 
 
-async def test_risk_review_still_flags_ordinary_non_model_failures(tmp_path, stub, key_env):
+async def test_risk_review_rejects_ordinary_non_model_failures(tmp_path, stub, key_env):
     from agents.risk_agent import RiskAgent
 
     _activate(tmp_path, stub)
     with patch("agents.risk_agent.run_magentic", new=AsyncMock(side_effect=ValueError("bad output"))):
-        review = await RiskAgent().review(_context(), "BUY 1 share of AAPL")
-    assert review["status"] == "FLAGGED"
-    assert review["requires_hitl"] is True
+        with pytest.raises(ProviderError) as caught:
+            await RiskAgent().review(_context(), "BUY 1 share of AAPL")
+    assert caught.value.code == "CRITIC_OUTPUT_INVALID"
+    assert caught.value.role == "risk_critic"
 
 
 async def test_missing_risk_critic_stops_the_orchestrator_before_any_model_call(tmp_path, stub, key_env):
@@ -745,3 +746,87 @@ async def test_release_helper_refuses_unreviewed_proposal_before_any_side_effect
     assert state.trade_proposals == before
     assert context.user_context["deferred_proposal"] == held
     assert "pending_proposal" not in context.user_context
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("intent", ["analytical", "conversational", "educational"])
+async def test_schema_invalid_critic_registers_and_broadcasts_nothing(
+    tmp_path, stub, key_env, private_config_dir, streaming, intent
+):
+    _activate(tmp_path, stub)
+    stub.tool_arguments["return_riskassessment"] = {"status": "NOT_A_VERDICT"}
+    assert state.start_execution(tmp_path / "execution.sqlite3", workspace="uk", private_dir=private_config_dir)
+    try:
+        orchestrator = OrchestratorAgent(mcp_client=MagicMock(), chat_manager=MagicMock())
+        events = []
+        before = dict(state.trade_proposals)
+        with pytest.raises(ProviderError) as caught:
+            await _run_orchestrator_with_real_decision(
+                orchestrator, stub, events, context_intent=intent, streaming=streaming
+            )
+        assert caught.value.code == "CRITIC_OUTPUT_INVALID"
+        assert caught.value.role == "risk_critic"
+        assert kit.model_id_for("risk_critic") in [r.model for r in stub.snapshot()]
+        assert events == []
+        assert state.trade_proposals == before
+    finally:
+        state.close_execution()
+
+
+@pytest.mark.parametrize("boundary", ["_register_for_human_review", "register_deferred_proposal"])
+async def test_direct_registration_requires_critic_success_marker(boundary):
+    agent = DecisionAgent(mcp_client=MagicMock())
+    context = _context()
+    proposal = {"proposal_id": "unreviewed", "ticker": "AAPL", "action": "BUY", "quantity": 1}
+    context.user_context["deferred_proposal"] = proposal
+    context.user_context["risk_review"] = {"status": "APPROVED"}
+    with patch.object(state, "register_trade_proposal") as register:
+        with pytest.raises(ModelRegistryError) as caught:
+            if boundary == "_register_for_human_review":
+                agent._register_for_human_review(proposal, context)
+            else:
+                agent.register_deferred_proposal(context)
+    assert caught.value.code == "RISK_REVIEW_REQUIRED"
+    register.assert_not_called()
+    assert context.user_context["deferred_proposal"] is proposal
+
+
+async def test_failed_review_clears_previous_success_marker(tmp_path, stub, key_env):
+    from agents.risk_agent import RiskAgent
+
+    _activate(tmp_path, stub)
+    context = _context()
+    await RiskAgent().review(context, "BUY AAPL")
+    assert context.user_context["risk_review_succeeded"] is True
+    stub.tool_arguments["return_riskassessment"] = {}
+    with pytest.raises(ProviderError):
+        await RiskAgent().review(context, "BUY MSFT")
+    assert "risk_review_succeeded" not in context.user_context
+
+
+@pytest.mark.parametrize("stage", ["reflex", "synthesis"])
+async def test_unreachable_swarm_stream_is_typed(tmp_path, stub, key_env, stage):
+    from contextlib import asynccontextmanager
+    import httpx
+    import openai
+    from agents.orchestrator import SwarmOrchestrator
+    from agents.swarm_utils import AgentResult
+
+    _activate(tmp_path, stub, **({"base_urls": DEAD_COORDINATOR} if stage == "reflex" else {}))
+    swarm = SwarmOrchestrator(reflex_timeout=0.01, synthesis_timeout=0.01)
+    await swarm.buffer.push(AgentResult(source="QuantEngine", data={}, conviction=8))
+    if stage == "synthesis":
+        await swarm.buffer.push(AgentResult(source="ResearchAgent", data={}, conviction=6))
+        real_stream = swarm.agent.run_stream
+        @asynccontextmanager
+        async def stream(prompt, **kwargs):
+            if kwargs.get("message_history") is not None:
+                raise openai.APIConnectionError(request=httpx.Request("POST", "http://127.0.0.1"))
+            async with real_stream(prompt, **kwargs) as result:
+                yield result
+        swarm.agent.run_stream = stream
+    with pytest.raises(ProviderError) as caught:
+        async for _ in swarm.stream_swarm_run("What now?"):
+            pass
+    assert caught.value.code == "PROVIDER_UNREACHABLE"
+    assert caught.value.role == "coordinator"
