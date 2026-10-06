@@ -388,12 +388,13 @@ def preflight_holdout(inputs: StudyInputs, prep: Prepared, criteria: Mapping[str
     if dataset_digest(inputs.rows, inputs.events) != inputs.dataset_sha256:
         raise unrunnable("the dataset rows do not reproduce dataset_sha256")
     days = [day for day in prep.sessions if prep.holdout.contains(day)]
+    day_set = set(days)
     if len(days) < 2:
         raise unrunnable("the holdout range needs at least two sessions")
     for instrument_class in (EQUITY, NON_GOLD_ETF):
         if instrument_class not in inputs.ticks.classes():
             raise unrunnable(f"no tick table is registered for instrument class {instrument_class}")
-        gaps = [day for day in days if not inputs.ticks.covers(instrument_class, day)]
+        gaps = [day for day in days if not inputs.ticks.covers(instrument_class, day, series="EQ")]
         if gaps:
             raise unrunnable(
                 f"the {instrument_class} tick table does not cover {len(gaps)} holdout sessions, first {gaps[0].isoformat()}"
@@ -403,6 +404,17 @@ def preflight_holdout(inputs: StudyInputs, prep: Prepared, criteria: Mapping[str
     absent = [day for day in days if day not in etf_rows]
     if absent:
         raise unrunnable(f"the benchmark ETF has no bar on {len(absent)} of {len(days)} holdout sessions, first {absent[0].isoformat()}")
+    # Inspect metadata only. Validate every observed series, including changes mid-holdout.
+    benchmark_anchors = set(prep.params.benchmark.candidate_isins)
+    for row in inputs.rows:
+        if row.trade_date not in day_set:
+            continue
+        instrument_class = NON_GOLD_ETF if row.anchor_isin in benchmark_anchors else EQUITY
+        if not inputs.ticks.covers(instrument_class, row.trade_date, series=row.series):
+            raise unrunnable(
+                f"the {instrument_class} tick table does not cover series {row.series!r} "
+                f"on {row.trade_date.isoformat()} for {row.anchor_isin}"
+            )
     first, last = etf_rows[days[0]], etf_rows[days[-1]]
     if first.raw_close <= 0 or last.raw_close <= 0:
         raise unrunnable("the benchmark ETF has a non-positive raw close on its first or last holdout session")
@@ -488,7 +500,7 @@ def run_holdout(inputs: StudyInputs, *, expected_head: str, logged_at: str | Non
         })
         write_head_file(reg)
         report_path = write_report(report_root, report) if report_root is not None else None
-    except Exception as exc:  # the holdout is already spent: record a typed INVALID verdict, never a silent spend
+    except BaseException as exc:  # the holdout is already spent: record a typed INVALID verdict, never a silent spend
         # An append can succeed before its caller raises. Recover the durable open in that case.
         opened_events = [event for event in reg.holdout_events()
                          if event.seq >= len(entries_before_open)
@@ -499,12 +511,14 @@ def run_holdout(inputs: StudyInputs, *, expected_head: str, logged_at: str | Non
         reg.append_holdout_invalid({
             "holdout_open_event_hash": opened_events[-1].entry_hash, "registration_entry_hash": entry.entry_hash,
             "error_type": type(exc).__name__, "error_code": getattr(exc, "code", "unexpected_error"),
+            "reason": "interrupted" if not isinstance(exc, Exception) else "evaluation_failed",
         })
         try:
             write_head_file(reg)
         except OSError:
             pass  # INVALID is already durable; a head-write failure must not mask it.
         raise HoldoutInvalid(
+            f"INVALID: {'interrupted' if not isinstance(exc, Exception) else 'evaluation_failed'}; "
             f"the holdout was opened and then failed ({type(exc).__name__}); INVALID was recorded in the registry"
         ) from exc
     return HoldoutOutcome(report, verdict, grant.event_hash, report_path)
@@ -658,6 +672,15 @@ def cli_run(config: Mapping[str, Any]) -> dict[str, Any]:
 
 def cli_holdout(config: Mapping[str, Any], *, logged_at: str) -> dict[str, Any]:
     inputs, pin = build_inputs(config)
+    registration = inputs.registry.registration()
+    for result in inputs.registry.holdout_results():
+        if result.payload["registration_entry_hash"] != registration.entry_hash:
+            continue
+        if result.kind in ("holdout_open", "holdout_invalid"):
+            reason = result.payload.get("reason", "evaluation_failed")
+            if result.kind == "holdout_open" or reason == "in_progress":
+                reason = "interrupted"
+            raise HoldoutInvalid(f"INVALID: {reason}; {_anchor_instruction(inputs.registry)}")
     check_pin_fresh(inputs.registry, _need_pin(pin))
     try:
         outcome = run_holdout(inputs, expected_head=_need_pin(pin), logged_at=logged_at,

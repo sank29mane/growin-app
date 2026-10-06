@@ -506,3 +506,75 @@ def test_deleted_ledger_rerun_does_not_invalidate_the_original_verdict(tmp_path)
     assert reg.head_hash() == original_head
     assert reg.invalid_events() == ()
     assert not ledger.exists()
+
+
+# Review round 4: interrupted opens and class/series-aware tick preflight.
+@pytest.mark.parametrize("failure", [KeyboardInterrupt(), BaseException("abort")])
+def test_baseexception_after_open_is_durably_invalid_and_cli_reports_it(tmp_path, monkeypatch, capsys, failure):
+    inputs, head = _registered(tmp_path)
+    reg = inputs.registry
+    real_fsync = os.fsync
+    synced = []
+
+    def track_fsync(fd):
+        real_fsync(fd)
+        if os.fstat(fd).st_ino == reg.path.stat().st_ino:
+            synced.append(reg.path.read_text())
+
+    def interrupt_before_exposure(*_a, **_k):
+        (provisional,) = reg.invalid_events()
+        assert provisional.payload["reason"] == "in_progress"
+        assert any(provisional.entry_hash in content for content in synced)
+        raise failure
+
+    monkeypatch.setattr(os, "fsync", track_fsync)
+    monkeypatch.setattr(data.DatasetView, "open", interrupt_before_exposure)
+    with pytest.raises(HoldoutInvalid):
+        study.run_holdout(inputs, expected_head=head)
+    (result,) = reg.holdout_results()
+    assert result.kind == "holdout_invalid"
+    assert result.payload["error_type"] == type(failure).__name__
+    assert result.payload["reason"] == "interrupted"
+    assert len(reg.holdout_events()) == 1
+    config = _cli_config(tmp_path, inputs, head, monkeypatch)
+    assert cli.main(["holdout", "--config", str(config)]) == 2
+    assert "INVALID: interrupted" in capsys.readouterr().out
+    assert reg.holdout_results() == (result,)
+
+
+@pytest.mark.parametrize("state", ["open_only", "in_progress"])
+def test_cli_reports_an_interrupted_open_even_with_a_stale_pin(tmp_path, monkeypatch, capsys, state):
+    inputs, head = _registered(tmp_path)
+    reg = inputs.registry
+    opened = reg.append_holdout_open({"registration_entry_hash": reg.registration().entry_hash,
+                                      "holdout_range": study.prepare(inputs).holdout.as_payload()})
+    if state == "in_progress":
+        reg.append_holdout_invalid({"registration_entry_hash": reg.registration().entry_hash,
+                                    "holdout_open_event_hash": opened.entry_hash, "reason": "in_progress"})
+    before = reg.entries()
+    config = _cli_config(tmp_path, inputs, head, monkeypatch)
+    assert cli.main(["holdout", "--config", str(config)]) == 2
+    assert "INVALID: interrupted" in capsys.readouterr().out
+    assert reg.entries() == before
+
+
+def test_successful_verdict_supersedes_provisional_invalid(tmp_path):
+    inputs, head = _registered(tmp_path)
+    outcome = study.run_holdout(inputs, expected_head=head)
+    reg = inputs.registry
+    (result,) = reg.holdout_results()
+    assert result.kind == "holdout_verdict"
+    assert result.payload["holdout_open_event_hash"] == outcome.event_hash
+    assert result.payload["verdict"] == outcome.verdict.verdict
+    assert reg.invalid_events() == ()
+    assert any(e.kind == "holdout_invalid" and e.payload["reason"] == "in_progress" for e in reg.entries())
+
+
+@pytest.mark.parametrize("anchor, offset", [(ETF, 0), (ETF, 20), (ETF, 59), ("INE000A01000", 20)])
+def test_unsupported_series_refuses_before_open_for_benchmark_and_universe(tmp_path, anchor, offset):
+    inputs, head = _etf_case(tmp_path, updates=lambda r: {"series": "BE"}
+                             if r.anchor_isin == anchor and r.trade_date == HOLDOUT_DAYS[offset] else None)
+    with pytest.raises(StrategyIndiaError, match="series 'BE'") as err:
+        study.run_holdout(inputs, expected_head=head)
+    assert err.value.code == "holdout_unrunnable"
+    _unspent(inputs, head)

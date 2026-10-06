@@ -213,6 +213,11 @@ def open_holdout(
         "logged_at": logged_at,
     }
     event = registry.append_holdout_open(payload)
+    # _append fsyncs this provisional outcome before a grant can expose any data.
+    registry.append_holdout_invalid({
+        "holdout_open_event_hash": event.entry_hash, "registration_entry_hash": reg.entry_hash,
+        "reason": "in_progress",
+    })
     return HoldoutGrant(reg.entry_hash, event.entry_hash, holdout, payload["criteria_sha256"], _ISSUER)
 
 

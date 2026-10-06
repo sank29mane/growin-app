@@ -237,6 +237,21 @@ class Registry:
     def holdout_events(self) -> tuple[Entry, ...]:
         return tuple(entry for entry in self.entries() if entry.kind == KIND_HOLDOUT_OPEN)
 
+    def holdout_results(self) -> tuple[Entry, ...]:
+        """Latest outcome per open; an open without an outcome means interrupted INVALID.
+
+        ``entries`` retains the full audit history, including superseded outcomes.
+        """
+        latest: dict[str, Entry] = {}
+        for entry in self.entries():
+            if entry.kind == KIND_HOLDOUT_OPEN:
+                latest[entry.entry_hash] = entry
+            elif entry.kind in (KIND_HOLDOUT_INVALID, KIND_HOLDOUT_VERDICT):
+                opened = entry.payload["holdout_open_event_hash"]
+                if opened in latest:
+                    latest[opened] = entry
+        return tuple(latest.values())
+
     # ---- appending -----------------------------------------------------------
     def _append(self, kind: str, payload: Mapping[str, Any]) -> Entry:
         existing = self.entries() if self.path.exists() else ()
@@ -283,7 +298,8 @@ class Registry:
         return self._append(KIND_HOLDOUT_INVALID, payload)
 
     def invalid_events(self) -> tuple[Entry, ...]:
-        return tuple(entry for entry in self.entries() if entry.kind == KIND_HOLDOUT_INVALID)
+        """Effective INVALID records, excluding ones superseded by a later verdict."""
+        return tuple(entry for entry in self.holdout_results() if entry.kind == KIND_HOLDOUT_INVALID)
 
 
 def spent_ranges(entries: Sequence[Entry]) -> list[tuple[date, date]]:
