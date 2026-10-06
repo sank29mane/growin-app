@@ -656,6 +656,46 @@ def test_the_config_repr_does_not_show_the_slippage_value(tmp_path):
     assert "31" not in repr(config.execution)
 
 
+@pytest.mark.asyncio
+async def test_the_reservation_transaction_itself_enforces_the_position_cap_and_needs_stored_limits(
+    tmp_path, private_config_dir, monkeypatch, regime_zero
+):
+    """The admission pre-check is a convenience; the ledger is the authority (D-18)."""
+
+    from execution import ApprovalConflict, ExecutionLedger, VenueBinding
+    from execution.venue import PRICE_SOURCE_TEST_REPLAY
+    from t212_practice_testkit import practice_proposal_dict
+
+    stack = await stack_with(tmp_path, private_config_dir, monkeypatch)
+    try:
+        # 500 shares x 71.3p = GBP 356.5, over the 300 cap, forced past the pre-check.
+        proposal = practice_proposal_dict("forced-cap", quantity="500", limit_price="71.3")
+        admission = stack.service.admit(
+            proposal, currency="GBP", price="0.713", price_source=PRICE_SOURCE_TEST_REPLAY,
+            **stack.app._local_paper_preflight(),
+        )
+        assert admission.decision.value == "ADMITTED"
+        with pytest.raises(ApprovalConflict, match="per-position cap"):
+            stack.service.reserve("forced-cap")
+        assert stack.ledger.get_reservation("forced-cap") is None
+    finally:
+        stack.close()
+
+    binding = VenueBinding(venue="t212_practice", account_id=PRACTICE_ACCOUNT, currency="GBP")
+    with ExecutionLedger(tmp_path / "nolimits.sqlite3", workspace="uk", venue=binding) as ledger:
+        ledger.configure_paper_budget(PRACTICE_ACCOUNT, "GBP", "900", workspace="uk")
+        from execution import ExecutionService
+
+        service = ExecutionService(None, ledger, simulator=None, risk_gate=None)
+        proposal = practice_proposal_dict("no-limits", quantity="1", limit_price="71.3")
+        service.admit(
+            proposal, currency="GBP", price="0.713", price_source=PRICE_SOURCE_TEST_REPLAY,
+            simulator_evidence={"simulated_fill_price": "0.713"}, risk_evidence={"scaled_size": "1"},
+        )
+        with pytest.raises(ApprovalConflict, match="limits"):
+            service.reserve("no-limits")
+
+
 # --- the shipped regime model (characterisation, see the 66-04 SUMMARY) ------------------------------
 
 

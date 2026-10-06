@@ -343,6 +343,38 @@ async def test_a_sell_reservation_is_checked_in_the_ledger_even_without_the_admi
         stack.close()
 
 
+@pytest.mark.asyncio
+async def test_the_ledger_alone_refuses_a_sell_without_a_broker_number_or_beyond_the_brokers_available(
+    tmp_path, private_config_dir, monkeypatch
+):
+    """Both checks live in the reservation itself, not only in the admission pre-check."""
+
+    from execution.service import ExecutionConflictError
+    from execution.venue import PRICE_SOURCE_TEST_REPLAY
+    from t212_practice_testkit import practice_proposal_dict
+
+    stack = await held_position(tmp_path, private_config_dir, monkeypatch, quantity=3)
+    try:
+        proposal = practice_proposal_dict("lone-sell", side="SELL", quantity="2", limit_price="71.2")
+        admission = stack.service.admit(
+            proposal, currency="GBP", price="0.712", price_source=PRICE_SOURCE_TEST_REPLAY,
+            **stack.app._local_paper_preflight(),
+        )
+        assert admission.decision.value == "ADMITTED"
+        # No broker number: the service refuses before the ledger is asked.
+        with pytest.raises(ExecutionConflictError):
+            stack.service.reserve("lone-sell")
+        assert stack.ledger.get_reservation("lone-sell") is None
+        # The broker has 1 available while the ledger holds 3: the ledger refuses on its own.
+        with pytest.raises(ApprovalConflict, match="broker"):
+            stack.ledger.reserve_sell_quantity("lone-sell", broker_available_quantity="1")
+        assert stack.ledger.get_reservation("lone-sell") is None
+        reserved = stack.ledger.reserve_sell_quantity("lone-sell", broker_available_quantity="2")
+        assert reserved.reserved == Decimal("2") and reserved.state == "ACTIVE"
+    finally:
+        stack.close()
+
+
 # --- paper ledgers keep denying SELL (D-19, D-21) --------------------------------------------------------
 
 
