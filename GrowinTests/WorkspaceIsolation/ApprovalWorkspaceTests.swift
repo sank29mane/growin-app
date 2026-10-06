@@ -550,17 +550,19 @@ struct ApprovalWorkspaceTests {
         }
     }
 
-    // MARK: Task 3: no unscoped API, per-workspace Secure Enclave tag
+    // MARK: Task 3: no unscoped API, India-only Secure Enclave credential
 
-    @Test func secureEnclaveTagsDifferPerWorkspace() {
-        let uk = SecureEnclaveApprovalSigner.keyTag(for: .uk)
-        let india = SecureEnclaveApprovalSigner.keyTag(for: .india)
-        #expect(uk != india)
-        #expect(String(decoding: uk, as: UTF8.self) == "san.Growin.approval-key.v1.uk")
-        #expect(String(decoding: india, as: UTF8.self) == "san.Growin.approval-key.v1.india")
-        for tag in [uk, india] {
-            #expect(String(decoding: tag, as: UTF8.self).hasPrefix("san.Growin.approval-key.v1."))
-        }
+    /// 63-03 replaced the SecKey signer (per-workspace application tags) with a
+    /// CryptoKit key blob in the keychain. The isolation this test used to pin
+    /// now lives in the credential policy: the blob exists for India only.
+    @Test func secureEnclaveCredentialIsIndiaOnly() throws {
+        #expect(CredentialName.approvalSecureEnclaveKey.policy == .fixed(.india))
+        #expect(CredentialName.approvalSecureEnclaveKey.policy.allows(.workspace(.india)))
+        #expect(!CredentialName.approvalSecureEnclaveKey.policy.allows(.workspace(.uk)))
+        #expect(!CredentialName.approvalSecureEnclaveKey.policy.allows(.shared))
+        let source = try PaperOperationsSourceProbe.contents("Growin/Security/SecureEnclaveApprovalSigner.swift")
+        #expect(!source.contains("keyTag"))
+        #expect(!source.contains("kSecAttrApplicationTag"))
     }
 
     /// Every .swift file under Growin/, as (repo-relative path, contents).

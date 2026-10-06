@@ -65,6 +65,9 @@ nonisolated enum CredentialName: String, CaseIterable, Sendable {
     case t212IsaKey
     case t212IsaSecret
     case approvalSigningKey = "approvalSoftwareP256PrivateKey.v1"
+    /// CryptoKit Secure Enclave key blob for India (63-03, D-01). The blob is
+    /// only usable inside this Mac's Secure Enclave. India only: no UK scope.
+    case approvalSecureEnclaveKey = "approvalSecureEnclaveP256KeyBlob.v1"
 
     /// Operator decision 2026-10-05 (research-a2): LLM and news keys are shared,
     /// Trading 212 and Alpaca keys belong to UK, the approval key is per
@@ -91,6 +94,8 @@ nonisolated enum CredentialName: String, CaseIterable, Sendable {
             return .fixed(.uk)
         case .approvalSigningKey:
             return .perWorkspace
+        case .approvalSecureEnclaveKey:
+            return .fixed(.india)
         }
     }
 
