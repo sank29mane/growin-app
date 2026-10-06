@@ -279,6 +279,26 @@ def write_head_file(registry: Registry) -> str:
     return head
 
 
+def _heal_head_file(registry: Registry, recorded: str, pin: str) -> bool:
+    """The pin is the verified chain head and the file holds an earlier entry of that chain: rewrite the file.
+
+    This is the state a failed head write after the verdict leaves. A pin whose file hash is not in the chain
+    stays refused.
+    """
+    try:
+        chain = registry.entries(expected_head=pin)
+    except RegistryError:
+        return False
+    if recorded not in {entry.entry_hash for entry in chain[:-1]}:
+        return False
+    try:
+        write_head_file(registry)
+    except OSError as exc:
+        raise StrategyIndiaError("the recorded registry head is stale and could not be rewritten",
+                                 code="registry_head_stale") from exc
+    return True
+
+
 def check_pin_fresh(registry: Registry, pin: str) -> None:
     """Refuse a pin that is not the head the tool last wrote (a pre-open pin replayed after the event was deleted)."""
     path = head_file_path(registry)
@@ -290,6 +310,8 @@ def check_pin_fresh(registry: Registry, pin: str) -> None:
         recorded = path.read_text(encoding="utf-8").strip()
     except (OSError, UnicodeError) as exc:
         raise StrategyIndiaError("the recorded registry head is unreadable", code="registry_head_stale") from exc
+    if recorded != pin and _heal_head_file(registry, recorded, pin):
+        return
     if recorded != pin:
         raise StrategyIndiaError(
             "the pinned registry head is stale: it is not the head this tool last recorded", code="registry_head_stale"
@@ -539,6 +561,10 @@ def run_holdout(inputs: StudyInputs, *, expected_head: str, logged_at: str | Non
         if result.kind == "holdout_verdict" or (
             result.kind == "holdout_invalid" and result.payload["reason"] != "in_progress"
         ):
+            try:
+                write_head_file(reg)  # retry: the file must not stay on a pre-outcome head
+            except OSError:
+                pass  # check_pin_fresh heals a file that is an earlier entry of the verified chain
             raise HoldoutInvalid(
                 f"the durable {result.payload.get('verdict', 'INVALID')} outcome is retained; "
                 f"post-outcome processing failed ({type(exc).__name__})"
