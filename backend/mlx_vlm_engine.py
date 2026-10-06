@@ -69,7 +69,7 @@ class MLXVLMInferenceEngine:
 
 
 
-    def load_model(self, model_path: str = "mlx-community/Qwen2.5-VL-7B-Instruct-4bit") -> bool:
+    def load_model(self, model_path: str) -> bool:
         """
         Load a VLM model using mlx-vlm.
         """

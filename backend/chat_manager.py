@@ -54,6 +54,12 @@ class ChatManager:
         except sqlite3.OperationalError:
             pass
 
+        # Phase 67 lineage: sha256 of the model registry file that served the reply
+        try:
+            cursor.execute("ALTER TABLE messages ADD COLUMN registry_fingerprint TEXT")
+        except sqlite3.OperationalError:
+            pass
+
         # Add lm_studio_response_id column if it doesn't exist
         try:
             cursor.execute("ALTER TABLE messages ADD COLUMN lm_studio_response_id TEXT")
@@ -261,6 +267,7 @@ class ChatManager:
         model_name: Optional[str] = None,
         lm_studio_response_id: Optional[str] = None,
         images: Optional[List[str]] = None,
+        registry_fingerprint: Optional[str] = None,
     ) -> str:
         """Save a message to the conversation"""
         message_id = str(uuid.uuid4())
@@ -268,8 +275,8 @@ class ChatManager:
 
         cursor.execute(
             """
-            INSERT INTO messages (id, conversation_id, role, content, tool_calls, agent_name, model_name, lm_studio_response_id, images)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO messages (id, conversation_id, role, content, tool_calls, agent_name, model_name, lm_studio_response_id, images, registry_fingerprint)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 message_id,
@@ -281,6 +288,7 @@ class ChatManager:
                 model_name,
                 lm_studio_response_id,
                 json.dumps(images) if images else None,
+                registry_fingerprint,
             ),
         )
         self.conn.commit()
@@ -292,7 +300,7 @@ class ChatManager:
 
         cursor.execute(
             """
-            SELECT id, role, content, strftime('%Y-%m-%dT%H:%M:%SZ', timestamp) as timestamp, tool_calls, agent_name, model_name, lm_studio_response_id, images
+            SELECT id, role, content, strftime('%Y-%m-%dT%H:%M:%SZ', timestamp) as timestamp, tool_calls, agent_name, model_name, lm_studio_response_id, images, registry_fingerprint
             FROM messages
             WHERE conversation_id = ?
             ORDER BY timestamp DESC
@@ -316,6 +324,7 @@ class ChatManager:
                     "model_name": row["model_name"],
                     "lm_studio_response_id": row["lm_studio_response_id"],
                     "images": json.loads(row["images"]) if row["images"] else None,
+                    "registry_fingerprint": row["registry_fingerprint"],
                 }
             )
 

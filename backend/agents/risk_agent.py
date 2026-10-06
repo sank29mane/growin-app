@@ -13,9 +13,12 @@ from decimal import Decimal
 from pydantic import BaseModel, Field
 from magentic import prompt as mag_prompt
 
+from .critic_binding import clear_review, proposal_identity, _bind_successful_review
 from .base_agent import BaseAgent, AgentResponse, AgentConfig
 from market_context import MarketContext
 from utils.financial_math import create_decimal
+from model_registry import ROLE_RISK_CRITIC, ModelRegistryError, ProviderError, active_registry_or_none
+from model_registry.provider import run_magentic
 
 logger = logging.getLogger(__name__)
 
@@ -78,10 +81,17 @@ class RiskAgent(BaseAgent):
     Uses high-precision models and magentic for structured Pydantic outputs.
     """
     
-    def __init__(self, model_name: str = "granite-tiny"):
+    def __init__(self):
         config = AgentConfig(name="RiskAgent", timeout=15.0)
         super().__init__(config)
-        self.model_name = model_name
+
+    @property
+    def model_name(self) -> Optional[str]:
+        """The risk_critic role's model id for lineage display, or None."""
+        registry = active_registry_or_none()
+        if registry is None or not registry.has_role(ROLE_RISK_CRITIC):
+            return None
+        return registry.resolve(ROLE_RISK_CRITIC).model
 
     async def analyze(self, context_dict: Dict[str, Any]) -> AgentResponse:
         """
@@ -108,7 +118,8 @@ class RiskAgent(BaseAgent):
             # Execute structured audit via Magentic
             portfolio_val = market_context.portfolio.total_value if market_context.portfolio else "Unknown"
             
-            audit_result = await asyncio.to_thread(
+            audit_result = await run_magentic(
+                ROLE_RISK_CRITIC,
                 conduct_risk_audit,
                 market_context.ticker,
                 market_context.intent,
@@ -134,6 +145,8 @@ class RiskAgent(BaseAgent):
                 latency_ms=0 # Managed by execution loop
             )
                 
+        except (ModelRegistryError, ProviderError):
+            raise
         except Exception as e:
 
 
@@ -142,12 +155,24 @@ class RiskAgent(BaseAgent):
 
     async def review(self, context: MarketContext, suggestion: str) -> Dict[str, Any]:
         """Convenience method for Orchestrator integration"""
+        clear_review(context)
+        proposal = context.user_context.get("deferred_proposal")
+        if proposal:
+            # Bind the server-stamped workspace too; registration must not change
+            # the reviewed payload when the ledger supplies this field.
+            from app_context import state
+            if state._execution_ledger is not None and "workspace" not in proposal:
+                proposal["workspace"] = state._execution_ledger.workspace.value
+        identity = proposal_identity(proposal) if proposal else None
         res = await self.execute({"context": context, "suggestion": suggestion})
-        if res.success:
-            return res.data
-        return {
-            "status": "FLAGGED",
-            "confidence_score": 0.0,
-            "risk_assessment": f"Risk Agent Error: {res.error}",
-            "requires_hitl": True
-        }
+        if not res.success:
+            raise ProviderError("CRITIC_OUTPUT_INVALID", ROLE_RISK_CRITIC)
+        try:
+            review = RiskAssessment.model_validate(res.data).model_dump()
+        except (ValueError, TypeError):
+            raise ProviderError("CRITIC_OUTPUT_INVALID", ROLE_RISK_CRITIC) from None
+        if identity is not None:
+            if context.user_context.get("deferred_proposal") is not proposal or proposal_identity(proposal) != identity:
+                raise ModelRegistryError("RISK_REVIEW_REQUIRED", ROLE_RISK_CRITIC)
+            _bind_successful_review(context, identity)
+        return review

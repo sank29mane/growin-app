@@ -3,6 +3,17 @@ import time
 from typing import Dict, Optional
 from datetime import datetime
 
+def _initial_status(detail: str, engine_label: str) -> Dict[str, str]:
+    """Starting status row. Model-driven agents start as "Unknown" and are updated
+    with the registry's model id at run time; the others name their data source."""
+    return {
+        "status": "ready",
+        "detail": detail,
+        "model": engine_label,
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
 class StatusManager:
     """
     Thread-safe registry for real-time status updates of agents and system components.
@@ -16,15 +27,15 @@ class StatusManager:
             if cls._instance is None:
                 cls._instance = super(StatusManager, cls).__new__(cls)
                 cls._instance.statuses = {
-                    "coordinator": {"status": "ready", "detail": "Idle", "model": "Granite 4.0 Tiny", "timestamp": datetime.now().isoformat()},
-                    "decision_agent": {"status": "ready", "detail": "Idle", "model": "LFM 2.5B (Native)", "timestamp": datetime.now().isoformat()},
-                    "quant_agent": {"status": "ready", "detail": "Monitoring markets", "model": "TA-Lib", "timestamp": datetime.now().isoformat()},
-                    "portfolio_agent": {"status": "ready", "detail": "Synced", "model": "Trading212 API", "timestamp": datetime.now().isoformat()},
-                    "forecasting_agent": {"status": "ready", "detail": "Models loaded", "model": "TTM-R2", "timestamp": datetime.now().isoformat()},
-                    "research_agent": {"status": "ready", "detail": "Idle", "model": "NewsAPI", "timestamp": datetime.now().isoformat()},
-                    "social_agent": {"status": "ready", "detail": "Monitoring feeds", "model": "Tavily + VADER", "timestamp": datetime.now().isoformat()},
-                    "whale_agent": {"status": "ready", "detail": "Monitoring trades", "model": "Alpaca Trades", "timestamp": datetime.now().isoformat()},
-                    "lmstudio": {"status": "ready", "detail": "Idle", "model": "LM Studio v1", "timestamp": datetime.now().isoformat()},
+                    "coordinator": _initial_status("Idle", "Unknown"),
+                    "decision_agent": _initial_status("Idle", "Unknown"),
+                    "quant_agent": _initial_status("Monitoring markets", "TA-Lib"),
+                    "portfolio_agent": _initial_status("Synced", "Trading212 API"),
+                    "forecasting_agent": _initial_status("Models loaded", "Unknown"),
+                    "research_agent": _initial_status("Idle", "NewsAPI"),
+                    "social_agent": _initial_status("Monitoring feeds", "Tavily + VADER"),
+                    "whale_agent": _initial_status("Monitoring trades", "Alpaca Trades"),
+                    "lmstudio": _initial_status("Idle", "LM Studio"),
                 }
                 cls._instance.reasoning_steps = {} # step_id -> {name, content, status}
             return cls._instance

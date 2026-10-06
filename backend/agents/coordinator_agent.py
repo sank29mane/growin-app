@@ -66,10 +66,11 @@ class CoordinatorAgent(BaseAgent):
 
         self.ticker_resolver = TickerResolver()
         
-        # SOTA 2026: Clean self.llm initialization explicitly via LLMFactory if not provided
+        # The coordinator role from the model registry, unless an LLM is injected.
         if llm is None:
             from agents.llm_factory import LLMFactory
-            self.llm = LLMFactory.create_llm(temperature=0.0)
+            from model_registry import ROLE_COORDINATOR
+            self.llm = LLMFactory.for_role(ROLE_COORDINATOR)
         else:
             self.llm = llm
 

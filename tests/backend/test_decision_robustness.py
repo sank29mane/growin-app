@@ -10,24 +10,24 @@ logger = logging.getLogger(__name__)
 
 from unittest.mock import AsyncMock, patch
 from agents.llm_factory import LLMFactory
+from model_registry_testkit import fake_replies, offline_registry  # noqa: F401
 
 @pytest.mark.asyncio
-async def test_hallucination_prevention():
+async def test_hallucination_prevention(offline_registry):
     """
     Test that DecisionAgent identifies missing data and doesn't hallucinate numbers.
     """
     with patch.object(LLMFactory, 'create_llm', new_callable=AsyncMock) as mock_create, \
          patch("agents.decision_agent.extract_tool_calls") as mock_ext:
         mock_ext.return_value = []
-        mock_llm = AsyncMock()
-        mock_llm.active_model_id = "native-mlx"
-        mock_llm.chat = AsyncMock(return_value={
-            "content": "The DecisionAgent's ability is hampered because we do not have access to WhaleAgent and SocialAgent data."
-        })
+        mock_llm = fake_replies(
+            "The DecisionAgent's ability is hampered because we do not have access to WhaleAgent and SocialAgent data."
+        )
+        mock_llm.resolved = offline_registry.resolve("decision")
         mock_create.return_value = mock_llm
 
-        # Initialize DecisionAgent
-        agent = DecisionAgent(model_name="native-mlx")
+        # Initialize DecisionAgent (its model comes from the registry's decision role)
+        agent = DecisionAgent()
         
         # CASE 1: Missing Whale and Social Data
         # Only Price and Portfolio provided

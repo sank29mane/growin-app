@@ -15,6 +15,15 @@ from datetime import datetime
 import uuid
 from app_logging import correlation_id_ctx
 from utils.audit_log import log_audit
+from model_registry import (
+    ROLE_COORDINATOR,
+    ROLE_DECISION,
+    ROLE_RISK_CRITIC,
+    ModelRegistry,
+    ModelRegistryError,
+    ModelRoleMissing,
+    ProviderError,
+)
 
 # Constants
 TITLE_UPDATE_INTERVAL = 6  # Update title every 6 messages
@@ -22,7 +31,41 @@ TITLE_UPDATE_INTERVAL = 6  # Update title every 6 messages
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-async def update_conversation_title_if_needed(conversation_id: str, model_name: Optional[str] = None):
+
+def require_chat_registry() -> ModelRegistry:
+    """The loaded registry, or a 503 with a stable code before any model call.
+
+    Chat needs the coordinator, decision and risk_critic roles. A missing
+    registry or role stops the request here, before any model call or proposal:
+    nothing is routed to a default model.
+    """
+    registry = state.model_registry
+    if registry is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "MODEL_REGISTRY_UNAVAILABLE", "reason": state.model_registry_error},
+        )
+    try:
+        registry.require(ROLE_COORDINATOR, ROLE_DECISION, ROLE_RISK_CRITIC)
+    except ModelRegistryError as exc:
+        raise HTTPException(status_code=503, detail={"code": exc.code, "role": exc.field})
+    return registry
+
+
+def model_error_to_http(exc: Exception) -> HTTPException:
+    """Map a registry or provider failure to a sanitized HTTP error."""
+    if isinstance(exc, ModelRegistryError):
+        return HTTPException(status_code=503, detail={"code": exc.code, "field": exc.field})
+    assert isinstance(exc, ProviderError)
+    return HTTPException(status_code=502, detail={"code": exc.code, "role": exc.role})
+
+
+def decision_lineage(registry: ModelRegistry) -> tuple:
+    """(decision model id, registry fingerprint) recorded with each reply (P12)."""
+    return registry.resolve(ROLE_DECISION).model, registry.fingerprint
+
+
+async def update_conversation_title_if_needed(conversation_id: str):
     """
     Update conversation title iteratively based on conversation growth.
     Updates title when conversation reaches milestones or grows significantly.
@@ -50,7 +93,7 @@ async def update_conversation_title_if_needed(conversation_id: str, model_name: 
 
         if should_update:
             # Generate new title with full context
-            title_result = await generate_conversation_title(conversation_id, model_name)
+            title_result = await generate_conversation_title(conversation_id)
             logger.info(f"Updated conversation {conversation_id} title to: {title_result.get('title')}")
 
     except Exception as e:
@@ -66,10 +109,12 @@ async def chat_message(
     """
     Chat endpoint using Hybrid Architecture with Streaming Support.
     """
+    registry = require_chat_registry()
+
     # Set Request Correlation ID
     request_id = str(uuid.uuid4())
     token = correlation_id_ctx.set(request_id)
-    
+
     # Check for SSE request
     if "text/event-stream" in accept:
         from sse_starlette.sse import EventSourceResponse
@@ -107,10 +152,9 @@ async def chat_message(
         
         orchestrator = OrchestratorAgent(
             mcp_client=state.mcp_client,
-            chat_manager=state.chat_manager,
-            model_name=request.model_name or "native-mlx"
+            chat_manager=state.chat_manager
         )
-        
+
         # Load history for context
         history = chat_manager.load_history(conversation_id, limit=6)
         
@@ -139,7 +183,8 @@ async def chat_message(
             content=response,
             tool_calls=[],
             agent_name="DecisionAgent",
-            model_name=request.model_name,
+            model_name=decision_lineage(registry)[0],
+            registry_fingerprint=registry.fingerprint,
             lm_studio_response_id=new_response_id
         )
 
@@ -148,7 +193,7 @@ async def chat_message(
             state.rag_manager.add_chat_message("assistant", response, conversation_id)
 
         # Iteratively update conversation title based on growing context
-        await update_conversation_title_if_needed(conversation_id, request.model_name)
+        await update_conversation_title_if_needed(conversation_id)
 
         return {
             "conversation_id": conversation_id,
@@ -157,10 +202,12 @@ async def chat_message(
             "quick_actions": result.get("quick_actions", []),
             "tool_calls": None, # Explicitly null to prevent frontend from treating it as a tool/search result
             "timestamp": timestamp,
-            "model_name": request.model_name,
-            "coordinator_model": request.coordinator_model,
+            "model_name": decision_lineage(registry)[0],
             "data": sanitize_nan(market_context.model_dump(by_alias=True))
         }
+    except (ModelRegistryError, ProviderError) as e:
+        logger.error("Chat model error: %s", e)
+        raise model_error_to_http(e)
     except Exception as e:
         logger.error(f"Chat error: {str(e)}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
@@ -168,6 +215,7 @@ async def chat_message(
 async def stream_chat_generator(request: ChatMessage):
     """Generator for SSE streaming responses with SOTA 2026 telemetry."""
     queue = asyncio.Queue()
+    registry = require_chat_registry()
     
     async def telemetry_handler(msg):
         await queue.put(msg)
@@ -218,10 +266,9 @@ async def stream_chat_generator(request: ChatMessage):
                 from agents.orchestrator_agent import OrchestratorAgent
                 orchestrator = OrchestratorAgent(
                     mcp_client=state.mcp_client,
-                    chat_manager=state.chat_manager,
-                    model_name=request.model_name or "native-mlx"
+                    chat_manager=state.chat_manager
                 )
-                
+
                 full_response = ""
                 final_context = None
                 quick_actions = []
@@ -248,7 +295,8 @@ async def stream_chat_generator(request: ChatMessage):
                     role="assistant",
                     content=full_response,
                     agent_name="OrchestratorAgent",
-                    model_name=request.model_name
+                    model_name=decision_lineage(registry)[0],
+                    registry_fingerprint=registry.fingerprint
                 )
                 
                 # Index in RAG
@@ -267,14 +315,16 @@ async def stream_chat_generator(request: ChatMessage):
                 })
                 
                 # Async title update
-                await update_conversation_title_if_needed(conversation_id, request.model_name)
-                
+                await update_conversation_title_if_needed(conversation_id)
+
             except Exception as e:
                 logger.error(f"Processing error: {e}")
                 # SOTA 2026: Distinguish recoverable errors
                 recoverable = any(x in str(e).lower() for x in ["timeout", "rate limit", "connection"])
+                typed_code = e.code if isinstance(e, (ModelRegistryError, ProviderError)) else None
                 await queue.put({
-                    "type": "error", 
+                    "type": "error",
+                    "code": typed_code,
                     "content": str(e),
                     "recoverable": recoverable,
                     "retryAfterMs": 2000 if recoverable else 0
@@ -303,6 +353,7 @@ async def stream_chat_generator(request: ChatMessage):
                         "data": json.dumps({
                             "type": "RUN_ERROR",
                             "message": item["content"],
+                            "code": item.get("code"),
                             "recoverable": item.get("recoverable", False),
                             "retryAfterMs": item.get("retryAfterMs", 0)
                         }) 
@@ -341,7 +392,7 @@ async def analyze_portfolio(request: AnalyzeRequest):
     Used by the macOS app for ad-hoc queries without full conversation context.
     
     Args:
-        request: AnalyzeRequest with query string and optional model_name
+        request: AnalyzeRequest with the query string (models come from the registry)
         
     Returns:
         AgentResponse with final_answer and messages list
@@ -349,6 +400,8 @@ async def analyze_portfolio(request: AnalyzeRequest):
     Raises:
         HTTPException: If MCP not connected or analysis fails
     """
+    require_chat_registry()
+
     if not state.mcp_client.session:
         raise HTTPException(status_code=503, detail="MCP Server not connected")
 
@@ -366,10 +419,9 @@ async def analyze_portfolio(request: AnalyzeRequest):
         
         orchestrator = OrchestratorAgent(
             mcp_client=state.mcp_client,
-            chat_manager=state.chat_manager,
-            model_name=request.model_name or "native-mlx"
+            chat_manager=state.chat_manager
         )
-        
+
         result = await orchestrator.run(
             query=request.query,
             ticker=ticker,
@@ -377,6 +429,9 @@ async def analyze_portfolio(request: AnalyzeRequest):
         )
         
         return {"messages": [], "final_answer": result.get("content", "")}
+    except (ModelRegistryError, ProviderError) as e:
+        logger.error("Analysis model error: %s", e)
+        raise model_error_to_http(e)
     except Exception as e:
         logger.error(f"Analysis failed: {e}")
         # Sentinel: Sanitized error message
@@ -466,7 +521,7 @@ async def clear_conversation(conversation_id: str):
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
 
-async def generate_conversation_title(conversation_id: str, model_name: Optional[str] = None):
+async def generate_conversation_title(conversation_id: str):
     """
     Generate a concise AI-powered title for a conversation.
     """
@@ -496,7 +551,7 @@ async def generate_conversation_title(conversation_id: str, model_name: Optional
         )
 
         from agents.decision_agent import DecisionAgent
-        agent = DecisionAgent(model_name=model_name or "native-mlx")
+        agent = DecisionAgent()
         response = await agent.generate_response(prompt)
 
         # Use utility for robust extraction
@@ -509,9 +564,9 @@ async def generate_conversation_title(conversation_id: str, model_name: Optional
         return {"title": "Financial Analysis"}
 
 @router.post("/conversations/{conversation_id}/generate-title")
-async def generate_conversation_title_endpoint(conversation_id: str, model_name: Optional[str] = None):
+async def generate_conversation_title_endpoint(conversation_id: str):
     """Endpoint wrapper for title generation"""
-    return await generate_conversation_title(conversation_id, model_name)
+    return await generate_conversation_title(conversation_id)
 
 class IngestRequest(BaseModel):
     content: str

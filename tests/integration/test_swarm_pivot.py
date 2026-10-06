@@ -11,9 +11,17 @@ project_root = Path(__file__).parent.parent.parent.absolute()
 sys.path.append(str(project_root))
 sys.path.append(str(project_root / 'backend'))
 
+sys.path.append(str(project_root / 'tests' / 'backend'))
+from model_registry_testkit import offline_registry  # noqa: E402,F401  (fixture)
 from agents.orchestrator import SwarmOrchestrator, SwarmResponse
 from agents.swarm_utils import ContextBuffer, AgentResult
 from utils.hardware_guard import hardware_guard
+
+@pytest.fixture(autouse=True)
+def _swarm_registry(offline_registry):
+    """The swarm runs on the registry's coordinator role."""
+    return offline_registry
+
 
 # Mock Stream Result helper
 class MockStreamResult:

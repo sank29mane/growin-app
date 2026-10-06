@@ -1,6 +1,7 @@
 import os
 os.environ['OPENAI_API_KEY'] = 'sk-dummy-key-for-test'
 from agents.llm_factory import LLMFactory
+from model_registry_testkit import fake_replies, offline_registry  # noqa: F401
 import pytest
 import asyncio
 import json
@@ -53,7 +54,7 @@ async def test_frayer_resilience_uk_primary_failure():
         mock_yf.assert_called_once()
 
 @pytest.mark.asyncio
-async def test_decision_agent_agentic_loop_tool_execution():
+async def test_decision_agent_agentic_loop_tool_execution(offline_registry):
     """Test DecisionAgent correctly identifies and executes a tool call in its loop"""
     # Need to patch LLMFactory to avoid actual initialization
     orig_shadow = os.environ.pop("USE_SHADOW_LLM", None)
@@ -67,9 +68,10 @@ async def test_decision_agent_agentic_loop_tool_execution():
             from agents.decision_agent import ToolCall
             mock_ext.side_effect = [[ToolCall(tool_name="docker_run_python", arguments={"script": "print(2+2)", "engine": "npu"})], []]
             mock_llm = MagicMock()
+            mock_llm.resolved = offline_registry.resolve("decision")
             mock_factory.return_value = mock_llm
 
-            agent = DecisionAgent(model_name="native-mlx")
+            agent = DecisionAgent()
             await agent._initialize_llm()
 
             # Turn 1: LLM outputs a tool call
@@ -77,9 +79,10 @@ async def test_decision_agent_agentic_loop_tool_execution():
             tool_call_content = '[TOOL:docker_run_python({"script": "print(2+2)", "engine": "npu"})]'
             final_answer = "The result of the calculation is 4."
 
-            mock_llm.chat = AsyncMock(side_effect=[
-                {"content": tool_call_content},
-                {"content": final_answer}
+            from types import SimpleNamespace
+            mock_llm.ainvoke = AsyncMock(side_effect=[
+                SimpleNamespace(content=tool_call_content),
+                SimpleNamespace(content=final_answer)
             ])
 
             mock_context = MarketContext(query="Analyze generic item 2+2", intent="analytical")

@@ -62,7 +62,7 @@ def uk_state(tmp_path, private_config_dir):
 
 
 def _agent():
-    return DecisionAgent(model_name="native-mlx", mcp_client=MagicMock())
+    return DecisionAgent(mcp_client=MagicMock())
 
 
 def _chat_proposal(agent, ticker="AAPL"):
@@ -70,6 +70,23 @@ def _chat_proposal(agent, ticker="AAPL"):
     proposal = agent._extract_trade_proposal("BUY 1 share of AAPL.", context)
     assert proposal is not None
     return proposal, context
+
+
+async def _review_proposal(context, proposal):
+    from agents.base_agent import AgentResponse
+    from agents.risk_agent import RiskAgent, RiskAssessment
+
+    context.user_context["deferred_proposal"] = proposal
+    critic = RiskAgent()
+    critic.execute = AsyncMock(return_value=AgentResponse(
+        agent_name="RiskAgent", success=True, latency_ms=0,
+        data=RiskAssessment(
+            status="APPROVED", confidence_score=1,
+            risk_assessment="Fixture review", compliance_notes="Fixture review",
+            recommendation_adjustment="None", debate_refutation="None",
+        ).model_dump(),
+    ))
+    await critic.review(context, "BUY 1 share of AAPL")
 
 
 # --- AppState.register_trade_proposal ---
@@ -115,13 +132,15 @@ def test_proposal_carrying_unscoped_is_refused(uk_state):
 # --- the decision agent ---
 
 
-def test_agent_registration_without_a_ledger_returns_false_and_logs_the_code(
+@pytest.mark.asyncio
+async def test_agent_registration_without_a_ledger_returns_false_and_logs_the_code(
     monkeypatch, caplog
 ):
     monkeypatch.setattr(app_context, "state", AppState())
     agent = _agent()
     proposal, context = _chat_proposal(agent)
 
+    await _review_proposal(context, proposal)
     with caplog.at_level(logging.WARNING):
         registered = agent._register_for_human_review(proposal, context)
 
@@ -132,13 +151,15 @@ def test_agent_registration_without_a_ledger_returns_false_and_logs_the_code(
     assert app_context.state.trade_proposals == {}
 
 
-def test_agent_registration_on_a_uk_ledger_is_refused_for_missing_account_and_broker(
+@pytest.mark.asyncio
+async def test_agent_registration_on_a_uk_ledger_is_refused_for_missing_account_and_broker(
     monkeypatch, uk_state, caplog
 ):
     monkeypatch.setattr(app_context, "state", uk_state)
     agent = _agent()
     proposal, context = _chat_proposal(agent)
 
+    await _review_proposal(context, proposal)
     with caplog.at_level(logging.WARNING):
         registered = agent._register_for_human_review(proposal, context)
 
@@ -150,7 +171,8 @@ def test_agent_registration_on_a_uk_ledger_is_refused_for_missing_account_and_br
 
 
 @pytest.mark.asyncio
-async def test_chat_reply_survives_a_refused_registration(monkeypatch, caplog):
+@pytest.mark.parametrize("kwargs", [{}, {"defer_proposal": False}])
+async def test_chat_reply_survives_a_refused_registration(monkeypatch, caplog, kwargs):
     monkeypatch.setattr(app_context, "state", AppState())
     audits = []
     monkeypatch.setattr(
@@ -166,7 +188,11 @@ async def test_chat_reply_survives_a_refused_registration(monkeypatch, caplog):
     context = MarketContext(query="Buy AAPL", intent="analytical", ticker="AAPL")
 
     with caplog.at_level(logging.WARNING):
-        result = await agent.make_decision(context, "Buy AAPL")
+        result = await agent.make_decision(context, "Buy AAPL", **kwargs)
+        assert "pending_proposal" not in context.user_context
+        assert "deferred_proposal" in context.user_context
+        await _review_proposal(context, context.user_context["deferred_proposal"])
+        result["content"] += agent.register_deferred_proposal(context)
 
     assert result["content"].startswith("BUY 2 shares of AAPL now.")
     assert "Trade proposal not registered for review (TRADE_PROPOSAL_NOT_REGISTERED)." in (

@@ -103,13 +103,23 @@ class ModelWorker:
         return {"status": "success"}
 
     def _load_ttm(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        from forecast_bridge import validate_forecast_request
+
+        # The model id and revision come from the registry's forecaster role.
+        # A request without a model is rejected before any library loads.
+        try:
+            spec = validate_forecast_request(request)
+        except ValueError as exc:
+            return {"status": "error", "error": str(exc)}
+
         from tsfm_public.models.tinytimemixer import TinyTimeMixerForPrediction
         
-        model_id = request.get("model_id", "ibm-granite/granite-timeseries-ttm-r2")
+        model_id = spec["model"]
         logger.info(f"Pinning TTM model: {model_id}")
         
         self.ttm_model = TinyTimeMixerForPrediction.from_pretrained(
             model_id,
+            revision=spec["revision"],
             context_length=512,
             prediction_length=96
         )
@@ -137,12 +147,19 @@ class ModelWorker:
         return {"status": "success", "response": response}
 
     def _forecast_ttm(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        from forecast_bridge import run_forecast
+        from forecast_bridge import run_forecast, validate_forecast_request
+        try:
+            spec = validate_forecast_request(request)
+        except ValueError as exc:
+            return {"success": False, "error": str(exc)}
         ohlcv = request.get("ohlcv_data", [])
         steps = request.get("prediction_steps", 96)
         timeframe = request.get("timeframe", "1Hour")
         ticker = request.get("ticker")
-        return run_forecast(ohlcv, steps, timeframe=timeframe, ticker=ticker)
+        return run_forecast(
+            ohlcv, steps, timeframe=timeframe, ticker=ticker,
+            model=spec["model"], revision=spec["revision"],
+        )
 
     def _forecast_fused(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """

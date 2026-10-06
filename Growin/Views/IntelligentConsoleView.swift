@@ -428,16 +428,9 @@ struct NodeView: View {
         ["working", "thinking", "analyzing", "generating utility text..."].contains(status.lowercased()) || status.lowercased().contains("working")
     }
     
+    /// The model id exactly as the backend reports it. No display-name guessing.
     var prettyModel: String? {
-        guard let m = model else { return nil }
-        let low = m.lowercased()
-        if low.contains("granite") { return "Granite 4.0 Tiny" }
-        if low.contains("native-mlx") || low.contains("lfm") { return "LFM 2.5B (Native)" }
-        if low.contains("mistral") { return "Mistral 7B" }
-        if low.contains("gpt-4o") { return "GPT-4o" }
-        if low.contains("claude") { return "Claude 3.5" }
-        if low.contains("gemini") { return "Gemini 1.5" }
-        return m
+        model
     }
 
     var statusColor: Color {

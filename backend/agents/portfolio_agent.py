@@ -14,7 +14,6 @@ import numpy as np
 import yfinance as yf
 from decimal import Decimal
 from pydantic import BaseModel, Field
-from magentic import prompt as mag_prompt
 
 from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from market_context import PortfolioData
@@ -33,15 +32,6 @@ class PortfolioAnalysis(BaseModel):
     risk_concentration: List[str] = Field(default_factory=list, description="List of sectors or tickers with high risk")
     rebalance_needed: bool = Field(..., description="Whether a rebalance is recommended")
     summary_insight: str = Field(..., description="Key qualitative insight for the user")
-
-@mag_prompt(
-    "Perform a qualitative analysis of the current portfolio status.\n"
-    "Portfolio Summary: {summary}\n"
-    "Top Holdings: {holdings}\n"
-    "Analyze diversification and potential risks, then return a structured PortfolioAnalysis."
-)
-def analyze_portfolio_quality(summary: str, holdings: str) -> PortfolioAnalysis:
-    ...
 
 # Module-level circuit breaker to persist state across agent instantiations (SOTA 2026 Resilience API)
 portfolio_circuit_breaker = get_circuit_breaker("portfolio", failure_threshold=3, recovery_timeout=30.0)

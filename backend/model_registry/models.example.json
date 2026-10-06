@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "providers": {
+    "lmstudio": {
+      "kind": "openai_compatible",
+      "base_url": "http://127.0.0.1:1234/v1",
+      "api_key_env": null,
+      "timeout_s": 120
+    },
+    "ollama": {
+      "kind": "openai_compatible",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "api_key_env": null,
+      "timeout_s": 120
+    },
+    "xai": {
+      "kind": "openai_compatible",
+      "base_url": "https://api.example.invalid/v1",
+      "api_key_env": "EXAMPLE_API_KEY",
+      "timeout_s": 60
+    },
+    "local_checkpoint": {
+      "kind": "hf_local"
+    }
+  },
+  "roles": {
+    "coordinator": {
+      "provider": "lmstudio",
+      "model": "example-small-model",
+      "temperature": 0.0,
+      "max_tokens": 512
+    },
+    "decision": {
+      "provider": "xai",
+      "model": "example-large-model",
+      "temperature": 0.1,
+      "max_tokens": 2048,
+      "image_prefix": null,
+      "compact_prompt": false
+    },
+    "research": {
+      "provider": "ollama",
+      "model": "example-research-model",
+      "temperature": 0.0
+    },
+    "risk_critic": {
+      "provider": "xai",
+      "model": "example-large-model",
+      "temperature": 0.0
+    },
+    "math_codegen": {
+      "provider": "lmstudio",
+      "model": "example-code-model",
+      "temperature": 0.1,
+      "max_tokens": 2048
+    },
+    "forecaster": {
+      "provider": "local_checkpoint",
+      "model": "example-org/example-forecaster",
+      "revision": "main"
+    }
+  }
+}

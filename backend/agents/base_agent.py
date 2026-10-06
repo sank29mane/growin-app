@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 from pydantic import BaseModel, Field
 from datetime import datetime, timezone
 import logging
+from model_registry import ModelRegistryError, ProviderError
 
 logger = logging.getLogger(__name__)
 
@@ -227,6 +228,8 @@ class BaseAgent(ABC):
             
             return response
             
+        except (ModelRegistryError, ProviderError):
+            raise
         except Exception as e:
             latency = (time.time() - start) * 1000
             self.logger.error(f"{self.config.name}: Exception - {e}")

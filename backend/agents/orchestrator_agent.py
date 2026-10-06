@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 
 from .base_agent import BaseAgent, AgentResponse
 from .coordinator_agent import COORDINATOR_SYSTEM_PROMPT
+from .critic_binding import clear_review, require_review, consume_broadcast
 from .decision_agent import DecisionAgent
 from .messenger import AgentMessage, get_messenger
 from market_context import MarketContext
@@ -24,6 +25,14 @@ from status_manager import status_manager
 from app_logging import correlation_id_ctx
 from utils.audit_log import log_audit
 from .llm_factory import LLMFactory
+from model_registry import (
+    ROLE_COORDINATOR,
+    ROLE_DECISION,
+    ROLE_RISK_CRITIC,
+    ModelRegistryError,
+    ProviderError,
+    get_active_registry,
+)
 from price_validation import PriceValidator
 
 # Import specialist agents (as used in CoordinatorAgent)
@@ -42,12 +51,10 @@ class OrchestratorAgent:
     - Support for 8-bit AFFINE local inference optimization
     """
     
-    def __init__(self, mcp_client=None, chat_manager=None, model_name: str = "native-mlx", api_keys: Optional[Dict[str, str]] = None):
+    def __init__(self, mcp_client=None, chat_manager=None):
         from app_context import state
-        self.model_name = model_name
         self.mcp_client = mcp_client or state.mcp_client
         self.chat_manager = chat_manager or state.chat_manager
-        self.api_keys = api_keys or {}
         
         # Core Components
         self.data_fabricator = DataFabricator()
@@ -64,10 +71,10 @@ class OrchestratorAgent:
 
         # Risk Agent (Critic)
         from .risk_agent import RiskAgent
-        self.risk_agent = RiskAgent(model_name=model_name)
+        self.risk_agent = RiskAgent()
 
         # Decision logic container (reusing DecisionAgent's internal logic)
-        self.decision_engine = DecisionAgent(model_name=model_name, api_keys=api_keys, mcp_client=self.mcp_client)
+        self.decision_engine = DecisionAgent(mcp_client=self.mcp_client)
         
         from utils.ticker_utils import TickerResolver
         self.ticker_resolver = TickerResolver()
@@ -75,35 +82,62 @@ class OrchestratorAgent:
         self.routing_llm = None
         self._initialized = False
         
-        logger.info(f"OrchestratorAgent initialized with model: {model_name}")
+        logger.info("OrchestratorAgent initialized (models come from the role registry)")
+
+    @property
+    def model_name(self) -> Optional[str]:
+        """The decision role's model id, for status and telemetry."""
+        return self.decision_engine.model_name
 
     async def _initialize(self):
         """Initialize LLMs and providers"""
         if self._initialized:
             return
             
-        # Initialize routing LLM (lightweight)
-        # If the user's selected model is from LM Studio (HF-style ID with '/'),
-        # use lmstudio-auto for routing too, to avoid dependencies on missing local models.
-        is_lmstudio_model = "/" in (self.model_name or "")
-        routing_model = "lmstudio-auto" if is_lmstudio_model else "granite-tiny"
-        
-        try:
-            self.routing_llm = await LLMFactory.create_llm(routing_model)
-        except Exception as e:
+        # Up front, before any model call or proposal: every role this request
+        # needs must be configured. A risk_critic failure after a proposal is
+        # registered would otherwise leave that proposal behind.
+        get_active_registry().require(ROLE_COORDINATOR, ROLE_DECISION, ROLE_RISK_CRITIC)
 
-            handle_error(e, "Routing LLM ({routing_model}) failed. Falling back to lmstudio-auto.", logger, raise_error=False)
-            try:
-                self.routing_llm = await LLMFactory.create_llm("lmstudio-auto")
-            except Exception as e2:
-
-                handle_error(e2, "Routing LLM fallback also failed. Routing will use heuristics only.", logger, raise_error=False)
-                self.routing_llm = None
+        # Routing LLM: the registry's coordinator role. A role that is not
+        # configured raises ModelRoleMissing; there is no fallback model.
+        self.routing_llm = await LLMFactory.create_llm(ROLE_COORDINATOR)
         
         # Initialize decision engine (reasoning model)
         await self.decision_engine._initialize_llm()
         
         self._initialized = True
+
+    async def _release_proposal(self, context: MarketContext, recommendation: str, c_id: Optional[str]) -> str:
+        """Register and announce the held-back proposal. Runs after the risk review.
+
+        make_decision(defer_proposal=True) only extracts the proposal. It is
+        registered with the human review gate, broadcast and tagged here, so a
+        risk_critic or rebuttal failure earlier in ``run`` means nothing was
+        ever registered or announced.
+        """
+        held = context.user_context.get("deferred_proposal")
+        pending = context.user_context.get("pending_proposal")
+        if held:
+            require_review(context, held)
+        elif pending:
+            require_review(context, pending, "registered")
+        note = self.decision_engine.register_deferred_proposal(context)
+        if note:
+            recommendation += note
+        proposal = context.user_context.get("pending_proposal")
+        if proposal:
+            consume_broadcast(context, proposal)
+            await self.messenger.send_message(AgentMessage(
+                sender="OrchestratorAgent",
+                recipient="broadcast",
+                subject="rebalance_proposal",
+                payload=proposal,
+                correlation_id=c_id
+            ))
+            # Manual approval tag for the reply text
+            recommendation += f"\n\n[ACTION_REQUIRED:APPROVE_TRADE({proposal.get('proposal_id')})]"
+        return recommendation
 
     async def _classify_intent(self, query: str) -> Dict[str, Any]:
         """Classify user intent using routing LLM (reused from Coordinator)"""
@@ -183,6 +217,10 @@ Query: "{clean_query}"
                 "primary_ticker": ticker,
                 "reason": "Unified Routing"
             }
+        except (ModelRegistryError, ProviderError):
+            # Fail closed: an unreachable coordinator stops the request. Keyword
+            # heuristics would let the decision step run without a routing model.
+            raise
         except Exception as e:
 
             handle_error(e, "Orchestrator routing failed", logger, raise_error=False)
@@ -372,6 +410,8 @@ Query: "{clean_query}"
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
             for res in results:
+                if isinstance(res, (ModelRegistryError, ProviderError)):
+                    raise res
                 if isinstance(res, AgentResponse) and res.success:
                     await self._merge_result(context, res)
 
@@ -403,25 +443,16 @@ Query: "{clean_query}"
         tlh_prompt = f"\n[TAX-LOSS HARVESTING OPPORTUNITIES]\n{json.dumps(tlh_candidates)}\n"
         full_query = query + alpha_prompt + tlh_prompt + f"\n[STITCHED NARRATIVE]\n{stitched_narrative}\n"
         
-        decision_result = await self.decision_engine.make_decision(context, full_query, images=images)
+        # The trade proposal is held back (defer_proposal) until the risk review is done.
+        decision_result = await self.decision_engine.make_decision(context, full_query, images=images, defer_proposal=True)
         recommendation = decision_result.get("content", "")
         quick_actions = decision_result.get("quick_actions", [])
-        
-        # SOTA 2026 Phase 30: Emit Rebalance Proposal for HITL UI
-        if "pending_proposal" in context.user_context:
-            proposal = context.user_context["pending_proposal"]
-            await self.messenger.send_message(AgentMessage(
-                sender="OrchestratorAgent",
-                recipient="broadcast",
-                subject="rebalance_proposal",
-                payload=proposal,
-                correlation_id=c_id
-            ))
-            # Also append manual approval tag to text
-            recommendation += f"\n\n[ACTION_REQUIRED:APPROVE_TRADE({proposal.get('proposal_id')})]"
 
         # --- SOTA 2026: ADVERSARIAL DEBATE LOOP ---
         if context.intent in ["conversational", "educational"]:
+            if context.user_context.get("deferred_proposal"):
+                context.user_context["risk_review"] = await self.risk_agent.review(context, recommendation)
+            recommendation = await self._release_proposal(context, recommendation, c_id)
             return {
                 "content": recommendation, 
                 "response_id": decision_result.get("response_id"), 
@@ -450,7 +481,7 @@ Query: "{clean_query}"
             
             risk_review = await self.risk_agent.review(context, recommendation)
             debate_trace.append({"turn": turn, "status": risk_review.get("status"), "refutation": risk_review.get("debate_refutation")})
-            
+
             if risk_review.get("status") == "APPROVED" or turn >= max_debate_turns:
                 break
             
@@ -503,7 +534,9 @@ Query: "{clean_query}"
             db.calculate_agent_alpha(c_id)
         
         asyncio.create_task(delayed_alpha())
-        
+
+        quick_actions = self.decision_engine._get_quick_actions(context)
+        recommendation = await self._release_proposal(context, recommendation, c_id)
         return {
             "content": recommendation,
             "response_id": decision_result.get("response_id"),
@@ -537,6 +570,8 @@ Query: "{clean_query}"
                     correlation_id=c_id
                 ))
             return result
+        except (ModelRegistryError, ProviderError):
+            raise
         except Exception as e:
 
             handle_error(e, "Orchestrator specialist failed ({agent_name})", logger, raise_error=False)
@@ -650,6 +685,8 @@ Query: "{clean_query}"
             status_manager.set_status("orchestrator", "working", f"Executing Swarm ({len(tasks)} agents)...")
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for res in results:
+                if isinstance(res, (ModelRegistryError, ProviderError)):
+                    raise res
                 if isinstance(res, AgentResponse) and res.success:
                     await self._merge_result(context, res)
 
@@ -669,10 +706,16 @@ Query: "{clean_query}"
         full_response = ""
         async for chunk in self.decision_engine.make_decision_stream(context, query, images=images):
             full_response += chunk
-            yield chunk
+
+        # Extract without registering; hold proposal text until the critic has reviewed it.
+        proposal = self.decision_engine._extract_trade_proposal(full_response, context)
+        if proposal:
+            clear_review(context)
+            context.user_context["deferred_proposal"] = proposal
 
         # 4. Governance Phase (Risk Review)
-        if context.intent in ["conversational", "educational"]:
+        if context.intent in ["conversational", "educational"] and not proposal:
+             yield full_response
              # Yield final context for route handler metadata
              from pydantic import BaseModel
              class FinalEvent(BaseModel):
@@ -690,7 +733,7 @@ Query: "{clean_query}"
             warning = f"\n\n⚠️ **RISK WARNING**: {risk_review.get('risk_assessment')}"
             if risk_review.get("requires_hitl"):
                 warning += "\n\n[ACTION_REQUIRED:TRADE_APPROVAL]"
-            yield warning
+            full_response += warning
 
         # Yield final context for route handler metadata
         from pydantic import BaseModel
@@ -698,4 +741,8 @@ Query: "{clean_query}"
             market_context: MarketContext
             quick_actions: List[Dict[str, str]]
         
-        yield FinalEvent(market_context=context, quick_actions=self.decision_engine._get_quick_actions(context))
+        quick_actions = self.decision_engine._get_quick_actions(context)
+        final_event = FinalEvent(market_context=context, quick_actions=quick_actions)
+        full_response = await self._release_proposal(context, full_response, c_id)
+        yield full_response
+        yield final_event

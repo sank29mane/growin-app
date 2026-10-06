@@ -4,6 +4,7 @@ import pytest
 
 from agents.decision_agent import DecisionAgent, ToolCall
 from market_context import MarketContext
+from model_registry_testkit import fake_replies, offline_registry  # noqa: F401
 
 
 @pytest.mark.asyncio
@@ -17,20 +18,17 @@ from market_context import MarketContext
         "cancel_order",
     ],
 )
-async def test_high_conviction_cannot_call_broker_execution_tools(tool_name):
+async def test_high_conviction_cannot_call_broker_execution_tools(tool_name, offline_registry):
     """Agent conviction must never grant direct broker execution authority."""
     mcp_client = MagicMock()
     mcp_client.call_tool = AsyncMock()
 
-    llm = MagicMock()
-    llm.chat = AsyncMock(
-        side_effect=[
-            {"content": f"[TOOL:{tool_name}(...) ]"},
-            {"content": "I created a trade proposal for human review."},
-        ]
+    llm = fake_replies(
+        f"[TOOL:{tool_name}(...) ]",
+        "I created a trade proposal for human review.",
     )
 
-    agent = DecisionAgent(model_name="native-mlx", mcp_client=mcp_client)
+    agent = DecisionAgent(mcp_client=mcp_client)
     agent.llm = llm
     agent._initialized = True
     context = MarketContext(query="Create a high-conviction trade", intent="analytical")
@@ -50,12 +48,12 @@ async def test_high_conviction_cannot_call_broker_execution_tools(tool_name):
     assert result["content"] == "I created a trade proposal for human review."
     mcp_client.call_tool.assert_not_awaited()
 
-    follow_up_messages = llm.chat.await_args_list[1].kwargs["messages"]
+    follow_up_messages = llm.ainvoke.await_args_list[1].args[0]
     assert "Requires UI confirmation" in follow_up_messages[-1]["content"]
 
 
 def test_high_conviction_proposal_still_requires_human_approval():
-    agent = DecisionAgent(model_name="native-mlx", mcp_client=MagicMock())
+    agent = DecisionAgent(mcp_client=MagicMock())
     context = MarketContext(
         query="Buy AAPL",
         intent="analytical",

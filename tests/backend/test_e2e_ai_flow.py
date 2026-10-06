@@ -3,11 +3,12 @@ import pytest
 from fastapi.testclient import TestClient
 from server import app
 import asyncio
+from model_registry_testkit import offline_registry  # noqa: F401
 
 client = TestClient(app)
 
 @pytest.mark.asyncio
-async def test_e2e_ai_flow():
+async def test_e2e_ai_flow(offline_registry):
     """
     SOTA 2026: End-to-End AI Flow Test.
     1. Generate Strategy (Streaming)
@@ -44,7 +45,7 @@ async def test_e2e_ai_flow():
         error_event = next(e for e in events if e["event"] == "error")
         error_msg = error_event["data"].get("error", "") or error_event["data"].get("message", "")
         error_msg_str = str(error_msg)
-        if any(x in error_msg_str for x in ["MLX", "hardware", "libmlx.so", "Total failure", "NoneType", "LM Studio", "reachable", "Connection", "unreachable"]) or "mlx" in error_msg_str.lower():
+        if any(x in error_msg_str for x in ["MLX", "hardware", "libmlx.so", "Total failure", "NoneType", "LM Studio", "reachable", "Connection", "unreachable", "PROVIDER_UNREACHABLE"]) or "mlx" in error_msg_str.lower():
             pytest.skip(f"Missing MLX hardware or LM Studio offline: {error_msg_str}")
         else:
             pytest.fail(f"Real regression detected in AI stream: {error_msg_str}")

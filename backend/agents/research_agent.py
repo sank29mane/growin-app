@@ -26,6 +26,8 @@ import asyncio
 import re
 from pydantic import BaseModel, Field
 from magentic import prompt as mag_prompt
+from model_registry import ROLE_RESEARCH, ModelRegistryError, ProviderError
+from model_registry.provider import run_magentic
 from resilience import get_circuit_breaker, CircuitBreakerOpenError
 from utils.http_client import agent_http_client
 
@@ -246,6 +248,10 @@ class ResearchAgent(BaseAgent):
             
         except ImportError:
             return self._neutral_response(ticker, error="Missing dependencies")
+        except (ModelRegistryError, ProviderError):
+            # Surface to BaseAgent.execute: the specialist fails instead of
+            # reporting neutral sentiment as if it had run.
+            raise
         except Exception as e:
 
             handle_error(e, "Research analysis failed", logger, raise_error=False)
@@ -471,6 +477,10 @@ class ResearchAgent(BaseAgent):
             logger.info(f"NewsData.io returned {len(articles)} articles")
             return articles
             
+        except (ModelRegistryError, ProviderError):
+            # The smart query uses the research role. A missing role or failing
+            # provider is a failed research step, not an empty article list.
+            raise
         except Exception as e:
 
 
@@ -488,7 +498,7 @@ class ResearchAgent(BaseAgent):
             
             # Execute magentic prompt (async execution)
             # This is significantly more robust than manual string parsing.
-            params_obj = await asyncio.to_thread(generate_news_query, user_query, user_query, market_context)
+            params_obj = await run_magentic(ROLE_RESEARCH, generate_news_query, user_query, user_query, market_context)
             
             # Convert Pydantic object to dict for the API client
             params = params_obj.model_dump(exclude_none=True)
@@ -501,6 +511,9 @@ class ResearchAgent(BaseAgent):
             logger.info(f"Smart Query Generated (Magentic): {params}")
             return params
             
+        except (ModelRegistryError, ProviderError):
+            # A missing role or failing provider must surface, not degrade silently.
+            raise
         except Exception as e:
 
 

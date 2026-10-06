@@ -539,21 +539,44 @@ struct ToolFunctionDefinition: Codable {
     let parameters: [String: AnyCodable]
 }
 
+/// One model role as the backend reports it (`GET /api/models/roles`).
+/// Non-secret fields only: no URL, no environment variable name, no key value.
+struct ModelRole: Codable, Identifiable, Equatable {
+    var id: String { role }
+    let role: String
+    let provider: String
+    let kind: String
+    let model: String
+    /// nil when the provider takes no key; otherwise whether its key variable is set.
+    let keyConfigured: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case role, provider, kind, model
+        case keyConfigured = "key_configured"
+    }
+}
+
+struct ModelRolesResponse: Codable, Equatable {
+    let roles: [ModelRole]
+    let missingRoles: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case roles
+        case missingRoles = "missing_roles"
+    }
+}
+
+/// Chat request body. It carries no model, provider or key: the backend's role
+/// registry is the only authority and rejects those fields.
 struct GrowinChatMessage: Codable {
     let message: String
     let conversationId: String?
-    let modelName: String?
-    let coordinatorModel: String?
-    let apiKeys: [String: String]?
     let accountType: String?
     let images: [String]?
-    
+
     enum CodingKeys: String, CodingKey {
         case message
         case conversationId = "conversation_id"
-        case modelName = "model_name"
-        case coordinatorModel = "coordinator_model"
-        case apiKeys = "api_keys"
         case accountType = "account_type"
         case images
     }

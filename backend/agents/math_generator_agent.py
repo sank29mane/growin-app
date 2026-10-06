@@ -7,14 +7,15 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 from .base_agent import BaseAgent, AgentConfig, AgentResponse
 from schemas import MathScriptRequest, MathScriptResponse
-from mlx_langchain import ChatMLX
+from model_registry import ROLE_MATH_CODEGEN, ModelRegistryError, ProviderError
+from .llm_factory import LLMFactory
 
 logger = logging.getLogger(__name__)
 
 class MathGeneratorAgent(BaseAgent):
     """
     Specialized agent for generating NPU-optimized math scripts using MLX.
-    Uses the local Granite-4.0-Tiny model for ultra-fast script generation.
+    Uses the registry's math_codegen role for script generation.
     """
 
     def __init__(self, config: Optional[AgentConfig] = None):
@@ -27,16 +28,9 @@ class MathGeneratorAgent(BaseAgent):
             )
         super().__init__(config)
         
-        # Use a reliable model - fallback to LFM 2.5B if granite is missing, but config is fixed now.
-        # Still, robust fallback is good practice.
-        self.model_name = "granite-tiny"
-        
-        # Initialize ChatMLX with low temperature for code generation consistency
-        self.llm = ChatMLX(
-            model_name=self.model_name,
-            temperature=0.1,
-            max_tokens=2048
-        )
+        # Bound lazily to the registry's math_codegen role: a missing role
+        # fails the request, never a different model.
+        self.llm = None
 
     async def analyze(self, context: Dict[str, Any]) -> AgentResponse:
         """
@@ -61,6 +55,8 @@ class MathGeneratorAgent(BaseAgent):
                 data=response_data.model_dump(),
                 latency_ms=0  # BaseAgent.execute will overwrite this
             )
+        except (ModelRegistryError, ProviderError):
+            raise
         except Exception as e:
 
             handle_error(e, "MathGeneratorAgent analysis failed", self.logger, raise_error=False)
@@ -110,8 +106,8 @@ class MathGeneratorAgent(BaseAgent):
         
         content = ""
         try:
-            # Generate response using ChatMLX (which handles its own internal async/sync bridging)
-            # Note: ChatMLX inherited from BaseChatModel, we use ainvoke for async
+            if self.llm is None:
+                self.llm = await LLMFactory.create_llm(ROLE_MATH_CODEGEN)
             result = await self.llm.ainvoke(messages)
             content = result.content
 
@@ -137,37 +133,12 @@ class MathGeneratorAgent(BaseAgent):
                 explanation=parsed.get("explanation", "No explanation provided."),
                 engine_requirement="npu"
             )
+        except (ModelRegistryError, ProviderError):
+            # A missing role or a failing provider is not a parse problem.
+            raise
         except Exception as e:
 
             handle_error(e, "Failed to parse MathGeneratorAgent output as JSON", self.logger, raise_error=False)
-
-            # Use Fallback Agent/Model if granite fails
-            if self.model_name == "granite-tiny":
-                 self.logger.info("Retrying with fallback model (LFM)...")
-                 self.llm.model_name = "native-mlx" # Assuming this maps to LFM in ChatMLX
-                 content = ""
-                 try:
-                     result = await self.llm.ainvoke(messages)
-                     content = result.content
-                     # ... parsing logic (simplified duplication for safety) ...
-                     cleaned_content = content.strip()
-                     if cleaned_content.startswith("```json"): cleaned_content = cleaned_content[7:]
-                     if cleaned_content.endswith("```"): cleaned_content = cleaned_content[:-3]
-                     cleaned_content = cleaned_content.strip()
-                     start = cleaned_content.find("{")
-                     end = cleaned_content.rfind("}") + 1
-                     if start != -1 and end != -1:
-                         cleaned_content = cleaned_content[start:end]
-
-                     parsed = json.loads(cleaned_content)
-                     return MathScriptResponse(
-                        script=parsed.get("script", "# Error: No script generated"),
-                        explanation=parsed.get("explanation", "No explanation provided."),
-                        engine_requirement="npu"
-                     )
-                 except Exception as fallback_e:
-
-                     handle_error(fallback_e, "Fallback model failed", self.logger, raise_error=False)
 
             # Fallback behavior
             return MathScriptResponse(

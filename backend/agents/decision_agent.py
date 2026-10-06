@@ -19,7 +19,10 @@ from decimal import Decimal
 from pydantic import BaseModel, Field
 from magentic import prompt as mag_prompt
 from langchain_core.messages import SystemMessage, HumanMessage
+from .critic_binding import clear_review, consume_registration
 from .llm_factory import LLMFactory
+from model_registry import ROLE_DECISION, ModelRegistryError, ProviderError
+from model_registry.provider import image_message_content, run_magentic
 from utils.audit_log import AUDIT_UNSCOPED, log_audit
 from execution import (
     ExecutionConflictError,
@@ -141,7 +144,7 @@ class DecisionAgent:
     """
     The "Brain" - Uses high-reasoning LLM to make final decisions.
 
-    Model: User-selectable (GPT-4o, Claude, native-mlx, etc.)
+    Model: the registry's ``decision`` role (private/models.json).
     Role: Synthesize all data, validate prices, make recommendations
     Performance: 5-8s (LLM reasoning time)
     """
@@ -150,25 +153,44 @@ class DecisionAgent:
     # separately authorized execution path outside the reasoning loop.
     INTERCEPTED_TOOLS = frozenset(SENSITIVE_TOOLS)
 
-    def __init__(self, model_name: str = "native-mlx", api_keys: Optional[Dict[str, str]] = None, mcp_client=None):
+    PROPOSAL_NOT_REGISTERED_NOTE = (
+        "\n\nTrade proposal not registered for review "
+        "(TRADE_PROPOSAL_NOT_REGISTERED)."
+    )
 
-        self.model_name = model_name
-        self.api_keys = api_keys or {}
+    def __init__(self, mcp_client=None):
         from app_context import state
         self.mcp_client = mcp_client or state.mcp_client
         self.llm = None
-        self._lm_studio_client = None # Deprecated, kept for compat if needed, but Factory handles it
+        # Bound to the registry's decision role by _initialize_llm.
+        self._resolved = None
         self._initialized = False
 
-    async def _initialize_llm(self):
-        """Initialize the LLM using the Factory"""
-        try:
-            self.llm = await LLMFactory.create_llm(self.model_name, self.api_keys)
+    @property
+    def model_name(self) -> Optional[str]:
+        """The decision role's model id, once the role has been resolved."""
+        return self._resolved.model if self._resolved is not None else None
 
-            # Update model name if auto-detected by LM Studio
-            if hasattr(self.llm, "active_model_id"):
-                self.model_name = self.llm.active_model_id
-                self._lm_studio_client = self.llm # For explicit checks if needed
+    @property
+    def registry_fingerprint(self) -> Optional[str]:
+        from model_registry import active_registry_or_none
+
+        registry = active_registry_or_none()
+        return registry.fingerprint if registry is not None else None
+
+    def _image_prefix(self) -> Optional[str]:
+        """Capability field from the role, never inferred from the model id."""
+        return self._resolved.image_prefix if self._resolved is not None else None
+
+    def _compact_prompt(self) -> bool:
+        """Capability field from the role, never inferred from the model id."""
+        return bool(self._resolved is not None and self._resolved.compact_prompt)
+
+    async def _initialize_llm(self):
+        """Bind the decision role through the Factory. No fallback model."""
+        try:
+            self.llm = await LLMFactory.create_llm(ROLE_DECISION)
+            self._resolved = self.llm.resolved
 
             logger.info(f"DecisionAgent successfully initialized with {self.model_name}")
             self._initialized = True
@@ -179,29 +201,16 @@ class DecisionAgent:
             handle_error(e, "DecisionAgent initialization failed", logger, raise_error=False)
             raise
 
-    def _convert_base64_to_pil(self, images: Optional[List[str]]) -> List[Any]:
-        if not images:
-            return []
-        import base64
-        from io import BytesIO
-        from PIL import Image
-        pil_images = []
-        for img_str in images:
-            try:
-                if "," in img_str:
-                    img_str = img_str.split(",")[1]
-                data = base64.b64decode(img_str)
-                img = Image.open(BytesIO(data)).convert("RGB")
-                pil_images.append(img)
-            except Exception as e:
-
-                handle_error(e, "Error converting base64 image in DecisionAgent", logger, raise_error=False)
-        return pil_images
-
-    async def make_decision(self, context: MarketContext, query: str, previous_response_id: Optional[str] = None, images: Optional[List[str]] = None) -> Dict[str, Any]:
+    async def make_decision(self, context: MarketContext, query: str, previous_response_id: Optional[str] = None, images: Optional[List[str]] = None, defer_proposal: bool = True) -> Dict[str, Any]:
         """
         Make a trading decision based on aggregated market context.
         Returns a dict with 'content' and 'response_id'.
+
+        Proposals are always deferred, including for legacy callers passing False.
+        The trade proposal is extracted but neither
+        registered nor exposed: the caller registers it with
+        ``register_deferred_proposal`` once the risk review has finished, so a
+        failed review leaves nothing registered.
         """
         if not self._initialized:
             await self._initialize_llm()
@@ -218,17 +227,15 @@ class DecisionAgent:
         if contradictions:
             context.user_context["contradictions"] = contradictions
 
-        # Convert base64 images to PIL images
-        pil_images = self._convert_base64_to_pil(images)
-
         # 2. Build optimized prompt
         prompt = self._build_prompt(context, query)
         prompt = self._inject_context_layers(prompt, query)
 
-        # Gemma-4 VLM prompt formatting
-        if images and "gemma-4" in (self.model_name or "").lower():
-            if not prompt.startswith("<|image|>"):
-                prompt = "<|image|>\n" + prompt
+        # Image prompt prefix comes from the role's image_prefix field.
+        image_prefix = self._image_prefix()
+        if images and image_prefix:
+            if not prompt.startswith(image_prefix):
+                prompt = image_prefix + "\n" + prompt
 
         # 2.5 SOTA 2026: JMCE Uncertainty Gating
         uncertainty_warning = ""
@@ -253,7 +260,7 @@ class DecisionAgent:
                     "query": query,
                     "context_data": {
                         "ticker": context.ticker,
-                        "price": context.price.price if context.price else 0,
+                        "price": context.price.current_price if context.price else 0,
                         "rsi": context.quant.rsi if context.quant else 0,
                         "portfolio_value": context.portfolio.total_value if context.portfolio else 0,
                         "cash": context.portfolio.cash_balance.get('total', 0) if context.portfolio and isinstance(context.portfolio.cash_balance, dict) else 0
@@ -310,6 +317,8 @@ class DecisionAgent:
                         logger.warning(f"DecisionAgent: Math execution failed: {exec_result.get('error')}")
                 else:
                     logger.warning(f"DecisionAgent: Math generation failed: {math_response.error}")
+            except (ModelRegistryError, ProviderError):
+                raise
             except Exception as me:
 
                 handle_error(me, "DecisionAgent: Math delegation workflow failed", logger, raise_error=False)
@@ -319,7 +328,7 @@ class DecisionAgent:
             system_content = self._get_system_persona(context.intent)
             
             # Execute loop (Stateful and Consolidated)
-            loop_result = await self._run_agentic_loop(system_content, prompt, context, previous_response_id, images=pil_images)
+            loop_result = await self._run_agentic_loop(system_content, prompt, context, previous_response_id, images=images)
             recommendation = loop_result.get("content", "")
             response_id = loop_result.get("response_id")
             
@@ -329,15 +338,8 @@ class DecisionAgent:
             # SOTA 2026 Phase 30: Detect and extract Trade Proposals for HITL
             trade_proposal = self._extract_trade_proposal(recommendation, context)
             if trade_proposal:
-                proposal_id = trade_proposal.get("proposal_id")
-                if self._register_for_human_review(trade_proposal, context):
-                    context.user_context["pending_proposal"] = trade_proposal
-                    logger.info(f"DecisionAgent: Detected trade proposal for {trade_proposal.get('ticker')} ({proposal_id}). Routing to HITL gate.")
-                else:
-                    recommendation += (
-                        "\n\nTrade proposal not registered for review "
-                        "(TRADE_PROPOSAL_NOT_REGISTERED)."
-                    )
+                clear_review(context)
+                context.user_context["deferred_proposal"] = trade_proposal
 
             status_manager.set_status("decision_agent", "ready", "Decision delivered", model=self.model_name)
 
@@ -359,6 +361,8 @@ class DecisionAgent:
                     "correlation_id": correlation_id_ctx.get(),
                     "recommendation_snippet": recommendation[:200],
                     "response_id": response_id,
+                    "model": self.model_name,
+                    "registry_fingerprint": self.registry_fingerprint,
                     "contradictions_count": len(contradictions) if contradictions else 0,
                     "quick_actions_count": len(quick_actions)
                 },
@@ -371,6 +375,11 @@ class DecisionAgent:
                 "quick_actions": quick_actions
             }
 
+        except (ModelRegistryError, ProviderError) as e:
+            # Fail closed: a missing role or failing provider is a typed error for
+            # the caller, never recommendation text.
+            status_manager.set_status("decision_agent", "error", f"Error: {e.code}", model=self.model_name)
+            raise
         except Exception as e:
 
 
@@ -489,13 +498,11 @@ class DecisionAgent:
         prompt = self._inject_context_layers(prompt, query)
         system_content = self._get_system_persona(context.intent)
 
-        # Convert base64 images to PIL images
-        pil_images = self._convert_base64_to_pil(images)
-
-        # Gemma-4 VLM prompt formatting
-        if images and "gemma-4" in (self.model_name or "").lower():
-            if not prompt.startswith("<|image|>"):
-                prompt = "<|image|>\n" + prompt
+        # Image prompt prefix comes from the role's image_prefix field.
+        image_prefix = self._image_prefix()
+        if images and image_prefix:
+            if not prompt.startswith(image_prefix):
+                prompt = image_prefix + "\n" + prompt
 
         try:
             full_response = ""
@@ -515,9 +522,9 @@ class DecisionAgent:
                     else:
                         messages.append(AIMessage(content=content))
                         
-                messages.append(HumanMessage(content=prompt))
+                messages.append(HumanMessage(content=image_message_content(prompt, images)))
                 
-                async for chunk in self.llm.astream(messages, images=pil_images):
+                async for chunk in self.llm.astream(messages):
                     content = chunk.content
                     
                     # Process via Thinking Parser
@@ -566,7 +573,7 @@ class DecisionAgent:
                             context.reasoning += "\n" + event["content"]
             else:
                 # Fallback
-                response = await self._generate_draft(system_content, prompt, context=context, query=query, images=pil_images)
+                response = await self._generate_draft(system_content, prompt, context=context, query=query, images=images)
                 full_response = response
                 yield response
             
@@ -604,11 +611,17 @@ class DecisionAgent:
                     "ticker": context.ticker,
                     "intent": context.intent,
                     "correlation_id": correlation_id_ctx.get(),
-                    "full_response_length": len(full_response)
+                    "full_response_length": len(full_response),
+                    "model": self.model_name,
+                    "registry_fingerprint": self.registry_fingerprint
                 },
                 workspace=self._audit_workspace(),
             )
             
+        except (ModelRegistryError, ProviderError) as e:
+            # Fail closed: raise to the caller instead of yielding error text.
+            status_manager.set_status("decision_agent", "error", f"Error: {e.code}", model=self.model_name)
+            raise
         except Exception as e:
 
 
@@ -616,7 +629,7 @@ class DecisionAgent:
             yield f"Error: {str(e)}"
 
     async def _run_agentic_loop(self, system_content: str, prompt: str, context: MarketContext, previous_response_id: Optional[str] = None, images: Optional[List[Any]] = None) -> Dict[str, Any]:
-        """Runs multi-turn LLM loop with tool support and server-side state."""
+        """Runs the multi-turn LLM loop with tool support."""
         import asyncio
         import os
         import re
@@ -627,40 +640,8 @@ class DecisionAgent:
             shadow_text = self._generate_shadow_response(context)
             return {"content": self._clean_response(shadow_text), "response_id": "shadow-test-id"}
 
-        # 1. Stateful Priority: If LM Studio Client supports it, use server-side context
-        from lm_studio_client import LMStudioClient
-        if isinstance(self.llm, LMStudioClient) and hasattr(self.llm, "stateful_chat"):
-            try:
-                logger.info(f"DecisionAgent: Initiating stateful chat turn (Prev ID: {previous_response_id})")
-                stateful_resp = await self.llm.stateful_chat(
-                    model_id=self.model_name,
-                    input_text=prompt,
-                    previous_response_id=previous_response_id,
-                    system_prompt=system_content,
-                    temperature=0.1
-                )
-                if "error" not in stateful_resp:
-                    content = stateful_resp.get("content", "")
-                    reasoning = stateful_resp.get("reasoning", "")
-
-                    # Capture reasoning if not provided by client directly
-                    if not reasoning:
-                         reasoning = self._extract_reasoning(content)
-
-                    if reasoning:
-                         context.reasoning = reasoning
-
-                    return {
-                        "content": self._clean_response(content),
-                        "response_id": stateful_resp.get("response_id")
-                    }
-                else:
-                    logger.warning(f"Stateful chat failed: {stateful_resp['error']}. Falling back to stateless loop.")
-            except Exception as se:
-
-                handle_error(se, "Stateful transition error. Falling back.", logger, raise_error=False)
-
-        # 2. Stateless Fallback: Standard Agentic Loop
+        # Stateless loop: the registry's decision role is an OpenAI-compatible
+        # chat endpoint, so each turn sends the full message list (Q6 default).
         messages = [
             {"role": "system", "content": system_content}
         ]
@@ -670,21 +651,17 @@ class DecisionAgent:
             content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
             messages.append({"role": msg.get("role", "user"), "content": content})
             
-        messages.append({"role": "user", "content": prompt})
+        messages.append({"role": "user", "content": image_message_content(prompt, images)})
         
         mcp = self.mcp_client
         response_id = None
         
         # Limit loop to 3 turns
         for _ in range(3):
-            if hasattr(self.llm, "chat"):
-                resp = await self.llm.chat(
-                    model_id=self.model_name,
-                    messages=messages,
-                    temperature=0.1
-                )
-                content = resp.get("content", "")
-                reasoning = resp.get("reasoning", "")
+            if hasattr(self.llm, "ainvoke"):
+                reply = await self.llm.ainvoke(messages)
+                content = reply.content if isinstance(reply.content, str) else str(reply.content)
+                reasoning = ""
                 
                 # Capture reasoning
                 if not reasoning:
@@ -692,10 +669,10 @@ class DecisionAgent:
                 if reasoning:
                     context.reasoning = reasoning
 
-                response_id = resp.get("sessionId") or resp.get("response_id")
+                response_id = None
                 
-                # SOTA 2026: Agentic Tool Extraction via Magentic
-                tool_calls = await asyncio.to_thread(extract_tool_calls, content, reasoning)
+                # SOTA 2026: Agentic Tool Extraction via Magentic, bound to the decision role
+                tool_calls = await run_magentic(ROLE_DECISION, extract_tool_calls, content, reasoning)
                 
                 if tool_calls:
                     from status_manager import status_manager
@@ -741,12 +718,7 @@ class DecisionAgent:
                 
                 return {"content": self._clean_response(content), "response_id": response_id}
             else:
-                # Basic generation fallback
-                draft = await self._generate_draft(system_content, prompt, context=context, query=query, images=images)
-                reasoning = self._extract_reasoning(draft)
-                if reasoning:
-                    context.reasoning = reasoning
-                return {"content": self._clean_response(draft), "response_id": None}
+                raise ValueError("LLM interface not recognized: the decision role must expose ainvoke")
                 
         return {"content": "Reasoning loop exceeded max turns.", "response_id": None}
 
@@ -754,32 +726,12 @@ class DecisionAgent:
     async def _generate_draft(self, system_content: str, prompt: str, context: Optional[MarketContext] = None, query: str = "", images: Optional[List[Any]] = None) -> str:
         """Generate initial draft."""
         if hasattr(self.llm, "ainvoke"):
-            # LangChain
-            messages = [SystemMessage(content=system_content), HumanMessage(content=prompt)]
-            kwargs = {}
-            if images:
-                kwargs["images"] = images
-            response = await self.llm.ainvoke(messages, **kwargs)
+            messages = [SystemMessage(content=system_content), HumanMessage(content=image_message_content(prompt, images))]
+            response = await self.llm.ainvoke(messages)
             return response.content
-        elif hasattr(self.llm, "chat"):
-            # LM Studio Client - Optimized for High Token Throughput
-            msg_dicts = [{"role": "system", "content": system_content}, {"role": "user", "content": prompt}]
-            # Use higher max_tokens for complex synthesis
-            resp = await self.llm.chat(
-                model_id=self.model_name, 
-                messages=msg_dicts, 
-                temperature=0.2, # Slight temperature for better synthesis
-                max_tokens=2048
-            )
-
-            if "error" in resp:
-                raise RuntimeError(resp["error"])
-
-            return resp.get("content", "")
         else:
             llm_type = type(self.llm).__name__
-            llm_attrs = dir(self.llm) if self.llm else "None"
-            raise ValueError(f"LLM interface not recognized. Type: {llm_type}, Attrs: {llm_attrs}")
+            raise ValueError(f"LLM interface not recognized. Type: {llm_type}")
 
     def _generate_shadow_response(self, context: MarketContext, query: str = "") -> str:
         """
@@ -905,8 +857,8 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
 
     def _inject_context_layers(self, prompt: str, query: str) -> str:
         """Inject RAG and Skills into prompt."""
-        # Detect small model for aggressive optimization
-        is_small_model = any(k in (self.model_name or "").lower() for k in ["nano", "mobile", "phi", "tiny", "gemma-2b"])
+        # Aggressive optimization is a role capability field, not a model-name guess
+        is_small_model = self._compact_prompt()
 
 
         # Skills (Limit length for small models)
@@ -960,7 +912,7 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
     def _get_system_persona(self, intent: str) -> str:
         """Return the appropriate system prompt based on intent."""
         # Simplified persona for small models to reduce cognitive load
-        if any(k in (self.model_name or "").lower() for k in ["nano", "mobile", "phi", "tiny", "gemma-2b"]):
+        if self._compact_prompt():
 
             return "**Lead Financial Trader (Nano)**\nYou are a senior, profit‑maximising Lead Financial Trader. You consult your Coordinator Agent for data and provide high-probability trade suggestions based on SMA, RSI, MACD, and Sentiment."
 
@@ -1203,10 +1155,27 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
 
         return "\n".join(sections)
 
-    def switch_model(self, new_model: str):
-        self.model_name = new_model
-        self._initialized = False # Force re-init using factory on next call
-        logger.info(f"Switched to model: {new_model}")
+    def register_deferred_proposal(self, context: MarketContext) -> Optional[str]:
+        """Register the proposal ``make_decision(defer_proposal=True)`` held back.
+
+        Returns None when there was nothing to register or registration worked
+        (the proposal is then in ``context.user_context["pending_proposal"]``),
+        and the "not registered" note to append to the reply when the human
+        review gate refused it.
+        """
+        proposal = context.user_context.get("deferred_proposal")
+        if proposal is None:
+            return None
+        if self._register_for_human_review(proposal, context):
+            context.user_context.pop("deferred_proposal", None)
+            context.user_context["pending_proposal"] = proposal
+            logger.info(
+                f"DecisionAgent: Registered trade proposal for {proposal.get('ticker')} "
+                f"({proposal.get('proposal_id')}) after risk review. Routing to HITL gate."
+            )
+            return None
+        context.user_context.pop("deferred_proposal", None)
+        return self.PROPOSAL_NOT_REGISTERED_NOTE
 
     async def generate_response(self, prompt: str) -> str:
         """Utility generation"""
@@ -1221,15 +1190,21 @@ The analysis for **{ticker}** is complete. Based on the Swarm execution, we dete
         no account or broker, so registration fails until a human-reviewed path
         supplies them; that refusal is logged by code and the proposal dropped.
         """
+        consume_registration(context, trade_proposal)
+
         from app_context import state
 
         try:
             state.register_trade_proposal(trade_proposal)
         except (ExecutionDisabledError, LedgerError, ExecutionConflictError, ValueError) as exc:
+            clear_review(context)
             # pydantic's ValidationError is a ValueError. Log the code and the
             # exception class only, never the proposal contents.
             logger.warning("TRADE_PROPOSAL_NOT_REGISTERED: %s", type(exc).__name__)
             return False
+        except Exception:
+            clear_review(context)
+            raise
         return True
 
     def _audit_workspace(self) -> str:
