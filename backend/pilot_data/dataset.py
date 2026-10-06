@@ -148,8 +148,27 @@ class DatasetManifest(CaveatedResult):
     dividend_amount_unknown_events: dict[str, tuple[DividendAmountUnknownEvent, ...]] = {}
 
 
-def dataset_hash(rows: list[DatasetRow]) -> str:
-    return canonical_sha256([row.payload() for row in rows])
+def _events_payload(events: dict[str, tuple[DividendAmountUnknownEvent, ...]]) -> dict[str, list[list[str]]]:
+    """Canonical, sorted form of the manifest event list (anchor -> [[ex_date, event_id], ...])."""
+    return {
+        anchor: sorted([event.ex_date.isoformat(), event.event_id] for event in found)
+        for anchor, found in sorted(events.items())
+    }
+
+
+def dataset_hash(
+    rows: list[DatasetRow], events: dict[str, tuple[DividendAmountUnknownEvent, ...]] | None = None
+) -> str:
+    """Hash of the rows, plus the D-20 event list when there is one.
+
+    The event list joins the hash only when non-empty, so a dataset without amount-unknown dividends
+    (including every pre-D-20 dataset) keeps the hash it always had. The manifest is otherwise unhashed,
+    so this is what stops an edited event list from verifying.
+    """
+    payloads = [row.payload() for row in rows]
+    if not events:
+        return canonical_sha256(payloads)
+    return canonical_sha256({"rows": payloads, "dividend_amount_unknown_events": _events_payload(events)})
 
 
 _UNSAFE_PATH_CHARS = ("'", "\\", "\n", "\r", "\x00")
@@ -310,7 +329,7 @@ def build_dataset_snapshot(
             "short_history": span.short_history,
         }
     rows.sort(key=lambda row: (row.anchor_isin, row.trade_date))
-    digest = dataset_hash(rows)
+    digest = dataset_hash(rows, unknown_events)
     all_raw = all(members[code].rawness_overall == "raw_confirmed" for code in {r.stock_code for r in rows})
     manifest = DatasetManifest(
         workspace="india", caveats=standard_caveats(*(() if all_raw else (BREEZE_RAW_UNVERIFIED_CAVEAT,))),
@@ -378,6 +397,8 @@ def verify_dataset(path: Path, *, workspace: str) -> DatasetManifest:
         raise PilotDataError("dataset_integrity", "manifest.json is missing or unreadable") from exc
     if manifest.workspace != workspace:
         raise PilotDataError("workspace_mismatch", "dataset belongs to a different workspace")
+    if path.resolve().name != manifest.dataset_sha256:
+        raise PilotDataError("dataset_integrity", "the directory name is not the dataset hash in the manifest")
     parquet = path / "rows.parquet"
     try:
         actual = sha256_hex(parquet.read_bytes())
@@ -389,7 +410,8 @@ def verify_dataset(path: Path, *, workspace: str) -> DatasetManifest:
         rows = _read_parquet(parquet)
     except Exception as exc:  # corrupt content that still matched the hash cannot be trusted either
         raise PilotDataError("dataset_integrity", "rows.parquet could not be read") from exc
-    if dataset_hash(rows) != manifest.dataset_sha256 or len(rows) != manifest.row_count:
+    if dataset_hash(rows, manifest.dividend_amount_unknown_events) != manifest.dataset_sha256 \
+            or len(rows) != manifest.row_count:
         raise PilotDataError("dataset_integrity", "rows do not reproduce the dataset hash")
     _check_unknown_dividend_tags(rows, manifest)
     return manifest

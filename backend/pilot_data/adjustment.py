@@ -304,7 +304,7 @@ def _resolve_unknown_dividends(
         if gap is None:
             near.append("gap:unmeasurable")
         elif not (1 - max_gap <= gap <= 1 + max_gap):
-            near.append(f"gap:{gap.quantize(Decimal('0.000000001'), rounding=ROUND_HALF_EVEN)}")
+            near.append(f"gap:{gap.quantize(Decimal('0.0001'), rounding=ROUND_HALF_EVEN)}")
         if near:
             unresolved.append(
                 UnresolvedAction(

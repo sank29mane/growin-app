@@ -472,7 +472,7 @@ def test_a_large_unexplained_gap_on_the_ex_date_is_still_flagged():
     # a 0.56 ratio is inside 59's jump band but far too big for a dividend: still not lifted
     inside = factor_set(flat_bars(J3, J4, J5, open_by_day={J4: "56"}), [interim(J4)], J5)
     assert [(u.reason, u.detail["nearby"]) for u in inside.unresolved] == [
-        ("dividend_amount_unknown_conflict", "gap:0.560000000")]
+        ("dividend_amount_unknown_conflict", "gap:0.5600")]
     assert inside.unknown_dividend_events() == ()
 
 
@@ -529,7 +529,7 @@ def test_a_hidden_one_for_two_bonus_gap_is_not_read_as_a_dividend():
     fs, bars = gap_set("66.7")  # a hidden 1:2 bonus opens at 2/3 of the previous close
     assert fs.unknown_dividend_events() == ()
     assert [(u.reason, u.detail["nearby"]) for u in fs.unresolved] == [
-        ("dividend_amount_unknown_conflict", "gap:0.667000000")]
+        ("dividend_amount_unknown_conflict", "gap:0.6670")]
     series = adjusted_series(bars, fs, as_of=J5, workspace="india")
     assert series.bars[0].adjusted_quarantined and series.bars[0].adj_close is None
     assert not any(b.dividend_amount_unknown or b.dividend_amount_unknown_ex_date for b in series.bars)
@@ -608,7 +608,7 @@ def test_bars_are_tagged_even_when_a_later_unresolved_action_withholds_their_val
         (True, True), (True, True), (True, False), (True, False), (False, False)]
 
 
-def test_a_rejected_gap_label_keeps_enough_digits_to_show_why_it_was_rejected():
-    fs, _ = gap_set("79.99999")  # 0.7999999 rounds to 0.8000 at four digits and would look like the boundary
-    (conflict,) = fs.unresolved
-    assert conflict.detail["nearby"] == "gap:0.799999900"
+def test_the_hidden_bonus_case_keeps_the_factor_set_hash_it_had_on_main():
+    # The conflict label is part of the hashed factor set; pilot-adjust/2 has shipped, so it must not drift.
+    fs, _ = gap_set("66.7")
+    assert fs.factor_set_sha256 == "0f15f9f39964fbb84a8e0f6714569f6b8622d610f72fe2aad63d3066a473e27a"
