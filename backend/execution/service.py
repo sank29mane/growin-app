@@ -149,6 +149,7 @@ class ExecutionService:
         risk_db_connection: Any = None,
         deny_reason: Optional[str] = None,
         price_source: Optional[str] = None,
+        price_divisor: object = None,
     ) -> ExecutionAdmission:
         """Run deterministic simulation/risk checks and persist immutable evidence."""
 
@@ -228,10 +229,17 @@ class ExecutionService:
             )
             risk_value = risk_evidence.get("admitted_quantity", risk_evidence.get("scaled_size"))
             risk_quantity = _finite_decimal(risk_value, "risk quantity")
-            if bound and intent.order_type is OrderType.LIMIT and price is None:
-                # A bound venue's notional is the LIMIT price. Falling back to the
-                # simulator fill would reserve and cap-check a lower, unpinned figure.
-                raise ValueError("PRICE_NOT_PINNED_TO_LIMIT")
+            if bound and intent.order_type is OrderType.LIMIT:
+                # A bound venue's notional is the LIMIT price in pounds: limit / divisor
+                # (100 for a GBX instrument, 1 for GBP). The admission price must EQUAL
+                # that figure. A missing price, a missing divisor or any other price
+                # (a simulator fill, a pence/pound mix-up) would reserve and cap-check
+                # a figure the broker is not bound by.
+                if price is None or price_divisor is None or intent.limit_price is None:
+                    raise ValueError("PRICE_NOT_PINNED_TO_LIMIT")
+                divisor = _finite_decimal(price_divisor, "price divisor")
+                if divisor <= 0 or _finite_decimal(price, "price") != intent.limit_price / divisor:
+                    raise ValueError("PRICE_NOT_PINNED_TO_LIMIT")
             price_decimal = _finite_decimal(
                 price if price is not None else simulator_fill, "price"
             )

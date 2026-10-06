@@ -67,7 +67,7 @@ async def test_a_production_started_practice_service_refuses_local_replay(
         assert stack.service.admissible_price_sources == frozenset({PRICE_SOURCE_OPERATOR_RECORDED})
         denied = stack.service.admit(
             practice_proposal_dict("prod-replay", quantity="1", limit_price="50"),
-            currency="GBP", price="0.5", price_source=PRICE_SOURCE_TEST_REPLAY,
+            currency="GBP", price="0.5", price_divisor="100", price_source=PRICE_SOURCE_TEST_REPLAY,
             **stack.app._local_paper_preflight(),
         )
         assert denied.decision.value == "DENIED"
@@ -76,7 +76,7 @@ async def test_a_production_started_practice_service_refuses_local_replay(
         # The same call from the operator-recorded source is not refused for its source.
         recorded = stack.service.admit(
             practice_proposal_dict("prod-recorded", quantity="1", limit_price="50"),
-            currency="GBP", price="0.5", price_source=PRICE_SOURCE_OPERATOR_RECORDED,
+            currency="GBP", price="0.5", price_divisor="100", price_source=PRICE_SOURCE_OPERATOR_RECORDED,
             **stack.app._local_paper_preflight(),
         )
         assert recorded.reason_code != "PRICE_SOURCE_NOT_ADMISSIBLE"
@@ -128,12 +128,12 @@ def test_a_bound_ledger_service_refuses_local_replay_unless_a_test_injects_it(tm
         }
         denied = refusing.admit(
             practice_proposal_dict("r-1", quantity="1", limit_price="50"),
-            currency="GBP", price="0.5", price_source=PRICE_SOURCE_TEST_REPLAY, **evidence,
+            currency="GBP", price="0.5", price_divisor="100", price_source=PRICE_SOURCE_TEST_REPLAY, **evidence,
         )
         assert denied.decision.value == "DENIED"
         assert denied.reason_code == "PRICE_SOURCE_NOT_ADMISSIBLE"
         allowed = injected.admit(
             practice_proposal_dict("r-2", quantity="1", limit_price="50"),
-            currency="GBP", price="0.5", price_source=PRICE_SOURCE_TEST_REPLAY, **evidence,
+            currency="GBP", price="0.5", price_divisor="100", price_source=PRICE_SOURCE_TEST_REPLAY, **evidence,
         )
         assert allowed.decision.value == "ADMITTED"

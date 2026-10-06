@@ -154,13 +154,16 @@ def enroll(approval: Any, key: ec.EllipticCurvePrivateKey, *, workspace: str = "
     approval.enroll_key(public_x963(key), token, workspace=workspace)
 
 
-def prepare(app_state: Any, proposal: dict[str, Any], *, price: str = "50") -> Any:
+def prepare(
+    app_state: Any, proposal: dict[str, Any], *, price: str = "50", price_divisor: str = "1"
+) -> Any:
     """Register, admit with fixture evidence, and reserve one proposal."""
 
     return app_state.execution_service.prepare(
         proposal,
         currency="GBP",
         price=price,
+        price_divisor=price_divisor,
         # A bound venue admits only from a recorded-quote replay (D-02); this is
         # the fixture replay. A paper ledger ignores it.
         price_source=PRICE_SOURCE_TEST_REPLAY,

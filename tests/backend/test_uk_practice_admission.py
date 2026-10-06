@@ -671,7 +671,7 @@ async def test_the_reservation_transaction_itself_enforces_the_position_cap_and_
         # 520 shares x 71.3p = GBP 370.76, over the 300 cap, forced past the pre-check.
         proposal = practice_proposal_dict("forced-cap", quantity="520", limit_price="71.3")
         admission = stack.service.admit(
-            proposal, currency="GBP", price="0.713", price_source=PRICE_SOURCE_TEST_REPLAY,
+            proposal, currency="GBP", price="0.713", price_divisor="100", price_source=PRICE_SOURCE_TEST_REPLAY,
             **stack.app._local_paper_preflight(),
         )
         assert admission.decision.value == "ADMITTED"
@@ -691,7 +691,7 @@ async def test_the_reservation_transaction_itself_enforces_the_position_cap_and_
         )
         proposal = practice_proposal_dict("no-limits", quantity="1", limit_price="71.3")
         service.admit(
-            proposal, currency="GBP", price="0.713", price_source=PRICE_SOURCE_TEST_REPLAY,
+            proposal, currency="GBP", price="0.713", price_divisor="100", price_source=PRICE_SOURCE_TEST_REPLAY,
             simulator_evidence={"simulated_fill_price": "0.713"}, risk_evidence={"scaled_size": "1"},
         )
         with pytest.raises(ApprovalConflict, match="limits"):

@@ -463,7 +463,7 @@ def prepare_fixture(
     side: str = "BUY",
     quantity: str = "2",
     limit_price: str = "50",
-    price_gbp: str = "0.5",
+    price_gbp: Optional[str] = None,
     broker_available: Optional[str] = None,
 ):
     """Register, admit (fixture evidence) and reserve one practice proposal."""
@@ -474,6 +474,9 @@ def prepare_fixture(
         proposal_id, ticker=ticker, side=side, quantity=quantity, limit_price=limit_price
     )
     stack.proposals[proposal_id] = proposal
+    if price_gbp is None:
+        # The pinned admission price: the pence LIMIT in pounds.
+        price_gbp = format(Decimal(limit_price) / Decimal("100"), "f")
     kwargs: dict[str, Any] = {}
     if broker_available is not None:
         kwargs["broker_available_quantity"] = broker_available
@@ -481,6 +484,7 @@ def prepare_fixture(
         proposal,
         currency="GBP",
         price=price_gbp,
+        price_divisor="100",
         price_source=PRICE_SOURCE_TEST_REPLAY,
         **stack.app._local_paper_preflight(),
         **kwargs,

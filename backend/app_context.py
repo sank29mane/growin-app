@@ -656,6 +656,7 @@ class AppState:
         window["spread"] = list(context.tick_window["spread"])
         kwargs = {
             "price": pinned_price,
+            "price_divisor": divisor,
             "price_source": price_source,
             "tick_window": window,
             "regime_id": context.regime.regime_id,

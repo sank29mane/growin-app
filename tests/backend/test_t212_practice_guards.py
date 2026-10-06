@@ -635,7 +635,7 @@ async def test_an_intent_the_adapter_cannot_send_fails_with_a_stable_code_and_no
         from execution.venue import PRICE_SOURCE_TEST_REPLAY
 
         admission = stack.service.prepare(
-            proposal, currency="GBP", price="0.5", price_source=PRICE_SOURCE_TEST_REPLAY,
+            proposal, currency="GBP", price="0.5", price_divisor="100", price_source=PRICE_SOURCE_TEST_REPLAY,
             **stack.app._local_paper_preflight(),
         )
         assert admission.decision.value == "ADMITTED"

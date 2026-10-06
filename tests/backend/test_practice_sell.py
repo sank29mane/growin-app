@@ -329,7 +329,7 @@ async def test_a_sell_reservation_is_checked_in_the_ledger_even_without_the_admi
 
         proposal = practice_proposal_dict("forced", side="SELL", quantity="2", limit_price="71.2")
         admission = stack.service.admit(
-            proposal, currency="GBP", price="0.712", price_source=PRICE_SOURCE_TEST_REPLAY,
+            proposal, currency="GBP", price="0.712", price_divisor="100", price_source=PRICE_SOURCE_TEST_REPLAY,
             **stack.app._local_paper_preflight(),
         )
         assert admission.decision.value == "ADMITTED"
@@ -357,7 +357,7 @@ async def test_the_ledger_alone_refuses_a_sell_without_a_broker_number_or_beyond
     try:
         proposal = practice_proposal_dict("lone-sell", side="SELL", quantity="2", limit_price="71.2")
         admission = stack.service.admit(
-            proposal, currency="GBP", price="0.712", price_source=PRICE_SOURCE_TEST_REPLAY,
+            proposal, currency="GBP", price="0.712", price_divisor="100", price_source=PRICE_SOURCE_TEST_REPLAY,
             **stack.app._local_paper_preflight(),
         )
         assert admission.decision.value == "ADMITTED"

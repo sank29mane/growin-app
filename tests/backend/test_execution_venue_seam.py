@@ -235,6 +235,7 @@ class _Stack:
             intent,
             currency="GBP",
             price="50",
+            price_divisor="1",
             simulator_evidence={"simulated_fill_price": "50"},
             risk_evidence={"scaled_size": str(intent.quantity)},
             price_source=PRICE_SOURCE_TEST_REPLAY,
