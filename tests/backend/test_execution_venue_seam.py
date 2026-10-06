@@ -884,6 +884,68 @@ async def test_status_surfaces_report_the_same_mode(
         state.close_execution()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("account_id", ["paper-uat", "paper-uat-v2"])
+async def test_a_practice_ack_is_never_settled_as_a_local_uat_cancellation(
+    tmp_path, private_config_dir, monkeypatch, account_id
+):
+    """A practice account named like the UAT account keeps its real ACK."""
+
+    import base64
+    from unittest.mock import MagicMock
+
+    from httpx import ASGITransport, AsyncClient
+
+    from app_context import state
+    from server import app
+
+    monkeypatch.setenv("GROWIN_WORKSPACE", "uk")
+    monkeypatch.setattr(state, "_chat_manager", MagicMock())
+    write_practice_files(
+        private_config_dir, execution=practice_execution_payload(account_id=account_id)
+    )
+    double = RecordingDispatcher()
+    state.close_execution()
+    try:
+        assert state.start_execution(
+            tmp_path / "p.sqlite3", workspace="uk", private_dir=private_config_dir,
+            dispatcher_factories=practice_factories(double),
+        ), state.execution_startup_error
+        key = private_key()
+        enroll(state.execution_service._approval_service, key)
+        proposal = practice_proposal(account=account_id)
+        prepare(state, proposal)
+        pid = proposal["proposal_id"]
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            challenge = (
+                await client.post(
+                    "/api/ai/trade/approval/challenge",
+                    json={"proposal_id": pid, "workspace": "uk"},
+                )
+            ).json()
+            signature = sign(key, base64.b64decode(challenge["signed_payload_b64"]))
+            response = await client.post(
+                "/api/ai/trade/approval/complete",
+                json={
+                    "proposal_id": pid,
+                    "challenge_id": challenge["challenge_id"],
+                    "signature_der_b64": base64.b64encode(signature).decode("ascii"),
+                    "workspace": "uk",
+                },
+            )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert "released" not in body["message"] and "No broker was contacted" not in body["message"]
+        assert body["execution_details"]["broker"] == VENUE_T212_PRACTICE
+        assert len(double.intents) == 1
+        order = state._execution_ledger.get_order(pid)
+        assert order.state == "ACKNOWLEDGED"
+        budget = state._execution_ledger.get_paper_budget(account_id, "GBP", workspace="uk")
+        assert budget.reserved == Decimal("100") and budget.released == Decimal("0")
+    finally:
+        state.close_execution()
+
+
 def test_no_trading_212_host_string_in_execution_or_app_context():
     root = Path(__file__).resolve().parents[2] / "backend"
     hits = []

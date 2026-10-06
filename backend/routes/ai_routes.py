@@ -215,7 +215,17 @@ async def complete_trade_approval(request: SignedApprovalRequest):
             detail="Broker outcome is unknown; reconciliation is required before retrying",
         )
     proposal = state.get_trade_proposal(request.proposal_id)
-    is_local_uat = proposal and proposal.get("account") in {"paper-uat", "paper-uat-v2"}
+    # The local UAT zero-fill settlement is a paper-ledger behaviour only. A
+    # practice ledger (venue binding present) is a real broker account, so an
+    # account id that happens to read "paper-uat" must never trigger it.
+    ledger = state._execution_ledger
+    is_local_uat = bool(
+        proposal
+        and ledger is not None
+        and ledger.venue_binding is None
+        and state.execution_venue_binding is None
+        and proposal.get("account") in {"paper-uat", "paper-uat-v2"}
+    )
     if is_local_uat:
         # The UAT dispatcher is local-only. Settle it as a zero-fill cancellation
         # after its acknowledgement so the bounded £1 test budget is reusable.
