@@ -9,6 +9,7 @@ enum LocalApprovalSignerError: LocalizedError {
     case legacyKeyMismatch
     case workspaceKeyExists
     case noLegacyKey
+    case practiceRequiresAuthorization
 
     var errorDescription: String? {
         switch self {
@@ -26,6 +27,8 @@ enum LocalApprovalSignerError: LocalizedError {
             return "This workspace already has an approval key."
         case .noLegacyKey:
             return "There is no existing local approval key to adopt."
+        case .practiceRequiresAuthorization:
+            return "Practice orders can only be signed after a Touch ID check."
         }
     }
 }
@@ -69,13 +72,43 @@ final class LocalApprovalSigner: @unchecked Sendable {
         return makeIdentity(try decodePrivateKey(rawKey))
     }
 
-    /// Signs the exact canonical bytes supplied and reviewed by the caller.
+    /// Signs the exact canonical bytes supplied and reviewed by the caller. A PRACTICE
+    /// payload is refused here: it can only be signed through `signAuthorizedPractice`,
+    /// which needs a token that `PracticeApprovalAuthorizer` issues after Touch ID.
     func sign(_ payload: Data, for workspace: Workspace) throws -> Data {
+        guard !Self.isPracticePayload(payload) else {
+            throw LocalApprovalSignerError.practiceRequiresAuthorization
+        }
+        return try signBytes(payload, for: workspace)
+    }
+
+    /// The only path that signs a PRACTICE payload. The token cannot be built outside
+    /// `PracticeApprovalAuthorizer.swift`, after a successful biometric evaluation.
+    func signAuthorizedPractice(
+        _ payload: Data,
+        for workspace: Workspace,
+        authorization: PracticeSigningAuthorization
+    ) throws -> Data {
+        _ = authorization
+        return try signBytes(payload, for: workspace)
+    }
+
+    private func signBytes(_ payload: Data, for workspace: Workspace) throws -> Data {
         guard let rawKey = try storedKey(for: workspace) else {
             throw LocalApprovalSignerError.notConfigured
         }
         let privateKey = try decodePrivateKey(rawKey)
         return try privateKey.signature(for: payload).derRepresentation
+    }
+
+    /// Fail closed: a JSON object whose mode is PRACTICE, or non-object bytes that
+    /// mention PRACTICE at all, are treated as practice payloads.
+    private static func isPracticePayload(_ payload: Data) -> Bool {
+        if let object = (try? JSONSerialization.jsonObject(with: payload)) as? [String: Any] {
+            let mode = (object["mode"] as? String) ?? ""
+            return mode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == "PRACTICE"
+        }
+        return String(decoding: payload, as: UTF8.self).uppercased().contains("PRACTICE")
     }
 
     // MARK: Legacy key adoption

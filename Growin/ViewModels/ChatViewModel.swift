@@ -69,6 +69,11 @@ class ChatViewModel {
     }
 
     func completeTradeApproval(_ review: TradeApprovalReview) async throws {
+        // Chat never signs PRACTICE. Practice orders go through Practice Approvals, which
+        // pins the review to the shown proposal and requires Touch ID per signature.
+        guard review.payload.mode.uppercased() != PracticeApprovalPolicy.mode else {
+            throw TradeApprovalReviewError.invalidEnvelope
+        }
         guard let workspace = WorkspaceSelection.current() else {
             throw ChatWorkspaceError.noWorkspaceSelected
         }

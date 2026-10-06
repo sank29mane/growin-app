@@ -58,13 +58,20 @@ struct TouchIDAuthenticator: BiometricAuthenticating {
     }
 }
 
+/// Proof that a biometric check just succeeded. `LocalApprovalSigner.signAuthorizedPractice`
+/// requires one, and the initializer is `fileprivate`, so only `PracticeApprovalAuthorizer`
+/// (after `authenticate` returns) can create it.
+struct PracticeSigningAuthorization: Sendable {
+    fileprivate init() {}
+}
+
 /// Produces a practice approval signature only after a biometric check. The review
 /// is validated and the key identity matched BEFORE the prompt, so the operator is
 /// never asked to touch for an envelope that would be refused. The signing closure
 /// runs only after authentication succeeds; any authenticator error fails closed.
 struct PracticeApprovalAuthorizer: Sendable {
     typealias IdentityProvider = @Sendable (Workspace) throws -> ApprovalSignerIdentity
-    typealias SignProvider = @Sendable (Data, Workspace) throws -> Data
+    typealias SignProvider = @Sendable (Data, Workspace, PracticeSigningAuthorization) throws -> Data
 
     let authenticator: any BiometricAuthenticating
     let identity: IdentityProvider
@@ -73,7 +80,9 @@ struct PracticeApprovalAuthorizer: Sendable {
     static let shared = PracticeApprovalAuthorizer(
         authenticator: TouchIDAuthenticator(),
         identity: { try LocalApprovalSigner.shared.identity(for: $0) },
-        sign: { try LocalApprovalSigner.shared.sign($0, for: $1) }
+        sign: {
+            try LocalApprovalSigner.shared.signAuthorizedPractice($0, for: $1, authorization: $2)
+        }
     )
 
     func signature(for review: TradeApprovalReview, workspace: Workspace) async throws -> Data {
@@ -88,6 +97,6 @@ struct PracticeApprovalAuthorizer: Sendable {
         try await authenticator.authenticate(
             reason: "Approve practice \(review.payload.side) \(review.payload.quantity) \(review.payload.ticker)"
         )
-        return try sign(review.signedBytes, workspace)
+        return try sign(review.signedBytes, workspace, PracticeSigningAuthorization())
     }
 }

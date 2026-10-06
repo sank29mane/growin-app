@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Testing
 @testable import Growin
@@ -32,7 +33,7 @@ struct PracticeApprovalBiometricTests {
         PracticeApprovalAuthorizer(
             authenticator: StubAuthenticator(outcome: outcome, counter: counter),
             identity: { _ in ApprovalSignerIdentity(keyID: keyId, publicKeyX963: Data()) },
-            sign: { _, _ in counter.didSign(); return Data([1, 2, 3]) }
+            sign: { _, _, _ in counter.didSign(); return Data([1, 2, 3]) }
         )
     }
 
@@ -91,5 +92,158 @@ struct PracticeApprovalBiometricTests {
         }
         #expect(counter.auth == 0)
         #expect(counter.signed == 0)
+    }
+
+    // MARK: Every signing entry point refuses PRACTICE without Touch ID
+
+    private static func realSigner() throws -> (LocalApprovalSigner, KeychainStore) {
+        let store = KeychainStore(service: "san.Growin.credentials.v1.test.\(UUID().uuidString)")
+        let signer = LocalApprovalSigner(store: store)
+        _ = try signer.createIdentityIfNeeded(for: .uk)
+        _ = try signer.createIdentityIfNeeded(for: .india)
+        return (signer, store)
+    }
+
+    /// The review fixture is frozen with key id "key-1"; present the real public key under it.
+    nonisolated private static func fixtureIdentity(_ signer: LocalApprovalSigner, _ workspace: Workspace) throws -> ApprovalSignerIdentity {
+        ApprovalSignerIdentity(keyID: "key-1", publicKeyX963: try signer.identity(for: workspace).publicKeyX963)
+    }
+
+    private static func cleanUp(_ store: KeychainStore) {
+        for workspace in Workspace.allCases {
+            try? store.remove(.approvalSigningKey, scope: .workspace(workspace))
+        }
+    }
+
+    private static func expectRefused(_ body: () throws -> Data, _ label: String) {
+        do {
+            _ = try body()
+            Issue.record("\(label) signed a PRACTICE payload without authorization")
+        } catch LocalApprovalSignerError.practiceRequiresAuthorization {
+        } catch {
+            Issue.record("\(label) threw the wrong error: \(error)")
+        }
+    }
+
+    @Test func theRawSignerRefusesPracticePayloadsInEveryShape() throws {
+        let (signer, store) = try Self.realSigner()
+        defer { Self.cleanUp(store) }
+        let review = try PracticeApprovalTests.review()
+        let shapes: [(String, Data)] = [
+            ("signedBytes", review.signedBytes),
+            ("lowercase mode", Data(#"{"mode":"practice","x":1}"#.utf8)),
+            ("padded mode", Data(#"{"mode":" PRACTICE "}"#.utf8)),
+            ("non-JSON bytes", Data("PRACTICE order bytes".utf8)),
+        ]
+        for workspace in Workspace.allCases {
+            for (label, bytes) in shapes {
+                Self.expectRefused({ try signer.sign(bytes, for: workspace) }, "\(label)/\(workspace)")
+            }
+        }
+    }
+
+    @Test func theRawSignerStillSignsPaperPayloads() throws {
+        let (signer, store) = try Self.realSigner()
+        defer { Self.cleanUp(store) }
+        let signature = try signer.sign(Data(#"{"mode":"PAPER"}"#.utf8), for: .uk)
+        #expect(!signature.isEmpty)
+    }
+
+    @Test func theIndiaPaperAdapterEntryPointRefusesPractice() throws {
+        let review = try PracticeApprovalTests.review()
+        Self.expectRefused({ try LocalPaperApprovalSigner().sign(review.signedBytes) }, "LocalPaperApprovalSigner")
+    }
+
+    @Test func chatRefusesAPracticeReviewBeforeAnySigning() async throws {
+        let review = try PracticeApprovalTests.review()
+        let chat = ChatViewModel()
+        do {
+            try await chat.completeTradeApproval(review)
+            Issue.record("Chat accepted a PRACTICE review")
+        } catch TradeApprovalReviewError.invalidEnvelope {
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test func theAuthorizedPathSignsOnlyAfterBiometricAndTheSignatureVerifies() async throws {
+        let (signer, store) = try Self.realSigner()
+        defer { Self.cleanUp(store) }
+        let identity = try signer.identity(for: .uk)
+        let counter = AuthCounter()
+        let authorizer = PracticeApprovalAuthorizer(
+            authenticator: StubAuthenticator(outcome: nil, counter: counter),
+            identity: { try Self.fixtureIdentity(signer, $0) },
+            sign: { try signer.signAuthorizedPractice($0, for: $1, authorization: $2) }
+        )
+        let review = try PracticeApprovalTests.review()
+        let signature = try await authorizer.signature(for: review, workspace: .uk)
+        let key = try P256.Signing.PublicKey(x963Representation: identity.publicKeyX963)
+        #expect(key.isValidSignature(try P256.Signing.ECDSASignature(derRepresentation: signature), for: review.signedBytes))
+        #expect(counter.auth == 1)
+
+        let denied = PracticeApprovalAuthorizer(
+            authenticator: StubAuthenticator(outcome: .cancelled, counter: counter),
+            identity: { try Self.fixtureIdentity(signer, $0) },
+            sign: { try signer.signAuthorizedPractice($0, for: $1, authorization: $2) }
+        )
+        do {
+            _ = try await denied.signature(for: review, workspace: .uk)
+            Issue.record("Cancelled biometric still signed")
+        } catch let error as PracticeApprovalAuthError {
+            #expect(error == .cancelled)
+        }
+    }
+
+    // MARK: Source scan
+
+    private static func appSources() throws -> [(path: String, text: String)] {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let enumerator = try #require(FileManager.default.enumerator(
+            at: repoRoot.appendingPathComponent("Growin"), includingPropertiesForKeys: nil))
+        var sources: [(String, String)] = []
+        for case let url as URL in enumerator where url.pathExtension == "swift" {
+            sources.append((String(url.path.dropFirst(repoRoot.path.count + 1)),
+                            try String(contentsOf: url, encoding: .utf8)))
+        }
+        return sources
+    }
+
+    @Test func noOtherCallerOfTheRawSignerHandlesPractice() throws {
+        let sources = try Self.appSources()
+        #expect(sources.count > 10, "source probe found too few files")
+        let rawCallers = Set(sources.filter { $0.text.contains("LocalApprovalSigner.shared.sign(") }.map(\.path))
+        // A new raw caller fails here and must be reviewed for PRACTICE handling.
+        #expect(rawCallers == [
+            "Growin/Models/PaperOperationsModels.swift",
+            "Growin/ViewModels/ChatViewModel.swift",
+            "Growin/Views/SettingsView.swift",
+        ])
+        for (path, text) in sources where rawCallers.contains(path) {
+            #expect(!text.contains("expectedPractice"), "\(path) builds a PRACTICE review")
+            #expect(!text.contains("PracticeApprovalAuthorizer"), "\(path) mixes the authorizer with the raw signer")
+        }
+        let chat = try #require(sources.first { $0.path == "Growin/ViewModels/ChatViewModel.swift" }?.text)
+        let guardAt = try #require(chat.range(of: "PracticeApprovalPolicy.mode"))
+        let signAt = try #require(chat.range(of: "LocalApprovalSigner.shared.sign("))
+        #expect(guardAt.lowerBound < signAt.lowerBound, "Chat must reject PRACTICE before it signs")
+    }
+
+    @Test func onlyTheAuthorizerCanMintAPracticeSigningToken() throws {
+        let sources = try Self.appSources()
+        let authorizerPath = "Growin/Security/PracticeApprovalAuthorizer.swift"
+        let signerPath = "Growin/Security/LocalApprovalSigner.swift"
+        for (path, text) in sources {
+            if text.contains("PracticeSigningAuthorization(") {
+                #expect(path == authorizerPath, "\(path) mints a practice token")
+            }
+            if text.contains("signAuthorizedPractice(") {
+                #expect([authorizerPath, signerPath].contains(path), "\(path) calls the practice signer directly")
+            }
+        }
+        let practiceView = try #require(sources.first { $0.path == "Growin/Views/Trading/PracticeApprovalsView.swift" }?.text)
+        #expect(practiceView.contains("PracticeApprovalAuthorizer.shared.signature("))
+        #expect(!practiceView.contains("LocalApprovalSigner"))
     }
 }
