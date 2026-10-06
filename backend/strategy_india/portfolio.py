@@ -28,7 +28,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from decimal import Decimal
 
-from costs.core import COST_CONTEXT, IST, Side, round_money
+from costs.charges import price_trade_day
+from costs.core import COST_CONTEXT, IST, Side, TradeFill, round_money
 from costs.fills import FillOutcome, FillResult, FillScenario, LimitOrder, SessionBar, TickSize
 from costs.run import simulate_and_price
 from costs.schedule import PricingBasis, ScheduleSet
@@ -359,6 +360,24 @@ class Book:
             )
             self.swaps += 1
             del self.positions[p.anchor_isin]
+
+    def exit_costs_at_mark(self, session: date, *, schedules: ScheduleSet, pricing_basis: PricingBasis) -> Decimal:
+        """Sell-side charges to close every open position at its last mark on ``session`` (read-only).
+
+        Same cost model as a real exit: ``price_trade_day`` over SELL fills on one NSE contract note, the schedule
+        resolved for ``session`` and the run's pricing basis, so brokerage, STT, DP and GST are the ones a filled
+        exit pays. The sale price is the last mark, the same raw close the ETF benchmark sells at. The book is
+        not changed, so ordinary mark-to-market and every fold figure stay exactly as they were.
+        """
+        fills = [
+            TradeFill(f"liquidate|{pos.anchor_isin}", pos.isin, "NSE", Side.SELL, pos.quantity, pos.last_price, session)
+            for _, pos in sorted(self.positions.items()) if pos.quantity > 0
+        ]
+        if not fills:
+            return ZERO
+        day = price_trade_day(fills, schedules.resolve(session, pricing_basis), workspace="india", currency="INR",
+                              pricing_basis=pricing_basis)
+        return day.total
 
     # ---- marking ---------------------------------------------------------------
     def mark(self, session: date, closes: Mapping[str, Decimal], *, ex_date_open: Mapping[str, Decimal] | None = None) -> Decimal:

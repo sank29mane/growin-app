@@ -13,7 +13,7 @@ The numbers themselves stay in the private criteria file.
   config, consistent with 58). A registration seals a copy and its
   ``holdout_criteria_sha256``. Tracked code holds only ``CRITERIA_SCHEMA`` (key
   names and types) and the verdict logic, which carries no literal threshold.
-  A tracked EXAMPLE file with the proposed numbers lives under
+  A tracked EXAMPLE file with the confirmed numbers lives under
   ``tests/backend/fixtures/strategy_india/`` and is a fixture, not a default.
 * ``open_holdout`` is the only way to obtain a ``HoldoutGrant``. It refuses a
   missing or changed criteria set, a pinned-head mismatch and a second open,
@@ -49,8 +49,11 @@ FAIL = "FAIL"
 INCONCLUSIVE = "INCONCLUSIVE"
 
 HOLDOUT_SESSIONS = 250
+CRITERIA_STATUS = "CONFIRMED, operator 2026-10-07"  # sealed into every holdout verdict (D-19 answered)
 _ONE = Decimal(1)
-_CTX = decimal.Context(prec=60, rounding=decimal.ROUND_HALF_EVEN)  # fixed context: the same inputs always give the same digits
+# Fixed context for every annualisation step (swaps, growth, power, the final minus one and the excess subtraction).
+# Each of those runs through a _CTX method, never an operator, so the ambient decimal context cannot change a digit.
+_CTX = decimal.Context(prec=60, rounding=decimal.ROUND_HALF_EVEN)
 
 # Key names and value types only. No threshold appears here.
 CRITERIA_SCHEMA: dict[str, type] = {
@@ -242,6 +245,7 @@ class HoldoutEvidence:
     swaps: int  # filled position exits, the first portfolio build is not a swap
     holdout_sessions: int
     no_assumed_fill_attempts: int
+    exit_costs_at_end: Decimal = Decimal(0)  # already deducted from net_return and max_drawdown; kept for the audit trail
 
 
 @dataclass(frozen=True)
@@ -259,7 +263,7 @@ class HoldoutVerdict:
 def annualised_swaps(swaps: int, sessions: int, annualisation_sessions: int) -> Decimal:
     if sessions <= 0:
         raise StrategyIndiaError("holdout sessions must be positive")
-    return Decimal(swaps) * Decimal(annualisation_sessions) / Decimal(sessions)
+    return _CTX.divide(_CTX.multiply(Decimal(swaps), Decimal(annualisation_sessions)), Decimal(sessions))
 
 
 def annualised_return(net_return: Decimal, sessions: int, annualisation_sessions: int) -> Decimal:
@@ -269,18 +273,18 @@ def annualised_return(net_return: Decimal, sessions: int, annualisation_sessions
     """
     if sessions <= 0:
         raise StrategyIndiaError("holdout sessions must be positive")
-    growth = _ONE + net_return
+    growth = _CTX.add(_ONE, net_return)
     if growth <= 0:
         return Decimal(-1)
-    return _CTX.power(growth, _CTX.divide(Decimal(annualisation_sessions), Decimal(sessions))) - _ONE
+    return _CTX.subtract(_CTX.power(growth, _CTX.divide(Decimal(annualisation_sessions), Decimal(sessions))), _ONE)
 
 
 def annualised_excess_return(ev: "HoldoutEvidence", annualisation_sessions: int) -> Decimal | None:
     """Strategy annualised return minus the ETF benchmark's, or None when the benchmark is unknown."""
     if ev.benchmark_net_return is None:
         return None
-    return (annualised_return(ev.net_return, ev.holdout_sessions, annualisation_sessions)
-            - annualised_return(ev.benchmark_net_return, ev.holdout_sessions, annualisation_sessions))
+    return _CTX.subtract(annualised_return(ev.net_return, ev.holdout_sessions, annualisation_sessions),
+                         annualised_return(ev.benchmark_net_return, ev.holdout_sessions, annualisation_sessions))
 
 
 def _breaches(criteria: Mapping[str, Any], ev: HoldoutEvidence) -> list[str]:

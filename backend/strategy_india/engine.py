@@ -118,6 +118,7 @@ class SegmentResult:
     attempts: tuple
     fills: tuple[FillRecord, ...]
     charges_total: Decimal
+    exit_costs_at_end: Decimal  # sell-side charges to close the open positions at the last mark; not in end_equity
     traded_notional: Decimal
     swaps: int
     entries: int
@@ -134,6 +135,16 @@ class SegmentResult:
     @property
     def net_return(self) -> Decimal:
         return self.end_equity / self.start_equity - ONE
+
+    @property
+    def end_equity_after_exit_costs(self) -> Decimal:
+        """End equity as if every open position were sold at the last mark and paid its sell-side charges."""
+        return self.end_equity - self.exit_costs_at_end
+
+    @property
+    def net_return_after_exit_costs(self) -> Decimal:
+        """The gate figure: net return with exit costs on open positions, like the ETF's full round trip."""
+        return self.end_equity_after_exit_costs / self.start_equity - ONE
 
     @property
     def affected_attempts(self) -> int:
@@ -202,7 +213,9 @@ def simulate_segment(
         fold=fold, scenario_id=scenario.scenario_id, mode=mode, sessions=tuple(sessions),
         start_equity=book.capital, end_equity=book.equity(), curve=tuple(book.curve), exposure=tuple(book.exposure),
         closed=tuple(book.closed), open_positions=open_positions, attempts=tuple(book.attempts),
-        fills=tuple(book.fills), charges_total=book.charges_total, traded_notional=book.traded_notional,
+        fills=tuple(book.fills), charges_total=book.charges_total,
+        exit_costs_at_end=book.exit_costs_at_mark(last, schedules=ctx.schedules, pricing_basis=ctx.pricing_basis),
+        traded_notional=book.traded_notional,
         swaps=book.swaps, entries=book.entries, halt_events=book.halt_events, flatten_events=book.flatten_events,
         hurdle_rejections=book.hurdle_rejections, smallcap_rejections=book.smallcap_rejections,
         scenario_refs=tuple(sorted(book.scenario_refs)), contract_notes=tuple(book.contract_notes),

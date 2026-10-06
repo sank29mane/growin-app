@@ -38,7 +38,7 @@ from . import metrics
 from .benchmark import TRI_LABEL, EtfChoice, EtfResult, TriSeries, TriUnavailable
 from .data import DividendEvents
 from .engine import SegmentResult
-from .holdout import HoldoutEvidence, HoldoutVerdict
+from .holdout import CRITERIA_STATUS, HoldoutEvidence, HoldoutVerdict
 from .params import StrategyParams
 
 ZERO = Decimal(0)
@@ -277,11 +277,16 @@ def summarise_segment(seg: SegmentResult, params: StrategyParams) -> SegmentSumm
 
 
 def holdout_evidence(seg: SegmentResult, etf: EtfResult | None) -> HoldoutEvidence:
+    # The excess-return gate is judged net of exit costs: the ETF benchmark pays a full round trip, so open positions
+    # at the end of the holdout pay their sell-side charges too. Only this evidence is adjusted; ``seg.net_return``
+    # (mark-to-market, used by folds and the research report) is untouched.
     curve = [seg.start_equity] + [value for _, value in seg.curve]
+    curve[-1] = seg.end_equity_after_exit_costs
     return HoldoutEvidence(
-        net_return=seg.net_return, benchmark_net_return=etf.net_return if etf is not None else None,
+        net_return=seg.net_return_after_exit_costs, benchmark_net_return=etf.net_return if etf is not None else None,
         max_drawdown=metrics.max_drawdown(curve), flatten_events=seg.flatten_events, swaps=seg.swaps,
         holdout_sessions=len(seg.sessions), no_assumed_fill_attempts=seg.affected_attempts,
+        exit_costs_at_end=seg.exit_costs_at_end,
     )
 
 
@@ -440,7 +445,7 @@ def build_report(
             "missing_evidence": list(verdict.missing_evidence), "sensitivity_flips": list(verdict.sensitivity_flips),
             "annualised_swaps": str(verdict.annualised_swaps), "passed": verdict.passed,
             "annualised_excess_return": None if verdict.annualised_excess_return is None else str(verdict.annualised_excess_return),
-            "criteria_status": "PROPOSED (D-19) until the operator confirms",
+            "criteria_status": CRITERIA_STATUS,
         }
         for name, ev in (holdout_evidence_ or {}).items():
             if ev is not None:

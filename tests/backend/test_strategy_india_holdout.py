@@ -1,4 +1,4 @@
-"""AC-4 (holdout seal, D-12) and AC-5 (D-19 verdict, PROPOSED)."""
+"""AC-4 (holdout seal, D-12) and AC-5 (D-19 verdict, CONFIRMED)."""
 
 from __future__ import annotations
 

@@ -1,6 +1,6 @@
 {
   "version": "d19-example-1",
-  "status": "PROPOSED",
+  "status": "CONFIRMED, operator 2026-10-07",
   "gate_scenario": "phase62_gate",
   "gate_k_ticks": 3,
   "benchmark": "liquid_etf_buy_and_hold_one_round_trip",
