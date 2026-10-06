@@ -82,7 +82,8 @@ wins and this file is wrong.
   `reset --latch halt` while drawdown is at or below -8%, because the halt would latch again at the next close.
   `--rebase-halt-anchor` overrides that: it sets a separate halt anchor (equity at the last evaluated close) that
   only the -8% test reads, and writes `rebase_halt_anchor` into the RESET audit entry. The true peak never moves,
-  so the -15% end is still measured from the real high-water mark.
+  so the -15% end is still measured from the real high-water mark. Once `ended` is set, `reset --latch halt` is refused with or without the flag (the Mac refuses it
+  the same way: "halt cannot be released while the pilot is ended").
 - **Caps.** Only buys count toward `capital_cap` and `per_position_cap`: deployed = position cost basis + open buy
   pending notional + this order. The cost basis of a position is the larger of the broker holding and the VM fill
   ledger, because holdings lag fills by a day. A sell is never refused for being over a cap; it is refused only when

@@ -1089,6 +1089,21 @@ def test_admin_halt_reset_refuses_while_drawdown_is_at_the_threshold(tmp_path):
     assert store.load().halt is True
 
 
+def test_admin_halt_reset_with_the_flag_is_refused_once_the_pilot_has_ended(tmp_path):
+    store = _halted_store(tmp_path)
+    state = store.load()
+    _close(state, 12, "425")  # exactly -15%: ended, halt stays latched
+    assert state.ended and state.halt
+    store.save(state)
+    before_state, before_audit = store.path.read_bytes(), (store.directory / "audit.jsonl").read_bytes()
+    for args in (("reset", "--latch", "halt"), ("reset", "--latch", "halt", "--rebase-halt-anchor")):
+        code, out, err = _run(store.directory, *args)
+        assert code == 1 and out == "" and "pilot is ended" in err
+    assert store.path.read_bytes() == before_state  # no anchor set, halt not cleared
+    assert (store.directory / "audit.jsonl").read_bytes() == before_audit  # and no RESET entry
+    assert store.load().halt_anchor is None
+
+
 def test_admin_halt_reset_with_the_flag_sets_the_anchor_and_audits_it(tmp_path):
     store = _halted_store(tmp_path)
     code, out, _ = _run(store.directory, "reset", "--latch", "halt", "--rebase-halt-anchor")

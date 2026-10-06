@@ -58,6 +58,12 @@ SCRIPTS = {
         ("reset", False), ("reset", True), ("close", "441.60"),
     ],
     "reset_while_ended_is_refused_without_the_flag": [("close", "400"), ("reset", False)],
+    "reset_while_ended_is_refused_with_the_flag": [
+        ("close", "400"), ("reset", True), ("close", "400"), ("reset", True),
+    ],
+    "reset_after_ended_is_refused_even_when_the_anchor_was_rebased_earlier": [
+        ("close", "460"), ("reset", True), ("close", "425"), ("reset", True), ("reset", False),
+    ],
 }
 
 
@@ -146,3 +152,19 @@ def test_the_scripts_reach_a_refusal_a_rebase_a_drop_and_an_anchored_halt():
             else:
                 seen["refused"] += 1
     assert all(count >= 1 for count in seen.values()), seen
+
+
+@pytest.mark.parametrize("rebase", [False, True], ids=["plain", "rebase_flag"])
+def test_halt_reset_after_the_pilot_ended_is_refused_by_both_with_the_same_message(rebase):
+    """The anchored reset used to slip through on the VM once ended (equity <= -15%)."""
+    mac, vm = _Mac(), _Vm()
+    mac.close("400")
+    vm.close("400")
+    assert mac.state.ended and vm.state.ended
+    with pytest.raises(drawdown.ResetRefused) as mac_err:
+        drawdown.reset(mac.state, "halt", "op", limits=MAC_LIMITS, rebase_halt_anchor=rebase)
+    with pytest.raises(vm_risk.ResetRefused) as vm_err:
+        vm_risk.reset_latch(vm.state, "halt", limits=VM_LIMITS, rebase_halt_anchor=rebase)
+    assert str(mac_err.value) == str(vm_err.value) == "halt cannot be released while the pilot is ended"
+    assert vm.state.halt and vm.state.halt_anchor is None
+    assert mac.view() == vm.view()
