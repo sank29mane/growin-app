@@ -64,11 +64,28 @@ def _figure(value: Optional[Decimal]) -> str:
         return str(value)
 
 
+def _category(risk_governance: RiskGovernanceData, name: str) -> str:
+    """An enum-like field as text, or 'unavailable' when nobody ever set it.
+
+    ``liquidity_status`` and ``systemic_risk_level`` default to STABLE and LOW on the
+    model, so the value alone cannot tell "computed as STABLE" from "never computed".
+    Pydantic's ``model_fields_set`` can: it holds exactly the fields that were passed in
+    or assigned. A copy that re-feeds every field (``model_dump()`` without
+    ``exclude_unset``) marks them all as set, so callers that rebuild the object must
+    keep the set intact.
+    """
+    if name not in risk_governance.model_fields_set:
+        return _UNAVAILABLE
+    value = getattr(risk_governance, name)
+    return str(value) if value else _UNAVAILABLE
+
+
 def format_risk_governance(risk_governance: Optional[RiskGovernanceData]) -> str:
     """The five liquidity figures the critic is shown (P-17).
 
     Text only. The critic is advisory; the deterministic gate is the slippage check
-    in ``risk_india.rules`` and admission, not this prompt.
+    in ``risk_india.rules`` and admission, not this prompt. A figure that was never
+    computed reads 'unavailable', for the enum fields as much as the numeric ones.
     """
     if risk_governance is None:
         return (
@@ -78,10 +95,10 @@ def format_risk_governance(risk_governance: Optional[RiskGovernanceData]) -> str
     return "\n".join(
         (
             f"- slippage_bps: {_figure(risk_governance.slippage_bps)}",
-            f"- liquidity_status: {risk_governance.liquidity_status}",
+            f"- liquidity_status: {_category(risk_governance, 'liquidity_status')}",
             f"- pov_participation: {_figure(risk_governance.pov_participation)}",
             f"- adv_30d: {_figure(risk_governance.adv_30d)}",
-            f"- systemic_risk_level: {risk_governance.systemic_risk_level}",
+            f"- systemic_risk_level: {_category(risk_governance, 'systemic_risk_level')}",
         )
     )
 

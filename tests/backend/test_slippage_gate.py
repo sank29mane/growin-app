@@ -142,15 +142,63 @@ async def test_without_risk_governance_the_prompt_says_unavailable_not_zero(stub
 def test_format_risk_governance_text_is_exact_and_decimal_safe():
     assert format_risk_governance(None).startswith("- slippage_bps, liquidity_status")
     text = format_risk_governance(
-        RiskGovernanceData(slippage_bps=Decimal("1E+2"), adv_30d=Decimal("1E+6"), pov_participation=Decimal("0.05"))
+        RiskGovernanceData(
+            slippage_bps=Decimal("1E+2"), adv_30d=Decimal("1E+6"), pov_participation=Decimal("0.05"),
+            liquidity_status="THIN", systemic_risk_level="ELEVATED",
+        )
     )
     assert text.splitlines() == [
         "- slippage_bps: 100",
-        "- liquidity_status: STABLE",
+        "- liquidity_status: THIN",
         "- pov_participation: 0.05",
         "- adv_30d: 1000000",
-        "- systemic_risk_level: LOW",
+        "- systemic_risk_level: ELEVATED",
     ]
+
+
+def test_an_empty_risk_governance_object_reads_unavailable_for_every_figure():
+    """The model defaults (STABLE, LOW) are not computed values: an empty object must not say them."""
+    text = format_risk_governance(RiskGovernanceData())
+    assert text.splitlines() == [
+        "- slippage_bps: unavailable",
+        "- liquidity_status: unavailable",
+        "- pov_participation: unavailable",
+        "- adv_30d: unavailable",
+        "- systemic_risk_level: unavailable",
+    ]
+    assert "STABLE" not in text and "LOW" not in text
+
+
+def test_explicitly_supplied_stable_and_low_are_shown_as_computed_values():
+    text = format_risk_governance(RiskGovernanceData(liquidity_status="STABLE", systemic_risk_level="LOW"))
+    lines = text.splitlines()
+    assert lines[1] == "- liquidity_status: STABLE" and lines[4] == "- systemic_risk_level: LOW"
+    assert lines[0] == "- slippage_bps: unavailable"  # the numeric figures stay unset
+    only_liquidity = format_risk_governance(RiskGovernanceData(liquidity_status="STABLE")).splitlines()
+    assert only_liquidity[1] == "- liquidity_status: STABLE"
+    assert only_liquidity[4] == "- systemic_risk_level: unavailable"
+
+
+def test_a_field_assigned_after_construction_counts_as_computed():
+    risk_governance = RiskGovernanceData()
+    risk_governance.liquidity_status = "THIN"
+    risk_governance.adv_30d = Decimal("1000")
+    lines = format_risk_governance(risk_governance).splitlines()
+    assert lines[1] == "- liquidity_status: THIN" and lines[3] == "- adv_30d: 1000"
+    assert lines[4] == "- systemic_risk_level: unavailable"
+
+
+@pytest.mark.asyncio
+async def test_an_empty_risk_governance_object_reaches_the_critic_as_unavailable(stub, registry_factory):
+    registry_factory()
+    context = _illiquid_context()
+    context.risk_governance = RiskGovernanceData()
+    await RiskAgent().review(context, "BUY 1,000,000 ILLIQ")
+
+    [request] = stub.snapshot()
+    prompt = json.dumps(request.json["messages"])
+    assert "liquidity_status: unavailable" in prompt and "systemic_risk_level: unavailable" in prompt
+    assert "liquidity_status: STABLE" not in prompt and "systemic_risk_level: LOW" not in prompt
 
 
 @pytest.mark.asyncio
