@@ -142,10 +142,12 @@ class T212PracticeDispatcher:
         binding: VenueBinding,
         *,
         clock: Callable[[], float] = time.time,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self.transport = transport
         self.binding = binding
         self._clock = clock
+        self._sleep = sleep
         self.metadata = PracticeMetadata(transport, clock=clock)
         self.reconciler: Any = None
         self._pinned = False
@@ -161,7 +163,7 @@ class T212PracticeDispatcher:
         from .practice_reconcile import PracticeReconciler
 
         self.reconciler = PracticeReconciler(
-            self.transport, ledger, self.binding, clock=self._clock
+            self.transport, ledger, self.binding, clock=self._clock, sleep=self._sleep
         )
 
     @property
@@ -314,7 +316,7 @@ def practice_factory(
             # Both halves are required (HTTP Basic). There is no bare-key fallback.
             raise VenueError("PRACTICE_CREDENTIALS_MISSING", context.venue)
         http = PracticeTransport(key, secret, clock=clock, sleep=sleep, transport=transport)
-        return T212PracticeDispatcher(http, context.binding, clock=clock)
+        return T212PracticeDispatcher(http, context.binding, clock=clock, sleep=sleep)
 
     return build
 

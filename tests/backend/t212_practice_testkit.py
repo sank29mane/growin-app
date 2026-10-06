@@ -78,6 +78,7 @@ class FakeDemoBroker:
         self.account_id = account_id
         self.currency = currency
         self.requests: list[httpx.Request] = []
+        self.times: list[float] = []
         self.next_id = 7_000_001
         self.pending: dict[int, dict[str, Any]] = {}
         self.orders: dict[int, dict[str, Any]] = {}
@@ -97,6 +98,7 @@ class FakeDemoBroker:
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
+        self.times.append(self.clock.now)
         path = request.url.path
         if self.get_override is not None and request.method == "GET":
             override = self.get_override(request)
@@ -522,3 +524,16 @@ def all_ledger_text(ledger: ExecutionLedger) -> str:
         return "\n".join(chunks)
     finally:
         raw.close()
+
+
+def route_client(stack: "PracticeStack", monkeypatch, *, client=("127.0.0.1", 4321)):
+    """An httpx client over the practice router, with the route module bound to ``stack``."""
+
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    from routes import t212_practice_routes
+
+    api = FastAPI()
+    api.include_router(t212_practice_routes.router)
+    monkeypatch.setattr(t212_practice_routes, "state", stack.app)
+    return AsyncClient(transport=ASGITransport(app=api, client=client), base_url="http://test")

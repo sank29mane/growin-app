@@ -12,11 +12,8 @@ import json
 from decimal import Decimal
 
 import pytest
-from fastapi import FastAPI
-from httpx import ASGITransport, AsyncClient
-
-from routes import t212_practice_routes
 from t212_practice_testkit import (
+    route_client,
     DEMO_LIMIT_URL,
     KEY_CANARY,
     PRACTICE_ACCOUNT,
@@ -35,13 +32,6 @@ def no_real_network(monkeypatch):
 
 def basic(key: str, secret: str) -> str:
     return "Basic " + base64.b64encode(f"{key}:{secret}".encode()).decode()
-
-
-def route_client(stack, monkeypatch, *, client=("127.0.0.1", 4321)) -> AsyncClient:
-    app = FastAPI()
-    app.include_router(t212_practice_routes.router)
-    monkeypatch.setattr(t212_practice_routes, "state", stack.app)
-    return AsyncClient(transport=ASGITransport(app=app, client=client), base_url="http://test")
 
 
 @pytest.mark.asyncio
