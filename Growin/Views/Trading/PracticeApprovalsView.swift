@@ -128,16 +128,9 @@ struct PracticeApprovalsView: View {
     }
 
     /// Signs only a PRACTICE review for the UK workspace, with the UK key the review names.
+    /// Every signature needs its own Touch ID evaluation; no biometric, no signature.
     private func sign(_ review: TradeApprovalReview) async throws {
-        guard review.payload.workspace == workspace.rawValue,
-              review.payload.mode == PracticeApprovalPolicy.mode else {
-            throw TradeApprovalReviewError.invalidEnvelope
-        }
-        let identity = try LocalApprovalSigner.shared.identity(for: workspace)
-        guard identity.keyID == review.payload.keyId else {
-            throw TradeApprovalReviewError.signerMismatch
-        }
-        let signature = try LocalApprovalSigner.shared.sign(review.signedBytes, for: workspace)
+        let signature = try await PracticeApprovalAuthorizer.shared.signature(for: review, workspace: workspace)
         let result = try await AIService().completeTradeApproval(review, signature: signature, workspace: workspace)
         statusIsError = false
         statusMessage = result.message

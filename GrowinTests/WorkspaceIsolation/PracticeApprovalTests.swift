@@ -72,7 +72,7 @@ struct PracticeApprovalTests {
 
     /// A signed-payload dictionary for the practice proposal above. Keys are the
     /// backend's snake_case names; a nil value leaves the key out.
-    private static func payload(
+    static func payload(
         mode: String = "PRACTICE",
         broker: String = "t212_practice",
         workspace: String = "uk",
@@ -107,7 +107,7 @@ struct PracticeApprovalTests {
         return json
     }
 
-    private static func challenge(_ json: [String: Any], expires: Int) throws -> ApprovalChallengeResponse {
+    static func challenge(_ json: [String: Any], expires: Int) throws -> ApprovalChallengeResponse {
         let bytes = try JSONSerialization.data(withJSONObject: json, options: [.sortedKeys])
         return ApprovalChallengeResponse(
             challengeId: "c-1",
@@ -120,7 +120,7 @@ struct PracticeApprovalTests {
         )
     }
 
-    private static func review(
+    static func review(
         _ proposal: PracticeProposal? = nil,
         workspace: Workspace = .uk,
         mode: String = "PRACTICE",
