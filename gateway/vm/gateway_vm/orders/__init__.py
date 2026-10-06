@@ -53,6 +53,7 @@ CODE_TABLE: dict[str, tuple[int, str]] = {
     "quote_unavailable": _UNAVAILABLE,
     "tick_reference_unavailable": _UNAVAILABLE,
     "account_read_failed": _UNAVAILABLE,
+    "clock_inconsistent": _UNAVAILABLE,
 }
 
 

@@ -80,6 +80,10 @@ class Challenge:
     intent: Intent
     issued_at: int
     expires_at: int
+    # time.monotonic() at issue. None means the reference is gone (for example
+    # a challenge rebuilt without it): the pipeline refuses such a challenge
+    # because it can no longer prove the 60 s lifetime without the wall clock.
+    minted_mono: float | None = None
 
 
 class ChallengeStore:
@@ -112,6 +116,7 @@ class ChallengeStore:
         key_id: str,
         limits_sha256: str,
         ids: SecretIds,
+        mono: float | None = None,
     ) -> Challenge:
         with self._mutex:
             self._purge(now_epoch)
@@ -135,6 +140,7 @@ class ChallengeStore:
                 intent=intent,
                 issued_at=now_epoch,
                 expires_at=now_epoch + CHALLENGE_TTL_SECONDS,
+                minted_mono=mono,
             )
             self._items[challenge_id] = challenge
             return challenge

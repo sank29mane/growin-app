@@ -15,8 +15,10 @@ call count stays zero on every path.
 from __future__ import annotations
 
 import base64
+import math
 import re
 import threading
+import time
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -24,6 +26,7 @@ from decimal import Decimal
 from typing import Any, Callable, Protocol, Sequence
 
 from . import (
+    CHALLENGE_TTL_SECONDS,
     CONTRACT,
     MAX_OUTSTANDING_CHALLENGES,
     OrderRefusal,
@@ -31,7 +34,7 @@ from . import (
     refusal,
 )
 from .audit import AuditBroken, AuditLog
-from .challenge import ChallengeStore, SecretIds, intent_sha256
+from .challenge import Challenge, ChallengeStore, SecretIds, intent_sha256
 from .intent import Intent, parse_intent
 from .kill import KillState
 from .limits import (
@@ -48,8 +51,20 @@ from .store import StateStore
 from .verify import PinnedKey
 
 Clock = Callable[[], datetime]
+Monotonic = Callable[[], float]
 
 _CHALLENGE_ID = re.compile(r"[A-Za-z0-9-]{1,64}")
+
+
+@dataclass(frozen=True)
+class _Sample:
+    """One reading of both clocks. ``mono`` is None if the monotonic clock
+    returned something unusable, which the pipeline treats as an inconsistent
+    clock."""
+
+    wall: datetime
+    epoch: int
+    mono: float | None
 
 
 @dataclass(frozen=True)
@@ -141,6 +156,7 @@ class OrderPipeline:
         audit: AuditLog,
         clock: Clock,
         forward: RefusalForward,
+        monotonic: Monotonic = time.monotonic,
         ids: SecretIds | None = None,
         lock: AbstractContextManager[Any] | None = None,
     ) -> None:
@@ -152,6 +168,7 @@ class OrderPipeline:
         self._guard = guard
         self._audit = audit
         self._clock = clock
+        self._monotonic = monotonic
         self._forward = forward
         self._ids = ids or SecretIds()
         self._challenges = ChallengeStore()
@@ -159,25 +176,79 @@ class OrderPipeline:
 
     # -- helpers -----------------------------------------------------------
 
-    def _now(self) -> tuple[datetime, int]:
+    def _sample(self) -> _Sample:
         now = self._clock()
         if now.tzinfo is None:
             raise ValueError("pipeline clock must be timezone-aware")
-        return now, int(now.timestamp())
+        mono: float | None = self._monotonic()
+        if (
+            isinstance(mono, bool)
+            or not isinstance(mono, (int, float))
+            or not math.isfinite(mono)
+        ):
+            mono = None
+        return _Sample(now, int(now.timestamp()), mono)
 
-    def _late_codes(self, now: datetime, expires_at: int | None = None) -> list[str]:
+    @staticmethod
+    def _inconsistent(
+        prev: _Sample | None, cur: _Sample, challenge: Challenge | None = None
+    ) -> bool:
+        """True when the two clocks cannot be trusted for this request.
+
+        The wall clock may be corrected backward while the guard reads run, and
+        a backward step can make a dead challenge look alive. Any wall or
+        monotonic sample earlier than the one before it, a wall sample earlier
+        than the challenge's issued_at, a monotonic sample earlier than the
+        mint reference, an unusable monotonic reading, or a challenge with no
+        monotonic reference at all (a restart lost it) is refused.
+        """
+        if cur.mono is None:
+            return True
+        if prev is not None:
+            if prev.mono is None or cur.wall < prev.wall or cur.mono < prev.mono:
+                return True
+        if challenge is not None:
+            if challenge.minted_mono is None:
+                return True
+            if cur.epoch < challenge.issued_at or cur.mono < challenge.minted_mono:
+                return True
+        return False
+
+    def _late_codes(
+        self,
+        cur: _Sample,
+        challenge: Challenge | None = None,
+        *,
+        session: bool = True,
+    ) -> list[str]:
         """Codes for a deadline that passed while the reads were in flight.
 
-        ``now`` must be sampled AFTER the blocking reads and the audit write: a
+        ``cur`` must be sampled AFTER the blocking reads and the audit write: a
         check that began at 15:09:59 and finished at 15:10:01 is a 15:10:01
-        check (D-11), and a challenge is only good while the VM clock says so.
+        check (D-11), and a challenge is only good while the VM says so. The
+        60 s lifetime is enforced on BOTH clocks: the wall clock (the signed
+        expires_at) and a monotonic deadline that a wall-clock step cannot move.
         """
         codes: list[str] = []
-        if not session_open(to_ist(now)):
+        if session and not session_open(to_ist(cur.wall)):
             codes.append("session_closed")
-        if expires_at is not None and int(now.timestamp()) >= expires_at:
-            codes.append("challenge_expired")
+        if challenge is not None and cur.mono is not None:
+            wall_dead = cur.epoch >= challenge.expires_at
+            mono_dead = (
+                challenge.minted_mono is not None
+                and cur.mono - challenge.minted_mono >= CHALLENGE_TTL_SECONDS
+            )
+            if wall_dead or mono_dead:
+                codes.append("challenge_expired")
         return codes
+
+    def _time_codes(
+        self, prev: _Sample | None, cur: _Sample, challenge: Challenge | None = None
+    ) -> list[str]:
+        """clock_inconsistent if the clocks disagree, else any deadline code."""
+        if self._inconsistent(prev, cur, challenge):
+            return ["clock_inconsistent"]
+        return self._late_codes(cur, challenge)
 
     def _entry(
         self,
@@ -249,7 +320,10 @@ class OrderPipeline:
         intent = parse_intent(raw_body)
         with self._lock:
             self._require_audit()
-            now, epoch = self._now()
+            s0 = self._sample()
+            if self._inconsistent(None, s0):
+                raise self._refuse("intents", intent, ["clock_inconsistent"])
+            now, epoch = s0.wall, s0.epoch
             if intent.limits_sha256 != self._limits_sha256:
                 raise self._refuse("intents", intent, ["limits_hash_mismatch"])
             if intent.key_id != self._key.key_id:
@@ -263,19 +337,21 @@ class OrderPipeline:
             result = self._guard.check(intent, now)
             if result.codes:
                 raise self._refuse("intents", intent, result.codes, result)
-            # The guard's reads are done and may have been slow. Sample the VM
-            # clock again: the cutoff is judged, and the challenge is issued, at
-            # the time the reads finished, not the time the request arrived.
-            now, epoch = self._now()
-            late = self._late_codes(now)
+            # The guard's reads are done and may have been slow. Sample both
+            # clocks again: the cutoff is judged, and the challenge is issued
+            # (wall and monotonic), at the time the reads finished, not the time
+            # the request arrived. A wall clock that moved backward is refused.
+            s1 = self._sample()
+            late = self._time_codes(s0, s1)
             if late:
                 raise self._refuse("intents", intent, late, result)
             challenge = self._challenges.mint(
                 intent,
-                now_epoch=epoch,
+                now_epoch=s1.epoch,
                 key_id=self._key.key_id,
                 limits_sha256=self._limits_sha256,
                 ids=self._ids,
+                mono=s1.mono,
             )
             try:
                 self._append(self._entry("intents", intent, "CHALLENGED", [], result))
@@ -283,10 +359,11 @@ class OrderPipeline:
                 self._challenges.take(challenge.challenge_id)
                 raise
             # Last look, immediately before success is returned: the audit
-            # write is also blocking. A challenge that is already dead or past
-            # the cutoff is never handed out.
-            final, _ = self._now()
-            late = self._late_codes(final, challenge.expires_at)
+            # write is also blocking. A challenge that is already dead, past the
+            # cutoff, or issued under a clock that stepped backward is never
+            # handed out.
+            s2 = self._sample()
+            late = self._time_codes(s1, s2, challenge)
             if late:
                 self._challenges.take(challenge.challenge_id)
                 raise self._refuse("intents", intent, late, result)
@@ -303,26 +380,29 @@ class OrderPipeline:
             raise intent_invalid("bad_signature_type")
         with self._lock:
             self._require_audit()
-            now, epoch = self._now()
+            s0 = self._sample()
             # O5: known, then clock, then consume (single use), then verify.
             challenge = self._challenges.take(challenge_id)
             intent = challenge.intent
-            if epoch >= challenge.expires_at:
-                raise self._refuse("authorize", intent, ["challenge_expired"])
+            if self._inconsistent(None, s0, challenge):
+                raise self._refuse("authorize", intent, ["clock_inconsistent"])
+            expired = self._late_codes(s0, challenge, session=False)
+            if expired:
+                raise self._refuse("authorize", intent, expired)
             if not self._key.verify_der(bytes(signature_der), challenge.signed_bytes):
                 raise self._refuse("authorize", intent, ["signature_invalid"])
             if self._intents.is_consumed(intent.intent_id):
                 raise self._refuse("authorize", intent, ["intent_consumed"])
             self._intents.consume(intent.intent_id)
-            result = self._guard.check(intent, now)
+            result = self._guard.check(intent, s0.wall)
             if result.codes:
                 raise self._refuse("authorize", intent, result.codes, result)
-            # Reads are done: sample the clock again and recheck both deadlines
-            # before a success is recorded. A check that started at 15:09:59,
-            # or inside the challenge's last second, and finished after the
-            # deadline is refused.
-            late_now, _ = self._now()
-            late = self._late_codes(late_now, challenge.expires_at)
+            # Reads are done: sample again and recheck both deadlines (and that
+            # the clocks stayed consistent) before a success is recorded. A
+            # check that started at 15:09:59, or inside the challenge's last
+            # second, and finished after the deadline is refused.
+            s1 = self._sample()
+            late = self._time_codes(s0, s1, challenge)
             if late:
                 raise self._refuse("authorize", intent, late, result)
             entry = self._append(
@@ -333,8 +413,8 @@ class OrderPipeline:
             # after the challenge died is answered with an audited refusal, never
             # success. (63 forwards nothing, so the success entry above sends
             # nothing; the refusal that follows is the last word on the intent.)
-            final, _ = self._now()
-            late = self._late_codes(final, challenge.expires_at)
+            s2 = self._sample()
+            late = self._time_codes(s1, s2, challenge)
             if late:
                 raise self._refuse("authorize", intent, late, result)
             return AuthorizeResult(

@@ -48,14 +48,30 @@ T0 = datetime(2026, 10, 8, 4, 30, 0, tzinfo=timezone.utc)  # 10:00 IST, a Thursd
 
 
 class FakeClock:
+    """Wall clock plus a monotonic clock the tests drive separately.
+
+    ``advance`` moves both (time passing). ``drift`` moves them independently:
+    a wall-clock step (NTP correction, operator date change) leaves the
+    monotonic clock alone, and a stalled wall clock leaves it running.
+    """
+
     def __init__(self, now: datetime = T0) -> None:
         self.now = now
+        self.mono = 5000.0
 
     def __call__(self) -> datetime:
         return self.now
 
+    def monotonic(self) -> float:
+        return self.mono
+
     def advance(self, seconds: float) -> None:
         self.now = self.now + timedelta(seconds=seconds)
+        self.mono += seconds
+
+    def drift(self, *, wall: float = 0.0, mono: float = 0.0) -> None:
+        self.now = self.now + timedelta(seconds=wall)
+        self.mono += mono
 
 
 class SeqIds(SecretIds):
@@ -136,6 +152,7 @@ class Rig:
             guard=self.guard,
             audit=self.audit,
             clock=self.clock,
+            monotonic=lambda: self.clock.monotonic(),
             forward=self.forward,
             ids=self.ids,
         )
@@ -698,6 +715,7 @@ class RealRig:
             guard=guard,
             audit=audit,
             clock=self.clock,
+            monotonic=lambda: self.clock.monotonic(),
             forward=self.forward,
             ids=self.ids,
             lock=store.lock(),
@@ -1371,6 +1389,201 @@ def test_authorize_audit_write_ending_inside_both_deadlines_still_passes(real: R
     real.clock.advance(58)
     slow_success_append(real, monkeypatch, 1)  # ends 10:00:59, expiry is 10:01:00
     assert real.pipeline.authorize(minted.challenge_id, real.signed(minted)).decision == "VERIFIED_NOT_FORWARDED"
+
+
+# ------------------------------------------------ clock consistency (round 2)
+
+
+def drift_read(real: RealRig, monkeypatch, target, method: str, *, wall: float, mono: float) -> None:
+    """One port read during which the wall and monotonic clocks move by these amounts."""
+    original = getattr(target, method)
+
+    def drifting(*args, **kwargs):
+        value = original(*args, **kwargs)
+        real.clock.drift(wall=wall, mono=mono)
+        return value
+
+    monkeypatch.setattr(target, method, drifting)
+
+
+def drift_append(real: RealRig, monkeypatch, decision: str, *, wall: float, mono: float) -> None:
+    """The audit write for `decision` finishes after the clocks moved by these amounts."""
+    original = real.audit.append
+
+    def drifting(fields):
+        entry = original(fields)
+        if fields["decision"] == decision:
+            real.clock.drift(wall=wall, mono=mono)
+        return entry
+
+    monkeypatch.setattr(real.audit, "append", drifting)
+
+
+def forget_monotonic_reference(real: RealRig, minted) -> None:
+    """Model a challenge that lost its monotonic reference (rebuilt after a restart)."""
+    import dataclasses
+
+    items = real.pipeline._challenges._items
+    items[minted.challenge_id] = dataclasses.replace(items[minted.challenge_id], minted_mono=None)
+
+
+def assert_clock_refusal(err, real: RealRig, route: str) -> None:
+    expect(err, 503, "ORDERS_UNAVAILABLE", "clock_inconsistent")
+    last = real.audit.entries_after(0)[-1]
+    assert (last["decision"], last["codes"], last["route"]) == ("REFUSED", ["clock_inconsistent"], route)
+    assert real.forward.calls == 0
+
+
+# -- authorize
+
+
+def test_authorize_refuses_when_the_wall_clock_steps_back_during_the_reads(real: RealRig, monkeypatch):
+    minted = real.mint()  # issued 10:00:00
+    real.clock.advance(30)  # 10:00:30, mono +30
+    # The wall clock is corrected back 10 s while the account read runs. The
+    # second sample (10:00:20) is still after issued_at, so only the comparison
+    # of the two samples can see it.
+    drift_read(real, monkeypatch, real.account, "snapshot", wall=-10, mono=1)
+    with pytest.raises(OrderRefusal) as err:
+        real.pipeline.authorize(minted.challenge_id, real.signed(minted))
+    assert_clock_refusal(err, real, "authorize")
+
+
+def test_authorize_refuses_when_the_wall_clock_steps_back_during_the_audit_write(real: RealRig, monkeypatch):
+    minted = real.mint()
+    real.clock.advance(30)
+    drift_append(real, monkeypatch, "VERIFIED_NOT_FORWARDED", wall=-10, mono=1)
+    with pytest.raises(OrderRefusal) as err:
+        real.pipeline.authorize(minted.challenge_id, real.signed(minted))
+    assert_clock_refusal(err, real, "authorize")
+
+
+def test_authorize_refuses_a_sample_earlier_than_issued_at(real: RealRig):
+    minted = real.mint()  # issued_at = 10:00:00
+    real.clock.drift(wall=-5, mono=1)  # the wall clock was corrected to 09:59:55 before authorize
+    with pytest.raises(OrderRefusal) as err:
+        real.pipeline.authorize(minted.challenge_id, real.signed(minted))
+    assert_clock_refusal(err, real, "authorize")
+
+
+def test_authorize_refuses_when_the_monotonic_clock_goes_backward(real: RealRig, monkeypatch):
+    minted = real.mint()
+    real.clock.advance(10)
+    drift_read(real, monkeypatch, real.account, "snapshot", wall=1, mono=-3)
+    with pytest.raises(OrderRefusal) as err:
+        real.pipeline.authorize(minted.challenge_id, real.signed(minted))
+    assert_clock_refusal(err, real, "authorize")
+
+
+def test_authorize_monotonic_deadline_exceeded_while_the_wall_clock_looks_fine(real: RealRig):
+    minted = real.mint()  # issued 10:00:00, mono 5000
+    real.clock.drift(wall=30, mono=61)  # wall says 10:00:30 (live), monotonic says 61 s elapsed
+    real.refused_authorize(minted, "challenge_expired", 409, "REPLAY")
+
+
+def test_authorize_monotonic_deadline_exceeded_during_the_reads(real: RealRig, monkeypatch):
+    minted = real.mint()
+    real.clock.advance(10)
+    drift_read(real, monkeypatch, real.market, "quote", wall=1, mono=55)  # mono total 65
+    real.refused_authorize(minted, "challenge_expired", 409, "REPLAY")
+
+
+def test_authorize_monotonic_deadline_exceeded_during_the_audit_write(real: RealRig, monkeypatch):
+    minted = real.mint()
+    real.clock.advance(10)
+    drift_append(real, monkeypatch, "VERIFIED_NOT_FORWARDED", wall=1, mono=55)
+    real.refused_authorize(minted, "challenge_expired", 409, "REPLAY")
+
+
+def test_authorize_inside_both_deadlines_with_drifting_clocks_still_passes(real: RealRig):
+    minted = real.mint()
+    real.clock.drift(wall=30, mono=31)
+    assert real.pipeline.authorize(minted.challenge_id, real.signed(minted)).decision == "VERIFIED_NOT_FORWARDED"
+
+
+def test_authorize_without_a_monotonic_reference_is_refused(real: RealRig):
+    minted = real.mint()
+    forget_monotonic_reference(real, minted)
+    real.clock.advance(5)
+    with pytest.raises(OrderRefusal) as err:
+        real.pipeline.authorize(minted.challenge_id, real.signed(minted))
+    assert_clock_refusal(err, real, "authorize")
+
+
+def test_authorize_with_an_unusable_monotonic_reading_is_refused(real: RealRig, monkeypatch):
+    minted = real.mint()
+    monkeypatch.setattr(real.clock, "monotonic", lambda: float("nan"))
+    with pytest.raises(OrderRefusal) as err:
+        real.pipeline.authorize(minted.challenge_id, real.signed(minted))
+    assert_clock_refusal(err, real, "authorize")
+
+
+# -- mint
+
+
+def test_mint_refuses_when_the_wall_clock_steps_back_during_the_reads(real: RealRig, monkeypatch):
+    drift_read(real, monkeypatch, real.account, "snapshot", wall=-10, mono=1)
+    with pytest.raises(OrderRefusal) as err:
+        real.mint()
+    assert_clock_refusal(err, real, "intents")
+    assert real.decisions() == [("REFUSED", ["clock_inconsistent"])]
+    monkeypatch.undo()
+    assert_no_challenge_left_behind(real)
+
+
+def test_mint_refuses_when_the_wall_clock_steps_back_during_the_audit_write(real: RealRig, monkeypatch):
+    drift_append(real, monkeypatch, "CHALLENGED", wall=-10, mono=1)
+    with pytest.raises(OrderRefusal) as err:
+        real.mint()
+    assert_clock_refusal(err, real, "intents")
+    assert real.decisions() == [("CHALLENGED", []), ("REFUSED", ["clock_inconsistent"])]
+    monkeypatch.undo()
+    assert_no_challenge_left_behind(real)
+
+
+def test_mint_refuses_a_sub_second_wall_step_back_before_the_answer(real: RealRig, monkeypatch):
+    # Same wall second as issued_at, but the second sample is earlier than the first.
+    drift_append(real, monkeypatch, "CHALLENGED", wall=-0.4, mono=0.1)
+    real.clock.drift(wall=0.5)  # first samples at 10:00:00.5, second at 10:00:00.1
+    with pytest.raises(OrderRefusal) as err:
+        real.mint()
+    assert_clock_refusal(err, real, "intents")
+    monkeypatch.undo()
+    assert_no_challenge_left_behind(real)
+
+
+def test_mint_monotonic_deadline_exceeded_while_the_wall_clock_looks_fine(real: RealRig, monkeypatch):
+    drift_append(real, monkeypatch, "CHALLENGED", wall=1, mono=61)
+    with pytest.raises(OrderRefusal) as err:
+        real.mint()
+    expect(err, 409, "REPLAY", "challenge_expired")
+    assert real.decisions() == [("CHALLENGED", []), ("REFUSED", ["challenge_expired"])]
+    monkeypatch.undo()
+    assert_no_challenge_left_behind(real)
+
+
+def test_mint_with_an_unusable_monotonic_reference_is_refused(real: RealRig, monkeypatch):
+    monkeypatch.setattr(real.clock, "monotonic", lambda: None)
+    with pytest.raises(OrderRefusal) as err:
+        real.mint()
+    assert_clock_refusal(err, real, "intents")
+    monkeypatch.undo()
+    assert_no_challenge_left_behind(real)
+
+
+def test_mint_refuses_when_the_monotonic_clock_goes_backward(real: RealRig, monkeypatch):
+    drift_read(real, monkeypatch, real.market, "quote", wall=1, mono=-2)
+    with pytest.raises(OrderRefusal) as err:
+        real.mint()
+    assert_clock_refusal(err, real, "intents")
+    monkeypatch.undo()
+    assert_no_challenge_left_behind(real)
+
+
+def test_the_minted_challenge_keeps_the_monotonic_reference_it_was_issued_under(real: RealRig):
+    minted = real.mint()
+    stored = real.pipeline._challenges._items[minted.challenge_id]
+    assert stored.minted_mono == real.clock.mono
 
 
 def test_recheck_account_mismatch_unexplained_isin_after_mint(real: RealRig):

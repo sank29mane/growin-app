@@ -37,7 +37,7 @@ wins and this file is wrong.
   `instrument_unsupported`, `sell_exceeds_holding`); 423 ORDERS_BLOCKED (`kill_switch`, `halt_latch`, `pilot_ended`, `stop_open`, `mac_halt`,
   `account_mismatch`, `session_closed`, `live_disabled`); 403 SIGNATURE_INVALID; 429 CHALLENGE_CAPACITY; 503
   ORDERS_UNAVAILABLE (`config_invalid`, `state_unreadable`, `state_unwritable`, `audit_broken`, `quote_unavailable`,
-  `tick_reference_unavailable`, `account_read_failed`); plus the inherited 401, 403, 400, 422 and 503 session, egress and budget codes.
+  `tick_reference_unavailable`, `account_read_failed`, `clock_inconsistent`); plus the inherited 401, 403, 400, 422 and 503 session, egress and budget codes.
 - **O7 Audit entry.** seq, prev_sha256, entry_sha256, at_utc, route, intent_id, proposal_id, intent_sha256, key_id,
   side, stock_code, isin, quantity, limit_price, reason, batch_id, decision (`CHALLENGED`, `REFUSED`,
   `VERIFIED_NOT_FORWARDED`, `HALTED`, `RESET`, `EVALUATED`), codes, limits_sha256, kill, latches. No quote values,
@@ -64,6 +64,14 @@ wins and this file is wrong.
   that fails the strict parse answers 422 INTENT_INVALID with a short code (`missing_key`, `extra_key`,
   `duplicate_key`, `float_not_allowed`, `non_ascii`, `bad_type`, `bad_field:NAME` and similar); the code never
   echoes a value.
+- **Clocks.** Both routes sample the VM wall clock and a monotonic clock before the reads, after the reads, and
+  after the blocking audit write, and judge the 15:10 IST cutoff and the 60 s challenge lifetime on the last
+  sample, so a slow write can never turn into a success. The lifetime is enforced on the wall clock (the signed
+  `expires_at`) and on a monotonic deadline kept with the in-process challenge; either one expiring is
+  `challenge_expired`. A wall sample earlier than the previous one or earlier than `issued_at`, a monotonic sample
+  that goes backward, an unusable monotonic reading, or a challenge with no monotonic reference (lost after a
+  restart) is 503 `clock_inconsistent`, audited as REFUSED. An authorize that is refused after its
+  `VERIFIED_NOT_FORWARDED` entry was written is followed by a REFUSED entry; in 63 nothing is forwarded either way.
 - **Latches.** `halt` (drawdown at or below -8%) refuses buys and allows sells. `ended` (at or below -15%) is sells
   only and terminal. A `stop` latch (close at or below cost x 0.88) makes that ISIN sell-only. While any stop exit is
   open, every buy on every ISIN is refused `stop_open`; the latch clears when the trade list shows the exit fill, with
