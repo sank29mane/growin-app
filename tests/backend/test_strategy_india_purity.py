@@ -24,6 +24,7 @@ CLOCK_ALLOWED = {"__main__.py"}
 TICK_ADAPTER = "ticks.py"
 DYNAMIC_IMPORT_NAMES = {"importlib", "__import__", "import_module"}
 EVAL_NAMES = {"exec", "eval", "compile"}
+SYS_MODULES_RULE = "sys.modules is banned in strategy_india: any lookup reaches a banned module without an import"
 IMPORT_RULE = "costs.ticks is reachable only as 'from costs.ticks import <public names>'"
 
 
@@ -112,27 +113,23 @@ def _ticks_violation(node: ast.AST, filename: str, costs_names: set[str]) -> str
     return None
 
 
-def _is_sys_modules(node: ast.AST) -> bool:
-    """`sys.modules` under any alias of sys, or a from-imported `modules`."""
-    return (isinstance(node, ast.Attribute) and node.attr == "modules") or (
-        isinstance(node, ast.Name) and node.id == "modules"
-    )
-
-
-def _binding_violation(node: ast.AST) -> str | None:
+def _binding_violation(node: ast.AST, sys_names: set[str]) -> str | None:
     """Ways to reach a banned module without a from-import that the other rules can see."""
     if isinstance(node, ast.Import):
         for alias in node.names:
+            if alias.name == "sys.modules" or alias.name.startswith("sys.modules."):
+                return SYS_MODULES_RULE
             if alias.name.startswith("backend."):
                 return f"plain 'import {alias.name}' binds the name backend: use from-imports"
     elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == "backend":
         if any(alias.name == "*" for alias in node.names):
             return "'from backend import *' binds every backend package: use named from-imports"
-    elif isinstance(node, ast.Subscript) and _is_sys_modules(node.value):
-        for part in _strings(node.slice):
-            name = _norm(part.strip("."))
-            if name in {"backend", "costs", "costs.ticks"} or name.split(".")[0] in BANNED_ROOTS:
-                return f"sys.modules['{part}'] reaches a banned module without an import"
+    elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == "sys":
+        if any(alias.name in ("modules", "*") for alias in node.names):
+            return SYS_MODULES_RULE
+    elif isinstance(node, ast.Attribute) and node.attr == "modules":
+        if isinstance(node.value, ast.Name) and node.value.id in sys_names:
+            return SYS_MODULES_RULE
     return None
 
 
@@ -142,6 +139,10 @@ def scan_source(source: str, filename: str) -> list[str]:
     costs_names = {"costs"} | {
         alias.asname for node in ast.walk(tree) if isinstance(node, ast.Import)
         for alias in node.names if _norm(alias.name) == "costs" and alias.asname
+    }
+    sys_names = {"sys"} | {
+        alias.asname for node in ast.walk(tree) if isinstance(node, ast.Import)
+        for alias in node.names if alias.name == "sys" and alias.asname
     }
     heavy_ok = filename in FLOAT_ALLOWED
     for node in ast.walk(tree):
@@ -162,7 +163,7 @@ def scan_source(source: str, filename: str) -> list[str]:
         problem = _ticks_violation(node, filename, costs_names)
         if problem:
             out.append(f"{filename}:{line}: {problem}")
-        problem = _binding_violation(node)
+        problem = _binding_violation(node, sys_names)
         if problem:
             out.append(f"{filename}:{line}: {problem}")
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div) and not heavy_ok:
@@ -320,16 +321,25 @@ def test_package_is_pure():
         ("import os, backend.utils", "engine.py", "plain 'import backend.utils' binds"),
         ("from backend import *", "engine.py", "'from backend import *'"),
         ("from backend import *\nexecution.f()", "engine.py", "'from backend import *'"),
-        # sys.modules lookups of costs, costs.ticks, backend or a banned root
-        ("import sys\nx = sys.modules['costs'].ticks.f", "ticks.py", "sys.modules['costs']"),
-        ("import sys\nx = sys.modules['backend.costs'].ticks", "ticks.py", "sys.modules['backend.costs']"),
-        ("import sys\nx = sys.modules['costs.ticks']._x", "ticks.py", "sys.modules['costs.ticks']"),
-        ("import sys\nx = sys.modules['backend.costs.ticks'].f", "ticks.py", "sys.modules['backend.costs.ticks']"),
-        ("import sys as s\nx = s.modules['execution'].f()", "engine.py", "sys.modules['execution']"),
-        ("import sys\nx = sys.modules['backend.execution.ledger']", "engine.py", "sys.modules['backend.execution.ledger']"),
-        ("import sys\nx = sys.modules['gateway']", "engine.py", "sys.modules['gateway']"),
-        ("import sys\nx = sys.modules['backend'].execution", "engine.py", "sys.modules['backend']"),
-        ("from sys import modules\nx = modules['time']", "engine.py", "sys.modules['time']"),
+        # sys.modules is banned outright: subscripts, .get(), aliases and from-imports
+        ("import sys\nx = sys.modules['costs'].ticks.f", "ticks.py", "sys.modules is banned"),
+        ("import sys\nx = sys.modules['backend.costs'].ticks", "ticks.py", "sys.modules is banned"),
+        ("import sys\nx = sys.modules['costs.ticks']._x", "ticks.py", "sys.modules is banned"),
+        ("import sys\nx = sys.modules['backend.costs.ticks'].f", "ticks.py", "sys.modules is banned"),
+        ("import sys as s\nx = s.modules['execution'].f()", "engine.py", "sys.modules is banned"),
+        ("import sys\nx = sys.modules['backend.execution.ledger']", "engine.py", "sys.modules is banned"),
+        ("import sys\nx = sys.modules['gateway']", "engine.py", "sys.modules is banned"),
+        ("import sys\nx = sys.modules['backend'].execution", "engine.py", "sys.modules is banned"),
+        ("from sys import modules\nx = modules['time']", "engine.py", "sys.modules is banned"),
+        ("import sys\nx = sys.modules.get('backend.costs').ticks", "engine.py", "sys.modules is banned"),
+        ("import sys\nx = sys.modules.get('backend.execution')", "engine.py", "sys.modules is banned"),
+        ("from sys import modules as loaded\nx = loaded['backend.execution']", "engine.py", "sys.modules is banned"),
+        ("import sys as s\nx = s.modules['costs.ticks']", "engine.py", "sys.modules is banned"),
+        ("import sys as s\nx = s.modules.get(name)", "engine.py", "sys.modules is banned"),
+        ("import sys\nx = sys.modules", "engine.py", "sys.modules is banned"),
+        ("from sys import modules", "engine.py", "sys.modules is banned"),
+        ("from sys import *", "engine.py", "sys.modules is banned"),
+        ("import sys.modules", "engine.py", "sys.modules is banned"),
         # exec, eval, compile
         ("exec('x = 1')", "engine.py", "exec is banned"),
         ("x = eval(s)", "engine.py", "eval is banned"),
@@ -346,9 +356,9 @@ def test_planted_violation_is_caught(source, filename, fragment):
     assert found and any(fragment in item for item in found), found
 
 
-def test_sys_modules_and_from_imports_of_allowed_packages_stay_allowed():
+def test_from_imports_of_allowed_packages_and_other_sys_attributes_stay_allowed():
     ok = ("import sys\nfrom backend.utils import helper\nfrom backend import utils\nfrom backend.strategy_india import engine\n"
-          "a = sys.modules['decimal']\nb = sys.modules.get(name)\nc = sys.modules[name]\nd = sys.argv['x']\n")
+          "d = sys.argv['x']\ne = other.modules[0]\nf = sys.exit\n")
     assert scan_source(ok, "engine.py") == []
 
 
