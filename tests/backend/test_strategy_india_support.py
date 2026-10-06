@@ -34,7 +34,7 @@ from strategy_india.ticks import EQUITY, NON_GOLD_ETF, TickTables, load_default_
 from strategy_india.params import StrategyParams, parse_params, placeholder_params
 
 SCHEDULE_VERSION = "icici-prime9999-ivalue-nse-cash-2024-10-01.r1"
-SESSION_START = date(2025, 5, 1)  # after the 2025-04-15 tick revision, so ticks resolve
+SESSION_START = date(2026, 9, 7)  # both the 2025-04-15 equity table and the 2026-09-07 non-Gold ETF table cover it
 
 
 def sha(text: str) -> str:
@@ -198,9 +198,9 @@ def write_coverage(root: Path, report: BandCoverageReport) -> Path:
 
 
 def tick_tables(with_etf: bool = True) -> TickTables:
-    """Test-only: the equity table doubles as the ETF table so the benchmark can resolve ticks."""
-    equity = load_default_tables().table_for(EQUITY)
-    return TickTables({EQUITY: equity, NON_GOLD_ETF: equity} if with_etf else {EQUITY: equity})
+    """Use the committed class-specific tables, optionally leaving ETFs unregistered."""
+    tables = load_default_tables()
+    return tables if with_etf else TickTables({EQUITY: tables.table_for(EQUITY)})
 
 
 def costs_inputs() -> tuple[FillScenarioSet, ScheduleSet, TickTables, PricingBasis]:

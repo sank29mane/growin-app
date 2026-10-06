@@ -1,0 +1,43 @@
+{
+  "schema": "growin.costs.tick_sizes/1",
+  "source_id": "nse-cash-non-gold-etf-ticks",
+  "versions": [
+    {
+      "version": "nse-cash-etf-ticks-2021-01-01.r1",
+      "effective_from": "2021-01-01",
+      "effective_to": "2025-04-14",
+      "exchange": "NSE",
+      "segment": "cash",
+      "status": "sourced from NSE circulars; scope is Exchange Traded Funds other than Gold ETFs, series EQ only (NSE/CMTR/67774 item 1.22: ETFs trade in 'Rolling settlement with series as EQ'; BL and other series are not named for ETFs and fail closed); Gold ETFs are NOT covered because NSE set their tick one security at a time (Rs 0.05 or Rs 0.01, changed by separate circulars such as NSE/CMTR/43225, 46234, 47424, 49065, 50551, 50899, 50985, 59407, 59529, 60469 and 60943), so a caller must never resolve a Gold ETF from this table; effective_from is the start of the Phase 62 research window, not the date the regime began; effective_to is the day before the 2025-04-15 price-linked table, and the exclusion of ETFs from that table after 2024-05-24 is stated in NSE/CMTR/62174 and NSE/CMTR/67774, with no CMTR-feed circular revising a non-Gold ETF tick in between",
+      "reference_price_rule": "not used: one flat tick for every price, so any positive reference price resolves to the same band",
+      "series": ["EQ"],
+      "sources": [
+        "NSE/CMTR/44481 Capital Market Consolidated Circular, Circular Ref 39/2020, dated 2020-05-27, item 3.3 Tick Size (tick for all Exchange Traded Fund instruments is one paise except for Gold ETFs): https://nsearchives.nseindia.com/content/circulars/CMTR44481.zip (fetched 2026-10-06)",
+        "NSE/CMTR/57270 Capital Market Consolidated Circular, Circular Ref 75/2023, dated 2023-06-26, item 3.3 Tick Size (tick for Exchange Traded Fund instruments is one paise; Gold ETFs follow their own trading parameters): https://nsearchives.nseindia.com/content/circulars/CMTR57270.zip (fetched 2026-10-06)",
+        "NSE/CMTR/61813 Capital Market Consolidated Circular, Circular Ref 59/2024, dated 2024-04-29, item 3.3 Tick Size (same wording as 57270): https://nsearchives.nseindia.com/content/circulars/CMTR61813.zip (fetched 2026-10-06)",
+        "NSE/CMTR/62174 Revision in tick size of securities in CM segment, Circular Ref 66/2024, dated 2024-05-24, effective 2024-06-10, applies to all securities excluding Exchange Traded Funds: https://nsearchives.nseindia.com/content/circulars/CMTR62174.pdf (fetched 2026-10-06)",
+        "NSE/CMTR/67133 Revision in tick size of securities in CM segment - Update, Circular Ref 33/2025, dated 2025-03-13, effective 2025-04-15, restates the Exchange Traded Fund exclusion: https://nsearchives.nseindia.com/content/circulars/CMTR67133.pdf (fetched 2026-10-06)",
+        "NSE/CMTR/67774 Capital Market Consolidated Circular, Circular Ref 48/2025, dated 2025-04-30, item 3.3 B (price-linked table excludes Exchange Traded Funds) and item 1.22 (ETF tick Rs 0.01 or Rs 0.05 as per the respective ETF): https://nsearchives.nseindia.com/content/circulars/CMTR67774.zip (fetched 2026-10-06)"
+      ],
+      "bands": [
+        {"from": "0", "to": null, "tick": "0.01"}
+      ]
+    },
+    {
+      "version": "nse-cash-etf-ticks-2026-09-07.r1",
+      "effective_from": "2026-09-07",
+      "effective_to": null,
+      "exchange": "NSE",
+      "segment": "cash",
+      "status": "sourced from NSE circular; scope is Exchange Traded Funds other than Gold ETFs, series EQ only (NSE/CMTR/76101 parameter table: 'Series Rolling settlement with series as EQ'); Gold ETFs are NOT covered (existing Gold ETFs keep their own Rs 0.01 or Rs 0.05, new Gold ETFs get Rs 0.05); 2025-04-15 to 2026-09-06 is deliberately uncovered: the circulars for that period (NSE/CMTR/67133, 67774 and the 2026-04-28 consolidated NSE/CMTR/73927) exclude ETFs from the price-linked table and say only 'Rs 0.01 / Rs 0.05 as per respective ETF', which names no rule for non-Gold ETFs",
+      "reference_price_rule": "not used: one flat tick for every price, so any positive reference price resolves to the same band",
+      "series": ["EQ"],
+      "sources": [
+        "NSE/CMTR/76101 Trading in Exchange Traded Funds (ETFs) - update in trading parameters, Circular Ref 122/2026, dated 2026-09-01, effective 2026-09-07, tick size row: Rs 0.05 for Gold ETFs, Rs 0.01 for other than Gold ETFs: https://nsearchives.nseindia.com/content/circulars/CMTR76101.pdf (fetched 2026-10-06)"
+      ],
+      "bands": [
+        {"from": "0", "to": null, "tick": "0.01"}
+      ]
+    }
+  ]
+}

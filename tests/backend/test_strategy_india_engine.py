@@ -93,7 +93,7 @@ def test_scenario_schedule_and_tick_hashes_and_the_pinned_version_are_in_the_res
     assert seg.scenario_refs == ((GATE_ID, gate.scenarios_version, gate.scenarios_hash),)
     assert seg.schedule_refs == ((SCHEDULE_VERSION, ctx.schedules.get(SCHEDULE_VERSION).schedule_hash),)
     (source, source_hash), = seg.tick_refs
-    version = tick_tables().table_for(EQUITY).versions[0]
+    version, = [v for v in tick_tables().table_for(EQUITY).versions if v.covers(SESS[0])]
     assert source == f"nse-cash-price-band-ticks:{version.version}" and source_hash == version.version_hash
 
 
@@ -105,8 +105,8 @@ def test_no_assumed_fill_produces_no_trade():
     assert seg.attempts and all(a.affected and a.outcome == FillOutcome.NO_ASSUMED_FILL.value for a in seg.attempts)
 
 
-def test_a_pre_revision_order_without_an_encoded_tick_fails_closed_with_no_default_tick():
-    early = weekday_sessions(date(2025, 1, 6), 70)
+def test_an_order_before_tick_history_fails_closed_with_no_default_tick():
+    early = weekday_sessions(date(2020, 1, 6), 70)
     rows = make_rows(early, default_names(8) + etf_names())
     ctx = make_context(rows, HoldoutRange(early[-10], early[-1]))
     seg = _segment(ctx)
@@ -115,7 +115,7 @@ def test_a_pre_revision_order_without_an_encoded_tick_fails_closed_with_no_defau
     assert seg.end_equity == seg.start_equity
     # the building blocks refuse too
     with pytest.raises(TickSizeUnavailable):
-        resolve_tick(tick_tables(), session_date=date(2025, 4, 14), band_reference_price=Decimal("100"),
+        resolve_tick(tick_tables(), session_date=date(2020, 12, 31), band_reference_price=Decimal("100"),
                      instrument_class=EQUITY, series="EQ")
     scenarios, schedules, _, basis = costs_inputs()
     bar = _sbar(early[0])
