@@ -31,3 +31,7 @@ backend/workspace_credentials.py
 scripts/ledger_tool.py
 private/*
 tests/backend/test_private_config.py
+
+# Phase 63: VM order guards (all depths) and the Mac India risk module (all depths)
+gateway/vm/gateway_vm/orders/*
+backend/risk_india/*

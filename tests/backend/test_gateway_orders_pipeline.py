@@ -552,3 +552,738 @@ def test_audit_chain_detects_edit_and_drop(rig: Rig, tmp_path: Path):
 def test_audit_rejects_keys_outside_the_allowlist(rig: Rig):
     with pytest.raises(ValueError):
         rig.audit.append({"decision": "REFUSED", "account_id": "123"})
+
+
+# =============================================================================
+# Task 3: the same pipeline on the real modules (evaluator, kill reader, store,
+# audit). Port fakes return values that tests swap AFTER mint, so each re-check
+# row proves authorize reads everything again. The pipeline is built once per
+# test, not rebuilt per row.
+# =============================================================================
+
+import ast  # noqa: E402
+import os  # noqa: E402
+import re  # noqa: E402
+import subprocess  # noqa: E402
+import threading  # noqa: E402
+from dataclasses import dataclass  # noqa: E402
+from datetime import date  # noqa: E402
+from decimal import Decimal  # noqa: E402
+
+from gateway_vm.orders import risk  # noqa: E402
+from gateway_vm.orders.kill import ENABLED, MetadataKillReader  # noqa: E402
+from gateway_vm.orders.limits import (  # noqa: E402
+    AccountSnapshot,
+    Holding,
+    Limits,
+    OpenOrder,
+    Quote,
+    Trade,
+)
+from gateway_vm.orders.pipeline import RuleGuard  # noqa: E402
+from gateway_vm.orders.store import StateStore  # noqa: E402
+
+LIMITS = Limits.from_fields(VECTORS["limits"])
+ISIN_A = "INE000A01012"  # TESTCO, the BASE_INTENT security
+ISIN_B = "INE111B01023"  # ABC
+D = Decimal
+
+
+def quote_for(code: str = "TESTCO", isin: str = ISIN_A, ltp: str = "100.00", **kw) -> Quote:
+    base = dict(
+        stock_code=code,
+        isin=isin,
+        series="EQ",
+        ltp=D(ltp),
+        lower_circuit=D("90.00"),
+        upper_circuit=D("110.00"),
+        previous_close=D("99.80"),
+        session_date=date(2026, 10, 8),
+    )
+    base.update(kw)
+    return Quote(**base)
+
+
+class FakeKill:
+    def __init__(self) -> None:
+        self.state = ENABLED
+        self.reads = 0
+
+    def read(self):
+        self.reads += 1
+        return self.state
+
+
+class FakeAccount:
+    def __init__(self) -> None:
+        self.snap = AccountSnapshot()
+        self.reads = 0
+        self.fail = False
+
+    def snapshot(self) -> AccountSnapshot:
+        self.reads += 1
+        if self.fail:
+            raise RuntimeError("breeze down")
+        return self.snap
+
+
+class FakeMarket:
+    def __init__(self) -> None:
+        self.quotes = {"TESTCO": quote_for(), "ABC": quote_for("ABC", ISIN_B)}
+        self.reads = 0
+        self.fail = False
+
+    def quote(self, stock_code: str) -> Quote:
+        self.reads += 1
+        if self.fail:
+            raise RuntimeError("quote down")
+        return self.quotes[stock_code]
+
+
+class RealRig:
+    def __init__(self, tmp_path: Path, *, kill=None) -> None:
+        self.dir = tmp_path / "state"
+        self.dir.mkdir(mode=0o700)
+        self.clock = FakeClock()
+        self.ids = SeqIds()
+        self.kill = kill or FakeKill()
+        self.account = FakeAccount()
+        self.market = FakeMarket()
+        self.forward = RefusalForward()
+        self.store = StateStore(self.dir)
+        self.audit = AuditLog(self.dir / "audit.jsonl", clock=self.clock)
+        self.key = PinnedKey(bytes.fromhex(PRIMARY["public_key_x963_hex"]), allow_test_key=True)
+        # First start: initialise the state once (peak = capital_cap). The server
+        # does this at startup; a missing state file after that is refused.
+        self.store.load_or_init(LIMITS, audit_has_entries=False)
+        self.pipeline = self.build(self.store)
+
+    def build(self, store: StateStore) -> OrderPipeline:
+        guard = RuleGuard(
+            limits=LIMITS,
+            kill=self.kill,
+            store=store,
+            account=self.account,
+            market=self.market,
+            audit=self.audit,
+        )
+        return OrderPipeline(
+            key=self.key,
+            limits_sha256=LIMITS.sha256,
+            intents=store,
+            guard=guard,
+            audit=self.audit,
+            clock=self.clock,
+            forward=self.forward,
+            ids=self.ids,
+            lock=store.lock(),
+        )
+
+    def reads(self) -> tuple[int, int, int]:
+        kill_reads = self.kill.reads if isinstance(self.kill, FakeKill) else -1
+        return (kill_reads, self.account.reads, self.market.reads)
+
+    def mint(self, **overrides):
+        return self.pipeline.mint(intent_body(**overrides))
+
+    def signed(self, minted) -> bytes:
+        return sign(PRIMARY, minted.signed_bytes)
+
+    def state(self) -> risk.OrderState:
+        return StateStore(self.dir).load()
+
+    def edit_state(self, mutate) -> None:
+        state = self.state()
+        mutate(state)
+        StateStore(self.dir).save(state)
+
+    def decisions(self) -> list[tuple[str, list[str]]]:
+        return [(e["decision"], e["codes"]) for e in self.audit.entries_after(0)]
+
+    def refused_authorize(self, minted, code: str, status: int, error: str):
+        with pytest.raises(OrderRefusal) as err:
+            self.pipeline.authorize(minted.challenge_id, self.signed(minted))
+        expect(err, status, error, code)
+        assert self.forward.calls == 0
+        last = self.audit.entries_after(0)[-1]
+        assert last["decision"] == "REFUSED" and last["codes"][0] == code
+        assert last["route"] == "authorize"
+
+
+@pytest.fixture
+def real(tmp_path: Path) -> RealRig:
+    return RealRig(tmp_path)
+
+
+def holding_snapshot(*, isin=ISIN_A, qty=100, cost="10000", opens=(), extra_trades=()) -> AccountSnapshot:
+    """A holding the ledger explains: the matching buy fill is on the trade list."""
+    return AccountSnapshot(
+        holdings=(Holding(isin, qty, D(cost)),),
+        open_orders=tuple(opens),
+        trades=(Trade(f"seed-{isin}", isin, "buy", qty, D(cost) / qty, D("0")), *extra_trades),
+    )
+
+
+# ----------------------------------------------------------- real-stack basics
+
+
+def test_real_stack_happy_path_reads_everything_once_per_check(real: RealRig):
+    minted = real.mint()
+    assert real.reads() == (1, 1, 1)
+    result = real.pipeline.authorize(minted.challenge_id, real.signed(minted))
+    assert result.decision == "VERIFIED_NOT_FORWARDED"
+    assert real.reads() == (2, 2, 2)  # fresh reads again at authorize, no cache
+    assert real.decisions() == [("CHALLENGED", []), ("VERIFIED_NOT_FORWARDED", [])]
+    assert real.state().consumed_intents == [BASE_INTENT["intent_id"]]
+    assert real.forward.calls == 0
+    entry = real.audit.entries_after(0)[-1]
+    assert entry["kill"] == "enabled" and entry["limits_sha256"] == LIMITS.sha256
+
+
+def test_consumed_intent_survives_a_restart_on_the_real_store(real: RealRig):
+    minted = real.mint()
+    real.pipeline.authorize(minted.challenge_id, real.signed(minted))
+    restarted = real.build(StateStore(real.dir))
+    with pytest.raises(OrderRefusal) as err:
+        restarted.mint(intent_body())
+    expect(err, 409, "REPLAY", "intent_consumed")
+    assert real.forward.calls == 0
+
+
+def test_limits_hash_mismatch_refuses_at_mint_on_the_real_stack(real: RealRig):
+    with pytest.raises(OrderRefusal) as err:
+        real.mint(limits_sha256="1" * 64)
+    expect(err, 409, "LIMIT_REJECTED", "limits_hash_mismatch")
+    assert real.reads() == (0, 0, 0)
+    assert real.forward.calls == 0
+
+
+def test_corrupt_state_after_mint_answers_503_at_authorize(real: RealRig):
+    minted = real.mint()
+    sig = real.signed(minted)
+    real.store.path.write_text("{corrupt")
+    with pytest.raises(OrderRefusal) as err:
+        real.pipeline.authorize(minted.challenge_id, sig)
+    expect(err, 503, "ORDERS_UNAVAILABLE", "state_unreadable")
+    assert real.forward.calls == 0
+
+
+def test_broken_audit_blocks_the_next_mint_with_503(real: RealRig):
+    real.mint()
+    real.audit.path.write_bytes(real.audit.path.read_bytes() + b"{trunc")
+    with pytest.raises(OrderRefusal) as err:
+        real.mint(intent_id="intent-test-0002")
+    expect(err, 503, "ORDERS_UNAVAILABLE", "audit_broken")
+    assert real.forward.calls == 0
+
+
+def test_account_and_quote_read_failures_fail_closed(real: RealRig):
+    real.account.fail = True
+    with pytest.raises(OrderRefusal) as err:
+        real.mint()
+    expect(err, 503, "ORDERS_UNAVAILABLE", "account_read_failed")
+    real.account.fail = False
+    real.market.fail = True
+    with pytest.raises(OrderRefusal) as err:
+        real.mint()
+    expect(err, 503, "ORDERS_UNAVAILABLE", "quote_unavailable")
+    assert real.forward.calls == 0
+
+
+# ---------------------------------------------------- kill switch (real reader)
+
+
+@pytest.fixture
+def metadata_server():
+    from test_gateway_orders_kill import Fake  # loopback fake, 127.0.0.1 only
+
+    server = Fake()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield server
+    server.shutdown()
+    server.server_close()
+
+
+def test_kill_blocks_at_mint_with_no_account_or_quote_reads(tmp_path, metadata_server):
+    metadata_server.mode["body"] = b"blocked"
+    rig = RealRig(tmp_path, kill=MetadataKillReader(metadata_server.base))
+    with pytest.raises(OrderRefusal) as err:
+        rig.mint()
+    expect(err, 423, "ORDERS_BLOCKED", "kill_switch")
+    assert (rig.account.reads, rig.market.reads) == (0, 0)
+    assert rig.forward.calls == 0
+    assert rig.audit.entries_after(0)[0]["codes"] == ["kill_switch"]
+
+
+def test_kill_blocks_at_authorize_after_a_clean_mint(tmp_path, metadata_server):
+    rig = RealRig(tmp_path, kill=MetadataKillReader(metadata_server.base))
+    minted = rig.mint()
+    metadata_server.mode["body"] = b"enabled\n"  # one stray byte flips it
+    rig.refused_authorize(minted, "kill_switch", 423, "ORDERS_BLOCKED")
+    assert len(metadata_server.requests) == 2  # one read per check, no cache
+    assert rig.account.reads == 1  # not read again once the kill switch said no
+    assert rig.state().consumed_intents == [BASE_INTENT["intent_id"]]
+
+
+def test_kill_flipped_back_to_enabled_allows_a_fresh_order(tmp_path, metadata_server):
+    metadata_server.mode["status"] = 503
+    rig = RealRig(tmp_path, kill=MetadataKillReader(metadata_server.base))
+    with pytest.raises(OrderRefusal):
+        rig.mint()
+    metadata_server.mode["status"] = 200
+    assert rig.mint(intent_id="intent-test-0002").challenge_id
+
+
+# ------------------------------------------ latches set between mint and authorize
+
+
+def test_halt_latch_set_between_mint_and_authorize_refuses_a_buy(real: RealRig):
+    minted = real.mint()
+    real.edit_state(lambda s: setattr(s, "halt", True))
+    real.refused_authorize(minted, "halt_latch", 423, "ORDERS_BLOCKED")
+
+
+def test_mac_halt_route_blocks_even_a_minted_buy_and_a_sell(real: RealRig):
+    minted = real.mint()
+    real.pipeline.halt()
+    real.refused_authorize(minted, "mac_halt", 423, "ORDERS_BLOCKED")
+    real.account.snap = holding_snapshot()
+    with pytest.raises(OrderRefusal) as err:
+        real.mint(intent_id="intent-test-0002", side="sell", reason="exit")
+    expect(err, 423, "ORDERS_BLOCKED", "mac_halt")
+
+
+def test_ended_latch_refuses_buys_but_a_sell_is_verified(real: RealRig):
+    real.edit_state(lambda s: (setattr(s, "halt", True), setattr(s, "ended", True)))
+    with pytest.raises(OrderRefusal) as err:
+        real.mint()
+    expect(err, 423, "ORDERS_BLOCKED", "pilot_ended")
+    real.account.snap = holding_snapshot()
+    sell = real.mint(intent_id="intent-test-0002", side="sell", reason="flatten", quantity=100, limit_price="100.00")
+    assert real.pipeline.authorize(sell.challenge_id, real.signed(sell)).decision == "VERIFIED_NOT_FORWARDED"
+
+
+def test_verified_sell_leaves_the_halt_latch_set(real: RealRig):
+    real.account.snap = holding_snapshot()
+    real.edit_state(lambda s: setattr(s, "halt", True))
+    sell = real.mint(intent_id="intent-test-0002", side="sell", reason="halve", quantity=50, limit_price="100.00")
+    assert real.pipeline.authorize(sell.challenge_id, real.signed(sell)).decision == "VERIFIED_NOT_FORWARDED"
+    assert real.state().halt is True
+    # The sell then fills and shows on the trade list: still no clearing.
+    real.account.snap = holding_snapshot(
+        qty=50, cost="5000",
+        extra_trades=(Trade("sell-1", ISIN_A, "sell", 50, D("100"), D("0")),),
+    )
+    with pytest.raises(OrderRefusal) as err:
+        real.mint(intent_id="intent-test-0003")
+    expect(err, 423, "ORDERS_BLOCKED", "halt_latch")
+    assert real.state().halt is True
+
+
+def stopped_on_b(rig: RealRig) -> None:
+    """ISIN_B bought 20 at 500, closed at 440: -12% stop latch, drawdown only -2.4%."""
+
+    def seed(state: risk.OrderState) -> None:
+        risk.apply_trades(state, [Trade("b-buy", ISIN_B, "buy", 20, D("500"), D("0"))])
+        risk.evaluate_session(state, LIMITS, date(2026, 10, 7), {ISIN_B: D("440")})
+
+    rig.edit_state(seed)
+    assert list(rig.state().stops) == [ISIN_B]
+    rig.account.snap = AccountSnapshot(
+        holdings=(Holding(ISIN_B, 20, D("10000")),),
+        trades=(Trade("b-buy", ISIN_B, "buy", 20, D("500"), D("0")),),
+    )
+    rig.market.quotes["ABC"] = quote_for(
+        "ABC", ISIN_B, ltp="440.00", lower_circuit=D("400.00"), upper_circuit=D("480.00"), previous_close=D("440.00")
+    )
+
+
+def test_stop_exit_open_refuses_a_buy_on_any_isin_at_mint(real: RealRig):
+    stopped_on_b(real)
+    with pytest.raises(OrderRefusal) as err:
+        real.mint()  # TESTCO, not the stopped ISIN
+    expect(err, 423, "ORDERS_BLOCKED", "stop_open")
+    with pytest.raises(OrderRefusal) as err:
+        real.mint(
+            intent_id="intent-test-0002", stock_code="ABC", isin=ISIN_B, limit_price="440.00", quantity=1
+        )
+    expect(err, 423, "ORDERS_BLOCKED", "stop_open")
+    assert real.forward.calls == 0
+
+
+def test_stop_set_between_mint_and_authorize_refuses_at_authorize(real: RealRig):
+    minted = real.mint()
+    stopped_on_b(real)
+    real.refused_authorize(minted, "stop_open", 423, "ORDERS_BLOCKED")
+
+
+def test_sell_of_the_stopped_isin_is_verified_and_the_stop_stays_until_the_fill(real: RealRig):
+    stopped_on_b(real)
+    sell = real.mint(
+        intent_id="intent-test-0002", side="sell", reason="stop", stock_code="ABC", isin=ISIN_B,
+        quantity=20, limit_price="440.00",
+    )
+    assert real.pipeline.authorize(sell.challenge_id, real.signed(sell)).decision == "VERIFIED_NOT_FORWARDED"
+    assert list(real.state().stops) == [ISIN_B]  # verified is not filled
+    with pytest.raises(OrderRefusal) as err:
+        real.mint(intent_id="intent-test-0003")
+    expect(err, 423, "ORDERS_BLOCKED", "stop_open")
+    assert list(real.state().stops) == [ISIN_B]
+
+
+def test_buy_is_allowed_again_once_the_trade_list_shows_the_exit_fill(real: RealRig):
+    stopped_on_b(real)
+    # Partial exit fill: still open.
+    real.account.snap = AccountSnapshot(
+        holdings=(Holding(ISIN_B, 10, D("5000")),),
+        trades=(
+            Trade("b-buy", ISIN_B, "buy", 20, D("500"), D("0")),
+            Trade("b-sell-1", ISIN_B, "sell", 10, D("440"), D("0")),
+        ),
+    )
+    with pytest.raises(OrderRefusal) as err:
+        real.mint()
+    expect(err, 423, "ORDERS_BLOCKED", "stop_open")
+    # The exit completes. No admin reset: the fill evidence clears the latch.
+    real.account.snap = AccountSnapshot(
+        holdings=(),
+        trades=(
+            Trade("b-buy", ISIN_B, "buy", 20, D("500"), D("0")),
+            Trade("b-sell-1", ISIN_B, "sell", 10, D("440"), D("0")),
+            Trade("b-sell-2", ISIN_B, "sell", 10, D("440"), D("0")),
+        ),
+    )
+    minted = real.mint()
+    assert real.state().stops == {}
+    assert real.pipeline.authorize(minted.challenge_id, real.signed(minted)).decision == "VERIFIED_NOT_FORWARDED"
+
+
+def test_stop_latch_survives_a_restart_before_the_fill(real: RealRig):
+    stopped_on_b(real)
+    restarted = real.build(StateStore(real.dir))
+    with pytest.raises(OrderRefusal) as err:
+        restarted.mint(intent_body())
+    expect(err, 423, "ORDERS_BLOCKED", "stop_open")
+
+
+# ------------------------------------------- fresh re-check after a valid mint
+
+
+def test_recheck_capital_cap_from_an_open_buy_that_appears_after_mint(real: RealRig):
+    minted = real.mint()
+    before = real.reads()
+    real.account.snap = AccountSnapshot(open_orders=(OpenOrder(ISIN_B, "buy", 500, D("100.00")),))
+    real.refused_authorize(minted, "capital_cap", 409, "LIMIT_REJECTED")
+    after = real.reads()
+    assert all(a > b for a, b in zip(after, before))  # every port read again
+
+
+def test_recheck_capital_cap_breach_only_from_open_buy_pending_notional(real: RealRig):
+    minted = real.mint()
+    positions_only = AccountSnapshot(
+        holdings=(Holding(ISIN_B, 100, D("20000")),),
+        trades=(Trade("b-buy", ISIN_B, "buy", 100, D("200"), D("0")),),
+    )
+    real.account.snap = positions_only
+    # Prove the positions alone are under the cap: another order passes on them.
+    probe = real.mint(intent_id="intent-test-0002")
+    assert real.pipeline.authorize(probe.challenge_id, real.signed(probe)).decision == "VERIFIED_NOT_FORWARDED"
+    real.account.snap = AccountSnapshot(
+        holdings=positions_only.holdings,
+        trades=positions_only.trades,
+        open_orders=(OpenOrder(ISIN_B, "buy", 295, D("100.00")),),  # 29500 pending
+    )
+    real.refused_authorize(minted, "capital_cap", 409, "LIMIT_REJECTED")
+
+
+def test_recheck_collar_on_a_buy_when_ltp_falls(real: RealRig):
+    minted = real.mint()
+    real.market.quotes["TESTCO"] = quote_for(ltp="97.00")  # limit 100.05 is 3.1% above
+    real.refused_authorize(minted, "collar", 409, "LIMIT_REJECTED")
+
+
+def test_recheck_collar_on_a_sell_when_ltp_rises(real: RealRig):
+    real.account.snap = holding_snapshot()
+    minted = real.mint(intent_id="intent-test-0002", side="sell", reason="exit", quantity=10, limit_price="99.95")
+    real.market.quotes["TESTCO"] = quote_for(ltp="103.00")  # limit is 3.0% below
+    real.refused_authorize(minted, "collar", 409, "LIMIT_REJECTED")
+
+
+def test_recheck_session_cutoff_between_1509_59_and_1510_00(real: RealRig):
+    real.clock.now = datetime(2026, 10, 8, 9, 39, 59, tzinfo=timezone.utc)  # 15:09:59 IST
+    minted = real.mint()
+    real.clock.advance(1)  # 15:10:00 IST
+    real.refused_authorize(minted, "session_closed", 423, "ORDERS_BLOCKED")
+
+
+def test_recheck_account_mismatch_unexplained_isin_after_mint(real: RealRig):
+    minted = real.mint()
+    real.account.snap = AccountSnapshot(holdings=(Holding(ISIN_B, 5, D("500")),))
+    real.refused_authorize(minted, "account_mismatch", 423, "ORDERS_BLOCKED")
+    assert real.state().account_mismatch is True  # latched, not just refused once
+    with pytest.raises(OrderRefusal) as err:
+        real.mint(intent_id="intent-test-0002")
+    expect(err, 423, "ORDERS_BLOCKED", "account_mismatch")
+
+
+def test_recheck_account_mismatch_excess_quantity_after_mint(real: RealRig):
+    real.account.snap = holding_snapshot(qty=10, cost="1000")
+    minted = real.mint(intent_id="intent-test-0002", side="sell", reason="exit", quantity=5, limit_price="100.00")
+    real.account.snap = AccountSnapshot(
+        holdings=(Holding(ISIN_A, 11, D("1100")),),  # the ledger only explains 10
+        trades=real.account.snap.trades,
+    )
+    real.refused_authorize(minted, "account_mismatch", 423, "ORDERS_BLOCKED")
+
+
+# --------------------------------------------------- the no-order-path AST guard
+
+NON_GET = {"POST", "PUT", "PATCH", "DELETE"}
+NON_GET_ATTRS = {"post", "put", "patch", "delete"}
+BANNED_NAMES = {"place_order", "place_market_order"}
+# The broker endpoint is the path segment "order" (Breeze .../v1/order). Our own
+# relay routes live under /v1/orders/ (plural) and must not match.
+ORDER_ENDPOINT = re.compile(r"(?:^|/)order(?:$|[/?#\s])")
+VERB_AND_ORDER = re.compile(r"(?i)\b(?:POST|PUT|PATCH|DELETE)\s+\S*/order(?:$|[/?#\s])")
+
+
+@dataclass(frozen=True)
+class OrderPathOffence:
+    path: str
+    line: int
+    kind: str
+
+
+def _py_files(paths) -> list[Path]:
+    files: list[Path] = []
+    for raw in paths:
+        item = Path(raw)
+        files.extend(sorted(item.rglob("*.py")) if item.is_dir() else [item])
+    return files
+
+
+def _local_nodes(scope: ast.AST):
+    """Nodes of one scope: nested function bodies are their own scopes, but their
+    decorators and defaults are evaluated here, so they stay in."""
+    stack = [scope]
+    while stack:
+        node = stack.pop()
+        yield node
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)) and node is not scope:
+            args = node.args
+            stack.extend(list(getattr(node, "decorator_list", [])) + args.defaults + [d for d in args.kw_defaults if d])
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+
+
+def _scopes(tree: ast.AST):
+    yield tree
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            yield node
+
+
+def _is_endpoint(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and ORDER_ENDPOINT.search(node.value) is not None
+    )
+
+
+def _scope_offences(scope: ast.AST, module_has_endpoint: bool) -> list[tuple[int, str]]:
+    nodes = list(_local_nodes(scope))
+    if not (module_has_endpoint or any(_is_endpoint(n) for n in nodes)):
+        return []
+    found: list[tuple[int, str]] = []
+    for n in nodes:
+        if isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value.strip().upper() in NON_GET:
+            found.append((n.lineno, "non-GET method beside an /order endpoint"))
+        elif isinstance(n, ast.Attribute) and n.attr in NON_GET_ATTRS:
+            found.append((n.lineno, "post/put/patch/delete call beside an /order endpoint"))
+        elif isinstance(n, ast.keyword) and n.arg == "method" and not (
+            isinstance(n.value, ast.Constant) and str(n.value.value).upper() == "GET"
+        ):
+            found.append((n.value.lineno, "method= is not GET beside an /order endpoint"))
+    return found
+
+
+def find_order_paths(paths) -> list[OrderPathOffence]:
+    """Offending nodes in every .py under paths: any non-GET request shaped at the
+    broker /order endpoint, any place_order or place_market_order reference, and
+    any forward implementation other than RefusalForward."""
+    offences: list[OrderPathOffence] = []
+    for file in _py_files(paths):
+        tree = ast.parse(file.read_text(encoding="utf-8"))
+        seen: set[tuple[int, str]] = set()
+        # A module-level constant naming the endpoint counts for every function in the module.
+        module_has_endpoint = any(_is_endpoint(n) for n in _local_nodes(tree))
+        for scope in _scopes(tree):
+            for line, kind in _scope_offences(scope, module_has_endpoint):
+                if (line, kind) not in seen:
+                    seen.add((line, kind))
+                    offences.append(OrderPathOffence(str(file), line, kind))
+        for n in ast.walk(tree):
+            names: list[str] = []
+            if isinstance(n, ast.Name):
+                names.append(n.id)
+            elif isinstance(n, ast.Attribute):
+                names.append(n.attr)
+            elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                names.append(n.name)
+            elif isinstance(n, ast.keyword) and n.arg:
+                names.append(n.arg)
+            elif isinstance(n, ast.alias):
+                names.append(n.name.split(".")[-1])
+            elif isinstance(n, ast.Constant) and isinstance(n.value, str):
+                if n.value in BANNED_NAMES:
+                    names.append(n.value)
+                if VERB_AND_ORDER.search(n.value):
+                    offences.append(OrderPathOffence(str(file), n.lineno, "verb and /order in one string"))
+            for name in names:
+                if name in BANNED_NAMES:
+                    offences.append(OrderPathOffence(str(file), getattr(n, "lineno", 0), f"reference to {name}"))
+            if isinstance(n, ast.ClassDef) and "forward" in n.name.lower() and n.name != "RefusalForward":
+                offences.append(OrderPathOffence(str(file), n.lineno, f"forward implementation {n.name}"))
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name.lower().startswith("forward"):
+                offences.append(OrderPathOffence(str(file), n.lineno, f"forward function {n.name}"))
+    return offences
+
+
+def assert_no_order_path(paths) -> None:
+    """Reusable by 63-05 Task 3 and 63-06 Task 3 over wider path sets."""
+    offences = find_order_paths(paths)
+    assert offences == [], "\n".join(f"{o.path}:{o.line}: {o.kind}" for o in offences)
+
+
+def test_gateway_vm_tree_has_no_order_path():
+    assert_no_order_path([ROOT / "gateway" / "vm" / "gateway_vm"])
+
+
+def test_forward_implementation_is_only_the_refusal_object():
+    tree = ast.parse((ROOT / "gateway/vm/gateway_vm/orders/pipeline.py").read_text())
+    classes = [n.name for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and "forward" in n.name.lower()]
+    assert classes == ["RefusalForward"]
+    refuse = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "refuse")
+    # The refusal counts the call and returns a constant; it builds nothing.
+    assert [type(s).__name__ for s in refuse.body] == ["AugAssign", "Return"]
+    assert RefusalForward().refuse("x") == "VERIFIED_NOT_FORWARDED"
+
+
+PLANTED = {
+    "http_client_post": (
+        "import http.client\n"
+        "def go():\n"
+        "    c = http.client.HTTPSConnection('api.icicidirect.com')\n"
+        "    c.request('POST', '/breezeapi/api/v1/order', body=b'{}')\n"
+    ),
+    "requests_post_fstring": (
+        "import requests\n"
+        "BASE = 'https://api.icicidirect.com/breezeapi/api/v1'\n"
+        "def go():\n"
+        "    requests.post(f'{BASE}/order', json={})\n"
+    ),
+    "delete_method_keyword": (
+        "import urllib.request\n"
+        "def go():\n"
+        "    return urllib.request.Request('https://x/breezeapi/api/v1/order', method='DELETE')\n"
+    ),
+    "method_variable": (
+        "def go(conn):\n"
+        "    verb = 'PUT'\n"
+        "    conn.request(verb, '/breezeapi/api/v1/order')\n"
+    ),
+    "verb_and_path_in_one_constant": "ROUTE = 'POST /order'\n",
+    "place_order_call": "def go(client):\n    return client.place_order(stock_code='X')\n",
+    "place_market_order_name": "def go():\n    place_market_order()\n",
+    "module_constant_then_post_in_a_function": (
+        "ORDER_URL = 'https://x/breezeapi/api/v1/order'\n"
+        "def go(session):\n"
+        "    session.post(ORDER_URL)\n"
+    ),
+    "second_forward_class": "class HttpForward:\n    def send(self):\n        pass\n",
+}
+
+
+@pytest.mark.parametrize("name", sorted(PLANTED))
+def test_ast_guard_fails_on_a_planted_order_call(tmp_path, name):
+    planted = tmp_path / "planted.py"
+    planted.write_text(PLANTED[name])
+    assert find_order_paths([planted]), name
+    with pytest.raises(AssertionError):
+        assert_no_order_path([planted])
+
+
+def test_ast_guard_allows_reads_and_our_own_plural_routes(tmp_path):
+    ok = tmp_path / "ok.py"
+    ok.write_text(
+        "import http.client\n"
+        "ROUTE = '/v1/orders/intents'\n"
+        "def read(c):\n"
+        "    c.request('GET', '/breezeapi/api/v1/order')\n"
+        "def route(app):\n"
+        "    @app.post('/v1/orders/authorize')\n"
+        "    def authorize():\n"
+        "        return {}\n"
+    )
+    assert find_order_paths([ok]) == []
+
+
+def test_ast_guard_scans_directories_recursively(tmp_path):
+    deep = tmp_path / "a" / "b"
+    deep.mkdir(parents=True)
+    (deep / "x.py").write_text(PLANTED["place_order_call"])
+    assert find_order_paths([tmp_path])
+
+
+# ------------------------------------------------------------ contract + safety
+
+
+def test_orders_api_doc_lists_every_o6_code_and_all_eight_sections():
+    from gateway_vm.orders import CODE_TABLE
+
+    text = (ROOT / "gateway" / "ORDERS-API.md").read_text()
+    for number in range(1, 9):
+        assert re.search(rf"\*\*O{number} ", text), f"O{number} missing"
+    for code in CODE_TABLE:
+        assert f"`{code}`" in text, f"{code} missing from ORDERS-API.md"
+    assert "growin-orders/1" in text and "VERIFIED_NOT_FORWARDED" in text
+    assert "## Consumers" in text and "growin-orders/2" in text
+
+
+def _guard_exit(tmp_path: Path, rel_path: str, reviewed: str = "false") -> int:
+    changes = tmp_path / "changes.tsv"
+    changes.write_text(f"modified\t{rel_path}\t\n")
+    done = subprocess.run(
+        ["bash", str(ROOT / ".github/scripts/safety-guard.sh"), str(changes), str(ROOT / ".github/safety-paths.txt")],
+        capture_output=True, text=True, env={"PATH": os.environ["PATH"], "REVIEWED": reviewed},
+    )
+    return done.returncode
+
+
+@pytest.mark.parametrize(
+    "rel_path",
+    [
+        "gateway/vm/gateway_vm/orders/pipeline.py",
+        "gateway/vm/gateway_vm/orders/__init__.py",
+        "gateway/vm/gateway_vm/orders/data/nse_cash_tick_sizes.json",
+        "gateway/vm/gateway_vm/orders/deeper/still/file.py",
+        "backend/risk_india/limits.py",
+        "backend/risk_india/sub/deep/state.py",
+    ],
+)
+def test_safety_guard_blocks_unlabelled_changes_to_the_order_trees(tmp_path, rel_path):
+    assert _guard_exit(tmp_path, rel_path) == 1
+
+
+@pytest.mark.parametrize(
+    "rel_path",
+    ["gateway/vm/gateway_vm/egress.py", "docs/notes.md", "gateway/ORDERS-API.md", "backend/risk_indiana/x.py"],
+)
+def test_safety_guard_does_not_over_match(tmp_path, rel_path):
+    assert _guard_exit(tmp_path, rel_path) == 0
+
+
+def test_safety_guard_passes_with_the_review_label(tmp_path):
+    assert _guard_exit(tmp_path, "gateway/vm/gateway_vm/orders/pipeline.py", reviewed="true") == 0

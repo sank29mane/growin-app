@@ -32,6 +32,17 @@ from . import (
 from .audit import AuditBroken, AuditLog
 from .challenge import ChallengeStore, SecretIds, intent_sha256
 from .intent import Intent, parse_intent
+from .kill import KillState
+from .limits import (
+    AccountSnapshot,
+    Limits,
+    Quote,
+    TickTable,
+    evaluate,
+    to_ist,
+)
+from .risk import apply_trades, detect_mismatch
+from .store import StateStore
 from .verify import PinnedKey
 
 Clock = Callable[[], datetime]
@@ -279,3 +290,100 @@ class OrderPipeline:
             result = GuardResult(codes=(), kill=None, latches=tuple(latches))
             self._append(self._entry("halt", None, "HALTED", ["mac_halt"], result))
             return {"contract": CONTRACT, "mac_halt": True}
+
+
+# --------------------------------------------------------------- the real guard
+
+
+class KillPort(Protocol):
+    def read(self) -> KillState: ...
+
+
+class AccountPort(Protocol):
+    """Fresh holdings, open orders and trade list. Raise on any read failure."""
+
+    def snapshot(self) -> AccountSnapshot: ...
+
+
+class MarketPort(Protocol):
+    """Fresh quote for a stock code, bound to its security master row (P-21)."""
+
+    def quote(self, stock_code: str) -> Quote: ...
+
+
+class RuleGuard:
+    """Guard over the real modules: kill reader, durable state, account and
+    market ports, and the pure evaluator.
+
+    Every check reads the kill switch, the state file, the account and the quote
+    again; nothing is cached between mint and authorize. A killed switch short
+    circuits before any account or market read, so a blocked relay makes no
+    broker-side reads. The account read first feeds new fills into the VM ledger
+    (which is what clears a stop latch), then looks for an unexplained holding
+    (D-04) and latches account_mismatch, persistently, if it finds one.
+    """
+
+    def __init__(
+        self,
+        *,
+        limits: Limits,
+        kill: KillPort,
+        store: StateStore,
+        account: AccountPort,
+        market: MarketPort,
+        audit: AuditLog,
+        tick_table: TickTable | None = None,
+    ) -> None:
+        self._limits = limits
+        self._kill = kill
+        self._store = store
+        self._account = account
+        self._market = market
+        self._audit = audit
+        self._tick_table = tick_table
+
+    def _state(self):
+        return self._store.load_or_init(
+            self._limits, audit_has_entries=self._audit.has_entries()
+        )
+
+    def check(self, intent: Intent, now: datetime) -> GuardResult:
+        with self._store.lock():
+            kill = self._kill.read()
+            state = self._state()
+            if not kill.enabled:
+                return GuardResult(
+                    codes=("kill_switch",), kill=kill.label, latches=state.latch_names()
+                )
+            try:
+                snapshot = self._account.snapshot()
+            except Exception:
+                raise refusal("account_read_failed") from None
+            changed = apply_trades(state, snapshot.trades)
+            if not state.account_mismatch and detect_mismatch(state, snapshot.holdings):
+                state.account_mismatch = True
+                changed = True
+            if changed:
+                self._store.save(state)
+            try:
+                quote: Quote | None = self._market.quote(intent.stock_code)
+            except Exception:
+                quote = None
+            codes = evaluate(
+                self._limits,
+                state.flags(),
+                snapshot,
+                quote,
+                to_ist(now),
+                intent,
+                kill_enabled=kill.enabled,
+                tick_table=self._tick_table,
+            )
+            return GuardResult(codes=codes, kill=kill.label, latches=state.latch_names())
+
+    def set_mac_halt(self) -> tuple[str, ...]:
+        with self._store.lock():
+            state = self._state()
+            state.mac_halt = True
+            self._store.save(state)
+            return state.latch_names()
