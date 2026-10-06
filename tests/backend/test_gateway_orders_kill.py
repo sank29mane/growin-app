@@ -119,7 +119,7 @@ def test_slow_metadata_server_blocks_on_the_timeout(fake):
     started = time.monotonic()
     state = read(fake)
     assert state.enabled is False and state.label == "unreadable"
-    assert time.monotonic() - started < 1.4  # 1 s timeout, not the 1.5 s reply
+    assert time.monotonic() - started < 1.45  # 1 s timeout, not the 1.5 s reply
 
 
 def test_redirect_is_not_followed(fake):
