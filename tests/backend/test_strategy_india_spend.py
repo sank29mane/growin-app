@@ -185,7 +185,7 @@ def test_deleting_the_open_event_with_the_stale_pin_cannot_reopen_the_holdout(tm
     lines = inputs.registry.path.read_text().splitlines()
     inputs.registry.path.write_text(lines[0] + "\n")  # the open event is deleted
     assert inputs.registry.verify() == pre_open_head  # and the old pin is a perfectly valid head again
-    with pytest.raises(HoldoutSpent, match="ledger"):
+    with pytest.raises(HoldoutInvalid, match="INVALID: interrupted.*ledger"):
         study.run_holdout(inputs, expected_head=pre_open_head)
     assert inputs.registry.holdout_events() == ()  # nothing was appended, nothing was read
 
@@ -326,8 +326,13 @@ def test_each_post_open_failure_leaves_durable_spend_and_invalid(tmp_path, monke
     with pytest.raises(HoldoutInvalid):
         study.run_holdout(inputs, expected_head=head)
     assert len(study.spent_ledger_path(reg).read_text().splitlines()) == 1
-    assert len(reg.holdout_events()) == len(reg.invalid_events()) == 1
-    assert reg.invalid_events()[0].payload["holdout_open_event_hash"] == reg.holdout_events()[0].entry_hash
+    assert len(reg.holdout_events()) == 1
+    if step == "verdict_head":
+        assert reg.invalid_events() == ()
+        assert reg.holdout_results()[0].kind == "holdout_verdict"
+    else:
+        assert len(reg.invalid_events()) == 1
+        assert reg.invalid_events()[0].payload["holdout_open_event_hash"] == reg.holdout_events()[0].entry_hash
 
 
 def test_read_only_ledger_refuses_before_open(tmp_path, monkeypatch):
@@ -365,7 +370,8 @@ def test_report_failure_preserves_registry_verdict_and_prints_anchor(tmp_path, m
     assert verdict.payload["verdict"] in {"PASS", "FAIL", "INCONCLUSIVE"}
     assert verdict.payload["verdict_sha256"] == canonical_sha256(verdict.payload["verdict_payload"])
     assert len(study.spent_ledger_path(inputs.registry).read_text().splitlines()) == 1
-    assert len(inputs.registry.invalid_events()) == 1
+    assert inputs.registry.invalid_events() == ()
+    assert inputs.registry.holdout_results() == (verdict,)
 
 
 def test_library_refuses_deleted_open_and_deleted_ledger_with_stale_head(tmp_path):
@@ -396,12 +402,12 @@ def test_cli_ledger_io_errors_are_typed_refusals(tmp_path, monkeypatch, capsys, 
         ledger.mkdir()
     else:
         ledger.touch()
-        original = type(ledger).read_text
+        original = type(ledger).read_bytes
         def unreadable(path, *a, **k):
             if path == ledger:
                 raise PermissionError("unreadable ledger")
             return original(path, *a, **k)
-        monkeypatch.setattr(type(ledger), "read_text", unreadable)
+        monkeypatch.setattr(type(ledger), "read_bytes", unreadable)
     config = _cli_config(tmp_path, inputs, head, monkeypatch)
     assert cli.main(["holdout", "--config", str(config)]) == 2
     assert "ledger_invalid" in capsys.readouterr().out
@@ -437,8 +443,8 @@ def test_partially_overlapping_spent_ledger_range_refuses_library_open(tmp_path)
     registered = HoldoutRange(HOLDOUT_DAYS[0], HOLDOUT_DAYS[-1])
     assert partial != registered and partial.overlaps(registered)
     ledger = study.spent_ledger_path(inputs.registry)
-    ledger.write_text(json.dumps({"holdout_range": partial.as_payload()}) + "\n")
-    with pytest.raises(HoldoutSpent, match="ledger"):
+    ledger.write_text(json.dumps({"holdout_range": partial.as_payload(), "registration_entry_hash": sha("older")}) + "\n")
+    with pytest.raises(HoldoutInvalid, match="ledger"):
         study.run_holdout(inputs, expected_head=head)
     assert inputs.registry.holdout_events() == ()
     assert inputs.registry.head_hash() == head
@@ -570,11 +576,12 @@ def test_successful_verdict_supersedes_provisional_invalid(tmp_path):
     assert any(e.kind == "holdout_invalid" and e.payload["reason"] == "in_progress" for e in reg.entries())
 
 
-@pytest.mark.parametrize("anchor, offset", [(ETF, 0), (ETF, 20), (ETF, 59), ("INE000A01000", 20)])
-def test_unsupported_series_refuses_before_open_for_benchmark_and_universe(tmp_path, anchor, offset):
-    inputs, head = _etf_case(tmp_path, updates=lambda r: {"series": "BE"}
+@pytest.mark.parametrize("series", ["BE", "BZ"])
+@pytest.mark.parametrize("anchor, offset", [(ETF, 0), (ETF, 20), (ETF, 59)])
+def test_unsupported_benchmark_series_refuses_before_open(tmp_path, anchor, offset, series):
+    inputs, head = _etf_case(tmp_path, updates=lambda r: {"series": series}
                              if r.anchor_isin == anchor and r.trade_date == HOLDOUT_DAYS[offset] else None)
-    with pytest.raises(StrategyIndiaError, match="series 'BE'") as err:
+    with pytest.raises(StrategyIndiaError, match=f"series '{series}'") as err:
         study.run_holdout(inputs, expected_head=head)
     assert err.value.code == "holdout_unrunnable"
     _unspent(inputs, head)

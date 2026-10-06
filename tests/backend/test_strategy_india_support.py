@@ -31,10 +31,11 @@ from strategy_india.engine import RunContext
 from strategy_india.ticks import TickTables as _TT  # noqa: F401
 from strategy_india.holdout import HoldoutRange
 from strategy_india.ticks import EQUITY, NON_GOLD_ETF, TickTables, load_default_tables
+from strategy_india.gate import recompute_report_sha256
 from strategy_india.params import StrategyParams, parse_params, placeholder_params
 
 SCHEDULE_VERSION = "icici-prime9999-ivalue-nse-cash-2024-10-01.r1"
-SESSION_START = date(2026, 9, 7)  # both the 2025-04-15 equity table and the 2026-09-07 non-Gold ETF table cover it
+SESSION_START = date(2026, 9, 7)  # the committed equity and non-Gold ETF tables both cover this window
 
 
 def sha(text: str) -> str:
@@ -182,19 +183,32 @@ def coverage_report(
                         reason="band_crosscheck_row_conflict", source_sha256s=(sha("band"),))
         for code, isin, day in unavailable
     )
-    return BandCoverageReport(
+    report = BandCoverageReport(
         workspace="india", caveats=standard_caveats(), period_start=start, period_end=end, sessions=100,
         sessions_by_status={"list": 100}, unsupported_sessions=(), targets_checked=10, target_unknown_counts={},
         fixed_count=900, no_band_count=0, unknown_count=len(items),
         unknown_by_reason={"band_crosscheck_row_conflict": len(items)} if items else {},
         convention=None, archive_depth=None, phase62_blocked=bool(blocked), blocked_reasons=tuple(blocked),
         row_conflict_sessions=(), nonblocking_reasons=(), unavailable_bands=items,
-        report_sha256=digest or sha(f"coverage-{start}-{end}-{len(items)}-{len(blocked)}"),
+        report_sha256="0" * 64,
     )
+    real = recompute_report_sha256(report, TARGETS_SHA)  # the way 59 derives it
+    return report.model_copy(update={"report_sha256": digest or real})
 
 
 def write_coverage(root: Path, report: BandCoverageReport) -> Path:
     return write_coverage_report(root, report)
+
+
+FIXTURE_DIR = Path(__file__).parent / "fixtures" / "strategy_india"
+TARGETS_SHA = sha("synthetic-target-universe")
+
+
+def default_criteria() -> dict:
+    """The tracked EXAMPLE D-19 criteria (a fixture, not a default in code)."""
+    import json
+
+    return json.loads((FIXTURE_DIR / "d19_criteria_example.json").read_text())
 
 
 def tick_tables(with_etf: bool = True) -> TickTables:
@@ -239,6 +253,24 @@ def make_context(
 GIT_COMMIT = "b" * 40
 
 
+def tag_rows(rows, events):
+    """Tag rows the way 59 does for amount-unknown events: bars up to the last ex-date, plus the ex-date flag."""
+    last: dict[str, date] = {}
+    exes: set[tuple[str, date]] = set()
+    for event in events.all():
+        last[event.anchor_isin] = max(last.get(event.anchor_isin, event.ex_date), event.ex_date)
+        exes.add((event.anchor_isin, event.ex_date))
+    out = []
+    for row in rows:
+        limit = last.get(row.anchor_isin)
+        flags = {
+            "dividend_amount_unknown": limit is not None and row.trade_date <= limit,
+            "dividend_amount_unknown_ex_date": (row.anchor_isin, row.trade_date) in exes,
+        }
+        out.append(row.model_copy(update=flags) if any(flags.values()) else row)
+    return out
+
+
 def study_inputs(
     tmp_path: Path,
     *,
@@ -256,16 +288,17 @@ def study_inputs(
     registry_name: str = "registry.jsonl",
     ticks: TickTables | None = None,
     start: date = SESSION_START,
+    criteria: Mapping | None = None,
 ):
     """A complete synthetic study: dataset, gate report, registry path, every 60 input."""
-    from pilot_data.dataset import dataset_hash
+    from strategy_india.data import dataset_digest
     from strategy_india.folds import FoldRules
     from strategy_india.registry import Registry
     from strategy_india.study import StudyInputs
 
     sessions = weekday_sessions(start, sessions_n)
     names = default_names(n_names) + etf_names()
-    rows = rows if rows is not None else make_rows(sessions, names, ex_gaps=ex_gaps)
+    rows = rows if rows is not None else tag_rows(make_rows(sessions, names, ex_gaps=ex_gaps), events or DividendEvents())
     cov_root = tmp_path / "cov"
     cov_path = write_coverage(cov_root, coverage_report(sessions[0], sessions[-1], unavailable=unavailable))
     scenarios, schedules, tick_obj, _ = costs_inputs()
@@ -273,14 +306,15 @@ def study_inputs(
     raw.update(params_overrides or {})
     eligible = sorted({row.anchor_isin for row in rows} - set(ETF_ISINS))
     return StudyInputs(
-        rows=rows, dataset_sha256=dataset_hash(sorted(rows, key=lambda r: (r.anchor_isin, r.trade_date))),
+        rows=rows, dataset_sha256=dataset_digest(rows, events or DividendEvents()),
         params_raw=raw, limits=limits(), coverage_path=cov_path, eligibility=StaticEligibility(eligible),
         universe_policy=UniversePolicy(), bands=bands or StaticBands(), scenarios=scenarios, schedules=schedules,
         schedule_version=SCHEDULE_VERSION, ticks=ticks or tick_obj,
         fold_rules=FoldRules(n_folds=3, test_sessions=50, min_train_sessions=120), git_commit=GIT_COMMIT,
         parameter_budget_n=12, registry=Registry(tmp_path / "private" / registry_name),
         events=events or DividendEvents(), tri_path=tri[0] if tri else None, tri_sha256=tri[1] if tri else None,
-        provider=provider, holdout_sessions=holdout_sessions,
+        provider=provider, holdout_sessions=holdout_sessions, targets_sha256=TARGETS_SHA,
+        criteria=criteria if criteria is not None else default_criteria(),
     )
 
 
@@ -297,7 +331,6 @@ def write_tri(path: Path, sessions: Sequence[date], base: Decimal = Decimal("912
 
 def registration_record(**overrides):
     """A valid registration payload with distinct synthetic hashes."""
-    from strategy_india.holdout import default_criteria
     from strategy_india.registry import HASH_FIELDS, criteria_hash
 
     criteria = default_criteria()

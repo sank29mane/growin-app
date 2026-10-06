@@ -15,7 +15,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import date
 from decimal import Decimal
-from pathlib import Path
 
 from costs import ticks as _costs_ticks
 from costs.core import Side, TickSizeUnavailable
@@ -60,7 +59,7 @@ class TickTables:
             table = self.table_for(instrument_class)
         except TickSizeUnavailable:
             return False
-        return any(version.covers(day) for version in table.versions)
+        return any(version.covers(day) and series in version.series for version in table.versions)
 
     def table_for(self, instrument_class: str) -> _costs_ticks.TickTable:
         if instrument_class not in SUPPORTED_CLASSES:
@@ -69,11 +68,6 @@ class TickTables:
         if table is None:
             raise TickSizeUnavailable(f"no tick table is encoded for instrument class {instrument_class}")
         return table
-
-
-def load_table(path: Path) -> _costs_ticks.TickTable:
-    """Load one table from an explicit path (never the no-argument default)."""
-    return _costs_ticks.load_tick_table(Path(path))
 
 
 def load_default_tables() -> TickTables:

@@ -24,7 +24,7 @@ from strategy_india.errors import DataError, RegistryError, RegistryMismatch, St
 from strategy_india.holdout import load_criteria_file, parse_criteria
 from strategy_india.params import params_sha256, placeholder_params
 from strategy_india.signals import MODE_SENSITIVITY, SignalTable
-from strategy_india.ticks import EQUITY, NON_GOLD_ETF, TickTables, load_default_tables, load_table
+from strategy_india.ticks import EQUITY, NON_GOLD_ETF, TickTables, load_default_tables
 
 from test_strategy_india_support import (
     FIXTURE_DIR,
@@ -61,26 +61,27 @@ def test_a_missing_etf_tick_table_refuses_without_spending_the_holdout(tmp_path)
     assert inputs.registry.holdout_events() == () and inputs.registry.head_hash() == head
 
 
-def test_an_etf_table_that_stops_before_the_holdout_refuses_without_spending_it(tmp_path):
-    raw = json.loads((FIXTURE_DIR / "synthetic_etf_tick_table.json").read_text())
-    raw["versions"][0]["effective_to"] = "2025-12-31"
-    short = tmp_path / "etf_short.json"
-    short.write_text(json.dumps(raw))
-    ticks = TickTables({EQUITY: load_default_tables().table_for(EQUITY), NON_GOLD_ETF: load_table(short)})
-    inputs, _, head = _registered(tmp_path, ticks=ticks)
-    holdout_days = [d for d in SESSIONS[-60:] if d > date(2025, 12, 31)]
-    assert holdout_days, "the synthetic holdout runs past the table"
-    with pytest.raises(StrategyIndiaError, match="does not cover") as err:
+def test_committed_etf_table_gap_refuses_without_spending(tmp_path):
+    # #539 encodes no ETF tick from 2025-04-15 through 2026-09-06.
+    inputs, _, head = _registered(tmp_path, start=date(2024, 1, 1))
+    with pytest.raises(StrategyIndiaError, match="NON_GOLD_ETF.*does not cover") as err:
         study.run_holdout(inputs, expected_head=head)
-    assert err.value.code == "holdout_unrunnable" and "NON_GOLD_ETF" in str(err.value)
-    assert inputs.registry.holdout_events() == ()
+    assert err.value.code == "holdout_unrunnable"
+    assert inputs.registry.holdout_events() == () and inputs.registry.head_hash() == head
 
 
 def test_equity_ticks_missing_for_holdout_dates_refuse_without_spending(tmp_path):
-    inputs, _, head = _registered(tmp_path, start=date(2023, 6, 1))  # the whole window precedes 2025-04-15
+    inputs, _, head = _registered(tmp_path, start=date(2019, 1, 1))  # before the first committed equity version
     with pytest.raises(StrategyIndiaError, match="EQUITY") as err:
         study.run_holdout(inputs, expected_head=head)
     assert err.value.code == "holdout_unrunnable" and inputs.registry.holdout_events() == ()
+
+
+def test_committed_tables_cover_the_pre_revision_window(tmp_path):
+    inputs, _, head = _registered(tmp_path, start=date(2021, 1, 4))
+    outcome = study.run_holdout(inputs, expected_head=head)
+    assert outcome.report.units[0].etf_unknown_reason is None
+    assert len(inputs.registry.holdout_events()) == 1
 
 
 def test_a_dataset_that_does_not_reproduce_its_hash_refuses_without_spending(tmp_path):

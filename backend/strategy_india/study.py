@@ -45,7 +45,10 @@ from .holdout import (
 )
 from .hurdle import hurdle_map_sha256
 from .params import StrategyParams, params_sha256, parse_params
-from .registry import Entry, LIVE_CHECKED_FIELDS, Registry, canonical_sha256, check_live_inputs, criteria_hash
+from .registry import (
+    Entry, LIVE_CHECKED_FIELDS, Registry, canonical_sha256, check_live_inputs, criteria_hash,
+    durable_jsonl, trim_incomplete_tail,
+)
 from .report import Unit, StudyReport, build_report, holdout_evidence, write_report
 from .signals import MODE_BASE
 from .ticks import EQUITY, NON_GOLD_ETF, TickTables
@@ -231,6 +234,11 @@ HEAD_LATEST_NAME = "registry_head_latest.txt"  # written by the tool after every
 def _private_append(path: Path, line: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        trim_incomplete_tail(fd, path)
+    except BaseException:
+        os.close(fd)
+        raise
     size_before = os.fstat(fd).st_size
     try:
         data = memoryview((line + "\n").encode("utf-8"))
@@ -288,27 +296,45 @@ def check_pin_fresh(registry: Registry, pin: str) -> None:
         )
 
 
-def _ledger_ranges(registry: Registry) -> list[HoldoutRange]:
+def _ledger_records(registry: Registry) -> list[dict[str, Any]]:
     path = spent_ledger_path(registry)
     if not path.exists():
         return []
-    out: list[HoldoutRange] = []
+    out: list[dict[str, Any]] = []
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = durable_jsonl(path).decode("utf-8").splitlines()
     except (OSError, UnicodeError) as exc:
         raise StrategyIndiaError("spent-holdouts ledger is unreadable", code="ledger_invalid") from exc
     for number, line in enumerate(lines, start=1):
         try:
-            out.append(HoldoutRange.from_payload(json.loads(line)["holdout_range"]))
+            record = json.loads(line)
+            HoldoutRange.from_payload(record["holdout_range"])
+            if not isinstance(record.get("registration_entry_hash"), str) or not _HEX64.fullmatch(
+                record["registration_entry_hash"]
+            ):
+                raise ValueError("missing registration hash")
+            out.append(record)
         except (ValueError, KeyError, TypeError) as exc:
             raise StrategyIndiaError(f"spent-holdouts ledger line {number} is malformed", code="ledger_invalid") from exc
     return out
 
 
+def interrupted_reservations(registry: Registry) -> list[dict[str, Any]]:
+    """Durable ledger reservations with no matching open remain spent and INVALID."""
+    opens = registry.holdout_events()
+    return [record for record in _ledger_records(registry) if not any(
+        opened.payload["registration_entry_hash"] == record["registration_entry_hash"]
+        and opened.payload["holdout_range"] == record["holdout_range"] for opened in opens
+    )]
+
+
 def check_ledger_clear(registry: Registry, holdout: HoldoutRange) -> None:
-    """Refuse when the private ledger lists a spent holdout overlapping this range, whatever the registry says."""
-    for spent in _ledger_ranges(registry):
-        if spent.overlaps(holdout):
+    """Refuse every overlapping spend, including a reservation interrupted before the open."""
+    interrupted = interrupted_reservations(registry)
+    for record in _ledger_records(registry):
+        if HoldoutRange.from_payload(record["holdout_range"]).overlaps(holdout):
+            if record in interrupted:
+                raise HoldoutInvalid("INVALID: interrupted; the ledger reserved the holdout without a matching open")
             raise HoldoutSpent("the private spent-holdouts ledger lists this holdout as spent")
 
 
@@ -404,12 +430,11 @@ def preflight_holdout(inputs: StudyInputs, prep: Prepared, criteria: Mapping[str
     absent = [day for day in days if day not in etf_rows]
     if absent:
         raise unrunnable(f"the benchmark ETF has no bar on {len(absent)} of {len(days)} holdout sessions, first {absent[0].isoformat()}")
-    # Inspect metadata only. Validate every observed series, including changes mid-holdout.
-    benchmark_anchors = set(prep.params.benchmark.candidate_isins)
+    # The benchmark must remain runnable. Universe series changes become ineligibility or missed fills.
     for row in inputs.rows:
-        if row.trade_date not in day_set:
+        if row.trade_date not in day_set or row.anchor_isin != etf_anchor:
             continue
-        instrument_class = NON_GOLD_ETF if row.anchor_isin in benchmark_anchors else EQUITY
+        instrument_class = NON_GOLD_ETF
         if not inputs.ticks.covers(instrument_class, row.trade_date, series=row.series):
             raise unrunnable(
                 f"the {instrument_class} tick table does not cover series {row.series!r} "
@@ -506,10 +531,20 @@ def run_holdout(inputs: StudyInputs, *, expected_head: str, logged_at: str | Non
                          if event.seq >= len(entries_before_open)
                          and event.payload["registration_entry_hash"] == entry.entry_hash]
         if not opened_events:
-            raise StrategyIndiaError("the ledger reserved the holdout but its open could not be recorded",
-                                     code="holdout_invalid") from exc
+            raise HoldoutInvalid("INVALID: interrupted; the ledger reserved the holdout but its open could not be recorded") from exc
+        opened_hash = opened_events[-1].entry_hash
+        result = next(result for result in reg.holdout_results() if (
+            result.entry_hash == opened_hash or result.payload.get("holdout_open_event_hash") == opened_hash
+        ))
+        if result.kind == "holdout_verdict" or (
+            result.kind == "holdout_invalid" and result.payload["reason"] != "in_progress"
+        ):
+            raise HoldoutInvalid(
+                f"the durable {result.payload.get('verdict', 'INVALID')} outcome is retained; "
+                f"post-outcome processing failed ({type(exc).__name__})"
+            ) from exc
         reg.append_holdout_invalid({
-            "holdout_open_event_hash": opened_events[-1].entry_hash, "registration_entry_hash": entry.entry_hash,
+            "holdout_open_event_hash": opened_hash, "registration_entry_hash": entry.entry_hash,
             "error_type": type(exc).__name__, "error_code": getattr(exc, "code", "unexpected_error"),
             "reason": "interrupted" if not isinstance(exc, Exception) else "evaluation_failed",
         })
@@ -681,6 +716,7 @@ def cli_holdout(config: Mapping[str, Any], *, logged_at: str) -> dict[str, Any]:
             if result.kind == "holdout_open" or reason == "in_progress":
                 reason = "interrupted"
             raise HoldoutInvalid(f"INVALID: {reason}; {_anchor_instruction(inputs.registry)}")
+    check_ledger_clear(inputs.registry, HoldoutRange.from_payload(registration.payload["holdout_range"]))
     check_pin_fresh(inputs.registry, _need_pin(pin))
     try:
         outcome = run_holdout(inputs, expected_head=_need_pin(pin), logged_at=logged_at,

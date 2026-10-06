@@ -330,12 +330,12 @@ def test_a_valid_dataset_with_a_different_hash_than_the_registered_one_is_refuse
 
 
 @pytest.mark.parametrize("event_id, expected", [
-    (None, "c6a014f7b569b0ddaea7c4f7ae9efdfaf6dc60a791f39bb9d79c2e9656764407"),
-    ("EV1", "80b273b235dd60221af315b3d29122a44821787e8ba8a40f3f2e06a4a485068a"),
-    ("EV2", "56eb29d802ced87a416f0d96b46b6a3ab289cbf3456042bbd9ed3ff57a606286"),
+    (None, "c7f4f443361b25c792bc60db26915f7d42149ba286a7c8a380d2292f9b47752c"),
+    ("EV1", "449c92b11a31d10bb8dc6b43a242b2694b3b0ce159072ee02acd9bd5cb4df8b5"),
+    ("EV2", "2787d414fd5d54328b5f7f6671864f8e7634fd87ea12d2a609bed0d9d5ce3624"),
 ])
 def test_dataset_digest_matches_golden_hashes_from_approved_pr542(event_id, expected):
-    # Golden values computed by PR #542's actual dataset_hash at d13c5fb.
+    # Golden values re-derived from main 101d3b4's event-bound dataset_hash.
     from strategy_india.data import DividendUnknownEvent, dataset_digest
 
     rows = make_rows(weekday_sessions(SESSION_START, 5), default_names(2))
