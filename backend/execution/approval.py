@@ -200,6 +200,11 @@ class ApprovalService:
         )
         if refusal is not None:
             raise ApprovalConflict(refusal_text(refusal))
+        if order.state != "PENDING":
+            # An UNKNOWN order keeps its reservation ACTIVE, so the reservation check
+            # alone would issue a fresh challenge for something that may already be at
+            # the broker. Only a never-dispatched order can be approved again.
+            raise ApprovalConflict(f"order is already {order.state}; it cannot be approved again")
         admission = self._ledger.get_admission(proposal_id)
         if admission is None or admission.decision.value != "ADMITTED":
             raise ApprovalConflict("admitted evidence is required before approval")
