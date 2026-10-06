@@ -248,7 +248,9 @@ class Registry:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         try:
-            os.write(fd, (line + "\n").encode("utf-8"))
+            data = memoryview((line + "\n").encode("utf-8"))
+            while data:
+                data = data[os.write(fd, data):]
             os.fsync(fd)
         finally:
             os.close(fd)
