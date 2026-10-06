@@ -663,6 +663,37 @@ def test_practice_ledger_is_never_opened_as_paper(tmp_path):
     assert snapshot(path)["sha256"] == before["sha256"]
 
 
+def test_a_ledger_bound_to_a_kind_that_is_no_longer_registered_refuses_to_open(tmp_path):
+    from venue_registry import VenueSpec, override_venue_specs
+
+    kind = "test_only_venue"
+    spec = VenueSpec(
+        kind=kind,
+        workspace="india",
+        currency="INR",
+        modes=frozenset({"PRACTICE"}),
+        ledger_path=lambda: tmp_path / "unused.sqlite3",
+        dispatcher_key=kind,
+    )
+    path = tmp_path / "execution.sqlite3"
+    with override_venue_specs({kind: spec}):
+        binding = VenueBinding(venue=kind, account_id="acct-test-only-01", currency="INR")
+        with ExecutionLedger(path, workspace="india", venue=binding):
+            pass
+        # Still registered: it reopens.
+        with ExecutionLedger(path, workspace="india", venue=binding):
+            pass
+    before = snapshot(path)
+
+    # Out of the override the kind is gone. Neither an unbound open (as paper)
+    # nor a bound open of the stored kind may succeed; the file is untouched.
+    with pytest.raises(LedgerVenueMismatch):
+        ExecutionLedger(path, workspace="india")
+    with pytest.raises(LedgerVenueMismatch):
+        ExecutionLedger(path, workspace="india", venue=binding)
+    assert snapshot(path)["sha256"] == before["sha256"]
+
+
 def test_venue_binding_is_database_immutable(tmp_path):
     path = tmp_path / "execution.sqlite3"
     with ExecutionLedger(path, workspace="uk", venue=practice_binding()):
