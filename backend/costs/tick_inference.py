@@ -25,6 +25,10 @@ The schedule rows stay authoritative: ``uncovered_windows`` only ever returns da
 and ``InferredTickSource`` answers only inside its window. Every result, available or not, carries
 provenance (method, window, sample counts, thresholds, the tick, a hash of the input rows) and a hash of
 that provenance, which the caller seals.
+
+Each unavailable result has two texts. ``reason`` carries the sample counts and is sealed in the provenance
+only. ``category`` is one of the ``CATEGORIES`` below, has no digit in it, and is the only text a caller may
+show an operator: the sample includes holdout sessions, so a count, price or date from it must not leak.
 """
 
 from __future__ import annotations
@@ -55,6 +59,12 @@ THRESHOLDS = {
     "block_sessions": BLOCK_SESSIONS,
     "min_off_0_05_percent": MIN_OFF_GRID_PERCENT,
 }
+CATEGORY_DUPLICATE = "duplicate session"
+CATEGORY_MISSING = "missing price"
+CATEGORY_OFF_GRID = "price off 0.01 grid"
+CATEGORY_TOO_SMALL = "sample too small"
+CATEGORY_MIXED = "mixed sample / possible tick change"
+CATEGORIES = (CATEGORY_DUPLICATE, CATEGORY_MISSING, CATEGORY_OFF_GRID, CATEGORY_TOO_SMALL, CATEGORY_MIXED)
 INFERRED = "inferred"
 UNAVAILABLE = "unavailable"
 
@@ -106,12 +116,12 @@ def _worst_block(session_off: Sequence[int], session_n: Sequence[int]) -> tuple[
     ``BLOCK_SESSIONS`` consecutive sessions (all sessions when there are fewer). Every window is checked, so
     a change in the first or the last 20 sessions is seen however the sample is cut. Integers only."""
     size = min(BLOCK_SESSIONS, len(session_off))
-    worst = (1, 1)
+    worst: tuple[int, int] | None = None
     for i in range(len(session_off) - size + 1):
         off, total = sum(session_off[i:i + size]), sum(session_n[i:i + size])
-        if off * worst[1] < worst[0] * total:
+        if worst is None or off * worst[1] < worst[0] * total:
             worst = (off, total)
-    return worst
+    return worst if worst is not None else (0, 0)
 
 
 @dataclass(frozen=True)
@@ -123,7 +133,8 @@ class InferredTickSource:
     window_end: date
     status: str
     tick: Decimal | None
-    reason: str | None
+    reason: str | None  # carries sample counts: sealed in the provenance, never shown to an operator
+    category: str | None  # one of CATEGORIES, no digits: the only failure text an operator may see
     provenance: Mapping[str, Any]
     provenance_sha256: str
 
@@ -141,6 +152,9 @@ class InferredTickSource:
             and record.get("status") == self.status
             and record.get("tick") == (str(self.tick) if self.tick is not None else None)
             and record.get("reason") == self.reason
+            and record.get("category") == self.category
+            and (self.category is None) == (self.status == INFERRED)
+            and (self.category is None or self.category in CATEGORIES)
             and (self.status, self.tick in (COARSE_GRID, FINE_GRID)) in ((INFERRED, True), (UNAVAILABLE, False))
         )
         if not consistent:
@@ -158,7 +172,7 @@ class InferredTickSource:
         if self.status != INFERRED or self.tick is None:
             raise TickSizeUnavailable(
                 f"no tick can be inferred for {self.security} in {self.window_start.isoformat()}.."
-                f"{self.window_end.isoformat()}: {self.reason}"
+                f"{self.window_end.isoformat()}: {self.category}"
             )
         if not self.in_window(day):
             raise TickSizeUnavailable(f"{day} is outside the inference window of {self.security}")
@@ -191,17 +205,19 @@ def infer_tick(
         canonical_json([[obs.session.isoformat(), [_price_text(p) for p in obs.prices]] for obs in sample])
     )
     reason: str | None = None
+    category: str | None = None
     prices: list[Decimal] = []
     session_off: list[int] = []  # prices off the 0.05 grid, per session
     session_n: list[int] = []
     sessions = [obs.session for obs in sample]
     if len(set(sessions)) != len(sessions):
-        reason = "a session appears more than once in the sample"
+        reason, category = "a session appears more than once in the sample", CATEGORY_DUPLICATE
     for obs in sample:
         if reason is not None:
             break
         if not obs.prices or not all(_valid(p) for p in obs.prices):
             reason = f"missing, non-Decimal or non-positive price on {obs.session.isoformat()}"
+            category = CATEGORY_MISSING
             break
         prices.extend(obs.prices)
         session_off.append(sum(1 for p in obs.prices if not _on_grid(p, COARSE_GRID)))
@@ -209,15 +225,17 @@ def infer_tick(
     off_fine = 0 if reason else sum(1 for p in prices if not _on_grid(p, FINE_GRID))
     off_coarse = 0 if reason else sum(1 for p in prices if not _on_grid(p, COARSE_GRID))
     distinct = len(set(prices))
-    worst_block = _worst_block(session_off, session_n) if not reason else (1, 1)
+    worst_block = _worst_block(session_off, session_n) if not reason else (0, 0)
     tick: Decimal | None = None
     if reason is None and off_fine:
         reason = f"{off_fine} prices are not multiples of 0.01, so they are not as-traded prices"
+        category = CATEGORY_OFF_GRID
     elif reason is None and (len(sample) < MIN_SESSIONS or len(prices) < MIN_PRICES or distinct < MIN_DISTINCT_PRICES):
         reason = (
             f"sample too small: {len(sample)} sessions, {len(prices)} prices, {distinct} distinct prices "
             f"(need {MIN_SESSIONS}, {MIN_PRICES}, {MIN_DISTINCT_PRICES})"
         )
+        category = CATEGORY_TOO_SMALL
     elif reason is None and off_coarse and not (
         off_coarse * 100 >= MIN_OFF_GRID_PERCENT * len(prices)
         and worst_block[0] * 100 >= MIN_OFF_GRID_PERCENT * worst_block[1]
@@ -228,6 +246,7 @@ def infer_tick(
             f"{MIN_OFF_GRID_PERCENT}% overall and in every block), so the tick may have changed inside the "
             f"window or some prints are corrupted"
         )
+        category = CATEGORY_MIXED
     elif reason is None:
         tick = FINE_GRID if off_coarse else COARSE_GRID
     provenance: dict[str, Any] = {
@@ -239,6 +258,7 @@ def infer_tick(
         "status": INFERRED if tick is not None else UNAVAILABLE,
         "tick": str(tick) if tick is not None else None,
         "reason": reason,
+        "category": category,
         "sessions": len(sample),
         "prices": len(prices),
         "distinct_prices": distinct,
@@ -255,6 +275,7 @@ def infer_tick(
         status=provenance["status"],
         tick=tick,
         reason=reason,
+        category=category,
         provenance=provenance,
         provenance_sha256=sha256_hex(canonical_json(provenance)),
     )

@@ -7,6 +7,7 @@ live in ``strategy_india.ticks``.
 from __future__ import annotations
 
 import random
+import re
 from dataclasses import replace
 from datetime import date, timedelta
 from decimal import Decimal
@@ -204,6 +205,106 @@ def test_a_20_session_run_on_the_0_05_grid_inside_a_0_01_sample_refuses():
     assert result.provenance["worst_block_off_0_05"] == "0/80"
 
 
+def mixed_session(rng: random.Random, off: int, per_session: int = 4) -> tuple[Decimal, ...]:
+    """One session of ``per_session`` prices, exactly ``off`` of them on the 0.01 grid but off the 0.05 grid."""
+    prices = []
+    for n in range(per_session):
+        base = D(rng.randint(5000, 5500)) / 20  # a multiple of 0.05
+        prices.append(base + D(rng.randint(1, 4)) / 100 if n < off else base)
+    return tuple(prices)
+
+
+def shaped(off_per_session: list[int], seed: int = 5) -> list[ti.TickObservation]:
+    rng = random.Random(seed)
+    days = weekdays(date(2025, 6, 2), len(off_per_session))
+    return [ti.TickObservation(day, mixed_session(rng, off)) for day, off in zip(days, off_per_session)]
+
+
+def test_the_overall_half_off_grid_rule_refuses_when_every_block_sits_exactly_at_half():
+    # Alternating 10 clean and 10 corrupted sessions: every window of 20 sessions holds exactly 10 of each, so
+    # every block is at exactly 50%, yet the 110 sessions start and end clean, so the whole sample is 45%.
+    # Only the overall check can refuse it.
+    off = ([0] * 10 + [4] * 10) * 5 + [0] * 10
+    result = infer(shaped(off))
+    assert result.provenance["worst_block_off_0_05"] == "40/80"  # no block is below the 50% line
+    assert result.provenance["prices_off_0_05"] * 100 < 50 * result.provenance["prices"]  # 200 of 440: 45%
+    assert result.status == ti.UNAVAILABLE and result.tick is None and result.category == ti.CATEGORY_MIXED
+
+
+@pytest.mark.parametrize("sessions", [140, 147, 153])
+def test_a_tick_change_confined_to_the_final_block_refuses(sessions):
+    # A 0.01 security whose last 20 sessions sit on the 0.05 grid. Overall it is still about 70% off the grid
+    # and every window that starts earlier still holds some 0.01 sessions, so only the window that ends at the
+    # last session can refuse it, whatever the length of the sample.
+    obs = observations(sessions, grid="0.01")
+    obs[-20:] = observations(20, grid="0.05", seed=11, start=obs[-20].session)
+    result = infer(obs)
+    assert result.provenance["prices_off_0_05"] * 100 >= 50 * result.provenance["prices"]
+    assert result.provenance["worst_block_off_0_05"] == "0/80"
+    assert result.status == ti.UNAVAILABLE and result.category == ti.CATEGORY_MIXED
+
+
+def test_the_half_off_grid_boundary_is_exactly_40_of_80_per_block_and_50_percent_overall():
+    steady = [2] * 120  # 2 of 4 prices off the grid in every session: every block 40/80, overall 240/480
+    at_half = infer(shaped(steady))
+    assert at_half.provenance["worst_block_off_0_05"] == "40/80" and at_half.provenance["prices_off_0_05"] == 240
+    assert at_half.status == ti.INFERRED and at_half.tick == D("0.01")
+    # One session short by one print, another long by one (far away): overall still 240/480, one block 39/80.
+    short = list(steady)
+    short[5], short[100] = 1, 3
+    refused = infer(shaped(short))
+    assert refused.provenance["worst_block_off_0_05"] == "39/80" and refused.provenance["prices_off_0_05"] == 240
+    assert refused.status == ti.UNAVAILABLE and refused.category == ti.CATEGORY_MIXED
+    # And one print short overall (239/480, no block below 40/80 elsewhere): refuses on the overall rule.
+    overall = list(steady)
+    overall[5] = 1
+    assert infer(shaped(overall)).status == ti.UNAVAILABLE
+
+
+def test_a_sample_with_every_price_off_the_grid_seals_its_real_worst_block():
+    result = infer(shaped([4] * 120))
+    assert result.tick == D("0.01")
+    assert result.provenance["worst_block_off_0_05"] == "80/80"  # not a placeholder 1/1
+    assert infer(observations(140, grid="0.05")).provenance["worst_block_off_0_05"] == "0/80"
+
+
+def test_the_method_name_is_pinned():
+    assert ti.METHOD == "price-grid-inference/2"
+    assert infer(observations(grid="0.01")).provenance["method"] == "price-grid-inference/2"
+
+
+def _category_samples() -> dict[str, list[ti.TickObservation]]:
+    off_grid = with_price(observations(grid="0.05"), 70, D("250.005"))
+    missing = with_price(observations(grid="0.05"), 70, None)
+    mixed = with_price(observations(grid="0.05"), 70, D("250.03"))
+    duplicate = observations(grid="0.05") + [observations(grid="0.05")[3]]
+    return {ti.CATEGORY_TOO_SMALL: observations(40, grid="0.05"), ti.CATEGORY_MIXED: mixed,
+            ti.CATEGORY_OFF_GRID: off_grid, ti.CATEGORY_MISSING: missing, ti.CATEGORY_DUPLICATE: duplicate}
+
+
+@pytest.mark.parametrize("category", ti.CATEGORIES)
+def test_every_refusal_category_reaches_the_operator_with_no_digit_from_the_sample(category):
+    sample = _category_samples()[category]
+    result = infer(sample)
+    assert result.status == ti.UNAVAILABLE and result.category == category
+    assert result.provenance["category"] == category
+    assert result.provenance["reason"] == result.reason  # the detailed text (with counts) stays sealed
+    tables = tables_with(sample)
+    shown = [result.category, tables.uncovered_reason(NON_GOLD_ETF, date(2025, 9, 15), security=ETF)]
+    with pytest.raises(TickSizeUnavailable) as err:
+        etf_tick(tables, date(2025, 9, 15))
+    shown.append(str(err.value))
+    assert shown[1] == category and category in shown[2]
+    sample_dates = [o.session.isoformat() for o in sample]
+    for text in shown:
+        # Constants are not sample data: the category names (the 0.01 grid), the security and the window dates.
+        residue = text
+        for constant in (*ti.CATEGORIES, ETF, *(d.isoformat() for d in WINDOW)):
+            residue = residue.replace(constant, "")
+        assert not re.search(r"\d", residue), text
+        assert not any(d in text for d in sample_dates), text
+
+
 def test_rows_outside_the_window_are_not_inputs():
     inside = observations(140, grid="0.05", start=date(2025, 6, 2))
     junk = [ti.TickObservation(date(2025, 4, 14), (D("1.003"),) * 4), ti.TickObservation(date(2026, 9, 7), (None,) * 4)]
@@ -333,7 +434,9 @@ def test_the_equity_class_never_uses_an_inferred_source():
 def test_only_series_eq_rows_feed_the_inference_and_only_eq_resolves():
     obs = observations(140, grid="0.05")
     tables = load_default_tables(rows=rows_for(ETF, obs, series="BE"), benchmark_isins=(ETF,))
-    assert "0 sessions" in tables.uncovered_reason(NON_GOLD_ETF, date(2025, 9, 15), security=ETF)
+    assert tables.uncovered_reason(NON_GOLD_ETF, date(2025, 9, 15), security=ETF) == ti.CATEGORY_TOO_SMALL
+    (record,) = tables.inference_provenance()
+    assert record["sessions"] == 0 and "0 sessions" in record["reason"]  # the counts live in the sealed record
     ok = tables_with(obs)
     assert not ok.covers(NON_GOLD_ETF, date(2025, 9, 15), series="BE", security=ETF)
     with pytest.raises(TickSizeUnavailable):

@@ -423,7 +423,8 @@ def preflight_holdout(inputs: StudyInputs, prep: Prepared, criteria: Mapping[str
     ETF's first and last raw close (a validity check, not an outcome), and, for the A5 ETF tick inference, the
     benchmark ETF's open, high, low and close on every session of the uncovered window, holdout sessions
     included (done when the tick tables are built, before this runs). Only the inferred tick, the method and
-    the provenance hash reach the operator output, never a count or a price from those sessions. The
+    the provenance hash reach the operator output, plus, when the inference refuses, a failure category with no digit
+    in it; never a count, a price or a date from those sessions (the counts stay in the sealed provenance). The
     registry, gate, D-19 criteria hash and D-20 event hash were already checked against the registration by the caller.
     """
     try:
@@ -449,9 +450,10 @@ def preflight_holdout(inputs: StudyInputs, prep: Prepared, criteria: Mapping[str
         gaps = [day for day in days if not inputs.ticks.covers(instrument_class, day, series="EQ", security=security)]
         if gaps:
             why = inputs.ticks.uncovered_reason(instrument_class, gaps[0], security=security)
+            if why:  # a category only: the count and first date of the gap come from the same holdout sample
+                raise unrunnable(f"the {instrument_class} tick table does not cover the holdout (inferred tick unavailable: {why})")
             raise unrunnable(
                 f"the {instrument_class} tick table does not cover {len(gaps)} holdout sessions, first {gaps[0].isoformat()}"
-                + (f" (inferred tick unavailable: {why})" if why else "")
             )
     # The registered ETF benchmark must exist on EVERY holdout session, or it would be silently truncated or fail later.
     etf_rows = {row.trade_date: row for row in inputs.rows if row.anchor_isin == etf_anchor}

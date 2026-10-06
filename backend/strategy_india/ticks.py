@@ -133,11 +133,12 @@ class TickTables:
         return source is not None and source.covers(day)
 
     def uncovered_reason(self, instrument_class: str, day: date, *, security: str | None) -> str | None:
-        """Why an inferred source exists for this security and date but cannot answer, if so."""
+        """The failure CATEGORY (no digits, no date, no price) of an inferred source that exists for this
+        security and date but cannot answer, if so. The counts behind it stay in the sealed provenance."""
         if instrument_class != NON_GOLD_ETF or security is None:
             return None
         source = self.inferred_for(security, day)
-        return None if source is None or source.covers(day) else source.reason
+        return None if source is None or source.covers(day) else source.category
 
     def table_for(self, instrument_class: str) -> TickTable:
         if instrument_class not in SUPPORTED_CLASSES:

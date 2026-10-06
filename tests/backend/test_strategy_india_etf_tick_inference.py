@@ -6,6 +6,7 @@ Synthetic study inputs whose holdout sits inside the window the committed ETF sc
 from __future__ import annotations
 
 import json
+import re
 from datetime import date
 
 import pytest
@@ -54,6 +55,12 @@ def test_a_thin_sample_refuses_without_spending_and_names_the_reason(tmp_path):
         study.run_holdout(inputs, expected_head=head)
     assert err.value.code == "holdout_unrunnable" and "NOT spent" in str(err.value)
     assert inputs.registry.holdout_events() == () and inputs.registry.head_hash() == head
+    # D-12: the operator sees the failure category only, with no count, price or date from the holdout sample.
+    message = str(err.value)
+    assert "sample too small" in message
+    assert not re.search(r"\d", message), message
+    (record,) = inputs.ticks.inference_provenance()
+    assert record["sessions"] > 0 and re.search(r"\d", record["reason"])  # the counts stay in the sealed record
 
 
 def test_only_the_registered_benchmark_may_use_an_inferred_tick(tmp_path):
