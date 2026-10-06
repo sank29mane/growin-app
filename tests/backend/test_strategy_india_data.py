@@ -160,6 +160,21 @@ def test_published_dataset_directory_loads_through_verify_dataset(tmp_path):
         load_dataset_rows(tmp_path / "exports" / digest, expected_dataset_sha256=sha("other"))
 
 
+def test_load_dataset_rows_goes_through_the_public_59_reader_and_keeps_the_hash(tmp_path):
+    from pilot_data.dataset import read_dataset_rows
+
+    from strategy_india.data import dataset_digest, events_from_manifest
+
+    sessions = weekday_sessions(SESSION_START, 12)
+    rows = make_rows(sessions, default_names(2))
+    path = _published(tmp_path, rows, {})
+    manifest, loaded = load_dataset_rows(path, expected_dataset_sha256=path.name)
+    assert loaded == read_dataset_rows(path)  # same rows, dtypes and order as the public 59 reader
+    assert [(r.anchor_isin, r.trade_date) for r in loaded] == sorted((r.anchor_isin, r.trade_date) for r in rows)
+    # the dataset hash is unchanged: the loaded rows still reproduce the one 59 published
+    assert dataset_digest(loaded, events_from_manifest(manifest)) == manifest.dataset_sha256 == path.name
+
+
 def _published(tmp_path, rows, events):
     from pilot_data.core import standard_caveats as caveats
     from pilot_data.dataset import DatasetManifest, DividendAmountUnknownEvent, _export, dataset_hash

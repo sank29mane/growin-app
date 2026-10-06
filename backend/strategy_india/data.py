@@ -452,9 +452,9 @@ def events_from_manifest(manifest: Any) -> DividendEvents:
 
 def load_dataset_rows(path: Path, *, expected_dataset_sha256: str | None = None) -> tuple[Any, list[Any]]:
     """Verify a published 59 dataset directory and read its rows (read-only)."""
-    from pilot_data import dataset as _dataset
+    from pilot_data.dataset import read_dataset_rows, verify_dataset
 
-    manifest = _dataset.verify_dataset(Path(path), workspace="india")
+    manifest = verify_dataset(Path(path), workspace="india")
     if expected_dataset_sha256 is not None and manifest.dataset_sha256 != expected_dataset_sha256:
         raise DataError("dataset_sha256 differs from the expected value")
-    return manifest, _dataset._read_parquet(Path(path) / "rows.parquet")
+    return manifest, read_dataset_rows(Path(path))
