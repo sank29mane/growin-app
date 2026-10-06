@@ -13,6 +13,7 @@ with synthetic inputs.
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -27,9 +28,9 @@ from costs.schedule import PricingBasis, ScheduleSet
 from private_config.schemas import IndiaLimits
 
 from .benchmark import EtfChoice, EtfResult, TriSeries, TriUnavailable, choose_etf, etf_buy_and_hold, load_tri
-from .data import BandSource, DatasetView, DividendEvents, EligibilitySource
-from .engine import RunContext, run_holdout_segment, run_walk_forward
-from .errors import RegistryError, RegistryMismatch, StrategyIndiaError
+from .data import BandSource, DatasetView, DividendEvents, EligibilitySource, check_events_against_rows
+from .engine import RunContext, fit_fold_components, run_holdout_segment, run_walk_forward
+from .errors import HoldoutInvalid, HoldoutSpent, RegistryError, RegistryMismatch, StrategyIndiaError
 from .folds import FoldRules
 from .gate import GateResult, load_coverage_report
 from .holdout import (
@@ -38,6 +39,7 @@ from .holdout import (
     check_gate_scenario,
     evaluate_verdict,
     holdout_digest,
+    parse_criteria,
     holdout_range_for,
     open_holdout,
 )
@@ -45,6 +47,7 @@ from .hurdle import hurdle_map_sha256
 from .params import StrategyParams, params_sha256, parse_params
 from .registry import Entry, LIVE_CHECKED_FIELDS, Registry, check_live_inputs, criteria_hash
 from .report import Unit, StudyReport, build_report, holdout_evidence, write_report
+from .signals import MODE_BASE
 from .ticks import EQUITY, NON_GOLD_ETF, TickTables
 
 TRI_ID = "nifty500_tri"
@@ -89,6 +92,7 @@ class Prepared:
 
 def prepare(inputs: StudyInputs) -> Prepared:
     params = parse_params(inputs.params_raw)
+    check_events_against_rows(inputs.events, inputs.rows)
     sessions = tuple(sorted({getattr(row, "trade_date", None) or row.session for row in inputs.rows}))
     holdout = holdout_range_for(sessions, inputs.holdout_sessions)
     view = DatasetView.from_rows(inputs.rows, holdout=holdout)
@@ -174,7 +178,7 @@ def register(inputs: StudyInputs, *, hypothesis: str, expected_head: str | None 
     (a removed holdout-open event) cannot be extended.
     """
     prep = prepare(inputs)
-    criteria = required_criteria(inputs)
+    criteria = parse_criteria(required_criteria(inputs))
     reg = inputs.registry
     if reg.path.exists() and reg.path.stat().st_size > 0:
         reg.entries(expected_head=require_head(expected_head))
@@ -188,7 +192,9 @@ def register(inputs: StudyInputs, *, hypothesis: str, expected_head: str | None 
     spent = [e.entry_hash for e in reg.holdout_events()] if reg.path.exists() else []
     record = {name: live[name] for name in LIVE_CHECKED_FIELDS}
     record.update(hypothesis=hypothesis, holdout_criteria=criteria, spent_holdout_event_hashes=spent)
-    return reg.register(record)
+    entry = reg.register(record)
+    write_head_file(reg)
+    return entry
 
 
 def _gate_for_registration(inputs: StudyInputs, prep: Prepared, entry: Entry, window: tuple[date, date]) -> GateResult:
@@ -216,6 +222,81 @@ def _etf(view: DatasetView, anchor: str, start: date, end: date, ctx: RunContext
 
 def _input_hashes(entry: Entry) -> dict[str, str]:
     return {name: entry.payload[name] for name in entry.payload if name.endswith("_sha256")}
+
+
+SPENT_LEDGER_NAME = "spent_holdouts.jsonl"  # append-only, private, next to the registry
+HEAD_LATEST_NAME = "registry_head_latest.txt"  # written by the tool after every registry append (0600)
+
+
+def _private_append(path: Path, line: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        data = memoryview((line + "\n").encode("utf-8"))
+        while data:
+            data = data[os.write(fd, data):]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def spent_ledger_path(registry: Registry) -> Path:
+    return registry.path.with_name(SPENT_LEDGER_NAME)
+
+
+def head_file_path(registry: Registry) -> Path:
+    return registry.path.with_name(HEAD_LATEST_NAME)
+
+
+def write_head_file(registry: Registry) -> str:
+    """Record the current head next to the registry so a stale pin is noticed (0600)."""
+    head = registry.head_hash()
+    path = head_file_path(registry)
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(head + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+    return head
+
+
+def check_pin_fresh(registry: Registry, pin: str) -> None:
+    """Refuse a pin that is not the head the tool last wrote (a pre-open pin replayed after the event was deleted)."""
+    path = head_file_path(registry)
+    if path.exists() and path.read_text(encoding="utf-8").strip() != pin:
+        raise StrategyIndiaError(
+            "the pinned registry head is stale: it is not the head this tool last recorded", code="registry_head_stale"
+        )
+
+
+def _ledger_ranges(registry: Registry) -> list[HoldoutRange]:
+    path = spent_ledger_path(registry)
+    if not path.exists():
+        return []
+    out: list[HoldoutRange] = []
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        try:
+            out.append(HoldoutRange.from_payload(json.loads(line)["holdout_range"]))
+        except (ValueError, KeyError, TypeError) as exc:
+            raise StrategyIndiaError(f"spent-holdouts ledger line {number} is malformed", code="ledger_invalid") from exc
+    return out
+
+
+def check_ledger_clear(registry: Registry, holdout: HoldoutRange) -> None:
+    """Refuse when the private ledger lists a spent holdout overlapping this range, whatever the registry says."""
+    for spent in _ledger_ranges(registry):
+        if spent.overlaps(holdout):
+            raise HoldoutSpent("the private spent-holdouts ledger lists this holdout as spent")
+
+
+def record_spent(registry: Registry, entry: Entry, holdout: HoldoutRange, event_hash: str) -> None:
+    _private_append(
+        spent_ledger_path(registry),
+        json.dumps({"holdout_range": holdout.as_payload(), "registration_entry_hash": entry.entry_hash,
+                    "holdout_open_event_hash": event_hash}, sort_keys=True),
+    )
 
 
 def _registered(inputs: StudyInputs, registration_hash: str | None, what: str) -> Entry:
@@ -259,12 +340,20 @@ def unrunnable(message: str) -> StrategyIndiaError:
     return StrategyIndiaError(f"{message}; the holdout is NOT spent", code="holdout_unrunnable")
 
 
-def preflight_holdout(inputs: StudyInputs, prep: Prepared, criteria: Mapping[str, Any]) -> None:
+def preflight_holdout(inputs: StudyInputs, prep: Prepared, criteria: Mapping[str, Any], *, etf_anchor: str,
+                      dev_ctx: RunContext) -> None:
     """Everything that can be known before the holdout is opened. Any failure refuses WITHOUT spending it.
 
-    Uses session dates and table coverage only; no holdout price is read. The registry, gate, D-19 criteria
-    and D-20 event hashes were already checked against the registration by the caller.
+    The contract is that nothing that can be checked in advance may fail after the open. Uses session dates,
+    table coverage, stored-input availability and development data only; the only holdout prices read are the
+    ETF's first and last raw close (a validity check, not an outcome). The registry, gate, D-19 criteria hash
+    and D-20 event hash were already checked against the registration by the caller.
     """
+    try:
+        parse_criteria(criteria)  # every policy value must be one the verdict logic honours
+    except StrategyIndiaError as exc:
+        raise unrunnable(f"the sealed criteria cannot be honoured ({exc})") from exc
+    check_ledger_clear(inputs.registry, prep.holdout)
     gate_scenario = inputs.scenarios.gate()
     check_gate_scenario(criteria, k_ticks=gate_scenario.k_ticks, phase62_gate=gate_scenario.phase62_gate)
     sealed_factor(inputs, criteria)
@@ -275,8 +364,8 @@ def preflight_holdout(inputs: StudyInputs, prep: Prepared, criteria: Mapping[str
     if dataset_hash(sorted(inputs.rows, key=lambda r: (r.anchor_isin, r.trade_date))) != inputs.dataset_sha256:
         raise unrunnable("the dataset rows do not reproduce dataset_sha256")
     days = [day for day in prep.sessions if prep.holdout.contains(day)]
-    if not days:
-        raise unrunnable("the holdout range holds no sessions")
+    if len(days) < 2:
+        raise unrunnable("the holdout range needs at least two sessions")
     for instrument_class in (EQUITY, NON_GOLD_ETF):
         if instrument_class not in inputs.ticks.classes():
             raise unrunnable(f"no tick table is registered for instrument class {instrument_class}")
@@ -285,6 +374,29 @@ def preflight_holdout(inputs: StudyInputs, prep: Prepared, criteria: Mapping[str
             raise unrunnable(
                 f"the {instrument_class} tick table does not cover {len(gaps)} holdout sessions, first {gaps[0].isoformat()}"
             )
+    # The registered ETF benchmark must exist on EVERY holdout session, or it would be silently truncated or fail later.
+    etf_rows = {row.trade_date: row for row in inputs.rows if row.anchor_isin == etf_anchor}
+    absent = [day for day in days if day not in etf_rows]
+    if absent:
+        raise unrunnable(f"the benchmark ETF has no bar on {len(absent)} of {len(days)} holdout sessions, first {absent[0].isoformat()}")
+    first, last = etf_rows[days[0]], etf_rows[days[-1]]
+    if first.raw_close <= 0 or last.raw_close <= 0:
+        raise unrunnable("the benchmark ETF has a non-positive raw close on its first or last holdout session")
+    if inputs.limits.capital_cap // first.raw_close < 1:
+        raise unrunnable("the capital cap cannot buy one benchmark ETF share at the first holdout session")
+    # Eligibility inputs must exist for every holdout decision date, where the source can say so.
+    available = getattr(inputs.eligibility, "inputs_available", None)
+    if available is not None:
+        for day in days:
+            reason = available(day)
+            if reason is not None:
+                raise unrunnable(f"eligibility inputs are missing: {reason}")
+    # The regime filter is fit on development rows only, so a trial fit can run now.
+    try:
+        features = dev_ctx.table(MODE_BASE).market_features()
+        fit_fold_components(dev_ctx, features, cutoff=prep.view.visible_end, observations=None)
+    except (StrategyIndiaError, ValueError) as exc:
+        raise unrunnable(f"the regime filter cannot be fit on development data ({type(exc).__name__})") from exc
 
 
 @dataclass(frozen=True)
@@ -307,29 +419,42 @@ def run_holdout(inputs: StudyInputs, *, expected_head: str, logged_at: str | Non
     etf_anchor = entry.payload["benchmark_ids"][0]
     live = live_inputs(inputs, prep, gate, etf_anchor, criteria)
     entry = require_registration(reg, live, expected_head=expected_head, entry_hash=entry.entry_hash)
-    preflight_holdout(inputs, prep, criteria)  # nothing below this line can be refused for a known reason
+    dev_ctx = _context(inputs, prep, gate, prep.view, criteria)
+    preflight_holdout(inputs, prep, criteria, etf_anchor=etf_anchor, dev_ctx=dev_ctx)  # nothing after this can be known in advance
     gate_scenario = inputs.scenarios.gate()
     grant = open_holdout(reg, criteria=criteria, expected_head=expected_head, registration_hash=entry.entry_hash,
                          logged_at=logged_at)
-    opened = prep.view.open(grant)
-    ctx = _context(inputs, prep, gate, opened, criteria)
-    run = run_holdout_segment(ctx, grant.holdout)
-    etf, why = _etf(opened, etf_anchor, grant.holdout.start, grant.holdout.end, ctx, inputs.limits.capital_cap)
-    base = holdout_evidence(run.scenarios[gate_scenario.scenario_id], etf)
-    sens = holdout_evidence(run.sensitivity, etf) if run.sensitivity is not None else None
-    verdict = evaluate_verdict(criteria, base, sens)
-    dev_start, dev_end = _dev_window(prep)
-    etf_choice = choose_etf(prep.view, prep.params.benchmark, start=dev_start, end=dev_end)
-    unit = Unit("holdout", grant.holdout.start, grant.holdout.end, dev_end, run.regime, run.slope, False, 0, 0,
-                run.scenarios, run.sensitivity, etf, why)
-    report = build_report(
-        kind="holdout", registration_entry_hash=entry.entry_hash, input_hashes=_input_hashes(entry), units=[unit],
-        unavailable=gate.unavailable, run_window=(grant.holdout.start, grant.holdout.end), etf_choice=etf_choice,
-        tri=_tri(inputs), params=prep.params, capital=inputs.limits.capital_cap,
-        schedule=inputs.schedules.get(inputs.schedule_version), trials=entry.payload["parameter_budget_n"],
-        dividend_events=inputs.events, sensitivity_factor=ctx.sensitivity_factor, verdict=verdict,
-        holdout_evidence_={"evidence": base, "sensitivity_evidence": sens},
-    )
+    record_spent(reg, entry, grant.holdout, grant.event_hash)
+    write_head_file(reg)
+    try:
+        opened = prep.view.open(grant)
+        ctx = _context(inputs, prep, gate, opened, criteria)
+        run = run_holdout_segment(ctx, grant.holdout)
+        etf, why = _etf(opened, etf_anchor, grant.holdout.start, grant.holdout.end, ctx, inputs.limits.capital_cap)
+        base = holdout_evidence(run.scenarios[gate_scenario.scenario_id], etf)
+        sens = holdout_evidence(run.sensitivity, etf) if run.sensitivity is not None else None
+        verdict = evaluate_verdict(criteria, base, sens)
+        dev_start, dev_end = _dev_window(prep)
+        etf_choice = choose_etf(prep.view, prep.params.benchmark, start=dev_start, end=dev_end)
+        unit = Unit("holdout", grant.holdout.start, grant.holdout.end, dev_end, run.regime, run.slope, False, 0, 0,
+                    run.scenarios, run.sensitivity, etf, why)
+        report = build_report(
+            kind="holdout", registration_entry_hash=entry.entry_hash, input_hashes=_input_hashes(entry), units=[unit],
+            unavailable=gate.unavailable, run_window=(grant.holdout.start, grant.holdout.end), etf_choice=etf_choice,
+            tri=_tri(inputs), params=prep.params, capital=inputs.limits.capital_cap,
+            schedule=inputs.schedules.get(inputs.schedule_version), trials=entry.payload["parameter_budget_n"],
+            dividend_events=inputs.events, sensitivity_factor=ctx.sensitivity_factor, verdict=verdict,
+            holdout_evidence_={"evidence": base, "sensitivity_evidence": sens},
+        )
+    except Exception as exc:  # the holdout is already spent: record a typed INVALID verdict, never a silent spend
+        reg.append_holdout_invalid({
+            "holdout_open_event_hash": grant.event_hash, "registration_entry_hash": entry.entry_hash,
+            "error_type": type(exc).__name__, "error_code": getattr(exc, "code", "unexpected_error"),
+        })
+        write_head_file(reg)
+        raise HoldoutInvalid(
+            f"the holdout was opened and then failed ({type(exc).__name__}); INVALID was recorded in the registry"
+        ) from exc
     return HoldoutOutcome(report, verdict, grant.event_hash)
 
 
@@ -373,8 +498,32 @@ def resolve_registry_head(config: Mapping[str, Any], holdout_refs: Sequence[Any]
     return pin
 
 
-def build_inputs(config: Mapping[str, Any]) -> tuple[StudyInputs, str | None]:
+def expected_dataset_sha256(config: Mapping[str, Any], *, bind_to_registration: bool) -> str | None:
+    """The dataset hash the load must reproduce: the registered one for a run or a holdout, optionally an explicit
+    ``dataset_sha256`` from the config (it must then agree). A first registration has nothing registered yet."""
+    explicit = config.get("dataset_sha256")
+    registered: str | None = None
+    registry = Registry(Path(config["registry"]))
+    if bind_to_registration and registry.path.exists() and registry.registrations():
+        registered = registry.registration().payload["dataset_sha256"]
+    if explicit is not None and registered is not None and explicit != registered:
+        raise StrategyIndiaError("the configured dataset_sha256 differs from the registered one", code="dataset_mismatch")
+    return registered if registered is not None else explicit
+
+
+def load_bound_dataset(config: Mapping[str, Any], *, bind_to_registration: bool) -> tuple[Any, list[Any]]:
+    """Load the 59 dataset directory, refusing before any evaluation if it is not the registered dataset."""
+    from .data import load_dataset_rows
+
+    return load_dataset_rows(Path(config["dataset_dir"]),
+                             expected_dataset_sha256=expected_dataset_sha256(config, bind_to_registration=bind_to_registration))
+
+
+def build_inputs(config: Mapping[str, Any], *, bind_to_registration: bool = True) -> tuple[StudyInputs, str | None]:
     """Real wiring: 58 private config, the verified 59 dataset and a read-only 59 store.
+
+    ``bind_to_registration`` (research, preflight and holdout) makes the dataset load refuse any dataset whose hash
+    differs from the registered one, so an edited and re-hashed copy in a new directory cannot load.
 
     Returns the inputs and the registry head pin if one can be resolved (None only when none exists).
     """
@@ -386,7 +535,7 @@ def build_inputs(config: Mapping[str, Any]) -> tuple[StudyInputs, str | None]:
     from pilot_data.universe import UniversePolicy
     from private_config.loader import load_workspace_config
 
-    from .data import UniverseEligibility, events_from_manifest, load_dataset_rows
+    from .data import UniverseEligibility, events_from_manifest
     from .holdout import load_criteria_file
     from .ticks import load_default_tables
 
@@ -395,7 +544,7 @@ def build_inputs(config: Mapping[str, Any]) -> tuple[StudyInputs, str | None]:
     workspace_dir = Path(config["private_dir"]) / "india"
     ref = config["criteria"]
     criteria = load_criteria_file(workspace_dir, ref.get("path", ""), ref.get("sha256"))
-    manifest, rows = load_dataset_rows(Path(config["dataset_dir"]))
+    manifest, rows = load_bound_dataset(config, bind_to_registration=bind_to_registration)
     store = PilotDataStore(Path(config["store_root"]), workspace="india", read_only=True)
     targets = latest_target_universe(store, workspace="india")
     if targets is None:
@@ -438,7 +587,9 @@ def _need_pin(pin: str | None) -> str:
 
 
 def cli_register(config: Mapping[str, Any]) -> dict[str, Any]:
-    inputs, pin = build_inputs(config)
+    inputs, pin = build_inputs(config, bind_to_registration=False)
+    if pin is not None:
+        check_pin_fresh(inputs.registry, pin)
     entry = register(inputs, hypothesis=config.get("hypothesis", "cross-sectional momentum with a swing exit"),
                      expected_head=pin)
     return {"registered": entry.entry_hash, "registry_head": inputs.registry.head_hash(),
@@ -447,6 +598,7 @@ def cli_register(config: Mapping[str, Any]) -> dict[str, Any]:
 
 def cli_run(config: Mapping[str, Any]) -> dict[str, Any]:
     inputs, pin = build_inputs(config)
+    check_pin_fresh(inputs.registry, _need_pin(pin))
     report = run_research(inputs, expected_head=_need_pin(pin))
     path = write_report(Path(config["report_root"]), report)
     return {"report": str(path), "report_sha256": report.report_sha256, "registry_head": inputs.registry.head_hash()}
@@ -454,6 +606,7 @@ def cli_run(config: Mapping[str, Any]) -> dict[str, Any]:
 
 def cli_holdout(config: Mapping[str, Any], *, logged_at: str) -> dict[str, Any]:
     inputs, pin = build_inputs(config)
+    check_pin_fresh(inputs.registry, _need_pin(pin))
     outcome = run_holdout(inputs, expected_head=_need_pin(pin), logged_at=logged_at)
     path = write_report(Path(config["report_root"]), outcome.report)
     return {"report": str(path), "verdict": outcome.verdict.verdict, "holdout_event": outcome.event_hash,

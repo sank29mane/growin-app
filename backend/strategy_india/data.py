@@ -25,6 +25,7 @@ from typing import Any, Protocol
 
 from costs.core import LookaheadError
 from costs.fills import BandUnavailable, PriceBand, SessionBar, TickSize
+from pilot_data import surveillance as _surveillance
 from pilot_data import universe as _universe
 from pilot_data.price_bands import BandObservation
 
@@ -371,6 +372,15 @@ class UniverseEligibility:
         self._allow = allow_missing_surveillance_before
         self._status = status_source if status_source is not None else _universe.NoTradingStatusSource()
 
+    def inputs_available(self, day: date) -> str | None:
+        """Why ``snapshot(day)`` would fail for a missing input, or None. Looks for stored snapshots only, not prices."""
+        needs_surveillance = not (self._mode == "research" and self._allow is not None and day < self._allow)
+        if needs_surveillance:
+            for kind in ("asm", "gsm"):
+                if _surveillance.snapshot_for(self._store, kind, day) is None:
+                    return f"no {kind.upper()} surveillance snapshot is effective exactly {day.isoformat()}"
+        return None
+
     def snapshot(self, as_of: date) -> EligibilitySnapshot:
         result = _universe.evaluate_universe(
             self._store, as_of=as_of, targets=self._targets, policy=self.policy, mode=self._mode,
@@ -384,6 +394,44 @@ class UniverseEligibility:
             smallcap={decision.anchor_isin: decision.smallcap_class for decision in result.decisions},
             result_sha256=result.result_sha256,
         )
+
+
+def check_events_against_rows(events: DividendEvents, rows: Iterable[Any]) -> None:
+    """D-20 cross-check of the event list against the row tags, in both directions (defence in depth: 59 ``verify_dataset``
+    does the same for a published dataset, but a caller can build ``StudyInputs`` directly).
+
+    * a name with any ``dividend_amount_unknown`` row must have a listed event, and a listed name needs a tagged row;
+    * a row flagged as an ex-date must sit on a listed ex-date of its anchor;
+    * a listed ex-date that has a row must have that row flagged as the ex-date.
+    """
+    tagged: set[str] = set()
+    flagged: set[tuple[str, date]] = set()
+    present: set[tuple[str, date]] = set()
+    for row in rows:
+        anchor, day = row.anchor_isin, getattr(row, "trade_date", None) or row.session
+        present.add((anchor, day))
+        if getattr(row, "dividend_amount_unknown", False):
+            tagged.add(anchor)
+        if getattr(row, "dividend_amount_unknown_ex_date", False):
+            flagged.add((anchor, day))
+    listed = {(e.anchor_isin, e.ex_date) for e in events.all()}
+    listed_anchors = {anchor for anchor, _ in listed}
+
+    def fail(message: str) -> DataError:
+        return DataError(message, code="events_mismatch")
+
+    if tagged - listed_anchors:
+        raise fail(f"rows are tagged dividend_amount_unknown for {sorted(tagged - listed_anchors)[0]} but no event is listed")
+    if listed_anchors - tagged:
+        raise fail(f"events are listed for {sorted(listed_anchors - tagged)[0]} but no row is tagged")
+    unlisted_flags = flagged - listed
+    if unlisted_flags:
+        anchor, day = sorted(unlisted_flags)[0]
+        raise fail(f"row {anchor} {day.isoformat()} is flagged as an amount-unknown ex-date that no event lists")
+    unflagged = {key for key in listed if key in present and key not in flagged}
+    if unflagged:
+        anchor, day = sorted(unflagged)[0]
+        raise fail(f"event {anchor} {day.isoformat()} has a bar on its ex-date that is not flagged")
 
 
 def events_from_manifest(manifest: Any) -> DividendEvents:

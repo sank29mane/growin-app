@@ -19,6 +19,9 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
+from costs.core import CostModelError
+from pilot_data.core import PilotDataError
+
 from .errors import GateRefused, StrategyIndiaError
 from .gate import load_coverage_report
 
@@ -80,6 +83,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         _print({"refused": exc.code, "error": str(exc)})
         return exc.exit_code
     except StrategyIndiaError as exc:
+        _print({"refused": exc.code, "error": str(exc)})
+        return 2
+    except CostModelError as exc:  # a 60 input error (for example a non-positive price) is a typed refusal too
+        _print({"refused": "cost_model_error", "error": str(exc)})
+        return 2
+    except PilotDataError as exc:
         _print({"refused": exc.code, "error": str(exc)})
         return 2
 

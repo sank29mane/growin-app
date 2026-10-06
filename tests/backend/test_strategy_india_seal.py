@@ -119,19 +119,17 @@ def test_the_event_list_hash_is_canonical_sorted_and_defined_for_empty():
 @pytest.mark.parametrize(
     "changed",
     [
-        DividendEvents(),  # emptied after a non-empty list was sealed
-        DividendEvents([DividendUnknownEvent(ANCHOR, "EV1", SESSIONS[251])]),  # a moved ex-date
-        DividendEvents([DividendUnknownEvent(ANCHOR, "EV9", SESSIONS[250])]),  # a different event id
-        DividendEvents([EV, DividendUnknownEvent("INE000A01001", "EV2", SESSIONS[260])]),  # an extra event
+        DividendEvents([DividendUnknownEvent(ANCHOR, "EV9", SESSIONS[250])]),  # a different event id, same ex-date
+        DividendEvents([EV, DividendUnknownEvent(ANCHOR, "EV1b", SESSIONS[250])]),  # a second id on the same ex-date
     ],
-    ids=["empty", "moved", "renamed", "extra"],
+    ids=["renamed", "extra_id"],
 )
-def test_a_changed_or_empty_event_list_is_refused_for_research_and_the_holdout(tmp_path, changed):
+def test_a_changed_event_list_that_matches_the_row_tags_is_refused_by_the_seal(tmp_path, changed):
     inputs = study_inputs(tmp_path, events=DividendEvents([EV]))
     study.register(inputs, hypothesis="h")
     head = inputs.registry.head_hash()
     study.run_research(inputs, expected_head=head)  # the sealed list runs
-    inputs.events = changed
+    inputs.events = changed  # consistent with the rows, so only the sealed hash can catch it
     with pytest.raises(RegistryMismatch) as err:
         study.run_research(inputs, expected_head=head)
     assert err.value.field == "dividend_events_sha256"
@@ -140,15 +138,94 @@ def test_a_changed_or_empty_event_list_is_refused_for_research_and_the_holdout(t
     assert inputs.registry.holdout_events() == ()
 
 
+@pytest.mark.parametrize(
+    "changed",
+    [
+        DividendEvents(),  # emptied after a non-empty list was sealed: tagged rows now have no event
+        DividendEvents([DividendUnknownEvent(ANCHOR, "EV1", SESSIONS[251])]),  # a moved ex-date: the flagged row is unlisted
+        DividendEvents([EV, DividendUnknownEvent("INE000A01001", "EV2", SESSIONS[260])]),  # an event for an untagged name
+    ],
+    ids=["empty", "moved", "extra_name"],
+)
+def test_a_changed_or_empty_event_list_that_contradicts_the_row_tags_is_refused_before_anything_runs(tmp_path, changed):
+    inputs = study_inputs(tmp_path, events=DividendEvents([EV]))
+    study.register(inputs, hypothesis="h")
+    head = inputs.registry.head_hash()
+    inputs.events = changed
+    for call in (lambda: study.run_research(inputs, expected_head=head), lambda: study.run_holdout(inputs, expected_head=head)):
+        with pytest.raises(DataError) as err:
+            call()
+        assert err.value.code == "events_mismatch"
+    assert inputs.registry.holdout_events() == ()
+
+
 def test_an_empty_list_is_allowed_only_when_it_was_sealed_empty(tmp_path):
     inputs = study_inputs(tmp_path)
     study.register(inputs, hypothesis="h")
     head = inputs.registry.head_hash()
     study.run_research(inputs, expected_head=head)
-    inputs.events = DividendEvents([EV])
-    with pytest.raises(RegistryMismatch) as err:
+    inputs.events = DividendEvents([EV])  # rows carry no tags, so the cross-check refuses first
+    with pytest.raises(DataError):
         study.run_research(inputs, expected_head=head)
-    assert err.value.field == "dividend_events_sha256"
+    sealed = study_inputs(tmp_path / "sealed", events=DividendEvents([EV]))
+    study.register(sealed, hypothesis="h")
+    sealed_head = sealed.registry.head_hash()
+    sealed.events = DividendEvents()
+    sealed.rows = [r.model_copy(update={"dividend_amount_unknown": False, "dividend_amount_unknown_ex_date": False})
+                   for r in sealed.rows]  # even a consistent untagged dataset cannot slip past the seal
+    from pilot_data.dataset import dataset_hash
+
+    sealed.dataset_sha256 = dataset_hash(sorted(sealed.rows, key=lambda r: (r.anchor_isin, r.trade_date)))
+    with pytest.raises(RegistryMismatch):
+        study.run_research(sealed, expected_head=sealed_head)
+
+
+# ---- fix 4 and 5: events against row tags, both directions ---------------------------------------------
+def _with_tags(inputs, **changes):
+    inputs.rows = [r.model_copy(update={k: v(r) for k, v in changes.items()}) for r in inputs.rows]
+    from pilot_data.dataset import dataset_hash
+
+    inputs.dataset_sha256 = dataset_hash(sorted(inputs.rows, key=lambda r: (r.anchor_isin, r.trade_date)))
+
+
+def test_rows_tagged_with_no_listed_events_are_refused_at_register_and_run(tmp_path):
+    inputs = study_inputs(tmp_path, events=DividendEvents([EV]))
+    inputs.events = DividendEvents()  # the caller drops the list but the dataset still says amount-unknown
+    with pytest.raises(DataError) as err:
+        study.register(inputs, hypothesis="h")
+    assert err.value.code == "events_mismatch" and not inputs.registry.path.exists()
+    with pytest.raises(DataError):
+        study.prepare(inputs)
+
+
+def test_a_listed_event_whose_ex_date_bar_is_not_flagged_is_refused(tmp_path):
+    inputs = study_inputs(tmp_path, events=DividendEvents([EV]))
+    _with_tags(inputs, dividend_amount_unknown_ex_date=lambda r: False)
+    with pytest.raises(DataError, match="not flagged"):
+        study.prepare(inputs)
+
+
+def test_a_flagged_ex_date_that_no_event_lists_is_refused(tmp_path):
+    inputs = study_inputs(tmp_path, events=DividendEvents([EV]))
+    _with_tags(inputs, dividend_amount_unknown_ex_date=lambda r: r.anchor_isin == ANCHOR and r.trade_date in (EV.ex_date, SESSIONS[100]))
+    with pytest.raises(DataError, match="no event lists"):
+        study.prepare(inputs)
+
+
+def test_a_listed_anchor_with_no_tagged_row_is_refused(tmp_path):
+    inputs = study_inputs(tmp_path, events=DividendEvents([EV]))
+    _with_tags(inputs, dividend_amount_unknown=lambda r: False)
+    with pytest.raises(DataError, match="no row is tagged"):
+        study.prepare(inputs)
+
+
+def test_a_listed_ex_date_with_no_bar_is_allowed_like_59(tmp_path):
+    ex = SESSIONS[250]
+    rows = make_rows(SESSIONS, default_names(10) + __import__("test_strategy_india_support").etf_names(), drop=[(ANCHOR, ex)])
+    from test_strategy_india_support import tag_rows
+
+    inputs = study_inputs(tmp_path, rows=tag_rows(rows, DividendEvents([EV])), events=DividendEvents([EV]))
+    study.prepare(inputs)
 
 
 # ---- fix 3: the sealed sensitivity factor -------------------------------------------------------------
@@ -277,7 +354,7 @@ def test_without_a_ref_the_pin_must_be_explicit(tmp_path):
 
 def test_cli_registers_and_prints_the_new_head_and_run_and_holdout_need_a_pin(tmp_path, monkeypatch, capsys):
     inputs = study_inputs(tmp_path)
-    monkeypatch.setattr(study, "build_inputs", lambda config: (inputs, config.get("registry_head_sha256")))
+    monkeypatch.setattr(study, "build_inputs", lambda config, **_kw: (inputs, config.get("registry_head_sha256")))
     config = tmp_path / "config.json"
     base = {"private_dir": "x", "dataset_dir": "x", "store_root": "x", "coverage_report": "x", "registry": "x",
             "report_root": str(tmp_path / "out"), "git_commit": "b" * 40, "fold_rules": {"n_folds": 1, "test_sessions": 1, "min_train_sessions": 1},

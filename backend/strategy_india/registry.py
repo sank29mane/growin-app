@@ -30,6 +30,7 @@ from .errors import HoldoutSpent, RegistryError, RegistryMismatch
 GENESIS = "0" * 64
 KIND_REGISTRATION = "registration"
 KIND_HOLDOUT_OPEN = "holdout_open"
+KIND_HOLDOUT_INVALID = "holdout_invalid"
 
 HASH_FIELDS = (
     "params_sha256",
@@ -271,6 +272,13 @@ class Registry:
 
     def append_holdout_open(self, payload: Mapping[str, Any]) -> Entry:
         return self._append(KIND_HOLDOUT_OPEN, payload)
+
+    def append_holdout_invalid(self, payload: Mapping[str, Any]) -> Entry:
+        """A typed INVALID verdict for an opened holdout whose evaluation failed."""
+        return self._append(KIND_HOLDOUT_INVALID, payload)
+
+    def invalid_events(self) -> tuple[Entry, ...]:
+        return tuple(entry for entry in self.entries() if entry.kind == KIND_HOLDOUT_INVALID)
 
 
 def spent_ranges(entries: Sequence[Entry]) -> list[tuple[date, date]]:

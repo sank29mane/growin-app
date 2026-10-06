@@ -285,3 +285,40 @@ def test_small_cap_exposure_stays_within_thirty_percent():
                             slope=Decimal("0.01"), regime_cash=None, mode="base", fold="x")
     assert max(v for _, v in free.exposure) > Decimal("0.6")
     assert free.smallcap_rejections == 0
+
+
+def test_a_valid_dataset_with_a_different_hash_than_the_registered_one_is_refused_before_any_evaluation(tmp_path):
+    from strategy_india import study
+    from strategy_india.errors import DataError, StrategyIndiaError
+    from strategy_india.registry import Registry
+
+    from test_strategy_india_support import registration_record
+
+    sessions = weekday_sessions(SESSION_START, 12)
+    ex = sessions[6]
+    base = make_rows(sessions, default_names(2))
+    tagged = [r.model_copy(update={"dividend_amount_unknown": r.anchor_isin == "INE000A01000" and r.trade_date < ex,
+                                   "dividend_amount_unknown_ex_date": r.anchor_isin == "INE000A01000" and r.trade_date == ex})
+              for r in base]
+    registered_dir = _published(tmp_path / "a", tagged, {"INE000A01000": [("EV1", ex)]})
+    # the same data edited and re-hashed: valid in itself, published in a new directory under a new hash
+    shifted = [r.model_copy(update={"raw_volume": r.raw_volume + 1}) if r.trade_date == sessions[2] else r for r in tagged]
+    other_dir = _published(tmp_path / "b", shifted, {"INE000A01000": [("EV1", ex)]})
+    assert registered_dir.name != other_dir.name
+    manifest, _ = load_dataset_rows(registered_dir)  # both verify on their own
+    load_dataset_rows(other_dir)
+    registry = Registry(tmp_path / "private" / "registry.jsonl")
+    registry.register(registration_record(dataset_sha256=manifest.dataset_sha256))
+    config = {"registry": str(registry.path), "dataset_dir": str(registered_dir)}
+    assert study.load_bound_dataset(config, bind_to_registration=True)[0].dataset_sha256 == manifest.dataset_sha256
+    with pytest.raises(DataError, match="dataset_sha256"):
+        study.load_bound_dataset({**config, "dataset_dir": str(other_dir)}, bind_to_registration=True)
+    with pytest.raises(StrategyIndiaError) as err:  # the configured hash must agree with the registered one as well
+        study.load_bound_dataset({**config, "dataset_sha256": sha("x")}, bind_to_registration=True)
+    assert err.value.code == "dataset_mismatch"
+    # a first registration has nothing registered, so it can load a new dataset
+    assert study.load_bound_dataset({**config, "dataset_dir": str(other_dir)}, bind_to_registration=False)[0].dataset_sha256 \
+        == load_dataset_rows(other_dir)[0].dataset_sha256
+    with pytest.raises(DataError):  # an explicit hash in the config is enforced even for a registration
+        study.load_bound_dataset({**config, "dataset_dir": str(other_dir), "dataset_sha256": manifest.dataset_sha256},
+                                 bind_to_registration=False)

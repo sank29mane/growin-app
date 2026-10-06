@@ -77,6 +77,7 @@ def parse_criteria(raw: Any) -> dict[str, Any]:
             raise RegistryError(f"D-19 criteria {key} is not a decimal string") from None
     if not Decimal(0) < Decimal(raw["dividend_sensitivity_factor"]) < Decimal(1):
         raise RegistryError("D-19 criteria dividend_sensitivity_factor must lie between 0 and 1")
+    check_supported(raw)  # the verdict logic must be able to honour every policy value, or nothing can be sealed
     return dict(raw)
 
 
@@ -256,12 +257,37 @@ def _breaches(criteria: Mapping[str, Any], ev: HoldoutEvidence) -> list[str]:
 
 
 def check_supported(criteria: Mapping[str, Any]) -> None:
-    """The verdict logic implements one policy for missing evidence and flips. Refuse anything else."""
+    """Refuse any criteria the verdict logic cannot honour. Called at parse, at registration and at the
+    holdout pre-flight, so an unsupported value can never be discovered after the holdout is spent."""
+
+    def bad(message: str) -> StrategyIndiaError:
+        return StrategyIndiaError(f"criteria {message}", code="criteria_unsupported")
+
     for key in ("missing_evidence", "dividend_sensitivity_flip"):
         if criteria.get(key) != "inconclusive":
-            raise StrategyIndiaError(f"criteria {key} must be 'inconclusive'; no other policy is implemented")
+            raise bad(f"{key} must be 'inconclusive'; no other policy is implemented")
     if criteria.get("one_shot") is not True:
-        raise StrategyIndiaError("criteria one_shot must be true")
+        raise bad("one_shot must be true")
+    if criteria.get("exclude_first_build") is not True:
+        raise bad("exclude_first_build must be true; the first build is excluded structurally")
+    if criteria.get("gate_scenario") != "phase62_gate":
+        raise bad("gate_scenario must be phase62_gate")
+    if criteria.get("benchmark") != "liquid_etf_buy_and_hold_one_round_trip":
+        raise bad("benchmark must be liquid_etf_buy_and_hold_one_round_trip")
+    sessions = criteria.get("annualisation_sessions")
+    if isinstance(sessions, bool) or not isinstance(sessions, int) or sessions <= 0:
+        raise bad("annualisation_sessions must be a positive int (zero would hide every swap)")
+    k = criteria.get("gate_k_ticks")
+    if isinstance(k, bool) or not isinstance(k, int) or k < 1:
+        raise bad("gate_k_ticks must be an int of at least 1")
+    try:
+        floor, swaps = Decimal(criteria["max_drawdown_floor"]), Decimal(criteria["max_annualised_swaps"])
+    except (KeyError, InvalidOperation, TypeError):
+        raise bad("max_drawdown_floor and max_annualised_swaps must be decimal strings") from None
+    if not Decimal(-1) < floor < Decimal(0):
+        raise bad("max_drawdown_floor must lie between -1 and 0")
+    if swaps < 0:
+        raise bad("max_annualised_swaps must not be negative")
 
 
 def check_gate_scenario(criteria: Mapping[str, Any], *, k_ticks: int, phase62_gate: bool) -> None:

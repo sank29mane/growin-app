@@ -255,6 +255,24 @@ def make_context(
 GIT_COMMIT = "b" * 40
 
 
+def tag_rows(rows, events):
+    """Tag rows the way 59 does for amount-unknown events: bars up to the last ex-date, plus the ex-date flag."""
+    last: dict[str, date] = {}
+    exes: set[tuple[str, date]] = set()
+    for event in events.all():
+        last[event.anchor_isin] = max(last.get(event.anchor_isin, event.ex_date), event.ex_date)
+        exes.add((event.anchor_isin, event.ex_date))
+    out = []
+    for row in rows:
+        limit = last.get(row.anchor_isin)
+        flags = {
+            "dividend_amount_unknown": limit is not None and row.trade_date <= limit,
+            "dividend_amount_unknown_ex_date": (row.anchor_isin, row.trade_date) in exes,
+        }
+        out.append(row.model_copy(update=flags) if any(flags.values()) else row)
+    return out
+
+
 def study_inputs(
     tmp_path: Path,
     *,
@@ -282,7 +300,7 @@ def study_inputs(
 
     sessions = weekday_sessions(start, sessions_n)
     names = default_names(n_names) + etf_names()
-    rows = rows if rows is not None else make_rows(sessions, names, ex_gaps=ex_gaps)
+    rows = rows if rows is not None else tag_rows(make_rows(sessions, names, ex_gaps=ex_gaps), events or DividendEvents())
     cov_root = tmp_path / "cov"
     cov_path = write_coverage(cov_root, coverage_report(sessions[0], sessions[-1], unavailable=unavailable))
     scenarios, schedules, tick_obj, _ = costs_inputs()
