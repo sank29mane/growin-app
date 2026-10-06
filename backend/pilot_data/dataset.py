@@ -396,26 +396,27 @@ def verify_dataset(path: Path, *, workspace: str) -> DatasetManifest:
 
 
 def _check_unknown_dividend_tags(rows: list[DatasetRow], manifest: DatasetManifest) -> None:
-    """D-20 cross-check between the manifest event list and the per-row tags.
+    """D-20: every row's tags must follow exactly from the manifest event list.
 
-    Manifest to rows, bar tag only: every listed anchor needs at least one dividend_amount_unknown row.
-    Rows to manifest, ex-date flag: every flagged row must sit on a listed ex-date of its anchor. A
-    listed ex-date may have no flagged row (no accepted bar that day), so that direction is not checked.
+    This is the rule adjusted_series applies, so it holds for any set of accepted bars. For an anchor
+    with listed ex-dates E (empty when the anchor is not listed):
+      dividend_amount_unknown          == (E is not empty and trade_date <= max(E))
+      dividend_amount_unknown_ex_date  == (trade_date in E)
+    The first tag is set whether or not the bar's adjusted value is withheld. A listed ex-date with no
+    accepted bar on it is legal, so Phase 62 reads ex-dates from the manifest, not from the row flag.
     """
     listed = {anchor: {event.ex_date for event in events}
               for anchor, events in manifest.dividend_amount_unknown_events.items()}
-    tagged = {row.anchor_isin for row in rows if row.dividend_amount_unknown}
-    missing = sorted(set(listed) - tagged)
-    if missing:
-        raise PilotDataError(
-            "dataset_integrity", f"manifest lists amount-unknown dividend events for {missing[0]} but no row is tagged"
-        )
     for row in rows:
-        if row.dividend_amount_unknown_ex_date and row.trade_date not in listed.get(row.anchor_isin, set()):
+        ex_dates = listed.get(row.anchor_isin, set())
+        want_bar = bool(ex_dates) and row.trade_date <= max(ex_dates)
+        want_ex = row.trade_date in ex_dates
+        if row.dividend_amount_unknown != want_bar or row.dividend_amount_unknown_ex_date != want_ex:
             raise PilotDataError(
                 "dataset_integrity",
-                f"row {row.anchor_isin} {row.trade_date.isoformat()} is flagged as an amount-unknown ex-date "
-                "that the manifest does not list",
+                f"row {row.anchor_isin} {row.trade_date.isoformat()} carries dividend_amount_unknown="
+                f"{row.dividend_amount_unknown} and dividend_amount_unknown_ex_date="
+                f"{row.dividend_amount_unknown_ex_date}, but the manifest event list requires {want_bar} and {want_ex}",
             )
 
 

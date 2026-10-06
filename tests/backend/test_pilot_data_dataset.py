@@ -12,7 +12,9 @@ import pytest
 from pilot_data.bhavcopy import ingest_pr_zip
 from pilot_data.corporate_actions import derive_corporate_actions
 from pilot_data.core import PilotDataError, sha256_hex
-from pilot_data.dataset import _read_parquet, _write_parquet, build_dataset_snapshot, main, verify_dataset
+from pilot_data.dataset import (
+    _read_parquet, _write_parquet, build_dataset_snapshot, dataset_hash, main, verify_dataset,
+)
 from pilot_data.store import PilotDataStore
 
 import pilot_data_testkit as kit
@@ -260,11 +262,12 @@ def add_steady_event(store, purpose, day=D4):
     derive_corporate_actions(store, workspace="india")
 
 
-def steady_run(store, *purposes):
+def steady_run(store, *purposes, breeze_days=None):
     load_bhavcopy(store)
     for purpose in purposes:
         add_steady_event(store, purpose)
-    load_breeze(store, "STEADY", breeze_rows("STEADY", STEADY))
+    prices = {d: p for d, p in STEADY.items() if breeze_days is None or d in breeze_days}
+    load_breeze(store, "STEADY", breeze_rows("STEADY", prices))
     return run(store, make_targets(STEADY_MEMBER))
 
 
@@ -332,48 +335,86 @@ def test_a_dataset_exported_before_the_tag_columns_still_verifies(store, tmp_pat
     assert all(not r.dividend_amount_unknown for r in _read_parquet(parquet))
 
 
-def test_verify_cross_checks_the_manifest_event_list_against_the_row_tags(store, tmp_path):
-    report = steady_run(store, "INTERIM DIVIDEND")
+def exported(store, tmp_path, report):
     manifest = snapshot(store, report, tmp_path / "export")
     target = tmp_path / "export" / manifest.dataset_sha256
+    os.chmod(target, 0o755)
+    os.chmod(target / "manifest.json", 0o644)
+    return manifest, target
+
+
+def rewrite_manifest(target, edit):
+    body = json.loads((target / "manifest.json").read_text())
+    edit(body)
+    (target / "manifest.json").write_text(json.dumps(body))
+
+
+def verify_error(target):
+    with pytest.raises(PilotDataError) as caught:
+        verify_dataset(target, workspace="india")
+    return caught.value
+
+
+ANCHOR = STEADY_MEMBER.anchor_isin
+
+
+def test_verify_accepts_the_dataset_as_built_and_checks_the_exact_tag_rule(store, tmp_path):
+    manifest, target = exported(store, tmp_path, steady_run(store, "INTERIM DIVIDEND"))
     assert verify_dataset(target, workspace="india") == manifest
-    os.chmod(target, 0o755)
-    manifest_file = target / "manifest.json"
-    os.chmod(manifest_file, 0o644)
-    original = json.loads(manifest_file.read_text())
-    anchor = STEADY_MEMBER.anchor_isin
-    (event,) = original["dividend_amount_unknown_events"][anchor]
-
-    def tampered(events):
-        body = json.loads(json.dumps(original))
-        body["dividend_amount_unknown_events"] = events
-        manifest_file.write_text(json.dumps(body))
-        with pytest.raises(PilotDataError) as caught:
-            verify_dataset(target, workspace="india")
-        return caught.value
-
-    # rows are flagged as an ex-date, but the manifest lists nothing for them
-    assert tampered({}).code == "dataset_integrity"
-    # the manifest lists an anchor that has no tagged rows at all
-    fabricated = tampered({anchor: [event], "INE999Z01011": [event]})
-    assert fabricated.code == "dataset_integrity" and "INE999Z01011" in str(fabricated)
-    # the listed ex-date is not the flagged row's date
-    moved = tampered({anchor: [{**event, "ex_date": D3.isoformat()}]})
-    assert moved.code == "dataset_integrity" and "does not list" in str(moved)
-    manifest_file.write_text(json.dumps(original))
-    assert verify_dataset(target, workspace="india").dataset_sha256 == manifest.dataset_sha256
 
 
-def test_a_listed_ex_date_without_an_accepted_bar_is_allowed(store, tmp_path):
-    # D-20 keeps the manifest as the source of ex-dates: a row flag exists only when a bar trades that day.
-    report = steady_run(store, "INTERIM DIVIDEND")
-    manifest = snapshot(store, report, tmp_path / "export")
-    target = tmp_path / "export" / manifest.dataset_sha256
-    os.chmod(target, 0o755)
-    manifest_file = target / "manifest.json"
-    os.chmod(manifest_file, 0o644)
-    body = json.loads(manifest_file.read_text())
-    body["dividend_amount_unknown_events"][STEADY_MEMBER.anchor_isin].append(
-        {"event_id": "e" * 64, "ex_date": "2025-03-08"})  # the Saturday
-    manifest_file.write_text(json.dumps(body))
-    assert verify_dataset(target, workspace="india").dataset_sha256 == manifest.dataset_sha256
+def test_a_dataset_whose_ex_date_bar_was_not_accepted_still_verifies(store, tmp_path):
+    # No Breeze bar on the ex-date D4: the event is listed, the bar tags still follow, no row has the ex-date flag.
+    manifest, target = exported(store, tmp_path, steady_run(store, "INTERIM DIVIDEND", breeze_days={D1, D2, D3, D5}))
+    (event,) = manifest.dividend_amount_unknown_events[ANCHOR]
+    assert event.ex_date == D4
+    rows = {r.trade_date: r for r in _read_parquet(target / "rows.parquet")}
+    assert D4 not in rows and not any(r.dividend_amount_unknown_ex_date for r in rows.values())
+    assert [rows[d].dividend_amount_unknown for d in (D1, D2, D3, D5)] == [True, True, True, False]
+    assert verify_dataset(target, workspace="india") == manifest
+
+
+def test_a_dataset_with_no_accepted_bar_on_or_before_the_last_ex_date_still_verifies(store, tmp_path):
+    manifest, target = exported(store, tmp_path, steady_run(store, "INTERIM DIVIDEND", breeze_days={D5}))
+    assert [e.ex_date for e in manifest.dividend_amount_unknown_events[ANCHOR]] == [D4]
+    rows = _read_parquet(target / "rows.parquet")
+    assert [r.trade_date for r in rows] == [D5] and not rows[0].dividend_amount_unknown
+    assert verify_dataset(target, workspace="india") == manifest
+
+
+@pytest.mark.parametrize("extra_day", [D3, D5])
+def test_an_extra_event_added_to_the_manifest_fails(store, tmp_path, extra_day):
+    manifest, target = exported(store, tmp_path, steady_run(store, "INTERIM DIVIDEND"))
+    rewrite_manifest(target, lambda body: body["dividend_amount_unknown_events"][ANCHOR].append(
+        {"event_id": "e" * 64, "ex_date": extra_day.isoformat()}))
+    error = verify_error(target)
+    assert error.code == "dataset_integrity" and "manifest event list requires" in str(error)
+
+
+def test_an_anchor_removed_from_the_manifest_while_its_rows_stay_tagged_fails(store, tmp_path):
+    manifest, target = exported(store, tmp_path, steady_run(store, "INTERIM DIVIDEND"))
+    rewrite_manifest(target, lambda body: body["dividend_amount_unknown_events"].pop(ANCHOR))
+    assert verify_error(target).code == "dataset_integrity"
+
+
+def test_an_anchor_fabricated_in_the_manifest_fails(store, tmp_path):
+    manifest, target = exported(store, tmp_path, steady_run(store))  # no events: no row is tagged
+    rewrite_manifest(target, lambda body: body["dividend_amount_unknown_events"].update(
+        {ANCHOR: [{"event_id": "e" * 64, "ex_date": D4.isoformat()}]}))
+    assert verify_error(target).code == "dataset_integrity"
+
+
+@pytest.mark.parametrize("field,day", [("dividend_amount_unknown", D5), ("dividend_amount_unknown", D1),
+                                       ("dividend_amount_unknown_ex_date", D2)])
+def test_a_flipped_tag_on_one_row_fails_even_with_the_hashes_repaired(store, tmp_path, field, day):
+    manifest, target = exported(store, tmp_path, steady_run(store, "INTERIM DIVIDEND"))
+    parquet = target / "rows.parquet"
+    rows = _read_parquet(parquet)
+    flipped = [r.model_copy(update={field: not getattr(r, field)}) if r.trade_date == day else r for r in rows]
+    os.chmod(parquet, 0o644)
+    parquet.unlink()
+    _write_parquet(flipped, parquet, tmp_path / "export")
+    rewrite_manifest(target, lambda body: body.update(
+        dataset_sha256=dataset_hash(flipped), parquet_sha256=sha256_hex(parquet.read_bytes())))
+    error = verify_error(target)  # the dataset hash matches the edited rows, so only the tag rule can catch it
+    assert error.code == "dataset_integrity" and "manifest event list requires" in str(error)
