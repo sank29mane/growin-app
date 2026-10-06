@@ -395,7 +395,10 @@ def slippage_check(
 
     A missing, zero, negative or non-finite bid or ask for the order's side, or no
     quote at all, fails closed with the typed code ``SLIPPAGE_QUOTE_UNAVAILABLE`` and
-    reason ``ask_missing`` or ``bid_missing``. A missing fill price or cap fails closed
+    reason ``ask_missing`` or ``bid_missing``. The other side may be absent, but a value
+    that is present and zero, negative or non-finite is ``bid_unusable`` or
+    ``ask_unusable``, and a crossed book (bid above ask) is ``book_crossed``; a locked
+    book (bid equal to ask) is allowed. A missing fill price or cap fails closed
     as ``SLIPPAGE_LIMIT``. The cap is passed in (India: 25 bps, from ``IndiaExecution``);
     this function has no default. The comparison is done in cross-multiplied form, so
     the edge is exact: exactly the cap passes and a hundredth of a basis point more
@@ -413,12 +416,28 @@ def slippage_check(
     else:
         cap = None
     book_side = "ask" if side == "buy" else "bid"
+    other_side = "bid" if side == "buy" else "ask"
     reference = _positive_decimal(getattr(quote, book_side, None)) if isinstance(quote, Quote) else None
+    # The other side is not needed, but a value that is PRESENT must be usable, and the
+    # two must not cross: a crossed or garbage book is a bad snapshot, so neither side of
+    # it is a trustworthy reference.
+    other_raw = getattr(quote, other_side, None) if isinstance(quote, Quote) else None
+    other = _positive_decimal(other_raw)
+    other_unusable = other_raw is not None and other is None
+    crossed = (
+        reference is not None
+        and other is not None
+        and (other > reference if side == "buy" else reference > other)
+    )
     fill = _positive_decimal(fill_price)
     if cap is None:
         return SlippageResult(False, SLIPPAGE_LIMIT, "cap_missing", None)
     if reference is None:
         return SlippageResult(False, SLIPPAGE_QUOTE_UNAVAILABLE, f"{book_side}_missing", None)
+    if other_unusable:
+        return SlippageResult(False, SLIPPAGE_QUOTE_UNAVAILABLE, f"{other_side}_unusable", None)
+    if crossed:
+        return SlippageResult(False, SLIPPAGE_QUOTE_UNAVAILABLE, "book_crossed", None)
     if fill is None:
         return SlippageResult(False, SLIPPAGE_LIMIT, "price_missing", None)
     adverse = fill - reference if side == "buy" else reference - fill

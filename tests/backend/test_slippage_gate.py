@@ -229,7 +229,8 @@ def _book(bid=None, ask=None, ltp="10100") -> rules.Quote:
 def _check(side: str, reference, fill, cap):
     """The reference sits on the side the order takes; the other side is a decoy."""
     if side == "buy":
-        return rules.slippage_check(side, _book(bid=Decimal("1"), ask=reference), fill, cap)
+        decoy = reference / 2 if isinstance(reference, Decimal) and reference.is_finite() else Decimal("1")
+        return rules.slippage_check(side, _book(bid=decoy, ask=reference), fill, cap)
     return rules.slippage_check(side, _book(bid=reference, ask=Decimal("1000000")), fill, cap)
 
 
@@ -314,6 +315,31 @@ def test_a_missing_side_of_the_book_refuses_with_a_typed_code():
     # Only the order's own side is needed: a buy does not need a bid, a sell does not need an ask.
     assert rules.slippage_check("buy", _book(bid=None, ask=ASK), ASK, INDIA_MAX_SLIPPAGE_BPS).ok
     assert rules.slippage_check("sell", _book(bid=BID, ask=None), BID, INDIA_MAX_SLIPPAGE_BPS).ok
+
+
+@pytest.mark.parametrize("side", ["buy", "sell"])
+def test_a_crossed_book_refuses_on_both_sides(side):
+    crossed = _book(bid=Decimal("101"), ask=Decimal("100"))
+    for fill in ("100", "101"):  # each side passes at its own reference without the guard
+        result = rules.slippage_check(side, crossed, Decimal(fill), INDIA_MAX_SLIPPAGE_BPS)
+        assert not result.ok and result.code == rules.SLIPPAGE_QUOTE_UNAVAILABLE
+        assert result.reason == "book_crossed" and result.slippage_bps is None
+    # A locked book (bid == ask) is a real, if odd, market and still measures.
+    locked = _book(bid=Decimal("100"), ask=Decimal("100"))
+    assert rules.slippage_check(side, locked, Decimal("100"), INDIA_MAX_SLIPPAGE_BPS).ok
+
+
+@pytest.mark.parametrize("side", ["buy", "sell"])
+@pytest.mark.parametrize(
+    "bad", [Decimal("0"), Decimal("-1"), Decimal("NaN"), Decimal("Infinity"), "abc", True]
+)
+def test_an_unusable_value_on_the_other_side_refuses_too(side, bad):
+    other = "bid" if side == "buy" else "ask"
+    quote = _book(**{"bid": BID, "ask": ASK, other: bad})
+    fill = ASK if side == "buy" else BID
+    result = rules.slippage_check(side, quote, fill, INDIA_MAX_SLIPPAGE_BPS)
+    assert not result.ok and result.code == rules.SLIPPAGE_QUOTE_UNAVAILABLE
+    assert result.reason == f"{other}_unusable"
 
 
 def test_a_quote_with_no_book_at_all_never_falls_back_to_ltp():
