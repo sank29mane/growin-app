@@ -28,6 +28,7 @@ from strategy_india.data import (
     EligibilitySnapshot,
 )
 from strategy_india.engine import RunContext
+from strategy_india.ticks import TickTables as _TT  # noqa: F401
 from strategy_india.holdout import HoldoutRange
 from strategy_india.ticks import EQUITY, NON_GOLD_ETF, TickTables, load_default_tables
 from strategy_india.params import StrategyParams, parse_params, placeholder_params
@@ -233,6 +234,64 @@ def make_context(
         events=events or DividendEvents(),
         scenarios=scenarios, schedules=schedules, pricing_basis=basis, ticks=ticks,
     )
+
+
+GIT_COMMIT = "b" * 40
+
+
+def study_inputs(
+    tmp_path: Path,
+    *,
+    sessions_n: int = 400,
+    holdout_sessions: int = 60,
+    n_names: int = 10,
+    unavailable: Sequence[tuple[str, str, date]] = (),
+    events: DividendEvents | None = None,
+    ex_gaps: Mapping[tuple[str, date], Decimal] | None = None,
+    tri: tuple[Path, str] | None = None,
+    params_overrides: Mapping | None = None,
+    provider=None,
+    rows=None,
+    bands: StaticBands | None = None,
+    registry_name: str = "registry.jsonl",
+    ticks: TickTables | None = None,
+):
+    """A complete synthetic study: dataset, gate report, registry path, every 60 input."""
+    from pilot_data.dataset import dataset_hash
+    from strategy_india.folds import FoldRules
+    from strategy_india.registry import Registry
+    from strategy_india.study import StudyInputs
+
+    sessions = weekday_sessions(SESSION_START, sessions_n)
+    names = default_names(n_names) + etf_names()
+    rows = rows if rows is not None else make_rows(sessions, names, ex_gaps=ex_gaps)
+    cov_root = tmp_path / "cov"
+    cov_path = write_coverage(cov_root, coverage_report(sessions[0], sessions[-1], unavailable=unavailable))
+    scenarios, schedules, tick_obj, _ = costs_inputs()
+    raw = placeholder_params()
+    raw.update(params_overrides or {})
+    eligible = sorted({row.anchor_isin for row in rows} - set(ETF_ISINS))
+    return StudyInputs(
+        rows=rows, dataset_sha256=dataset_hash(sorted(rows, key=lambda r: (r.anchor_isin, r.trade_date))),
+        params_raw=raw, limits=limits(), coverage_path=cov_path, eligibility=StaticEligibility(eligible),
+        universe_policy=UniversePolicy(), bands=bands or StaticBands(), scenarios=scenarios, schedules=schedules,
+        schedule_version=SCHEDULE_VERSION, ticks=ticks or tick_obj,
+        fold_rules=FoldRules(n_folds=3, test_sessions=50, min_train_sessions=120), git_commit=GIT_COMMIT,
+        parameter_budget_n=12, registry=Registry(tmp_path / "private" / registry_name),
+        events=events or DividendEvents(), tri_path=tri[0] if tri else None, tri_sha256=tri[1] if tri else None,
+        provider=provider, holdout_sessions=holdout_sessions,
+    )
+
+
+def write_tri(path: Path, sessions: Sequence[date], base: Decimal = Decimal("91234.5678")) -> str:
+    """A synthetic gross TRI file (obviously fake levels). Returns its sha256."""
+    lines = ["IndexName,Date,Total Returns Index"]
+    level = base
+    for day in sessions:
+        level = (level * Decimal("1.0004")).quantize(Decimal("0.0001"))
+        lines.append(f"NIFTY 500,{day.strftime('%d %b %Y')},{level}")
+    path.write_text("\n".join(lines) + "\n")
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def registration_record(**overrides):

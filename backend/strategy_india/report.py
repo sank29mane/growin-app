@@ -343,7 +343,7 @@ def _coverage(units: Sequence[UnitReport], unavailable: Sequence[UnavailableBand
 
 
 def _daily(seg: SegmentResult) -> list[Decimal]:
-    return metrics.daily_returns([seg.start_equity] + [v for _, v in seg.curve])
+    return metrics.daily_returns([v for _, v in seg.curve])
 
 
 def _aggregate(units: Sequence[Unit], reports: Sequence[UnitReport], params: StrategyParams, trials: int) -> AggregateReport:
