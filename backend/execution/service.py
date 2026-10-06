@@ -34,7 +34,7 @@ from .models import (
     Workspace,
 )
 from .venue import (
-    ADMISSIBLE_PRICE_SOURCES,
+    admissible_price_sources,
     LIVE_DISABLED,
     CancelResult,
     intent_refusal,
@@ -78,7 +78,11 @@ class ExecutionService:
         simulator: Any = None,
         risk_gate: Any = None,
         require_runtime_preflight: bool = False,
+        allow_test_price_sources: bool = False,
     ):
+        # Explicit, test-only injection of the ``local-replay`` price source. The
+        # default refuses it, so a production service can never admit from it.
+        self._price_sources = admissible_price_sources(allow_test_price_sources)
         self._dispatcher = dispatcher
         self._ledger = ledger
         self._require_approval = require_approval
@@ -94,6 +98,10 @@ class ExecutionService:
         # Local locks improve same-process replay UX. SQLite transactions and
         # constraints remain the authority across services and restarts.
         self._proposal_locks: Dict[str, asyncio.Lock] = {}
+
+    @property
+    def admissible_price_sources(self) -> frozenset[str]:
+        return self._price_sources
 
     @property
     def execution_enabled(self) -> bool:
@@ -174,7 +182,7 @@ class ExecutionService:
             if intent.side is not OrderSide.BUY and not bound:
                 # Paper ledgers deny every SELL. Only a practice ledger reserves held quantity.
                 raise ValueError("SELL admission requires a position reservation")
-            if bound and price_source not in ADMISSIBLE_PRICE_SOURCES:
+            if bound and price_source not in self._price_sources:
                 # D-02: a bound venue admits only from a recorded-quote replay. A price
                 # from Yahoo, Position.currentPrice or anywhere else never admits.
                 raise ValueError("PRICE_SOURCE_NOT_ADMISSIBLE")

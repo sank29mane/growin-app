@@ -108,6 +108,7 @@ async def test_tracer_signed_practice_intent_reaches_the_seam_double_once(
         workspace="uk",
         private_dir=private_config_dir,
         dispatcher_factories=practice_factories(double),
+        allow_test_price_sources=True,
     ), app_state.execution_startup_error
     try:
         service = app_state.execution_service
@@ -220,6 +221,7 @@ class _Stack:
             self.ledger,
             require_approval=True,
             approval_service=self.approval,
+            allow_test_price_sources=True,
         )
 
     def close(self) -> None:
@@ -922,6 +924,7 @@ async def test_a_practice_ack_is_never_settled_as_a_local_uat_cancellation(
         assert state.start_execution(
             tmp_path / "p.sqlite3", workspace="uk", private_dir=private_config_dir,
             dispatcher_factories=practice_factories(double),
+            allow_test_price_sources=True,
         ), state.execution_startup_error
         key = private_key()
         enroll(state.execution_service._approval_service, key)

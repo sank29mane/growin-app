@@ -382,6 +382,7 @@ async def test_a_uk_process_reaches_the_seam_double_with_a_uk_practice_intent(
         workspace="uk",
         private_dir=private_config_dir,
         dispatcher_factories=_factories(counting),
+        allow_test_price_sources=True,
     )
     try:
         service = app_state.execution_service

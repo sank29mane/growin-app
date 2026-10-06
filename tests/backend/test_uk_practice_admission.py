@@ -686,7 +686,9 @@ async def test_the_reservation_transaction_itself_enforces_the_position_cap_and_
         ledger.configure_paper_budget(PRACTICE_ACCOUNT, "GBP", "900", workspace="uk")
         from execution import ExecutionService
 
-        service = ExecutionService(None, ledger, simulator=None, risk_gate=None)
+        service = ExecutionService(
+            None, ledger, simulator=None, risk_gate=None, allow_test_price_sources=True
+        )
         proposal = practice_proposal_dict("no-limits", quantity="1", limit_price="71.3")
         service.admit(
             proposal, currency="GBP", price="0.713", price_source=PRICE_SOURCE_TEST_REPLAY,

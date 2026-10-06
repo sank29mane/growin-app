@@ -29,7 +29,6 @@ from execution import (
     coerce_workspace,
 )
 from execution.venue import (
-    ADMISSIBLE_PRICE_SOURCES,
     PRICE_SOURCE_OPERATOR_RECORDED,
     PracticeCaps,
     VenueBinding,
@@ -195,6 +194,7 @@ class AppState:
         workspace,
         private_dir,
         dispatcher_factories: Optional[DispatcherFactoryMap] = None,
+        allow_test_price_sources: bool = False,
     ) -> bool:
         """Acquire local execution authority and install the venue's dispatcher.
 
@@ -285,6 +285,7 @@ class AppState:
             simulator=PreFlightSimulator(),
             risk_gate=RiskSwarmGate(),
             require_runtime_preflight=True,
+            allow_test_price_sources=allow_test_price_sources,
         )
         self.execution_authority = True
         self.workspace_config = config
@@ -532,7 +533,7 @@ class AppState:
         binding = self.execution_venue_binding
         adapter = self.venue_adapter
         side = intent.side.value
-        if price_source not in ADMISSIBLE_PRICE_SOURCES:
+        if price_source not in self.execution_service.admissible_price_sources:
             return "PRICE_SOURCE_NOT_ADMISSIBLE", None
 
         metadata = getattr(adapter, "metadata", None)

@@ -166,13 +166,22 @@ def execution_mode_label(authority: bool, binding: Optional[VenueBinding]) -> st
 
 
 # Where an admission price may come from in a bound-venue ledger (Phase 66, D-02).
-# ``operator-recorded`` is a recorded-quote replay the operator typed; the other is
-# the test fixture replay. A Yahoo price or a ``Position.currentPrice`` is in neither.
+# ``operator-recorded`` is a recorded-quote replay the operator typed. A Yahoo price
+# or a ``Position.currentPrice`` is in neither set. ``local-replay`` is the test
+# fixture replay: it is admissible ONLY where a test injects it explicitly (see
+# ``ExecutionService(allow_test_price_sources=True)``); production never does.
 PRICE_SOURCE_OPERATOR_RECORDED = "operator-recorded"
 PRICE_SOURCE_TEST_REPLAY = "local-replay"
-ADMISSIBLE_PRICE_SOURCES = frozenset(
-    {PRICE_SOURCE_OPERATOR_RECORDED, PRICE_SOURCE_TEST_REPLAY}
-)
+ADMISSIBLE_PRICE_SOURCES = frozenset({PRICE_SOURCE_OPERATOR_RECORDED})
+TEST_ONLY_PRICE_SOURCES = frozenset({PRICE_SOURCE_TEST_REPLAY})
+
+
+def admissible_price_sources(allow_test_sources: bool = False) -> frozenset[str]:
+    """The price sources a bound venue admits from; test sources only on explicit opt-in."""
+
+    if allow_test_sources:
+        return ADMISSIBLE_PRICE_SOURCES | TEST_ONLY_PRICE_SOURCES
+    return ADMISSIBLE_PRICE_SOURCES
 
 
 @dataclass(frozen=True)
@@ -275,6 +284,8 @@ __all__ = [
     "CancelResult",
     "PRICE_SOURCE_OPERATOR_RECORDED",
     "PRICE_SOURCE_TEST_REPLAY",
+    "TEST_ONLY_PRICE_SOURCES",
+    "admissible_price_sources",
     "VenueCanceller",
     "ACCOUNT_BINDING_MISMATCH",
     "BROKER_VENUE_MISMATCH",

@@ -411,6 +411,7 @@ async def start_practice_stack(
         workspace="uk",
         private_dir=private_dir,
         dispatcher_factories=factories,
+        allow_test_price_sources=True,  # explicit test-only opt-in to local-replay
     )
     stack = PracticeStack(
         app=app,
