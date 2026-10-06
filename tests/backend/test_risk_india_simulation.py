@@ -156,9 +156,11 @@ class Sim:
                 self.cost[order.anchor_isin] = (
                     held_cost * remaining / before[order.anchor_isin] if remaining else Decimal(0)
                 )
-                self.state = drawdown.apply_exit_fill(
-                    self.state, order.anchor_isin, sold_quantity=sold, remaining_quantity=remaining
-                )
+            # Report the outcome for every order, a miss (sold = 0) included: a miss must
+            # change nothing, and reporting it is how a bug that treats it as a fill shows.
+            self.state = drawdown.apply_exit_fill(
+                self.state, order.anchor_isin, sold_quantity=sold, remaining_quantity=remaining
+            )
         return before
 
 

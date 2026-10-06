@@ -398,6 +398,17 @@ def test_a_partial_fill_does_not_clear_the_stop_and_the_full_fill_does():
     assert A not in done.stops and A not in done.open_exits
 
 
+def test_reporting_a_missed_exit_changes_nothing():
+    stopped = step(
+        drawdown.initial_state(LIMITS), D1, cash="40000", positions=[pos(A, 20, "10000")], closes={A: "440"}
+    ).state
+    assert drawdown.apply_exit_fill(stopped, A, sold_quantity=0, remaining_quantity=20) == stopped
+    halted = one_position("460").state
+    assert drawdown.apply_exit_fill(halted, A, sold_quantity=0, remaining_quantity=100) == halted
+    ended = one_position("400").state
+    assert drawdown.apply_exit_fill(ended, A, sold_quantity=0, remaining_quantity=100) == ended
+
+
 def test_fills_never_touch_halt_or_ended():
     halted = one_position("460").state
     sold = drawdown.apply_exit_fill(halted, A, sold_quantity=50, remaining_quantity=50)
