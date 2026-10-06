@@ -38,6 +38,11 @@ CHAT_ROLES = (
 )
 ROLE_NAMES = CHAT_ROLES + (ROLE_FORECASTER,)
 
+# Roles that must name a temperature. The code carries no sampling defaults, so
+# an unset temperature would mean "whatever the server picks" for the roles that
+# decide and review trades. Such a role fails closed at resolve time.
+TEMPERATURE_REQUIRED_ROLES = frozenset({ROLE_DECISION, ROLE_RISK_CRITIC})
+
 # The only legal kind per role class. Looked up, never compared by value.
 CHAT_ROLE_KINDS = frozenset({KIND_OPENAI_COMPATIBLE})
 FORECASTER_ROLE_KINDS = frozenset({KIND_HF_LOCAL})

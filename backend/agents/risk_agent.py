@@ -16,7 +16,7 @@ from magentic import prompt as mag_prompt
 from .base_agent import BaseAgent, AgentResponse, AgentConfig
 from market_context import MarketContext
 from utils.financial_math import create_decimal
-from model_registry import ROLE_RISK_CRITIC, active_registry_or_none
+from model_registry import ROLE_RISK_CRITIC, ModelRegistryError, ProviderError, active_registry_or_none
 from model_registry.provider import run_magentic
 
 logger = logging.getLogger(__name__)
@@ -144,6 +144,13 @@ class RiskAgent(BaseAgent):
                 latency_ms=0 # Managed by execution loop
             )
                 
+        except (ModelRegistryError, ProviderError) as e:
+            # Fail closed: record the typed error for review() and raise. A model
+            # failure must never become a FLAGGED review that lets the decision through.
+            sink = context_dict.get("_model_errors")
+            if isinstance(sink, list):
+                sink.append(e)
+            raise
         except Exception as e:
 
 
@@ -152,7 +159,12 @@ class RiskAgent(BaseAgent):
 
     async def review(self, context: MarketContext, suggestion: str) -> Dict[str, Any]:
         """Convenience method for Orchestrator integration"""
-        res = await self.execute({"context": context, "suggestion": suggestion})
+        model_errors: List[Exception] = []
+        res = await self.execute({"context": context, "suggestion": suggestion, "_model_errors": model_errors})
+        if model_errors:
+            # BaseAgent.execute turns exceptions into failed responses. Re-raise the
+            # typed registry or provider error so it is never mapped to FLAGGED.
+            raise model_errors[0]
         if res.success:
             return res.data
         return {

@@ -26,7 +26,7 @@ import asyncio
 import re
 from pydantic import BaseModel, Field
 from magentic import prompt as mag_prompt
-from model_registry import ROLE_RESEARCH, ModelRegistryError
+from model_registry import ROLE_RESEARCH, ModelRegistryError, ProviderError
 from model_registry.provider import run_magentic
 from resilience import get_circuit_breaker, CircuitBreakerOpenError
 from utils.http_client import agent_http_client
@@ -503,8 +503,8 @@ class ResearchAgent(BaseAgent):
             logger.info(f"Smart Query Generated (Magentic): {params}")
             return params
             
-        except ModelRegistryError:
-            # A role that is not configured must surface, not degrade silently.
+        except (ModelRegistryError, ProviderError):
+            # A missing role or failing provider must surface, not degrade silently.
             raise
         except Exception as e:
 

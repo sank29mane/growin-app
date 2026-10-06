@@ -18,6 +18,7 @@ from utils.audit_log import log_audit
 from model_registry import (
     ROLE_COORDINATOR,
     ROLE_DECISION,
+    ROLE_RISK_CRITIC,
     ModelRegistry,
     ModelRegistryError,
     ModelRoleMissing,
@@ -34,8 +35,9 @@ router = APIRouter()
 def require_chat_registry() -> ModelRegistry:
     """The loaded registry, or a 503 with a stable code before any model call.
 
-    Chat needs the coordinator and decision roles. A missing registry or role
-    stops the request here: nothing is routed to a default model.
+    Chat needs the coordinator, decision and risk_critic roles. A missing
+    registry or role stops the request here, before any model call or proposal:
+    nothing is routed to a default model.
     """
     registry = state.model_registry
     if registry is None:
@@ -44,9 +46,9 @@ def require_chat_registry() -> ModelRegistry:
             detail={"code": "MODEL_REGISTRY_UNAVAILABLE", "reason": state.model_registry_error},
         )
     try:
-        registry.require(ROLE_COORDINATOR, ROLE_DECISION)
-    except ModelRoleMissing as exc:
-        raise HTTPException(status_code=503, detail={"code": exc.code, "role": exc.role})
+        registry.require(ROLE_COORDINATOR, ROLE_DECISION, ROLE_RISK_CRITIC)
+    except ModelRegistryError as exc:
+        raise HTTPException(status_code=503, detail={"code": exc.code, "role": exc.field})
     return registry
 
 
@@ -319,8 +321,10 @@ async def stream_chat_generator(request: ChatMessage):
                 logger.error(f"Processing error: {e}")
                 # SOTA 2026: Distinguish recoverable errors
                 recoverable = any(x in str(e).lower() for x in ["timeout", "rate limit", "connection"])
+                typed_code = e.code if isinstance(e, (ModelRegistryError, ProviderError)) else None
                 await queue.put({
-                    "type": "error", 
+                    "type": "error",
+                    "code": typed_code,
                     "content": str(e),
                     "recoverable": recoverable,
                     "retryAfterMs": 2000 if recoverable else 0
@@ -349,6 +353,7 @@ async def stream_chat_generator(request: ChatMessage):
                         "data": json.dumps({
                             "type": "RUN_ERROR",
                             "message": item["content"],
+                            "code": item.get("code"),
                             "recoverable": item.get("recoverable", False),
                             "retryAfterMs": item.get("retryAfterMs", 0)
                         }) 

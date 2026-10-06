@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from magentic import prompt as mag_prompt
 from langchain_core.messages import SystemMessage, HumanMessage
 from .llm_factory import LLMFactory
-from model_registry import ROLE_DECISION
+from model_registry import ROLE_DECISION, ModelRegistryError, ProviderError
 from model_registry.provider import image_message_content, run_magentic
 from utils.audit_log import AUDIT_UNSCOPED, log_audit
 from execution import (
@@ -368,6 +368,11 @@ class DecisionAgent:
                 "quick_actions": quick_actions
             }
 
+        except (ModelRegistryError, ProviderError) as e:
+            # Fail closed: a missing role or failing provider is a typed error for
+            # the caller, never recommendation text.
+            status_manager.set_status("decision_agent", "error", f"Error: {e.code}", model=self.model_name)
+            raise
         except Exception as e:
 
 
@@ -606,6 +611,10 @@ class DecisionAgent:
                 workspace=self._audit_workspace(),
             )
             
+        except (ModelRegistryError, ProviderError) as e:
+            # Fail closed: raise to the caller instead of yielding error text.
+            status_manager.set_status("decision_agent", "error", f"Error: {e.code}", model=self.model_name)
+            raise
         except Exception as e:
 
 

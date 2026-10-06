@@ -19,6 +19,7 @@ import secrets
 import pytest
 
 from model_stub_server import ModelStubServer
+from model_registry.schemas import TEMPERATURE_REQUIRED_ROLES
 from model_registry import (
     CHAT_ROLES,
     ROLE_FORECASTER,
@@ -52,6 +53,7 @@ def registry_document(
     role_provider: Optional[Dict[str, str]] = None,
     role_extra: Optional[Dict[str, Dict[str, Any]]] = None,
     include_forecaster: bool = True,
+    base_urls: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """A valid registry document aimed at the stub server at ``stub_url``."""
 
@@ -85,6 +87,8 @@ def registry_document(
     }
     for role in wanted:
         entry: Dict[str, Any] = {"provider": mapping[role], "model": model_id_for(role)}
+        if role in TEMPERATURE_REQUIRED_ROLES:
+            entry["temperature"] = 0.0
         entry.update((role_extra or {}).get(role, {}))
         document["roles"][role] = entry
     if include_forecaster:
@@ -93,6 +97,8 @@ def registry_document(
             "model": "stub-org/stub-forecaster",
             "revision": "stub-revision-1",
         }
+    for provider_id, url in (base_urls or {}).items():
+        document["providers"][provider_id]["base_url"] = url
     return copy.deepcopy(document)
 
 
@@ -266,3 +272,13 @@ def registry_factory(tmp_path, stub, key_env):
         yield build
     finally:
         set_active_registry(None)
+
+
+# A loopback port nothing listens on: connections are refused at once.
+DEAD_URL = "http://127.0.0.1:9"
+
+
+def dead_provider_urls(*provider_ids: str) -> Dict[str, str]:
+    """``base_urls`` override that points the given providers at a closed port."""
+
+    return {pid: f"{DEAD_URL}/{pid}/v1" for pid in provider_ids}

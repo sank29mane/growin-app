@@ -24,7 +24,14 @@ from status_manager import status_manager
 from app_logging import correlation_id_ctx
 from utils.audit_log import log_audit
 from .llm_factory import LLMFactory
-from model_registry import ROLE_COORDINATOR
+from model_registry import (
+    ROLE_COORDINATOR,
+    ROLE_DECISION,
+    ROLE_RISK_CRITIC,
+    ModelRegistryError,
+    ProviderError,
+    get_active_registry,
+)
 from price_validation import PriceValidator
 
 # Import specialist agents (as used in CoordinatorAgent)
@@ -86,6 +93,11 @@ class OrchestratorAgent:
         if self._initialized:
             return
             
+        # Up front, before any model call or proposal: every role this request
+        # needs must be configured. A risk_critic failure after a proposal is
+        # registered would otherwise leave that proposal behind.
+        get_active_registry().require(ROLE_COORDINATOR, ROLE_DECISION, ROLE_RISK_CRITIC)
+
         # Routing LLM: the registry's coordinator role. A role that is not
         # configured raises ModelRoleMissing; there is no fallback model.
         self.routing_llm = await LLMFactory.create_llm(ROLE_COORDINATOR)
@@ -94,6 +106,22 @@ class OrchestratorAgent:
         await self.decision_engine._initialize_llm()
         
         self._initialized = True
+
+    async def _void_pending_proposal(self, context: MarketContext, reason: str) -> None:
+        """Reject the proposal make_decision registered when the risk step cannot finish.
+
+        Uses the execution service's existing reject path. A reply that skipped
+        its risk review must not leave an approvable proposal behind.
+        """
+        from app_context import state
+
+        proposal = context.user_context.pop("pending_proposal", None)
+        if not proposal:
+            return
+        try:
+            await state.execution_service.reject(proposal, reason)
+        except Exception as exc:
+            logger.error("Could not void proposal %s: %s", proposal.get("proposal_id"), type(exc).__name__)
 
     async def _classify_intent(self, query: str) -> Dict[str, Any]:
         """Classify user intent using routing LLM (reused from Coordinator)"""
@@ -173,6 +201,10 @@ Query: "{clean_query}"
                 "primary_ticker": ticker,
                 "reason": "Unified Routing"
             }
+        except (ModelRegistryError, ProviderError):
+            # Fail closed: an unreachable coordinator stops the request. Keyword
+            # heuristics would let the decision step run without a routing model.
+            raise
         except Exception as e:
 
             handle_error(e, "Orchestrator routing failed", logger, raise_error=False)
@@ -438,9 +470,13 @@ Query: "{clean_query}"
                 correlation_id=c_id
             ))
             
-            risk_review = await self.risk_agent.review(context, recommendation)
+            try:
+                risk_review = await self.risk_agent.review(context, recommendation)
+            except (ModelRegistryError, ProviderError):
+                await self._void_pending_proposal(context, "RISK_CRITIC_UNAVAILABLE")
+                raise
             debate_trace.append({"turn": turn, "status": risk_review.get("status"), "refutation": risk_review.get("debate_refutation")})
-            
+
             if risk_review.get("status") == "APPROVED" or turn >= max_debate_turns:
                 break
             
@@ -454,7 +490,11 @@ Query: "{clean_query}"
             Stitched Context: {stitched_narrative}
             """
             # Use decision engine to generate rebuttal
-            rebuttal_result = await self.decision_engine.generate_response(rebuttal_prompt)
+            try:
+                rebuttal_result = await self.decision_engine.generate_response(rebuttal_prompt)
+            except (ModelRegistryError, ProviderError):
+                await self._void_pending_proposal(context, "DECISION_REBUTTAL_UNAVAILABLE")
+                raise
             recommendation = rebuttal_result
 
         # Calculate final ACE Score using dedicated component

@@ -41,6 +41,7 @@ from .schemas import (
     ROLE_FORECASTER,
     ROLE_NAMES,
     SCHEMA_VERSION,
+    TEMPERATURE_REQUIRED_ROLES,
     PROVIDER_ID_PATTERN,
     ProviderConfig,
     RegistryFile,
@@ -108,6 +109,9 @@ class ModelRegistry:
         config = self.roles.get(role)
         if config is None:
             raise ModelRoleMissing(role)
+        if role in TEMPERATURE_REQUIRED_ROLES and config.temperature is None:
+            # Fails this role only; the registry and the other roles stay usable.
+            raise ModelRegistryError("TEMPERATURE_REQUIRED", role)
         provider = self.providers[config.provider]
         return ResolvedRole(
             role=role,
@@ -126,11 +130,14 @@ class ModelRegistry:
         )
 
     def require(self, *roles: str) -> None:
-        """Raise ``ModelRoleMissing`` for the first role that is not configured."""
+        """Raise for the first role that is not configured or not usable.
+
+        ``ModelRoleMissing`` for an absent role, ``TEMPERATURE_REQUIRED`` for a
+        decision or risk_critic role with no temperature.
+        """
 
         for role in roles:
-            if role not in self.roles:
-                raise ModelRoleMissing(role)
+            self.resolve(role)
 
     def describe_roles(self, environ: Optional[Mapping[str, str]] = None) -> dict[str, Any]:
         """Non-secret role summary for the app. No URL, env name or key value.
@@ -140,10 +147,16 @@ class ModelRegistry:
         """
 
         items = []
+        unusable = []
         for name in ROLE_NAMES:
             if name not in self.roles:
                 continue
-            resolved = self.resolve(name)
+            try:
+                resolved = self.resolve(name)
+            except ModelRegistryError:
+                # Present but unusable (no temperature): reported as missing.
+                unusable.append(name)
+                continue
             key_configured: Optional[bool] = None
             if resolved.api_key_env is not None:
                 key_configured = resolved.api_key(environ) is not None
@@ -156,7 +169,7 @@ class ModelRegistry:
                     "key_configured": key_configured,
                 }
             )
-        missing = [name for name in ROLE_NAMES if name not in self.roles]
+        missing = [name for name in ROLE_NAMES if name not in self.roles or name in unusable]
         return {"roles": items, "missing_roles": missing}
 
 
