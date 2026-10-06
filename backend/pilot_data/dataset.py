@@ -148,8 +148,27 @@ class DatasetManifest(CaveatedResult):
     dividend_amount_unknown_events: dict[str, tuple[DividendAmountUnknownEvent, ...]] = {}
 
 
-def dataset_hash(rows: list[DatasetRow]) -> str:
-    return canonical_sha256([row.payload() for row in rows])
+def _events_payload(events: dict[str, tuple[DividendAmountUnknownEvent, ...]]) -> dict[str, list[list[str]]]:
+    """Canonical, sorted form of the manifest event list (anchor -> [[ex_date, event_id], ...])."""
+    return {
+        anchor: sorted([event.ex_date.isoformat(), event.event_id] for event in found)
+        for anchor, found in sorted(events.items())
+    }
+
+
+def dataset_hash(
+    rows: list[DatasetRow], events: dict[str, tuple[DividendAmountUnknownEvent, ...]] | None = None
+) -> str:
+    """Hash of the rows, plus the D-20 event list when there is one.
+
+    The event list joins the hash only when non-empty, so a dataset without amount-unknown dividends
+    (including every pre-D-20 dataset) keeps the hash it always had. The manifest is otherwise unhashed,
+    so this is what stops an edited event list from verifying.
+    """
+    payloads = [row.payload() for row in rows]
+    if not events:
+        return canonical_sha256(payloads)
+    return canonical_sha256({"rows": payloads, "dividend_amount_unknown_events": _events_payload(events)})
 
 
 _UNSAFE_PATH_CHARS = ("'", "\\", "\n", "\r", "\x00")
@@ -310,7 +329,7 @@ def build_dataset_snapshot(
             "short_history": span.short_history,
         }
     rows.sort(key=lambda row: (row.anchor_isin, row.trade_date))
-    digest = dataset_hash(rows)
+    digest = dataset_hash(rows, unknown_events)
     all_raw = all(members[code].rawness_overall == "raw_confirmed" for code in {r.stock_code for r in rows})
     manifest = DatasetManifest(
         workspace="india", caveats=standard_caveats(*(() if all_raw else (BREEZE_RAW_UNVERIFIED_CAVEAT,))),
@@ -378,6 +397,8 @@ def verify_dataset(path: Path, *, workspace: str) -> DatasetManifest:
         raise PilotDataError("dataset_integrity", "manifest.json is missing or unreadable") from exc
     if manifest.workspace != workspace:
         raise PilotDataError("workspace_mismatch", "dataset belongs to a different workspace")
+    if path.resolve().name != manifest.dataset_sha256:
+        raise PilotDataError("dataset_integrity", "the directory name is not the dataset hash in the manifest")
     parquet = path / "rows.parquet"
     try:
         actual = sha256_hex(parquet.read_bytes())
@@ -389,33 +410,35 @@ def verify_dataset(path: Path, *, workspace: str) -> DatasetManifest:
         rows = _read_parquet(parquet)
     except Exception as exc:  # corrupt content that still matched the hash cannot be trusted either
         raise PilotDataError("dataset_integrity", "rows.parquet could not be read") from exc
-    if dataset_hash(rows) != manifest.dataset_sha256 or len(rows) != manifest.row_count:
+    if dataset_hash(rows, manifest.dividend_amount_unknown_events) != manifest.dataset_sha256 \
+            or len(rows) != manifest.row_count:
         raise PilotDataError("dataset_integrity", "rows do not reproduce the dataset hash")
     _check_unknown_dividend_tags(rows, manifest)
     return manifest
 
 
 def _check_unknown_dividend_tags(rows: list[DatasetRow], manifest: DatasetManifest) -> None:
-    """D-20 cross-check between the manifest event list and the per-row tags.
+    """D-20: every row's tags must follow exactly from the manifest event list.
 
-    Manifest to rows, bar tag only: every listed anchor needs at least one dividend_amount_unknown row.
-    Rows to manifest, ex-date flag: every flagged row must sit on a listed ex-date of its anchor. A
-    listed ex-date may have no flagged row (no accepted bar that day), so that direction is not checked.
+    This is the rule adjusted_series applies, so it holds for any set of accepted bars. For an anchor
+    with listed ex-dates E (empty when the anchor is not listed):
+      dividend_amount_unknown          == (E is not empty and trade_date <= max(E))
+      dividend_amount_unknown_ex_date  == (trade_date in E)
+    The first tag is set whether or not the bar's adjusted value is withheld. A listed ex-date with no
+    accepted bar on it is legal, so Phase 62 reads ex-dates from the manifest, not from the row flag.
     """
     listed = {anchor: {event.ex_date for event in events}
               for anchor, events in manifest.dividend_amount_unknown_events.items()}
-    tagged = {row.anchor_isin for row in rows if row.dividend_amount_unknown}
-    missing = sorted(set(listed) - tagged)
-    if missing:
-        raise PilotDataError(
-            "dataset_integrity", f"manifest lists amount-unknown dividend events for {missing[0]} but no row is tagged"
-        )
     for row in rows:
-        if row.dividend_amount_unknown_ex_date and row.trade_date not in listed.get(row.anchor_isin, set()):
+        ex_dates = listed.get(row.anchor_isin, set())
+        want_bar = bool(ex_dates) and row.trade_date <= max(ex_dates)
+        want_ex = row.trade_date in ex_dates
+        if row.dividend_amount_unknown != want_bar or row.dividend_amount_unknown_ex_date != want_ex:
             raise PilotDataError(
                 "dataset_integrity",
-                f"row {row.anchor_isin} {row.trade_date.isoformat()} is flagged as an amount-unknown ex-date "
-                "that the manifest does not list",
+                f"row {row.anchor_isin} {row.trade_date.isoformat()} carries dividend_amount_unknown="
+                f"{row.dividend_amount_unknown} and dividend_amount_unknown_ex_date="
+                f"{row.dividend_amount_unknown_ex_date}, but the manifest event list requires {want_bar} and {want_ex}",
             )
 
 

@@ -606,3 +606,9 @@ def test_bars_are_tagged_even_when_a_later_unresolved_action_withholds_their_val
     series = adjusted_series(flat_bars(*days), fs, as_of=days[4], workspace="india")
     assert [(b.adjusted_quarantined, b.dividend_amount_unknown) for b in series.bars] == [
         (True, True), (True, True), (True, False), (True, False), (False, False)]
+
+
+def test_the_hidden_bonus_case_keeps_the_factor_set_hash_it_had_on_main():
+    # The conflict label is part of the hashed factor set; pilot-adjust/2 has shipped, so it must not drift.
+    fs, _ = gap_set("66.7")
+    assert fs.factor_set_sha256 == "0f15f9f39964fbb84a8e0f6714569f6b8622d610f72fe2aad63d3066a473e27a"
