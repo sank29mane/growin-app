@@ -21,7 +21,7 @@ from .store import PilotDataStore
 
 ActionKind = Literal[
     "split", "consolidation", "bonus", "dividend", "rights", "demerger", "merger",
-    "other_price_affecting", "non_price", "unknown",
+    "other_price_affecting", "non_price", "unknown", "dividend_amount_unknown",
 ]
 
 _NUM = r"(\d+(?:\.\d+)?)"
@@ -36,6 +36,9 @@ _DIVIDEND = re.compile(
     rf"^(?:(?:INT|INTERIM|FIN|FNL|FINAL|SPL|SPECIAL) ?)?(?:DIV|DIVIDEND)(?: ?- ?| )(?:RS|RE)\.? ?{_NUM}"
     r"(?: PE?R SH(?:ARE)?)?$"
 )
+# D-20 (Phase 62): NSE publishes some interim dividends with no amount at all. Only the exact
+# bare phrase is typed; final and special dividends with no amount stay unknown (unresolved).
+_INTERIM_DIVIDEND_NO_AMOUNT = re.compile(r"^INTERIM DIVIDEND$")
 _MERGER = re.compile(r"^(?:MERGER|AMALGAMATION)$")
 # Bc PURPOSE is cut at 25 characters, so REDEMPTION arrives as REDEMPTN or REDEMPTI.
 _REDEMPTION_TRUNCATED = re.compile(r"^REDEMPT[A-Z]{0,3}$")
@@ -60,7 +63,8 @@ ADJUSTABLE_KINDS = frozenset({"split", "consolidation", "bonus", "dividend", "no
 # ingest) instead of conflicting with rows derived by the old rules. Older
 # tables stay as history and are never read.
 # Store table names allow only [a-z_], so revisions are letters (a was unsuffixed).
-CLASSIFIER_REVISION = "b"
+# Revision c types the amount-less INTERIM DIVIDEND purpose (D-20); b read it as unknown.
+CLASSIFIER_REVISION = "c"
 EVENTS_TABLE = f"corporate_action_events_rev_{CLASSIFIER_REVISION}"
 SIGHTINGS_TABLE = f"corporate_action_sightings_rev_{CLASSIFIER_REVISION}"
 
@@ -146,6 +150,8 @@ def _classify(part: str) -> ActionPart:
     if match:
         amount = _positive(match.group(1))
         return ActionPart(kind="dividend", dividend_per_share=amount) if amount else ActionPart(kind="unknown")
+    if _INTERIM_DIVIDEND_NO_AMOUNT.match(part):
+        return ActionPart(kind="dividend_amount_unknown")
     if part.startswith(("RIGHTS", "RGHTS")):
         return ActionPart(kind="rights")
     if part == "DEMERGER":
@@ -184,6 +190,10 @@ def parse_purpose(purpose: str) -> tuple[ActionPart, ...]:
 
 
 def is_adjustable(parts: tuple[ActionPart, ...]) -> bool:
+    if any(part.kind == "dividend_amount_unknown" for part in parts):
+        # D-20 lifts only a lone amount-less interim dividend. Any companion part (a bonus, a split,
+        # another dividend) leaves the whole event unresolved.
+        return len(parts) == 1
     return bool(parts) and all(part.kind in ADJUSTABLE_KINDS for part in parts)
 
 

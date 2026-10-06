@@ -248,3 +248,132 @@ def test_cli_build_and_verify(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["error_code"] == "crosscheck_run_missing"
     assert main(["verify", "--path", str(tmp_path / "nowhere"), "--workspace", "india"]) == 2
     assert json.loads(capsys.readouterr().out)["error_code"] == "dataset_integrity"
+
+
+# ------------------------------------------------------------------ D-20: amount-less interim dividends
+def add_steady_event(store, purpose, day=D4):
+    ingest_pr_zip(
+        store, desc(kind="pr_zip"),
+        kit.pr_zip(D2, [kit.pd_index_row()], [kit.bc_row("EQ", "STEADYCO", "STEADY CO", purpose, ex_date=day)], []),
+        trade_date=D2,
+    )
+    derive_corporate_actions(store, workspace="india")
+
+
+def steady_run(store, *purposes):
+    load_bhavcopy(store)
+    for purpose in purposes:
+        add_steady_event(store, purpose)
+    load_breeze(store, "STEADY", breeze_rows("STEADY", STEADY))
+    return run(store, make_targets(STEADY_MEMBER))
+
+
+def test_amountless_interim_dividend_rows_are_lifted_tagged_and_the_manifest_records_the_policy(store, tmp_path):
+    plain = snapshot(store, steady_run(store))
+    with PilotDataStore(tmp_path / "other", workspace="india") as other:
+        report = steady_run(other, "INTERIM DIVIDEND")
+        manifest = snapshot(other, report, tmp_path / "export")
+    assert manifest.dataset_sha256 != plain.dataset_sha256
+    assert (manifest.adjustment_policy_version, manifest.unknown_dividend_policy) == ("pilot-adjust/2", "unknown_zero/1")
+    assert plain.dividend_amount_unknown_events == {}
+    (events,) = manifest.dividend_amount_unknown_events.values()
+    assert [e.ex_date for e in events] == [D4] and len(events[0].event_id) == 64
+    assert list(manifest.dividend_amount_unknown_events) == [STEADY_MEMBER.anchor_isin]
+    assert verify_dataset(tmp_path / "export" / manifest.dataset_sha256, workspace="india") == manifest
+    rows = _read_parquet(tmp_path / "export" / manifest.dataset_sha256 / "rows.parquet")
+    by_day = {r.trade_date: r for r in rows}
+    assert not any(r.adjusted_quarantined for r in rows)  # lifted: the pre-D-20 build withheld D1 to D3
+    assert all(by_day[d].adj_close == by_day[d].raw_close == Decimal("100.0000") for d in by_day)
+    assert [(d, by_day[d].dividend_amount_unknown, by_day[d].dividend_amount_unknown_ex_date) for d in (D1, D2, D3, D4, D5)] == [
+        (D1, True, False), (D2, True, False), (D3, True, False), (D4, True, True), (D5, False, False)]
+    assert all("policy=pilot-adjust/2" in r.adjusted_basis for r in rows)
+
+
+def test_a_coinciding_bonus_keeps_the_quarantine_in_the_dataset(store, tmp_path):
+    report = steady_run(store, "INTERIM DIVIDEND", "BONUS 1:1")
+    manifest = snapshot(store, report, tmp_path / "export")
+    rows = _read_parquet(tmp_path / "export" / manifest.dataset_sha256 / "rows.parquet")
+    by_day = {r.trade_date: r for r in rows}
+    assert manifest.dividend_amount_unknown_events == {}
+    assert all(by_day[d].adjusted_quarantined and by_day[d].adj_close is None for d in (D1, D2, D3))
+    assert not any(r.dividend_amount_unknown or r.dividend_amount_unknown_ex_date for r in rows)
+
+
+def test_rebuilding_the_amountless_dividend_dataset_is_idempotent(store):
+    report = steady_run(store, "INTERIM DIVIDEND")
+    first, second = snapshot(store, report), snapshot(store, report)
+    assert first.dataset_sha256 == second.dataset_sha256
+    assert first.dividend_amount_unknown_events == second.dividend_amount_unknown_events
+    assert store.query("SELECT count(*) FROM dataset_snapshots")[0][0] == 1
+
+
+def test_a_dataset_exported_before_the_tag_columns_still_verifies(store, tmp_path):
+    export = tmp_path / "export"
+    manifest = snapshot(store, built_run(store), export)  # no amount-less events: every tag is False
+    target = export / manifest.dataset_sha256
+    os.chmod(target, 0o755)
+    parquet, manifest_file = target / "rows.parquet", target / "manifest.json"
+    con = duckdb.connect(":memory:")
+    con.execute(f"CREATE TABLE t AS SELECT * FROM read_parquet('{parquet}')")
+    con.execute("ALTER TABLE t DROP COLUMN dividend_amount_unknown")
+    con.execute("ALTER TABLE t DROP COLUMN dividend_amount_unknown_ex_date")
+    os.chmod(parquet, 0o644)
+    parquet.unlink()
+    con.execute(f"COPY t TO '{parquet}' (FORMAT PARQUET)")
+    con.close()
+    body = json.loads(manifest_file.read_text())
+    body["parquet_sha256"] = sha256_hex(parquet.read_bytes())
+    for name in ("adjustment_policy_version", "unknown_dividend_policy", "dividend_amount_unknown_events"):
+        body.pop(name)
+    os.chmod(manifest_file, 0o644)
+    manifest_file.write_text(json.dumps(body))
+    legacy = verify_dataset(target, workspace="india")
+    assert legacy.dataset_sha256 == manifest.dataset_sha256 and legacy.adjustment_policy_version is None
+    assert all(not r.dividend_amount_unknown for r in _read_parquet(parquet))
+
+
+def test_verify_cross_checks_the_manifest_event_list_against_the_row_tags(store, tmp_path):
+    report = steady_run(store, "INTERIM DIVIDEND")
+    manifest = snapshot(store, report, tmp_path / "export")
+    target = tmp_path / "export" / manifest.dataset_sha256
+    assert verify_dataset(target, workspace="india") == manifest
+    os.chmod(target, 0o755)
+    manifest_file = target / "manifest.json"
+    os.chmod(manifest_file, 0o644)
+    original = json.loads(manifest_file.read_text())
+    anchor = STEADY_MEMBER.anchor_isin
+    (event,) = original["dividend_amount_unknown_events"][anchor]
+
+    def tampered(events):
+        body = json.loads(json.dumps(original))
+        body["dividend_amount_unknown_events"] = events
+        manifest_file.write_text(json.dumps(body))
+        with pytest.raises(PilotDataError) as caught:
+            verify_dataset(target, workspace="india")
+        return caught.value
+
+    # rows are flagged as an ex-date, but the manifest lists nothing for them
+    assert tampered({}).code == "dataset_integrity"
+    # the manifest lists an anchor that has no tagged rows at all
+    fabricated = tampered({anchor: [event], "INE999Z01011": [event]})
+    assert fabricated.code == "dataset_integrity" and "INE999Z01011" in str(fabricated)
+    # the listed ex-date is not the flagged row's date
+    moved = tampered({anchor: [{**event, "ex_date": D3.isoformat()}]})
+    assert moved.code == "dataset_integrity" and "does not list" in str(moved)
+    manifest_file.write_text(json.dumps(original))
+    assert verify_dataset(target, workspace="india").dataset_sha256 == manifest.dataset_sha256
+
+
+def test_a_listed_ex_date_without_an_accepted_bar_is_allowed(store, tmp_path):
+    # D-20 keeps the manifest as the source of ex-dates: a row flag exists only when a bar trades that day.
+    report = steady_run(store, "INTERIM DIVIDEND")
+    manifest = snapshot(store, report, tmp_path / "export")
+    target = tmp_path / "export" / manifest.dataset_sha256
+    os.chmod(target, 0o755)
+    manifest_file = target / "manifest.json"
+    os.chmod(manifest_file, 0o644)
+    body = json.loads(manifest_file.read_text())
+    body["dividend_amount_unknown_events"][STEADY_MEMBER.anchor_isin].append(
+        {"event_id": "e" * 64, "ex_date": "2025-03-08"})  # the Saturday
+    manifest_file.write_text(json.dumps(body))
+    assert verify_dataset(target, workspace="india").dataset_sha256 == manifest.dataset_sha256
