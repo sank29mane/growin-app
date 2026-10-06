@@ -22,6 +22,9 @@ BANNED_CALLS = {"now", "utcnow", "today", "fromtimestamp", "utcfromtimestamp"}
 FLOAT_ALLOWED = {"regime.py"}
 CLOCK_ALLOWED = {"__main__.py"}
 TICK_ADAPTER = "ticks.py"
+DYNAMIC_IMPORT_NAMES = {"importlib", "__import__", "import_module"}
+EVAL_NAMES = {"exec", "eval", "compile"}
+IMPORT_RULE = "costs.ticks is reachable only as 'from costs.ticks import <public names>'"
 
 
 def _int_like(node: ast.AST) -> bool:
@@ -37,40 +40,74 @@ def _int_like(node: ast.AST) -> bool:
     return False
 
 
-TICKS_RECEIVERS = {"costs_ticks", "_costs_ticks", "ticks"}
+def _strings(*nodes: ast.AST) -> list[str]:
+    return [n.value for root in nodes for n in ast.walk(root) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
 
 
-def _ticks_aliases(tree: ast.AST) -> set[str]:
-    """Names this file binds to the costs.ticks module, whatever the import form."""
-    names = set(TICKS_RECEIVERS)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name == "costs.ticks" and alias.asname:
-                    names.add(alias.asname)
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == "costs":
-            for alias in node.names:
-                if alias.name == "ticks":
-                    names.add(alias.asname or alias.name)
-    return names
+def _ticks_violation(node: ast.AST, filename: str, costs_names: set[str]) -> str | None:
+    """Allowlist for costs.ticks: only `from costs.ticks import <public names>`, and only in the adapter.
 
-
-def _is_ticks_module(node: ast.AST, aliases: set[str]) -> bool:
-    """A bound alias name, or the dotted chain costs.ticks."""
-    if isinstance(node, ast.Name):
-        return node.id in aliases
-    return (isinstance(node, ast.Attribute) and node.attr == "ticks"
-            and isinstance(node.value, ast.Name) and node.value.id == "costs")
-
-
-def _private(name: str) -> bool:
-    return name.startswith("_") and not name.startswith("__")
+    No module object can be bound that way, so aliasing, getattr, vars() and __dict__ on it cannot happen.
+    Anything else that names the module, and any dynamic import machinery, is a violation.
+    """
+    if isinstance(node, ast.Import):
+        for alias in node.names:
+            if alias.name.split(".")[0] == "importlib":
+                return "importlib is banned in strategy_india"
+            if alias.name.startswith("costs.ticks"):
+                return f"{IMPORT_RULE}, not import {alias.name}"
+            if alias.name.split(".")[0] == "costs":
+                return f"costs is reachable only through 'from costs.<submodule> import <names>', not import {alias.name}"
+    elif isinstance(node, ast.ImportFrom):
+        if node.level >= 2:
+            return "relative import leaves strategy_india"
+        if any(alias.name == "costs" for alias in node.names):
+            return "costs may not be imported as a name: use 'from costs.<submodule> import <names>'"
+        if node.level != 0 or not node.module:
+            return None
+        if node.module.split(".")[0] == "importlib":
+            return "importlib is banned in strategy_india"
+        if node.module == "costs" and any(alias.name in ("ticks", "*") for alias in node.names):
+            return f"{IMPORT_RULE}, not 'from costs import ticks'"
+        if node.module == "costs.ticks":
+            if filename != TICK_ADAPTER:
+                return "costs.ticks may only be imported by ticks.py"
+            bad = [alias.name for alias in node.names if alias.name.startswith("_") or alias.name == "*"]
+            if bad:
+                return f"private costs.ticks name {', '.join(bad)}"
+    elif isinstance(node, ast.Attribute):
+        if node.attr in DYNAMIC_IMPORT_NAMES:
+            return f"{node.attr} is banned in strategy_india"
+        if node.attr in {"exec", "eval"} or (
+            node.attr == "compile" and isinstance(node.value, ast.Name) and node.value.id in {"builtins", "__builtins__"}
+        ):
+            return f"{node.attr} is banned in strategy_india"
+        if node.attr == "ticks" and isinstance(node.value, ast.Name) and node.value.id in costs_names:
+            return f"{IMPORT_RULE}, not a costs.ticks attribute chain"
+    elif isinstance(node, ast.Name) and (node.id in DYNAMIC_IMPORT_NAMES or node.id in EVAL_NAMES):
+        return f"{node.id} is banned in strategy_india"
+    elif isinstance(node, (ast.Call, ast.Subscript)):
+        call = isinstance(node, ast.Call)
+        if call and isinstance(node.func, ast.Name) and node.func.id == "getattr" and any(
+            part in EVAL_NAMES for part in _strings(*node.args)
+        ):
+            return "exec/eval/compile is banned in strategy_india"
+        parts = _strings(*node.args, *(k.value for k in node.keywords)) if call else _strings(node.slice)
+        stripped = {part.strip(".") for part in parts}
+        if any("costs.ticks" in part or part in DYNAMIC_IMPORT_NAMES for part in parts) or (
+            call and {"costs", "ticks"} <= stripped
+        ):
+            return f"{IMPORT_RULE}, not a string naming the module"
+    return None
 
 
 def scan_source(source: str, filename: str) -> list[str]:
     out: list[str] = []
     tree = ast.parse(source, filename=filename)
-    aliases = _ticks_aliases(tree)
+    costs_names = {"costs"} | {
+        alias.asname for node in ast.walk(tree) if isinstance(node, ast.Import)
+        for alias in node.names if alias.name == "costs" and alias.asname
+    }
     heavy_ok = filename in FLOAT_ALLOWED
     for node in ast.walk(tree):
         line = getattr(node, "lineno", 0)
@@ -78,28 +115,16 @@ def scan_source(source: str, filename: str) -> list[str]:
         if isinstance(node, ast.Import):
             modules = [alias.name for alias in node.names]
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            modules = [node.module]
-            if node.module == "costs":
-                modules += [f"costs.{alias.name}" for alias in node.names]
+            modules = [node.module]  # relative imports of level 1 stay in the package; level >= 2 is banned below
         for name in modules:
             root = name.split(".")[0]
             if root in BANNED_ROOTS:
                 out.append(f"{filename}:{line}: banned import {name}")
             if root in HEAVY_ROOTS and not heavy_ok:
                 out.append(f"{filename}:{line}: {name} is allowed only in regime.py")
-            if name in ("costs.ticks",) and filename != TICK_ADAPTER:
-                out.append(f"{filename}:{line}: costs.ticks may only be imported by ticks.py")
-        if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module in ("costs.ticks", "costs"):
-            for alias in node.names:
-                if alias.name.startswith("_") and (node.module == "costs.ticks" or alias.name == "_ticks"):
-                    out.append(f"{filename}:{line}: private costs.ticks name {alias.name}")
-        if isinstance(node, ast.Attribute) and _private(node.attr) and _is_ticks_module(node.value, aliases):
-            out.append(f"{filename}:{line}: private costs.ticks name {node.attr}")
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr"
-                and len(node.args) >= 2 and _is_ticks_module(node.args[0], aliases)
-                and isinstance(node.args[1], ast.Constant) and isinstance(node.args[1].value, str)
-                and _private(node.args[1].value)):
-            out.append(f"{filename}:{line}: private costs.ticks name {node.args[1].value} via getattr")
+        problem = _ticks_violation(node, filename, costs_names)
+        if problem:
+            out.append(f"{filename}:{line}: {problem}")
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div) and not heavy_ok:
             if _int_like(node.left) and _int_like(node.right):
                 out.append(f"{filename}:{line}: int/int true division yields a float; use Decimal")
@@ -150,18 +175,90 @@ def test_package_is_pure():
         ("x = float('1')", "engine.py", "float()"),
         ("import datetime\nx = datetime.datetime.now()", "engine.py", ".now()"),
         ("import datetime\nx = datetime.date.today()", "report.py", ".today()"),
+        # costs.ticks: only public from-imports, only in ticks.py
         ("from costs.ticks import resolve_tick_from_table", "engine.py", "ticks.py"),
-        ("from costs import ticks", "engine.py", "ticks.py"),
         ("from costs.ticks import _resolve_tick_from_table", "ticks.py", "private costs.ticks name"),
-        ("import costs.ticks as _costs_ticks\nx = _costs_ticks._resolve_tick_from_table(t)", "ticks.py",
-         "private costs.ticks name"),
-        ("import costs.ticks as ct\nx = ct._resolve_tick_from_table(t)", "ticks.py", "private costs.ticks name"),
-        ("from costs import ticks as ct\nx = ct._resolve_tick_from_table(t)", "ticks.py", "private costs.ticks name"),
-        ("import costs.ticks\nx = costs.ticks._resolve_tick_from_table(t)", "ticks.py", "private costs.ticks name"),
-        ("from costs import ticks as _costs_ticks\nx = getattr(_costs_ticks, '_resolve_tick_from_table')", "ticks.py",
-         "private costs.ticks name"),
-        ("import costs.ticks\nx = getattr(costs.ticks, '_resolve_tick_from_table')", "ticks.py",
-         "private costs.ticks name"),
+        ("from costs.ticks import resolve_nse_cash_tick, _tick_value", "ticks.py", "private costs.ticks name"),
+        ("from costs.ticks import *", "ticks.py", "private costs.ticks name"),
+        ("from costs.ticks import _x as public_looking", "ticks.py", "private costs.ticks name"),
+        # the module bound or named any other way
+        ("import costs.ticks", "ticks.py", "not import costs.ticks"),
+        ("import costs.ticks as ct", "ticks.py", "not import costs.ticks"),
+        ("from costs import ticks", "ticks.py", "not 'from costs import ticks'"),
+        ("from costs import ticks as ct", "ticks.py", "not 'from costs import ticks'"),
+        ("from costs import *", "ticks.py", "not 'from costs import ticks'"),
+        ("from costs import ticks", "engine.py", "not 'from costs import ticks'"),
+        ("import costs\nx = costs.ticks.committed_tick_table(c)", "ticks.py", "attribute chain"),
+        ("import costs\nt = costs.ticks", "ticks.py", "attribute chain"),
+        ("import costs as c\nt = c.ticks", "ticks.py", "attribute chain"),
+        ("import costs.ticks\nx = costs.ticks._resolve_tick_from_table(t)", "ticks.py", "attribute chain"),
+        # aliasing and reflection: the import that makes them possible is itself the violation
+        ("import costs.ticks as ct\nt = ct\nx = t._resolve_tick_from_table(a)", "ticks.py", "not import costs.ticks"),
+        ("import costs.ticks as ct\nx = getattr(ct, name)", "ticks.py", "not import costs.ticks"),
+        ("import costs.ticks as ct\nx = getattr(ct, name=n)", "ticks.py", "not import costs.ticks"),
+        ("import costs.ticks as ct\nx = hasattr(ct, name=n)", "ticks.py", "not import costs.ticks"),
+        ("import costs.ticks as ct\nsetattr(ct, name=n, value=v)", "ticks.py", "not import costs.ticks"),
+        ("import costs.ticks as ct\ndelattr(ct, n)", "ticks.py", "not import costs.ticks"),
+        ("import costs.ticks as ct\ndelattr(ct, name=n)", "ticks.py", "not import costs.ticks"),
+        ("from costs import ticks as ct\nx = getattr(ct, '_resolve_tick_from_table')", "ticks.py", "not 'from costs"),
+        ("from costs import ticks as ct\nx = hasattr(ct, '_resolve_tick_from_table')", "ticks.py", "not 'from costs"),
+        ("import costs.ticks as ct\nx = getattr(ct, '__dict__')[k]", "ticks.py", "not import costs.ticks"),
+        ("import costs.ticks as ct\nx = ct.__dict__[name]", "ticks.py", "not import costs.ticks"),
+        ("import costs.ticks as ct\nx = vars(ct)['_resolve_tick_from_table']", "ticks.py", "not import costs.ticks"),
+        ("import costs.ticks as ct\nx = vars(object=ct)[k]", "ticks.py", "not import costs.ticks"),
+        ("import costs\nx = getattr(costs.ticks, name=n)", "ticks.py", "attribute chain"),
+        ("import costs\nx = vars(object=costs.ticks)", "ticks.py", "attribute chain"),
+        # strings naming the module, and any dynamic import machinery
+        ("import sys\nm = sys.modules['costs.ticks']", "ticks.py", "string naming the module"),
+        ("m = lookup('costs.ticks')", "ticks.py", "string naming the module"),
+        ("m = lookup('ticks', 'costs')", "ticks.py", "string naming the module"),
+        ("m = lookup('.ticks', package='costs')", "ticks.py", "string naming the module"),
+        ("import importlib", "ticks.py", "importlib is banned"),
+        ("import importlib.util", "ticks.py", "importlib is banned"),
+        ("from importlib import util", "ticks.py", "importlib is banned"),
+        ("import importlib\nm = importlib.import_module('costs.ticks')", "ticks.py", "importlib is banned"),
+        ("import importlib\nm = importlib.import_module('costs.ticks')", "ticks.py", "string naming the module"),
+        ("import importlib\nm = importlib.import_module('ticks', 'costs')", "ticks.py", "string naming the module"),
+        ("import importlib\nm = importlib.import_module('.ticks', package='costs')", "ticks.py",
+         "string naming the module"),
+        ("import importlib\nm = importlib.import_module(name=n)", "ticks.py", "import_module is banned"),
+        ("import importlib\nm = importlib.import_module(name)", "ticks.py", "import_module is banned"),
+        ("from importlib import import_module\nm = import_module('costs.ticks')", "ticks.py", "importlib is banned"),
+        ("from importlib import import_module as im\nm = im('costs.ticks')", "ticks.py", "importlib is banned"),
+        ("from importlib import import_module as im\nm = im('costs.ticks')", "ticks.py", "string naming the module"),
+        ("m = __import__('costs.ticks')", "ticks.py", "__import__ is banned"),
+        ("m = __import__('costs', fromlist=['ticks'])", "ticks.py", "string naming the module"),
+        ("m = __import__(name)", "ticks.py", "__import__ is banned"),
+        ("import builtins\nm = getattr(builtins, '__import__')(n)", "ticks.py", "string naming the module"),
+        # relative imports that leave the package
+        ("from ..costs.ticks import _x", "ticks.py", "relative import leaves"),
+        ("from ..costs import ticks", "ticks.py", "relative import leaves"),
+        ("from .. import costs as c\nx = c.ticks", "ticks.py", "relative import leaves"),
+        ("from ... import costs", "ticks.py", "relative import leaves"),
+        ("from ..costs.core import Side", "engine.py", "relative import leaves"),
+        ("from .. import gateway", "engine.py", "relative import leaves"),
+        # bare costs, in every form
+        ("import costs", "engine.py", "not import costs"),
+        ("import costs as c", "engine.py", "not import costs"),
+        ("import costs.core", "engine.py", "not import costs.core"),
+        ("import costs.core as cc", "engine.py", "not import costs.core"),
+        ("import costs\nx = getattr(costs, 'ticks')", "engine.py", "not import costs"),
+        ("import costs\nx = vars(costs)['ticks']", "engine.py", "not import costs"),
+        ("import costs\nx = costs.__dict__['ticks']", "engine.py", "not import costs"),
+        ("import costs\nx = costs.__getattribute__('ticks')", "engine.py", "not import costs"),
+        ("from . import costs", "engine.py", "may not be imported as a name"),
+        ("from .. import costs", "engine.py", "relative import leaves"),
+        ("from backend import costs as c", "engine.py", "may not be imported as a name"),
+        ("from costs import costs", "engine.py", "may not be imported as a name"),
+        # exec, eval, compile
+        ("exec('x = 1')", "engine.py", "exec is banned"),
+        ("x = eval(s)", "engine.py", "eval is banned"),
+        ("c = compile(s, 'f', 'exec')", "engine.py", "compile is banned"),
+        ("f = eval\nx = f(s)", "engine.py", "eval is banned"),
+        ("import builtins\nbuiltins.exec(s)", "engine.py", "exec is banned"),
+        ("import builtins\nx = builtins.eval(s)", "engine.py", "eval is banned"),
+        ("import builtins\nc = builtins.compile(s, 'f', 'exec')", "engine.py", "compile is banned"),
+        ("x = getattr(__builtins__, 'eval')(s)", "engine.py", "exec/eval/compile is banned"),
     ],
 )
 def test_planted_violation_is_caught(source, filename, fragment):
@@ -174,11 +271,22 @@ def test_decimal_division_is_not_flagged():
     assert scan_source(ok, "metrics.py") == []
 
 
-def test_public_costs_ticks_use_and_unrelated_privates_stay_allowed():
-    ok = ("from costs import ticks as _costs_ticks\nimport costs.ticks as ct\n"
-          "a = _costs_ticks.committed_tick_table(c)\nb = ct.align_limit(p, t, s)\nc = getattr(ct, 'align_limit')\n"
-          "d = self._cache\ne = other._hidden\nf = ct.__name__\n")
+def test_public_from_import_of_costs_ticks_stays_allowed():
+    ok = ("from costs.ticks import resolve_nse_cash_tick\n"
+          "from costs.ticks import InstrumentClass, TickTable, committed_tick_table\n"
+          "from costs.ticks import align_limit as _align_limit\n"
+          "a = resolve_nse_cash_tick(session_date=d)\nb = _align_limit(p, t, s)\n")
     assert scan_source(ok, "ticks.py") == []
+    assert scan_source("from costs.ticks import resolve_nse_cash_tick", "ticks.py") == []
+
+
+def test_unrelated_reflection_and_attributes_stay_allowed():
+    ok = ("from costs.core import Side\nfrom costs import schedule\nfrom .errors import X\nfrom . import metrics\n"
+          "import re\nr = re.compile('a')\n"
+          "d = self._cache\ne = other._hidden\nf = row.ticks\ng = getattr(row, name)\nh = hasattr(self, name)\n"
+          "i = vars(row)\nj = row.__dict__['k']\nk = getattr(row, 'align_limit', None)\nl = core.IST\n"
+          "m = fmt('tick table for {}', cls)\n")
+    assert scan_source(ok, "engine.py") == []
 
 
 def test_allowed_places_stay_allowed():
@@ -188,5 +296,5 @@ def test_allowed_places_stay_allowed():
 
 
 def test_only_the_tick_adapter_touches_costs_ticks():
-    users = [p.name for p in PKG.glob("*.py") if "costs.ticks" in p.read_text() or "from costs import ticks" in p.read_text()]
+    users = [p.name for p in PKG.glob("*.py") if "costs.ticks" in p.read_text()]
     assert users == [TICK_ADAPTER]
