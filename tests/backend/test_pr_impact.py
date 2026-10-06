@@ -105,21 +105,21 @@ def test_load_metrics_rejects_oversize_and_garbage(tmp_path):
 
 # --- budget rules ----------------------------------------------------------
 
-def row(rule, enforce=True):
-    return {"id": "cov.total_pct", "rule": rule, "enforce": enforce}
+def row(rule):
+    return {"id": "cov.total_pct", "rule": rule, "warn": True}
 
 
 @pytest.mark.parametrize("rule,head,base,state", [
-    ({"max": 0}, 1, None, "fail"),
+    ({"max": 0}, 1, None, "warn"),
     ({"max": 0}, 0, None, "ok"),
     ({"min_delta": -0.5}, 80.0, 80.4, "ok"),
-    ({"min_delta": -0.5}, 79.4, 80.0, "fail"),
-    ({"min_delta": -0.5}, 79.0, None, "ok"),          # no baseline: delta rules skip
-    ({"max_delta_pct": 25}, 130, 100, "fail"),
+    ({"min_delta": -0.5}, 79.4, 80.0, "warn"),
+    ({"min_delta": -0.5}, 79.0, None, "na"),          # no baseline: delta rules skip
+    ({"max_delta_pct": 25}, 130, 100, "warn"),
     ({"max_delta_pct": 25}, 125, 100, "ok"),
-    ({"max_delta_pct": 25}, 5, 0, "ok"),              # zero baseline: no percentage
-    ({"max_delta": 0}, 4, 3, "fail"),
-    ({"min": 70}, 69.9, None, "fail"),
+    ({"max_delta_pct": 25}, 5, 0, "na"),              # zero baseline: no percentage
+    ({"max_delta": 0}, 4, 3, "warn"),
+    ({"min": 70}, 69.9, None, "warn"),
 ])
 def test_evaluate(rule, head, base, state):
     r = row(rule)
@@ -128,13 +128,14 @@ def test_evaluate(rule, head, base, state):
 
 
 def test_advisory_breach_warns_and_missing_metric_is_na():
-    assert pri.evaluate(row({"max": 0}, enforce=False), {"cov.total_pct": 1}, None) == "warn"
+    assert pri.evaluate(row({"max": 0}), {"cov.total_pct": 1}, None) == "warn"
     assert pri.evaluate(row({"max": 0}), {}, None) == "na"
 
 
 def test_shipped_budget_is_valid():
     rows = pri.load_budget(BUDGET)
     assert {r["id"] for r in rows} == pri.METRIC_IDS
+    assert all(r["warn"] is True and "enforce" not in r for r in rows)
 
 
 def test_safety_coverage_uses_the_guard_globs():
@@ -152,29 +153,29 @@ def test_report_passes_and_renders_the_table(tmp_path):
     code, body = run_report(tmp_path, metrics(files=files), metrics(files=files))
     assert code == 0
     assert body.startswith(pri.MARKER)
-    assert "remains within every enforced budget" in body
+    assert "Advisory only" in body
     assert "Baseline: `1234567` · PR result: `abcdef1` · Source CI: success" in body
 
 
-def test_report_fails_on_coverage_drop_and_failing_tests(tmp_path):
+def test_report_warns_on_coverage_drop_and_failing_tests(tmp_path):
     head = metrics(failed=2, files={"backend/execution/a.py": [5, 10]})
     base = metrics(files={"backend/execution/a.py": [9, 10]})
     code, body = run_report(tmp_path, head, base)
-    assert code == pri.EXIT_BREACH
-    assert "3 enforced budgets exceeded" in body
+    assert code == 0
+    assert "3 budget(s) exceeded" in body
     assert "-40.00 pp" in body
 
 
 def test_report_without_baseline_still_applies_absolute_budgets(tmp_path):
     code, body = run_report(tmp_path, metrics(failed=1))
-    assert code == pri.EXIT_BREACH
+    assert code == 0
     assert "No main baseline yet" in body
 
 
 def test_report_with_advisory_breach_exits_zero(tmp_path):
     code, body = run_report(tmp_path, metrics(duration=100.0), metrics(duration=60.0))
     assert code == 0
-    assert "advisory budget" in body and "⚠️" in body
+    assert "Advisory only" in body and "⚠️" in body
 
 
 def test_report_notice_when_head_metrics_are_missing(tmp_path):
@@ -182,12 +183,12 @@ def test_report_notice_when_head_metrics_are_missing(tmp_path):
                      "--safety-paths", str(SAFETY), "--head-sha", "abcdef1",
                      "--ci-conclusion", "failure", "--out", str(tmp_path / "c.md")])
     assert code == 0
-    assert "No impact report for this commit" in (tmp_path / "c.md").read_text()
+    assert "Metrics not evaluated for this commit" in (tmp_path / "c.md").read_text()
 
 
-def test_report_exits_1_when_head_metrics_fail_validation(tmp_path):
+def test_report_degrades_when_head_metrics_fail_validation(tmp_path):
     code, body = run_report(tmp_path, '{"schema": 1, "tests": {"total": -5}}')
-    assert code == 1
+    assert code == 0
     assert "failed validation" in body
 
 
@@ -211,3 +212,143 @@ def test_ci_and_report_workflows_share_the_artifact_name():
     assert 'workflows: [ "Growin Backend CI" ]' in report
     assert "pull_request_target" not in report
     assert "ref: ${{ github.event.repository.default_branch }}" in report
+
+
+@pytest.mark.parametrize("pair", [[0, 0], [1, 0]])
+def test_zero_coverage_denominator_is_rejected_and_report_degrades(tmp_path, pair):
+    payload = metrics(files={"backend/execution/a.py": pair})
+    with pytest.raises(pri.MetricsError):
+        pri.load_metrics(write(tmp_path, "m.json", payload))
+    code, body = run_report(tmp_path, payload, payload)
+    assert code == 0
+    assert "not evaluated" in body
+    assert "✅" not in body
+
+
+@pytest.mark.parametrize("payload", [
+    '{"schema":1,"tests":{"total":' + '9' * 400 + ',"failed":0,"skipped":0,"duration_s":1}}',
+    '{"schema":1,"nested":' + '[' * 2000 + '0' + ']' * 2000 + '}',
+])
+def test_numeric_overflow_and_deep_json_produce_degraded_comment(tmp_path, payload):
+    with pytest.raises(pri.MetricsError):
+        pri.load_metrics(write(tmp_path, "m.json", payload))
+    code, body = run_report(tmp_path, payload)
+    assert code == 0
+    assert "failed validation" in body and "not evaluated" in body
+    assert "✅" not in body
+
+
+def test_missing_metrics_and_missing_baseline_are_never_green(tmp_path):
+    code, body = run_report(tmp_path, {"schema": 1})
+    assert code == 0
+    assert body.count("➖ not evaluated") == len(pri.METRIC_IDS) + 1
+    assert "✅" not in body
+    code, body = run_report(tmp_path, metrics())
+    total_row = next(line for line in body.splitlines() if "Tests collected" in line)
+    assert "not evaluated" in total_row and "✅" not in total_row
+
+
+def test_approximate_baseline_has_sha_and_age(tmp_path):
+    head = pri.load_metrics(write(tmp_path, "h.json", metrics()))
+    body, code = pri.render_report(pri.load_budget(BUDGET), head, head, [],
+                                   "abcdef1", "1234567", "success", True,
+                                   "2026-01-01T00:00:00Z")
+    assert code == 0
+    assert "approximate baseline (`1234567`, " in body
+    assert "hours old)" in body
+
+
+@pytest.mark.parametrize("exact_available", [True, False])
+def test_baseline_prefers_merge_base_and_labels_fallback(tmp_path, monkeypatch, capsys, exact_available):
+    exact = {"databaseId": 1, "headSha": "a" * 40, "createdAt": "2026-10-01T00:00:00Z"}
+    latest = {"databaseId": 2, "headSha": "b" * 40, "createdAt": "2026-10-02T00:00:00Z"}
+    calls = []
+
+    def gh_json(*args):
+        if args[0] == "api":
+            return {"merge_base_commit": {"sha": exact["headSha"]}}
+        return [exact] if "--commit" in args else [latest, exact]
+
+    def download(args, **kwargs):
+        calls.append(args[3])
+        if args[3] == "1" and not exact_available:
+            raise pri.subprocess.CalledProcessError(1, args)
+        write(tmp_path, "metrics.json", metrics())
+
+    monkeypatch.setattr(pri, "_gh_json", gh_json)
+    monkeypatch.setattr(pri.subprocess, "run", download)
+    assert pri.main(["baseline", "--repo", "owner/repo", "--head-sha", "c" * 40,
+                     "--out-dir", str(tmp_path)]) == 0
+    output = capsys.readouterr().out
+    expected = exact if exact_available else latest
+    assert f"sha={expected['headSha']}" in output
+    assert f"created_at={expected['createdAt']}" in output
+    assert f"approximate={str(not exact_available).lower()}" in output
+    assert calls == (["1"] if exact_available else ["1", "2"])
+
+
+def test_baseline_lookup_errors_leave_no_artifact(tmp_path, monkeypatch, capsys):
+    write(tmp_path, "metrics.json", metrics())
+
+    def unavailable(*args):
+        raise pri.subprocess.CalledProcessError(1, args)
+
+    monkeypatch.setattr(pri, "_gh_json", unavailable)
+    assert pri.main(["baseline", "--repo", "owner/repo", "--head-sha", "c" * 40,
+                     "--out-dir", str(tmp_path)]) == 0
+    assert not (tmp_path / "metrics.json").exists()
+    assert "sha=\n" in capsys.readouterr().out
+
+
+def test_workflow_security_and_advisory_wiring():
+    import re
+    ci = (REPO_ROOT / ".github/workflows/ci.yml").read_text()
+    report = (REPO_ROOT / ".github/workflows/pr-impact.yml").read_text()
+    for action in re.findall(r"uses: (.+)", ci + report):
+        assert re.fullmatch(r"[\w/-]+@[0-9a-f]{40} # v[\w.]+", action)
+    assert "issues: write" not in report
+    assert "group: pr-impact-${{ github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.head_sha }}" in report
+    assert "enforced" not in report.lower()
+    posting = report.split("- name: Post or update the comment")[1]
+    assert 'current=$(gh api' in posting
+    assert '"$current" != "$HEAD_SHA"' in posting
+    assert '"$latest_attempt" != "$SOURCE_ATTEMPT"' in posting
+    assert posting.index('"$current" != "$HEAD_SHA"') < posting.index('gh api -X PATCH')
+    assert "name: Run SOTA Test Suite" in ci
+    assert "name: Run SOTA Unit & Integration Tests\n        timeout-minutes: 20" in ci
+
+
+@pytest.mark.parametrize("current,attempt,posts", [
+    ("new-head", "1", False),
+    ("reported-head", "2", False),
+    ("reported-head", "1", True),
+])
+def test_posting_step_skips_stale_head_or_attempt(tmp_path, current, attempt, posts):
+    import os
+    import subprocess
+    import textwrap
+    import yaml
+
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/pr-impact.yml").read_text())
+    step = next(s for s in workflow["jobs"]["report"]["steps"]
+                if s["name"] == "Post or update the comment")
+    gh = tmp_path / "gh"
+    gh.write_text(textwrap.dedent("""\
+        #!/bin/bash
+        echo "$*" >> "$CALL_LOG"
+        case "$*" in
+          *--paginate*) echo "42" ;;
+          *pulls/544*) echo "$CURRENT_HEAD" ;;
+          *actions/runs/123*) echo "$CURRENT_ATTEMPT" ;;
+        esac
+    """))
+    gh.chmod(0o755)
+    (tmp_path / "comment.md").write_text("advisory report")
+    env = dict(os.environ, PATH=f"{tmp_path}:{os.environ['PATH']}",
+               RUNNER_TEMP=str(tmp_path), REPO="owner/repo", PR="544", RUN_ID="123",
+               HEAD_SHA="reported-head", SOURCE_ATTEMPT="1", CURRENT_HEAD=current,
+               CURRENT_ATTEMPT=attempt, CALL_LOG=str(tmp_path / "calls"))
+    result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", step["run"]],
+                            env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert ("-X PATCH" in (tmp_path / "calls").read_text()) is posts

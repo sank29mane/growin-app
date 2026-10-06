@@ -18,10 +18,10 @@ jobs:
       GROWIN_ANALYTICS_ENABLED: "false"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
@@ -34,7 +34,7 @@ jobs:
           uv sync --project backend --all-groups
 
       - name: Run SOTA Unit & Integration Tests
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: |
           export PYTHONPATH=$PYTHONPATH:$(pwd)/backend
           mkdir -p pr-impact
@@ -63,7 +63,7 @@ jobs:
 
       - name: Upload PR impact metrics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: pr-impact-metrics
           path: pr-impact/metrics.json

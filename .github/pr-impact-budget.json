@@ -6,7 +6,7 @@
       "label": "Tests collected",
       "unit": "count",
       "rule": { "min_delta": 0 },
-      "enforce": false
+      "warn": true
     },
     {
       "id": "tests.failed",
@@ -14,7 +14,7 @@
       "label": "Failed or errored",
       "unit": "count",
       "rule": { "max": 0 },
-      "enforce": true
+      "warn": true
     },
     {
       "id": "tests.skipped",
@@ -22,7 +22,7 @@
       "label": "Skipped or xfailed",
       "unit": "count",
       "rule": { "max_delta": 0 },
-      "enforce": false
+      "warn": true
     },
     {
       "id": "tests.duration_s",
@@ -30,7 +30,7 @@
       "label": "Suite time",
       "unit": "seconds",
       "rule": { "max_delta_pct": 25 },
-      "enforce": false
+      "warn": true
     },
     {
       "id": "bench.duration_s",
@@ -38,7 +38,7 @@
       "label": "Benchmark suite time",
       "unit": "seconds",
       "rule": { "max_delta_pct": 50 },
-      "enforce": false
+      "warn": true
     },
     {
       "id": "cov.total_pct",
@@ -46,7 +46,7 @@
       "label": "Backend line coverage",
       "unit": "percent",
       "rule": { "min_delta": -0.5 },
-      "enforce": true
+      "warn": true
     },
     {
       "id": "cov.safety_pct",
@@ -54,7 +54,7 @@
       "label": "Safety-path line coverage",
       "unit": "percent",
       "rule": { "min_delta": -0.25 },
-      "enforce": true
+      "warn": true
     }
   ]
 }

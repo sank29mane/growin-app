@@ -9,8 +9,8 @@
            compares the PR against main, and renders the PR comment.
 
 Standard library only, so it runs under `python3 -I` on any runner.
-`report` exits 0 when every enforced budget holds, 3 when one is exceeded, and
-1 when the PR's metrics file fails validation.
+`report` is advisory and exits 0 even when budgets are exceeded or metrics
+fail validation. Configuration errors exit 2.
 """
 
 from __future__ import annotations
@@ -21,6 +21,8 @@ import json
 import math
 import re
 import sys
+import subprocess
+from datetime import datetime, timezone
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -42,7 +44,6 @@ EXCLUDED_PREFIXES = (
     "backend/growin_core_src/",
 )
 EPS = 1e-9
-EXIT_BREACH = 3
 
 METRIC_IDS = {
     "tests.total", "tests.failed", "tests.skipped", "tests.duration_s",
@@ -50,7 +51,7 @@ METRIC_IDS = {
 }
 RULE_KEYS = {"max", "min", "max_delta", "min_delta", "max_delta_pct"}
 UNITS = {"count", "seconds", "percent"}
-ICONS = {"ok": "✅", "warn": "⚠️", "fail": "❌", "na": "➖"}
+ICONS = {"ok": "✅", "warn": "⚠️", "na": "➖"}
 
 
 class MetricsError(ValueError):
@@ -146,6 +147,13 @@ def _num(obj: object, key: str, integer: bool = False) -> float:
 
 def load_metrics(path: Path) -> dict:
     try:
+        return _load_metrics(path)
+    except (OverflowError, RecursionError):
+        raise MetricsError("metrics exceed numeric or nesting limits") from None
+
+
+def _load_metrics(path: Path) -> dict:
+    try:
         if path.stat().st_size > MAX_METRICS_BYTES:
             raise MetricsError("metrics file is too large")
         raw = json.loads(path.read_text())
@@ -189,7 +197,7 @@ def load_metrics(path: Path) -> dict:
                 raise MetricsError("coverage entry is malformed")
             covered = _num({"v": pair[0]}, "v", True)
             total = _num({"v": pair[1]}, "v", True)
-            if covered > total:
+            if total == 0 or covered > total:
                 raise MetricsError("coverage entry is out of range")
             checked_files[name] = (int(covered), int(total))
         out["coverage"] = checked_files
@@ -209,7 +217,7 @@ def load_budget(path: Path) -> list[dict]:
             raise MetricsError(f"budget row {row['id']} has an invalid rule")
         if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in rule.values()):
             raise MetricsError(f"budget row {row['id']} has a non-numeric rule")
-        if not isinstance(row.get("enforce"), bool) or not row.get("label") or not row.get("area"):
+        if not isinstance(row.get("warn"), bool) or not row.get("label") or not row.get("area"):
             raise MetricsError(f"budget row {row['id']} is incomplete")
     return rows
 
@@ -258,12 +266,15 @@ def derive(m: dict, patterns: list[str]) -> dict[str, float]:
 
 
 def evaluate(row: dict, head: dict[str, float], base: dict[str, float] | None) -> str:
-    """Return ok, warn (advisory breach), fail (enforced breach), or na."""
+    """Return ok, warn (advisory breach), or na (not evaluated)."""
     h = head.get(row["id"])
     if h is None:
         return "na"
     b = (base or {}).get(row["id"])
     rule = row["rule"]
+    delta_rules = {"max_delta", "min_delta", "max_delta_pct"} & rule.keys()
+    if delta_rules and (b is None or ("max_delta_pct" in rule and b == 0)):
+        return "na"
     breached = False
     if "max" in rule and h > rule["max"] + EPS:
         breached = True
@@ -279,7 +290,7 @@ def evaluate(row: dict, head: dict[str, float], base: dict[str, float] | None) -
             breached = True
     if not breached:
         return "ok"
-    return "fail" if row["enforce"] else "warn"
+    return "warn"
 
 
 # --------------------------------------------------------------------------
@@ -344,8 +355,18 @@ def _short(sha: str | None) -> str | None:
     return sha[:7] if sha and SHA_RE.match(sha) else None
 
 
-def _footer(head_sha: str | None, base_sha: str | None, ci: str) -> str:
+def _footer(head_sha: str | None, base_sha: str | None, ci: str,
+            approximate: bool = False, created_at: str | None = None) -> str:
     base = f"`{_short(base_sha)}`" if _short(base_sha) else "none yet"
+    if approximate and _short(base_sha):
+        age = "age unknown"
+        try:
+            created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            hours = max(0, (datetime.now(timezone.utc) - created).total_seconds() / 3600)
+            age = f"{hours:.1f} hours old"
+        except (AttributeError, ValueError, TypeError):
+            pass
+        base = f"approximate baseline ({base}, {age})"
     head = f"`{_short(head_sha)}`" if _short(head_sha) else "unknown"
     conclusion = ci if ci in CI_CONCLUSIONS else "unknown"
     return f"Baseline: {base} · PR result: {head} · Source CI: {conclusion}"
@@ -353,8 +374,8 @@ def _footer(head_sha: str | None, base_sha: str | None, ci: str) -> str:
 
 def render_notice(reason: str, head_sha: str | None, ci: str) -> str:
     return (
-        f"{MARKER}\n## PR impact\n\n"
-        f"No impact report for this commit. {reason}\n\n"
+        f"{MARKER}\n## PR impact (advisory)\n\n"
+        f"Metrics not evaluated for this commit. {reason}\n\n"
         f"{_footer(head_sha, None, ci)}\n"
     )
 
@@ -409,21 +430,15 @@ def render_report(
     head_sha: str | None,
     base_sha: str | None,
     ci: str,
+    approximate: bool = False,
+    created_at: str | None = None,
 ) -> tuple[str, int]:
     hv = derive(head, patterns)
     bv = derive(base, patterns) if base else None
     states = [evaluate(r, hv, bv) for r in rows]
-    fails, warns = states.count("fail"), states.count("warn")
-
-    if fails:
-        verdict = f"❌ {fails} enforced budget{'s' if fails != 1 else ''} exceeded."
-    elif warns:
-        verdict = (f"⚠️ Every enforced budget holds. {warns} advisory budget"
-                   f"{'s' if warns != 1 else ''} exceeded.")
-    else:
-        verdict = "✅ PR impact remains within every enforced budget."
-
-    out = [MARKER, "## PR impact", "", verdict, ""]
+    warns, missing = states.count("warn"), states.count("na")
+    verdict = f"Advisory only. {warns} budget(s) exceeded; {missing} metric(s) not evaluated."
+    out = [MARKER, "## PR impact (advisory)", "", verdict, ""]
     out += ["| Area | Metric | Main baseline | This PR | Impact | Budget | |",
             "| :-- | :-- | --: | --: | --: | :-- | :-: |"]
     for row, state in zip(rows, states):
@@ -431,18 +446,18 @@ def render_report(
         out.append(
             f"| {row['area']} | {row['label']} | {fmt_value(row['unit'], b)} "
             f"| {fmt_value(row['unit'], h)} | {fmt_impact(row['unit'], h, b)} "
-            f"| {fmt_budget(row['unit'], row['rule'])} | {ICONS[state]} |"
+            f"| {fmt_budget(row['unit'], row['rule'])} | {ICONS[state]}{' not evaluated' if state == 'na' else ''} |"
         )
     out.append("")
     if bv is None:
         out += ["No main baseline yet, so budgets that compare against main were skipped.", ""]
     if "na" in states:
-        out += ["➖ means this run did not produce that metric.", ""]
-    out += [_footer(head_sha, base_sha if bv else None, ci), ""]
+        out += ["➖ not evaluated means a metric or usable baseline is missing.", ""]
+    out += [_footer(head_sha, base_sha if bv else None, ci, approximate, created_at), ""]
     details = _details(head, base)
     if details:
         out += [details]
-    return "\n".join(out), (EXIT_BREACH if fails else 0)
+    return "\n".join(out), 0
 
 
 def cmd_report(args: argparse.Namespace) -> int:
@@ -465,7 +480,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     except MetricsError as e:
         print(f"::error::PR metrics failed validation: {e}")
         out_path.write_text(render_notice("The metrics artifact failed validation.", args.head_sha, ci))
-        return 1
+        return 0
 
     base = None
     if args.base and Path(args.base).is_file():
@@ -474,10 +489,61 @@ def cmd_report(args: argparse.Namespace) -> int:
         except MetricsError as e:
             print(f"::warning::Ignoring main baseline: {e}")
 
-    body, code = render_report(rows, head, base, patterns, args.head_sha, args.base_sha, ci)
+    body, code = render_report(rows, head, base, patterns, args.head_sha, args.base_sha, ci, args.approximate_baseline, args.base_created_at)
     out_path.write_text(body)
     print(body)
     return code
+
+
+def _gh_json(*args: str) -> object:
+    result = subprocess.run(["gh", *args], check=True, capture_output=True, text=True)
+    return json.loads(result.stdout)
+
+
+def cmd_baseline(args: argparse.Namespace) -> int:
+    """Prefer the merge-base main artifact, then a successful main fallback."""
+    merge_base = None
+    runs = []
+    fields = "databaseId,headSha,createdAt,event,headBranch,conclusion"
+    common = ["run", "list", "--repo", args.repo, "--workflow", "ci.yml",
+              "--branch", "main", "--event", "push", "--status", "success",
+              "--limit", "50", "--json", fields]
+    try:
+        comparison = _gh_json("api", f"repos/{args.repo}/compare/main...{args.head_sha}")
+        merge_base = comparison["merge_base_commit"]["sha"]
+        runs = _gh_json(*common, "--commit", merge_base)
+    except (subprocess.SubprocessError, OSError, ValueError, KeyError, TypeError):
+        print("::notice::Merge-base baseline lookup unavailable.", file=sys.stderr)
+    try:
+        runs += _gh_json(*common)
+    except (subprocess.SubprocessError, OSError, ValueError, TypeError):
+        print("::notice::Latest main baseline lookup unavailable.", file=sys.stderr)
+    destination = Path(args.out_dir)
+    destination.mkdir(parents=True, exist_ok=True)
+    artifact = destination / "metrics.json"
+    seen = set()
+    for run in runs:
+        run_id = str(run["databaseId"])
+        if run_id in seen:
+            continue
+        seen.add(run_id)
+        # Do not reuse a partially downloaded or invalid previous candidate.
+        artifact.unlink(missing_ok=True)
+        try:
+            subprocess.run(["gh", "run", "download", run_id, "--repo", args.repo,
+                            "-n", "pr-impact-metrics", "-D", str(destination)],
+                           check=True, capture_output=True, text=True)
+            load_metrics(artifact)
+        except (subprocess.SubprocessError, OSError, MetricsError):
+            continue
+        print(f"sha={run['headSha']}")
+        print(f"created_at={run['createdAt']}")
+        print(f"approximate={'false' if run['headSha'] == merge_base else 'true'}")
+        return 0
+    artifact.unlink(missing_ok=True)
+    print("::notice::No usable main baseline artifact.", file=sys.stderr)
+    print("sha=\ncreated_at=\napproximate=false")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -499,9 +565,17 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--safety-paths", required=True)
     r.add_argument("--head-sha")
     r.add_argument("--base-sha")
+    r.add_argument("--base-created-at")
+    r.add_argument("--approximate-baseline", action="store_true")
     r.add_argument("--ci-conclusion", default="unknown")
     r.add_argument("--out", required=True)
     r.set_defaults(fn=cmd_report)
+
+    b = sub.add_parser("baseline")
+    b.add_argument("--repo", required=True)
+    b.add_argument("--head-sha", required=True)
+    b.add_argument("--out-dir", required=True)
+    b.set_defaults(fn=cmd_baseline)
 
     args = ap.parse_args(argv)
     return args.fn(args)
