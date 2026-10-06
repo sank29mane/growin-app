@@ -272,15 +272,20 @@ final class RelayOrderReviewTests: XCTestCase {
 
     // MARK: Software signer is gated by the bytes, not the flow label (P2, #558)
 
-    private func ukPaperBytes(keyId: String, workspace: String = "uk") -> Data {
-        CanonicalJSON.data([
+    private func ukPaperBytes(
+        keyId: String, workspace: String = "uk", mode: String = "PAPER", extra: [String: Any] = [:]
+    ) -> Data {
+        var body: [String: Any] = [
             "version": 1, "purpose": "growin.execution.dispatch", "challenge_id": "c-1",
             "proposal_id": "p-1", "client_order_id": "co-1", "intent_hash": "ih",
-            "workspace": workspace, "account": "paper", "broker": "local-paper", "mode": "PAPER",
+            "workspace": workspace, "account": "paper", "broker": "local-paper", "mode": mode,
             "ticker": "VOD.L", "side": "BUY", "quantity": "10", "order_type": "LIMIT",
-            "limit_price": "70.50", "replaces_proposal_id": "", "evidence_hash": "eh",
-            "nonce": "n", "issued_at": 1, "expires_at": 2, "key_id": keyId,
-        ] as [String: Any])
+            "limit_price": "70.50", "replaces_proposal_id": "", "requote_id": "",
+            "admitted_quantity": "10", "currency": "GBP", "price": "70.50", "notional": "705.00",
+            "evidence_hash": "eh", "nonce": "n", "issued_at": 1, "expires_at": 2, "key_id": keyId,
+        ]
+        for (key, value) in extra { body[key] = value }
+        return CanonicalJSON.data(body)
     }
 
     /// Break-proof: removing the payload check in requireSoftwareSignable makes the
@@ -339,6 +344,72 @@ final class RelayOrderReviewTests: XCTestCase {
                 XCTAssertTrue(error is SignedPayloadInspectionError, "\(error)")
             }
         }
+    }
+
+    private var relayIntentFields: [String: Any] {
+        [
+            "intent_id": "intent-0001", "isin": "INE002A01018", "stock_code": "RELIANCE",
+            "exchange": "NSE", "limits_sha256": String(repeating: "a", count: 64),
+        ]
+    }
+
+    private func assertSoftwareRefuses(_ bytes: Data, _ expected: ApprovalSignerRouterError, _ label: String) async {
+        XCTAssertThrowsError(try router.sign(bytes, for: .uk, flow: .paperApproval), label) { error in
+            XCTAssertEqual(error as? ApprovalSignerRouterError, expected, "sync: \(label)")
+        }
+        do {
+            _ = try await router.signAsync(bytes, for: .uk, flow: .paperApproval)
+            XCTFail("signed: \(label)")
+        } catch {
+            XCTAssertEqual(error as? ApprovalSignerRouterError, expected, "async: \(label)")
+        }
+    }
+
+    /// Codex P2 round 3. Break-proof: loosening the gate back to the inspector's lenient
+    /// parse (ignoring unknown keys) makes the relay-in-intent and unknown-key cases sign.
+    func testSoftwareSignerRefusesRelayFieldsHiddenInsideAPaperIntentSyncAndAsync() async throws {
+        let identity = try router.createIdentityIfNeeded(for: .uk)
+        await assertSoftwareRefuses(
+            ukPaperBytes(keyId: identity.keyID, extra: ["intent": relayIntentFields]), .relayIsIndiaOnly, "nested intent")
+        await assertSoftwareRefuses(
+            ukPaperBytes(keyId: identity.keyID, extra: ["limits_sha256": String(repeating: "b", count: 64)]),
+            .relayIsIndiaOnly, "top-level limits_sha256")
+        await assertSoftwareRefuses(
+            ukPaperBytes(keyId: identity.keyID, extra: ["isin": "INE002A01018"]), .relayIsIndiaOnly, "india isin")
+        await assertSoftwareRefuses(
+            ukPaperBytes(keyId: identity.keyID, extra: ["venue": ["exchange": "NSE"]]), .relayIsIndiaOnly, "nested venue")
+        XCTAssertEqual(fixture.backend.keyAccessCount, 0)
+    }
+
+    func testSoftwareSignerRefusesUnknownKeysAndNestedValuesSyncAndAsync() async throws {
+        let identity = try router.createIdentityIfNeeded(for: .uk)
+        await assertSoftwareRefuses(
+            ukPaperBytes(keyId: identity.keyID, extra: ["surprise": "x"]), .softwarePayloadNotCanonical, "unknown top-level key")
+        await assertSoftwareRefuses(
+            ukPaperBytes(keyId: identity.keyID, extra: ["extra_obj": ["a": "b"]]), .softwarePayloadNotCanonical, "nested object")
+        await assertSoftwareRefuses(
+            ukPaperBytes(keyId: identity.keyID, extra: ["extra_list": [1, 2]]), .softwarePayloadNotCanonical, "array value")
+        // A missing canonical key is also not the exact schema.
+        var short = try XCTUnwrap(JSONSerialization.jsonObject(with: ukPaperBytes(keyId: identity.keyID)) as? [String: Any])
+        short.removeValue(forKey: "notional")
+        await assertSoftwareRefuses(CanonicalJSON.data(short), .softwarePayloadNotCanonical, "missing key")
+    }
+
+    func testSoftwareSignerRefusesLiveAndPracticeModeSyncAndAsync() async throws {
+        let identity = try router.createIdentityIfNeeded(for: .uk)
+        for mode in ["LIVE", "PRACTICE", "paper", ""] {
+            await assertSoftwareRefuses(
+                ukPaperBytes(keyId: identity.keyID, mode: mode), .softwareModeNotPaper, "mode \(mode)")
+        }
+        XCTAssertEqual(fixture.backend.keyAccessCount, 0)
+    }
+
+    func testSoftwareSignerStillSignsALegitimatePaperApprovalSync() throws {
+        let identity = try router.createIdentityIfNeeded(for: .uk)
+        let payload = ukPaperBytes(keyId: identity.keyID)
+        let der = try router.sign(payload, for: .uk, flow: .paperApproval)
+        let publicKey = try P256.Signing.PublicKey(x963Representation: identity.publicKeyX963)
+        XCTAssertTrue(publicKey.isValidSignature(try P256.Signing.ECDSASignature(derRepresentation: der), for: payload))
     }
 
     func testSoftwareSignerStillSignsALegitimatePaperApprovalAsync() async throws {
