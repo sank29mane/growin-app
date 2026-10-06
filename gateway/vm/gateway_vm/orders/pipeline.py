@@ -39,6 +39,7 @@ from .limits import (
     Quote,
     TickTable,
     evaluate,
+    session_open,
     to_ist,
 )
 from .risk import apply_trades, detect_mismatch
@@ -163,6 +164,20 @@ class OrderPipeline:
             raise ValueError("pipeline clock must be timezone-aware")
         return now, int(now.timestamp())
 
+    def _late_codes(self, now: datetime, expires_at: int | None = None) -> list[str]:
+        """Codes for a deadline that passed while the reads were in flight.
+
+        ``now`` must be sampled AFTER the blocking reads and the audit write: a
+        check that began at 15:09:59 and finished at 15:10:01 is a 15:10:01
+        check (D-11), and a challenge is only good while the VM clock says so.
+        """
+        codes: list[str] = []
+        if not session_open(to_ist(now)):
+            codes.append("session_closed")
+        if expires_at is not None and int(now.timestamp()) >= expires_at:
+            codes.append("challenge_expired")
+        return codes
+
     def _entry(
         self,
         route: str,
@@ -235,6 +250,13 @@ class OrderPipeline:
             result = self._guard.check(intent, now)
             if result.codes:
                 raise self._refuse("intents", intent, result.codes, result)
+            # The guard's reads are done and may have been slow. Sample the VM
+            # clock again: the cutoff is judged, and the challenge is issued, at
+            # the time the reads finished, not the time the request arrived.
+            now, epoch = self._now()
+            late = self._late_codes(now)
+            if late:
+                raise self._refuse("intents", intent, late, result)
             challenge = self._challenges.mint(
                 intent,
                 now_epoch=epoch,
@@ -247,6 +269,14 @@ class OrderPipeline:
             except OrderRefusal:
                 self._challenges.take(challenge.challenge_id)
                 raise
+            # Last look, immediately before success is returned: the audit
+            # write is also blocking. A challenge that is already dead or past
+            # the cutoff is never handed out.
+            final, _ = self._now()
+            late = self._late_codes(final, challenge.expires_at)
+            if late:
+                self._challenges.take(challenge.challenge_id)
+                raise self._refuse("intents", intent, late, result)
             return MintResult(
                 challenge_id=challenge.challenge_id,
                 signed_bytes=challenge.signed_bytes,
@@ -273,6 +303,14 @@ class OrderPipeline:
             result = self._guard.check(intent, now)
             if result.codes:
                 raise self._refuse("authorize", intent, result.codes, result)
+            # Reads are done: sample the clock again and recheck both deadlines
+            # before a success is recorded. A check that started at 15:09:59,
+            # or inside the challenge's last second, and finished after the
+            # deadline is refused.
+            late_now, _ = self._now()
+            late = self._late_codes(late_now, challenge.expires_at)
+            if late:
+                raise self._refuse("authorize", intent, late, result)
             entry = self._append(
                 self._entry("authorize", intent, "VERIFIED_NOT_FORWARDED", [], result)
             )

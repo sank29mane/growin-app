@@ -1017,6 +1017,119 @@ def test_recheck_session_cutoff_between_1509_59_and_1510_00(real: RealRig):
     real.refused_authorize(minted, "session_closed", 423, "ORDERS_BLOCKED")
 
 
+CUTOFF_MINUS_1S = datetime(2026, 10, 8, 9, 39, 59, tzinfo=timezone.utc)  # 15:09:59 IST
+
+
+def slow_read(real: RealRig, monkeypatch, target, method: str, seconds: float) -> None:
+    """Make one port read take `seconds` of VM time (the clock moves during the read)."""
+    original = getattr(target, method)
+
+    def slow(*args, **kwargs):
+        value = original(*args, **kwargs)
+        real.clock.advance(seconds)
+        return value
+
+    monkeypatch.setattr(target, method, slow)
+
+
+def assert_no_challenge_left_behind(real: RealRig) -> None:
+    """A refused mint must not leave a live challenge: the same intent mints cleanly."""
+    real.clock.now = T0
+    again = real.mint()
+    assert again.challenge_id
+
+
+@pytest.mark.parametrize(
+    "target,method",
+    [("kill", "read"), ("account", "snapshot"), ("market", "quote")],
+)
+def test_mint_whose_reads_cross_the_1510_cutoff_is_refused(real: RealRig, monkeypatch, target, method):
+    real.clock.now = CUTOFF_MINUS_1S
+    slow_read(real, monkeypatch, getattr(real, target), method, 2)  # starts 15:09:59, ends 15:10:01
+    with pytest.raises(OrderRefusal) as err:
+        real.mint()
+    expect(err, 423, "ORDERS_BLOCKED", "session_closed")
+    assert real.decisions() == [("REFUSED", ["session_closed"])]
+    assert real.forward.calls == 0
+    monkeypatch.undo()
+    assert_no_challenge_left_behind(real)
+
+
+def test_mint_whose_reads_stay_inside_the_session_still_passes(real: RealRig, monkeypatch):
+    real.clock.now = CUTOFF_MINUS_1S
+    slow_read(real, monkeypatch, real.account, "snapshot", 0.5)  # ends 15:09:59.5
+    assert real.mint().challenge_id
+
+
+def test_mint_challenge_is_issued_at_the_time_the_reads_finished(real: RealRig, monkeypatch):
+    slow_read(real, monkeypatch, real.account, "snapshot", 7)
+    minted = real.mint()
+    assert minted.expires_at == int((T0 + timedelta(seconds=7 + 60)).timestamp())
+
+
+def test_mint_audit_write_crossing_the_cutoff_withdraws_the_challenge(real: RealRig, monkeypatch):
+    real.clock.now = CUTOFF_MINUS_1S
+    original = real.audit.append
+    calls = []
+
+    def slow_append(fields):
+        entry = original(fields)
+        if not calls:
+            real.clock.advance(2)  # the CHALLENGED write finishes at 15:10:01
+        calls.append(fields["decision"])
+        return entry
+
+    monkeypatch.setattr(real.audit, "append", slow_append)
+    with pytest.raises(OrderRefusal) as err:
+        real.mint()
+    expect(err, 423, "ORDERS_BLOCKED", "session_closed")
+    assert real.decisions() == [("CHALLENGED", []), ("REFUSED", ["session_closed"])]
+    monkeypatch.undo()
+    assert_no_challenge_left_behind(real)
+
+
+def test_mint_that_would_hand_out_an_already_expired_challenge_is_refused(real: RealRig, monkeypatch):
+    original = real.audit.append
+    calls = []
+
+    def slow_append(fields):
+        entry = original(fields)
+        if not calls:
+            real.clock.advance(61)  # past the 60 s TTL before the answer is returned
+        calls.append(fields["decision"])
+        return entry
+
+    monkeypatch.setattr(real.audit, "append", slow_append)
+    with pytest.raises(OrderRefusal) as err:
+        real.mint()
+    expect(err, 409, "REPLAY", "challenge_expired")
+    monkeypatch.undo()
+    assert_no_challenge_left_behind(real)
+
+
+def test_authorize_whose_reads_cross_the_cutoff_is_refused(real: RealRig, monkeypatch):
+    real.clock.now = CUTOFF_MINUS_1S - timedelta(seconds=1)  # 15:09:58
+    minted = real.mint()
+    real.clock.advance(1)  # 15:09:59: still open when authorize starts
+    slow_read(real, monkeypatch, real.account, "snapshot", 2)  # ends 15:10:01
+    real.refused_authorize(minted, "session_closed", 423, "ORDERS_BLOCKED")
+    assert real.decisions()[-1] == ("REFUSED", ["session_closed"])
+
+
+def test_authorize_whose_reads_cross_challenge_expiry_is_refused(real: RealRig, monkeypatch):
+    minted = real.mint()  # issued 10:00:00, expires 10:01:00
+    real.clock.advance(59)  # 10:00:59: live when authorize starts
+    slow_read(real, monkeypatch, real.market, "quote", 2)  # ends 10:01:01
+    real.refused_authorize(minted, "challenge_expired", 409, "REPLAY")
+
+
+def test_authorize_whose_reads_end_exactly_at_the_last_valid_second_passes(real: RealRig, monkeypatch):
+    minted = real.mint()
+    real.clock.advance(58)
+    slow_read(real, monkeypatch, real.market, "quote", 1)  # ends 10:00:59, expiry is 10:01:00
+    assert real.pipeline.authorize(minted.challenge_id, real.signed(minted)).decision == "VERIFIED_NOT_FORWARDED"
+
+
 def test_recheck_account_mismatch_unexplained_isin_after_mint(real: RealRig):
     minted = real.mint()
     real.account.snap = AccountSnapshot(holdings=(Holding(ISIN_B, 5, D("500")),))
