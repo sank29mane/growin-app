@@ -626,6 +626,26 @@ async def test_the_hook_also_stops_a_non_get_on_the_demo_host():
     assert recorder.count == 0
 
 
+@pytest.mark.parametrize("url", [
+    "https://attacker.invalid/api/v0/equity/account/cash",
+    "http://live.trading212.com/api/v0/equity/account/cash",
+    "https://demo.trading212.com:8443/api/v0/equity/account/cash",
+])
+@pytest.mark.asyncio
+async def test_get_to_an_untrusted_origin_is_refused_before_transport(url):
+    recorder = Recorder(ok_router)
+    async with reader(recorder) as (client, _):
+        with pytest.raises(PermissionError, match="untrusted broker origin"):
+            await client.client.get(url)
+        request = client.client.build_request("GET", url)
+        with pytest.raises(PermissionError, match="untrusted broker origin"):
+            await client.client.send(request)
+        client.base_url = url.rsplit("/equity", 1)[0]
+        with pytest.raises(PermissionError, match="untrusted broker origin"):
+            await client._request("GET", "equity/account/cash")
+    assert recorder.count == 0
+
+
 # --- explicit environment: no default, one helper for the server and the status ----
 
 BAD_VALUES = [None, "", "yes", "1", "0", "TRUE", "True", "FALSE", " true", "true ", "demo", "live"]

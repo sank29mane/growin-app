@@ -204,12 +204,19 @@ READ_METHOD = "GET"
 
 
 async def _refuse_non_get_before_sending(request: httpx.Request) -> None:
-    """httpx request hook: nothing but GET leaves this process, on any host.
+    """httpx request hook: only GET to a pinned HTTPS broker origin can leave.
 
     The live host gets the same rule as the demo host: it is read through this
     client and never written (operator rule for 66-02). Because the hook sits on
     the client itself, it also refuses a call that bypasses ``_request``.
     """
+
+    if (
+        request.url.scheme != "https"
+        or request.url.host not in {"demo.trading212.com", "live.trading212.com"}
+        or request.url.port not in {None, 443}
+    ):
+        raise PermissionError("Trading 212 read refused: untrusted broker origin")
 
     if request.method != READ_METHOD:
         raise PermissionError(
