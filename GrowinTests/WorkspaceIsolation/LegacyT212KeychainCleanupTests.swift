@@ -65,16 +65,22 @@ struct LegacyT212KeychainCleanupTests {
 
     @Test func removesExactlyTheLegacyAccountsAndNothingElse() throws {
         let rig = Rig()
-        let otherService = RawKeychain(service: rig.service + ".other")
+        // One neighbour service sorts before the test service and one after, so a delete
+        // that ignores the service cannot get lucky whichever order Keychain picks.
+        let neighbours = [rig.service.replacingOccurrences(of: ".test.", with: ".test!."),
+                          rig.service.replacingOccurrences(of: ".test.", with: ".test~.")]
+            .map { RawKeychain(service: $0) }
         defer {
             rig.tearDown(extra: Self.decoyAccounts)
-            for account in Cleanup.legacyAccounts { otherService.remove(account: account) }
+            for neighbour in neighbours {
+                for account in Cleanup.legacyAccounts { neighbour.remove(account: account) }
+            }
         }
         // Seed order matters: SecItemDelete removes one arbitrary match, usually the oldest.
         // Victims go in first and the targets last, so a query that is too broad kills a
         // decoy instead of getting lucky and hitting a target.
         // Same account string, different service: must survive.
-        try rig.seed(Cleanup.legacyAccounts, in: otherService)
+        for neighbour in neighbours { try rig.seed(Cleanup.legacyAccounts, in: neighbour) }
         try rig.seed(Self.decoyAccounts)
         try rig.seed(Cleanup.legacyAccounts)
 
@@ -90,8 +96,10 @@ struct LegacyT212KeychainCleanupTests {
         for account in Self.decoyAccounts {
             #expect(try rig.raw.data(account: account) == Self.canary, "decoy was deleted")
         }
-        for account in Cleanup.legacyAccounts {
-            #expect(try otherService.data(account: account) == Self.canary, "other-service item was deleted")
+        for neighbour in neighbours {
+            for account in Cleanup.legacyAccounts {
+                #expect(try neighbour.data(account: account) == Self.canary, "other-service item was deleted")
+            }
         }
         #expect(recorder.lines == ["removed 4 legacy items"])
         #expect(rig.defaults.bool(forKey: Cleanup.completionKey))
