@@ -28,6 +28,7 @@ from t212_practice_testkit import (
     start_practice_stack,
 )
 from t212_testkit import FakeClock, install_no_real_network
+from regime_testkit import calm_probabilities
 from venue_seam_testkit import SYNTH_LIMITS, practice_execution_payload, write_practice_files
 
 PREPARE = "/api/t212-practice/preparations"
@@ -40,10 +41,12 @@ def no_real_network(monkeypatch):
 
 @pytest.fixture
 def regime_zero(monkeypatch):
-    """Regime 0 (full size) from the real classifier code path.
+    """The calmest regime (full size) from the real classifier code path.
 
-    Only the model inference is replaced. The three-quote window check, the
-    features and the snapshot-bound evidence all still run.
+    Only the model inference is replaced, and it names the calm component through the
+    shipped model's severity map (raw id 3 today), never a literal raw id. The
+    three-quote window check, the features, the severity map and the snapshot-bound
+    evidence all still run.
     """
 
     import market_data.regime as regime_module
@@ -51,7 +54,7 @@ def regime_zero(monkeypatch):
     monkeypatch.setattr(
         regime_module,
         "fast_gmm_predict_proba",
-        lambda feature, **params: np.array([1.0, 0.0, 0.0, 0.0]),
+        lambda feature, **params: calm_probabilities(),
     )
 
 
@@ -698,24 +701,128 @@ async def test_the_reservation_transaction_itself_enforces_the_position_cap_and_
             service.reserve("no-limits")
 
 
-# --- the shipped regime model (characterisation, see the 66-04 SUMMARY) ------------------------------
+# --- the shipped regime model, no patched inference (GMM-REGIME-DEFECT fix) ---------------------------
+#
+# These tests never patch ``fast_gmm_predict_proba``. The real classifier reads the real
+# artifact, the severity map orders its components, and the real risk gate sizes the order.
+# Before the fix a tight, ordinary LSE quote landed on raw id 3 (the CALM component) and the
+# old table sized it at 5%, so a whole share was denied. Raw id 3 is now sized by its severity
+# rank (calm, full size) and the ordinary quote proceeds through every existing gate.
+
+
+def swing_readings(swing, *, bid="71.2", ask="71.3", end=None, step=2):
+    """Three readings whose middle mid swings by ``swing`` (log), ending on a tight 71.2 / 71.3.
+
+    The classifier's volatility feature is the standard deviation of the window's log mid
+    returns, so a swing of v gives a volatility of v. The spread stays about 0.14%, well
+    inside the 5% block, so only the volatility moves the regime.
+    """
+
+    end = end or datetime.now(timezone.utc)
+    base = (Decimal(bid) + Decimal(ask)) / 2
+    middle = (base * Decimal(str(float(np.exp(swing))))).quantize(Decimal("0.0001"))
+    half = Decimal("0.05")
+    quotes = [(base - half, base + half), (middle - half, middle + half), (Decimal(bid), Decimal(ask))]
+    return [
+        {
+            "bid": str(low),
+            "ask": str(high),
+            "observed_at": (end - timedelta(seconds=step * (len(quotes) - 1 - index))).isoformat(),
+        }
+        for index, (low, high) in enumerate(quotes)
+    ]
 
 
 @pytest.mark.asyncio
-async def test_the_shipped_regime_model_scales_ordinary_tight_quotes_down_so_a_whole_share_is_denied(
+async def test_an_ordinary_tight_quote_is_admitted_at_full_size_with_no_patched_inference(
     tmp_path, private_config_dir, monkeypatch
 ):
-    """No regime patch: the real classifier. It maps a tight LSE spread to regime 3 (x0.05),
-    and the risk gate then admits 0.05 of a share. A real broker is sent the whole intent
-    quantity, so a scaled-down admission is denied instead of being sent larger than admitted.
-    This pins today's behaviour; the operator decides the UK practice policy before 66-05.
-    """
+    """The defect, fixed: the calm quote that used to be scaled to 0.05 of a share is admitted whole."""
 
     stack = await stack_with(tmp_path, private_config_dir, monkeypatch)
     try:
         result = await prepare(stack, monkeypatch, quantity=1)
+        assert result["admitted"] is True, result
+        admission = result["admission"]
+        assert admission["decision"] == "ADMITTED" and admission["reason_code"] == "ADMITTED"
+        assert Decimal(admission["risk_quantity"]) == 1, "the calm regime keeps the whole request"
+        assert Decimal(admission["final_quantity"]) == 1, "no flooring or rounding is needed"
+        reservation = stack.ledger.get_reservation(result["proposal_id"])
+        assert reservation is not None and reservation.state == "ACTIVE"
+        assert reservation.reserved == Decimal("0.713")
+        assert stack.broker.mutations == [], "admission never sends an order"
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "swing,label,size",
+    [(0.08, "normal", Decimal("0.5")), (0.25, "stressed", Decimal("0.1"))],
+)
+async def test_a_scaled_request_still_denies_with_no_reservation_and_no_dispatch(
+    swing, label, size, tmp_path, private_config_dir, monkeypatch
+):
+    """Real inference on a more volatile window scales the request below the intent.
+
+    A real broker is sent the whole intent quantity, so RISK_SCALED_BELOW_REQUEST stays: no
+    flooring to one share, no practice exemption. A denial reserves and sends nothing.
+    """
+
+    stack = await stack_with(tmp_path, private_config_dir, monkeypatch)
+    try:
+        result = await prepare(stack, monkeypatch, quantity=2, readings=swing_readings(swing))
         assert_denied(stack, result, "RISK_SCALED_BELOW_REQUEST")
-        assert Decimal(result["admission"]["risk_quantity"]) < 1
+        assert Decimal(result["admission"]["risk_quantity"]) == 2 * size, label
+        assert reservation_rows(stack) == (0, 0)
+        assert stack.broker.mutations == []
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_a_one_share_request_is_not_floored_when_the_regime_scales_it(
+    tmp_path, private_config_dir, monkeypatch
+):
+    stack = await stack_with(tmp_path, private_config_dir, monkeypatch)
+    try:
+        result = await prepare(stack, monkeypatch, quantity=1, readings=swing_readings(0.25))
+        assert_denied(stack, result, "RISK_SCALED_BELOW_REQUEST")
+        assert Decimal(result["admission"]["risk_quantity"]) == Decimal("0.1")
+        assert reservation_rows(stack) == (0, 0)
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_a_spread_above_five_percent_is_still_blocked_even_for_the_calm_regime(
+    tmp_path, private_config_dir, monkeypatch, regime_zero
+):
+    """The calm regime sizes at 1.0 but the 5% spread block is a separate, unchanged gate."""
+
+    stack = await stack_with(tmp_path, private_config_dir, monkeypatch)
+    try:
+        wide = readings("68", "72")  # a 5.7% spread
+        result = await prepare(stack, monkeypatch, quantity=1, limit_price="72", readings=wide)
+        assert result["admitted"] is False, result
+        assert Decimal(result["admission"]["risk_quantity"]) == 0
+        assert reservation_rows(stack) == (0, 0)
+        assert stack.broker.mutations == []
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_staleness_and_an_insufficient_window_still_deny_with_real_inference(
+    tmp_path, private_config_dir, monkeypatch
+):
+    stack = await stack_with(tmp_path, private_config_dir, monkeypatch)
+    try:
+        old = datetime.now(timezone.utc) - timedelta(seconds=45)
+        assert_denied(stack, await prepare(stack, monkeypatch, readings=readings(end=old)), "STALE_SNAPSHOT")
+        short = await prepare(stack, monkeypatch, readings=readings(count=2))
+        assert_denied(stack, short, "REGIME_WINDOW_INSUFFICIENT")
+        assert reservation_rows(stack) == (0, 0)
     finally:
         stack.close()
 

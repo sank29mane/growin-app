@@ -220,6 +220,9 @@ async def test_paper_preparation_is_real_loopback_only_fail_closed_and_reserves_
             quote=ils.make_evidence(),
         )
         assert admission.decision.value == "ADMITTED"
+        # The replayed quotes classify as the calm regime, which keeps the whole request
+        # (it used to be sized at 0.05 of a share by the unordered raw-id table).
+        assert admission.final_quantity == Decimal("1")
         assert state._execution_ledger.get_reservation(admission.proposal_id) is not None
         assert "regime" not in body
         regime = prepared.json().get("regime")
