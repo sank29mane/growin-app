@@ -5,8 +5,13 @@ Keeps one issue titled "Operator dashboard" up to date with every open PR,
 ordered as stacks, plus what to do next on each one.
 
   update   Reads PRs, workflow runs, and PR file lists from the GitHub API,
-           renders the dashboard, and creates or edits the issue. With
+           renders the dashboard, and creates or edits the issue body. With
            --dry-run it prints the body and writes nothing.
+
+Operator notes live in a separate issue comment marked
+`<!-- operator-notes -->`. The bot creates it once and never edits it; the
+issue body shows a read-only copy. The only thing the bot rewrites is the
+issue body.
 
 Runs from the default branch only (see pr-dashboard.yml). It never checks
 out or executes PR code. PR titles, bodies, branch names, and file names are
@@ -43,9 +48,16 @@ def _load_impact():
 impact = _load_impact()
 
 MARKER = "<!-- growin-pr-dashboard -->"
-NOTES_START = "<!-- operator-notes:start -->"
-NOTES_END = "<!-- operator-notes:end -->"
-NOTES_PLACEHOLDER = "_Operator notes go here. Anything between these two markers survives every update._"
+NOTES_MARKER = "<!-- operator-notes -->"
+NOTES_HEADER = ("**Operator notes.** Edit this comment freely. The dashboard copies it into "
+                "the issue body on every update and never edits it.")
+NOTES_PLACEHOLDER = "_Nothing yet._"
+# The old in-body block. Read once to seed the notes comment, never written.
+LEGACY_START = "<!-- operator-notes:start -->"
+LEGACY_END = "<!-- operator-notes:end -->"
+LEGACY_PLACEHOLDER = "_Operator notes go here. Anything between these two markers survives every update._"
+TRUSTED_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
+MAX_NOTES = 20_000
 TITLE = "Operator dashboard"
 BOT = "github-actions[bot]"
 LABEL = "dashboard"
@@ -55,9 +67,12 @@ MAX_OPEN = 100
 MAX_MERGED = 20
 MAX_BODY = 60_000
 MERGED_DAYS = 7
-PASS = {"success", "neutral", "skipped"}
-ICONS = {"pass": "✅", "fail": "❌", "pending": "⏳", "missing": "➖"}
-GATE_RE = re.compile(r"operator gate:\s*(.+)", re.IGNORECASE)
+FAILED = {"failure", "timed_out", "startup_failure"}
+ICONS = {"pass": "✅", "fail": "❌", "pending": "⏳", "missing": "➖", "unresolved": "⚠️"}
+MERGE_READY = {"clean", "has_hooks"}
+MERGE_STATES = {"blocked", "behind", "unstable", "unknown", "draft", "dirty"}
+GATE_RE = re.compile(r"^\s*[*_]*operator gate:\s*(.+)", re.IGNORECASE)
+AUTOLINK_RE = re.compile(r"(?i)\b(?:https?|ftp)://|\bwww\.")
 TRIGGER_RE = re.compile(r"[^A-Za-z0-9 #()._:/-]")
 
 
@@ -65,17 +80,23 @@ TRIGGER_RE = re.compile(r"[^A-Za-z0-9 #()._:/-]")
 # untrusted text
 # --------------------------------------------------------------------------
 
+def _break_autolink(m: re.Match) -> str:
+    return m.group(0).replace("://", "\u200b://").replace(".", "\u200b.")
+
+
 def md_text(value: object, limit: int = 60) -> str:
     """Escape PR-controlled text for a markdown table cell on one line.
 
-    Removes control characters, neutralises HTML, links, emphasis, code
-    spans, table pipes, and @mentions, then truncates.
+    Removes control characters, neutralises HTML, links, bare URLs, emphasis,
+    code spans, table pipes, and @mentions, then truncates.
     """
     text = str(value) if value is not None else ""
     text = "".join(" " if ord(c) < 32 or ord(c) == 127 else c for c in text)
     text = " ".join(text.split())
     if len(text) > limit:
         text = text[: limit - 1].rstrip() + "…"
+    # Bare URLs autolink in GitHub markdown. A zero-width space breaks them.
+    text = AUTOLINK_RE.sub(_break_autolink, text)
     out = []
     for c in text:
         if c == "&":
@@ -104,7 +125,7 @@ def operator_gate(body: object) -> str:
     if not isinstance(body, str):
         return ""
     for line in body.splitlines():
-        m = GATE_RE.search(line)
+        m = GATE_RE.match(line)
         if m:
             return m.group(1).strip().strip("*_` ").strip()
     return ""
@@ -135,7 +156,12 @@ def run_state(run: dict | None) -> str:
         return "missing"
     if run.get("status") != "completed":
         return "pending"
-    return "pass" if run.get("conclusion") in PASS else "fail"
+    conclusion = run.get("conclusion")
+    if conclusion == "success":
+        return "pass"
+    # skipped, neutral, cancelled, action_required, stale: not a code failure,
+    # but not a pass either. Never treated as green.
+    return "fail" if conclusion in FAILED else "unresolved"
 
 
 def normalise(pull: dict, repo: str) -> dict:
@@ -266,35 +292,92 @@ def next_action(pr: dict, parent: int | None) -> tuple[str, str]:
         return "retarget", "Base has no open PR: retarget to main"
     if pr["draft"]:
         return "draft", "Draft"
-    if pr["mergeable"] is False:
+    if pr["mergeable"] is False or pr["mergeable_state"] == "dirty":
         return "conflicts", "Conflicts: rebase"
     if pr["ci"] == "fail":
         return "ci", "CI failing"
+    if pr["safety_required"] is None:
+        return "unknown", "Safety status unknown"
     if pr["safety_required"] and not pr["labeled"]:
         return "label", "Needs safety-reviewed label"
     if pr["ci"] in ("pending", "missing"):
         return "wait", "Waiting on CI"
+    if pr["ci"] == "unresolved":
+        return "unresolved", "CI unresolved: re-run"
     if pr["guard"] == "fail":
         return "guard", "Safety Guard failing"
     if pr["guard"] in ("pending", "missing"):
         return "wait", "Waiting on Safety Guard"
+    if pr["guard"] == "unresolved":
+        return "unresolved", "Safety Guard unresolved: re-run"
     if pr["mergeable"] is None:
         return "wait", "Waiting on GitHub mergeability check"
+    if pr["mergeable_state"] not in MERGE_READY:
+        return "blocked", f"Blocked ({_state_word(pr)})"
     return "merge", "Merge"
+
+
+def _state_word(pr: dict) -> str:
+    state = pr["mergeable_state"]
+    return state if state in MERGE_STATES else "unknown"
 
 
 # --------------------------------------------------------------------------
 # issue body
 # --------------------------------------------------------------------------
 
-def extract_notes(body: object) -> str:
-    """The operator-notes block, markers included, or a fresh empty one."""
-    if isinstance(body, str):
-        start = body.find(NOTES_START)
-        end = body.find(NOTES_END, start + len(NOTES_START)) if start != -1 else -1
-        if start != -1 and end != -1:
-            return body[start:end + len(NOTES_END)]
-    return f"{NOTES_START}\n{NOTES_PLACEHOLDER}\n{NOTES_END}"
+# Operator notes live in their own issue comment, marked NOTES_MARKER. The
+# bot creates that comment once and never edits it, so a note saved while a
+# run is in flight cannot be overwritten. The body shows a read-only copy.
+
+def legacy_notes(body: object) -> str | None:
+    """Text of the old in-body notes block, for a one-time migration."""
+    if not isinstance(body, str):
+        return None
+    start = body.find(LEGACY_START)
+    end = body.find(LEGACY_END, start + len(LEGACY_START)) if start != -1 else -1
+    if start == -1 or end == -1:
+        return None
+    text = body[start + len(LEGACY_START):end].strip()
+    return text if text and text != LEGACY_PLACEHOLDER else None
+
+
+def notes_seed(text: str | None) -> str:
+    return f"{NOTES_MARKER}\n{NOTES_HEADER}\n\n{text or NOTES_PLACEHOLDER}\n"
+
+
+def find_notes_comment(comments: list) -> dict | None:
+    """Latest notes comment by the bot or a repo owner, member, or
+    collaborator. Anyone can comment on a public issue, so other authors are
+    ignored even when they paste the marker."""
+    hits = [c for c in comments if isinstance(c, dict)
+            and NOTES_MARKER in (c.get("body") or "")
+            and ((c.get("user") or {}).get("login") == BOT
+                 or c.get("author_association") in TRUSTED_ASSOCIATIONS)]
+    if not hits:
+        return None
+    return max(hits, key=lambda c: (str(c.get("updated_at") or ""), c.get("id") or 0))
+
+
+def notes_text(comment: dict) -> str:
+    text = (comment.get("body") or "").replace(NOTES_MARKER, "").replace(MARKER, "").strip()
+    if text.startswith(NOTES_HEADER):
+        text = text[len(NOTES_HEADER):].strip()
+    return text[:MAX_NOTES]
+
+
+def notes_section(comment: dict | None, repo: str) -> str:
+    out = ["## Operator notes", ""]
+    if comment is None:
+        out.append("_The notes comment is created on the first update._")
+        return "\n".join(out)
+    url = comment.get("html_url") or ""
+    ok = re.fullmatch(rf"https://github\.com/{re.escape(repo)}/issues/\d+#issuecomment-\d+", url)
+    where = f"[the notes comment]({url})" if ok else "the notes comment below"
+    out += [f"_Read-only copy of {where}. Edit that comment, not this body._", ""]
+    text = notes_text(comment) or NOTES_PLACEHOLDER
+    out += [f"> {line}" if line else ">" for line in text.splitlines()]
+    return "\n".join(out)
 
 
 def find_issue(issues: list) -> dict | None:
@@ -316,8 +399,10 @@ def _label_cell(pr: dict) -> str:
 
 
 def _merge_cell(pr: dict) -> str:
-    if pr["mergeable"] is False:
+    if pr["mergeable"] is False or pr["mergeable_state"] == "dirty":
         return "❌ conflicts"
+    if pr["mergeable"] and pr["mergeable_state"] not in MERGE_READY:
+        return f"⚠️ {_state_word(pr)}"
     if pr["mergeable"] is None:
         return "⏳ computing"
     return "✅ yes"
@@ -342,6 +427,8 @@ def render(rows: list[tuple[dict, int, int | None]], merged: list[dict], notes: 
         tally = [f"{len(rows)} open"]
         for key, word in (("merge", "ready to merge"), ("label", "need the safety label"),
                           ("ci", "CI failing"), ("conflicts", "with conflicts"),
+                          ("blocked", "blocked"), ("unresolved", "with unresolved checks"),
+                          ("unknown", "with unknown safety status"),
                           ("stacked", "waiting on a base PR"), ("draft", "draft")):
             if counts.get(key):
                 tally.append(f"{counts[key]} {word}")
@@ -349,8 +436,9 @@ def render(rows: list[tuple[dict, int, int | None]], merged: list[dict], notes: 
                 "| PR | State | CI | Safety Guard | Label | Mergeable | Next action |",
                 "| :-- | :-- | :-: | :-: | :-- | :-- | :-- |", *lines, "",
                 "CI is `Run SOTA Test Suite` and Safety Guard is the guard run on the current "
-                "head. ➖ means no run on this head yet. Stacked PRs always show ➖ because "
-                "those checks only run against main.", ""]
+                "head. ➖ means no run on this head yet. ⚠️ means it ended without passing "
+                "(skipped, cancelled, or similar). Stacked PRs always show ➖ because those "
+                "checks only run against main.", ""]
     else:
         out += ["No open pull requests.", ""]
 
@@ -361,7 +449,7 @@ def render(rows: list[tuple[dict, int, int | None]], merged: list[dict], notes: 
                        f"· {p['merged_at']:%Y-%m-%d}")
     else:
         out.append("None.")
-    out += ["", "## Operator notes", "", notes, "", "---"]
+    out += ["", notes, "", "---"]
     footer = f"Updated {now:%Y-%m-%d %H:%M} UTC from {clean_trigger(trigger)}"
     if run_url:
         footer += f" · [run]({run_url})"
@@ -394,23 +482,42 @@ def update(repo: str, trigger: str, patterns: list[str], api=None,
     rows = order_stacks(collect(repo, api, patterns, sleep))
     closed = api(f"repos/{repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100")
     merged = recently_merged(closed if isinstance(closed, list) else [], now)
-    # Read the issue last, right before writing, so a note the operator saved
-    # while PRs were being read is not lost.
     issues = impact.api_pages(api, f"repos/{repo}/issues?state=open&creator={quote(BOT)}", 500)
     issue = find_issue(issues)
-    body = render(rows, merged, extract_notes(issue.get("body") if issue else None),
-                  trigger, now, run_url)
-    if dry_run:
-        return body
-    if issue:
-        api(f"repos/{repo}/issues/{int(issue['number'])}", "PATCH", {"body": body})
-        print(f"Updated issue #{issue['number']}.")
-    else:
-        payload = {"title": TITLE, "body": body}
+
+    def page(comment: dict | None) -> str:
+        return render(rows, merged, notes_section(comment, repo), trigger, now, run_url)
+
+    if issue is None:
+        if dry_run:
+            return page(None)
+        payload = {"title": TITLE, "body": page(None)}
         if label_exists(repo, api):
             payload["labels"] = [LABEL]
         created = api(f"repos/{repo}/issues", "POST", payload)
-        print(f"Created issue #{(created or {}).get('number')}.")
+        number = int(created["number"])
+        comment = api(f"repos/{repo}/issues/{number}/comments", "POST", {"body": notes_seed(None)})
+        body = page(comment)
+        api(f"repos/{repo}/issues/{number}", "PATCH", {"body": body})
+        print(f"Created issue #{number} and its notes comment.")
+        return body
+
+    number = int(issue["number"])
+    comments = impact.api_pages(api, f"repos/{repo}/issues/{number}/comments", 1000)
+    comment = find_notes_comment(comments)
+    if comment is None:
+        # One-time migration: seed the comment from the old in-body block.
+        seed = notes_seed(legacy_notes(issue.get("body")))
+        if dry_run:
+            comment = {"body": seed}
+        else:
+            comment = api(f"repos/{repo}/issues/{number}/comments", "POST", {"body": seed})
+            print(f"Created the notes comment on issue #{number}.")
+    body = page(comment)
+    if not dry_run:
+        # The bot only ever writes the issue body. Notes comments are never edited.
+        api(f"repos/{repo}/issues/{number}", "PATCH", {"body": body})
+        print(f"Updated issue #{number}.")
     return body
 
 

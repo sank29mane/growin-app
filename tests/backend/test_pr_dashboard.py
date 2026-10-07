@@ -25,13 +25,13 @@ NOW = datetime(2026, 10, 8, 12, 0, tzinfo=timezone.utc)
 
 
 def pr(number, base="main", head=None, draft=False, ci="pass", guard="pass", labeled=False,
-       required=False, mergeable=True, gate="", same_repo=True, title=None):
+       required=False, mergeable=True, gate="", same_repo=True, title=None, state="clean"):
     return {
         "number": number, "title": title or f"PR {number}",
         "url": f"https://github.com/{REPO}/pull/{number}", "draft": draft,
         "base_ref": base, "default_branch": "main", "head_ref": head or f"feat/{number}",
         "head_sha": "a" * 40, "same_repo": same_repo, "mergeable": mergeable,
-        "mergeable_state": "clean", "labeled": labeled, "gate": gate,
+        "mergeable_state": state, "labeled": labeled, "gate": gate,
         "ci": ci, "guard": guard, "safety_required": required,
     }
 
@@ -88,19 +88,61 @@ def test_order_stacks_ignores_fork_branches_with_the_same_name_and_survives_cycl
     ({"base": "feat/1", "draft": True}, 1, ("stacked", "Waiting on base #1")),
     ({"base": "feat/1", "draft": True, "gate": "UAT"}, 1, ("draft", "Draft: UAT")),
     ({"base": "feat/gone"}, None, ("retarget", "Base has no open PR: retarget to main")),
+    # C2: mergeable=True is not enough. Only clean or has_hooks may say Merge.
+    ({"state": "has_hooks"}, None, ("merge", "Merge")),
+    ({"state": "blocked"}, None, ("blocked", "Blocked (blocked)")),
+    ({"state": "behind"}, None, ("blocked", "Blocked (behind)")),
+    ({"state": "unstable"}, None, ("blocked", "Blocked (unstable)")),
+    ({"state": "unknown"}, None, ("blocked", "Blocked (unknown)")),
+    ({"state": "draft"}, None, ("blocked", "Blocked (draft)")),
+    ({"state": "weird<b>"}, None, ("blocked", "Blocked (unknown)")),
+    ({"state": "dirty"}, None, ("conflicts", "Conflicts: rebase")),
+    # C3: anything but success is unresolved, never Merge.
+    ({"ci": "unresolved"}, None, ("unresolved", "CI unresolved: re-run")),
+    ({"guard": "unresolved"}, None, ("unresolved", "Safety Guard unresolved: re-run")),
+    # C5: unknown safety classification is never Merge, even with the label.
+    ({"required": None}, None, ("unknown", "Safety status unknown")),
+    ({"required": None, "labeled": True}, None, ("unknown", "Safety status unknown")),
 ])
 def test_next_action(kwargs, parent, expected):
     assert dash.next_action(pr(5, **kwargs), parent) == expected
+
+
+@pytest.mark.parametrize("conclusion,state", [
+    ("success", "pass"), ("failure", "fail"), ("timed_out", "fail"), ("startup_failure", "fail"),
+    ("skipped", "unresolved"), ("neutral", "unresolved"), ("cancelled", "unresolved"),
+    ("action_required", "unresolved"), ("stale", "unresolved"), (None, "unresolved"),
+])
+def test_only_success_is_a_pass(conclusion, state):
+    assert dash.run_state({"status": "completed", "conclusion": conclusion}) == state
+    if state != "pass":
+        key, _ = dash.next_action(pr(5, ci=state), None)
+        assert key != "merge"
+
+
+def test_merge_cell_shows_a_blocking_state():
+    assert dash._merge_cell(pr(5)) == "✅ yes"
+    assert dash._merge_cell(pr(5, state="blocked")) == "⚠️ blocked"
+    assert dash._merge_cell(pr(5, state="dirty")) == "❌ conflicts"
+    assert dash._merge_cell(pr(5, mergeable=None, state="unknown")) == "⏳ computing"
 
 
 def test_operator_gate_line_is_found_and_escaped():
     body = "Intro\n\n**Operator gate:** press Touch ID @someone <script>\nOperator gate: second"
     assert dash.operator_gate(body) == "press Touch ID @someone <script>"
     assert dash.operator_gate("no gate here") == ""
+    assert dash.operator_gate("> **Operator gate:** quoted") == ""
+    assert dash.operator_gate("  _Operator gate:_ UAT") == "UAT"
     assert dash.operator_gate(None) == ""
     _, text = dash.next_action(pr(5, draft=True, gate=dash.operator_gate(body)), None)
     assert "@someone" not in text and "<script>" not in text
     assert text == "Draft: press Touch ID &#64;someone &lt;script&gt;"
+
+
+def test_operator_gate_only_matches_at_line_start():
+    # O5: a mid-line mention is prose, not a gate.
+    assert dash.operator_gate("This PR has no operator gate: nothing to do here") == ""
+    assert dash.operator_gate("text\noperator gate: real one") == "real one"
 
 
 # --- untrusted text -------------------------------------------------------------
@@ -110,8 +152,19 @@ def test_md_text_neutralises_markdown_html_and_mentions():
     out = dash.md_text(hostile, 200)
     assert "|" not in out.replace("\\|", "")
     assert "<" not in out and ">" not in out and "@" not in out and "`" not in out
-    assert "\\[x\\](http://evil)" in out and "\\#12" in out and "\n" not in out
+    assert "\\[x\\](http\u200b://evil)" in out and "\\#12" in out and "\n" not in out
     assert dash.md_text("x" * 100, 10) == "x" * 9 + "…"
+
+
+@pytest.mark.parametrize("title", [
+    "see https://evil.example/x", "HTTP://EVIL.example", "go to www.evil.example now",
+    "ftp://files.example",
+])
+def test_md_text_breaks_bare_autolinks(title):
+    # O4: GitHub autolinks bare URLs and www. hosts in issue bodies.
+    out = dash.md_text(title, 200)
+    assert not re.search(r"(?i)(https?|ftp)://|www\.", out)
+    assert "​" in out
 
 
 def test_trigger_text_is_restricted():
@@ -148,22 +201,53 @@ def test_latest_run_uses_the_default_branch_workflow_and_newest_attempt():
 
 # --- notes and marker -------------------------------------------------------------
 
-def test_notes_are_preserved_verbatim():
-    notes = (f"{dash.NOTES_START}\nMerge #553 first.\n| odd | table |\n<!-- inner -->\n"
-             f"@me `code`\n{dash.NOTES_END}")
-    body = f"{dash.MARKER}\nold table\n\n{notes}\n\nfooter"
-    assert dash.extract_notes(body) == notes
-    rendered = dash.render([], [], dash.extract_notes(body), "schedule", NOW)
-    assert notes in rendered
-    assert dash.extract_notes(rendered) == notes
+NOTE_URL = "https://github.com/owner/repo/issues/42#issuecomment-900"
 
 
-@pytest.mark.parametrize("body", [None, "", "no markers", f"{dash.NOTES_START} only start",
-                                  f"{dash.NOTES_END} before {dash.NOTES_START}"])
-def test_missing_notes_get_an_empty_placeholder_block(body):
-    notes = dash.extract_notes(body)
-    assert notes.startswith(dash.NOTES_START) and notes.endswith(dash.NOTES_END)
-    assert dash.NOTES_PLACEHOLDER in notes
+def note(body_text, login="sank29mane", assoc="OWNER", cid=900, updated="2026-10-08T10:00:00Z"):
+    return {"id": cid, "body": body_text, "user": {"login": login}, "author_association": assoc,
+            "updated_at": updated, "html_url": f"https://github.com/owner/repo/issues/42#issuecomment-{cid}"}
+
+
+def test_notes_section_is_a_read_only_copy_with_a_link():
+    text = "Merge #553 first.\n\n| odd | table |\n@me `code`"
+    section = dash.notes_section(note(dash.notes_seed(text)), REPO)
+    assert f"_Read-only copy of [the notes comment]({NOTE_URL}). Edit that comment" in section
+    assert "> Merge #553 first.\n>\n> | odd | table |\n> @me `code`" in section
+    assert dash.NOTES_MARKER not in section and dash.NOTES_HEADER not in section
+
+
+def test_notes_section_rejects_odd_links_and_strips_the_dashboard_marker():
+    bad = dict(note(f"{dash.NOTES_MARKER}\n{dash.MARKER} hi"), html_url="https://evil.example/x")
+    section = dash.notes_section(bad, REPO)
+    assert "evil" not in section and "the notes comment below" in section
+    assert dash.MARKER not in section and "> hi" in section
+    assert "created on the first update" in dash.notes_section(None, REPO)
+
+
+def test_find_notes_comment_trusts_only_the_bot_and_repo_members():
+    comments = [
+        note(f"{dash.NOTES_MARKER}\nbot seed", login="github-actions[bot]", assoc="NONE", cid=1,
+             updated="2026-10-01T00:00:00Z"),
+        note(f"{dash.NOTES_MARKER}\nowner edit", cid=2, updated="2026-10-05T00:00:00Z"),
+        note(f"{dash.NOTES_MARKER}\nstranger", login="drive-by", assoc="NONE", cid=3,
+             updated="2026-10-09T00:00:00Z"),
+        note("no marker", cid=4, updated="2026-10-10T00:00:00Z"),
+    ]
+    assert dash.find_notes_comment(comments)["id"] == 2
+    assert dash.find_notes_comment(comments[2:]) is None
+    assert dash.find_notes_comment([]) is None
+
+
+@pytest.mark.parametrize("body,expected", [
+    (f"x\n{dash.LEGACY_START}\nKeep me.\n{dash.LEGACY_END}\n", "Keep me."),
+    (f"{dash.LEGACY_START}\n{dash.LEGACY_PLACEHOLDER}\n{dash.LEGACY_END}", None),
+    (f"{dash.LEGACY_START} only start", None),
+    (f"{dash.LEGACY_END} before {dash.LEGACY_START}", None),
+    (None, None), ("", None),
+])
+def test_legacy_notes_block_is_read_for_migration(body, expected):
+    assert dash.legacy_notes(body) == expected
 
 
 def issue(number, login="github-actions[bot]", body=None, **extra):
@@ -203,7 +287,7 @@ def test_render_table_and_footer():
     rows = dash.order_stacks(prs)
     merged = [{"number": 552, "title": "VM | guards", "url": "https://x/552",
                "merged_at": NOW - timedelta(hours=3)}]
-    body = dash.render(rows, merged, dash.extract_notes(None), "pull_request_target (labeled #553)",
+    body = dash.render(rows, merged, dash.notes_section(None, REPO), "pull_request_target (labeled #553)",
                        NOW, "https://github.com/owner/repo/actions/runs/1")
     assert body.startswith(dash.MARKER)
     assert "4 open · 1 ready to merge · 1 need the safety label · 1 waiting on a base PR · 1 draft" in body
@@ -221,7 +305,7 @@ def test_render_table_and_footer():
 
 
 def test_render_empty_state():
-    body = dash.render([], [], dash.extract_notes(None), "schedule", NOW)
+    body = dash.render([], [], dash.notes_section(None, REPO), "schedule", NOW)
     assert "No open pull requests." in body and "None." in body
 
 
@@ -239,21 +323,31 @@ def pull_json(number, base="main", head=None, mergeable=True, draft=False, label
 
 
 class FakeGitHub:
-    def __init__(self, issues=(), label=True, mergeable_first=True):
+    def __init__(self, issues=(), comments=(), label=True, mergeable_first=True):
         self.calls = []
         self.pulls = {
             553: pull_json(553, labels=("safety-reviewed",)),
             557: pull_json(557, base="feat/553", body="Operator gate: wait for UAT", draft=True),
         }
         self.issues = list(issues)
+        self.comments = list(comments)
         self.label = label
         self.mergeable_first = mergeable_first
         self.seen = set()
 
     def __call__(self, path, method="GET", payload=None):
         self.calls.append((method, path, payload))
-        if method != "GET":
+        if method == "POST" and path == "repos/owner/repo/issues":
             return {"number": 77}
+        m = re.fullmatch(r"repos/owner/repo/issues/(\d+)/comments(\?.*)?", path)
+        if method == "POST" and m:
+            return {"id": 901, "body": payload["body"], "user": {"login": "github-actions[bot]"},
+                    "author_association": "NONE", "updated_at": "2026-10-08T12:00:00Z",
+                    "html_url": f"https://github.com/owner/repo/issues/{m.group(1)}#issuecomment-901"}
+        if method != "GET":
+            return {}
+        if m:
+            return self.comments
         m = re.fullmatch(r"repos/owner/repo/pulls/(\d+)", path)
         if m:
             n = int(m.group(1))
@@ -285,32 +379,76 @@ def patterns():
     return dash.impact.load_patterns(SAFETY)
 
 
-def test_update_creates_the_issue_with_label_when_missing():
+def run(gh, **kw):
+    return dash.update(REPO, "schedule", patterns(), api=gh, now=NOW, sleep=lambda s: None, **kw)
+
+
+def test_update_creates_the_issue_and_its_notes_comment():
     gh = FakeGitHub()
-    body = dash.update(REPO, "schedule", patterns(), api=gh, now=NOW, sleep=lambda s: None)
-    (method, path, payload), = gh.writes()
-    assert (method, path) == ("POST", "repos/owner/repo/issues")
-    assert payload["title"] == "Operator dashboard" and payload["labels"] == ["dashboard"]
-    assert payload["body"] == body and dash.MARKER in body and dash.NOTES_PLACEHOLDER in body
+    body = run(gh)
+    (m1, p1, issue_payload), (m2, p2, comment_payload), (m3, p3, patch) = gh.writes()
+    assert (m1, p1) == ("POST", "repos/owner/repo/issues")
+    assert issue_payload["title"] == "Operator dashboard" and issue_payload["labels"] == ["dashboard"]
+    assert (m2, p2) == ("POST", "repos/owner/repo/issues/77/comments")
+    assert comment_payload["body"] == dash.notes_seed(None)
+    assert (m3, p3) == ("PATCH", "repos/owner/repo/issues/77") and patch["body"] == body
+    assert "[the notes comment](https://github.com/owner/repo/issues/77#issuecomment-901)" in body
+    assert f"> {dash.NOTES_PLACEHOLDER}" in body and dash.MARKER in body
     assert "| [#553]" in body and "| **Merge** |" in body
     assert "└─ [#557]" in body and "Draft: wait for UAT" in body
 
 
 def test_update_creates_without_label_when_the_label_does_not_exist():
     gh = FakeGitHub(label=False)
-    dash.update(REPO, "schedule", patterns(), api=gh, now=NOW, sleep=lambda s: None)
-    (_, _, payload), = gh.writes()
-    assert "labels" not in payload
+    run(gh)
+    assert "labels" not in gh.writes()[0][2]
 
 
-def test_update_patches_the_existing_issue_and_keeps_notes():
-    notes = f"{dash.NOTES_START}\nKeep me. #553 after UAT.\n{dash.NOTES_END}"
-    existing = issue(42, body=f"{dash.MARKER}\nstale table\n{notes}\n")
+def test_update_migrates_the_old_notes_block_into_a_comment_once():
+    legacy = f"{dash.LEGACY_START}\nKeep me. #553 after UAT.\n{dash.LEGACY_END}"
+    existing = issue(42, body=f"{dash.MARKER}\nstale table\n{legacy}\n")
     gh = FakeGitHub(issues=[issue(41, login="someone"), existing])
-    dash.update(REPO, "schedule", patterns(), api=gh, now=NOW, sleep=lambda s: None)
-    (method, path, payload), = gh.writes()
-    assert (method, path) == ("PATCH", "repos/owner/repo/issues/42")
-    assert notes in payload["body"] and "stale table" not in payload["body"]
+    run(gh)
+    (m1, p1, seed), (m2, p2, patch) = gh.writes()
+    assert (m1, p1) == ("POST", "repos/owner/repo/issues/42/comments")
+    assert seed["body"] == dash.notes_seed("Keep me. #553 after UAT.")
+    assert (m2, p2) == ("PATCH", "repos/owner/repo/issues/42")
+    assert "> Keep me. #553 after UAT." in patch["body"]
+    assert dash.LEGACY_START not in patch["body"] and "stale table" not in patch["body"]
+
+
+def test_update_copies_the_notes_comment_and_never_edits_it():
+    # C6: the operator edits the comment; the bot only rewrites the issue body,
+    # so a note saved mid-run cannot be overwritten.
+    existing = issue(42, body=f"{dash.MARKER}\nold body\n")
+    comments = [note(dash.notes_seed("v2: merge 557 after UAT"), cid=900),
+                note(f"{dash.NOTES_MARKER}\nspoof", login="drive-by", assoc="NONE", cid=950,
+                     updated="2026-10-09T00:00:00Z")]
+    gh = FakeGitHub(issues=[existing], comments=comments)
+    run(gh)
+    writes = gh.writes()
+    assert [(m, p) for m, p, _ in writes] == [("PATCH", "repos/owner/repo/issues/42")]
+    body = writes[0][2]["body"]
+    assert "> v2: merge 557 after UAT" in body and "spoof" not in body
+    assert f"[the notes comment]({NOTE_URL})" in body
+    assert not any("/comments/" in p for _, p, _ in gh.calls)
+
+
+def test_update_ignores_a_stranger_marker_and_creates_its_own_comment():
+    existing = issue(42, body=f"{dash.MARKER}\nold body\n")
+    gh = FakeGitHub(issues=[existing],
+                    comments=[note(f"{dash.NOTES_MARKER}\nspoof", login="x", assoc="CONTRIBUTOR")])
+    body = run(gh)
+    assert [(m, p) for m, p, _ in gh.writes()] == [
+        ("POST", "repos/owner/repo/issues/42/comments"), ("PATCH", "repos/owner/repo/issues/42")]
+    assert "spoof" not in body
+
+
+def test_dry_run_previews_the_migration_without_writing():
+    legacy = f"{dash.LEGACY_START}\nKeep me.\n{dash.LEGACY_END}"
+    gh = FakeGitHub(issues=[issue(42, body=f"{dash.MARKER}\n{legacy}")])
+    body = run(gh, dry_run=True)
+    assert gh.writes() == [] and "> Keep me." in body
 
 
 def test_update_rereads_unknown_mergeability_once_and_dry_run_writes_nothing():
@@ -347,7 +485,7 @@ def test_dashboard_workflow_security():
         "ready_for_review", "converted_to_draft", "edited"}
     assert on["workflow_run"]["workflows"] == ["Growin Backend CI", "Safety Guard"]
     assert wf["permissions"] == {"contents": "read", "pull-requests": "read", "issues": "write",
-                                 "checks": "read", "actions": "read"}
+                                 "actions": "read"}
     assert wf["concurrency"] == {"group": "pr-dashboard", "cancel-in-progress": False}
     steps = wf["jobs"]["dashboard"]["steps"]
     checkout = steps[0]["with"]
@@ -386,13 +524,27 @@ def test_swift_ci_is_advisory_and_pinned():
     assert upload["if"] == "failure()"
 
 
+AVAIL = "A.swift:3:9: error: 'glassEffect(_:in:)' is only available in macOS 27.0 or newer"
+AVAIL2 = "C.swift:9:2: error: 'Foo' is unavailable in macOS"
+SCOPE = "B.swift:1:8: error: cannot find 'Foo' in scope"
+SYNTAX = "D.swift:4:1: error: expected '}' in struct"
+
+
 @pytest.mark.parametrize("older,status,log,code,degraded", [
-    # SDK gap on an older SDK: warning and summary, not a red X
-    ("true", 65, "A.swift:3:9: error: value of type 'some View' has no member 'glassEffect'", 0, True),
-    ("true", 65, "B.swift:1:8: error: no such module 'FoundationModels'", 0, True),
-    # The same error on a new enough SDK is a real failure
-    ("false", 65, "A.swift:3:9: error: value of type 'some View' has no member 'glassEffect'", 1, False),
-    # A failure that is not an SDK gap stays red even on an older SDK
+    # Pure availability errors on an older SDK: warning and summary, not a red X
+    ("true", 65, AVAIL, 0, True),
+    ("true", 65, f"{AVAIL}\nnote: in expansion\n{AVAIL2}\n{AVAIL}", 0, True),
+    # C4: one real error mixed in keeps it red
+    ("true", 65, f"{AVAIL}\n{SCOPE}", 1, False),
+    ("true", 65, f"{AVAIL}\n{SYNTAX}", 1, False),
+    # Errors that look like an SDK gap but are not availability errors stay red
+    ("true", 65, SCOPE, 1, False),
+    ("true", 65, "B.swift:1:8: error: no such module 'FoundationModels'", 1, False),
+    ("true", 65, "A.swift:3:9: error: value of type 'some View' has no member 'glassEffect'", 1, False),
+    # Exit 65 with no error line at all is red too
+    ("true", 65, "** BUILD FAILED **", 1, False),
+    # Availability errors on a new enough SDK are real failures
+    ("false", 65, AVAIL, 1, False),
     ("true", 65, "error: linker command failed with exit code 1", 1, False),
     ("false", 0, "", 0, False),
 ])
@@ -421,6 +573,8 @@ def test_swift_build_step_degrades_only_on_an_sdk_gap(tmp_path, older, status, l
         assert "::warning::Swift CI skipped" in r.stdout
         text = summary.read_text()
         assert "## Swift CI: degraded (advisory)" in text and "macOS `26.5` SDK or newer" in text
-        assert log.split("error: ", 1)[1] in text
+        for line in log.splitlines():
+            if "error: " in line:
+                assert line.split("error: ", 1)[1] in text
     elif code:
         assert "::error::Swift build failed" in r.stdout

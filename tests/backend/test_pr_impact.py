@@ -437,9 +437,36 @@ def test_empty_path_never_matches_like_the_guard():
     assert pri.matches_safety(None, ["*"]) is False
 
 
-def test_glob_match_is_bounded_on_long_input():
-    assert pri.glob_match("a" * 5000, "*") is False
+def test_glob_match_refuses_to_guess_on_long_input():
+    with pytest.raises(pri.GlobUnevaluable):
+        pri.glob_match("a" * 5000, "*")
     assert pri.glob_match("a" * 200 + "b", "*(*(a))b") is True
+
+
+LONG_SAFETY = "backend/execution/" + "a" * 1010 + ".py"
+LONG_OTHER = "docs/" + "b" * 1023 + ".md"
+
+
+def test_unevaluable_paths_fail_closed_as_safety_paths():
+    # C1: bash flags a 1,031-char backend/execution/ path. The matcher cannot
+    # evaluate it, so it must count as a safety path, not silently pass.
+    assert len(LONG_SAFETY) == 1031 and len(LONG_OTHER) == 1031
+    patterns = pri.load_patterns(SAFETY)
+    assert pri.matches_safety(LONG_SAFETY, patterns) is True
+    assert pri.matches_safety(LONG_OTHER, patterns) is True    # unknown means required
+    assert pri.matches_safety("docs/short.md", patterns) is False
+
+
+def test_unevaluable_path_is_flagged_in_the_footprint_and_readiness():
+    files = [{"filename": LONG_SAFETY, "status": "added", "additions": 1, "deletions": 0}]
+    ctx = ctx_for(files=files)
+    assert ctx["safety_required"] is True
+    assert ctx["footprint"]["safety"][0]["kind"] == "unchecked"
+    body = pri.render_footprint(ctx)
+    assert "(unprintable path) (too long to check, so treated as a safety path)" in body
+    assert "`safety-reviewed`: required, missing" in pri.readiness_line(ctx)
+    renamed = [{"filename": "docs/x.md", "previous_filename": LONG_OTHER, "status": "renamed"}]
+    assert ctx_for(files=renamed)["footprint"]["safety"][0]["kind"] == "unchecked"
 
 
 # --- change footprint ------------------------------------------------------
@@ -690,6 +717,8 @@ def test_report_v2_layout_with_pr_context(tmp_path, monkeypatch):
     assert lines[3] == "**🟡 Healthy, needs attention: needs `safety-reviewed` label**"
     assert lines[5].startswith("Tests 100 (+0) · Failed 0 · Coverage 80.00% (+0.00 pp)")
     assert lines[7].startswith("**Merge readiness:** Ready for review · base `main`")
+    assert lines[9] == pri.LABEL_NOTE  # O7
+    assert "refreshes on the next CI run" in pri.LABEL_NOTE and "tracks label changes live" in pri.LABEL_NOTE
     order = [body.index(s) for s in ("**Merge readiness:**", "| Area | Metric |",
                                      "### Change footprint", "Baseline: `1234567`")]
     assert order == sorted(order)
@@ -702,6 +731,41 @@ def test_report_degrades_when_the_pr_lookup_fails(tmp_path, monkeypatch):
     assert pri.main(report_args(tmp_path, write(tmp_path, "h.json", metrics()))) == 0
     body = (tmp_path / "c.md").read_text()
     assert "### Change footprint\n\nUnavailable" in body and "Merge readiness" not in body
+    # O1: a failed lookup must never read as healthy, even with perfect metrics.
+    m = metrics(files={"backend/execution/a.py": [8, 10]})
+    assert pri.main(report_args(tmp_path, write(tmp_path, "h.json", m), write(tmp_path, "b.json", m))) == 0
+    body = (tmp_path / "c.md").read_text()
+    assert body.splitlines()[3] == "**🟡 Healthy, needs attention: merge state unavailable**"
+    assert "🟢" not in body and pri.LABEL_NOTE not in body
+
+
+def test_headline_yellow_when_merge_context_is_missing():
+    hv = vals()
+    states = states_for(hv, hv)
+    assert pri.headline("success", hv, ROWS, states) == "🟢 Healthy"
+    assert pri.headline("success", hv, ROWS, states, ctx_missing=True) == \
+        "🟡 Healthy, needs attention: merge state unavailable"
+
+
+def test_headline_carries_draft_and_stack_position():
+    # O2
+    hv = vals()
+    states = states_for(hv, hv)
+    ok = dict(files=FILES[:1])
+    assert pri.headline("success", hv, ROWS, states, ctx_for(draft=True, **ok)) == "🟢 Healthy · Draft"
+    assert pri.headline("success", hv, ROWS, states,
+                        ctx_for(draft=True, base="feat/a", parent=552, **ok)) == \
+        "🟢 Healthy · Draft · stacked on #552"
+    assert pri.headline("failure", hv, ROWS, states, ctx_for(base="feat/b", **ok)) == \
+        "🔴 CI failed · stacked, no open parent PR"
+    assert pri.headline("success", hv, ROWS, states, ctx_for(**ok)) == "🟢 Healthy"
+
+
+@pytest.mark.parametrize("ci", ["skipped", "neutral", "cancelled"])
+def test_headline_never_green_unless_ci_succeeded(ci):
+    hv = vals()
+    got = pri.headline(ci, hv, ROWS, states_for(hv, hv))
+    assert not got.startswith("🟢")
 
 
 def test_notice_keeps_footprint_and_never_goes_green(tmp_path, monkeypatch):
@@ -711,7 +775,7 @@ def test_notice_keeps_footprint_and_never_goes_green(tmp_path, monkeypatch):
         [("repos/owner/repo/pulls/7/files", FILES[:1]), ("repos/owner/repo/pulls/7", pull)]))
     assert pri.main(report_args(tmp_path, tmp_path / "missing.json", ci="failure")) == 0
     body = (tmp_path / "c.md").read_text()
-    assert "**🔴 CI failed**" in body and "🟢" not in body
+    assert "**🔴 CI failed · Draft**" in body and "🟢" not in body
     assert "Metrics not evaluated for this commit" in body
     assert "### Change footprint" in body and "Draft · base `main`" in body
 

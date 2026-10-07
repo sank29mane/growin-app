@@ -7,10 +7,11 @@ name: Swift CI
 #
 # The operator builds with Xcode-beta. If the project adopts APIs newer than
 # the runner's SDK, raise MIN_SDK. Then, when the runner's SDK is older than
-# MIN_SDK and the build fails the way an SDK gap fails (missing module,
-# member, or symbol), the job ends with a warning and a step summary saying
-# what is missing instead of a red X. On an SDK at least MIN_SDK, every build
-# or test failure is a real failure.
+# MIN_SDK and EVERY compiler error is an SDK-availability error (for example
+# "is only available in macOS 27.0 or newer"), the job ends with a warning
+# and a step summary saying what is missing instead of a red X. Any other
+# error, including "cannot find ... in scope" and syntax errors, keeps it
+# red. On an SDK at least MIN_SDK, every build or test failure is red.
 on:
   pull_request:
     branches: [ main ]
@@ -97,9 +98,11 @@ jobs:
           status=${PIPESTATUS[0]}
           if [[ $status -eq 0 ]]; then echo "built=true" >> "$GITHUB_OUTPUT"; exit 0; fi
           echo "built=false" >> "$GITHUB_OUTPUT"
-          gap='no such module|has no member|cannot find (type )?.* in scope|is only available in macOS|is unavailable in macOS|future Xcode project file format|requires a newer version of Xcode|unable to find a destination'
-          if [[ "$OLDER_SDK" == "true" ]] && grep -Eq "$gap" "$RUNNER_TEMP/build.log"; then
-            missing=$(grep -E "error:.*($gap)" "$RUNNER_TEMP/build.log" | sed -E 's/^.*error: //' | sort -u | head -n 8)
+          # Degrade only when every error line is an SDK-availability error.
+          gap='is only available in macOS [0-9]|is unavailable in macOS|future Xcode project file format|requires a newer version of Xcode|SDK .*(cannot be located|not found)'
+          errors=$(grep -E "error:" "$RUNNER_TEMP/build.log" | sort -u)
+          if [[ "$OLDER_SDK" == "true" && -n "$errors" ]] && ! grep -Evq "$gap" <<< "$errors"; then
+            missing=$(sed -E 's/^.*error: //' <<< "$errors" | sort -u | head -n 8)
             echo "::warning::Swift CI skipped: the runner's newest Xcode is $XCODE with the macOS $SDK SDK, and the project needs the macOS $MIN_SDK SDK or newer. Not a code failure."
             {
               echo "## Swift CI: degraded (advisory)"

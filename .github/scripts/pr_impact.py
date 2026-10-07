@@ -426,16 +426,42 @@ def _node_ends(node: tuple, s: str, pos: int) -> set[int]:
     return {end for end in range(pos, n + 1) if end not in hits}
 
 
+class GlobUnevaluable(ValueError):
+    """The matcher cannot decide this path or pattern (too long or too deep)."""
+
+
 def glob_match(path: str, pattern: str) -> bool:
-    """True when bash `[[ $path == $pattern ]]` would be true."""
+    """True when bash `[[ $path == $pattern ]]` would be true.
+
+    Raises GlobUnevaluable instead of guessing when the input is too large.
+    """
     if len(path) > MAX_MATCH_LEN or len(pattern) > MAX_MATCH_LEN:
-        return False
-    return len(path) in _seq_ends(_compile_glob(pattern), path, 0)
+        raise GlobUnevaluable("path or pattern is too long to match")
+    try:
+        return len(path) in _seq_ends(_compile_glob(pattern), path, 0)
+    except (RecursionError, MemoryError):
+        raise GlobUnevaluable("pattern is too deep to match") from None
+
+
+def glob_checkable(path: str | None) -> bool:
+    return not path or len(path) <= MAX_MATCH_LEN
 
 
 def matches_safety(path: str | None, patterns: list[str]) -> bool:
-    """safety-guard.sh `matches`: an empty path never matches."""
-    return bool(path) and any(glob_match(path, p) for p in patterns)
+    """safety-guard.sh `matches`: an empty path never matches.
+
+    Fails closed: a path the matcher cannot evaluate counts as a safety path,
+    because bash would still have checked it.
+    """
+    if not path:
+        return False
+    for pattern in patterns:
+        try:
+            if glob_match(path, pattern):
+                return True
+        except GlobUnevaluable:
+            return True
+    return False
 
 
 def is_test_path(path: str | None) -> bool:
@@ -465,6 +491,8 @@ REVIEW_LABEL = "safety-reviewed"
 DISPLAY_PATH_RE = re.compile(r"^[A-Za-z0-9_./ +@(),=~-]{1,240}$")
 REF_RE = re.compile(r"^[A-Za-z0-9._/-]{1,200}$")
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
+LABEL_NOTE = ("<sub>Label status here refreshes on the next CI run. The Operator dashboard "
+              "issue tracks label changes live.</sub>")
 FILE_STATUSES = {"added", "removed", "modified", "renamed", "copied", "changed", "unchanged"}
 MERGE_STATES = {
     "clean": "clean",
@@ -538,7 +566,8 @@ def footprint(files: list, patterns: list[str]) -> dict:
         row[1] += _int(f.get("additions"))
         row[2] += _int(f.get("deletions"))
         if matches_safety(path, patterns) or matches_safety(prev, patterns):
-            safety.append({"kind": "path", "path": path, "previous": prev, "status": status})
+            kind = "path" if glob_checkable(path) and glob_checkable(prev) else "unchecked"
+            safety.append({"kind": kind, "path": path, "previous": prev, "status": status})
         if status == "removed" and is_test_path(path):
             safety.append({"kind": "deleted test", "path": path, "previous": "", "status": status})
         if status == "renamed" and is_test_path(prev) and not is_test_path(path):
@@ -655,6 +684,8 @@ def render_footprint(ctx: dict | None) -> str:
             else:
                 note = hit["status"] if hit["status"] in FILE_STATUSES else "changed"
             out.append(f"- {path} ({note})")
+        elif hit["kind"] == "unchecked":
+            out.append(f"- {path} (too long to check, so treated as a safety path)")
         elif hit["kind"] == "deleted test":
             out.append(f"- {path} (deleted test)")
         else:
@@ -679,16 +710,33 @@ CI_RED = {
 }
 
 
+def _position(ctx: dict | None) -> str:
+    """' · Draft · stacked on #N' for the end of the headline."""
+    if ctx is None:
+        return ""
+    parts = ["Draft"] if ctx["draft"] else []
+    if ctx["base_ref"] != ctx["default_branch"]:
+        parts.append(f"stacked on #{ctx['parent']}" if ctx["parent"] else "stacked, no open parent PR")
+    return "".join(f" · {p}" for p in parts)
+
+
 def headline(ci: str, hv: dict[str, float], rows: list[dict], states: list[str],
              ctx: dict | None = None, notice: str | None = None,
-             has_base: bool = True) -> str:
+             has_base: bool = True, ctx_missing: bool = False) -> str:
     """One line: 🟢 Healthy, 🟡 Healthy, needs attention: ..., or 🔴 ...
 
     Red: CI did not succeed, or tests failed.
     Yellow: anything a reviewer should look at before merging (budgets over,
-    metrics missing, conflicts, a missing safety label).
-    Green: none of the above. Never green without test metrics.
+    metrics missing, conflicts, a missing safety label, or merge state that
+    could not be read).
+    Green: none of the above. Never green without test metrics, and never
+    green when the PR lookup was asked for and failed.
+    Draft and stacked status are appended either way.
     """
+    return _verdict(ci, hv, rows, states, ctx, notice, has_base, ctx_missing) + _position(ctx)
+
+
+def _verdict(ci, hv, rows, states, ctx, notice, has_base, ctx_missing) -> str:
     red: list[str] = []
     if ci in CI_RED:
         red.append(CI_RED[ci])
@@ -698,8 +746,8 @@ def headline(ci: str, hv: dict[str, float], rows: list[dict], states: list[str],
     if red:
         return "🔴 " + "; ".join(red)
     attention: list[str] = []
-    if ci not in ("success", "neutral", "skipped"):
-        attention.append("CI result unknown")
+    if ci != "success":
+        attention.append(f"CI {ci}" if ci in CI_CONCLUSIONS else "CI result unknown")
     if notice:
         attention.append(notice)
     elif "tests.total" not in hv:
@@ -709,6 +757,8 @@ def headline(ci: str, hv: dict[str, float], rows: list[dict], states: list[str],
     over = [r["label"] for r, s in zip(rows, states) if s == "warn" and r["id"] != "tests.failed"]
     if over:
         attention.append(f"over budget: {', '.join(over)}")
+    if ctx_missing:
+        attention.append("merge state unavailable")
     if ctx is not None:
         if ctx["mergeable"] is False:
             attention.append("merge conflicts")
@@ -891,7 +941,7 @@ def _pr_sections(ctx: dict | None, want_ctx: bool) -> tuple[list[str], list[str]
     """(readiness lines for the top, footprint lines for below the table)."""
     if not want_ctx:
         return [], []
-    top = [readiness_line(ctx), ""] if ctx else []
+    top = [readiness_line(ctx), "", LABEL_NOTE, ""] if ctx else []
     return top, [render_footprint(ctx)]
 
 
@@ -899,7 +949,7 @@ def render_notice(reason: str, head_sha: str | None, ci: str,
                   ctx: dict | None = None, want_ctx: bool = False) -> str:
     top, bottom = _pr_sections(ctx, want_ctx)
     out = [MARKER, "## PR impact (advisory)", "",
-           f"**{headline(ci, {}, [], [], ctx, notice='metrics not evaluated')}**", ""]
+           f"**{headline(ci, {}, [], [], ctx, notice='metrics not evaluated', ctx_missing=want_ctx and ctx is None)}**", ""]
     out += top
     out += [f"Metrics not evaluated for this commit. {reason}", ""]
     out += bottom
@@ -969,7 +1019,7 @@ def render_report(
     verdict = f"Advisory only. {warns} budget(s) exceeded; {missing} metric(s) not evaluated."
     top, bottom = _pr_sections(ctx, want_ctx)
     out = [MARKER, "## PR impact (advisory)", "",
-           f"**{headline(ci, hv, rows, states, ctx, has_base=bv is not None)}**", "",
+           f"**{headline(ci, hv, rows, states, ctx, has_base=bv is not None, ctx_missing=want_ctx and ctx is None)}**", "",
            summary_line(hv, bv), ""]
     out += top
     out += [verdict, ""]
