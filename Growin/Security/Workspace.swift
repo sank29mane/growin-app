@@ -52,8 +52,6 @@ nonisolated enum CredentialName: String, CaseIterable, Sendable {
     case openaiApiKey
     case geminiApiKey
     case finnhubApiKey
-    case trading212ApiKey
-    case trading212ApiSecret
     case trading212IsaApiKey
     case trading212IsaApiSecret
     case alpacaApiKey
@@ -78,9 +76,7 @@ nonisolated enum CredentialName: String, CaseIterable, Sendable {
              .newsApiKey,
              .tavilyApiKey:
             return .shared
-        case .trading212ApiKey,
-             .trading212ApiSecret,
-             .trading212IsaApiKey,
+        case .trading212IsaApiKey,
              .trading212IsaApiSecret,
              .t212InvestKey,
              .t212InvestSecret,
