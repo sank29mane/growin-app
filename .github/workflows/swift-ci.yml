@@ -103,13 +103,15 @@ jobs:
           # Degrade only when every error MESSAGE is one a newer SDK fixes.
           # Diagnostics look like "path:LINE:COL: error: MESSAGE" or
           # "xcodebuild: error: MESSAGE". Matching only the message means a
-          # file name cannot make a real error look like an SDK gap.
+          # file name cannot make a real error look like an SDK gap. The diag
+          # prefix is greedy so the LAST ": error: " wins (paths may contain
+          # colons), and the version phrases must end the message.
           sdk_gap() {
             local line="$1" msg
-            local diag=':[0-9]+:[0-9]+: error: (.*)$'
+            local diag='^.*:[0-9]+:[0-9]+: error: (.*)$'
             local tool='^(xcodebuild: )?error: (.*)$'
             local avail='^.+ is only available in macOS [0-9]+(\.[0-9]+)* or newer$'
-            local version='^(The project .+ cannot be opened because it is in a future Xcode project file format.*|.+ requires a newer version of Xcode.*|SDK ".+" cannot be located\.?)$'
+            local version='^(The project .+ cannot be opened because it is in a future Xcode project file format( \([0-9]+\))?\.?|.+ requires a newer version of Xcode\.?|SDK ".+" cannot be located\.?)$'
             if [[ "$line" =~ $diag ]]; then msg="${BASH_REMATCH[1]}"
             elif [[ "$line" =~ $tool ]]; then msg="${BASH_REMATCH[2]}"
             else return 1; fi
