@@ -25,9 +25,9 @@ from typing import Any, Protocol
 
 from costs.core import LookaheadError
 from costs.fills import BandUnavailable, PriceBand, SessionBar, TickSize
-from pilot_data import surveillance as _surveillance
-from pilot_data import universe as _universe
 from pilot_data.price_bands import BandObservation
+from pilot_data.surveillance import snapshot_for
+from pilot_data.universe import NoTradingStatusSource, evaluate_universe
 
 from .errors import DataError, HoldoutViolation
 from .holdout import HoldoutGrant, HoldoutRange, is_grant
@@ -370,19 +370,20 @@ class UniverseEligibility:
         self.policy = policy
         self._mode = mode
         self._allow = allow_missing_surveillance_before
-        self._status = status_source if status_source is not None else _universe.NoTradingStatusSource()
+        self._status = status_source if status_source is not None else NoTradingStatusSource()
 
     def inputs_available(self, day: date) -> str | None:
         """Why ``snapshot(day)`` would fail for a missing input, or None. Looks for stored snapshots only, not prices."""
         needs_surveillance = not (self._mode == "research" and self._allow is not None and day < self._allow)
         if needs_surveillance:
             for kind in ("asm", "gsm"):
-                if _surveillance.snapshot_for(self._store, kind, day) is None:
-                    return f"no {kind.upper()} surveillance snapshot is effective exactly {day.isoformat()}"
+                if snapshot_for(self._store, kind, day) is None:
+                    # D-12: the reason reaches the operator in a holdout refusal, so it carries no date
+                    return f"no {kind.upper()} surveillance snapshot is effective on a decision date"
         return None
 
     def snapshot(self, as_of: date) -> EligibilitySnapshot:
-        result = _universe.evaluate_universe(
+        result = evaluate_universe(
             self._store, as_of=as_of, targets=self._targets, policy=self.policy, mode=self._mode,
             allow_missing_surveillance_before=self._allow, workspace="india", status_source=self._status,
         )
@@ -452,9 +453,9 @@ def events_from_manifest(manifest: Any) -> DividendEvents:
 
 def load_dataset_rows(path: Path, *, expected_dataset_sha256: str | None = None) -> tuple[Any, list[Any]]:
     """Verify a published 59 dataset directory and read its rows (read-only)."""
-    from pilot_data import dataset as _dataset
+    from pilot_data.dataset import read_dataset_rows, verify_dataset
 
-    manifest = _dataset.verify_dataset(Path(path), workspace="india")
+    manifest = verify_dataset(Path(path), workspace="india")
     if expected_dataset_sha256 is not None and manifest.dataset_sha256 != expected_dataset_sha256:
         raise DataError("dataset_sha256 differs from the expected value")
-    return manifest, _dataset._read_parquet(Path(path) / "rows.parquet")
+    return manifest, read_dataset_rows(Path(path))

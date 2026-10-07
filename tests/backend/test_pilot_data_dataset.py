@@ -13,7 +13,7 @@ from pilot_data.bhavcopy import ingest_pr_zip
 from pilot_data.corporate_actions import derive_corporate_actions
 from pilot_data.core import PilotDataError, canonical_sha256, sha256_hex
 from pilot_data.dataset import (
-    _read_parquet, _write_parquet, build_dataset_snapshot, dataset_hash, main, verify_dataset,
+    _read_parquet, _write_parquet, build_dataset_snapshot, dataset_hash, main, read_dataset_rows, verify_dataset,
 )
 from pilot_data.store import PilotDataStore
 
@@ -92,6 +92,21 @@ def test_dataset_rows_via_export_and_adjusted_values(store, tmp_path):
     bases = {r.stock_code: r.raw_adjustment_basis for r in rows}
     assert bases == {"CANBAN": "as_traded_breeze_raw_confirmed", "STEADY": "as_traded_breeze_unverified"}
     assert [c.code for c in manifest.caveats] == ["SURVIVORSHIP_BIAS", "HINDSIGHT_BIAS", "BREEZE_RAW_UNVERIFIED"]
+
+
+def test_public_reader_returns_the_same_rows_and_leaves_the_dataset_hash_alone(store, tmp_path):
+    report = built_run(store)
+    manifest = snapshot(store, report, tmp_path / "export")
+    path = tmp_path / "export" / manifest.dataset_sha256
+    verified = verify_dataset(path, workspace="india")
+    rows = read_dataset_rows(path)
+    private = _read_parquet(path / "rows.parquet")
+    assert rows == private and len(rows) == manifest.row_count  # same values, same dtypes (Decimal, date), same order
+    assert [(r.anchor_isin, r.trade_date) for r in rows] == sorted((r.anchor_isin, r.trade_date) for r in rows)
+    assert all(isinstance(r.raw_close, Decimal) and isinstance(r.trade_date, date) for r in rows)
+    # hash pin: what the public reader returns reproduces the published dataset hash unchanged
+    assert dataset_hash(rows, verified.dividend_amount_unknown_events) == manifest.dataset_sha256 == verified.dataset_sha256
+    assert read_dataset_rows(str(path)) == rows  # a plain path string works too
 
 
 def test_bars_before_an_unresolved_action_are_quarantined_for_adjusted_values_only(store, tmp_path):

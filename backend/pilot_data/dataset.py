@@ -222,6 +222,15 @@ def _read_parquet(path: Path) -> list[DatasetRow]:
     return [DatasetRow(**dict(zip(names, values))) for values in found]
 
 
+def read_dataset_rows(dataset_dir: Path) -> list[DatasetRow]:
+    """Public reader: the rows of a published dataset directory, in (anchor_isin, trade_date) order.
+
+    It reads ``rows.parquet`` and nothing else. It does not verify anything, so call ``verify_dataset`` first
+    (it hashes the file and the rows); callers outside this package use this instead of ``_read_parquet``.
+    """
+    return _read_parquet(Path(dataset_dir) / "rows.parquet")
+
+
 def build_dataset_snapshot(
     store: PilotDataStore,
     *,
