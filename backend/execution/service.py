@@ -8,9 +8,13 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Mapping, Optional, Protocol, Union
 
+from pydantic import ValidationError
+from risk_india.rules import RiskConfigError
+
 from .approval import ApprovalChallenge, ApprovalService
 from .india_guard import (
     INDIA_LIMITS_UNAVAILABLE,
+    INTENT_INVALID,
     IndiaAdmissionGuard,
     IndiaLimitDenied,
     IndiaQuoteEvidence,
@@ -483,6 +487,17 @@ class ExecutionService:
         enrolled = self._ledger.get_approval_key(workspace=workspace)
         return enrolled.key_id if enrolled is not None else None
 
+    def _pending_india_buy(self, proposal_id: str):
+        """The stored order when it is a PENDING India BUY (any ledger venue), else None."""
+
+        ledger = self._ledger
+        if ledger is None or ledger.workspace is not Workspace.INDIA:
+            return None
+        order = ledger.get_order(proposal_id)
+        if order is None or order.state != "PENDING" or order.intent.get("side") != OrderSide.BUY.value:
+            return None
+        return order
+
     def _recheck_india_buy(
         self, proposal_id: str, india_quote: Optional[IndiaQuoteEvidence]
     ) -> Optional[str]:
@@ -495,26 +510,36 @@ class ExecutionService:
         admissible while halted or ended.
         """
 
+        # The recheck depends on the India workspace and the BUY side only. A venue binding
+        # (a Breeze relay bound in 63-05) must never switch it off.
+        order = self._pending_india_buy(proposal_id)
+        if order is None:
+            return None
         ledger = self._ledger
-        if ledger is None or ledger.workspace is not Workspace.INDIA or ledger.venue_binding is not None:
-            return None
-        order = ledger.get_order(proposal_id)
-        if order is None or order.state != "PENDING" or order.intent.get("side") != OrderSide.BUY.value:
-            return None
         guard = self._india_guard
         code: Optional[str] = None
         if guard is None:
             code = INDIA_LIMITS_UNAVAILABLE
         else:
+            admission = ledger.get_admission(proposal_id)
+            admitted = (
+                admission.final_quantity
+                if admission is not None and admission.decision is AdmissionDecision.ADMITTED
+                else None
+            )
             try:
                 guard.check_order(
                     OrderIntent.model_validate(dict(order.intent)),
                     ledger,
                     india_quote,
                     exclude_proposal_id=proposal_id,
+                    admitted_quantity=admitted,
                 )
             except IndiaLimitDenied as exc:
                 code = exc.code
+            except (RiskConfigError, ValidationError):
+                # A naive clock or an intent that no longer validates is a refusal, not a 500.
+                code = INTENT_INVALID
         if code is not None:
             try:
                 ledger.reject(proposal_id, code)
@@ -594,6 +619,15 @@ class ExecutionService:
                 else refusal_text(refusal)
             )
         async with self._lock_for(proposal_id):
+            try:
+                if self._pending_india_buy(proposal_id) is not None:
+                    # Verify first: an unauthenticated request must never be able to reject
+                    # and release a pending order through the recheck.
+                    self._approval_service.verify_signature(
+                        proposal_id, challenge_id, signature_der, workspace=workspace
+                    )
+            except (ApprovalConflict, InvalidTransition, OrderNotFound) as exc:
+                raise ExecutionConflictError(str(exc)) from exc
             denied = self._recheck_india_buy(proposal_id, india_quote)
             if denied is not None:
                 raise ExecutionConflictError(denied)

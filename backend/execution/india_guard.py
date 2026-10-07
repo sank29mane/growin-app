@@ -156,12 +156,15 @@ class IndiaAdmissionGuard:
         evidence: Optional[IndiaQuoteEvidence],
         *,
         exclude_proposal_id: str = "",
+        admitted_quantity: Optional[Decimal] = None,
     ) -> Mapping[str, Any]:
         """Run every Mac India rule for one intent. Raises ``IndiaLimitDenied`` on any code.
 
         ``exclude_proposal_id`` is for a recheck of an order that is already admitted (at
         challenge and at claim): its own reservation and open sell are left out of the caps,
-        so the order does not count against itself.
+        so the order does not count against itself. ``admitted_quantity`` is the quantity the
+        admission settled on (the risk gate may have scaled it below the request); the intent
+        stays immutable, and a recheck sizes the order at what was actually reserved.
 
         Returns the detail recorded with an admitted order. A BUY reads the latch file; a
         SELL never does, because halted, ended and stop latches only ever block buys, and an
@@ -172,10 +175,11 @@ class IndiaAdmissionGuard:
         if now.tzinfo is None:
             raise rules.RiskConfigError("the admission clock must be timezone-aware")
         buy = intent.side is OrderSide.BUY
+        quantity = intent.quantity if admitted_quantity is None else admitted_quantity
         if (
             intent.order_type is not OrderType.LIMIT
             or intent.limit_price is None
-            or intent.quantity != intent.quantity.to_integral_value()
+            or quantity != quantity.to_integral_value()
         ):
             raise IndiaLimitDenied(INTENT_INVALID)
         if not intent.ticker.startswith(_TICKER_PREFIX) or len(intent.ticker) == len(_TICKER_PREFIX):
@@ -216,7 +220,7 @@ class IndiaAdmissionGuard:
                 "buy" if buy else "sell",
                 symbol,
                 own_key,
-                int(intent.quantity),
+                int(quantity),
                 intent.limit_price,
             )
         except IndiaLimitDenied:

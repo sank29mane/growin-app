@@ -430,3 +430,194 @@ def test_fill_evidence_without_a_position_row_still_counts_as_a_fill(world):
 def test_zero_quantity_evidence_is_not_a_fill(world):
     _record_fill_evidence_only(world.ledger, "zero", "0")
     assert world.ledger.has_fills() is False
+
+
+# ======================================================================= fix round 2
+
+
+def admit_scaled(world, proposal_id, quantity, scaled, *, ticker=ils.TICKER):
+    """Admit a BUY whose risk gate sized it down from ``quantity`` to ``scaled``."""
+    intent = ils.make_intent(proposal_id, quantity=quantity, ticker=ticker)
+    admission = world.service.admit(
+        intent,
+        currency="INR",
+        price="100.00",
+        simulator_evidence={"simulated_fill_price": "100.00"},
+        risk_evidence={"scaled_size": str(scaled)},
+        india_quote=fresh(),
+    )
+    assert admission.decision is AdmissionDecision.ADMITTED
+    assert admission.final_quantity == Decimal(str(scaled))
+    return admission
+
+
+def test_the_challenge_recheck_sizes_caps_at_the_admitted_quantity(world):
+    admit_scaled(world, "a", 5, 2)  # asked for 500, the gate settled on 200
+    admit_only(world, "b", 3)  # 300 on the same name
+    world.service.reserve("a")
+    world.service.reserve("b")  # 200 + 300 = 500, inside the 600 per-position cap
+    assert world.ledger.get_order("a").intent["quantity"] == "5"  # the intent stays immutable
+    challenge = world.service.create_approval_challenge("a", workspace="india", india_quote=fresh())
+    assert challenge.proposal_id == "a" and world.ledger.get_order("a").state == "PENDING"
+    assert reserved(world, "a") and reserved(world, "b")
+
+
+@pytest.mark.asyncio
+async def test_the_claim_recheck_sizes_caps_at_the_admitted_quantity(world):
+    admit_scaled(world, "a", 5, 2)
+    world.service.reserve("a")
+    challenge = world.service.create_approval_challenge("a", workspace="india", india_quote=fresh())
+    signature = sign(world.key, challenge.signed_payload)
+    admit_only(world, "b", 3)
+    world.service.reserve("b")  # lands after the challenge: 200 + 300 = 500, still inside 600
+    ack = await world.service.approve_signed(
+        "a", challenge.challenge_id, signature, workspace="india", india_quote=fresh()
+    )
+    assert ack.status == "ACKNOWLEDGED" and world.dispatcher.calls == 1
+
+
+def test_the_recheck_still_refuses_when_the_admitted_quantity_really_breaks_a_cap(world):
+    admit_scaled(world, "a", 5, 2)
+    world.service.reserve("a")
+    ils.seed_position(world.ledger, ils.TICKER, 5, "500.00", guard=world.guard)  # 500 + 200 > 600
+    with pytest.raises(ApprovalConflict) as refused:
+        world.service.create_approval_challenge("a", workspace="india", india_quote=fresh())
+    assert str(refused.value) == "per_position_cap"
+    released(world, "a")
+
+
+@pytest.mark.asyncio
+async def test_a_bad_signature_cannot_reject_or_release_a_pending_buy(world):
+    from execution import ApprovalVerificationError
+
+    admit_only(world, "a", 2)
+    world.service.reserve("a")
+    challenge = world.service.create_approval_challenge("a", workspace="india", india_quote=fresh())
+    latch_halt(world)  # the recheck would now reject this order
+    with pytest.raises(ApprovalVerificationError):
+        await world.service.approve_signed(
+            "a", challenge.challenge_id, b"not a signature", workspace="india", india_quote=fresh()
+        )
+    with pytest.raises(ApprovalVerificationError):
+        await world.service.approve_signed(  # right bytes, wrong key
+            "a", challenge.challenge_id, sign(private_key(), challenge.signed_payload),
+            workspace="india", india_quote=fresh(),
+        )
+    with pytest.raises(ExecutionConflictError):
+        await world.service.approve_signed(
+            "a", "no-such-challenge", b"x", workspace="india", india_quote=fresh()
+        )
+    assert world.ledger.get_order("a").state == "PENDING"
+    assert reserved(world, "a")
+    assert world.dispatcher.calls == 0 and world.ledger.approval_evidence_count("a") == 0
+    # A genuine signature over the same challenge still meets the recheck and is refused.
+    with pytest.raises(ExecutionConflictError) as refused:
+        await world.service.approve_signed(
+            "a", challenge.challenge_id, sign(world.key, challenge.signed_payload),
+            workspace="india", india_quote=fresh(),
+        )
+    assert str(refused.value) == "halt_latch"
+    released(world, "a")
+
+
+def test_a_naive_clock_is_a_refusal_not_a_crash(world):
+    admit_only(world, "a", 2)
+    world.service.reserve("a")
+    world.clock.now = datetime(2026, 10, 8, 10, 0)  # no tzinfo: RiskConfigError inside the guard
+    with pytest.raises(ApprovalConflict) as refused:
+        world.service.create_approval_challenge("a", workspace="india", india_quote=fresh())
+    assert str(refused.value) == "intent_invalid"
+    released(world, "a")
+
+
+@pytest.mark.asyncio
+async def test_a_naive_clock_at_claim_is_a_refusal_too(world):
+    admit_only(world, "a", 2)
+    world.service.reserve("a")
+    challenge = world.service.create_approval_challenge("a", workspace="india", india_quote=fresh())
+    signature = sign(world.key, challenge.signed_payload)
+    world.clock.now = datetime(2026, 10, 8, 10, 0)
+    with pytest.raises(ExecutionConflictError) as refused:
+        await world.service.approve_signed(
+            "a", challenge.challenge_id, signature, workspace="india", india_quote=fresh()
+        )
+    assert str(refused.value) == "intent_invalid"
+    assert world.dispatcher.calls == 0
+    released(world, "a")
+
+
+def test_an_intent_that_no_longer_validates_is_a_refusal_not_a_crash(world, monkeypatch):
+    from pydantic import ValidationError
+
+    from execution import service as service_module
+
+    try:
+        service_module.OrderIntent.model_validate({})
+    except ValidationError as error:
+        captured = error
+
+    class Broken:
+        @staticmethod
+        def model_validate(_value):
+            raise captured
+
+    admit_only(world, "a", 2)
+    world.service.reserve("a")
+    monkeypatch.setattr(service_module, "OrderIntent", Broken)
+    with pytest.raises(ApprovalConflict) as refused:
+        world.service.create_approval_challenge("a", workspace="india", india_quote=fresh())
+    assert str(refused.value) == "intent_invalid"
+    monkeypatch.undo()
+    released(world, "a")
+
+
+FAKE_KIND = "fake_india_shadow"
+FAKE_ACCOUNT = "acct-fake-india-0001"
+
+
+@pytest.fixture
+def bound_world(tmp_path):
+    """An India ledger with a venue binding (what a bound Breeze relay will be in 63-05)."""
+
+    from execution.venue import VenueBinding
+    from venue_registry import VenueSpec, override_venue_specs
+
+    spec = VenueSpec(
+        kind=FAKE_KIND, workspace="india", currency="INR", modes=frozenset({"PRACTICE"}),
+        ledger_path=lambda: tmp_path / "fake" / "execution.sqlite3", dispatcher_key="fake_factory",
+    )
+    private = ils.india_private_dir(tmp_path)
+    with override_venue_specs({FAKE_KIND: spec}):
+        from execution import ExecutionLedger
+
+        ledger = ExecutionLedger(
+            tmp_path / "bound.sqlite3", workspace="india", require_approval=True,
+            venue=VenueBinding(venue=FAKE_KIND, account_id=FAKE_ACCOUNT, currency="INR"),
+        )
+        try:
+            intent = ils.make_intent(
+                "bound-a", mode="PRACTICE", broker=FAKE_KIND, account=FAKE_ACCOUNT, quantity=2
+            )
+            ledger.register_intent(intent)
+            yield SimpleNamespace(ledger=ledger, private=private)
+        finally:
+            ledger.close()
+
+
+def test_the_recheck_still_runs_when_the_india_ledger_has_a_venue_binding(bound_world):
+    ledger = bound_world.ledger
+    assert ledger.venue_binding is not None
+    guard = ils.make_guard(ledger, bound_world.private)
+    service = ExecutionService(PaperDispatcher(), ledger, require_approval=True, india_guard=guard)
+    with pytest.raises(ApprovalConflict) as refused:
+        service.create_approval_challenge("bound-a", workspace="india")  # no quote
+    assert str(refused.value) == "quote_unavailable"
+    assert ledger.get_order("bound-a").state == "REJECTED"
+
+
+def test_a_bound_india_ledger_with_no_guard_is_refused_too(bound_world):
+    service = ExecutionService(PaperDispatcher(), bound_world.ledger, require_approval=True)
+    with pytest.raises(ApprovalConflict) as refused:
+        service.create_approval_challenge("bound-a", workspace="india", india_quote=fresh())
+    assert str(refused.value) == "india_limits_unavailable"
+    assert bound_world.ledger.get_order("bound-a").state == "REJECTED"
