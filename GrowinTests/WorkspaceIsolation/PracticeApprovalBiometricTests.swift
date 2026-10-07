@@ -197,15 +197,26 @@ struct PracticeApprovalBiometricTests {
 
     // MARK: Source scan
 
+    /// Resolves symlinks with realpath(3) so the repo root and every enumerated file agree on one
+    /// spelling (a worktree under a symlinked directory, or /var vs /private/var).
+    private static func realPath(_ path: String) -> String {
+        guard let resolved = realpath(path, nil) else { return path }
+        defer { free(resolved) }
+        return String(cString: resolved)
+    }
+
     private static func appSources() throws -> [(path: String, text: String)] {
-        let repoRoot = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let repoRoot = realPath(
+            URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().path)
         let enumerator = try #require(FileManager.default.enumerator(
-            at: repoRoot.appendingPathComponent("Growin"), includingPropertiesForKeys: nil))
+            at: URL(fileURLWithPath: realPath(repoRoot + "/Growin")), includingPropertiesForKeys: nil))
         var sources: [(String, String)] = []
         for case let url as URL in enumerator where url.pathExtension == "swift" {
-            sources.append((String(url.path.dropFirst(repoRoot.path.count + 1)),
-                            try String(contentsOf: url, encoding: .utf8)))
+            let resolved = realPath(url.path)
+            #expect(resolved.hasPrefix(repoRoot + "/"), "\(resolved) resolves outside the repo")
+            sources.append((String(resolved.dropFirst(repoRoot.count + 1)),
+                            try String(contentsOfFile: resolved, encoding: .utf8)))
         }
         return sources
     }
@@ -245,5 +256,24 @@ struct PracticeApprovalBiometricTests {
         let practiceView = try #require(sources.first { $0.path == "Growin/Views/Trading/PracticeApprovalsView.swift" }?.text)
         #expect(practiceView.contains("PracticeApprovalAuthorizer.shared.signature("))
         #expect(!practiceView.contains("LocalApprovalSigner"))
+    }
+
+    @Test func appCodeOnlyUsesTheSharedAuthorizerAndNeverBuildsAnother() throws {
+        let sources = try Self.appSources()
+        #expect(sources.count > 10, "source probe found too few files")
+        let authorizerPath = "Growin/Security/PracticeApprovalAuthorizer.swift"
+        for (path, text) in sources {
+            if path == authorizerPath {
+                // Exactly one construction, and it is the shared instance.
+                #expect(text.components(separatedBy: "PracticeApprovalAuthorizer(").count - 1 == 1,
+                        "\(path) constructs more than the shared authorizer")
+                #expect(text.contains("static let shared = PracticeApprovalAuthorizer("))
+                continue
+            }
+            #expect(!text.contains("PracticeApprovalAuthorizer("), "\(path) constructs an authorizer")
+            #expect(!text.contains("PracticeApprovalAuthorizer.init"), "\(path) constructs an authorizer")
+        }
+        let users = sources.filter { $0.text.contains("PracticeApprovalAuthorizer.shared") }.map(\.path)
+        #expect(users.contains("Growin/Views/Trading/PracticeApprovalsView.swift"))
     }
 }

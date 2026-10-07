@@ -58,6 +58,7 @@ class StubBackend:
         self.reconcile_script: dict[str, list[str]] = {}  # proposal_id -> states per call
         self.cancelled: set[str] = set()
         self.reconcile_extra: dict[str, dict] = {}  # proposal_id -> extra reconcile response fields
+        self.reconcile_omit: dict[str, set[str]] = {}  # proposal_id -> response fields to drop
         self.counter = itertools.count(1)
         self.never_approve = False
 
@@ -93,9 +94,13 @@ class StubBackend:
                 state = script.pop(0) if len(script) > 1 else script[0]
             else:
                 state = self._default_state(pid)
-            return 200, {
-                "proposal_id": pid, "state": state, "code": "APPLIED", **self.reconcile_extra.get(pid, {})
+            body = {
+                "proposal_id": pid, "state": state, "code": "APPLIED", "position_check": "OK",
+                **self.reconcile_extra.get(pid, {}),
             }
+            for field in self.reconcile_omit.get(pid, ()):
+                body.pop(field, None)
+            return 200, body
         if path == smoke.CANCEL:
             self.cancelled.add(payload["proposal_id"])
             return 200, {"proposal_id": payload["proposal_id"], "cancel": {"outcome": "REQUESTED", "code": "HTTP_200"}}
@@ -603,6 +608,19 @@ def test_an_anomaly_code_or_failed_position_check_after_a_far_buy_stops_before_t
     assert evidence.steps[0]["anomaly"]["code"] == extra.get("code", "APPLIED")
     assert "anomaly" in evidence.md_path.read_text(encoding="utf-8")
     assert "anomaly" in evidence.json_path.read_text(encoding="utf-8")
+
+
+def test_a_missing_position_check_is_an_anomaly_and_stops_the_run(tmp_path):
+    backend = StubBackend()
+    backend.reconcile_omit["prop-1"] = {"position_check"}
+    run, backend, ask, said, evidence = build(tmp_path, far("VODl_EQ") + far("LLOYl_EQ"), backend)
+    run.preflight()
+    with pytest.raises(smoke.SmokeError, match="position check MISSING"):
+        run.buy_far(1)
+    assert run.far_tickers == [], "the step did not count as done"
+    assert len(backend.posts_to(smoke.PREPARE)) == 1, "nothing further was prepared"
+    assert evidence.steps[-1]["step"] == "anomaly" and evidence.steps[-1]["proposal_id"] == "prop-1"
+    assert evidence.steps[0]["anomaly"]["position_check"] == "MISSING"
 
 
 def test_the_full_run_aborts_at_the_first_anomaly_and_never_reaches_q1(tmp_path):

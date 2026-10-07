@@ -337,7 +337,10 @@ class Smoke:
 
         body = result if isinstance(result, dict) else {}
         code = str(body.get("code"))
-        position_check = str(body.get("position_check", "SKIPPED"))
+        # A reconcile response always carries position_check. A missing value means the answer is
+        # not the shape we expect, which is an anomaly and not a silent SKIPPED.
+        raw_position_check = body.get("position_check")
+        position_check = "MISSING" if raw_position_check is None else str(raw_position_check)
         problems = []
         if code not in HEALTHY_RECONCILE_CODES:
             problems.append(f"{body.get('state')}/{code}")
