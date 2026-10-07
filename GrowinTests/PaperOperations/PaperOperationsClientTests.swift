@@ -19,7 +19,7 @@ struct PaperOperationsClientTests {
 
     @Test
     func startReplayPostsConfirmationLiteralAndRelianceFixture() async throws {
-        try await PaperOperationsHTTPIsolation.shared.run {
+        try await PaperOperationsMainActorRunner.shared.run {
             let client = makeClient()
             _ = try await client.startReplay()
 
@@ -43,7 +43,7 @@ struct PaperOperationsClientTests {
 
     @Test
     func recordedURLsStayInsideMarketDataAllowlist() async throws {
-        try await PaperOperationsHTTPIsolation.shared.run {
+        try await PaperOperationsMainActorRunner.shared.run {
             let client = makeClient()
             _ = try await client.startReplay()
             _ = try await client.refreshStatus()
@@ -70,7 +70,7 @@ struct PaperOperationsClientTests {
 
     @Test
     func sessionAndPrepareBodiesOmitBrokerModeURLAndAPIKey() async throws {
-        try await PaperOperationsHTTPIsolation.shared.run {
+        try await PaperOperationsMainActorRunner.shared.run {
             let client = makeClient()
             let sessionBody = try client.encodeSessionStartBody()
             let prepareBody = try client.encodePrepareBody(symbol: "RELIANCE", quantity: "1")
@@ -87,7 +87,7 @@ struct PaperOperationsClientTests {
 
     @Test
     func stopSessionDeletesCurrentAndDoesNotGetSnapshots() async throws {
-        try await PaperOperationsHTTPIsolation.shared.run {
+        try await PaperOperationsMainActorRunner.shared.run {
             let client = makeClient()
             _ = try await client.stopSession()
 
@@ -100,7 +100,7 @@ struct PaperOperationsClientTests {
 
     @Test
     func currentSessionGetsSessionsCurrent() async throws {
-        try await PaperOperationsHTTPIsolation.shared.run {
+        try await PaperOperationsMainActorRunner.shared.run {
             let client = makeClient()
             _ = try await client.currentSession()
 
@@ -112,7 +112,7 @@ struct PaperOperationsClientTests {
 
     @Test
     func snapshot409StaleSnapshotMapsToTypedClientError() async {
-        await PaperOperationsHTTPIsolation.shared.run {
+        await PaperOperationsMainActorRunner.shared.run {
             let client = makeClient()
             stub.overrideSnapshotStatus = 409
             stub.overrideSnapshotPayload = Data(
@@ -132,7 +132,7 @@ struct PaperOperationsClientTests {
 
     @Test
     func prepareIndiaPaperJSONHasOnlyConfirmationSymbolAndQuantity() async throws {
-        try await PaperOperationsHTTPIsolation.shared.run {
+        try await PaperOperationsMainActorRunner.shared.run {
             let client = makeClient()
             _ = try await client.prepareIndiaPaper(symbol: "RELIANCE", quantity: "1")
 
@@ -151,7 +151,7 @@ struct PaperOperationsClientTests {
 
     @Test
     func reconcileIndiaPaperJSONHasOnlyConfirmationAndProposalId() async throws {
-        try await PaperOperationsHTTPIsolation.shared.run {
+        try await PaperOperationsMainActorRunner.shared.run {
             let client = makeClient()
             _ = try await client.reconcileIndiaPaper(proposalId: "paper-admitted-1")
 
@@ -218,7 +218,7 @@ struct PaperOperationsClientTests {
 
     @Test
     func prepare409PaperPreparationDeniedMapsToTypedClientError() async {
-        await PaperOperationsHTTPIsolation.shared.run {
+        await PaperOperationsMainActorRunner.shared.run {
             let client = makeClient()
             stub.overridePrepareStatus = 409
             stub.overridePreparePayload = Data(

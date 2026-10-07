@@ -77,6 +77,24 @@ struct SourceTreeTests {
         }
     }
 
+    @Test func aMissingOrEmptyScanRootThrowsInsteadOfWalkingNothing() throws {
+        let fixture = try Fixture.make()
+        defer { fixture.remove() }
+        #expect(throws: SourceTree.Failure.self) {
+            _ = try SourceTree.swiftSources(under: "Typo", in: fixture.link)
+        }
+        // A directory that exists but holds no Swift: also refused, not returned as [].
+        try FileManager.default.createDirectory(atPath: fixture.real + "/Empty", withIntermediateDirectories: true)
+        try "text\n".write(toFile: fixture.real + "/Empty/readme.txt", atomically: true, encoding: .utf8)
+        #expect(throws: SourceTree.Failure.self) {
+            _ = try SourceTree.swiftSources(under: "Empty", in: fixture.link)
+        }
+        // A file where a directory is expected.
+        #expect(throws: SourceTree.Failure.self) {
+            _ = try SourceTree.swiftSources(under: "Growin/A.swift", in: fixture.link)
+        }
+    }
+
     @Test func repoRootResolvesToTheRealRepoAndSeesTheApp() throws {
         let root = SourceTree.repoRoot
         #expect(root == SourceTree.realPath(root))
@@ -91,7 +109,11 @@ struct SourceTreeTests {
     @Test func noTestOutsideSourceTreeLocatesSourcesFromTheCompilerPath() throws {
         let needle = "#" + "filePath"
         let allowed: Set<String> = ["GrowinTests/SourceTree.swift", "GrowinTests/SourceTreeTests.swift"]
-        let offenders = try SourceTree.swiftSources(under: "GrowinTests")
+        let tests = try SourceTree.swiftSources(under: "GrowinTests")
+        // A walk that found nothing would make the ban below pass vacuously.
+        #expect(tests.count > 5, "test-source walk found too few files: \(tests.count)")
+        #expect(tests.contains { $0.path == "GrowinTests/SourceTree.swift" })
+        let offenders = tests
             .filter { $0.text.contains(needle) && !allowed.contains($0.path) }
             .map(\.path)
         #expect(offenders.isEmpty, "use SourceTree instead of the compiler path: \(offenders)")

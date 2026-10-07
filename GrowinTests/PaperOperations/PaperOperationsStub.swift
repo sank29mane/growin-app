@@ -1,12 +1,15 @@
 import Foundation
 @testable import Growin
 
-/// Pass-through kept so existing `await PaperOperationsHTTPIsolation.shared.run { ... }` call sites
-/// need no re-indent. It used to serialise tests around process-wide static stub state; that state is
-/// gone (every test owns a `PaperOperationsStub`), so nothing is serialised any more and a test that
-/// shared state again would fail under the repeated parallel runs instead of hiding behind a lock.
-struct PaperOperationsHTTPIsolation {
-    static let shared = PaperOperationsHTTPIsolation()
+/// Runs a test body on the main actor. It does not serialise anything: it used to be called
+/// `PaperOperationsHTTPIsolation` and gate tests around process-wide static stub state, which is gone
+/// now that every test owns a `PaperOperationsStub`. A test that shared state again would fail under
+/// repeated parallel runs instead of hiding behind a lock.
+///
+/// TODO: drop this wrapper by marking each test `@MainActor` and dedenting its body. Kept for now so
+/// the flake fix does not re-indent most test bodies in two files.
+struct PaperOperationsMainActorRunner {
+    static let shared = PaperOperationsMainActorRunner()
 
     func run<T: Sendable>(
         _ operation: @MainActor @Sendable () async throws -> T

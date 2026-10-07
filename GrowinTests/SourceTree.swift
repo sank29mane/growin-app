@@ -10,11 +10,15 @@ import Foundation
 enum SourceTree {
     enum Failure: Error, CustomStringConvertible {
         case unreadable(String)
+        case missingDirectory(String)
+        case noSwiftFiles(String)
         case escapesRoot(path: String, root: String)
 
         var description: String {
             switch self {
             case .unreadable(let path): return "cannot read \(path)"
+            case .missingDirectory(let path): return "scan root \(path) is not a directory"
+            case .noSwiftFiles(let path): return "scan root \(path) holds no .swift files, so a scan over it would pass vacuously"
             case .escapesRoot(let path, let root): return "\(path) resolves outside \(root)"
             }
         }
@@ -54,6 +58,12 @@ enum SourceTree {
     ) throws -> [(path: String, text: String)] {
         let resolvedRoot = realPath(root)
         let start = realPath(resolvedRoot + "/" + directory)
+        // An enumerator over a missing directory yields nothing, and every "no file contains X"
+        // scan would then pass. Refuse a missing or empty root instead of returning [].
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: start, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw Failure.missingDirectory(start)
+        }
         guard let enumerator = FileManager.default.enumerator(
             at: URL(fileURLWithPath: start), includingPropertiesForKeys: nil
         ) else {
@@ -65,6 +75,7 @@ enum SourceTree {
             let text = try String(contentsOfFile: resolvedRoot + "/" + relative, encoding: .utf8)
             sources.append((relative, text))
         }
+        guard !sources.isEmpty else { throw Failure.noSwiftFiles(start) }
         return sources
     }
 

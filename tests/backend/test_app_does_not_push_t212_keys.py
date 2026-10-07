@@ -79,6 +79,100 @@ def t212_input_field_offences(root: Path) -> list[str]:
     return found
 
 
+CONTAINER_NAME = re.compile(r"\b(?:Section|GroupBox|SettingsCard)\b")
+TRAILING_CLOSURE = re.compile(r"(header|footer|label)\s*:\s*\{")
+
+
+def _after_string(text: str, i: int) -> int:
+    """Index just past the string literal that opens at text[i] == '"'."""
+    i += 1
+    while i < len(text) and text[i] != '"':
+        i += 2 if text[i] == "\\" else 1
+    return i + 1
+
+
+def _closing(text: str, i: int) -> int:
+    """Index of the bracket matching text[i], skipping string literals. -1 if unbalanced."""
+    opener = text[i]
+    closer = {"(": ")", "{": "}"}[opener]
+    depth = 0
+    while i < len(text):
+        char = text[i]
+        if char == '"':
+            i = _after_string(text, i)
+            continue
+        if char == opener:
+            depth += 1
+        elif char == closer:
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
+def labelled_containers(text: str) -> list[tuple[int, str, str]]:
+    """(offset, label text, body text) for each Section / GroupBox / SettingsCard with a body.
+
+    The label is the call arguments plus any `header:` / `label:` closure, so
+    `Section("Trading 212")`, `GroupBox(label: Text("T212"))` and
+    `Section { ... } header: { Text("Trading 212") }` all expose their wording.
+    """
+    found = []
+    for match in CONTAINER_NAME.finditer(text):
+        j = match.end()
+        while j < len(text) and text[j].isspace():
+            j += 1
+        label = ""
+        if j < len(text) and text[j] == "(":
+            end = _closing(text, j)
+            if end < 0:
+                continue
+            label = text[j + 1 : end]
+            j = end + 1
+            while j < len(text) and text[j].isspace():
+                j += 1
+        if j >= len(text) or text[j] != "{":
+            continue
+        end = _closing(text, j)
+        if end < 0:
+            continue
+        body = text[j + 1 : end]
+        j = end + 1
+        while True:
+            while j < len(text) and text[j].isspace():
+                j += 1
+            trailing = TRAILING_CLOSURE.match(text, j)
+            if not trailing:
+                break
+            open_at = trailing.end() - 1
+            end = _closing(text, open_at)
+            if end < 0:
+                break
+            if trailing.group(1) in ("header", "label"):
+                label += "\n" + text[open_at + 1 : end]
+            j = end + 1
+        found.append((match.start(), label, body))
+    return found
+
+
+def t212_container_offences(root: Path) -> list[str]:
+    """Typed-input controls inside a Section / GroupBox / SettingsCard whose label names Trading 212.
+
+    Catches `Section("Trading 212") { SecureField("API Key", ...) }`, where neither the field nor
+    its modifiers mention Trading 212. Obfuscation such as "trading212" + "ApiKey" is out of scope:
+    the threat model is an honest but fallible change, not someone hiding a field from this scan.
+    """
+    found = []
+    for path in sorted(root.rglob("*.swift")):
+        text = path.read_text(encoding="utf-8")
+        for offset, label, body in labelled_containers(text):
+            if T212_WORDING.search(label) and INPUT_CONTROL.search(body):
+                line = text.count("\n", 0, offset) + 1
+                found.append(f"{path.relative_to(root)}:{line}: input control inside a Trading 212 container")
+    return found
+
+
 def test_no_swift_source_names_the_key_push_route_or_its_payload():
     assert len(list(APP.rglob("*.swift"))) > 20
     assert offences(APP) == []
@@ -109,6 +203,49 @@ def test_no_swift_source_reintroduces_a_t212_key_field_or_keychain_write():
     assert (APP / CREDENTIAL_ENUM).is_file()
     assert t212_input_field_offences(APP) == []
     assert t212_credential_offences(APP) == []
+    assert t212_container_offences(APP) == []
+
+
+def test_the_container_scan_really_sees_the_settings_trading_212_card():
+    """Guards the container scan against passing vacuously because the parser found nothing."""
+    settings = (APP / "Views" / "SettingsView.swift").read_text(encoding="utf-8")
+    cards = [
+        (label, body)
+        for _, label, body in labelled_containers(settings)
+        if T212_WORDING.search(label)
+    ]
+    assert cards, "no Trading 212 container parsed in SettingsView: the container scan is blind"
+    assert any("Picker" in body for _, body in cards)
+    assert not any(INPUT_CONTROL.search(body) for _, body in cards)
+
+
+def test_the_container_scan_catches_a_field_inside_a_trading_212_container(tmp_path):
+    planted = {
+        "SectionArgs.swift": 'Section("Trading 212") {\n    SecureField("API Key", text: $draft)\n}\n',
+        "GroupBoxLabel.swift": 'GroupBox(label: Text("T212 credentials")) {\n    VStack { TextField("Key", text: $k) }\n}\n',
+        "HeaderClosure.swift": (
+            "Section {\n    SecureField(\"Secret\", text: $s)\n} header: {\n    Text(\"Trading 212 MCP\")\n}\n"
+        ),
+        "CardTitle.swift": 'SettingsCard(title: "Trading 212 API", icon: "x") {\n    VStack {\n        TextEditor(text: $t)\n    }\n}\n',
+        "BraceInString.swift": 'Section("Trading 212 {") {\n    SecureField("API Key", text: $draft)\n}\n',
+    }
+    for name, body in planted.items():
+        (tmp_path / name).write_text(body, encoding="utf-8")
+    hits = t212_container_offences(tmp_path)
+    for name in planted:
+        assert any(hit.startswith(name) for hit in hits), name
+
+
+def test_the_container_scan_ignores_other_containers_and_non_field_t212_content(tmp_path):
+    (tmp_path / "Fine.swift").write_text(
+        'Section("OpenAI & Gemini") {\n    SecureField("sk-...", text: $openai)\n}\n'
+        'Section("Trading 212") {\n    Picker("Account", selection: $t) { Text("Invest").tag("invest") }\n}\n'
+        'SettingsCard(title: "Trading 212 API", icon: "x") {\n    Text("Keys come from the launch environment")\n}\n'
+        'Section {\n    Text("x")\n} header: {\n    Text("Trading 212")\n}\n'
+        'Section("Other") {\n    SecureField("sk", text: $a)\n}\n',
+        encoding="utf-8",
+    )
+    assert t212_container_offences(tmp_path) == []
 
 
 def test_the_config_view_has_no_trading_212_binding_or_field():

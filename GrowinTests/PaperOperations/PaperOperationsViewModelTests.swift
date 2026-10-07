@@ -13,7 +13,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func constructingViewModelDoesNotIssueAClientCall() async {
-        await PaperOperationsHTTPIsolation.shared.run {
+        await PaperOperationsMainActorRunner.shared.run {
             let client = makeClient()
             _ = PaperOperationsViewModel(client: client, signer: StubPaperApprovalSigner(configured: false))
             #expect(stub.snapshotRecord().urls.isEmpty)
@@ -22,7 +22,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func idleViewModelRecordsZeroRequestsAfter200ms() async {
-        await PaperOperationsHTTPIsolation.shared.run {
+        await PaperOperationsMainActorRunner.shared.run {
             let client = makeClient()
             _ = PaperOperationsViewModel(client: client, signer: StubPaperApprovalSigner(configured: false))
             try? await Task.sleep(for: .milliseconds(200))
@@ -47,7 +47,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func viewModelRecordedPathsStayOnAllowlistAndOmitForbiddenPrefixes() async {
-        await PaperOperationsHTTPIsolation.shared.run {
+        await PaperOperationsMainActorRunner.shared.run {
             let viewModel = PaperOperationsViewModel(
                 client: makeClient(),
                 signer: StubPaperApprovalSigner(configured: true)
@@ -75,7 +75,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func atMostOneWorkflowAccentIsReserved() async {
-        await PaperOperationsHTTPIsolation.shared.run {
+        await PaperOperationsMainActorRunner.shared.run {
             let viewModel = PaperOperationsViewModel(
                 client: makeClient(),
                 signer: StubPaperApprovalSigner(configured: false)
@@ -108,7 +108,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func canPrepareIsFalseWhileSessionIsStopped() async {
-        await PaperOperationsHTTPIsolation.shared.run {
+        await PaperOperationsMainActorRunner.shared.run {
             let viewModel = PaperOperationsViewModel(
                 client: makeClient(),
                 signer: StubPaperApprovalSigner(configured: false)
@@ -122,7 +122,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func startLocalReplayPostsConfirmationThenGetsRelianceSnapshot() async throws {
-        try await PaperOperationsHTTPIsolation.shared.run {
+        try await PaperOperationsMainActorRunner.shared.run {
             let viewModel = PaperOperationsViewModel(
                 client: makeClient(),
                 signer: StubPaperApprovalSigner(configured: false)
@@ -146,7 +146,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func malformedPayloadMapsToDurableBlockingReasonAndKeepsLastEvidence() async {
-        await PaperOperationsHTTPIsolation.shared.run {
+        await PaperOperationsMainActorRunner.shared.run {
             let viewModel = PaperOperationsViewModel(
                 client: makeClient(),
                 signer: StubPaperApprovalSigner(configured: false)
@@ -172,7 +172,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func stopLocalReplayDeletesCurrentAndDoesNotGetSnapshot() async {
-        await PaperOperationsHTTPIsolation.shared.run {
+        await PaperOperationsMainActorRunner.shared.run {
             let viewModel = PaperOperationsViewModel(
                 client: makeClient(),
                 signer: StubPaperApprovalSigner(configured: true)
@@ -194,7 +194,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func refreshSessionStatusDoesNotRecordSnapshotURLAndLeavesStaleBlocking() async {
-        await PaperOperationsHTTPIsolation.shared.run {
+        await PaperOperationsMainActorRunner.shared.run {
             let viewModel = PaperOperationsViewModel(
                 client: makeClient(),
                 signer: StubPaperApprovalSigner(configured: true)
@@ -226,7 +226,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func loadSnapshotEvidenceOnStaleSnapshotSetsDurableStaleAndKeepsLastEvidence() async {
-        await PaperOperationsHTTPIsolation.shared.run {
+        await PaperOperationsMainActorRunner.shared.run {
             let viewModel = PaperOperationsViewModel(
                 client: makeClient(),
                 signer: StubPaperApprovalSigner(configured: true)
@@ -257,7 +257,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func zeroInstrumentsClearsSelectedSymbol() async {
-        await PaperOperationsHTTPIsolation.shared.run {
+        await PaperOperationsMainActorRunner.shared.run {
             let viewModel = PaperOperationsViewModel(
                 client: makeClient(),
                 signer: StubPaperApprovalSigner(configured: true)
@@ -279,7 +279,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func manyInstrumentsDoNotImplicitlySelectOnStart() async {
-        await PaperOperationsHTTPIsolation.shared.run {
+        await PaperOperationsMainActorRunner.shared.run {
             let viewModel = PaperOperationsViewModel(
                 client: makeClient(),
                 signer: StubPaperApprovalSigner(configured: true)
@@ -298,7 +298,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func refreshAutoSelectsWhenExactlyOneInstrumentRemains() async {
-        await PaperOperationsHTTPIsolation.shared.run {
+        await PaperOperationsMainActorRunner.shared.run {
             let viewModel = PaperOperationsViewModel(
                 client: makeClient(),
                 signer: StubPaperApprovalSigner(configured: true)
@@ -320,7 +320,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func pickerSelectionRejectsSymbolsOutsideSessionInstruments() async {
-        await PaperOperationsHTTPIsolation.shared.run {
+        await PaperOperationsMainActorRunner.shared.run {
             let viewModel = PaperOperationsViewModel(
                 client: makeClient(),
                 signer: StubPaperApprovalSigner(configured: true)
@@ -336,7 +336,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func runningWithoutSnapshotKeepsCanPrepareFalseAndMissingCopy() async {
-        await PaperOperationsHTTPIsolation.shared.run {
+        await PaperOperationsMainActorRunner.shared.run {
             let viewModel = PaperOperationsViewModel(
                 client: makeClient(),
                 signer: StubPaperApprovalSigner(configured: true)
@@ -360,7 +360,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func signerNotConfiguredBlocksPrepareWithoutCreatingIdentity() async {
-        await PaperOperationsHTTPIsolation.shared.run {
+        await PaperOperationsMainActorRunner.shared.run {
             let signer = StubPaperApprovalSigner(configured: false)
             let viewModel = PaperOperationsViewModel(client: makeClient(), signer: signer)
 
@@ -379,7 +379,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func unreconciledIntentBlocksPrepareWithUnreconciledCopy() async {
-        await PaperOperationsHTTPIsolation.shared.run {
+        await PaperOperationsMainActorRunner.shared.run {
             let viewModel = PaperOperationsViewModel(
                 client: makeClient(),
                 signer: StubPaperApprovalSigner(configured: true)
@@ -398,7 +398,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func emptyObjectSnapshotPayloadIsMalformedAndKeepsLastSnapshotFields() async {
-        await PaperOperationsHTTPIsolation.shared.run {
+        await PaperOperationsMainActorRunner.shared.run {
             let viewModel = PaperOperationsViewModel(
                 client: makeClient(),
                 signer: StubPaperApprovalSigner(configured: true)
@@ -423,7 +423,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func canPrepareIsTrueWithoutRegimeSimulatorOrSwarmAndSlotSaysEvidenceComplete() async {
-        await PaperOperationsHTTPIsolation.shared.run {
+        await PaperOperationsMainActorRunner.shared.run {
             let viewModel = PaperOperationsViewModel(
                 client: makeClient(),
                 signer: StubPaperApprovalSigner(configured: true)
@@ -447,7 +447,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func quantityLongerThan32KeepsCanPrepareFalse() async {
-        await PaperOperationsHTTPIsolation.shared.run {
+        await PaperOperationsMainActorRunner.shared.run {
             let viewModel = PaperOperationsViewModel(
                 client: makeClient(),
                 signer: StubPaperApprovalSigner(configured: true)
@@ -463,7 +463,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func concurrentInFlightIgnoresSecondSessionAction() async {
-        await PaperOperationsHTTPIsolation.shared.run {
+        await PaperOperationsMainActorRunner.shared.run {
             let viewModel = PaperOperationsViewModel(
                 client: makeClient(),
                 signer: StubPaperApprovalSigner(configured: true)
@@ -480,7 +480,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func loadSnapshotEvidenceWhenStoppedDoesNotFetch() async {
-        await PaperOperationsHTTPIsolation.shared.run {
+        await PaperOperationsMainActorRunner.shared.run {
             let viewModel = PaperOperationsViewModel(
                 client: makeClient(),
                 signer: StubPaperApprovalSigner(configured: true)
@@ -494,7 +494,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func preparePaperIntentIsNoOpWhenCanPrepareIsFalse() async {
-        await PaperOperationsHTTPIsolation.shared.run {
+        await PaperOperationsMainActorRunner.shared.run {
             let approver = StubPaperTradeApprover()
             let viewModel = PaperOperationsViewModel(
                 client: makeClient(),
@@ -512,7 +512,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func prepare201DeniedDoesNotOpenSheetAndKeepsLastEvidence() async {
-        await PaperOperationsHTTPIsolation.shared.run {
+        await PaperOperationsMainActorRunner.shared.run {
             let approver = StubPaperTradeApprover()
             let viewModel = PaperOperationsViewModel(
                 client: makeClient(),
@@ -543,7 +543,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func prepare201AdmittedOpensSheetWithExecutionTicker() async {
-        await PaperOperationsHTTPIsolation.shared.run {
+        await PaperOperationsMainActorRunner.shared.run {
             let approver = StubPaperTradeApprover()
             let viewModel = PaperOperationsViewModel(
                 client: makeClient(),
@@ -577,7 +577,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func prepare409DeniedKeepsPrepareDisabledWithFailClosedCopy() async {
-        await PaperOperationsHTTPIsolation.shared.run {
+        await PaperOperationsMainActorRunner.shared.run {
             let viewModel = PaperOperationsViewModel(
                 client: makeClient(),
                 signer: StubPaperApprovalSigner(configured: true),
@@ -602,7 +602,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func prepareTransportFailureUsesPrepareFailedCopyAndDoesNotOpenSheet() async {
-        await PaperOperationsHTTPIsolation.shared.run {
+        await PaperOperationsMainActorRunner.shared.run {
             let viewModel = PaperOperationsViewModel(
                 client: makeClient(),
                 signer: StubPaperApprovalSigner(configured: true),
@@ -642,7 +642,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func signedCompleteStoresOrderAckAndAcknowledgeDoesNotCallCompleteAgain() async throws {
-        try await PaperOperationsHTTPIsolation.shared.run {
+        try await PaperOperationsMainActorRunner.shared.run {
             let approver = StubPaperTradeApprover()
             let viewModel = PaperOperationsViewModel(
                 client: makeClient(),
@@ -675,7 +675,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func acknowledgeWithoutStoredAckUsesFailedCopyAndDoesNotAdvance() async throws {
-        try await PaperOperationsHTTPIsolation.shared.run {
+        try await PaperOperationsMainActorRunner.shared.run {
             let approver = StubPaperTradeApprover()
             approver.completeResponse = ApprovalCompletionResponse(
                 message: "Paper trade acknowledged by local-paper.",
@@ -704,7 +704,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func reconcilePaperOutcomeIsNoOpBeforeAcknowledgement() async throws {
-        try await PaperOperationsHTTPIsolation.shared.run {
+        try await PaperOperationsMainActorRunner.shared.run {
             let approver = StubPaperTradeApprover()
             let viewModel = PaperOperationsViewModel(
                 client: makeClient(),
@@ -725,7 +725,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func reconcileAfterAcknowledgePostsLoopbackConfirmationAndUnblocksPrepare() async throws {
-        try await PaperOperationsHTTPIsolation.shared.run {
+        try await PaperOperationsMainActorRunner.shared.run {
             let approver = StubPaperTradeApprover()
             let viewModel = PaperOperationsViewModel(
                 client: makeClient(),
@@ -758,7 +758,7 @@ struct PaperOperationsViewModelTests {
 
     @Test
     func reconcileFailureKeepsUnreconciledCopyAndDoesNotInventAFill() async throws {
-        try await PaperOperationsHTTPIsolation.shared.run {
+        try await PaperOperationsMainActorRunner.shared.run {
             let approver = StubPaperTradeApprover()
             let viewModel = PaperOperationsViewModel(
                 client: makeClient(),

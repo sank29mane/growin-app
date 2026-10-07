@@ -224,6 +224,7 @@ struct PracticeApprovalBiometricTests {
 
     @Test func onlyTheAuthorizerCanMintAPracticeSigningToken() throws {
         let sources = try Self.appSources()
+        #expect(sources.count > 10, "source probe found too few files")
         let authorizerPath = "Growin/Security/PracticeApprovalAuthorizer.swift"
         let signerPath = "Growin/Security/LocalApprovalSigner.swift"
         for (path, text) in sources {
@@ -382,9 +383,15 @@ struct PracticeApprovalBiometricTests {
             .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
             .joined(separator: "\n")
         var out: [String] = []
-        let constructions = matchCount(#"\bLocalApprovalSigner\s*\("#, in: text)
+        // Named construction, `Type.init`, and inferred `.init(store:` where the type comes from a
+        // property, return or parameter annotation (`var s: LocalApprovalSigner { .init(store: x) }`).
+        // The initializer's only label is `store`, and `\s` spans newlines for multiline calls.
+        var constructions = matchCount(#"\bLocalApprovalSigner\s*\("#, in: text)
             + matchCount(#"\bLocalApprovalSigner\s*\.\s*init\b"#, in: text)
-            + matchCount(#":\s*LocalApprovalSigner\??\s*=\s*\.init\b"#, in: text)
+            + matchCount(#"\.\s*init\s*\(\s*store\s*:"#, in: text)
+        if path == signerPath {
+            constructions += matchCount(#"\bSelf\s*\("#, in: text) + matchCount(#"\bSelf\s*\.\s*init\b"#, in: text)
+        }
         if path == signerPath {
             if constructions != 1 { out.append("\(path) builds \(constructions) signer instances, expected exactly the shared one") }
         } else if constructions > 0 {
@@ -392,6 +399,10 @@ struct PracticeApprovalBiometricTests {
         }
         if path != signerPath, matchCount(#"\bextension\s+LocalApprovalSigner\b"#, in: text) > 0 {
             out.append("\(path) extends LocalApprovalSigner")
+        }
+        // `let t = LocalApprovalSigner.self; t.init(store:)` builds an instance with no spelling above.
+        if path != signerPath, matchCount(#"\bLocalApprovalSigner\s*\.\s*self\b"#, in: text) > 0 {
+            out.append("\(path) takes the LocalApprovalSigner metatype")
         }
         if matchCount(#"typealias\s+\w+\s*=\s*(\w+\.)*LocalApprovalSigner\b"#, in: text) > 0 {
             out.append("\(path) aliases the signer type")
@@ -424,6 +435,23 @@ struct PracticeApprovalBiometricTests {
             ("stored copy of shared", "Growin/Views/X.swift", "let s = LocalApprovalSigner.shared\n_ = try s.sign(bytes, for: .uk)"),
             ("second instance in signer file", Self.signerPath,
              signerFile + "let other = LocalApprovalSigner(store: .shared)\n"),
+            ("typed computed property .init", "Growin/Views/X.swift",
+             "var signer: LocalApprovalSigner { .init(store: .shared) }"),
+            ("typed stored property .init", "Growin/Views/X.swift",
+             "let signer: LocalApprovalSigner = .init(store: .shared)"),
+            ("function return .init", "Growin/Views/X.swift",
+             "func makeSigner() -> LocalApprovalSigner {\n    return .init(store: .shared)\n}"),
+            ("parameter default .init", "Growin/Views/X.swift",
+             "func run(signer: LocalApprovalSigner = .init(store: .shared)) {}"),
+            ("multiline .init", "Growin/Views/X.swift",
+             "var signer: LocalApprovalSigner {\n    .init(\n        store: .shared\n    )\n}"),
+            ("multiline named construction", "Growin/Views/X.swift",
+             "let s = LocalApprovalSigner(\n    store: .shared\n)"),
+            ("metatype then init", "Growin/Views/X.swift",
+             "let t = LocalApprovalSigner.self\nlet s = t.init(store: .shared)"),
+            ("metatype, spaced", "Growin/Views/X.swift", "let t = LocalApprovalSigner . self"),
+            ("Self( second site in signer file", Self.signerPath,
+             signerFile + "extension LocalApprovalSigner { static func other() -> Self { Self(store: .shared) } }\n"),
             ("no shared instance in signer file", Self.signerPath, "final class LocalApprovalSigner {}\n"),
         ]
         for (label, path, text) in evasions {
