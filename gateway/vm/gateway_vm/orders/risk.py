@@ -486,6 +486,9 @@ def reset_latch(
 ) -> bool:
     """Admin reset (VM shell, admin window). ended is terminal and refused.
 
+    Halt is not releasable once the pilot has ended, with or without
+    ``rebase_halt_anchor`` (the Mac ``drawdown.reset`` refuses it the same way).
+
     Resetting halt is refused while drawdown is at or below the halt threshold:
     the next evaluated close would only latch it again. The operator may pass
     ``rebase_halt_anchor`` to accept the loss and restart the -8% test from the
@@ -501,6 +504,8 @@ def reset_latch(
         raise ResetRefused("the halt anchor applies to the halt latch only")
     rebased = False
     if latch == "halt":
+        if state.ended:
+            raise ResetRefused("halt cannot be released while the pilot is ended")
         if limits is None:
             raise ResetRefused("the limits are required to reset the halt latch")
         if state.drawdown <= limits.drawdown_halt:

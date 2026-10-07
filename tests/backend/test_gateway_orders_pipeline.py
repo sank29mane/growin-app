@@ -28,6 +28,7 @@ from gateway_vm.orders.audit import AuditLog  # noqa: E402
 from gateway_vm.orders.challenge import SecretIds, canonical_bytes  # noqa: E402
 from gateway_vm.orders.intent import FIELDS, parse_intent  # noqa: E402
 from gateway_vm.orders.pipeline import (  # noqa: E402
+    DatedTickReference,
     GuardResult,
     OrderPipeline,
     RefusalForward,
@@ -658,11 +659,17 @@ class FakeMarket:
 
 
 class FakeTickReference:
-    """Month-end close port. Defaults to the same price as the quote's previous close."""
+    """Month-end close port. ``default`` is the price, dated ``month`` (the month before the session).
+
+    ``raw`` replaces the whole return value (a bare Decimal, a mis-typed object) so a test can hand
+    the production guard something the port contract forbids.
+    """
 
     def __init__(self) -> None:
         self.values: dict[str, object] = {}
         self.default: object = D("99.80")
+        self.month: object = date(2026, 9, 30)
+        self.raw: object = None
         self.reads: list[tuple[str, date]] = []
         self.fail = False
 
@@ -670,7 +677,9 @@ class FakeTickReference:
         self.reads.append((isin, session_date))
         if self.fail:
             raise RuntimeError("month-end close unknown")
-        return self.values.get(isin, self.default)
+        if self.raw is not None:
+            return self.raw
+        return DatedTickReference(self.values.get(isin, self.default), self.month)
 
 
 class RealRig:
@@ -974,6 +983,63 @@ def test_unusable_tick_reference_refuses_with_a_typed_503(real: RealRig, bad):
     expect(err, 503, "ORDERS_UNAVAILABLE", "tick_reference_unavailable")
     assert real.decisions() == [("REFUSED", ["tick_reference_unavailable"])]
     assert real.forward.calls == 0
+
+
+@pytest.mark.parametrize(
+    "month, why",
+    [
+        (date(2026, 8, 31), "stale: two months before the session"),
+        (date(2026, 10, 1), "wrong: the session's own month"),
+        (date(2026, 11, 30), "wrong: a later month"),
+        (date(2025, 9, 30), "stale: the right month a year ago"),
+        (None, "undated"),
+        ("2026-09-30", "malformed: an ISO string, not a date"),
+        (datetime(2026, 9, 30, 15, 30), "malformed: a datetime"),
+    ],
+    ids=lambda v: None,
+)
+def test_production_refuses_a_reference_dated_to_the_wrong_month(real: RealRig, month, why):
+    # 249.90 would pass the 0.01 tick for 100.01; a dated reference in any month but
+    # September must never reach the tick band, whatever the price says.
+    real.tick_reference.default = D("249.90")
+    real.tick_reference.month = month
+    with pytest.raises(OrderRefusal) as err:
+        real.mint(limit_price="100.01")
+    expect(err, 503, "ORDERS_UNAVAILABLE", "tick_reference_unavailable")
+    assert real.decisions() == [("REFUSED", ["tick_reference_unavailable"])]
+    assert real.forward.calls == 0
+
+
+@pytest.mark.parametrize(
+    "bare",
+    [D("249.90"), "249.90", 249.9, (D("249.90"), date(2026, 9, 30)), {"price": D("249.90"), "month": date(2026, 9, 30)}],
+    ids=repr,
+)
+def test_production_refuses_a_reference_that_is_not_a_dated_reference(real: RealRig, bare):
+    real.tick_reference.raw = bare
+    with pytest.raises(OrderRefusal) as err:
+        real.mint()
+    expect(err, 503, "ORDERS_UNAVAILABLE", "tick_reference_unavailable")
+    assert real.forward.calls == 0
+
+
+def test_production_accepts_a_reference_from_the_month_before_the_session(real: RealRig):
+    real.tick_reference.default = D("249.90")
+    real.tick_reference.month = date(2026, 9, 1)  # any day of September counts
+    assert real.mint(limit_price="100.01").challenge_id
+
+
+def test_production_january_session_wants_december(real: RealRig):
+    real.market.quotes["TESTCO"] = quote_for(session_date=date(2027, 1, 4))
+    real.clock.now = datetime(2027, 1, 4, 4, 30, 0, tzinfo=timezone.utc)  # 10:00 IST, a Monday
+    real.tick_reference.default = D("249.90")
+    real.tick_reference.month = date(2026, 12, 31)
+    assert real.mint(limit_price="100.01").challenge_id
+    for wrong in (date(2027, 1, 2), date(2026, 11, 30), date(2025, 12, 31)):
+        real.tick_reference.month = wrong
+        with pytest.raises(OrderRefusal) as err:
+            real.mint(intent_id=f"intent-{wrong:%Y%m%d}", limit_price="100.01")
+        expect(err, 503, "ORDERS_UNAVAILABLE", "tick_reference_unavailable")
 
 
 def test_failing_tick_reference_port_refuses_at_mint_and_at_authorize(real: RealRig):

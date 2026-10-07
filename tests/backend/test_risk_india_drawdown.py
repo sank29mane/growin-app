@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from risk_india import drawdown, exits, rules
-from risk_india_support import FillOrderError, in_execution_order, reference_month_for, replay_fills
+from risk_india_support import FillOrderError, in_execution_order, replay_fills
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "tests" / "backend" / "fixtures" / "relay_orders"
@@ -630,7 +630,7 @@ def _buy_codes(flags: rules.RiskFlags, case_name: str = "buy_ok", **overrides) -
             previous_close=Decimal(case["quote"]["previous_close"]),
             session_date=date.fromisoformat(case["quote"]["session_date"]),
             tick_reference=Decimal(case["tick_reference"]),
-            tick_reference_month=reference_month_for(date(2026, 10, 8)),
+            tick_reference_month=date.fromisoformat(case["tick_reference_month"]),
         ),
         datetime.fromisoformat(case["now_ist"]),
         rules.OrderRequest(
@@ -657,7 +657,7 @@ def test_open_stop_exit_blocks_buys_on_any_isin_until_the_exit_fill_arrives():
         rules.Quote(
             "STOPCO", B, "EQ", Decimal("100"), Decimal("90"), Decimal("110"),
             Decimal("99.80"), date(2026, 10, 8), tick_reference=Decimal("99.80"),
-            tick_reference_month=reference_month_for(date(2026, 10, 8)),
+            tick_reference_month=date.fromisoformat(CASES["buy_ok"]["tick_reference_month"]),
         ),
         datetime.fromisoformat("2026-10-08T10:00:00+05:30"),
         rules.OrderRequest("sell", "STOPCO", B, 20, Decimal("100.00")),

@@ -43,6 +43,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -79,6 +80,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -133,6 +135,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "200.00",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -186,6 +189,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "200.00",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -243,6 +247,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "200.00",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -298,6 +303,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "200.00",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -338,6 +344,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "200.00",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -383,6 +390,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -425,6 +433,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -476,6 +485,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -527,6 +537,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -563,6 +574,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -599,6 +611,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -637,6 +650,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -682,6 +696,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "sell",
     "stock_code": "TESTCO",
@@ -724,6 +739,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "sell",
     "stock_code": "TESTCO",
@@ -762,6 +778,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -798,6 +815,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -836,6 +854,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -874,6 +893,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "300.00",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -910,6 +930,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "300.00",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -948,6 +969,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "250",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -986,6 +1008,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "249.99",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -1022,6 +1045,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "1000",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -1060,6 +1084,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "1000.01",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -1098,6 +1123,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -1134,6 +1160,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -1172,6 +1199,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -1210,6 +1238,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -1246,6 +1275,7 @@
     "session_date": "2026-10-10"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -1284,6 +1314,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -1323,6 +1354,7 @@
     "session_date": "2026-10-07"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -1352,6 +1384,7 @@
    },
    "quote": null,
    "tick_reference": null,
+   "tick_reference_month": null,
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -1390,6 +1423,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -1428,6 +1462,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -1466,6 +1501,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -1502,6 +1538,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -1546,6 +1583,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "sell",
     "stock_code": "TESTCO",
@@ -1588,6 +1626,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "sell",
     "stock_code": "TESTCO",
@@ -1639,6 +1678,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "sell",
     "stock_code": "TESTCO",
@@ -1690,6 +1730,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "sell",
     "stock_code": "TESTCO",
@@ -1726,6 +1767,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "sell",
     "stock_code": "TESTCO",
@@ -1764,6 +1806,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -1808,6 +1851,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "sell",
     "stock_code": "TESTCO",
@@ -1844,6 +1888,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -1889,6 +1934,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "sell",
     "stock_code": "TESTCO",
@@ -1927,6 +1973,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -1967,6 +2014,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -2014,6 +2062,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "sell",
     "stock_code": "TESTCO",
@@ -2058,6 +2107,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "sell",
     "stock_code": "TESTCO",
@@ -2096,6 +2146,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -2154,6 +2205,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "200.00",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -2195,6 +2247,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -2236,6 +2289,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -2276,6 +2330,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -2313,6 +2368,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -2357,6 +2413,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "sell",
     "stock_code": "TESTCO",
@@ -2395,6 +2452,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -2439,6 +2497,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "99.80",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "sell",
     "stock_code": "TESTCO",
@@ -2477,6 +2536,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "249.90",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -2513,6 +2573,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "250.00",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -2551,6 +2612,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "250.00",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -2587,6 +2649,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "1000.01",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -2625,6 +2688,7 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": null,
+   "tick_reference_month": null,
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
@@ -2663,12 +2727,91 @@
     "session_date": "2026-10-08"
    },
    "tick_reference": "0",
+   "tick_reference_month": "2026-09-30",
    "intent": {
     "side": "buy",
     "stock_code": "TESTCO",
     "isin": "INE000A01012",
     "quantity": 10,
     "limit_price": "250.05"
+   },
+   "expected_codes": [
+    "tick_reference_unavailable"
+   ]
+  },
+  {
+   "name": "tick_ref_stale_month_refuses",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "250.00",
+    "lower_circuit": "225.00",
+    "upper_circuit": "275.00",
+    "previous_close": "250.40",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "249.90",
+   "tick_reference_month": "2026-08-31",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "250.01"
+   },
+   "expected_codes": [
+    "tick_reference_unavailable"
+   ]
+  },
+  {
+   "name": "tick_ref_wrong_month_refuses",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "250.00",
+    "lower_circuit": "225.00",
+    "upper_circuit": "275.00",
+    "previous_close": "250.40",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "249.90",
+   "tick_reference_month": "2026-10-07",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "250.01"
    },
    "expected_codes": [
     "tick_reference_unavailable"
@@ -2998,5 +3141,5 @@
    }
   }
  ],
- "tick_reference_note": "tick_reference is the tick table's band reference: the close on the last trading day of the previous calendar month, from an injected port. null means the port could not supply it. It is separate from quote.previous_close (the A2 mark check)."
+ "tick_reference_note": "tick_reference is the tick table's band reference: the close on the last trading day of the previous calendar month, from an injected port. null means the port could not supply it. It is separate from quote.previous_close (the A2 mark check). tick_reference_month is the ISO date the reference was taken on. It must fall in the calendar month before the session; null means undated or unavailable. A stale or wrong-month value is unavailable on both sides, never used."
 }

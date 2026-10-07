@@ -454,6 +454,43 @@ def test_untimed_trades_keep_arrival_order_across_a_reload(tmp_path):
     assert [tid for tid, _ in risk.chronological_fills(reloaded)] == ["z", "y", "a"]
 
 
+def test_an_untimed_fill_after_timed_ones_takes_the_latest_ledger_time(tmp_path):
+    """F-1: mixed timed and untimed fills. An untimed fill is stamped with the latest time seen.
+
+    z (buy 10 x 100, 10:00) and y (sell 10, 10:01) are timed; a (buy 10 x 200) has no time and
+    arrives on a later poll. It must replay last: cost 2000. Stamped "" instead it would sort
+    first and the sell would shrink it: (2000 + 1000) x 10 / 20 = 1500, under-counting capital.
+    """
+    z, y, a = _round_trip()
+    untimed_a = Trade(a.trade_id, ISIN, "buy", 10, Decimal("200"), Decimal("0"), None)
+    state = risk.initial_state(LIMITS)
+    risk.apply_trades(state, [z, y])
+    risk.apply_trades(state, [untimed_a])
+    assert risk.ledger_cost(state) == {ISIN: Decimal("2000")}
+    assert [tid for tid, _ in risk.chronological_fills(state)] == ["z", "y", "a"]
+    assert state.fills["a"].executed_at == state.fills["y"].executed_at != ""
+    store = _store(tmp_path)
+    store.save(state)
+    assert risk.ledger_cost(StateStore(store.directory).load()) == {ISIN: Decimal("2000")}
+
+
+def test_untimed_fills_go_last_within_a_batch_in_arrival_order():
+    """F-2: a snapshot that lists untimed trades first still applies them after the timed ones.
+
+    u1 (sell 10) and u2 (buy 10) have no time; t (buy 10, 10:00) does. Applied first, u1 would
+    be a sell of nothing held and latch account_mismatch (a fail-closed refusal of every order).
+    """
+    t = Trade("t", ISIN, "buy", 10, Decimal("100"), Decimal("0"), _at(0))
+    u1 = Trade("u1", ISIN, "sell", 10, Decimal("100"), Decimal("0"), None)
+    u2 = Trade("u2", ISIN, "buy", 10, Decimal("100"), Decimal("0"), None)
+    state = risk.initial_state(LIMITS)
+    assert risk.apply_trades(state, [u1, u2, t])
+    assert [tid for tid, _ in risk.chronological_fills(state)] == ["t", "u1", "u2"]
+    assert [state.fills[tid].seq for tid in ("t", "u1", "u2")] == [0, 1, 2]
+    assert state.account_mismatch is False
+    assert risk.net_quantities(state) == {ISIN: 10}
+
+
 def test_a_late_arriving_earlier_fill_is_replayed_at_its_exchange_time(tmp_path):
     z, y, a = _round_trip()
     state = risk.initial_state(LIMITS)
@@ -1087,6 +1124,21 @@ def test_admin_halt_reset_refuses_while_drawdown_is_at_the_threshold(tmp_path):
     assert store.path.read_bytes() == before_state  # nothing cleared, anchor not touched
     assert (store.directory / "audit.jsonl").read_bytes() == before_audit  # and not audited as a reset
     assert store.load().halt is True
+
+
+def test_admin_halt_reset_with_the_flag_is_refused_once_the_pilot_has_ended(tmp_path):
+    store = _halted_store(tmp_path)
+    state = store.load()
+    _close(state, 12, "425")  # exactly -15%: ended, halt stays latched
+    assert state.ended and state.halt
+    store.save(state)
+    before_state, before_audit = store.path.read_bytes(), (store.directory / "audit.jsonl").read_bytes()
+    for args in (("reset", "--latch", "halt"), ("reset", "--latch", "halt", "--rebase-halt-anchor")):
+        code, out, err = _run(store.directory, *args)
+        assert code == 1 and out == "" and "pilot is ended" in err
+    assert store.path.read_bytes() == before_state  # no anchor set, halt not cleared
+    assert (store.directory / "audit.jsonl").read_bytes() == before_audit  # and no RESET entry
+    assert store.load().halt_anchor is None
 
 
 def test_admin_halt_reset_with_the_flag_sets_the_anchor_and_audits_it(tmp_path):

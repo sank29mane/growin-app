@@ -19,7 +19,6 @@ import pytest
 from costs.core import InputError
 from costs.ticks import InstrumentClass
 from risk_india import rules
-from risk_india_support import reference_month_for
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "tests" / "backend" / "fixtures" / "relay_orders"
@@ -57,16 +56,13 @@ def _account(raw: dict) -> rules.Account:
 
 
 def _quote(
-    raw: dict | None, tick_reference: str | None, tick_reference_month: str | None = None
+    raw: dict | None, tick_reference: str | None, tick_reference_month: str | None
 ) -> rules.Quote | None:
+    """The month is read from the row (null stays undated); the harness never derives it."""
     if raw is None:
         return None
     session = date.fromisoformat(raw["session_date"])
-    month = (
-        date.fromisoformat(tick_reference_month)
-        if tick_reference_month
-        else reference_month_for(session)  # Mac-only default: the vectors carry no month yet
-    )
+    month = date.fromisoformat(tick_reference_month) if tick_reference_month else None
     return rules.Quote(
         stock_code=raw["stock_code"],
         isin=raw["isin"],
@@ -96,7 +92,7 @@ def run_case(case: dict) -> rules.Decision:
         rules.Limits.from_fields(LV["limits"]),
         _flags(case["flags"]),
         _account(case["account"]),
-        _quote(case["quote"], case["tick_reference"], case.get("tick_reference_month")),
+        _quote(case["quote"], case["tick_reference"], case["tick_reference_month"]),
         datetime.fromisoformat(case["now_ist"]),
         _order(case["intent"]),
         kill_enabled=case["kill_enabled"],
@@ -281,6 +277,8 @@ def test_the_tick_reference_vector_rows_the_vm_added_are_all_present():
         "tick_ref_monthly_above_1000_daily_at_1000_refuses_005",
         "tick_ref_unavailable_fails_closed",
         "tick_ref_zero_is_unavailable",
+        "tick_ref_stale_month_refuses",
+        "tick_ref_wrong_month_refuses",
     } <= names
     assert all("tick_reference" in c for c in CASES)
 
@@ -288,7 +286,7 @@ def test_the_tick_reference_vector_rows_the_vm_added_are_all_present():
 @pytest.mark.parametrize("reference", [None, Decimal("0"), Decimal("-1"), Decimal("NaN"), Decimal("Infinity")])
 def test_a_missing_or_unusable_tick_reference_refuses_with_its_own_code(reference):
     case = next(c for c in CASES if c["name"] == "buy_ok")
-    quote = _quote(case["quote"], case["tick_reference"])
+    quote = _quote(case["quote"], case["tick_reference"], case["tick_reference_month"])
     assert quote is not None
     quote = dataclasses.replace(quote, tick_reference=reference)
     codes = rules.evaluate(
@@ -302,6 +300,7 @@ def test_a_quote_dated_outside_the_tick_table_fails_closed_as_off_tick():
     case = dict(next(c for c in CASES if c["name"] == "buy_ok"))
     case["now_ist"] = "2020-12-30T10:00:00+05:30"
     case["quote"] = {**case["quote"], "session_date": "2020-12-30"}
+    case["tick_reference_month"] = "2020-11-30"  # dated to the month before this session
     assert "off_tick" in run_case(case).codes
 
 
@@ -355,7 +354,7 @@ def _codes_with_reference(reference: str | None, month: date | None, *, session:
                           price: str = "100.01") -> tuple[str, ...]:
     """buy_ok on ``session`` at ``price`` with the given tick reference and its date."""
     case = next(c for c in CASES if c["name"] == "buy_ok")
-    quote = _quote({**case["quote"], "session_date": session}, reference)
+    quote = _quote({**case["quote"], "session_date": session}, reference, None)
     assert quote is not None
     quote = dataclasses.replace(quote, tick_reference_month=month)
     return rules.evaluate(
@@ -365,9 +364,10 @@ def _codes_with_reference(reference: str | None, month: date | None, *, session:
     ).codes
 
 
-def test_the_harness_default_month_is_the_previous_calendar_month_and_the_rows_still_match():
-    assert reference_month_for(date(2026, 10, 8)) == date(2026, 9, 1)
-    assert reference_month_for(date(2027, 1, 4)) == date(2026, 12, 1)
+def test_every_vector_row_carries_its_own_reference_month_and_the_rows_still_match():
+    # The harness reads the month from the row; nothing derives it from the session.
+    assert all("tick_reference_month" in c for c in CASES)
+    assert all((c["tick_reference_month"] is None) == (c["tick_reference"] is None) for c in CASES)
     assert _codes_with_reference("250.00", date(2026, 9, 30), price="100.05") == ()
 
 
