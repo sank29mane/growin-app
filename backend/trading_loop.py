@@ -28,9 +28,9 @@ try:
         RiskSwarmGate,
         TelemetryLogger,
     )
-    from backend.simulation.regime_severity import build_severity_map
+    from backend.simulation.regime_severity import RegimeSeverityError, build_severity_map, validate_posterior
 except ImportError:
-    from simulation.regime_severity import build_severity_map
+    from simulation.regime_severity import RegimeSeverityError, build_severity_map, validate_posterior
     from simulation import (
         PreFlightDecision,
         PreFlightSimulator,
@@ -186,8 +186,26 @@ class LiveTradingLoop:
             scaler_var
         )
         
-        if probabilities.shape != (self.severity_map.component_count,):
-            raise ValueError("regime probabilities do not match the model's component count")
+        try:
+            probabilities = validate_posterior(probabilities, self.severity_map.component_count)
+        except RegimeSeverityError as exc:
+            # A NaN or malformed posterior has an argmax of 0, which would silently pick
+            # whichever component is numbered 0. The regime is invalidated instead: nothing
+            # is sized or dispatched until a valid posterior arrives.
+            logger.error(f"Regime invalidated ({exc.code}); orders are blocked until a valid posterior.")
+            self.current_regime = -1
+            self.requoter.current_regime = -1
+            self.risk_leverage_coefficient = 0.0
+            return {
+                "volatility": vol,
+                "spread": spread,
+                "probabilities": [],
+                "dominant_regime": -1,
+                "regime_changed": False,
+                "regime_valid": False,
+                "risk_leverage_coefficient": 0.0,
+                "active_adapter_id": None,
+            }
         dominant_regime = int(np.argmax(probabilities))
 
         # 4. Trigger the MLX adapter hot-swapper when a regime change is identified
@@ -220,6 +238,7 @@ class LiveTradingLoop:
             "probabilities": probabilities.tolist(),
             "dominant_regime": dominant_regime,
             "regime_changed": regime_changed,
+            "regime_valid": True,
             "risk_leverage_coefficient": self.risk_leverage_coefficient,
             "active_adapter_id": adapter_id
         }
@@ -296,7 +315,7 @@ class LiveTradingLoop:
             regime_id=regime_id,
             current_spread_pct=current_spread_pct,
             db_connection=db_connection,
-            policy_hash=self.severity_map.policy_hash,
+            severity_map=self.severity_map,
         )
         
         approved = scaled_size > 0.0

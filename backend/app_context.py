@@ -314,6 +314,7 @@ class AppState:
             require_runtime_preflight=True,
             allow_test_price_sources=allow_test_price_sources,
             india_guard=india_guard,
+            regime_severity_map=severity_map,
         )
         self.execution_authority = True
         self.workspace_config = config
@@ -878,6 +879,10 @@ class AppState:
             # component, found through the severity map, never as a literal raw id.
             "regime_id": severity_map.calm_id,
             "regime_policy_hash": severity_map.policy_hash,
+            "regime_audit": {
+                **severity_map.audit(severity_map.calm_id),
+                "model_version": f"local-fixture:{severity_map.params_sha256}",
+            },
             "current_spread_pct": 0.02,
             "risk_db_connection": self._preflight_policy_connection,
         }

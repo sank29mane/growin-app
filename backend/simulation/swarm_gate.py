@@ -1,9 +1,9 @@
 import logging
 
 try:
-    from backend.simulation.regime_severity import policy_matches
+    from backend.simulation.regime_severity import policy_table_matches
 except ImportError:
-    from .regime_severity import policy_matches
+    from .regime_severity import policy_table_matches
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,7 @@ class RiskSwarmGate:
         regime_id: int,
         current_spread_pct: float,
         db_connection,
-        policy_hash: str | None = None,
+        severity_map=None,
     ) -> float:
         """
         Evaluate the capital scaling policy for a trade.
@@ -31,8 +31,10 @@ class RiskSwarmGate:
                 severity-ranked multiplier; the raw ID is arbitrary and never ordered here.
             current_spread_pct (float): Current relative spread (e.g. 0.02 = 2.0%).
             db_connection: A database connection (SQLite or DuckDB).
-            policy_hash (str | None): When given, the connection must carry exactly this
-                severity-policy hash (``scaling_policy_meta``), else the trade is blocked.
+            severity_map (RegimeSeverityMap | None): When given, the connection's actual
+                rows must equal the trusted map's severity policy (ids and multipliers
+                recomputed from the map, not read from a stored hash), else the trade is
+                blocked.
             
         Returns:
             float: Scaled trade size. Returns 0.0 if spread exceeds 5.0% or query fails.
@@ -49,7 +51,7 @@ class RiskSwarmGate:
             logger.error("RiskSwarmGate database connection is None. Blocking trade for safety.")
             return 0.0
 
-        if policy_hash is not None and not policy_matches(db_connection, policy_hash):
+        if severity_map is not None and not policy_table_matches(db_connection, severity_map):
             logger.error(
                 "RiskSwarmGate scaling policy was not built from the classifying regime "
                 "model's severity map. Blocking trade for safety."

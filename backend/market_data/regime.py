@@ -10,7 +10,7 @@ import numpy as np
 
 from coreml.fast_gmm import fast_gmm_predict_proba
 from coreml.gmm_loader import load_gmm_params
-from simulation.regime_severity import RegimeSeverityError, build_severity_map
+from simulation.regime_severity import RegimeSeverityError, build_severity_map, validate_posterior
 
 from .admission import RegimeEvidence
 from .models import Instrument
@@ -70,8 +70,12 @@ class RegimeClassifier:
             raise MarketDataError("REGIME_INFERENCE_FAILED", "regime inference failed") from exc
         if not np.isfinite(probabilities).all() or probabilities.ndim != 1:
             raise MarketDataError("REGIME_INFERENCE_FAILED", "regime inference produced invalid output")
-        if probabilities.shape[0] != self.severity_map.component_count:
-            raise MarketDataError("REGIME_INFERENCE_FAILED", "regime inference produced invalid output")
+        try:
+            # Finite, non-negative, one entry per component, summing to one: argmax of
+            # anything else (NaN gives index 0) would name a component the model never chose.
+            probabilities = validate_posterior(probabilities, self.severity_map.component_count)
+        except RegimeSeverityError as exc:
+            raise MarketDataError("REGIME_INFERENCE_FAILED", "regime inference produced invalid output") from exc
         regime_id = int(np.argmax(probabilities))
         try:
             severity_rank = self.severity_map.rank(regime_id)
