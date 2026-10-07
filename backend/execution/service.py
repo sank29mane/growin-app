@@ -9,6 +9,12 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Mapping, Optional, Protocol, Union
 
 from .approval import ApprovalChallenge, ApprovalService
+from .india_guard import (
+    INDIA_LIMITS_UNAVAILABLE,
+    IndiaAdmissionGuard,
+    IndiaLimitDenied,
+    IndiaQuoteEvidence,
+)
 from .ledger import (
     ApprovalConflict,
     ClaimResult,
@@ -79,6 +85,7 @@ class ExecutionService:
         risk_gate: Any = None,
         require_runtime_preflight: bool = False,
         allow_test_price_sources: bool = False,
+        india_guard: Optional[IndiaAdmissionGuard] = None,
     ):
         # Explicit, test-only injection of the ``local-replay`` price source. The
         # default refuses it, so a production service can never admit from it.
@@ -90,6 +97,9 @@ class ExecutionService:
         self._simulator = simulator
         self._risk_gate = risk_gate
         self._require_runtime_preflight = require_runtime_preflight
+        # Phase 63-04: the Mac's India limits. Used only for India intents. A runtime
+        # service with no guard denies every India admission (fail closed).
+        self._india_guard = india_guard
         if require_approval:
             if ledger is not None:
                 ledger.require_approval = True
@@ -102,6 +112,10 @@ class ExecutionService:
     @property
     def admissible_price_sources(self) -> frozenset[str]:
         return self._price_sources
+
+    @property
+    def india_guard(self) -> Optional[IndiaAdmissionGuard]:
+        return self._india_guard
 
     @property
     def execution_enabled(self) -> bool:
@@ -150,6 +164,7 @@ class ExecutionService:
         deny_reason: Optional[str] = None,
         price_source: Optional[str] = None,
         price_divisor: object = None,
+        india_quote: Optional[IndiaQuoteEvidence] = None,
     ) -> ExecutionAdmission:
         """Run deterministic simulation/risk checks and persist immutable evidence."""
 
@@ -172,6 +187,11 @@ class ExecutionService:
         risk_quantity = Decimal("0")
         price_decimal = Decimal("0")
         spread_decimal = Decimal("0")
+        # Phase 63-04: the Mac's India limits. UK and every other workspace never touch it.
+        india = intent.workspace is Workspace.INDIA
+        india_guard = self._india_guard if india else None
+        india_detail: Dict[str, Any] = {}
+        india_codes: tuple[str, ...] = ()
         try:
             if deny_reason:
                 raise ValueError(deny_reason)
@@ -180,13 +200,19 @@ class ExecutionService:
             if (now - observed_at).total_seconds() > max_age_seconds or observed_at > now:
                 raise ValueError("admission evidence is stale")
             bound = self._ledger.venue_binding is not None
-            if intent.side is not OrderSide.BUY and not bound:
-                # Paper ledgers deny every SELL. Only a practice ledger reserves held quantity.
+            if intent.side is not OrderSide.BUY and not bound and india_guard is None:
+                # Paper ledgers deny every SELL. Only a practice ledger reserves held quantity,
+                # and only the guarded India ledger admits one without a reservation (63-04).
                 raise ValueError("SELL admission requires a position reservation")
             if bound and price_source not in self._price_sources:
                 # D-02: a bound venue admits only from a recorded-quote replay. A price
                 # from Yahoo, Position.currentPrice or anywhere else never admits.
                 raise ValueError("PRICE_SOURCE_NOT_ADMISSIBLE")
+            if india:
+                if india_guard is not None:
+                    india_detail = dict(india_guard.check_order(intent, self._ledger, india_quote))
+                elif self._require_runtime_preflight:
+                    raise IndiaLimitDenied(INDIA_LIMITS_UNAVAILABLE)
             selected_simulator = simulator or self._simulator
             selected_gate = risk_gate or self._risk_gate
             if self._require_runtime_preflight:
@@ -229,6 +255,16 @@ class ExecutionService:
             )
             risk_value = risk_evidence.get("admitted_quantity", risk_evidence.get("scaled_size"))
             risk_quantity = _finite_decimal(risk_value, "risk quantity")
+            if (
+                india_guard is not None
+                and intent.side is OrderSide.SELL
+                and 0 < risk_quantity < intent.quantity
+            ):
+                # Regime scaling sizes capital that is deployed. A SELL deploys none, and the
+                # D-06 halve and flatten batches must sell the exact quantity. A veto from
+                # the gate (a zero size or allowed=False) still denies below.
+                india_detail["risk_scaling_waived_from"] = _decimal_text(risk_quantity)
+                risk_quantity = intent.quantity
             if bound and intent.order_type is OrderType.LIMIT:
                 # A bound venue's notional is the LIMIT price in pounds: limit / divisor
                 # (100 for a GBX instrument, 1 for GBP). The admission price must EQUAL
@@ -253,10 +289,18 @@ class ExecutionService:
                 raise ValueError("RISK_SCALED_BELOW_REQUEST")
             if risk_evidence.get("allowed") is False:
                 raise ValueError("risk gate denied the intent")
+            if india_guard is not None:
+                slippage = india_guard.check_slippage(intent, india_quote, simulator_fill)
+                india_detail["slippage_bps"] = _decimal_text(slippage)
             decision = AdmissionDecision.ADMITTED
             reason = "ADMITTED"
         except Exception as exc:
-            reason = _reason_code(str(exc))
+            if isinstance(exc, IndiaLimitDenied):
+                # The O6 names are lower case on purpose: Mac and VM refuse with one spelling.
+                reason = exc.code
+                india_codes = exc.codes
+            else:
+                reason = _reason_code(str(exc))
             simulator_fill = max(Decimal("0"), simulator_fill)
             drawdown = max(Decimal("0"), drawdown)
             risk_quantity = max(Decimal("0"), risk_quantity)
@@ -269,6 +313,12 @@ class ExecutionService:
             "max_age_seconds": max_age_seconds,
             "current_spread_pct": _decimal_text(spread_decimal),
         }
+        if india:
+            evidence["india"] = {
+                "guard": india_guard is not None,
+                "codes": list(india_codes),
+                **india_detail,
+            }
         evidence_hash = hashlib.sha256(canonical_json(evidence).encode("utf-8")).hexdigest()
         final_quantity = risk_quantity if decision is AdmissionDecision.ADMITTED else Decimal("0")
         notional = final_quantity * price_decimal
@@ -307,6 +357,10 @@ class ExecutionService:
         if self._ledger is None:
             raise ExecutionDisabledError("durable execution reservation is unavailable")
         admission = self._ledger.get_admission(proposal_id)
+        if admission is not None and self._ledger.is_india_paper_sell(admission.side):
+            # An India paper SELL reserves no buying power. Its position is checked again,
+            # atomically, when the approval is claimed (63-04, D-06).
+            return None
         if (
             admission is not None
             and admission.side is OrderSide.SELL
@@ -358,6 +412,13 @@ class ExecutionService:
         if order.acknowledgment is not None:
             proposal["execution_ack"] = order.acknowledgment.model_dump(mode="json")
             proposal["execution_result"] = proposal["execution_ack"]
+        if self._ledger.is_india_paper_sell(intent.get("side")):
+            batch = self._ledger.get_exit_batch(proposal_id)
+            if batch is not None:
+                # Stored beside the intent as a ledger event, never inside it, so the
+                # intent hash is unchanged (D-06).
+                proposal["batch_id"] = batch["batch_id"]
+                proposal["reason"] = batch["reason"]
         return proposal
 
     async def approve(self, proposal: Proposal) -> OrderAck:

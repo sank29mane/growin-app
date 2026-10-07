@@ -32,6 +32,7 @@ from execution import (
     ReconciliationSnapshot,
     ReconciliationStatus,
 )
+import india_limits_support as ils
 from market_data.admission import RecordedQuoteReading
 from t212_practice_testkit import (
     PRACTICE_ACCOUNT,
@@ -92,8 +93,9 @@ class PaperHarness(Harness):
 
     can_cancel = False
 
-    def __init__(self, workspace: str, tmp_path) -> None:
+    def __init__(self, workspace: str, tmp_path, private_dir=None) -> None:
         self.workspace = workspace
+        self.private_dir = private_dir
         self.id = f"paper-{workspace}"
         self.tmp_path = tmp_path
         if workspace == "uk":
@@ -109,11 +111,16 @@ class PaperHarness(Harness):
         self.key = private_key()
         enroll(self.approval, self.key, workspace=self.workspace)
         self.dispatcher = CountingPaper()
+        # Phase 63-04: an India runtime service carries the Mac's India limits. UK is unchanged.
+        guard = (
+            ils.make_guard(self.ledger, self.private_dir) if self.workspace == "india" else None
+        )
         self.service = ExecutionService(
             self.dispatcher, self.ledger, require_approval=True, approval_service=self.approval,
             simulator=__import__("simulation").PreFlightSimulator(),
             risk_gate=__import__("simulation").RiskSwarmGate(),
             require_runtime_preflight=True,
+            india_guard=guard,
         )
         self.policy = AppState._local_preflight_policy_connection()
         self.ledger.configure_paper_budget(self.account, self.currency, "1000", workspace=self.workspace)
@@ -125,12 +132,16 @@ class PaperHarness(Harness):
         self.ledger.close()
 
     def _proposal(self, proposal_id: str) -> dict[str, Any]:
-        return {
+        proposal = {
             "proposal_id": proposal_id, "client_order_id": f"growin-{proposal_id}",
             "workspace": self.workspace, "account": self.account, "broker": self.broker,
             "mode": "PAPER", "ticker": self.ticker, "action": "BUY", "quantity": str(QUANTITY),
             "status": "PENDING",
         }
+        if self.workspace == "india":
+            # The India limits need a LIMIT order (the price the suite already uses).
+            proposal.update({"order_type": "LIMIT", "limit_price": "10.00"})
+        return proposal
 
     async def admit(self, kind: str, proposal_id: str):
         now = datetime.now(timezone.utc)
@@ -141,6 +152,12 @@ class PaperHarness(Harness):
             "regime_id": 0, "current_spread_pct": 0.002, "risk_db_connection": self.policy,
             "evidence_at": now,
         }
+        if self.workspace == "india":
+            kwargs["india_quote"] = ils.make_evidence(
+                ltp=Decimal("10.00"), lower_circuit=Decimal("9.00"), upper_circuit=Decimal("11.00"),
+                previous_close=Decimal("10.00"), tick_reference=Decimal("10.00"),
+                bid=Decimal("9.99"), ask=Decimal("10.01"),
+            )
         if kind == "stale":
             kwargs["evidence_at"] = now - timedelta(seconds=120)
         if kind == "missing":
@@ -331,7 +348,7 @@ class PracticeHarness(Harness):
 
 VENUES = {
     "paper-uk": lambda tmp_path, private_dir, monkeypatch: PaperHarness("uk", tmp_path),
-    "paper-india": lambda tmp_path, private_dir, monkeypatch: PaperHarness("india", tmp_path),
+    "paper-india": lambda tmp_path, private_dir, monkeypatch: PaperHarness("india", tmp_path, private_dir),
     "t212-practice": lambda tmp_path, private_dir, monkeypatch: PracticeHarness(
         tmp_path, private_dir, monkeypatch
     ),

@@ -318,22 +318,51 @@ def _imported_roots(path: Path) -> set[str]:
     return roots
 
 
+PURE_MODULES = {"__init__.py", "rules.py", "drawdown.py", "exits.py"}
+# 63-04: the latch file and the reset CLI do file I/O, so they are scanned by their own
+# allowlists below. Every other module in the package stays under the pure checks, and a new
+# file that is in neither set fails the test, so adding I/O here is always a deliberate edit.
+IO_MODULES = {"state.py", "__main__.py"}
+
+_PURE_IMPORTS = {
+    "__future__", "hashlib", "json", "re", "dataclasses", "datetime", "decimal", "typing",
+    "collections.abc", "types", "costs.core", "costs.ticks", ".rules", ".exits", ".drawdown",
+}
+_IO_IMPORTS = {
+    "state.py": {
+        "__future__", "fcntl", "hashlib", "hmac", "json", "os", "re", "stat", "threading",
+        "contextlib", "datetime", "decimal", "pathlib", "types", "typing", ".drawdown",
+        ".exits", ".rules",
+    },
+    "__main__.py": {
+        "__future__", "argparse", "getpass", "os", "sys", "datetime", "decimal", "pathlib", "typing",
+        "execution.ledger", "private_config", "utils.audit_log", "risk_india.drawdown",
+        "risk_india.rules", "risk_india.state",
+    },
+}
+_NETWORK_ROOTS = {"socket", "ssl", "http", "urllib", "requests", "httpx", "aiohttp", "websockets"}
+
+
+def test_the_package_has_no_unclassified_module():
+    assert {f.name for f in PACKAGE.glob("*.py")} == PURE_MODULES | IO_MODULES
+
+
 def test_nothing_under_risk_india_imports_the_vm_or_the_outside_world():
-    allowed = {
-        "__future__", "hashlib", "json", "re", "dataclasses", "datetime", "decimal", "typing",
-        "collections.abc", "types", "costs.core", "costs.ticks", ".rules", ".exits", ".drawdown",
-    }
     files = sorted(PACKAGE.glob("*.py"))
     assert {f.name for f in files} >= {"__init__.py", "rules.py"}
     for path in files:
         roots = _imported_roots(path)
         assert not {r for r in roots if "gateway" in r}, path
+        allowed = _PURE_IMPORTS if path.name in PURE_MODULES else _IO_IMPORTS[path.name]
         assert roots <= allowed, (path.name, roots - allowed)
+        assert not {r.split(".")[0] for r in roots} & _NETWORK_ROOTS, path
 
 
 def test_risk_india_is_decimal_only_with_no_float_and_no_io():
     banned_calls = {"open", "print", "eval", "exec", "float", "input"}
     for path in sorted(PACKAGE.glob("*.py")):
+        if path.name in IO_MODULES:
+            continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.Constant):
@@ -345,6 +374,25 @@ def test_risk_india_is_decimal_only_with_no_float_and_no_io():
                     path.name,
                     node.lineno,
                 )
+
+
+def test_the_io_modules_keep_the_money_and_clock_rules_of_the_pure_ones():
+    # state.py and __main__.py may touch files (and the CLI may print and read its own
+    # environment), but never a float, a dynamic-code call, a clock or the network.
+    banned_calls = {"eval", "exec", "float", "input", "__import__"}
+    banned_attrs = {"now", "today", "utcnow", "time", "monotonic", "system", "popen", "urlopen"}
+    for name in sorted(IO_MODULES):
+        tree = ast.parse((PACKAGE / name).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant):
+                assert not isinstance(node.value, float), (name, node.lineno)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                assert node.func.id not in banned_calls, (name, node.lineno)
+                assert name == "__main__.py" or node.func.id not in {"print"}, (name, node.lineno)
+            if isinstance(node, ast.Attribute):
+                assert node.attr not in banned_attrs, (name, node.lineno)
+                if name == "state.py":
+                    assert node.attr not in {"environ", "getenv"}, (name, node.lineno)
 
 
 # ---------------------------------------------------- the reference is dated (63-02 r2)
