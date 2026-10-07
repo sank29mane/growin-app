@@ -352,3 +352,371 @@ def test_posting_step_skips_stale_head_or_attempt(tmp_path, current, attempt, po
                             env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert ("-X PATCH" in (tmp_path / "calls").read_text()) is posts
+
+
+# --- safety-path matcher (port of safety-guard.sh) -------------------------
+
+GLOB_CASES = [
+    # `*` and `?` cross `/`, and a leading `.` needs no special match
+    ("backend/execution/a/b.py", "backend/execution/*", True),
+    (".github/workflows/ci.yml", ".github/*", True),
+    ("backend/execution", "backend/execution/*", False),
+    ("backend/server.py", "backend/server.py", True),
+    ("backend/serverXpy", "backend/server.py", False),
+    ("a.py", "?.py", True),
+    ("ab.py", "?.py", False),
+    ("/.py", "?.py", True),
+    # brackets
+    ("v1.txt", "v[0-9].txt", True),
+    ("va.txt", "v[!0-9].txt", True),
+    ("v1.txt", "v[^0-9].txt", False),
+    ("]", "[]]", True),
+    ("-", "[a-]", True),
+    ("A", "[[:upper:]]", True),
+    ("a", "[[:upper:]]", False),
+    ("[a", "[a", True),
+    # escapes
+    ("a*b", "a\\*b", True),
+    ("axb", "a\\*b", False),
+    # extglob
+    ("backend/x.py", "backend/@(x|y).py", True),
+    ("backend/z.py", "backend/@(x|y).py", False),
+    ("ab", "?(a)b", True),
+    ("b", "?(a)b", True),
+    ("aab", "?(a)b", False),
+    ("aaab", "*(a)b", True),
+    ("b", "*(a)b", True),
+    ("b", "+(a)b", False),
+    ("aab", "+(a)b", True),
+    ("foo.py", "!(*.md)", True),
+    ("foo.md", "!(*.md)", False),
+    ("backend/execution/x.py", "backend/!(execution)/*", False),
+    ("backend/brokers/x.py", "backend/!(execution)/*", True),
+    ("abcaxc", "+(a@(b|x)c)", True),
+    ("abcayc", "+(a@(b|x)c)", False),
+    ("Growin/Security/Keys.swift", "Growin/@(Security|Auth)/*.swift", True),
+]
+
+
+@pytest.mark.parametrize("path,pattern,expected", GLOB_CASES)
+def test_glob_match_follows_bash_extglob(path, pattern, expected):
+    assert pri.glob_match(path, pattern) is expected
+
+
+def _bash_match(path, pattern):
+    import shutil
+    import subprocess
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash not available")
+    # Same construct as safety-guard.sh: unquoted pattern inside [[ ]].
+    # -O extglob makes bash 3.2 behave like bash >= 4.1 inside [[ ]].
+    r = subprocess.run([bash, "-O", "extglob", "-c", '[[ "$1" == $2 ]]', "_", path, pattern])
+    return r.returncode == 0
+
+
+@pytest.mark.parametrize("path,pattern,expected", GLOB_CASES)
+def test_glob_cases_agree_with_real_bash(path, pattern, expected):
+    assert _bash_match(path, pattern) is expected
+
+
+@pytest.mark.parametrize("path", [
+    "backend/execution/gate.py", "backend/executions.py", ".github/safety-paths.txt",
+    "Growin/Security/Signer.swift", "Growin/SecurityView.swift", "private/x/y",
+    "backend/server.py", "backend/server.pyc", "tests/backend/test_private_config.py",
+    "docs/README.md", "backend/utils/risk_engine.py", "backend/utils/risk_engine_v2.py",
+])
+def test_shipped_patterns_agree_with_real_bash(path):
+    patterns = pri.load_patterns(SAFETY)
+    assert pri.matches_safety(path, patterns) is any(_bash_match(path, p) for p in patterns)
+
+
+def test_empty_path_never_matches_like_the_guard():
+    assert pri.glob_match("", "*") is True       # raw bash semantics
+    assert pri.matches_safety("", ["*"]) is False  # guard's `matches` returns 1
+    assert pri.matches_safety(None, ["*"]) is False
+
+
+def test_glob_match_is_bounded_on_long_input():
+    assert pri.glob_match("a" * 5000, "*") is False
+    assert pri.glob_match("a" * 200 + "b", "*(*(a))b") is True
+
+
+# --- change footprint ------------------------------------------------------
+
+FILES = [
+    {"filename": "backend/routes/x.py", "status": "modified", "additions": 10, "deletions": 2},
+    {"filename": "backend/execution/gate.py", "status": "modified", "additions": 3, "deletions": 1},
+    {"filename": "tests/backend/test_x.py", "status": "added", "additions": 50, "deletions": 0},
+    {"filename": "tests/backend/test_gone.py", "status": "removed", "additions": 0, "deletions": 9},
+    {"filename": "scripts/moved.py", "status": "renamed", "previous_filename": "tests/backend/moved.py",
+     "additions": 0, "deletions": 0},
+    {"filename": "backend/new_name.py", "status": "renamed", "previous_filename": "backend/brokers/old.py",
+     "additions": 1, "deletions": 1},
+    {"filename": "Growin/Views/A.swift", "status": "modified", "additions": 4, "deletions": 4},
+    {"filename": "Growin.xcodeproj/project.pbxproj", "status": "modified", "additions": 1, "deletions": 1},
+    {"filename": "GrowinTests/ATests.swift", "status": "added", "additions": 7, "deletions": 0},
+    {"filename": "GrowinUITests/BTests.swift", "status": "modified", "additions": 1, "deletions": 0},
+    {"filename": ".github/workflows/ci.yml", "status": "modified", "additions": 2, "deletions": 2},
+    {"filename": "gateway/vm/a.py", "status": "added", "additions": 5, "deletions": 0},
+    {"filename": "README.md", "status": "modified", "additions": 1, "deletions": 0},
+    {"filename": "junk", "status": "modified", "additions": "9", "deletions": True},  # bad numbers
+    {"status": "modified"},                                                           # no filename
+    "not a dict",
+]
+
+
+def test_footprint_groups_by_area_in_fixed_order():
+    fp = pri.footprint(FILES, pri.load_patterns(SAFETY))
+    assert list(fp["areas"]) == ["Backend app", "Backend tests", "Swift app", "Swift tests",
+                                 "CI", "Gateway", "Docs and other"]
+    assert fp["areas"]["Backend app"] == [3, 14, 4]
+    assert fp["areas"]["Backend tests"] == [2, 50, 9]
+    assert fp["areas"]["Swift app"] == [2, 5, 5]
+    assert fp["areas"]["Swift tests"] == [2, 8, 0]
+    assert fp["areas"]["Docs and other"] == [3, 1, 0]  # scripts/moved.py, README.md, junk
+
+
+def test_footprint_flags_what_safety_guard_flags():
+    fp = pri.footprint(FILES, pri.load_patterns(SAFETY))
+    flagged = {(h["kind"], h["path"]) for h in fp["safety"]}
+    assert flagged == {
+        ("path", "backend/execution/gate.py"),
+        ("path", "backend/new_name.py"),          # renamed out of backend/brokers/
+        ("deleted test", "tests/backend/test_gone.py"),
+        ("test moved out", "scripts/moved.py"),
+        ("path", ".github/workflows/ci.yml"),
+    }
+
+
+def ctx_for(files=FILES, labeled=False, draft=False, base="main", parent=None,
+            mergeable=True, state="clean"):
+    pull = {"draft": draft, "base": {"ref": base, "repo": {"default_branch": "main"}},
+            "mergeable": mergeable, "mergeable_state": state,
+            "labels": [{"name": "safety-reviewed"}] if labeled else [{"name": "enhancement"}]}
+    return pri.build_context(pull, files, parent, pri.load_patterns(SAFETY))
+
+
+def test_render_footprint_lists_safety_paths_and_label_note():
+    body = pri.render_footprint(ctx_for())
+    assert "| Backend app | 3 | +14 | -4 |" in body
+    assert "| **Total** | **14** | **+85** | **-20** |" in body  # two malformed entries skipped
+    assert "**Safety paths (5).**" in body and "`safety-reviewed` label" in body
+    assert "Label: missing." in body
+    assert "- `backend/new_name.py` (renamed from `backend/brokers/old.py`)" in body
+    assert "- `tests/backend/test_gone.py` (deleted test)" in body
+    assert "- `scripts/moved.py` (test moved out of `tests/backend/moved.py`)" in body
+    assert "No safety paths touched." in pri.render_footprint(ctx_for(files=FILES[:1]))
+    assert "Unavailable" in pri.render_footprint(None)
+
+
+def test_render_footprint_never_prints_hostile_file_names():
+    files = [{"filename": "backend/execution/a`](http://evil)|x.py", "status": "pwn<b>",
+              "additions": 1, "deletions": 0}]
+    body = pri.render_footprint(ctx_for(files=files))
+    assert "evil" not in body and "<b>" not in body and "pwn" not in body
+    assert "(unprintable path) (changed)" in body
+
+
+# --- merge readiness and stacked detection ---------------------------------
+
+def test_readiness_line_states():
+    line = pri.readiness_line(ctx_for())
+    assert line == ("**Merge readiness:** Ready for review · base `main` · mergeable: clean"
+                    " · `safety-reviewed`: required, missing")
+    line = pri.readiness_line(ctx_for(labeled=True, draft=True, base="feat/a", parent=552,
+                                      mergeable=False, state="dirty"))
+    assert "Draft · base `feat/a` (stacked on #552) · mergeable: no, conflicts" in line
+    assert "required, present" in line
+    line = pri.readiness_line(ctx_for(files=FILES[:1], base="feat/b", mergeable=None, state="unknown"))
+    assert "(no open parent PR found)" in line and "still computing" in line
+    assert "`safety-reviewed`: not required" in line
+
+
+OPEN_PRS = [
+    {"number": 553, "head": {"ref": "feat/x", "repo": {"full_name": "fork/growin-app"}}},
+    {"number": 552, "head": {"ref": "feat/x", "repo": {"full_name": "owner/repo"}}},
+    {"number": 551, "head": {"ref": "feat/y", "repo": None}},
+]
+
+
+def test_find_parent_ignores_forks_with_the_same_branch_name():
+    assert pri.find_parent("feat/x", "owner/repo", OPEN_PRS) == 552
+    assert pri.find_parent("feat/x", "other/repo", OPEN_PRS) is None
+    assert pri.find_parent("feat/y", "owner/repo", OPEN_PRS) is None
+    assert pri.find_parent("feat/x", "owner/repo", [{"number": True, "head": OPEN_PRS[1]["head"]}]) is None
+
+
+def fake_api(routes, calls=None):
+    """Route GETs by path prefix. Unknown paths fail like `gh api` does."""
+    def api(path, method="GET", payload=None):
+        if calls is not None:
+            calls.append((method, path, payload))
+        for prefix, value in routes:
+            if path.startswith(prefix):
+                return value
+        raise pri.subprocess.CalledProcessError(1, ["gh", "api", path])
+    return api
+
+
+def test_fetch_pr_context_detects_stack_and_retries_mergeable():
+    calls, slept = [], []
+    pull_unknown = {"state": "open", "draft": False, "mergeable": None, "mergeable_state": "unknown",
+                    "base": {"ref": "feat/x", "repo": {"default_branch": "main"}}, "labels": []}
+    pull_known = dict(pull_unknown, mergeable=True, mergeable_state="clean")
+    seq = iter([pull_unknown, pull_known])
+    base = fake_api([
+        ("repos/owner/repo/pulls/554/files", FILES[:2]),
+        ("repos/owner/repo/pulls?state=open&head=owner%3Afeat%2Fx", OPEN_PRS),
+    ], calls)
+
+    def api(path, method="GET", payload=None):
+        if path == "repos/owner/repo/pulls/554":
+            calls.append((method, path, payload))
+            return next(seq)
+        return base(path, method, payload)
+
+    ctx = pri.fetch_pr_context("owner/repo", 554, pri.load_patterns(SAFETY), api, slept.append)
+    assert ctx["parent"] == 552 and ctx["mergeable"] is True and slept == [3]
+    assert ctx["safety_required"] is True
+    assert all(method == "GET" for method, _, _ in calls)
+    assert "repos/owner/repo/pulls/554/files?per_page=100&page=1" in [p for _, p, _ in calls]
+
+
+def test_fetch_pr_context_skips_parent_lookup_on_main_and_rejects_bad_repo():
+    calls = []
+    pull = {"state": "open", "mergeable": True, "base": {"ref": "main", "repo": {"default_branch": "main"}}}
+    api = fake_api([("repos/o/r/pulls/9/files", []), ("repos/o/r/pulls/9", pull)], calls)
+    ctx = pri.fetch_pr_context("o/r", 9, ["x"], api, lambda s: None)
+    assert ctx["parent"] is None and not any("head=" in p for _, p, _ in calls)
+    with pytest.raises(ValueError):
+        pri.fetch_pr_context("o/r;rm -rf", 9, ["x"], api, lambda s: None)
+
+
+def test_api_pages_follows_pages_and_stops_at_limit():
+    pages = {1: list(range(100)), 2: list(range(100, 150))}
+    seen = []
+
+    def api(path, method="GET", payload=None):
+        seen.append(path)
+        return pages[int(path.rsplit("page=", 1)[1])]
+
+    assert pri.api_pages(api, "repos/o/r/pulls/1/files", 3000) == list(range(150))
+    assert seen == ["repos/o/r/pulls/1/files?per_page=100&page=1",
+                    "repos/o/r/pulls/1/files?per_page=100&page=2"]
+    assert len(pri.api_pages(api, "x?state=open", 120)) == 120
+    with pytest.raises(ValueError):
+        pri.api_pages(lambda *a, **k: {"message": "nope"}, "x", 10)
+
+
+# --- headline verdict and summary line --------------------------------------
+
+ROWS = pri.load_budget(BUDGET)
+
+
+def vals(**kw):
+    out = {"tests.total": 100, "tests.failed": 0, "tests.skipped": 0, "tests.duration_s": 60.0,
+           "cov.total_pct": 70.0, "cov.safety_pct": 80.0}
+    out.update({k.replace("__", "."): v for k, v in kw.items()})
+    return out
+
+
+def states_for(hv, bv):
+    return [pri.evaluate(r, hv, bv) for r in ROWS]
+
+
+@pytest.mark.parametrize("ci,hv,bv,expected", [
+    ("success", vals(), vals(), "🟢 Healthy"),
+    ("success", vals(), None, "🟢 Healthy (no main baseline to compare)"),
+    ("failure", vals(), vals(), "🔴 CI failed"),
+    ("timed_out", vals(), vals(), "🔴 CI timed out"),
+    ("failure", vals(tests__failed=2), vals(), "🔴 CI failed; 2 failing tests"),
+    ("success", vals(tests__failed=1), vals(), "🔴 1 failing test"),
+    ("success", vals(tests__duration_s=100.0), vals(),
+     "🟡 Healthy, needs attention: over budget: Suite time"),
+    ("success", vals(cov__total_pct=60.0, tests__total=90), vals(),
+     "🟡 Healthy, needs attention: over budget: Tests collected, Backend line coverage"),
+    ("success", {}, None, "🟡 Healthy, needs attention: test metrics missing"),
+    ("success", {"tests.total": 1, "tests.failed": 0}, None,
+     "🟡 Healthy, needs attention: coverage missing"),
+    ("weird`@everyone", vals(), vals(), "🟡 Healthy, needs attention: CI result unknown"),
+])
+def test_headline_rules(ci, hv, bv, expected):
+    assert pri.headline(ci, hv, ROWS, states_for(hv, bv), None, has_base=bv is not None) == expected
+
+
+def test_headline_includes_readiness_problems():
+    hv = vals()
+    ctx = ctx_for(mergeable=False, state="dirty")
+    got = pri.headline("success", hv, ROWS, states_for(hv, hv), ctx)
+    assert got == "🟡 Healthy, needs attention: merge conflicts; needs `safety-reviewed` label"
+    assert pri.headline("success", hv, ROWS, states_for(hv, hv), ctx_for(labeled=True)) == "🟢 Healthy"
+    assert pri.headline("success", {}, [], [], None, notice="metrics not evaluated").startswith("🟡")
+    assert pri.headline("failure", {}, [], [], None, notice="metrics not evaluated") == "🔴 CI failed"
+
+
+def test_summary_line_with_and_without_baseline():
+    head = vals(tests__total=112, tests__duration_s=66.0, cov__total_pct=70.25)
+    line = pri.summary_line(head, vals())
+    assert line == ("Tests 112 (+12) · Failed 0 · Coverage 70.25% (+0.25 pp) · "
+                    "Safety-path coverage 80.00% (+0.00 pp) · Suite time 1m 06s (+10.0%)")
+    assert pri.summary_line({}, None) == ("Tests n/a · Failed n/a · Coverage n/a · "
+                                          "Safety-path coverage n/a · Suite time n/a")
+    assert pri.summary_line(vals(), None).startswith("Tests 100 · Failed 0 · Coverage 70.00% ·")
+
+
+# --- report v2 layout -------------------------------------------------------
+
+def report_args(tmp_path, head, base=None, ci="success"):
+    args = ["report", "--head", str(head), "--budget", str(BUDGET), "--safety-paths", str(SAFETY),
+            "--head-sha", "abcdef1", "--ci-conclusion", ci, "--repo", "owner/repo", "--pr", "7",
+            "--out", str(tmp_path / "c.md")]
+    if base is not None:
+        args += ["--base", str(base), "--base-sha", "1234567"]
+    return args
+
+
+def test_report_v2_layout_with_pr_context(tmp_path, monkeypatch):
+    pull = {"state": "open", "draft": False, "mergeable": True, "mergeable_state": "clean",
+            "base": {"ref": "main", "repo": {"default_branch": "main"}}, "labels": []}
+    calls = []
+    monkeypatch.setattr(pri, "gh_api", fake_api(
+        [("repos/owner/repo/pulls/7/files", FILES[:3]), ("repos/owner/repo/pulls/7", pull)], calls))
+    m = metrics(files={"backend/execution/a.py": [8, 10]})
+    assert pri.main(report_args(tmp_path, write(tmp_path, "h.json", m), write(tmp_path, "b.json", m))) == 0
+    body = (tmp_path / "c.md").read_text()
+    lines = body.splitlines()
+    assert lines[0] == pri.MARKER
+    assert lines[3] == "**🟡 Healthy, needs attention: needs `safety-reviewed` label**"
+    assert lines[5].startswith("Tests 100 (+0) · Failed 0 · Coverage 80.00% (+0.00 pp)")
+    assert lines[7].startswith("**Merge readiness:** Ready for review · base `main`")
+    order = [body.index(s) for s in ("**Merge readiness:**", "| Area | Metric |",
+                                     "### Change footprint", "Baseline: `1234567`")]
+    assert order == sorted(order)
+    assert "- `backend/execution/gate.py` (modified)" in body
+    assert all(method == "GET" for method, _, _ in calls)
+
+
+def test_report_degrades_when_the_pr_lookup_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(pri, "gh_api", fake_api([]))
+    assert pri.main(report_args(tmp_path, write(tmp_path, "h.json", metrics()))) == 0
+    body = (tmp_path / "c.md").read_text()
+    assert "### Change footprint\n\nUnavailable" in body and "Merge readiness" not in body
+
+
+def test_notice_keeps_footprint_and_never_goes_green(tmp_path, monkeypatch):
+    pull = {"state": "open", "draft": True, "mergeable": True, "mergeable_state": "draft",
+            "base": {"ref": "main", "repo": {"default_branch": "main"}}, "labels": []}
+    monkeypatch.setattr(pri, "gh_api", fake_api(
+        [("repos/owner/repo/pulls/7/files", FILES[:1]), ("repos/owner/repo/pulls/7", pull)]))
+    assert pri.main(report_args(tmp_path, tmp_path / "missing.json", ci="failure")) == 0
+    body = (tmp_path / "c.md").read_text()
+    assert "**🔴 CI failed**" in body and "🟢" not in body
+    assert "Metrics not evaluated for this commit" in body
+    assert "### Change footprint" in body and "Draft · base `main`" in body
+
+
+def test_report_workflow_passes_pr_context_from_the_api():
+    report = (REPO_ROOT / ".github/workflows/pr-impact.yml").read_text()
+    assert '--repo "$REPO" --pr "$PR"' in report
+    assert "PR: ${{ steps.pr.outputs.number }}" in report

@@ -85,6 +85,9 @@ jobs:
           BASE_SHA: ${{ steps.base.outputs.sha }}
           BASE_CREATED_AT: ${{ steps.base.outputs.created_at }}
           APPROXIMATE: ${{ steps.base.outputs.approximate }}
+          PR: ${{ steps.pr.outputs.number }}
+        # --repo/--pr add the change footprint and merge readiness. They read
+        # the PR file list and PR state from the API as data only.
         run: |
           baseline_args=()
           if [[ "$APPROXIMATE" == "true" ]]; then
@@ -99,6 +102,7 @@ jobs:
             --base-sha "$BASE_SHA" \
             --base-created-at "$BASE_CREATED_AT" "${baseline_args[@]}" \
             --ci-conclusion "$CI_CONCLUSION" \
+            --repo "$REPO" --pr "$PR" \
             --out "$RUNNER_TEMP/comment.md" || true
           cat "$RUNNER_TEMP/comment.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
 
