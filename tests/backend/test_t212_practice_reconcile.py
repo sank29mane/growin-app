@@ -232,6 +232,31 @@ async def test_a_fill_price_that_looks_like_pounds_for_a_pence_instrument_is_an_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("unit_mismatch", [False, True], ids=["negative-wallet", "gbx-unit-mismatch"])
+async def test_sell_fill_cross_checks_negative_wallet_impact(
+    tmp_path, private_config_dir, monkeypatch, unit_mismatch
+):
+    stack = await start_practice_stack(tmp_path, private_config_dir, monkeypatch)
+    try:
+        await place(stack, "sell-seed", quantity="2")
+        stack.broker.fill(7000001, price=49.0)
+        assert (await stack.adapter.reconciler.reconcile("sell-seed")).state == "FILLED"
+        await place(stack, "sell-wallet", side="SELL", quantity="2", limit_price="48", broker_available="2")
+        stack.broker.fill(7000002, price=49.0)
+        fill = stack.broker.fills[7000002][0]
+        fill["walletImpact"]["netValue"] = -0.98
+        if unit_mismatch:
+            fill["price"] = 0.49
+        result = await stack.adapter.reconciler.reconcile("sell-wallet")
+        assert result.code == ("FILL_VALUE_MISMATCH" if unit_mismatch else "APPLIED")
+        assert result.state == ("ACKNOWLEDGED" if unit_mismatch else "FILLED")
+        position = stack.ledger.get_paper_position(PRACTICE_ACCOUNT, "GBP", "VODl_EQ", workspace="uk")
+        assert Decimal(position["quantity"]) == (Decimal("2") if unit_mismatch else Decimal("0"))
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
 async def test_a_fill_above_the_limit_notional_is_refused_by_the_ledger(
     tmp_path, private_config_dir, monkeypatch
 ):
