@@ -350,13 +350,15 @@ class Smoke:
             return
         note = "; ".join(problems)
         anomaly = {"code": code, "position_check": position_check, "state": str(body.get("state"))}
+        step_name = "unknown step"
         for step in self.evidence.steps:
             if step.get("proposal_id") == proposal_id and step.get("step") != "anomaly":
+                step_name = str(step.get("step", "unknown step"))
                 step["anomaly"] = anomaly
         self.evidence.add(
             {"step": "anomaly", "proposal_id": proposal_id, "result": str(body.get("state")), "note": note}
         )
-        raise SmokeError(f"reconcile anomaly ({note}). Stopped; nothing further was sent.")
+        raise SmokeError(f"reconcile anomaly at {step_name} ({note}). Stopped; nothing further was sent.")
 
     def _reconcile_until(self, record: dict[str, Any], wanted: str) -> str:
         seen: list[str] = []

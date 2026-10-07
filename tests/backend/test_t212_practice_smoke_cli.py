@@ -615,7 +615,7 @@ def test_a_missing_position_check_is_an_anomaly_and_stops_the_run(tmp_path):
     backend.reconcile_omit["prop-1"] = {"position_check"}
     run, backend, ask, said, evidence = build(tmp_path, far("VODl_EQ") + far("LLOYl_EQ"), backend)
     run.preflight()
-    with pytest.raises(smoke.SmokeError, match="position check MISSING"):
+    with pytest.raises(smoke.SmokeError, match="reconcile anomaly at buy-1 .*position check MISSING"):
         run.buy_far(1)
     assert run.far_tickers == [], "the step did not count as done"
     assert len(backend.posts_to(smoke.PREPARE)) == 1, "nothing further was prepared"
