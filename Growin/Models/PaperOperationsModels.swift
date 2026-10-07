@@ -353,17 +353,18 @@ protocol PaperApprovalSigning: AnyObject {
     func sign(_ payload: Data) throws -> Data
 }
 
-/// Paper Operations is India-only, so this adapter always signs as India.
+/// Paper Operations is India-only, so this adapter always signs as India. The
+/// router sends India to the Secure Enclave signer, so every signature asks for Touch ID.
 final class LocalPaperApprovalSigner: PaperApprovalSigning {
     var isConfigured: Bool {
-        LocalApprovalSigner.shared.isConfigured(for: .india)
+        ApprovalSignerRouter.shared.isConfigured(for: .india)
     }
 
     func identity() throws -> ApprovalSignerIdentity {
-        try LocalApprovalSigner.shared.identity(for: .india)
+        try ApprovalSignerRouter.shared.identity(for: .india)
     }
 
     func sign(_ payload: Data) throws -> Data {
-        try LocalApprovalSigner.shared.sign(payload, for: .india)
+        try ApprovalSignerRouter.shared.sign(payload, for: .india, flow: .paperApproval)
     }
 }

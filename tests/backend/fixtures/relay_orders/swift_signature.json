@@ -1,0 +1,25 @@
+{
+  "key_id" : "56cc9f06e147f8157e9bc29dc1c7d14538d2124d6c5c79f2a7031389ed5672e3",
+  "public_key_x963_hex" : "043ca059121d88096540cdef44df066a6de1e6f807008e3178824ec4d9b6b6cc6ddde26b3c22626a41041c5300e929a684c4cbeeaa46cb27c2b35ca5aff18b80c2",
+  "rows" : [
+    {
+      "canonical_sha256" : "bd3183c6b9a5cc09b002ca8e104e72387ef474884fae7b0131204071a0ad0118",
+      "name" : "buy_entry",
+      "signature_der_b64" : "MEUCIFNL+divw5vChhCO8/VvRRFEs88Z2Quh6QaiXppehWiwAiEAvVi5yjavgADkrM1SnFfahf2EHKWWwBngzAXfpAxgAHo="
+    },
+    {
+      "canonical_sha256" : "b1202dc142b625d59f7c02947cada7f5adfb90bb296cc57fa3a22978c9d3f245",
+      "name" : "sell_stop_with_batch",
+      "signature_der_b64" : "MEQCIHEhiwJc3ayI73ulStIOpQu4BpSyIvMGgov9d2uV3GZBAiAMKp+hTbYR8j3HHooIaKAZSmyMOYfu4lxYK9dcisDoXA=="
+    },
+    {
+      "canonical_sha256" : "c579a8ab72928066c57d975e47167898393d42ddd6da16bbc102d36c43870efe",
+      "name" : "buy_two_decimals_large_qty",
+      "signature_der_b64" : "MEUCIBJUjbVmpSAk0rtz74B7ZoWt4YD89qAeXeV4oeAQbVG7AiEA+5bhjb1RYBPLmjA5iHpZQxo0KkUFOpUQDpATvso9oFY="
+    }
+  ],
+  "schema" : "growin-orders/1 swift signature vector",
+  "signer" : "primary",
+  "test_only" : true,
+  "warning" : "TEST ONLY. Signed by Swift (CryptoKit) with the public TEST ONLY primary key from signing_vectors.json. Never pin or enrol this key."
+}
