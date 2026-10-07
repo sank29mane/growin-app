@@ -105,13 +105,19 @@ jobs:
           # "xcodebuild: error: MESSAGE". Matching only the message means a
           # file name cannot make a real error look like an SDK gap. The diag
           # prefix is greedy so the LAST ": error: " wins (paths may contain
-          # colons), and the version phrases must end the message.
+          # colons), and the version phrase must end the message. A line with
+          # more than one "error: " is never classified: extraction would keep
+          # only the tail and could drop a real error, so it stays red. The
+          # future-project-format phrase is not listed: real xcodebuild prints
+          # "Unable to read project", so it never fired. Unknown means red.
           sdk_gap() {
-            local line="$1" msg
+            local line="$1" msg stripped
+            stripped="${line//error: /}"
+            (( ${#line} - ${#stripped} > 7 )) && return 1
             local diag='^.*:[0-9]+:[0-9]+: error: (.*)$'
             local tool='^(xcodebuild: )?error: (.*)$'
             local avail='^.+ is only available in macOS [0-9]+(\.[0-9]+)* or newer$'
-            local version='^(The project .+ cannot be opened because it is in a future Xcode project file format( \([0-9]+\))?\.?|.+ requires a newer version of Xcode\.?|SDK ".+" cannot be located\.?)$'
+            local version='^(.+ requires a newer version of Xcode\.?|SDK ".+" cannot be located\.?)$'
             if [[ "$line" =~ $diag ]]; then msg="${BASH_REMATCH[1]}"
             elif [[ "$line" =~ $tool ]]; then msg="${BASH_REMATCH[2]}"
             else return 1; fi
