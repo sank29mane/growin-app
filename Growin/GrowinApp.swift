@@ -10,12 +10,9 @@ struct GrowinApp: App {
     @State private var portfolioObserver = PortfolioSummaryObserver.shared
     
     init() {
-        // Move legacy secrets out of UserDefaults before any view model reads them.
-        // Failed items remain in UserDefaults so migration is lossless and retryable.
-        _ = KeychainStore.shared.migrateLegacyUserDefaults()
-        // Then move flat Keychain items to their scoped accounts (copy, verify, delete).
-        // Failed items stay in place and retry on the next launch.
-        _ = KeychainStore.shared.migrateFlatItemsToScoped()
+        // All launch migrations go through one guarded entry point. It skips them when
+        // the process is a test host, so tests never touch the real Keychain.
+        LaunchMigrations.runAtLaunch()
 
         // Initialize Notification Manager
         NotificationManager.shared.requestAuthorization()
