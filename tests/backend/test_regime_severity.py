@@ -73,6 +73,10 @@ def test_every_configured_k_is_calm_at_full_size_and_never_sizes_a_worse_regime_
     rows = REGIME_POLICY_TABLE[count]
     assert len(rows) == count
     assert rows[0].size_multiplier == Decimal("1.0")
+    # A wider BUY collar in the worst regime is the wrong direction: the most severe rank
+    # of every K shares the widest collar, 2.0, and never goes above it.
+    assert rows[-1].collar_multiplier == Decimal("2.0")
+    assert max(row.collar_multiplier for row in rows) == Decimal("2.0")
     sizes = [row.size_multiplier for row in rows]
     collars = [row.collar_multiplier for row in rows]
     adapters = [row.adapter_id for row in rows]
@@ -680,3 +684,84 @@ def test_the_requoter_accepts_a_numpy_integer_id_and_refuses_other_non_labels():
         with pytest.raises(Exception) as error:
             quoter.get_regime_multiplier(bad)
         assert error.value.code == "REGIME_ID_UNKNOWN"
+
+
+class _SwitchableManager(_StubManager):
+    """Adapter manager whose swap can be made to fail or raise."""
+
+    def __init__(self):
+        super().__init__()
+        self.mode = "ok"
+
+    def swap_adapter(self, adapter_id):
+        if self.mode == "raise":
+            raise RuntimeError("adapter swap blew up")
+        self.swapped.append(adapter_id)
+        return self.mode == "ok"
+
+
+@pytest.mark.parametrize("mode", ["failed_swap", "swap_raises", "inference_raises"])
+@pytest.mark.asyncio
+async def test_a_failed_swap_or_inference_error_invalidates_the_regime_until_the_next_good_classification(
+    mode, tmp_path, monkeypatch
+):
+    """P1-c: a crisis posterior with a failed swap used to leave the previous calm regime in
+    place and dispatch 10 of 10. Any inference or adapter failure now invalidates the regime."""
+
+    import backend.trading_loop as loop_module
+    from backend.trading_loop import LiveTradingLoop
+
+    real_predict = loop_module.fast_gmm_predict_proba
+    manager = _SwitchableManager()
+    loop = LiveTradingLoop(manager, shipped_params(), telemetry_db_path=str(tmp_path / "t.db"))
+    ticks = _tick_stream()
+    for tick in ticks[:40]:
+        loop.process_tick(*tick)
+    previous = loop.current_regime
+    assert previous != -1 and loop.risk_leverage_coefficient > 0.0
+
+    crisis_id = shipped_map().id_by_rank[3]
+    assert previous != crisis_id
+    if mode == "failed_swap":
+        manager.mode = "fail"
+        monkeypatch.setattr(loop_module, "fast_gmm_predict_proba", lambda *a, **k: np.eye(4)[crisis_id])
+    elif mode == "swap_raises":
+        manager.mode = "raise"
+        monkeypatch.setattr(loop_module, "fast_gmm_predict_proba", lambda *a, **k: np.eye(4)[crisis_id])
+    else:
+        def boom(*args, **kwargs):
+            raise RuntimeError("inference failed")
+
+        monkeypatch.setattr(loop_module, "fast_gmm_predict_proba", boom)
+
+    result = loop.process_tick(*ticks[41])  # must not raise
+    assert result["regime_valid"] is False and result["dominant_regime"] == -1
+    assert loop.current_regime == -1 and loop.requoter.current_regime == -1
+    assert loop.risk_leverage_coefficient == 0.0 and result["risk_leverage_coefficient"] == 0.0
+
+    connection = build_scaling_policy_connection(loop.severity_map)
+    dispatched = []
+
+    async def dispatch(size, price):
+        dispatched.append(size)
+        return {"actual_fill_price": price}
+
+    window = {"bid": [99.9] * 5, "ask": [100.1] * 5, "spread": [0.002] * 5}
+    try:
+        decision = await loop.execute_order_pre_flight(
+            "BUY", 10.0, window, {"equity": 1000.0, "peak_equity": 1000.0}, connection, dispatch
+        )
+        assert decision.approved is False and dispatched == []
+
+        # The next successful classification restores it.
+        manager.mode = "ok"
+        monkeypatch.setattr(loop_module, "fast_gmm_predict_proba", real_predict)
+        for tick in ticks[42:46]:
+            loop.process_tick(*tick)
+        assert loop.current_regime != -1 and loop.risk_leverage_coefficient > 0.0
+        decision = await loop.execute_order_pre_flight(
+            "BUY", 10.0, window, {"equity": 1000.0, "peak_equity": 1000.0}, connection, dispatch
+        )
+        assert decision.approved is True and dispatched
+    finally:
+        connection.close()

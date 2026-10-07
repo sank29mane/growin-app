@@ -72,3 +72,52 @@ def bound_regime_fields(raw_id: int | None = None) -> dict:
         "regime_policy_hash": severity_map.policy_hash,
         "regime_audit": {**severity_map.audit(raw), "model_version": f"gmm-p256:{ARTIFACT_SHA256}"},
     }
+
+
+_SHARED_POLICY = {}
+
+
+def gated(**kwargs) -> dict:
+    """ExecutionService keyword arguments for a gated, bound service: the real risk gate and
+    the shipped model's trusted severity map. Every admission is sized by the gate now."""
+
+    from simulation import RiskSwarmGate
+
+    return {"risk_gate": RiskSwarmGate(), "regime_severity_map": shipped_map(), **kwargs}
+
+
+def bound_admit(raw_id: int | None = None, *, spread: float = 0.002) -> dict:
+    """``admit``/``prepare`` keyword arguments that bind an admission to the shipped model.
+
+    The default is the calm component, which the real gate sizes at 1.0, so a test that asks
+    for N shares still gets N. The policy table is built once from the shipped map and only
+    read, never modified; a test that needs a different table builds its own.
+    """
+
+    from simulation.regime_severity import build_scaling_policy_connection
+
+    connection = _SHARED_POLICY.get("connection")
+    if connection is None:
+        connection = build_scaling_policy_connection(shipped_map())
+        _SHARED_POLICY["connection"] = connection
+    return {**bound_regime_fields(raw_id), "current_spread_pct": spread, "risk_db_connection": connection}
+
+
+class FractionGate:
+    """The real risk gate with its sizing multiplier fixed by the test.
+
+    For tests of what happens AFTER a gate has scaled an order (re-checks at the admitted
+    quantity, the SELL waiver). Everything else is the real gate: it still verifies the policy
+    table against the trusted map, still enforces the 5% spread block and still returns zero
+    when the real gate would. Only a non-zero result is replaced by ``size * fraction``.
+    """
+
+    def __init__(self, fraction: float) -> None:
+        from simulation import RiskSwarmGate
+
+        self.fraction = fraction
+        self._gate = RiskSwarmGate()
+
+    def evaluate(self, fill, size, regime_id, spread, connection, severity_map=None):
+        real = self._gate.evaluate(fill, size, regime_id, spread, connection, severity_map=severity_map)
+        return 0.0 if real == 0.0 else size * self.fraction

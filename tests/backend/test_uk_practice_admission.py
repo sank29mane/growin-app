@@ -689,14 +689,26 @@ async def test_the_reservation_transaction_itself_enforces_the_position_cap_and_
         ledger.configure_paper_budget(PRACTICE_ACCOUNT, "GBP", "900", workspace="uk")
         from execution import ExecutionService
 
+        from regime_testkit import bound_regime_fields, shipped_map
+        from simulation import PreFlightSimulator, RiskSwarmGate
+        from simulation.regime_severity import build_scaling_policy_connection
+
+        # Every admission is gated and bound now, so this one carries a real gate, the trusted
+        # map and the calm component; only the stored limits are missing.
         service = ExecutionService(
-            None, ledger, simulator=None, risk_gate=None, allow_test_price_sources=True
+            None, ledger, simulator=PreFlightSimulator(), risk_gate=RiskSwarmGate(),
+            allow_test_price_sources=True, regime_severity_map=shipped_map(),
         )
+        connection = build_scaling_policy_connection(shipped_map())
         proposal = practice_proposal_dict("no-limits", quantity="1", limit_price="71.3")
-        service.admit(
+        admission = service.admit(
             proposal, currency="GBP", price="0.713", price_divisor="100", price_source=PRICE_SOURCE_TEST_REPLAY,
-            simulator_evidence={"simulated_fill_price": "0.713"}, risk_evidence={"scaled_size": "1"},
+            tick_window={"bid": [0.99], "ask": [1.01], "spread": [0.02]},
+            portfolio_state={"equity": 100.0, "peak_equity": 100.0},
+            current_spread_pct=0.02, risk_db_connection=connection, **bound_regime_fields(),
         )
+        connection.close()
+        assert admission.decision.value == "ADMITTED"
         with pytest.raises(ApprovalConflict, match="limits"):
             service.reserve("no-limits")
 
@@ -857,6 +869,34 @@ async def test_a_uk_admission_denies_when_the_size_table_is_not_the_trusted_mode
         stack.app._preflight_policy_connection = original
         if replacement is not None:
             replacement.close()
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_a_caller_admitted_quantity_cannot_lift_a_scaled_bound_uk_admission(
+    tmp_path, private_config_dir, monkeypatch
+):
+    """P1-b on a bound practice ledger with runtime preflight on: a crisis regime scales 1 share
+    to 0.05, and a caller-supplied admitted_quantity of 1 must not turn that into a full-size
+    admission that reserves and could dispatch."""
+
+    from execution.venue import PRICE_SOURCE_TEST_REPLAY
+    from regime_testkit import bound_regime_fields
+    from t212_practice_testkit import practice_proposal_dict
+
+    stack = await stack_with(tmp_path, private_config_dir, monkeypatch)
+    try:
+        preflight = {**stack.app._local_paper_preflight(), **bound_regime_fields(1)}
+        admission = stack.service.admit(
+            practice_proposal_dict("override", quantity="1", limit_price="71.3"),
+            currency="GBP", price="0.713", price_divisor="100", price_source=PRICE_SOURCE_TEST_REPLAY,
+            risk_evidence={"admitted_quantity": "1"}, **preflight,
+        )
+        assert admission.decision.value == "DENIED"
+        assert stack.ledger.get_reservation("override") is None
+        assert reservation_rows(stack) == (0, 0)
+        assert stack.broker.mutations == []
+    finally:
         stack.close()
 
 

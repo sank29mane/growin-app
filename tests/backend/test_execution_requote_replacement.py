@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+from regime_testkit import bound_admit, gated
 import pytest
 
 from execution.ledger import ExecutionLedger, intent_hash
@@ -16,8 +17,8 @@ class _DispatcherSentinel:
 
 def _parent(ledger):
     proposal = {"proposal_id": "parent", "workspace": "uk", "account": "invest", "broker": "paper", "mode": "PAPER", "ticker": "VUSA", "action": "BUY", "quantity": "2"}
-    service = ExecutionService(_DispatcherSentinel(), ledger)
-    service.admit(proposal, currency="GBP", price="10", simulator_evidence={"simulated_fill_price": "10"}, risk_evidence={"scaled_size": "2"})
+    service = ExecutionService(_DispatcherSentinel(), ledger, **gated())
+    service.admit(proposal, currency="GBP", price="10", simulator_evidence={"simulated_fill_price": "10"}, risk_evidence={"scaled_size": "2"}, **bound_admit())
     ledger.configure_paper_budget("invest", "GBP", "100", workspace="uk")
     service.reserve("parent")
     ledger.claim_intent(_intent_from_proposal(proposal))
@@ -62,7 +63,7 @@ def test_partial_cancel_prepares_fresh_limit_intent_without_dispatch(tmp_path):
             currency="GBP",
             price=prepared.intent.limit_price,
             simulator_evidence={"simulated_fill_price": str(prepared.intent.limit_price)},
-            risk_evidence={"scaled_size": str(prepared.intent.quantity)},
+            risk_evidence={"scaled_size": str(prepared.intent.quantity)}, **bound_admit(),
         )
         assert admission.proposal_id == "replacement"
         service.reserve("replacement")

@@ -5,6 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
+from regime_testkit import bound_admit, gated
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -26,7 +27,7 @@ from venue_seam_testkit import enroll, private_key, sign
 def reset_execution_state():
     original_service = state._execution_service
     state.trade_proposals.clear()
-    state.execution_service = ExecutionService()
+    state.execution_service = ExecutionService(**gated())
     yield
     state.trade_proposals.clear()
     state._execution_service = original_service
@@ -115,7 +116,7 @@ def signed_stack(tmp_path):
             state._execution_ledger = ledger
             state.execution_authority = True
             state.execution_service = ExecutionService(
-                dispatcher, ledger, require_approval=True, approval_service=approval
+                dispatcher, ledger, require_approval=True, approval_service=approval, **gated(),
             )
             return state.execution_service
 
@@ -128,7 +129,7 @@ def signed_stack(tmp_path):
                 currency="GBP",
                 price="100",
                 simulator_evidence={"simulated_fill_price": "100"},
-                risk_evidence={"scaled_size": str(proposal["quantity"])},
+                risk_evidence={"scaled_size": str(proposal["quantity"])}, **bound_admit(),
             )
             service.reserve(proposal["proposal_id"])
             state.trade_proposals[proposal["proposal_id"]] = proposal
@@ -368,7 +369,7 @@ async def test_approve_trade_rejects_invalid_proposal_side():
     proposal = add_proposal(action="REBALANCE")
     dispatcher = MagicMock()
     dispatcher.dispatch = AsyncMock()
-    state.execution_service = ExecutionService(dispatcher)
+    state.execution_service = ExecutionService(dispatcher, **gated())
 
     response = await post_approval(proposal["proposal_id"])
 
@@ -390,7 +391,7 @@ async def test_approve_trade_already_processed_without_ack_conflicts():
     proposal = add_proposal(status="APPROVED")
     dispatcher = MagicMock()
     dispatcher.dispatch = AsyncMock()
-    state.execution_service = ExecutionService(dispatcher)
+    state.execution_service = ExecutionService(dispatcher, **gated())
 
     response = await post_approval(proposal["proposal_id"])
 

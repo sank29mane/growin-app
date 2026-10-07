@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from regime_testkit import bound_admit, gated
 from execution.ledger import ExecutionLedger
 from execution.models import OrderAck, OrderSide
 from execution.requote import (
@@ -28,13 +29,13 @@ def _setup_parent(ledger):
         "action": "BUY",
         "quantity": "2",
     }
-    service = ExecutionService(_DispatcherSentinel(), ledger)
+    service = ExecutionService(_DispatcherSentinel(), ledger, **gated())
     service.admit(
         proposal,
         currency="GBP",
         price="10",
         simulator_evidence={"simulated_fill_price": "10"},
-        risk_evidence={"scaled_size": "2"},
+        risk_evidence={"scaled_size": "2"}, **bound_admit(),
     )
     ledger.configure_paper_budget("invest", "GBP", "100", workspace="uk")
     service.reserve(proposal["proposal_id"])
