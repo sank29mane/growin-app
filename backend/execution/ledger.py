@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from pathlib import Path
-from typing import Any, Iterator, Mapping, Optional
+from typing import Any, Iterable, Iterator, Mapping, Optional
 
 from .models import (
     AdmissionDecision,
@@ -713,6 +713,68 @@ def _install_venue_limits_table(connection: sqlite3.Connection) -> None:
         )
 
 
+_QUANTITY_TABLE = "ledger_quantity_reservations"
+
+# Event types a bound-venue caller may add through ``record_audit_event``.
+_AUDIT_EVENT_TYPES = frozenset(
+    {
+        "CANCEL_REQUESTED",
+        "CANCEL_RESPONSE",
+        "RECONCILIATION_ESCALATED",
+        "RECONCILIATION_ANOMALY",
+    }
+)
+# States in which an order may already be at the broker (Phase 66, D-16).
+_IN_FLIGHT_STATES = ("SUBMITTING", "UNKNOWN", "ACKNOWLEDGED", "PARTIALLY_FILLED")
+
+
+def _install_quantity_reservations_table(connection: sqlite3.Connection) -> None:
+    """Create the empty SELL quantity-reservation table. Idempotent; caller owns the transaction.
+
+    It exists only in a bound-venue ledger (Phase 66, D-19, D-21). A paper ledger
+    never gets it, so a SELL there stays denied exactly as before. Rows are never
+    deleted; the workspace insert guard matches every other ledger table.
+    """
+
+    connection.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {_QUANTITY_TABLE} (
+            proposal_id TEXT PRIMARY KEY REFERENCES order_intents(proposal_id),
+            workspace TEXT NOT NULL,
+            account TEXT NOT NULL,
+            currency TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            intent_hash TEXT NOT NULL,
+            reserved TEXT NOT NULL,
+            consumed TEXT NOT NULL DEFAULT '0',
+            released TEXT NOT NULL DEFAULT '0',
+            state TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS {_QUANTITY_TABLE}_no_delete
+        BEFORE DELETE ON {_QUANTITY_TABLE}
+        BEGIN
+            SELECT RAISE(ABORT, 'quantity reservations are never deleted');
+        END
+        """
+    )
+    connection.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS {_QUANTITY_TABLE}_workspace_insert_guard
+        BEFORE INSERT ON {_QUANTITY_TABLE}
+        WHEN NEW.workspace IS NOT {_PIN_SUBQUERY}
+        BEGIN
+            SELECT RAISE(ABORT, '{_WORKSPACE_GUARD_MESSAGE}');
+        END
+        """
+    )
+
+
 def _install_venue_binding(
     connection: sqlite3.Connection, binding: VenueBinding, bound_at: str
 ) -> None:
@@ -749,6 +811,7 @@ def _install_venue_binding(
         (binding.venue, binding.account_id, binding.currency, bound_at),
     )
     _install_venue_limits_table(connection)
+    _install_quantity_reservations_table(connection)
 
 
 def _apply_base_schema(connection: sqlite3.Connection, from_version: int) -> None:
@@ -1335,6 +1398,7 @@ class ExecutionLedger:
         now = _now()
         with self._transaction() as connection:
             _install_venue_limits_table(connection)
+            _install_quantity_reservations_table(connection)
             row = connection.execute(
                 f"SELECT capital_cap, per_position_cap FROM {_VENUE_LIMITS_TABLE} "
                 "WHERE singleton = 1"
@@ -1410,6 +1474,19 @@ class ExecutionLedger:
             budget = self._budget_from_row(budget_row)
             if budget.available < admission.notional:
                 raise ApprovalConflict("paper budget is insufficient")
+            if self.venue_binding is not None:
+                # D-18: held notional plus every other open BUY plus this order
+                # must stay within the per-position cap, checked in this same
+                # transaction so two reservations cannot both pass.
+                limits = self._venue_limits_locked(connection)
+                if limits is None:
+                    raise ApprovalConflict("venue limits are required before reservation")
+                held = self._held_position_locked(connection, admission)
+                others = self._outstanding_buy_notional_locked(
+                    connection, admission.ticker, exclude=proposal_id
+                )
+                if held[1] + others + admission.notional > limits[1]:
+                    raise ApprovalConflict("per-position cap would be exceeded")
             connection.execute(
                 """
                 INSERT INTO buying_power_reservations
@@ -1463,10 +1540,17 @@ class ExecutionLedger:
 
     def get_reservation(self, proposal_id: str) -> Optional[PaperReservation]:
         with self._mutex:
-            row = self._require_connection().execute(
+            connection = self._require_connection()
+            row = connection.execute(
                 "SELECT * FROM buying_power_reservations WHERE proposal_id = ?",
                 (proposal_id,),
             ).fetchone()
+            if row is None and self.venue_binding is not None:
+                # A practice SELL reserves held quantity, not buying power.
+                row = connection.execute(
+                    f"SELECT * FROM {_QUANTITY_TABLE} WHERE proposal_id = ?",
+                    (proposal_id,),
+                ).fetchone()
         return self._reservation_from_row(row) if row is not None else None
 
     def find_active_pending_reservation(
@@ -1492,6 +1576,340 @@ class ExecutionLedger:
                 (self.workspace, account),
             ).fetchone()
         return str(row["proposal_id"]) if row is not None else None
+
+    # --- bound-venue accounting (Phase 66, practice ledgers only) -------------
+    #
+    # Everything in this block is inert in a paper ledger: it needs a venue
+    # binding, and the quantity-reservation table exists only in bound ledgers.
+
+    def _require_bound(self) -> VenueBinding:
+        if self.venue_binding is None:
+            raise ApprovalConflict("this operation exists only in a bound-venue ledger")
+        return self.venue_binding
+
+    def _venue_limits_locked(
+        self, connection: sqlite3.Connection
+    ) -> Optional[tuple[Decimal, Decimal]]:
+        try:
+            row = connection.execute(
+                f"SELECT capital_cap, per_position_cap FROM {_VENUE_LIMITS_TABLE} "
+                "WHERE singleton = 1"
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        if row is None:
+            return None
+        return _decimal(row["capital_cap"]), _decimal(row["per_position_cap"])
+
+    def get_venue_limits(self) -> Optional[tuple[Decimal, Decimal]]:
+        """``(capital_cap, per_position_cap)`` of a bound ledger, else None."""
+
+        if self.venue_binding is None:
+            return None
+        with self._mutex:
+            return self._venue_limits_locked(self._require_connection())
+
+    @staticmethod
+    def _held_position_locked(
+        connection: sqlite3.Connection, admission: ExecutionAdmission
+    ) -> tuple[Decimal, Decimal]:
+        """``(quantity, cost notional)`` held for the admission's ticker."""
+
+        row = connection.execute(
+            "SELECT quantity, notional FROM paper_positions "
+            "WHERE workspace = ? AND account = ? AND currency = ? AND ticker = ?",
+            (admission.workspace, admission.account, admission.currency, admission.ticker),
+        ).fetchone()
+        if row is None:
+            return Decimal("0"), Decimal("0")
+        return _decimal(row["quantity"]), _decimal(row["notional"])
+
+    @staticmethod
+    def _outstanding_buy_notional_locked(
+        connection: sqlite3.Connection, ticker: str, *, exclude: str = ""
+    ) -> Decimal:
+        total = Decimal("0")
+        for row in connection.execute(
+            """
+            SELECT r.reserved, r.consumed, r.released
+            FROM buying_power_reservations AS r
+            JOIN execution_admissions AS a ON a.proposal_id = r.proposal_id
+            WHERE r.state = 'ACTIVE' AND a.ticker = ? AND r.proposal_id != ?
+            """,
+            (ticker, exclude),
+        ).fetchall():
+            total += _decimal(row["reserved"]) - _decimal(row["consumed"]) - _decimal(
+                row["released"]
+            )
+        return total
+
+    @staticmethod
+    def _outstanding_sell_quantity_locked(
+        connection: sqlite3.Connection, ticker: str, *, exclude: str = ""
+    ) -> Decimal:
+        total = Decimal("0")
+        for row in connection.execute(
+            f"SELECT reserved, consumed, released FROM {_QUANTITY_TABLE} "
+            "WHERE state = 'ACTIVE' AND ticker = ? AND proposal_id != ?",
+            (ticker, exclude),
+        ).fetchall():
+            total += _decimal(row["reserved"]) - _decimal(row["consumed"]) - _decimal(
+                row["released"]
+            )
+        return total
+
+    def practice_headroom(self, account: str, currency: str, ticker: str) -> Mapping[str, Decimal]:
+        """Read-only figures admission uses to deny before it records a decision.
+
+        ``held_quantity`` and ``held_notional`` are the ledger's own reconciled
+        position; ``open_buy_notional`` and ``open_sell_quantity`` are active
+        reservations; ``budget_available`` is the bound budget's remainder.
+        """
+
+        self._require_bound()
+        with self._mutex:
+            connection = self._require_connection()
+            row = connection.execute(
+                "SELECT quantity, notional FROM paper_positions "
+                "WHERE workspace = ? AND account = ? AND currency = ? AND ticker = ?",
+                (self.workspace, account, currency, ticker),
+            ).fetchone()
+            held_quantity = _decimal(row["quantity"]) if row is not None else Decimal("0")
+            held_notional = _decimal(row["notional"]) if row is not None else Decimal("0")
+            budget = connection.execute(
+                "SELECT * FROM paper_budgets WHERE workspace = ? AND account = ? AND currency = ?",
+                (self.workspace, account, currency),
+            ).fetchone()
+            available = (
+                self._budget_from_row(budget).available if budget is not None else Decimal("0")
+            )
+            return {
+                "held_quantity": held_quantity,
+                "held_notional": held_notional,
+                "open_buy_notional": self._outstanding_buy_notional_locked(connection, ticker),
+                "open_sell_quantity": self._outstanding_sell_quantity_locked(connection, ticker),
+                "budget_available": available,
+            }
+
+    def reserve_sell_quantity(
+        self, proposal_id: str, *, broker_available_quantity: Decimal | str | int
+    ) -> PaperReservation:
+        """Reserve held quantity for an admitted practice SELL (D-19).
+
+        The quantity must not exceed the ledger's reconciled position minus the
+        other open SELL reservations, and must not exceed the broker's own
+        ``quantityAvailableForTrading``. Both checks and the insert share one
+        transaction. A paper ledger has no such table and refuses.
+        """
+
+        self._require_bound()
+        broker_available = _decimal(broker_available_quantity)
+        now = _now()
+        with self._transaction() as connection:
+            order = self._select_order(connection, proposal_id)
+            if order is None:
+                raise OrderNotFound(f"order {proposal_id!r} was not found")
+            admission_row = connection.execute(
+                "SELECT * FROM execution_admissions WHERE proposal_id = ?", (proposal_id,)
+            ).fetchone()
+            if admission_row is None:
+                raise ApprovalConflict("execution admission is required before reservation")
+            admission = self._admission_from_row(admission_row)
+            if admission.decision is not AdmissionDecision.ADMITTED:
+                raise ApprovalConflict("execution admission denied the intent")
+            if admission.intent_hash != str(order["intent_hash"]):
+                raise IntentConflict("admission intent hash does not match stored intent")
+            if admission.side is not OrderSide.SELL:
+                raise ApprovalConflict("quantity reservation is for SELL orders only")
+            if self._workspace_engaged_locked(connection):
+                raise ApprovalConflict("workspace execution control is engaged")
+            existing = connection.execute(
+                f"SELECT * FROM {_QUANTITY_TABLE} WHERE proposal_id = ?", (proposal_id,)
+            ).fetchone()
+            if existing is not None:
+                return self._reservation_from_row(existing)
+            held, _ = self._held_position_locked(connection, admission)
+            others = self._outstanding_sell_quantity_locked(
+                connection, admission.ticker, exclude=proposal_id
+            )
+            if admission.final_quantity > held - others:
+                raise ApprovalConflict("SELL exceeds the reconciled position")
+            if admission.final_quantity > broker_available:
+                raise ApprovalConflict("SELL exceeds the broker's available quantity")
+            connection.execute(
+                f"""
+                INSERT INTO {_QUANTITY_TABLE}
+                    (proposal_id, workspace, account, currency, ticker, intent_hash,
+                     reserved, state, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)
+                """,
+                (
+                    proposal_id,
+                    self.workspace,
+                    admission.account,
+                    admission.currency,
+                    admission.ticker,
+                    admission.intent_hash,
+                    _decimal_str(admission.final_quantity),
+                    now,
+                    now,
+                ),
+            )
+            self._append_event(
+                connection,
+                proposal_id,
+                "QUANTITY_RESERVED",
+                str(order["state"]),
+                str(order["state"]),
+                {
+                    "ticker": admission.ticker,
+                    "reserved": _decimal_str(admission.final_quantity),
+                    "intent_hash": admission.intent_hash,
+                },
+                now,
+            )
+            row = connection.execute(
+                f"SELECT * FROM {_QUANTITY_TABLE} WHERE proposal_id = ?", (proposal_id,)
+            ).fetchone()
+            if row is None:
+                raise LedgerError("quantity reservation did not persist")
+            return self._reservation_from_row(row)
+
+    def _release_quantity_reservation_locked(
+        self, connection: sqlite3.Connection, proposal_id: str, now: str
+    ) -> None:
+        if self.venue_binding is None:
+            return
+        row = connection.execute(
+            f"SELECT * FROM {_QUANTITY_TABLE} WHERE proposal_id = ?", (proposal_id,)
+        ).fetchone()
+        if row is None:
+            return
+        outstanding = (
+            _decimal(row["reserved"]) - _decimal(row["consumed"]) - _decimal(row["released"])
+        )
+        if outstanding <= 0:
+            return
+        connection.execute(
+            f"UPDATE {_QUANTITY_TABLE} SET released = ?, state = 'SETTLED', updated_at = ? "
+            "WHERE proposal_id = ?",
+            (_decimal_str(_decimal(row["released"]) + outstanding), now, proposal_id),
+        )
+
+    def _assert_no_in_flight_locked(
+        self,
+        connection: sqlite3.Connection,
+        intent: Mapping[str, Any],
+        proposal_id: str,
+    ) -> None:
+        """D-16: refuse a claim while the same ticker has an order that may be at the broker.
+
+        Run inside the claim transaction, so two approvals cannot both pass it.
+        Bound-venue ledgers only: paper ledgers keep today's behaviour.
+        """
+
+        if self.venue_binding is None:
+            return
+        placeholders = ", ".join("?" for _ in _IN_FLIGHT_STATES)
+        row = connection.execute(
+            f"""
+            SELECT i.proposal_id
+            FROM order_intents AS i
+            JOIN order_projection AS p ON p.proposal_id = i.proposal_id
+            WHERE json_extract(i.canonical_json, '$.ticker') = ?
+              AND json_extract(i.canonical_json, '$.account') = ?
+              AND i.proposal_id != ?
+              AND p.state IN ({placeholders})
+            LIMIT 1
+            """,
+            (str(intent.get("ticker")), str(intent.get("account")), proposal_id, *_IN_FLIGHT_STATES),
+        ).fetchone()
+        if row is not None:
+            raise ApprovalConflict("ticker already has an order in flight")
+
+    def list_orders(self, states: Optional[Iterable[str]] = None) -> list[LedgerOrder]:
+        """Orders, oldest first, optionally limited to the given states."""
+
+        sql = (
+            "SELECT i.*, p.state, p.acknowledgment_json, p.updated_at "
+            "FROM order_intents AS i JOIN order_projection AS p USING (proposal_id)"
+        )
+        parameters: tuple[object, ...] = ()
+        if states is not None:
+            wanted = tuple(states)
+            if not wanted:
+                return []
+            sql += " WHERE p.state IN (%s)" % ", ".join("?" for _ in wanted)
+            parameters = wanted
+        sql += " ORDER BY i.created_at, i.proposal_id"
+        with self._mutex:
+            rows = self._require_connection().execute(sql, parameters).fetchall()
+        for row in rows:
+            self._check_row_workspace(row)
+        return [self._order_from_row(row) for row in rows]
+
+    def known_broker_order_ids(self) -> set[str]:
+        """Every broker order id this ledger has stored in an acknowledgement."""
+
+        found: set[str] = set()
+        for order in self.list_orders():
+            if order.acknowledgment is not None:
+                found.add(order.acknowledgment.broker_order_id)
+        return found
+
+    def record_audit_event(
+        self, proposal_id: str, event_type: str, payload: Mapping[str, Any]
+    ) -> None:
+        """Append one allow-listed audit event; the order's state does not change."""
+
+        self._require_bound()
+        if event_type not in _AUDIT_EVENT_TYPES:
+            raise ValueError("audit event type is not allowed")
+        now = _now()
+        with self._transaction() as connection:
+            row = self._select_order(connection, proposal_id)
+            if row is None:
+                raise OrderNotFound(f"order {proposal_id!r} was not found")
+            state = str(row["state"])
+            self._append_event(connection, proposal_id, event_type, state, state, payload, now)
+
+    def record_cancel_requested(self, proposal_id: str) -> str:
+        """Write the cancel event before any DELETE and return the stored broker id (D-22).
+
+        Only an acknowledged or partially filled order with a stored broker id
+        can be cancelled, and only once: a second request raises, so a cancel
+        is never sent twice.
+        """
+
+        self._require_bound()
+        now = _now()
+        with self._transaction() as connection:
+            row = self._select_order(connection, proposal_id)
+            if row is None:
+                raise OrderNotFound(f"order {proposal_id!r} was not found")
+            state = str(row["state"])
+            if state not in {"ACKNOWLEDGED", "PARTIALLY_FILLED"} or not row["acknowledgment_json"]:
+                raise InvalidTransition(
+                    f"cannot cancel an order in {state} without an acknowledgement"
+                )
+            already = connection.execute(
+                "SELECT 1 FROM execution_events "
+                "WHERE proposal_id = ? AND event_type = 'CANCEL_REQUESTED'",
+                (proposal_id,),
+            ).fetchone()
+            if already is not None:
+                raise InvalidTransition("a cancel was already requested for this order")
+            broker_order_id = _ack_from_json(str(row["acknowledgment_json"])).broker_order_id
+            self._append_event(
+                connection,
+                proposal_id,
+                "CANCEL_REQUESTED",
+                state,
+                state,
+                {"broker_order_id": broker_order_id},
+                now,
+            )
+            return broker_order_id
 
     def engage_workspace_control(
         self,
@@ -1651,8 +2069,15 @@ class ExecutionLedger:
                 raise ApprovalConflict("admitted evidence is required before approval")
             if str(admission["intent_hash"]) != str(order["intent_hash"]):
                 raise ApprovalConflict("approval admission does not match the immutable intent")
+            sell_in_bound = (
+                self.venue_binding is not None and str(intent.get("side")) == OrderSide.SELL.value
+            )
             reservation = connection.execute(
-                "SELECT state, intent_hash FROM buying_power_reservations WHERE proposal_id = ?",
+                (
+                    f"SELECT state, intent_hash FROM {_QUANTITY_TABLE} WHERE proposal_id = ?"
+                    if sell_in_bound
+                    else "SELECT state, intent_hash FROM buying_power_reservations WHERE proposal_id = ?"
+                ),
                 (proposal_id,),
             ).fetchone()
             if reservation is None or str(reservation["state"]) != "ACTIVE":
@@ -1837,10 +2262,17 @@ class ExecutionLedger:
                 or str(signed_payload.get("evidence_hash", "")) != str(admission["evidence_hash"])
             ):
                 raise ApprovalConflict("approval evidence does not match admitted quantity")
-            reservation = connection.execute(
-                "SELECT * FROM buying_power_reservations WHERE proposal_id = ?",
-                (proposal_id,),
-            ).fetchone()
+            if str(admission["side"]) == OrderSide.SELL.value and self.venue_binding is not None:
+                # A practice SELL holds a quantity reservation, not buying power.
+                reservation = connection.execute(
+                    f"SELECT * FROM {_QUANTITY_TABLE} WHERE proposal_id = ?",
+                    (proposal_id,),
+                ).fetchone()
+            else:
+                reservation = connection.execute(
+                    "SELECT * FROM buying_power_reservations WHERE proposal_id = ?",
+                    (proposal_id,),
+                ).fetchone()
             if reservation is None or str(reservation["state"]) != "ACTIVE":
                 raise ApprovalConflict("active paper reservation is required before signed claim")
             if str(reservation["intent_hash"]) != stored_intent_hash:
@@ -1858,6 +2290,7 @@ class ExecutionLedger:
             state = str(row["state"])
             if state != "PENDING":
                 raise InvalidTransition(f"order is already {state}")
+            self._assert_no_in_flight_locked(connection, intent, proposal_id)
 
             approval_id = str(uuid.uuid4())
             try:
@@ -2009,6 +2442,9 @@ class ExecutionLedger:
                 )
             if state != "PENDING":
                 raise InvalidTransition(f"order is already {state}")
+            self._assert_no_in_flight_locked(
+                connection, json.loads(str(row["canonical_json"])), proposal_id
+            )
 
             cursor = connection.execute(
                 """
@@ -2160,8 +2596,14 @@ class ExecutionLedger:
             if admission_row is None:
                 raise ApprovalConflict("execution admission is required before reconciliation")
             admission = self._admission_from_row(admission_row)
+            # A practice SELL reconciles against its quantity reservation (D-19).
+            is_sell = admission.side is OrderSide.SELL and self.venue_binding is not None
             reservation_row = connection.execute(
-                "SELECT * FROM buying_power_reservations WHERE proposal_id = ?",
+                (
+                    f"SELECT * FROM {_QUANTITY_TABLE} WHERE proposal_id = ?"
+                    if is_sell
+                    else "SELECT * FROM buying_power_reservations WHERE proposal_id = ?"
+                ),
                 (snapshot.proposal_id,),
             ).fetchone()
             if reservation_row is None:
@@ -2186,10 +2628,16 @@ class ExecutionLedger:
                 raise InvalidTransition("reconciliation evidence is non-monotonic")
             if snapshot.cumulative_quantity > admission.final_quantity:
                 raise InvalidTransition("reconciliation overfills the admitted quantity")
-            if snapshot.cumulative_notional > admission.notional:
+            if not is_sell and snapshot.cumulative_notional > admission.notional:
+                # A BUY never costs more than the limit price it was reserved at.
+                # A SELL's proceeds may exceed the limit notional (price improvement).
                 raise InvalidTransition("reconciliation exceeds the admitted notional")
             if snapshot.cumulative_quantity > 0 and snapshot.cumulative_notional <= 0:
                 raise InvalidTransition("filled quantity requires positive notional")
+            if (snapshot.cumulative_quantity > prior_quantity) != (
+                snapshot.cumulative_notional > prior_notional
+            ):
+                raise InvalidTransition("fill quantity and notional must advance together")
             state = str(row["state"])
             legal = {
                 "ACKNOWLEDGED": {"ACKNOWLEDGED", "PARTIALLY_FILLED", "FILLED", "CANCELLED", "REJECTED", "UNKNOWN"},
@@ -2219,23 +2667,40 @@ class ExecutionLedger:
                 ),
             )
             delta_notional = snapshot.cumulative_notional - prior_notional
-            self._apply_reservation_reconciliation_locked(
-                connection,
-                reservation,
-                admission,
-                snapshot,
-                delta_notional,
-                now,
-            )
             delta_quantity = snapshot.cumulative_quantity - prior_quantity
-            if target in {"FILLED", "PARTIALLY_FILLED"} and delta_notional > 0:
-                self._apply_position_fill_locked(
-                    connection, admission, delta_quantity, delta_notional, now
+            if is_sell:
+                self._apply_quantity_reconciliation_locked(
+                    connection, reservation, snapshot, delta_quantity, now
                 )
-            if target == "ACKNOWLEDGED" and not row["acknowledgment_json"]:
+                # Every validated positive fill delta moves the position, whatever
+                # status carries it: a first-seen CANCELLED or UNKNOWN snapshot
+                # that already shows a partial fill still consumed that quantity.
+                if delta_quantity > 0:
+                    self._apply_position_sell_locked(connection, admission, delta_quantity, now)
+            else:
+                self._apply_reservation_reconciliation_locked(
+                    connection,
+                    reservation,
+                    admission,
+                    snapshot,
+                    delta_notional,
+                    now,
+                )
+                if delta_quantity > 0 and delta_notional > 0:
+                    self._apply_position_fill_locked(
+                        connection, admission, delta_quantity, delta_notional, now
+                    )
+            # An adopted broker id must stick: a bound ledger stores the
+            # acknowledgement on the first reconciliation that supplies one,
+            # whatever state it adopts. A paper ledger keeps its old behaviour.
+            if not row["acknowledgment_json"] and (
+                target == "ACKNOWLEDGED" or self.venue_binding is not None
+            ):
                 generated_ack = OrderAck(
                     proposal_id=snapshot.proposal_id,
-                    broker="paper",
+                    broker=(
+                        self.venue_binding.venue if self.venue_binding is not None else "paper"
+                    ),
                     broker_order_id=snapshot.broker_order_id,
                     status="ACKNOWLEDGED",
                 )
@@ -2381,6 +2846,78 @@ class ExecutionLedger:
             ),
         )
 
+    def _apply_quantity_reconciliation_locked(
+        self,
+        connection: sqlite3.Connection,
+        reservation: PaperReservation,
+        snapshot: ReconciliationSnapshot,
+        delta_quantity: Decimal,
+        now: str,
+    ) -> None:
+        """Consume the SELL quantity reservation on a fill; settle it on a terminal state."""
+
+        consumed = reservation.consumed + delta_quantity
+        released = reservation.released
+        terminal = snapshot.status in {
+            ReconciliationStatus.FILLED,
+            ReconciliationStatus.CANCELLED,
+            ReconciliationStatus.REJECTED,
+        }
+        if terminal:
+            released = reservation.reserved - consumed
+        state = "SETTLED" if terminal else "ACTIVE"
+        if consumed < 0 or released < 0 or consumed + released > reservation.reserved:
+            raise InvalidTransition("quantity reservation accounting is invalid")
+        connection.execute(
+            f"UPDATE {_QUANTITY_TABLE} SET consumed = ?, released = ?, state = ?, updated_at = ? "
+            "WHERE proposal_id = ?",
+            (
+                _decimal_str(consumed),
+                _decimal_str(released),
+                state,
+                now,
+                snapshot.proposal_id,
+            ),
+        )
+
+    @staticmethod
+    def _apply_position_sell_locked(
+        connection: sqlite3.Connection,
+        admission: ExecutionAdmission,
+        delta_quantity: Decimal,
+        now: str,
+    ) -> None:
+        """Reduce the position and return the sold cost basis (D-19).
+
+        The cost basis removed is the position's average cost times the quantity
+        sold, so the ticker's per-position headroom grows back by exactly that.
+        """
+
+        row = connection.execute(
+            "SELECT quantity, notional FROM paper_positions "
+            "WHERE workspace = ? AND account = ? AND currency = ? AND ticker = ?",
+            (admission.workspace, admission.account, admission.currency, admission.ticker),
+        ).fetchone()
+        held = _decimal(row["quantity"]) if row is not None else Decimal("0")
+        cost = _decimal(row["notional"]) if row is not None else Decimal("0")
+        if delta_quantity > held:
+            raise InvalidTransition("SELL fill exceeds the reconciled position")
+        remaining = held - delta_quantity
+        remaining_cost = Decimal("0") if remaining == 0 else cost - cost * delta_quantity / held
+        connection.execute(
+            "UPDATE paper_positions SET quantity = ?, notional = ?, updated_at = ? "
+            "WHERE workspace = ? AND account = ? AND currency = ? AND ticker = ?",
+            (
+                _decimal_str(remaining),
+                _decimal_str(max(Decimal("0"), remaining_cost)),
+                now,
+                admission.workspace,
+                admission.account,
+                admission.currency,
+                admission.ticker,
+            ),
+        )
+
     def get_paper_position(
         self, account: str, currency: str, ticker: str, *, workspace: Workspace | str
     ) -> Optional[Mapping[str, str]]:
@@ -2419,6 +2956,7 @@ class ExecutionLedger:
             ).fetchone()
             if reservation is not None:
                 self._release_full_reservation_locked(connection, reservation, now)
+            self._release_quantity_reservation_locked(connection, proposal_id, now)
             self._append_event(
                 connection,
                 proposal_id,
@@ -2470,6 +3008,7 @@ class ExecutionLedger:
                 ).fetchone()
                 if reservation is not None:
                     self._release_full_reservation_locked(connection, reservation, now)
+                self._release_quantity_reservation_locked(connection, proposal_id, now)
             connection.execute(
                 """
                 UPDATE order_projection

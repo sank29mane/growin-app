@@ -173,6 +173,33 @@ class AIService {
         return result.message
     }
 
+    /// Pending Trading 212 practice proposals, from the loopback backend. Empty when none.
+    func practiceProposals() async throws -> [PracticeProposal] {
+        guard let url = URL(string: baseURL + "/api/t212-practice/proposals") else {
+            throw URLError(.badURL)
+        }
+        let (data, response) = try await session.data(from: url)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            throw NSError(domain: "AIService.PracticeApproval", code: 0,
+                          userInfo: [NSLocalizedDescriptionKey: "Practice proposals are unavailable."])
+        }
+        return try JSONDecoder().decode(PracticeProposalList.self, from: data).proposals
+    }
+
+    /// Asks for a challenge on a practice proposal and checks it against that proposal
+    /// before anything can be signed. LIVE, an unknown mode, or a changed limit price or
+    /// order type is refused by `TradeApprovalReview`.
+    func requestPracticeApproval(proposal: PracticeProposal, workspace: Workspace) async throws -> TradeApprovalReview {
+        guard workspace == PracticeApprovalPolicy.workspace else {
+            throw TradeApprovalReviewError.workspaceMismatch
+        }
+        let challenge: ApprovalChallengeResponse = try await postJSON(
+            endpoint: "/api/ai/trade/approval/challenge",
+            body: ["proposal_id": proposal.proposalId, "workspace": workspace.rawValue]
+        )
+        return try TradeApprovalReview(challenge: challenge, expectedPractice: proposal, expectedWorkspace: workspace)
+    }
+
     func requestTradeApproval(proposal: TradeProposalData, workspace: Workspace) async throws -> TradeApprovalReview {
         let challenge: ApprovalChallengeResponse = try await postJSON(
             endpoint: "/api/ai/trade/approval/challenge",

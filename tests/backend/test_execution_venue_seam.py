@@ -38,6 +38,7 @@ from execution.venue import (
     BROKER_VENUE_MISMATCH,
     LIVE_DISABLED,
     MODE_VENUE_MISMATCH,
+    PRICE_SOURCE_TEST_REPLAY,
     VENUE_PAPER,
     VENUE_T212_PRACTICE,
     VenueError,
@@ -66,8 +67,10 @@ def uk_process(monkeypatch):
     monkeypatch.setenv("GROWIN_WORKSPACE", "uk")
 
 
-def test_production_factory_map_holds_only_paper():
-    assert set(production_dispatcher_factories()) == {VENUE_PAPER}
+def test_production_factory_map_holds_paper_and_the_demo_only_practice_adapter():
+    # 66-03: the map gained the practice adapter, which can reach the demo host only.
+    # It is still not a live-capable entry: no other venue id is in the map.
+    assert set(production_dispatcher_factories()) == {VENUE_PAPER, VENUE_T212_PRACTICE}
 
 
 @pytest.mark.parametrize("venue", ["t212_live", "", "PAPER", "breeze_relay", None])
@@ -85,7 +88,8 @@ def test_resolving_a_known_but_unregistered_venue_raises_unavailable():
     from execution.venue import resolve_factory
 
     with pytest.raises(VenueError) as refused:
-        resolve_factory(VENUE_T212_PRACTICE)
+        # An injected map without the entry: no fallback to paper.
+        resolve_factory(VENUE_T212_PRACTICE, {VENUE_PAPER: production_dispatcher_factories()[VENUE_PAPER]})
     assert refused.value.code == "VENUE_UNAVAILABLE"
     assert resolve_factory(VENUE_PAPER)(None).__class__.__name__ == "PaperDispatcher"
 
@@ -104,6 +108,7 @@ async def test_tracer_signed_practice_intent_reaches_the_seam_double_once(
         workspace="uk",
         private_dir=private_config_dir,
         dispatcher_factories=practice_factories(double),
+        allow_test_price_sources=True,
     ), app_state.execution_startup_error
     try:
         service = app_state.execution_service
@@ -216,6 +221,7 @@ class _Stack:
             self.ledger,
             require_approval=True,
             approval_service=self.approval,
+            allow_test_price_sources=True,
         )
 
     def close(self) -> None:
@@ -229,9 +235,14 @@ class _Stack:
             intent,
             currency="GBP",
             price="50",
+            price_divisor="1",
             simulator_evidence={"simulated_fill_price": "50"},
             risk_evidence={"scaled_size": str(intent.quantity)},
+            price_source=PRICE_SOURCE_TEST_REPLAY,
         )
+        if self.ledger.venue_binding is not None:
+            # 66-03: a bound ledger reserves only against stored venue limits.
+            self.ledger.configure_venue_limits("1000", "1000", workspace="uk")
         self.ledger.configure_paper_budget(intent.account, "GBP", "1000", workspace="uk")
         self.service.reserve(intent.proposal_id)
 
@@ -654,9 +665,13 @@ def test_practice_venue_with_no_registered_factory_is_disabled_never_paper(
     ledger_dir = tmp_path / "ledger"
     app_state = AppState()
 
-    # No dispatcher_factories: the production map, which holds paper only.
+    # An injected map that holds paper only (the production map now also holds the
+    # demo-only practice adapter): the practice venue has no factory, so no ledger.
     started = app_state.start_execution(
-        ledger_dir / "execution.sqlite3", workspace="uk", private_dir=private_config_dir
+        ledger_dir / "execution.sqlite3",
+        workspace="uk",
+        private_dir=private_config_dir,
+        dispatcher_factories={VENUE_PAPER: production_dispatcher_factories()[VENUE_PAPER]},
     )
 
     assert started is False
@@ -910,6 +925,7 @@ async def test_a_practice_ack_is_never_settled_as_a_local_uat_cancellation(
         assert state.start_execution(
             tmp_path / "p.sqlite3", workspace="uk", private_dir=private_config_dir,
             dispatcher_factories=practice_factories(double),
+            allow_test_price_sources=True,
         ), state.execution_startup_error
         key = private_key()
         enroll(state.execution_service._approval_service, key)
@@ -936,7 +952,9 @@ async def test_a_practice_ack_is_never_settled_as_a_local_uat_cancellation(
         assert response.status_code == 200, response.text
         body = response.json()
         assert "released" not in body["message"] and "No broker was contacted" not in body["message"]
-        assert body["message"] == f"Practice trade acknowledged by {VENUE_T212_PRACTICE}."
+        assert body["message"] == (
+            f"Practice order acknowledged by {VENUE_T212_PRACTICE}. Reconcile to confirm its state."
+        )
         assert body["execution_details"]["broker"] == VENUE_T212_PRACTICE
         assert len(double.intents) == 1
         order = state._execution_ledger.get_order(pid)

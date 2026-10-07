@@ -1,7 +1,7 @@
 {
   "_fixture": {
     "spec": "Trading 212 public API v0, https://docs.trading212.com/_bundle/api.json?download",
-    "spec_sha256": "a272f70a…c4fc041d",
+    "spec_sha256": "a272f70a\u2026c4fc041d",
     "provenance": "Shape taken from 66-RESEARCH sections 2-5 (spec read 2026-10-06). Values are invented. No Trading 212 request was made to write this file, and the file was not byte-diffed against the spec in 66-02.",
     "endpoint": "GET /equity/history/orders"
   },
@@ -38,7 +38,10 @@
             "limitPrice": 180.0,
             "extendedHours": false,
             "initiatedFrom": "API",
-            "createdAt": "2026-10-06T14:02:00.000+00:00"
+            "createdAt": "2026-10-06T14:02:00.000+00:00",
+            "side": "BUY",
+            "currency": "USD",
+            "timeInForce": "DAY"
           },
           "fill": {
             "id": 770011,
@@ -52,7 +55,8 @@
               "fxRate": 0.7427,
               "taxes": [],
               "realisedProfitLoss": 0.0
-            }
+            },
+            "tradingMethod": "TOTV"
           }
         }
       ],

@@ -8,6 +8,7 @@ struct SettingsView: View {
             HFModelHubSection()
             AgentPersonasSection()
             ApprovalSecuritySection()
+            PracticeApprovalsSection()
             TradingConfigSection()
             AccountStatusSection()
             AboutSection()
@@ -176,12 +177,13 @@ struct ApprovalSecuritySection: View {
                     isEnrolling = false
                     return
                 }
-                guard approvalStatus.mode == "paper" else {
+                // The token sits beside the ledger the backend reports: the workspace's
+                // paper ledger, or the separate UK practice ledger.
+                guard ApprovalEnrollment.allowsEnrolment(mode: approvalStatus.mode),
+                      let tokenURL = ApprovalEnrollment.tokenURL(workspace: ws, mode: approvalStatus.mode) else {
                     throw NSError(domain: "Growin.Approval", code: 1,
-                                  userInfo: [NSLocalizedDescriptionKey: "Local paper execution is unavailable."])
+                                  userInfo: [NSLocalizedDescriptionKey: "Local execution is unavailable for this workspace."])
                 }
-                let tokenURL = FileManager.default.homeDirectoryForCurrentUser
-                    .appendingPathComponent("Library/Application Support/Growin/workspaces/\(ws.rawValue)/execution.sqlite3.enrollment-token")
                 let token = try String(contentsOf: tokenURL, encoding: .utf8)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 _ = try await AIService().enrollApprovalKey(identity: identity, token: token, workspace: ws)

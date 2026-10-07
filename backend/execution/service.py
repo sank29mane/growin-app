@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import math
+import re
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Mapping, Optional, Protocol, Union
@@ -25,13 +26,20 @@ from .models import (
     OrderAck,
     OrderIntent,
     OrderMode,
+    OrderType,
     OrderSide,
     OrderState,
     ReconciliationSnapshot,
     WORKSPACE_CURRENCY,
     Workspace,
 )
-from .venue import LIVE_DISABLED, intent_refusal, refusal_text
+from .venue import (
+    admissible_price_sources,
+    LIVE_DISABLED,
+    CancelResult,
+    intent_refusal,
+    refusal_text,
+)
 
 
 class ExecutionDisabledError(RuntimeError):
@@ -70,7 +78,11 @@ class ExecutionService:
         simulator: Any = None,
         risk_gate: Any = None,
         require_runtime_preflight: bool = False,
+        allow_test_price_sources: bool = False,
     ):
+        # Explicit, test-only injection of the ``local-replay`` price source. The
+        # default refuses it, so a production service can never admit from it.
+        self._price_sources = admissible_price_sources(allow_test_price_sources)
         self._dispatcher = dispatcher
         self._ledger = ledger
         self._require_approval = require_approval
@@ -86,6 +98,10 @@ class ExecutionService:
         # Local locks improve same-process replay UX. SQLite transactions and
         # constraints remain the authority across services and restarts.
         self._proposal_locks: Dict[str, asyncio.Lock] = {}
+
+    @property
+    def admissible_price_sources(self) -> frozenset[str]:
+        return self._price_sources
 
     @property
     def execution_enabled(self) -> bool:
@@ -132,6 +148,8 @@ class ExecutionService:
         current_spread_pct: object = None,
         risk_db_connection: Any = None,
         deny_reason: Optional[str] = None,
+        price_source: Optional[str] = None,
+        price_divisor: object = None,
     ) -> ExecutionAdmission:
         """Run deterministic simulation/risk checks and persist immutable evidence."""
 
@@ -161,8 +179,14 @@ class ExecutionService:
                 raise ValueError("admission evidence timestamp must be timezone-aware")
             if (now - observed_at).total_seconds() > max_age_seconds or observed_at > now:
                 raise ValueError("admission evidence is stale")
-            if intent.side is not OrderSide.BUY:
+            bound = self._ledger.venue_binding is not None
+            if intent.side is not OrderSide.BUY and not bound:
+                # Paper ledgers deny every SELL. Only a practice ledger reserves held quantity.
                 raise ValueError("SELL admission requires a position reservation")
+            if bound and price_source not in self._price_sources:
+                # D-02: a bound venue admits only from a recorded-quote replay. A price
+                # from Yahoo, Position.currentPrice or anywhere else never admits.
+                raise ValueError("PRICE_SOURCE_NOT_ADMISSIBLE")
             selected_simulator = simulator or self._simulator
             selected_gate = risk_gate or self._risk_gate
             if self._require_runtime_preflight:
@@ -205,6 +229,17 @@ class ExecutionService:
             )
             risk_value = risk_evidence.get("admitted_quantity", risk_evidence.get("scaled_size"))
             risk_quantity = _finite_decimal(risk_value, "risk quantity")
+            if bound and intent.order_type is OrderType.LIMIT:
+                # A bound venue's notional is the LIMIT price in pounds: limit / divisor
+                # (100 for a GBX instrument, 1 for GBP). The admission price must EQUAL
+                # that figure. A missing price, a missing divisor or any other price
+                # (a simulator fill, a pence/pound mix-up) would reserve and cap-check
+                # a figure the broker is not bound by.
+                if price is None or price_divisor is None or intent.limit_price is None:
+                    raise ValueError("PRICE_NOT_PINNED_TO_LIMIT")
+                divisor = _finite_decimal(price_divisor, "price divisor")
+                if divisor <= 0 or _finite_decimal(price, "price") != intent.limit_price / divisor:
+                    raise ValueError("PRICE_NOT_PINNED_TO_LIMIT")
             price_decimal = _finite_decimal(
                 price if price is not None else simulator_fill, "price"
             )
@@ -212,6 +247,10 @@ class ExecutionService:
                 raise ValueError("admission quantities and price must be positive")
             if risk_quantity > intent.quantity:
                 raise ValueError("risk gate cannot increase quantity")
+            if bound and risk_quantity != intent.quantity:
+                # A real broker is sent the intent's quantity. A scaled-down admission
+                # would reserve less than the broker is asked to fill, so it is denied.
+                raise ValueError("RISK_SCALED_BELOW_REQUEST")
             if risk_evidence.get("allowed") is False:
                 raise ValueError("risk gate denied the intent")
             decision = AdmissionDecision.ADMITTED
@@ -262,15 +301,30 @@ class ExecutionService:
                 _sync_projection(proposal, order.state)
         return stored
 
-    def reserve(self, proposal_id: str):
+    def reserve(self, proposal_id: str, *, broker_available_quantity: object = None):
+        """Reserve buying power for a BUY, or held quantity for a practice SELL (D-19)."""
+
         if self._ledger is None:
             raise ExecutionDisabledError("durable execution reservation is unavailable")
+        admission = self._ledger.get_admission(proposal_id)
+        if (
+            admission is not None
+            and admission.side is OrderSide.SELL
+            and self._ledger.venue_binding is not None
+        ):
+            if broker_available_quantity is None:
+                # Fail closed: a SELL is never reserved without the broker's own number.
+                raise ExecutionConflictError("broker available quantity is required for a SELL")
+            return self._ledger.reserve_sell_quantity(
+                proposal_id, broker_available_quantity=broker_available_quantity
+            )
         return self._ledger.reserve_buying_power(proposal_id)
 
     def prepare(self, proposal: Proposal, **kwargs: Any) -> ExecutionAdmission:
+        broker_available = kwargs.pop("broker_available_quantity", None)
         admission = self.admit(proposal, **kwargs)
         if admission.decision is AdmissionDecision.ADMITTED:
-            self.reserve(admission.proposal_id)
+            self.reserve(admission.proposal_id, broker_available_quantity=broker_available)
         return admission
 
     def get_proposal(self, proposal_id: str) -> Optional[Dict[str, Any]]:
@@ -391,6 +445,10 @@ class ExecutionService:
             )
         if not self._require_approval or self._approval_service is None:
             raise ExecutionDisabledError("Signed approval service is unavailable")
+        if getattr(self._dispatcher, "execution_ready", True) is False:
+            # A broker venue that has not proven its account (D-13) takes no order,
+            # and no claim is made, so nothing is consumed.
+            raise ExecutionDisabledError("Execution is not ready: the broker account is not verified")
         self._ledger.require_workspace(workspace)
         durable = self.get_proposal(proposal_id)
         if durable is None:
@@ -421,6 +479,38 @@ class ExecutionService:
         if self._ledger is None:
             raise ExecutionDisabledError("durable reconciliation is unavailable")
         return self._ledger.reconcile(snapshot)
+
+    async def cancel_order(self, proposal_id: str) -> CancelResult:
+        """Request a cancel of one acknowledged order through the venue (D-22).
+
+        The ledger event is written first and commits before the one cancel
+        request. The request is never resent: a second call for the same order
+        is refused by the ledger. The returned outcome is "requested", never
+        "cancelled"; a reconcile settles the order.
+        """
+
+        if self._dispatcher is None or self._ledger is None:
+            raise ExecutionDisabledError("Broker execution is disabled")
+        cancel = getattr(self._dispatcher, "cancel", None)
+        if not callable(cancel):
+            raise ExecutionDisabledError("This venue cannot cancel orders")
+        if getattr(self._dispatcher, "execution_ready", True) is False:
+            raise ExecutionDisabledError("Execution is not ready: the broker account is not verified")
+        async with self._lock_for(proposal_id):
+            try:
+                broker_order_id = self._ledger.record_cancel_requested(proposal_id)
+            except (ApprovalConflict, InvalidTransition, OrderNotFound) as exc:
+                raise ExecutionConflictError(str(exc)) from exc
+            try:
+                result = await cancel(broker_order_id)
+            except Exception:
+                result = CancelResult("UNKNOWN", "CANCEL_ERROR")
+            self._ledger.record_audit_event(
+                proposal_id,
+                "CANCEL_RESPONSE",
+                {"outcome": result.outcome, "code": result.code},
+            )
+            return result
 
     def engage_workspace_control(
         self, reason_code: str = "MANUAL_KILL", *, workspace: Union[Workspace, str]
@@ -493,13 +583,17 @@ class ExecutionService:
 
         try:
             ack = await self._dispatcher.dispatch(intent)
-        except BrokerExecutionError:
-            self._ledger.mark_failed(intent.proposal_id, "BROKER_REJECTED")
+        except BrokerExecutionError as exc:
+            self._ledger.mark_failed(
+                intent.proposal_id, _reason_of(exc, "BROKER_REJECTED")
+            )
             if proposal is not None:
                 _sync_projection(proposal, OrderState.FAILED.value)
             raise
-        except BrokerOutcomeUnknownError:
-            self._ledger.mark_unknown(intent.proposal_id, "INCOMPLETE_ACK")
+        except BrokerOutcomeUnknownError as exc:
+            self._ledger.mark_unknown(
+                intent.proposal_id, _reason_of(exc, "INCOMPLETE_ACK")
+            )
             if proposal is not None:
                 _sync_projection(proposal, OrderState.UNKNOWN.value)
             raise
@@ -614,6 +708,16 @@ class ExecutionService:
             _sync_projection(mutable, OrderState.REJECTED.value)
             mutable["rejected_at"] = datetime.now().timestamp()
             mutable["rejection_notes"] = notes
+
+
+_REASON_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+
+def _reason_of(error: Exception, default: str) -> str:
+    """A dispatcher error's own short code when it has one, else ``default``."""
+
+    code = getattr(error, "reason_code", None)
+    return code if isinstance(code, str) and _REASON_RE.fullmatch(code) else default
 
 
 def _required_identity(proposal: Dict[str, Any], name: str) -> Any:

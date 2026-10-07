@@ -151,6 +151,13 @@ class WorkspaceExecution(BaseModel):
         default=None, repr=False
     )
     currency: Annotated[str, StringConstraints(pattern=r"^[A-Z]{3}$")] | None = None
+    # Phase 66 D-26: the UK practice slippage cap in basis points (proposed 25, the
+    # operator may change it). It is kept exactly as written (no validation here)
+    # because a missing, null, non-numeric, zero or negative value must make
+    # admission DENY every order, never block start-up and never mean "no cap".
+    # The reader is ``market_data.admission.parse_max_slippage_bps``. A paper
+    # venue ignores the field. JSON floats are already refused by the loader.
+    max_slippage_bps: Any = Field(default=None, repr=False)
 
     @model_validator(mode="after")
     def _venue_shape(self) -> "WorkspaceExecution":

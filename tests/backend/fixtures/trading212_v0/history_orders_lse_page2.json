@@ -1,0 +1,66 @@
+{
+  "_fixture": {
+    "spec": "Trading 212 public API v0, https://docs.trading212.com/_bundle/api.json?download",
+    "spec_sha256": "a272f70a\u2026c4fc041d",
+    "provenance": "Shape taken from 66-RESEARCH sections 2-5 and the 66-02 review notes (spec read 2026-10-06). Values are invented. No Trading 212 request was made to write this file, and the file was not byte-diffed against the spec (no network in 66-03).",
+    "endpoint": "GET /equity/history/orders"
+  },
+  "request": {
+    "method": "GET",
+    "path": "/api/v0/equity/history/orders?cursor=1791365501000&ticker=VODl_EQ&limit=1"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "x-ratelimit-limit": "20",
+      "x-ratelimit-period": "60",
+      "x-ratelimit-remaining": "18",
+      "x-ratelimit-used": "1",
+      "x-ratelimit-reset": "@NOW+60"
+    },
+    "body": {
+      "items": [
+        {
+          "order": {
+            "id": 4400120001,
+            "type": "LIMIT",
+            "strategy": "QUANTITY",
+            "side": "BUY",
+            "status": "FILLED",
+            "ticker": "VODl_EQ",
+            "instrument": {
+              "ticker": "VODl_EQ",
+              "name": "Vodafone",
+              "isin": "GB00BH4HKS39",
+              "currency": "GBX"
+            },
+            "currency": "GBX",
+            "quantity": 2.0,
+            "filledQuantity": 2.0,
+            "limitPrice": 50.0,
+            "timeInForce": "DAY",
+            "extendedHours": false,
+            "initiatedFrom": "API",
+            "createdAt": "2026-10-07T09:31:12.000+00:00"
+          },
+          "fill": {
+            "id": 770101,
+            "filledAt": "2026-10-07T09:31:20.000+00:00",
+            "price": 49.0,
+            "quantity": 1.0,
+            "type": "TRADE",
+            "tradingMethod": "TOTV",
+            "walletImpact": {
+              "currency": "GBP",
+              "netValue": 0.49,
+              "fxRate": 1.0,
+              "taxes": [],
+              "realisedProfitLoss": 0.0
+            }
+          }
+        }
+      ],
+      "nextPagePath": null
+    }
+  }
+}

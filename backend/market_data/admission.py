@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any, Callable
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from execution.models import OrderIntent
 
-from .models import IndiaInstrument, MarketSnapshot
+from .models import Instrument, MarketSnapshot
 from .session import MarketDataError, MarketDataSession
 
 
@@ -18,7 +20,7 @@ class RegimeEvidence(BaseModel):
 
     model_config = ConfigDict(str_strip_whitespace=True, frozen=True, extra="forbid")
 
-    instrument: IndiaInstrument
+    instrument: Instrument
     regime_id: int = Field(..., ge=0)
     observed_at: datetime
     model_version: str = Field(..., min_length=1, max_length=128)
@@ -56,7 +58,7 @@ def build_market_preflight_context(
     session: MarketDataSession,
     *,
     intent: OrderIntent,
-    instrument: IndiaInstrument,
+    instrument: Instrument,
     regime: RegimeEvidence,
     now: datetime | None = None,
     max_regime_age_seconds: float = 30.0,
@@ -91,3 +93,104 @@ def build_market_preflight_context(
         tick_window=session.tick_window(instrument, now=checked_now),
         evidence_at=min(snapshot.quote_observed_at, regime.observed_at),
     )
+
+
+# --- UK practice price rules (Phase 66, D-03, D-18, D-26) -------------------------
+#
+# Pure functions, no I/O. Prices in a GBX instrument are pence; money in the ledger
+# is pounds, so a notional is quantity x limit price / 100 for GBX.
+
+SLIPPAGE_LIMIT = "SLIPPAGE_LIMIT"
+SLIPPAGE_CAP_UNAVAILABLE = "SLIPPAGE_CAP_UNAVAILABLE"
+SLIPPAGE_QUOTE_UNAVAILABLE = "SLIPPAGE_QUOTE_UNAVAILABLE"
+
+_BPS = Decimal("10000")
+_DECIMAL_TEXT = re.compile(r"^(0|[1-9][0-9]*)(\.[0-9]+)?$")
+
+
+class RecordedQuoteReading(BaseModel):
+    """One bid and ask the operator typed from the practice app, with the time of reading.
+
+    A missing bid or ask is allowed here on purpose: admission then denies with a
+    stable reason instead of the request being a bare validation error.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    bid: Decimal | None = Field(default=None, allow_inf_nan=False, max_digits=20, decimal_places=8)
+    ask: Decimal | None = Field(default=None, allow_inf_nan=False, max_digits=20, decimal_places=8)
+    observed_at: datetime
+
+    @model_validator(mode="after")
+    def _aware(self) -> "RecordedQuoteReading":
+        if self.observed_at.tzinfo is None:
+            raise ValueError("a recorded reading needs a timezone-aware time")
+        return self
+
+
+def parse_max_slippage_bps(raw: object) -> Decimal | None:
+    """The configured cap in basis points, or None when it is not a usable positive number.
+
+    Accepts a JSON integer or a plain decimal string. Absent, null, a boolean, a
+    list, non-numeric text, zero and negative values all return None, and None
+    means DENY. It never means "no cap".
+    """
+
+    if isinstance(raw, bool) or raw is None:
+        return None
+    if isinstance(raw, int):
+        value = Decimal(raw)
+    elif isinstance(raw, str) and _DECIMAL_TEXT.fullmatch(raw.strip()):
+        value = Decimal(raw.strip())
+    else:
+        return None
+    return value if value.is_finite() and value > 0 else None
+
+
+def slippage_bps(
+    side: str, limit_price: Decimal, bid: Decimal | None, ask: Decimal | None
+) -> Decimal | None:
+    """Side-adjusted slippage against the recorded quote, in basis points.
+
+    BUY is measured against the recorded ask: (limit - ask) / ask x 10000. SELL
+    against the recorded bid: (bid - limit) / bid x 10000. A positive value means
+    the order is worse than the quote; a far limit is negative. None when the
+    side's reference price is missing.
+    """
+
+    reference = ask if side == "BUY" else bid
+    if reference is None or reference <= 0:
+        return None
+    gap = (limit_price - reference) if side == "BUY" else (reference - limit_price)
+    return gap / reference * _BPS
+
+
+def slippage_denial(
+    side: str,
+    limit_price: Decimal,
+    bid: Decimal | None,
+    ask: Decimal | None,
+    cap_bps: Decimal | None,
+) -> str | None:
+    """A stable denial code, or None when the order is inside the slippage cap.
+
+    A missing cap or a missing recorded price denies. Exactly at the cap passes;
+    anything above it is ``SLIPPAGE_LIMIT``. The comparison is cross-multiplied so
+    it is exact, with no division rounding at the boundary.
+    """
+
+    if cap_bps is None:
+        return SLIPPAGE_CAP_UNAVAILABLE
+    reference = ask if side == "BUY" else bid
+    if reference is None or reference <= 0:
+        return SLIPPAGE_QUOTE_UNAVAILABLE
+    gap = (limit_price - reference) if side == "BUY" else (reference - limit_price)
+    if gap * _BPS > cap_bps * reference:
+        return SLIPPAGE_LIMIT
+    return None
+
+
+def practice_notional(quantity: Decimal, limit_price: Decimal, price_divisor: Decimal) -> Decimal:
+    """Worst-case order value in pounds: quantity x limit price, pence divided by 100 (D-18)."""
+
+    return quantity * limit_price / price_divisor

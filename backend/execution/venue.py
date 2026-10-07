@@ -165,8 +165,45 @@ def execution_mode_label(authority: bool, binding: Optional[VenueBinding]) -> st
     return "paper" if binding is None else "practice"
 
 
+# Where an admission price may come from in a bound-venue ledger (Phase 66, D-02).
+# ``operator-recorded`` is a recorded-quote replay the operator typed. A Yahoo price
+# or a ``Position.currentPrice`` is in neither set. ``local-replay`` is the test
+# fixture replay: it is admissible ONLY where a test injects it explicitly (see
+# ``ExecutionService(allow_test_price_sources=True)``); production never does.
+PRICE_SOURCE_OPERATOR_RECORDED = "operator-recorded"
+PRICE_SOURCE_TEST_REPLAY = "local-replay"
+ADMISSIBLE_PRICE_SOURCES = frozenset({PRICE_SOURCE_OPERATOR_RECORDED})
+TEST_ONLY_PRICE_SOURCES = frozenset({PRICE_SOURCE_TEST_REPLAY})
+
+
+def admissible_price_sources(allow_test_sources: bool = False) -> frozenset[str]:
+    """The price sources a bound venue admits from; test sources only on explicit opt-in."""
+
+    if allow_test_sources:
+        return ADMISSIBLE_PRICE_SOURCES | TEST_ONLY_PRICE_SOURCES
+    return ADMISSIBLE_PRICE_SOURCES
+
+
+@dataclass(frozen=True)
+class CancelResult:
+    """What one cancel attempt did. ``REQUESTED`` means accepted, not cancelled (D-22)."""
+
+    outcome: str  # REQUESTED, REFUSED or UNKNOWN
+    code: str
+
+    @property
+    def requested(self) -> bool:
+        return self.outcome == "REQUESTED"
+
+
 class VenueDispatcher(Protocol):
     async def dispatch(self, intent: OrderIntent) -> OrderAck: ...
+
+
+class VenueCanceller(Protocol):
+    """Optional capability: a dispatcher that can request a cancel (63 reuses this shape)."""
+
+    async def cancel(self, broker_order_id: str) -> CancelResult: ...
 
 
 @dataclass(frozen=True)
@@ -197,10 +234,22 @@ def _paper_factory(_context: VenueContext) -> VenueDispatcher:
     return PaperDispatcher()
 
 
-def production_dispatcher_factories() -> dict[str, DispatcherFactory]:
-    """The production map. ``paper`` only: no code path here reaches a broker."""
+def _t212_practice_factory(context: VenueContext) -> VenueDispatcher:
+    """The practice adapter. It reaches the demo host only and needs the practice key pair."""
 
-    return {VENUE_PAPER: _paper_factory}
+    from brokers.trading212.practice_dispatcher import practice_factory
+
+    return practice_factory()(context)
+
+
+def production_dispatcher_factories() -> dict[str, DispatcherFactory]:
+    """The production map: ``paper`` and the practice (demo-only) adapter.
+
+    Nothing here can reach a live broker host: the practice adapter defines only
+    the demo base URL and refuses any other host before a request is sent.
+    """
+
+    return {VENUE_PAPER: _paper_factory, VENUE_T212_PRACTICE: _t212_practice_factory}
 
 
 def resolve_factory(
@@ -231,6 +280,13 @@ def select_dispatcher(
 
 
 __all__ = [
+    "ADMISSIBLE_PRICE_SOURCES",
+    "CancelResult",
+    "PRICE_SOURCE_OPERATOR_RECORDED",
+    "PRICE_SOURCE_TEST_REPLAY",
+    "TEST_ONLY_PRICE_SOURCES",
+    "admissible_price_sources",
+    "VenueCanceller",
     "ACCOUNT_BINDING_MISMATCH",
     "BROKER_VENUE_MISMATCH",
     "DispatcherFactory",

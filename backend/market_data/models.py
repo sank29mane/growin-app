@@ -32,13 +32,51 @@ class IndiaInstrument(BaseModel):
         return f"{self.venue}:{self.segment}:{self.symbol}"
 
 
+class UkInstrument(BaseModel):
+    """A UK practice instrument, identified by its Trading 212 ticker (Phase 66, D-20).
+
+    ``symbol`` is the ticker exactly as the broker lists it (for example
+    ``VODl_EQ``) and is also the execution ticker, so the intent sends what the
+    broker knows. ``currency`` is the instrument's own quote currency: GBX means
+    prices are in pence. It sits beside ``IndiaInstrument`` and changes nothing
+    about it.
+    """
+
+    model_config = ConfigDict(str_strip_whitespace=True, frozen=True, extra="forbid")
+
+    workspace: Literal["uk"] = "uk"
+    venue: Literal["T212"] = "T212"
+    segment: Literal["CASH"] = "CASH"
+    symbol: str = Field(..., min_length=1, max_length=32, pattern=r"^[A-Za-z0-9._-]+$")
+    currency: Literal["GBP", "GBX"]
+
+    @property
+    def key(self) -> str:
+        return f"{self.workspace}:{self.venue}:{self.segment}:{self.symbol}"
+
+    @property
+    def execution_ticker(self) -> str:
+        return self.symbol
+
+    @property
+    def price_divisor(self) -> Decimal:
+        """Quote units per pound: 100 for pence (GBX), 1 for pounds."""
+
+        return Decimal("100") if self.currency == "GBX" else Decimal("1")
+
+
+# India instruments validate first, so every existing India payload (which never
+# names a workspace) keeps resolving to the same type it always did.
+Instrument = IndiaInstrument | UkInstrument
+
+
 class MarketDataSubscription(BaseModel):
     """Explicit, capability-limited request passed to a provider."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    workspace: Literal["india"] = "india"
-    instruments: tuple[IndiaInstrument, ...] = Field(..., min_length=1)
+    workspace: Literal["india", "uk"] = "india"
+    instruments: tuple[Instrument, ...] = Field(..., min_length=1)
     channels: tuple[Literal["quote", "trade"], ...] = ("quote", "trade")
     read_only: Literal[True] = True
 
@@ -47,6 +85,8 @@ class MarketDataSubscription(BaseModel):
         keys = [instrument.key for instrument in self.instruments]
         if len(keys) != len(set(keys)):
             raise ValueError("subscription instruments must be unique")
+        if any(instrument.workspace != self.workspace for instrument in self.instruments):
+            raise ValueError("subscription instruments must belong to its workspace")
         if not self.channels or len(self.channels) != len(set(self.channels)):
             raise ValueError("subscription channels must be unique and non-empty")
         return self
@@ -55,7 +95,7 @@ class MarketDataSubscription(BaseModel):
 class _MarketEvent(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, frozen=True, extra="forbid")
 
-    instrument: IndiaInstrument
+    instrument: Instrument
     source: str = Field(..., min_length=1, max_length=64)
     observed_at: datetime
     received_at: datetime
@@ -114,7 +154,7 @@ class MarketSnapshot(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    instrument: IndiaInstrument
+    instrument: Instrument
     source: str
     bid: Decimal = Field(
         ..., gt=0, allow_inf_nan=False, max_digits=20, decimal_places=8

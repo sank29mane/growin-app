@@ -1,0 +1,23 @@
+{
+  "_fixture": {
+    "spec": "Trading 212 public API v0, https://docs.trading212.com/_bundle/api.json?download",
+    "spec_sha256": "a272f70a\u2026c4fc041d",
+    "provenance": "Shape taken from 66-RESEARCH sections 2-5 and the 66-02 review notes (spec read 2026-10-06). Values are invented. No Trading 212 request was made to write this file, and the file was not byte-diffed against the spec (no network in 66-03).",
+    "endpoint": "POST /equity/orders/limit"
+  },
+  "request": {
+    "method": "POST",
+    "path": "/api/v0/equity/orders/limit"
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "x-ratelimit-limit": "1",
+      "x-ratelimit-period": "2",
+      "x-ratelimit-remaining": "0",
+      "x-ratelimit-used": "1",
+      "x-ratelimit-reset": "@NOW+2"
+    },
+    "body_text": "Failed validation"
+  }
+}
