@@ -499,10 +499,12 @@ def test_the_requote_policy_has_no_default_ladder_so_an_unmapped_regime_denies()
         bid=Decimal("10.00"), ask=Decimal("10.50"), volatility=Decimal("0.02"), cost=Decimal("0"),
         tick_size=Decimal("0.01"), regime_id=3, observed_at=now, source="test",
     )
-    with pytest.raises(RequoteValidationError, match="regime"):
-        evaluate_requote(
-            side=OrderSide.BUY, evidence=evidence, policy=RequotePolicy(), venue=LocalPaperVenue(), now=now
-        )
+    for raw_id in range(4):  # the old ladder {0, 1, 2} treated raw ids as severities
+        with pytest.raises(RequoteValidationError, match="regime"):
+            evaluate_requote(
+                side=OrderSide.BUY, evidence=QuoteEvidence(**{**evidence.__dict__, "regime_id": raw_id}),
+                policy=RequotePolicy(), venue=LocalPaperVenue(), now=now,
+            )
     mapped = RequotePolicy.for_severity_map(shipped_map())
     assert evaluate_requote(
         side=OrderSide.BUY, evidence=evidence, policy=mapped, venue=LocalPaperVenue(), now=now
