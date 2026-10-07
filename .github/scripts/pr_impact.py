@@ -6,25 +6,31 @@
            metrics.json.
   report   Runs in the privileged workflow_run job, from the default branch.
            Treats both metrics files as untrusted data, validates their shape,
-           compares the PR against main, and renders the PR comment.
+           compares the PR against main, and renders the PR comment. With
+           --repo and --pr it also reads the PR's file list and merge state
+           from the GitHub API (data only, never PR code).
 
 Standard library only, so it runs under `python3 -I` on any runner.
 `report` is advisory and exits 0 even when budgets are exceeded or metrics
 fail validation. Configuration errors exit 2.
+
+Every GitHub API call goes through gh_api(), so tests can swap in a fake.
 """
 
 from __future__ import annotations
 
 import argparse
-import fnmatch
+import functools
 import json
 import math
 import re
 import sys
 import subprocess
+import time
 from datetime import datetime, timezone
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from urllib.parse import quote
 
 SCHEMA = 1
 MARKER = "<!-- growin-pr-impact -->"
@@ -233,6 +239,580 @@ def load_patterns(path: Path) -> list[str]:
 
 
 # --------------------------------------------------------------------------
+# safety-path matcher
+#
+# A port of safety-guard.sh's `[[ "$path" == $pattern ]]`. Inside [[ ]] bash
+# matches as if extglob were on, `*` and `?` also cross `/`, and a leading
+# `.` needs no special match. Supported: * ? [...] [!...] [^...] [:class:]
+# ranges, backslash escapes, and ?(..) *(..) +(..) @(..) !(..) with `|`.
+# The matcher tracks the set of reachable end positions, so it never
+# backtracks exponentially.
+# --------------------------------------------------------------------------
+
+MAX_MATCH_LEN = 1024
+_ASCII_PUNCT = set("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")
+_POSIX_CLASSES = {
+    "alnum": lambda c: c.isascii() and c.isalnum(),
+    "alpha": lambda c: c.isascii() and c.isalpha(),
+    "ascii": lambda c: ord(c) < 128,
+    "blank": lambda c: c in " \t",
+    "cntrl": lambda c: ord(c) < 32 or ord(c) == 127,
+    "digit": lambda c: c in "0123456789",
+    "graph": lambda c: 33 <= ord(c) <= 126,
+    "lower": lambda c: "a" <= c <= "z",
+    "print": lambda c: 32 <= ord(c) <= 126,
+    "punct": lambda c: c in _ASCII_PUNCT,
+    "space": lambda c: c in " \t\n\r\f\v",
+    "upper": lambda c: "A" <= c <= "Z",
+    "word": lambda c: c == "_" or (c.isascii() and c.isalnum()),
+    "xdigit": lambda c: c in "0123456789abcdefABCDEF",
+}
+
+
+def _parse_bracket(p: str, i: int) -> tuple[tuple | None, int]:
+    """Parse `[...]` at p[i]. Returns (None, i) when it is a literal `[`."""
+    j = i + 1
+    neg = j < len(p) and p[j] in "!^"
+    if neg:
+        j += 1
+    items: list[tuple] = []
+    first = True
+    while j < len(p):
+        c = p[j]
+        if c == "]" and not first:
+            return ("cls", neg, tuple(items)), j + 1
+        first = False
+        if c == "[" and p.startswith(":", j + 1):
+            end = p.find(":]", j + 2)
+            if end != -1:
+                items.append(("class", p[j + 2:end]))
+                j = end + 2
+                continue
+        if c == "\\" and j + 1 < len(p):
+            j += 1
+            c = p[j]
+        if j + 2 < len(p) and p[j + 1] == "-" and p[j + 2] != "]":
+            hi_at = j + 2
+            if p[hi_at] == "\\" and hi_at + 1 < len(p):
+                hi_at += 1
+            items.append(("range", c, p[hi_at]))
+            j = hi_at + 1
+            continue
+        items.append(("char", c))
+        j += 1
+    return None, i
+
+
+def _parse_ext(p: str, i: int) -> tuple[tuple | None, int]:
+    """Parse the pattern list after `op(`. Returns (None, i) if unterminated."""
+    alts = []
+    j = i
+    while True:
+        seq, j = _parse_seq(p, j, in_ext=True)
+        alts.append(seq)
+        if j >= len(p):
+            return None, i
+        if p[j] == ")":
+            return tuple(alts), j + 1
+        j += 1  # skip `|`
+
+
+def _parse_seq(p: str, i: int, in_ext: bool) -> tuple[tuple, int]:
+    nodes: list[tuple] = []
+    while i < len(p):
+        c = p[i]
+        if c == "\\" and i + 1 < len(p):
+            nodes.append(("lit", p[i + 1]))
+            i += 2
+            continue
+        if c == "[":
+            cls, j = _parse_bracket(p, i)
+            if cls is not None:
+                nodes.append(cls)
+                i = j
+                continue
+        if in_ext and c in "|)":
+            return tuple(nodes), i
+        if c in "?*+@!" and p.startswith("(", i + 1):
+            alts, j = _parse_ext(p, i + 2)
+            if alts is not None:
+                nodes.append(("ext", c, alts))
+                i = j
+                continue
+        if c == "*":
+            if not nodes or nodes[-1] != ("star",):
+                nodes.append(("star",))
+        elif c == "?":
+            nodes.append(("any",))
+        else:
+            nodes.append(("lit", c))
+        i += 1
+    return tuple(nodes), i
+
+
+@functools.lru_cache(maxsize=512)
+def _compile_glob(pattern: str) -> tuple:
+    return _parse_seq(pattern, 0, in_ext=False)[0]
+
+
+def _class_hit(node: tuple, ch: str) -> bool:
+    hit = False
+    for item in node[2]:
+        kind = item[0]
+        if kind == "char":
+            hit = ch == item[1]
+        elif kind == "range":
+            hit = item[1] <= ch <= item[2]
+        else:
+            test = _POSIX_CLASSES.get(item[1])
+            hit = bool(test and test(ch))
+        if hit:
+            break
+    return hit != node[1]
+
+
+def _seq_ends(seq: tuple, s: str, start: int) -> set[int]:
+    cur = {start}
+    for node in seq:
+        nxt: set[int] = set()
+        for pos in cur:
+            nxt |= _node_ends(node, s, pos)
+        if not nxt:
+            return nxt
+        cur = nxt
+    return cur
+
+
+def _node_ends(node: tuple, s: str, pos: int) -> set[int]:
+    n = len(s)
+    kind = node[0]
+    if kind == "lit":
+        return {pos + 1} if pos < n and s[pos] == node[1] else set()
+    if kind == "any":
+        return {pos + 1} if pos < n else set()
+    if kind == "star":
+        return set(range(pos, n + 1))
+    if kind == "cls":
+        return {pos + 1} if pos < n and _class_hit(node, s[pos]) else set()
+
+    op, alts = node[1], node[2]
+
+    def once(at: int) -> set[int]:
+        out: set[int] = set()
+        for alt in alts:
+            out |= _seq_ends(alt, s, at)
+        return out
+
+    def closure(seed: set[int]) -> set[int]:
+        seen = set(seed)
+        frontier = set(seed)
+        while frontier:
+            fresh: set[int] = set()
+            for at in frontier:
+                fresh |= once(at)
+            frontier = fresh - seen
+            seen |= frontier
+        return seen
+
+    if op == "@":
+        return once(pos)
+    if op == "?":
+        return once(pos) | {pos}
+    if op == "*":
+        return closure({pos})
+    if op == "+":
+        return closure(once(pos))
+    hits = once(pos)  # "!": any span that no alternative matches in full
+    return {end for end in range(pos, n + 1) if end not in hits}
+
+
+class GlobUnevaluable(ValueError):
+    """The matcher cannot decide this path or pattern (too long or too deep)."""
+
+
+def glob_match(path: str, pattern: str) -> bool:
+    """True when bash `[[ $path == $pattern ]]` would be true.
+
+    Raises GlobUnevaluable instead of guessing when the input is too large.
+    """
+    if len(path) > MAX_MATCH_LEN or len(pattern) > MAX_MATCH_LEN:
+        raise GlobUnevaluable("path or pattern is too long to match")
+    try:
+        return len(path) in _seq_ends(_compile_glob(pattern), path, 0)
+    except (RecursionError, MemoryError):
+        raise GlobUnevaluable("pattern is too deep to match") from None
+
+
+def glob_checkable(path: str | None) -> bool:
+    return not path or len(path) <= MAX_MATCH_LEN
+
+
+def matches_safety(path: str | None, patterns: list[str]) -> bool:
+    """safety-guard.sh `matches`: an empty path never matches.
+
+    Fails closed: a path the matcher cannot evaluate counts as a safety path,
+    because bash would still have checked it.
+    """
+    if not path:
+        return False
+    for pattern in patterns:
+        try:
+            if glob_match(path, pattern):
+                return True
+        except GlobUnevaluable:
+            return True
+    return False
+
+
+def is_test_path(path: str | None) -> bool:
+    """safety-guard.sh `is_test`."""
+    return bool(path) and path.startswith(("tests/", "GrowinTests/", "GrowinUITests/"))
+
+
+# --------------------------------------------------------------------------
+# change footprint and merge readiness (GitHub API data, never PR code)
+# --------------------------------------------------------------------------
+
+AREAS = (
+    ("backend/", "Backend app"),
+    ("tests/", "Backend tests"),
+    ("GrowinTests/", "Swift tests"),
+    ("GrowinUITests/", "Swift tests"),
+    ("Growin/", "Swift app"),
+    ("Growin.xcodeproj/", "Swift app"),
+    (".github/", "CI"),
+    ("gateway/", "Gateway"),
+)
+AREA_ORDER = ("Backend app", "Backend tests", "Swift app", "Swift tests",
+              "CI", "Gateway", "Docs and other")
+MAX_PR_FILES = 3000          # the PR files API stops here
+MAX_LISTED_SAFETY = 40
+REVIEW_LABEL = "safety-reviewed"
+DISPLAY_PATH_RE = re.compile(r"^[A-Za-z0-9_./ +@(),=~-]{1,240}$")
+REF_RE = re.compile(r"^[A-Za-z0-9._/-]{1,200}$")
+REPO_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
+LABEL_NOTE = ("<sub>Label status here refreshes on the next CI run. The Operator dashboard "
+              "issue tracks label changes live.</sub>")
+FILE_STATUSES = {"added", "removed", "modified", "renamed", "copied", "changed", "unchanged"}
+MERGE_STATES = {
+    "clean": "clean",
+    "dirty": "conflicts",
+    "blocked": "blocked until required checks and label pass",
+    "behind": "behind base",
+    "unstable": "non-required checks failing",
+    "has_hooks": "clean (hooks pending)",
+    "draft": "draft",
+}
+# States the headline may stay green with. `unstable` only means a
+# non-required (advisory) check failed.
+HEADLINE_OK_STATES = {"clean", "has_hooks", "unstable"}
+HEADLINE_STATE_WORDS = {
+    "blocked": "blocked by required checks or label",
+    "behind": "behind base",
+    "dirty": "has conflicts",
+    "draft": "waits on draft status",
+    "unknown": "state unknown",
+}
+
+
+def gh_api(path: str, method: str = "GET", payload: dict | None = None) -> object:
+    """The only place this script and pr_dashboard.py talk to GitHub."""
+    cmd = ["gh", "api", "-X", method, "-H", "Accept: application/vnd.github+json", path]
+    if payload is not None:
+        cmd += ["--input", "-"]
+    result = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=60,
+                            input=json.dumps(payload) if payload is not None else None)
+    return json.loads(result.stdout) if result.stdout.strip() else None
+
+
+def api_pages(api, path: str, limit: int) -> list:
+    """Follow ?page=N until a short page or `limit` items."""
+    sep = "&" if "?" in path else "?"
+    items: list = []
+    page = 1
+    while len(items) < limit:
+        chunk = api(f"{path}{sep}per_page=100&page={page}")
+        if not isinstance(chunk, list):
+            raise ValueError("expected a list from the GitHub API")
+        items += chunk
+        if len(chunk) < 100:
+            break
+        page += 1
+    return items[:limit]
+
+
+def display_path(path: str) -> str:
+    """Render an attacker-controlled file name safely inside a code span."""
+    return f"`{path}`" if DISPLAY_PATH_RE.match(path) and "`" not in path else "(unprintable path)"
+
+
+def display_ref(ref: str) -> str:
+    return f"`{ref}`" if REF_RE.match(ref) else "(unusual branch name)"
+
+
+def area_of(path: str) -> str:
+    for prefix, name in AREAS:
+        if path.startswith(prefix):
+            return name
+    return "Docs and other"
+
+
+def _int(v: object) -> int:
+    return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else 0
+
+
+def footprint(files: list, patterns: list[str]) -> dict:
+    """Group PR files by area and list what Safety Guard would flag."""
+    areas: dict[str, list[int]] = {}
+    safety: list[dict] = []
+    for f in files:
+        if not isinstance(f, dict) or not isinstance(f.get("filename"), str):
+            continue
+        path = f["filename"]
+        prev = f.get("previous_filename") if isinstance(f.get("previous_filename"), str) else ""
+        status = f.get("status") if isinstance(f.get("status"), str) else "modified"
+        row = areas.setdefault(area_of(path), [0, 0, 0])
+        row[0] += 1
+        row[1] += _int(f.get("additions"))
+        row[2] += _int(f.get("deletions"))
+        if matches_safety(path, patterns) or matches_safety(prev, patterns):
+            kind = "path" if glob_checkable(path) and glob_checkable(prev) else "unchecked"
+            safety.append({"kind": kind, "path": path, "previous": prev, "status": status})
+        if status == "removed" and is_test_path(path):
+            safety.append({"kind": "deleted test", "path": path, "previous": "", "status": status})
+        if status == "renamed" and is_test_path(prev) and not is_test_path(path):
+            safety.append({"kind": "test moved out", "path": path, "previous": prev, "status": status})
+    ordered = {name: areas[name] for name in AREA_ORDER if name in areas}
+    return {"areas": ordered, "safety": safety}
+
+
+def find_parent(base_ref: str, repo: str, open_prs: list) -> int | None:
+    """The open PR whose head branch (in this repo) is `base_ref`."""
+    for pr in open_prs:
+        try:
+            head = pr["head"]
+            if head["ref"] == base_ref and head["repo"]["full_name"] == repo:
+                number = pr["number"]
+                if isinstance(number, int) and not isinstance(number, bool):
+                    return number
+        except (KeyError, TypeError):
+            continue
+    return None
+
+
+def build_context(pull: dict, files: list, parent: int | None, patterns: list[str]) -> dict:
+    labels = [lb.get("name") for lb in pull.get("labels") or [] if isinstance(lb, dict)]
+    fp = footprint(files, patterns)
+    mergeable = pull.get("mergeable")
+    return {
+        "draft": pull.get("draft") is True,
+        "base_ref": str(pull["base"]["ref"]),
+        "default_branch": str(pull["base"]["repo"].get("default_branch") or "main"),
+        "parent": parent,
+        "mergeable": mergeable if isinstance(mergeable, bool) else None,
+        "mergeable_state": str(pull.get("mergeable_state") or "unknown"),
+        "labeled": REVIEW_LABEL in labels,
+        "footprint": fp,
+        "safety_required": bool(fp["safety"]),
+        "files_truncated": len(files) >= MAX_PR_FILES,
+    }
+
+
+def fetch_pull(api, repo: str, pr: int, sleep=time.sleep) -> dict:
+    """GET one PR. GitHub computes `mergeable` lazily, so ask once more."""
+    pull = api(f"repos/{repo}/pulls/{int(pr)}")
+    if pull.get("mergeable") is None and pull.get("state") == "open":
+        sleep(3)
+        pull = api(f"repos/{repo}/pulls/{int(pr)}")
+    return pull
+
+
+def fetch_pr_context(repo: str, pr: int, patterns: list[str], api=None,
+                     sleep=time.sleep) -> dict:
+    api = api or gh_api
+    if not REPO_RE.match(repo):
+        raise ValueError("repo is not owner/name")
+    pull = fetch_pull(api, repo, pr, sleep)
+    files = api_pages(api, f"repos/{repo}/pulls/{int(pr)}/files", MAX_PR_FILES)
+    base_ref = pull["base"]["ref"]
+    parent = None
+    if base_ref != (pull["base"]["repo"].get("default_branch") or "main"):
+        owner = repo.split("/")[0]
+        heads = api(f"repos/{repo}/pulls?state=open&head={quote(owner + ':' + base_ref, safe='')}&per_page=100")
+        parent = find_parent(base_ref, repo, heads if isinstance(heads, list) else [])
+    return build_context(pull, files, parent, patterns)
+
+
+def readiness_line(ctx: dict) -> str:
+    parts = ["Draft" if ctx["draft"] else "Ready for review"]
+    base = f"base {display_ref(ctx['base_ref'])}"
+    if ctx["base_ref"] != ctx["default_branch"]:
+        base += f" (stacked on #{ctx['parent']})" if ctx["parent"] else " (no open parent PR found)"
+    parts.append(base)
+    if ctx["mergeable"] is False:
+        parts.append("mergeable: no, conflicts")
+    elif ctx["mergeable"] is None:
+        parts.append("mergeable: still computing")
+    else:
+        parts.append(f"mergeable: {MERGE_STATES.get(ctx['mergeable_state'], 'yes')}")
+    if not ctx["safety_required"]:
+        label = "not required" + (" (present)" if ctx["labeled"] else "")
+    else:
+        label = "required, present" if ctx["labeled"] else "required, missing"
+    parts.append(f"`{REVIEW_LABEL}`: {label}")
+    return "**Merge readiness:** " + " · ".join(parts)
+
+
+def render_footprint(ctx: dict | None) -> str:
+    if ctx is None:
+        return "### Change footprint\n\nUnavailable: the GitHub API lookup failed.\n"
+    fp = ctx["footprint"]
+    out = ["### Change footprint", ""]
+    if not fp["areas"]:
+        out += ["No changed files reported.", ""]
+    else:
+        out += ["| Area | Files | Added | Removed |", "| :-- | --: | --: | --: |"]
+        tot = [0, 0, 0]
+        for name, (n, add, rm) in fp["areas"].items():
+            out.append(f"| {name} | {n:,} | +{add:,} | -{rm:,} |")
+            tot = [tot[0] + n, tot[1] + add, tot[2] + rm]
+        out += [f"| **Total** | **{tot[0]:,}** | **+{tot[1]:,}** | **-{tot[2]:,}** |", ""]
+    if ctx["files_truncated"]:
+        out += [f"The file list stops at {MAX_PR_FILES:,} files, so totals are a floor.", ""]
+    hits = fp["safety"]
+    if not hits:
+        out += ["No safety paths touched.", ""]
+        return "\n".join(out)
+    state = "present" if ctx["labeled"] else "missing"
+    out += [f"**Safety paths ({len(hits)}).** These need the `{REVIEW_LABEL}` label "
+            f"from a human before Safety Guard passes. Label: {state}.", ""]
+    for hit in hits[:MAX_LISTED_SAFETY]:
+        path = display_path(hit["path"])
+        if hit["kind"] == "path":
+            if hit["previous"]:
+                note = f"renamed from {display_path(hit['previous'])}"
+            else:
+                note = hit["status"] if hit["status"] in FILE_STATUSES else "changed"
+            out.append(f"- {path} ({note})")
+        elif hit["kind"] == "unchecked":
+            out.append(f"- {path} (too long to check, so treated as a safety path)")
+        elif hit["kind"] == "deleted test":
+            out.append(f"- {path} (deleted test)")
+        else:
+            out.append(f"- {path} (test moved out of {display_path(hit['previous'])})")
+    if len(hits) > MAX_LISTED_SAFETY:
+        out.append(f"- and {len(hits) - MAX_LISTED_SAFETY} more")
+    out.append("")
+    return "\n".join(out)
+
+
+# --------------------------------------------------------------------------
+# headline verdict and one-line summary
+# --------------------------------------------------------------------------
+
+CI_RED = {
+    "failure": "CI failed",
+    "cancelled": "CI cancelled",
+    "timed_out": "CI timed out",
+    "startup_failure": "CI failed to start",
+    "action_required": "CI is waiting for approval",
+    "stale": "CI result is stale",
+}
+
+
+def _position(ctx: dict | None) -> str:
+    """' · Draft · stacked on #N' for the end of the headline."""
+    if ctx is None:
+        return ""
+    parts = ["Draft"] if ctx["draft"] else []
+    if ctx["base_ref"] != ctx["default_branch"]:
+        parts.append(f"stacked on #{ctx['parent']}" if ctx["parent"] else "stacked, no open parent PR")
+    return "".join(f" · {p}" for p in parts)
+
+
+def headline(ci: str, hv: dict[str, float], rows: list[dict], states: list[str],
+             ctx: dict | None = None, notice: str | None = None,
+             has_base: bool = True, ctx_missing: bool = False) -> str:
+    """One line: 🟢 Healthy, 🟡 Healthy, needs attention: ..., or 🔴 ...
+
+    Red: CI did not succeed, or tests failed.
+    Yellow: anything a reviewer should look at before merging (budgets over,
+    metrics missing, conflicts, a missing safety label, or merge state that
+    could not be read).
+    Green: none of the above. Never green without test metrics, and never
+    green when the PR lookup was asked for and failed.
+    Draft and stacked status are appended either way.
+    """
+    return _verdict(ci, hv, rows, states, ctx, notice, has_base, ctx_missing) + _position(ctx)
+
+
+def _verdict(ci, hv, rows, states, ctx, notice, has_base, ctx_missing) -> str:
+    red: list[str] = []
+    if ci in CI_RED:
+        red.append(CI_RED[ci])
+    failed = int(hv.get("tests.failed", 0))
+    if failed:
+        red.append(f"{failed:,} failing test{'s' if failed != 1 else ''}")
+    if red:
+        return "🔴 " + "; ".join(red)
+    attention: list[str] = []
+    if ci != "success":
+        attention.append(f"CI {ci}" if ci in CI_CONCLUSIONS else "CI result unknown")
+    if notice:
+        attention.append(notice)
+    elif "tests.total" not in hv:
+        attention.append("test metrics missing")
+    elif "cov.total_pct" not in hv:
+        attention.append("coverage missing")
+    over = [r["label"] for r, s in zip(rows, states) if s == "warn" and r["id"] != "tests.failed"]
+    if over:
+        attention.append(f"over budget: {', '.join(over)}")
+    if ctx_missing:
+        attention.append("merge state unavailable")
+    if ctx is not None:
+        if ctx["mergeable"] is False:
+            attention.append("merge conflicts")
+        elif ctx["mergeable"] is None:
+            attention.append("mergeability still computing")
+        elif ctx["mergeable_state"] not in HEADLINE_OK_STATES:
+            attention.append(f"merge {HEADLINE_STATE_WORDS.get(ctx['mergeable_state'], 'state unknown')}")
+        if ctx["safety_required"] and not ctx["labeled"]:
+            attention.append(f"needs `{REVIEW_LABEL}` label")
+    if attention:
+        return "🟡 Healthy, needs attention: " + "; ".join(attention)
+    return "🟢 Healthy" if has_base else "🟢 Healthy (no main baseline to compare)"
+
+
+def summary_line(hv: dict[str, float], bv: dict[str, float] | None) -> str:
+    bv = bv or {}
+
+    def part(label: str, key: str, unit: str, pct_delta: bool = False,
+             no_delta: bool = False) -> str:
+        h = hv.get(key)
+        if h is None:
+            return f"{label} n/a"
+        text = f"{label} {fmt_value(unit, h)}"
+        b = bv.get(key)
+        if b is not None and not no_delta:
+            d = h - b
+            if pct_delta:
+                text += f" ({d / b * 100:+.1f}%)" if b > 0 else ""
+            elif unit == "percent":
+                text += f" ({d:+.2f} pp)"
+            else:
+                text += f" ({int(d):+,})"
+        return text
+
+    return " · ".join([
+        part("Tests", "tests.total", "count"),
+        part("Failed", "tests.failed", "count", no_delta=True),
+        part("Coverage", "cov.total_pct", "percent"),
+        part("Safety-path coverage", "cov.safety_pct", "percent"),
+        part("Suite time", "tests.duration_s", "seconds", pct_delta=True),
+    ])
+
+
+# --------------------------------------------------------------------------
 # compare
 # --------------------------------------------------------------------------
 
@@ -257,8 +837,7 @@ def derive(m: dict, patterns: list[str]) -> dict[str, float]:
         if overall is not None:
             vals["cov.total_pct"] = overall
         # Same glob semantics as safety-guard.sh: `*` also crosses `/`.
-        safe = {p: v for p, v in files.items()
-                if any(fnmatch.fnmatchcase(p, pat) for pat in patterns)}
+        safe = {p: v for p, v in files.items() if matches_safety(p, patterns)}
         safety = _pct(safe)
         if safety is not None:
             vals["cov.safety_pct"] = safety
@@ -372,12 +951,24 @@ def _footer(head_sha: str | None, base_sha: str | None, ci: str,
     return f"Baseline: {base} · PR result: {head} · Source CI: {conclusion}"
 
 
-def render_notice(reason: str, head_sha: str | None, ci: str) -> str:
-    return (
-        f"{MARKER}\n## PR impact (advisory)\n\n"
-        f"Metrics not evaluated for this commit. {reason}\n\n"
-        f"{_footer(head_sha, None, ci)}\n"
-    )
+def _pr_sections(ctx: dict | None, want_ctx: bool) -> tuple[list[str], list[str]]:
+    """(readiness lines for the top, footprint lines for below the table)."""
+    if not want_ctx:
+        return [], []
+    top = [readiness_line(ctx), "", LABEL_NOTE, ""] if ctx else []
+    return top, [render_footprint(ctx)]
+
+
+def render_notice(reason: str, head_sha: str | None, ci: str,
+                  ctx: dict | None = None, want_ctx: bool = False) -> str:
+    top, bottom = _pr_sections(ctx, want_ctx)
+    out = [MARKER, "## PR impact (advisory)", "",
+           f"**{headline(ci, {}, [], [], ctx, notice='metrics not evaluated', ctx_missing=want_ctx and ctx is None)}**", ""]
+    out += top
+    out += [f"Metrics not evaluated for this commit. {reason}", ""]
+    out += bottom
+    out += [_footer(head_sha, None, ci), ""]
+    return "\n".join(out)
 
 
 def _details(head: dict, base: dict | None) -> str:
@@ -432,13 +1023,20 @@ def render_report(
     ci: str,
     approximate: bool = False,
     created_at: str | None = None,
+    ctx: dict | None = None,
+    want_ctx: bool = False,
 ) -> tuple[str, int]:
     hv = derive(head, patterns)
     bv = derive(base, patterns) if base else None
     states = [evaluate(r, hv, bv) for r in rows]
     warns, missing = states.count("warn"), states.count("na")
     verdict = f"Advisory only. {warns} budget(s) exceeded; {missing} metric(s) not evaluated."
-    out = [MARKER, "## PR impact (advisory)", "", verdict, ""]
+    top, bottom = _pr_sections(ctx, want_ctx)
+    out = [MARKER, "## PR impact (advisory)", "",
+           f"**{headline(ci, hv, rows, states, ctx, has_base=bv is not None, ctx_missing=want_ctx and ctx is None)}**", "",
+           summary_line(hv, bv), ""]
+    out += top
+    out += [verdict, ""]
     out += ["| Area | Metric | Main baseline | This PR | Impact | Budget | |",
             "| :-- | :-- | --: | --: | --: | :-- | :-: |"]
     for row, state in zip(rows, states):
@@ -453,6 +1051,7 @@ def render_report(
         out += ["No main baseline yet, so budgets that compare against main were skipped.", ""]
     if "na" in states:
         out += ["➖ not evaluated means a metric or usable baseline is missing.", ""]
+    out += bottom
     out += [_footer(head_sha, base_sha if bv else None, ci, approximate, created_at), ""]
     details = _details(head, base)
     if details:
@@ -470,16 +1069,25 @@ def cmd_report(args: argparse.Namespace) -> int:
         print(f"::error::{e}")
         return 2
 
+    want_ctx = bool(args.repo and args.pr)
+    ctx = None
+    if want_ctx:
+        try:
+            ctx = fetch_pr_context(args.repo, args.pr, patterns)
+        except (subprocess.SubprocessError, OSError, ValueError, KeyError, TypeError, AttributeError):
+            print("::warning::PR file list or merge state lookup failed. Footprint omitted.")
+
     if not args.head or not Path(args.head).is_file():
         out_path.write_text(render_notice(
             "CI finished without producing metrics, usually because it stopped before the tests ran.",
-            args.head_sha, ci))
+            args.head_sha, ci, ctx, want_ctx))
         return 0
     try:
         head = load_metrics(Path(args.head))
     except MetricsError as e:
         print(f"::error::PR metrics failed validation: {e}")
-        out_path.write_text(render_notice("The metrics artifact failed validation.", args.head_sha, ci))
+        out_path.write_text(render_notice("The metrics artifact failed validation.", args.head_sha, ci,
+                                         ctx, want_ctx))
         return 0
 
     base = None
@@ -489,7 +1097,8 @@ def cmd_report(args: argparse.Namespace) -> int:
         except MetricsError as e:
             print(f"::warning::Ignoring main baseline: {e}")
 
-    body, code = render_report(rows, head, base, patterns, args.head_sha, args.base_sha, ci, args.approximate_baseline, args.base_created_at)
+    body, code = render_report(rows, head, base, patterns, args.head_sha, args.base_sha, ci,
+                               args.approximate_baseline, args.base_created_at, ctx, want_ctx)
     out_path.write_text(body)
     print(body)
     return code
@@ -568,6 +1177,8 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--base-created-at")
     r.add_argument("--approximate-baseline", action="store_true")
     r.add_argument("--ci-conclusion", default="unknown")
+    r.add_argument("--repo", help="owner/name; with --pr adds footprint and merge readiness")
+    r.add_argument("--pr", type=int)
     r.add_argument("--out", required=True)
     r.set_defaults(fn=cmd_report)
 
