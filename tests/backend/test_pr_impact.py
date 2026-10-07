@@ -761,6 +761,51 @@ def test_headline_carries_draft_and_stack_position():
     assert pri.headline("success", hv, ROWS, states, ctx_for(**ok)) == "🟢 Healthy"
 
 
+@pytest.mark.parametrize("mergeable,state,reason", [
+    (None, "unknown", "mergeability still computing"),
+    (True, "blocked", "merge blocked by required checks or label"),
+    (True, "behind", "merge behind base"),
+    (True, "dirty", "merge has conflicts"),
+    (True, "draft", "merge waits on draft status"),
+    (True, "odd<b>", "merge state unknown"),
+])
+def test_headline_not_green_unless_github_says_mergeable(mergeable, state, reason):
+    # Round 2: mergeable=None or a blocking state must not read as healthy.
+    hv = vals()
+    ctx = ctx_for(files=FILES[:1], mergeable=mergeable, state=state)
+    assert pri.headline("success", hv, ROWS, states_for(hv, hv), ctx) == \
+        f"🟡 Healthy, needs attention: {reason}"
+
+
+@pytest.mark.parametrize("state", ["clean", "has_hooks", "unstable"])
+def test_headline_green_states(state):
+    hv = vals()
+    ctx = ctx_for(files=FILES[:1], state=state)
+    assert pri.headline("success", hv, ROWS, states_for(hv, hv), ctx) == "🟢 Healthy"
+
+
+def test_notice_with_failed_lookup_says_merge_state_unavailable(tmp_path, monkeypatch):
+    # Round 2: no metrics AND a failed PR lookup. The flag must reach render_notice.
+    monkeypatch.setattr(pri, "gh_api", fake_api([]))
+    assert pri.main(report_args(tmp_path, tmp_path / "missing.json")) == 0
+    body = (tmp_path / "c.md").read_text()
+    assert body.splitlines()[3] == \
+        "**🟡 Healthy, needs attention: metrics not evaluated; merge state unavailable**"
+    assert "### Change footprint\n\nUnavailable" in body
+
+
+def test_too_deep_pattern_fails_closed():
+    # Round 2: a pattern nested deeper than Python's recursion limit, but
+    # under the length cap, cannot be evaluated, so the path counts as safety.
+    depth = 340
+    pattern = "@(" * depth + "a" + ")" * depth
+    assert len(pattern) <= pri.MAX_MATCH_LEN
+    with pytest.raises(pri.GlobUnevaluable):
+        pri.glob_match("a", pattern)
+    assert pri.matches_safety("docs/readme.md", [pattern]) is True
+    assert pri.matches_safety("docs/readme.md", ["backend/*", pattern]) is True
+
+
 @pytest.mark.parametrize("ci", ["skipped", "neutral", "cancelled"])
 def test_headline_never_green_unless_ci_succeeded(ci):
     hv = vals()

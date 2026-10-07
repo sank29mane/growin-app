@@ -503,6 +503,16 @@ MERGE_STATES = {
     "has_hooks": "clean (hooks pending)",
     "draft": "draft",
 }
+# States the headline may stay green with. `unstable` only means a
+# non-required (advisory) check failed.
+HEADLINE_OK_STATES = {"clean", "has_hooks", "unstable"}
+HEADLINE_STATE_WORDS = {
+    "blocked": "blocked by required checks or label",
+    "behind": "behind base",
+    "dirty": "has conflicts",
+    "draft": "waits on draft status",
+    "unknown": "state unknown",
+}
 
 
 def gh_api(path: str, method: str = "GET", payload: dict | None = None) -> object:
@@ -762,6 +772,10 @@ def _verdict(ci, hv, rows, states, ctx, notice, has_base, ctx_missing) -> str:
     if ctx is not None:
         if ctx["mergeable"] is False:
             attention.append("merge conflicts")
+        elif ctx["mergeable"] is None:
+            attention.append("mergeability still computing")
+        elif ctx["mergeable_state"] not in HEADLINE_OK_STATES:
+            attention.append(f"merge {HEADLINE_STATE_WORDS.get(ctx['mergeable_state'], 'state unknown')}")
         if ctx["safety_required"] and not ctx["labeled"]:
             attention.append(f"needs `{REVIEW_LABEL}` label")
     if attention:

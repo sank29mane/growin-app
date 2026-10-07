@@ -312,6 +312,10 @@ def next_action(pr: dict, parent: int | None) -> tuple[str, str]:
         return "unresolved", "Safety Guard unresolved: re-run"
     if pr["mergeable"] is None:
         return "wait", "Waiting on GitHub mergeability check"
+    if pr["mergeable_state"] == "unstable":
+        # A non-required check failed. Required ones are handled above, but
+        # this is still not green.
+        return "advisory", "Advisory checks failing"
     if pr["mergeable_state"] not in MERGE_READY:
         return "blocked", f"Blocked ({_state_word(pr)})"
     return "merge", "Merge"
@@ -401,6 +405,8 @@ def _label_cell(pr: dict) -> str:
 def _merge_cell(pr: dict) -> str:
     if pr["mergeable"] is False or pr["mergeable_state"] == "dirty":
         return "❌ conflicts"
+    if pr["mergeable"] and pr["mergeable_state"] == "unstable":
+        return "⚠️ advisory checks failing"
     if pr["mergeable"] and pr["mergeable_state"] not in MERGE_READY:
         return f"⚠️ {_state_word(pr)}"
     if pr["mergeable"] is None:
@@ -427,7 +433,8 @@ def render(rows: list[tuple[dict, int, int | None]], merged: list[dict], notes: 
         tally = [f"{len(rows)} open"]
         for key, word in (("merge", "ready to merge"), ("label", "need the safety label"),
                           ("ci", "CI failing"), ("conflicts", "with conflicts"),
-                          ("blocked", "blocked"), ("unresolved", "with unresolved checks"),
+                          ("blocked", "blocked"), ("advisory", "with advisory checks failing"),
+                          ("unresolved", "with unresolved checks"),
                           ("unknown", "with unknown safety status"),
                           ("stacked", "waiting on a base PR"), ("draft", "draft")):
             if counts.get(key):

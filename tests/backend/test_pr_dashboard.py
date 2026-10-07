@@ -103,7 +103,8 @@ def test_order_stacks_ignores_fork_branches_with_the_same_name_and_survives_cycl
     ({"state": "has_hooks"}, None, ("merge", "Merge")),
     ({"state": "blocked"}, None, ("blocked", "Blocked (blocked)")),
     ({"state": "behind"}, None, ("blocked", "Blocked (behind)")),
-    ({"state": "unstable"}, None, ("blocked", "Blocked (unstable)")),
+    # Round 2: unstable means an advisory check failed. Say so; still not Merge.
+    ({"state": "unstable"}, None, ("advisory", "Advisory checks failing")),
     ({"state": "unknown"}, None, ("blocked", "Blocked (unknown)")),
     ({"state": "draft"}, None, ("blocked", "Blocked (draft)")),
     ({"state": "weird<b>"}, None, ("blocked", "Blocked (unknown)")),
@@ -134,6 +135,7 @@ def test_only_success_is_a_pass(conclusion, state):
 def test_merge_cell_shows_a_blocking_state():
     assert dash._merge_cell(pr(5)) == "✅ yes"
     assert dash._merge_cell(pr(5, state="blocked")) == "⚠️ blocked"
+    assert dash._merge_cell(pr(5, state="unstable")) == "⚠️ advisory checks failing"
     assert dash._merge_cell(pr(5, state="dirty")) == "❌ conflicts"
     assert dash._merge_cell(pr(5, mergeable=None, state="unknown")) == "⏳ computing"
 
@@ -536,7 +538,11 @@ def test_swift_ci_is_advisory_and_pinned():
 
 
 AVAIL = "A.swift:3:9: error: 'glassEffect(_:in:)' is only available in macOS 27.0 or newer"
-AVAIL2 = "C.swift:9:2: error: 'Foo' is unavailable in macOS"
+AVAIL2 = "/w/C.swift:9:2: error: 'Bar' is only available in macOS 26.4 or newer"
+UNAVAILABLE = "C.swift:9:2: error: 'Foo' is unavailable in macOS"
+SDK_MISSING = 'xcodebuild: error: SDK "macosx27.0" cannot be located.'
+# A real syntax error in a file whose path contains SDK-gap words
+TRICK_PATH = "/w/is unavailable in macOS/is only available in macOS 27.0 or newer.swift:4:1: error: expected '}' in struct"
 SCOPE = "B.swift:1:8: error: cannot find 'Foo' in scope"
 SYNTAX = "D.swift:4:1: error: expected '}' in struct"
 
@@ -545,6 +551,14 @@ SYNTAX = "D.swift:4:1: error: expected '}' in struct"
     # Pure availability errors on an older SDK: warning and summary, not a red X
     ("true", 65, AVAIL, 0, True),
     ("true", 65, f"{AVAIL}\nnote: in expansion\n{AVAIL2}\n{AVAIL}", 0, True),
+    ("true", 65, SDK_MISSING, 0, True),
+    # Round 2: only the message after "error: " is classified, so a path
+    # cannot disguise a syntax error, and @available(macOS, unavailable)
+    # (permanent, no SDK fixes it) stays red.
+    ("true", 65, TRICK_PATH, 1, False),
+    ("true", 65, f"{AVAIL}\n{TRICK_PATH}", 1, False),
+    ("true", 65, UNAVAILABLE, 1, False),
+    ("true", 65, f"{AVAIL}\n{UNAVAILABLE}", 1, False),
     # C4: one real error mixed in keeps it red
     ("true", 65, f"{AVAIL}\n{SCOPE}", 1, False),
     ("true", 65, f"{AVAIL}\n{SYNTAX}", 1, False),

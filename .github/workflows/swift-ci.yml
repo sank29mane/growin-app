@@ -7,11 +7,13 @@ name: Swift CI
 #
 # The operator builds with Xcode-beta. If the project adopts APIs newer than
 # the runner's SDK, raise MIN_SDK. Then, when the runner's SDK is older than
-# MIN_SDK and EVERY compiler error is an SDK-availability error (for example
-# "is only available in macOS 27.0 or newer"), the job ends with a warning
-# and a step summary saying what is missing instead of a red X. Any other
-# error, including "cannot find ... in scope" and syntax errors, keeps it
-# red. On an SDK at least MIN_SDK, every build or test failure is red.
+# MIN_SDK and the MESSAGE of every error line (the text after "error: ") is
+# one a newer SDK fixes ("... is only available in macOS N or newer", or an
+# explicit Xcode or SDK version error), the job ends with a warning and a
+# step summary saying what is missing instead of a red X. Anything else keeps
+# it red: "cannot find ... in scope", syntax errors, mixed logs, and plain
+# "is unavailable in macOS" (@available(macOS, unavailable) is permanent).
+# On an SDK at least MIN_SDK, every build or test failure is red.
 on:
   pull_request:
     branches: [ main ]
@@ -98,10 +100,30 @@ jobs:
           status=${PIPESTATUS[0]}
           if [[ $status -eq 0 ]]; then echo "built=true" >> "$GITHUB_OUTPUT"; exit 0; fi
           echo "built=false" >> "$GITHUB_OUTPUT"
-          # Degrade only when every error line is an SDK-availability error.
-          gap='is only available in macOS [0-9]|is unavailable in macOS|future Xcode project file format|requires a newer version of Xcode|SDK .*(cannot be located|not found)'
+          # Degrade only when every error MESSAGE is one a newer SDK fixes.
+          # Diagnostics look like "path:LINE:COL: error: MESSAGE" or
+          # "xcodebuild: error: MESSAGE". Matching only the message means a
+          # file name cannot make a real error look like an SDK gap.
+          sdk_gap() {
+            local line="$1" msg
+            local diag=':[0-9]+:[0-9]+: error: (.*)$'
+            local tool='^(xcodebuild: )?error: (.*)$'
+            local avail='^.+ is only available in macOS [0-9]+(\.[0-9]+)* or newer$'
+            local version='^(The project .+ cannot be opened because it is in a future Xcode project file format.*|.+ requires a newer version of Xcode.*|SDK ".+" cannot be located\.?)$'
+            if [[ "$line" =~ $diag ]]; then msg="${BASH_REMATCH[1]}"
+            elif [[ "$line" =~ $tool ]]; then msg="${BASH_REMATCH[2]}"
+            else return 1; fi
+            [[ "$msg" =~ $avail || "$msg" =~ $version ]]
+          }
           errors=$(grep -E "error:" "$RUNNER_TEMP/build.log" | sort -u)
-          if [[ "$OLDER_SDK" == "true" && -n "$errors" ]] && ! grep -Evq "$gap" <<< "$errors"; then
+          all_gap=false
+          if [[ -n "$errors" ]]; then
+            all_gap=true
+            while IFS= read -r line; do
+              sdk_gap "$line" || { all_gap=false; break; }
+            done <<< "$errors"
+          fi
+          if [[ "$OLDER_SDK" == "true" && "$all_gap" == "true" ]]; then
             missing=$(sed -E 's/^.*error: //' <<< "$errors" | sort -u | head -n 8)
             echo "::warning::Swift CI skipped: the runner's newest Xcode is $XCODE with the macOS $SDK SDK, and the project needs the macOS $MIN_SDK SDK or newer. Not a code failure."
             {
