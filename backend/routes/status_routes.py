@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 from status_manager import status_manager
 from agents.messenger import get_messenger
 from app_context import state
+from shared_types import resolve_trading212_environment
 import time
 
 router = APIRouter()
@@ -18,7 +19,9 @@ async def get_system_status():
         "system": status_manager.get_system_info(),
         "agents": status_manager.get_all_statuses(),
         "environment": {
-            "trading212": "demo" if os.getenv("TRADING212_USE_DEMO", "true").lower() == "true" else "live",
+            # The same helper the Trading 212 MCP server uses (66-02, D-10b): demo, live,
+            # or unset/invalid. There is no default, so this never claims demo for a live setup.
+            "trading212": resolve_trading212_environment(),
             "alpaca": "paper" if os.getenv("ALPACA_USE_PAPER", "true").lower() == "true" else "live",
         },
         # Execution authority is the only permission signal the client may use.

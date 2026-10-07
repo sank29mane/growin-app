@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
 Trading 212 MCP Server
-A Model Context Protocol server for Trading 212 API integration.
-Provides comprehensive access to account data, portfolio management, and trading operations.
+A read-only Model Context Protocol server for Trading 212 account data.
+
+It exposes reads only. It has no order, cancel, pie-mutation or account-switch
+tool, and its HTTP client can send nothing but GET (66-CONTEXT D-05, D-10, D-14).
+Orders reach Trading 212 only through the typed execution boundary.
 """
 
 import aiofiles
@@ -26,13 +29,12 @@ from mcp.server.stdio import stdio_server
 from mcp.types import Resource, TextContent, Tool
 from utils import sanitize_nan
 from utils.process_guard import start_parent_watchdog
-from shared_types import SENSITIVE_TOOLS
-from utils.rate_limiter import (
-    get_t212_budgeter,
-    PRIORITY_EXECUTION,
-    PRIORITY_SYNC,
-    PRIORITY_POLLING,
+from shared_types import (
+    SENSITIVE_TOOLS,
+    Trading212EnvironmentError,
+    require_trading212_environment,
 )
+from brokers.trading212.governor import Governor, endpoint_template
 
 # Start watchdog immediately to ensure cleanup if parent dies
 start_parent_watchdog()
@@ -41,13 +43,9 @@ start_parent_watchdog()
 LIVE_API_BASE = "https://live.trading212.com/api/v0"
 DEMO_API_BASE = "https://demo.trading212.com/api/v0"
 STATE_FILE = ".state.json"
-READ_ONLY_ENV = "GROWIN_TRADING212_READ_ONLY"
+PRACTICE_CREDENTIAL_PREFIX = "TRADING212_PRACTICE_"
 
 logger = logging.getLogger(__name__)
-
-
-def is_read_only_mode() -> bool:
-    return os.getenv(READ_ONLY_ENV, "0").strip().lower() in {"1", "true", "yes"}
 
 
 async def _load_state(filepath: str) -> Optional[Dict[str, Any]]:
@@ -62,21 +60,11 @@ async def _load_state(filepath: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-async def _save_state(filepath: str, data: Dict[str, Any]):
-    """Saves state to file asynchronously."""
-    try:
-        async with aiofiles.open(filepath, "w") as f:
-            await f.write(json.dumps(data))
-    except Exception:
-        pass
-
-
 # Import centralized currency normalization
 from utils.currency_utils import normalize_all_positions
 from utils.ticker_utils import normalize_ticker
 from t212_handlers import (
     handle_analyze_portfolio,
-    handle_market_order,
     handle_get_price_history,
     handle_get_current_price,
 )
@@ -212,22 +200,131 @@ class FileCache:
         await self._save_to_disk()
 
 
-class Trading212Client:
-    """Client for Trading 212 API operations."""
+READ_METHOD = "GET"
 
-    def __init__(self, api_key: str, api_secret: str, use_demo: bool = False):
+
+async def _refuse_non_get_before_sending(request: httpx.Request) -> None:
+    """httpx request hook: only GET to a pinned HTTPS broker origin can leave.
+
+    The live host gets the same rule as the demo host: it is read through this
+    client and never written (operator rule for 66-02). Because the hook sits on
+    the client itself, it also refuses a call that bypasses ``_request``.
+    """
+
+    if (
+        request.url.scheme != "https"
+        or request.url.host not in {"demo.trading212.com", "live.trading212.com"}
+        or request.url.port not in {None, 443}
+    ):
+        raise PermissionError("Trading 212 read refused: untrusted broker origin")
+
+    if request.method != READ_METHOD:
+        raise PermissionError(
+            "Trading 212 broker mutation blocked by read-only transport: "
+            f"{request.method} {request.url.host}"
+        )
+
+
+_MISSING = object()
+
+
+def _present(source: Dict[str, Any], *path: str) -> Any:
+    """Return source[path...] or the ``_MISSING`` marker; never a default value."""
+
+    node: Any = source
+    for step in path:
+        if not isinstance(node, dict) or step not in node or node[step] is None:
+            return _MISSING
+        node = node[step]
+    return node
+
+
+def _legacy(pairs: list[tuple[str, Any]]) -> Dict[str, Any]:
+    """Build a legacy-shaped dict; a key with no v0 source is omitted, never 0 (D-10d)."""
+
+    return {key: value for key, value in pairs if value is not _MISSING}
+
+
+def normalize_account_info(summary: Dict[str, Any]) -> Dict[str, Any]:
+    """v0 ``equity/account/summary`` to the keys the old ``account/info`` carried."""
+
+    return _legacy(
+        [
+            ("id", _present(summary, "id")),
+            ("currencyCode", _present(summary, "currency")),
+        ]
+    )
+
+
+def normalize_account_cash(summary: Dict[str, Any]) -> Dict[str, Any]:
+    """v0 ``equity/account/summary`` to the keys the old ``account/cash`` carried."""
+
+    return _legacy(
+        [
+            ("free", _present(summary, "cash", "availableToTrade")),
+            ("total", _present(summary, "totalValue")),
+            ("invested", _present(summary, "investments", "totalCost")),
+            ("ppl", _present(summary, "investments", "unrealizedProfitLoss")),
+            ("result", _present(summary, "investments", "realizedProfitLoss")),
+            ("pieCash", _present(summary, "cash", "inPies")),
+            ("blocked", _present(summary, "cash", "reservedForOrders")),
+        ]
+    )
+
+
+def normalize_position(position: Dict[str, Any]) -> Dict[str, Any]:
+    """v0 ``equity/positions`` item to the keys the old ``equity/portfolio`` item carried.
+
+    ``maxBuy`` has no v0 source and is never emitted.
+    """
+
+    return _legacy(
+        [
+            ("ticker", _present(position, "instrument", "ticker")),
+            ("quantity", _present(position, "quantity")),
+            ("averagePrice", _present(position, "averagePricePaid")),
+            ("currentPrice", _present(position, "currentPrice")),
+            ("ppl", _present(position, "walletImpact", "unrealizedProfitLoss")),
+            ("fxPpl", _present(position, "walletImpact", "fxImpact")),
+            ("initialFillDate", _present(position, "createdAt")),
+            ("pieQuantity", _present(position, "quantityInPies")),
+            ("maxSell", _present(position, "quantityAvailableForTrading")),
+            ("currency", _present(position, "instrument", "currency")),
+        ]
+    )
+
+
+class Trading212Client:
+    """Read-only client for Trading 212 account data.
+
+    It has no method that writes, and ``_request`` refuses every method but GET
+    before any network use. Every read acquires its endpoint's governor slot.
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        api_secret: str,
+        use_demo: bool,
+        *,
+        governor: Optional[Governor] = None,
+        transport: Optional[httpx.AsyncBaseTransport] = None,
+    ):
+        if not api_key or not api_secret:
+            raise ValueError(
+                "Trading 212 needs both an API key and an API secret (HTTP Basic); "
+                "no client was built."
+            )
         self.api_key = api_key
         self.api_secret = api_secret
         self.base_url = DEMO_API_BASE if use_demo else LIVE_API_BASE
+        self.governor = governor if governor is not None else Governor()
 
-        if api_secret:
-            credentials = f"{api_key}:{api_secret}"
-            encoded_credentials = base64.b64encode(credentials.encode("utf-8")).decode(
-                "utf-8"
-            )
-            self.auth_header = f"Basic {encoded_credentials}"
-        else:
-            self.auth_header = api_key
+        credentials = f"{api_key}:{api_secret}"
+        encoded_credentials = base64.b64encode(credentials.encode("utf-8")).decode(
+            "utf-8"
+        )
+        self.auth_header = f"Basic {encoded_credentials}"
 
         self.client = httpx.AsyncClient(
             headers={
@@ -235,158 +332,71 @@ class Trading212Client:
                 "Content-Type": "application/json",
             },
             timeout=30.0,
+            follow_redirects=False,
+            transport=transport,
+            event_hooks={"request": [_refuse_non_get_before_sending]},
         )
         self.cache = FileCache(ttl_seconds=86400)
 
     async def close(self):
         await self.client.aclose()
 
-    async def _request(self, method: str, endpoint: str, **kwargs) -> dict:
-        if is_read_only_mode() and method.upper() != "GET":
+    async def _request(self, method: str, endpoint: str, **kwargs) -> Any:
+        """GET ``endpoint`` once, or once more after a single 429 (D-10a, D-14).
+
+        A timeout, a connection error and any 4xx or 5xx other than a first 429
+        raise at once with no further attempt.
+        """
+
+        if method.upper() != READ_METHOD:
             raise PermissionError(
                 "Trading 212 broker mutation blocked by read-only transport"
             )
+        if any(name in kwargs for name in ("json", "data", "content", "files")):
+            raise PermissionError("Trading 212 reads carry no request body")
 
         url = f"{self.base_url}/{endpoint}"
-        max_retries = 3
-        base_delay = 1.0
+        for attempt in (0, 1):
+            key = await self.governor.acquire(READ_METHOD, endpoint)
+            response = await self.client.request(READ_METHOD, url, **kwargs)
+            self.governor.observe(key, response.headers)
+            if response.status_code == 429 and attempt == 0:
+                wait = self.governor.hold_after_throttle(key, response.headers)
+                logger.warning(
+                    "T212 API 429 on %s: waiting %.1fs for the rate limit reset, then one retry",
+                    endpoint_template(READ_METHOD, endpoint),
+                    wait,
+                )
+                continue
+            response.raise_for_status()
+            if response.content:
+                return response.json()
+            return {}
 
-        # SOTA 2026: Determine request priority for the Budgeter
-        priority = PRIORITY_POLLING
-        if method.upper() in ["POST", "DELETE"]:
-            priority = PRIORITY_EXECUTION
-        elif "account" in endpoint or "portfolio" in endpoint or "history" in endpoint:
-            priority = PRIORITY_SYNC
-
-        budgeter = get_t212_budgeter()
-
-        for attempt in range(max_retries + 1):
-            try:
-                # Acquire token before sending request
-                await budgeter.acquire(priority=priority)
-
-                response = await self.client.request(method, url, **kwargs)
-                response.raise_for_status()
-                if response.content:
-                    return response.json()
-                return {}
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code == 429 and attempt < max_retries:
-                    delay = base_delay * (2**attempt)
-                    logger.warning(
-                        f"T212 API 429: Throttled by broker. Manual backoff: {delay}s"
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-                raise
-            except Exception:
-                if attempt < max_retries:
-                    delay = base_delay * (2**attempt)
-                    await asyncio.sleep(delay)
-                    continue
-                raise
+    async def get_account_summary(self) -> dict:
+        return await self._request("GET", "equity/account/summary")
 
     async def get_account_info(self) -> dict:
-        return await self._request("GET", "equity/account/info")
+        return normalize_account_info(await self.get_account_summary())
 
     async def get_account_cash(self) -> dict:
-        return await self._request("GET", "equity/account/cash")
+        return normalize_account_cash(await self.get_account_summary())
 
     async def get_all_positions(self) -> list:
-        return await self._request("GET", "equity/portfolio")
+        positions = await self._request("GET", "equity/positions")
+        return [normalize_position(item) for item in positions]
 
     async def get_position_by_ticker(self, ticker: str) -> dict:
-        return await self._request("GET", f"equity/portfolio/{ticker}")
+        positions = await self._request(
+            "GET", f"equity/positions?{urlencode({'ticker': ticker})}"
+        )
+        return normalize_position(positions[0]) if positions else {}
 
     async def get_all_orders(self) -> list:
         return await self._request("GET", "equity/orders")
 
     async def get_order_by_id(self, order_id: str) -> dict:
         return await self._request("GET", f"equity/orders/{order_id}")
-
-    async def _apply_temporal_jitter(self):
-        """SOTA 2026: Randomized execution delay to avoid 'velocity clustering' flags."""
-        import random
-
-        jitter = random.uniform(0.5, 2.0)  # 500ms to 2000ms
-        logger.info(f"Applying Temporal Jitter: {jitter:.2f}s delay before dispatch...")
-        await asyncio.sleep(jitter)
-
-    async def place_market_order(
-        self, ticker: str, quantity: float, order_type: str = "BUY"
-    ) -> dict:
-        await self._apply_temporal_jitter()
-        adjusted_quantity = quantity if order_type.upper() == "BUY" else -abs(quantity)
-        payload = {"ticker": ticker, "quantity": adjusted_quantity}
-        return await self._request("POST", "equity/orders/market", json=payload)
-
-    async def place_limit_order(
-        self,
-        ticker: str,
-        quantity: float,
-        limit_price: float,
-        order_type: str = "BUY",
-        time_validity: str = "DAY",
-    ) -> dict:
-        await self._apply_temporal_jitter()
-        adjusted_quantity = quantity if order_type.upper() == "BUY" else -abs(quantity)
-        api_time_validity = (
-            "GOOD_TILL_CANCEL" if time_validity.upper() == "GTC" else time_validity
-        )
-        payload = {
-            "ticker": ticker,
-            "quantity": adjusted_quantity,
-            "limitPrice": limit_price,
-            "timeValidity": api_time_validity,
-        }
-        return await self._request("POST", "equity/orders/limit", json=payload)
-
-    async def place_stop_order(
-        self,
-        ticker: str,
-        quantity: float,
-        stop_price: float,
-        order_type: str = "BUY",
-        time_validity: str = "DAY",
-    ) -> dict:
-        await self._apply_temporal_jitter()
-        adjusted_quantity = quantity if order_type.upper() == "BUY" else -abs(quantity)
-        api_time_validity = (
-            "GOOD_TILL_CANCEL" if time_validity.upper() == "GTC" else time_validity
-        )
-        payload = {
-            "ticker": ticker,
-            "quantity": adjusted_quantity,
-            "stopPrice": stop_price,
-            "timeValidity": api_time_validity,
-        }
-        return await self._request("POST", "equity/orders/stop", json=payload)
-
-    async def place_stop_limit_order(
-        self,
-        ticker: str,
-        quantity: float,
-        limit_price: float,
-        stop_price: float,
-        order_type: str = "BUY",
-        time_validity: str = "DAY",
-    ) -> dict:
-        await self._apply_temporal_jitter()
-        adjusted_quantity = quantity if order_type.upper() == "BUY" else -abs(quantity)
-        api_time_validity = (
-            "GOOD_TILL_CANCEL" if time_validity.upper() == "GTC" else time_validity
-        )
-        payload = {
-            "ticker": ticker,
-            "quantity": adjusted_quantity,
-            "limitPrice": limit_price,
-            "stopPrice": stop_price,
-            "timeValidity": api_time_validity,
-        }
-        return await self._request("POST", "equity/orders/stop_limit", json=payload)
-
-    async def cancel_order(self, order_id: str) -> dict:
-        return await self._request("DELETE", f"equity/orders/{order_id}")
 
     async def get_historical_orders(
         self, cursor: Optional[int] = None, limit: int = 50
@@ -453,19 +463,6 @@ class Trading212Client:
 
     async def get_pie(self, pie_id: int) -> dict:
         return await self._request("GET", f"equity/pies/{pie_id}")
-
-    async def create_pie(self, name: str, icon: str, instruments: list) -> dict:
-        payload = {"name": name, "icon": icon, "instruments": instruments}
-        return await self._request("POST", "equity/pies", json=payload)
-
-    async def update_pie(
-        self, pie_id: int, name: str, icon: str, instruments: list
-    ) -> dict:
-        payload = {"name": name, "icon": icon, "instruments": instruments}
-        return await self._request("POST", f"equity/pies/{pie_id}", json=payload)
-
-    async def delete_pie(self, pie_id: int) -> dict:
-        return await self._request("DELETE", f"equity/pies/{pie_id}")
 
 
 app = Server("trading212-mcp-server")
@@ -571,80 +568,6 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
-            name="place_market_order",
-            description="Place market order",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "ticker": {"type": "string"},
-                    "quantity": {"type": "number"},
-                    "order_type": {"type": "string", "enum": ["BUY", "SELL"]},
-                },
-                "required": ["ticker", "quantity", "order_type"],
-            },
-        ),
-        Tool(
-            name="place_limit_order",
-            description="Place limit order",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "ticker": {"type": "string"},
-                    "quantity": {"type": "number"},
-                    "limit_price": {"type": "number"},
-                    "order_type": {"type": "string", "enum": ["BUY", "SELL"]},
-                    "time_validity": {"type": "string", "enum": ["DAY", "GTC"]},
-                },
-                "required": ["ticker", "quantity", "limit_price", "order_type"],
-            },
-        ),
-        Tool(
-            name="place_stop_order",
-            description="Place stop order",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "ticker": {"type": "string"},
-                    "quantity": {"type": "number"},
-                    "stop_price": {"type": "number"},
-                    "order_type": {"type": "string", "enum": ["BUY", "SELL"]},
-                    "time_validity": {"type": "string", "enum": ["DAY", "GTC"]},
-                },
-                "required": ["ticker", "quantity", "stop_price", "order_type"],
-            },
-        ),
-        Tool(
-            name="place_stop_limit_order",
-            description="Place stop-limit order",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "ticker": {"type": "string"},
-                    "quantity": {"type": "number"},
-                    "stop_price": {"type": "number"},
-                    "limit_price": {"type": "number"},
-                    "order_type": {"type": "string", "enum": ["BUY", "SELL"]},
-                    "time_validity": {"type": "string", "enum": ["DAY", "GTC"]},
-                },
-                "required": [
-                    "ticker",
-                    "quantity",
-                    "stop_price",
-                    "limit_price",
-                    "order_type",
-                ],
-            },
-        ),
-        Tool(
-            name="cancel_order",
-            description="Cancel order",
-            inputSchema={
-                "type": "object",
-                "properties": {"order_id": {"type": "string"}},
-                "required": ["order_id"],
-            },
-        ),
-        Tool(
             name="search_instruments",
             description="Search instruments",
             inputSchema={
@@ -675,90 +598,6 @@ async def list_tools() -> list[Tool]:
                 "type": "object",
                 "properties": {"pie_id": {"type": "number"}},
                 "required": ["pie_id"],
-            },
-        ),
-        Tool(
-            name="create_investment_pie",
-            description="Create pie",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                    "icon": {"type": "string"},
-                    "instruments": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "ticker": {"type": "string"},
-                                "targetShare": {"type": "number"},
-                            },
-                        },
-                    },
-                },
-                "required": ["name", "icon", "instruments"],
-            },
-        ),
-        Tool(
-            name="update_investment_pie",
-            description="Update pie",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "pie_id": {"type": "number"},
-                    "name": {"type": "string"},
-                    "icon": {"type": "string"},
-                    "instruments": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "ticker": {"type": "string"},
-                                "targetShare": {"type": "number"},
-                            },
-                        },
-                    },
-                },
-                "required": ["pie_id", "name", "icon", "instruments"],
-            },
-        ),
-        Tool(
-            name="delete_investment_pie",
-            description="Delete pie",
-            inputSchema={
-                "type": "object",
-                "properties": {"pie_id": {"type": "number"}},
-                "required": ["pie_id"],
-            },
-        ),
-        Tool(
-            name="update_pie",
-            description="Create or update an investment pie",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "action": {"type": "string", "enum": ["create", "update"]},
-                    "pie_name": {"type": "string"},
-                    "weights": {
-                        "type": "object",
-                        "description": "Dictionary mapping ticker to explicit target weight as a float (e.g. 0.5 for 50%). Do not use whole numbers for percentages.",
-                        "additionalProperties": {"type": "number"},
-                    },
-                },
-                "required": ["action", "pie_name", "weights"],
-            },
-        ),
-        Tool(
-            name="switch_account",
-            description="Switch account",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "account_type": {"type": "string", "enum": ["invest", "isa"]},
-                    "key": {"type": "string"},
-                    "secret": {"type": "string"},
-                },
-                "required": ["account_type"],
             },
         ),
         Tool(
@@ -842,55 +681,23 @@ async def list_tools() -> list[Tool]:
             },
         ),
     ]
-    if is_read_only_mode():
-        return [tool for tool in tools if tool.name not in SENSITIVE_TOOLS]
     return tools
 
 
 @app.call_tool()
 async def call_tool(name: str, arguments: Any) -> list[TextContent]:
-    global active_account_type
-
-    if is_read_only_mode() and name in SENSITIVE_TOOLS:
+    # No mutation tool exists in this server. A name from the sensitive list is
+    # refused outright, whatever the environment says (defence in depth, D-05).
+    if name in SENSITIVE_TOOLS:
         raise PermissionError(f"Trading 212 mutation tool blocked in read-only mode: {name}")
 
     c = get_active_client()
-
-    # SOTA 2026: Shadow Mode Interceptor (Phase 36 Wave 3)
-    # Block real execution if GROWIN_SHADOW_MODE is 1
-    is_shadow = os.environ.get("GROWIN_SHADOW_MODE", "0") == "1"
-    if is_shadow and name in SENSITIVE_TOOLS:
-        log_msg = (
-            f"🕵️ SHADOW MODE INTERCEPT: Tool '{name}' with args {json.dumps(arguments)}"
-        )
-        print(log_msg, file=sys.stderr)
-
-        # Log to a dedicated file for the UAT harness to consume
-        shadow_log_path = "shadow_trades.log"
-
-        def write_shadow_log():
-            with open(shadow_log_path, "a") as f:
-                f.write(
-                    f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {name} | {json.dumps(arguments)}\n"
-                )
-
-        await asyncio.to_thread(write_shadow_log)
-
-        return [
-            TextContent(
-                type="text",
-                text=f"[SHADOW_SUCCESS] {name} intercepted successfully. No capital committed.",
-            )
-        ]
 
     try:
         if name == "analyze_portfolio":
             return await handle_analyze_portfolio(
                 arguments, active_account_type, get_clients, clients
             )
-
-        elif name == "place_market_order":
-            return await handle_market_order(arguments, c)
 
         elif name == "get_price_history":
             return await handle_get_price_history(arguments)
@@ -917,61 +724,6 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 except Exception:
                     continue
             return [TextContent(type="text", text=f"Position {ticker} not found.")]
-
-        elif name == "place_limit_order":
-            result = await c.place_limit_order(
-                ticker=arguments["ticker"],
-                quantity=arguments["quantity"],
-                limit_price=arguments["limit_price"],
-                order_type=arguments["order_type"],
-                time_validity=arguments.get("time_validity", "DAY"),
-            )
-            return [
-                TextContent(
-                    type="text",
-                    text=f"Limit order placed:\n{json.dumps(result, indent=2)}",
-                )
-            ]
-
-        elif name == "place_stop_order":
-            result = await c.place_stop_order(
-                ticker=arguments["ticker"],
-                quantity=arguments["quantity"],
-                stop_price=arguments["stop_price"],
-                order_type=arguments["order_type"],
-                time_validity=arguments.get("time_validity", "DAY"),
-            )
-            return [
-                TextContent(
-                    type="text",
-                    text=f"Stop order placed:\n{json.dumps(result, indent=2)}",
-                )
-            ]
-
-        elif name == "place_stop_limit_order":
-            result = await c.place_stop_limit_order(
-                ticker=arguments["ticker"],
-                quantity=arguments["quantity"],
-                stop_price=arguments["stop_price"],
-                limit_price=arguments["limit_price"],
-                order_type=arguments["order_type"],
-                time_validity=arguments.get("time_validity", "DAY"),
-            )
-            return [
-                TextContent(
-                    type="text",
-                    text=f"Stop-limit order placed:\n{json.dumps(result, indent=2)}",
-                )
-            ]
-
-        elif name == "cancel_order":
-            result = await c.cancel_order(arguments["order_id"])
-            return [
-                TextContent(
-                    type="text",
-                    text=f"Order cancelled:\n{json.dumps(result, indent=2)}",
-                )
-            ]
 
         elif name == "search_instruments":
             query = arguments["query"].upper()
@@ -1045,109 +797,6 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         elif name == "get_pie_details":
             pie = await c.get_pie(arguments["pie_id"])
             return [TextContent(type="text", text=json.dumps(pie, indent=2))]
-
-        elif name == "create_investment_pie":
-            result = await c.create_pie(
-                name=arguments["name"],
-                icon=arguments["icon"],
-                instruments=arguments["instruments"],
-            )
-            return [
-                TextContent(
-                    type="text", text=f"Pie created:\n{json.dumps(result, indent=2)}"
-                )
-            ]
-
-        elif name == "update_investment_pie":
-            result = await c.update_pie(
-                pie_id=arguments["pie_id"],
-                name=arguments["name"],
-                icon=arguments["icon"],
-                instruments=arguments["instruments"],
-            )
-            return [
-                TextContent(
-                    type="text", text=f"Pie updated:\n{json.dumps(result, indent=2)}"
-                )
-            ]
-
-        elif name == "delete_investment_pie":
-            result = await c.delete_pie(arguments["pie_id"])
-            return [
-                TextContent(
-                    type="text", text=f"Pie deleted:\n{json.dumps(result, indent=2)}"
-                )
-            ]
-
-        elif name == "update_pie":
-            action = arguments["action"]
-            pie_name = arguments["pie_name"]
-            weights = arguments["weights"]  # Dict of {ticker: weight}
-
-            # Map weights to instruments list format for T212 API
-            instruments = []
-            for ticker, weight in weights.items():
-                w_float = float(weight)
-                if w_float < 0.0 or w_float > 1.0:
-                    return [
-                        TextContent(
-                            type="text",
-                            text=f"Error: Trading212 Pies do not support shorts or margin leverage. Weight for {ticker} ({w_float}) must be between 0.0 and 1.0."
-                        )
-                    ]
-                instruments.append(
-                    {
-                        "ticker": normalize_ticker(ticker),
-                        "targetShare": w_float,
-                    }
-                )
-
-            if action == "create":
-                # Icon is required by create_pie in this server, default to a briefcase
-                result = await c.create_pie(
-                    name=pie_name, icon="briefcase", instruments=instruments
-                )
-                return [
-                    TextContent(
-                        type="text",
-                        text=f"Pie created: {pie_name}\n{json.dumps(result, indent=2)}",
-                    )
-                ]
-            else:
-                # For update, we'd need a pie_id. This is a simplification.
-                # In a real scenario, we would search for the pie by name first.
-                return [
-                    TextContent(
-                        type="text",
-                        text=f"Update action for {pie_name} not fully implemented without pie_id.",
-                    )
-                ]
-
-        elif name == "switch_account":
-            account_type = arguments["account_type"].lower()
-            new_key, new_secret = arguments.get("key"), arguments.get("secret")
-            if account_type not in ["invest", "isa"]:
-                raise ValueError("Invalid account type.")
-            active_account_type = account_type
-            if new_key:
-                if account_type not in credentials:
-                    credentials[account_type] = {}
-                credentials[account_type]["key"] = new_key
-                if new_secret is not None:
-                    credentials[account_type]["secret"] = new_secret
-                if clients.get(account_type):
-                    await clients[account_type].close()
-                clients[account_type] = Trading212Client(
-                    new_key, new_secret or "", credentials.get("use_demo", False)
-                )
-
-            if not clients.get(account_type):
-                raise ValueError(f"No API key found for {account_type.upper()}.")
-
-            await _save_state(STATE_FILE, {"account_type": active_account_type})
-            return [
-                TextContent(type="text", text=f"Switched to {account_type.upper()}.")
-            ]
 
         elif name == "get_ticker_analysis":
             ticker = normalize_ticker(arguments["ticker"])
@@ -1234,8 +883,8 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
 
 clients: Dict[str, Trading212Client] = {}
-credentials: dict = {}
 active_account_type: str = "invest"
+startup_error: Optional[str] = None
 
 
 def get_clients() -> Dict[str, Trading212Client]:
@@ -1248,17 +897,41 @@ def get_active_client() -> Trading212Client:
     if not c:
         available = get_clients()
         if not available:
-            raise ValueError("No Trading 212 clients initialized.")
+            raise ValueError(startup_error or "No Trading 212 clients initialized.")
         return list(available.values())[0]
     return c
 
 
-async def main():
-    global clients, credentials
-    load_dotenv()
+def drop_practice_credentials(environ: Dict[str, str]) -> list[str]:
+    """Remove ``TRADING212_PRACTICE_*`` from ``environ`` and return the names removed.
+
+    The practice account belongs to the execution adapter alone (D-07). This
+    server must not hold its keys even if a ``.env`` file loaded here names them.
+    """
+
+    names = [n for n in list(environ) if n.upper().startswith(PRACTICE_CREDENTIAL_PREFIX)]
+    for name in names:
+        del environ[name]
+    return names
+
+
+def build_clients(
+    environ: Dict[str, str],
+    *,
+    transport: Optional[httpx.AsyncBaseTransport] = None,
+) -> Dict[str, Trading212Client]:
+    """Build read-only clients from the environment, or raise.
+
+    Raises ``Trading212EnvironmentError`` unless TRADING212_USE_DEMO is exactly
+    ``true`` or ``false`` (no default, D-10b). An account whose key has no
+    secret gets no client: HTTP Basic needs both and there is no bare-key
+    fallback.
+    """
+
+    use_demo = require_trading212_environment(environ) == "demo"
 
     def get_env_var(name: str) -> Optional[str]:
-        val = os.getenv(name)
+        val = environ.get(name)
         return val if val and val.strip() else None
 
     generic_key = get_env_var("TRADING212_API_KEY")
@@ -1269,31 +942,54 @@ async def main():
     invest_secret = get_env_var("TRADING212_API_SECRET_INVEST") or generic_secret
     isa_secret = get_env_var("TRADING212_API_SECRET_ISA") or generic_secret
 
-    use_demo = (get_env_var("TRADING212_USE_DEMO") or "false").lower() == "true"
+    built: Dict[str, Trading212Client] = {}
 
-    if use_demo:
-        print("Trading 212: Using DEMO environment.", file=sys.stderr)
-    else:
-        print("Trading 212: Using LIVE environment. EXERCISE CAUTION.", file=sys.stderr)
-
-    credentials = {
-        "invest": {"key": invest_key, "secret": invest_secret},
-        "isa": {"key": isa_key, "secret": isa_secret},
-        "use_demo": use_demo,
-    }
+    def build(account: str, key: Optional[str], secret: Optional[str]):
+        if not key:
+            return None
+        if not secret:
+            logger.error(
+                "Trading 212 %s account: key is set without a secret; no client built",
+                account.upper(),
+            )
+            return None
+        return Trading212Client(key, secret, use_demo, transport=transport)
 
     if invest_key and isa_key and invest_key == isa_key:
-        clients["invest"] = Trading212Client(invest_key, invest_secret or "", use_demo)
-        clients["isa"] = clients["invest"]
+        shared = build("invest", invest_key, invest_secret)
+        if shared:
+            built["invest"] = shared
+            built["isa"] = shared
     else:
-        if invest_key:
-            clients["invest"] = Trading212Client(
-                invest_key, invest_secret or "", use_demo
-            )
-        if isa_key:
-            clients["isa"] = Trading212Client(isa_key, isa_secret or "", use_demo)
+        invest_client = build("invest", invest_key, invest_secret)
+        if invest_client:
+            built["invest"] = invest_client
+        isa_client = build("isa", isa_key, isa_secret)
+        if isa_client:
+            built["isa"] = isa_client
+    return built
 
-    global active_account_type
+
+async def main():
+    global clients, active_account_type, startup_error
+    load_dotenv()
+    drop_practice_credentials(os.environ)
+
+    try:
+        clients = build_clients(os.environ)
+        startup_error = None
+        environment = require_trading212_environment(os.environ)
+        if environment == "demo":
+            print("Trading 212: Using DEMO environment (reads only).", file=sys.stderr)
+        else:
+            print(
+                "Trading 212: Using LIVE environment (GET reads only).", file=sys.stderr
+            )
+    except Trading212EnvironmentError as error:
+        clients = {}
+        startup_error = str(error)
+        print(f"Trading 212: no client built. {error}", file=sys.stderr)
+
     active_account_type = (
         "invest" if "invest" in clients else ("isa" if "isa" in clients else "invest")
     )
@@ -1301,7 +997,7 @@ async def main():
     state_data = await _load_state(STATE_FILE)
     if state_data:
         saved_type = state_data.get("account_type")
-        if saved_type in credentials:
+        if saved_type in ("invest", "isa"):
             active_account_type = saved_type
 
     async with stdio_server() as (read_stream, write_stream):

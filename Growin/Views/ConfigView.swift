@@ -4,7 +4,6 @@ struct ConfigView: View {
     @Environment(\.dismiss) var dismiss
     @KeychainStorage(.openaiApiKey, scope: .shared) private var openaiApiKey = ""
     @KeychainStorage(.geminiApiKey, scope: .shared) private var geminiApiKey = ""
-    @KeychainStorage(.trading212ApiKey, scope: .workspace(.uk)) private var trading212ApiKey = ""
     
     var provider: String? // Optional provider that triggered this
     
@@ -35,21 +34,6 @@ struct ConfigView: View {
                             .accessibilityLabel("Gemini API Key")
                             .accessibilityHint("Enter your Gemini API key")
                     }
-                }
-                
-                Section("Trading 212 MCP") {
-                    VStack(alignment: .leading) {
-                        Text("API Key")
-                            .font(.caption)
-                        SecureField("Your T212 API Key", text: $trading212ApiKey)
-                            .textFieldStyle(.roundedBorder)
-                            .accessibilityLabel("Trading 212 API Key")
-                            .accessibilityHint("Enter your Trading 212 API key")
-                    }
-                    
-                    Text("Required for Portfolio Analysis and Trading operations.")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
                 }
                 
                 Section {

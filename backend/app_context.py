@@ -666,10 +666,3 @@ class AnalyzeRequest(BaseModel):
 class AgentResponse(BaseModel):
     messages: List[Dict[str, Any]]
     final_answer: str
-
-class T212ConfigRequest(BaseModel):
-    account_type: str
-    invest_key: Optional[str] = None
-    invest_secret: Optional[str] = None
-    isa_key: Optional[str] = None
-    isa_secret: Optional[str] = None
