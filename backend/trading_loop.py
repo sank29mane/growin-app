@@ -28,9 +28,9 @@ try:
         RiskSwarmGate,
         TelemetryLogger,
     )
-    from backend.simulation.regime_severity import RegimeSeverityError, build_severity_map, validate_posterior
+    from backend.simulation.regime_severity import build_severity_map, validate_posterior
 except ImportError:
-    from simulation.regime_severity import RegimeSeverityError, build_severity_map, validate_posterior
+    from simulation.regime_severity import build_severity_map, validate_posterior
     from simulation import (
         PreFlightDecision,
         PreFlightSimulator,
@@ -177,35 +177,22 @@ class LiveTradingLoop:
         ], dtype=np.float64)
         
         # 3. Run Numba fast GMM probability predictor
-        probabilities = fast_gmm_predict_proba(
-            x,
-            self.weights,
-            self.means,
-            self.precisions_cholesky,
-            scaler_mean,
-            scaler_var
-        )
-        
         try:
+            probabilities = fast_gmm_predict_proba(
+                x,
+                self.weights,
+                self.means,
+                self.precisions_cholesky,
+                scaler_mean,
+                scaler_var
+            )
             probabilities = validate_posterior(probabilities, self.severity_map.component_count)
-        except RegimeSeverityError as exc:
-            # A NaN or malformed posterior has an argmax of 0, which would silently pick
-            # whichever component is numbered 0. The regime is invalidated instead: nothing
-            # is sized or dispatched until a valid posterior arrives.
-            logger.error(f"Regime invalidated ({exc.code}); orders are blocked until a valid posterior.")
-            self.current_regime = -1
-            self.requoter.current_regime = -1
-            self.risk_leverage_coefficient = 0.0
-            return {
-                "volatility": vol,
-                "spread": spread,
-                "probabilities": [],
-                "dominant_regime": -1,
-                "regime_changed": False,
-                "regime_valid": False,
-                "risk_leverage_coefficient": 0.0,
-                "active_adapter_id": None,
-            }
+        except Exception as exc:  # noqa: BLE001 - any inference failure invalidates the regime
+            # A failed inference leaves no current classification, and a NaN or malformed
+            # posterior has an argmax of 0, which would silently pick whichever component is
+            # numbered 0. Either way the regime is invalidated: nothing is sized or dispatched
+            # until a later tick classifies successfully.
+            return self._invalidate_regime(vol, spread, getattr(exc, "code", type(exc).__name__))
         dominant_regime = int(np.argmax(probabilities))
 
         # 4. Trigger the MLX adapter hot-swapper when a regime change is identified
@@ -216,13 +203,21 @@ class LiveTradingLoop:
             
         regime_changed = False
         if dominant_regime != self.current_regime:
-            swap_success = self.model_manager.swap_adapter(adapter_id)
+            try:
+                swap_success = bool(self.model_manager.swap_adapter(adapter_id))
+            except Exception as exc:  # noqa: BLE001 - a failing adapter swap is a failed swap
+                logger.error(f"Adapter swap raised {type(exc).__name__} for regime {dominant_regime}")
+                swap_success = False
             if swap_success:
                 self.current_regime = dominant_regime
                 self.requoter.current_regime = dominant_regime
                 regime_changed = True
             else:
+                # The new regime is known but its adapter is not in place. Keeping the previous
+                # (possibly calmer) regime would size orders for the wrong market, so the
+                # regime is invalidated instead.
                 logger.error(f"Failed to hot-swap model adapter to {adapter_id} for regime {dominant_regime}")
+                return self._invalidate_regime(vol, spread, "ADAPTER_SWAP_FAILED")
                 
         # 5. Apply profitability constraints: scale risk leverage based on regime probabilities
         self.risk_leverage_coefficient = float(
@@ -241,6 +236,25 @@ class LiveTradingLoop:
             "regime_valid": True,
             "risk_leverage_coefficient": self.risk_leverage_coefficient,
             "active_adapter_id": adapter_id
+        }
+
+    def _invalidate_regime(self, vol: float, spread: float, reason: str) -> Dict[str, Any]:
+        """No usable regime: block sizing and dispatch until the next successful classification."""
+
+        logger.error(f"Regime invalidated ({reason}); orders are blocked until the next good classification.")
+        self.current_regime = -1
+        self.requoter.current_regime = -1
+        self.risk_leverage_coefficient = 0.0
+        return {
+            "volatility": vol,
+            "spread": spread,
+            "probabilities": [],
+            "dominant_regime": -1,
+            "regime_changed": False,
+            "regime_valid": False,
+            "invalid_reason": reason,
+            "risk_leverage_coefficient": 0.0,
+            "active_adapter_id": None,
         }
 
     async def execute_order_pre_flight(

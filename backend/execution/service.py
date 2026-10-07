@@ -247,27 +247,40 @@ class ExecutionService:
                         portfolio_state or {},
                     )
                 )
-            if selected_gate is not None:
-                if regime_id is None:
-                    # A raw component id means nothing without the model that emitted it, so
-                    # there is no neutral default: an unclassified order is denied.
-                    raise ValueError("GMM regime id is required")
-                # Required on every path that sizes through the risk gate, runtime preflight or
-                # not: the model and policy binding, the regime audit and a policy table whose
-                # actual rows match the trusted map. Missing or wrong means deny.
-                _verify_regime_binding(
-                    self._regime_severity_map, regime_id, regime_policy_hash, regime_audit,
-                    risk_db_connection,
-                )
-                risk_output = selected_gate.evaluate(
-                    float(simulator_evidence.get("simulated_fill_price", 0)),
-                    float(intent.quantity),
-                    regime_id,
-                    0 if current_spread_pct is None else float(current_spread_pct),
-                    risk_db_connection,
-                    severity_map=self._regime_severity_map,
-                )
-                risk_evidence = {**risk_evidence, "scaled_size": risk_output}
+            if selected_gate is None:
+                # Every admission can reserve and later dispatch, so every one is sized by the
+                # risk gate under a verified regime binding. Caller-supplied simulator or risk
+                # evidence is never a substitute for the gate: no gate, no admission.
+                raise ValueError("REGIME_BINDING_REQUIRED")
+            if regime_id is None:
+                # A raw component id means nothing without the model that emitted it, so
+                # there is no neutral default: an unclassified order is denied.
+                raise ValueError("GMM regime id is required")
+            # Required on every admission, runtime preflight or not: the model and policy
+            # binding, the regime audit and a policy table whose actual rows match the
+            # trusted map. Missing or wrong means deny. The gate also checks the table
+            # itself (``severity_map=``) on purpose: it is a second, independent check
+            # for the other caller of the gate, the legacy trading loop.
+            _verify_regime_binding(
+                self._regime_severity_map, regime_id, regime_policy_hash, regime_audit,
+                risk_db_connection,
+            )
+            risk_output = selected_gate.evaluate(
+                float(simulator_evidence.get("simulated_fill_price", 0)),
+                float(intent.quantity),
+                regime_id,
+                0 if current_spread_pct is None else float(current_spread_pct),
+                risk_db_connection,
+                severity_map=self._regime_severity_map,
+            )
+            caller_admitted = risk_evidence.get("admitted_quantity")
+            risk_evidence = {**risk_evidence, "scaled_size": risk_output}
+            if caller_admitted is not None and _finite_decimal(
+                caller_admitted, "caller admitted quantity"
+            ) != _finite_decimal(risk_output, "risk quantity"):
+                # The admitted quantity comes from the gate and nothing else. A caller's
+                # figure that disagrees with it (a crisis scale, a spread veto) is refused.
+                raise ValueError("RISK_EVIDENCE_CONFLICT")
             if not simulator_evidence or not risk_evidence:
                 raise ValueError("simulator and risk evidence are required")
             simulator_fill = _finite_decimal(
@@ -279,7 +292,7 @@ class ExecutionService:
             spread_decimal = _finite_decimal(
                 0 if current_spread_pct is None else current_spread_pct, "spread"
             )
-            risk_value = risk_evidence.get("admitted_quantity", risk_evidence.get("scaled_size"))
+            risk_value = risk_evidence.get("scaled_size")
             risk_quantity = _finite_decimal(risk_value, "risk quantity")
             if (
                 india_guard is not None
