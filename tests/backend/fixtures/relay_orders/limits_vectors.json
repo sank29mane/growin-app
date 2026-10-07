@@ -1,0 +1,3002 @@
+{
+ "schema": "growin-orders/1 limits vectors",
+ "test_only": true,
+ "note": "Synthetic limits for tests. Real values live in /etc/growin-gateway/limits.json and private/ and are never committed.",
+ "limits": {
+  "schema_version": 1,
+  "workspace": "india",
+  "currency": "INR",
+  "capital_cap": "50000",
+  "per_position_cap": "17500",
+  "drawdown_halt": "-0.08",
+  "drawdown_flatten": "-0.15",
+  "position_stop": "-0.12",
+  "fat_finger_collar": "0.02"
+ },
+ "limits_sha256": "09bd78d93a91b9e4e8dcb0e05275ec313546f33a76ee9b834fd2dc983fb44b9f",
+ "capital_cap_for_drawdown_cases": "50000",
+ "evaluator_cases": [
+  {
+   "name": "buy_ok",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "100.00"
+   },
+   "expected_codes": []
+  },
+  {
+   "name": "kill_disabled_blocks",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": false,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "100.00"
+   },
+   "expected_codes": [
+    "kill_switch"
+   ]
+  },
+  {
+   "name": "buy_exact_capital_cap_passes",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [
+     {
+      "isin": "INE333D01045",
+      "quantity": 100,
+      "cost": "17000"
+     },
+     {
+      "isin": "INE444E01056",
+      "quantity": 100,
+      "cost": "17000"
+     },
+     {
+      "isin": "INE111B01023",
+      "quantity": 100,
+      "cost": "15000"
+     }
+    ],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "200.00",
+    "lower_circuit": "180.00",
+    "upper_circuit": "220.00",
+    "previous_close": "200.00",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "200.00",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 5,
+    "limit_price": "200.00"
+   },
+   "expected_codes": [],
+   "note": "49000 held plus 1000 order is exactly the 50000 cap"
+  },
+  {
+   "name": "buy_one_paisa_over_capital_cap",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [
+     {
+      "isin": "INE333D01045",
+      "quantity": 100,
+      "cost": "17000"
+     },
+     {
+      "isin": "INE444E01056",
+      "quantity": 100,
+      "cost": "17000"
+     },
+     {
+      "isin": "INE111B01023",
+      "quantity": 100,
+      "cost": "15000.01"
+     }
+    ],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "200.00",
+    "lower_circuit": "180.00",
+    "upper_circuit": "220.00",
+    "previous_close": "200.00",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "200.00",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 5,
+    "limit_price": "200.00"
+   },
+   "expected_codes": [
+    "capital_cap"
+   ],
+   "note": "49000.01 held plus 1000 is 50000.01"
+  },
+  {
+   "name": "capital_cap_exact_with_open_buy_pending_notional_passes",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [
+     {
+      "isin": "INE333D01045",
+      "quantity": 100,
+      "cost": "17000"
+     },
+     {
+      "isin": "INE444E01056",
+      "quantity": 100,
+      "cost": "17000"
+     }
+    ],
+    "open_orders": [
+     {
+      "isin": "INE111B01023",
+      "side": "buy",
+      "quantity": 100,
+      "limit_price": "150.00"
+     }
+    ]
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "200.00",
+    "lower_circuit": "180.00",
+    "upper_circuit": "220.00",
+    "previous_close": "200.00",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "200.00",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 5,
+    "limit_price": "200.00"
+   },
+   "expected_codes": [],
+   "note": "positions alone are 34000; the open buy adds 15000 pending; 34000 + 15000 + 1000 = 50000 passes"
+  },
+  {
+   "name": "capital_cap_open_buy_pushes_over",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [
+     {
+      "isin": "INE333D01045",
+      "quantity": 100,
+      "cost": "17000"
+     },
+     {
+      "isin": "INE444E01056",
+      "quantity": 100,
+      "cost": "17000"
+     }
+    ],
+    "open_orders": [
+     {
+      "isin": "INE111B01023",
+      "side": "buy",
+      "quantity": 100,
+      "limit_price": "150.01"
+     }
+    ]
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "200.00",
+    "lower_circuit": "180.00",
+    "upper_circuit": "220.00",
+    "previous_close": "200.00",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "200.00",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 5,
+    "limit_price": "200.00"
+   },
+   "expected_codes": [
+    "capital_cap"
+   ]
+  },
+  {
+   "name": "ledger_cost_counts_when_holdings_lag",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {
+     "INE111B01023": "49000.01"
+    }
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "200.00",
+    "lower_circuit": "180.00",
+    "upper_circuit": "220.00",
+    "previous_close": "200.00",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "200.00",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 5,
+    "limit_price": "200.00"
+   },
+   "expected_codes": [
+    "capital_cap"
+   ],
+   "note": "a fill not yet in holdings (T+1) still counts as deployed"
+  },
+  {
+   "name": "per_position_cap_exact_edge_passes",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [
+     {
+      "isin": "INE000A01012",
+      "quantity": 150,
+      "cost": "15000"
+     }
+    ],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 25,
+    "limit_price": "100.00"
+   },
+   "expected_codes": []
+  },
+  {
+   "name": "per_position_cap_one_paisa_per_share_over",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [
+     {
+      "isin": "INE000A01012",
+      "quantity": 150,
+      "cost": "15000"
+     }
+    ],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 25,
+    "limit_price": "100.01"
+   },
+   "expected_codes": [
+    "per_position_cap"
+   ]
+  },
+  {
+   "name": "per_position_cap_includes_open_buys",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [
+     {
+      "isin": "INE000A01012",
+      "quantity": 150,
+      "cost": "15000"
+     }
+    ],
+    "open_orders": [
+     {
+      "isin": "INE000A01012",
+      "side": "buy",
+      "quantity": 20,
+      "limit_price": "100.00"
+     }
+    ]
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "100.00"
+   },
+   "expected_codes": [
+    "per_position_cap"
+   ]
+  },
+  {
+   "name": "per_position_cap_open_buy_on_other_isin_ignored",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [
+     {
+      "isin": "INE000A01012",
+      "quantity": 150,
+      "cost": "15000"
+     }
+    ],
+    "open_orders": [
+     {
+      "isin": "INE111B01023",
+      "side": "buy",
+      "quantity": 20,
+      "limit_price": "100.00"
+     }
+    ]
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "100.00"
+   },
+   "expected_codes": []
+  },
+  {
+   "name": "collar_buy_exactly_2pct_passes",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "120.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "102.00"
+   },
+   "expected_codes": []
+  },
+  {
+   "name": "collar_buy_just_over_2pct",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "120.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "102.01"
+   },
+   "expected_codes": [
+    "collar"
+   ]
+  },
+  {
+   "name": "collar_buy_far_below_ltp_also_refused",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "80.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "97.99"
+   },
+   "expected_codes": [
+    "collar"
+   ],
+   "note": "the collar is two-sided on buys too"
+  },
+  {
+   "name": "collar_sell_exactly_2pct_passes",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [
+     {
+      "isin": "INE000A01012",
+      "quantity": 100,
+      "cost": "10000"
+     }
+    ],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "80.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "sell",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "98.00"
+   },
+   "expected_codes": []
+  },
+  {
+   "name": "collar_sell_just_over_2pct",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [
+     {
+      "isin": "INE000A01012",
+      "quantity": 100,
+      "cost": "10000"
+     }
+    ],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "80.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "sell",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "97.99"
+   },
+   "expected_codes": [
+    "collar"
+   ]
+  },
+  {
+   "name": "circuit_upper_edge_passes",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "99.50",
+    "upper_circuit": "100.50",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "100.50"
+   },
+   "expected_codes": []
+  },
+  {
+   "name": "circuit_above_upper_refused",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "99.50",
+    "upper_circuit": "100.50",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "100.51"
+   },
+   "expected_codes": [
+    "circuit_band"
+   ]
+  },
+  {
+   "name": "circuit_below_lower_refused",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "99.50",
+    "upper_circuit": "100.50",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "99.49"
+   },
+   "expected_codes": [
+    "circuit_band"
+   ]
+  },
+  {
+   "name": "tick_005_on_tick_passes",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "300.00",
+    "lower_circuit": "270.00",
+    "upper_circuit": "330.00",
+    "previous_close": "300.00",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "300.00",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "300.05"
+   },
+   "expected_codes": []
+  },
+  {
+   "name": "tick_005_off_tick_refused",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "300.00",
+    "lower_circuit": "270.00",
+    "upper_circuit": "330.00",
+    "previous_close": "300.00",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "300.00",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "300.03"
+   },
+   "expected_codes": [
+    "off_tick"
+   ]
+  },
+  {
+   "name": "tick_reference_exactly_250_is_005",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "250.00",
+    "lower_circuit": "225.00",
+    "upper_circuit": "275.00",
+    "previous_close": "250",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "250",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "250.01"
+   },
+   "expected_codes": [
+    "off_tick"
+   ]
+  },
+  {
+   "name": "tick_reference_249_99_is_001",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "250.00",
+    "lower_circuit": "225.00",
+    "upper_circuit": "275.00",
+    "previous_close": "249.99",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "249.99",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "250.01"
+   },
+   "expected_codes": []
+  },
+  {
+   "name": "tick_reference_exactly_1000_is_005",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "1000.00",
+    "lower_circuit": "900.00",
+    "upper_circuit": "1100.00",
+    "previous_close": "1000",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "1000",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "1000.03"
+   },
+   "expected_codes": [
+    "off_tick"
+   ]
+  },
+  {
+   "name": "tick_reference_1000_01_is_010",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "1000.00",
+    "lower_circuit": "900.00",
+    "upper_circuit": "1100.00",
+    "previous_close": "1000.01",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "1000.01",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "1000.05"
+   },
+   "expected_codes": [
+    "off_tick"
+   ]
+  },
+  {
+   "name": "session_1509_59_open",
+   "now_ist": "2026-10-08T15:09:59+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "100.00"
+   },
+   "expected_codes": []
+  },
+  {
+   "name": "session_1510_00_closed",
+   "now_ist": "2026-10-08T15:10:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "100.00"
+   },
+   "expected_codes": [
+    "session_closed"
+   ]
+  },
+  {
+   "name": "session_0914_59_closed",
+   "now_ist": "2026-10-08T09:14:59+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "100.00"
+   },
+   "expected_codes": [
+    "session_closed"
+   ]
+  },
+  {
+   "name": "session_0915_00_open",
+   "now_ist": "2026-10-08T09:15:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "100.00"
+   },
+   "expected_codes": []
+  },
+  {
+   "name": "session_saturday_closed",
+   "now_ist": "2026-10-10T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-10"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "100.00"
+   },
+   "expected_codes": [
+    "session_closed"
+   ]
+  },
+  {
+   "name": "session_utc_instant_converts_to_ist",
+   "now_ist": "2026-10-08T09:40:00+00:00",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "100.00"
+   },
+   "expected_codes": [
+    "session_closed"
+   ],
+   "note": "09:40 UTC is 15:10 IST"
+  },
+  {
+   "name": "quote_from_previous_session_is_unavailable",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-07"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "100.00"
+   },
+   "expected_codes": [
+    "quote_unavailable"
+   ]
+  },
+  {
+   "name": "quote_missing_is_unavailable",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": null,
+   "tick_reference": null,
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "100.00"
+   },
+   "expected_codes": [
+    "quote_unavailable"
+   ]
+  },
+  {
+   "name": "etf_or_inf_isin_unsupported",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INF000A01010",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INF000A01010",
+    "quantity": 10,
+    "limit_price": "100.00"
+   },
+   "expected_codes": [
+    "instrument_unsupported"
+   ]
+  },
+  {
+   "name": "series_outside_eq_be_unsupported",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "SM",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "100.00"
+   },
+   "expected_codes": [
+    "instrument_unsupported"
+   ]
+  },
+  {
+   "name": "series_be_supported",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "BE",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "100.00"
+   },
+   "expected_codes": []
+  },
+  {
+   "name": "isin_must_match_security_master",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE111B01023",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "100.00"
+   },
+   "expected_codes": [
+    "isin_mismatch"
+   ]
+  },
+  {
+   "name": "sell_ok",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [
+     {
+      "isin": "INE000A01012",
+      "quantity": 100,
+      "cost": "10000"
+     }
+    ],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "sell",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 100,
+    "limit_price": "100.00"
+   },
+   "expected_codes": []
+  },
+  {
+   "name": "sell_above_holding",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [
+     {
+      "isin": "INE000A01012",
+      "quantity": 100,
+      "cost": "10000"
+     }
+    ],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "sell",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 101,
+    "limit_price": "100.00"
+   },
+   "expected_codes": [
+    "sell_exceeds_holding"
+   ]
+  },
+  {
+   "name": "sell_above_holding_minus_open_sells",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [
+     {
+      "isin": "INE000A01012",
+      "quantity": 100,
+      "cost": "10000"
+     }
+    ],
+    "open_orders": [
+     {
+      "isin": "INE000A01012",
+      "side": "sell",
+      "quantity": 40,
+      "limit_price": "100.00"
+     }
+    ]
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "sell",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 61,
+    "limit_price": "100.00"
+   },
+   "expected_codes": [
+    "sell_exceeds_holding"
+   ]
+  },
+  {
+   "name": "sell_equal_holding_minus_open_sells_passes",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [
+     {
+      "isin": "INE000A01012",
+      "quantity": 100,
+      "cost": "10000"
+     }
+    ],
+    "open_orders": [
+     {
+      "isin": "INE000A01012",
+      "side": "sell",
+      "quantity": 40,
+      "limit_price": "100.00"
+     }
+    ]
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "sell",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 60,
+    "limit_price": "100.00"
+   },
+   "expected_codes": []
+  },
+  {
+   "name": "sell_with_no_holding",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "sell",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "100.00"
+   },
+   "expected_codes": [
+    "sell_exceeds_holding"
+   ]
+  },
+  {
+   "name": "halt_refuses_buy",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": true,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "100.00"
+   },
+   "expected_codes": [
+    "halt_latch"
+   ]
+  },
+  {
+   "name": "halt_allows_sell",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": true,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [
+     {
+      "isin": "INE000A01012",
+      "quantity": 100,
+      "cost": "10000"
+     }
+    ],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "sell",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "100.00"
+   },
+   "expected_codes": []
+  },
+  {
+   "name": "ended_refuses_buy",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": true,
+    "ended": true,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "100.00"
+   },
+   "expected_codes": [
+    "pilot_ended",
+    "halt_latch"
+   ]
+  },
+  {
+   "name": "ended_allows_sell",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": true,
+    "ended": true,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [
+     {
+      "isin": "INE000A01012",
+      "quantity": 100,
+      "cost": "10000"
+     }
+    ],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "sell",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "100.00"
+   },
+   "expected_codes": []
+  },
+  {
+   "name": "stop_open_refuses_buy_on_the_stopped_isin",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [
+     "INE000A01012"
+    ],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "100.00"
+   },
+   "expected_codes": [
+    "stop_open"
+   ]
+  },
+  {
+   "name": "stop_open_refuses_buy_on_a_different_isin",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [
+     "INE111B01023"
+    ],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "100.00"
+   },
+   "expected_codes": [
+    "stop_open"
+   ],
+   "note": "operator 2026-10-07: while any stop exit is open, ALL buys are refused"
+  },
+  {
+   "name": "stop_open_allows_sell_of_the_stopped_isin",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [
+     "INE000A01012"
+    ],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [
+     {
+      "isin": "INE000A01012",
+      "quantity": 100,
+      "cost": "10000"
+     }
+    ],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "sell",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 100,
+    "limit_price": "100.00"
+   },
+   "expected_codes": []
+  },
+  {
+   "name": "stop_open_allows_sell_of_another_isin",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [
+     "INE111B01023"
+    ],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [
+     {
+      "isin": "INE000A01012",
+      "quantity": 100,
+      "cost": "10000"
+     }
+    ],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "sell",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 100,
+    "limit_price": "100.00"
+   },
+   "expected_codes": []
+  },
+  {
+   "name": "stop_open_beats_every_non_hard_block_code",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": true,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [
+     "INE111B01023"
+    ],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "120.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "103.00"
+   },
+   "expected_codes": [
+    "stop_open",
+    "halt_latch",
+    "collar"
+   ]
+  },
+  {
+   "name": "stop_open_beats_capital_cap",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [
+     "INE111B01023"
+    ],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [
+     {
+      "isin": "INE333D01045",
+      "quantity": 100,
+      "cost": "17000"
+     },
+     {
+      "isin": "INE444E01056",
+      "quantity": 100,
+      "cost": "17000"
+     },
+     {
+      "isin": "INE111B01023",
+      "quantity": 100,
+      "cost": "15000.01"
+     }
+    ],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "200.00",
+    "lower_circuit": "180.00",
+    "upper_circuit": "220.00",
+    "previous_close": "200.00",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "200.00",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 5,
+    "limit_price": "200.00"
+   },
+   "expected_codes": [
+    "stop_open",
+    "capital_cap"
+   ]
+  },
+  {
+   "name": "hard_block_kill_switch_precedes_stop_open",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": false,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [
+     "INE111B01023"
+    ],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "100.00"
+   },
+   "expected_codes": [
+    "kill_switch",
+    "stop_open"
+   ]
+  },
+  {
+   "name": "hard_block_pilot_ended_precedes_stop_open",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": true,
+    "ended": true,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [
+     "INE111B01023"
+    ],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "100.00"
+   },
+   "expected_codes": [
+    "pilot_ended",
+    "stop_open",
+    "halt_latch"
+   ]
+  },
+  {
+   "name": "buy_allowed_again_after_the_exit_fill_clears_the_stop",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "100.00"
+   },
+   "expected_codes": [],
+   "note": "the stop latch is cleared by the trade-list exit fill (risk.apply_trades), no admin reset"
+  },
+  {
+   "name": "mac_halt_refuses_buy",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": true,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "100.00"
+   },
+   "expected_codes": [
+    "mac_halt"
+   ]
+  },
+  {
+   "name": "mac_halt_refuses_sell",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": true,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [
+     {
+      "isin": "INE000A01012",
+      "quantity": 100,
+      "cost": "10000"
+     }
+    ],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "sell",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "100.00"
+   },
+   "expected_codes": [
+    "mac_halt"
+   ]
+  },
+  {
+   "name": "account_mismatch_refuses_buy",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": true,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "100.00"
+   },
+   "expected_codes": [
+    "account_mismatch"
+   ]
+  },
+  {
+   "name": "account_mismatch_refuses_sell",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": true,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [
+     {
+      "isin": "INE000A01012",
+      "quantity": 100,
+      "cost": "10000"
+     }
+    ],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "100.00",
+    "lower_circuit": "90.00",
+    "upper_circuit": "110.00",
+    "previous_close": "99.80",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "99.80",
+   "intent": {
+    "side": "sell",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "100.00"
+   },
+   "expected_codes": [
+    "account_mismatch"
+   ]
+  },
+  {
+   "name": "tick_ref_monthly_below_250_daily_above_allows_001",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "250.00",
+    "lower_circuit": "225.00",
+    "upper_circuit": "275.00",
+    "previous_close": "250.40",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "249.90",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "250.01"
+   },
+   "expected_codes": []
+  },
+  {
+   "name": "tick_ref_monthly_above_250_daily_below_refuses_001",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "250.00",
+    "lower_circuit": "225.00",
+    "upper_circuit": "275.00",
+    "previous_close": "249.90",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "250.00",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "250.01"
+   },
+   "expected_codes": [
+    "off_tick"
+   ]
+  },
+  {
+   "name": "tick_ref_monthly_above_250_daily_below_allows_005",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "250.00",
+    "lower_circuit": "225.00",
+    "upper_circuit": "275.00",
+    "previous_close": "249.90",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "250.00",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "250.05"
+   },
+   "expected_codes": []
+  },
+  {
+   "name": "tick_ref_monthly_above_1000_daily_at_1000_refuses_005",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "1000.00",
+    "lower_circuit": "900.00",
+    "upper_circuit": "1100.00",
+    "previous_close": "1000.00",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "1000.01",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "1000.05"
+   },
+   "expected_codes": [
+    "off_tick"
+   ]
+  },
+  {
+   "name": "tick_ref_unavailable_fails_closed",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "250.00",
+    "lower_circuit": "225.00",
+    "upper_circuit": "275.00",
+    "previous_close": "250.40",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": null,
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "250.05"
+   },
+   "expected_codes": [
+    "tick_reference_unavailable"
+   ]
+  },
+  {
+   "name": "tick_ref_zero_is_unavailable",
+   "now_ist": "2026-10-08T10:00:00+05:30",
+   "kill_enabled": true,
+   "flags": {
+    "halt": false,
+    "ended": false,
+    "mac_halt": false,
+    "account_mismatch": false,
+    "stops": [],
+    "ledger_cost": {}
+   },
+   "account": {
+    "holdings": [],
+    "open_orders": []
+   },
+   "quote": {
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "series": "EQ",
+    "ltp": "250.00",
+    "lower_circuit": "225.00",
+    "upper_circuit": "275.00",
+    "previous_close": "250.40",
+    "session_date": "2026-10-08"
+   },
+   "tick_reference": "0",
+   "intent": {
+    "side": "buy",
+    "stock_code": "TESTCO",
+    "isin": "INE000A01012",
+    "quantity": 10,
+    "limit_price": "250.05"
+   },
+   "expected_codes": [
+    "tick_reference_unavailable"
+   ]
+  }
+ ],
+ "drawdown_cases": [
+  {
+   "name": "minus_8_00_exactly_latches_halt",
+   "fills": [
+    {
+     "trade_id": "t1",
+     "isin": "INE000A01012",
+     "side": "buy",
+     "quantity": 100,
+     "price": "500",
+     "charges": "0"
+    }
+   ],
+   "sessions": [
+    {
+     "session": "2026-10-09",
+     "closes": {
+      "INE000A01012": "460"
+     }
+    }
+   ],
+   "expected": {
+    "halt": true,
+    "ended": false,
+    "stops": []
+   },
+   "note": "equity 46000 = peak x 0.92"
+  },
+  {
+   "name": "minus_7_998_does_not_latch",
+   "fills": [
+    {
+     "trade_id": "t1",
+     "isin": "INE000A01012",
+     "side": "buy",
+     "quantity": 100,
+     "price": "500",
+     "charges": "0"
+    }
+   ],
+   "sessions": [
+    {
+     "session": "2026-10-09",
+     "closes": {
+      "INE000A01012": "460.01"
+     }
+    }
+   ],
+   "expected": {
+    "halt": false,
+    "ended": false,
+    "stops": []
+   }
+  },
+  {
+   "name": "minus_15_00_exactly_latches_ended_and_halt_and_stop",
+   "fills": [
+    {
+     "trade_id": "t1",
+     "isin": "INE000A01012",
+     "side": "buy",
+     "quantity": 100,
+     "price": "500",
+     "charges": "0"
+    }
+   ],
+   "sessions": [
+    {
+     "session": "2026-10-09",
+     "closes": {
+      "INE000A01012": "425"
+     }
+    }
+   ],
+   "expected": {
+    "halt": true,
+    "ended": true,
+    "stops": [
+     "INE000A01012"
+    ]
+   },
+   "note": "equity 42500 = peak x 0.85; 425 <= 500 x 0.88"
+  },
+  {
+   "name": "just_above_minus_15_is_halt_only",
+   "fills": [
+    {
+     "trade_id": "t1",
+     "isin": "INE000A01012",
+     "side": "buy",
+     "quantity": 100,
+     "price": "500",
+     "charges": "0"
+    }
+   ],
+   "sessions": [
+    {
+     "session": "2026-10-09",
+     "closes": {
+      "INE000A01012": "425.01"
+     }
+    }
+   ],
+   "expected": {
+    "halt": true,
+    "ended": false,
+    "stops": [
+     "INE000A01012"
+    ]
+   }
+  },
+  {
+   "name": "gap_through_minus_15_sets_both",
+   "fills": [
+    {
+     "trade_id": "t1",
+     "isin": "INE000A01012",
+     "side": "buy",
+     "quantity": 100,
+     "price": "500",
+     "charges": "0"
+    }
+   ],
+   "sessions": [
+    {
+     "session": "2026-10-09",
+     "closes": {
+      "INE000A01012": "300"
+     }
+    }
+   ],
+   "expected": {
+    "halt": true,
+    "ended": true,
+    "stops": [
+     "INE000A01012"
+    ]
+   }
+  },
+  {
+   "name": "stop_at_exactly_cost_x_0_88",
+   "fills": [
+    {
+     "trade_id": "t1",
+     "isin": "INE000A01012",
+     "side": "buy",
+     "quantity": 20,
+     "price": "500",
+     "charges": "0"
+    }
+   ],
+   "sessions": [
+    {
+     "session": "2026-10-09",
+     "closes": {
+      "INE000A01012": "440"
+     }
+    }
+   ],
+   "expected": {
+    "halt": false,
+    "ended": false,
+    "stops": [
+     "INE000A01012"
+    ]
+   },
+   "note": "close 440 = 500 x 0.88; drawdown only -2.4%"
+  },
+  {
+   "name": "stop_not_at_440_01",
+   "fills": [
+    {
+     "trade_id": "t1",
+     "isin": "INE000A01012",
+     "side": "buy",
+     "quantity": 20,
+     "price": "500",
+     "charges": "0"
+    }
+   ],
+   "sessions": [
+    {
+     "session": "2026-10-09",
+     "closes": {
+      "INE000A01012": "440.01"
+     }
+    }
+   ],
+   "expected": {
+    "halt": false,
+    "ended": false,
+    "stops": []
+   }
+  },
+  {
+   "name": "peak_starts_at_capital_cap_and_halt_uses_it",
+   "fills": [],
+   "sessions": [],
+   "expected": {
+    "halt": true,
+    "ended": false,
+    "stops": []
+   },
+   "start": {
+    "cash": "46000",
+    "peak": "50000"
+   },
+   "note": "start cash 46000 against peak 50000"
+  },
+  {
+   "name": "peak_ratchets_up_then_halt_is_measured_from_it",
+   "fills": [],
+   "sessions": [],
+   "expected": {
+    "halt": true,
+    "ended": false,
+    "stops": []
+   },
+   "start": {
+    "cash": "55200",
+    "peak": "60000"
+   },
+   "note": "55200 = 60000 x 0.92"
+  },
+  {
+   "name": "latches_never_clear_on_recovery",
+   "fills": [
+    {
+     "trade_id": "t1",
+     "isin": "INE000A01012",
+     "side": "buy",
+     "quantity": 100,
+     "price": "500",
+     "charges": "0"
+    }
+   ],
+   "sessions": [
+    {
+     "session": "2026-10-09",
+     "closes": {
+      "INE000A01012": "460"
+     }
+    },
+    {
+     "session": "2026-10-12",
+     "closes": {
+      "INE000A01012": "520"
+     }
+    }
+   ],
+   "expected": {
+    "halt": true,
+    "ended": false,
+    "stops": []
+   }
+  },
+  {
+   "name": "stop_latch_does_not_clear_on_recovery",
+   "fills": [
+    {
+     "trade_id": "t1",
+     "isin": "INE000A01012",
+     "side": "buy",
+     "quantity": 20,
+     "price": "500",
+     "charges": "0"
+    }
+   ],
+   "sessions": [
+    {
+     "session": "2026-10-09",
+     "closes": {
+      "INE000A01012": "440"
+     }
+    },
+    {
+     "session": "2026-10-12",
+     "closes": {
+      "INE000A01012": "600"
+     }
+    }
+   ],
+   "expected": {
+    "halt": false,
+    "ended": false,
+    "stops": [
+     "INE000A01012"
+    ]
+   }
+  },
+  {
+   "name": "already_evaluated_session_is_ignored",
+   "fills": [
+    {
+     "trade_id": "t1",
+     "isin": "INE000A01012",
+     "side": "buy",
+     "quantity": 100,
+     "price": "500",
+     "charges": "0"
+    }
+   ],
+   "sessions": [
+    {
+     "session": "2026-10-09",
+     "closes": {
+      "INE000A01012": "500"
+     }
+    },
+    {
+     "session": "2026-10-09",
+     "closes": {
+      "INE000A01012": "300"
+     }
+    }
+   ],
+   "expected": {
+    "halt": false,
+    "ended": false,
+    "stops": []
+   }
+  }
+ ],
+ "tick_reference_note": "tick_reference is the tick table's band reference: the close on the last trading day of the previous calendar month, from an injected port. null means the port could not supply it. It is separate from quote.previous_close (the A2 mark check)."
+}

@@ -1,0 +1,67 @@
+{
+  "schema": "growin.costs.tick_sizes/1",
+  "source_id": "nse-cash-price-band-ticks",
+  "versions": [
+    {
+      "version": "nse-cash-ticks-2021-01-01.r1",
+      "effective_from": "2021-01-01",
+      "effective_to": "2024-06-09",
+      "exchange": "NSE",
+      "segment": "cash",
+      "status": "sourced from NSE circulars; scope is non-ETF securities in series EQ and BE only, the two series the 2020-05-27 consolidated circular lists (series BZ is listed only from the 2023-06-26 consolidated circular, and BO, RL, AF, BL and T0 are named only in the 2024-05-24 circular, so they are left out and fail closed for this period); excludes Gold and other ETFs, SME (SM/ST/SZ: the consolidated circulars list a Rs 0.05 SME column inside item 1.2 G, the listing-day parameters, so its scope is unclear and it is left out), debt, close-ended mutual fund, InvIT and REIT series; effective_from is the start of the Phase 62 research window, not the date the regime began (the flat tick is documented from 2020-05-27); the flat Rs 0.05 is stated in the 2020, 2023 and 2024 consolidated circulars and in NSE/CMTR/62174, and no circular in the NSE CMTR feed from 2021-01-01 to 2024-05-24 revises it",
+      "reference_price_rule": "not used: one flat tick for every price, so any positive reference price resolves to the same band",
+      "series": ["EQ", "BE"],
+      "sources": [
+        "NSE/CMTR/44481 Capital Market Consolidated Circular, Circular Ref 39/2020, dated 2020-05-27, item 3.3 Tick Size (all other securities five paise; ETFs other than Gold one paise) and item 1.2 G market parameters (Series EQ/BE, Tick size Rs. 0.05): https://nsearchives.nseindia.com/content/circulars/CMTR44481.zip (fetched 2026-10-06)",
+        "NSE/CMTR/57270 Capital Market Consolidated Circular, Circular Ref 75/2023, dated 2023-06-26, item 1.2 G market parameters (Series EQ/BE/BZ, Tick size Rs. 0.05): https://nsearchives.nseindia.com/content/circulars/CMTR57270.zip (fetched 2026-10-06)",
+        "NSE/CMTR/61813 Capital Market Consolidated Circular, Circular Ref 59/2024, dated 2024-04-29, item 1.2 G market parameters (Series EQ/BE/BZ, Tick size Rs. 0.05): https://nsearchives.nseindia.com/content/circulars/CMTR61813.zip (fetched 2026-10-06)",
+        "NSE/CMTR/62174 Revision in tick size of securities in CM segment, Circular Ref 66/2024, dated 2024-05-24, states the current tick is Rs 0.05 and ends this version when it takes effect on 2024-06-10: https://nsearchives.nseindia.com/content/circulars/CMTR62174.pdf (fetched 2026-10-06)"
+      ],
+      "bands": [
+        {"from": "0", "to": null, "tick": "0.05"}
+      ]
+    },
+    {
+      "version": "nse-cash-ticks-2024-06-10.r1",
+      "effective_from": "2024-06-10",
+      "effective_to": "2025-04-14",
+      "exchange": "NSE",
+      "segment": "cash",
+      "status": "sourced from NSE circulars; scope is non-ETF securities in series EQ, BE, BZ, BO, RL, AF, BL and T0, each named in NSE/CMTR/62174 (para 1: all securities excluding Exchange Traded Funds available in 'EQ', 'BE', 'BZ', 'BO', 'RL', 'AF' series (and their corresponding 'BL' series as applicable); the tick determined for securities in T+1 settlement also applies to T+0 settlement (series T0)); excludes ETFs and the SME series SM/ST/SZ, which that circular does not name; boundary clause in NSE/CMTR/62174: securities with price below Rs 250 have tick Rs 0.01, and if the reference price is less than Rs 250 the tick is Rs 0.01 else the regular Rs 0.05, so exactly Rs 250.00 is Rs 0.05 and Rs 249.99 is Rs 0.01",
+      "reference_price_rule": "closing price on the last trading day of the previous month, reviewed monthly and applied from the first trading day of the next month; the first determination used the 2024-05-31 close for 2024-06-10; a new listing uses the issue price or the last close three trading days before listing; after a split, bonus, dividend or rights issue the existing tick stands until the next monthly review; the caller supplies this price",
+      "series": ["EQ", "BE", "BZ", "BO", "RL", "AF", "BL", "T0"],
+      "sources": [
+        "NSE/CMTR/62174 Revision in tick size of securities in CM segment, Circular Ref 66/2024, dated 2024-05-24, effective from trade date 2024-06-10: https://nsearchives.nseindia.com/content/circulars/CMTR62174.pdf (fetched 2026-10-06)",
+        "NSE/CMTR/67133 Revision in tick size of securities in CM segment - Update, Circular Ref 33/2025, dated 2025-03-13, effective 2025-04-15, which ends this version the day before: https://nsearchives.nseindia.com/content/circulars/CMTR67133.pdf (fetched 2026-10-06)"
+      ],
+      "bands": [
+        {"from": "0", "to": "250", "tick": "0.01"},
+        {"from": "250", "to": null, "tick": "0.05"}
+      ]
+    },
+    {
+      "version": "nse-cash-ticks-2025-04-15.r2",
+      "effective_from": "2025-04-15",
+      "effective_to": null,
+      "exchange": "NSE",
+      "segment": "cash",
+      "status": "sourced from NSE/CMTR/67133 and NSE/CMTR/67774; scope is non-ETF securities in series EQ, T0, BE, BZ, BO, RL, AF and BL, the list in NSE/CMTR/67133 para 1 and NSE/CMTR/67774 item 3.3 B (all securities excluding Exchange Traded Funds available in 'EQ', 'T0', 'BE', 'BZ', 'BO', 'RL', 'AF' series and their corresponding 'BL' series as applicable); excludes ETFs and the SME series SM/ST/SZ, which neither names; supersedes r1, which put an exact Rs 1,000, 5,000, 10,000 or 20,000 in the upper band; still unconfirmed against the Breeze security master ticksize column, which conflicts for some names: confirm with a live quote in Phase 61",
+      "reference_price_rule": "closing price on the last trading day of the previous month, reviewed monthly and applied from the first trading day of the next month; the first revision was determined on 2025-04-11 EOD from the 2025-03-28 close; a new listing uses the issue price or the last close; after a split, bonus, dividend or rights issue the existing tick stands until the next monthly review; the caller supplies this price",
+      "series": ["EQ", "T0", "BE", "BZ", "BO", "RL", "AF", "BL"],
+      "sources": [
+        "NSE/CMTR/67133 Revision in tick size of securities in CM segment - Update, Circular Ref 33/2025, dated 2025-03-13, effective from trade date 2025-04-15; table rows: Below 250 = 0.01, >= 250 to 1,000 = 0.05, > 1,000 to 5,000 = 0.10, > 5,000 to 10,000 = 0.50, > 10,000 to 20,000 = 1.00, > 20,000 = 5.00 (so exactly 1,000, 5,000, 10,000 and 20,000 belong to the lower band): https://nsearchives.nseindia.com/content/circulars/CMTR67133.pdf (fetched 2026-10-06)",
+        "NSE/CMTR/67774 Capital Market Consolidated Circular, Circular Ref 48/2025, dated 2025-04-30, item 3.3 B restates the same table with the same >= and > markers and excludes Exchange Traded Funds: https://nsearchives.nseindia.com/content/circulars/CMTR67774.zip (fetched 2026-10-06)",
+        "https://zerodha.com/marketintel/bulletin/408151/revision-in-tick-size-for-nse-derivatives-and-cash-segment-from-april-15-2025",
+        "https://www.angelone.in/news/market-updates/nse-revises-tick-size-for-stocks-and-indices-from-april-15-what-traders-need-to-know"
+      ],
+      "bands": [
+        {"from": "0", "to": "250", "tick": "0.01"},
+        {"from": "250", "to": "1000", "tick": "0.05", "upper_inclusive": true},
+        {"from": "1000", "to": "5000", "tick": "0.10", "upper_inclusive": true},
+        {"from": "5000", "to": "10000", "tick": "0.50", "upper_inclusive": true},
+        {"from": "10000", "to": "20000", "tick": "1.00", "upper_inclusive": true},
+        {"from": "20000", "to": null, "tick": "5.00"}
+      ]
+    }
+  ]
+}
