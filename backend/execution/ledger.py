@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Iterable, Iterator, Mapping, Optional
 
 from .models import (
@@ -80,6 +81,14 @@ class ApprovalConflict(LedgerError):
 
 class ApprovalKeyConflict(LedgerError):
     """Raised when approval-key enrollment would replace an active key."""
+
+
+class IndiaCapExceeded(ApprovalConflict):
+    """The reservation would break an India cap. ``code`` is the O6 reason (63-04, C1)."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
 
 
 class RequoteConflict(LedgerError):
@@ -587,6 +596,21 @@ _BASE_SCHEMA_STATEMENTS = (
 
 
 @dataclass(frozen=True)
+class IndiaAccountView:
+    """What the Mac's India limits need to know about the ledger, read in one pass (63-04).
+
+    ``positions`` are ``(ticker, quantity, cost basis)`` for every held ticker. ``open_buys``
+    are ``(ticker, unfilled quantity, limit price)`` for every admitted BUY whose buying-power
+    reservation is still ACTIVE. ``open_sells`` maps a ticker to the admitted SELL quantity
+    that has not reached a terminal state (waiting for approval, or claimed).
+    """
+
+    positions: tuple[tuple[str, Decimal, Decimal], ...]
+    open_buys: tuple[tuple[str, Decimal, Decimal], ...]
+    open_sells: Mapping[str, Decimal]
+
+
+@dataclass(frozen=True)
 class LedgerIdentity:
     """What a ledger file says about its owner, read without any write."""
 
@@ -726,6 +750,13 @@ _AUDIT_EVENT_TYPES = frozenset(
 )
 # States in which an order may already be at the broker (Phase 66, D-16).
 _IN_FLIGHT_STATES = ("SUBMITTING", "UNKNOWN", "ACKNOWLEDGED", "PARTIALLY_FILLED")
+# Phase 63-04: an India paper SELL holds no reservation. It is "claimed" once approval has
+# consumed its challenge, and from then until a terminal state its quantity is open.
+_SELL_CLAIMED_STATES = ("SUBMITTING", "APPROVED", "ACKNOWLEDGED", "PARTIALLY_FILLED", "UNKNOWN")
+EXIT_BATCH_EVENT = "EXIT_BATCH_REGISTERED"
+EXIT_BATCH_REASONS = frozenset({"halve", "flatten", "stop"})
+_BATCH_ID_PATTERN = re.compile(r"^[a-z0-9-]{8,64}$")
+SELL_EXCEEDS_HOLDING = "sell_exceeds_holding"
 
 
 def _install_quantity_reservations_table(connection: sqlite3.Connection) -> None:
@@ -1430,8 +1461,15 @@ class ExecutionLedger:
             ).fetchone()
         return self._budget_from_row(row) if row is not None else None
 
-    def reserve_buying_power(self, proposal_id: str) -> PaperReservation:
-        """Atomically check budget and reserve an admitted BUY notional."""
+    def reserve_buying_power(
+        self, proposal_id: str, *, india_caps: Optional[tuple[Decimal, Decimal]] = None
+    ) -> PaperReservation:
+        """Atomically check budget and reserve an admitted BUY notional.
+
+        In the India paper ledger the caller must pass ``india_caps`` (capital cap, per-position
+        cap): both are enforced inside this transaction at limit-price notional, and a missing
+        pair refuses the reservation (63-04, C1).
+        """
 
         now = _now()
         with self._transaction() as connection:
@@ -1474,6 +1512,10 @@ class ExecutionLedger:
             budget = self._budget_from_row(budget_row)
             if budget.available < admission.notional:
                 raise ApprovalConflict("paper budget is insufficient")
+            if self.workspace is Workspace.INDIA and self.venue_binding is None:
+                if india_caps is None:
+                    raise ApprovalConflict("india limits are required before reservation")
+                self._assert_india_caps_locked(connection, admission, intent, india_caps, proposal_id)
             if self.venue_binding is not None:
                 # D-18: held notional plus every other open BUY plus this order
                 # must stay within the per-position cap, checked in this same
@@ -1796,6 +1838,254 @@ class ExecutionLedger:
             (_decimal_str(_decimal(row["released"]) + outstanding), now, proposal_id),
         )
 
+    # --- India paper SELL and the Mac's India limits (Phase 63-04) ------------
+    #
+    # No schema change. An India paper ledger has no quantity-reservation table (that
+    # exists only in bound ledgers), so a SELL's open quantity is derived from the existing
+    # admission and order-state rows, inside the same transaction that decides.
+
+    def is_india_paper_sell(self, side: object) -> bool:
+        """True for a SELL in the unbound India ledger: admitted and claimed without a reservation."""
+
+        return (
+            self.workspace is Workspace.INDIA
+            and self.venue_binding is None
+            and str(getattr(side, "value", side)) == OrderSide.SELL.value
+        )
+
+    @staticmethod
+    def _india_open_sell_quantity_locked(
+        connection: sqlite3.Connection,
+        ticker: str,
+        *,
+        exclude: str = "",
+        include_pending: bool,
+    ) -> Decimal:
+        """Admitted SELL quantity of ``ticker`` that has not reached a terminal state.
+
+        ``include_pending`` adds SELLs that are admitted but not yet claimed. Admission counts
+        them (an operator cannot queue more than is held). The challenge and the claim do
+        not, so the first approval to be claimed wins and the later one is refused.
+        """
+
+        states = (("PENDING",) if include_pending else ()) + _SELL_CLAIMED_STATES
+        placeholders = ", ".join("?" for _ in states)
+        total = Decimal("0")
+        for row in connection.execute(
+            f"""
+            SELECT a.final_quantity
+            FROM execution_admissions AS a
+            JOIN order_projection AS p ON p.proposal_id = a.proposal_id
+            WHERE a.ticker = ? AND a.side = 'SELL' AND a.decision = 'ADMITTED'
+              AND a.proposal_id != ? AND p.state IN ({placeholders})
+            """,
+            (ticker, exclude, *states),
+        ).fetchall():
+            total += _decimal(row["final_quantity"])
+        return total
+
+    def _assert_india_sell_headroom_locked(
+        self, connection: sqlite3.Connection, admission: sqlite3.Row
+    ) -> None:
+        """Refuse a SELL that exceeds the held quantity minus every other claimed SELL."""
+
+        held, _ = self._held_position_locked(connection, self._admission_from_row(admission))
+        claimed = self._india_open_sell_quantity_locked(
+            connection,
+            str(admission["ticker"]),
+            exclude=str(admission["proposal_id"]),
+            include_pending=False,
+        )
+        if _decimal(admission["final_quantity"]) > held - claimed:
+            raise ApprovalConflict(SELL_EXCEEDS_HOLDING)
+
+    @staticmethod
+    def _fills_exist(connection: sqlite3.Connection) -> bool:
+        if connection.execute("SELECT 1 FROM paper_positions LIMIT 1").fetchone() is not None:
+            return True
+        return (
+            connection.execute(
+                "SELECT 1 FROM reconciliation_evidence "
+                "WHERE CAST(cumulative_quantity AS REAL) > 0 LIMIT 1"
+            ).fetchone()
+            is not None
+        )
+
+    def has_fills(self) -> bool:
+        """True when this ledger has ever recorded a fill (a position row or fill evidence).
+
+        The Mac latch file uses it to tell a pilot start (no file, no fills) from a deleted
+        file (no file, fills): the second must fail closed.
+        """
+
+        with self._mutex:
+            return self._fills_exist(self._require_connection())
+
+    @staticmethod
+    def _india_positions_locked(
+        connection: sqlite3.Connection, workspace: str
+    ) -> tuple[tuple[str, Decimal, Decimal], ...]:
+        return tuple(
+            (str(row["ticker"]), _decimal(row["quantity"]), _decimal(row["notional"]))
+            for row in connection.execute(
+                "SELECT ticker, quantity, notional FROM paper_positions "
+                "WHERE workspace = ? ORDER BY ticker",
+                (workspace,),
+            ).fetchall()
+            if _decimal(row["quantity"]) > 0
+        )
+
+    @staticmethod
+    def _india_open_buys_locked(
+        connection: sqlite3.Connection, *, exclude: str = ""
+    ) -> list[tuple[str, Decimal, Decimal]]:
+        """``(ticker, unfilled quantity, limit price)`` of every ACTIVE buy reservation.
+
+        The limit price is the intent's own, never the admission mid, so a cap check measures
+        what the broker could be asked to pay. ``exclude`` leaves one order out (the order
+        being rechecked must not count itself).
+        """
+
+        open_buys: list[tuple[str, Decimal, Decimal]] = []
+        for row in connection.execute(
+            """
+            SELECT a.proposal_id, a.ticker, a.final_quantity, a.price, i.canonical_json
+            FROM buying_power_reservations AS r
+            JOIN execution_admissions AS a ON a.proposal_id = r.proposal_id
+            JOIN order_intents AS i ON i.proposal_id = r.proposal_id
+            WHERE r.state = 'ACTIVE' AND a.side = 'BUY' AND a.decision = 'ADMITTED'
+              AND a.proposal_id != ?
+            ORDER BY a.ticker, a.proposal_id
+            """,
+            (exclude,),
+        ).fetchall():
+            filled_row = connection.execute(
+                "SELECT cumulative_quantity FROM reconciliation_evidence "
+                "WHERE proposal_id = ? ORDER BY evidence_id DESC LIMIT 1",
+                (str(row["proposal_id"]),),
+            ).fetchone()
+            filled = _decimal(filled_row["cumulative_quantity"]) if filled_row else Decimal("0")
+            unfilled = _decimal(row["final_quantity"]) - filled
+            if unfilled <= 0:
+                continue
+            limit = json.loads(str(row["canonical_json"])).get("limit_price")
+            open_buys.append(
+                (
+                    str(row["ticker"]),
+                    unfilled,
+                    _decimal(limit) if limit is not None else _decimal(row["price"]),
+                )
+            )
+        return open_buys
+
+    def _assert_india_caps_locked(
+        self,
+        connection: sqlite3.Connection,
+        admission: ExecutionAdmission,
+        intent: Mapping[str, Any],
+        caps: tuple[Decimal, Decimal],
+        proposal_id: str,
+    ) -> None:
+        """Both India caps, at limit-price notional, in the reservation's own transaction.
+
+        Admission checks the same caps earlier, but two admissions can both pass before either
+        reserves. This check runs under the writer transaction that inserts the reservation, so
+        the second reservation sees the first and is refused (C1).
+        """
+
+        capital_cap, per_position_cap = caps
+        limit = intent.get("limit_price")
+        price = _decimal(limit) if limit is not None else admission.price
+        notional = admission.final_quantity * price
+        costs: dict[str, Decimal] = {}
+        for ticker, _quantity, cost in self._india_positions_locked(connection, self.workspace.value):
+            costs[ticker] = costs.get(ticker, Decimal("0")) + cost
+        pending: dict[str, Decimal] = {}
+        for ticker, unfilled, limit_price in self._india_open_buys_locked(
+            connection, exclude=proposal_id
+        ):
+            pending[ticker] = pending.get(ticker, Decimal("0")) + unfilled * limit_price
+        deployed = sum(costs.values(), Decimal("0")) + sum(pending.values(), Decimal("0")) + notional
+        if deployed > capital_cap:
+            raise IndiaCapExceeded("capital_cap")
+        own = costs.get(admission.ticker, Decimal("0")) + pending.get(admission.ticker, Decimal("0")) + notional
+        if own > per_position_cap:
+            raise IndiaCapExceeded("per_position_cap")
+
+    def india_account_view(self, *, exclude_proposal_id: str = "") -> IndiaAccountView:
+        """Positions, open buys and open sells for the Mac's India rules, read in one pass.
+
+        ``exclude_proposal_id`` leaves that order's own reservation and open sell out, for a
+        recheck of an order that is already admitted.
+        """
+
+        if self.workspace is not Workspace.INDIA:
+            raise WorkspaceMismatch("the India account view exists only in the India ledger")
+        with self._mutex:
+            connection = self._require_connection()
+            positions = self._india_positions_locked(connection, self.workspace.value)
+            open_buys = self._india_open_buys_locked(connection, exclude=exclude_proposal_id)
+            open_sells: dict[str, Decimal] = {}
+            states = ("PENDING",) + _SELL_CLAIMED_STATES
+            for row in connection.execute(
+                f"""
+                SELECT a.ticker, a.final_quantity
+                FROM execution_admissions AS a
+                JOIN order_projection AS p ON p.proposal_id = a.proposal_id
+                WHERE a.side = 'SELL' AND a.decision = 'ADMITTED' AND a.proposal_id != ?
+                  AND p.state IN ({", ".join("?" for _ in states)})
+                """,
+                (exclude_proposal_id, *states),
+            ).fetchall():
+                ticker = str(row["ticker"])
+                open_sells[ticker] = open_sells.get(ticker, Decimal("0")) + _decimal(
+                    row["final_quantity"]
+                )
+        return IndiaAccountView(positions, tuple(open_buys), MappingProxyType(open_sells))
+
+    def record_exit_batch(self, proposal_id: str, batch_id: str, reason: str) -> None:
+        """Store a halve, flatten or stop batch tag with a registered SELL proposal.
+
+        The tag is a ledger event, not an intent field, so the immutable intent and its hash
+        are unchanged. Repeating the same tag is a no-op; a different one is refused.
+        """
+
+        if self.workspace is not Workspace.INDIA or self.venue_binding is not None:
+            raise ApprovalConflict("exit batches exist only in the India paper ledger")
+        if _BATCH_ID_PATTERN.fullmatch(batch_id) is None or reason not in EXIT_BATCH_REASONS:
+            raise ValueError("exit batch id or reason is invalid")
+        payload = {"batch_id": batch_id, "reason": reason}
+        now = _now()
+        with self._transaction() as connection:
+            row = self._select_order(connection, proposal_id)
+            if row is None:
+                raise OrderNotFound(f"order {proposal_id!r} was not found")
+            existing = connection.execute(
+                "SELECT payload_json FROM execution_events "
+                "WHERE proposal_id = ? AND event_type = ?",
+                (proposal_id, EXIT_BATCH_EVENT),
+            ).fetchone()
+            if existing is not None:
+                if json.loads(str(existing["payload_json"])) != payload:
+                    raise IntentConflict("the proposal already belongs to another exit batch")
+                return
+            state = str(row["state"])
+            self._append_event(connection, proposal_id, EXIT_BATCH_EVENT, state, state, payload, now)
+
+    def get_exit_batch(self, proposal_id: str) -> Optional[Mapping[str, str]]:
+        """``{"batch_id", "reason"}`` for a registered exit proposal, else None."""
+
+        with self._mutex:
+            row = self._require_connection().execute(
+                "SELECT payload_json FROM execution_events "
+                "WHERE proposal_id = ? AND event_type = ? ORDER BY event_id LIMIT 1",
+                (proposal_id, EXIT_BATCH_EVENT),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = json.loads(str(row["payload_json"]))
+        return {"batch_id": str(payload["batch_id"]), "reason": str(payload["reason"])}
+
     def _assert_no_in_flight_locked(
         self,
         connection: sqlite3.Connection,
@@ -2062,28 +2352,34 @@ class ExecutionLedger:
             if str(order["intent_hash"]) != intent_hash:
                 raise ApprovalConflict("challenge intent hash does not match stored intent")
             admission = connection.execute(
-                "SELECT decision, intent_hash FROM execution_admissions WHERE proposal_id = ?",
+                "SELECT * FROM execution_admissions WHERE proposal_id = ?",
                 (proposal_id,),
             ).fetchone()
             if admission is None or str(admission["decision"]) != AdmissionDecision.ADMITTED.value:
                 raise ApprovalConflict("admitted evidence is required before approval")
             if str(admission["intent_hash"]) != str(order["intent_hash"]):
                 raise ApprovalConflict("approval admission does not match the immutable intent")
-            sell_in_bound = (
-                self.venue_binding is not None and str(intent.get("side")) == OrderSide.SELL.value
-            )
-            reservation = connection.execute(
-                (
-                    f"SELECT state, intent_hash FROM {_QUANTITY_TABLE} WHERE proposal_id = ?"
-                    if sell_in_bound
-                    else "SELECT state, intent_hash FROM buying_power_reservations WHERE proposal_id = ?"
-                ),
-                (proposal_id,),
-            ).fetchone()
-            if reservation is None or str(reservation["state"]) != "ACTIVE":
-                raise ApprovalConflict("active paper reservation is required before approval")
-            if str(reservation["intent_hash"]) != str(order["intent_hash"]):
-                raise ApprovalConflict("approval reservation does not match the immutable intent")
+            if self.is_india_paper_sell(str(intent.get("side"))):
+                # An India paper SELL holds no reservation. Its gate is the position: held
+                # minus every other claimed SELL, inside this transaction (63-04, D-06).
+                self._assert_india_sell_headroom_locked(connection, admission)
+            else:
+                sell_in_bound = (
+                    self.venue_binding is not None
+                    and str(intent.get("side")) == OrderSide.SELL.value
+                )
+                reservation = connection.execute(
+                    (
+                        f"SELECT state, intent_hash FROM {_QUANTITY_TABLE} WHERE proposal_id = ?"
+                        if sell_in_bound
+                        else "SELECT state, intent_hash FROM buying_power_reservations WHERE proposal_id = ?"
+                    ),
+                    (proposal_id,),
+                ).fetchone()
+                if reservation is None or str(reservation["state"]) != "ACTIVE":
+                    raise ApprovalConflict("active paper reservation is required before approval")
+                if str(reservation["intent_hash"]) != str(order["intent_hash"]):
+                    raise ApprovalConflict("approval reservation does not match the immutable intent")
             if self._workspace_engaged_locked(connection):
                 raise ApprovalConflict("workspace execution control is engaged")
             key = connection.execute(
@@ -2262,21 +2558,27 @@ class ExecutionLedger:
                 or str(signed_payload.get("evidence_hash", "")) != str(admission["evidence_hash"])
             ):
                 raise ApprovalConflict("approval evidence does not match admitted quantity")
-            if str(admission["side"]) == OrderSide.SELL.value and self.venue_binding is not None:
-                # A practice SELL holds a quantity reservation, not buying power.
-                reservation = connection.execute(
-                    f"SELECT * FROM {_QUANTITY_TABLE} WHERE proposal_id = ?",
-                    (proposal_id,),
-                ).fetchone()
+            if self.is_india_paper_sell(str(admission["side"])):
+                # An India paper SELL holds no reservation. The position is checked here, in
+                # the claim transaction, against every other claimed SELL, so two approvals
+                # that each passed admission cannot both sell the same shares (63-04, D-06).
+                self._assert_india_sell_headroom_locked(connection, admission)
             else:
-                reservation = connection.execute(
-                    "SELECT * FROM buying_power_reservations WHERE proposal_id = ?",
-                    (proposal_id,),
-                ).fetchone()
-            if reservation is None or str(reservation["state"]) != "ACTIVE":
-                raise ApprovalConflict("active paper reservation is required before signed claim")
-            if str(reservation["intent_hash"]) != stored_intent_hash:
-                raise ApprovalConflict("signed claim reservation does not match the immutable intent")
+                if str(admission["side"]) == OrderSide.SELL.value and self.venue_binding is not None:
+                    # A practice SELL holds a quantity reservation, not buying power.
+                    reservation = connection.execute(
+                        f"SELECT * FROM {_QUANTITY_TABLE} WHERE proposal_id = ?",
+                        (proposal_id,),
+                    ).fetchone()
+                else:
+                    reservation = connection.execute(
+                        "SELECT * FROM buying_power_reservations WHERE proposal_id = ?",
+                        (proposal_id,),
+                    ).fetchone()
+                if reservation is None or str(reservation["state"]) != "ACTIVE":
+                    raise ApprovalConflict("active paper reservation is required before signed claim")
+                if str(reservation["intent_hash"]) != stored_intent_hash:
+                    raise ApprovalConflict("signed claim reservation does not match the immutable intent")
             if self._workspace_engaged_locked(connection):
                 raise ApprovalConflict("workspace execution control is engaged")
             if now_epoch >= int(challenge["expires_at_epoch"]):
@@ -3868,6 +4170,12 @@ class LedgerReader:
             return None
         return {"quantity": str(row["quantity"]), "notional": str(row["notional"])}
 
+    def has_fills(self) -> bool:
+        """True when the ledger has ever recorded a fill (see ``ExecutionLedger.has_fills``)."""
+
+        with self._mutex:
+            return ExecutionLedger._fills_exist(self._require_connection())
+
     def get_workspace_control(self, *, workspace: Workspace | str) -> WorkspaceControl:
         pinned = self.require_workspace(workspace)
         with self._mutex:
@@ -3970,6 +4278,8 @@ __all__ = [
     "DispatchAttempt",
     "ExecutionEvent",
     "ExecutionLedger",
+    "IndiaAccountView",
+    "IndiaCapExceeded",
     "IntentConflict",
     "InvalidTransition",
     "LEGACY_SCHEMA_VERSIONS",

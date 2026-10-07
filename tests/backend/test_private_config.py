@@ -939,3 +939,186 @@ def test_india_paper_execution_file_loads_and_changes_nothing_else(private_confi
     assert after.venue == "paper"
     assert after.limits == before.limits
     assert after.fingerprint != before.fingerprint
+
+
+# --- Phase 63-04: India execution.json (P-15) ------------------------------------
+
+INDIA_EXECUTION = {
+    "schema_version": 1,
+    "workspace": "india",
+    "venue": "paper",
+    "fat_finger_collar": "0.02",
+    "max_slippage_bps": "25",
+}
+
+
+def _india_execution(private: Path, payload: dict | None = None, *, raw: str | None = None) -> None:
+    path = private / "india" / "execution.json"
+    if raw is not None:
+        path.write_text(raw, encoding="utf-8")
+        os.chmod(path, 0o600)
+    else:
+        write_json(path, INDIA_EXECUTION if payload is None else payload)
+
+
+def _strict_error(private: Path) -> PrivateConfigError:
+    with pytest.raises(PrivateConfigError) as info:
+        load_workspace_config(private, "india", require_india_execution=True)
+    return info.value
+
+
+def test_india_execution_loads_the_operators_values_not_code_defaults(private_config_dir: Path):
+    config = load_workspace_config(private_config_dir, "india", require_india_execution=True)
+    assert config.india_execution is not None
+    assert config.india_execution.max_slippage_bps == Decimal(25)
+    assert config.india_execution.fat_finger_collar == Decimal("0.02")
+    # A different operator value comes back as that value, so 25 is not a default in code.
+    _india_execution(private_config_dir, {**INDIA_EXECUTION, "max_slippage_bps": "40.5"})
+    changed = load_workspace_config(private_config_dir, "india", require_india_execution=True)
+    assert changed.india_execution.max_slippage_bps == Decimal("40.5")
+
+
+def test_india_execution_values_stay_out_of_repr(private_config_dir: Path):
+    _india_execution(
+        private_config_dir, {**INDIA_EXECUTION, "fat_finger_collar": "0.0317", "max_slippage_bps": "47.31"}
+    )
+    config = load_workspace_config(private_config_dir, "india", require_india_execution=True)
+    shown = repr(config) + repr(config.india_execution) + str(config.india_execution)
+    assert "0.0317" not in shown and "47.31" not in shown
+
+
+def test_india_execution_authority_needs_the_file_but_research_loads_do_not(private_config_dir: Path):
+    (private_config_dir / "india" / "execution.json").unlink()
+    error = _strict_error(private_config_dir)
+    assert (error.code, error.field) == ("EXECUTION_CONFIG_MISSING", "execution.json")
+    # The 62 research load reads no India execution values and still succeeds.
+    research = load_workspace_config(private_config_dir, "india")
+    assert research.execution is None and research.india_execution is None
+    assert research.venue == "paper"
+
+
+@pytest.mark.parametrize(
+    "state",
+    ["missing", "float", "bad_collar", "garbage", "unknown_venue", "open_permissions", "symlink"],
+)
+def test_the_research_read_never_opens_india_execution_json(private_config_dir: Path, state: str):
+    # P-15: a research load (include_execution=False) succeeds whatever execution.json is,
+    # and its fingerprint does not depend on the file.
+    path = private_config_dir / "india" / "execution.json"
+    clean = load_workspace_config(private_config_dir, "india", include_execution=False)
+    if state == "missing":
+        path.unlink()
+    elif state == "float":
+        _india_execution(
+            private_config_dir,
+            raw='{"schema_version": 1, "workspace": "india", "venue": "paper", '
+            '"fat_finger_collar": 0.02, "max_slippage_bps": "25"}',
+        )
+    elif state == "bad_collar":
+        _india_execution(private_config_dir, {**INDIA_EXECUTION, "fat_finger_collar": "5"})
+    elif state == "garbage":
+        _india_execution(private_config_dir, raw="{not json")
+    elif state == "unknown_venue":
+        _india_execution(private_config_dir, {**INDIA_EXECUTION, "venue": "nowhere"})
+    elif state == "open_permissions":
+        os.chmod(path, 0o644)
+    else:
+        real = private_config_dir / "india" / "real-execution.json"
+        path.rename(real)
+        path.symlink_to(real)
+    research = load_workspace_config(private_config_dir, "india", include_execution=False)
+    assert research.execution is None and research.india_execution is None
+    assert research.limits == clean.limits and research.strategy == clean.strategy
+    assert research.fingerprint == clean.fingerprint
+    # The same damaged file still stops the default load that execution uses.
+    if state not in ("missing", "bad_collar"):  # a bad collar is only checked by the execution start
+        with pytest.raises(PrivateConfigError):
+            load_workspace_config(private_config_dir, "india")
+
+
+def test_research_cannot_ask_for_execution_authority_without_reading_the_file(private_config_dir: Path):
+    with pytest.raises(ValueError):
+        load_workspace_config(
+            private_config_dir, "india", require_india_execution=True, include_execution=False
+        )
+
+
+def test_the_62_study_load_uses_the_research_read(monkeypatch, tmp_path):
+    from private_config import loader as loader_module
+    from strategy_india import study
+
+    seen = {}
+
+    class Stop(Exception):
+        pass
+
+    def spy(private_dir, workspace, **kwargs):
+        seen.update(kwargs, workspace=workspace)
+        raise Stop
+
+    monkeypatch.setattr(loader_module, "load_workspace_config", spy)
+    with pytest.raises(Stop):
+        study.build_inputs({"private_dir": tmp_path})
+    assert seen == {"workspace": "india", "include_execution": False}
+
+
+def test_a_62_research_load_ignores_india_execution_values(private_config_dir: Path):
+    # Out-of-range 63 values do not touch the research load; only execution start refuses.
+    _india_execution(private_config_dir, {**INDIA_EXECUTION, "fat_finger_collar": "5"})
+    research = load_workspace_config(private_config_dir, "india")
+    assert research.india_execution is None
+    assert research.limits is not None and research.strategy is not None
+    assert _strict_error(private_config_dir).code == "SCHEMA_INVALID"
+
+
+@pytest.mark.parametrize(
+    "change,field",
+    [
+        ({"fat_finger_collar": "0"}, "fat_finger_collar"),
+        ({"fat_finger_collar": "1"}, "fat_finger_collar"),
+        ({"fat_finger_collar": "-0.02"}, "fat_finger_collar"),
+        ({"fat_finger_collar": "1.5"}, "fat_finger_collar"),
+        ({"fat_finger_collar": "abc"}, "fat_finger_collar"),
+        ({"max_slippage_bps": "0"}, "max_slippage_bps"),
+        ({"max_slippage_bps": "-1"}, "max_slippage_bps"),
+        ({"max_slippage_bps": 25}, "max_slippage_bps"),
+        ({"unexpected": "x"}, "unexpected"),
+    ],
+)
+def test_india_execution_refuses_bad_values_and_unknown_keys(
+    private_config_dir: Path, change: dict, field: str
+):
+    _india_execution(private_config_dir, {**INDIA_EXECUTION, **change})
+    error = _strict_error(private_config_dir)
+    assert (error.code, error.field) == ("SCHEMA_INVALID", field)
+
+
+def test_india_execution_refuses_a_json_float(private_config_dir: Path):
+    _india_execution(
+        private_config_dir,
+        raw='{"schema_version": 1, "workspace": "india", "venue": "paper", '
+        '"fat_finger_collar": 0.02, "max_slippage_bps": "25"}',
+    )
+    assert _strict_error(private_config_dir).code == "FLOAT_NOT_ALLOWED"
+
+
+def test_india_execution_in_another_workspaces_file_is_refused(private_config_dir: Path):
+    _india_execution(private_config_dir, {**INDIA_EXECUTION, "workspace": "uk"})
+    assert _strict_error(private_config_dir).code == "WORKSPACE_MISMATCH"
+
+
+@pytest.mark.parametrize("missing", ["fat_finger_collar", "max_slippage_bps"])
+def test_india_execution_has_no_default_for_either_value(private_config_dir: Path, missing: str):
+    payload = {k: v for k, v in INDIA_EXECUTION.items() if k != missing}
+    _india_execution(private_config_dir, payload)
+    error = _strict_error(private_config_dir)
+    assert (error.code, error.field) == ("SCHEMA_INVALID", missing)
+
+
+def test_a_uk_execution_file_naming_a_collar_is_refused(private_config_dir: Path):
+    write_json(
+        private_config_dir / "uk" / "execution.json",
+        {"schema_version": 1, "workspace": "uk", "venue": "paper", "fat_finger_collar": "0.02"},
+    )
+    error = _load_error(private_config_dir, "uk")
+    assert error.code == "SCHEMA_INVALID"

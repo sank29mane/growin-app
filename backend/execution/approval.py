@@ -208,9 +208,12 @@ class ApprovalService:
         admission = self._ledger.get_admission(proposal_id)
         if admission is None or admission.decision.value != "ADMITTED":
             raise ApprovalConflict("admitted evidence is required before approval")
-        reservation = self._ledger.get_reservation(proposal_id)
-        if reservation is None or reservation.state != "ACTIVE":
-            raise ApprovalConflict("active paper reservation is required before approval")
+        if not self._ledger.is_india_paper_sell(admission.side):
+            # An India paper SELL holds no reservation; the ledger checks its position,
+            # inside the challenge transaction, instead (63-04, D-06).
+            reservation = self._ledger.get_reservation(proposal_id)
+            if reservation is None or reservation.state != "ACTIVE":
+                raise ApprovalConflict("active paper reservation is required before approval")
         key = self._ledger.get_approval_key(workspace=pinned)
         if key is None:
             raise ApprovalConflict("approval signer is not enrolled")

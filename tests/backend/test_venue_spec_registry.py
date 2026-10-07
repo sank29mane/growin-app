@@ -408,13 +408,17 @@ def test_a_spec_held_by_the_caller_cannot_change_the_sealed_entry(tmp_path):
 
 
 def _fake_execution_payload(workspace: str) -> dict:
-    return {
+    payload = {
         "schema_version": 1,
         "workspace": workspace,
         "venue": FAKE_KIND,
         "account_id": FAKE_ACCOUNT,
         "currency": "INR",
     }
+    if workspace == "india":
+        # Phase 63-04 (P-15): India execution authority also needs the collar and slippage cap.
+        payload.update({"fat_finger_collar": "0.02", "max_slippage_bps": "25"})
+    return payload
 
 
 def test_the_loader_applies_the_fake_spec_workspace(with_fake_spec, private_config_dir):

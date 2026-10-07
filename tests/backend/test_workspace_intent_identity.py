@@ -148,13 +148,14 @@ def test_every_v5_fixture_intent_still_hashes_to_its_stored_hash(tmp_path):
 # --- admission currency ---
 
 
-def _admit(service, proposal, currency):
+def _admit(service, proposal, currency, **extra):
     return service.admit(
         proposal,
         currency=currency,
         price="10",
         simulator_evidence={"simulated_fill_price": "10"},
         risk_evidence={"scaled_size": "1"},
+        **extra,
     )
 
 
@@ -190,9 +191,22 @@ def test_admit_refuses_a_currency_from_another_workspace(
 @pytest.mark.parametrize(("workspace", "currency"), [("uk", "GBP"), ("india", "INR")])
 def test_admit_proceeds_with_the_workspace_currency(tmp_path, workspace, currency):
     with ExecutionLedger(tmp_path / "execution.sqlite3", workspace=workspace) as ledger:
-        service = ExecutionService(PaperDispatcher(), ledger)
+        guard = None
+        proposal = _proposal(workspace=workspace)
+        extra = {}
+        if workspace == "india":
+            # 63-04: India admission needs the Mac's India limits, a LIMIT order and a quote.
+            import india_limits_support as ils
 
-        admission = _admit(service, _proposal(workspace=workspace), currency)
+            (tmp_path / "cfg").mkdir()
+            guard = ils.make_guard(ledger, ils.india_private_dir(tmp_path / "cfg"))
+            proposal.update(
+                {"ticker": ils.TICKER, "order_type": "LIMIT", "limit_price": "100.00"}
+            )
+            extra = {"india_quote": ils.make_evidence()}
+        service = ExecutionService(PaperDispatcher(), ledger, india_guard=guard)
+
+        admission = _admit(service, proposal, currency, **extra)
 
         assert admission.decision.value == "ADMITTED"
         assert admission.currency == currency

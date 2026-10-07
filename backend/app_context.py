@@ -2,9 +2,10 @@
 Shared application state and models to avoid circular imports.
 """
 
-from datetime import datetime, timezone
+import hashlib
+from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 import sqlite3
 import uuid
 from pydantic import BaseModel, ConfigDict
@@ -39,7 +40,10 @@ from execution.venue import (
     resolve_factory,
     spec_for,
 )
+from execution.india_guard import IndiaAdmissionGuard, IndiaQuoteEvidence
 from private_config import PrivateConfigError, load_workspace_config
+from risk_india.drawdown import SessionResult, pending_batches
+from risk_india.exits import ExitBatch, Position
 from workspace_credentials import process_workspace
 from model_registry import (
     ModelRegistry,
@@ -195,6 +199,7 @@ class AppState:
         private_dir,
         dispatcher_factories: Optional[DispatcherFactoryMap] = None,
         allow_test_price_sources: bool = False,
+        india_clock: Optional[Callable[[], datetime]] = None,
     ) -> bool:
         """Acquire local execution authority and install the venue's dispatcher.
 
@@ -208,6 +213,10 @@ class AppState:
         default the production map, which holds ``paper`` only. An unknown or
         unregistered venue, or a practice venue outside a UK process, leaves
         execution disabled: it is never replaced by paper.
+
+        India (Phase 63-04, P-15) also needs a valid ``private/india/execution.json``
+        (collar and slippage cap), and installs the Mac's India limits on admission.
+        ``india_clock`` is a test seam for that guard's IST-aware clock.
         """
         self.close_execution()
         ledger = None
@@ -216,7 +225,10 @@ class AppState:
             # private config, an unpinned or foreign ledger, an unavailable venue,
             # or an I/O failure leaves execution disabled instead of aborting startup.
             ws = coerce_workspace(workspace)
-            config = load_workspace_config(private_dir, ws.value)
+            # India execution authority needs a valid private/india/execution.json (P-15).
+            config = load_workspace_config(
+                private_dir, ws.value, require_india_execution=ws is Workspace.INDIA
+            )
             venue = config.venue
             binding = None
             caps = None
@@ -253,6 +265,12 @@ class AppState:
             dispatcher = factory(
                 VenueContext(workspace=ws, venue=venue, binding=binding, caps=caps)
             )
+            # The Mac's own India limits, latch file and slippage cap (63-04). A config or
+            # limits error here leaves execution disabled, like every other start failure.
+            india_guard = None
+            if ws is Workspace.INDIA:
+                clock_args = {} if india_clock is None else {"clock": india_clock}
+                india_guard = IndiaAdmissionGuard.from_config(config, ledger, **clock_args)
         except (
             LedgerError,
             OSError,
@@ -286,6 +304,7 @@ class AppState:
             risk_gate=RiskSwarmGate(),
             require_runtime_preflight=True,
             allow_test_price_sources=allow_test_price_sources,
+            india_guard=india_guard,
         )
         self.execution_authority = True
         self.workspace_config = config
@@ -389,8 +408,15 @@ class AppState:
         *,
         instrument: IndiaInstrument,
         portfolio_state: Dict[str, Any],
+        quote: Optional[IndiaQuoteEvidence] = None,
     ):
-        """Run canonical Phase 54 admission from the active Phase 55 snapshot."""
+        """Run canonical Phase 54 admission from the active Phase 55 snapshot.
+
+        ``quote`` carries the India rule inputs (63-04): circuits, tick reference, bid and ask
+        with the time they were read. Without a fresh one the Mac's India limits deny the
+        order ``quote_unavailable``. A halve, flatten or stop SELL registered by
+        ``register_india_exit_batches`` comes through here too.
+        """
 
         if (
             not self.execution_authority
@@ -403,7 +429,7 @@ class AppState:
         intent = self.execution_service.register_proposal(proposal)
         session = self._market_data_session
         if session is None:
-            return self.execution_service.admit(intent, currency="INR")
+            return self.execution_service.admit(intent, currency="INR", india_quote=quote)
         try:
             classifier = self._regime_classifier or RegimeClassifier()
             self._regime_classifier = classifier
@@ -415,12 +441,15 @@ class AppState:
                 regime=regime,
             )
         except MarketDataError as exc:
-            return self.execution_service.admit(intent, currency="INR", deny_reason=exc.code)
+            return self.execution_service.admit(
+                intent, currency="INR", deny_reason=exc.code, india_quote=quote
+            )
         return self.execution_service.prepare(
             intent,
             currency="INR",
             portfolio_state=portfolio_state,
             risk_db_connection=self._preflight_policy_connection,
+            india_quote=quote,
             **context.execution_kwargs(),
         )
 
@@ -673,8 +702,19 @@ class AppState:
             kwargs["broker_available_quantity"] = broker_available
         return None, kwargs
 
-    def prepare_india_paper_local(self, *, symbol: str, quantity: str):
-        """Create a server-owned PAPER intent; this stops before approval/dispatch."""
+    def prepare_india_paper_local(
+        self,
+        *,
+        symbol: str,
+        quantity: str,
+        limit_price: Optional[Decimal] = None,
+        quote: Optional[IndiaQuoteEvidence] = None,
+    ):
+        """Create a server-owned PAPER intent; this stops before approval/dispatch.
+
+        The Mac's India limits need a LIMIT price and a fresh quote (63-04). Without them the
+        admission is recorded DENIED (``intent_invalid`` or ``quote_unavailable``).
+        """
         if self._execution_ledger is None:
             raise LedgerError("local paper execution authority is unavailable")
         instrument = IndiaInstrument(symbol=symbol)
@@ -689,11 +729,119 @@ class AppState:
             "reasoning": "Explicit local India paper preparation. No broker is contacted.",
             "status": "PENDING",
         }
+        if limit_price is not None:
+            proposal["order_type"] = "LIMIT"
+            proposal["limit_price"] = format(Decimal(limit_price), "f")
         admission = self.admit_india_paper_proposal(
             proposal, instrument=instrument,
             portfolio_state={"equity": 100000.0, "peak_equity": 100000.0},
+            quote=quote,
         )
         return proposal, admission
+
+    # --- India Option B latches and exit batches (Phase 63-04, D-05 to D-08) -------------
+
+    def _india_authority(self):
+        ledger = self._execution_ledger
+        service = self._execution_service
+        guard = service.india_guard if service is not None else None
+        if (
+            not self.execution_authority
+            or ledger is None
+            or guard is None
+            or ledger.workspace != Workspace.INDIA
+        ):
+            raise LedgerError("India execution authority is unavailable")
+        return ledger, guard
+
+    @staticmethod
+    def _india_positions(view) -> list[Position]:
+        positions = []
+        for ticker, quantity, cost in view.positions:
+            if quantity != quantity.to_integral_value():
+                raise LedgerError("India positions are whole shares")
+            positions.append(
+                Position(
+                    isin=ticker,
+                    stock_code=ticker.rsplit(":", 1)[-1],
+                    quantity=int(quantity),
+                    cost=cost,
+                )
+            )
+        return positions
+
+    def evaluate_india_session(
+        self, marks: Mapping[str, Decimal], session_date: date, *, cash: Decimal
+    ) -> SessionResult:
+        """Apply one session close to the Mac's Option B latches and persist them.
+
+        ``marks`` are the closes by execution ticker (``NSE:CASH:SYMBOL``); a held position
+        with no mark raises and writes nothing. ``cash`` is the pilot's cash after charges.
+        The Mac ledger cannot derive it (it does not book SELL fills or charges), so the
+        caller supplies it: 63-05 takes it from the VM, tests pass it explicitly. The result
+        carries the halve, flatten and stop batches newly raised, to be registered with
+        ``register_india_exit_batches``.
+        """
+
+        ledger, guard = self._india_authority()
+        positions = self._india_positions(ledger.india_account_view())
+        return guard.store.evaluate_session(marks, session_date, cash=cash, positions=positions)
+
+    def pending_india_exit_batches(self, decided_on: date) -> tuple[ExitBatch, ...]:
+        """Every open exit rebuilt for the next session (a missed limit is re-issued, not dropped)."""
+
+        ledger, guard = self._india_authority()
+        state = guard.store.load()
+        return pending_batches(state, self._india_positions(ledger.india_account_view()), decided_on)
+
+    def register_india_exit_batches(
+        self, batches, *, limit_prices: Mapping[str, Decimal]
+    ) -> list[Dict[str, Any]]:
+        """Register one SELL proposal per position of each batch, sharing the batch id.
+
+        ``limit_prices`` maps an execution ticker to the limit price chosen now, inside the
+        collar and the circuit band (the exit intents carry none, so it is never stale). A
+        missing or non-positive price refuses the whole call before anything is registered.
+        Admission re-checks the collar, band, tick and session when the SELL is admitted. The
+        batch id and reason are stored beside each proposal as a ledger event, not in the
+        intent, so intent hashes do not change. Registering the same batch again is a no-op.
+        """
+
+        ledger, _guard = self._india_authority()
+        planned = []
+        for batch in batches:
+            for exit_intent in batch.intents:
+                price = limit_prices.get(exit_intent.isin)
+                if not isinstance(price, Decimal) or not price.is_finite() or price <= 0:
+                    raise ValueError(f"a positive limit price is required for {exit_intent.isin}")
+                planned.append((batch, exit_intent, price))
+        proposals: list[Dict[str, Any]] = []
+        for batch, exit_intent, price in planned:
+            slug = hashlib.sha256(exit_intent.isin.encode("utf-8")).hexdigest()[:10]
+            proposal_id = f"exit-{batch.batch_id}-{slug}"
+            proposal = {
+                "proposal_id": proposal_id,
+                "client_order_id": f"india-{proposal_id}",
+                "workspace": ledger.workspace.value,
+                "account": "paper",
+                "broker": "paper",
+                "mode": "PAPER",
+                "ticker": exit_intent.isin,
+                "action": "SELL",
+                "quantity": str(exit_intent.quantity),
+                "order_type": "LIMIT",
+                "limit_price": format(price, "f"),
+                "reasoning": (
+                    f"Mac Option B {batch.reason} exit: sell {exit_intent.quantity} "
+                    f"{exit_intent.stock_code}. Each order needs its own Touch ID approval."
+                ),
+                "status": "PENDING",
+            }
+            self.execution_service.register_proposal(proposal)
+            ledger.record_exit_batch(proposal_id, batch.batch_id, batch.reason)
+            self.trade_proposals[proposal_id] = proposal
+            proposals.append(self.get_trade_proposal(proposal_id) or proposal)
+        return proposals
 
     @staticmethod
     def _local_preflight_policy_connection():

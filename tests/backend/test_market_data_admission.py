@@ -18,6 +18,8 @@ from market_data import (
 )
 from simulation import PreFlightSimulator, RiskSwarmGate
 
+import india_limits_support as ils
+
 
 def get_now():
     return datetime.now(timezone.utc)
@@ -98,6 +100,7 @@ async def test_fresh_bound_snapshot_feeds_real_phase_54_controls(tmp_path):
     dispatcher = MagicMock()
     dispatcher.dispatch = AsyncMock()
     connection = policy_connection()
+    private = ils.india_private_dir(tmp_path)
     try:
         with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="india") as ledger:
             service = ExecutionService(
@@ -106,12 +109,15 @@ async def test_fresh_bound_snapshot_feeds_real_phase_54_controls(tmp_path):
                 simulator=PreFlightSimulator(),
                 risk_gate=RiskSwarmGate(),
                 require_runtime_preflight=True,
+                india_guard=ils.make_guard(ledger, private),
             )
             admission = service.admit(
-                intent(),
+                # 63-04: an India order is a LIMIT inside the collar with a fresh quote.
+                intent(order_type="LIMIT", limit_price=Decimal("100.00")),
                 currency="INR",
                 portfolio_state={"equity": 1000.0, "peak_equity": 1000.0},
                 risk_db_connection=connection,
+                india_quote=ils.make_evidence(),
                 **context.execution_kwargs(),
             )
             assert admission.decision is AdmissionDecision.ADMITTED
@@ -200,6 +206,7 @@ async def test_app_owned_india_entry_uses_market_session_and_durably_rejects_gap
         tmp_path / "execution.sqlite3",
         workspace="india",
         private_dir=private_config_dir,
+        india_clock=lambda: ils.NOW,
     )
     try:
         await app_state.start_market_data_replay(
@@ -210,11 +217,14 @@ async def test_app_owned_india_entry_uses_market_session_and_durably_rejects_gap
             ),
         )
         app_state._execution_ledger.configure_paper_budget("paper", "INR", "1000", workspace="india")
-        proposal = intent(proposal_id="app-entry").model_dump(mode="json")
+        proposal = intent(
+            proposal_id="app-entry", order_type="LIMIT", limit_price=Decimal("100.00")
+        ).model_dump(mode="json")
         admitted = app_state.admit_india_paper_proposal(
             proposal,
             instrument=INSTRUMENT,
             portfolio_state={"equity": 1000.0, "peak_equity": 1000.0},
+            quote=ils.make_evidence(),
         )
         assert admitted.decision is AdmissionDecision.ADMITTED
         assert app_state._execution_ledger.list_attempts("app-entry") == []

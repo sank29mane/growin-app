@@ -676,7 +676,8 @@ def build_inputs(config: Mapping[str, Any], *, bind_to_registration: bool = True
     from .holdout import load_criteria_file
     from .ticks import load_default_tables
 
-    cfg = load_workspace_config(config["private_dir"], "india")
+    # P-15: research never reads private/india/execution.json (collar and slippage cap).
+    cfg = load_workspace_config(config["private_dir"], "india", include_execution=False)
     assert cfg.strategy is not None and cfg.limits is not None
     workspace_dir = Path(config["private_dir"]) / "india"
     ref = config["criteria"]
