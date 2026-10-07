@@ -77,6 +77,7 @@ wins and this file is wrong.
   open, every buy on every ISIN is refused `stop_open`; the latch clears when the trade list shows the exit fill, with
   no admin reset. A verified sell never clears `halt` or a stop. An exit still open at 15:30 IST raises an operator
   alert through the same channel as halt and kill-switch alerts. `mac_halt` and `account_mismatch` refuse everything.
+  For example, an open INFY stop blocks a RELIANCE buy until the stop is cleared.
   Only the admin CLI clears `halt`, `stop`, `mac_halt` and `account_mismatch`; it refuses `ended`. It also refuses
   `reset --latch halt` while drawdown is at or below -8%, because the halt would latch again at the next close.
   `--rebase-halt-anchor` overrides that: it sets a separate halt anchor (equity at the last evaluated close) that
