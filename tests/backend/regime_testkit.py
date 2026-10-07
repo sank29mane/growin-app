@@ -56,3 +56,19 @@ def permuted_params(order: tuple[int, ...]) -> dict:
         "scaler_mean": params["scaler_mean"],
         "scaler_var": params["scaler_var"],
     }
+
+
+def bound_regime_fields(raw_id: int | None = None) -> dict:
+    """The regime kwargs an admission must carry: raw id, policy hash and a matching audit.
+
+    ``raw_id`` defaults to the calm component. The audit is built from the trusted map plus a
+    model version, exactly the shape the classifier's evidence produces.
+    """
+
+    severity_map = shipped_map()
+    raw = severity_map.calm_id if raw_id is None else raw_id
+    return {
+        "regime_id": raw,
+        "regime_policy_hash": severity_map.policy_hash,
+        "regime_audit": {**severity_map.audit(raw), "model_version": f"gmm-p256:{ARTIFACT_SHA256}"},
+    }

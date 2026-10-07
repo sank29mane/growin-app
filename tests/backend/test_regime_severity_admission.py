@@ -31,7 +31,7 @@ from market_data import (
 )
 from regime_testkit import ARTIFACT, permuted_params, shipped_map, shipped_params
 from simulation import RiskSwarmGate
-from simulation.regime_severity import build_scaling_policy_connection, build_severity_map, policy_matches
+from simulation.regime_severity import build_scaling_policy_connection, build_severity_map, policy_table_matches
 
 INSTRUMENT = IndiaInstrument(symbol="RELIANCE")
 PERMUTATIONS = list(itertools.permutations(range(4)))
@@ -203,6 +203,34 @@ async def test_a_regime_id_the_model_does_not_have_is_refused_at_classification(
     assert error.value.code == "REGIME_INFERENCE_FAILED"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "posterior",
+    [
+        np.array([0.5, 0.5, 0.5, 0.5]),  # finite but not a probability vector
+        np.array([1.2, -0.2, 0.0, 0.0]),
+        np.array([0.0, 0.0, 0.0, 0.0]),
+        np.array([np.nan, np.nan, np.nan, np.nan]),
+    ],
+    ids=["sums-to-two", "negative", "all-zero", "nan"],
+)
+async def test_an_invalid_posterior_denies_instead_of_picking_component_zero(posterior, monkeypatch):
+    import market_data.regime as regime_module
+
+    monkeypatch.setattr(regime_module, "fast_gmm_predict_proba", lambda feature, **p: posterior)
+    with pytest.raises(MarketDataError) as error:
+        await _classify(RegimeClassifier(), ("100", "100.01", "100.02"))
+    assert error.value.code == "REGIME_INFERENCE_FAILED"
+
+
+def test_the_classifier_refuses_a_model_with_negated_precision_factors(tmp_path):
+    params = shipped_params()
+    params["precisions_cholesky"] = -params["precisions_cholesky"]
+    with pytest.raises(MarketDataError) as error:
+        RegimeClassifier(_write_model(tmp_path, params))
+    assert error.value.code == "REGIME_COVARIANCE_INVALID"
+
+
 # --- India: the fixture that was being sized at 5% ---------------------------------------------
 
 
@@ -300,11 +328,15 @@ async def test_the_app_owned_size_policy_is_bound_to_the_classifiers_severity_ma
     )
     try:
         severity_map = state._regime_severity_map()
-        assert policy_matches(state._preflight_policy_connection, severity_map.policy_hash)
+        assert policy_table_matches(state._preflight_policy_connection, severity_map)
         rows = dict(state._preflight_policy_connection.execute("SELECT regime_id, scale_multiplier FROM scaling_policies"))
         assert rows == {3: 1.0, 0: 0.5, 2: 0.1, 1: 0.05}
         local = state._local_paper_preflight()
         assert local["regime_id"] == 3 and local["regime_policy_hash"] == severity_map.policy_hash
+        assert local["regime_audit"]["policy_hash"] == severity_map.policy_hash
+        assert local["regime_audit"]["regime_id"] == 3 and local["regime_audit"]["severity_label"] == "calm"
+        assert local["regime_audit"]["model_version"]
+        assert state.execution_service._regime_severity_map is severity_map
     finally:
         state.close_execution()
 
@@ -336,13 +368,20 @@ def _intent(proposal_id, quantity="1"):
     )
 
 
-def _admit(tmp_path, name, *, regime_id, policy_hash, audit, connection, gate=None, runtime_preflight=True, at=None):
+_TRUSTED = object()
+
+
+def _admit(
+    tmp_path, name, *, regime_id, policy_hash, audit, connection, gate=None, runtime_preflight=True, at=None,
+    trusted=_TRUSTED,
+):
     (tmp_path / name).mkdir()
     private = ils.india_private_dir(tmp_path / name)
     with ExecutionLedger(tmp_path / f"{name}.sqlite3", workspace="india") as ledger:
         service = ExecutionService(
             MagicMock(dispatch=AsyncMock()), ledger, simulator=_FixedSimulator(), risk_gate=gate or RiskSwarmGate(),
             require_runtime_preflight=runtime_preflight, india_guard=ils.make_guard(ledger, private),
+            regime_severity_map=shipped_map() if trusted is _TRUSTED else trusted,
         )
         kwargs = {
             "price": "100", "tick_window": {"bid": [99.9], "ask": [100.1], "spread": [0.002]},
@@ -468,6 +507,130 @@ def test_a_regime_id_outside_the_model_is_denied_with_no_quantity(unknown, tmp_p
         )
         assert admission.decision is AdmissionDecision.DENIED
         assert admission.final_quantity == Decimal("0")
+    finally:
+        connection.close()
+
+
+def _handmade_raw_keyed_table():
+    """The pre-fix table: raw ids as if they were severities (0 full size, 3 five percent)."""
+
+    import sqlite3
+
+    handmade = sqlite3.connect(":memory:")
+    handmade.execute("CREATE TABLE scaling_policies (regime_id INTEGER PRIMARY KEY, scale_multiplier REAL NOT NULL)")
+    handmade.executemany("INSERT INTO scaling_policies VALUES (?, ?)", ((0, 1.0), (1, 0.5), (2, 0.1), (3, 0.05)))
+    return handmade
+
+
+@pytest.mark.parametrize("runtime_preflight", [True, False])
+def test_the_old_raw_id_table_with_no_binding_is_denied_not_admitted_at_full_size(tmp_path, runtime_preflight):
+    """C3: omitting the hash and audit used to skip the binding, so the old table admitted raw
+    id 0 (the NORMAL component) at full size with no regime audit."""
+
+    handmade = _handmade_raw_keyed_table()
+    gate = _CountingGate()
+    try:
+        admission = _admit(
+            tmp_path, f"oldtable{runtime_preflight}", regime_id=0, policy_hash=None, audit=None,
+            connection=handmade, gate=gate, runtime_preflight=runtime_preflight,
+        )
+        assert admission.decision is AdmissionDecision.DENIED
+        assert admission.reason_code == "REGIME_BINDING_REQUIRED"
+        assert admission.final_quantity == Decimal("0")
+        assert gate.calls == 0
+    finally:
+        handmade.close()
+
+
+def test_the_old_raw_id_table_with_a_copied_hash_and_audit_is_still_denied(tmp_path):
+    handmade = _handmade_raw_keyed_table()
+    severity_map = shipped_map()
+    gate = _CountingGate()
+    try:
+        admission = _admit(
+            tmp_path, "oldcopied", regime_id=0, policy_hash=severity_map.policy_hash,
+            audit=_audit(regime_id=0, severity_rank=1, severity_label="normal"), connection=handmade, gate=gate,
+        )
+        assert admission.decision is AdmissionDecision.DENIED
+        assert admission.reason_code == "REGIME_POLICY_MISMATCH"
+        assert gate.calls == 0
+    finally:
+        handmade.close()
+
+
+@pytest.mark.parametrize(
+    "policy_hash,audit,code",
+    [
+        (None, "audit", "REGIME_BINDING_REQUIRED"),
+        ("hash", None, "REGIME_BINDING_REQUIRED"),
+        ("hash", "audit-empty", "REGIME_BINDING_REQUIRED"),
+        ("hash", "audit-no-model", "REGIME_BINDING_REQUIRED"),
+        ("f" * 64, "audit", "REGIME_POLICY_MISMATCH"),
+        ("hash", "audit-wrong-rank", "REGIME_POLICY_MISMATCH"),
+        ("hash", "audit-wrong-label", "REGIME_POLICY_MISMATCH"),
+        ("hash", "audit-wrong-id", "REGIME_POLICY_MISMATCH"),
+        ("hash", "audit-wrong-policy", "REGIME_POLICY_MISMATCH"),
+    ],
+)
+def test_a_missing_or_inconsistent_regime_binding_denies_even_with_the_right_table(
+    policy_hash, audit, code, tmp_path
+):
+    severity_map = shipped_map()
+    connection = build_scaling_policy_connection(severity_map)
+    audits = {
+        "audit": _audit(),
+        "audit-empty": {},
+        "audit-no-model": {k: v for k, v in _audit().items() if k != "model_version"},
+        "audit-wrong-rank": _audit(severity_rank=2),
+        "audit-wrong-label": _audit(severity_label="crisis"),
+        "audit-wrong-id": _audit(regime_id=0),
+        "audit-wrong-policy": _audit(policy_version="other"),
+    }
+    gate = _CountingGate()
+    try:
+        admission = _admit(
+            tmp_path, f"binding-{abs(hash((str(policy_hash), str(audit))))}", regime_id=3,
+            policy_hash=severity_map.policy_hash if policy_hash == "hash" else policy_hash,
+            audit=audits.get(audit, audit), connection=connection, gate=gate,
+        )
+        assert admission.decision is AdmissionDecision.DENIED and admission.reason_code == code
+        assert gate.calls == 0
+    finally:
+        connection.close()
+
+
+def test_a_service_with_no_trusted_severity_map_denies_every_gated_admission(tmp_path):
+    severity_map = shipped_map()
+    connection = build_scaling_policy_connection(severity_map)
+    gate = _CountingGate()
+    try:
+        admission = _admit(
+            tmp_path, "nomap", regime_id=3, policy_hash=severity_map.policy_hash, audit=_audit(),
+            connection=connection, gate=gate, trusted=None,
+        )
+        assert admission.decision is AdmissionDecision.DENIED
+        assert admission.reason_code == "REGIME_SEVERITY_MAP_UNAVAILABLE"
+        assert gate.calls == 0
+    finally:
+        connection.close()
+
+
+def test_a_tampered_crisis_row_with_a_matching_hash_row_denies_at_the_service(tmp_path):
+    """C2: crisis (raw id 1) raised from 0.05 to 1.0, hash row and audit untouched."""
+
+    severity_map = shipped_map()
+    connection = build_scaling_policy_connection(severity_map)
+    connection.execute("UPDATE scaling_policies SET scale_multiplier = 1.0 WHERE regime_id = 1")
+    gate = _CountingGate()
+    try:
+        admission = _admit(
+            tmp_path, "tamper", regime_id=1, policy_hash=severity_map.policy_hash,
+            audit=_audit(regime_id=1, severity_rank=3, severity_label="crisis"), connection=connection, gate=gate,
+        )
+        assert admission.decision is AdmissionDecision.DENIED
+        assert admission.reason_code == "REGIME_POLICY_MISMATCH"
+        assert admission.final_quantity == Decimal("0")
+        assert gate.calls == 0
     finally:
         connection.close()
 

@@ -118,6 +118,7 @@ async def test_fresh_bound_snapshot_feeds_real_phase_54_controls(tmp_path):
                 simulator=PreFlightSimulator(),
                 risk_gate=RiskSwarmGate(),
                 require_runtime_preflight=True,
+                regime_severity_map=shipped_map(),
                 india_guard=ils.make_guard(ledger, private),
             )
             admission = service.admit(
