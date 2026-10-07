@@ -227,7 +227,7 @@ def _pilot_data_violation(node: ast.AST) -> str | None:
     elif isinstance(node, (ast.Call, ast.Subscript)):
         call = isinstance(node, ast.Call)
         parts = _strings(*node.args, *(k.value for k in node.keywords)) if call else _strings(node.slice)
-        if any(part.strip(".").split(".")[0] == "pilot_data" for part in parts):
+        if any(_norm(part.strip(".")).split(".")[0] == "pilot_data" for part in parts):
             return f"{PILOT_RULE}, not a string naming the package"
     return None
 
@@ -552,6 +552,8 @@ def test_package_is_pure():
         ("x = pilot_data.dataset._read_parquet(p)", "data.py", "attribute chain"),
         ("f = lookup('pilot_data.dataset')", "data.py", "string naming the package"),
         ("f = lookup(name='pilot_data')", "data.py", "string naming the package"),
+        ("f = lookup('backend.pilot_data')", "data.py", "string naming the package"),
+        ("f = lookup('backend.pilot_data.dataset')", "data.py", "string naming the package"),
         ("import importlib\nm = importlib.import_module('pilot_data.dataset')", "data.py", "string naming the package"),
         # exec, eval, compile
         ("exec('x = 1')", "engine.py", "exec is banned"),
