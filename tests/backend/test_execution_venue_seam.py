@@ -936,6 +936,7 @@ async def test_a_practice_ack_is_never_settled_as_a_local_uat_cancellation(
         assert response.status_code == 200, response.text
         body = response.json()
         assert "released" not in body["message"] and "No broker was contacted" not in body["message"]
+        assert body["message"] == f"Practice trade acknowledged by {VENUE_T212_PRACTICE}."
         assert body["execution_details"]["broker"] == VENUE_T212_PRACTICE
         assert len(double.intents) == 1
         order = state._execution_ledger.get_order(pid)
