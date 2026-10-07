@@ -22,6 +22,17 @@ spec.loader.exec_module(dash)
 
 REPO = "owner/repo"
 NOW = datetime(2026, 10, 8, 12, 0, tzinfo=timezone.utc)
+# Marker strings are part of the contract with the operator, so the tests
+# spell them out instead of reading them from the script.
+NOTES_MARKER = "<!-- operator-notes -->"
+LEGACY_START = "<!-- operator-notes:start -->"
+LEGACY_END = "<!-- operator-notes:end -->"
+LEGACY_PLACEHOLDER = "_Operator notes go here. Anything between these two markers survives every update._"
+
+
+def test_notes_marker_contract():
+    assert (dash.NOTES_MARKER, dash.LEGACY_START, dash.LEGACY_END, dash.LEGACY_PLACEHOLDER) == \
+        (NOTES_MARKER, LEGACY_START, LEGACY_END, LEGACY_PLACEHOLDER)
 
 
 def pr(number, base="main", head=None, draft=False, ci="pass", guard="pass", labeled=False,
@@ -214,11 +225,11 @@ def test_notes_section_is_a_read_only_copy_with_a_link():
     section = dash.notes_section(note(dash.notes_seed(text)), REPO)
     assert f"_Read-only copy of [the notes comment]({NOTE_URL}). Edit that comment" in section
     assert "> Merge #553 first.\n>\n> | odd | table |\n> @me `code`" in section
-    assert dash.NOTES_MARKER not in section and dash.NOTES_HEADER not in section
+    assert NOTES_MARKER not in section and dash.NOTES_HEADER not in section
 
 
 def test_notes_section_rejects_odd_links_and_strips_the_dashboard_marker():
-    bad = dict(note(f"{dash.NOTES_MARKER}\n{dash.MARKER} hi"), html_url="https://evil.example/x")
+    bad = dict(note(f"{NOTES_MARKER}\n{dash.MARKER} hi"), html_url="https://evil.example/x")
     section = dash.notes_section(bad, REPO)
     assert "evil" not in section and "the notes comment below" in section
     assert dash.MARKER not in section and "> hi" in section
@@ -227,10 +238,10 @@ def test_notes_section_rejects_odd_links_and_strips_the_dashboard_marker():
 
 def test_find_notes_comment_trusts_only_the_bot_and_repo_members():
     comments = [
-        note(f"{dash.NOTES_MARKER}\nbot seed", login="github-actions[bot]", assoc="NONE", cid=1,
+        note(f"{NOTES_MARKER}\nbot seed", login="github-actions[bot]", assoc="NONE", cid=1,
              updated="2026-10-01T00:00:00Z"),
-        note(f"{dash.NOTES_MARKER}\nowner edit", cid=2, updated="2026-10-05T00:00:00Z"),
-        note(f"{dash.NOTES_MARKER}\nstranger", login="drive-by", assoc="NONE", cid=3,
+        note(f"{NOTES_MARKER}\nowner edit", cid=2, updated="2026-10-05T00:00:00Z"),
+        note(f"{NOTES_MARKER}\nstranger", login="drive-by", assoc="NONE", cid=3,
              updated="2026-10-09T00:00:00Z"),
         note("no marker", cid=4, updated="2026-10-10T00:00:00Z"),
     ]
@@ -240,10 +251,10 @@ def test_find_notes_comment_trusts_only_the_bot_and_repo_members():
 
 
 @pytest.mark.parametrize("body,expected", [
-    (f"x\n{dash.LEGACY_START}\nKeep me.\n{dash.LEGACY_END}\n", "Keep me."),
-    (f"{dash.LEGACY_START}\n{dash.LEGACY_PLACEHOLDER}\n{dash.LEGACY_END}", None),
-    (f"{dash.LEGACY_START} only start", None),
-    (f"{dash.LEGACY_END} before {dash.LEGACY_START}", None),
+    (f"x\n{LEGACY_START}\nKeep me.\n{LEGACY_END}\n", "Keep me."),
+    (f"{LEGACY_START}\n{LEGACY_PLACEHOLDER}\n{LEGACY_END}", None),
+    (f"{LEGACY_START} only start", None),
+    (f"{LEGACY_END} before {LEGACY_START}", None),
     (None, None), ("", None),
 ])
 def test_legacy_notes_block_is_read_for_migration(body, expected):
@@ -405,7 +416,7 @@ def test_update_creates_without_label_when_the_label_does_not_exist():
 
 
 def test_update_migrates_the_old_notes_block_into_a_comment_once():
-    legacy = f"{dash.LEGACY_START}\nKeep me. #553 after UAT.\n{dash.LEGACY_END}"
+    legacy = f"{LEGACY_START}\nKeep me. #553 after UAT.\n{LEGACY_END}"
     existing = issue(42, body=f"{dash.MARKER}\nstale table\n{legacy}\n")
     gh = FakeGitHub(issues=[issue(41, login="someone"), existing])
     run(gh)
@@ -414,7 +425,7 @@ def test_update_migrates_the_old_notes_block_into_a_comment_once():
     assert seed["body"] == dash.notes_seed("Keep me. #553 after UAT.")
     assert (m2, p2) == ("PATCH", "repos/owner/repo/issues/42")
     assert "> Keep me. #553 after UAT." in patch["body"]
-    assert dash.LEGACY_START not in patch["body"] and "stale table" not in patch["body"]
+    assert LEGACY_START not in patch["body"] and "stale table" not in patch["body"]
 
 
 def test_update_copies_the_notes_comment_and_never_edits_it():
@@ -422,7 +433,7 @@ def test_update_copies_the_notes_comment_and_never_edits_it():
     # so a note saved mid-run cannot be overwritten.
     existing = issue(42, body=f"{dash.MARKER}\nold body\n")
     comments = [note(dash.notes_seed("v2: merge 557 after UAT"), cid=900),
-                note(f"{dash.NOTES_MARKER}\nspoof", login="drive-by", assoc="NONE", cid=950,
+                note(f"{NOTES_MARKER}\nspoof", login="drive-by", assoc="NONE", cid=950,
                      updated="2026-10-09T00:00:00Z")]
     gh = FakeGitHub(issues=[existing], comments=comments)
     run(gh)
@@ -437,7 +448,7 @@ def test_update_copies_the_notes_comment_and_never_edits_it():
 def test_update_ignores_a_stranger_marker_and_creates_its_own_comment():
     existing = issue(42, body=f"{dash.MARKER}\nold body\n")
     gh = FakeGitHub(issues=[existing],
-                    comments=[note(f"{dash.NOTES_MARKER}\nspoof", login="x", assoc="CONTRIBUTOR")])
+                    comments=[note(f"{NOTES_MARKER}\nspoof", login="x", assoc="CONTRIBUTOR")])
     body = run(gh)
     assert [(m, p) for m, p, _ in gh.writes()] == [
         ("POST", "repos/owner/repo/issues/42/comments"), ("PATCH", "repos/owner/repo/issues/42")]
@@ -445,7 +456,7 @@ def test_update_ignores_a_stranger_marker_and_creates_its_own_comment():
 
 
 def test_dry_run_previews_the_migration_without_writing():
-    legacy = f"{dash.LEGACY_START}\nKeep me.\n{dash.LEGACY_END}"
+    legacy = f"{LEGACY_START}\nKeep me.\n{LEGACY_END}"
     gh = FakeGitHub(issues=[issue(42, body=f"{dash.MARKER}\n{legacy}")])
     body = run(gh, dry_run=True)
     assert gh.writes() == [] and "> Keep me." in body
