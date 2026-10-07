@@ -22,7 +22,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
-from costs import tick_inference as _inference
+from costs.tick_inference import InferredTickSource, TickObservation, infer_ticks, uncovered_windows
 from costs.core import Side, TickSizeUnavailable, positive_decimal
 from costs.fills import TickSize
 from costs.ticks import (
@@ -53,7 +53,7 @@ class TickTables:
     def __init__(
         self,
         tables: Mapping[str, TickTable],
-        inferred: Iterable[_inference.InferredTickSource] = (),
+        inferred: Iterable[InferredTickSource] = (),
     ) -> None:
         for name, table in tables.items():
             if name not in SUPPORTED_CLASSES:
@@ -64,7 +64,7 @@ class TickTables:
         sources = tuple(inferred)
         if sources and NON_GOLD_ETF not in self._tables:
             raise TickSizeUnavailable("an inferred ETF tick needs the NON_GOLD_ETF table to be registered")
-        windows = _inference.uncovered_windows(self._tables[NON_GOLD_ETF]) if sources else ()
+        windows = uncovered_windows(self._tables[NON_GOLD_ETF]) if sources else ()
         seen: set[tuple[str, date, date]] = set()
         for source in sources:
             key = (source.security, source.window_start, source.window_end)
@@ -102,7 +102,7 @@ class TickTables:
         """The full provenance records of the inferred sources, for the operator's output."""
         return [{**s.provenance, "provenance_sha256": s.provenance_sha256} for s in self._inferred]
 
-    def inferred_for(self, security: str, day: date) -> _inference.InferredTickSource | None:
+    def inferred_for(self, security: str, day: date) -> InferredTickSource | None:
         """The inferred source for this security whose window holds ``day``, answerable or not."""
         for source in self._inferred:
             if source.security == security and source.in_window(day):
@@ -151,20 +151,20 @@ class TickTables:
 
 def infer_benchmark_ticks(
     rows: Iterable[Any], benchmark_isins: Sequence[str]
-) -> tuple[_inference.InferredTickSource, ...]:
+) -> tuple[InferredTickSource, ...]:
     """Infer the ETF tick for each configured benchmark ISIN over each window the committed ETF table leaves
     uncovered, from the Phase 59 dataset rows (raw open, high, low and close of series EQ). Unavailable
     results are kept: they are sealed too, and they make the preflight refuse with their reason."""
     wanted = set(benchmark_isins)
-    by_security: dict[str, list[_inference.TickObservation]] = {}
+    by_security: dict[str, list[TickObservation]] = {}
     for row in rows:
         if row.anchor_isin in wanted and row.series == "EQ":
             day = getattr(row, "trade_date", None) or row.session
             by_security.setdefault(row.anchor_isin, []).append(
-                _inference.TickObservation(day, (row.raw_open, row.raw_high, row.raw_low, row.raw_close))
+                TickObservation(day, (row.raw_open, row.raw_high, row.raw_low, row.raw_close))
             )
-    windows = _inference.uncovered_windows(committed_tick_table(InstrumentClass.NON_GOLD_ETF))
-    return _inference.infer_ticks(securities=sorted(wanted), windows=windows, observations_by_security=by_security)
+    windows = uncovered_windows(committed_tick_table(InstrumentClass.NON_GOLD_ETF))
+    return infer_ticks(securities=sorted(wanted), windows=windows, observations_by_security=by_security)
 
 
 def load_default_tables(*, rows: Iterable[Any] | None = None, benchmark_isins: Sequence[str] = ()) -> TickTables:
