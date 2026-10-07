@@ -20,6 +20,7 @@ from .ledger import (
     ClaimResult,
     ClaimStatus,
     ExecutionLedger,
+    IndiaCapExceeded,
     IntentConflict,
     InvalidTransition,
     OrderNotFound,
@@ -97,8 +98,8 @@ class ExecutionService:
         self._simulator = simulator
         self._risk_gate = risk_gate
         self._require_runtime_preflight = require_runtime_preflight
-        # Phase 63-04: the Mac's India limits. Used only for India intents. A runtime
-        # service with no guard denies every India admission (fail closed).
+        # Phase 63-04: the Mac's India limits. Used only for India intents. A service with
+        # no guard denies every India admission (fail closed, whatever its other flags).
         self._india_guard = india_guard
         if require_approval:
             if ledger is not None:
@@ -211,7 +212,8 @@ class ExecutionService:
             if india:
                 if india_guard is not None:
                     india_detail = dict(india_guard.check_order(intent, self._ledger, india_quote))
-                elif self._require_runtime_preflight:
+                else:
+                    # No guard, no India admission, whatever else the service was built for.
                     raise IndiaLimitDenied(INDIA_LIMITS_UNAVAILABLE)
             selected_simulator = simulator or self._simulator
             selected_gate = risk_gate or self._risk_gate
@@ -372,7 +374,23 @@ class ExecutionService:
             return self._ledger.reserve_sell_quantity(
                 proposal_id, broker_available_quantity=broker_available_quantity
             )
-        return self._ledger.reserve_buying_power(proposal_id)
+        caps = None
+        if (
+            self._india_guard is not None
+            and admission is not None
+            and self._ledger.workspace is Workspace.INDIA
+            and self._ledger.venue_binding is None
+        ):
+            # Both India caps are enforced inside the reservation transaction itself.
+            limits = self._india_guard.limits
+            caps = (limits.capital_cap, limits.per_position_cap)
+        try:
+            return self._ledger.reserve_buying_power(proposal_id, india_caps=caps)
+        except IndiaCapExceeded:
+            # Two admissions passed the cap check before either reserved; this one lost.
+            # It is closed, never left PENDING with an admission and no reservation.
+            self._ledger.reject(proposal_id, "india cap exceeded at reservation")
+            raise
 
     def prepare(self, proposal: Proposal, **kwargs: Any) -> ExecutionAdmission:
         broker_available = kwargs.pop("broker_available_quantity", None)
@@ -465,12 +483,59 @@ class ExecutionService:
         enrolled = self._ledger.get_approval_key(workspace=workspace)
         return enrolled.key_id if enrolled is not None else None
 
+    def _recheck_india_buy(
+        self, proposal_id: str, india_quote: Optional[IndiaQuoteEvidence]
+    ) -> Optional[str]:
+        """Re-validate a pending India BUY against the guards as they are now (63-04, C2).
+
+        Admission ran once, earlier. A halt, an end, a stop, a closed session, a stale quote
+        or a cap taken by another order can arrive since. ``None`` means the order may go on
+        (or is not a pending India BUY). Otherwise the O6 reason is returned after the order
+        is rejected, which releases its reservation. SELLs keep their ledger checks and stay
+        admissible while halted or ended.
+        """
+
+        ledger = self._ledger
+        if ledger is None or ledger.workspace is not Workspace.INDIA or ledger.venue_binding is not None:
+            return None
+        order = ledger.get_order(proposal_id)
+        if order is None or order.state != "PENDING" or order.intent.get("side") != OrderSide.BUY.value:
+            return None
+        guard = self._india_guard
+        code: Optional[str] = None
+        if guard is None:
+            code = INDIA_LIMITS_UNAVAILABLE
+        else:
+            try:
+                guard.check_order(
+                    OrderIntent.model_validate(dict(order.intent)),
+                    ledger,
+                    india_quote,
+                    exclude_proposal_id=proposal_id,
+                )
+            except IndiaLimitDenied as exc:
+                code = exc.code
+        if code is not None:
+            try:
+                ledger.reject(proposal_id, code)
+            except (InvalidTransition, OrderNotFound):
+                pass
+        return code
+
     def create_approval_challenge(
-        self, proposal_id: str, *, workspace: Union[Workspace, str], ttl_seconds: int = 60
+        self,
+        proposal_id: str,
+        *,
+        workspace: Union[Workspace, str],
+        ttl_seconds: int = 60,
+        india_quote: Optional[IndiaQuoteEvidence] = None,
     ) -> ApprovalChallenge:
         if self._approval_service is None or self._ledger is None:
             raise ExecutionDisabledError("Signed approval service is unavailable")
         self._ledger.require_workspace(workspace)
+        denied = self._recheck_india_buy(proposal_id, india_quote)
+        if denied is not None:
+            raise ApprovalConflict(denied)
         return self._approval_service.create_challenge(
             proposal_id, workspace=workspace, ttl_seconds=ttl_seconds
         )
@@ -499,6 +564,7 @@ class ExecutionService:
         signature_der: bytes,
         *,
         workspace: Union[Workspace, str],
+        india_quote: Optional[IndiaQuoteEvidence] = None,
     ) -> OrderAck:
         if self._dispatcher is None or self._ledger is None:
             raise ExecutionDisabledError(
@@ -528,6 +594,9 @@ class ExecutionService:
                 else refusal_text(refusal)
             )
         async with self._lock_for(proposal_id):
+            denied = self._recheck_india_buy(proposal_id, india_quote)
+            if denied is not None:
+                raise ExecutionConflictError(denied)
             try:
                 claim = self._approval_service.approve_signed(
                     proposal_id, challenge_id, signature_der, workspace=workspace

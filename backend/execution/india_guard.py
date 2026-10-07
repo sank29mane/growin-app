@@ -154,8 +154,14 @@ class IndiaAdmissionGuard:
         intent: OrderIntent,
         ledger: ExecutionLedger,
         evidence: Optional[IndiaQuoteEvidence],
+        *,
+        exclude_proposal_id: str = "",
     ) -> Mapping[str, Any]:
         """Run every Mac India rule for one intent. Raises ``IndiaLimitDenied`` on any code.
+
+        ``exclude_proposal_id`` is for a recheck of an order that is already admitted (at
+        challenge and at claim): its own reservation and open sell are left out of the caps,
+        so the order does not count against itself.
 
         Returns the detail recorded with an admitted order. A BUY reads the latch file; a
         SELL never does, because halted, ended and stop latches only ever block buys, and an
@@ -184,7 +190,7 @@ class IndiaAdmissionGuard:
                 raise IndiaLimitDenied(exc.code) from None
 
         try:
-            view = ledger.india_account_view()
+            view = ledger.india_account_view(exclude_proposal_id=exclude_proposal_id)
             quote = self._usable_quote(evidence, now)
             # The Mac ledger is keyed by execution ticker. The order's own position takes the
             # quote's ISIN so ``rules`` can match it; every other position keeps its ticker as

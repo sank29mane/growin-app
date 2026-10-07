@@ -75,9 +75,20 @@ def india_private_dir(
     return private
 
 
-def make_guard(ledger: ExecutionLedger, private: Path, *, now: datetime = NOW) -> IndiaAdmissionGuard:
+class MutableClock:
+    """An injectable admission clock a test can move (the guard reads it on every call)."""
+
+    def __init__(self, now: datetime = NOW) -> None:
+        self.now = now
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
+def make_guard(ledger: ExecutionLedger, private: Path, *, now: Any = NOW) -> IndiaAdmissionGuard:
     config = load_workspace_config(private, "india", require_india_execution=True)
-    return IndiaAdmissionGuard.from_config(config, ledger, clock=lambda: now)
+    clock = now if callable(now) else (lambda: now)
+    return IndiaAdmissionGuard.from_config(config, ledger, clock=clock)
 
 
 def make_service(

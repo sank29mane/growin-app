@@ -202,13 +202,14 @@ def test_regime_scaling_never_shrinks_a_sell_but_a_veto_still_denies(world):
     )
     assert zero.decision is AdmissionDecision.DENIED
     # BUY sizing is unchanged: the gate may still scale a BUY down.
-    buy = ils.admit(
-        world.service,
+    buy = world.service.admit(
         ils.make_intent("b-scaled", quantity=5, limit_price="10.00", ticker=ticker),
-        evidence=evidence_for("AAA"),
-        fill="10.00",
+        currency="INR", price="10.00",
+        simulator_evidence={"simulated_fill_price": "10.00"},
+        risk_evidence={"scaled_size": "2"},  # the gate sizes the BUY down from 5 to 2
+        india_quote=evidence_for("AAA"),
     )
-    assert buy.decision is AdmissionDecision.ADMITTED and buy.final_quantity == Decimal("5")
+    assert buy.decision is AdmissionDecision.ADMITTED and buy.final_quantity == Decimal("2")
 
 
 # ------------------------------------------------------------- challenge and claim

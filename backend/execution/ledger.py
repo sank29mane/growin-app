@@ -83,6 +83,14 @@ class ApprovalKeyConflict(LedgerError):
     """Raised when approval-key enrollment would replace an active key."""
 
 
+class IndiaCapExceeded(ApprovalConflict):
+    """The reservation would break an India cap. ``code`` is the O6 reason (63-04, C1)."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
 class RequoteConflict(LedgerError):
     """Raised when immutable local re-quote evidence is inconsistent."""
 
@@ -1453,8 +1461,15 @@ class ExecutionLedger:
             ).fetchone()
         return self._budget_from_row(row) if row is not None else None
 
-    def reserve_buying_power(self, proposal_id: str) -> PaperReservation:
-        """Atomically check budget and reserve an admitted BUY notional."""
+    def reserve_buying_power(
+        self, proposal_id: str, *, india_caps: Optional[tuple[Decimal, Decimal]] = None
+    ) -> PaperReservation:
+        """Atomically check budget and reserve an admitted BUY notional.
+
+        In the India paper ledger the caller must pass ``india_caps`` (capital cap, per-position
+        cap): both are enforced inside this transaction at limit-price notional, and a missing
+        pair refuses the reservation (63-04, C1).
+        """
 
         now = _now()
         with self._transaction() as connection:
@@ -1497,6 +1512,10 @@ class ExecutionLedger:
             budget = self._budget_from_row(budget_row)
             if budget.available < admission.notional:
                 raise ApprovalConflict("paper budget is insufficient")
+            if self.workspace is Workspace.INDIA and self.venue_binding is None:
+                if india_caps is None:
+                    raise ApprovalConflict("india limits are required before reservation")
+                self._assert_india_caps_locked(connection, admission, intent, india_caps, proposal_id)
             if self.venue_binding is not None:
                 # D-18: held notional plus every other open BUY plus this order
                 # must stay within the per-position cap, checked in this same
@@ -1902,50 +1921,110 @@ class ExecutionLedger:
         with self._mutex:
             return self._fills_exist(self._require_connection())
 
-    def india_account_view(self) -> IndiaAccountView:
-        """Positions, open buys and open sells for the Mac's India rules, read in one pass."""
+    @staticmethod
+    def _india_positions_locked(
+        connection: sqlite3.Connection, workspace: str
+    ) -> tuple[tuple[str, Decimal, Decimal], ...]:
+        return tuple(
+            (str(row["ticker"]), _decimal(row["quantity"]), _decimal(row["notional"]))
+            for row in connection.execute(
+                "SELECT ticker, quantity, notional FROM paper_positions "
+                "WHERE workspace = ? ORDER BY ticker",
+                (workspace,),
+            ).fetchall()
+            if _decimal(row["quantity"]) > 0
+        )
+
+    @staticmethod
+    def _india_open_buys_locked(
+        connection: sqlite3.Connection, *, exclude: str = ""
+    ) -> list[tuple[str, Decimal, Decimal]]:
+        """``(ticker, unfilled quantity, limit price)`` of every ACTIVE buy reservation.
+
+        The limit price is the intent's own, never the admission mid, so a cap check measures
+        what the broker could be asked to pay. ``exclude`` leaves one order out (the order
+        being rechecked must not count itself).
+        """
+
+        open_buys: list[tuple[str, Decimal, Decimal]] = []
+        for row in connection.execute(
+            """
+            SELECT a.proposal_id, a.ticker, a.final_quantity, a.price, i.canonical_json
+            FROM buying_power_reservations AS r
+            JOIN execution_admissions AS a ON a.proposal_id = r.proposal_id
+            JOIN order_intents AS i ON i.proposal_id = r.proposal_id
+            WHERE r.state = 'ACTIVE' AND a.side = 'BUY' AND a.decision = 'ADMITTED'
+              AND a.proposal_id != ?
+            ORDER BY a.ticker, a.proposal_id
+            """,
+            (exclude,),
+        ).fetchall():
+            filled_row = connection.execute(
+                "SELECT cumulative_quantity FROM reconciliation_evidence "
+                "WHERE proposal_id = ? ORDER BY evidence_id DESC LIMIT 1",
+                (str(row["proposal_id"]),),
+            ).fetchone()
+            filled = _decimal(filled_row["cumulative_quantity"]) if filled_row else Decimal("0")
+            unfilled = _decimal(row["final_quantity"]) - filled
+            if unfilled <= 0:
+                continue
+            limit = json.loads(str(row["canonical_json"])).get("limit_price")
+            open_buys.append(
+                (
+                    str(row["ticker"]),
+                    unfilled,
+                    _decimal(limit) if limit is not None else _decimal(row["price"]),
+                )
+            )
+        return open_buys
+
+    def _assert_india_caps_locked(
+        self,
+        connection: sqlite3.Connection,
+        admission: ExecutionAdmission,
+        intent: Mapping[str, Any],
+        caps: tuple[Decimal, Decimal],
+        proposal_id: str,
+    ) -> None:
+        """Both India caps, at limit-price notional, in the reservation's own transaction.
+
+        Admission checks the same caps earlier, but two admissions can both pass before either
+        reserves. This check runs under the writer transaction that inserts the reservation, so
+        the second reservation sees the first and is refused (C1).
+        """
+
+        capital_cap, per_position_cap = caps
+        limit = intent.get("limit_price")
+        price = _decimal(limit) if limit is not None else admission.price
+        notional = admission.final_quantity * price
+        costs: dict[str, Decimal] = {}
+        for ticker, _quantity, cost in self._india_positions_locked(connection, self.workspace.value):
+            costs[ticker] = costs.get(ticker, Decimal("0")) + cost
+        pending: dict[str, Decimal] = {}
+        for ticker, unfilled, limit_price in self._india_open_buys_locked(
+            connection, exclude=proposal_id
+        ):
+            pending[ticker] = pending.get(ticker, Decimal("0")) + unfilled * limit_price
+        deployed = sum(costs.values(), Decimal("0")) + sum(pending.values(), Decimal("0")) + notional
+        if deployed > capital_cap:
+            raise IndiaCapExceeded("capital_cap")
+        own = costs.get(admission.ticker, Decimal("0")) + pending.get(admission.ticker, Decimal("0")) + notional
+        if own > per_position_cap:
+            raise IndiaCapExceeded("per_position_cap")
+
+    def india_account_view(self, *, exclude_proposal_id: str = "") -> IndiaAccountView:
+        """Positions, open buys and open sells for the Mac's India rules, read in one pass.
+
+        ``exclude_proposal_id`` leaves that order's own reservation and open sell out, for a
+        recheck of an order that is already admitted.
+        """
 
         if self.workspace is not Workspace.INDIA:
             raise WorkspaceMismatch("the India account view exists only in the India ledger")
         with self._mutex:
             connection = self._require_connection()
-            positions = tuple(
-                (str(row["ticker"]), _decimal(row["quantity"]), _decimal(row["notional"]))
-                for row in connection.execute(
-                    "SELECT ticker, quantity, notional FROM paper_positions "
-                    "WHERE workspace = ? ORDER BY ticker",
-                    (self.workspace.value,),
-                ).fetchall()
-                if _decimal(row["quantity"]) > 0
-            )
-            open_buys: list[tuple[str, Decimal, Decimal]] = []
-            for row in connection.execute(
-                """
-                SELECT a.proposal_id, a.ticker, a.final_quantity, a.price, i.canonical_json
-                FROM buying_power_reservations AS r
-                JOIN execution_admissions AS a ON a.proposal_id = r.proposal_id
-                JOIN order_intents AS i ON i.proposal_id = r.proposal_id
-                WHERE r.state = 'ACTIVE' AND a.side = 'BUY' AND a.decision = 'ADMITTED'
-                ORDER BY a.ticker, a.proposal_id
-                """
-            ).fetchall():
-                filled_row = connection.execute(
-                    "SELECT cumulative_quantity FROM reconciliation_evidence "
-                    "WHERE proposal_id = ? ORDER BY evidence_id DESC LIMIT 1",
-                    (str(row["proposal_id"]),),
-                ).fetchone()
-                filled = _decimal(filled_row["cumulative_quantity"]) if filled_row else Decimal("0")
-                unfilled = _decimal(row["final_quantity"]) - filled
-                if unfilled <= 0:
-                    continue
-                limit = json.loads(str(row["canonical_json"])).get("limit_price")
-                open_buys.append(
-                    (
-                        str(row["ticker"]),
-                        unfilled,
-                        _decimal(limit) if limit is not None else _decimal(row["price"]),
-                    )
-                )
+            positions = self._india_positions_locked(connection, self.workspace.value)
+            open_buys = self._india_open_buys_locked(connection, exclude=exclude_proposal_id)
             open_sells: dict[str, Decimal] = {}
             states = ("PENDING",) + _SELL_CLAIMED_STATES
             for row in connection.execute(
@@ -1953,10 +2032,10 @@ class ExecutionLedger:
                 SELECT a.ticker, a.final_quantity
                 FROM execution_admissions AS a
                 JOIN order_projection AS p ON p.proposal_id = a.proposal_id
-                WHERE a.side = 'SELL' AND a.decision = 'ADMITTED'
+                WHERE a.side = 'SELL' AND a.decision = 'ADMITTED' AND a.proposal_id != ?
                   AND p.state IN ({", ".join("?" for _ in states)})
                 """,
-                states,
+                (exclude_proposal_id, *states),
             ).fetchall():
                 ticker = str(row["ticker"])
                 open_sells[ticker] = open_sells.get(ticker, Decimal("0")) + _decimal(
@@ -4199,6 +4278,8 @@ __all__ = [
     "DispatchAttempt",
     "ExecutionEvent",
     "ExecutionLedger",
+    "IndiaAccountView",
+    "IndiaCapExceeded",
     "IntentConflict",
     "InvalidTransition",
     "LEGACY_SCHEMA_VERSIONS",

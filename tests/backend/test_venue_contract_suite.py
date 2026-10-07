@@ -143,6 +143,13 @@ class PaperHarness(Harness):
             proposal.update({"order_type": "LIMIT", "limit_price": "10.00"})
         return proposal
 
+    def _india_quote(self):
+        return ils.make_evidence(
+            ltp=Decimal("10.00"), lower_circuit=Decimal("9.00"), upper_circuit=Decimal("11.00"),
+            previous_close=Decimal("10.00"), tick_reference=Decimal("10.00"),
+            bid=Decimal("9.99"), ask=Decimal("10.01"),
+        )
+
     async def admit(self, kind: str, proposal_id: str):
         now = datetime.now(timezone.utc)
         kwargs: dict[str, Any] = {
@@ -153,11 +160,7 @@ class PaperHarness(Harness):
             "evidence_at": now,
         }
         if self.workspace == "india":
-            kwargs["india_quote"] = ils.make_evidence(
-                ltp=Decimal("10.00"), lower_circuit=Decimal("9.00"), upper_circuit=Decimal("11.00"),
-                previous_close=Decimal("10.00"), tick_reference=Decimal("10.00"),
-                bid=Decimal("9.99"), ask=Decimal("10.01"),
-            )
+            kwargs["india_quote"] = self._india_quote()
         if kind == "stale":
             kwargs["evidence_at"] = now - timedelta(seconds=120)
         if kind == "missing":
@@ -172,11 +175,15 @@ class PaperHarness(Harness):
         return self.service.reserve(proposal_id)
 
     async def approve(self, proposal_id):
-        challenge = self.service.create_approval_challenge(proposal_id, workspace=self.workspace)
+        # 63-04: an India BUY is rechecked against a fresh quote at challenge and at claim.
+        extra = {"india_quote": self._india_quote()} if self.workspace == "india" else {}
+        challenge = self.service.create_approval_challenge(
+            proposal_id, workspace=self.workspace, **extra
+        )
         signature = sign(self.key, challenge.signed_payload)
         self._signed[proposal_id] = (challenge.challenge_id, signature)
         return await self.service.approve_signed(
-            proposal_id, challenge.challenge_id, signature, workspace=self.workspace
+            proposal_id, challenge.challenge_id, signature, workspace=self.workspace, **extra
         )
 
     async def approve_again(self, proposal_id):

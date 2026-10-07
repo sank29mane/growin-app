@@ -997,6 +997,71 @@ def test_india_execution_authority_needs_the_file_but_research_loads_do_not(priv
     assert research.venue == "paper"
 
 
+@pytest.mark.parametrize(
+    "state",
+    ["missing", "float", "bad_collar", "garbage", "unknown_venue", "open_permissions", "symlink"],
+)
+def test_the_research_read_never_opens_india_execution_json(private_config_dir: Path, state: str):
+    # P-15: a research load (include_execution=False) succeeds whatever execution.json is,
+    # and its fingerprint does not depend on the file.
+    path = private_config_dir / "india" / "execution.json"
+    clean = load_workspace_config(private_config_dir, "india", include_execution=False)
+    if state == "missing":
+        path.unlink()
+    elif state == "float":
+        _india_execution(
+            private_config_dir,
+            raw='{"schema_version": 1, "workspace": "india", "venue": "paper", '
+            '"fat_finger_collar": 0.02, "max_slippage_bps": "25"}',
+        )
+    elif state == "bad_collar":
+        _india_execution(private_config_dir, {**INDIA_EXECUTION, "fat_finger_collar": "5"})
+    elif state == "garbage":
+        _india_execution(private_config_dir, raw="{not json")
+    elif state == "unknown_venue":
+        _india_execution(private_config_dir, {**INDIA_EXECUTION, "venue": "nowhere"})
+    elif state == "open_permissions":
+        os.chmod(path, 0o644)
+    else:
+        real = private_config_dir / "india" / "real-execution.json"
+        path.rename(real)
+        path.symlink_to(real)
+    research = load_workspace_config(private_config_dir, "india", include_execution=False)
+    assert research.execution is None and research.india_execution is None
+    assert research.limits == clean.limits and research.strategy == clean.strategy
+    assert research.fingerprint == clean.fingerprint
+    # The same damaged file still stops the default load that execution uses.
+    if state not in ("missing", "bad_collar"):  # a bad collar is only checked by the execution start
+        with pytest.raises(PrivateConfigError):
+            load_workspace_config(private_config_dir, "india")
+
+
+def test_research_cannot_ask_for_execution_authority_without_reading_the_file(private_config_dir: Path):
+    with pytest.raises(ValueError):
+        load_workspace_config(
+            private_config_dir, "india", require_india_execution=True, include_execution=False
+        )
+
+
+def test_the_62_study_load_uses_the_research_read(monkeypatch, tmp_path):
+    from private_config import loader as loader_module
+    from strategy_india import study
+
+    seen = {}
+
+    class Stop(Exception):
+        pass
+
+    def spy(private_dir, workspace, **kwargs):
+        seen.update(kwargs, workspace=workspace)
+        raise Stop
+
+    monkeypatch.setattr(loader_module, "load_workspace_config", spy)
+    with pytest.raises(Stop):
+        study.build_inputs({"private_dir": tmp_path})
+    assert seen == {"workspace": "india", "include_execution": False}
+
+
 def test_a_62_research_load_ignores_india_execution_values(private_config_dir: Path):
     # Out-of-range 63 values do not touch the research load; only execution start refuses.
     _india_execution(private_config_dir, {**INDIA_EXECUTION, "fat_finger_collar": "5"})

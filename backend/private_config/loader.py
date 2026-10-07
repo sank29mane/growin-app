@@ -407,7 +407,16 @@ def load_workspace_config(
     workspace: str,
     *,
     require_india_execution: bool = False,
+    include_execution: bool = True,
 ) -> WorkspaceConfig:
+    """Load and validate one workspace's private config.
+
+    ``include_execution=False`` is the research read (Phase 62, P-15): ``execution.json`` is
+    not opened, parsed or fingerprinted, so a missing, malformed or float-valued execution
+    file cannot affect a research load. Execution start never uses it.
+    """
+    if not include_execution and require_india_execution:
+        raise ValueError("India execution authority needs execution.json to be read")
     if workspace not in SUPPORTED_WORKSPACES:
         raise PrivateConfigError("UNSUPPORTED_WORKSPACE", "workspace")
     if private_dir is None:
@@ -448,8 +457,12 @@ def load_workspace_config(
         manifest = _validate_model(UkManifest, parsed_files["manifest.json"])
         _check_bound_identity(manifest, workspace)
 
-    execution = _load_execution(
-        workspace_dir, workspace, raw_files, require_india=require_india_execution
+    execution = (
+        _load_execution(
+            workspace_dir, workspace, raw_files, require_india=require_india_execution
+        )
+        if include_execution
+        else None
     )
     uk_limits: UkLimits | None = None
     execution_spec = None if execution is None else spec_for(execution.venue)
