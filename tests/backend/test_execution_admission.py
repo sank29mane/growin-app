@@ -14,6 +14,8 @@ from execution import (
     OrderIntent,
 )
 from simulation import PreFlightSimulator, RiskSwarmGate
+from regime_testkit import bound_regime_fields, shipped_map
+from simulation.regime_severity import build_scaling_policy_connection
 
 
 def intent(proposal_id="admit-1", **overrides):
@@ -61,7 +63,7 @@ def preflight_context(connection, *, spread=0.02):
     return {
         "tick_window": {"bid": [99.0], "ask": [101.0], "spread": [spread]},
         "portfolio_state": {"equity": 100.0, "peak_equity": 100.0},
-        "regime_id": 0,
+        **bound_regime_fields(),
         "current_spread_pct": spread,
         "risk_db_connection": connection,
     }
@@ -74,18 +76,12 @@ def preflight_service(dispatcher, ledger):
         simulator=PreFlightSimulator(),
         risk_gate=RiskSwarmGate(),
         require_runtime_preflight=True,
+        regime_severity_map=shipped_map(),
     )
 
 
 def policy_connection():
-    connection = sqlite3.connect(":memory:")
-    connection.execute(
-        "CREATE TABLE scaling_policies (regime_id INTEGER PRIMARY KEY, scale_multiplier REAL NOT NULL)"
-    )
-    connection.execute(
-        "INSERT INTO scaling_policies (regime_id, scale_multiplier) VALUES (0, 1)"
-    )
-    return connection
+    return build_scaling_policy_connection(shipped_map())
 
 
 def test_runtime_preflight_requires_context_and_rejects_before_dispatch(tmp_path):

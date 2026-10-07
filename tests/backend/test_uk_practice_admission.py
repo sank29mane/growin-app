@@ -827,6 +827,39 @@ async def test_staleness_and_an_insufficient_window_still_deny_with_real_inferen
         stack.close()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("damage", ["another_models_table", "tampered_crisis_row"])
+async def test_a_uk_admission_denies_when_the_size_table_is_not_the_trusted_models_policy(
+    damage, tmp_path, private_config_dir, monkeypatch
+):
+    """The UK path passes the policy hash and audit; the service checks them and the table's
+    actual rows against the loaded model's severity map. A table from another model, or one
+    crisis multiplier raised to full size, denies with no reservation and no dispatch."""
+
+    from regime_testkit import permuted_params
+    from simulation.regime_severity import build_scaling_policy_connection, build_severity_map
+
+    stack = await stack_with(tmp_path, private_config_dir, monkeypatch)
+    original = stack.app._preflight_policy_connection
+    try:
+        if damage == "another_models_table":
+            replacement = build_scaling_policy_connection(build_severity_map(permuted_params((1, 0, 2, 3))))
+            stack.app._preflight_policy_connection = replacement
+        else:
+            original.execute("UPDATE scaling_policies SET scale_multiplier = 1.0 WHERE regime_id = 1")
+            replacement = None
+        result = await prepare(stack, monkeypatch, quantity=1)
+        assert_denied(stack, result, "REGIME_POLICY_MISMATCH")
+        assert Decimal(result["admission"]["risk_quantity"]) == 0
+        assert reservation_rows(stack) == (0, 0)
+        assert stack.broker.mutations == []
+    finally:
+        stack.app._preflight_policy_connection = original
+        if replacement is not None:
+            replacement.close()
+        stack.close()
+
+
 # --- pending practice proposals are listable and readable by id (loopback only) ---------------------
 
 

@@ -30,7 +30,7 @@ from simulation.regime_severity import (
     build_scaling_policy_connection,
     build_severity_map,
     params_sha256,
-    policy_matches,
+    policy_table_matches,
 )
 from simulation.requoter import AdaptiveReQuoter
 
@@ -123,7 +123,7 @@ def test_a_renumbered_model_scales_the_same_through_the_sql_policy_and_the_risk_
     connection = build_scaling_policy_connection(renumbered)
     try:
         for new_id, old_id in enumerate(order):
-            scaled = gate.evaluate(10.0, 100.0, new_id, 0.001, connection, policy_hash=renumbered.policy_hash)
+            scaled = gate.evaluate(10.0, 100.0, new_id, 0.001, connection, severity_map=renumbered)
             assert scaled == pytest.approx(100.0 * SIZE_BY_OLD_ID[old_id])
             assert scaled == pytest.approx(100.0 * base.size_multiplier(old_id))
     finally:
@@ -148,8 +148,10 @@ def test_a_renumbered_model_gets_the_same_requote_collar_per_component(order):
     renumbered = build_severity_map(permuted_params(order))
     for new_id, old_id in enumerate(order):
         assert limit_for(renumbered, new_id) == limit_for(base, old_id)
-    # The four collars are genuinely different, so the comparison above is not vacuous.
-    assert len({limit_for(base, raw) for raw in range(4)}) == 4
+    # Calm, normal and the two most severe components give three different collars (crisis
+    # shares the widest value, 2.0), so the comparison above is not vacuous.
+    assert len({limit_for(base, raw) for raw in range(4)}) == 3
+    assert limit_for(base, 2) == limit_for(base, 1) > limit_for(base, 0) > limit_for(base, 3)
 
 
 class _StubManager:
@@ -338,13 +340,13 @@ def test_the_policy_hash_is_deterministic_and_changes_with_the_model_the_order_a
 
     softer = dict(REGIME_POLICY_TABLE)
     rows = list(REGIME_POLICY_TABLE[4])
-    rows[3] = rs.RankPolicy("crisis", Decimal("0.5"), Decimal("3.0"), 2)
+    rows[3] = rs.RankPolicy("crisis", Decimal("0.5"), Decimal("2.0"), 2)
     softer[4] = tuple(rows)
     monkeypatch.setattr(rs, "REGIME_POLICY_TABLE", softer)
     assert build_severity_map(shipped_params()).policy_hash != base
 
 
-def test_a_policy_table_is_only_accepted_when_its_hash_matches():
+def test_a_policy_table_is_only_accepted_when_its_actual_rows_match_the_trusted_map():
     severity_map = shipped_map()
     other = build_severity_map(permuted_params((1, 0, 2, 3)))
     connection = build_scaling_policy_connection(severity_map)
@@ -352,15 +354,56 @@ def test_a_policy_table_is_only_accepted_when_its_hash_matches():
     handmade.execute("CREATE TABLE scaling_policies (regime_id INTEGER PRIMARY KEY, scale_multiplier REAL NOT NULL)")
     handmade.executemany("INSERT INTO scaling_policies VALUES (?, ?)", ((0, 1.0), (1, 0.5), (2, 0.1), (3, 0.05)))
     try:
-        assert policy_matches(connection, severity_map.policy_hash)
-        assert not policy_matches(connection, other.policy_hash)
-        assert not policy_matches(connection, "")
-        assert not policy_matches(connection, None)
-        assert not policy_matches(handmade, severity_map.policy_hash), "a raw-keyed table has no policy hash"
-        assert not policy_matches(None, severity_map.policy_hash)
+        assert policy_table_matches(connection, severity_map)
+        assert not policy_table_matches(connection, other)
+        assert not policy_table_matches(handmade, severity_map), "a raw-keyed table has no policy meta"
+        assert not policy_table_matches(None, severity_map)
     finally:
         connection.close()
         handmade.close()
+
+
+def _tampered(severity_map, sql, args=()):
+    connection = build_scaling_policy_connection(severity_map)
+    connection.execute(sql, args)
+    return connection
+
+
+@pytest.mark.parametrize(
+    "sql,args",
+    [
+        # The crisis row (raw id 1) raised from 0.05 to full size, hash row untouched.
+        ("UPDATE scaling_policies SET scale_multiplier = 1.0 WHERE regime_id = 1", ()),
+        ("UPDATE scaling_policies SET scale_multiplier = 0.51 WHERE regime_id = 0", ()),
+        ("UPDATE scaling_policies SET scale_multiplier = 0.0 WHERE regime_id = 3", ()),
+        ("DELETE FROM scaling_policies WHERE regime_id = 2", ()),
+        ("INSERT INTO scaling_policies VALUES (4, 1.0)", ()),
+        ("UPDATE scaling_policies SET regime_id = 7 WHERE regime_id = 2", ()),
+        ("INSERT INTO scaling_policy_meta VALUES ('extra')", ()),
+        ("UPDATE scaling_policy_meta SET policy_hash = 'f'", ()),
+        ("DELETE FROM scaling_policy_meta", ()),
+    ],
+)
+def test_a_tampered_policy_table_is_refused_by_content_even_when_the_hash_row_matches(sql, args):
+    severity_map = shipped_map()
+    connection = _tampered(severity_map, sql, args)
+    try:
+        assert not policy_table_matches(connection, severity_map)
+        # The risk gate refuses it too, so a full-size crisis fill is not possible.
+        assert RiskSwarmGate().evaluate(10.0, 100.0, 1, 0.001, connection, severity_map=severity_map) == 0.0
+    finally:
+        connection.close()
+
+
+def test_the_tampered_crisis_row_would_otherwise_admit_full_size():
+    """The risk gate without the severity map trusts the rows: this is the hole C2 closes."""
+
+    severity_map = shipped_map()
+    connection = _tampered(severity_map, "UPDATE scaling_policies SET scale_multiplier = 1.0 WHERE regime_id = 1")
+    try:
+        assert RiskSwarmGate().evaluate(10.0, 100.0, 1, 0.001, connection) == 100.0
+    finally:
+        connection.close()
 
 
 def test_the_risk_gate_refuses_a_table_built_from_another_models_ordering():
@@ -370,8 +413,8 @@ def test_the_risk_gate_refuses_a_table_built_from_another_models_ordering():
     wrong_table = build_scaling_policy_connection(other)
     right_table = build_scaling_policy_connection(severity_map)
     try:
-        assert gate.evaluate(10.0, 100.0, 3, 0.001, right_table, policy_hash=severity_map.policy_hash) == 100.0
-        assert gate.evaluate(10.0, 100.0, 3, 0.001, wrong_table, policy_hash=severity_map.policy_hash) == 0.0
+        assert gate.evaluate(10.0, 100.0, 3, 0.001, right_table, severity_map=severity_map) == 100.0
+        assert gate.evaluate(10.0, 100.0, 3, 0.001, wrong_table, severity_map=severity_map) == 0.0
         # Without a hash the gate behaves as before: it trusts the table it is handed.
         assert gate.evaluate(10.0, 100.0, 3, 0.001, wrong_table) > 0.0
     finally:
@@ -385,9 +428,9 @@ def test_the_five_percent_spread_block_survives_in_the_gate():
     connection = build_scaling_policy_connection(severity_map)
     try:
         calm = severity_map.calm_id
-        assert gate.evaluate(10.0, 100.0, calm, 0.05, connection, policy_hash=severity_map.policy_hash) == 100.0
-        assert gate.evaluate(10.0, 100.0, calm, 0.0501, connection, policy_hash=severity_map.policy_hash) == 0.0
-        assert gate.evaluate(10.0, 100.0, calm, 0.001, None, policy_hash=severity_map.policy_hash) == 0.0
+        assert gate.evaluate(10.0, 100.0, calm, 0.05, connection, severity_map=severity_map) == 100.0
+        assert gate.evaluate(10.0, 100.0, calm, 0.0501, connection, severity_map=severity_map) == 0.0
+        assert gate.evaluate(10.0, 100.0, calm, 0.001, None, severity_map=severity_map) == 0.0
     finally:
         connection.close()
 
@@ -480,7 +523,7 @@ async def test_the_legacy_loop_sizes_the_calm_component_at_full_size_and_the_cri
 def test_the_requoter_reads_raw_ids_only_through_the_severity_map():
     severity_map = shipped_map()
     quoter = AdaptiveReQuoter(None, None, 3, severity_map=severity_map)
-    assert {raw: quoter.get_regime_multiplier(raw) for raw in range(4)} == {3: 1.0, 0: 1.5, 2: 2.0, 1: 3.0}
+    assert {raw: quoter.get_regime_multiplier(raw) for raw in range(4)} == {3: 1.0, 0: 1.5, 2: 2.0, 1: 2.0}
     # Legacy string labels are untouched.
     assert quoter.get_regime_multiplier("extreme") == 3.0
     assert quoter.get_regime_multiplier("something-else") == 1.5
@@ -512,3 +555,128 @@ def test_the_requote_policy_has_no_default_ladder_so_an_unmapped_regime_denies()
     unknown = QuoteEvidence(**{**evidence.__dict__, "regime_id": 9})
     with pytest.raises(RequoteValidationError, match="regime"):
         evaluate_requote(side=OrderSide.BUY, evidence=unknown, policy=mapped, venue=LocalPaperVenue(), now=now)
+
+
+# --- C1: factor structure and posterior validity -----------------------------------------------
+
+
+def _with_factors(transform):
+    params = shipped_params()
+    params["precisions_cholesky"] = transform(params["precisions_cholesky"].copy())
+    return params
+
+
+def _negate_one(factors):
+    factors[0] = -factors[0]
+    return factors
+
+
+def _zero_one_diagonal(factors):
+    factors[2, 1, 1] = 0.0
+    return factors
+
+
+def _negative_one_diagonal(factors):
+    factors[1, 0, 0] = -abs(factors[1, 0, 0])
+    return factors
+
+
+@pytest.mark.parametrize(
+    "transform",
+    [
+        lambda f: -f,  # every factor negated: L @ L.T is unchanged, the posterior is NaN
+        _negate_one,
+        lambda f: np.swapaxes(f, 1, 2).copy(),  # lower triangular instead of upper
+        _zero_one_diagonal,
+        _negative_one_diagonal,
+        lambda f: f + np.tril(np.full((2, 2), 1e-3), -1),  # a stray entry below the diagonal
+    ],
+    ids=["all-negated", "one-negated", "lower-triangular", "zero-diagonal", "negative-diagonal", "below-diagonal-entry"],
+)
+def test_a_precision_factor_that_is_not_upper_triangular_with_a_positive_diagonal_refuses(transform):
+    assert _refusal(_with_factors(transform)) == "REGIME_COVARIANCE_INVALID"
+
+
+@pytest.mark.parametrize("order", [(3, 0, 2, 1), (0, 1, 2, 3), (2, 3, 1, 0)])
+def test_a_renumbered_model_with_negated_factors_cannot_be_loaded_by_the_legacy_loop(order, tmp_path):
+    """Codex's repro: negated factors gave a NaN posterior whose argmax picked component 0."""
+
+    from backend.trading_loop import LiveTradingLoop
+
+    params = permuted_params(order)
+    params["precisions_cholesky"] = -params["precisions_cholesky"]
+    with pytest.raises(Exception) as error:
+        LiveTradingLoop(_StubManager(), params, telemetry_db_path=str(tmp_path / "t.db"))
+    assert error.value.code == "REGIME_COVARIANCE_INVALID"
+
+
+BAD_POSTERIORS = [
+    pytest.param(np.array([np.nan, np.nan, np.nan, np.nan]), id="nan"),
+    pytest.param(np.array([0.25, 0.25, np.inf, 0.25]), id="inf"),
+    pytest.param(np.array([0.5, 0.5, 0.5, 0.5]), id="sums-to-two"),
+    pytest.param(np.array([0.0, 0.0, 0.0, 0.0]), id="all-zero"),
+    pytest.param(np.array([1.2, -0.2, 0.0, 0.0]), id="negative-entry"),
+    pytest.param(np.array([1.0, 0.0, 0.0]), id="too-short"),
+    pytest.param(np.array([[1.0, 0.0, 0.0, 0.0]]), id="two-dimensional"),
+]
+
+
+@pytest.mark.parametrize("posterior", BAD_POSTERIORS)
+def test_an_invalid_posterior_is_refused_before_any_argmax(posterior):
+    with pytest.raises(RegimeSeverityError) as error:
+        rs.validate_posterior(posterior, 4)
+    assert error.value.code == "REGIME_POSTERIOR_INVALID"
+
+
+def test_a_valid_posterior_is_accepted_unchanged():
+    vector = np.array([0.1, 0.2, 0.3, 0.4])
+    assert np.array_equal(rs.validate_posterior(vector, 4), vector)
+
+
+@pytest.mark.parametrize("posterior", BAD_POSTERIORS)
+@pytest.mark.asyncio
+async def test_the_legacy_loop_invalidates_the_regime_on_a_bad_posterior_and_blocks_orders(
+    posterior, tmp_path, monkeypatch
+):
+    import backend.trading_loop as loop_module
+    from backend.trading_loop import LiveTradingLoop
+
+    manager = _StubManager()
+    loop = LiveTradingLoop(manager, shipped_params(), telemetry_db_path=str(tmp_path / "t.db"))
+    for tick in _tick_stream()[:40]:
+        loop.process_tick(*tick)
+    assert loop.current_regime != -1 and loop.risk_leverage_coefficient > 0.0
+    swaps_before = list(manager.swapped)
+
+    monkeypatch.setattr(loop_module, "fast_gmm_predict_proba", lambda *args, **kwargs: posterior)
+    result = loop.process_tick(*_tick_stream()[41])
+    assert result["regime_valid"] is False and result["dominant_regime"] == -1
+    assert loop.current_regime == -1 and loop.requoter.current_regime == -1
+    assert loop.risk_leverage_coefficient == 0.0 and result["risk_leverage_coefficient"] == 0.0
+    assert manager.swapped == swaps_before, "no adapter swap on an invalid posterior"
+
+    connection = build_scaling_policy_connection(loop.severity_map)
+    dispatched = []
+
+    async def dispatch(size, price):
+        dispatched.append(size)
+        return {"actual_fill_price": price}
+
+    try:
+        decision = await loop.execute_order_pre_flight(
+            "BUY", 10.0, {"bid": [99.9] * 5, "ask": [100.1] * 5, "spread": [0.002] * 5},
+            {"equity": 1000.0, "peak_equity": 1000.0}, connection, dispatch,
+        )
+    finally:
+        connection.close()
+    assert decision.approved is False and dispatched == []
+
+
+def test_the_requoter_accepts_a_numpy_integer_id_and_refuses_other_non_labels():
+    quoter = AdaptiveReQuoter(None, None, 3, severity_map=shipped_map())
+    assert quoter.get_regime_multiplier(np.int64(3)) == 1.0
+    assert quoter.get_regime_multiplier(np.int32(1)) == 2.0
+    for bad in (None, 1.0, True, 2.5):
+        with pytest.raises(Exception) as error:
+            quoter.get_regime_multiplier(bad)
+        assert error.value.code == "REGIME_ID_UNKNOWN"

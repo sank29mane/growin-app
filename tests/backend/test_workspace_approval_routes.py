@@ -23,6 +23,7 @@ from execution import (
 )
 from server import app
 from simulation import PreFlightSimulator, RiskSwarmGate
+from regime_testkit import shipped_map
 
 MISMATCH_DETAIL = "Workspace does not match the open execution ledger"
 REJECTION_UNAVAILABLE = "Trade rejection is unavailable: no execution ledger is open"
@@ -57,6 +58,7 @@ def uk_routes(tmp_path):
         simulator=PreFlightSimulator(),
         risk_gate=RiskSwarmGate(),
         require_runtime_preflight=True,
+        regime_severity_map=shipped_map(),
     )
     state.execution_service = service
     state._execution_ledger = ledger
