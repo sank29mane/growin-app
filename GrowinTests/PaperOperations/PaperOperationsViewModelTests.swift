@@ -3,12 +3,12 @@ import Testing
 @testable import Growin
 
 struct PaperOperationsViewModelTests {
+    /// Swift Testing builds a fresh struct per test, so each test owns its stub, session and records.
+    let stub = PaperOperationsStub()
+
     private func makeClient() -> PaperOperationsClient {
-        PaperOperationsURLProtocol.reset()
-        return PaperOperationsClient(
-            session: PaperOperationsClientTests.makeTestSession(),
-            baseURL: URL(string: "http://127.0.0.1:8002")!
-        )
+        stub.reset()
+        return stub.makeClient()
     }
 
     @Test
@@ -16,7 +16,7 @@ struct PaperOperationsViewModelTests {
         await PaperOperationsHTTPIsolation.shared.run {
             let client = makeClient()
             _ = PaperOperationsViewModel(client: client, signer: StubPaperApprovalSigner(configured: false))
-            #expect(PaperOperationsURLProtocol.snapshotRecord().urls.isEmpty)
+            #expect(stub.snapshotRecord().urls.isEmpty)
         }
     }
 
@@ -26,8 +26,8 @@ struct PaperOperationsViewModelTests {
             let client = makeClient()
             _ = PaperOperationsViewModel(client: client, signer: StubPaperApprovalSigner(configured: false))
             try? await Task.sleep(for: .milliseconds(200))
-            #expect(PaperOperationsURLProtocol.snapshotRecord().urls.isEmpty)
-            #expect(PaperOperationsURLProtocol.snapshotRecord().methods.isEmpty)
+            #expect(stub.snapshotRecord().urls.isEmpty)
+            #expect(stub.snapshotRecord().methods.isEmpty)
         }
     }
 
@@ -57,7 +57,7 @@ struct PaperOperationsViewModelTests {
             await viewModel.loadSnapshotEvidence()
             await viewModel.stopLocalReplay()
 
-            let record = PaperOperationsURLProtocol.snapshotRecord()
+            let record = stub.snapshotRecord()
             #expect(!record.urls.isEmpty)
             for url in record.urls {
                 let allowed = PaperOperationsClient.allowlistPrefixes.contains { prefix in
@@ -130,7 +130,7 @@ struct PaperOperationsViewModelTests {
 
             await viewModel.startLocalReplay()
 
-            let record = PaperOperationsURLProtocol.snapshotRecord()
+            let record = stub.snapshotRecord()
             #expect(record.methods == ["POST", "GET"])
             #expect(record.urls.map(\.path) == [
                 "/api/market-data/sessions",
@@ -179,11 +179,11 @@ struct PaperOperationsViewModelTests {
             )
             viewModel.unreconciledIntent = true
             await viewModel.startLocalReplay()
-            PaperOperationsURLProtocol.reset()
+            stub.reset()
 
             await viewModel.stopLocalReplay()
 
-            let record = PaperOperationsURLProtocol.snapshotRecord()
+            let record = stub.snapshotRecord()
             #expect(record.methods == ["DELETE"])
             #expect(record.urls.map(\.path) == ["/api/market-data/sessions/current"])
             #expect(record.urls.allSatisfy { !$0.path.contains("/snapshots/") })
@@ -207,14 +207,14 @@ struct PaperOperationsViewModelTests {
                 ask: "101.02"
             )
             viewModel.blockingReason = .staleSnapshot
-            PaperOperationsURLProtocol.reset()
-            PaperOperationsURLProtocol.overrideCurrentPayload = Data(
+            stub.reset()
+            stub.overrideCurrentPayload = Data(
                 #"{"state":"RUNNING","provider":"local-replay","instruments":[{"workspace":"india","venue":"NSE","segment":"CASH","symbol":"RELIANCE","currency":"INR"}],"read_only":true}"#.utf8
             )
 
             await viewModel.refreshSessionStatus()
 
-            let record = PaperOperationsURLProtocol.snapshotRecord()
+            let record = stub.snapshotRecord()
             #expect(record.methods == ["GET"])
             #expect(record.urls.map(\.path) == ["/api/market-data/sessions/current"])
             #expect(record.urls.allSatisfy { !$0.path.contains("/snapshots/") })
@@ -238,15 +238,15 @@ struct PaperOperationsViewModelTests {
                 bid: "99.02",
                 ask: "101.02"
             )
-            PaperOperationsURLProtocol.reset()
-            PaperOperationsURLProtocol.overrideSnapshotStatus = 409
-            PaperOperationsURLProtocol.overrideSnapshotPayload = Data(
+            stub.reset()
+            stub.overrideSnapshotStatus = 409
+            stub.overrideSnapshotPayload = Data(
                 #"{"detail":{"code":"STALE_SNAPSHOT","message":"top-of-book snapshot is stale"}}"#.utf8
             )
 
             await viewModel.loadSnapshotEvidence()
 
-            let record = PaperOperationsURLProtocol.snapshotRecord()
+            let record = stub.snapshotRecord()
             #expect(record.urls.map(\.path) == ["/api/market-data/snapshots/RELIANCE"])
             #expect(viewModel.blockingReason?.kind == .staleSnapshot)
             #expect(viewModel.blockingReason?.copy == PaperOperationsCopy.staleSnapshot)
@@ -264,8 +264,8 @@ struct PaperOperationsViewModelTests {
             )
             await viewModel.startLocalReplay()
             #expect(viewModel.selectedInstrumentSymbol == "RELIANCE")
-            PaperOperationsURLProtocol.reset()
-            PaperOperationsURLProtocol.overrideCurrentPayload = Data(
+            stub.reset()
+            stub.overrideCurrentPayload = Data(
                 #"{"state":"RUNNING","provider":"local-replay","instruments":[],"read_only":true}"#.utf8
             )
 
@@ -284,7 +284,7 @@ struct PaperOperationsViewModelTests {
                 client: makeClient(),
                 signer: StubPaperApprovalSigner(configured: true)
             )
-            PaperOperationsURLProtocol.overrideStartPayload = Data(
+            stub.overrideStartPayload = Data(
                 #"{"state":"RUNNING","provider":"local-replay","instruments":[{"workspace":"india","venue":"NSE","segment":"CASH","symbol":"RELIANCE","currency":"INR"},{"workspace":"india","venue":"NSE","segment":"CASH","symbol":"INFY","currency":"INR"}],"read_only":true}"#.utf8
             )
 
@@ -303,12 +303,12 @@ struct PaperOperationsViewModelTests {
                 client: makeClient(),
                 signer: StubPaperApprovalSigner(configured: true)
             )
-            PaperOperationsURLProtocol.overrideStartPayload = Data(
+            stub.overrideStartPayload = Data(
                 #"{"state":"RUNNING","provider":"local-replay","instruments":[{"workspace":"india","venue":"NSE","segment":"CASH","symbol":"RELIANCE","currency":"INR"},{"workspace":"india","venue":"NSE","segment":"CASH","symbol":"INFY","currency":"INR"}],"read_only":true}"#.utf8
             )
             await viewModel.startLocalReplay()
-            PaperOperationsURLProtocol.reset()
-            PaperOperationsURLProtocol.overrideCurrentPayload = Data(
+            stub.reset()
+            stub.overrideCurrentPayload = Data(
                 #"{"state":"RUNNING","provider":"local-replay","instruments":[{"workspace":"india","venue":"NSE","segment":"CASH","symbol":"RELIANCE","currency":"INR"}],"read_only":true}"#.utf8
             )
 
@@ -341,7 +341,7 @@ struct PaperOperationsViewModelTests {
                 client: makeClient(),
                 signer: StubPaperApprovalSigner(configured: true)
             )
-            PaperOperationsURLProtocol.overrideStartPayload = Data(
+            stub.overrideStartPayload = Data(
                 #"{"state":"RUNNING","provider":"local-replay","instruments":[{"workspace":"india","venue":"NSE","segment":"CASH","symbol":"RELIANCE","currency":"INR"},{"workspace":"india","venue":"NSE","segment":"CASH","symbol":"INFY","currency":"INR"}],"read_only":true}"#.utf8
             )
 
@@ -406,8 +406,8 @@ struct PaperOperationsViewModelTests {
             await viewModel.startLocalReplay()
             #expect(viewModel.snapshot?.bid == "99.02")
             #expect(viewModel.lastEvidence?.ask == "101.02")
-            PaperOperationsURLProtocol.reset()
-            PaperOperationsURLProtocol.overrideSnapshotPayload = Data(#"{}"#.utf8)
+            stub.reset()
+            stub.overrideSnapshotPayload = Data(#"{}"#.utf8)
 
             await viewModel.loadSnapshotEvidence()
 
@@ -474,7 +474,7 @@ struct PaperOperationsViewModelTests {
             await viewModel.refreshSessionStatus()
             await viewModel.loadSnapshotEvidence()
 
-            #expect(PaperOperationsURLProtocol.snapshotRecord().urls.isEmpty)
+            #expect(stub.snapshotRecord().urls.isEmpty)
         }
     }
 
@@ -488,7 +488,7 @@ struct PaperOperationsViewModelTests {
 
             await viewModel.loadSnapshotEvidence()
 
-            #expect(PaperOperationsURLProtocol.snapshotRecord().urls.isEmpty)
+            #expect(stub.snapshotRecord().urls.isEmpty)
         }
     }
 
@@ -504,7 +504,7 @@ struct PaperOperationsViewModelTests {
 
             await viewModel.preparePaperIntent()
 
-            #expect(PaperOperationsURLProtocol.snapshotRecord().urls.isEmpty)
+            #expect(stub.snapshotRecord().urls.isEmpty)
             #expect(viewModel.pendingTradeApproval == nil)
             #expect(approver.requestCallCount == 0)
         }
@@ -522,14 +522,14 @@ struct PaperOperationsViewModelTests {
             await viewModel.startLocalReplay()
             #expect(viewModel.canPrepare == true)
             let keptBid = viewModel.lastEvidence?.bid
-            PaperOperationsURLProtocol.reset()
-            PaperOperationsURLProtocol.overridePreparePayload = Data(
+            stub.reset()
+            stub.overridePreparePayload = Data(
                 #"{"proposal_id":"paper-denied-1","state":"DENIED","admission":{"decision":"DENIED","reason_code":"SPREAD_TOO_WIDE","simulator_fill_price":"100.51","simulator_drawdown_pct":"0.01","risk_quantity":"1","current_spread_pct":"0.09"}}"#.utf8
             )
 
             await viewModel.preparePaperIntent()
 
-            let record = PaperOperationsURLProtocol.snapshotRecord()
+            let record = stub.snapshotRecord()
             #expect(record.urls.map(\.path) == ["/api/market-data/paper-preparations"])
             #expect(record.urls.allSatisfy { !$0.absoluteString.contains("/api/ai/trade/approve") })
             #expect(viewModel.pendingTradeApproval == nil)
@@ -551,14 +551,14 @@ struct PaperOperationsViewModelTests {
                 tradeApprover: approver
             )
             await viewModel.startLocalReplay()
-            PaperOperationsURLProtocol.reset()
-            PaperOperationsURLProtocol.overridePreparePayload = Data(
+            stub.reset()
+            stub.overridePreparePayload = Data(
                 #"{"proposal_id":"paper-admitted-1","state":"PENDING","admission":{"decision":"ADMITTED","reason_code":"ADMITTED","simulator_fill_price":"100.51","simulator_drawdown_pct":"0.01","risk_quantity":"1","current_spread_pct":"0.01"},"regime":{"regime_id":1,"model_version":"gmm-v1","observed_at":"2026-09-11T18:37:05Z","source_snapshot_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}"#.utf8
             )
 
             await viewModel.preparePaperIntent()
 
-            let record = PaperOperationsURLProtocol.snapshotRecord()
+            let record = stub.snapshotRecord()
             #expect(record.urls.map(\.path) == ["/api/market-data/paper-preparations"])
             #expect(record.urls.allSatisfy { !$0.absoluteString.contains("/api/ai/trade/approve") })
             #expect(approver.requestCallCount == 1)
@@ -585,9 +585,9 @@ struct PaperOperationsViewModelTests {
             )
             await viewModel.startLocalReplay()
             #expect(viewModel.canPrepare == true)
-            PaperOperationsURLProtocol.reset()
-            PaperOperationsURLProtocol.overridePrepareStatus = 409
-            PaperOperationsURLProtocol.overridePreparePayload = Data(
+            stub.reset()
+            stub.overridePrepareStatus = 409
+            stub.overridePreparePayload = Data(
                 #"{"detail":{"code":"PAPER_PREPARATION_DENIED","message":"workspace is not india"}}"#.utf8
             )
 
@@ -609,8 +609,8 @@ struct PaperOperationsViewModelTests {
                 tradeApprover: StubPaperTradeApprover()
             )
             await viewModel.startLocalReplay()
-            PaperOperationsURLProtocol.reset()
-            PaperOperationsURLProtocol.overridePrepareTransportFailure = true
+            stub.reset()
+            stub.overridePrepareTransportFailure = true
 
             await viewModel.preparePaperIntent()
 
@@ -650,7 +650,7 @@ struct PaperOperationsViewModelTests {
                 tradeApprover: approver
             )
             let review = try await admittedReview(viewModel: viewModel)
-            PaperOperationsURLProtocol.reset()
+            stub.reset()
 
             try await viewModel.completeTradeApproval(review)
 
@@ -666,8 +666,8 @@ struct PaperOperationsViewModelTests {
 
             #expect(approver.completeCallCount == 1)
             #expect(viewModel.lifecycleStep == .acknowledged)
-            #expect(PaperOperationsURLProtocol.snapshotRecord().urls.isEmpty)
-            #expect(PaperOperationsURLProtocol.snapshotRecord().urls.allSatisfy {
+            #expect(stub.snapshotRecord().urls.isEmpty)
+            #expect(stub.snapshotRecord().urls.allSatisfy {
                 !$0.absoluteString.contains("/api/ai/trade/approval/complete")
             })
         }
@@ -713,11 +713,11 @@ struct PaperOperationsViewModelTests {
             )
             let review = try await admittedReview(viewModel: viewModel)
             try await viewModel.completeTradeApproval(review)
-            PaperOperationsURLProtocol.reset()
+            stub.reset()
 
             await viewModel.reconcilePaperOutcome()
 
-            #expect(PaperOperationsURLProtocol.snapshotRecord().urls.isEmpty)
+            #expect(stub.snapshotRecord().urls.isEmpty)
             #expect(viewModel.lifecycleStep == .signed)
             #expect(viewModel.canPrepare == false)
         }
@@ -737,11 +737,11 @@ struct PaperOperationsViewModelTests {
             viewModel.acknowledgeLocalFill()
             #expect(viewModel.canPrepare == false)
             #expect(viewModel.blockingReason?.kind == .unreconciled)
-            PaperOperationsURLProtocol.reset()
+            stub.reset()
 
             await viewModel.reconcilePaperOutcome()
 
-            let record = PaperOperationsURLProtocol.snapshotRecord()
+            let record = stub.snapshotRecord()
             #expect(record.urls.map(\.path) == ["/api/market-data/paper-reconciliations"])
             #expect(record.methods == ["POST"])
             let body = try #require(record.bodies.first)
@@ -768,9 +768,9 @@ struct PaperOperationsViewModelTests {
             let review = try await admittedReview(viewModel: viewModel)
             try await viewModel.completeTradeApproval(review)
             viewModel.acknowledgeLocalFill()
-            PaperOperationsURLProtocol.reset()
-            PaperOperationsURLProtocol.overrideReconcileStatus = 500
-            PaperOperationsURLProtocol.overrideReconcilePayload = Data(#"{"detail":"loopback failed"}"#.utf8)
+            stub.reset()
+            stub.overrideReconcileStatus = 500
+            stub.overrideReconcilePayload = Data(#"{"detail":"loopback failed"}"#.utf8)
 
             await viewModel.reconcilePaperOutcome()
 
@@ -785,8 +785,8 @@ struct PaperOperationsViewModelTests {
     @MainActor
     private func admittedReview(viewModel: PaperOperationsViewModel) async throws -> TradeApprovalReview {
         await viewModel.startLocalReplay()
-        PaperOperationsURLProtocol.reset()
-        PaperOperationsURLProtocol.overridePreparePayload = Data(
+        stub.reset()
+        stub.overridePreparePayload = Data(
             #"{"proposal_id":"paper-admitted-1","state":"PENDING","admission":{"decision":"ADMITTED","reason_code":"ADMITTED","simulator_fill_price":"100.51","simulator_drawdown_pct":"0.01","risk_quantity":"1","current_spread_pct":"0.01"}}"#.utf8
         )
         await viewModel.preparePaperIntent()
