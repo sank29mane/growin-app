@@ -545,6 +545,23 @@ SDK_MISSING = 'xcodebuild: error: SDK "macosx27.0" cannot be located.'
 TRICK_PATH = "/w/is unavailable in macOS/is only available in macOS 27.0 or newer.swift:4:1: error: expected '}' in struct"
 SCOPE = "B.swift:1:8: error: cannot find 'Foo' in scope"
 SYNTAX = "D.swift:4:1: error: expected '}' in struct"
+# Follow-up (#561 final check): colons are legal in macOS paths, so the LAST
+# ":N:N: error: " is the real diagnostic, not the first one.
+COLON_PATH = "/w/x:1:2: error: a requires a newer version of Xcode.swift:4:1: error: expected '}' in struct"
+# A version phrase followed by more text is not the whole message.
+NEWER_TAIL = "E.swift:1:1: error: 'Foo' requires a newer version of Xcode; also cannot find 'Bar' in scope"
+NEWER_TOOL_TAIL = "xcodebuild: error: 'Foo' requires a newer version of Xcode; also cannot find 'Bar' in scope"
+FORMAT_TAIL = "xcodebuild: error: The project 'G' cannot be opened because it is in a future Xcode project file format; also cannot find 'Bar' in scope"
+NEWER = "E.swift:1:1: error: 'Foo' requires a newer version of Xcode"
+# Real xcodebuild says "Unable to read project 'X.xcodeproj'." for a future
+# project format, so the old format phrase never fired and is gone (fail closed).
+FORMAT = "xcodebuild: error: The project 'G' cannot be opened because it is in a future Xcode project file format."
+# Fix round 1: a line carrying two diagnostic delimiters is never an SDK gap,
+# because the greedy extraction would otherwise keep only the quoted tail.
+QUOTED = '@available(*, unavailable, message: "blocked :1:2: error: The project G cannot be opened because it is in a future Xcode project file format.")'
+QUOTED_BARE = 'E.swift:1:1: error: @available(*, unavailable, message: "blocked :1:2: error: The project G cannot be opened because it is in a future Xcode project file format.'
+QUOTED_NEWER = 'E.swift:1:1: error: @available(*, unavailable, message: "blocked :1:2: error: a requires a newer version of Xcode'
+ANCHOR = '/w/x:1:2: error: SDK "y.swift:4:1: error: expected \'}\' in struct" cannot be located.'
 
 
 @pytest.mark.parametrize("older,status,log,code,degraded", [
@@ -559,6 +576,19 @@ SYNTAX = "D.swift:4:1: error: expected '}' in struct"
     ("true", 65, f"{AVAIL}\n{TRICK_PATH}", 1, False),
     ("true", 65, UNAVAILABLE, 1, False),
     ("true", 65, f"{AVAIL}\n{UNAVAILABLE}", 1, False),
+    # Follow-up: version phrases degrade only as the complete message
+    ("true", 65, NEWER, 0, True),
+    ("true", 65, FORMAT, 1, False),
+    ("true", 65, QUOTED, 1, False),
+    ("true", 65, QUOTED_BARE, 1, False),
+    ("true", 65, QUOTED_NEWER, 1, False),
+    ("true", 65, ANCHOR, 1, False),
+    ("true", 65, f"{AVAIL}\n{ANCHOR}", 1, False),
+    ("true", 65, COLON_PATH, 1, False),
+    ("true", 65, f"{AVAIL}\n{COLON_PATH}", 1, False),
+    ("true", 65, NEWER_TAIL, 1, False),
+    ("true", 65, NEWER_TOOL_TAIL, 1, False),
+    ("true", 65, FORMAT_TAIL, 1, False),
     # C4: one real error mixed in keeps it red
     ("true", 65, f"{AVAIL}\n{SCOPE}", 1, False),
     ("true", 65, f"{AVAIL}\n{SYNTAX}", 1, False),
