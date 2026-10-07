@@ -70,10 +70,13 @@ struct LegacyT212KeychainCleanupTests {
             rig.tearDown(extra: Self.decoyAccounts)
             for account in Cleanup.legacyAccounts { otherService.remove(account: account) }
         }
-        try rig.seed(Cleanup.legacyAccounts)
-        try rig.seed(Self.decoyAccounts)
-        // Same account string, different service: must survive too.
+        // Seed order matters: SecItemDelete removes one arbitrary match, usually the oldest.
+        // Victims go in first and the targets last, so a query that is too broad kills a
+        // decoy instead of getting lucky and hitting a target.
+        // Same account string, different service: must survive.
         try rig.seed(Cleanup.legacyAccounts, in: otherService)
+        try rig.seed(Self.decoyAccounts)
+        try rig.seed(Cleanup.legacyAccounts)
 
         let recorder = Recorder()
         let outcome = Cleanup.runOnce(
