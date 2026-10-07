@@ -364,4 +364,75 @@ struct PracticeApprovalBiometricTests {
             text: typeFile("    #if DEBUG\n    static func makeForTesting() -> Self { Self(authenticator: a) }\n    #endif\n")
         ).isEmpty)
     }
+
+    // MARK: Raw signer instances
+    //
+    // `noOtherCallerOfTheRawSignerHandlesPractice` matches the literal `LocalApprovalSigner.shared.sign(`.
+    // A second instance (`LocalApprovalSigner(store:)`, `.init`, a typealias, an extension factory,
+    // or a stored copy of `.shared`) would sign without ever being counted by that scan.
+    // The initializer is internal, so the compiler does not stop it.
+
+    private static let signerPath = "Growin/Security/LocalApprovalSigner.swift"
+
+    /// Violations for one app source file. Empty means the file builds no signer instance,
+    /// except the single `static let shared` site inside the signer's own file.
+    private static func signerInstanceViolations(path: String, text rawText: String) -> [String] {
+        let text = rawText
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .joined(separator: "\n")
+        var out: [String] = []
+        let constructions = matchCount(#"\bLocalApprovalSigner\s*\("#, in: text)
+            + matchCount(#"\bLocalApprovalSigner\s*\.\s*init\b"#, in: text)
+            + matchCount(#":\s*LocalApprovalSigner\??\s*=\s*\.init\b"#, in: text)
+        if path == signerPath {
+            if constructions != 1 { out.append("\(path) builds \(constructions) signer instances, expected exactly the shared one") }
+        } else if constructions > 0 {
+            out.append("\(path) builds a LocalApprovalSigner instance")
+        }
+        if path != signerPath, matchCount(#"\bextension\s+LocalApprovalSigner\b"#, in: text) > 0 {
+            out.append("\(path) extends LocalApprovalSigner")
+        }
+        if matchCount(#"typealias\s+\w+\s*=\s*(\w+\.)*LocalApprovalSigner\b"#, in: text) > 0 {
+            out.append("\(path) aliases the signer type")
+        }
+        if matchCount(#"\bLocalApprovalSigner\.shared(?!\s*\.\s*\w)"#, in: text) > 0 {
+            out.append("\(path) keeps a reference to LocalApprovalSigner.shared instead of calling through it")
+        }
+        return out
+    }
+
+    @Test func appCodeNeverBuildsASecondRawSignerInstance() throws {
+        let sources = try Self.appSources()
+        #expect(sources.count > 10, "source probe found too few files")
+        #expect(sources.contains { $0.path == Self.signerPath })
+        for (path, text) in sources {
+            #expect(Self.signerInstanceViolations(path: path, text: text).isEmpty,
+                    "\(Self.signerInstanceViolations(path: path, text: text))")
+        }
+    }
+
+    @Test func theSignerInstanceScanFlagsEveryEvasionForm() {
+        let signerFile = "final class LocalApprovalSigner {\n    static let shared = LocalApprovalSigner(store: .shared)\n}\n"
+        let evasions: [(String, String, String)] = [
+            ("instance with store", "Growin/Views/X.swift", "let s = LocalApprovalSigner(store: .shared)"),
+            ("instance with spaced paren", "Growin/Views/X.swift", "let s = LocalApprovalSigner (store: store)"),
+            ("explicit .init", "Growin/Views/X.swift", "let s = LocalApprovalSigner.init(store: store)"),
+            ("typed bare .init", "Growin/Views/X.swift", "let s: LocalApprovalSigner = .init(store: store)"),
+            ("typealias", "Growin/Views/X.swift", "typealias Signer = LocalApprovalSigner\nlet s = Signer(store: store)"),
+            ("extension factory", "Growin/Views/X.swift", "extension LocalApprovalSigner { static func make() -> Self { Self(store: .shared) } }"),
+            ("stored copy of shared", "Growin/Views/X.swift", "let s = LocalApprovalSigner.shared\n_ = try s.sign(bytes, for: .uk)"),
+            ("second instance in signer file", Self.signerPath,
+             signerFile + "let other = LocalApprovalSigner(store: .shared)\n"),
+            ("no shared instance in signer file", Self.signerPath, "final class LocalApprovalSigner {}\n"),
+        ]
+        for (label, path, text) in evasions {
+            #expect(!Self.signerInstanceViolations(path: path, text: text).isEmpty, "scan missed: \(label)")
+        }
+        #expect(Self.signerInstanceViolations(path: Self.signerPath, text: signerFile).isEmpty)
+        #expect(Self.signerInstanceViolations(
+            path: "Growin/Views/X.swift",
+            text: "// LocalApprovalSigner(store: x) is not allowed here\nlet id = try LocalApprovalSigner.shared.identity(for: .uk)\nthrow LocalApprovalSignerError.notConfigured"
+        ).isEmpty)
+    }
 }
