@@ -12,7 +12,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_FLOOR
-from typing import Mapping
+from typing import Any, Mapping
 
 from .ledger import ExecutionLedger, LedgerRequote, canonical_json
 from .models import OrderIntent, OrderMode, OrderSide, OrderType, ReconciliationStatus
@@ -82,11 +82,29 @@ class QuoteEvidence:
 class RequotePolicy:
     """Versioned pure policy inputs supplied by the caller."""
 
-    regime_multipliers: Mapping[int, Decimal] = field(
-        default_factory=lambda: {0: Decimal("1"), 1: Decimal("1.5"), 2: Decimal("2")}
-    )
+    # Keyed by the RAW model component id carried in ``QuoteEvidence.regime_id``. There
+    # is no default table: raw ids are arbitrary per model, so a fixed {0, 1, 2} ladder
+    # sized the wrong regimes. Build one from the model's severity map with
+    # ``RequotePolicy.for_severity_map``; an empty table denies every regime.
+    regime_multipliers: Mapping[int, Decimal] = field(default_factory=dict)
     max_age_seconds: int = 30
     version: str = "local-paper-v1"
+
+    @classmethod
+    def for_severity_map(
+        cls, severity_map: Any, *, max_age_seconds: int = 30, version: str = "local-paper-v1"
+    ) -> "RequotePolicy":
+        """Collar multipliers by severity rank, re-keyed to the raw ids of this model.
+
+        The policy version carries the map's policy hash, so the candidate's snapshot
+        hash (and the re-quote record) is bound to the ordering and ladder used.
+        """
+
+        return cls(
+            regime_multipliers=severity_map.collar_multipliers_by_id(),
+            max_age_seconds=max_age_seconds,
+            version=f"{version}+{severity_map.policy_version}:{severity_map.policy_hash[:16]}",
+        )
 
     def __post_init__(self) -> None:
         if self.max_age_seconds < 0:

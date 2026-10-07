@@ -1,5 +1,10 @@
 import logging
 
+try:
+    from backend.simulation.regime_severity import policy_matches
+except ImportError:
+    from .regime_severity import policy_matches
+
 logger = logging.getLogger(__name__)
 
 class RiskSwarmGate:
@@ -13,7 +18,8 @@ class RiskSwarmGate:
         trade_size: float,
         regime_id: int,
         current_spread_pct: float,
-        db_connection
+        db_connection,
+        policy_hash: str | None = None,
     ) -> float:
         """
         Evaluate the capital scaling policy for a trade.
@@ -21,9 +27,12 @@ class RiskSwarmGate:
         Parameters:
             simulated_fill_price (float): Estimated fill price including slippage.
             trade_size (float): The proposed trade quantity.
-            regime_id (int): The GMM regime ID.
+            regime_id (int): The raw GMM component ID. The policy table maps it to a
+                severity-ranked multiplier; the raw ID is arbitrary and never ordered here.
             current_spread_pct (float): Current relative spread (e.g. 0.02 = 2.0%).
             db_connection: A database connection (SQLite or DuckDB).
+            policy_hash (str | None): When given, the connection must carry exactly this
+                severity-policy hash (``scaling_policy_meta``), else the trade is blocked.
             
         Returns:
             float: Scaled trade size. Returns 0.0 if spread exceeds 5.0% or query fails.
@@ -38,6 +47,13 @@ class RiskSwarmGate:
 
         if db_connection is None:
             logger.error("RiskSwarmGate database connection is None. Blocking trade for safety.")
+            return 0.0
+
+        if policy_hash is not None and not policy_matches(db_connection, policy_hash):
+            logger.error(
+                "RiskSwarmGate scaling policy was not built from the classifying regime "
+                "model's severity map. Blocking trade for safety."
+            )
             return 0.0
 
         try:

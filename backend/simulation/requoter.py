@@ -1,13 +1,21 @@
 import asyncio
 import logging
 
+try:
+    from backend.simulation.regime_severity import RegimeSeverityError
+except ImportError:
+    from .regime_severity import RegimeSeverityError
+
 logger = logging.getLogger(__name__)
 
 class AdaptiveReQuoter:
-    def __init__(self, vol_tracker, alpaca_client, current_regime, interval: float = 5.0):
+    def __init__(self, vol_tracker, alpaca_client, current_regime, interval: float = 5.0, severity_map=None):
         self.vol_tracker = vol_tracker
         self.alpaca_client = alpaca_client
+        # A string is a legacy volatility label. An int is a RAW GMM component id and is
+        # only meaningful through the model's severity map.
         self.current_regime = current_regime
+        self.severity_map = severity_map
         self.interval = interval
         self.active_orders = {}
 
@@ -38,7 +46,15 @@ class AdaptiveReQuoter:
         margin = spread_base + (current_volatility * regime_multiplier)
         return mid_price - margin, mid_price + margin
 
-    def get_regime_multiplier(self, regime: str) -> float:
+    def get_regime_multiplier(self, regime) -> float:
+        if isinstance(regime, int) and not isinstance(regime, bool):
+            # Raw component ids are arbitrary; no severity map, or an id it does not know
+            # (including the loop's "none detected yet" -1), is a refusal, not a 1.5 guess.
+            if self.severity_map is None:
+                raise RegimeSeverityError(
+                    "REGIME_SEVERITY_MAP_REQUIRED", "a raw regime id needs the model's severity map"
+                )
+            return float(self.severity_map.collar_multiplier(regime))
         multipliers = {
             "low_vol": 1.0,
             "normal": 1.5,
