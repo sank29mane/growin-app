@@ -158,9 +158,16 @@ class WorkspaceExecution(BaseModel):
     # The reader is ``market_data.admission.parse_max_slippage_bps``. A paper
     # venue ignores the field. JSON floats are already refused by the loader.
     max_slippage_bps: Any = Field(default=None, repr=False)
+    # Phase 63 (P-15): the India fat-finger collar. Kept raw here for the same reason as
+    # ``max_slippage_bps``: the 62 research load and any non-execution read must not fail on
+    # an India execution value. ``IndiaExecution`` (the execution start path) validates it.
+    # UK has no collar, so a UK file naming one is refused.
+    fat_finger_collar: Any = Field(default=None, repr=False)
 
     @model_validator(mode="after")
     def _venue_shape(self) -> "WorkspaceExecution":
+        if self.workspace == "uk" and self.fat_finger_collar is not None:
+            raise ValueError("fat_finger_collar is an India field")
         if self.venue not in known_venues():
             raise ValueError("venue is unknown")
         spec = spec_for(self.venue)
@@ -172,6 +179,38 @@ class WorkspaceExecution(BaseModel):
         elif {"account_id", "currency"} & self.model_fields_set:
             raise ValueError("the paper venue takes no account_id or currency")
         return self
+
+
+class IndiaExecution(WorkspaceExecution):
+    """``private/india/execution.json`` for India execution authority (Phase 63, P-15, D-09).
+
+    The same file as ``WorkspaceExecution`` (venue and optional bound-venue fields), plus the
+    two values the Mac's own India limits need that ``limits.json`` does not carry: the
+    fat-finger collar and ``max_slippage_bps``. Both are required decimal strings; a float,
+    an unknown key, a collar outside (0, 1) or a non-positive slippage cap is refused. The
+    values live in ``private/`` alone and are hidden from ``repr``.
+
+    Only the execution start path loads this model. The 62 research load reads the file as
+    ``WorkspaceExecution`` (values unchecked), so 62's sealed inputs do not change.
+    """
+
+    workspace: Literal["india"]
+    fat_finger_collar: DecimalStr = Field(repr=False)
+    max_slippage_bps: DecimalStr = Field(repr=False)
+
+    @field_validator("fat_finger_collar")
+    @classmethod
+    def _collar_in_open_unit_interval(cls, value: Decimal) -> Decimal:
+        if not Decimal(0) < value < Decimal(1):
+            raise ValueError("fat_finger_collar must lie between 0 and 1")
+        return value
+
+    @field_validator("max_slippage_bps")
+    @classmethod
+    def _slippage_positive(cls, value: Decimal) -> Decimal:
+        if not value > Decimal(0):
+            raise ValueError("max_slippage_bps must be positive")
+        return value
 
 
 class UkLimits(BaseModel):

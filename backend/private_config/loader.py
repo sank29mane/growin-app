@@ -26,6 +26,7 @@ from venue_registry import known_venues, spec_for
 from .errors import PrivateConfigError, schema_error_from_validation_error
 from .schemas import (
     FileRef,
+    IndiaExecution,
     IndiaLimits,
     IndiaStrategy,
     UkLimits,
@@ -58,6 +59,9 @@ class WorkspaceConfig:
     # only for a practice venue.
     execution: WorkspaceExecution | None = None
     uk_limits: UkLimits | None = None
+    # Phase 63 (P-15). Set only when ``require_india_execution`` was passed: the validated
+    # India execution file (collar and slippage cap). It is the same object as ``execution``.
+    india_execution: IndiaExecution | None = None
 
     @property
     def venue(self) -> str:
@@ -345,16 +349,28 @@ UK_LIMITS_FILE = "limits.json"
 
 
 def _load_execution(
-    workspace_dir: Path, workspace: str, raw_files: dict[str, bytes]
+    workspace_dir: Path,
+    workspace: str,
+    raw_files: dict[str, bytes],
+    *,
+    require_india: bool = False,
 ) -> WorkspaceExecution | None:
-    """Read the optional execution.json. Absent means venue paper, as before.
+    """Read execution.json. Absent means venue paper, as before, except for India authority.
 
     A present file that is invalid, names an unknown venue, or names a Trading
     212 venue in India is an error: it never falls back to paper.
+
+    ``require_india`` is the Phase 63 execution start path (P-15): the file is then
+    required for India (``EXECUTION_CONFIG_MISSING``) and validated as ``IndiaExecution``,
+    which also carries the collar and the slippage cap. Every other read of an India
+    workspace (the 62 research load) leaves it optional and its India values unchecked.
     """
 
+    india_strict = require_india and workspace == "india"
     path = workspace_dir / EXECUTION_FILE
     if not os.path.lexists(path):
+        if india_strict:
+            raise PrivateConfigError("EXECUTION_CONFIG_MISSING", EXECUTION_FILE)
         return None
     raw = _read_config_file(path, EXECUTION_FILE)
     data = _parse_object(raw, EXECUTION_FILE)
@@ -369,7 +385,7 @@ def _load_execution(
             if name not in data:
                 raise PrivateConfigError("SCHEMA_INVALID", name)
     _check_identity(data, workspace)
-    execution = _validate_model(WorkspaceExecution, data)
+    execution = _validate_model(IndiaExecution if india_strict else WorkspaceExecution, data)
     _check_bound_identity(execution, workspace)
     raw_files[EXECUTION_FILE] = raw
     return execution
@@ -387,7 +403,10 @@ def _load_uk_limits(workspace_dir: Path, raw_files: dict[str, bytes]) -> UkLimit
 
 
 def load_workspace_config(
-    private_dir: str | os.PathLike[str] | None, workspace: str
+    private_dir: str | os.PathLike[str] | None,
+    workspace: str,
+    *,
+    require_india_execution: bool = False,
 ) -> WorkspaceConfig:
     if workspace not in SUPPORTED_WORKSPACES:
         raise PrivateConfigError("UNSUPPORTED_WORKSPACE", "workspace")
@@ -429,7 +448,9 @@ def load_workspace_config(
         manifest = _validate_model(UkManifest, parsed_files["manifest.json"])
         _check_bound_identity(manifest, workspace)
 
-    execution = _load_execution(workspace_dir, workspace, raw_files)
+    execution = _load_execution(
+        workspace_dir, workspace, raw_files, require_india=require_india_execution
+    )
     uk_limits: UkLimits | None = None
     execution_spec = None if execution is None else spec_for(execution.venue)
     if execution_spec is not None and execution_spec.workspace == "uk":
@@ -444,4 +465,5 @@ def load_workspace_config(
         fingerprint=_fingerprint(raw_files),
         execution=execution,
         uk_limits=uk_limits,
+        india_execution=execution if isinstance(execution, IndiaExecution) else None,
     )

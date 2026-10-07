@@ -734,7 +734,13 @@ def test_an_india_execution_file_naming_trading212_cannot_start(
 def test_india_paper_execution_file_starts_on_paper(tmp_path, private_config_dir):
     write_json(
         private_config_dir / "india" / "execution.json",
-        {"schema_version": 1, "workspace": "india", "venue": "paper"},
+        {
+            "schema_version": 1,
+            "workspace": "india",
+            "venue": "paper",
+            "fat_finger_collar": "0.02",
+            "max_slippage_bps": "25",
+        },
     )
     app_state = AppState()
     assert app_state.start_execution(
@@ -745,6 +751,24 @@ def test_india_paper_execution_file_starts_on_paper(tmp_path, private_config_dir
         assert app_state.execution_mode == "paper"
     finally:
         app_state.close_execution()
+
+
+def test_an_india_paper_file_without_the_63_fields_cannot_start(tmp_path, private_config_dir):
+    # Phase 63-04 (P-15): India authority needs the collar and the slippage cap. The minimal
+    # file that used to start India on paper now leaves execution disabled.
+    write_json(
+        private_config_dir / "india" / "execution.json",
+        {"schema_version": 1, "workspace": "india", "venue": "paper"},
+    )
+    app_state = AppState()
+
+    started = app_state.start_execution(
+        tmp_path / "india.sqlite3", workspace="india", private_dir=private_config_dir
+    )
+
+    assert started is False
+    assert app_state.execution_authority is False
+    assert "SCHEMA_INVALID" in app_state.execution_startup_error
 
 
 def test_practice_ledger_reopened_with_another_account_id_cannot_start(

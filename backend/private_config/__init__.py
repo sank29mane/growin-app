@@ -9,6 +9,7 @@ from .loader import (
 )
 from .schemas import (
     FileRef,
+    IndiaExecution,
     IndiaLimits,
     IndiaStrategy,
     UkLimits,
@@ -20,6 +21,7 @@ __all__ = [
     "SUPPORTED_WORKSPACES",
     "WORKSPACE_CURRENCY",
     "FileRef",
+    "IndiaExecution",
     "IndiaLimits",
     "IndiaStrategy",
     "PrivateConfigError",
