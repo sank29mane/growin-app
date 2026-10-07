@@ -1,6 +1,5 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-import sqlite3
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -17,14 +16,31 @@ from market_data import (
     build_market_preflight_context,
 )
 from simulation import PreFlightSimulator, RiskSwarmGate
+from simulation.regime_severity import build_scaling_policy_connection
 
 import india_limits_support as ils
+from regime_testkit import shipped_map
 
 
 def get_now():
     return datetime.now(timezone.utc)
 
 INSTRUMENT = IndiaInstrument(symbol="RELIANCE")
+
+
+def calm_regime_fields():
+    """Evidence fields for the shipped model's calmest component (raw id from its severity map)."""
+
+    severity_map = shipped_map()
+    raw_id = severity_map.calm_id
+    return {
+        "regime_id": raw_id,
+        "severity_rank": severity_map.rank(raw_id),
+        "severity_label": severity_map.label(raw_id),
+        "mapping_version": severity_map.mapping_version,
+        "policy_version": severity_map.policy_version,
+        "policy_hash": severity_map.policy_hash,
+    }
 
 
 def quote(*, observed_at=None):
@@ -68,14 +84,7 @@ def intent(**overrides):
 
 
 def policy_connection():
-    connection = sqlite3.connect(":memory:")
-    connection.execute(
-        "CREATE TABLE scaling_policies (regime_id INTEGER PRIMARY KEY, scale_multiplier REAL NOT NULL)"
-    )
-    connection.execute(
-        "INSERT INTO scaling_policies (regime_id, scale_multiplier) VALUES (0, 1)"
-    )
-    return connection
+    return build_scaling_policy_connection(shipped_map())
 
 
 @pytest.mark.asyncio
@@ -85,10 +94,10 @@ async def test_fresh_bound_snapshot_feeds_real_phase_54_controls(tmp_path):
     snapshot = session.snapshot(INSTRUMENT, now=now)
     regime = RegimeEvidence(
         instrument=INSTRUMENT,
-        regime_id=0,
         observed_at=now,
         model_version="phase50-test-v1",
         source_snapshot_id=snapshot.snapshot_id,
+        **calm_regime_fields(),
     )
     context = build_market_preflight_context(
         session,
@@ -145,10 +154,10 @@ async def test_cross_workspace_and_wrong_instrument_fail_before_simulation(
     snapshot = session.snapshot(INSTRUMENT, now=now)
     regime = RegimeEvidence(
         instrument=INSTRUMENT,
-        regime_id=0,
         observed_at=now,
         model_version="phase50-test-v1",
         source_snapshot_id=snapshot.snapshot_id,
+        **calm_regime_fields(),
     )
     with pytest.raises(MarketDataError) as error:
         build_market_preflight_context(
@@ -168,10 +177,10 @@ async def test_stale_or_mismatched_regime_fails_closed():
     snapshot = session.snapshot(INSTRUMENT, now=now)
     stale = RegimeEvidence(
         instrument=INSTRUMENT,
-        regime_id=0,
         observed_at=now - timedelta(seconds=31),
         model_version="phase50-test-v1",
         source_snapshot_id=snapshot.snapshot_id,
+        **calm_regime_fields(),
     )
     with pytest.raises(MarketDataError) as error:
         build_market_preflight_context(

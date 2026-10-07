@@ -28,6 +28,11 @@ async def test_classifier_binds_deterministic_evidence_to_fresh_snapshot():
     assert evidence.source_snapshot_id == session.snapshot(INSTRUMENT, now=NOW).snapshot_id
     assert evidence.model_version.startswith("gmm-p256:")
     assert evidence.regime_id >= 0
+    # A flat, tight window is the calm component. The raw id stays as the model emitted it
+    # (3 on the shipped artifact); the severity fields say what it means and size follows them.
+    assert (evidence.severity_rank, evidence.severity_label) == (0, "calm")
+    assert evidence.regime_id == 3
+    assert len(evidence.policy_hash) == 64
 
 
 @pytest.mark.asyncio

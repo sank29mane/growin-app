@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-import numpy as np
 import pytest
 
 import t212_practice_testkit as kit
@@ -19,6 +18,7 @@ from execution.venue import (
     PRICE_SOURCE_TEST_REPLAY,
     admissible_price_sources,
 )
+from regime_testkit import calm_probabilities
 from t212_practice_testkit import PRACTICE_ACCOUNT, practice_proposal_dict, start_practice_stack
 from t212_testkit import install_no_real_network
 
@@ -33,7 +33,7 @@ def regime_zero(monkeypatch):
     import market_data.regime as regime_module
 
     monkeypatch.setattr(
-        regime_module, "fast_gmm_predict_proba", lambda feature, **params: np.array([1.0, 0.0, 0.0, 0.0])
+        regime_module, "fast_gmm_predict_proba", lambda feature, **params: calm_probabilities()
     )
 
 
