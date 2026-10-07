@@ -60,6 +60,7 @@ def _strings(*nodes: ast.AST) -> list[str]:
 def _ticks_violation(node: ast.AST, filename: str, costs_names: set[str]) -> str | None:
     """Allowlist for costs.ticks: only `from costs.ticks import <public names>`, and only in the adapter.
 
+    Imported names must be public; local `as _foo` aliases remain allowed.
     No module object can be bound that way, so aliasing, getattr, vars() and __dict__ on it cannot happen.
     Anything else that names the module, and any dynamic import machinery, is a violation.
     """

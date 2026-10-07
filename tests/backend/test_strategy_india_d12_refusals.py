@@ -1,7 +1,7 @@
 """D-12: no preflight refusal puts a holdout-session date, count or series into the operator-facing message.
 
 Every refusal that can fire before the holdout opens is driven here, and each message is held to the rule the
-#548 inference refusal already met: it names a category and carries no digit and no date.
+#548 inference refusal already met, closed across preflight by #555: it names a category and carries no digit and no date.
 """
 
 from __future__ import annotations
