@@ -19,7 +19,6 @@ from execution import (
     LocalPaperVenue,
     OrderAck,
     OrderSide,
-    PaperDispatcher,
     QuoteEvidence,
     ReconciliationSnapshot,
     ReconciliationStatus,
@@ -28,9 +27,19 @@ from execution import (
     Workspace,
     WorkspaceMismatch,
     coerce_workspace,
-    default_ledger_path,
+)
+from execution.venue import (
+    PracticeCaps,
+    VenueBinding,
+    VenueContext,
+    VenueError,
+    DispatcherFactoryMap,
+    execution_mode_label,
+    resolve_factory,
+    spec_for,
 )
 from private_config import PrivateConfigError, load_workspace_config
+from workspace_credentials import process_workspace
 from model_registry import (
     ModelRegistry,
     active_registry_error,
@@ -73,6 +82,9 @@ class AppState:
         self._regime_classifier = None
         self.execution_authority = False
         self.execution_startup_error = None
+        # Phase 66: the ledger's venue binding while authority is held; None for a
+        # paper ledger and whenever execution is disabled.
+        self.execution_venue_binding: Optional[VenueBinding] = None
         # Loaded private WorkspaceConfig for Phases 62 and 63; None until a successful start.
         self.workspace_config = None
         self.lm_studio_client = None  # Lazy init to avoid startup blocking
@@ -154,34 +166,99 @@ class AppState:
     def execution_service(self, value: ExecutionService):
         self._execution_service = value
 
-    def start_execution(self, db_path, *, workspace, private_dir) -> bool:
-        """Acquire local execution authority and enable paper-only dispatch.
+    @property
+    def execution_mode(self) -> str:
+        """``practice``, ``paper`` or ``disabled``: the one source for every status."""
+
+        return execution_mode_label(self.execution_authority, self.execution_venue_binding)
+
+    def start_execution(
+        self,
+        db_path,
+        *,
+        workspace,
+        private_dir,
+        dispatcher_factories: Optional[DispatcherFactoryMap] = None,
+    ) -> bool:
+        """Acquire local execution authority and install the venue's dispatcher.
 
         Every execution, paper included, needs valid private configuration for
         its workspace (decision 1). The config loads before the ledger path is
         resolved or opened, so a config failure never touches a ledger file.
-        ``db_path`` may be None, meaning ``default_ledger_path(workspace)``.
+        ``db_path`` may be None, meaning the venue's default ledger path.
+
+        The venue comes from ``private/<workspace>/execution.json`` (absent
+        means ``paper``). The dispatcher comes from ``dispatcher_factories``,
+        default the production map, which holds ``paper`` only. An unknown or
+        unregistered venue, or a practice venue outside a UK process, leaves
+        execution disabled: it is never replaced by paper.
         """
         self.close_execution()
+        ledger = None
         try:
             # One fail-closed handler: an unsupported workspace (ValueError), bad
-            # private config, an unpinned or foreign ledger, or an I/O failure
-            # leaves execution disabled instead of aborting startup.
+            # private config, an unpinned or foreign ledger, an unavailable venue,
+            # or an I/O failure leaves execution disabled instead of aborting startup.
             ws = coerce_workspace(workspace)
             config = load_workspace_config(private_dir, ws.value)
-            path = db_path if db_path is not None else default_ledger_path(ws)
-            ledger = ExecutionLedger(path, workspace=ws, require_approval=True)
-        except (LedgerError, OSError, sqlite3.Error, ValueError, PrivateConfigError) as exc:
+            venue = config.venue
+            binding = None
+            caps = None
+            spec = spec_for(venue)
+            if spec is not None:
+                # A bound venue runs only in its spec's workspace, in a process
+                # of that workspace.
+                if ws.value != spec.workspace or process_workspace() != spec.workspace:
+                    raise VenueError("VENUE_WORKSPACE_MISMATCH", venue)
+                binding = VenueBinding(
+                    venue=venue,
+                    account_id=config.execution.account_id,
+                    currency=config.execution.currency,
+                )
+                if config.uk_limits is not None:
+                    caps = PracticeCaps(
+                        capital_cap=config.uk_limits.capital_cap,
+                        per_position_cap=config.uk_limits.per_position_cap,
+                    )
+            # Resolve the factory before any ledger is opened: an unregistered
+            # venue must not create or touch a ledger file.
+            factory = resolve_factory(venue, dispatcher_factories)
+            # db_path None means the ledger's own default: the venue spec's path
+            # for a bound venue, the workspace's real ledger for paper.
+            ledger = ExecutionLedger(
+                db_path, workspace=ws, require_approval=True, venue=binding
+            )
+            if binding is not None and caps is not None:
+                # Both caps are stored once, and the budget equals capital_cap. A
+                # change to either cap later is refused (a new ledger is needed).
+                ledger.configure_venue_limits(
+                    caps.capital_cap, caps.per_position_cap, workspace=ws
+                )
+            dispatcher = factory(
+                VenueContext(workspace=ws, venue=venue, binding=binding, caps=caps)
+            )
+        except (
+            LedgerError,
+            OSError,
+            sqlite3.Error,
+            ValueError,
+            PrivateConfigError,
+            VenueError,
+        ) as exc:
+            if ledger is not None:
+                ledger.close()
             self._execution_service = ExecutionService()
             self.execution_authority = False
+            self.execution_venue_binding = None
             self.workspace_config = None
             # Error text carries codes, field names and paths, never config values.
             self.execution_startup_error = f"{type(exc).__name__}: {exc}"
             return False
         self._execution_ledger = ledger
+        self.execution_venue_binding = binding
         self._preflight_policy_connection = self._local_preflight_policy_connection()
         self._execution_service = ExecutionService(
-            PaperDispatcher(),
+            dispatcher,
             ledger,
             require_approval=True,
             simulator=PreFlightSimulator(),
@@ -202,6 +279,7 @@ class AppState:
         self._execution_ledger = None
         self._execution_service = None
         self.execution_authority = False
+        self.execution_venue_binding = None
         self.workspace_config = None
 
     def market_data_status(self) -> Dict[str, Any]:
@@ -378,8 +456,10 @@ class AppState:
         if not self.execution_authority or self._execution_ledger is None:
             raise LedgerError("local paper execution authority is unavailable")
         # The UAT builder is UK-only (GBP budget): it must never write into an
-        # India ledger.
+        # India ledger, and never into a practice ledger.
         self._execution_ledger.require_workspace(Workspace.UK)
+        if self._execution_ledger.venue_binding is not None:
+            raise LedgerError("paper approval check is unavailable in a practice ledger")
         # Re-open the frozen pending review rather than allocating another UAT
         # proposal. Older `paper-uat` entries are included for recovery from
         # the first implementation; neither path can reach a real broker.
@@ -432,6 +512,8 @@ class AppState:
         if not self.execution_authority or self._execution_ledger is None:
             raise LedgerError("local paper execution authority is unavailable")
         self._execution_ledger.require_workspace(Workspace.UK)
+        if self._execution_ledger.venue_binding is not None:
+            raise LedgerError("re-quote check is unavailable in a practice ledger")
         account = "paper-requote-uat-v1"
         pending_id = self._execution_ledger.find_active_pending_reservation(
             account, workspace=Workspace.UK

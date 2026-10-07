@@ -19,10 +19,13 @@ from execution import (
     LedgerError,
     LedgerReader,
     LedgerUnpinned,
+    LedgerVenueMismatch,
+    VenueBinding,
     Workspace,
     WorkspaceMismatch,
     coerce_workspace,
     default_ledger_path,
+    practice_ledger_path,
 )
 from execution.models import OrderIntent
 from ledger_fixture_support import replay_v5_fixture
@@ -536,3 +539,226 @@ def test_package_exports():
     for name in ("Workspace", "WorkspaceMismatch", "LedgerUnpinned", "LedgerReader", "coerce_workspace"):
         assert name in execution.__all__
         assert hasattr(execution, name)
+
+
+# --- Phase 66: practice ledger binding (D-01, D-21) ---------------------------
+
+V6_PRE66_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "ledger_v6_pre66.sql"
+SYNTH_ACCOUNT = "acct-synthetic-0001"
+
+
+def practice_binding(account_id: str = SYNTH_ACCOUNT) -> VenueBinding:
+    return VenueBinding(venue="t212_practice", account_id=account_id, currency="GBP")
+
+
+def structure(path: Path) -> dict:
+    """Table, trigger and index names plus per-table row counts."""
+
+    connection = ro_connect(path)
+    try:
+        objects = sorted(
+            (row[0], row[1])
+            for row in connection.execute(
+                "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
+            )
+        )
+        counts = {
+            name: connection.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]
+            for kind, name in objects
+            if kind == "table"
+        }
+    finally:
+        connection.close()
+    return {"objects": objects, "counts": counts}
+
+
+def replay_v6_pre66_fixture(path: Path) -> Path:
+    """A v6 paper ledger as the pre-66 ledger code wrote it (captured SQL)."""
+
+    connection = sqlite3.connect(path, isolation_level=None)
+    try:
+        connection.executescript(V6_PRE66_FIXTURE.read_text(encoding="utf-8"))
+        connection.execute("PRAGMA journal_mode=WAL").fetchone()
+    finally:
+        connection.close()
+    return path
+
+
+def test_practice_ledger_records_venue_account_and_currency_at_creation(tmp_path):
+    path = tmp_path / "practice" / "execution.sqlite3"
+    with ExecutionLedger(path, workspace="uk", venue=practice_binding()) as ledger:
+        assert ledger.workspace == Workspace.UK
+        assert ledger.venue_binding == practice_binding()
+        assert ledger.pragmas()["user_version"] == 6  # no SCHEMA_VERSION bump
+
+    connection = ro_connect(path)
+    try:
+        rows = connection.execute(
+            "SELECT singleton, venue, account_id, currency FROM ledger_venue_binding"
+        ).fetchall()
+        identity = connection.execute("SELECT workspace FROM ledger_identity").fetchall()
+    finally:
+        connection.close()
+    assert rows == [(1, "t212_practice", SYNTH_ACCOUNT, "GBP")]
+    assert identity == [("uk",)]
+
+
+def test_practice_ledger_reopens_only_with_its_own_binding(tmp_path):
+    path = tmp_path / "execution.sqlite3"
+    with ExecutionLedger(path, workspace="uk", venue=practice_binding()):
+        pass
+    before = snapshot(path)
+
+    with ExecutionLedger(path, workspace="uk", venue=practice_binding()) as ledger:
+        assert ledger.venue_binding == practice_binding()
+    with pytest.raises(LedgerVenueMismatch) as other_account:
+        ExecutionLedger(path, workspace="uk", venue=practice_binding("acct-other-0002"))
+    assert SYNTH_ACCOUNT not in str(other_account.value)
+    assert "acct-other-0002" not in str(other_account.value)
+
+    after = snapshot(path)
+    assert after["dump"] == before["dump"]
+    assert after["sha256"] == before["sha256"]
+
+
+def test_binding_refuses_another_currency_or_venue_before_it_can_be_written(tmp_path):
+    with pytest.raises(ValueError):
+        VenueBinding(venue="t212_practice", account_id=SYNTH_ACCOUNT, currency="INR")
+    with pytest.raises(ValueError):
+        VenueBinding(venue="paper", account_id=SYNTH_ACCOUNT, currency="GBP")
+    with pytest.raises(ValueError):
+        VenueBinding(venue="t212_practice", account_id="", currency="GBP")
+    assert not (tmp_path / "execution.sqlite3").exists()
+
+
+def test_practice_binding_is_a_uk_binding(tmp_path):
+    with pytest.raises(LedgerVenueMismatch):
+        ExecutionLedger(tmp_path / "india.sqlite3", workspace="india", venue=practice_binding())
+    assert not (tmp_path / "india.sqlite3").exists()
+
+
+def test_real_uk_ledger_is_never_opened_as_practice(tmp_path):
+    path = tmp_path / "execution.sqlite3"
+    with ExecutionLedger(path, workspace="uk") as ledger:
+        ledger.register_intent(make_intent("real-1"))
+    before = snapshot(path)
+
+    with pytest.raises(LedgerVenueMismatch):
+        ExecutionLedger(path, workspace="uk", venue=practice_binding())
+
+    after = snapshot(path)
+    assert after["dump"] == before["dump"]
+    assert after["sha256"] == before["sha256"]
+
+
+def test_practice_ledger_is_never_opened_as_paper(tmp_path):
+    path = tmp_path / "execution.sqlite3"
+    with ExecutionLedger(path, workspace="uk", venue=practice_binding()):
+        pass
+    before = snapshot(path)
+
+    with pytest.raises(LedgerVenueMismatch):
+        ExecutionLedger(path, workspace="uk")
+
+    assert snapshot(path)["sha256"] == before["sha256"]
+
+
+def test_a_ledger_bound_to_a_kind_that_is_no_longer_registered_refuses_to_open(tmp_path):
+    from venue_registry import VenueSpec, override_venue_specs
+
+    kind = "test_only_venue"
+    spec = VenueSpec(
+        kind=kind,
+        workspace="india",
+        currency="INR",
+        modes=frozenset({"PRACTICE"}),
+        ledger_path=lambda: tmp_path / "unused.sqlite3",
+        dispatcher_key=kind,
+    )
+    path = tmp_path / "execution.sqlite3"
+    with override_venue_specs({kind: spec}):
+        binding = VenueBinding(venue=kind, account_id="acct-test-only-01", currency="INR")
+        with ExecutionLedger(path, workspace="india", venue=binding):
+            pass
+        # Still registered: it reopens.
+        with ExecutionLedger(path, workspace="india", venue=binding):
+            pass
+    before = snapshot(path)
+
+    # Out of the override the kind is gone. Neither an unbound open (as paper)
+    # nor a bound open of the stored kind may succeed; the file is untouched.
+    with pytest.raises(LedgerVenueMismatch):
+        ExecutionLedger(path, workspace="india")
+    with pytest.raises(LedgerVenueMismatch):
+        ExecutionLedger(path, workspace="india", venue=binding)
+    assert snapshot(path)["sha256"] == before["sha256"]
+
+
+def test_venue_binding_is_database_immutable(tmp_path):
+    path = tmp_path / "execution.sqlite3"
+    with ExecutionLedger(path, workspace="uk", venue=practice_binding()):
+        pass
+    connection = sqlite3.connect(path)
+    try:
+        for statement in (
+            "UPDATE ledger_venue_binding SET account_id = 'acct-other-0002'",
+            "DELETE FROM ledger_venue_binding",
+        ):
+            with pytest.raises(sqlite3.DatabaseError, match="immutable"):
+                connection.execute(statement)
+    finally:
+        connection.close()
+
+
+def test_a_binding_table_with_no_valid_row_fails_closed(tmp_path):
+    path = tmp_path / "execution.sqlite3"
+    with ExecutionLedger(path, workspace="uk", venue=practice_binding()):
+        pass
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("DROP TRIGGER ledger_venue_binding_no_delete")
+        connection.execute("DELETE FROM ledger_venue_binding")
+        connection.commit()
+    finally:
+        connection.close()
+    for venue in (None, practice_binding()):
+        with pytest.raises(LedgerVenueMismatch):
+            ExecutionLedger(path, workspace="uk", venue=venue)
+
+
+def test_practice_ledger_path_is_not_the_real_uk_ledger_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    practice = practice_ledger_path()
+    real = default_ledger_path("uk")
+    assert practice != real
+    assert practice.parent != real.parent
+    assert tmp_path in practice.parents
+
+
+def test_a_v6_ledger_written_before_66_opens_with_no_structural_change(tmp_path):
+    path = replay_v6_pre66_fixture(tmp_path / "execution.sqlite3")
+    before = structure(path)
+    assert before["counts"]["order_intents"] == 1
+    assert "ledger_venue_binding" not in {name for _, name in before["objects"]}
+
+    with ExecutionLedger(path, workspace="uk") as ledger:
+        assert ledger.venue_binding is None
+        assert ledger.allowed_mode.value == "PAPER"
+        assert ledger.pragmas()["user_version"] == 6
+        assert ledger.get_order("fixture-1") is not None
+
+    after = structure(path)
+    assert after["objects"] == before["objects"]
+    assert after["counts"] == before["counts"]
+
+
+def test_a_v6_ledger_written_before_66_is_refused_as_practice_untouched(tmp_path):
+    path = replay_v6_pre66_fixture(tmp_path / "execution.sqlite3")
+    before = snapshot(path)
+
+    with pytest.raises(LedgerVenueMismatch):
+        ExecutionLedger(path, workspace="uk", venue=practice_binding())
+
+    after = snapshot(path)
+    assert after["dump"] == before["dump"]
+    assert after["sha256"] == before["sha256"]

@@ -25,7 +25,7 @@ async def get_system_status():
         # Legacy broker configuration flags are diagnostic-only and never enable
         # live execution.
         "execution": {
-            "mode": "paper" if state.execution_authority else "disabled",
+            "mode": state.execution_mode,
             "authority": state.execution_authority,
         },
         "timestamp": time.time()

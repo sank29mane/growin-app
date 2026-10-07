@@ -35,6 +35,10 @@ class OrderSide(str, Enum):
 
 class OrderMode(str, Enum):
     PAPER = "PAPER"
+    # Phase 66: a real order against a broker's practice (demo) account. It is
+    # accepted only by a ledger bound to a practice venue (execution.venue);
+    # every other ledger refuses it. LIVE stays refused everywhere.
+    PRACTICE = "PRACTICE"
     LIVE = "LIVE"
 
 

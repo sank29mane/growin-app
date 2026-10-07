@@ -6,18 +6,29 @@ log record may contain one.
 
 import logging
 import sys
-from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
 from data_engine import AlpacaClient
-from execution import OrderIntent, Trading212Dispatcher
-from execution.service import BrokerExecutionError
+from app_context import AppState
+from execution import ApprovalConflict, ExecutionConflictError
+from execution.venue import VENUE_T212_PRACTICE, production_dispatcher_factories
 from mcp_client import (
     MultiMCPManager,
     build_mcp_subprocess_environment,
+)
+from venue_seam_testkit import (
+    SYNTH_ACCOUNT,
+    RecordingDispatcher,
+    enroll,
+    practice_proposal,
+    prepare,
+    private_key,
+    sign,
+    write_json,
+    write_practice_files,
 )
 from workspace_credentials import (
     CredentialScopeError,
@@ -252,67 +263,139 @@ def test_data_engine_no_longer_reads_alpaca_keys_at_import():
     assert not hasattr(data_engine, "API_SECRET")
 
 
-# --- the Trading 212 dispatcher ---
+# --- the venue seam keeps the UK-only property (ISO-02, Phase 66) ---
+#
+# These replace the cases that targeted the deleted Trading212Dispatcher. The
+# property is the same: a Trading 212 venue cannot start in an India or
+# unknown process, cannot start on an India ledger, and a UK practice ledger
+# refuses an order from any other broker. No broker is contacted; the practice
+# dispatcher is a recording double behind the factory map.
 
 
-def _intent(**updates):
-    values = {
-        "proposal_id": "proposal-58-07",
-        "client_order_id": "growin-proposal-58-07-v1",
-        "workspace": "uk",
-        "account": "invest",
-        "broker": "trading212",
-        "ticker": "AAPL_US_EQ",
-        "side": "BUY",
-        "quantity": Decimal("2"),
-    }
-    values.update(updates)
-    return OrderIntent(**values)
+class _CountingFactory:
+    def __init__(self):
+        self.double = RecordingDispatcher()
+        self.calls = 0
+
+    def __call__(self, _context):
+        self.calls += 1
+        return self.double
 
 
-def _recording_client():
-    client = MagicMock()
-    client.call_tool = AsyncMock(
-        return_value=SimpleNamespace(
-            isError=False, content=[{"orderId": "t212-1", "status": "ACKNOWLEDGED"}]
-        )
-    )
-    return client
+def _factories(counting):
+    return {**production_dispatcher_factories(), VENUE_T212_PRACTICE: counting}
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("process", "intent_updates"),
-    [
-        ("india", {}),
-        (None, {}),
-        ("us", {}),
-        ("uk", {"workspace": "india", "account": "india-paper"}),
-        ("uk", {"broker": "paper"}),
-    ],
-)
-async def test_dispatcher_refuses_before_calling_the_mcp_client(
-    monkeypatch, process, intent_updates
+@pytest.mark.parametrize("process", ["india", None, "us"])
+def test_practice_venue_does_not_start_outside_a_uk_process(
+    monkeypatch, tmp_path, private_config_dir, process
 ):
     _set_process(monkeypatch, process)
-    client = _recording_client()
+    write_practice_files(private_config_dir)
+    counting = _CountingFactory()
+    app_state = AppState()
 
-    with pytest.raises(BrokerExecutionError, match="accepts only UK trading212 intents"):
-        await Trading212Dispatcher(client).dispatch(_intent(**intent_updates))
+    started = app_state.start_execution(
+        tmp_path / "practice.sqlite3",
+        workspace="uk",
+        private_dir=private_config_dir,
+        dispatcher_factories=_factories(counting),
+    )
 
-    client.call_tool.assert_not_awaited()
+    assert started is False
+    assert app_state.execution_authority is False
+    assert "VENUE_WORKSPACE_MISMATCH" in app_state.execution_startup_error
+    assert counting.calls == 0
+    assert not (tmp_path / "practice.sqlite3").exists()
+
+
+def test_practice_venue_does_not_start_on_an_india_ledger(
+    monkeypatch, tmp_path, private_config_dir
+):
+    _set_process(monkeypatch, "uk")
+    write_json(
+        private_config_dir / "india" / "execution.json",
+        {
+            "schema_version": 1,
+            "workspace": "india",
+            "venue": VENUE_T212_PRACTICE,
+            "account_id": SYNTH_ACCOUNT,
+            "currency": "GBP",
+        },
+    )
+    counting = _CountingFactory()
+    app_state = AppState()
+
+    started = app_state.start_execution(
+        tmp_path / "india.sqlite3",
+        workspace="india",
+        private_dir=private_config_dir,
+        dispatcher_factories=_factories(counting),
+    )
+
+    assert started is False
+    assert "VENUE_NOT_ALLOWED" in app_state.execution_startup_error
+    assert counting.calls == 0
+
+
+def test_practice_ledger_refuses_an_order_from_another_broker_or_workspace(
+    monkeypatch, tmp_path, private_config_dir
+):
+    _set_process(monkeypatch, "uk")
+    write_practice_files(private_config_dir)
+    counting = _CountingFactory()
+    app_state = AppState()
+    assert app_state.start_execution(
+        tmp_path / "practice.sqlite3",
+        workspace="uk",
+        private_dir=private_config_dir,
+        dispatcher_factories=_factories(counting),
+    )
+    try:
+        ledger = app_state._execution_ledger
+        # broker "paper" (the old ("uk", {"broker": "paper"}) case)
+        wrong_broker = practice_proposal("wrong-broker", broker="paper")
+        app_state.execution_service.register_proposal(wrong_broker)
+        with pytest.raises(ApprovalConflict, match="broker"):
+            app_state.execution_service.create_approval_challenge("wrong-broker", workspace="uk")
+        # an India intent (the old ("uk", {"workspace": "india"}) case)
+        with pytest.raises(ExecutionConflictError, match="workspace"):
+            app_state.execution_service.register_proposal(
+                practice_proposal("india-intent", workspace="india", account="india-paper")
+            )
+        assert ledger.list_attempts() == []
+        assert counting.double.intents == []
+    finally:
+        app_state.close_execution()
 
 
 @pytest.mark.asyncio
-async def test_dispatcher_passes_a_uk_trading212_intent_in_a_uk_process(monkeypatch):
+async def test_a_uk_process_reaches_the_seam_double_with_a_uk_practice_intent(
+    monkeypatch, tmp_path, private_config_dir
+):
     _set_process(monkeypatch, "uk")
-    client = _recording_client()
-
-    ack = await Trading212Dispatcher(client).dispatch(_intent())
-
-    client.call_tool.assert_awaited_once_with(
-        "place_market_order",
-        {"ticker": "AAPL_US_EQ", "quantity": 2.0, "order_type": "BUY"},
+    write_practice_files(private_config_dir)
+    counting = _CountingFactory()
+    app_state = AppState()
+    assert app_state.start_execution(
+        tmp_path / "practice.sqlite3",
+        workspace="uk",
+        private_dir=private_config_dir,
+        dispatcher_factories=_factories(counting),
     )
-    assert ack.broker == "trading212"
-    assert ack.broker_order_id == "t212-1"
+    try:
+        service = app_state.execution_service
+        key = private_key()
+        enroll(service._approval_service, key)
+        prepare(app_state, practice_proposal("uk-ok"))
+        challenge = service.create_approval_challenge("uk-ok", workspace="uk")
+        ack = await service.approve_signed(
+            "uk-ok", challenge.challenge_id, sign(key, challenge.signed_payload), workspace="uk"
+        )
+    finally:
+        app_state.close_execution()
+
+    assert counting.calls == 1
+    assert [intent.proposal_id for intent in counting.double.intents] == ["uk-ok"]
+    assert counting.double.intents[0].workspace.value == "uk"
+    assert ack.broker == VENUE_T212_PRACTICE

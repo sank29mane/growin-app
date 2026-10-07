@@ -37,6 +37,16 @@ from .models import (
     Workspace,
     WorkspaceControl,
 )
+from .venue import (
+    VENUE_T212_PRACTICE,
+    VenueBinding,
+    allowed_mode,
+    allowed_modes,
+    intent_refusal,
+    refusal_text,
+    registered_kinds,
+    spec_for,
+)
 
 
 SCHEMA_VERSION = 6
@@ -175,6 +185,13 @@ class LedgerUnpinned(LedgerError):
     """Raised when a ledger file has no workspace pin (legacy v1 to v5 or unmarked)."""
 
 
+class LedgerVenueMismatch(LedgerError):
+    """Raised when a ledger's venue binding is not the one the opener asked for.
+
+    The text names no account id and no currency.
+    """
+
+
 def coerce_workspace(value: object) -> Workspace:
     """Return the ``Workspace`` for ``value`` or raise ``ValueError``.
 
@@ -205,6 +222,33 @@ def default_ledger_path(workspace: Workspace | str) -> Path:
         / pinned.value
         / "execution.sqlite3"
     )
+
+
+def practice_ledger_path() -> Path:
+    """Return the Trading 212 practice-ledger path (uk only) without creating it.
+
+    It is the ``t212_practice`` spec's default ledger path, and it is never
+    ``default_ledger_path``: practice code must not open, read or migrate the
+    real ledger of the same workspace (Phase 66 D-01).
+    """
+
+    spec = spec_for(VENUE_T212_PRACTICE)
+    if spec is None:
+        raise LedgerVenueMismatch("the practice venue is not registered")
+    return spec.ledger_path()
+
+
+def _same_file_path(candidate: Path, canonical: Path) -> bool:
+    """True when two paths can name one file: same real path, case-folded, or same inode."""
+
+    left = os.path.realpath(candidate)
+    right = os.path.realpath(canonical)
+    if left == right or left.casefold() == right.casefold():
+        return True
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return False
 
 
 def canonical_json(value: Any) -> str:
@@ -549,6 +593,9 @@ class LedgerIdentity:
     kind: str  # "fresh", "pinned", "unpinned" or "newer"
     workspace: Optional[Workspace]
     user_version: int
+    # Present only in a practice ledger created by Phase 66 code. A file with
+    # no binding table is a paper ledger, exactly as every v6 file was before.
+    binding: Optional[VenueBinding] = None
 
 
 def _require_sqlite_capabilities(connection: sqlite3.Connection) -> None:
@@ -589,10 +636,119 @@ def _read_identity(connection: sqlite3.Connection) -> LedgerIdentity:
         ).fetchone()
         if row is not None:
             try:
-                return LedgerIdentity("pinned", Workspace(str(row[0])), user_version)
+                workspace = Workspace(str(row[0]))
             except ValueError:
-                pass
+                workspace = None
+            if workspace is not None:
+                binding = _read_binding(connection, tables)
+                return LedgerIdentity("pinned", workspace, user_version, binding)
     return LedgerIdentity("unpinned", None, user_version)
+
+
+_VENUE_BINDING_TABLE = "ledger_venue_binding"
+
+
+def _read_binding(
+    connection: sqlite3.Connection, tables: set[str]
+) -> Optional[VenueBinding]:
+    """Read the practice binding, if the file has one. Fails closed on a bad row."""
+
+    if _VENUE_BINDING_TABLE not in tables:
+        return None
+    row = connection.execute(
+        f"SELECT venue, account_id, currency FROM {_VENUE_BINDING_TABLE} WHERE singleton = 1"
+    ).fetchone()
+    if row is None:
+        raise LedgerVenueMismatch("ledger venue binding is missing")
+    try:
+        return VenueBinding(venue=str(row[0]), account_id=str(row[1]), currency=str(row[2]))
+    except ValueError:
+        raise LedgerVenueMismatch("ledger venue binding is invalid") from None
+
+
+def _venue_binding_check() -> str:
+    """The binding CHECK, enumerated from the registered specs and nothing wider.
+
+    One (venue, currency) pair per registered kind. Kind and currency are
+    validated by ``VenueSpec`` to ``[a-z0-9_]`` and ``[A-Z]{3}``, so they are
+    safe to inline here.
+    """
+
+    pairs = []
+    for kind in registered_kinds():
+        spec = spec_for(kind)
+        if spec is not None:
+            pairs.append(f"(venue = '{spec.kind}' AND currency = '{spec.currency}')")
+    return " OR ".join(pairs) if pairs else "0"
+
+
+_VENUE_LIMITS_TABLE = "ledger_venue_limits"
+
+
+def _install_venue_limits_table(connection: sqlite3.Connection) -> None:
+    """Create the empty, write-once caps table. Idempotent; caller owns the transaction.
+
+    It exists only in a bound-venue ledger. One row, never updated or deleted.
+    """
+
+    connection.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {_VENUE_LIMITS_TABLE} (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            capital_cap TEXT NOT NULL,
+            per_position_cap TEXT NOT NULL,
+            configured_at TEXT NOT NULL
+        )
+        """
+    )
+    for event in ("UPDATE", "DELETE"):
+        connection.execute(
+            f"""
+            CREATE TRIGGER IF NOT EXISTS {_VENUE_LIMITS_TABLE}_no_{event.lower()}
+            BEFORE {event} ON {_VENUE_LIMITS_TABLE}
+            BEGIN
+                SELECT RAISE(ABORT, 'ledger venue limits are immutable');
+            END
+            """
+        )
+
+
+def _install_venue_binding(
+    connection: sqlite3.Connection, binding: VenueBinding, bound_at: str
+) -> None:
+    """Write the immutable practice binding. Caller owns the transaction.
+
+    Only a fresh practice ledger gets this table; no existing ledger is altered.
+    """
+
+    connection.execute(
+        f"""
+        CREATE TABLE {_VENUE_BINDING_TABLE} (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            venue TEXT NOT NULL,
+            account_id TEXT NOT NULL CHECK (length(account_id) BETWEEN 1 AND 64),
+            currency TEXT NOT NULL,
+            bound_at TEXT NOT NULL,
+            CHECK ({_venue_binding_check()})
+        )
+        """
+    )
+    for event in ("UPDATE", "DELETE"):
+        connection.execute(
+            f"""
+            CREATE TRIGGER {_VENUE_BINDING_TABLE}_no_{event.lower()}
+            BEFORE {event} ON {_VENUE_BINDING_TABLE}
+            BEGIN
+                SELECT RAISE(ABORT, 'ledger venue binding is immutable');
+            END
+            """
+        )
+    connection.execute(
+        f"INSERT INTO {_VENUE_BINDING_TABLE} (singleton, venue, account_id, currency, bound_at) "
+        "VALUES (1, ?, ?, ?, ?)",
+        (binding.venue, binding.account_id, binding.currency, bound_at),
+    )
+    _install_venue_limits_table(connection)
 
 
 def _apply_base_schema(connection: sqlite3.Connection, from_version: int) -> None:
@@ -749,13 +905,39 @@ class ExecutionLedger:
         workspace: Workspace | str,
         busy_timeout_ms: int = 5_000,
         require_approval: bool = False,
+        venue: Optional[VenueBinding] = None,
     ) -> None:
         if not 1 <= busy_timeout_ms <= 60_000:
             raise ValueError("busy_timeout_ms must be between 1 and 60000")
 
         self.workspace: Workspace = coerce_workspace(workspace)
+        if venue is not None:
+            if not isinstance(venue, VenueBinding):
+                raise ValueError("venue must be a VenueBinding")
+            spec = spec_for(venue.venue)
+            if spec is None:
+                raise LedgerVenueMismatch("the ledger venue is not registered")
+            if self.workspace.value != spec.workspace:
+                raise LedgerVenueMismatch(
+                    f"this venue's ledger exists only for the {spec.workspace} workspace"
+                )
+        # None means a paper ledger. A bound ledger is only ever created or
+        # reopened by passing the binding it was created with.
+        self.venue_binding: Optional[VenueBinding] = venue
         self.require_approval = require_approval
-        self.path = Path(path) if path is not None else default_ledger_path(self.workspace)
+        if path is not None:
+            self.path = Path(path)
+        elif venue is not None:
+            self.path = spec.ledger_path()
+        else:
+            self.path = default_ledger_path(self.workspace)
+        if venue is not None and _same_file_path(self.path, default_ledger_path(self.workspace)):
+            # D-01: a bound ledger is never the workspace's real ledger, even
+            # when that file is absent or empty. Refused before any file, lock
+            # or directory is created or opened.
+            raise LedgerVenueMismatch(
+                "a bound venue ledger must not use the workspace's real ledger path"
+            )
         if self.path.exists() and self.path.is_symlink():
             raise LedgerError("ledger path must not be a symbolic link")
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -776,6 +958,7 @@ class ExecutionLedger:
             identity = self._probe_identity()
             if identity is not None:
                 self._enforce_identity(identity)
+                self._enforce_venue(identity)
             self._connection = sqlite3.connect(
                 self.path,
                 timeout=busy_timeout_ms / 1_000,
@@ -849,6 +1032,21 @@ class ExecutionLedger:
                 f"requested {self.workspace.value}"
             )
 
+    def _enforce_venue(self, identity: LedgerIdentity) -> None:
+        """Refuse a venue binding that is not exactly the one requested.
+
+        Paper (no binding requested) and practice are different ledgers: a
+        practice file never opens as paper, and a file with no binding (the
+        real ledger of the workspace) never opens as practice.
+        """
+
+        if identity.kind != "pinned":
+            return
+        if identity.binding != self.venue_binding:
+            raise LedgerVenueMismatch(
+                f"ledger {self.path} venue binding does not match the requested venue"
+            )
+
     def _pin_fresh_file(self) -> None:
         with self._transaction() as connection:
             # The writer lock is held, so this only guards a file created
@@ -856,7 +1054,10 @@ class ExecutionLedger:
             if _read_identity(connection).kind != "fresh":
                 raise LedgerError("ledger file changed while it was being opened")
             _apply_base_schema(connection, 0)
-            _install_identity(connection, self.workspace, "first-open", _now())
+            now = _now()
+            _install_identity(connection, self.workspace, "first-open", now)
+            if self.venue_binding is not None:
+                _install_venue_binding(connection, self.venue_binding, now)
 
     def _acquire_writer_lock(self) -> None:
         flags = os.O_RDWR | os.O_CREAT
@@ -1061,32 +1262,98 @@ class ExecutionLedger:
         workspace: Workspace | str,
     ) -> PaperBudget:
         self.require_workspace(workspace)
+        binding = self.venue_binding
+        if binding is not None and (
+            account != binding.account_id or currency != binding.currency
+        ):
+            raise ApprovalConflict(
+                "a practice ledger budget must use its bound account and currency"
+            )
         amount_decimal = _positive_decimal(amount, "budget amount")
         now = _now()
         with self._transaction() as connection:
+            return self._upsert_paper_budget(connection, account, currency, amount_decimal, now)
+
+    def _upsert_paper_budget(
+        self,
+        connection: sqlite3.Connection,
+        account: str,
+        currency: str,
+        amount_decimal: Decimal,
+        now: str,
+    ) -> PaperBudget:
+        """Insert the budget or confirm it is unchanged. The caller owns the transaction."""
+
+        row = connection.execute(
+            "SELECT * FROM paper_budgets WHERE workspace = ? AND account = ? AND currency = ?",
+            (self.workspace, account, currency),
+        ).fetchone()
+        if row is not None:
+            if _decimal(row["amount"]) != amount_decimal:
+                raise ApprovalConflict("paper budget is immutable once configured")
+            return self._budget_from_row(row)
+        connection.execute(
+            """
+            INSERT INTO paper_budgets
+                (workspace, account, currency, amount, reserved, consumed, released, created_at, updated_at)
+            VALUES (?, ?, ?, ?, '0', '0', '0', ?, ?)
+            """,
+            (self.workspace, account, currency, _decimal_str(amount_decimal), now, now),
+        )
+        row = connection.execute(
+            "SELECT * FROM paper_budgets WHERE workspace = ? AND account = ? AND currency = ?",
+            (self.workspace, account, currency),
+        ).fetchone()
+        if row is None:
+            raise LedgerError("paper budget did not persist")
+        return self._budget_from_row(row)
+
+    def configure_venue_limits(
+        self,
+        capital_cap: Decimal | str | int | float,
+        per_position_cap: Decimal | str | int | float,
+        *,
+        workspace: Workspace | str,
+    ) -> PaperBudget:
+        """Persist both venue caps once and set the bound budget to the capital cap.
+
+        Bound-venue ledgers only (D-03). The first call stores both caps and the
+        budget in one transaction. Every later call must pass the same two
+        values: a change to either cap, not only the capital cap, raises
+        ``ApprovalConflict`` and writes nothing. Changing caps means a new
+        ledger. This stores the per-position cap; enforcing it is a later plan.
+        """
+
+        self.require_workspace(workspace)
+        binding = self.venue_binding
+        if binding is None:
+            raise ApprovalConflict("venue limits exist only in a bound-venue ledger")
+        capital = _positive_decimal(capital_cap, "capital cap")
+        per_position = _positive_decimal(per_position_cap, "per-position cap")
+        if per_position > capital:
+            raise ApprovalConflict("per-position cap exceeds the capital cap")
+        now = _now()
+        with self._transaction() as connection:
+            _install_venue_limits_table(connection)
             row = connection.execute(
-                "SELECT * FROM paper_budgets WHERE workspace = ? AND account = ? AND currency = ?",
-                (self.workspace, account, currency),
-            ).fetchone()
-            if row is not None:
-                if _decimal(row["amount"]) != amount_decimal:
-                    raise ApprovalConflict("paper budget is immutable once configured")
-                return self._budget_from_row(row)
-            connection.execute(
-                """
-                INSERT INTO paper_budgets
-                    (workspace, account, currency, amount, reserved, consumed, released, created_at, updated_at)
-                VALUES (?, ?, ?, ?, '0', '0', '0', ?, ?)
-                """,
-                (self.workspace, account, currency, _decimal_str(amount_decimal), now, now),
-            )
-            row = connection.execute(
-                "SELECT * FROM paper_budgets WHERE workspace = ? AND account = ? AND currency = ?",
-                (self.workspace, account, currency),
+                f"SELECT capital_cap, per_position_cap FROM {_VENUE_LIMITS_TABLE} "
+                "WHERE singleton = 1"
             ).fetchone()
             if row is None:
-                raise LedgerError("paper budget did not persist")
-            return self._budget_from_row(row)
+                connection.execute(
+                    f"INSERT INTO {_VENUE_LIMITS_TABLE} "
+                    "(singleton, capital_cap, per_position_cap, configured_at) "
+                    "VALUES (1, ?, ?, ?)",
+                    (_decimal_str(capital), _decimal_str(per_position), now),
+                )
+            elif (
+                _decimal(row["capital_cap"]) != capital
+                or _decimal(row["per_position_cap"]) != per_position
+            ):
+                raise ApprovalConflict("venue limits are immutable once configured")
+            return self._upsert_paper_budget(
+                connection, binding.account_id, binding.currency, capital, now
+            )
 
     def get_paper_budget(
         self, account: str, currency: str, *, workspace: Workspace | str
@@ -1553,8 +1820,7 @@ class ExecutionLedger:
                 raise ApprovalConflict("approval does not match the immutable intent")
             if str(intent.get("workspace")) != self.workspace:
                 raise ApprovalConflict("approval workspace does not match ledger workspace")
-            if str(intent.get("mode", "")).upper() != "PAPER":
-                raise ApprovalConflict("live execution remains disabled")
+            self._require_intent_allowed(intent)
             admission = connection.execute(
                 "SELECT * FROM execution_admissions WHERE proposal_id = ?",
                 (proposal_id,),
@@ -1727,6 +1993,7 @@ class ExecutionLedger:
 
             if row is None:  # Defensive: all branches above establish a row.
                 raise LedgerError("failed to establish order intent")
+            self._require_intent_allowed(json.loads(str(row["canonical_json"])))
             state = str(row["state"])
             if state in {"ACKNOWLEDGED", "APPROVED"} and row["acknowledgment_json"]:
                 return ClaimResult(ClaimStatus.REPLAY, self._order_from_row(row))
@@ -2714,6 +2981,34 @@ class ExecutionLedger:
         self._check_row_workspace(row)
         return row
 
+    def _require_intent_allowed(self, intent: Mapping[str, Any]) -> None:
+        """Refuse an order this ledger's venue does not accept (D-08).
+
+        LIVE is refused in every ledger. A paper ledger accepts PAPER only; a
+        practice ledger accepts PRACTICE only, for its venue and bound account.
+        """
+
+        refusal = intent_refusal(
+            intent.get("mode", ""),
+            intent["broker"],
+            intent["account"],
+            self.venue_binding,
+        )
+        if refusal is not None:
+            raise ApprovalConflict(refusal_text(refusal))
+
+    @property
+    def allowed_mode(self):
+        """The one order mode this ledger accepts (single-mode venues and paper)."""
+
+        return allowed_mode(self.venue_binding)
+
+    @property
+    def allowed_modes(self) -> frozenset[str]:
+        """Every order mode this ledger accepts."""
+
+        return allowed_modes(self.venue_binding)
+
     def _check_row_workspace(self, row: Optional[sqlite3.Row]) -> None:
         """Defense in depth: a stored intent must carry this ledger's workspace."""
 
@@ -3147,6 +3442,7 @@ __all__ = [
     "LedgerReader",
     "LedgerRequote",
     "LedgerUnpinned",
+    "LedgerVenueMismatch",
     "LedgerWriterUnavailable",
     "OrderNotFound",
     "PaperBudget",
@@ -3154,6 +3450,7 @@ __all__ = [
     "ReconciliationSnapshot",
     "RequoteConflict",
     "SCHEMA_VERSION",
+    "practice_ledger_path",
     "Workspace",
     "WorkspaceControl",
     "WorkspaceMismatch",

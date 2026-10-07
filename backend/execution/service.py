@@ -31,6 +31,7 @@ from .models import (
     WORKSPACE_CURRENCY,
     Workspace,
 )
+from .venue import LIVE_DISABLED, intent_refusal, refusal_text
 
 
 class ExecutionDisabledError(RuntimeError):
@@ -395,8 +396,18 @@ class ExecutionService:
         if durable is None:
             raise ExecutionConflictError(f"Trade proposal {proposal_id} was not found")
         intent = _intent_from_proposal(durable)
-        if intent.mode is not OrderMode.PAPER:
-            raise ExecutionDisabledError("Live execution remains disabled")
+        refusal = intent_refusal(
+            intent.mode,
+            intent.broker,
+            intent.account,
+            self._ledger.venue_binding,
+        )
+        if refusal is not None:
+            raise ExecutionDisabledError(
+                "Live execution remains disabled"
+                if refusal == LIVE_DISABLED
+                else refusal_text(refusal)
+            )
         async with self._lock_for(proposal_id):
             try:
                 claim = self._approval_service.approve_signed(
