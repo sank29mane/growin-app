@@ -194,21 +194,9 @@ struct KeychainScopeTests {
 
     // MARK: Source probe
 
-    /// Every .swift file under Growin/, as (repo-relative path, contents).
+    /// Every .swift file under Growin/, as (repo-relative path, contents). Symlink-safe via SourceTree.
     private static func appSources() throws -> [(path: String, text: String)] {
-        let testsFile = URL(fileURLWithPath: #filePath)
-        let repoRoot = testsFile
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let appRoot = repoRoot.appendingPathComponent("Growin")
-        let enumerator = try #require(FileManager.default.enumerator(at: appRoot, includingPropertiesForKeys: nil))
-        var sources: [(String, String)] = []
-        for case let url as URL in enumerator where url.pathExtension == "swift" {
-            let relative = String(url.path.dropFirst(repoRoot.path.count + 1))
-            sources.append((relative, try String(contentsOf: url, encoding: .utf8)))
-        }
-        return sources
+        try SourceTree.swiftSources()
     }
 
     @Test func everyCredentialCallSiteNamesAScope() throws {
