@@ -337,7 +337,10 @@ class Smoke:
 
         body = result if isinstance(result, dict) else {}
         code = str(body.get("code"))
-        position_check = str(body.get("position_check", "SKIPPED"))
+        # A reconcile response always carries position_check. A missing value means the answer is
+        # not the shape we expect, which is an anomaly and not a silent SKIPPED.
+        raw_position_check = body.get("position_check")
+        position_check = "MISSING" if raw_position_check is None else str(raw_position_check)
         problems = []
         if code not in HEALTHY_RECONCILE_CODES:
             problems.append(f"{body.get('state')}/{code}")
@@ -347,13 +350,15 @@ class Smoke:
             return
         note = "; ".join(problems)
         anomaly = {"code": code, "position_check": position_check, "state": str(body.get("state"))}
+        step_name = "unknown step"
         for step in self.evidence.steps:
             if step.get("proposal_id") == proposal_id and step.get("step") != "anomaly":
+                step_name = str(step.get("step", "unknown step"))
                 step["anomaly"] = anomaly
         self.evidence.add(
             {"step": "anomaly", "proposal_id": proposal_id, "result": str(body.get("state")), "note": note}
         )
-        raise SmokeError(f"reconcile anomaly ({note}). Stopped; nothing further was sent.")
+        raise SmokeError(f"reconcile anomaly at {step_name} ({note}). Stopped; nothing further was sent.")
 
     def _reconcile_until(self, record: dict[str, Any], wanted: str) -> str:
         seen: list[str] = []

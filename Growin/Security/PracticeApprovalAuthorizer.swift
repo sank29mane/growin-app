@@ -77,6 +77,19 @@ struct PracticeApprovalAuthorizer: Sendable {
     let identity: IdentityProvider
     let sign: SignProvider
 
+    /// `private`: the compiler lets only this type's own file construct an authorizer, so
+    /// production code can reach `shared` and nothing else. A second construction site in
+    /// this file is caught by the source scan in `PracticeApprovalBiometricTests`.
+    private init(
+        authenticator: any BiometricAuthenticating,
+        identity: @escaping IdentityProvider,
+        sign: @escaping SignProvider
+    ) {
+        self.authenticator = authenticator
+        self.identity = identity
+        self.sign = sign
+    }
+
     static let shared = PracticeApprovalAuthorizer(
         authenticator: TouchIDAuthenticator(),
         identity: { try LocalApprovalSigner.shared.identity(for: $0) },
@@ -84,6 +97,18 @@ struct PracticeApprovalAuthorizer: Sendable {
             try LocalApprovalSigner.shared.signAuthorizedPractice($0, for: $1, authorization: $2)
         }
     )
+
+    #if DEBUG
+    /// Test injection point. Compiled out of Release, so no shipped code path can build an
+    /// authorizer with a stub authenticator.
+    static func makeForTesting(
+        authenticator: any BiometricAuthenticating,
+        identity: @escaping IdentityProvider,
+        sign: @escaping SignProvider
+    ) -> PracticeApprovalAuthorizer {
+        PracticeApprovalAuthorizer(authenticator: authenticator, identity: identity, sign: sign)
+    }
+    #endif
 
     func signature(for review: TradeApprovalReview, workspace: Workspace) async throws -> Data {
         guard review.payload.workspace == workspace.rawValue,

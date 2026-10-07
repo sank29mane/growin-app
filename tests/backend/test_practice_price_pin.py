@@ -80,6 +80,7 @@ def test_a_bound_limit_order_without_the_unit_divisor_is_denied(tmp_path):
     binding = VenueBinding(venue="t212_practice", account_id=PRACTICE_ACCOUNT, currency="GBP")
     with ExecutionLedger(tmp_path / "nodiv.sqlite3", workspace="uk", venue=binding) as ledger:
         service = ExecutionService(None, ledger, simulator=None, risk_gate=None)
-        denied = _admit(service, "d-1", limit_price="50", price="0.5", divisor=None)
+        # Price equals the limit, so the missing divisor is the only reason to deny.
+        denied = _admit(service, "d-1", limit_price="50", price="50", divisor=None)
         assert denied.decision.value == "DENIED"
         assert denied.reason_code == "PRICE_NOT_PINNED_TO_LIMIT"
