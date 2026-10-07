@@ -210,7 +210,7 @@ def test_render_table_and_footer():
     lines = [line for line in body.splitlines() if line.startswith("| ")][2:]
     assert lines[0].startswith("| [#553](https://github.com/owner/repo/pull/553) PR 553 | Ready | ✅ | ✅ | no |")
     assert lines[0].endswith("| Needs safety-reviewed label |")
-    assert lines[1].startswith("| └─ [#557]") and "| — | — | not required |" in lines[1]
+    assert lines[1].startswith("| └─ [#557]") and "| ➖ | ➖ | not required |" in lines[1]
     assert lines[1].endswith("| Waiting on base #553 |")
     assert lines[2].startswith("| [#560]") and lines[2].endswith("| Draft: needs Touch ID |")
     assert lines[3].endswith("| **Merge** |")

@@ -56,7 +56,7 @@ MAX_MERGED = 20
 MAX_BODY = 60_000
 MERGED_DAYS = 7
 PASS = {"success", "neutral", "skipped"}
-ICONS = {"pass": "✅", "fail": "❌", "pending": "⏳", "missing": "—"}
+ICONS = {"pass": "✅", "fail": "❌", "pending": "⏳", "missing": "➖"}
 GATE_RE = re.compile(r"operator gate:\s*(.+)", re.IGNORECASE)
 TRIGGER_RE = re.compile(r"[^A-Za-z0-9 #()._:/-]")
 
@@ -332,9 +332,7 @@ def render(rows: list[tuple[dict, int, int | None]], merged: list[dict], notes: 
         counts[key] = counts.get(key, 0) + 1
         indent = "&nbsp;&nbsp;&nbsp;" * max(0, depth - 1) + ("└─ " if depth else "")
         cell = f"{indent}[#{pr['number']}]({pr['url']}) {md_text(pr['title'], 60)}"
-        stacked = pr["base_ref"] != pr["default_branch"]
-        ci = "—" if stacked and pr["ci"] == "missing" else ICONS[pr["ci"]]
-        guard = "—" if stacked and pr["guard"] == "missing" else ICONS[pr["guard"]]
+        ci, guard = ICONS[pr["ci"]], ICONS[pr["guard"]]
         bold = f"**{action}**" if key == "merge" else action
         lines.append(f"| {cell} | {'Draft' if pr['draft'] else 'Ready'} | {ci} | {guard} "
                      f"| {_label_cell(pr)} | {_merge_cell(pr)} | {bold} |")
@@ -351,7 +349,8 @@ def render(rows: list[tuple[dict, int, int | None]], merged: list[dict], notes: 
                 "| PR | State | CI | Safety Guard | Label | Mergeable | Next action |",
                 "| :-- | :-- | :-: | :-: | :-- | :-- | :-- |", *lines, "",
                 "CI is `Run SOTA Test Suite` and Safety Guard is the guard run on the current "
-                "head. Stacked PRs show — because those checks only run against main.", ""]
+                "head. ➖ means no run on this head yet. Stacked PRs always show ➖ because "
+                "those checks only run against main.", ""]
     else:
         out += ["No open pull requests.", ""]
 
