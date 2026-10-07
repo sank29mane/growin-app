@@ -20,7 +20,7 @@ enum KeychainStoreError: LocalizedError {
 }
 
 final class KeychainStore: @unchecked Sendable {
-    static let productionService = "san.Growin.credentials.v1"
+    nonisolated static let productionService = "san.Growin.credentials.v1"
     static let shared = KeychainStore(service: productionService)
 
     private let service: String

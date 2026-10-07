@@ -211,7 +211,7 @@ struct KeychainScopeTests {
                 }
                 if line.contains("KeychainStore.shared.") && !line.contains("scope:") {
                     let isSigner = path == "Growin/Security/LocalApprovalSigner.swift"
-                    let isLaunchMigration = path == "Growin/GrowinApp.swift" && line.contains("migrate")
+                    let isLaunchMigration = path == "Growin/Security/LaunchMigrations.swift" && line.contains("migrate")
                     if !isSigner && !isLaunchMigration {
                         unscoped.append(location)
                     }

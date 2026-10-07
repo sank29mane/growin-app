@@ -10,15 +10,9 @@ struct GrowinApp: App {
     @State private var portfolioObserver = PortfolioSummaryObserver.shared
     
     init() {
-        // One-time removal of the Trading 212 key and secret older builds kept in the
-        // Keychain. Never reads a value, never fails launch, runs once (see the file).
-        LegacyT212KeychainCleanup.runOnce()
-        // Move legacy secrets out of UserDefaults before any view model reads them.
-        // Failed items remain in UserDefaults so migration is lossless and retryable.
-        _ = KeychainStore.shared.migrateLegacyUserDefaults()
-        // Then move flat Keychain items to their scoped accounts (copy, verify, delete).
-        // Failed items stay in place and retry on the next launch.
-        _ = KeychainStore.shared.migrateFlatItemsToScoped()
+        // All launch migrations go through one guarded entry point. It skips them when
+        // the process is a test host, so tests never touch the real Keychain.
+        LaunchMigrations.runAtLaunch()
 
         // Initialize Notification Manager
         NotificationManager.shared.requestAuthorization()

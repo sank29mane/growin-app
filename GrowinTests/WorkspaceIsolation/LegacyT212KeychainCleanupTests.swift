@@ -3,10 +3,16 @@ import Security
 import Testing
 @testable import Growin
 
-/// Every Keychain test here uses its own service, so the operator's real
-/// `san.Growin.credentials.v1` items are never read, moved or deleted. The
-/// canary values below are fake. No test calls the migration with its default
-/// service; `noTestCanReachTheProductionKeychain` enforces that.
+/// Every Keychain test here passes its own private service to the migration, so
+/// the operator's real `san.Growin.credentials.v1` items are not read, moved or
+/// deleted by these tests. The canary values below are fake.
+///
+/// That is not the whole story: GrowinTests is app-hosted, so the test runner
+/// launches the real app and `GrowinApp.init` runs. Keeping that launch away from the
+/// real Keychain is the job of the `LaunchMigrations` test-host guard, covered in
+/// `LaunchMigrationsTests`. This file only guarantees that no test names the
+/// production service (`noTestCanReachTheProductionKeychain`) and that every
+/// migration call states its service (`everyMigrationCallStatesItsService`).
 @Suite(.serialized)
 struct LegacyT212KeychainCleanupTests {
     private typealias Cleanup = LegacyT212KeychainCleanup
@@ -287,28 +293,184 @@ struct LegacyT212KeychainCleanupTests {
             #expect(!text.contains(banned), "\(banned) must not appear in the migration")
         }
         #expect(text.components(separatedBy: "SecItemDelete(").count == 2, "exactly one delete call")
-        // The one delete query pins class, service and account.
-        let body = try #require(text.components(separatedBy: "static func deleteExactItem").dropFirst().first)
-        let queryBlock = String(body.prefix(400))
-        for pinned in ["kSecClassGenericPassword", "kSecAttrService", "kSecAttrAccount"] {
-            #expect(queryBlock.contains(pinned), "\(pinned) missing from the delete query")
-        }
-        #expect(!queryBlock.contains("kSecMatch"))
     }
 
-    @Test func theAppRunsTheMigrationAtLaunch() throws {
-        let app = try SourceTree.contents("Growin/GrowinApp.swift")
-        let initBody = try #require(app.components(separatedBy: "init() {").dropFirst().first)
-        let upToBody = String(initBody.prefix(900))
-        #expect(upToBody.contains("LegacyT212KeychainCleanup.runOnce("))
+    @Test func theDeleteQueryPinsOneItemAndNeverPrompts() {
+        let query = Cleanup.exactQuery(service: "svc", account: "acct")
+        #expect(Set(query.keys) == [
+            kSecClass as String, kSecAttrService as String, kSecAttrAccount as String,
+            kSecUseAuthenticationUI as String,
+        ])
+        #expect(query[kSecClass as String] as? String == kSecClassGenericPassword as String)
+        #expect(query[kSecAttrService as String] as? String == "svc")
+        #expect(query[kSecAttrAccount as String] as? String == "acct")
+        #expect(query[kSecUseAuthenticationUI as String] as? String == kSecUseAuthenticationUIFail as String)
     }
 
     @Test func noTestCanReachTheProductionKeychain() throws {
         // Needles are assembled so this file does not trip its own scan.
-        let needles = ["runOnce" + "()", "production" + "Service"]
         let offenders = try SourceTree.swiftSources(under: "GrowinTests")
-            .filter { source in needles.contains { source.text.contains($0) } }
+            .filter { $0.text.contains("production" + "Service") }
             .map(\.path)
         #expect(offenders == [])
+    }
+
+    // MARK: Every call states its service
+
+    /// Counts calls to the migration whose first argument is not `service:`. The needle is
+    /// assembled so this file does not trip its own scan.
+    private static func callsWithoutService(in text: String) -> Int {
+        let needle = "run" + "Once("
+        var count = 0
+        var rest = Substring(text)
+        while let found = rest.range(of: needle) {
+            let after = rest[found.upperBound...]
+            if !after.drop(while: { $0.isWhitespace }).hasPrefix("service:") { count += 1 }
+            rest = after
+        }
+        return count
+    }
+
+    @Test func everyMigrationCallStatesItsService() throws {
+        for source in try Self.allSwiftSources() {
+            #expect(Self.callsWithoutService(in: source.text) == 0, "\(source.path) calls the migration without service:")
+        }
+        // The migration itself has no default service to fall back on.
+        #expect(!(try SourceTree.contents(Self.migrationPath)).contains("production" + "Service"))
+    }
+
+    @Test func theCallScanCatchesPlantedCalls() {
+        let call = "run" + "Once"
+        #expect(Self.callsWithoutService(in: "\(call)()") == 1)
+        #expect(Self.callsWithoutService(in: "\(call)(defaults: d)") == 1)
+        #expect(Self.callsWithoutService(in: "\(call)(log: { _ in }, service: s)") == 1)
+        #expect(Self.callsWithoutService(in: "\(call)(service: s)") == 0)
+        #expect(Self.callsWithoutService(in: "\(call)(\n            service: s,\n defaults: d)") == 0)
+        #expect(Self.callsWithoutService(in: "\(call)() \(call)(service: s) \(call)(defaults: d)") == 2)
+    }
+
+    // MARK: Duplicates, bounds, prompts and retry cap
+
+    /// A fake keychain holding N matches per account. Each delete removes one, like the file keychain.
+    private final class FakeKeychain: @unchecked Sendable {
+        var matches: [String: Int]
+        var calls: [String] = []
+        init(_ matches: [String: Int]) { self.matches = matches }
+        func delete(_ service: String, _ account: String) -> OSStatus {
+            calls.append(account)
+            if let left = matches[account], left > 0 {
+                matches[account] = left - 1
+                return errSecSuccess
+            }
+            return errSecItemNotFound
+        }
+    }
+
+    @Test func duplicateMatchesAreAllDeletedBeforeCompletionIsRecorded() {
+        let rig = Rig()
+        defer { rig.tearDown() }
+        let accounts = Cleanup.legacyAccounts
+        let fake = FakeKeychain([accounts[0]: 3, accounts[2]: 2])
+
+        let outcome = Cleanup.runOnce(
+            service: rig.service, defaults: rig.defaults,
+            delete: { fake.delete($0, $1) }, log: { _ in })
+
+        #expect(outcome.removed == 5)
+        #expect(outcome.failedStatuses.isEmpty)
+        #expect(fake.matches.values.allSatisfy { $0 == 0 }, "a duplicate survived")
+        #expect(fake.calls.count == 9, "each account is deleted until not-found")
+        #expect(rig.defaults.bool(forKey: Cleanup.completionKey))
+    }
+
+    @Test func theDeleteLoopIsBoundedAndTheBoundIsAnError() {
+        let limit = Cleanup.maxDeletesPerAccount
+        let first = Cleanup.legacyAccounts[0]
+
+        // One under the bound still finishes cleanly (needs the final not-found call).
+        let ok = Rig()
+        defer { ok.tearDown() }
+        let fakeOK = FakeKeychain([first: limit - 1])
+        let finished = Cleanup.runOnce(service: ok.service, defaults: ok.defaults,
+                                       delete: { fakeOK.delete($0, $1) }, log: { _ in })
+        #expect(finished.removed == limit - 1)
+        #expect(finished.failedStatuses.isEmpty)
+
+        // At the bound the migration cannot tell the matches are gone, so it reports an error.
+        let capped = Rig()
+        defer { capped.tearDown() }
+        let fakeHuge = FakeKeychain([first: 1000])
+        let result = Cleanup.runOnce(service: capped.service, defaults: capped.defaults,
+                                     delete: { fakeHuge.delete($0, $1) }, log: { _ in })
+        #expect(fakeHuge.calls.filter { $0 == first }.count == limit)
+        #expect(result.failedStatuses == [Cleanup.tooManyMatchesStatus])
+        #expect(!capped.defaults.bool(forKey: Cleanup.completionKey))
+    }
+
+    @Test func aNonNotFoundErrorStopsThatAccountImmediately() {
+        let rig = Rig()
+        defer { rig.tearDown() }
+        let first = Cleanup.legacyAccounts[0]
+        let counter = Recorder()
+        let outcome = Cleanup.runOnce(
+            service: rig.service, defaults: rig.defaults,
+            delete: { _, account in
+                guard account == first else { return errSecItemNotFound }
+                counter.calls.append(("", account))
+                return counter.calls.count == 1 ? errSecSuccess : errSecAuthFailed
+            },
+            log: { _ in })
+
+        #expect(counter.calls.count == 2, "no retry after an error")
+        #expect(outcome.removed == 1)
+        #expect(outcome.failedStatuses == [errSecAuthFailed])
+    }
+
+    @Test func retriesStopAfterThreeFailedLaunchesWithOneHelpfulLine() {
+        let rig = Rig()
+        defer { rig.tearDown() }
+        let recorder = Recorder()
+        func launch() -> Cleanup.Outcome {
+            Cleanup.runOnce(
+                service: rig.service, defaults: rig.defaults,
+                delete: { service, account in
+                    recorder.calls.append((service, account))
+                    return errSecInteractionNotAllowed
+                },
+                log: { recorder.lines.append($0) })
+        }
+
+        let first = launch()
+        let second = launch()
+        #expect(!first.gaveUp && !second.gaveUp)
+        #expect(!recorder.lines.contains(Cleanup.giveUpMessage))
+
+        let third = launch()
+        #expect(third.gaveUp)
+        #expect(recorder.lines.filter { $0 == Cleanup.giveUpMessage }.count == 1)
+        #expect(Cleanup.giveUpMessage.contains("Keychain Access"))
+        #expect(rig.defaults.integer(forKey: Cleanup.failedLaunchesKey) == 3)
+
+        let linesBefore = recorder.lines.count
+        let callsBefore = recorder.calls.count
+        let fourth = launch()
+        #expect(fourth.skipped)
+        #expect(recorder.calls.count == callsBefore, "no Keychain call after giving up")
+        #expect(recorder.lines.count == linesBefore, "silent after giving up")
+        #expect(!rig.defaults.bool(forKey: Cleanup.completionKey))
+    }
+
+    @Test func aSuccessfulLaunchBeforeTheCapStillCompletes() {
+        let rig = Rig()
+        defer { rig.tearDown() }
+        Cleanup.runOnce(service: rig.service, defaults: rig.defaults,
+                        delete: { _, _ in errSecInteractionNotAllowed }, log: { _ in })
+        Cleanup.runOnce(service: rig.service, defaults: rig.defaults,
+                        delete: { _, _ in errSecInteractionNotAllowed }, log: { _ in })
+        let recovered = Cleanup.runOnce(service: rig.service, defaults: rig.defaults, log: { _ in })
+
+        #expect(recovered.failedStatuses.isEmpty)
+        #expect(!recovered.gaveUp)
+        #expect(rig.defaults.bool(forKey: Cleanup.completionKey))
     }
 }
