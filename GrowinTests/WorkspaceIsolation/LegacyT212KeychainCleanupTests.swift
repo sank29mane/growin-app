@@ -473,4 +473,53 @@ struct LegacyT212KeychainCleanupTests {
         #expect(!recovered.gaveUp)
         #expect(rig.defaults.bool(forKey: Cleanup.completionKey))
     }
+
+    @Test func aUserCancelOrAFailedAuthenticationIsNeverAskedAgain() {
+        #expect(errSecUserCanceled == -128)
+        #expect(errSecAuthFailed == -25293)
+        for status in [errSecUserCanceled, errSecAuthFailed] {
+            let rig = Rig()
+            defer { rig.tearDown() }
+            let recorder = Recorder()
+            let first = Cleanup.runOnce(
+                service: rig.service, defaults: rig.defaults,
+                delete: { service, account in
+                    recorder.calls.append((service, account))
+                    return status
+                },
+                log: { recorder.lines.append($0) })
+
+            #expect(first.gaveUp, "status \(status)")
+            #expect(rig.defaults.integer(forKey: Cleanup.failedLaunchesKey) == Cleanup.maxFailedLaunches)
+            #expect(recorder.lines.filter { $0 == Cleanup.giveUpMessage }.count == 1)
+
+            let callsBefore = recorder.calls.count
+            let second = Cleanup.runOnce(
+                service: rig.service, defaults: rig.defaults,
+                delete: { service, account in
+                    recorder.calls.append((service, account))
+                    return status
+                },
+                log: { recorder.lines.append($0) })
+            #expect(second.skipped)
+            #expect(recorder.calls.count == callsBefore, "asked the Keychain again after a refusal")
+        }
+    }
+
+    @Test func otherErrorsStillGetTheirThreeLaunches() {
+        let rig = Rig()
+        defer { rig.tearDown() }
+        let first = Cleanup.runOnce(service: rig.service, defaults: rig.defaults,
+                                    delete: { _, _ in errSecInteractionNotAllowed }, log: { _ in })
+        #expect(!first.gaveUp)
+        #expect(rig.defaults.integer(forKey: Cleanup.failedLaunchesKey) == 1)
+    }
+
+    @Test func logLinesAreKeptByTheSystemLog() throws {
+        let text = try SourceTree.contents(Self.migrationPath)
+        #expect(text.contains("logger.notice("), "failure and give-up lines need .notice or .error")
+        for dropped in ["logger.info(", "logger.debug(", "logger.trace("] {
+            #expect(!text.contains(dropped), "\(dropped) lines are not persisted by macOS")
+        }
+    }
 }

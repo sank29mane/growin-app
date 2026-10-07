@@ -3,7 +3,7 @@ import XCTest
 final class PaperOperationsBoundaryUITests: XCTestCase {
     @MainActor
     func testPaperOperationsSidebarRowExistsWithoutLiveBrokerChrome() throws {
-        let app = XCUIApplication()
+        let app = GrowinLaunch.makeApp()
         app.launch()
 
         let paperOperationsRow = app.descendants(matching: .any)["PAPER OPERATIONS"].firstMatch

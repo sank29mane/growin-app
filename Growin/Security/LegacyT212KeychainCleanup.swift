@@ -40,6 +40,10 @@ nonisolated enum LegacyT212KeychainCleanup {
     /// After this many failed launches the migration stops retrying.
     static let maxFailedLaunches = 3
 
+    /// Statuses that mean a person said no (-128 user cancelled, -25293 authentication
+    /// failed). They are never retried: the failed-launch count jumps to the cap.
+    static let stopImmediatelyStatuses: Set<OSStatus> = [errSecUserCanceled, errSecAuthFailed]
+
     /// `SecItemDelete` on the file keychain removes one match per call, and the same
     /// service and account can exist once per keychain on the search list. Delete in a
     /// loop until not-found, but never more than this many calls per account.
@@ -88,7 +92,9 @@ nonisolated enum LegacyT212KeychainCleanup {
     private static let logger = Logger(subsystem: "san.Growin", category: "legacy-t212-cleanup")
 
     static func defaultLog(_ message: String) {
-        logger.info("\(message, privacy: .public)")
+        // .notice, not .info: macOS keeps notice lines, so the operator can see the
+        // failure status and the give-up line after the fact.
+        logger.notice("\(message, privacy: .public)")
     }
 
     /// Deletes every match of one exact pair. Stops at not-found (done), at any
@@ -146,7 +152,11 @@ nonisolated enum LegacyT212KeychainCleanup {
         if failed.isEmpty {
             defaults.set(true, forKey: completionKey)
         } else {
-            let failedLaunches = defaults.integer(forKey: failedLaunchesKey) + 1
+            // The user cancelled or authentication failed: asking again would only prompt
+            // again, so go straight to the cap.
+            let failedLaunches = failed.contains { stopImmediatelyStatuses.contains($0) }
+                ? maxFailedLaunches
+                : defaults.integer(forKey: failedLaunchesKey) + 1
             defaults.set(failedLaunches, forKey: failedLaunchesKey)
             if failedLaunches >= maxFailedLaunches {
                 gaveUp = true
