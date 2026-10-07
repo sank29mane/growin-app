@@ -30,7 +30,7 @@ from market_data import (
     build_market_preflight_context,
 )
 from regime_testkit import ARTIFACT, permuted_params, shipped_map, shipped_params
-from simulation import PreFlightSimulator, RiskSwarmGate
+from simulation import RiskSwarmGate
 from simulation.regime_severity import build_scaling_policy_connection, build_severity_map, policy_matches
 
 INSTRUMENT = IndiaInstrument(symbol="RELIANCE")
