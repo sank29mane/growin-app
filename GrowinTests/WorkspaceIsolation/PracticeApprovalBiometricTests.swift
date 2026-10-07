@@ -197,28 +197,9 @@ struct PracticeApprovalBiometricTests {
 
     // MARK: Source scan
 
-    /// Resolves symlinks with realpath(3) so the repo root and every enumerated file agree on one
-    /// spelling (a worktree under a symlinked directory, or /var vs /private/var).
-    private static func realPath(_ path: String) -> String {
-        guard let resolved = realpath(path, nil) else { return path }
-        defer { free(resolved) }
-        return String(cString: resolved)
-    }
-
+    /// Every .swift file under Growin/, as (repo-relative path, contents). Symlink-safe via SourceTree.
     private static func appSources() throws -> [(path: String, text: String)] {
-        let repoRoot = realPath(
-            URL(fileURLWithPath: #filePath)
-                .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().path)
-        let enumerator = try #require(FileManager.default.enumerator(
-            at: URL(fileURLWithPath: realPath(repoRoot + "/Growin")), includingPropertiesForKeys: nil))
-        var sources: [(String, String)] = []
-        for case let url as URL in enumerator where url.pathExtension == "swift" {
-            let resolved = realPath(url.path)
-            #expect(resolved.hasPrefix(repoRoot + "/"), "\(resolved) resolves outside the repo")
-            sources.append((String(resolved.dropFirst(repoRoot.count + 1)),
-                            try String(contentsOfFile: resolved, encoding: .utf8)))
-        }
-        return sources
+        try SourceTree.swiftSources()
     }
 
     @Test func noOtherCallerOfTheRawSignerHandlesPractice() throws {

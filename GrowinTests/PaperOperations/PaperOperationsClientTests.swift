@@ -4,12 +4,7 @@ import Testing
 
 enum PaperOperationsSourceProbe {
     static func contents(_ relativePath: String) throws -> String {
-        let testsFile = URL(fileURLWithPath: #filePath)
-        let repoRoot = testsFile
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        return try String(contentsOf: repoRoot.appendingPathComponent(relativePath), encoding: .utf8)
+        try SourceTree.contents(relativePath)
     }
 }
 
