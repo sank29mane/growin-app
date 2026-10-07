@@ -28,7 +28,9 @@ try:
         RiskSwarmGate,
         TelemetryLogger,
     )
+    from backend.simulation.regime_severity import build_severity_map
 except ImportError:
+    from simulation.regime_severity import build_severity_map
     from simulation import (
         PreFlightDecision,
         PreFlightSimulator,
@@ -49,7 +51,7 @@ class LiveTradingLoop:
         model_manager: MLXAdapterManager,
         gmm_params: Dict[str, np.ndarray],
         alpha: float = 0.05,
-        leverage_coefficients: Optional[Dict[int, float]] = None,
+        leverage_by_severity_rank: Optional[Dict[int, float]] = None,
         telemetry_db_path: str = "simulation_telemetry.db",
         alpaca_client: Any = None
     ):
@@ -60,7 +62,9 @@ class LiveTradingLoop:
             model_manager: Pre-configured MLXAdapterManager for hot-swapping QLoRA adapters
             gmm_params: Dictionary of parameters loaded from the trained GMM model
             alpha: EMA volatility smoothing parameter
-            leverage_coefficients: Risk scaling coefficients mapping regime_id -> weight (default: {0: 1.0, 1: 0.5, 2: 0.1, 3: 0.05})
+            leverage_by_severity_rank: Optional override of risk scaling weights keyed by
+                severity rank (0 = calmest), never by raw component id. The default is the
+                model's own policy table (calm 1.0, 0.5, 0.1, crisis 0.05 for K=4).
             telemetry_db_path: Path to the SQLite telemetry database file
         """
         try:
@@ -99,9 +103,20 @@ class LiveTradingLoop:
         # Live state tracking
         self.current_regime: int = -1
         
-        # Default leverage coefficients up to K=4 regimes to handle trained GMM models
-        default_coefs = {0: 1.0, 1: 0.5, 2: 0.1, 3: 0.05}
-        self.leverage_coefficients = leverage_coefficients or default_coefs
+        # Raw component ids are arbitrary. The severity map orders this model's components
+        # (raising for an unsupported K, a bad covariance or scaler, or tied scores), and
+        # every consumer below reads it: leverage, adapters, collar and the size policy.
+        self.severity_map = build_severity_map(gmm_params)
+        count = self.severity_map.component_count
+        if leverage_by_severity_rank is None:
+            self.leverage_coefficients = self.severity_map.size_multipliers_by_id()
+        else:
+            if set(leverage_by_severity_rank) != set(range(count)):
+                raise ValueError("leverage_by_severity_rank must have exactly one weight per severity rank")
+            self.leverage_coefficients = {
+                raw: float(leverage_by_severity_rank[self.severity_map.rank(raw)])
+                for raw in range(count)
+            }
         self.risk_leverage_coefficient: float = 1.0
 
         # Instantiate simulation objects
@@ -112,7 +127,8 @@ class LiveTradingLoop:
         self.requoter = AdaptiveReQuoter(
             vol_tracker=self.vol_tracker,
             alpaca_client=self.alpaca_client,
-            current_regime=self.current_regime
+            current_regime=self.current_regime,
+            severity_map=self.severity_map,
         )
         self.requoter_task = None
 
@@ -170,15 +186,15 @@ class LiveTradingLoop:
             scaler_var
         )
         
+        if probabilities.shape != (self.severity_map.component_count,):
+            raise ValueError("regime probabilities do not match the model's component count")
         dominant_regime = int(np.argmax(probabilities))
-        
+
         # 4. Trigger the MLX adapter hot-swapper when a regime change is identified
-        # Map the dominant regime to preloaded adapter IDs to handle mismatched counts (e.g. K=4 GMM, 3 adapters)
+        # The adapter follows the component's severity rank (K=4 GMM, 3 adapters: the two
+        # most severe ranks share the last adapter), never the raw component id.
         available_adapters = list(self.model_manager.preloaded_weights.keys())
-        if available_adapters:
-            adapter_id = min(dominant_regime, max(available_adapters))
-        else:
-            adapter_id = dominant_regime
+        adapter_id = self.severity_map.adapter_id(dominant_regime, available_adapters)
             
         regime_changed = False
         if dominant_regime != self.current_regime:
@@ -193,7 +209,7 @@ class LiveTradingLoop:
         # 5. Apply profitability constraints: scale risk leverage based on regime probabilities
         self.risk_leverage_coefficient = float(
             sum(
-                probabilities[k] * self.leverage_coefficients.get(k, 0.05 if k >= 2 else 1.0)
+                probabilities[k] * self.leverage_coefficients[k]
                 for k in range(len(probabilities))
             )
         )
@@ -255,8 +271,18 @@ class LiveTradingLoop:
         # 2. Get current regime and spread pct
         regime_id = self.current_regime
         if regime_id == -1:
-            regime_id = 0  # Default to base regime if none detected yet
-            
+            # No regime detected yet. A raw id of 0 is not a neutral default (it is an
+            # arbitrary component), so an unclassified order is blocked, not sized.
+            logger.warning("Pre-flight trade blocked: no regime has been classified yet.")
+            return PreFlightDecision(
+                approved=False,
+                simulated_fill_price=simulated_fill_price,
+                scaled_size=0.0,
+                regime_id=-1,
+                latency_ms=sim_res["latency_ms"],
+                simulator_drawdown_pct=simulator_drawdown_pct,
+            )
+
         # Get relative spread from last tick in window, or default to current spread tracker value
         if "spread" in tick_window and len(tick_window["spread"]) > 0:
             current_spread_pct = float(tick_window["spread"][-1])
@@ -269,7 +295,8 @@ class LiveTradingLoop:
             trade_size=order_qty,
             regime_id=regime_id,
             current_spread_pct=current_spread_pct,
-            db_connection=db_connection
+            db_connection=db_connection,
+            policy_hash=self.severity_map.policy_hash,
         )
         
         approved = scaled_size > 0.0

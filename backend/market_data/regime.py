@@ -10,6 +10,7 @@ import numpy as np
 
 from coreml.fast_gmm import fast_gmm_predict_proba
 from coreml.gmm_loader import load_gmm_params
+from simulation.regime_severity import RegimeSeverityError, build_severity_map
 
 from .admission import RegimeEvidence
 from .models import Instrument
@@ -33,6 +34,13 @@ class RegimeClassifier:
             raise MarketDataError("REGIME_MODEL_INVALID", "regime model is invalid") from exc
         self._validate_params()
         self.model_version = f"gmm-p256:{sha256(raw).hexdigest()}"
+        # The artifact-bound severity ordering (raw component id -> rank). Built once at
+        # load: an unsupported K, a bad covariance or scaler, or tied scores refuse here,
+        # so no classification is ever produced from a model that cannot be ordered.
+        try:
+            self.severity_map = build_severity_map(self._params)
+        except RegimeSeverityError as exc:
+            raise MarketDataError(exc.code, str(exc)) from exc
 
     def evidence(
         self,
@@ -62,12 +70,25 @@ class RegimeClassifier:
             raise MarketDataError("REGIME_INFERENCE_FAILED", "regime inference failed") from exc
         if not np.isfinite(probabilities).all() or probabilities.ndim != 1:
             raise MarketDataError("REGIME_INFERENCE_FAILED", "regime inference produced invalid output")
+        if probabilities.shape[0] != self.severity_map.component_count:
+            raise MarketDataError("REGIME_INFERENCE_FAILED", "regime inference produced invalid output")
+        regime_id = int(np.argmax(probabilities))
+        try:
+            severity_rank = self.severity_map.rank(regime_id)
+            severity_label = self.severity_map.label(regime_id)
+        except RegimeSeverityError as exc:
+            raise MarketDataError(exc.code, str(exc)) from exc
         return RegimeEvidence(
             instrument=instrument,
-            regime_id=int(np.argmax(probabilities)),
+            regime_id=regime_id,
             observed_at=snapshot.quote_observed_at,
             model_version=self.model_version,
             source_snapshot_id=snapshot.snapshot_id,
+            severity_rank=severity_rank,
+            severity_label=severity_label,
+            mapping_version=self.severity_map.mapping_version,
+            policy_version=self.severity_map.policy_version,
+            policy_hash=self.severity_map.policy_hash,
         )
 
     def _validate_params(self) -> None:

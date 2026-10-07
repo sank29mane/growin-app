@@ -10,6 +10,7 @@ from typing import Any, Dict, Mapping, Optional, Protocol, Union
 
 from pydantic import ValidationError
 from risk_india.rules import RiskConfigError
+from simulation.regime_severity import policy_matches
 
 from .approval import ApprovalChallenge, ApprovalService
 from .india_guard import (
@@ -164,6 +165,8 @@ class ExecutionService:
         tick_window: Optional[Dict[str, Any]] = None,
         portfolio_state: Optional[Dict[str, Any]] = None,
         regime_id: Optional[int] = None,
+        regime_policy_hash: Optional[str] = None,
+        regime_audit: Optional[Mapping[str, Any]] = None,
         current_spread_pct: object = None,
         risk_db_connection: Any = None,
         deny_reason: Optional[str] = None,
@@ -240,12 +243,24 @@ class ExecutionService:
                     )
                 )
             if selected_gate is not None:
+                if regime_id is None:
+                    # A raw component id means nothing without the model that emitted it, so
+                    # there is no neutral default: an unclassified order is denied.
+                    raise ValueError("GMM regime id is required")
+                gate_kwargs: Dict[str, Any] = {}
+                if regime_policy_hash is not None:
+                    # The size policy must have been built from the severity map this
+                    # regime was classified with (raw ids are arbitrary per model).
+                    if not policy_matches(risk_db_connection, regime_policy_hash):
+                        raise ValueError("REGIME_POLICY_MISMATCH")
+                    gate_kwargs["policy_hash"] = regime_policy_hash
                 risk_output = selected_gate.evaluate(
                     float(simulator_evidence.get("simulated_fill_price", 0)),
                     float(intent.quantity),
-                    0 if regime_id is None else regime_id,
+                    regime_id,
                     0 if current_spread_pct is None else float(current_spread_pct),
                     risk_db_connection,
+                    **gate_kwargs,
                 )
                 risk_evidence = {**risk_evidence, "scaled_size": risk_output}
             if not simulator_evidence or not risk_evidence:
@@ -319,6 +334,9 @@ class ExecutionService:
             "max_age_seconds": max_age_seconds,
             "current_spread_pct": _decimal_text(spread_decimal),
         }
+        if regime_audit:
+            # Model, ordering and size-policy versions are part of what the approval signs.
+            evidence["regime"] = _json_safe(dict(regime_audit))
         if india:
             evidence["india"] = {
                 "guard": india_guard is not None,
