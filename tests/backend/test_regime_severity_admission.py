@@ -373,7 +373,7 @@ _TRUSTED = object()
 
 def _admit(
     tmp_path, name, *, regime_id, policy_hash, audit, connection, gate=None, runtime_preflight=True, at=None,
-    trusted=_TRUSTED,
+    trusted=_TRUSTED, risk_evidence=None, spread=0.002,
 ):
     (tmp_path / name).mkdir()
     private = ils.india_private_dir(tmp_path / name)
@@ -386,11 +386,13 @@ def _admit(
         kwargs = {
             "price": "100", "tick_window": {"bid": [99.9], "ask": [100.1], "spread": [0.002]},
             "portfolio_state": {"equity": 1000.0, "peak_equity": 1000.0},
-            "current_spread_pct": 0.002, "risk_db_connection": connection,
+            "current_spread_pct": spread, "risk_db_connection": connection,
             "evidence_at": at or datetime.now(timezone.utc), "india_quote": ils.make_evidence(),
         }
         if regime_id is not None:
             kwargs["regime_id"] = regime_id
+        if risk_evidence is not None:
+            kwargs["risk_evidence"] = risk_evidence
         if policy_hash is not None:
             kwargs["regime_policy_hash"] = policy_hash
         if audit is not None:
@@ -631,6 +633,168 @@ def test_a_tampered_crisis_row_with_a_matching_hash_row_denies_at_the_service(tm
         assert admission.reason_code == "REGIME_POLICY_MISMATCH"
         assert admission.final_quantity == Decimal("0")
         assert gate.calls == 0
+    finally:
+        connection.close()
+
+
+# --- fix round 2: every executable admission is gated and bound; the gate alone sizes it ------
+
+
+def _uk_paper_service(ledger, **kwargs):
+    return ExecutionService(MagicMock(dispatch=AsyncMock()), ledger, **kwargs)
+
+
+def _uk_intent(pid, qty="2"):
+    return OrderIntent(
+        proposal_id=pid, workspace="uk", account="invest", broker="paper", mode="PAPER",
+        ticker="VUSA", side="BUY", quantity=Decimal(qty),
+    )
+
+
+@pytest.mark.parametrize("with_binding", [False, True])
+def test_an_admission_with_no_risk_gate_is_denied_even_with_complete_caller_evidence(tmp_path, with_binding):
+    """P1-a: no gate used to skip the binding, so caller evidence admitted and reserved 2 of 2."""
+
+    from regime_testkit import bound_regime_fields
+
+    with ExecutionLedger(tmp_path / "l.sqlite3", workspace="uk") as ledger:
+        ledger.configure_paper_budget("invest", "GBP", "1000", workspace="uk")
+        service = _uk_paper_service(ledger, regime_severity_map=shipped_map())
+        extra = bound_regime_fields() if with_binding else {}
+        admission = service.admit(
+            _uk_intent("nogate"), currency="GBP", price="100",
+            simulator_evidence={"simulated_fill_price": "100"}, risk_evidence={"scaled_size": "2"}, **extra,
+        )
+        assert admission.decision is AdmissionDecision.DENIED
+        assert admission.reason_code == "REGIME_BINDING_REQUIRED"
+        assert admission.final_quantity == Decimal("0")
+        assert ledger.get_reservation("nogate") is None
+        with pytest.raises(Exception, match="admission"):
+            service.reserve("nogate")
+
+
+def _india_sell_service(tmp_path):
+    private = ils.india_private_dir(tmp_path)
+    ledger = ils.open_ledger(tmp_path)
+    guard = ils.make_guard(ledger, private)
+    service = ExecutionService(
+        MagicMock(dispatch=AsyncMock()), ledger, simulator=_FixedSimulator(), risk_gate=RiskSwarmGate(),
+        require_runtime_preflight=True, india_guard=guard, regime_severity_map=shipped_map(),
+    )
+    ils.seed_position(ledger, ils.TICKER, 7, "700.00", guard=guard)
+    return ledger, service
+
+
+def _sell(service, connection, pid, **fields):
+    return service.admit(
+        ils.make_intent(pid, side="SELL", quantity=7), currency="INR", price="100.00",
+        tick_window={"bid": [99.9], "ask": [100.1], "spread": [0.002]},
+        portfolio_state={"equity": 1000.0, "peak_equity": 1000.0}, current_spread_pct=0.002,
+        risk_db_connection=connection, evidence_at=datetime.now(timezone.utc),
+        india_quote=ils.make_evidence(), **fields,
+    )
+
+
+def test_a_guarded_india_sell_needs_a_verified_binding_and_still_keeps_its_exact_quantity(tmp_path):
+    from regime_testkit import bound_regime_fields
+
+    ledger, service = _india_sell_service(tmp_path)
+    connection = build_scaling_policy_connection(shipped_map())
+    tampered = build_scaling_policy_connection(shipped_map())
+    tampered.execute("UPDATE scaling_policies SET scale_multiplier = 1.0 WHERE regime_id = 1")
+    try:
+        # Denials first: a denied SELL holds no quantity, so the valid one below still fits.
+        unbound = _sell(service, connection, "sell-unbound", regime_id=3)
+        assert unbound.decision is AdmissionDecision.DENIED and unbound.reason_code == "REGIME_BINDING_REQUIRED"
+        crisis = _sell(service, tampered, "sell-tampered", **bound_regime_fields(1))
+        assert crisis.decision is AdmissionDecision.DENIED and crisis.reason_code == "REGIME_POLICY_MISMATCH"
+        # Normal regime (raw id 0) scales a BUY to half. A SELL deploys no capital, so the
+        # D-06 waiver keeps the exact 7, but only after the binding has been verified.
+        valid = _sell(service, connection, "sell-ok", **bound_regime_fields(0))
+        assert valid.decision is AdmissionDecision.ADMITTED and valid.final_quantity == Decimal("7")
+    finally:
+        connection.close()
+        tampered.close()
+        ledger.close()
+
+
+def test_a_guarded_india_sell_with_no_gate_is_denied(tmp_path):
+    from regime_testkit import bound_regime_fields
+
+    private = ils.india_private_dir(tmp_path)
+    ledger = ils.open_ledger(tmp_path)
+    guard = ils.make_guard(ledger, private)
+    service = ExecutionService(
+        MagicMock(dispatch=AsyncMock()), ledger, india_guard=guard, regime_severity_map=shipped_map()
+    )
+    ils.seed_position(ledger, ils.TICKER, 7, "700.00", guard=guard)
+    try:
+        admission = ils.admit(service, ils.make_intent("sell-nogate", side="SELL", quantity=7))
+        assert admission.decision is AdmissionDecision.DENIED
+        assert admission.reason_code == "REGIME_BINDING_REQUIRED"
+        assert ledger.get_reservation("sell-nogate") is None
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize(
+    "regime_id,spread,caller,expected_reason",
+    [
+        (1, 0.002, "1", "RISK_EVIDENCE_CONFLICT"),  # crisis scales 1 to 0.05
+        (3, 0.06, "1", "RISK_EVIDENCE_CONFLICT"),  # spread veto: the gate returns 0
+        (0, 0.002, "1", "RISK_EVIDENCE_CONFLICT"),  # normal scales 1 to 0.5
+    ],
+)
+def test_a_caller_admitted_quantity_cannot_override_the_gates_output(
+    regime_id, spread, caller, expected_reason, tmp_path
+):
+    """P1-b: ``risk_evidence["admitted_quantity"]`` used to win over the gate's own result."""
+
+    from regime_testkit import bound_regime_fields
+
+    connection = build_scaling_policy_connection(shipped_map())
+    gate = _CountingGate()
+    fields = bound_regime_fields(regime_id)
+    try:
+        admission = _admit(
+            tmp_path, f"override{regime_id}", regime_id=regime_id, policy_hash=fields["regime_policy_hash"],
+            audit=fields["regime_audit"], connection=connection, gate=gate, spread=spread,
+            risk_evidence={"admitted_quantity": caller},
+        )
+        assert admission.decision is AdmissionDecision.DENIED
+        assert admission.reason_code == expected_reason
+        assert admission.final_quantity == Decimal("0")
+        assert gate.calls == 1
+    finally:
+        connection.close()
+
+
+def test_a_caller_admitted_quantity_that_agrees_with_the_gate_changes_nothing(tmp_path):
+    from regime_testkit import bound_regime_fields
+
+    connection = build_scaling_policy_connection(shipped_map())
+    fields = bound_regime_fields()
+    try:
+        admission = _admit(
+            tmp_path, "agree", regime_id=fields["regime_id"], policy_hash=fields["regime_policy_hash"],
+            audit=fields["regime_audit"], connection=connection, risk_evidence={"admitted_quantity": "1"},
+        )
+        assert admission.decision is AdmissionDecision.ADMITTED and admission.final_quantity == Decimal("1")
+    finally:
+        connection.close()
+
+
+def test_the_admitted_quantity_is_the_gate_output_and_nothing_a_caller_passes(tmp_path):
+    from regime_testkit import bound_regime_fields
+
+    connection = build_scaling_policy_connection(shipped_map())
+    fields = bound_regime_fields(0)  # normal: the gate returns 0.5 of the request
+    try:
+        admission = _admit(
+            tmp_path, "gateonly", regime_id=0, policy_hash=fields["regime_policy_hash"],
+            audit=fields["regime_audit"], connection=connection, risk_evidence={"scaled_size": "1"},
+        )
+        assert admission.decision is AdmissionDecision.ADMITTED and admission.final_quantity == Decimal("0.5")
     finally:
         connection.close()
 

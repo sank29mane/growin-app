@@ -16,6 +16,7 @@ import uuid
 from decimal import Decimal
 from pathlib import Path
 
+from regime_testkit import bound_admit, gated
 import pytest
 
 from app_context import AppState
@@ -221,7 +222,7 @@ class _Stack:
             self.ledger,
             require_approval=True,
             approval_service=self.approval,
-            allow_test_price_sources=True,
+            allow_test_price_sources=True, **gated(),
         )
 
     def close(self) -> None:
@@ -237,7 +238,7 @@ class _Stack:
             price="50",
             price_divisor="1",
             simulator_evidence={"simulated_fill_price": "50"},
-            risk_evidence={"scaled_size": str(intent.quantity)},
+            risk_evidence={"scaled_size": str(intent.quantity)}, **bound_admit(),
             price_source=PRICE_SOURCE_TEST_REPLAY,
         )
         if self.ledger.venue_binding is not None:

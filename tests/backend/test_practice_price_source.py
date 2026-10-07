@@ -18,7 +18,7 @@ from execution.venue import (
     PRICE_SOURCE_TEST_REPLAY,
     admissible_price_sources,
 )
-from regime_testkit import calm_probabilities
+from regime_testkit import bound_admit, calm_probabilities, gated
 from t212_practice_testkit import PRACTICE_ACCOUNT, practice_proposal_dict, start_practice_stack
 from t212_testkit import install_no_real_network
 
@@ -118,13 +118,14 @@ def _intent(stack):
 def test_a_bound_ledger_service_refuses_local_replay_unless_a_test_injects_it(tmp_path):
     binding = VenueBinding(venue="t212_practice", account_id=PRACTICE_ACCOUNT, currency="GBP")
     with ExecutionLedger(tmp_path / "bound.sqlite3", workspace="uk", venue=binding) as ledger:
-        refusing = ExecutionService(None, ledger, simulator=None, risk_gate=None)
+        refusing = ExecutionService(None, ledger, simulator=None, **gated())
         injected = ExecutionService(
-            None, ledger, simulator=None, risk_gate=None, allow_test_price_sources=True
+            None, ledger, simulator=None, allow_test_price_sources=True, **gated(),
         )
         evidence = {
             "simulator_evidence": {"simulated_fill_price": "0.5"},
             "risk_evidence": {"scaled_size": "1"},
+            **bound_admit(),
         }
         denied = refusing.admit(
             practice_proposal_dict("r-1", quantity="1", limit_price="50"),
