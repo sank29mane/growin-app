@@ -68,20 +68,21 @@ def _ranks(*rows: tuple[str, str, str, int]) -> tuple[RankPolicy, ...]:
 # severity rank (index 0 = calmest). Size values are the existing risk schedule
 # (1.0, 0.5, 0.1, 0.05). The K = 2 and K = 3 rows are explicit and deliberately
 # conservative: the most severe rank always keeps the smallest size. Collar values are
-# the existing re-quote ladder (1, 1.5, 2) with crisis at the legacy requoter's
-# "extreme" 3. Adapter slots keep the old clamp (ranks 0, 1, 2, 3 use adapters 0, 1, 2, 2).
+# the existing re-quote ladder (1, 1.5, 2); crisis does NOT widen it further (a wider BUY
+# collar in the worst regime is the wrong direction), so crisis shares the widest value, 2.
+# The operator can change any value here. Adapter slots keep the old clamp (ranks 0, 1, 2, 3 use adapters 0, 1, 2, 2).
 REGIME_POLICY_TABLE: Mapping[int, tuple[RankPolicy, ...]] = MappingProxyType(
     {
         4: _ranks(
             ("calm", "1.0", "1.0", 0),
             ("normal", "0.5", "1.5", 1),
             ("stressed", "0.1", "2.0", 2),
-            ("crisis", "0.05", "3.0", 2),
+            ("crisis", "0.05", "2.0", 2),
         ),
         3: _ranks(
             ("calm", "1.0", "1.0", 0),
             ("stressed", "0.1", "2.0", 1),
-            ("crisis", "0.05", "3.0", 2),
+            ("crisis", "0.05", "2.0", 2),
         ),
         2: _ranks(
             ("calm", "1.0", "1.0", 0),
@@ -236,6 +237,16 @@ def build_severity_map(params: Mapping[str, Any]) -> RegimeSeverityMap:
     if cholesky.shape != (count, 2, 2):
         raise RegimeSeverityError("REGIME_COVARIANCE_INVALID", "regime precision factors have the wrong shape")
     for factor in cholesky:
+        # The training pipeline (sklearn) writes the precision Cholesky factor UPPER
+        # triangular with a strictly positive diagonal, and the predictor reads it that way
+        # (y = diff @ factor, log-determinant from the diagonal). A negated, lower-triangular
+        # or otherwise reshaped factor passes a positive-definiteness check (L @ L.T is
+        # sign-blind) and then yields NaN posteriors, so the structure is checked itself.
+        if np.any(np.tril(factor, -1) != 0.0) or np.any(np.diag(factor) <= 0.0):
+            raise RegimeSeverityError(
+                "REGIME_COVARIANCE_INVALID",
+                "a regime precision factor is not upper triangular with a positive diagonal",
+            )
         precision = factor @ factor.T
         try:
             eigenvalues = np.linalg.eigvalsh(precision)
@@ -298,14 +309,53 @@ def build_scaling_policy_connection(severity_map: RegimeSeverityMap) -> sqlite3.
     return connection
 
 
-def policy_matches(connection: Any, policy_hash: str) -> bool:
-    """True only when the connection carries exactly this policy hash."""
+def policy_table_matches(connection: Any, severity_map: RegimeSeverityMap) -> bool:
+    """True only when the connection's ACTUAL rows equal the trusted map's policy.
+
+    The expected multipliers are recomputed from the trusted map's rank order and
+    ``REGIME_POLICY_TABLE``. Nothing stored in the connection is trusted: not its hash row
+    (which is only checked to agree) and not any row, so a table whose crisis multiplier was
+    raised from 0.05 to 1.0 with the metadata left alone is refused, as is a table with a
+    missing, extra or renumbered row.
+    """
 
     try:
+        recomputed = _policy_hash(
+            severity_map.component_count, severity_map.rank_by_id, severity_map.params_sha256
+        )
+        if recomputed != severity_map.policy_hash:
+            return False  # the map no longer describes the table it was built with
+        expected = severity_map.size_multipliers_by_id()
         cursor = connection.cursor()
-        cursor.execute("SELECT policy_hash FROM scaling_policy_meta")
+        cursor.execute("SELECT regime_id, scale_multiplier FROM scaling_policies")
         rows = cursor.fetchall()
+        actual = {int(row[0]): float(row[1]) for row in rows}
+        if len(rows) != len(actual) or actual != expected:
+            return False
+        cursor.execute("SELECT policy_hash FROM scaling_policy_meta")
+        meta = cursor.fetchall()
     except Exception:  # noqa: BLE001 - a missing table or a broken connection is a mismatch
         return False
-    return isinstance(policy_hash, str) and len(rows) == 1 and rows[0][0] == policy_hash
+    return len(meta) == 1 and meta[0][0] == severity_map.policy_hash
 
+
+def validate_posterior(probabilities: Any, component_count: int) -> np.ndarray:
+    """A posterior is usable only if it is a finite probability vector over every component.
+
+    ``argmax`` of a NaN vector is index 0, which would silently pick whichever component
+    is numbered 0. Every place that takes an ``argmax`` calls this first.
+    """
+
+    try:
+        vector = np.asarray(probabilities, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise RegimeSeverityError("REGIME_POSTERIOR_INVALID", "regime posterior is not numeric") from exc
+    if (
+        vector.shape != (component_count,)
+        or not np.isfinite(vector).all()
+        or np.any(vector < 0.0)
+        or np.any(vector > 1.0 + 1e-9)
+        or abs(float(vector.sum()) - 1.0) > 1e-6
+    ):
+        raise RegimeSeverityError("REGIME_POSTERIOR_INVALID", "regime posterior is not a probability vector")
+    return vector

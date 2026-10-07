@@ -47,9 +47,11 @@ class AdaptiveReQuoter:
         return mid_price - margin, mid_price + margin
 
     def get_regime_multiplier(self, regime) -> float:
-        if isinstance(regime, int) and not isinstance(regime, bool):
-            # Raw component ids are arbitrary; no severity map, or an id it does not know
-            # (including the loop's "none detected yet" -1), is a refusal, not a 1.5 guess.
+        if not isinstance(regime, str):
+            # Anything that is not a legacy label is a raw component id (a numpy integer from
+            # argmax included). Raw ids are arbitrary; no severity map, an id it does not
+            # know (including the loop's "none detected yet" -1) or a non-integer is a
+            # refusal, not a 1.5 guess. The map itself rejects bool, float and None.
             if self.severity_map is None:
                 raise RegimeSeverityError(
                     "REGIME_SEVERITY_MAP_REQUIRED", "a raw regime id needs the model's severity map"
