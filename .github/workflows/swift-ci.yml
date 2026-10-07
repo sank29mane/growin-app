@@ -153,9 +153,9 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           log="$RUNNER_TEMP/test.log"
           if [[ -f "$log" ]]; then
-            passed=$(grep -Eci "^Test case .* passed" "$log" || true)
-            failed=$(grep -Eci "^Test case .* failed" "$log" || true)
-            skipped=$(grep -Eci "^Test case .* skipped" "$log" || true)
+            passed=$(grep -Eci "^Test case '[^']*' passed" "$log" || true)
+            failed=$(grep -Eci "^Test case '[^']*' failed" "$log" || true)
+            skipped=$(grep -Eci "^Test case '[^']*' skipped" "$log" || true)
             printf '\nPassed %s · failed %s · skipped %s\n' "$passed" "$failed" "$skipped" >> "$GITHUB_STEP_SUMMARY"
           fi
 
