@@ -7,7 +7,8 @@ and it imports nothing from ``gateway/``. The VM keeps its own implementation in
 mistake in one cannot silently become a mistake in both.
 
 ``evaluate`` returns every applicable reason code in a fixed precedence, so the first
-is the answer and the rest are detail. The names are the O6 reason names of
+is the answer and the rest are detail. An open stop on any ISIN refuses buys on
+every ISIN with ``stop_open``, ahead of all non-hard-block codes. The names are the O6 reason names of
 ``growin-orders/1`` and compare as strings against the VM's codes.
 
 Money, prices and ratios are ``Decimal`` built from strings. Trigger edges are
