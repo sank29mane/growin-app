@@ -6,8 +6,10 @@ name: PR Impact
 #
 # workflow_run executes this file as it exists on the default branch, so a PR
 # cannot rewrite the report, its budget, or its path list.
-# SECURITY: never check out or execute PR code here. The only PR-controlled
-# input is the pr-impact-metrics artifact, which pr_impact.py validates as data.
+# SECURITY: never check out or execute PR code here. The PR-controlled inputs
+# are the pr-impact-metrics artifact and the PR's API data (file list and
+# branch names). pr_impact.py validates the artifact and escapes or drops
+# unusual file and branch names before they reach the comment.
 on:
   workflow_run:
     workflows: [ "Growin Backend CI" ]

@@ -379,7 +379,48 @@ def test_swift_ci_is_advisory_and_pinned():
     assert "secrets." not in text and "TEST_RUNNER_GROWIN_SE_UAT=" not in text
     assert "-only-testing:GrowinTests" in text and "-skip-testing:GrowinUITests" in text
     assert "CODE_SIGNING_ALLOWED=NO" in text
+    assert job["env"]["MIN_SDK"] == "26.5"
     for action in _actions(text):
         assert re.fullmatch(r"[\w/-]+@[0-9a-f]{40} # v[\w.]+", action)
     upload = next(s for s in job["steps"] if "upload-artifact" in s.get("uses", ""))
     assert upload["if"] == "failure()"
+
+
+@pytest.mark.parametrize("older,status,log,code,degraded", [
+    # SDK gap on an older SDK: warning and summary, not a red X
+    ("true", 65, "A.swift:3:9: error: value of type 'some View' has no member 'glassEffect'", 0, True),
+    ("true", 65, "B.swift:1:8: error: no such module 'FoundationModels'", 0, True),
+    # The same error on a new enough SDK is a real failure
+    ("false", 65, "A.swift:3:9: error: value of type 'some View' has no member 'glassEffect'", 1, False),
+    # A failure that is not an SDK gap stays red even on an older SDK
+    ("true", 65, "error: linker command failed with exit code 1", 1, False),
+    ("false", 0, "", 0, False),
+])
+def test_swift_build_step_degrades_only_on_an_sdk_gap(tmp_path, older, status, log, code, degraded):
+    import os
+    import subprocess
+    import yaml
+
+    step = next(s for s in yaml.safe_load(SWIFT.read_text())["jobs"]["unit-tests"]["steps"]
+                if s.get("id") == "build")
+    fake = tmp_path / "bin" / "xcodebuild"
+    fake.parent.mkdir()
+    fake.write_text('#!/bin/bash\nprintf "%s\\n" "$FAKE_LOG"\nexit "$FAKE_STATUS"\n')
+    fake.chmod(0o755)
+    out, summary = tmp_path / "out", tmp_path / "summary"
+    env = dict(os.environ, PATH=f"{fake.parent}:{os.environ['PATH']}", RUNNER_TEMP=str(tmp_path),
+               GITHUB_OUTPUT=str(out), GITHUB_STEP_SUMMARY=str(summary), MIN_SDK="26.5",
+               OLDER_SDK=older, SDK="26.2", XCODE="Xcode_26.2.app",
+               FAKE_LOG=log, FAKE_STATUS=str(status))
+    r = subprocess.run(["bash", "-e", "-c", step["run"]], env=env, capture_output=True, text=True)
+    assert r.returncode == code, r.stdout + r.stderr
+    outputs = out.read_text()
+    assert ("built=true" in outputs) is (status == 0)
+    assert ("degraded=true" in outputs) is degraded
+    if degraded:
+        assert "::warning::Swift CI skipped" in r.stdout
+        text = summary.read_text()
+        assert "## Swift CI: degraded (advisory)" in text and "macOS `26.5` SDK or newer" in text
+        assert log.split("error: ", 1)[1] in text
+    elif code:
+        assert "::error::Swift build failed" in r.stdout

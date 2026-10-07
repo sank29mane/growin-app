@@ -5,11 +5,12 @@ name: Swift CI
 # has. GrowinUITests are skipped. Secure Enclave and Touch ID UAT tests stay
 # skipped because TEST_RUNNER_GROWIN_SE_UAT is never set here.
 #
-# The operator builds with Xcode-beta. When the runner only has an older SDK
-# and the build fails the way an SDK gap fails (missing module, member, or
-# symbol), the job ends with a warning and a step summary saying what is
-# missing instead of a red X. A failure on an SDK at least as new as
-# KNOWN_GOOD_SDK is a real failure.
+# The operator builds with Xcode-beta. If the project adopts APIs newer than
+# the runner's SDK, raise MIN_SDK. Then, when the runner's SDK is older than
+# MIN_SDK and the build fails the way an SDK gap fails (missing module,
+# member, or symbol), the job ends with a warning and a step summary saying
+# what is missing instead of a red X. On an SDK at least MIN_SDK, every build
+# or test failure is a real failure.
 on:
   pull_request:
     branches: [ main ]
@@ -40,9 +41,10 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 45
     env:
-      # The SDK the project is verified to build with (Xcode 27.0 beta,
-      # macOS 27.0 SDK, 2026-10-08). Raise it when the project adopts newer APIs.
-      KNOWN_GOOD_SDK: "27.0"
+      # Lowest macOS SDK verified to build and pass GrowinTests: macos-latest,
+      # Xcode 26.6, macOS 26.5 SDK, 2026-10-08 (86 passed). The operator's
+      # Xcode-beta 27.0 (macOS 27.0 SDK) also passes locally.
+      MIN_SDK: "26.5"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -68,7 +70,7 @@ jobs:
           sdk=$(xcodebuild -version -sdk macosx SDKVersion)
           echo "macOS SDK $sdk"
           older=false
-          if [[ "$(printf '%s\n%s\n' "$sdk" "$KNOWN_GOOD_SDK" | sort -V | head -n 1)" != "$KNOWN_GOOD_SDK" ]]; then older=true; fi
+          if [[ "$(printf '%s\n%s\n' "$sdk" "$MIN_SDK" | sort -V | head -n 1)" != "$MIN_SDK" ]]; then older=true; fi
           {
             echo "app=$(basename "$best")"
             echo "version=$best_ver"
@@ -84,7 +86,7 @@ jobs:
           SDK: ${{ steps.xcode.outputs.sdk }}
           XCODE: ${{ steps.xcode.outputs.app }}
         run: |
-          set -uo pipefail
+          set +e -uo pipefail  # the runner uses bash -e; keep going to read the status
           xcodebuild build-for-testing \
             -project Growin.xcodeproj -scheme Growin \
             -destination 'platform=macOS' \
@@ -98,12 +100,12 @@ jobs:
           gap='no such module|has no member|cannot find (type )?.* in scope|is only available in macOS|is unavailable in macOS|future Xcode project file format|requires a newer version of Xcode|unable to find a destination'
           if [[ "$OLDER_SDK" == "true" ]] && grep -Eq "$gap" "$RUNNER_TEMP/build.log"; then
             missing=$(grep -E "error:.*($gap)" "$RUNNER_TEMP/build.log" | sed -E 's/^.*error: //' | sort -u | head -n 8)
-            echo "::warning::Swift CI skipped: the runner's newest Xcode is $XCODE with the macOS $SDK SDK, and the project needs the macOS $KNOWN_GOOD_SDK SDK or newer. Not a code failure."
+            echo "::warning::Swift CI skipped: the runner's newest Xcode is $XCODE with the macOS $SDK SDK, and the project needs the macOS $MIN_SDK SDK or newer. Not a code failure."
             {
               echo "## Swift CI: degraded (advisory)"
               echo
               echo "The runner's newest Xcode is \`$XCODE\` with the macOS \`$SDK\` SDK."
-              echo "The project is verified with the macOS \`$KNOWN_GOOD_SDK\` SDK (Xcode-beta). The build failed on APIs the older SDK does not have, so tests were not run."
+              echo "The project needs the macOS \`$MIN_SDK\` SDK or newer. The build failed on APIs the older SDK does not have, so tests were not run."
               echo
               echo "First missing symbols:"
               echo
@@ -123,7 +125,7 @@ jobs:
         id: test
         if: steps.build.outputs.built == 'true'
         run: |
-          set -uo pipefail
+          set +e -uo pipefail  # the runner uses bash -e; keep going to read the status
           unset TEST_RUNNER_GROWIN_SE_UAT
           xcodebuild test-without-building \
             -project Growin.xcodeproj -scheme Growin \
@@ -149,18 +151,12 @@ jobs:
             echo
             echo "Xcode \`$XCODE\`, macOS SDK \`$SDK\`. Unit tests: GrowinTests only."
           } >> "$GITHUB_STEP_SUMMARY"
-          result="$RUNNER_TEMP/GrowinTests.xcresult"
-          if [[ -d "$result" ]]; then
-            xcrun xcresulttool get test-results summary --path "$result" > "$RUNNER_TEMP/summary.json" 2>/dev/null || true
-            python3 -I -c '
-          import json, sys
-          try:
-              s = json.load(open(sys.argv[1]))
-          except Exception:
-              sys.exit(0)
-          keys = ("result", "totalTestCount", "passedTests", "failedTests", "skippedTests", "expectedFailures")
-          print("\n" + " · ".join(f"{k}: {s[k]}" for k in keys if k in s))
-          ' "$RUNNER_TEMP/summary.json" >> "$GITHUB_STEP_SUMMARY"
+          log="$RUNNER_TEMP/test.log"
+          if [[ -f "$log" ]]; then
+            passed=$(grep -Eci "^Test case .* passed" "$log" || true)
+            failed=$(grep -Eci "^Test case .* failed" "$log" || true)
+            skipped=$(grep -Eci "^Test case .* skipped" "$log" || true)
+            printf '\nPassed %s · failed %s · skipped %s\n' "$passed" "$failed" "$skipped" >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Upload the test results on failure
