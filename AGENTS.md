@@ -29,6 +29,18 @@ Non-negotiable rules:
 6. Keep reports concise: result, changed files, verification, risks, and next
    action.
 
+## Cloud Agent (Linux)
+
+Cloud Agents run Linux, not macOS. Scope is the **Python FastAPI backend** in
+`backend/` (SwiftUI/Xcode and on-device MLX/CoreML are out of scope here).
+
+- **Install:** `bash .cursor/cloud-agent-install.sh` (or `uv sync --project backend --all-groups` after `uv` is on PATH).
+- **Start API:** `bash .cursor/start.sh` (listens on `0.0.0.0:8002`; health at `/health`).
+- **Tests:** match CI env (`CI=true`, `GROWIN_ANALYTICS_ENABLED=false`, `PYTHONPATH` includes `backend`), then:
+  `uv run --project backend pytest tests/backend/ --ignore=tests/backend/test_adapter.py --ignore=tests/backend/test_mlx_hotswap.py`
+- **Secrets:** optional for health and most unit tests. Do not enable live trading
+  or bypass execution controls without explicit user authorization (cookbook).
+
 ## 📝 Communication Tone (Mandatory)
 Apply "Unslop" principles to all text generation:
 - **No AI Tell-Words:** BANNED WORDS: delve, pivotal, testament, tapestry, showcase, vibrant, foster, enhance.
