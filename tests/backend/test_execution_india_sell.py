@@ -19,6 +19,7 @@ import pytest
 
 import india_limits_support as ils
 from app_context import AppState
+from regime_testkit import FractionGate, bound_admit, gated
 from execution import (
     AdmissionDecision,
     ApprovalConflict,
@@ -64,7 +65,7 @@ def world(tmp_path):
     key = private_key()
     enroll(approval, key, workspace="india")
     service = ExecutionService(
-        PaperDispatcher(), ledger, require_approval=True, approval_service=approval, india_guard=guard
+        PaperDispatcher(), ledger, require_approval=True, approval_service=approval, india_guard=guard, **gated(),
     )
     try:
         yield SimpleNamespace(
@@ -84,7 +85,8 @@ def sell(world, proposal_id, quantity, *, symbol="AAA", fill="10.00", scaled=Non
         currency="INR",
         price="10.00",
         simulator_evidence={"simulated_fill_price": fill},
-        risk_evidence={"scaled_size": str(scaled if scaled is not None else quantity)},
+        risk_evidence={"scaled_size": str(scaled if scaled is not None else quantity)}, **bound_admit(),
+        **({} if scaled is None else {"risk_gate": FractionGate(scaled / quantity)}),
         india_quote=evidence_for(symbol),
     )
 
@@ -168,14 +170,14 @@ def test_a_sell_still_obeys_collar_band_tick_session_and_quote(world):
     wide = ils.make_intent("s-wide", side="SELL", quantity=1, limit_price="10.25", ticker=ticker)
     denied = world.service.admit(
         wide, currency="INR", price="10.25",
-        simulator_evidence={"simulated_fill_price": "10.00"}, risk_evidence={"scaled_size": "1"},
+        simulator_evidence={"simulated_fill_price": "10.00"}, risk_evidence={"scaled_size": "1"}, **bound_admit(),
         india_quote=evidence_for("AAA"),
     )
     assert denied.reason_code == "collar"
     no_quote = world.service.admit(
         ils.make_intent("s-noq", side="SELL", quantity=1, limit_price="10.00", ticker=ticker),
         currency="INR", price="10.00",
-        simulator_evidence={"simulated_fill_price": "10.00"}, risk_evidence={"scaled_size": "1"},
+        simulator_evidence={"simulated_fill_price": "10.00"}, risk_evidence={"scaled_size": "1"}, **bound_admit(),
     )
     assert no_quote.reason_code == "quote_unavailable"
 
@@ -190,14 +192,15 @@ def test_regime_scaling_never_shrinks_a_sell_but_a_veto_still_denies(world):
         ils.make_intent("s-veto", side="SELL", quantity=1, limit_price="10.00", ticker=ticker),
         currency="INR", price="10.00",
         simulator_evidence={"simulated_fill_price": "10.00"},
-        risk_evidence={"scaled_size": "1", "allowed": False},
+        risk_evidence={"scaled_size": "1", "allowed": False}, **bound_admit(),
         india_quote=evidence_for("AAA"),
     )
     assert vetoed.decision is AdmissionDecision.DENIED
     zero = world.service.admit(
         ils.make_intent("s-zero", side="SELL", quantity=1, limit_price="10.00", ticker=ticker),
         currency="INR", price="10.00",
-        simulator_evidence={"simulated_fill_price": "10.00"}, risk_evidence={"scaled_size": "0"},
+        simulator_evidence={"simulated_fill_price": "10.00"}, risk_evidence={"scaled_size": "0"}, **bound_admit(),
+        risk_gate=FractionGate(0.0),
         india_quote=evidence_for("AAA"),
     )
     assert zero.decision is AdmissionDecision.DENIED
@@ -206,7 +209,8 @@ def test_regime_scaling_never_shrinks_a_sell_but_a_veto_still_denies(world):
         ils.make_intent("b-scaled", quantity=5, limit_price="10.00", ticker=ticker),
         currency="INR", price="10.00",
         simulator_evidence={"simulated_fill_price": "10.00"},
-        risk_evidence={"scaled_size": "2"},  # the gate sizes the BUY down from 5 to 2
+        risk_evidence={"scaled_size": "2"}, **bound_admit(),  # the gate sizes the BUY down from 5 to 2
+        risk_gate=FractionGate(0.4),
         india_quote=evidence_for("AAA"),
     )
     assert buy.decision is AdmissionDecision.ADMITTED and buy.final_quantity == Decimal("2")
@@ -510,13 +514,13 @@ async def test_each_registered_sell_is_admitted_and_approved_on_its_own_signatur
 def test_the_guard_less_india_ledger_still_denies_a_sell(tmp_path):
     ledger = ils.open_ledger(tmp_path)
     try:
-        service = ExecutionService(PaperDispatcher(), ledger)
+        service = ExecutionService(PaperDispatcher(), ledger, **gated())
         ils.seed_position(ledger, NAMES["AAA"][0], 5, "50.00")
         ticker, _ = NAMES["AAA"]
         admission = service.admit(
             ils.make_intent("g-1", side="SELL", quantity=1, limit_price="10.00", ticker=ticker),
             currency="INR", price="10.00",
-            simulator_evidence={"simulated_fill_price": "10.00"}, risk_evidence={"scaled_size": "1"},
+            simulator_evidence={"simulated_fill_price": "10.00"}, risk_evidence={"scaled_size": "1"}, **bound_admit(),
         )
         assert admission.decision is AdmissionDecision.DENIED
         assert admission.reason_code == "SELL_ADMISSION_REQUIRES_A_POSITION_RESERVATION"

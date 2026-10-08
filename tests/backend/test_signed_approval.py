@@ -5,6 +5,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+from regime_testkit import bound_admit, gated
 import pytest
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -63,13 +64,13 @@ def make_intent(proposal_id: str = "signed-1", **overrides) -> OrderIntent:
 
 
 def admit_and_reserve(ledger: ExecutionLedger, intent: OrderIntent) -> None:
-    service = ExecutionService(PaperDispatcher(), ledger, require_approval=True)
+    service = ExecutionService(PaperDispatcher(), ledger, require_approval=True, **gated())
     service.admit(
         intent,
         currency="GBP",
         price="100",
         simulator_evidence={"simulated_fill_price": "100"},
-        risk_evidence={"scaled_size": str(intent.quantity)},
+        risk_evidence={"scaled_size": str(intent.quantity)}, **bound_admit(),
     )
     ledger.configure_paper_budget(intent.account, "GBP", "10000", workspace="uk")
     service.reserve(intent.proposal_id)
@@ -129,7 +130,7 @@ async def test_signed_payload_is_exact_and_success_replays_only_same_evidence(tm
             PaperDispatcher(),
             ledger,
             require_approval=True,
-            approval_service=approval,
+            approval_service=approval, **gated(),
         )
         admit_and_reserve(ledger, make_intent())
         challenge = service.create_approval_challenge("signed-1", workspace="uk", ttl_seconds=60)
@@ -207,7 +208,7 @@ async def test_required_approval_blocks_legacy_and_invalid_signature(tmp_path):
         key = private_key()
         enroll(approval, key)
         service = ExecutionService(
-            PaperDispatcher(), ledger, require_approval=True, approval_service=approval
+            PaperDispatcher(), ledger, require_approval=True, approval_service=approval, **gated(),
         )
         intent = make_intent()
         admit_and_reserve(ledger, intent)
@@ -251,10 +252,10 @@ async def test_concurrent_services_create_one_approval_and_dispatch(tmp_path):
         signature = sign(key, challenge.signed_payload)
         dispatcher = BlockingDispatcher()
         first_service = ExecutionService(
-            dispatcher, ledger, require_approval=True, approval_service=approval
+            dispatcher, ledger, require_approval=True, approval_service=approval, **gated(),
         )
         second_service = ExecutionService(
-            dispatcher, ledger, require_approval=True, approval_service=approval
+            dispatcher, ledger, require_approval=True, approval_service=approval, **gated(),
         )
 
         first = asyncio.create_task(
@@ -470,7 +471,7 @@ def _workspace_stack(tmp_path, workspace: str, key):
         ledger,
         require_approval=True,
         approval_service=approval,
-        india_guard=guard,
+        india_guard=guard, **gated(),
     )
     intent = make_intent(workspace=workspace, **overrides)
     service.admit(
@@ -478,7 +479,7 @@ def _workspace_stack(tmp_path, workspace: str, key):
         currency=currency,
         price="100",
         simulator_evidence={"simulated_fill_price": "100"},
-        risk_evidence={"scaled_size": str(intent.quantity)},
+        risk_evidence={"scaled_size": str(intent.quantity)}, **bound_admit(),
         india_quote=quote,
     )
     ledger.configure_paper_budget(intent.account, currency, "10000", workspace=workspace)

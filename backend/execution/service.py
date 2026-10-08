@@ -10,6 +10,7 @@ from typing import Any, Dict, Mapping, Optional, Protocol, Union
 
 from pydantic import ValidationError
 from risk_india.rules import RiskConfigError
+from simulation.regime_severity import RegimeSeverityError, policy_table_matches
 
 from .approval import ApprovalChallenge, ApprovalService
 from .india_guard import (
@@ -91,7 +92,12 @@ class ExecutionService:
         require_runtime_preflight: bool = False,
         allow_test_price_sources: bool = False,
         india_guard: Optional[IndiaAdmissionGuard] = None,
+        regime_severity_map: Any = None,
     ):
+        # The trusted severity map of the loaded regime model. Any admission that reaches the
+        # risk gate is verified against it (see ``_verify_regime_binding``); without one every
+        # such admission is denied, because raw GMM component ids mean nothing on their own.
+        self._regime_severity_map = regime_severity_map
         # Explicit, test-only injection of the ``local-replay`` price source. The
         # default refuses it, so a production service can never admit from it.
         self._price_sources = admissible_price_sources(allow_test_price_sources)
@@ -164,6 +170,8 @@ class ExecutionService:
         tick_window: Optional[Dict[str, Any]] = None,
         portfolio_state: Optional[Dict[str, Any]] = None,
         regime_id: Optional[int] = None,
+        regime_policy_hash: Optional[str] = None,
+        regime_audit: Optional[Mapping[str, Any]] = None,
         current_spread_pct: object = None,
         risk_db_connection: Any = None,
         deny_reason: Optional[str] = None,
@@ -239,15 +247,40 @@ class ExecutionService:
                         portfolio_state or {},
                     )
                 )
-            if selected_gate is not None:
-                risk_output = selected_gate.evaluate(
-                    float(simulator_evidence.get("simulated_fill_price", 0)),
-                    float(intent.quantity),
-                    0 if regime_id is None else regime_id,
-                    0 if current_spread_pct is None else float(current_spread_pct),
-                    risk_db_connection,
-                )
-                risk_evidence = {**risk_evidence, "scaled_size": risk_output}
+            if selected_gate is None:
+                # Every admission can reserve and later dispatch, so every one is sized by the
+                # risk gate under a verified regime binding. Caller-supplied simulator or risk
+                # evidence is never a substitute for the gate: no gate, no admission.
+                raise ValueError("REGIME_BINDING_REQUIRED")
+            if regime_id is None:
+                # A raw component id means nothing without the model that emitted it, so
+                # there is no neutral default: an unclassified order is denied.
+                raise ValueError("GMM regime id is required")
+            # Required on every admission, runtime preflight or not: the model and policy
+            # binding, the regime audit and a policy table whose actual rows match the
+            # trusted map. Missing or wrong means deny. The gate also checks the table
+            # itself (``severity_map=``) on purpose: it is a second, independent check
+            # for the other caller of the gate, the legacy trading loop.
+            _verify_regime_binding(
+                self._regime_severity_map, regime_id, regime_policy_hash, regime_audit,
+                risk_db_connection,
+            )
+            risk_output = selected_gate.evaluate(
+                float(simulator_evidence.get("simulated_fill_price", 0)),
+                float(intent.quantity),
+                regime_id,
+                0 if current_spread_pct is None else float(current_spread_pct),
+                risk_db_connection,
+                severity_map=self._regime_severity_map,
+            )
+            caller_admitted = risk_evidence.get("admitted_quantity")
+            risk_evidence = {**risk_evidence, "scaled_size": risk_output}
+            if caller_admitted is not None and _finite_decimal(
+                caller_admitted, "caller admitted quantity"
+            ) != _finite_decimal(risk_output, "risk quantity"):
+                # The admitted quantity comes from the gate and nothing else. A caller's
+                # figure that disagrees with it (a crisis scale, a spread veto) is refused.
+                raise ValueError("RISK_EVIDENCE_CONFLICT")
             if not simulator_evidence or not risk_evidence:
                 raise ValueError("simulator and risk evidence are required")
             simulator_fill = _finite_decimal(
@@ -259,7 +292,7 @@ class ExecutionService:
             spread_decimal = _finite_decimal(
                 0 if current_spread_pct is None else current_spread_pct, "spread"
             )
-            risk_value = risk_evidence.get("admitted_quantity", risk_evidence.get("scaled_size"))
+            risk_value = risk_evidence.get("scaled_size")
             risk_quantity = _finite_decimal(risk_value, "risk quantity")
             if (
                 india_guard is not None
@@ -319,6 +352,9 @@ class ExecutionService:
             "max_age_seconds": max_age_seconds,
             "current_spread_pct": _decimal_text(spread_decimal),
         }
+        if regime_audit:
+            # Model, ordering and size-policy versions are part of what the approval signs.
+            evidence["regime"] = _json_safe(dict(regime_audit))
         if india:
             evidence["india"] = {
                 "guard": india_guard is not None,
@@ -950,6 +986,42 @@ def _json_safe(value: Mapping[str, Any]) -> Mapping[str, Any]:
         else:
             safe[str(key)] = str(item)
     return safe
+
+
+_BOUND_AUDIT_FIELDS = (
+    "regime_id", "severity_rank", "severity_label", "policy_hash", "mapping_version", "policy_version",
+)
+
+
+def _verify_regime_binding(
+    severity_map: Any,
+    regime_id: Any,
+    policy_hash: Any,
+    audit: Any,
+    connection: Any,
+) -> None:
+    """Refuse an admission whose regime, audit or size table is not bound to the trusted map.
+
+    Everything is recomputed from the trusted ``severity_map``; a caller's hash, audit or
+    table is only compared against it. Raises ``ValueError`` with a stable reason code.
+    """
+
+    if severity_map is None:
+        raise ValueError("REGIME_SEVERITY_MAP_UNAVAILABLE")
+    if not isinstance(policy_hash, str) or not policy_hash or not isinstance(audit, Mapping) or not audit:
+        raise ValueError("REGIME_BINDING_REQUIRED")
+    if not isinstance(audit.get("model_version"), str) or not audit["model_version"]:
+        raise ValueError("REGIME_BINDING_REQUIRED")
+    try:
+        trusted = severity_map.audit(regime_id)
+    except RegimeSeverityError as exc:
+        raise ValueError(exc.code) from exc
+    if policy_hash != severity_map.policy_hash:
+        raise ValueError("REGIME_POLICY_MISMATCH")
+    if any(audit.get(field) != trusted[field] for field in _BOUND_AUDIT_FIELDS):
+        raise ValueError("REGIME_POLICY_MISMATCH")
+    if not policy_table_matches(connection, severity_map):
+        raise ValueError("REGIME_POLICY_MISMATCH")
 
 
 def _reason_code(reason: str) -> str:

@@ -13,7 +13,6 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import httpx
-import numpy as np
 import pytest
 
 from execution import (
@@ -23,6 +22,7 @@ from execution import (
     VenueBinding,
 )
 from execution.service import BrokerExecutionError, BrokerOutcomeUnknownError
+from regime_testkit import calm_probabilities
 from t212_practice_testkit import (
     PRACTICE_ACCOUNT,
     FakeDemoBroker,
@@ -48,7 +48,7 @@ def regime_zero(monkeypatch):
     import market_data.regime as regime_module
 
     monkeypatch.setattr(
-        regime_module, "fast_gmm_predict_proba", lambda feature, **params: np.array([1.0, 0.0, 0.0, 0.0])
+        regime_module, "fast_gmm_predict_proba", lambda feature, **params: calm_probabilities()
     )
 
 

@@ -21,6 +21,7 @@ from execution import (
 )
 from server import app
 from simulation import PreFlightSimulator, RiskSwarmGate
+from regime_testkit import shipped_map
 
 UAT_ACCOUNTS = ("paper-uat-v2", "paper-uat", "paper-requote-uat-v1")
 
@@ -39,6 +40,7 @@ def _open_state(path, workspace) -> AppState:
         simulator=PreFlightSimulator(),
         risk_gate=RiskSwarmGate(),
         require_runtime_preflight=True,
+        regime_severity_map=shipped_map(),
     )
     app_state.execution_authority = True
     return app_state

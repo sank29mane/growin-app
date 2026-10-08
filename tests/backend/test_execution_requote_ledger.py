@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from regime_testkit import bound_admit, gated
 import pytest
 
 from execution.ledger import ExecutionLedger, RequoteConflict
@@ -19,13 +20,13 @@ def _setup_acknowledged_parent(ledger: ExecutionLedger, proposal_id: str = "pare
         "action": "BUY",
         "quantity": "2",
     }
-    service = ExecutionService(ledger=ledger)
+    service = ExecutionService(ledger=ledger, **gated())
     service.admit(
         proposal,
         currency="GBP",
         price="10",
         simulator_evidence={"simulated_fill_price": "10"},
-        risk_evidence={"scaled_size": "2"},
+        risk_evidence={"scaled_size": "2"}, **bound_admit(),
     )
     ledger.configure_paper_budget("invest", "GBP", "100", workspace="uk")
     service.reserve(proposal_id)

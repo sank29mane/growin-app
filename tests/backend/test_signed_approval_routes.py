@@ -11,6 +11,7 @@ from app_context import state
 from execution import ApprovalConflict, ExecutionLedger, ExecutionService, OrderAck, PaperDispatcher
 from simulation import PreFlightSimulator, RiskSwarmGate
 from server import app
+from regime_testkit import shipped_map
 
 
 @pytest.fixture
@@ -31,6 +32,7 @@ def signed_execution(tmp_path):
         simulator=PreFlightSimulator(),
         risk_gate=RiskSwarmGate(),
         require_runtime_preflight=True,
+        regime_severity_map=shipped_map(),
     )
     state.execution_service = service
     state._execution_ledger = ledger

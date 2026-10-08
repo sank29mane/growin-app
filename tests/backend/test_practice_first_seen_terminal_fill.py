@@ -12,11 +12,11 @@ import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
 
-import numpy as np
 import pytest
 
 from execution import ReconciliationSnapshot
 from execution.ledger import InvalidTransition
+from regime_testkit import calm_probabilities
 from t212_practice_testkit import (
     PRACTICE_ACCOUNT,
     place,
@@ -38,7 +38,7 @@ def regime_zero(monkeypatch):
     import market_data.regime as regime_module
 
     monkeypatch.setattr(
-        regime_module, "fast_gmm_predict_proba", lambda feature, **params: np.array([1.0, 0.0, 0.0, 0.0])
+        regime_module, "fast_gmm_predict_proba", lambda feature, **params: calm_probabilities()
     )
 
 

@@ -14,6 +14,8 @@ from execution import (
     OrderIntent,
 )
 from simulation import PreFlightSimulator, RiskSwarmGate
+from regime_testkit import FractionGate, bound_admit, bound_regime_fields, gated, shipped_map
+from simulation.regime_severity import build_scaling_policy_connection
 
 
 def intent(proposal_id="admit-1", **overrides):
@@ -38,6 +40,8 @@ def evidence(service, value="2", **kwargs):
         price="100",
         simulator_evidence=kwargs.pop("simulator_evidence", {"simulated_fill_price": "100"}),
         risk_evidence=kwargs.pop("risk_evidence", {"scaled_size": value}),
+        risk_gate=kwargs.pop("risk_gate", FractionGate(float(value) / 2.0)),
+        **bound_admit(),
         **kwargs,
     )
 
@@ -46,7 +50,7 @@ def test_missing_or_denied_evidence_records_no_reservation_or_dispatch(tmp_path)
     dispatcher = MagicMock()
     dispatcher.dispatch = AsyncMock()
     with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
-        service = ExecutionService(dispatcher, ledger)
+        service = ExecutionService(dispatcher, ledger, **gated())
         denied = evidence(service, risk_evidence={"allowed": False, "scaled_size": 0})
         assert denied.decision is AdmissionDecision.DENIED
         assert ledger.get_reservation("admit-1") is None
@@ -61,7 +65,7 @@ def preflight_context(connection, *, spread=0.02):
     return {
         "tick_window": {"bid": [99.0], "ask": [101.0], "spread": [spread]},
         "portfolio_state": {"equity": 100.0, "peak_equity": 100.0},
-        "regime_id": 0,
+        **bound_regime_fields(),
         "current_spread_pct": spread,
         "risk_db_connection": connection,
     }
@@ -74,18 +78,12 @@ def preflight_service(dispatcher, ledger):
         simulator=PreFlightSimulator(),
         risk_gate=RiskSwarmGate(),
         require_runtime_preflight=True,
+        regime_severity_map=shipped_map(),
     )
 
 
 def policy_connection():
-    connection = sqlite3.connect(":memory:")
-    connection.execute(
-        "CREATE TABLE scaling_policies (regime_id INTEGER PRIMARY KEY, scale_multiplier REAL NOT NULL)"
-    )
-    connection.execute(
-        "INSERT INTO scaling_policies (regime_id, scale_multiplier) VALUES (0, 1)"
-    )
-    return connection
+    return build_scaling_policy_connection(shipped_map())
 
 
 def test_runtime_preflight_requires_context_and_rejects_before_dispatch(tmp_path):
@@ -158,7 +156,7 @@ def test_app_startup_uses_runtime_preflight_for_local_paper_uat(tmp_path, privat
 )
 def test_non_finite_and_zero_simulator_values_deny(tmp_path, simulator_evidence):
     with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
-        service = ExecutionService(PaperDispatcher(), ledger)
+        service = ExecutionService(PaperDispatcher(), ledger, **gated())
         result = evidence(service, simulator_evidence=simulator_evidence)
         assert result.decision is AdmissionDecision.DENIED
         assert ledger.get_reservation("admit-1") is None
@@ -166,7 +164,7 @@ def test_non_finite_and_zero_simulator_values_deny(tmp_path, simulator_evidence)
 
 def test_stale_and_sell_evidence_fail_closed(tmp_path):
     with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
-        service = ExecutionService(PaperDispatcher(), ledger)
+        service = ExecutionService(PaperDispatcher(), ledger, **gated())
         stale = evidence(
             service,
             evidence_at=datetime.now(timezone.utc) - timedelta(minutes=5),
@@ -179,6 +177,7 @@ def test_stale_and_sell_evidence_fail_closed(tmp_path):
             price="100",
             simulator_evidence={"simulated_fill_price": "100"},
             risk_evidence={"scaled_size": "2"},
+            **bound_admit(),
         )
         assert result.decision is AdmissionDecision.DENIED
         assert ledger.get_reservation("sell") is None
@@ -186,7 +185,7 @@ def test_stale_and_sell_evidence_fail_closed(tmp_path):
 
 def test_admitted_evidence_is_decimal_and_immutable(tmp_path):
     with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
-        service = ExecutionService(PaperDispatcher(), ledger)
+        service = ExecutionService(PaperDispatcher(), ledger, **gated())
         result = evidence(service, value="1.5")
         assert result.decision is AdmissionDecision.ADMITTED
         assert result.final_quantity == Decimal("1.5")
@@ -200,4 +199,6 @@ def test_admitted_evidence_is_decimal_and_immutable(tmp_path):
                 price="101",
                 simulator_evidence={"simulated_fill_price": "101"},
                 risk_evidence={"scaled_size": "1.5"},
+                risk_gate=FractionGate(0.75),
+                **bound_admit(),
             )

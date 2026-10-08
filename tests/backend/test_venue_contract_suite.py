@@ -17,7 +17,6 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
-import numpy as np
 import pytest
 import pytest_asyncio
 
@@ -34,6 +33,7 @@ from execution import (
 )
 import india_limits_support as ils
 from market_data.admission import RecordedQuoteReading
+from regime_testkit import bound_regime_fields, calm_probabilities, shipped_map
 from t212_practice_testkit import (
     PRACTICE_ACCOUNT,
     start_practice_stack,
@@ -120,6 +120,7 @@ class PaperHarness(Harness):
             simulator=__import__("simulation").PreFlightSimulator(),
             risk_gate=__import__("simulation").RiskSwarmGate(),
             require_runtime_preflight=True,
+            regime_severity_map=shipped_map(),
             india_guard=guard,
         )
         self.policy = AppState._local_preflight_policy_connection()
@@ -156,7 +157,7 @@ class PaperHarness(Harness):
             "price": "10",
             "tick_window": {"bid": [9.99], "ask": [10.01], "spread": [0.002]},
             "portfolio_state": {"equity": 1000.0, "peak_equity": 1000.0},
-            "regime_id": 0, "current_spread_pct": 0.002, "risk_db_connection": self.policy,
+            **bound_regime_fields(), "current_spread_pct": 0.002, "risk_db_connection": self.policy,
             "evidence_at": now,
         }
         if self.workspace == "india":
@@ -164,7 +165,7 @@ class PaperHarness(Harness):
         if kind == "stale":
             kwargs["evidence_at"] = now - timedelta(seconds=120)
         if kind == "missing":
-            for name in ("tick_window", "portfolio_state", "regime_id", "current_spread_pct"):
+            for name in ("tick_window", "portfolio_state", "regime_id", "regime_policy_hash", "regime_audit", "current_spread_pct"):
                 kwargs.pop(name)
         return self.service.prepare(self._proposal(proposal_id), currency=self.currency, **kwargs)
 
@@ -259,7 +260,7 @@ class PracticeHarness(Harness):
 
         self.monkeypatch.setattr(
             regime_module, "fast_gmm_predict_proba",
-            lambda feature, **params: np.array([1.0, 0.0, 0.0, 0.0]),
+            lambda feature, **params: calm_probabilities(),
         )
         self.stack = await start_practice_stack(
             self.tmp_path, self.private_dir, self.monkeypatch,
