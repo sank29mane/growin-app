@@ -16,12 +16,19 @@ from costs.core import ScheduleError, ScheduleNotEffective, Side, TradeFill
 from costs.schedule import PricingBasis, load_schedule_set
 
 D = Decimal
-VERSION = "icici-prime9999-ivalue-nse-cash-2024-10-01.r1"
+R1 = "icici-prime9999-ivalue-nse-cash-2024-10-01.r1"
+R2 = "icici-prime9999-ivalue-nse-cash-2024-10-02.r2"
 SCHEDULE_PATH = Path(__file__).resolve().parents[2] / "backend" / "costs" / "schedules" / "icici_nse_cash_charges.json"
 
 # Any change to the committed schedule needs a new version id and a new literal
 # here, in the same commit. A rate edit cannot land without a visible test change.
-EXPECTED_SCHEDULE_HASH = "aeb1a8c4f58fcf077d9a4e18e3e1b3fd5cd362cc7f228465d2fb5dbceb50a79f"
+# r1 changed hash once, when its window was closed at 2024-10-01 (no recorded run
+# used the open-ended r1); r1's rates are untouched.
+EXPECTED_SCHEDULE_HASHES = {
+    R1: "a3162a825532ff3da9da3b71b0f9de0ed44b52790ee7254f75400ae966c3f7cf",
+    R2: "681910bf1f587cc1a29fb0525ddc3e62b1643a047f362782e3c3dc48fb6a334f",
+}
+MATCHED_PREFIX = "matched to the operator's redacted contract notes within 0.05 per printed line on "
 
 
 def raw_document() -> dict:
@@ -34,24 +41,23 @@ def write_variant(tmp_path: Path, document: dict, name: str = "variant.json") ->
     return path
 
 
-def committed():
-    return load_schedule_set().versions[0]
+def committed(version: str = R1):
+    return load_schedule_set().get(version)
 
 
-def test_committed_file_loads_one_version_with_expected_scope():
+def test_committed_file_loads_two_versions_with_expected_scope():
     schedule_set = load_schedule_set()
-    assert len(schedule_set.versions) == 1
-    version = schedule_set.versions[0]
-    assert version.version == VERSION
-    assert version.effective_from == date(2024, 10, 1)
-    assert version.effective_to is None
-    assert (version.workspace, version.exchange, version.segment, version.currency) == (
-        "india", "NSE", "cash", "INR",
-    )
+    assert [v.version for v in schedule_set.versions] == [R1, R2]
+    r1, r2 = schedule_set.versions
+    assert (r1.effective_from, r1.effective_to) == (date(2024, 10, 1), date(2024, 10, 1))
+    assert (r2.effective_from, r2.effective_to) == (date(2024, 10, 2), None)
+    for version in (r1, r2):
+        assert (version.workspace, version.exchange, version.segment, version.currency) == (
+            "india", "NSE", "cash", "INR",
+        )
 
 
-def test_every_rate_matches_the_rates_table():
-    version = committed()
+def assert_shared_rates(version):
     assert version.brokerage.delivery_rate == D("0.0007")
     assert version.brokerage.delivery_min_per_order == D("0")
     assert version.brokerage.intraday_rate == D("0.0005")
@@ -60,17 +66,14 @@ def test_every_rate_matches_the_rates_table():
     assert version.statutory.stt_intraday_sell_rate == D("0.00025")
     assert version.statutory.stamp_delivery_buy_rate == D("0.00015")
     assert version.statutory.stamp_intraday_buy_rate == D("0.00003")
-    assert version.statutory.exchange_transaction_rate == D("0.0000297")
     assert version.statutory.sebi_fee_rate == D("0.000001")
     assert version.statutory.ipft_rate == D("0")
     assert version.gst.rate == D("0.18")
     assert version.gst.applies_to == ("brokerage", "exchange_transaction", "sebi_fee", "ipft")
-    assert version.gst.base == "rounded_lines"
     assert version.dp.charge_per_debit == D("20")
     assert version.dp.gst_applies is True
     assert version.dp.basis == "per_sell_order"
     assert version.rounding.default_quantum == D("0.01")
-    assert dict(version.rounding.line_quantum) == {}
     assert version.account_overhead.amc_annual_ex_gst == D("300")
     assert version.account_overhead.amc_gst_rate == D("0.18")
     assert [fee.item for fee in version.account_overhead.plan_fees] == [
@@ -79,16 +82,82 @@ def test_every_rate_matches_the_rates_table():
     assert version.excluded_from_delivery_model == ("shares_as_margin_interest",)
 
 
-def test_schedule_hash_is_pinned():
-    assert committed().schedule_hash == EXPECTED_SCHEDULE_HASH
+def test_r1_rates_are_the_published_rates_table_untouched():
+    version = committed(R1)
+    assert_shared_rates(version)
+    assert version.statutory.exchange_transaction_rate == D("0.0000297")
+    assert version.gst.base == "rounded_lines"
+    assert dict(version.rounding.line_quantum) == {}
+
+
+def test_r2_rates_differ_from_r1_only_by_the_three_calibrations():
+    version = committed(R2)
+    assert_shared_rates(version)
+    # exchange_transaction line: printed per-ISIN rows and the IPFT footnote prove the combined rate.
+    assert version.statutory.exchange_transaction_rate == D("0.0000307")
+    # gst line: the printed charges-GST component matches the unrounded exchange and SEBI base.
+    assert version.gst.base == "unrounded_lines"
+    # stt and stamp_duty lines: printed at the note total, rounded to the whole rupee.
+    assert dict(version.rounding.line_quantum) == {"stt": D("1"), "stamp_duty": D("1")}
+
+
+def test_schedule_hashes_are_pinned():
+    for version, expected in EXPECTED_SCHEDULE_HASHES.items():
+        assert committed(version).schedule_hash == expected, version
 
 
 def test_hash_ignores_whitespace_and_key_order(tmp_path):
     document = raw_document()
-    version = document["versions"][0]
-    reordered = {key: version[key] for key in reversed(list(version))}
-    path = write_variant(tmp_path, {"versions": [reordered], "schema": document["schema"]})
-    assert load_schedule_set(path).versions[0].schedule_hash == EXPECTED_SCHEDULE_HASH
+    reordered_versions = [{key: item[key] for key in reversed(list(item))} for item in document["versions"]]
+    path = write_variant(tmp_path, {"versions": reordered_versions, "schema": document["schema"]})
+    loaded = load_schedule_set(path)
+    for version, expected in EXPECTED_SCHEDULE_HASHES.items():
+        assert loaded.get(version).schedule_hash == expected
+
+
+def test_r2_status_is_matched_and_names_the_unconfirmed_items():
+    status = committed(R2).status
+    assert status.startswith(MATCHED_PREFIX)
+    date.fromisoformat(status[len(MATCHED_PREFIX):].split(";", 1)[0])
+    assert "; unconfirmed: " in status
+    assert status.endswith("intraday brokerage and same-day rules unconfirmed (no same-day note)")
+    assert "dp basis unconfirmed" in status
+    # The DP amount is operator-attested (no document), never marked confirmed.
+    assert "dp amount matches an operator-observed ledger debit (attested " in status
+    assert "no document)" in status
+    assert "unconfirmed (not printed)" in status
+
+
+def test_r1_is_closed_superseded_and_still_resolvable_when_pinned():
+    r1 = committed(R1)
+    assert r1.effective_to == date(2024, 10, 1)
+    assert f"superseded by {R2} from 2024-10-02" in r1.status
+    assert "kept for pinned replay" in r1.status
+    resolved = load_schedule_set().resolve(date(2026, 10, 6), PricingBasis.pinned(R1))
+    assert resolved.version == R1
+
+
+def test_date_lookup_across_the_r1_r2_boundary():
+    schedule_set = load_schedule_set()
+    assert schedule_set.for_date(date(2024, 10, 1)).version == R1
+    assert schedule_set.for_date(date(2024, 10, 2)).version == R2
+    assert schedule_set.for_date(date(2026, 10, 6)).version == R2
+    with pytest.raises(ScheduleNotEffective):
+        schedule_set.for_date(date(2024, 9, 30))
+
+
+def test_pinned_r1_replay_prices_with_the_r1_rates_after_the_split():
+    fills = [TradeFill("b", "INE0TEST0001", "NSE", Side.BUY, 70, D("100.00"), date(2026, 10, 5))]
+    schedule_set = load_schedule_set()
+    pinned = price_trade_day(
+        fills, schedule_set.get(R1), workspace="india", currency="INR", pricing_basis=PricingBasis.pinned(R1)
+    )
+    current = price_trade_day(
+        fills, schedule_set.for_date(date(2026, 10, 5)), workspace="india", currency="INR",
+        pricing_basis=PricingBasis.trade_date(),
+    )
+    assert pinned.schedule_version == R1 and current.schedule_version == R2
+    assert pinned.line("stamp_duty") == D("1.05") and current.line("stamp_duty") == D("1")
 
 
 # ---- strict validation -------------------------------------------------------
@@ -260,15 +329,15 @@ def test_trade_date_basis_before_first_version_raises():
 
 def test_pinned_basis_resolves_outside_coverage_and_is_recorded():
     schedule_set = load_schedule_set()
-    basis = PricingBasis.pinned(VERSION)
+    basis = PricingBasis.pinned(R1)
     schedule = schedule_set.resolve(date(2022, 6, 1), basis)
-    assert schedule.version == VERSION
+    assert schedule.version == R1
     estimate = price_trade_day(
         one_sell(date(2022, 6, 1)), schedule, workspace="india", currency="INR", pricing_basis=basis
     )
     assert estimate.pricing_basis.mode == "pinned"
-    assert estimate.pricing_basis.pinned_version == VERSION
-    assert estimate.schedule_version == VERSION
+    assert estimate.pricing_basis.pinned_version == R1
+    assert estimate.schedule_version == R1
     assert estimate.total == D("36.64")
 
 
@@ -277,7 +346,7 @@ def test_pinned_basis_changes_the_estimate_hash():
     fills = one_sell(date(2026, 10, 6))
     schedule = schedule_set.for_date(date(2026, 10, 6))
     by_date = price_trade_day(fills, schedule, workspace="india", currency="INR", pricing_basis=PricingBasis.trade_date())
-    pinned = price_trade_day(fills, schedule, workspace="india", currency="INR", pricing_basis=PricingBasis.pinned(VERSION))
+    pinned = price_trade_day(fills, schedule, workspace="india", currency="INR", pricing_basis=PricingBasis.pinned(R2))
     assert by_date.total == pinned.total
     assert by_date.estimate_hash != pinned.estimate_hash
 
@@ -288,7 +357,7 @@ def test_pinned_to_unknown_version_raises():
 
 
 def test_price_trade_day_rejects_a_trade_date_basis_outside_coverage():
-    schedule = committed()
+    schedule = committed(R2)
     with pytest.raises(ScheduleNotEffective):
         price_trade_day(
             one_sell(date(2022, 6, 1)), schedule, workspace="india", currency="INR",
@@ -296,5 +365,6 @@ def test_price_trade_day_rejects_a_trade_date_basis_outside_coverage():
         )
 
 
-def test_hash_literal_looks_like_sha256():
-    assert re.fullmatch(r"[0-9a-f]{64}", EXPECTED_SCHEDULE_HASH)
+def test_hash_literals_look_like_sha256():
+    for literal in EXPECTED_SCHEDULE_HASHES.values():
+        assert re.fullmatch(r"[0-9a-f]{64}", literal)

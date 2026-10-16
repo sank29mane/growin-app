@@ -48,7 +48,7 @@ OTHER = "INE111B01023"
 # Pinned sha256 of backend/costs/schedules/icici_nse_cash_charges.json at the time
 # CHARGE_RATE_BOUND, CHARGE_ROUNDING_BOUND and CHARGE_SELL_FIXED_BOUND were derived.
 # If the schedule changes, this fails until the bound is re-derived and this pin moves.
-CHARGE_SCHEDULE_SHA256 = "92b988208488fb0a60eb14e1ce1760af634bc29c3c482bb740aa4b059797792d"
+CHARGE_SCHEDULE_SHA256 = "e0440f7f7b214927db7a137da8195316cdeebd844c6d5546f00112adf9abf2ea"
 
 
 def _trade(spec: dict) -> Trade:
@@ -585,6 +585,9 @@ GRID = [
     (1, "1"), (1, "10"), (3, "33.33"), (7, "100.05"), (10, "100"), (10, "499.95"), (100, "500"),
     (25, "1999.95"), (10, "5000"), (4, "12345.65"), (1, "17500"), (100, "500.05"), (1000, "50"),
     (2000, "25"), (100000, "0.5"),
+    # r2 rounds STT and stamp duty to the whole rupee: these values sit where either line rounds
+    # up by close to half a rupee, alone or together (the r1 bound of 0.10 does not cover them).
+    (1, "500.02"), (1, "3500"), (1, "3333.34"), (1, "1500"), (1, "666.68"),
 ]
 
 

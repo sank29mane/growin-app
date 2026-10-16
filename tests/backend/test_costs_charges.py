@@ -36,16 +36,19 @@ def fill(order_id, side, quantity, price, *, isin=ISIN, exchange="NSE", day=DAY)
     return TradeFill(order_id, isin, exchange, side, quantity, D(price), day)
 
 
+VERSION = "icici-prime9999-ivalue-nse-cash-2024-10-02.r2"
+
+
 def committed_schedule():
-    return load_schedule_set().versions[0]
+    return load_schedule_set().get(VERSION)
 
 
 def variant_schedule(tmp_path, edit):
     document = json.loads(SCHEDULE_PATH.read_text(encoding="utf-8"))
-    edit(document["versions"][0])
+    edit(next(v for v in document["versions"] if v["version"] == VERSION))
     path = tmp_path / "variant.json"
     path.write_text(json.dumps(document), encoding="utf-8")
-    return load_schedule_set(path).versions[0]
+    return load_schedule_set(path).get(VERSION)
 
 
 def price(fills, schedule=None):
@@ -79,8 +82,8 @@ def test_net_zero_same_day_is_intraday():
     estimate = price([fill("nz-b", Side.BUY, 70, "100.00"), fill("nz-s", Side.SELL, 70, "101.00")])
     assert classes(estimate) == {"nz-b": ("intraday", D("3.50")), "nz-s": ("intraday", D("3.54"))}
     assert estimate.line("brokerage") == D("7.04")
-    assert lines_of(estimate) == expected("7.04", "0.42", "0.01", "0.00", "1.34", "1.77", "0.21", "0.00", "0.00")
-    assert estimate.total == D("10.79")
+    assert lines_of(estimate) == expected("7.04", "0.43", "0.01", "0.00", "1.35", "2", "0", "0.00", "0.00")
+    assert estimate.total == D("10.83")
     assert estimate.dp_debits == 0
     assert estimate.provisional_flags == ()
 
@@ -88,8 +91,8 @@ def test_net_zero_same_day_is_intraday():
 def test_intraday_brokerage_is_capped_at_twenty_rupees_per_order():
     estimate = price([fill("c-b", Side.BUY, 500, "100.00"), fill("c-s", Side.SELL, 500, "100.00")])
     assert classes(estimate) == {"c-b": ("intraday", D("20.00")), "c-s": ("intraday", D("20.00"))}
-    assert lines_of(estimate) == expected("40.00", "2.97", "0.10", "0.00", "7.75", "12.50", "1.50", "0.00", "0.00")
-    assert estimate.total == D("64.82")
+    assert lines_of(estimate) == expected("40.00", "3.07", "0.10", "0.00", "7.77", "13", "2", "0.00", "0.00")
+    assert estimate.total == D("65.94")
 
 
 PARTIAL_BUY = [fill("pb-b", Side.BUY, 100, "100.00"), fill("pb-s", Side.SELL, 60, "101.00")]
@@ -102,8 +105,8 @@ def test_partial_square_off_buy_leg_larger():
         "pb-b": ("delivery", D("7.00")),
         "pb-s": ("squared_off_no_brokerage", D("0.00")),
     }
-    assert lines_of(estimate) == expected("7.00", "0.48", "0.02", "0.00", "1.35", "5.52", "0.78", "0.00", "0.00")
-    assert estimate.total == D("15.15")
+    assert lines_of(estimate) == expected("7.00", "0.49", "0.02", "0.00", "1.35", "6", "1", "0.00", "0.00")
+    assert estimate.total == D("15.86")
 
 
 def test_partial_square_off_sell_leg_larger():
@@ -112,8 +115,8 @@ def test_partial_square_off_sell_leg_larger():
         "ps-s": ("delivery", D("7.00")),
         "ps-b": ("squared_off_no_brokerage", D("0.00")),
     }
-    assert lines_of(estimate) == expected("7.00", "0.47", "0.02", "0.00", "1.35", "5.50", "0.18", "20.00", "3.60")
-    assert estimate.total == D("38.12")
+    assert lines_of(estimate) == expected("7.00", "0.49", "0.02", "0.00", "1.35", "6", "0", "20.00", "3.60")
+    assert estimate.total == D("38.46")
 
 
 def test_partial_square_off_statutory_is_provisional():
@@ -191,16 +194,16 @@ def test_dp_basis_per_isin_per_day(tmp_path):
 
 def test_rounding_quantum_override(tmp_path):
     buy = [fill("b", Side.BUY, 76, "100.00")]
-    assert price(buy).line("stt") == D("7.60")
-    schedule = variant_schedule(tmp_path, lambda v: v["rounding"].update(line_quantum={"stt": "1"}))
-    assert price(buy, schedule).line("stt") == D("8")
+    assert price(buy).line("stt") == D("8")
+    schedule = variant_schedule(tmp_path, lambda v: v["rounding"].update(line_quantum={}))
+    assert price(buy, schedule).line("stt") == D("7.60")
 
 
 def test_gst_base_rounded_versus_unrounded(tmp_path):
     buy = [fill("b", Side.BUY, 27, "100.00")]
-    assert price(buy).line("gst") == D("0.35")
-    schedule = variant_schedule(tmp_path, lambda v: v["gst"].update(base="unrounded_lines"))
-    assert price(buy, schedule).line("gst") == D("0.36")
+    assert price(buy).line("gst") == D("0.36")
+    schedule = variant_schedule(tmp_path, lambda v: v["gst"].update(base="rounded_lines"))
+    assert price(buy, schedule).line("gst") == D("0.35")
 
 
 def test_errors():

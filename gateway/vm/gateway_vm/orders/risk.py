@@ -49,15 +49,17 @@ SESSION_END = time(15, 30)
 # P-07: conservative per-fill bound on charges, derived from the Phase 60
 # schedule icici_nse_cash_charges.json (delivery, the costliest class). Worst
 # rates per rupee of traded value, with GST on brokerage, exchange and SEBI
-# lines: buy about 0.2012%, sell about 0.1862%. The rate below rounds up to
+# lines: buy about 0.2013%, sell about 0.1863%. The rate below rounds up to
 # 0.25%. A sell also pays one DP debit (20 plus 18% GST = 23.60), bounded by
-# the fixed amount, which also covers per-line rounding on every fill.
+# the fixed amount. The r2 schedule rounds STT and stamp duty to the whole
+# rupee, so one fill can round up by close to 1.00 across those two lines, plus
+# a few paise on the other lines: the rounding bound is 1.10.
 # tests/backend/test_gateway_orders_state.py recomputes the schedule's real
 # charges and fails if this is zero, below any row, or if the schedule file
 # changes without the bound being re-derived.
-CHARGE_BOUND_SCHEDULE_VERSION = "icici-prime9999-ivalue-nse-cash-2024-10-01.r1"
+CHARGE_BOUND_SCHEDULE_VERSION = "icici-prime9999-ivalue-nse-cash-2024-10-02.r2"
 CHARGE_RATE_BOUND = Decimal("0.0025")
-CHARGE_ROUNDING_BOUND = Decimal("0.10")
+CHARGE_ROUNDING_BOUND = Decimal("1.10")
 CHARGE_SELL_FIXED_BOUND = Decimal("25")
 
 LATCH_NAMES = ("halt", "ended", "mac_halt", "account_mismatch", "stop")
