@@ -36,7 +36,7 @@ struct KeychainScopeTests {
     @Test func policyTableMatchesOperatorDecision() {
         let shared: [CredentialName] = [.openaiApiKey, .geminiApiKey, .finnhubApiKey, .newsApiKey, .tavilyApiKey]
         let uk: [CredentialName] = [
-            .trading212ApiKey, .trading212ApiSecret, .trading212IsaApiKey, .trading212IsaApiSecret,
+            .trading212IsaApiKey, .trading212IsaApiSecret,
             .t212InvestKey, .t212InvestSecret, .t212IsaKey, .t212IsaSecret,
             .alpacaApiKey, .alpacaSecretKey,
         ]
@@ -54,21 +54,21 @@ struct KeychainScopeTests {
         let (store, service) = Self.makeStore()
         defer { Self.cleanUp(store) }
         Self.requireKeychain {
-            try store.set("uk-secret", for: .trading212ApiKey, scope: .workspace(.uk))
-            #expect(try store.string(for: .trading212ApiKey, scope: .workspace(.uk)) == "uk-secret")
+            try store.set("uk-secret", for: .alpacaApiKey, scope: .workspace(.uk))
+            #expect(try store.string(for: .alpacaApiKey, scope: .workspace(.uk)) == "uk-secret")
 
             #expect(throws: KeychainStoreError.self) {
-                _ = try store.string(for: .trading212ApiKey, scope: .workspace(.india))
+                _ = try store.string(for: .alpacaApiKey, scope: .workspace(.india))
             }
             #expect(throws: KeychainStoreError.self) {
-                try store.set("x", for: .trading212ApiKey, scope: .workspace(.india))
+                try store.set("x", for: .alpacaApiKey, scope: .workspace(.india))
             }
             #expect(throws: KeychainStoreError.self) {
-                _ = try store.data(for: .trading212ApiKey, scope: .shared)
+                _ = try store.data(for: .alpacaApiKey, scope: .shared)
             }
             // The raw india: account does not exist in the real Keychain.
-            #expect(try RawKeychain(service: service).data(account: "india:trading212ApiKey") == nil)
-            #expect(try RawKeychain(service: service).data(account: "uk:trading212ApiKey") != nil)
+            #expect(try RawKeychain(service: service).data(account: "india:alpacaApiKey") == nil)
+            #expect(try RawKeychain(service: service).data(account: "uk:alpacaApiKey") != nil)
         }
     }
 
@@ -211,7 +211,7 @@ struct KeychainScopeTests {
                 }
                 if line.contains("KeychainStore.shared.") && !line.contains("scope:") {
                     let isSigner = path == "Growin/Security/LocalApprovalSigner.swift"
-                    let isLaunchMigration = path == "Growin/GrowinApp.swift" && line.contains("migrate")
+                    let isLaunchMigration = path == "Growin/Security/LaunchMigrations.swift" && line.contains("migrate")
                     if !isSigner && !isLaunchMigration {
                         unscoped.append(location)
                     }

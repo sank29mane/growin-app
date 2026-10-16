@@ -24,6 +24,11 @@ struct RawKeychain {
         guard status == errSecSuccess else { throw KeychainStoreError.status(status) }
     }
 
+    /// Removes one raw account from the (test-only) service. Used by test cleanup.
+    func remove(account: String) {
+        SecItemDelete(query(account) as CFDictionary)
+    }
+
     func data(account: String) throws -> Data? {
         var item = query(account)
         item[kSecReturnData as String] = true
