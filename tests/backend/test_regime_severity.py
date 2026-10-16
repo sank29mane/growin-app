@@ -788,3 +788,97 @@ async def test_a_failed_swap_or_inference_error_invalidates_the_regime_until_the
         assert decision.approved is True and dispatched
     finally:
         connection.close()
+
+
+async def _preflight_buy(loop):
+    """Run one BUY pre-flight against the loop's current regime; returns (decision, dispatched)."""
+
+    connection = build_scaling_policy_connection(loop.severity_map)
+    dispatched = []
+
+    async def dispatch(size, price):
+        dispatched.append(size)
+        return {"actual_fill_price": price}
+
+    try:
+        decision = await loop.execute_order_pre_flight(
+            "BUY", 10.0, {"bid": [99.9] * 5, "ask": [100.1] * 5, "spread": [0.002] * 5},
+            {"equity": 1000.0, "peak_equity": 1000.0}, connection, dispatch,
+        )
+    finally:
+        connection.close()
+    return decision, dispatched
+
+
+@pytest.mark.parametrize(
+    "bad_tick",
+    [(None, 100.1, 99.9), (100.0, None, 99.9), (100.0, 100.1, None), (100.0, "n/a", 99.9)],
+    ids=["no_mid", "no_ask", "no_bid", "unparseable_ask"],
+)
+@pytest.mark.asyncio
+async def test_a_tick_that_breaks_the_feature_update_invalidates_a_warm_regime(bad_tick, tmp_path):
+    """Codex r1 P1: the feature updates sat outside the try. After a calm regime had warmed up,
+    ``process_tick(None, 100.1, 99.9)`` raised and the regime stayed at 3 with leverage 0.98,
+    so the next pre-flight approved and dispatched 10 of 10. Any failure now invalidates it."""
+
+    from backend.trading_loop import LiveTradingLoop
+
+    manager = _StubManager()
+    loop = LiveTradingLoop(manager, shipped_params(), telemetry_db_path=str(tmp_path / "t.db"))
+    ticks = _tick_stream()
+    for tick in ticks[:40]:
+        loop.process_tick(*tick)
+    assert loop.current_regime != -1 and loop.risk_leverage_coefficient > 0.0
+    decision, dispatched = await _preflight_buy(loop)
+    assert decision.approved is True and dispatched, "control: the warm regime sizes and dispatches"
+
+    result = loop.process_tick(*bad_tick)  # must not raise
+    assert result["regime_valid"] is False and result["dominant_regime"] == -1
+    assert loop.current_regime == -1 and loop.requoter.current_regime == -1
+    assert loop.risk_leverage_coefficient == 0.0 and result["risk_leverage_coefficient"] == 0.0
+
+    decision, dispatched = await _preflight_buy(loop)
+    assert decision.approved is False and decision.regime_id == -1 and decision.scaled_size == 0.0
+    assert dispatched == [], "a stale regime must not size or dispatch the order"
+
+    # The next good tick classifies again.
+    for tick in ticks[41:46]:
+        loop.process_tick(*tick)
+    assert loop.current_regime != -1 and loop.risk_leverage_coefficient > 0.0
+
+
+class _HostileCodeError(Exception):
+    """An exception whose ``code`` property itself raises when read."""
+
+    @property
+    def code(self):
+        raise RuntimeError("code is unreadable")
+
+
+@pytest.mark.asyncio
+async def test_an_exception_whose_code_property_raises_still_invalidates_the_regime(tmp_path, monkeypatch):
+    """Codex r1 P2: the handler read ``exc.code`` before invalidating, so a hostile ``code``
+    escaped it and the stale regime stayed usable. Invalidation now comes first."""
+
+    import backend.trading_loop as loop_module
+    from backend.trading_loop import LiveTradingLoop
+
+    manager = _StubManager()
+    loop = LiveTradingLoop(manager, shipped_params(), telemetry_db_path=str(tmp_path / "t.db"))
+    ticks = _tick_stream()
+    for tick in ticks[:40]:
+        loop.process_tick(*tick)
+    assert loop.current_regime != -1 and loop.risk_leverage_coefficient > 0.0
+
+    def hostile(*args, **kwargs):
+        raise _HostileCodeError("inference failed")
+
+    monkeypatch.setattr(loop_module, "fast_gmm_predict_proba", hostile)
+    result = loop.process_tick(*ticks[41])  # must not raise
+    assert result["regime_valid"] is False and result["dominant_regime"] == -1
+    assert result["invalid_reason"] == "_HostileCodeError"
+    assert loop.current_regime == -1 and loop.requoter.current_regime == -1
+    assert loop.risk_leverage_coefficient == 0.0
+
+    decision, dispatched = await _preflight_buy(loop)
+    assert decision.approved is False and dispatched == []

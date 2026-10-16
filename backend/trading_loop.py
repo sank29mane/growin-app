@@ -40,6 +40,18 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+def _failure_reason(exc: BaseException) -> str:
+    """A stable label for a pipeline failure; never raises, even if ``exc.code`` does."""
+
+    try:
+        code = getattr(exc, "code", None)
+        if isinstance(code, str) and code:
+            return code
+    except Exception:  # noqa: BLE001 - a hostile ``code`` property must not escape
+        pass
+    return type(exc).__name__
+
+
 class LiveTradingLoop:
     """
     Main live integration loop component coordinating market tick ingestion,
@@ -158,26 +170,33 @@ class LiveTradingLoop:
         Returns:
             dict: Pipeline telemetry for verification and monitoring
         """
-        # 1. Dynamically compute relative spreads and running EMA volatility
-        vol = self.vol_tracker.update(mid_price)
-        spread = self.spread_tracker.update(bid, ask)
-        
-        # 2. Run Z-score scaling using Welford parameters (accumulate running stats)
-        self.vol_standardizer.update(vol)
-        self.spread_standardizer.update(spread)
-        
-        # Prepare 1D feature array
-        x = np.array([vol, spread], dtype=np.float64)
-        
-        # Construct scaling mean and var arrays. Force minimum variance of 1e-12 to prevent div by zero.
-        scaler_mean = np.array([self.vol_standardizer.mean, self.spread_standardizer.mean], dtype=np.float64)
-        scaler_var = np.array([
-            max(self.vol_standardizer.variance, 1e-12),
-            max(self.spread_standardizer.variance, 1e-12)
-        ], dtype=np.float64)
-        
-        # 3. Run Numba fast GMM probability predictor
+        # The whole classification pipeline (feature updates, posterior, adapter lookups, swap
+        # and leverage) sits in one try. A tick that cannot be turned into a regime (a missing
+        # price, a bad posterior, an unreadable adapter slot) leaves no usable classification,
+        # so any exception invalidates the regime. Without this the previous regime and its
+        # leverage stayed in place and later orders were sized by a stale classification.
+        vol: Optional[float] = None
+        spread: Optional[float] = None
         try:
+            # 1. Dynamically compute relative spreads and running EMA volatility
+            vol = self.vol_tracker.update(mid_price)
+            spread = self.spread_tracker.update(bid, ask)
+
+            # 2. Run Z-score scaling using Welford parameters (accumulate running stats)
+            self.vol_standardizer.update(vol)
+            self.spread_standardizer.update(spread)
+
+            # Prepare 1D feature array
+            x = np.array([vol, spread], dtype=np.float64)
+
+            # Construct scaling mean and var arrays. Force minimum variance of 1e-12 to prevent div by zero.
+            scaler_mean = np.array([self.vol_standardizer.mean, self.spread_standardizer.mean], dtype=np.float64)
+            scaler_var = np.array([
+                max(self.vol_standardizer.variance, 1e-12),
+                max(self.spread_standardizer.variance, 1e-12)
+            ], dtype=np.float64)
+
+            # 3. Run Numba fast GMM probability predictor
             probabilities = fast_gmm_predict_proba(
                 x,
                 self.weights,
@@ -186,67 +205,76 @@ class LiveTradingLoop:
                 scaler_mean,
                 scaler_var
             )
+            # A NaN or malformed posterior has an argmax of 0, which would silently pick
+            # whichever component is numbered 0, so it is validated before it is read.
             probabilities = validate_posterior(probabilities, self.severity_map.component_count)
             dominant_regime = int(np.argmax(probabilities))
             # The adapter follows the component's severity rank (K=4 GMM, 3 adapters: the two
-            # most severe ranks share the last adapter), never the raw component id. These
-            # lookups sit inside the try on purpose: a manager with no readable slots or a
-            # severity map that cannot place the component leaves no usable regime.
+            # most severe ranks share the last adapter), never the raw component id.
             available_adapters = list(self.model_manager.preloaded_weights.keys())
             adapter_id = self.severity_map.adapter_id(dominant_regime, available_adapters)
-        except Exception as exc:  # noqa: BLE001 - any inference failure invalidates the regime
-            # A failed inference leaves no current classification, and a NaN or malformed
-            # posterior has an argmax of 0, which would silently pick whichever component is
-            # numbered 0. A failed adapter lookup is the same: the regime cannot be bound to a
-            # slot. Either way the regime is invalidated: nothing is sized or dispatched
-            # until a later tick classifies successfully.
-            return self._invalidate_regime(vol, spread, getattr(exc, "code", type(exc).__name__))
 
-        # 4. Trigger the MLX adapter hot-swapper when a regime change is identified
-        regime_changed = False
-        if dominant_regime != self.current_regime:
-            try:
-                swap_success = bool(self.model_manager.swap_adapter(adapter_id))
-            except Exception as exc:  # noqa: BLE001 - a failing adapter swap is a failed swap
-                logger.error(f"Adapter swap raised {type(exc).__name__} for regime {dominant_regime}")
-                swap_success = False
-            if swap_success:
-                self.current_regime = dominant_regime
-                self.requoter.current_regime = dominant_regime
-                regime_changed = True
-            else:
-                # The new regime is known but its adapter is not in place. Keeping the previous
-                # (possibly calmer) regime would size orders for the wrong market, so the
-                # regime is invalidated instead.
-                logger.error(f"Failed to hot-swap model adapter to {adapter_id} for regime {dominant_regime}")
-                return self._invalidate_regime(vol, spread, "ADAPTER_SWAP_FAILED")
-                
-        # 5. Apply profitability constraints: scale risk leverage based on regime probabilities
-        self.risk_leverage_coefficient = float(
-            sum(
-                probabilities[k] * self.leverage_coefficients[k]
-                for k in range(len(probabilities))
+            # 4. Trigger the MLX adapter hot-swapper when a regime change is identified
+            regime_changed = False
+            if dominant_regime != self.current_regime:
+                try:
+                    swap_success = bool(self.model_manager.swap_adapter(adapter_id))
+                except Exception as exc:  # noqa: BLE001 - a failing adapter swap is a failed swap
+                    logger.error(f"Adapter swap raised {type(exc).__name__} for regime {dominant_regime}")
+                    swap_success = False
+                if swap_success:
+                    self.current_regime = dominant_regime
+                    self.requoter.current_regime = dominant_regime
+                    regime_changed = True
+                else:
+                    # The new regime is known but its adapter is not in place. Keeping the previous
+                    # (possibly calmer) regime would size orders for the wrong market, so the
+                    # regime is invalidated instead.
+                    logger.error(f"Failed to hot-swap model adapter to {adapter_id} for regime {dominant_regime}")
+                    return self._invalidate_regime(vol, spread, "ADAPTER_SWAP_FAILED")
+
+            # 5. Apply profitability constraints: scale risk leverage based on regime probabilities
+            self.risk_leverage_coefficient = float(
+                sum(
+                    probabilities[k] * self.leverage_coefficients[k]
+                    for k in range(len(probabilities))
+                )
             )
-        )
-        
-        return {
-            "volatility": vol,
-            "spread": spread,
-            "probabilities": probabilities.tolist(),
-            "dominant_regime": dominant_regime,
-            "regime_changed": regime_changed,
-            "regime_valid": True,
-            "risk_leverage_coefficient": self.risk_leverage_coefficient,
-            "active_adapter_id": adapter_id
-        }
 
-    def _invalidate_regime(self, vol: float, spread: float, reason: str) -> Dict[str, Any]:
-        """No usable regime: block sizing and dispatch until the next successful classification."""
+            return {
+                "volatility": vol,
+                "spread": spread,
+                "probabilities": probabilities.tolist(),
+                "dominant_regime": dominant_regime,
+                "regime_changed": regime_changed,
+                "regime_valid": True,
+                "risk_leverage_coefficient": self.risk_leverage_coefficient,
+                "active_adapter_id": adapter_id
+            }
+        except Exception as exc:  # noqa: BLE001 - any pipeline failure invalidates the regime
+            # Invalidate first. Naming the reason can itself fail (an exception whose ``code``
+            # raises), and that must never leave the stale regime usable.
+            return self._invalidate_regime(vol, spread, exc)
 
-        logger.error(f"Regime invalidated ({reason}); orders are blocked until the next good classification.")
+    def _invalidate_regime(
+        self, vol: Optional[float], spread: Optional[float], reason: "str | BaseException"
+    ) -> Dict[str, Any]:
+        """No usable regime: block sizing and dispatch until the next successful classification.
+
+        The state is cleared before anything else, and nothing after it may raise: naming an
+        exception (its ``code`` property) or logging can fail, and a failure there must not
+        leave the previous regime in place.
+        """
+
         self.current_regime = -1
         self.requoter.current_regime = -1
         self.risk_leverage_coefficient = 0.0
+        if isinstance(reason, BaseException):
+            reason = _failure_reason(reason)
+        try:
+            logger.error(f"Regime invalidated ({reason}); orders are blocked until the next good classification.")
+        except Exception:  # noqa: BLE001 - the regime is already invalid; logging cannot undo that
+            pass
         return {
             "volatility": vol,
             "spread": spread,
