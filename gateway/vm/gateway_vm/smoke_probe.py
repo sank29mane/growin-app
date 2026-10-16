@@ -9,8 +9,15 @@ The result file holds booleans, counts, formats and public market data only.
 Before writing, every secret value is searched for in the serialized result in
 raw, URL-encoded and base64 form; a hit writes nothing and exits 4.
 
+S1 compares the user id typed by the operator with the one Breeze returns,
+exactly. ICICI logins can be a mobile number while Breeze returns an internal
+code, so on a mismatch the probe prints a masked hint and the account name to
+the terminal only and asks the operator to confirm the account (trust on first
+use, default deny). The hint, the returned id and the name never enter the
+result; only the boolean userid_confirmed_by_operator does.
+
 Exit codes: 0 ok, 2 no TTY or bad args, 3 egress failed, 4 redaction
-self-check failed, 5 S1 failed.
+self-check failed, 5 S1 failed (no match and no operator confirmation).
 """
 
 from __future__ import annotations
@@ -47,7 +54,7 @@ from .transport import HttpClientTransport, SystemClock
 
 RESULT_SCHEMA = "growin.smoke.breeze.v1"
 RESULT_FILENAME = "61-smoke-breeze.json"
-PROBE_VERSION = "61-01"
+PROBE_VERSION = "61-01b"
 DEFAULT_OUT = "/dev/shm/growin-probe/out"
 MAX_CALLS = 20
 ALL_STEPS = ("S0", "S1", "S2", "S3", "S4", "S5")
@@ -62,10 +69,25 @@ INSTRUCTION = (
 _IST = timezone(timedelta(hours=5, minutes=30))
 _LASTLOGIN_FORMATS = ("%d-%b-%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%d/%m/%Y %H:%M:%S")
 _ALLOWED_SEGMENTS = ("Trading", "Equity", "Derivatives", "Currency")
+# Shapes of the CustomerDetails metadata copied into the result. Anything else is
+# dropped, so a hostile or malformed 200 cannot smuggle text (such as the masked
+# id or the account name) into the result file.
+_EXG_STATUS_RE = re.compile(r"^[A-Z]{1,3}$")
+_EXG_DATE_RES = (
+    re.compile(r"^\d{2}-[A-Za-z]{3}-\d{4}$"),
+    re.compile(r"^\d{4}-\d{2}-\d{2}$"),
+    re.compile(r"^\d{2}/\d{2}/\d{4}$"),
+)
+_SUCCESS_KEY_RE = re.compile(r"^[A-Za-z_]{1,40}$")
 
 
 class RedactionError(Exception):
     """A secret value was found in the serialized result; nothing was written."""
+
+
+def _deny_confirm(_hint: str) -> bool:
+    """Default for Prompts.confirm_account: fail closed."""
+    return False
 
 
 @dataclass(frozen=True)
@@ -75,6 +97,16 @@ class Prompts:
     expected_userid: Callable[[], str]
     expected_ip: Callable[[], str]
     api_session: Callable[[], str]
+    confirm_account: Callable[[str], bool] = _deny_confirm
+
+
+def _confirm_account_prompt(_hint: str) -> bool:
+    """True only for an explicit "yes"; EOF, Ctrl-C or anything else is a no."""
+    try:
+        answer = input("Is this YOUR ICICI account (name and hint above)? Type yes to continue: ")
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return answer.strip().lower() == "yes"
 
 
 def default_prompts() -> Prompts:
@@ -85,6 +117,7 @@ def default_prompts() -> Prompts:
         expected_userid=lambda: getpass.getpass("Expected ICICI user id (hidden): "),
         expected_ip=lambda: getpass.getpass("Expected egress IP (hidden): "),
         api_session=lambda: getpass.getpass("API_Session (hidden): "),
+        confirm_account=_confirm_account_prompt,
     )
 
 
@@ -142,6 +175,8 @@ class _State:
     app_key: str
     secret_key: str
     expected_userid: str
+    out: Callable[[str], None] = print
+    confirm_account: Callable[[str], bool] = _deny_confirm
     api_session: str = ""
     token: str = ""
     secrets: list[str] = field(default_factory=list)
@@ -195,6 +230,95 @@ def _charset(code: str) -> str:
     return "other"
 
 
+def _charset_detail(code: str) -> str:
+    """Like _charset, but splits alnum by letter case. Shape only, no values."""
+    base = _charset(code)
+    if base != "alnum":
+        return base
+    letters = [c for c in code if c.isalpha()]
+    if all(c.isupper() for c in letters):
+        return "alnum_upper"
+    if all(c.islower() for c in letters):
+        return "alnum_lower"
+    return "alnum_mixed"
+
+
+def _printable(text: str) -> str:
+    return "".join(c if c.isprintable() else "?" for c in text)
+
+
+def _mask_userid(value: str) -> str:
+    """First two and last two characters from length 6; nothing shorter."""
+    if len(value) < 6:
+        return ""
+    return _printable(value[:2]) + "*" * (len(value) - 4) + _printable(value[-2:])
+
+
+def _name_hint(raw: object) -> str:
+    """First name token in full, later tokens as an initial and a dot."""
+    if not isinstance(raw, str):
+        return "unavailable"
+    tokens = raw.split()
+    if not tokens:
+        return "unavailable"
+    first = _printable(tokens[0])[:40]
+    return " ".join([first] + [_printable(t[0]) + "." for t in tokens[1:]])
+
+
+def _first_name_tokens(raw: object) -> list[str]:
+    """The first name token as sent and as displayed (they differ if sanitised)."""
+    if not isinstance(raw, str) or not raw.split():
+        return []
+    token = raw.split()[0]
+    return [token] if _printable(token)[:40] == token else [token, _printable(token)[:40]]
+
+
+def _mismatch_hint(returned: str, name: object, typed: str) -> str:
+    return (
+        f"S1 user id mismatch: Breeze returned len={len(returned)} "
+        f"charset={_charset_detail(returned)} hint={_mask_userid(returned) or 'none'} "
+        f"name={_name_hint(name)}; you typed len={len(typed)} charset={_charset(typed)}"
+    )
+
+
+def _identity_values(userid: str, user_name: str | None) -> frozenset[str]:
+    """Casefolded returned id and name tokens. Redaction ignores values under four
+    characters, so these are matched by equality instead, at any length."""
+    values = {userid.strip().casefold()}
+    if isinstance(user_name, str):
+        values.update(tok.casefold() for tok in user_name.split())
+    values.discard("")
+    return frozenset(values)
+
+
+def _is_identity(value: object, forbidden: frozenset[str]) -> bool:
+    return isinstance(value, str) and value.strip().casefold() in forbidden
+
+
+def _constrain_s1_metadata(
+    status: str | None,
+    trade_date: str | None,
+    keys: Sequence[str],
+    forbidden: frozenset[str] = frozenset(),
+) -> tuple[str | None, str | None, list[str], bool]:
+    """Keep only expected shapes that are not the returned id or a name token; the
+    last item says whether anything was dropped."""
+    dropped = False
+    if status is not None and (
+        not _EXG_STATUS_RE.match(status) or _is_identity(status, forbidden)
+    ):
+        status, dropped = None, True
+    if trade_date is not None and (
+        not any(rx.match(trade_date) for rx in _EXG_DATE_RES)
+        or _is_identity(trade_date, forbidden)
+    ):
+        trade_date, dropped = None, True
+    kept = [k for k in keys if _SUCCESS_KEY_RE.match(k) and not _is_identity(k, forbidden)]
+    if len(kept) != len(keys):
+        dropped = True
+    return status, trade_date, kept, dropped
+
+
 def _token_is_b64_pair(token: str) -> bool:
     try:
         text = base64.b64decode(token + "=" * (-len(token) % 4)).decode("utf-8")
@@ -234,6 +358,7 @@ def _s1_defaults(api_session: str) -> dict:
         "error_class": None,
         "success_keys": [],
         "userid_matches": False,
+        "userid_confirmed_by_operator": False,
         "segments": {},
         "code_length": len(api_session),
         "code_charset": _charset(api_session),
@@ -268,20 +393,63 @@ def _step_s1(st: _State) -> dict:
         out["error_class"] = "other"
         return out
     st.secrets.append(details.session_token)
+    st.secrets.append(details.userid)
+    if details.user_name:
+        st.secrets.append(details.user_name)
     st.token = details.session_token
-    out["success_keys"] = list(details.success_keys)
+    # Everything the hint can show is a secret from here on, before any field is
+    # copied into the result, so the final redaction check covers it too.
+    hint = _mismatch_hint(details.userid, details.user_name, st.expected_userid)
+    name_hint = _name_hint(details.user_name)
+    st.secrets.append(hint)
+    st.secrets.extend(
+        v
+        for v in (
+            _mask_userid(details.userid),
+            "" if name_hint == "unavailable" else name_hint,
+            *(t for t in _first_name_tokens(details.user_name) if len(t) >= 4),
+        )
+        if v
+    )
+    forbidden = _identity_values(details.userid, details.user_name)
+    (
+        out["exg_status_nse"],
+        out["exg_trade_date_nse"],
+        out["success_keys"],
+        dropped,
+    ) = _constrain_s1_metadata(
+        details.exg_status_nse,
+        details.exg_trade_date_nse,
+        details.success_keys,
+        forbidden,
+    )
+    segments = {
+        k: v
+        for k, v in details.segments.items()
+        if k in _ALLOWED_SEGMENTS and not _is_identity(v, forbidden)
+    }
+    if dropped or len(segments) != len(
+        [k for k in details.segments if k in _ALLOWED_SEGMENTS]
+    ):
+        st.note("s1_metadata_dropped")
     out["userid_matches"] = hmac.compare_digest(
         details.userid.encode("utf-8"), st.expected_userid.encode("utf-8")
     )
-    out["segments"] = {k: v for k, v in details.segments.items() if k in _ALLOWED_SEGMENTS}
+    out["segments"] = segments
     out["token_b64_pair"] = _token_is_b64_pair(details.session_token)
     out["token_length"] = len(details.session_token)
-    out["exg_trade_date_nse"] = details.exg_trade_date_nse
-    out["exg_status_nse"] = details.exg_status_nse
     out["lastlogin_format"], out["lastlogin_tz_hint"] = _lastlogin(
         details.lastlogin_raw, raw.fetched_at_utc
     )
-    out["pass"] = bool(out["userid_matches"])
+    if out["userid_matches"]:
+        out["pass"] = True
+        return out
+    # Mismatch on a valid CustomerDetails: show a masked hint on the terminal
+    # only, then pass solely on an explicit operator "yes" (fail closed).
+    st.out(hint)
+    confirmed = st.confirm_account(hint) is True
+    out["userid_confirmed_by_operator"] = confirmed
+    out["pass"] = confirmed
     return out
 
 
@@ -699,7 +867,7 @@ _TOP_KEYS = (
 _S0_KEYS = ("ok", "metadata_match", "echo_match")
 _S1_KEYS = (
     "pass", "http", "status_value", "status_type", "error_class", "success_keys",
-    "userid_matches", "segments", "code_length", "code_charset", "token_b64_pair",
+    "userid_matches", "userid_confirmed_by_operator", "segments", "code_length", "code_charset", "token_b64_pair",
     "token_length", "exg_trade_date_nse", "exg_status_nse", "lastlogin_format",
     "lastlogin_tz_hint",
 )
@@ -761,6 +929,26 @@ def _check_keys(node: object, expected: Sequence[str], where: str, problems: lis
             problems.append(f"{where} has unexpected key {key}")
 
 
+def _check_s1_shapes(s1: object, problems: list[str]) -> None:
+    """Off-shape metadata is a problem. Messages name the field, never the value."""
+    if not isinstance(s1, dict):
+        return
+    status = s1.get("exg_status_nse")
+    if status is not None and not (isinstance(status, str) and _EXG_STATUS_RE.match(status)):
+        problems.append("s1_customer_details exg_status_nse has an unexpected shape")
+    date = s1.get("exg_trade_date_nse")
+    if date is not None and not (
+        isinstance(date, str) and any(rx.match(date) for rx in _EXG_DATE_RES)
+    ):
+        problems.append("s1_customer_details exg_trade_date_nse has an unexpected shape")
+    keys = s1.get("success_keys")
+    if "success_keys" in s1 and not (
+        isinstance(keys, list)
+        and all(isinstance(k, str) and _SUCCESS_KEY_RE.match(k) for k in keys)
+    ):
+        problems.append("s1_customer_details success_keys has an unexpected shape")
+
+
 def validate_result(obj: object) -> list[str]:
     """Return a list of problems; empty means valid."""
     problems: list[str] = []
@@ -783,6 +971,7 @@ def validate_result(obj: object) -> list[str]:
         _check_keys(obj["s0_egress"], _S0_KEYS, "s0_egress", problems)
     if "s1_customer_details" in obj:
         _check_keys(obj["s1_customer_details"], _S1_KEYS, "s1_customer_details", problems)
+        _check_s1_shapes(obj["s1_customer_details"], problems)
     for key, expected in (("s2_bars", _S2_KEYS), ("s3_quotes", _S3_KEYS), ("s4_preview", _S4_KEYS)):
         items = obj.get(key)
         if not isinstance(items, list):
@@ -811,6 +1000,7 @@ def run_probe(
     out_dir: Path,
     sleep: Callable[[float], None],
     steps: Sequence[str] = ALL_STEPS,
+    out: Callable[[str], None] = print,
 ) -> dict:
     """Run S0 (always) then the requested steps, write the redacted result."""
     app_key = prompts.app_key()
@@ -824,6 +1014,8 @@ def run_probe(
         app_key=app_key,
         secret_key=secret_key,
         expected_userid=expected_userid,
+        out=out,
+        confirm_account=prompts.confirm_account,
     )
     st.secrets.extend([app_key, secret_key, expected_userid, expected_ip])
 
@@ -972,7 +1164,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"S0 egress ok={result['s0_egress']['ok']}")
     if "s1_customer_details" in result:
         s1 = result["s1_customer_details"]
-        print(f"S1 pass={s1['pass']} error_class={s1['error_class']}")
+        print(
+            f"S1 pass={s1['pass']} error_class={s1['error_class']} "
+            f"userid_confirmed_by_operator={s1['userid_confirmed_by_operator']}"
+        )
     print(f"breeze calls={result['calls']['breeze']}")
     if not result["s0_egress"]["ok"]:
         return 3
