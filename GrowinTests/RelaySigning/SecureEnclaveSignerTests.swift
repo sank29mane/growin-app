@@ -195,31 +195,86 @@ final class SecureEnclaveSignerTests: XCTestCase {
 
     // MARK: Real Secure Enclave (no signing, so no prompt)
 
-    private static func isBiometryCatacombFailure(_ error: Error) -> Bool {
-        let nsError = error as NSError
-        return nsError.domain == "com.apple.LocalAuthentication" && nsError.code == -1000
+    /// The operator UAT run. When it is set, nothing in the Secure Enclave checks may skip: a skip
+    /// there would look like a pass to whoever reads the summary.
+    private static var operatorUATRequested: Bool {
+        ProcessInfo.processInfo.environment["GROWIN_SE_UAT"] == "1"
+    }
+
+    /// The only causes that mean "this machine has no biometry hardware or enrolment":
+    /// `biometryNotAvailable`, `biometryNotEnrolled`, and the exact error a CI VM returns when
+    /// LocalAuthentication has no biometric user ("Failed to get bio catacomb UUID", code -1000).
+    /// Everything else, `biometryLockout` included, is a real failure on a Touch ID Mac.
+    static func isNoBiometryCause(_ error: NSError) -> Bool {
+        guard error.domain == LAError.errorDomain else { return false }
+        return [
+            LAError.Code.biometryNotAvailable.rawValue,
+            LAError.Code.biometryNotEnrolled.rawValue,
+            -1000,
+        ].contains(error.code)
+    }
+
+    /// Skips for an allow-listed no-biometry cause, unless the operator UAT is running. Anything
+    /// else fails the test. The caller returns right after, because this never returns a value.
+    private func skipOrFailForBiometry(_ cause: NSError?, stage: String) throws {
+        let detail = cause.map { "\($0.domain) \($0.code): \($0.localizedDescription)" } ?? "no error reported"
+        if let cause, Self.isNoBiometryCause(cause) {
+            if Self.operatorUATRequested {
+                XCTFail("\(stage): no usable biometry (\(detail)) during the operator UAT. This must run and pass, so it does not skip.")
+                return
+            }
+            throw XCTSkip("\(stage): no biometry on this machine (\(detail)); the Secure Enclave key was NOT checked. Run it on a Mac with Touch ID.")
+        }
+        XCTFail("\(stage) failed for a reason that is not 'no biometry hardware or enrolment': \(detail)")
+    }
+
+    func testIsNoBiometryCauseIsAnExactAllowList() {
+        func make(_ domain: String, _ code: Int) -> NSError { NSError(domain: domain, code: code) }
+        let la = LAError.errorDomain
+        XCTAssertEqual(la, "com.apple.LocalAuthentication")
+        for code in [LAError.Code.biometryNotAvailable.rawValue, LAError.Code.biometryNotEnrolled.rawValue, -1000] {
+            XCTAssertTrue(Self.isNoBiometryCause(make(la, code)), "\(code)")
+        }
+        // Lockout and every other LocalAuthentication code must fail the check, not skip it.
+        for code in [
+            LAError.Code.biometryLockout.rawValue, LAError.Code.authenticationFailed.rawValue,
+            LAError.Code.userCancel.rawValue, LAError.Code.passcodeNotSet.rawValue,
+            LAError.Code.notInteractive.rawValue, 0, -1001, -999,
+        ] {
+            XCTAssertFalse(Self.isNoBiometryCause(make(la, code)), "\(code)")
+        }
+        // Same numbers in another domain are not the same cause.
+        XCTAssertFalse(Self.isNoBiometryCause(make(NSOSStatusErrorDomain, -1000)))
+        XCTAssertFalse(Self.isNoBiometryCause(make("other", LAError.Code.biometryNotAvailable.rawValue)))
     }
 
     func testSecureEnclaveKeyReloadsFromItsBlobWithTheSamePublicKey() throws {
-        try XCTSkipUnless(SecureEnclave.isAvailable, "No Secure Enclave on this machine; nothing was checked.")
+        if !SecureEnclave.isAvailable {
+            if Self.operatorUATRequested {
+                return XCTFail("No Secure Enclave during the operator UAT; this must run and pass.")
+            }
+            throw XCTSkip("No Secure Enclave on this machine; nothing was checked.")
+        }
         // The key needs `.biometryCurrentSet`, so it cannot even be created without enrolled
-        // biometry (a CI VM has a Secure Enclave but no Touch ID). That is the only skip here:
-        // on a Mac with Touch ID this must run and pass.
+        // biometry (a CI VM has a Secure Enclave but no Touch ID). On a Mac with Touch ID this must
+        // run and pass; only the allow-listed no-biometry causes skip, and never during the UAT.
         var biometryError: NSError?
-        try XCTSkipUnless(
-            LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &biometryError),
-            "No biometry on this machine (\(biometryError?.code ?? 0)); the Secure Enclave key was NOT checked. Run it on a Mac with Touch ID."
-        )
+        guard LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &biometryError) else {
+            try skipOrFailForBiometry(biometryError, stage: "canEvaluatePolicy(biometrics)")
+            return
+        }
         let backend = SecureEnclaveKeyBackend()
         let blob: Data
         do {
             blob = try backend.createKeyBlob()
-        } catch ApprovalSignerError.underlying(let cause) where Self.isBiometryCatacombFailure(cause) {
-            // Backstop for a runner that answers canEvaluatePolicy differently: the exact
-            // LocalAuthentication -1000 "no bio catacomb" failure, nothing else.
-            throw XCTSkip("LocalAuthentication has no biometric user on this machine (-1000); the Secure Enclave key was NOT checked. Run it on a Mac with Touch ID.")
+        } catch ApprovalSignerError.underlying(let cause) {
+            try skipOrFailForBiometry(cause as NSError, stage: "Secure Enclave key creation")
+            return
         } catch ApprovalSignerError.deviceLocked {
             // Environmental, not a pass: the key class is "when unlocked" and this Mac is locked.
+            if Self.operatorUATRequested {
+                return XCTFail("The Mac is locked during the operator UAT (-25308); unlock it and rerun.")
+            }
             throw XCTSkip("The Mac is locked, so the Secure Enclave refused to create a key (-25308). This check did NOT run; run it at an unlocked Mac.")
         } catch {
             return XCTFail("Secure Enclave key creation with [.privateKeyUsage, .biometryCurrentSet] failed: \(error)")
