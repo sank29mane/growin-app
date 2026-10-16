@@ -1181,7 +1181,7 @@ def test_shape_guard_alone_drops_planted_metadata(tmp_path, monkeypatch, carrier
 def test_redaction_alone_refuses_planted_metadata(tmp_path, monkeypatch, carrier, which):
     """F1(a): with the shape guard off, the registered hint secrets stop the write."""
     monkeypatch.setattr(
-        sp, "_constrain_s1_metadata", lambda status, date, keys: (status, date, list(keys), False)
+        sp, "_constrain_s1_metadata", lambda status, date, keys, forbidden=(): (status, date, list(keys), False)
     )
     s = mismatch_secrets()
     value = _s1_planted_values(s)[which]
@@ -1206,7 +1206,7 @@ def test_planted_metadata_never_reaches_the_file_with_both_guards(tmp_path, carr
 
 def _shape_guard_off(monkeypatch):
     monkeypatch.setattr(
-        sp, "_constrain_s1_metadata", lambda status, date, keys: (status, date, list(keys), False)
+        sp, "_constrain_s1_metadata", lambda status, date, keys, forbidden=(): (status, date, list(keys), False)
     )
 
 
@@ -1239,8 +1239,10 @@ def test_name_hint_registration_alone_catches_a_short_first_token(tmp_path, monk
     assert not (tmp_path / "out" / sp.RESULT_FILENAME).exists()
 
 
-def test_first_name_token_is_registered_as_a_secret(tmp_path):
-    """A letters-only token passes the key shape, so only registration can stop it."""
+def test_first_name_token_is_registered_as_a_secret(tmp_path, monkeypatch):
+    """A letters-only token passes the key shape; with the equality drop off, only
+    registration can stop it."""
+    monkeypatch.setattr(sp, "_is_identity", lambda value, forbidden: False)
     s = mismatch_secrets()
     s.user_name = "ZEBEDIAH" + _rand_letters(4) + " QUARTERMAIN"
     token = s.user_name.split()[0]
@@ -1279,3 +1281,68 @@ def test_validator_rejects_off_shape_s1_metadata(full_result, field, bad):
     problems = sp.validate_result(full_result)
     assert any(field in p and "unexpected shape" in p for p in problems)
     assert not any("QZ***" in p or "SANKET" in p for p in problems)  # never echoes values
+
+
+# ============================================ review round 2: F3 short values
+
+
+def _walk_json(node, found):
+    """Collect every key and string value in a parsed JSON document."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            found.append(key)
+            _walk_json(value, found)
+    elif isinstance(node, list):
+        for value in node:
+            _walk_json(value, found)
+    elif isinstance(node, str):
+        found.append(node)
+
+
+def _short_leak_run(tmp_path, userid, name, carrier, planted):
+    s = mismatch_secrets()
+    s.userid = userid
+    s.user_name = name
+    bits = _planted_bits(s, carrier, planted)
+    confirm = Confirm(True)
+    result, _lines = run_mismatch(s, tmp_path, bits, confirm, steps=("S0", "S1"))
+    assert confirm.calls and result["s1_customer_details"]["pass"] is True  # explicit yes
+    on_disk = json.loads((tmp_path / "out" / sp.RESULT_FILENAME).read_text())
+    found: list[str] = []
+    _walk_json(on_disk, found)
+    return on_disk, found
+
+
+@pytest.mark.parametrize("carrier", ["exg_status", "success_key"])
+@pytest.mark.parametrize("userid,planted", [("QZX", "QZX"), ("QZ", "QZ"), ("QZX", "qzx")])
+def test_short_returned_id_never_reaches_the_file(tmp_path, carrier, userid, planted):
+    on_disk, found = _short_leak_run(tmp_path, userid, "ZQABCDEF QUARTERMAIN", carrier, planted)
+    assert not any(v.casefold() == userid.casefold() for v in found)
+    assert "s1_metadata_dropped" in on_disk["notes"]
+
+
+@pytest.mark.parametrize("carrier", ["exg_status", "success_key"])
+@pytest.mark.parametrize("planted", ["RAJ", "raj", "KUMAR"])
+def test_short_name_token_never_reaches_the_file(tmp_path, carrier, planted):
+    on_disk, found = _short_leak_run(tmp_path, "QZ" + _rand_letters(6) + "7P", "RAJ KUMAR", carrier, planted)
+    assert not any(v.casefold() in ("raj", "kumar") for v in found)
+    assert "s1_metadata_dropped" in on_disk["notes"]
+
+
+def test_short_id_planted_in_a_segment_flag_is_dropped(tmp_path):
+    s = mismatch_secrets()
+    s.userid = "Y"
+    body = json.loads(s.customer_body())
+    bits = _customer_only_bits(ok(json.dumps(body)))
+    on_disk_result, _lines = run_mismatch(s, tmp_path, bits, Confirm(True), steps=("S0", "S1"))
+    segments = on_disk_result["s1_customer_details"]["segments"]
+    assert "Y" not in segments.values()
+    assert "s1_metadata_dropped" in on_disk_result["notes"]
+
+
+def test_unrelated_metadata_is_not_dropped_by_the_identity_filter(tmp_path):
+    on_disk, _found = _short_leak_run(tmp_path, "QZX", "RAJ KUMAR", "exg_status", "QZX")
+    s1 = on_disk["s1_customer_details"]
+    assert s1["exg_trade_date_nse"] == "01-Oct-2026"
+    assert "idirect_userid" in s1["success_keys"]
+    assert s1["segments"]["Equity"] == "Y" and s1["segments"]["Derivatives"] == "Z"

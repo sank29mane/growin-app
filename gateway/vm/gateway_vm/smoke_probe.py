@@ -281,16 +281,39 @@ def _mismatch_hint(returned: str, name: object, typed: str) -> str:
     )
 
 
+def _identity_values(userid: str, user_name: str | None) -> frozenset[str]:
+    """Casefolded returned id and name tokens. Redaction ignores values under four
+    characters, so these are matched by equality instead, at any length."""
+    values = {userid.strip().casefold()}
+    if isinstance(user_name, str):
+        values.update(tok.casefold() for tok in user_name.split())
+    values.discard("")
+    return frozenset(values)
+
+
+def _is_identity(value: object, forbidden: frozenset[str]) -> bool:
+    return isinstance(value, str) and value.strip().casefold() in forbidden
+
+
 def _constrain_s1_metadata(
-    status: str | None, trade_date: str | None, keys: Sequence[str]
+    status: str | None,
+    trade_date: str | None,
+    keys: Sequence[str],
+    forbidden: frozenset[str] = frozenset(),
 ) -> tuple[str | None, str | None, list[str], bool]:
-    """Keep only expected shapes; the last item says whether anything was dropped."""
+    """Keep only expected shapes that are not the returned id or a name token; the
+    last item says whether anything was dropped."""
     dropped = False
-    if status is not None and not _EXG_STATUS_RE.match(status):
+    if status is not None and (
+        not _EXG_STATUS_RE.match(status) or _is_identity(status, forbidden)
+    ):
         status, dropped = None, True
-    if trade_date is not None and not any(rx.match(trade_date) for rx in _EXG_DATE_RES):
+    if trade_date is not None and (
+        not any(rx.match(trade_date) for rx in _EXG_DATE_RES)
+        or _is_identity(trade_date, forbidden)
+    ):
         trade_date, dropped = None, True
-    kept = [k for k in keys if _SUCCESS_KEY_RE.match(k)]
+    kept = [k for k in keys if _SUCCESS_KEY_RE.match(k) and not _is_identity(k, forbidden)]
     if len(kept) != len(keys):
         dropped = True
     return status, trade_date, kept, dropped
@@ -388,20 +411,31 @@ def _step_s1(st: _State) -> dict:
         )
         if v
     )
+    forbidden = _identity_values(details.userid, details.user_name)
     (
         out["exg_status_nse"],
         out["exg_trade_date_nse"],
         out["success_keys"],
         dropped,
     ) = _constrain_s1_metadata(
-        details.exg_status_nse, details.exg_trade_date_nse, details.success_keys
+        details.exg_status_nse,
+        details.exg_trade_date_nse,
+        details.success_keys,
+        forbidden,
     )
-    if dropped:
+    segments = {
+        k: v
+        for k, v in details.segments.items()
+        if k in _ALLOWED_SEGMENTS and not _is_identity(v, forbidden)
+    }
+    if dropped or len(segments) != len(
+        [k for k in details.segments if k in _ALLOWED_SEGMENTS]
+    ):
         st.note("s1_metadata_dropped")
     out["userid_matches"] = hmac.compare_digest(
         details.userid.encode("utf-8"), st.expected_userid.encode("utf-8")
     )
-    out["segments"] = {k: v for k, v in details.segments.items() if k in _ALLOWED_SEGMENTS}
+    out["segments"] = segments
     out["token_b64_pair"] = _token_is_b64_pair(details.session_token)
     out["token_length"] = len(details.session_token)
     out["lastlogin_format"], out["lastlogin_tz_hint"] = _lastlogin(
