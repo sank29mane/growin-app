@@ -7,6 +7,7 @@ import json
 import sqlite3
 from decimal import Decimal
 
+from regime_testkit import bound_admit, gated
 import pytest
 from pydantic import ValidationError
 
@@ -99,7 +100,7 @@ def test_register_proposal_names_the_missing_key_and_writes_nothing(tmp_path, mi
     proposal = _proposal()
     del proposal[missing]
     with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
-        service = ExecutionService(ledger=ledger)
+        service = ExecutionService(ledger=ledger, **gated())
 
         with pytest.raises(ValueError, match=f"missing required field '{missing}'"):
             service.register_proposal(proposal)
@@ -109,7 +110,7 @@ def test_register_proposal_names_the_missing_key_and_writes_nothing(tmp_path, mi
 
 def test_get_proposal_returns_the_stored_identity(tmp_path):
     with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
-        service = ExecutionService(ledger=ledger)
+        service = ExecutionService(ledger=ledger, **gated())
         service.register_proposal(
             _proposal(account="invest-2", broker="paper")
         )
@@ -154,21 +155,21 @@ def _admit(service, proposal, currency, **extra):
         currency=currency,
         price="10",
         simulator_evidence={"simulated_fill_price": "10"},
-        risk_evidence={"scaled_size": "1"},
+        risk_evidence={"scaled_size": "1"}, **bound_admit(),
         **extra,
     )
 
 
 def test_admit_without_currency_is_a_type_error(tmp_path):
     with ExecutionLedger(tmp_path / "execution.sqlite3", workspace="uk") as ledger:
-        service = ExecutionService(PaperDispatcher(), ledger)
+        service = ExecutionService(PaperDispatcher(), ledger, **gated())
 
         with pytest.raises(TypeError):
             service.admit(
                 _proposal(),
                 price="10",
                 simulator_evidence={"simulated_fill_price": "10"},
-                risk_evidence={"scaled_size": "1"},
+                risk_evidence={"scaled_size": "1"}, **bound_admit(),
             )
 
 
@@ -179,7 +180,7 @@ def test_admit_refuses_a_currency_from_another_workspace(
     tmp_path, workspace, wrong_currency
 ):
     with ExecutionLedger(tmp_path / "execution.sqlite3", workspace=workspace) as ledger:
-        service = ExecutionService(PaperDispatcher(), ledger)
+        service = ExecutionService(PaperDispatcher(), ledger, **gated())
 
         with pytest.raises(ExecutionConflictError, match="does not match workspace"):
             _admit(service, _proposal(workspace=workspace), wrong_currency)
@@ -204,7 +205,7 @@ def test_admit_proceeds_with_the_workspace_currency(tmp_path, workspace, currenc
                 {"ticker": ils.TICKER, "order_type": "LIMIT", "limit_price": "100.00"}
             )
             extra = {"india_quote": ils.make_evidence()}
-        service = ExecutionService(PaperDispatcher(), ledger, india_guard=guard)
+        service = ExecutionService(PaperDispatcher(), ledger, india_guard=guard, **gated())
 
         admission = _admit(service, proposal, currency, **extra)
 

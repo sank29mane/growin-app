@@ -20,6 +20,7 @@ from types import SimpleNamespace
 import pytest
 
 import india_limits_support as ils
+from regime_testkit import FractionGate, bound_admit, gated
 from execution import (
     AdmissionDecision,
     ApprovalConflict,
@@ -59,7 +60,7 @@ def world(tmp_path):
     enroll(approval, key, workspace="india")
     dispatcher = CountingPaper()
     service = ExecutionService(
-        dispatcher, ledger, require_approval=True, approval_service=approval, india_guard=guard
+        dispatcher, ledger, require_approval=True, approval_service=approval, india_guard=guard, **gated(),
     )
     try:
         yield SimpleNamespace(
@@ -370,13 +371,13 @@ async def test_sells_stay_approvable_while_halted_and_need_no_quote(world):
 def test_the_default_constructor_denies_every_india_admission(tmp_path):
     ledger = ils.open_ledger(tmp_path)
     try:
-        service = ExecutionService(PaperDispatcher(), ledger)  # no flags, no guard
+        service = ExecutionService(PaperDispatcher(), ledger, **gated())  # no flags, no guard
         admission = service.admit(
             ils.make_intent("plain"),
             currency="INR",
             price="100",
             simulator_evidence={"simulated_fill_price": "100"},
-            risk_evidence={"scaled_size": "1"},
+            risk_evidence={"scaled_size": "1"}, **bound_admit(),
         )
         assert admission.decision is AdmissionDecision.DENIED
         assert admission.reason_code == "india_limits_unavailable"
@@ -391,7 +392,7 @@ def test_a_service_with_no_guard_cannot_challenge_an_india_buy_another_service_a
     admit_only(world, "a", 2)
     world.service.reserve("a")
     bare = ExecutionService(
-        PaperDispatcher(), world.ledger, require_approval=True, approval_service=world.approval
+        PaperDispatcher(), world.ledger, require_approval=True, approval_service=world.approval, **gated(),
     )
     with pytest.raises(ApprovalConflict) as refused:
         bare.create_approval_challenge("a", workspace="india", india_quote=fresh())
@@ -443,7 +444,8 @@ def admit_scaled(world, proposal_id, quantity, scaled, *, ticker=ils.TICKER):
         currency="INR",
         price="100.00",
         simulator_evidence={"simulated_fill_price": "100.00"},
-        risk_evidence={"scaled_size": str(scaled)},
+        risk_evidence={"scaled_size": str(scaled)}, **bound_admit(),
+        risk_gate=FractionGate(float(scaled) / float(quantity)),
         india_quote=fresh(),
     )
     assert admission.decision is AdmissionDecision.ADMITTED
@@ -608,7 +610,7 @@ def test_the_recheck_still_runs_when_the_india_ledger_has_a_venue_binding(bound_
     ledger = bound_world.ledger
     assert ledger.venue_binding is not None
     guard = ils.make_guard(ledger, bound_world.private)
-    service = ExecutionService(PaperDispatcher(), ledger, require_approval=True, india_guard=guard)
+    service = ExecutionService(PaperDispatcher(), ledger, require_approval=True, india_guard=guard, **gated())
     with pytest.raises(ApprovalConflict) as refused:
         service.create_approval_challenge("bound-a", workspace="india")  # no quote
     assert str(refused.value) == "quote_unavailable"
@@ -616,7 +618,7 @@ def test_the_recheck_still_runs_when_the_india_ledger_has_a_venue_binding(bound_
 
 
 def test_a_bound_india_ledger_with_no_guard_is_refused_too(bound_world):
-    service = ExecutionService(PaperDispatcher(), bound_world.ledger, require_approval=True)
+    service = ExecutionService(PaperDispatcher(), bound_world.ledger, require_approval=True, **gated())
     with pytest.raises(ApprovalConflict) as refused:
         service.create_approval_challenge("bound-a", workspace="india", india_quote=fresh())
     assert str(refused.value) == "india_limits_unavailable"

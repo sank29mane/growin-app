@@ -52,6 +52,7 @@ from model_registry import (
     set_active_registry,
 )
 from simulation import PreFlightSimulator, RiskSwarmGate
+from simulation.regime_severity import RegimeSeverityMap, build_scaling_policy_connection
 from market_data import (
     IndiaInstrument,
     MarketDataEvent,
@@ -251,6 +252,9 @@ class AppState:
             # Resolve the factory before any ledger is opened: an unregistered
             # venue must not create or touch a ledger file.
             factory = resolve_factory(venue, dispatcher_factories)
+            # The model's severity ordering feeds the size policy every admission uses. A
+            # model that cannot be loaded or ordered leaves execution disabled.
+            severity_map = self._regime_severity_map()
             # db_path None means the ledger's own default: the venue spec's path
             # for a bound venue, the workspace's real ledger for paper.
             ledger = ExecutionLedger(
@@ -278,6 +282,7 @@ class AppState:
             ValueError,
             PrivateConfigError,
             VenueError,
+            MarketDataError,
         ) as exc:
             if ledger is not None:
                 ledger.close()
@@ -287,7 +292,11 @@ class AppState:
             self.venue_adapter = None
             self.workspace_config = None
             # Error text carries codes, field names and paths, never config values.
-            self.execution_startup_error = f"{type(exc).__name__}: {exc}"
+            if isinstance(exc, MarketDataError):
+                # The regime model's stable refusal code (for example REGIME_SEVERITY_AMBIGUOUS).
+                self.execution_startup_error = f"{type(exc).__name__}: {exc.code}"
+            else:
+                self.execution_startup_error = f"{type(exc).__name__}: {exc}"
             return False
         self._execution_ledger = ledger
         self.execution_venue_binding = binding
@@ -295,7 +304,7 @@ class AppState:
         attach = getattr(dispatcher, "attach", None)
         if binding is not None and callable(attach):
             attach(ledger)
-        self._preflight_policy_connection = self._local_preflight_policy_connection()
+        self._preflight_policy_connection = self._local_preflight_policy_connection(severity_map)
         self._execution_service = ExecutionService(
             dispatcher,
             ledger,
@@ -305,6 +314,7 @@ class AppState:
             require_runtime_preflight=True,
             allow_test_price_sources=allow_test_price_sources,
             india_guard=india_guard,
+            regime_severity_map=severity_map,
         )
         self.execution_authority = True
         self.workspace_config = config
@@ -689,6 +699,8 @@ class AppState:
             "price_source": price_source,
             "tick_window": window,
             "regime_id": context.regime.regime_id,
+            "regime_policy_hash": context.regime.policy_hash,
+            "regime_audit": context.regime.audit(),
             "current_spread_pct": context.snapshot.spread_pct,
             "evidence_at": context.evidence_at,
             "portfolio_state": {
@@ -844,24 +856,33 @@ class AppState:
         return proposals
 
     @staticmethod
-    def _local_preflight_policy_connection():
-        connection = sqlite3.connect(":memory:")
-        connection.execute(
-            "CREATE TABLE scaling_policies (regime_id INTEGER PRIMARY KEY, scale_multiplier REAL NOT NULL)"
-        )
-        connection.executemany(
-            "INSERT INTO scaling_policies (regime_id, scale_multiplier) VALUES (?, ?)",
-            ((0, 1.0), (1, 0.5), (2, 0.1), (3, 0.05)),
-        )
-        return connection
+    def _local_preflight_policy_connection(severity_map: Optional[RegimeSeverityMap] = None):
+        """The size-policy tables for one model's severity map (the shipped model by default)."""
+
+        return build_scaling_policy_connection(severity_map or RegimeClassifier().severity_map)
+
+    def _regime_severity_map(self) -> RegimeSeverityMap:
+        """The loaded model's artifact-bound severity ordering (one classifier per process)."""
+
+        classifier = self._regime_classifier or RegimeClassifier()
+        self._regime_classifier = classifier
+        return classifier.severity_map
 
     def _local_paper_preflight(self) -> Dict[str, Any]:
         if self._preflight_policy_connection is None:
             raise LedgerError("local preflight policy is unavailable")
+        severity_map = self._regime_severity_map()
         return {
             "tick_window": {"bid": [0.99], "ask": [1.01], "spread": [0.02]},
             "portfolio_state": {"equity": 100.0, "peak_equity": 100.0},
-            "regime_id": 0,
+            # A local fixture has no quotes to classify. It is sized as the model's calmest
+            # component, found through the severity map, never as a literal raw id.
+            "regime_id": severity_map.calm_id,
+            "regime_policy_hash": severity_map.policy_hash,
+            "regime_audit": {
+                **severity_map.audit(severity_map.calm_id),
+                "model_version": f"local-fixture:{severity_map.params_sha256}",
+            },
             "current_spread_pct": 0.02,
             "risk_db_connection": self._preflight_policy_connection,
         }
@@ -1007,10 +1028,13 @@ class AppState:
             side=OrderSide.BUY,
             evidence=QuoteEvidence(
                 bid=Decimal("1"), ask=Decimal("1"), volatility=Decimal("0"),
-                cost=Decimal("0"), tick_size=Decimal("0.01"), regime_id=0,
+                cost=Decimal("0"), tick_size=Decimal("0.01"),
+                regime_id=self._regime_severity_map().calm_id,
                 observed_at=now, source="local-requote-uat-fixture",
             ),
-            policy=RequotePolicy(max_age_seconds=30),
+            policy=RequotePolicy.for_severity_map(
+                self._regime_severity_map(), max_age_seconds=30
+            ),
             venue=LocalPaperVenue(),
             now=now,
         )

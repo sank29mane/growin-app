@@ -25,12 +25,33 @@ class RegimeEvidence(BaseModel):
     observed_at: datetime
     model_version: str = Field(..., min_length=1, max_length=128)
     source_snapshot_id: str = Field(..., min_length=64, max_length=64)
+    # The raw regime_id above is the model's arbitrary component id and is kept as
+    # evidence. Behaviour (size, collar, adapter) follows the severity rank below, which
+    # the model's own severity map assigned, and the hash binds the map and policy used.
+    severity_rank: int = Field(..., ge=0)
+    severity_label: str = Field(..., min_length=1, max_length=32)
+    mapping_version: str = Field(..., min_length=1, max_length=64)
+    policy_version: str = Field(..., min_length=1, max_length=64)
+    policy_hash: str = Field(..., min_length=64, max_length=64)
 
     @model_validator(mode="after")
     def validate_timestamp(self) -> "RegimeEvidence":
         if self.observed_at.tzinfo is None:
             raise ValueError("regime evidence timestamp must be timezone-aware")
         return self
+
+    def audit(self) -> dict[str, Any]:
+        """The regime facts that are hashed into the admission evidence."""
+
+        return {
+            "regime_id": self.regime_id,
+            "severity_rank": self.severity_rank,
+            "severity_label": self.severity_label,
+            "model_version": self.model_version,
+            "mapping_version": self.mapping_version,
+            "policy_version": self.policy_version,
+            "policy_hash": self.policy_hash,
+        }
 
 
 class MarketPreflightContext(BaseModel):
@@ -49,6 +70,8 @@ class MarketPreflightContext(BaseModel):
             "price": self.snapshot.mid,
             "tick_window": self.tick_window,
             "regime_id": self.regime.regime_id,
+            "regime_policy_hash": self.regime.policy_hash,
+            "regime_audit": self.regime.audit(),
             "current_spread_pct": self.snapshot.spread_pct,
             "evidence_at": self.evidence_at,
         }

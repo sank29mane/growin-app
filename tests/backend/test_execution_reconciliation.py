@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from regime_testkit import bound_admit, gated
 import pytest
 
 from execution import (
@@ -14,7 +15,7 @@ from execution.service import _intent_from_proposal
 
 
 def setup_order(ledger, pid="recon", quantity="2"):
-    service = ExecutionService(PaperDispatcher(), ledger)
+    service = ExecutionService(PaperDispatcher(), ledger, **gated())
     proposal = {
         "proposal_id": pid,
         "workspace": "uk",
@@ -30,7 +31,7 @@ def setup_order(ledger, pid="recon", quantity="2"):
         currency="GBP",
         price="10",
         simulator_evidence={"simulated_fill_price": "10"},
-        risk_evidence={"scaled_size": quantity},
+        risk_evidence={"scaled_size": quantity}, **bound_admit(),
     )
     ledger.configure_paper_budget("invest", "GBP", "100", workspace="uk")
     service.reserve(pid)

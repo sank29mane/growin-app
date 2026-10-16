@@ -19,6 +19,8 @@ import pytest
 
 import india_limits_support as ils
 from app_context import AppState
+from execution.service import _json_safe
+from regime_testkit import bound_admit, gated
 from execution import AdmissionDecision, ExecutionLedger, ExecutionService
 from execution.ledger import canonical_json
 from market_data import IndiaInstrument, TopOfBook
@@ -421,7 +423,7 @@ def test_a_runtime_service_without_the_guard_denies_every_india_admission(tmp_pa
     ledger = ils.open_ledger(tmp_path)
     try:
         service = ExecutionService(
-            ils.PaperDispatcher(), ledger, require_runtime_preflight=True, india_guard=None
+            ils.PaperDispatcher(), ledger, require_runtime_preflight=True, india_guard=None, **gated(),
         )
         admission = ils.admit(service, ils.make_intent("no-guard"))
         assert admission.decision is AdmissionDecision.DENIED
@@ -439,7 +441,7 @@ def test_the_guard_is_never_consulted_for_uk(tmp_path):
     guard.check_slippage = lambda *a, **k: calls.append(a)  # type: ignore[method-assign]
     try:
         with ExecutionLedger(tmp_path / "uk.sqlite3", workspace="uk") as uk_ledger:
-            service = ExecutionService(ils.PaperDispatcher(), uk_ledger, india_guard=guard)
+            service = ExecutionService(ils.PaperDispatcher(), uk_ledger, india_guard=guard, **gated())
             intent = ils.make_intent(
                 "uk-1", ticker="VUSA", workspace="uk", account="invest", limit_price=None
             )
@@ -449,7 +451,7 @@ def test_the_guard_is_never_consulted_for_uk(tmp_path):
                 currency="GBP",
                 price="100",
                 simulator_evidence={"simulated_fill_price": "100"},
-                risk_evidence={"scaled_size": "1"},
+                risk_evidence={"scaled_size": "1"}, **bound_admit(),
                 evidence_at=evidence_at,
             )
             assert admission.decision is AdmissionDecision.ADMITTED
@@ -457,10 +459,12 @@ def test_the_guard_is_never_consulted_for_uk(tmp_path):
             # The stored evidence is exactly the pre-63 UK shape: no India section.
             expected = {
                 "simulator": {"simulated_fill_price": "100"},
-                "risk": {"scaled_size": "1"},
+                "risk": {"scaled_size": "1.0"},
                 "evidence_at": evidence_at.isoformat(),
                 "max_age_seconds": 30,
-                "current_spread_pct": "0",
+                "current_spread_pct": "0.002",
+                # The regime binding the admission was made under is part of what is hashed.
+                "regime": _json_safe(bound_admit()["regime_audit"]),
             }
             digest = hashlib.sha256(canonical_json(expected).encode("utf-8")).hexdigest()
             assert admission.evidence_hash == digest
@@ -472,7 +476,7 @@ def test_the_guard_is_never_consulted_for_uk(tmp_path):
                 currency="GBP",
                 price="100",
                 simulator_evidence={"simulated_fill_price": "100"},
-                risk_evidence={"scaled_size": "1"},
+                risk_evidence={"scaled_size": "1"}, **bound_admit(),
             )
             assert sell.decision is AdmissionDecision.DENIED
             assert sell.reason_code == "SELL_ADMISSION_REQUIRES_A_POSITION_RESERVATION"
@@ -490,10 +494,13 @@ def test_the_denial_evidence_names_every_code_the_rules_returned(world):
     ).fetchone()
     evidence = {
         "simulator": {"simulated_fill_price": "100.00"},
+        # The India guard denied this order before the risk gate ran, so the risk block is
+        # the caller's, not the gate's.
         "risk": {"scaled_size": "1"},
         "evidence_at": admission.evidence_at.isoformat(),
         "max_age_seconds": 30,
         "current_spread_pct": "0",
+        "regime": _json_safe(bound_admit()["regime_audit"]),
         "india": {"guard": True, "codes": ["circuit_band", "collar"]},
     }
     assert rows["evidence_hash"] == hashlib.sha256(canonical_json(evidence).encode("utf-8")).hexdigest()

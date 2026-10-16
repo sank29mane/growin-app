@@ -14,6 +14,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from regime_testkit import bound_admit, gated
 from execution import ExecutionLedger, ExecutionService, OrderIntent, PaperDispatcher
 from execution.india_guard import IndiaAdmissionGuard, IndiaQuoteEvidence
 from private_config import load_workspace_config
@@ -94,7 +95,7 @@ def make_guard(ledger: ExecutionLedger, private: Path, *, now: Any = NOW) -> Ind
 def make_service(
     ledger: ExecutionLedger, guard: IndiaAdmissionGuard | None, **kwargs: Any
 ) -> ExecutionService:
-    return ExecutionService(PaperDispatcher(), ledger, india_guard=guard, **kwargs)
+    return ExecutionService(PaperDispatcher(), ledger, india_guard=guard, **gated(**kwargs))
 
 
 def make_quote(**overrides: Any) -> rules.Quote:
@@ -167,7 +168,7 @@ def admit(
         # The simulator fill defaults to the default quote's reference (ask 100.00), so a
         # limit price away from it does not trip the slippage gate by accident.
         simulator_evidence={"simulated_fill_price": fill or "100.00"},
-        risk_evidence={"scaled_size": str(intent.quantity)},
+        risk_evidence={"scaled_size": str(intent.quantity)}, **bound_admit(),
         india_quote=None if evidence is NO_QUOTE else (evidence or make_evidence()),
     )
 

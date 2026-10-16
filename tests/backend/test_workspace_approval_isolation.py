@@ -25,6 +25,7 @@ from execution import (
 )
 from server import app
 from simulation import PreFlightSimulator, RiskSwarmGate
+from regime_testkit import shipped_map
 
 
 def _count(ledger, table):
@@ -71,6 +72,7 @@ def _admitted_service(ledger, workspace="uk"):
         simulator=PreFlightSimulator(),
         risk_gate=RiskSwarmGate(),
         require_runtime_preflight=True,
+        regime_severity_map=shipped_map(),
     )
     proposal = _proposal(workspace)
     currency = "GBP" if workspace == "uk" else "INR"
