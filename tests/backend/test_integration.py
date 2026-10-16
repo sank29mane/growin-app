@@ -14,7 +14,7 @@ if backend_path not in sys.path:
 
 from backend.mlx.adapter_manager import MLXAdapterManager
 from backend.coreml.gmm_loader import load_gmm_params
-from backend.trading_loop import LiveTradingLoop
+from backend.trading_loop import _MAX_TICK_PRICE, _MIN_TICK_PRICE, LiveTradingLoop
 from utils.mlx_loader import mx, nn, HAS_MLX
 
 pytestmark = pytest.mark.skipif(not HAS_MLX, reason="MLX is not installed or available")
@@ -77,9 +77,12 @@ def test_live_trading_loop_integration():
             spread_pct = 0.50
             
         ret = np.random.normal(0, vol)
-        # A price is positive. An unclamped (1 + ret) with ret ~ N(0, 0.55) goes negative and
-        # then produces crossed books, which the loop now refuses as bad ticks.
-        current_price *= max(1.0 + ret, 0.5)
+        # ret is a log return, so the price stays positive with no clamp. The earlier
+        # max(1 + ret, 0.5) clamp fired on about 5% of ticks (544 of 10000 at seed 42), all in the
+        # crisis leg, and its downward bias walked the price to ~1e-67, far below anything the
+        # loop accepts as a quote. A plain log walk at seed 42 stays inside the loop's accepted
+        # range, and the test asserts below that no tick was refused.
+        current_price *= float(np.exp(ret))
         spread = current_price * spread_pct
         
         mid_prices[i] = current_price
@@ -124,6 +127,12 @@ def test_live_trading_loop_integration():
     print(f"  - Total regime swaps: {regime_swaps}")
     
     # 8. Assertions
+    # Every benchmark tick must have been classified. A refused tick returns regime_valid False
+    # with leverage 0.0, so without this the bounds check below would be the only thing to notice
+    # a fixture that drifted outside the loop's accepted price range.
+    assert all(r["regime_valid"] for r in results), "the fixture produced ticks the loop refused"
+    all_prices = np.concatenate([mid_prices, asks, bids])
+    assert all_prices.min() >= _MIN_TICK_PRICE and all_prices.max() < _MAX_TICK_PRICE
     # Latency constraint: strictly under 2.5ms
     assert avg_latency < 2.5, f"Average end-to-end latency {avg_latency:.2f}ms exceeds the 2.5ms budget"
     assert p95_latency < 2.5, f"95th percentile end-to-end latency {p95_latency:.2f}ms exceeds the 2.5ms budget"
