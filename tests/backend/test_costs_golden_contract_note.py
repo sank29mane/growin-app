@@ -24,6 +24,7 @@ from costs.contract_note import (
     load_fixture,
     price_note,
 )
+from costs.charges import CLASS_DELIVERY
 from costs.core import LINE_ORDER, ScheduleNotEffective
 from costs.schedule import PricingBasis, load_schedule_set
 
@@ -62,6 +63,23 @@ def find_fixture() -> Path | None:
     return None
 
 
+def assert_delivery_evidence(estimates) -> None:
+    """The fixture must prove delivery rates: the engine's own classification, not the raw side.
+
+    A BUY or SELL only counts when ``costs.charges`` classifies that order as delivery. A same-ISIN
+    same-day net-zero pair is intraday and counts for neither side; a partial square-off counts only
+    for the leg that keeps delivery brokerage.
+    """
+    delivery = {
+        row.side.value
+        for estimate in estimates
+        for row in estimate.order_brokerage
+        if row.classification == CLASS_DELIVERY
+    }
+    assert "BUY" in delivery, "the fixture needs at least one trade the engine classifies as a delivery BUY"
+    assert "SELL" in delivery, "the fixture needs at least one trade the engine classifies as a delivery SELL"
+
+
 def check_golden(path: Path) -> None:
     """Assert every golden property for the fixture at ``path``."""
     raw = json.loads(path.read_text(encoding="utf-8"))
@@ -81,14 +99,17 @@ def check_golden(path: Path) -> None:
 
     fixture = load_fixture(path)
     schedules = load_schedule_set()
+    priced = []
     for note in fixture.notes:
         try:
-            estimate = price_note(note, schedules, workspace="india", currency="INR")
+            priced.append((note, price_note(note, schedules, workspace="india", currency="INR")))
         except ScheduleNotEffective as exc:
             pytest.fail(
                 f"note {note.label!r} is dated before the schedule's first effective date; "
                 f"supply a note dated on or after it ({exc})"
             )
+    assert_delivery_evidence([estimate for _, estimate in priced])
+    for note, estimate in priced:
         result = compare_note(note, estimate, schedules=schedules)
         table = "\n".join(
             f"  {row.line}: note={row.reference} model={row.model} delta={row.delta}"
@@ -144,6 +165,9 @@ def check_confirmed_version_status(path: Path) -> None:
     schedules = load_schedule_set()
     versions = {schedules.resolve(note.trade_date, PricingBasis.trade_date()).version for note in fixture.notes}
     assert len(versions) == 1, f"every note must resolve to one schedule version, got {sorted(versions)}"
+    assert_delivery_evidence(
+        [price_note(note, schedules, workspace="india", currency="INR") for note in fixture.notes]
+    )
     confirmed = schedules.get(next(iter(versions)))
     assert confirmed.version != R1_VERSION
     assert confirmed.status.startswith(MATCHED_PREFIX), confirmed.status
@@ -243,6 +267,39 @@ def mixed_synthetic_document() -> dict:
 
 def test_harness_passes_a_mixed_buy_and_sell_note(tmp_path):
     check_golden(write(tmp_path, mixed_synthetic_document()))
+
+
+def intraday_only_document() -> dict:
+    """BUY and SELL of one ISIN on one day, net zero: every order is intraday."""
+    document = mixed_synthetic_document()
+    document["notes"][0]["label"] = "synthetic-net-zero"
+    document["notes"][0]["trades"] = [
+        {"order_ref": "o1", "isin": "INE0TEST0001", "side": "BUY", "quantity": 70, "price": "100.00"},
+        {"order_ref": "o2", "isin": "INE0TEST0001", "side": "SELL", "quantity": 70, "price": "101.00"},
+    ]
+    return document
+
+
+def test_harness_rejects_an_intraday_only_mixed_note(tmp_path):
+    with pytest.raises(AssertionError, match="delivery BUY"):
+        check_golden(write(tmp_path, intraday_only_document()))
+
+
+def test_harness_rejects_a_note_whose_only_sell_is_a_squared_off_leg(tmp_path):
+    # Buy 100, sell 60 of one ISIN: the buy keeps delivery brokerage, the sell is squared off.
+    document = mixed_synthetic_document()
+    document["notes"][0]["label"] = "synthetic-partial"
+    document["notes"][0]["trades"] = [
+        {"order_ref": "o1", "isin": "INE0TEST0001", "side": "BUY", "quantity": 100, "price": "100.00"},
+        {"order_ref": "o2", "isin": "INE0TEST0001", "side": "SELL", "quantity": 60, "price": "101.00"},
+    ]
+    with pytest.raises(AssertionError, match="delivery SELL"):
+        check_golden(write(tmp_path, document))
+
+
+def test_status_check_also_needs_delivery_evidence(tmp_path):
+    with pytest.raises(AssertionError, match="delivery BUY"):
+        check_confirmed_version_status(write(tmp_path, intraday_only_document()))
 
 
 def test_harness_needs_a_sell_somewhere(tmp_path):
