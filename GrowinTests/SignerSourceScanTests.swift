@@ -201,6 +201,21 @@ struct SignerSourceScanTests {
         "let make = ApprovalSignerRouter.init",
         "static let shared = ApprovalSignerRouter(india: a, uk: b)",
         "func f() -> ApprovalSignerRouter { ApprovalSignerRouter(india: a, uk: b) }",
+        // Inferred construction: the type is named only by annotation or parameter default.
+        "let r: ApprovalSignerRouter = .init(india: .shared, uk: .shared)",
+        "let r: ApprovalSignerRouter = .init(\n    india: a,\n    uk: b\n)",
+        "let r: ApprovalSignerRouter =\n    .init(india: a, uk: b)",
+        "let r: ApprovalSignerRouter\n    = .init(india: a, uk: b)",
+        "let r: ApprovalSignerRouter? = .init(india: a, uk: b)",
+        "let r: ApprovalSignerRouter = . init (a)",
+        "func run(r: ApprovalSignerRouter = .init(india: a, uk: b)) {}",
+        "func run(r: ApprovalSignerRouter = .init()) {}",
+        // Inferred from somewhere else: only the argument list gives it away.
+        "var r: ApprovalSignerRouter { .init(india: a, uk: b) }",
+        "func f() -> ApprovalSignerRouter { .init(india: a, uk: b) }",
+        "let r = make(.init(india: a, uk: b))",
+        "let r = make(.init(\n    india: a,\n    uk: b))",
+        "let r = make(. init ( india : a, uk: b))",
     ])
     func constructingASecondRouterIsFlagged(planted: String) {
         #expect(Scan.routerConstructionCount(in: planted) > 0, "scan missed: \(planted)")
@@ -214,6 +229,11 @@ struct SignerSourceScanTests {
         #expect(Scan.routerConstructionCount(in: "func run(r: ApprovalSignerRouter) {}") == 0)
         #expect(Scan.routerConstructionCount(in: "// let r = ApprovalSignerRouter(india: a, uk: b)") == 0)
         #expect(Scan.routerConstructionCount(in: "/* ApprovalSignerRouter\n.init() */ let x = 1") == 0)
+        #expect(Scan.routerConstructionCount(in: "// let r: ApprovalSignerRouter = .init(india: a, uk: b)") == 0)
+        #expect(Scan.routerConstructionCount(in: "let r: ApprovalSignerRouter = .shared") == 0)
+        #expect(Scan.routerConstructionCount(in: "func run(r: ApprovalSignerRouter = .shared) {}") == 0)
+        #expect(Scan.routerConstructionCount(in: "let d = Date.init(timeIntervalSince1970: 0)\nlet r: ApprovalSignerRouter = .shared") == 0)
+        #expect(Scan.routerConstructionCount(in: "let s = Foo(.init(indiaTime: 1))") == 0)
     }
 
     @Test func callSiteCountsArePerFileSoASecondCallInAListedFileChangesThem() {

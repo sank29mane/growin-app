@@ -197,14 +197,27 @@ nonisolated enum SignerSourceScan {
         return notCalled + labelsOnly
     }
 
-    /// `ApprovalSignerRouter(` or `ApprovalSignerRouter.init`, tolerant of spaces and line breaks. The
-    /// router is a singleton held as `.shared`; a second instance could carry different signers. Only
-    /// the router's own file may construct it, so callers pass every file but `routerPath`.
+    /// Constructing a router, tolerant of spaces and line breaks. The router is a singleton held as
+    /// `.shared`; a second instance could carry different signers. Only the router's own file may
+    /// construct it, so callers pass every file but `routerPath`. Counts:
+    /// - `ApprovalSignerRouter(` and `ApprovalSignerRouter.init`.
+    /// - Inferred construction through the type, by annotation or parameter default:
+    ///   `ApprovalSignerRouter = .init(...)` (also `ApprovalSignerRouter? = .init`).
+    /// - Any `.init(india:` argument list. The router's initialiser is `init(india:uk:)`, so this
+    ///   catches inference from a return type, a property or a generic that never spells the name
+    ///   next to the `.init`.
     static func routerConstructionCount(in text: String) -> Int {
-        matchCount(
+        let code = stripComments(text)
+        let spelled = matchCount(
             #"(?<![A-Za-z0-9_])ApprovalSignerRouter\s*(?:\(|\.\s*init\b)"#,
-            in: stripComments(text)
+            in: code
         )
+        let annotated = matchCount(
+            #"(?<![A-Za-z0-9_])ApprovalSignerRouter\s*\??\s*=\s*\.\s*init\b"#,
+            in: code
+        )
+        let inferred = matchCount(#"\.\s*init\s*\(\s*india\s*:"#, in: code)
+        return spelled + annotated + inferred
     }
 
     /// Router sign call sites per file, for every file but the router itself, zeros omitted.
