@@ -38,9 +38,49 @@ def offences(root: Path) -> list[str]:
 # legacy items (policy .fixed(.uk)) so the launch migration can still find and scope them.
 CREDENTIAL_ENUM = Path("Security") / "Workspace.swift"
 
+# The launch cleanup is the other exempt file: it must spell the legacy account names to delete
+# them. It is held to "delete only" by `legacy_cleanup_write_offences`, so the exemption cannot
+# widen into a way to write or read a Trading 212 credential.
+LEGACY_CLEANUP = Path("Security") / "LegacyT212KeychainCleanup.swift"
+CREDENTIAL_EXEMPT = (CREDENTIAL_ENUM, LEGACY_CLEANUP)
+
 # A Trading 212 key or secret by name: trading212ApiKey, trading212IsaApiSecret, t212InvestKey,
 # "t212_isa_secret" and so on. `t212AccountType` and `let trading212: String` do not match.
-T212_SECRET_NAME = re.compile(r"(?i)(?:trading212|t212)\w*?(?:key|secret)")
+# `key(?!chain)` keeps the word "Keychain" (LegacyT212KeychainCleanup, T212Keychain) from counting
+# as "key"; t212KeychainKey still matches on its trailing Key.
+T212_SECRET_NAME = re.compile(r"(?i)(?:trading212|t212)\w*?(?:key(?!chain)|secret)")
+
+# What the delete-only cleanup file may never contain. Each is a way to store a credential
+# (add, update, value data) or to read one back (copy, return flags, the app's own Keychain
+# wrappers). `kSecReturn` is a prefix on purpose: Data, Attributes, Ref and PersistentRef all read.
+CLEANUP_FORBIDDEN = (
+    "SecItemAdd",
+    "SecItemUpdate",
+    "SecItemCopyMatching",
+    "kSecValue",
+    "kSecReturn",
+    "KeychainStore",
+    "KeychainStorage",
+    "setValue",
+)
+# The file records progress in UserDefaults with two non-secret flags. Any other `.set(` is a write.
+CLEANUP_ALLOWED_SET = re.compile(r"\.set\([^()]*,\s*forKey:\s*(?:completionKey|failedLaunchesKey)\)")
+# A read of a stored value. `.bool(forKey:` and `.integer(forKey:` read only the file's own flags.
+CLEANUP_VALUE_READ = re.compile(r"\.(?:string|data|object|value|array|dictionary)\(\s*forKey:")
+
+
+def legacy_cleanup_write_offences(text: str) -> list[str]:
+    """Reasons the cleanup source is more than a delete: any store of, or read of, a value."""
+    code = "\n".join(line for line in text.splitlines() if not line.strip().startswith("//"))
+    found = [f"forbidden: {token}" for token in CLEANUP_FORBIDDEN if token in code]
+    if "SecItemDelete" not in code:
+        found.append("missing: SecItemDelete")
+    for line in code.splitlines():
+        if ".set(" in line and not CLEANUP_ALLOWED_SET.search(line):
+            found.append(f"unapproved set: {line.strip()}")
+        if CLEANUP_VALUE_READ.search(line):
+            found.append(f"value read: {line.strip()}")
+    return found
 
 # SwiftUI controls that take typed input. The scan reads the control and its modifier chain.
 INPUT_CONTROL = re.compile(r"\b(?:SecureField|TextField|TextEditor)\b")
@@ -52,7 +92,7 @@ def t212_credential_offences(root: Path) -> list[str]:
     found = []
     for path in sorted(root.rglob("*.swift")):
         relative = path.relative_to(root)
-        if relative == CREDENTIAL_ENUM:
+        if relative in CREDENTIAL_EXEMPT:
             continue
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             if T212_SECRET_NAME.search(line):
@@ -200,7 +240,8 @@ def test_no_swift_source_reintroduces_a_t212_key_field_or_keychain_write():
     """ConfigView and SettingsView lost their Trading 212 key fields in 66-02. Keep them gone."""
     assert len(list(APP.rglob("*.swift"))) > 20
     # The exemption must point at a real file, or the scan silently exempts nothing.
-    assert (APP / CREDENTIAL_ENUM).is_file()
+    for exempt in CREDENTIAL_EXEMPT:
+        assert (APP / exempt).is_file(), exempt
     assert t212_input_field_offences(APP) == []
     assert t212_credential_offences(APP) == []
     assert t212_container_offences(APP) == []
@@ -259,6 +300,7 @@ def test_the_t212_scans_catch_planted_fields_and_writes(tmp_path):
     (tmp_path / "Security").mkdir()
     # The enum file is exempt: the legacy credential names live there.
     (tmp_path / CREDENTIAL_ENUM).write_text("case trading212ApiKey\ncase t212IsaSecret\n", encoding="utf-8")
+    (tmp_path / LEGACY_CLEANUP).write_text('static let flatAccounts = ["trading212ApiKey"]\n', encoding="utf-8")
     assert t212_credential_offences(tmp_path) == []
 
     planted = {
@@ -310,3 +352,59 @@ def test_the_scan_catches_a_planted_key_push(tmp_path):
     found = offences(tmp_path)
     assert any("mcp/trading212/config" in item for item in found)
     assert any("invest_key" in item for item in found)
+
+
+def test_the_secret_name_pattern_skips_keychain_but_keeps_real_key_names():
+    # "Keychain" starts with "key" and used to count as one: these are not credential names.
+    for fine in (
+        "LegacyT212KeychainCleanup.runOnce(service: KeychainStore.productionService)",
+        "enum LegacyT212KeychainCleanup {",
+        "let t212Keychain = 1",
+        'Logger(category: "legacy-t212-keychain")',
+    ):
+        assert not T212_SECRET_NAME.search(fine), fine
+    # Real names still match, including one that mentions Keychain and then says Key.
+    for named in (
+        "case trading212ApiKey",
+        "let trading212ApiSecret = x",
+        "t212Secret",
+        "t212KeychainKey",
+        "trading212Keychain_secret",
+        '"t212_isa_secret"',
+        "T212INVESTKEY",
+    ):
+        assert T212_SECRET_NAME.search(named), named
+
+
+def test_the_legacy_cleanup_file_is_exempt_and_still_delete_only():
+    path = APP / LEGACY_CLEANUP
+    assert path.is_file()
+    text = path.read_text(encoding="utf-8")
+    assert "SecItemDelete" in text
+    assert legacy_cleanup_write_offences(text) == []
+
+
+def test_the_delete_only_check_catches_a_write_or_a_read():
+    real = (APP / LEGACY_CLEANUP).read_text(encoding="utf-8")
+    assert legacy_cleanup_write_offences(real) == []
+    planted = {
+        "SecItemAdd": "SecItemAdd(q as CFDictionary, nil)",
+        "SecItemUpdate": "SecItemUpdate(q as CFDictionary, a as CFDictionary)",
+        "SecItemCopyMatching": "SecItemCopyMatching(q as CFDictionary, &out)",
+        "kSecValueData": "q[kSecValueData as String] = data",
+        "kSecReturnData": "q[kSecReturnData as String] = true",
+        "kSecReturnAttributes": "q[kSecReturnAttributes as String] = true",
+        "KeychainStore": "try KeychainStore.shared.set(v, for: a)",
+        "setValue": 'defaults.setValue(v, forKey: "x")',
+        "unapproved set": 'defaults.set(secret, forKey: "trading212ApiKey")',
+        "value read": 'let v = defaults.string(forKey: "trading212ApiKey")',
+    }
+    for name, line in planted.items():
+        assert legacy_cleanup_write_offences(real + "\n" + line + "\n"), name
+    # A file with no delete at all is not the cleanup.
+    assert legacy_cleanup_write_offences("let x = 1\n") == ["missing: SecItemDelete"]
+    # The two progress flags stay allowed.
+    assert legacy_cleanup_write_offences(
+        "SecItemDelete(q)\ndefaults.set(true, forKey: completionKey)\n"
+        "defaults.set(failedLaunches, forKey: failedLaunchesKey)\n"
+    ) == []
