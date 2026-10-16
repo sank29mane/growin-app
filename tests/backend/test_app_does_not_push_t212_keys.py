@@ -79,11 +79,44 @@ CLEANUP_FOR_KEY = re.compile(r"(?:^|,)\s*forKey\s*:\s*(\w+)\s*$")
 CLEANUP_DELETE_CALL = re.compile(r"\bSecItemDelete\s*\(")
 
 
-def strip_swift_comments_and_strings(text: str) -> str:
-    """Swift source with comments blanked and string literals reduced to `""`.
+def _string_end(text: str, i: int) -> int:
+    """Index just past the one-line string literal that opens at text[i] == '"'.
+
+    A `\\( ... )` interpolation is code and may hold its own quotes, so it is skipped as a unit.
+    """
+    i += 1
+    while i < len(text) and text[i] != '"' and text[i] != "\n":
+        if text.startswith("\\(", i):
+            i = _interpolation_end(text, i + 1)
+        else:
+            i += 2 if text[i] == "\\" else 1
+    return i + 1 if i < len(text) and text[i] == '"' else i
+
+
+def _interpolation_end(text: str, i: int) -> int:
+    """Index just past the parenthesis matching text[i] == '(', skipping nested strings."""
+    depth = 0
+    while i < len(text):
+        if text[i] == '"':
+            i = _string_end(text, i)
+            continue
+        if text[i] == "(":
+            depth += 1
+        elif text[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return i
+
+
+def strip_swift_comments_and_strings(text: str, keep_strings: bool = False) -> str:
+    """Swift source with comments blanked. String literals are reduced to `""` unless kept.
 
     One pass, so `//` inside a string is not a comment and a quote inside a comment is not a
     string. Block comments nest, as in Swift. Newlines are kept so line numbers still line up.
+    `keep_strings=True` leaves every string literal, interpolation code included, in the output:
+    `\\(defaults.string(forKey: key))` is executable and must stay visible to the scans.
     """
     out = []
     i, n = 0, len(text)
@@ -92,14 +125,15 @@ def strip_swift_comments_and_strings(text: str) -> str:
         if text.startswith('"""', i):
             end = text.find('"""', i + 3)
             stop = n if end < 0 else end + 3
-            out.append('""' + "\n" * text.count("\n", i, stop))
+            if keep_strings:
+                out.append(text[i:stop])
+            else:
+                out.append('""' + "\n" * text.count("\n", i, stop))
             i = stop
         elif text[i] == '"':
-            i += 1
-            while i < n and text[i] != '"' and text[i] != "\n":
-                i += 2 if text[i] == "\\" else 1
-            i += 1
-            out.append('""')
+            stop = _string_end(text, i)
+            out.append(text[i:stop] if keep_strings else '""')
+            i = stop
         elif two == "//":
             while i < n and text[i] != "\n":
                 i += 1
@@ -128,21 +162,33 @@ def strip_swift_comments_and_strings(text: str) -> str:
 def _call_arguments(code: str, open_paren: int) -> str | None:
     """Text between the parenthesis at code[open_paren] and its match, or None if unbalanced."""
     depth = 0
-    for i in range(open_paren, len(code)):
+    i = open_paren
+    while i < len(code):
+        if code[i] == '"':
+            i = _string_end(code, i)
+            continue
         if code[i] == "(":
             depth += 1
         elif code[i] == ")":
             depth -= 1
             if depth == 0:
                 return code[open_paren + 1 : i]
+        i += 1
     return None
 
 
 def legacy_cleanup_write_offences(text: str) -> list[str]:
-    """Reasons the cleanup source is more than a delete: any store of, or read of, a value."""
-    code = strip_swift_comments_and_strings(text)
+    """Reasons the cleanup source is more than a delete: any store of, or read of, a value.
+
+    The forbidden-token and defaults checks read the code with comments removed but string
+    literals KEPT, so an interpolation such as `"\\(defaults.string(forKey: key))"` is scanned like
+    any other code. Only the SecItemDelete presence check uses text with strings removed too, so a
+    string that merely names the function does not count as a call.
+    """
+    code = strip_swift_comments_and_strings(text, keep_strings=True)
+    bare = strip_swift_comments_and_strings(text)
     found = [f"forbidden: {token}" for token in CLEANUP_FORBIDDEN if token in code]
-    if not CLEANUP_DELETE_CALL.search(code):
+    if not CLEANUP_DELETE_CALL.search(bare):
         found.append("missing: SecItemDelete call")
     for match in CLEANUP_DEFAULTS_CALL.finditer(code):
         arguments = _call_arguments(code, match.end() - 1)
@@ -489,6 +535,17 @@ def test_the_comment_and_string_stripper_keeps_code_and_drops_the_rest():
     assert stripped.count("\n") == 7  # line numbers survive
 
 
+def test_the_stripper_can_keep_strings_and_reads_nested_interpolation_quotes():
+    source = 'log("v: \\(defaults.string(forKey: key) ?? "<missing>")") // SecItemAdd\nlet z = 1\n'
+    kept = strip_swift_comments_and_strings(source, keep_strings=True)
+    assert 'defaults.string(forKey: key) ?? "<missing>"' in kept
+    assert "SecItemAdd" not in kept and "let z = 1" in kept  # the comment is still removed
+    # The nested quotes do not end the string early, so the `//` in a URL is not taken for a comment.
+    url = 'let u = "\\(base ?? "http://x")/p"\nlet z = 1\n'
+    assert strip_swift_comments_and_strings(url, keep_strings=True) == url
+    assert strip_swift_comments_and_strings(url) == 'let u = ""\nlet z = 1\n'
+
+
 REAL_CLEANUP = (APP / LEGACY_CLEANUP).read_text(encoding="utf-8")
 DELETE_CALL = "SecItemDelete(q as CFDictionary)\n"
 
@@ -522,6 +579,16 @@ def test_the_delete_only_check_catches_a_write_or_a_read():
         "object read": 'let v = defaults.object(forKey: failedKeyVariable)',
         "read of another bool": 'let v = defaults.bool(forKey: "other")',
         "read two keys": "let v = defaults.integer(forKey: completionKey) + defaults.data(forKey: other)",
+        # Codex round 4, P2: string interpolation is executable code, so it is scanned too.
+        "read inside interpolation": (
+            'log("legacy value: \\(defaults.string(forKey: key) ?? "<missing>")")'
+        ),
+        "kSecValueData inside interpolation": (
+            'log("legacy value: \\(q[kSecValueData as String] ?? "<missing>")")'
+        ),
+        "write inside interpolation": 'log("\\(defaults.set(secret, forKey: other))")',
+        "token inside a plain string": 'let note = "kSecReturnData"',
+        "read inside multi-line string": 'let m = """\n\\(defaults.string(forKey: key))\n"""',
     }
     for name, line in planted.items():
         assert legacy_cleanup_write_offences(REAL_CLEANUP + "\n" + line + "\n"), name
@@ -551,5 +618,7 @@ def test_the_delete_only_check_allows_what_the_cleanup_really_does():
         "defaults.set (\n    failedLaunches + 1,\n    forKey: failedLaunchesKey\n)\n"
         "defaults.removeObject(forKey: key)\n"
         "// SecItemAdd is only named in this comment\n"
-        'let note = "kSecReturnData stays out of strings too"\n'
+        '/* and kSecReturnData in this one */\n'
+        'log("removed \\(removed) legacy items, status \\(status)")\n'
+        'let message = "plain text with (a paren and // slashes"\n'
     ) == []
