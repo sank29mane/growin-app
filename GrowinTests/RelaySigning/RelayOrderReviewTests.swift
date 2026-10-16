@@ -420,22 +420,41 @@ final class RelayOrderReviewTests: XCTestCase {
         XCTAssertTrue(publicKey.isValidSignature(try P256.Signing.ECDSASignature(derRepresentation: der), for: payload))
     }
 
-    func testOnlyTheRouterReachesTheSoftwareSignerInAppSources() throws {
-        let root = RelayVectors.repoRoot.appendingPathComponent("Growin")
-        let enumerator = try XCTUnwrap(FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil))
+    /// The software key has exactly two doors. `ApprovalSignerRouter` (UK paper, strict allowlist,
+    /// PAPER only) and `PracticeApprovalAuthorizer` (UK practice, Touch ID before every signature,
+    /// #557). The authorizer is allow-listed instead of routed because the router refuses PRACTICE
+    /// for the software key by design (see the router's PAPER-only gate and its break-proofs above):
+    /// sending practice through it would mean opening that gate. The authorizer is pinned by
+    /// `PracticeApprovalBiometricTests` (single construction site, token only minted there). This test
+    /// pins what it may do with the software signer and that no other file reaches it.
+    func testOnlyTheRouterAndThePracticeAuthorizerReachTheSoftwareSignerInAppSources() throws {
+        let routerPath = "Growin/Security/ApprovalSignerRouter.swift"
+        let signerPath = "Growin/Security/LocalApprovalSigner.swift"
+        let authorizerPath = "Growin/Security/PracticeApprovalAuthorizer.swift"
+        let sources = try SourceTree.swiftSources()
+        XCTAssertGreaterThan(sources.count, 10)
+        XCTAssertTrue(sources.contains { $0.path == authorizerPath }, "the allow-listed file moved; update this scan")
         var offenders: [String] = []
-        var scanned = 0
-        for case let url as URL in enumerator where url.pathExtension == "swift" {
-            scanned += 1
-            let text = try String(contentsOf: url, encoding: .utf8)
-            let name = url.lastPathComponent
-            if text.contains("LocalApprovalSigner.shared"), name != "ApprovalSignerRouter.swift", name != "LocalApprovalSigner.swift" {
-                offenders.append(name)
+        for (path, text) in sources where text.contains("LocalApprovalSigner.shared") {
+            if path != routerPath, path != signerPath, path != authorizerPath {
+                offenders.append(path)
             }
         }
-        XCTAssertGreaterThan(scanned, 10)
-        XCTAssertEqual(offenders, [], "these files sign without the router")
-        let routerSource = try PaperOperationsSourceProbe.contents("Growin/Security/ApprovalSignerRouter.swift")
+        XCTAssertEqual(offenders, [], "these files sign without the router or the practice authorizer")
+
+        // The authorizer may read the identity and call the token-gated practice signer.
+        // The raw `sign(` (which refuses PRACTICE) and anything else stay off its menu.
+        let authorizer = try XCTUnwrap(sources.first { $0.path == authorizerPath }?.text)
+        let uses = authorizer.components(separatedBy: "LocalApprovalSigner.shared").count - 1
+        let allowedUses = authorizer.components(separatedBy: "LocalApprovalSigner.shared.identity(for:").count - 1
+            + authorizer.components(separatedBy: "LocalApprovalSigner.shared.signAuthorizedPractice(").count - 1
+        XCTAssertEqual(uses, 2, "the authorizer should touch the software signer in exactly two places")
+        XCTAssertEqual(allowedUses, uses, "the authorizer may only call identity(for:) and signAuthorizedPractice(")
+        // India must never reach the software key through it.
+        XCTAssertTrue(authorizer.contains("workspace == PracticeApprovalPolicy.workspace"),
+                      "the authorizer must refuse every workspace but the practice one before touching a key")
+
+        let routerSource = try XCTUnwrap(sources.first { $0.path == routerPath }?.text)
         XCTAssertTrue(routerSource.contains("case .india: return .secureEnclave"))
         XCTAssertTrue(routerSource.contains("case .uk: return .localSoftware"))
     }

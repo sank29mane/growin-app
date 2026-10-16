@@ -149,9 +149,142 @@ struct PracticeApprovalBiometricTests {
         #expect(!signature.isEmpty)
     }
 
-    @Test func theIndiaPaperAdapterEntryPointRefusesPractice() throws {
+    // MARK: India paper entry point
+    //
+    // India signs through the router's Secure Enclave signer, not the software signer, so the
+    // software signer's own check (`practiceRequiresAuthorization`) is no longer the first line of
+    // defence there. The Secure Enclave signer refuses earlier and by structure: it parses the exact
+    // bytes (strict inspector), then checks purpose, workspace and mode, all before the stored key is
+    // read, the key identity is derived, or a Touch ID context is built. That refusal is the stronger
+    // guard (one typed error per cause, no text matching, and a practice-looking byte string that is
+    // not a valid paper payload never gets near a key), so these tests pin it instead of forcing the
+    // software signer's error onto India. The software signer's own refusal stays pinned by
+    // `theRawSignerRefusesPracticePayloadsInEveryShape`.
+
+    /// A well-formed India paper-dispatch envelope whose only defect is the mode. Nothing but the mode
+    /// check can stop it: the key id is real and the purpose and workspace are right.
+    private static func indiaDispatchBytes(keyId: String, mode: String) -> Data {
+        CanonicalJSON.data([
+            "version": 1, "purpose": "growin.execution.dispatch", "challenge_id": "c-1",
+            "proposal_id": "p-1", "client_order_id": "co-1", "intent_hash": "ih",
+            "workspace": "india", "account": "paper", "broker": "local-paper", "mode": mode,
+            "ticker": "RELIANCE", "side": "BUY", "quantity": "10", "order_type": "LIMIT",
+            "limit_price": "2500.50", "nonce": "n", "issued_at": 1, "expires_at": 2, "key_id": keyId,
+        ] as [String: Any])
+    }
+
+    private static func practiceShapes(keyId: String) throws -> [(String, Data)] {
         let review = try PracticeApprovalTests.review()
-        Self.expectRefused({ try LocalPaperApprovalSigner().sign(review.signedBytes) }, "LocalPaperApprovalSigner")
+        return [
+            ("UK practice review bytes", review.signedBytes),
+            ("lowercase mode, not an envelope", Data(#"{"mode":"practice","x":1}"#.utf8)),
+            ("padded mode, not an envelope", Data(#"{"mode":" PRACTICE "}"#.utf8)),
+            ("non-JSON bytes", Data("PRACTICE order bytes".utf8)),
+            ("India envelope, PRACTICE", indiaDispatchBytes(keyId: keyId, mode: "PRACTICE")),
+            ("India envelope, lowercase practice", indiaDispatchBytes(keyId: keyId, mode: "practice")),
+            ("India envelope, padded PRACTICE", indiaDispatchBytes(keyId: keyId, mode: " PRACTICE ")),
+        ]
+    }
+
+    /// The typed refusals that happen before the signer looks at a key. A refusal that comes later
+    /// (`notConfigured`, `keyMismatch`, `underlying`) would mean the key was read first.
+    private static func isRefusalBeforeAnyKeyAccess(_ error: Error) -> Bool {
+        if error is SignedPayloadInspectionError { return true }
+        switch error as? ApprovalSignerError {
+        case .purposeNotAllowed?, .workspaceMismatch?, .modeNotAllowed?, .indiaOnly?: return true
+        default: return false
+        }
+    }
+
+    @Test func theIndiaPaperAdapterEntryPointRefusesEveryPracticeShapeBeforeAnyKeyAccess() throws {
+        // A key id no India key can have, so a refusal after the key read would show as
+        // `notConfigured` (no key enrolled) or `keyMismatch` (an operator key), never as these.
+        for (label, bytes) in try Self.practiceShapes(keyId: String(repeating: "a", count: 64)) {
+            do {
+                _ = try LocalPaperApprovalSigner().sign(bytes)
+                Issue.record("\(label) produced a signature at the India paper entry point")
+            } catch {
+                #expect(Self.isRefusalBeforeAnyKeyAccess(error), "\(label) was refused too late or untyped: \(error)")
+            }
+        }
+    }
+
+    /// Same refusals, on the router the adapter calls, but with a counting key backend so "before any
+    /// key access" is measured rather than inferred from the error type. Sync and async paths.
+    @Test func everyPracticeShapeIsRefusedBeforeTheKeyIsReadOrTouchIDIsAsked() async throws {
+        let fixture = SignerFixture(scalar: nil)
+        defer { fixture.cleanUp() }
+        let router = ApprovalSignerRouter(india: fixture.signer, uk: LocalApprovalSigner(store: fixture.store))
+        let identity = try router.createIdentityIfNeeded(for: .india)
+        let shapes = try Self.practiceShapes(keyId: identity.keyID)
+        fixture.backend.resetCounters()
+
+        var signatures = 0
+        for (label, bytes) in shapes {
+            do {
+                _ = try router.sign(bytes, for: .india, flow: .paperApproval)
+                signatures += 1
+                Issue.record("\(label) was signed (sync)")
+            } catch {
+                #expect(Self.isRefusalBeforeAnyKeyAccess(error), "\(label) sync: \(error)")
+            }
+            do {
+                _ = try await router.signAsync(bytes, for: .india, flow: .paperApproval)
+                signatures += 1
+                Issue.record("\(label) was signed (async)")
+            } catch {
+                #expect(Self.isRefusalBeforeAnyKeyAccess(error), "\(label) async: \(error)")
+            }
+        }
+        #expect(signatures == 0)
+        #expect(fixture.backend.keyAccessCount == 0, "a practice payload reached the key")
+        #expect(fixture.backend.signs == 0)
+        #expect(fixture.contexts.reasons.isEmpty, "a practice payload built a Touch ID prompt")
+
+        // Control: the same fixture does sign a PAPER envelope, so the zero counts above are not an
+        // artefact of a signer that refuses everything.
+        let paper = Self.indiaDispatchBytes(keyId: identity.keyID, mode: "PAPER")
+        let der = try router.sign(paper, for: .india, flow: .paperApproval)
+        #expect(!der.isEmpty)
+        #expect(fixture.backend.signs == 1)
+        #expect(fixture.contexts.reasons.count == 1)
+    }
+
+    /// The practice authorizer is the one place the software key signs outside the router, so it
+    /// must never accept India, even for a review whose own workspace field says india (the plain
+    /// review initializer is not validated, so such a value can be built in-process).
+    @Test func theAuthorizerRefusesIndiaBeforeAnyIdentityBiometricOrSignature() async throws {
+        let counter = AuthCounter()
+        let identityCalls = AuthCounter()
+        let expires = Int(Date().timeIntervalSince1970) + 600
+        let json = PracticeApprovalTests.payload(workspace: "india", expires: expires)
+        let challenge = try PracticeApprovalTests.challenge(json, expires: expires)
+        let bytes = try #require(Data(base64Encoded: challenge.signedPayloadB64))
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let payload = try decoder.decode(SignedTradeApprovalPayload.self, from: bytes)
+        #expect(payload.workspace == "india")
+        #expect(payload.mode == PracticeApprovalPolicy.mode)
+        let indiaReview = TradeApprovalReview(challenge: challenge, payload: payload, signedBytes: bytes)
+
+        let authorizer = PracticeApprovalAuthorizer.makeForTesting(
+            authenticator: StubAuthenticator(outcome: nil, counter: counter),
+            identity: { _ in
+                identityCalls.didAuth()
+                return ApprovalSignerIdentity(keyID: "key-1", publicKeyX963: Data())
+            },
+            sign: { _, _, _ in counter.didSign(); return Data([1]) }
+        )
+        do {
+            _ = try await authorizer.signature(for: indiaReview, workspace: .india)
+            Issue.record("The authorizer signed for India")
+        } catch TradeApprovalReviewError.invalidEnvelope {
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+        #expect(identityCalls.auth == 0, "the software identity was read for India")
+        #expect(counter.auth == 0)
+        #expect(counter.signed == 0)
     }
 
     @Test func chatRefusesAPracticeReviewBeforeAnySigning() async throws {
@@ -202,24 +335,63 @@ struct PracticeApprovalBiometricTests {
         try SourceTree.swiftSources()
     }
 
-    @Test func noOtherCallerOfTheRawSignerHandlesPractice() throws {
+    /// Topology after #558: the raw software signer is reached only inside `ApprovalSignerRouter`
+    /// (plus the practice authorizer, pinned by the tests below), and every approval signature in the
+    /// app goes through `ApprovalSignerRouter.shared`. A new router caller fails the exact-set check
+    /// and must be reviewed for PRACTICE handling. The router itself is PAPER-only for both keys.
+    @Test func theRawSignerIsReachedOnlyThroughTheRouterAndEveryRouterCallerHandlesPractice() throws {
         let sources = try Self.appSources()
         #expect(sources.count > 10, "source probe found too few files")
+        let routerPath = "Growin/Security/ApprovalSignerRouter.swift"
+
+        // No file calls the software signer's `sign(` through `.shared`; the router holds its own
+        // reference and the authorizer uses the token-gated method.
         let rawCallers = Set(sources.filter { $0.text.contains("LocalApprovalSigner.shared.sign(") }.map(\.path))
-        // A new raw caller fails here and must be reviewed for PRACTICE handling.
-        #expect(rawCallers == [
+        #expect(rawCallers.isEmpty, "raw software signing outside the router: \(rawCallers.sorted())")
+        // Nor does anything name the Secure Enclave signer's shared instance: the router takes it by
+        // inferred `.shared`, so a direct caller would bypass the flow, purpose and key checks.
+        let seCallers = sources.filter { $0.text.contains("SecureEnclaveApprovalSigner.shared") }.map(\.path)
+        #expect(seCallers.isEmpty, "Secure Enclave signer reached without the router: \(seCallers)")
+        // One router, built once, held only as `.shared` and always called through.
+        for (path, text) in sources where path != routerPath {
+            #expect(!text.contains("ApprovalSignerRouter("), "\(path) builds a second router")
+            #expect(Self.matchCount(#"\bApprovalSignerRouter\.shared(?!\s*\.\s*\w)"#, in: text) == 0,
+                    "\(path) keeps a reference to ApprovalSignerRouter.shared instead of calling through it")
+        }
+
+        let routerCallers = Set(sources.filter {
+            $0.path != routerPath
+                && ($0.text.contains("ApprovalSignerRouter.shared.sign(")
+                    || $0.text.contains("ApprovalSignerRouter.shared.signAsync("))
+        }.map(\.path))
+        // A new caller fails here and must be reviewed for PRACTICE handling.
+        #expect(routerCallers == [
             "Growin/Models/PaperOperationsModels.swift",
             "Growin/ViewModels/ChatViewModel.swift",
+            "Growin/ViewModels/RelayOrderBatchViewModel.swift",
             "Growin/Views/SettingsView.swift",
         ])
-        for (path, text) in sources where rawCallers.contains(path) {
+        for (path, text) in sources where routerCallers.contains(path) {
             #expect(!text.contains("expectedPractice"), "\(path) builds a PRACTICE review")
-            #expect(!text.contains("PracticeApprovalAuthorizer"), "\(path) mixes the authorizer with the raw signer")
+            #expect(!text.contains("PracticeApprovalAuthorizer"), "\(path) mixes the authorizer with the router")
         }
+
+        // Chat rejects PRACTICE before it reads an identity or signs through the router.
         let chat = try #require(sources.first { $0.path == "Growin/ViewModels/ChatViewModel.swift" }?.text)
         let guardAt = try #require(chat.range(of: "PracticeApprovalPolicy.mode"))
-        let signAt = try #require(chat.range(of: "LocalApprovalSigner.shared.sign("))
-        #expect(guardAt.lowerBound < signAt.lowerBound, "Chat must reject PRACTICE before it signs")
+        let routerAt = try #require(chat.range(of: "ApprovalSignerRouter.shared"))
+        #expect(guardAt.lowerBound < routerAt.lowerBound, "Chat must reject PRACTICE before it uses the router")
+
+        // The router's own gates: UK software key is PAPER-only, India's Secure Enclave signer is
+        // PAPER-only for paper dispatch. Behaviour is covered in RelayOrderReviewTests and above.
+        let router = try #require(sources.first { $0.path == routerPath }?.text)
+        #expect(router.contains(#"guard case .string("PAPER")? = object["mode"]"#))
+        #expect(router.contains("softwareModeNotPaper"))
+        let enclave = try #require(sources.first { $0.path == "Growin/Security/SecureEnclaveApprovalSigner.swift" }?.text)
+        #expect(enclave.contains(#"paper.mode != "PAPER""#))
+        // Practice Approvals signs through the authorizer, never the router.
+        let practiceView = try #require(sources.first { $0.path == "Growin/Views/Trading/PracticeApprovalsView.swift" }?.text)
+        #expect(!practiceView.contains("ApprovalSignerRouter"))
     }
 
     @Test func onlyTheAuthorizerCanMintAPracticeSigningToken() throws {
@@ -368,7 +540,7 @@ struct PracticeApprovalBiometricTests {
 
     // MARK: Raw signer instances
     //
-    // `noOtherCallerOfTheRawSignerHandlesPractice` matches the literal `LocalApprovalSigner.shared.sign(`.
+    // `theRawSignerIsReachedOnlyThroughTheRouterAndEveryRouterCallerHandlesPractice` matches the literal `LocalApprovalSigner.shared.sign(`.
     // A second instance (`LocalApprovalSigner(store:)`, `.init`, a typealias, an extension factory,
     // or a stored copy of `.shared`) would sign without ever being counted by that scan.
     // The initializer is internal, so the compiler does not stop it.

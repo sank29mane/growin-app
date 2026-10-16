@@ -10,10 +10,7 @@ import XCTest
 
 /// The committed growin-orders/1 signing vectors (TEST ONLY keys, public on purpose).
 enum RelayVectors {
-    static let repoRoot: URL = URL(fileURLWithPath: #filePath)
-        .deletingLastPathComponent()
-        .deletingLastPathComponent()
-        .deletingLastPathComponent()
+    static let repoRoot: URL = URL(fileURLWithPath: SourceTree.repoRoot)
 
     static let fixtures = repoRoot.appendingPathComponent("tests/backend/fixtures/relay_orders")
 

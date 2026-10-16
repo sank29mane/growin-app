@@ -195,12 +195,29 @@ final class SecureEnclaveSignerTests: XCTestCase {
 
     // MARK: Real Secure Enclave (no signing, so no prompt)
 
+    private static func isBiometryCatacombFailure(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        return nsError.domain == "com.apple.LocalAuthentication" && nsError.code == -1000
+    }
+
     func testSecureEnclaveKeyReloadsFromItsBlobWithTheSamePublicKey() throws {
         try XCTSkipUnless(SecureEnclave.isAvailable, "No Secure Enclave on this machine; nothing was checked.")
+        // The key needs `.biometryCurrentSet`, so it cannot even be created without enrolled
+        // biometry (a CI VM has a Secure Enclave but no Touch ID). That is the only skip here:
+        // on a Mac with Touch ID this must run and pass.
+        var biometryError: NSError?
+        try XCTSkipUnless(
+            LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &biometryError),
+            "No biometry on this machine (\(biometryError?.code ?? 0)); the Secure Enclave key was NOT checked. Run it on a Mac with Touch ID."
+        )
         let backend = SecureEnclaveKeyBackend()
         let blob: Data
         do {
             blob = try backend.createKeyBlob()
+        } catch ApprovalSignerError.underlying(let cause) where Self.isBiometryCatacombFailure(cause) {
+            // Backstop for a runner that answers canEvaluatePolicy differently: the exact
+            // LocalAuthentication -1000 "no bio catacomb" failure, nothing else.
+            throw XCTSkip("LocalAuthentication has no biometric user on this machine (-1000); the Secure Enclave key was NOT checked. Run it on a Mac with Touch ID.")
         } catch ApprovalSignerError.deviceLocked {
             // Environmental, not a pass: the key class is "when unlocked" and this Mac is locked.
             throw XCTSkip("The Mac is locked, so the Secure Enclave refused to create a key (-25308). This check did NOT run; run it at an unlocked Mac.")
