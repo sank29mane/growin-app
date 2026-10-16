@@ -84,6 +84,14 @@ struct LaunchMigrationsTests {
     // Needles are assembled so this file does not trip its own scans.
     private static let atLaunch = "run" + "AtLaunch("
     private static let sharedStore = "KeychainStore" + ".shared."
+    /// Every way to hold the shared store or the type as a value, with or without a member call.
+    /// An alias such as `let s = <store>.shared` never spells the dotted call, so the bare name
+    /// is the needle. `tests/backend/test_swift_scan_bypasses.py` holds the fuller rule set.
+    private static let storeValueNeedles = [
+        "KeychainStore" + ".shared",
+        "KeychainStore" + ".self",
+        "KeychainStore" + ".init",
+    ]
     private static let productionSteps = "." + "production" + "()"
     private static let quotedProductionService = "\"" + "san.Growin.credentials." + "v1" + "\""
     private static let cleanupCall = "LegacyT212KeychainCleanup." + "run" + "Once("
@@ -169,11 +177,13 @@ struct LaunchMigrationsTests {
             if text.contains(productionSteps) {
                 findings.append("\(path): uses the production steps")
             }
-            var rest = Substring(text)
-            while let found = rest.range(of: sharedStore) {
-                let before = rest[..<found.lowerBound].last
-                if before != "\"" { findings.append("\(path): calls the shared Keychain store") }
-                rest = rest[found.upperBound...]
+            for needle in storeValueNeedles {
+                var rest = Substring(text)
+                while let found = rest.range(of: needle) {
+                    let before = rest[..<found.lowerBound].last
+                    if before != "\"" { findings.append("\(path): reaches the shared Keychain store (\(needle))") }
+                    rest = rest[found.upperBound...]
+                }
             }
             for args in callArguments(of: atLaunch, in: text) where !args.contains("steps:") {
                 findings.append("\(path): calls the launch entry point without injected steps")
@@ -197,6 +207,9 @@ struct LaunchMigrationsTests {
             ("zero-argument entry point", "LaunchMigrations." + at + ")"),
             ("entry point without steps", "LaunchMigrations." + at + "skip: false)"),
             ("production service literal", Self.cleanupCall + "service: " + Self.quotedProductionService + ")"),
+            ("alias of the shared store", "let store = " + Self.storeValueNeedles[0] + "\nstore.migrateFlatItemsToScoped()"),
+            ("type taken as a value", "let kind = " + Self.storeValueNeedles[1]),
+            ("initializer taken as a value", "let make = " + Self.storeValueNeedles[2]),
         ]
         for sample in samples {
             let findings = Self.productionReach(in: [("T.swift", sample.text)])
@@ -211,6 +224,9 @@ struct LaunchMigrationsTests {
             "LaunchMigrations." + at + "skip: false, steps: counting)",
             "LaunchMigrations." + at + "skip: true,\n    steps: Self.countingSteps(counter))",
             "let service = \"san.Growin.credentials." + "v1.test.\\(UUID().uuidString)\"",
+            "let own = KeychainStore(service: unique)",
+            "#expect(throws: KeychainStoreError.self) {}",
+            "line.contains(\"" + Self.storeValueNeedles[1] + "\")",
         ]
         for text in fine {
             #expect(Self.productionReach(in: [("T.swift", text)]) == [], "\(text)")
@@ -224,7 +240,11 @@ struct LaunchMigrationsTests {
     /// UI tests launch the app in its own process, so each one must go through the helper
     /// that sets the suppression key.
     private static func uiLaunchViolations(in sources: [(path: String, text: String)]) -> [String] {
-        let creator = "XCUI" + "Application("
+        // The bare type name, not `XCUIApplication(`: `.init()`, `(bundleIdentifier:)`, a typealias
+        // and `.self` all name it. Only the helper may. Same for the launch environment, which a
+        // test could clear to drop the suppression key.
+        let appType = "XCUI" + "Application"
+        let environment = "launch" + "Environment"
         let helperAssignment =
             "launchEnvironment[\"\(LaunchMigrations.skipEnvironmentKey)\"] = \"1\""
         var findings: [String] = []
@@ -235,8 +255,10 @@ struct LaunchMigrationsTests {
             findings.append("\(helper.path): does not set the suppression key")
         }
         for (path, text) in sources where path != uiHelperPath {
-            if text.contains(creator) { findings.append("\(path): creates an application outside the helper") }
-            if text.contains(".launch()") && !text.contains("GrowinLaunch.makeApp()") {
+            if text.contains(appType) { findings.append("\(path): names the application type outside the helper") }
+            if text.contains(environment) { findings.append("\(path): touches the launch environment outside the helper") }
+            let launches = text.contains(".launch()") || text.contains(".activate()")
+            if launches && !text.contains("GrowinLaunch.makeApp()") {
                 findings.append("\(path): launches an app that did not come from the helper")
             }
         }
@@ -266,5 +288,24 @@ struct LaunchMigrationsTests {
         #expect(!Self.uiLaunchViolations(in: [(Self.uiHelperPath, "launchEnvironment[\"OTHER\"] = \"1\""), goodTest]).isEmpty)
         // No helper at all.
         #expect(!Self.uiLaunchViolations(in: [goodTest]).isEmpty)
+
+        // Other ways to name or start an app outside the helper (#566 P3).
+        let appType = "XCUI" + "Application"
+        let bypasses: [(label: String, text: String)] = [
+            ("init call", "let app = " + appType + ".init()"),
+            ("bundle identifier", "let app = " + appType + "(bundleIdentifier: \"x\")"),
+            ("url initializer", "let app = " + appType + "(url: u)"),
+            ("typealias", "typealias App = " + appType),
+            ("type value", "let t = " + appType + ".self"),
+            ("activate without the helper", "other.activate()"),
+            ("reset launch environment", "let app = GrowinLaunch.makeApp(); app.launchEnvironment = [:]"),
+        ]
+        for bypass in bypasses {
+            let found = Self.uiLaunchViolations(in: [helper, ("GrowinUITests/D.swift", bypass.text)])
+            #expect(!found.isEmpty, "\(bypass.label) went undetected")
+        }
+        // The app that came from the helper may be activated.
+        let activated = "let app = GrowinLaunch.makeApp(); app.activate()"
+        #expect(Self.uiLaunchViolations(in: [helper, ("GrowinUITests/E.swift", activated)]) == [])
     }
 }
