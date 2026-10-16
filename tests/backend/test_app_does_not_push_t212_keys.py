@@ -38,11 +38,13 @@ def offences(root: Path) -> list[str]:
 # legacy items (policy .fixed(.uk)) so the launch migration can still find and scope them.
 CREDENTIAL_ENUM = Path("Security") / "Workspace.swift"
 
-# The launch cleanup is the other exempt file: it must spell the legacy account names to delete
-# them. It is held to "delete only" by `legacy_cleanup_write_offences`, so the exemption cannot
-# widen into a way to write or read a Trading 212 credential.
+# The launch cleanup must spell the legacy account names to delete them. It is NOT exempt as a
+# file: only the exact stripped lines below are skipped, and the credential scan reads every other
+# line. `legacy_cleanup_write_offences` separately holds the file to "delete only".
 LEGACY_CLEANUP = Path("Security") / "LegacyT212KeychainCleanup.swift"
-CREDENTIAL_EXEMPT = (CREDENTIAL_ENUM, LEGACY_CLEANUP)
+CREDENTIAL_LINE_ALLOWLIST = {
+    LEGACY_CLEANUP: frozenset({'static let flatAccounts = ["trading212ApiKey", "trading212ApiSecret"]'}),
+}
 
 # A Trading 212 key or secret by name: trading212ApiKey, trading212IsaApiSecret, t212InvestKey,
 # "t212_isa_secret" and so on. `t212AccountType` and `let trading212: String` do not match.
@@ -50,9 +52,10 @@ CREDENTIAL_EXEMPT = (CREDENTIAL_ENUM, LEGACY_CLEANUP)
 # as "key"; t212KeychainKey still matches on its trailing Key.
 T212_SECRET_NAME = re.compile(r"(?i)(?:trading212|t212)\w*?(?:key(?!chain)|secret)")
 
-# What the delete-only cleanup file may never contain. Each is a way to store a credential
-# (add, update, value data) or to read one back (copy, return flags, the app's own Keychain
-# wrappers). `kSecReturn` is a prefix on purpose: Data, Attributes, Ref and PersistentRef all read.
+# What the delete-only cleanup file may never contain, checked on code with comments and string
+# literals removed. Each is a way to store a credential (add, update, value data, property
+# wrappers) or to read one back (copy, return flags, the app's own Keychain wrappers, a dump of
+# all defaults). `kSecReturn` is a prefix on purpose: Data, Attributes, Ref, PersistentRef read.
 CLEANUP_FORBIDDEN = (
     "SecItemAdd",
     "SecItemUpdate",
@@ -62,24 +65,91 @@ CLEANUP_FORBIDDEN = (
     "KeychainStore",
     "KeychainStorage",
     "setValue",
+    "@AppStorage",
+    "@SceneStorage",
+    "dictionaryRepresentation",
 )
-# The file records progress in UserDefaults with two non-secret flags. Any other `.set(` is a write.
-CLEANUP_ALLOWED_SET = re.compile(r"\.set\([^()]*,\s*forKey:\s*(?:completionKey|failedLaunchesKey)\)")
-# A read of a stored value. `.bool(forKey:` and `.integer(forKey:` read only the file's own flags.
-CLEANUP_VALUE_READ = re.compile(r"\.(?:string|data|object|value|array|dictionary)\(\s*forKey:")
+# The file keeps two non-secret progress flags in UserDefaults. Every write and every read of a
+# default must name exactly one of them. `removeObject(forKey:)` deletes and is not checked.
+CLEANUP_FLAG_KEYS = frozenset({"completionKey", "failedLaunchesKey"})
+CLEANUP_DEFAULTS_CALL = re.compile(
+    r"\.\s*(?:set|string|data|object|value|array|dictionary|stringArray|bool|integer|double|float|url)\s*\("
+)
+CLEANUP_FOR_KEY = re.compile(r"(?:^|,)\s*forKey\s*:\s*(\w+)\s*$")
+CLEANUP_DELETE_CALL = re.compile(r"\bSecItemDelete\s*\(")
+
+
+def strip_swift_comments_and_strings(text: str) -> str:
+    """Swift source with comments blanked and string literals reduced to `""`.
+
+    One pass, so `//` inside a string is not a comment and a quote inside a comment is not a
+    string. Block comments nest, as in Swift. Newlines are kept so line numbers still line up.
+    """
+    out = []
+    i, n = 0, len(text)
+    while i < n:
+        two = text[i : i + 2]
+        if text.startswith('"""', i):
+            end = text.find('"""', i + 3)
+            stop = n if end < 0 else end + 3
+            out.append('""' + "\n" * text.count("\n", i, stop))
+            i = stop
+        elif text[i] == '"':
+            i += 1
+            while i < n and text[i] != '"' and text[i] != "\n":
+                i += 2 if text[i] == "\\" else 1
+            i += 1
+            out.append('""')
+        elif two == "//":
+            while i < n and text[i] != "\n":
+                i += 1
+            out.append(" ")
+        elif two == "/*":
+            depth = 0
+            while i < n:
+                if text.startswith("/*", i):
+                    depth += 1
+                    i += 2
+                elif text.startswith("*/", i):
+                    depth -= 1
+                    i += 2
+                    if depth == 0:
+                        break
+                else:
+                    out.append("\n" if text[i] == "\n" else "")
+                    i += 1
+            out.append(" ")
+        else:
+            out.append(text[i])
+            i += 1
+    return "".join(out)
+
+
+def _call_arguments(code: str, open_paren: int) -> str | None:
+    """Text between the parenthesis at code[open_paren] and its match, or None if unbalanced."""
+    depth = 0
+    for i in range(open_paren, len(code)):
+        if code[i] == "(":
+            depth += 1
+        elif code[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return code[open_paren + 1 : i]
+    return None
 
 
 def legacy_cleanup_write_offences(text: str) -> list[str]:
     """Reasons the cleanup source is more than a delete: any store of, or read of, a value."""
-    code = "\n".join(line for line in text.splitlines() if not line.strip().startswith("//"))
+    code = strip_swift_comments_and_strings(text)
     found = [f"forbidden: {token}" for token in CLEANUP_FORBIDDEN if token in code]
-    if "SecItemDelete" not in code:
-        found.append("missing: SecItemDelete")
-    for line in code.splitlines():
-        if ".set(" in line and not CLEANUP_ALLOWED_SET.search(line):
-            found.append(f"unapproved set: {line.strip()}")
-        if CLEANUP_VALUE_READ.search(line):
-            found.append(f"value read: {line.strip()}")
+    if not CLEANUP_DELETE_CALL.search(code):
+        found.append("missing: SecItemDelete call")
+    for match in CLEANUP_DEFAULTS_CALL.finditer(code):
+        arguments = _call_arguments(code, match.end() - 1)
+        key = CLEANUP_FOR_KEY.search(arguments) if arguments is not None else None
+        if key is None or key.group(1) not in CLEANUP_FLAG_KEYS:
+            shown = " ".join((arguments or "<unbalanced>").split())
+            found.append(f"defaults access outside the two flags: {match.group(0).strip()}{shown})")
     return found
 
 # SwiftUI controls that take typed input. The scan reads the control and its modifier chain.
@@ -92,9 +162,12 @@ def t212_credential_offences(root: Path) -> list[str]:
     found = []
     for path in sorted(root.rglob("*.swift")):
         relative = path.relative_to(root)
-        if relative in CREDENTIAL_EXEMPT:
+        if relative == CREDENTIAL_ENUM:
             continue
+        allowed = CREDENTIAL_LINE_ALLOWLIST.get(relative, frozenset())
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if line.strip() in allowed:
+                continue
             if T212_SECRET_NAME.search(line):
                 found.append(f"{relative}:{number}: {line.strip()}")
     return found
@@ -213,6 +286,16 @@ def t212_container_offences(root: Path) -> list[str]:
     return found
 
 
+def assert_exemptions_are_not_vacuous() -> None:
+    """The enum file and every allow-listed line must really exist, or the allowance does nothing."""
+    assert (APP / CREDENTIAL_ENUM).is_file(), CREDENTIAL_ENUM
+    for relative, lines in CREDENTIAL_LINE_ALLOWLIST.items():
+        assert (APP / relative).is_file(), relative
+        present = {line.strip() for line in (APP / relative).read_text(encoding="utf-8").splitlines()}
+        for line in lines:
+            assert line in present, f"allow-listed line missing from {relative}: {line}"
+
+
 def test_no_swift_source_names_the_key_push_route_or_its_payload():
     assert len(list(APP.rglob("*.swift"))) > 20
     assert offences(APP) == []
@@ -240,8 +323,7 @@ def test_no_swift_source_reintroduces_a_t212_key_field_or_keychain_write():
     """ConfigView and SettingsView lost their Trading 212 key fields in 66-02. Keep them gone."""
     assert len(list(APP.rglob("*.swift"))) > 20
     # The exemption must point at a real file, or the scan silently exempts nothing.
-    for exempt in CREDENTIAL_EXEMPT:
-        assert (APP / exempt).is_file(), exempt
+    assert_exemptions_are_not_vacuous()
     assert t212_input_field_offences(APP) == []
     assert t212_credential_offences(APP) == []
     assert t212_container_offences(APP) == []
@@ -300,8 +382,20 @@ def test_the_t212_scans_catch_planted_fields_and_writes(tmp_path):
     (tmp_path / "Security").mkdir()
     # The enum file is exempt: the legacy credential names live there.
     (tmp_path / CREDENTIAL_ENUM).write_text("case trading212ApiKey\ncase t212IsaSecret\n", encoding="utf-8")
-    (tmp_path / LEGACY_CLEANUP).write_text('static let flatAccounts = ["trading212ApiKey"]\n', encoding="utf-8")
+    allowed_line = next(iter(CREDENTIAL_LINE_ALLOWLIST[LEGACY_CLEANUP]))
+    (tmp_path / LEGACY_CLEANUP).write_text(f"    {allowed_line}\n", encoding="utf-8")
     assert t212_credential_offences(tmp_path) == []
+    # The cleanup file is exempt for that one line only. Anything else in it is scanned.
+    (tmp_path / LEGACY_CLEANUP).write_text(
+        f"{allowed_line}\n"
+        'defaults.set(secret, forKey: "trading212ApiKey")\n'
+        '@AppStorage("trading212ApiKey") var trading212ApiKey = ""\n'
+        'let v = defaults.string (forKey: "trading212ApiKey")\n'
+        f"{allowed_line} // trailing text makes it a different line\n",
+        encoding="utf-8",
+    )
+    cleanup_hits = t212_credential_offences(tmp_path)
+    assert sorted(int(hit.split(":")[1]) for hit in cleanup_hits) == [2, 3, 4, 5]
 
     planted = {
         "KeychainField.swift": (
@@ -376,35 +470,86 @@ def test_the_secret_name_pattern_skips_keychain_but_keeps_real_key_names():
         assert T212_SECRET_NAME.search(named), named
 
 
-def test_the_legacy_cleanup_file_is_exempt_and_still_delete_only():
-    path = APP / LEGACY_CLEANUP
-    assert path.is_file()
-    text = path.read_text(encoding="utf-8")
-    assert "SecItemDelete" in text
+def test_the_legacy_cleanup_file_is_delete_only_and_its_allow_listed_lines_exist():
+    assert_exemptions_are_not_vacuous()
+    text = (APP / LEGACY_CLEANUP).read_text(encoding="utf-8")
     assert legacy_cleanup_write_offences(text) == []
 
 
+def test_the_comment_and_string_stripper_keeps_code_and_drops_the_rest():
+    stripped = strip_swift_comments_and_strings(
+        'let a = "x // not a comment" // SecItemAdd\n'
+        "/* outer /* nested SecItemAdd */ still comment */ let b = 1\n"
+        'let c = "quote \\" SecItemAdd"\n'
+        'let d = """\nSecItemAdd\n"""\n'
+        "SecItemDelete(q)\n"
+    )
+    assert "SecItemAdd" not in stripped
+    assert "let b = 1" in stripped and "SecItemDelete(q)" in stripped
+    assert stripped.count("\n") == 7  # line numbers survive
+
+
+REAL_CLEANUP = (APP / LEGACY_CLEANUP).read_text(encoding="utf-8")
+DELETE_CALL = "SecItemDelete(q as CFDictionary)\n"
+
+
 def test_the_delete_only_check_catches_a_write_or_a_read():
-    real = (APP / LEGACY_CLEANUP).read_text(encoding="utf-8")
-    assert legacy_cleanup_write_offences(real) == []
+    assert legacy_cleanup_write_offences(REAL_CLEANUP) == []
     planted = {
         "SecItemAdd": "SecItemAdd(q as CFDictionary, nil)",
+        "SecItemAdd spaced": "SecItemAdd (q as CFDictionary, nil)",
         "SecItemUpdate": "SecItemUpdate(q as CFDictionary, a as CFDictionary)",
         "SecItemCopyMatching": "SecItemCopyMatching(q as CFDictionary, &out)",
         "kSecValueData": "q[kSecValueData as String] = data",
         "kSecReturnData": "q[kSecReturnData as String] = true",
         "kSecReturnAttributes": "q[kSecReturnAttributes as String] = true",
         "KeychainStore": "try KeychainStore.shared.set(v, for: a)",
+        "KeychainStorage": "@KeychainStorage(.alpacaApiKey) var k = \"\"",
         "setValue": 'defaults.setValue(v, forKey: "x")',
-        "unapproved set": 'defaults.set(secret, forKey: "trading212ApiKey")',
-        "value read": 'let v = defaults.string(forKey: "trading212ApiKey")',
+        "dump of defaults": "let all = defaults.dictionaryRepresentation()",
+        # Codex round 3, P2: one allowed call must not approve the rest of the line.
+        "two calls on one line": (
+            'defaults.set(true, forKey: completionKey); defaults.set(secret, forKey: "trading212ApiKey")'
+        ),
+        "spaced set": 'defaults.set (secret, forKey: "trading212ApiKey")',
+        "dotted-space set": 'defaults\n    .set(secret, forKey: "trading212ApiKey")',
+        "set with extra argument": "defaults.set(secret, forKey: completionKey, other)",
+        "set on a flag name in a string": 'defaults.set(secret, forKey: "completionKey")',
+        "AppStorage": '@AppStorage("trading212ApiKey") var trading212ApiKey = ""',
+        "SceneStorage": '@SceneStorage("t212") var s = ""',
+        "spaced string read": 'let v = defaults.string (forKey: "trading212ApiKey")',
+        "string read": 'let v = defaults.string(forKey: "trading212ApiKey")',
+        "object read": 'let v = defaults.object(forKey: failedKeyVariable)',
+        "read of another bool": 'let v = defaults.bool(forKey: "other")',
+        "read two keys": "let v = defaults.integer(forKey: completionKey) + defaults.data(forKey: other)",
     }
     for name, line in planted.items():
-        assert legacy_cleanup_write_offences(real + "\n" + line + "\n"), name
-    # A file with no delete at all is not the cleanup.
-    assert legacy_cleanup_write_offences("let x = 1\n") == ["missing: SecItemDelete"]
-    # The two progress flags stay allowed.
+        assert legacy_cleanup_write_offences(REAL_CLEANUP + "\n" + line + "\n"), name
+        assert legacy_cleanup_write_offences(DELETE_CALL + line + "\n"), name
+
+
+def test_the_delete_check_needs_a_real_call_not_a_comment_or_a_string():
+    # Codex round 3, P3: the word SecItemDelete is not a call.
+    for source in (
+        "let x = 1\n",
+        "/* SecItemDelete(q) */\nlet x = 1\n",
+        "// SecItemDelete(q)\nlet x = 1\n",
+        'let marker = "SecItemDelete("\n',
+        'let marker = "SecItemDelete"\n',
+        "let f = SecItemDelete\n",
+    ):
+        assert legacy_cleanup_write_offences(source) == ["missing: SecItemDelete call"], source
+    assert legacy_cleanup_write_offences("SecItemDelete (q as CFDictionary)\n") == []
+
+
+def test_the_delete_only_check_allows_what_the_cleanup_really_does():
     assert legacy_cleanup_write_offences(
-        "SecItemDelete(q)\ndefaults.set(true, forKey: completionKey)\n"
+        DELETE_CALL
+        + "if defaults.bool(forKey: completionKey) || defaults.integer(forKey: failedLaunchesKey) >= 3 {}\n"
+        "defaults.set(true, forKey: completionKey)\n"
         "defaults.set(failedLaunches, forKey: failedLaunchesKey)\n"
+        "defaults.set (\n    failedLaunches + 1,\n    forKey: failedLaunchesKey\n)\n"
+        "defaults.removeObject(forKey: key)\n"
+        "// SecItemAdd is only named in this comment\n"
+        'let note = "kSecReturnData stays out of strings too"\n'
     ) == []
