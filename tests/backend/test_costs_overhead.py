@@ -27,7 +27,7 @@ from costs.schedule import PricingBasis, load_schedule_set
 
 D = Decimal
 ISIN = "INE0TEST0001"
-VERSION = "icici-prime9999-ivalue-nse-cash-2024-10-01.r1"
+VERSION = "icici-prime9999-ivalue-nse-cash-2024-10-02.r2"
 COSTS_DIR = Path(__file__).resolve().parents[2] / "backend" / "costs"
 
 
@@ -62,8 +62,8 @@ def credit(balance="100.00", expires=date(2027, 1, 14), source="test-synthetic-b
 
 def test_round_trip_hurdle_matches_the_worked_example():
     estimate = hurdle()
-    assert estimate.total == D("50.73")
-    assert estimate.cost_bps_of_buy_value == D("72.47")
+    assert estimate.total == D("50.68")
+    assert estimate.cost_bps_of_buy_value == D("72.40")
     assert estimate.buy_day.schedule_version == VERSION
     assert estimate.sell_day.schedule_version == VERSION
     assert estimate.buy_day.schedule_hash == estimate.sell_day.schedule_hash
@@ -112,18 +112,18 @@ def test_brokerage_gst_attributable_for_the_worked_buy_day():
 def test_credit_view_reduces_cash_charges_without_touching_the_hurdle():
     view = apply_prepaid_credit(worked_days(), credit("100.00"), schedules=load_schedule_set())
     assert view.credit_source == "test-synthetic-balance"
-    assert view.full_total == D("50.73")
+    assert view.full_total == D("50.68")
     assert view.credit_applied == D("11.56")
-    assert view.with_credit_total == D("39.17")
+    assert view.with_credit_total == D("39.12")
     assert view.credit_remaining == D("88.44")
     assert [d.credit_applied for d in view.days] == [D("5.78"), D("5.78")]
-    assert hurdle().total == D("50.73")
+    assert hurdle().total == D("50.68")
 
 
 def test_small_balance_is_exhausted_and_never_negative():
     view = apply_prepaid_credit(worked_days(), credit("3.00"), schedules=load_schedule_set())
     assert view.credit_applied == D("3.00")
-    assert view.with_credit_total == D("47.73")
+    assert view.with_credit_total == D("47.68")
     assert view.credit_remaining == D("0.00")
     assert [d.credit_applied for d in view.days] == [D("3.00"), D("0.00")]
 
@@ -182,7 +182,7 @@ def test_credit_rejects_bad_inputs():
 
 def disclosure(**overrides):
     kwargs = dict(
-        schedule=load_schedule_set().versions[0],
+        schedule=load_schedule_set().get(VERSION),
         period_start=date(2026, 11, 1),
         period_end=date(2027, 1, 30),
     )

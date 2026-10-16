@@ -48,7 +48,7 @@ def buy_note() -> dict:
         "trades": [{"order_ref": "o1", "isin": ISIN, "side": "BUY", "quantity": 70, "price": "100.00"}],
         "lines": {
             "brokerage": "4.90", "exchange_transaction": "0.21", "sebi_fee": "0.01",
-            "gst": "0.92", "stt": "7.00", "stamp_duty": "1.05",
+            "gst": "0.92", "stt": "7.00", "stamp_duty": "1.00",
         },
         "dp_lines": None,
         "note_total_charges": None,
@@ -193,11 +193,11 @@ def test_gst_components_must_sum_to_the_gst_line():
 
 def test_note_total_must_match_the_printed_lines():
     note = buy_note()
-    note["note_total_charges"] = "14.09"
-    assert one_note(note).note_total_charges == D("14.09")
-    note["note_total_charges"] = "14.10"
+    note["note_total_charges"] = "14.04"
+    assert one_note(note).note_total_charges == D("14.04")
+    note["note_total_charges"] = "14.05"
     one_note(note)
-    note["note_total_charges"] = "14.11"
+    note["note_total_charges"] = "14.06"
     with pytest.raises(ContractNoteError):
         one_note(note)
     sell = sell_note()
@@ -336,7 +336,7 @@ def test_a_note_dated_before_the_schedule_cannot_be_priced():
 
 PREVIEW = {
     "brokerage": "4.90", "exchange_turnover_charges": "0.21", "sebi_charges": "0.01", "stt": "7.00",
-    "stamp_duty": "1.05", "gst": "0.92", "total_brokerage": "14.09",
+    "stamp_duty": "1.00", "gst": "0.92", "total_brokerage": "14.04",
 }
 
 

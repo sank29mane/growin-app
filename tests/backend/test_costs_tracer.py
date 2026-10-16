@@ -37,7 +37,7 @@ from costs.schedule import PricingBasis, load_schedule_set
 
 D = Decimal
 ISIN = "INE0TEST0001"
-VERSION = "icici-prime9999-ivalue-nse-cash-2024-10-01.r1"
+VERSION = "icici-prime9999-ivalue-nse-cash-2024-10-02.r2"
 IST_OFFSET = "+05:30"
 TICK = TickSize(D("0.01"), date(2025, 4, 15), "test-explicit", sha256_hex("test-explicit"))
 SCENARIO = FillScenario(
@@ -103,7 +103,7 @@ def lines(estimate: ContractNoteEstimate) -> dict[str, Decimal]:
 
 BUY_DAY = {
     "brokerage": D("4.90"), "exchange_transaction": D("0.21"), "sebi_fee": D("0.01"),
-    "ipft": D("0.00"), "gst": D("0.92"), "stt": D("7.00"), "stamp_duty": D("1.05"),
+    "ipft": D("0.00"), "gst": D("0.92"), "stt": D("7.00"), "stamp_duty": D("1.00"),
     "dp_charge": D("0.00"), "dp_gst": D("0.00"),
 }
 SELL_DAY = {
@@ -124,9 +124,9 @@ def test_worked_example_end_to_end():
     assert lines(buy_day) == BUY_DAY
     assert lines(sell_day) == SELL_DAY
     assert tuple(line.name for line in buy_day.lines) == LINE_ORDER
-    assert buy_day.total == D("14.09")
+    assert buy_day.total == D("14.04")
     assert sell_day.total == D("36.64")
-    assert result.total_charges == D("50.73")
+    assert result.total_charges == D("50.68")
 
 
 def test_lineage_on_days_and_run():
@@ -171,8 +171,8 @@ def test_decision_drift_is_reported_never_charged():
     for before, after in zip(base.days, moved.days):
         assert lines(before) == lines(after)
         assert before.total == after.total
-    assert [d.total for d in moved.days] == [D("14.09"), D("36.64")]
-    assert moved.total_charges == D("50.73")
+    assert [d.total for d in moved.days] == [D("14.04"), D("36.64")]
+    assert moved.total_charges == D("50.68")
     assert moved_buy.execution_slippage_per_share == D("0.00")
     assert moved_sell.execution_slippage_per_share == D("0.00")
     for name in LINE_ORDER:

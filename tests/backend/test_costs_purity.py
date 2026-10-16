@@ -167,4 +167,4 @@ def test_schedule_with_duplicate_key_raises(tmp_path):
 
 def test_committed_schedule_loads():
     schedule_set = load_schedule_set()
-    assert len(schedule_set.versions) == 1
+    assert len(schedule_set.versions) == 2
