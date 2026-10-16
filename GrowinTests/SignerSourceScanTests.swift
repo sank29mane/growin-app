@@ -216,9 +216,79 @@ struct SignerSourceScanTests {
         "let r = make(.init(india: a, uk: b))",
         "let r = make(.init(\n    india: a,\n    uk: b))",
         "let r = make(. init ( india : a, uk: b))",
+        // Backticked spellings of `init` and of the `india` label.
+        "let r: ApprovalSignerRouter = .init(`india`: a, uk: b)",
+        "let r = make(.init(`india`: a, uk: b))",
+        "let r = make(.`init`(india: a, uk: b))",
+        "let r = make(.`init`(`india`: a, uk: b))",
+        "let r: ApprovalSignerRouter = .`init`(india: a, uk: b)",
+        "let r = ApprovalSignerRouter.`init`(india: a, uk: b)",
+        "let r = ApprovalSignerRouter . `init` (india: a, uk: b)",
     ])
     func constructingASecondRouterIsFlagged(planted: String) {
         #expect(Scan.routerConstructionCount(in: planted) > 0, "scan missed: \(planted)")
+    }
+
+    /// A typealias lets `R(india:uk:)` build a router with the name nowhere near the call. The alias
+    /// itself is the violation, so none of these needs the construction to be resolved.
+    @Test(arguments: [
+        // The Codex round 2 probe: SettingsView's configuration check rewritten through an alias.
+        "typealias R = ApprovalSignerRouter\nreturn R(india: .shared, uk: .shared).isConfigured(for: workspace)",
+        "typealias R=ApprovalSignerRouter",
+        "typealias   R   =\n    ApprovalSignerRouter",
+        "typealias R\n    = ApprovalSignerRouter",
+        "private typealias R = ApprovalSignerRouter",
+        "typealias R = ApprovalSignerRouter?",
+        "typealias R = ApprovalSignerRouter!",
+        "typealias R = Growin.ApprovalSignerRouter",
+        "typealias R = Growin . ApprovalSignerRouter",
+        "typealias R = Optional<ApprovalSignerRouter>",
+        "typealias R = [ApprovalSignerRouter]",
+        "typealias R = (ApprovalSignerRouter)",
+        "typealias `R` = ApprovalSignerRouter",
+        "typealias R<T> = ApprovalSignerRouter",
+        "associatedtype R = ApprovalSignerRouter",
+    ])
+    func aTypealiasOfTheRouterIsFlagged(planted: String) {
+        #expect(Scan.routerConstructionCount(in: planted) > 0, "scan missed: \(planted)")
+    }
+
+    /// Inside `extension ApprovalSignerRouter`, `Self(...)` and `Self.init(...)` build a router without
+    /// the name or an `.init(` with the right label next to it. The extension itself is the violation.
+    @Test(arguments: [
+        // The Codex round 2 P3 probe.
+        "extension ApprovalSignerRouter { static func make() -> Self { Self(india: .shared, uk: .shared) } }",
+        "extension ApprovalSignerRouter {\n    static func make() -> Self { Self.init(india: a, uk: b) }\n}",
+        "extension ApprovalSignerRouter {\n    static func make() -> Self { Self . init (india: a, uk: b) }\n}",
+        "public extension ApprovalSignerRouter {}",
+        "extension Growin.ApprovalSignerRouter {}",
+        "extension\n    ApprovalSignerRouter: Foo {}",
+        "extension ApprovalSignerRouter: Sendable where Self: Sendable {}",
+        "extension P where Self == ApprovalSignerRouter { static var x: Self { Self(india: a, uk: b) } }",
+    ])
+    func anExtensionOfTheRouterIsFlagged(planted: String) {
+        #expect(Scan.routerConstructionCount(in: planted) > 0, "scan missed: \(planted)")
+    }
+
+    @Test func aliasAndExtensionRulesLeaveUnrelatedCodeAlone() {
+        #expect(Scan.routerConstructionCount(in: "typealias Handler = () -> Void") == 0)
+        #expect(Scan.routerConstructionCount(in: "typealias Router2 = ApprovalSignerRouterConfig") == 0)
+        #expect(Scan.routerConstructionCount(in: "typealias R = MyApprovalSignerRouter") == 0)
+        #expect(Scan.routerConstructionCount(in: "typealias R = ApprovalSignerRouterError") == 0)
+        // An alias line followed by an unrelated mention must not be read as one declaration.
+        #expect(Scan.routerConstructionCount(in: "typealias Handler = () -> Void\nfunc run(r: ApprovalSignerRouter) {}") == 0)
+        #expect(Scan.routerConstructionCount(in: "typealias R = Foo\nlet r: ApprovalSignerRouter = .shared") == 0)
+        #expect(Scan.routerConstructionCount(in: "associatedtype Item = Int") == 0)
+        #expect(Scan.routerConstructionCount(in: "extension Foo { static func make() -> Self { Self(a: 1) } }") == 0)
+        #expect(Scan.routerConstructionCount(in: "extension Foo { static func make() -> Self { Self.init(a: 1) } }") == 0)
+        #expect(Scan.routerConstructionCount(in: "extension Foo: Bar {\n    func x(r: ApprovalSignerRouter) {}\n}") == 0)
+        #expect(Scan.routerConstructionCount(in: "extension Foo { var r: ApprovalSignerRouter { .shared } }") == 0)
+        #expect(Scan.routerConstructionCount(in: "extension ApprovalSignerRouterError: Equatable {}") == 0)
+        #expect(Scan.routerConstructionCount(in: "extension MyApprovalSignerRouter {}") == 0)
+        #expect(Scan.routerConstructionCount(in: "// typealias R = ApprovalSignerRouter") == 0)
+        #expect(Scan.routerConstructionCount(in: "// extension ApprovalSignerRouter {}") == 0)
+        #expect(Scan.routerConstructionCount(in: "/* typealias R = ApprovalSignerRouter */ let x = 1") == 0)
+        #expect(Scan.routerConstructionCount(in: "let s = Foo(.init(`indiaTime`: 1))") == 0)
     }
 
     @Test func routerUseThatIsNotConstructionIsNotFlagged() {
