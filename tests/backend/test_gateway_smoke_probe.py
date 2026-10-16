@@ -7,9 +7,12 @@ characters ^ = # to exercise URL-encoding in the redaction check.
 from __future__ import annotations
 
 import base64
+import builtins
+import dataclasses
 import json
 import secrets
 import stat
+import string
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -71,6 +74,7 @@ class Secrets:
         self.code = "A1" + secrets.token_hex(6)
         digits = "".join(secrets.choice("0123456789") for _ in range(8))
         self.token = base64.b64encode(f"{self.userid}:{digits}".encode()).decode()
+        self.user_name = "FAKE NAME"
 
     def values(self) -> list[str]:
         return [self.app_key, self.secret_key, self.userid, self.code, self.token]
@@ -86,7 +90,7 @@ class Secrets:
                     },
                     "idirect_userid": userid or self.userid,
                     "session_token": self.token,
-                    "idirect_user_name": "FAKE NAME",
+                    "idirect_user_name": self.user_name,
                     "idirect_lastlogin_time": "01-Oct-2026 15:50:00",
                 },
                 "Status": 200,
@@ -655,3 +659,407 @@ def test_main_validate_ok_on_full_result(monkeypatch, tmp_path, capsys, full_res
     capsys.readouterr()  # drop output printed while the fixture ran the probe
     assert sp.main(["--validate", str(path)]) == 0
     assert capsys.readouterr().out.strip() == "OK"
+
+
+# ===================================================== S1 user id mismatch
+# The operator logs in with a mobile number; Breeze returns an internal code.
+# On a mismatch the probe prints a masked hint to the terminal and asks the
+# operator to confirm. Nothing from the hint enters the result.
+
+TYPED_MOBILE = "9876543210"
+
+
+def _rand_letters(n: int) -> str:
+    return "".join(secrets.choice(string.ascii_uppercase) for _ in range(n))
+
+
+def mismatch_secrets() -> Secrets:
+    """Secrets whose returned user id and name are unique canaries (12 chars)."""
+    s = Secrets()
+    s.userid = "QZ" + _rand_letters(8) + "7P"
+    s.user_name = "ZQ" + secrets.token_hex(3).upper() + " QUARTERMAIN"
+    return s
+
+
+def mismatch_prompts(s: Secrets, confirm=None, typed: str = TYPED_MOBILE) -> sp.Prompts:
+    kwargs = {"expected_userid": lambda: typed}
+    if confirm is not None:
+        kwargs["confirm_account"] = confirm
+    return dataclasses.replace(prompts_for(s), **kwargs)
+
+
+class Confirm:
+    def __init__(self, answer: bool) -> None:
+        self.answer = answer
+        self.calls: list[str] = []
+
+    def __call__(self, hint: str) -> bool:
+        self.calls.append(hint)
+        return self.answer
+
+
+def run_mismatch(s, tmp_path, bits, confirm, steps=sp.ALL_STEPS):
+    transport, client, egress_factory = bits
+    lines: list[str] = []
+    result = sp.run_probe(
+        client=client,
+        egress_factory=egress_factory,
+        prompts=mismatch_prompts(s, confirm),
+        plan=sp.ProbePlan(),
+        out_dir=tmp_path / "out",
+        sleep=lambda _s: None,
+        steps=steps,
+        out=lines.append,
+    )
+    return result, lines
+
+
+def expected_hint_line(s: Secrets, typed: str = TYPED_MOBILE) -> str:
+    uid = s.userid
+    masked = uid[:2] + "*" * (len(uid) - 4) + uid[-2:]
+    first, *rest = s.user_name.split()
+    name = " ".join([first] + [r[0] + "." for r in rest])
+    return (
+        f"S1 user id mismatch: Breeze returned len={len(uid)} charset=alnum_upper "
+        f"hint={masked} name={name}; you typed len={len(typed)} charset=digits"
+    )
+
+
+def test_probe_version_bumped_and_schema_unchanged():
+    assert sp.PROBE_VERSION == "61-01b"
+    assert sp.RESULT_SCHEMA == "growin.smoke.breeze.v1"
+
+
+def test_mismatch_not_confirmed_fails_s1_and_stops(tmp_path):
+    s = mismatch_secrets()
+    transport, client, egress_factory = build_full(s)
+    confirm = Confirm(False)
+    result, lines = run_mismatch(s, tmp_path, (transport, client, egress_factory), confirm)
+
+    s1 = result["s1_customer_details"]
+    assert s1["pass"] is False
+    assert s1["userid_matches"] is False
+    assert s1["userid_confirmed_by_operator"] is False
+    assert len(confirm.calls) == 1
+    assert client.calls == 1
+    assert len(breeze_urls(transport)) == 1
+    for later in ("s2_bars", "s3_quotes", "s4_preview", "s5_replay"):
+        assert later not in result
+    assert lines == [expected_hint_line(s)]
+
+
+def test_main_exit_5_when_mismatch_not_confirmed(monkeypatch, tmp_path, capsys):
+    s = mismatch_secrets()
+    bits = build_full(s)
+    _patch_main(monkeypatch, s, bits, tty=True)
+    monkeypatch.setattr(sp, "default_prompts", lambda: mismatch_prompts(s, Confirm(False)))
+    assert sp.main(["--out", str(tmp_path / "out")]) == 5
+    out = capsys.readouterr().out
+    assert "userid_confirmed_by_operator=False" in out
+    assert "S1 user id mismatch" in out  # the hint reaches the terminal via print
+
+
+def test_mismatch_confirmed_passes_and_runs_s2_to_s5(tmp_path):
+    s = mismatch_secrets()
+    transport, client, egress_factory = build_full(s)
+    confirm = Confirm(True)
+    result, _lines = run_mismatch(s, tmp_path, (transport, client, egress_factory), confirm)
+
+    s1 = result["s1_customer_details"]
+    assert s1["pass"] is True
+    assert s1["userid_matches"] is False  # the exact compare itself did not relax
+    assert s1["userid_confirmed_by_operator"] is True
+    assert len(confirm.calls) == 1
+    assert client.calls == 13
+    for later in ("s2_bars", "s3_quotes", "s4_preview", "s5_replay"):
+        assert later in result
+    assert sp.validate_result(result) == []
+
+
+def test_main_exit_0_and_summary_flag_when_confirmed(monkeypatch, tmp_path, capsys):
+    s = mismatch_secrets()
+    _patch_main(monkeypatch, s, build_full(s), tty=True)
+    monkeypatch.setattr(sp, "default_prompts", lambda: mismatch_prompts(s, Confirm(True)))
+    assert sp.main(["--out", str(tmp_path / "out")]) == 0
+    out = capsys.readouterr().out
+    assert "userid_confirmed_by_operator=True" in out
+    assert s.userid not in out and s.user_name not in out
+
+
+def test_exact_match_never_asks_and_flag_is_false(tmp_path):
+    s = Secrets()
+    transport, client, egress_factory = build_full(s)
+    confirm = Confirm(True)
+    lines: list[str] = []
+    result = sp.run_probe(
+        client=client,
+        egress_factory=egress_factory,
+        prompts=dataclasses.replace(prompts_for(s), confirm_account=confirm),
+        plan=sp.ProbePlan(),
+        out_dir=tmp_path / "out",
+        sleep=lambda _s: None,
+        out=lines.append,
+    )
+    assert confirm.calls == []
+    assert lines == []
+    s1 = result["s1_customer_details"]
+    assert s1["pass"] is True and s1["userid_matches"] is True
+    assert s1["userid_confirmed_by_operator"] is False
+
+
+@pytest.mark.parametrize(
+    "variant",
+    ["lower", "trailing_space", "prefix_only", "suffix_only", "first_char_off", "last_char_off"],
+)
+def test_near_miss_is_still_a_mismatch(tmp_path, variant):
+    """The exact compare stays exact: a near match must go to the confirm path."""
+    s = Secrets()
+    uid = s.userid
+    typed = {
+        "lower": uid.lower(),
+        "trailing_space": uid + " ",
+        "prefix_only": uid[:-1],
+        "suffix_only": uid[1:],
+        "first_char_off": ("X" if uid[0] != "X" else "Y") + uid[1:],
+        "last_char_off": uid[:-1] + ("X" if uid[-1] != "X" else "Y"),
+    }[variant]
+    confirm = Confirm(False)
+    transport, client, egress_factory = build_full(s)
+    result = sp.run_probe(
+        client=client,
+        egress_factory=egress_factory,
+        prompts=mismatch_prompts(s, confirm, typed=typed),
+        plan=sp.ProbePlan(),
+        out_dir=tmp_path / "out",
+        sleep=lambda _s: None,
+        out=lambda _line: None,
+    )
+    assert len(confirm.calls) == 1
+    s1 = result["s1_customer_details"]
+    assert s1["userid_matches"] is False and s1["pass"] is False
+
+
+def _mismatching_success(s: Secrets, drop_token: bool = False) -> dict:
+    success = json.loads(s.customer_body())["Success"]
+    if drop_token:
+        del success["session_token"]
+    return success
+
+
+def _customer_only_bits(response: HttpResponse):
+    transport = FakeTransport(
+        {METADATA_URL: ok(EXPECTED_IP), ECHO: ok(EXPECTED_IP), V1_BASE + "customerdetails": response}
+    )
+    clock = FakeClock()
+    client = BreezeClient(transport, clock=clock)
+
+    def egress_factory(expected_ip: str) -> EgressChecker:
+        return EgressChecker(transport, expected_ip=expected_ip, echo_url=ECHO, clock=clock)
+
+    return transport, client, egress_factory
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["http_500_with_valid_looking_body", "success_missing_token", "error_payload", "not_json"],
+)
+def test_no_confirmation_offered_unless_customer_details_parsed(tmp_path, case):
+    s = mismatch_secrets()
+    good = {"Success": _mismatching_success(s), "Status": 200, "Error": None}
+    if case == "http_500_with_valid_looking_body":
+        response = HttpResponse(500, {}, json.dumps(good).encode())
+    elif case == "success_missing_token":
+        body = {"Success": _mismatching_success(s, drop_token=True), "Status": 200, "Error": None}
+        response = ok(json.dumps(body))
+    elif case == "error_payload":
+        body = {"Success": _mismatching_success(s), "Status": 5, "Error": "Invalid session."}
+        response = ok(json.dumps(body))
+    else:
+        response = ok("<html>mismatch</html>")
+
+    confirm = Confirm(True)
+    result, lines = run_mismatch(s, tmp_path, _customer_only_bits(response), confirm)
+
+    assert confirm.calls == []
+    assert lines == []
+    s1 = result["s1_customer_details"]
+    assert s1["pass"] is False
+    assert s1["userid_confirmed_by_operator"] is False
+    assert "s2_bars" not in result
+
+
+def _all_forms(value: str) -> set[str]:
+    raw = value.encode()
+    forms = {
+        value,
+        quote_plus(value),
+        json.dumps(value)[1:-1],
+        base64.b64encode(raw).decode(),
+        base64.urlsafe_b64encode(raw).decode(),
+    }
+    return forms | {f.rstrip("=") for f in forms}
+
+
+@pytest.mark.parametrize("answer", [False, True])
+def test_hint_name_and_returned_id_never_reach_the_result(tmp_path, answer, capsys):
+    s = mismatch_secrets()
+    result, lines = run_mismatch(s, tmp_path, build_full(s), Confirm(answer))
+
+    line = expected_hint_line(s)
+    assert lines == [line]
+    # the typed mobile number never appears, not even a 3-character slice of it
+    for i in range(len(TYPED_MOBILE) - 2):
+        assert TYPED_MOBILE[i : i + 3] not in line
+    assert "you typed len=10 charset=digits" in line
+    # injected output only: nothing went to stdout
+    assert s.userid not in capsys.readouterr().out
+
+    masked = s.userid[:2] + "*" * 8 + s.userid[-2:]
+    name_token = s.user_name.split()[0]
+    on_disk = (tmp_path / "out" / sp.RESULT_FILENAME).read_text()
+    dumped = json.dumps(result)
+    for value in (s.userid, s.user_name, name_token, masked):
+        for form in _all_forms(value):
+            assert form not in on_disk, f"leaked form of {value!r} to file"
+            assert form not in dumped, f"leaked form of {value!r} to result"
+
+
+@pytest.mark.parametrize("leak", ["userid", "user_name"])
+def test_returned_id_and_name_are_registered_as_secrets(tmp_path, monkeypatch, leak):
+    """Plant a leak into the result; the redaction self-check must catch it."""
+    s = mismatch_secrets()
+    planted = s.userid if leak == "userid" else s.user_name
+    monkeypatch.setattr(sp, "_lastlogin", lambda raw, now: (planted, "unknown"))
+    with pytest.raises(sp.RedactionError):
+        run_mismatch(s, tmp_path, build_full(s), Confirm(False))
+    assert not (tmp_path / "out" / sp.RESULT_FILENAME).exists()
+
+
+@pytest.mark.parametrize("length", [1, 2, 3, 4, 5])
+def test_mask_shows_zero_characters_below_six(length):
+    assert sp._mask_userid("ABCDEFGHIJ"[:length]) == ""
+
+
+@pytest.mark.parametrize("value", ["AB12CD", "379XTZ300", "QZ7777777777PQ"])
+def test_mask_shows_exactly_first_two_and_last_two_from_six(value):
+    masked = sp._mask_userid(value)
+    assert masked == value[:2] + "*" * (len(value) - 4) + value[-2:]
+    assert len(masked) == len(value)
+    assert masked[2:-2] == "*" * (len(value) - 4)
+
+
+def test_short_returned_id_line_shows_no_id_characters(tmp_path):
+    s = mismatch_secrets()
+    s.userid = "Q7ZP2"
+    _result, lines = run_mismatch(s, tmp_path, build_full(s), Confirm(False))
+    assert len(lines) == 1
+    assert "len=5 charset=alnum_upper hint=none" in lines[0]
+    assert "Q7" not in lines[0] and "P2" not in lines[0]
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("SANKET MANE", "SANKET M."),
+        ("SANKET KUMAR MANE", "SANKET K. M."),
+        ("SANKET", "SANKET"),
+        ("  SANKET   MANE  ", "SANKET M."),
+        (None, "unavailable"),
+        (12345, "unavailable"),
+        ("", "unavailable"),
+        ("   ", "unavailable"),
+    ],
+)
+def test_name_hint_format(raw, expected):
+    assert sp._name_hint(raw) == expected
+
+
+def test_missing_name_prints_unavailable(tmp_path):
+    s = mismatch_secrets()
+    body = json.loads(s.customer_body())
+    del body["Success"]["idirect_user_name"]
+    bits = _customer_only_bits(ok(json.dumps(body)))
+    _result, lines = run_mismatch(s, tmp_path, bits, Confirm(False))
+    assert len(lines) == 1 and "name=unavailable;" in lines[0]
+
+
+def test_prompts_without_confirm_account_deny():
+    prompts = sp.Prompts(
+        app_key=lambda: "a",
+        secret_key=lambda: "b",
+        expected_userid=lambda: "c",
+        expected_ip=lambda: "d",
+        api_session=lambda: "e",
+    )
+    assert prompts.confirm_account("any hint") is False
+
+
+def test_probe_with_default_confirm_denies_a_mismatch(tmp_path):
+    s = mismatch_secrets()
+    prompts = dataclasses.replace(prompts_for(s), expected_userid=lambda: TYPED_MOBILE)
+    transport, client, egress_factory = build_full(s)
+    result = sp.run_probe(
+        client=client,
+        egress_factory=egress_factory,
+        prompts=prompts,
+        plan=sp.ProbePlan(),
+        out_dir=tmp_path / "out",
+        sleep=lambda _s: None,
+        out=lambda _line: None,
+    )
+    assert result["s1_customer_details"]["pass"] is False
+    assert client.calls == 1
+
+
+@pytest.mark.parametrize("answer", ["yes", " YES ", "Yes\n", "\tyes"])
+def test_real_confirm_prompt_accepts_only_yes(monkeypatch, answer):
+    asked: list[str] = []
+
+    def fake_input(prompt=""):
+        asked.append(prompt)
+        return answer
+
+    monkeypatch.setattr(builtins, "input", fake_input)
+    assert sp.default_prompts().confirm_account("hint") is True
+    assert asked == ["Is this YOUR ICICI account (name and hint above)? Type yes to continue: "]
+
+
+@pytest.mark.parametrize("answer", ["y", "", "no", "yes please", "yess", "ye", "true", "1"])
+def test_real_confirm_prompt_denies_everything_else(monkeypatch, answer):
+    monkeypatch.setattr(builtins, "input", lambda prompt="": answer)
+    assert sp.default_prompts().confirm_account("hint") is False
+
+
+@pytest.mark.parametrize("exc", [EOFError, KeyboardInterrupt])
+def test_real_confirm_prompt_denies_on_eof_or_interrupt(monkeypatch, exc):
+    def boom(prompt=""):
+        raise exc()
+
+    monkeypatch.setattr(builtins, "input", boom)
+    assert sp.default_prompts().confirm_account("hint") is False
+
+
+def test_validator_accepts_the_new_key_and_flags_its_absence(tmp_path, capsys, monkeypatch):
+    s = Secrets()
+    result, _ = run(s, tmp_path, build_full(s), steps=sp.ALL_STEPS)
+    result = json.loads(json.dumps(result))
+    assert "userid_confirmed_by_operator" in result["s1_customer_details"]
+    assert sp.validate_result(result) == []
+
+    del result["s1_customer_details"]["userid_confirmed_by_operator"]
+    problems = sp.validate_result(result)
+    assert any("userid_confirmed_by_operator" in p and "missing key" in p for p in problems)
+
+    path = tmp_path / "old.json"
+    path.write_text(json.dumps(result))
+
+    class Stdin:
+        def isatty(self):
+            return False
+
+    monkeypatch.setattr(sys, "stdin", Stdin())
+    capsys.readouterr()
+    assert sp.main(["--validate", str(path)]) == 1
+    assert "PROBLEM s1_customer_details missing key userid_confirmed_by_operator" in (
+        capsys.readouterr().out
+    )

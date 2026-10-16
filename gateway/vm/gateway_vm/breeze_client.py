@@ -194,6 +194,7 @@ class CustomerDetails:
     exg_trade_date_nse: str | None
     exg_status_nse: str | None
     lastlogin_raw: str | None = field(default=None, repr=False)
+    user_name: str | None = field(default=None, repr=False)
 
 
 def parse_customer_details(success: object) -> CustomerDetails:
@@ -220,6 +221,7 @@ def parse_customer_details(success: object) -> CustomerDetails:
         return val if isinstance(val, str) else None
 
     last = success.get("idirect_lastlogin_time")
+    name = success.get("idirect_user_name")
     return CustomerDetails(
         userid=userid,
         session_token=token,
@@ -228,6 +230,7 @@ def parse_customer_details(success: object) -> CustomerDetails:
         exg_trade_date_nse=nse("exg_trade_date"),
         exg_status_nse=nse("exg_status"),
         lastlogin_raw=last if isinstance(last, str) else None,
+        user_name=name if isinstance(name, str) else None,
     )
 
 
