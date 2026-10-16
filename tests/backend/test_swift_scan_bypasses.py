@@ -89,19 +89,110 @@ STORE_ARGUMENT = re.compile(_NOT_AFTER_IDENT + r"store\s*:\s*\.shared" + _NOT_BE
 # `.shared` with no type in front of it takes its type from context, so the scan cannot tell a
 # KeychainStore from anything else: `Self.cleanUp(.shared)`, `run(on: .shared)`, `store = .shared`,
 # `var s: KeychainStore! = .shared`, `{ .shared }`, `return .shared`. The only implicit `.shared`
-# allowed is the KeychainScope enum case, in these four shapes. They are removed before the scan.
+# allowed is the KeychainScope enum case, in the three shapes below, removed before the scan. The
+# exemption is only as good as the type of the thing it is passed to, so the declarations that
+# could make it a KeychainStore are refused separately (see SCOPE_SHAPED_DECLARATIONS).
 KEYCHAIN_SCOPE_CONTEXTS = re.compile(
     r"scope\s*:\s*\.shared(?![A-Za-z0-9_])"
-    r"|[=!]=\s*\.shared(?![A-Za-z0-9_])"
-    r"|\ballows\s*\(\s*\.shared(?![A-Za-z0-9_])"
-    r"|\bcase\s+\.shared(?![A-Za-z0-9_])"
+    r"|\.\s*policy\s*[=!]=\s*\.shared(?![A-Za-z0-9_])"
+    r"|\.\s*policy\s*\.\s*allows\s*\(\s*\.shared(?![A-Za-z0-9_])"
+)
+# A declaration that gives a KeychainStore the label or name an exemption relies on, or that makes
+# a custom `==`, `!=`, `~=` or `allows`. All of these let `scope: .shared`, `x.policy == .shared`
+# or `x.policy.allows(.shared)` mean the shared store.
+#   `func cleanUp(scope store: KeychainStore)`, `scope: KeychainStore?`, `scope _: Optional<KeychainStore>`,
+#   `inout KeychainStore`, a multi-line parameter list, `init(scope store: KeychainStore)`.
+SCOPE_SHAPED_DECLARATIONS = (
+    (
+        "parameter or property labelled scope with a KeychainStore type",
+        re.compile(
+            _NOT_AFTER_IDENT + r"scope(?:\s+\w+)?\s*:\s*[^,)\n]*?(?<![A-Za-z0-9_])KeychainStore" + _NOT_BEFORE_IDENT
+        ),
+    ),
+    (
+        "generic parameter or where clause bound to KeychainStore",
+        re.compile(
+            r"<\s*\w+\s*:\s*KeychainStore" + _NOT_BEFORE_IDENT
+            + r"|\bwhere\b[^{\n]*\b\w+\s*(?::|==)\s*KeychainStore" + _NOT_BEFORE_IDENT
+        ),
+    ),
+    (
+        "custom ==, !=, ~=, allows or policy taking or holding a KeychainStore",
+        re.compile(
+            r"\b(?:func|var|let)\s*(?:==|!=|~=|allows\b|policy\b)[^{\n]*?(?<![A-Za-z0-9_])KeychainStore"
+            + _NOT_BEFORE_IDENT
+        ),
+    ),
 )
 DOT_SHARED = re.compile(r"\.\s*shared(?![A-Za-z0-9_])")
 STORE_LABEL_BEFORE = re.compile(r"(?<![A-Za-z0-9_])store\s*:\s*$")
-# A keyword before `.shared` still takes an implicit member (`return .shared`, `{ _ in .shared }`).
-KEYWORDS_BEFORE_IMPLICIT = frozenset({"return", "in", "else", "try", "await", "throw"})
+# A keyword before `.shared` still takes an implicit member (`return .shared`, `{ _ in .shared }`,
+# `_read { yield .shared }`).
+KEYWORDS_BEFORE_IMPLICIT = frozenset({"return", "in", "else", "try", "await", "throw", "yield", "case"})
 EXTENSION_OF_STORE = re.compile(r"\bextension\s+KeychainStore" + _NOT_BEFORE_IDENT)
 PRODUCTION_SERVICE = re.compile(_NOT_AFTER_IDENT + r"productionService" + _NOT_BEFORE_IDENT)
+
+
+RAW_STRING = re.compile(
+    r'(?<![A-Za-z0-9_"#])(?:(#+)"""[\s\S]*?"""\1|(#+)"[^\n]*?"\2)'
+)
+
+
+def blank_raw_strings(text: str) -> str:
+    """Raw string literals (`#"..."#`) reduced to `""`. Their backslashes are not escapes, and the
+    stripper below reads `\\(` as an interpolation, so a raw regex would derail it."""
+    return RAW_STRING.sub(lambda m: '""' + "\n" * m.group(0).count("\n"), text)
+
+
+def code_with_interpolations(text: str) -> str:
+    """Comments removed, string literal text dropped, interpolation expressions kept as code.
+
+    `print("x \\(Self.cleanUp(.shared))")` is executable: the text between `\\(` and its matching `)`
+    is code and may hold nested strings and parentheses. Each literal becomes `""`, followed by
+    ` (expression) ` for every interpolation in it, so the scans see the expression like any other.
+    """
+    src = strip_swift_comments_and_strings(blank_raw_strings(text), keep_strings=True)
+    n = len(src)
+
+    def code(i: int, until_close: bool) -> tuple[str, int]:
+        depth = 0
+        out = []
+        while i < n:
+            ch = src[i]
+            if until_close:
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    if depth == 0:
+                        return "".join(out), i + 1
+                    depth -= 1
+            if src.startswith('"""', i):
+                literal, i = string(i + 3, True)
+                out.append('""' + literal)
+            elif ch == '"':
+                literal, i = string(i + 1, False)
+                out.append('""' + literal)
+            else:
+                out.append(ch)
+                i += 1
+        return "".join(out), i
+
+    def string(i: int, multiline: bool) -> tuple[str, int]:
+        out = []
+        while i < n:
+            if multiline and src.startswith('"""', i):
+                return "".join(out), i + 3
+            ch = src[i]
+            if not multiline and ch in '"\n':
+                return "".join(out), i + (1 if ch == '"' else 0)
+            if src.startswith("\\(", i):
+                expression, i = code(i + 2, True)
+                out.append(" (" + expression + ") ")
+                continue
+            i += 2 if ch == "\\" else 1
+        return "".join(out), i
+
+    return code(0, False)[0]
 
 
 def implicit_shared_uses(code: str) -> list[str]:
@@ -138,8 +229,8 @@ def keychain_alias_offences(
 
     Backticks are removed first, so KeychainStore.`shared` is read as KeychainStore.shared.
     """
-    code = strip_swift_comments_and_strings(text, keep_strings=True).replace("`", "")
-    bare = strip_swift_comments_and_strings(text).replace("`", "")
+    code = strip_swift_comments_and_strings(blank_raw_strings(text), keep_strings=True).replace("`", "")
+    bare = code_with_interpolations(text).replace("`", "").replace("`", "")
     found = []
     for label, pattern in ALIAS_PATTERNS:
         for match in pattern.finditer(code):
@@ -149,6 +240,9 @@ def keychain_alias_offences(
         found.append(f"`store: .shared` appears {arguments}x, allowed {store_argument_pin}")
     if implicit_shared:
         found += implicit_shared_uses(bare)
+        for label, pattern in SCOPE_SHAPED_DECLARATIONS:
+            for match in pattern.finditer(bare):
+                found.append(f"{label}: {' '.join(match.group(0).split())}")
     if not allow_extension and EXTENSION_OF_STORE.search(bare):
         found.append("extension KeychainStore outside KeychainStore.swift")
     return found
@@ -188,7 +282,7 @@ def keychain_test_text_offences(text: str) -> list[str]:
     so a test may not name `productionService` at all.
     """
     found = keychain_alias_offences(text)
-    if PRODUCTION_SERVICE.search(strip_swift_comments_and_strings(text)):
+    if PRODUCTION_SERVICE.search(code_with_interpolations(text)):
         found.append("names productionService")
     return found
 
@@ -365,13 +459,51 @@ IMPLICIT_SAMPLES = {
     "array element": "let all: [KeychainStore] = [.shared]\n",
     "argument on its own line": "cleanUp(\n    .shared\n)\n",
     "dot then space": "cleanUp(. shared)\n",
+    "yield": "var s: KeychainStore { _read { yield .shared } }\n",
+    "switch case": "switch store {\ncase .shared: break\ndefault: break\n}\n",
+    "bare allows call": "allows(.shared)\n",
+    "bare equality": "let b = store == .shared\n",
+    # Codex r2 P2: the scope exemption is only as good as the type of what it is passed to.
+    "scope-labelled helper (Codex probe)": (
+        "func cleanUp(scope store: KeychainStore) { _ = store }\ncleanUp(scope: .shared)\n"
+    ),
+    "scope label only": "func cleanUp(scope: KeychainStore) {}\ncleanUp(scope: .shared)\n",
+    "scope optional": "func cleanUp(scope store: KeychainStore?) {}\n",
+    "scope unwrapped": "func cleanUp(scope store: KeychainStore!) {}\n",
+    "scope Optional generic": "func cleanUp(scope store: Optional<KeychainStore>) {}\n",
+    "scope inout": "func cleanUp(scope store: inout KeychainStore) {}\n",
+    "scope underscore name": "func cleanUp(scope _: KeychainStore) {}\n",
+    "scope backticked type": "func cleanUp(scope store: `KeychainStore`) {}\n",
+    "scope on its own line": "func cleanUp(\n    scope store: KeychainStore\n) {}\n",
+    "scope initializer": "init(scope store: KeychainStore) {}\n",
+    "scope property": "struct W { let scope: KeychainStore }\nW(scope: .shared)\n",
+    "scope generic": "func cleanUp<S: KeychainStore>(scope store: S) {}\n",
+    "scope where clause": "func cleanUp<S>(scope store: S) where S == KeychainStore {}\n",
+    "custom equality": "static func == (l: KeychainStore, r: Foo) -> Bool { true }\nlet b = x.policy == .shared\n",
+    "custom not equal": "func != (l: Foo, r: KeychainStore) -> Bool { true }\n",
+    "custom pattern match": "func ~= (l: KeychainStore, r: Foo) -> Bool { true }\n",
+    "custom allows": "func allows(_ s: KeychainStore) -> Bool { true }\n",
+    "allows closure": "let allows: (KeychainStore) -> Bool = { _ in true }\n",
+    "policy holding a store": "var policy: KeychainStore\n",
+    # Codex r2 P2: an interpolation is executable code.
+    "interpolated helper call (Codex probe)": 'print("cleanup: \\(Self.cleanUp(.shared))")\n',
+    "nested parentheses": 'print("x \\(a(b(c(.shared))))")\n',
+    "nested string inside": 'print("x \\(a("y", .shared))")\n',
+    "multi-line string": 'let m = """\n  x \\(cleanUp(.shared))\n"""\n',
+    "two interpolations": 'print("\\(a) and \\(cleanUp(.shared))")\n',
 }
 IMPLICIT_LEGITIMATE = {
     "URLSession member": "let s = URLSession.shared\n",
     "scope label": "store.set(v, for: .x, scope: .shared)\n",
-    "policy comparison": "#expect(name.policy == .shared)\n#expect(a != .shared)\n",
-    "policy allows": "#expect(!policy.allows(.shared))\n",
-    "pattern": "case .shared: return true\n",
+    "policy comparison": "#expect(name.policy == .shared)\n#expect(a.policy != .shared)\n",
+    "policy allows": "#expect(!CredentialName.x.policy.allows(.shared))\n",
+    "scope declarations": (
+        "func a(scope: KeychainScope) {}\nfunc b(scope store: KeychainScope) {}\nlet scope: KeychainScope\n"
+        "func c(_ store: KeychainStore, scope: KeychainScope) {}\nfunc d(\n    store: KeychainStore,\n    scope: .shared\n) {}\n"
+    ),
+    "unrelated operators": "static func == (l: Foo, r: Foo) -> Bool { true }\nfunc allows(_ s: KeychainScope) -> Bool { true }\n",
+    "interpolation with an explicit type": 'print("router: \\(ApprovalSignerRouter.shared.x)")\nlet t = "plain .shared text"\n',
+    "raw string with a backslash paren": 'let r = #"allows\\(\\s*\\.shared"#\n',
     "router": "ApprovalSignerRouter.shared.sign(x)\n",
     "member chain on the next line": "let r = ApprovalSignerRouter\n    .shared\n",
     "member of a call result": "make().shared\nlist[0].shared\n",
@@ -381,6 +513,7 @@ IMPLICIT_LEGITIMATE = {
     "extension of the error": "extension KeychainStoreError { var x: Int { 1 } }\n",
 }
 PRODUCTION_SERVICE_SAMPLES = {
+    "inside an interpolation": 'print("\\(KeychainStore.productionService)")\n',
     "named through the type": "let s = KeychainStore(service: KeychainStore.productionService)\n",
     "bare": "let s = KeychainStore(service: productionService)\n",
     "with a space": "let s = KeychainStore(service: KeychainStore . productionService)\n",

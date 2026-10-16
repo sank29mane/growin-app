@@ -92,6 +92,9 @@ struct LaunchMigrationsTests {
     private static let storeValuePattern = #"(?<![A-Za-z0-9_"])KeychainStore\s*\.\s*(?:shared|self|init)\b"#
     private static let storeExtensionPattern = #"extension\s+KeychainStore\b"#
     private static let storeTypealiasPattern = #"typealias\s+\w+\s*=\s*KeychainStore\b"#
+    /// The production service name, assembled so this file does not name it. Tests never need it:
+    /// a store built on it is the shared store.
+    private static let productionServicePattern = #"(?<![A-Za-z0-9_])"# + "production" + "Service" + #"\b"#
     /// The same names, spelled out for the planted samples.
     private static let storeValueNeedles = [
         "KeychainStore" + ".shared",
@@ -175,15 +178,68 @@ struct LaunchMigrationsTests {
 
     /// `.shared` written without a type in front of it takes its type from context, so a scan cannot
     /// tell a Keychain store from anything else: a helper call, an assignment, a getter, a return.
-    /// The Keychain scope enum case is the one allowed use, in the four shapes below. Comment lines
-    /// and text inside a string literal are skipped (an odd number of quotes earlier on the line).
+    /// The Keychain scope enum case is the one allowed use, in the three shapes below. Comment lines
+    /// and string literal text are skipped; the code inside an interpolation is scanned.
     private static let scopeContexts = [
         #"scope\s*:\s*\.shared\b"#,
-        #"[=!]=\s*\.shared\b"#,
-        #"allows\(\s*\.shared\b"#,
-        #"case\s+\.shared\b"#,
+        #"\.\s*policy\s*[=!]=\s*\.shared\b"#,
+        #"\.\s*policy\s*\.\s*allows[(]\s*\.shared\b"#,
     ]
-    private static let keywordsBeforeImplicitMember: Set<String> = ["return", "in", "else", "try", "await", "throw"]
+    private static let keywordsBeforeImplicitMember: Set<String> = [
+        "return", "in", "else", "try", "await", "throw", "yield", "case",
+    ]
+    /// Declarations that could make the exempt shapes above mean the shared store: a parameter or
+    /// property labelled scope whose type is the store, a generic bound to the store, and a custom
+    /// equality, pattern match, `allows` or `policy` taking or holding one.
+    private static let scopeShapedDeclarations = [
+        #"(?<![A-Za-z0-9_])scope(?:\s+\w+)?\s*:\s*[^,)]*?(?<![A-Za-z0-9_])KeychainStore\b"#,
+        #"<\s*\w+\s*:\s*KeychainStore\b|\bwhere\b[^{]*\b\w+\s*(?::|==)\s*KeychainStore\b"#,
+        #"\b(?:func|var|let)\s*(?:==|!=|~=|allows\b|policy\b)[^{]*?(?<![A-Za-z0-9_])KeychainStore\b"#,
+    ]
+
+    /// True when the end of `prefix` is inside the text of a string literal. A backslash followed by
+    /// an open parenthesis starts an interpolation, whose contents are code (nested strings and
+    /// parentheses included) until its closing parenthesis. One line only; raw strings are not modelled.
+    private static func endsInsideStringText(_ prefix: String) -> Bool {
+        var interpolationDepths: [Int] = []
+        var inString = false
+        let chars = Array(prefix)
+        var i = 0
+        while i < chars.count {
+            let c = chars[i]
+            if inString {
+                if c == "\\" {
+                    if i + 1 < chars.count, chars[i + 1] == "(" {
+                        interpolationDepths.append(0)
+                        inString = false
+                        i += 2
+                        continue
+                    }
+                    i += 2
+                    continue
+                }
+                if c == "\"" { inString = false }
+                i += 1
+                continue
+            }
+            if c == "\"" {
+                inString = true
+            } else if let depth = interpolationDepths.last {
+                if c == "(" {
+                    interpolationDepths[interpolationDepths.count - 1] = depth + 1
+                } else if c == ")" {
+                    if depth == 0 {
+                        interpolationDepths.removeLast()
+                        inString = true
+                    } else {
+                        interpolationDepths[interpolationDepths.count - 1] = depth - 1
+                    }
+                }
+            }
+            i += 1
+        }
+        return inString
+    }
 
     private static func implicitSharedUses(in text: String) -> [String] {
         var found: [String] = []
@@ -193,14 +249,22 @@ struct LaunchMigrationsTests {
             for context in scopeContexts {
                 line = line.replacingOccurrences(of: context, with: " ", options: .regularExpression)
             }
+            // Declarations of a scope-labelled store and the like, outside string text.
+            for pattern in scopeShapedDeclarations {
+                var declStart = line.startIndex
+                while let decl = line.range(of: pattern, options: .regularExpression, range: declStart..<line.endIndex) {
+                    declStart = decl.upperBound
+                    if endsInsideStringText(String(line[..<decl.lowerBound])) { continue }
+                    found.append(String(line[decl].prefix(40)))
+                }
+            }
             var searchStart = line.startIndex
             while let hit = line.range(
                 of: #"\.\s*shared\b"#, options: .regularExpression, range: searchStart..<line.endIndex)
             {
                 searchStart = hit.upperBound
                 let prefix = String(line[..<hit.lowerBound])
-                let quotes = prefix.replacingOccurrences(of: "\\\"", with: "").filter { $0 == "\"" }.count
-                if quotes % 2 == 1 { continue }
+                if endsInsideStringText(prefix) { continue }
                 let before = prefix.trimmingCharacters(in: .whitespaces)
                 if let last = before.last, last.isLetter || last.isNumber || last == "_" || last == ")" || last == "]" {
                     // `Type.shared` is a member access. A keyword in front still takes an implicit member.
@@ -234,6 +298,9 @@ struct LaunchMigrationsTests {
             }
             if text.range(of: storeTypealiasPattern, options: .regularExpression) != nil {
                 findings.append("\(path): aliases the Keychain store type")
+            }
+            if text.range(of: productionServicePattern, options: .regularExpression) != nil {
+                findings.append("\(path): names the production service")
             }
             for use in implicitSharedUses(in: text) {
                 findings.append("\(path): implicit shared member, type from context (\(use))")
@@ -308,6 +375,32 @@ struct LaunchMigrationsTests {
             ("backticked member", "let s = " + store + ".`shared`"),
             ("extension", "extension " + store + " { static var alias: " + store + " { shared } }"),
             ("typealias", "typealias Store = " + store),
+            ("production service", "let s = " + store + "(service: " + store + "." + "production" + "Service)"),
+            ("yield", "var s: KeychainStore { _read { yield .shared } }"),
+            ("switch case", "switch store {\ncase .shared: break\ndefault: break\n}"),
+            ("bare allows call", "allows(.shared)"),
+            // Codex r2 P2 on #573: the scope exemption is only as good as the type of what it is passed to.
+            ("scope-labelled helper", "func cleanUp(scope store: KeychainStore) {}\ncleanUp(scope: .shared)"),
+            ("scope label only", "func cleanUp(scope: KeychainStore) {}"),
+            ("scope optional", "func cleanUp(scope store: KeychainStore?) {}"),
+            ("scope unwrapped", "func cleanUp(scope store: KeychainStore!) {}"),
+            ("scope Optional generic", "func cleanUp(scope store: Optional<KeychainStore>) {}"),
+            ("scope inout", "func cleanUp(scope store: inout KeychainStore) {}"),
+            ("scope underscore name", "func cleanUp(scope _: KeychainStore) {}"),
+            ("scope initializer", "init(scope store: KeychainStore) {}"),
+            ("scope property", "struct W { let scope: KeychainStore }"),
+            ("scope generic", "func cleanUp<S: KeychainStore>(scope store: S) {}"),
+            ("scope where clause", "func cleanUp<S>(scope store: S) where S == KeychainStore {}"),
+            ("custom equality", "static func == (l: KeychainStore, r: Foo) -> Bool { true }"),
+            ("custom pattern match", "func ~= (l: KeychainStore, r: Foo) -> Bool { true }"),
+            ("custom allows", "func allows(_ s: KeychainStore) -> Bool { true }"),
+            ("allows closure", "let allows: (KeychainStore) -> Bool = { _ in true }"),
+            ("policy holding a store", "var policy: KeychainStore"),
+            // Codex r2 P2: an interpolation is executable code.
+            ("interpolated helper call", "print(\"cleanup: \\(Self.cleanUp(.shared))\")"),
+            ("nested parentheses", "print(\"x \\(a(b(c(.shared))))\")"),
+            ("nested string inside", "print(\"x \\(a(\"y\", .shared))\")"),
+            ("two interpolations", "print(\"\\(a) and \\(cleanUp(.shared))\")"),
         ]
         for sample in samples {
             let findings = Self.productionReach(in: [("T.swift", sample.text)])
@@ -320,8 +413,14 @@ struct LaunchMigrationsTests {
             "let s = URLSession.shared",
             "store.set(v, for: .x, scope: .shared)",
             "#expect(name.policy == .shared)",
-            "#expect(!policy.allows(.shared))",
-            "case .shared: return true",
+            "#expect(!CredentialName.x.policy.allows(.shared))",
+            "#expect(a.policy != .shared)",
+            "func a(scope: KeychainScope) {}",
+            "func b(scope store: KeychainScope) {}",
+            "func c(_ store: KeychainStore, scope: KeychainScope) {}",
+            "static func == (l: Foo, r: Foo) -> Bool { true }",
+            "print(\"router: \\(ApprovalSignerRouter.shared.x)\")",
+            "let t = \"plain .shared text\"",
             "ApprovalSignerRouter.shared.sign(x)",
             "make().shared",
             "// cleanUp(.shared)",
