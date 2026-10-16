@@ -69,6 +69,16 @@ INSTRUCTION = (
 _IST = timezone(timedelta(hours=5, minutes=30))
 _LASTLOGIN_FORMATS = ("%d-%b-%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%d/%m/%Y %H:%M:%S")
 _ALLOWED_SEGMENTS = ("Trading", "Equity", "Derivatives", "Currency")
+# Shapes of the CustomerDetails metadata copied into the result. Anything else is
+# dropped, so a hostile or malformed 200 cannot smuggle text (such as the masked
+# id or the account name) into the result file.
+_EXG_STATUS_RE = re.compile(r"^[A-Z]{1,3}$")
+_EXG_DATE_RES = (
+    re.compile(r"^\d{2}-[A-Za-z]{3}-\d{4}$"),
+    re.compile(r"^\d{4}-\d{2}-\d{2}$"),
+    re.compile(r"^\d{2}/\d{2}/\d{4}$"),
+)
+_SUCCESS_KEY_RE = re.compile(r"^[A-Za-z_]{1,40}$")
 
 
 class RedactionError(Exception):
@@ -255,12 +265,35 @@ def _name_hint(raw: object) -> str:
     return " ".join([first] + [_printable(t[0]) + "." for t in tokens[1:]])
 
 
+def _first_name_tokens(raw: object) -> list[str]:
+    """The first name token as sent and as displayed (they differ if sanitised)."""
+    if not isinstance(raw, str) or not raw.split():
+        return []
+    token = raw.split()[0]
+    return [token] if _printable(token)[:40] == token else [token, _printable(token)[:40]]
+
+
 def _mismatch_hint(returned: str, name: object, typed: str) -> str:
     return (
         f"S1 user id mismatch: Breeze returned len={len(returned)} "
         f"charset={_charset_detail(returned)} hint={_mask_userid(returned) or 'none'} "
         f"name={_name_hint(name)}; you typed len={len(typed)} charset={_charset(typed)}"
     )
+
+
+def _constrain_s1_metadata(
+    status: str | None, trade_date: str | None, keys: Sequence[str]
+) -> tuple[str | None, str | None, list[str], bool]:
+    """Keep only expected shapes; the last item says whether anything was dropped."""
+    dropped = False
+    if status is not None and not _EXG_STATUS_RE.match(status):
+        status, dropped = None, True
+    if trade_date is not None and not any(rx.match(trade_date) for rx in _EXG_DATE_RES):
+        trade_date, dropped = None, True
+    kept = [k for k in keys if _SUCCESS_KEY_RE.match(k)]
+    if len(kept) != len(keys):
+        dropped = True
+    return status, trade_date, kept, dropped
 
 
 def _token_is_b64_pair(token: str) -> bool:
@@ -341,15 +374,36 @@ def _step_s1(st: _State) -> dict:
     if details.user_name:
         st.secrets.append(details.user_name)
     st.token = details.session_token
-    out["success_keys"] = list(details.success_keys)
+    # Everything the hint can show is a secret from here on, before any field is
+    # copied into the result, so the final redaction check covers it too.
+    hint = _mismatch_hint(details.userid, details.user_name, st.expected_userid)
+    name_hint = _name_hint(details.user_name)
+    st.secrets.append(hint)
+    st.secrets.extend(
+        v
+        for v in (
+            _mask_userid(details.userid),
+            "" if name_hint == "unavailable" else name_hint,
+            *(t for t in _first_name_tokens(details.user_name) if len(t) >= 4),
+        )
+        if v
+    )
+    (
+        out["exg_status_nse"],
+        out["exg_trade_date_nse"],
+        out["success_keys"],
+        dropped,
+    ) = _constrain_s1_metadata(
+        details.exg_status_nse, details.exg_trade_date_nse, details.success_keys
+    )
+    if dropped:
+        st.note("s1_metadata_dropped")
     out["userid_matches"] = hmac.compare_digest(
         details.userid.encode("utf-8"), st.expected_userid.encode("utf-8")
     )
     out["segments"] = {k: v for k, v in details.segments.items() if k in _ALLOWED_SEGMENTS}
     out["token_b64_pair"] = _token_is_b64_pair(details.session_token)
     out["token_length"] = len(details.session_token)
-    out["exg_trade_date_nse"] = details.exg_trade_date_nse
-    out["exg_status_nse"] = details.exg_status_nse
     out["lastlogin_format"], out["lastlogin_tz_hint"] = _lastlogin(
         details.lastlogin_raw, raw.fetched_at_utc
     )
@@ -358,7 +412,6 @@ def _step_s1(st: _State) -> dict:
         return out
     # Mismatch on a valid CustomerDetails: show a masked hint on the terminal
     # only, then pass solely on an explicit operator "yes" (fail closed).
-    hint = _mismatch_hint(details.userid, details.user_name, st.expected_userid)
     st.out(hint)
     confirmed = st.confirm_account(hint) is True
     out["userid_confirmed_by_operator"] = confirmed
@@ -842,6 +895,26 @@ def _check_keys(node: object, expected: Sequence[str], where: str, problems: lis
             problems.append(f"{where} has unexpected key {key}")
 
 
+def _check_s1_shapes(s1: object, problems: list[str]) -> None:
+    """Off-shape metadata is a problem. Messages name the field, never the value."""
+    if not isinstance(s1, dict):
+        return
+    status = s1.get("exg_status_nse")
+    if status is not None and not (isinstance(status, str) and _EXG_STATUS_RE.match(status)):
+        problems.append("s1_customer_details exg_status_nse has an unexpected shape")
+    date = s1.get("exg_trade_date_nse")
+    if date is not None and not (
+        isinstance(date, str) and any(rx.match(date) for rx in _EXG_DATE_RES)
+    ):
+        problems.append("s1_customer_details exg_trade_date_nse has an unexpected shape")
+    keys = s1.get("success_keys")
+    if "success_keys" in s1 and not (
+        isinstance(keys, list)
+        and all(isinstance(k, str) and _SUCCESS_KEY_RE.match(k) for k in keys)
+    ):
+        problems.append("s1_customer_details success_keys has an unexpected shape")
+
+
 def validate_result(obj: object) -> list[str]:
     """Return a list of problems; empty means valid."""
     problems: list[str] = []
@@ -864,6 +937,7 @@ def validate_result(obj: object) -> list[str]:
         _check_keys(obj["s0_egress"], _S0_KEYS, "s0_egress", problems)
     if "s1_customer_details" in obj:
         _check_keys(obj["s1_customer_details"], _S1_KEYS, "s1_customer_details", problems)
+        _check_s1_shapes(obj["s1_customer_details"], problems)
     for key, expected in (("s2_bars", _S2_KEYS), ("s3_quotes", _S3_KEYS), ("s4_preview", _S4_KEYS)):
         items = obj.get(key)
         if not isinstance(items, list):

@@ -677,7 +677,7 @@ def mismatch_secrets() -> Secrets:
     """Secrets whose returned user id and name are unique canaries (12 chars)."""
     s = Secrets()
     s.userid = "QZ" + _rand_letters(8) + "7P"
-    s.user_name = "ZQ" + secrets.token_hex(3).upper() + " QUARTERMAIN"
+    s.user_name = "ZQ" + _rand_letters(6) + " QUARTERMAIN"  # letters only: no digit overlap with TYPED_MOBILE
     return s
 
 
@@ -1063,3 +1063,219 @@ def test_validator_accepts_the_new_key_and_flags_its_absence(tmp_path, capsys, m
     assert "PROBLEM s1_customer_details missing key userid_confirmed_by_operator" in (
         capsys.readouterr().out
     )
+
+
+# ================================================ review round 1: F1 and F2
+
+
+class _Truthy:
+    def __bool__(self) -> bool:
+        return True
+
+
+@pytest.mark.parametrize("answer", [1, "yes", _Truthy(), ["x"]], ids=["int1", "str", "obj", "list"])
+def test_only_literal_true_confirms(tmp_path, answer):
+    s = mismatch_secrets()
+    transport, client, egress_factory = build_full(s)
+    result, _lines = run_mismatch(
+        s, tmp_path, (transport, client, egress_factory), lambda _hint: answer
+    )
+    s1 = result["s1_customer_details"]
+    assert s1["pass"] is False
+    assert s1["userid_confirmed_by_operator"] is False
+    assert client.calls == 1 and "s2_bars" not in result
+
+
+@pytest.mark.parametrize("answer", [1, "yes", _Truthy()], ids=["int1", "str", "obj"])
+def test_main_exit_5_for_truthy_non_true_confirm(monkeypatch, tmp_path, answer):
+    s = mismatch_secrets()
+    _patch_main(monkeypatch, s, build_full(s), tty=True)
+    monkeypatch.setattr(sp, "default_prompts", lambda: mismatch_prompts(s, lambda _h: answer))
+    assert sp.main(["--out", str(tmp_path / "out")]) == 5
+
+
+def _hostile_bits(userid: str, name: str):
+    s = mismatch_secrets()
+    body = json.loads(s.customer_body())
+    body["Success"]["idirect_userid"] = userid
+    body["Success"]["idirect_user_name"] = name
+    return s, _customer_only_bits(ok(json.dumps(body)))
+
+
+@pytest.mark.parametrize(
+    "userid,name",
+    [
+        ("\x1b[31mAB\x1b]0;title\x07CD\r\n\x00ZZ", "\x1b[31mEVIL\x1b]0;title\x07 NAME\r\nX\x00Y"),
+        ("\x00\x00\x00\x00\x00\x00\x00\x00", "A \x1b[31mB \x00C ‮D"),
+        ("QQ\r\nQQ\x1b[2JQQ", "\x1b]0;pwn\x07"),
+        ("\x1b[31mshort", "\x1b[31m"),
+    ],
+)
+def test_hint_line_has_no_control_characters(tmp_path, userid, name):
+    s, bits = _hostile_bits(userid, name)
+    confirm = Confirm(False)
+    _result, lines = run_mismatch(s, tmp_path, bits, confirm)
+
+    assert len(lines) == 1 and confirm.calls == lines
+    for line in lines:
+        assert "\x1b" not in line
+        assert all(ch.isprintable() for ch in line), repr(line)
+        assert "\n" not in line and "\r" not in line and "\x00" not in line
+
+
+def _s1_planted_values(s: Secrets) -> dict[str, str]:
+    uid = s.userid
+    first, *rest = s.user_name.split()
+    return {
+        "masked_id": uid[:2] + "*" * (len(uid) - 4) + uid[-2:],
+        "name_hint": " ".join([first] + [r[0] + "." for r in rest]),
+        "hint_line": expected_hint_line(s),
+    }
+
+
+def _planted_bits(s: Secrets, carrier: str, value: str, drop_name: bool = False):
+    body = json.loads(s.customer_body())
+    if drop_name:
+        del body["Success"]["idirect_user_name"]
+    if carrier == "exg_status":
+        body["Success"]["exg_status"] = {"NSE": value}
+    elif carrier == "exg_trade_date":
+        body["Success"]["exg_trade_date"] = {"NSE": value}
+    else:
+        body["Success"][value] = "x"
+    return _customer_only_bits(ok(json.dumps(body)))
+
+
+_CARRIERS = ["exg_status", "exg_trade_date", "success_key"]
+_VALUES = ["masked_id", "name_hint", "hint_line"]
+
+
+def _carrier_value(result: dict, carrier: str):
+    s1 = result["s1_customer_details"]
+    return {
+        "exg_status": s1["exg_status_nse"],
+        "exg_trade_date": s1["exg_trade_date_nse"],
+        "success_key": s1["success_keys"],
+    }[carrier]
+
+
+@pytest.mark.parametrize("carrier", _CARRIERS)
+@pytest.mark.parametrize("which", _VALUES)
+def test_shape_guard_alone_drops_planted_metadata(tmp_path, monkeypatch, carrier, which):
+    """F1(b): with the redaction check off, off-shape metadata is still dropped."""
+    monkeypatch.setattr(sp, "assert_redacted", lambda serialized, found: None)
+    s = mismatch_secrets()
+    value = _s1_planted_values(s)[which]
+    result, _lines = run_mismatch(s, tmp_path, _planted_bits(s, carrier, value), Confirm(False))
+
+    on_disk = (tmp_path / "out" / sp.RESULT_FILENAME).read_text()
+    assert value not in on_disk and json.dumps(value)[1:-1] not in on_disk
+    carried = _carrier_value(result, carrier)
+    assert carried is None or value not in carried
+    assert "s1_metadata_dropped" in result["notes"]
+    assert not any("shape" in p or "secret-shaped" in p for p in sp.validate_result(result))
+
+
+@pytest.mark.parametrize("carrier", _CARRIERS)
+@pytest.mark.parametrize("which", _VALUES)
+def test_redaction_alone_refuses_planted_metadata(tmp_path, monkeypatch, carrier, which):
+    """F1(a): with the shape guard off, the registered hint secrets stop the write."""
+    monkeypatch.setattr(
+        sp, "_constrain_s1_metadata", lambda status, date, keys: (status, date, list(keys), False)
+    )
+    s = mismatch_secrets()
+    value = _s1_planted_values(s)[which]
+    with pytest.raises(sp.RedactionError):
+        run_mismatch(s, tmp_path, _planted_bits(s, carrier, value), Confirm(False))
+    assert not (tmp_path / "out" / sp.RESULT_FILENAME).exists()
+
+
+@pytest.mark.parametrize("carrier", _CARRIERS)
+@pytest.mark.parametrize("which", _VALUES)
+def test_planted_metadata_never_reaches_the_file_with_both_guards(tmp_path, carrier, which):
+    s = mismatch_secrets()
+    value = _s1_planted_values(s)[which]
+    result, _lines = run_mismatch(s, tmp_path, _planted_bits(s, carrier, value), Confirm(False))
+    on_disk = (tmp_path / "out" / sp.RESULT_FILENAME).read_text()
+    assert value not in on_disk
+    carried = _carrier_value(result, carrier)
+    assert carried is None or value not in carried
+    assert "s1_metadata_dropped" in result["notes"]
+    assert not any("shape" in p or "secret-shaped" in p for p in sp.validate_result(result))
+
+
+def _shape_guard_off(monkeypatch):
+    monkeypatch.setattr(
+        sp, "_constrain_s1_metadata", lambda status, date, keys: (status, date, list(keys), False)
+    )
+
+
+@pytest.mark.parametrize("carrier", _CARRIERS)
+def test_hint_line_registration_alone_catches_a_value_free_hint(tmp_path, monkeypatch, carrier):
+    """Short id and no name: the hint line holds no id or name text, so only its own
+    registration can stop a planted copy."""
+    _shape_guard_off(monkeypatch)
+    s = mismatch_secrets()
+    s.userid = "Q7ZP2"
+    line = (
+        "S1 user id mismatch: Breeze returned len=5 charset=alnum_upper hint=none "
+        "name=unavailable; you typed len=10 charset=digits"
+    )
+    bits = _planted_bits(s, carrier, line, drop_name=True)
+    with pytest.raises(sp.RedactionError):
+        run_mismatch(s, tmp_path, bits, Confirm(False))
+    assert not (tmp_path / "out" / sp.RESULT_FILENAME).exists()
+
+
+@pytest.mark.parametrize("carrier", _CARRIERS)
+def test_name_hint_registration_alone_catches_a_short_first_token(tmp_path, monkeypatch, carrier):
+    """First token under four characters is not registered on its own, so the
+    abbreviated name must be."""
+    _shape_guard_off(monkeypatch)
+    s = mismatch_secrets()
+    s.user_name = "AB QUARTERMAIN"
+    with pytest.raises(sp.RedactionError):
+        run_mismatch(s, tmp_path, _planted_bits(s, carrier, "AB Q."), Confirm(False))
+    assert not (tmp_path / "out" / sp.RESULT_FILENAME).exists()
+
+
+def test_first_name_token_is_registered_as_a_secret(tmp_path):
+    """A letters-only token passes the key shape, so only registration can stop it."""
+    s = mismatch_secrets()
+    s.user_name = "ZEBEDIAH" + _rand_letters(4) + " QUARTERMAIN"
+    token = s.user_name.split()[0]
+    with pytest.raises(sp.RedactionError):
+        run_mismatch(s, tmp_path, _planted_bits(s, "success_key", token), Confirm(False))
+    assert not (tmp_path / "out" / sp.RESULT_FILENAME).exists()
+
+
+def test_expected_metadata_survives_the_shape_guard(tmp_path):
+    s = Secrets()
+    result, _ = run(s, tmp_path, build(s))
+    s1 = result["s1_customer_details"]
+    assert s1["exg_status_nse"] == "O"
+    assert s1["exg_trade_date_nse"] == "01-Oct-2026"
+    assert "idirect_userid" in s1["success_keys"] and "session_token" in s1["success_keys"]
+    assert "s1_metadata_dropped" not in result["notes"]
+
+
+@pytest.mark.parametrize(
+    "field,bad",
+    [
+        ("exg_status_nse", "QZ********7P"),
+        ("exg_status_nse", "open"),
+        ("exg_status_nse", 7),
+        ("exg_trade_date_nse", "SANKET M."),
+        ("exg_trade_date_nse", "1-Oct-2026"),
+        ("success_keys", ["idirect_userid", "QZ********7P"]),
+        ("success_keys", ["has space"]),
+        ("success_keys", "idirect_userid"),
+        ("success_keys", [7]),
+    ],
+)
+def test_validator_rejects_off_shape_s1_metadata(full_result, field, bad):
+    assert sp.validate_result(full_result) == []
+    full_result["s1_customer_details"][field] = bad
+    problems = sp.validate_result(full_result)
+    assert any(field in p and "unexpected shape" in p for p in problems)
+    assert not any("QZ***" in p or "SANKET" in p for p in problems)  # never echoes values
