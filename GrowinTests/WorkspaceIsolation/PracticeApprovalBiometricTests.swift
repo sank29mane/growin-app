@@ -344,33 +344,27 @@ struct PracticeApprovalBiometricTests {
         #expect(sources.count > 10, "source probe found too few files")
         let routerPath = "Growin/Security/ApprovalSignerRouter.swift"
 
-        // No file calls the software signer's `sign(` through `.shared`; the router holds its own
-        // reference and the authorizer uses the token-gated method.
-        let rawCallers = Set(sources.filter { $0.text.contains("LocalApprovalSigner.shared.sign(") }.map(\.path))
-        #expect(rawCallers.isEmpty, "raw software signing outside the router: \(rawCallers.sorted())")
-        // Nor does anything name the Secure Enclave signer's shared instance: the router takes it by
-        // inferred `.shared`, so a direct caller would bypass the flow, purpose and key checks.
-        let seCallers = sources.filter { $0.text.contains("SecureEnclaveApprovalSigner.shared") }.map(\.path)
-        #expect(seCallers.isEmpty, "Secure Enclave signer reached without the router: \(seCallers)")
-        // One router, built once, held only as `.shared` and always called through.
-        for (path, text) in sources where path != routerPath {
-            #expect(!text.contains("ApprovalSignerRouter("), "\(path) builds a second router")
-            #expect(Self.matchCount(#"\bApprovalSignerRouter\.shared(?!\s*\.\s*\w)"#, in: text) == 0,
-                    "\(path) keeps a reference to ApprovalSignerRouter.shared instead of calling through it")
+        // Which files may name a signer type at all. This is the guard against the raw signer (the
+        // software `sign` has no workspace gate) and the Secure Enclave signer being reached around
+        // the router, including through a typed inferred `.shared` or a parameter default, which
+        // never spell `Type.shared`. Allow-list entries are checked not to go stale.
+        #expect(SignerSourceScan.allowListProblems(sources).isEmpty, "\(SignerSourceScan.allowListProblems(sources))")
+        for (path, text) in sources {
+            #expect(SignerSourceScan.namingViolations(path: path, text: text).isEmpty,
+                    "\(SignerSourceScan.namingViolations(path: path, text: text))")
+            // One router, held only as `.shared` and always called through (no stored copy), however
+            // the line breaks fall.
+            if path != routerPath {
+                #expect(SignerSourceScan.routerReferenceKeptCount(in: text) == 0,
+                        "\(path) keeps a reference to ApprovalSignerRouter.shared instead of calling through it")
+            }
         }
 
-        let routerCallers = Set(sources.filter {
-            $0.path != routerPath
-                && ($0.text.contains("ApprovalSignerRouter.shared.sign(")
-                    || $0.text.contains("ApprovalSignerRouter.shared.signAsync("))
-        }.map(\.path))
-        // A new caller fails here and must be reviewed for PRACTICE handling.
-        #expect(routerCallers == [
-            "Growin/Models/PaperOperationsModels.swift",
-            "Growin/ViewModels/ChatViewModel.swift",
-            "Growin/ViewModels/RelayOrderBatchViewModel.swift",
-            "Growin/Views/SettingsView.swift",
-        ])
+        // Exact number of router sign call sites per caller file, not only which files call. A new
+        // caller, or a second call in a listed file, changes this and must be reviewed for PRACTICE.
+        let routerCallSites = SignerSourceScan.routerSignCallSites(sources)
+        #expect(routerCallSites == SignerSourceScan.pinnedRouterSignCalls, "\(routerCallSites)")
+        let routerCallers = Set(routerCallSites.keys)
         for (path, text) in sources where routerCallers.contains(path) {
             #expect(!text.contains("expectedPractice"), "\(path) builds a PRACTICE review")
             #expect(!text.contains("PracticeApprovalAuthorizer"), "\(path) mixes the authorizer with the router")

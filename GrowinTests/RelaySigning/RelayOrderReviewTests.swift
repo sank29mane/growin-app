@@ -427,29 +427,38 @@ final class RelayOrderReviewTests: XCTestCase {
     /// sending practice through it would mean opening that gate. The authorizer is pinned by
     /// `PracticeApprovalBiometricTests` (single construction site, token only minted there). This test
     /// pins what it may do with the software signer and that no other file reaches it.
+    ///
+    /// "Reaches" means names the type, not "spells `LocalApprovalSigner.shared`": a typed inferred
+    /// `let s: LocalApprovalSigner = .shared` or a parameter default `= .shared` never spells that,
+    /// and `LocalApprovalSigner.sign` has no workspace gate. `SignerSourceScan` flags any identifier
+    /// use of a signer type (comments stripped) outside an explicit allow-list, and its own tests
+    /// (`SignerSourceScanTests`) prove each evasion form is caught.
     func testOnlyTheRouterAndThePracticeAuthorizerReachTheSoftwareSignerInAppSources() throws {
-        let routerPath = "Growin/Security/ApprovalSignerRouter.swift"
-        let signerPath = "Growin/Security/LocalApprovalSigner.swift"
+        let routerPath = SignerSourceScan.routerPath
         let authorizerPath = "Growin/Security/PracticeApprovalAuthorizer.swift"
         let sources = try SourceTree.swiftSources()
         XCTAssertGreaterThan(sources.count, 10)
-        XCTAssertTrue(sources.contains { $0.path == authorizerPath }, "the allow-listed file moved; update this scan")
-        var offenders: [String] = []
-        for (path, text) in sources where text.contains("LocalApprovalSigner.shared") {
-            if path != routerPath, path != signerPath, path != authorizerPath {
-                offenders.append(path)
-            }
+        XCTAssertEqual(SignerSourceScan.allowListProblems(sources), [], "the signer allow-list went stale")
+        for (path, text) in sources {
+            XCTAssertEqual(SignerSourceScan.namingViolations(path: path, text: text), [],
+                           "a file reaches a signer outside the router and the practice authorizer")
         }
-        XCTAssertEqual(offenders, [], "these files sign without the router or the practice authorizer")
+        // Only the router and the signer's own file may name the software signer besides the authorizer.
+        let softwareNamers = Set(sources.filter {
+            SignerSourceScan.mentions(of: "LocalApprovalSigner", in: SignerSourceScan.stripComments($0.text)) > 0
+        }.map(\.path))
+        XCTAssertEqual(softwareNamers, [
+            routerPath, "Growin/Security/LocalApprovalSigner.swift", authorizerPath,
+        ])
 
         // The authorizer may read the identity and call the token-gated practice signer.
-        // The raw `sign(` (which refuses PRACTICE) and anything else stay off its menu.
-        let authorizer = try XCTUnwrap(sources.first { $0.path == authorizerPath }?.text)
-        let uses = authorizer.components(separatedBy: "LocalApprovalSigner.shared").count - 1
-        let allowedUses = authorizer.components(separatedBy: "LocalApprovalSigner.shared.identity(for:").count - 1
-            + authorizer.components(separatedBy: "LocalApprovalSigner.shared.signAuthorizedPractice(").count - 1
-        XCTAssertEqual(uses, 2, "the authorizer should touch the software signer in exactly two places")
-        XCTAssertEqual(allowedUses, uses, "the authorizer may only call identity(for:) and signAuthorizedPractice(")
+        // The raw `sign(` (which refuses PRACTICE) and anything else stay off its menu. Its two
+        // mentions of the type are pinned in `SignerSourceScan.pinnedMentions`.
+        let authorizer = SignerSourceScan.stripComments(try XCTUnwrap(sources.first { $0.path == authorizerPath }?.text))
+        XCTAssertEqual(SignerSourceScan.matchCount(#"LocalApprovalSigner\s*\.\s*shared\s*\.\s*identity\s*\(\s*for\s*:"#, in: authorizer), 1)
+        XCTAssertEqual(SignerSourceScan.matchCount(#"LocalApprovalSigner\s*\.\s*shared\s*\.\s*signAuthorizedPractice\s*\("#, in: authorizer), 1)
+        XCTAssertEqual(SignerSourceScan.mentions(of: "LocalApprovalSigner", in: authorizer), 2,
+                       "the authorizer may touch the software signer in exactly those two places")
         // India must never reach the software key through it.
         XCTAssertTrue(authorizer.contains("workspace == PracticeApprovalPolicy.workspace"),
                       "the authorizer must refuse every workspace but the practice one before touching a key")
