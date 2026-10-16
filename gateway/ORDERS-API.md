@@ -111,6 +111,34 @@ wins and this file is wrong.
 - **Vectors.** `tests/backend/fixtures/relay_orders/signing_vectors.json` (canonical bytes, signatures, negatives) and
   `limits_vectors.json` (rule decisions with expected codes, drawdown paths, `limits_sha256`). Both are TEST ONLY.
 
+## Mac admission codes (63-04)
+
+The Mac enforces its own India limits before any approval challenge exists
+(`backend/execution/india_guard.py`). A refusal is a DENIED admission whose `reason_code` is the first code
+below; every code the rules returned is recorded in the admission evidence. Names are the O6 names, spelled
+the same on both sides (lower case), so a Mac refusal and a VM refusal of one order read alike.
+
+- **Shared with O6, same name:** `capital_cap`, `per_position_cap`, `collar`, `circuit_band`, `off_tick`,
+  `isin_mismatch`, `instrument_unsupported`, `sell_exceeds_holding`, `halt_latch`, `pilot_ended`, `stop_open`,
+  `session_closed`, `quote_unavailable`, `tick_reference_unavailable`, `state_unreadable`, `state_unwritable`,
+  `account_read_failed`. `kill_switch`, `mac_halt` and `account_mismatch` are VM-side facts: the Mac passes them
+  as clear and the VM refuses on them (63-05 brings `mac_halt` and `account_mismatch` back to the Mac).
+- **Mac only, never sent by the VM (new in 63-04):** `SLIPPAGE_LIMIT` and `SLIPPAGE_QUOTE_UNAVAILABLE` (the
+  P-16 gate: simulated fill worse than the admission quote's ask for a buy or bid for a sell by more than
+  `max_slippage_bps`, or no usable book price for the side; upper case, as `rules.slippage_check` names them),
+  `intent_invalid` (not a whole-share LIMIT order with a limit price) and `india_limits_unavailable` (the
+  service has no India guard; no admission, challenge or claim of an India BUY is possible without one).
+- **Rechecks.** A pending India BUY is run through the same rules again at challenge creation and at claim,
+  with a fresh quote (at most 30 s old), the current latches and latch file, the 15:10 IST cutoff and both
+  caps without the order's own reservation. A failed recheck refuses with the O6 reason and releases the
+  reservation. The caps are also enforced inside the reservation transaction itself, at limit-price
+  notional, so two admissions that passed before either reserved cannot both reserve. SELLs are not
+  rechecked: they stay admissible while halted or ended and are gated by the held quantity at claim.
+- **A new public code** must be added here and in `gateway_vm.orders` together, with a vector row if the VM
+  can also return it. A Mac-only code stays out of `growin-orders/1` bodies.
+- `state_unreadable` applies to BUY admission only. A SELL is judged without the latch file, because halt,
+  ended and stop latches only ever block buys and an unreadable file must not trap a position.
+
 ## Consumers
 
 - **63-02, Mac risk module.** Reads both vector files and must reach the same canonical bytes, the same

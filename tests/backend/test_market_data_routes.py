@@ -1,7 +1,10 @@
 from datetime import datetime, timezone
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+import india_limits_support as ils
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
@@ -183,7 +186,10 @@ async def test_paper_preparation_is_real_loopback_only_fail_closed_and_reserves_
     original_service = state._execution_service
     original_policy = state._preflight_policy_connection
     assert state.start_execution(
-        tmp_path / "india.sqlite3", workspace="india", private_dir=private_config_dir
+        tmp_path / "india.sqlite3",
+        workspace="india",
+        private_dir=private_config_dir,
+        india_clock=lambda: ils.NOW,
     )
     try:
         body = {"confirmation": "PREPARE_INDIA_PAPER", "symbol": "RELIANCE", "quantity": "1"}
@@ -200,8 +206,21 @@ async def test_paper_preparation_is_real_loopback_only_fail_closed_and_reserves_
         state._execution_ledger.configure_paper_budget("paper", "INR", "1000", workspace="india")
         prepared = await request("POST", "/api/market-data/paper-preparations", json=body)
         assert prepared.status_code == 201, prepared.text
-        assert prepared.json()["admission"]["decision"] == "ADMITTED"
-        assert state._execution_ledger.get_reservation(prepared.json()["proposal_id"]) is not None
+        # 63-04: the route sends no LIMIT price and no India quote, so the Mac's India limits
+        # deny it and nothing is reserved. 63-05 wires the relay quote and a limit.
+        assert prepared.json()["admission"]["decision"] == "DENIED"
+        assert prepared.json()["admission"]["reason_code"] == "intent_invalid"
+        assert state._execution_ledger.get_reservation(prepared.json()["proposal_id"]) is None
+        # With a LIMIT price and a fresh quote the same server-owned preparation is admitted
+        # and reserves, exactly as the route did before.
+        _proposal, admission = state.prepare_india_paper_local(
+            symbol="RELIANCE",
+            quantity="1",
+            limit_price=Decimal("100.00"),
+            quote=ils.make_evidence(),
+        )
+        assert admission.decision.value == "ADMITTED"
+        assert state._execution_ledger.get_reservation(admission.proposal_id) is not None
         assert "regime" not in body
         regime = prepared.json().get("regime")
         if regime is not None:
@@ -286,19 +305,24 @@ async def test_paper_reconcile_persists_ack_evidence_without_fill(
     original_service = state._execution_service
     original_policy = state._preflight_policy_connection
     assert state.start_execution(
-        tmp_path / "india.sqlite3", workspace="india", private_dir=private_config_dir
+        tmp_path / "india.sqlite3",
+        workspace="india",
+        private_dir=private_config_dir,
+        india_clock=lambda: ils.NOW,
     )
     try:
         await request("POST", "/api/market-data/sessions", json=start_body())
         state._execution_ledger.configure_paper_budget("paper", "INR", "1000", workspace="india")
-        prepared = await request(
-            "POST",
-            "/api/market-data/paper-preparations",
-            json={"confirmation": "PREPARE_INDIA_PAPER", "symbol": "RELIANCE", "quantity": "1"},
+        # 63-04: prepare through the server-owned path with the LIMIT price and quote the
+        # India limits need; the route itself has neither yet.
+        _proposal, admission = state.prepare_india_paper_local(
+            symbol="RELIANCE",
+            quantity="1",
+            limit_price=Decimal("100.00"),
+            quote=ils.make_evidence(),
         )
-        assert prepared.status_code == 201, prepared.text
-        assert prepared.json()["admission"]["decision"] == "ADMITTED"
-        proposal_id = prepared.json()["proposal_id"]
+        assert admission.decision.value == "ADMITTED"
+        proposal_id = admission.proposal_id
         ack = await _acknowledge_india_paper_without_fill(proposal_id)
 
         reconciled = await request(

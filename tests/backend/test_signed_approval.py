@@ -449,16 +449,37 @@ def _workspace_stack(tmp_path, workspace: str, key):
     token_path.write_bytes(b"one-time-secret")
     os.chmod(token_path, 0o600)
     approval.enroll_key(public_x963(key), b"one-time-secret", workspace=workspace)
+    guard = None
+    overrides: dict = {}
+    quote = None
+    if workspace == "india":
+        # 63-04: an India admission needs the Mac's India limits, a LIMIT order and a quote.
+        import india_limits_support as ils
+
+        (tmp_path / "india-config").mkdir()
+        guard = ils.make_guard(ledger, ils.india_private_dir(tmp_path / "india-config"))
+        overrides = {
+            "ticker": ils.TICKER,
+            "quantity": Decimal("2"),
+            "order_type": "LIMIT",
+            "limit_price": Decimal("100.00"),
+        }
+        quote = ils.make_evidence()
     service = ExecutionService(
-        PaperDispatcher(), ledger, require_approval=True, approval_service=approval
+        PaperDispatcher(),
+        ledger,
+        require_approval=True,
+        approval_service=approval,
+        india_guard=guard,
     )
-    intent = make_intent(workspace=workspace)
+    intent = make_intent(workspace=workspace, **overrides)
     service.admit(
         intent,
         currency=currency,
         price="100",
         simulator_evidence={"simulated_fill_price": "100"},
         risk_evidence={"scaled_size": str(intent.quantity)},
+        india_quote=quote,
     )
     ledger.configure_paper_budget(intent.account, currency, "10000", workspace=workspace)
     service.reserve(intent.proposal_id)

@@ -160,6 +160,19 @@ def build_private_config(root: _P58Path) -> _P58Path:
             "position_stop": "-0.25",
         },
     )
+    # Phase 63-04 (P-15): India execution authority needs this file. The slippage cap is the
+    # operator's India value (25 bps, 2026-10-07); the collar is the D-09 2%. Both are
+    # synthetic here like every other value in this directory.
+    _p58_write_json(
+        india / "execution.json",
+        {
+            "schema_version": 1,
+            "workspace": "india",
+            "venue": "paper",
+            "fat_finger_collar": "0.02",
+            "max_slippage_bps": "25",
+        },
+    )
     research = india / "research" / "fixture-research.json"
     holdout = india / "holdout" / "fixture-holdout.json"
     _p58_write_json(research, {"fixture": "synthetic research result"})
