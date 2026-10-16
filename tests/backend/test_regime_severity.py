@@ -687,26 +687,48 @@ def test_the_requoter_accepts_a_numpy_integer_id_and_refuses_other_non_labels():
 
 
 class _SwitchableManager(_StubManager):
-    """Adapter manager whose swap can be made to fail or raise."""
+    """Adapter manager whose swap and slot lookup can be made to fail, return None or raise."""
 
     def __init__(self):
         super().__init__()
         self.mode = "ok"
 
+    @property
+    def preloaded_weights(self):
+        if self.mode == "slots_unreadable":
+            raise RuntimeError("adapter slots are unreadable")
+        if self.mode == "slots_unorderable":
+            return {"not-a-slot-number": object(), 1: object()}
+        return self._slots
+
+    @preloaded_weights.setter
+    def preloaded_weights(self, value):
+        self._slots = value
+
     def swap_adapter(self, adapter_id):
         if self.mode == "raise":
             raise RuntimeError("adapter swap blew up")
+        if self.mode == "none":
+            return None  # a swap that reports nothing is not a swap that worked
         self.swapped.append(adapter_id)
         return self.mode == "ok"
 
 
-@pytest.mark.parametrize("mode", ["failed_swap", "swap_raises", "inference_raises"])
+_LOOKUP_FAILURES = ["slots_unreadable", "slots_unorderable"]
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["failed_swap", "swap_raises", "swap_returns_none", "inference_raises", *_LOOKUP_FAILURES],
+)
 @pytest.mark.asyncio
 async def test_a_failed_swap_or_inference_error_invalidates_the_regime_until_the_next_good_classification(
     mode, tmp_path, monkeypatch
 ):
     """P1-c: a crisis posterior with a failed swap used to leave the previous calm regime in
-    place and dispatch 10 of 10. Any inference or adapter failure now invalidates the regime."""
+    place and dispatch 10 of 10. Any inference, adapter-lookup or adapter failure now
+    invalidates the regime, including a swap that returns None and a slot lookup that raises
+    after a good posterior (66 follow-up: those lookups sat outside the try)."""
 
     import backend.trading_loop as loop_module
     from backend.trading_loop import LiveTradingLoop
@@ -722,12 +744,13 @@ async def test_a_failed_swap_or_inference_error_invalidates_the_regime_until_the
 
     crisis_id = shipped_map().id_by_rank[3]
     assert previous != crisis_id
-    if mode == "failed_swap":
-        manager.mode = "fail"
+    swap_modes = {"failed_swap": "fail", "swap_raises": "raise", "swap_returns_none": "none"}
+    if mode in swap_modes:
+        manager.mode = swap_modes[mode]
         monkeypatch.setattr(loop_module, "fast_gmm_predict_proba", lambda *a, **k: np.eye(4)[crisis_id])
-    elif mode == "swap_raises":
-        manager.mode = "raise"
-        monkeypatch.setattr(loop_module, "fast_gmm_predict_proba", lambda *a, **k: np.eye(4)[crisis_id])
+    elif mode in _LOOKUP_FAILURES:
+        # The posterior stays valid and the regime unchanged: only the slot lookup fails.
+        manager.mode = mode
     else:
         def boom(*args, **kwargs):
             raise RuntimeError("inference failed")
@@ -765,3 +788,183 @@ async def test_a_failed_swap_or_inference_error_invalidates_the_regime_until_the
         assert decision.approved is True and dispatched
     finally:
         connection.close()
+
+
+async def _preflight_buy(loop):
+    """Run one BUY pre-flight against the loop's current regime; returns (decision, dispatched)."""
+
+    connection = build_scaling_policy_connection(loop.severity_map)
+    dispatched = []
+
+    async def dispatch(size, price):
+        dispatched.append(size)
+        return {"actual_fill_price": price}
+
+    try:
+        decision = await loop.execute_order_pre_flight(
+            "BUY", 10.0, {"bid": [99.9] * 5, "ask": [100.1] * 5, "spread": [0.002] * 5},
+            {"equity": 1000.0, "peak_equity": 1000.0}, connection, dispatch,
+        )
+    finally:
+        connection.close()
+    return decision, dispatched
+
+
+@pytest.mark.parametrize(
+    "bad_tick",
+    [(None, 100.1, 99.9), (100.0, None, 99.9), (100.0, 100.1, None), (100.0, "n/a", 99.9)],
+    ids=["no_mid", "no_ask", "no_bid", "unparseable_ask"],
+)
+@pytest.mark.asyncio
+async def test_a_tick_that_breaks_the_feature_update_invalidates_a_warm_regime(bad_tick, tmp_path):
+    """Codex r1 P1: the feature updates sat outside the try. After a calm regime had warmed up,
+    ``process_tick(None, 100.1, 99.9)`` raised and the regime stayed at 3 with leverage 0.98,
+    so the next pre-flight approved and dispatched 10 of 10. Any failure now invalidates it."""
+
+    from backend.trading_loop import LiveTradingLoop
+
+    manager = _StubManager()
+    loop = LiveTradingLoop(manager, shipped_params(), telemetry_db_path=str(tmp_path / "t.db"))
+    ticks = _tick_stream()
+    for tick in ticks[:40]:
+        loop.process_tick(*tick)
+    assert loop.current_regime != -1 and loop.risk_leverage_coefficient > 0.0
+    decision, dispatched = await _preflight_buy(loop)
+    assert decision.approved is True and dispatched, "control: the warm regime sizes and dispatches"
+
+    result = loop.process_tick(*bad_tick)  # must not raise
+    assert result["regime_valid"] is False and result["dominant_regime"] == -1
+    assert loop.current_regime == -1 and loop.requoter.current_regime == -1
+    assert loop.risk_leverage_coefficient == 0.0 and result["risk_leverage_coefficient"] == 0.0
+
+    decision, dispatched = await _preflight_buy(loop)
+    assert decision.approved is False and decision.regime_id == -1 and decision.scaled_size == 0.0
+    assert dispatched == [], "a stale regime must not size or dispatch the order"
+
+    # The next good tick classifies again.
+    for tick in ticks[41:46]:
+        loop.process_tick(*tick)
+    assert loop.current_regime != -1 and loop.risk_leverage_coefficient > 0.0
+
+
+class _HostileCodeError(Exception):
+    """An exception whose ``code`` property itself raises when read."""
+
+    @property
+    def code(self):
+        raise RuntimeError("code is unreadable")
+
+
+@pytest.mark.asyncio
+async def test_an_exception_whose_code_property_raises_still_invalidates_the_regime(tmp_path, monkeypatch):
+    """Codex r1 P2: the handler read ``exc.code`` before invalidating, so a hostile ``code``
+    escaped it and the stale regime stayed usable. Invalidation now comes first."""
+
+    import backend.trading_loop as loop_module
+    from backend.trading_loop import LiveTradingLoop
+
+    manager = _StubManager()
+    loop = LiveTradingLoop(manager, shipped_params(), telemetry_db_path=str(tmp_path / "t.db"))
+    ticks = _tick_stream()
+    for tick in ticks[:40]:
+        loop.process_tick(*tick)
+    assert loop.current_regime != -1 and loop.risk_leverage_coefficient > 0.0
+
+    def hostile(*args, **kwargs):
+        raise _HostileCodeError("inference failed")
+
+    monkeypatch.setattr(loop_module, "fast_gmm_predict_proba", hostile)
+    result = loop.process_tick(*ticks[41])  # must not raise
+    assert result["regime_valid"] is False and result["dominant_regime"] == -1
+    assert result["invalid_reason"] == "_HostileCodeError"
+    assert loop.current_regime == -1 and loop.requoter.current_regime == -1
+    assert loop.risk_leverage_coefficient == 0.0
+
+    decision, dispatched = await _preflight_buy(loop)
+    assert decision.approved is False and dispatched == []
+
+
+def _bad_value_tick(field, value):
+    """A tick as (mid, ask, bid) with one price replaced."""
+
+    tick = {"mid": 100.0, "ask": 100.1, "bid": 99.9}
+    tick[field] = value
+    return tick["mid"], tick["ask"], tick["bid"]
+
+
+_BAD_TICKS = [
+    pytest.param(_bad_value_tick(field, value), id=f"{field}={label}")
+    for field in ("mid", "ask", "bid")
+    for label, value in (
+        ("nan", float("nan")), ("inf", float("inf")), ("-inf", float("-inf")),
+        ("zero", 0.0), ("negative", -1.0), ("bool", True), ("text", "100.0"),
+        ("1e308", 1e308), ("1e12", 1e12),
+    )
+] + [
+    pytest.param((100.0, 99.9, 100.1), id="crossed_book"),
+    # Opus verify of 79c4e47: a crossed tick sized 10 of 10 in regime 3.
+    pytest.param((100.0, 99.0, 101.0), id="crossed_100_99_101"),
+    # Opus verify: ask=1, bid=-1 gives mid=0 and spread=0, which read as calm and sized 10 of 10.
+    pytest.param((0.0, 1.0, -1.0), id="mid0_from_ask1_bid-1"),
+    pytest.param((-0.5, 1.0, -2.0), id="negative_book"),
+]
+
+
+def _comparable(result):
+    """A tick result without the one field that legitimately differs after an invalidation."""
+
+    return {key: value for key, value in result.items() if key != "regime_changed"}
+
+
+@pytest.mark.parametrize("warm", [False, True], ids=["cold_start", "warm_start"])
+@pytest.mark.parametrize("bad_tick", _BAD_TICKS)
+@pytest.mark.asyncio
+async def test_a_non_finite_or_malformed_tick_is_refused_before_any_feature_state_moves(bad_tick, warm, tmp_path):
+    """Codex r2 P1: on a fresh loop ``process_tick(nan, 100.1, 99.9)`` returned regime 3 valid with
+    leverage 0.98, because the volatility tracker returns 0.0 on its first update and hides the
+    bad mid. The tick is validated before any update, the regime is invalidated with
+    TICK_INVALID, and the next good tick classifies as if the bad one never arrived."""
+
+    from backend.trading_loop import LiveTradingLoop
+
+    ticks = _tick_stream()
+    warmup = 40 if warm else 0
+    reference = LiveTradingLoop(_StubManager(), shipped_params(), telemetry_db_path=str(tmp_path / "ref.db"))
+    expected = [reference.process_tick(*tick) for tick in ticks[:46]]
+
+    loop = LiveTradingLoop(_StubManager(), shipped_params(), telemetry_db_path=str(tmp_path / "t.db"))
+    for tick in ticks[:warmup]:
+        loop.process_tick(*tick)
+    if warm:
+        assert loop.current_regime != -1 and loop.risk_leverage_coefficient > 0.0
+
+    result = loop.process_tick(*bad_tick)  # must not raise
+    assert result["regime_valid"] is False and result["dominant_regime"] == -1
+    assert result["invalid_reason"] == "TICK_INVALID"
+    assert loop.current_regime == -1 and loop.requoter.current_regime == -1
+    assert loop.risk_leverage_coefficient == 0.0 and result["risk_leverage_coefficient"] == 0.0
+
+    decision, dispatched = await _preflight_buy(loop)
+    assert decision.approved is False and decision.scaled_size == 0.0 and dispatched == []
+
+    # Nothing was updated by the refused tick: the good ticks that follow match a loop that
+    # never saw it, and the regime comes back.
+    recovered = [loop.process_tick(*tick) for tick in ticks[warmup:46]]
+    assert [_comparable(r) for r in recovered] == [_comparable(r) for r in expected[warmup:46]]
+    assert loop.current_regime != -1 and loop.risk_leverage_coefficient > 0.0
+    decision, dispatched = await _preflight_buy(loop)
+    assert decision.approved is True and dispatched
+
+
+def test_a_numpy_float_tick_and_a_zero_spread_tick_are_still_classified(tmp_path):
+    """The validation must not refuse what the success path accepts: numpy floats and bid == ask."""
+
+    from backend.trading_loop import LiveTradingLoop
+
+    loop = LiveTradingLoop(_StubManager(), shipped_params(), telemetry_db_path=str(tmp_path / "t.db"))
+    for mid, ask, bid in _tick_stream()[:10]:
+        assert loop.process_tick(np.float64(mid), np.float32(ask), np.float64(bid))["regime_valid"] is True
+    assert loop.process_tick(100.0, 100.0, 100.0)["regime_valid"] is True
+    # A large but sane price (just under the 1e12 bound) is not refused.
+    big = LiveTradingLoop(_StubManager(), shipped_params(), telemetry_db_path=str(tmp_path / "big.db"))
+    assert big.process_tick(9.9e11, 9.9e11 + 1.0, 9.9e11 - 1.0)["regime_valid"] is True

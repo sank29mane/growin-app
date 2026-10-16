@@ -77,7 +77,9 @@ def test_live_trading_loop_integration():
             spread_pct = 0.50
             
         ret = np.random.normal(0, vol)
-        current_price *= (1.0 + ret)
+        # A price is positive. An unclamped (1 + ret) with ret ~ N(0, 0.55) goes negative and
+        # then produces crossed books, which the loop now refuses as bad ticks.
+        current_price *= max(1.0 + ret, 0.5)
         spread = current_price * spread_pct
         
         mid_prices[i] = current_price
