@@ -63,6 +63,10 @@ struct LegacyT212KeychainCleanupTests {
             "shared:" + CredentialName.openaiApiKey.rawValue,
             "india:" + CredentialName.approvalSigningKey.rawValue,
             CredentialName.approvalSigningKey.rawValue,   // Secure Enclave approval key account
+            // 63-03: the India Secure Enclave key blob. Losing it un-enrols India approvals and the
+            // ledger cannot rotate a key, so the legacy cleanup must never reach it.
+            "india:" + CredentialName.approvalSecureEnclaveKey.rawValue,
+            CredentialName.approvalSecureEnclaveKey.rawValue,
             "breezeApiKey",
         ]
     }

@@ -111,7 +111,10 @@ struct PracticeApprovalAuthorizer: Sendable {
     #endif
 
     func signature(for review: TradeApprovalReview, workspace: Workspace) async throws -> Data {
-        guard review.payload.workspace == workspace.rawValue,
+        // This is the one place the software key signs outside the router, so it refuses every
+        // workspace but the practice one (UK) here. India signs only through the Secure Enclave.
+        guard workspace == PracticeApprovalPolicy.workspace,
+              review.payload.workspace == workspace.rawValue,
               review.payload.mode == PracticeApprovalPolicy.mode else {
             throw TradeApprovalReviewError.invalidEnvelope
         }

@@ -33,12 +33,12 @@ struct ApprovalSecuritySection: View {
 
     private var isSelectedKeyConfigured: Bool {
         guard let workspace else { return false }
-        return LocalApprovalSigner.shared.isConfigured(for: workspace)
+        return ApprovalSignerRouter.shared.isConfigured(for: workspace)
     }
 
     private var canAdoptLegacyKey: Bool {
         guard let workspace else { return false }
-        return LocalApprovalSigner.shared.canAdoptLegacyKey(into: workspace)
+        return ApprovalSignerRouter.shared.canAdoptLegacyKey(into: workspace)
     }
 
     /// Resolves the selected workspace and the signing identity that must match
@@ -50,7 +50,7 @@ struct ApprovalSecuritySection: View {
         guard review.payload.workspace == workspace.rawValue else {
             throw TradeApprovalReviewError.workspaceMismatch
         }
-        let identity = try LocalApprovalSigner.shared.identity(for: workspace)
+        let identity = try ApprovalSignerRouter.shared.identity(for: workspace)
         guard identity.keyID == review.payload.keyId else {
             throw TradeApprovalReviewError.signerMismatch
         }
@@ -87,7 +87,9 @@ struct ApprovalSecuritySection: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                Text("This free local mode prevents stale, altered, or replayed approvals, but it does not provide Touch ID or Secure Enclave isolation.")
+                Text(workspace == .india
+                     ? "India approvals use a Secure Enclave key and ask for Touch ID on every signature."
+                     : "This free local mode prevents stale, altered, or replayed approvals, but it does not provide Touch ID or Secure Enclave isolation.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -138,7 +140,7 @@ struct ApprovalSecuritySection: View {
         .sheet(item: $pendingReview) { review in
             TradeApprovalSheet(review: review) {
                 let ws = try signingContext(for: review)
-                let signature = try LocalApprovalSigner.shared.sign(review.signedBytes, for: ws)
+                let signature = try await ApprovalSignerRouter.shared.signAsync(review.signedBytes, for: ws, flow: .paperApproval)
                 _ = try await AIService().completeTradeApproval(review, signature: signature, workspace: ws)
                 statusIsError = false
                 statusMessage = "Paper approval check acknowledged locally. No broker was contacted."
@@ -152,7 +154,7 @@ struct ApprovalSecuritySection: View {
                 approveTitle: "Sign and verify locally"
             ) {
                 let ws = try signingContext(for: review)
-                let signature = try LocalApprovalSigner.shared.sign(review.signedBytes, for: ws)
+                let signature = try await ApprovalSignerRouter.shared.signAsync(review.signedBytes, for: ws, flow: .paperApproval)
                 _ = try await AIService().verifyPaperRequoteCheck(review, signature: signature, workspace: ws)
                 statusIsError = false
                 statusMessage = "Paper replacement signature verified locally. No order was dispatched and no broker was contacted."
@@ -166,11 +168,16 @@ struct ApprovalSecuritySection: View {
         statusMessage = nil
         Task {
             do {
-                let identity = try LocalApprovalSigner.shared.createIdentityIfNeeded(for: ws)
+                let identity = try ApprovalSignerRouter.shared.createIdentityIfNeeded(for: ws)
                 let approvalStatus = try await AIService().approvalStatus(workspace: ws)
                 if approvalStatus.enrolled {
-                    guard approvalStatus.keyId == identity.keyID else {
-                        throw TradeApprovalReviewError.signerMismatch
+                    switch ApprovalSignerRouter.enrolmentDecision(
+                        workspace: ws, localKeyID: identity.keyID,
+                        backendEnrolled: true, backendKeyID: approvalStatus.keyId
+                    ) {
+                    case .freshLedgerRequired: throw ApprovalSignerRouterError.indiaLedgerKeyMismatch
+                    case .signerMismatch: throw TradeApprovalReviewError.signerMismatch
+                    case .alreadyEnrolled, .enrol: break
                     }
                     statusIsError = false
                     statusMessage = "Local paper approval is already enrolled for the \(ws.displayName) workspace."
@@ -206,7 +213,7 @@ struct ApprovalSecuritySection: View {
                 guard approvalStatus.enrolled, let enrolledKeyID = approvalStatus.keyId else {
                     throw LocalApprovalSignerError.legacyKeyMismatch
                 }
-                _ = try LocalApprovalSigner.shared.adoptLegacyKey(into: .uk, expectedKeyID: enrolledKeyID)
+                _ = try ApprovalSignerRouter.shared.adoptLegacyKey(into: .uk, expectedKeyID: enrolledKeyID)
                 statusIsError = false
                 statusMessage = "The existing local key now belongs to the UK workspace."
             } catch {

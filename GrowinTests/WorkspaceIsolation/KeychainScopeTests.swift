@@ -44,7 +44,9 @@ struct KeychainScopeTests {
         for name in uk { #expect(name.policy == .fixed(.uk), "\(name)") }
         #expect(CredentialName.approvalSigningKey.policy == .perWorkspace)
         #expect(CredentialName.approvalSigningKey.rawValue == "approvalSoftwareP256PrivateKey.v1")
-        #expect(CredentialName.allCases.count == shared.count + uk.count + 1)
+        // 63-03: the India Secure Enclave key blob is the one added credential, India only.
+        #expect(CredentialName.approvalSecureEnclaveKey.policy == .fixed(.india))
+        #expect(CredentialName.allCases.count == shared.count + uk.count + 2)
         #expect(KeychainScope.shared.accountPrefix == "shared")
         #expect(KeychainScope.workspace(.uk).accountPrefix == "uk")
         #expect(KeychainScope.workspace(.india).accountPrefix == "india")
