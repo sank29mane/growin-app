@@ -357,7 +357,14 @@ struct PracticeApprovalBiometricTests {
             if path != routerPath {
                 #expect(SignerSourceScan.routerReferenceKeptCount(in: text) == 0,
                         "\(path) keeps a reference to ApprovalSignerRouter.shared instead of calling through it")
+                // No second router: only the router's own file constructs one.
+                #expect(SignerSourceScan.routerConstructionCount(in: text) == 0,
+                        "\(path) constructs an ApprovalSignerRouter instead of using .shared")
             }
+            // A signing method is only ever called on the spot, never retained as a reference that
+            // could be invoked repeatedly past the per-file call counting below.
+            #expect(SignerSourceScan.signingMethodReferenceCount(in: text) == 0,
+                    "\(path) references .sign / .signAsync without calling it")
         }
 
         // Exact number of router sign call sites per caller file, not only which files call. A new

@@ -143,6 +143,79 @@ struct SignerSourceScanTests {
         #expect(Scan.routerReferenceKeptCount(in: "// let r = ApprovalSignerRouter.shared") == 0)
     }
 
+    // MARK: Retained signing method references
+
+    @Test(arguments: [
+        "let f = ApprovalSignerRouter.shared.sign\ntry f(a, .uk, .paperApproval)\ntry f(b, .uk, .paperApproval)",
+        "let f = ApprovalSignerRouter.shared.signAsync",
+        "let f = ApprovalSignerRouter.shared\n    .sign",
+        "let f = ApprovalSignerRouter.shared\n    .signAsync\nlet g = 1",
+        "let f = ApprovalSignerRouter . shared . sign ",
+        "let f = ApprovalSignerRouter.shared.sign(_:for:flow:)",
+        "let f = ApprovalSignerRouter.shared\n    .signAsync(\n        _:\n        for:\n        flow:\n    )",
+        "let f = ApprovalSignerRouter.shared.sign as Any",
+        "let k = \\ApprovalSignerRouter.sign",
+        "let s = LocalApprovalSigner(store: x)\nlet f = s.sign",
+        "let s = SecureEnclaveApprovalSigner(x)\nlet f = s.signAsync\nlet g = 1",
+        "let f = (ApprovalSignerRouter.shared).sign",
+        "let ok = ApprovalSignerRouter.shared.sign == nil",
+    ])
+    func aRetainedSigningMethodReferenceIsFlagged(planted: String) {
+        #expect(Scan.signingMethodReferenceCount(in: planted) > 0, "scan missed: \(planted)")
+    }
+
+    @Test(arguments: [
+        "try ApprovalSignerRouter.shared.sign(a, for: .uk, flow: .paperApproval)",
+        "try await ApprovalSignerRouter.shared.signAsync(a, for: .uk, flow: .paperApproval)",
+        "try ApprovalSignerRouter.shared\n    .sign(a, for: .uk, flow: .paperApproval)",
+        "try await ApprovalSignerRouter.shared . signAsync (\n    a, for: ws, flow: .paperApproval)",
+        "try s.sign(payload, for: .uk)\nlet r = ApprovalSignerRouter.shared.identity(for: ws)",
+        "let sig = ApprovalSignerRouter.shared.signature(for: ws)",
+        "let n = ApprovalSignerRouter.shared.signedBytesCount",
+        "handler.sign?(a)\nhandler.sign!(a)\nlet r = ApprovalSignerRouter.shared.identity(for: ws)",
+        "// let f = ApprovalSignerRouter.shared.sign\nlet r = ApprovalSignerRouter.shared.identity(for: ws)",
+        "/* let f = ApprovalSignerRouter.shared\n.signAsync */\nlet r = ApprovalSignerRouter.shared.identity(for: ws)",
+        // Storing a closure into a `sign` property is an assignment, not a method reference.
+        "self.sign = sign\nlet s: LocalApprovalSigner = x",
+    ])
+    func anImmediateCallOrAnAssignmentIsNotAMethodReference(code: String) {
+        #expect(Scan.signingMethodReferenceCount(in: code) == 0, "false positive: \(code)")
+    }
+
+    @Test func aFileThatNamesNoGuardedTypeIsNotScannedForMethodReferences() {
+        // Unrelated code, such as `FloatingPoint.sign`, cannot reach a signer without naming one.
+        #expect(Scan.signingMethodReferenceCount(in: "let s = value.sign") == 0)
+        #expect(Scan.signingMethodReferenceCount(in: "let s = value.sign\nlet r = ApprovalSignerRouter.shared.x") > 0)
+    }
+
+    // MARK: A second router
+
+    @Test(arguments: [
+        "let r = ApprovalSignerRouter(india: a, uk: b)",
+        "let r = ApprovalSignerRouter ( india: a, uk: b )",
+        "let r = ApprovalSignerRouter\n    (india: a, uk: b)",
+        "let r = ApprovalSignerRouter(\n    india: a,\n    uk: b\n)",
+        "let r = ApprovalSignerRouter.init(india: a, uk: b)",
+        "let r = ApprovalSignerRouter . init (india: a, uk: b)",
+        "let r = ApprovalSignerRouter\n    .init(india: a, uk: b)",
+        "let make = ApprovalSignerRouter.init",
+        "static let shared = ApprovalSignerRouter(india: a, uk: b)",
+        "func f() -> ApprovalSignerRouter { ApprovalSignerRouter(india: a, uk: b) }",
+    ])
+    func constructingASecondRouterIsFlagged(planted: String) {
+        #expect(Scan.routerConstructionCount(in: planted) > 0, "scan missed: \(planted)")
+    }
+
+    @Test func routerUseThatIsNotConstructionIsNotFlagged() {
+        #expect(Scan.routerConstructionCount(in: "try ApprovalSignerRouter.shared.sign(a, for: .uk, flow: .paperApproval)") == 0)
+        #expect(Scan.routerConstructionCount(in: "ApprovalSignerRouter.enrolmentDecision(workspace: .uk)") == 0)
+        #expect(Scan.routerConstructionCount(in: "throw ApprovalSignerRouterError.relayIsIndiaOnly(workspace: .uk)") == 0)
+        #expect(Scan.routerConstructionCount(in: "let x = MyApprovalSignerRouter(a)") == 0)
+        #expect(Scan.routerConstructionCount(in: "func run(r: ApprovalSignerRouter) {}") == 0)
+        #expect(Scan.routerConstructionCount(in: "// let r = ApprovalSignerRouter(india: a, uk: b)") == 0)
+        #expect(Scan.routerConstructionCount(in: "/* ApprovalSignerRouter\n.init() */ let x = 1") == 0)
+    }
+
     @Test func callSiteCountsArePerFileSoASecondCallInAListedFileChangesThem() {
         let one = "try await ApprovalSignerRouter.shared.signAsync(a)"
         let two = one + "\n" + one

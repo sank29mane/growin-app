@@ -173,6 +173,40 @@ nonisolated enum SignerSourceScan {
         matchCount(#"\bApprovalSignerRouter\s*\.\s*shared(?!\s*\.\s*\w)"#, in: stripComments(text))
     }
 
+    /// A signing method that is referenced and not called on the spot: `let f = ApprovalSignerRouter
+    /// .shared.sign` then `f(a)` twice. The per-file call counting only sees `.sign(`, so a retained
+    /// reference would be invoked any number of times unseen. Only the immediate call form is allowed.
+    ///
+    /// Counted in every file that names a guarded type, since only those files can reach a signer or
+    /// the router (see `namingViolations`). Counts:
+    /// - `.sign` / `.signAsync` not followed by `(`, with spaces and line breaks tolerated. Optional and
+    ///   forced calls (`.sign?(`, `.sign!(`) are still calls. An assignment target (`self.sign = sign`,
+    ///   a stored closure being set) is not a reference to a method and is left alone; `==` is not.
+    /// - `.sign(_:for:flow:)`: an unapplied reference spelled with argument labels only.
+    static func signingMethodReferenceCount(in text: String) -> Int {
+        let code = stripComments(text)
+        guard guardedTypes.contains(where: { mentions(of: $0, in: code) > 0 }) else { return 0 }
+        let notCalled = matchCount(
+            #"\.\s*(?:signAsync|sign)\b(?!\s*[?!]?\s*\()(?!\s*=(?!=))"#,
+            in: code
+        )
+        let labelsOnly = matchCount(
+            #"\.\s*(?:signAsync|sign)\s*\(\s*(?:[A-Za-z_]\w*\s*:\s*)+\)"#,
+            in: code
+        )
+        return notCalled + labelsOnly
+    }
+
+    /// `ApprovalSignerRouter(` or `ApprovalSignerRouter.init`, tolerant of spaces and line breaks. The
+    /// router is a singleton held as `.shared`; a second instance could carry different signers. Only
+    /// the router's own file may construct it, so callers pass every file but `routerPath`.
+    static func routerConstructionCount(in text: String) -> Int {
+        matchCount(
+            #"(?<![A-Za-z0-9_])ApprovalSignerRouter\s*(?:\(|\.\s*init\b)"#,
+            in: stripComments(text)
+        )
+    }
+
     /// Router sign call sites per file, for every file but the router itself, zeros omitted.
     static func routerSignCallSites(_ sources: [(path: String, text: String)]) -> [String: Int] {
         var out: [String: Int] = [:]
