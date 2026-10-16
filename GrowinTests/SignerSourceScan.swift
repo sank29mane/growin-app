@@ -173,6 +173,70 @@ nonisolated enum SignerSourceScan {
         matchCount(#"\bApprovalSignerRouter\s*\.\s*shared(?!\s*\.\s*\w)"#, in: stripComments(text))
     }
 
+    /// A signing method that is referenced and not called on the spot: `let f = ApprovalSignerRouter
+    /// .shared.sign` then `f(a)` twice. The per-file call counting only sees `.sign(`, so a retained
+    /// reference would be invoked any number of times unseen. Only the immediate call form is allowed.
+    ///
+    /// Counted in every file that names a guarded type, since only those files can reach a signer or
+    /// the router (see `namingViolations`). Counts:
+    /// - `.sign` / `.signAsync` not followed by `(`, with spaces and line breaks tolerated. Optional and
+    ///   forced calls (`.sign?(`, `.sign!(`) are still calls. An assignment target (`self.sign = sign`,
+    ///   a stored closure being set) is not a reference to a method and is left alone; `==` is not.
+    /// - `.sign(_:for:flow:)`: an unapplied reference spelled with argument labels only.
+    static func signingMethodReferenceCount(in text: String) -> Int {
+        let code = stripComments(text)
+        guard guardedTypes.contains(where: { mentions(of: $0, in: code) > 0 }) else { return 0 }
+        let notCalled = matchCount(
+            #"\.\s*(?:signAsync|sign)\b(?!\s*[?!]?\s*\()(?!\s*=(?!=))"#,
+            in: code
+        )
+        let labelsOnly = matchCount(
+            #"\.\s*(?:signAsync|sign)\s*\(\s*(?:[A-Za-z_]\w*\s*:\s*)+\)"#,
+            in: code
+        )
+        return notCalled + labelsOnly
+    }
+
+    /// Constructing a router, tolerant of spaces and line breaks. The router is a singleton held as
+    /// `.shared`; a second instance could carry different signers. Only the router's own file may
+    /// construct it, so callers pass every file but `routerPath`. Counts:
+    /// - `ApprovalSignerRouter(` and `ApprovalSignerRouter.init` (also a backticked `` .`init` ``).
+    /// - Inferred construction through the type, by annotation or parameter default:
+    ///   `ApprovalSignerRouter = .init(...)` (also `ApprovalSignerRouter? = .init`).
+    /// - Any `.init(india:` argument list (the label may be backticked). The router's initialiser is
+    ///   `init(india:uk:)`, so this catches inference from a return type, a property or a generic that
+    ///   never spells the name next to the `.init`.
+    /// - A `typealias` (or `associatedtype` default) whose right side is the router, with an optional
+    ///   `Growin.` prefix and `Optional<` / `Array<` / `(` / `[` wrappers. An alias lets `R(india:uk:)`
+    ///   build a router without the name appearing at the call, and nothing outside the router's file
+    ///   needs one, so the alias itself is the violation. `ApprovalSignerRouterConfig` is a different
+    ///   identifier and does not count.
+    /// - An `extension` whose header (up to the first `{`) names the router, such as
+    ///   `extension ApprovalSignerRouter` or `extension P where Self == ApprovalSignerRouter`. Inside it
+    ///   `Self(india:uk:)` constructs a router without the name or `.init`. Nothing outside the router's
+    ///   file needs to extend it, so the extension itself is the violation.
+    static func routerConstructionCount(in text: String) -> Int {
+        let code = stripComments(text)
+        let spelled = matchCount(
+            #"(?<![A-Za-z0-9_])ApprovalSignerRouter\s*(?:\(|\.\s*`?init`?(?![A-Za-z0-9_]))"#,
+            in: code
+        )
+        let annotated = matchCount(
+            #"(?<![A-Za-z0-9_])ApprovalSignerRouter\s*\??\s*=\s*\.\s*`?init`?(?![A-Za-z0-9_])"#,
+            in: code
+        )
+        let inferred = matchCount(#"\.\s*`?init`?\s*\(\s*`?india`?\s*:"#, in: code)
+        let aliased = matchCount(
+            #"(?<![A-Za-z0-9_])(?:typealias|associatedtype)\s+[^=;{}]*=\s*(?:(?:Optional|Array)\s*<\s*|[(\[]\s*|Growin\s*\.\s*)*ApprovalSignerRouter(?![A-Za-z0-9_])"#,
+            in: code
+        )
+        let extended = matchCount(
+            #"(?<![A-Za-z0-9_])extension\s+[^{;]*?(?<![A-Za-z0-9_])ApprovalSignerRouter(?![A-Za-z0-9_])"#,
+            in: code
+        )
+        return spelled + annotated + inferred + aliased + extended
+    }
+
     /// Router sign call sites per file, for every file but the router itself, zeros omitted.
     static func routerSignCallSites(_ sources: [(path: String, text: String)]) -> [String: Int] {
         var out: [String: Int] = [:]
