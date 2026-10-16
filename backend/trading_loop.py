@@ -6,6 +6,7 @@ Numba GMM regime inference, MLX adapter hot-swapping, and dynamic risk scaling.
 import numpy as np
 import logging
 import asyncio
+import numbers
 from typing import Dict, Any, Optional
 
 try:
@@ -39,6 +40,40 @@ except ImportError:
     )
 
 logger = logging.getLogger(__name__)
+
+class InvalidTickError(ValueError):
+    """A tick that cannot be classified. ``code`` is the stable reason the loop reports."""
+
+    code = "TICK_INVALID"
+
+
+# Upper bound on any quoted price the loop will classify. The dearest listed share trades near
+# 7e5 and the largest quote scales (JPY, KRW, INR paise) stay under 1e8, so 1e12 leaves four
+# orders of magnitude of headroom. The point is overflow: the volatility EMA squares a relative
+# return, and a price near 1e308 gives an infinite variance that no later tick can unwind.
+_MAX_TICK_PRICE = 1e12
+
+
+def _validate_tick(mid_price: object, ask: object, bid: object) -> None:
+    """Reject a tick that would poison the feature state or be sized on nonsense, before any update.
+
+    Refused: a non-real value or a bool; NaN or infinity; a price at or below zero; a price
+    at or above ``_MAX_TICK_PRICE``; a crossed book (bid above ask). The volatility tracker
+    returns 0.0 on its very first update, which hides a NaN or infinite mid on a cold loop,
+    and one such value poisons the EMA and Welford state for good, so the check comes first.
+    A refused tick leaves every feature state untouched and the next good tick classifies
+    normally. ``bid == ask`` (a zero spread) is accepted; only ``bid > ask`` is crossed.
+    """
+
+    for name, value in (("mid", mid_price), ("ask", ask), ("bid", bid)):
+        if isinstance(value, bool) or not isinstance(value, numbers.Real):
+            raise InvalidTickError(f"{name} price is not a real number")
+        # Written as a positive range test so NaN (every comparison False) is refused too.
+        if not (0 < value < _MAX_TICK_PRICE):
+            raise InvalidTickError(f"{name} price is not finite and inside (0, {_MAX_TICK_PRICE:g})")
+    if bid > ask:
+        raise InvalidTickError("the book is crossed (bid above ask)")
+
 
 def _failure_reason(exc: BaseException) -> str:
     """A stable label for a pipeline failure; never raises, even if ``exc.code`` does."""
@@ -178,6 +213,9 @@ class LiveTradingLoop:
         vol: Optional[float] = None
         spread: Optional[float] = None
         try:
+            # 0. Refuse a bad tick before any feature state moves (see _validate_tick).
+            _validate_tick(mid_price, ask, bid)
+
             # 1. Dynamically compute relative spreads and running EMA volatility
             vol = self.vol_tracker.update(mid_price)
             spread = self.spread_tracker.update(bid, ask)

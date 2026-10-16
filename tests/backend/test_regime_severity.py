@@ -882,3 +882,89 @@ async def test_an_exception_whose_code_property_raises_still_invalidates_the_reg
 
     decision, dispatched = await _preflight_buy(loop)
     assert decision.approved is False and dispatched == []
+
+
+def _bad_value_tick(field, value):
+    """A tick as (mid, ask, bid) with one price replaced."""
+
+    tick = {"mid": 100.0, "ask": 100.1, "bid": 99.9}
+    tick[field] = value
+    return tick["mid"], tick["ask"], tick["bid"]
+
+
+_BAD_TICKS = [
+    pytest.param(_bad_value_tick(field, value), id=f"{field}={label}")
+    for field in ("mid", "ask", "bid")
+    for label, value in (
+        ("nan", float("nan")), ("inf", float("inf")), ("-inf", float("-inf")),
+        ("zero", 0.0), ("negative", -1.0), ("bool", True), ("text", "100.0"),
+        ("1e308", 1e308), ("1e12", 1e12),
+    )
+] + [
+    pytest.param((100.0, 99.9, 100.1), id="crossed_book"),
+    # Opus verify of 79c4e47: a crossed tick sized 10 of 10 in regime 3.
+    pytest.param((100.0, 99.0, 101.0), id="crossed_100_99_101"),
+    # Opus verify: ask=1, bid=-1 gives mid=0 and spread=0, which read as calm and sized 10 of 10.
+    pytest.param((0.0, 1.0, -1.0), id="mid0_from_ask1_bid-1"),
+    pytest.param((-0.5, 1.0, -2.0), id="negative_book"),
+]
+
+
+def _comparable(result):
+    """A tick result without the one field that legitimately differs after an invalidation."""
+
+    return {key: value for key, value in result.items() if key != "regime_changed"}
+
+
+@pytest.mark.parametrize("warm", [False, True], ids=["cold_start", "warm_start"])
+@pytest.mark.parametrize("bad_tick", _BAD_TICKS)
+@pytest.mark.asyncio
+async def test_a_non_finite_or_malformed_tick_is_refused_before_any_feature_state_moves(bad_tick, warm, tmp_path):
+    """Codex r2 P1: on a fresh loop ``process_tick(nan, 100.1, 99.9)`` returned regime 3 valid with
+    leverage 0.98, because the volatility tracker returns 0.0 on its first update and hides the
+    bad mid. The tick is validated before any update, the regime is invalidated with
+    TICK_INVALID, and the next good tick classifies as if the bad one never arrived."""
+
+    from backend.trading_loop import LiveTradingLoop
+
+    ticks = _tick_stream()
+    warmup = 40 if warm else 0
+    reference = LiveTradingLoop(_StubManager(), shipped_params(), telemetry_db_path=str(tmp_path / "ref.db"))
+    expected = [reference.process_tick(*tick) for tick in ticks[:46]]
+
+    loop = LiveTradingLoop(_StubManager(), shipped_params(), telemetry_db_path=str(tmp_path / "t.db"))
+    for tick in ticks[:warmup]:
+        loop.process_tick(*tick)
+    if warm:
+        assert loop.current_regime != -1 and loop.risk_leverage_coefficient > 0.0
+
+    result = loop.process_tick(*bad_tick)  # must not raise
+    assert result["regime_valid"] is False and result["dominant_regime"] == -1
+    assert result["invalid_reason"] == "TICK_INVALID"
+    assert loop.current_regime == -1 and loop.requoter.current_regime == -1
+    assert loop.risk_leverage_coefficient == 0.0 and result["risk_leverage_coefficient"] == 0.0
+
+    decision, dispatched = await _preflight_buy(loop)
+    assert decision.approved is False and decision.scaled_size == 0.0 and dispatched == []
+
+    # Nothing was updated by the refused tick: the good ticks that follow match a loop that
+    # never saw it, and the regime comes back.
+    recovered = [loop.process_tick(*tick) for tick in ticks[warmup:46]]
+    assert [_comparable(r) for r in recovered] == [_comparable(r) for r in expected[warmup:46]]
+    assert loop.current_regime != -1 and loop.risk_leverage_coefficient > 0.0
+    decision, dispatched = await _preflight_buy(loop)
+    assert decision.approved is True and dispatched
+
+
+def test_a_numpy_float_tick_and_a_zero_spread_tick_are_still_classified(tmp_path):
+    """The validation must not refuse what the success path accepts: numpy floats and bid == ask."""
+
+    from backend.trading_loop import LiveTradingLoop
+
+    loop = LiveTradingLoop(_StubManager(), shipped_params(), telemetry_db_path=str(tmp_path / "t.db"))
+    for mid, ask, bid in _tick_stream()[:10]:
+        assert loop.process_tick(np.float64(mid), np.float32(ask), np.float64(bid))["regime_valid"] is True
+    assert loop.process_tick(100.0, 100.0, 100.0)["regime_valid"] is True
+    # A large but sane price (just under the 1e12 bound) is not refused.
+    big = LiveTradingLoop(_StubManager(), shipped_params(), telemetry_db_path=str(tmp_path / "big.db"))
+    assert big.process_tick(9.9e11, 9.9e11 + 1.0, 9.9e11 - 1.0)["regime_valid"] is True
