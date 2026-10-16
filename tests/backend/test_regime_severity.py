@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import itertools
+import math
 import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -968,3 +969,162 @@ def test_a_numpy_float_tick_and_a_zero_spread_tick_are_still_classified(tmp_path
     # A large but sane price (just under the 1e12 bound) is not refused.
     big = LiveTradingLoop(_StubManager(), shipped_params(), telemetry_db_path=str(tmp_path / "big.db"))
     assert big.process_tick(9.9e11, 9.9e11 + 1.0, 9.9e11 - 1.0)["regime_valid"] is True
+
+
+def _feature_state(loop):
+    """Every number the feature pipeline keeps between ticks."""
+
+    vol, spread = loop.vol_tracker, loop.spread_tracker
+    vol_std, spread_std = loop.vol_standardizer, loop.spread_standardizer
+    return (
+        (vol.last_price, vol.var, vol.vol, vol.initialized),
+        spread.spread,
+        (vol_std.count, vol_std.mean, vol_std.M2),
+        (spread_std.count, spread_std.mean, spread_std.M2),
+    )
+
+
+_MIN_PRICE = 1e-9  # mirrors trading_loop._MIN_TICK_PRICE; a test below pins the constant itself
+_BELOW_FLOOR = float(np.nextafter(_MIN_PRICE, 0.0))
+
+_FLOOR_AND_BOOK_TICKS = [
+    pytest.param(_bad_value_tick(field, value), id=f"{field}={label}")
+    for field in ("mid", "ask", "bid")
+    for label, value in (
+        ("1e-200", 1e-200), ("denormal", 5e-324), ("half_floor", _MIN_PRICE / 2), ("just_below_floor", _BELOW_FLOOR),
+    )
+] + [
+    # A consistent, uncrossed book entirely below the floor: only the floor refuses it.
+    pytest.param((1e-200, 1e-200, 1e-200), id="locked_book_1e-200"),
+    pytest.param((2e-200, 3e-200, 1e-200), id="consistent_book_1e-200"),
+    pytest.param((_BELOW_FLOOR, _BELOW_FLOOR, _BELOW_FLOOR), id="locked_book_just_below_floor"),
+] + [
+    # Inside the price range and not crossed, but the mid is not in the book.
+    pytest.param((99.8, 100.1, 99.9), id="mid_below_bid"),
+    pytest.param((100.2, 100.1, 99.9), id="mid_above_ask"),
+    pytest.param((float(np.nextafter(99.9, 0.0)), 100.1, 99.9), id="mid_one_ulp_below_bid"),
+    pytest.param((float(np.nextafter(100.1, 200.0)), 100.1, 99.9), id="mid_one_ulp_above_ask"),
+    pytest.param((100.000001, 100.0, 99.999999), id="narrow_book_mid_just_above_ask"),
+    pytest.param((100.5, 100.0, 100.0), id="zero_spread_mid_off_the_quote"),
+]
+
+
+@pytest.mark.parametrize("warm", [False, True], ids=["cold_start", "warm_start"])
+@pytest.mark.parametrize("bad_tick", _FLOOR_AND_BOOK_TICKS)
+@pytest.mark.asyncio
+async def test_a_sub_floor_price_or_a_mid_outside_the_book_is_refused_and_leaves_feature_state_untouched(
+    bad_tick, warm, tmp_path
+):
+    """Follow-ups to #568. A positive price like 1e-200 passed validation, and the next normal tick
+    then squared a relative return near 1e200: infinite variance in the EMA and Welford state,
+    so trading stayed blocked until restart. A mid outside [bid, ask] classified as if it were
+    a real quote. Both are refused now, before any state moves, and the next good tick classifies
+    as if the bad one never arrived."""
+
+    from backend.trading_loop import LiveTradingLoop
+
+    ticks = _tick_stream()
+    warmup = 40 if warm else 0
+    reference = LiveTradingLoop(_StubManager(), shipped_params(), telemetry_db_path=str(tmp_path / "ref.db"))
+    expected = [reference.process_tick(*tick) for tick in ticks[:46]]
+
+    loop = LiveTradingLoop(_StubManager(), shipped_params(), telemetry_db_path=str(tmp_path / "t.db"))
+    for tick in ticks[:warmup]:
+        loop.process_tick(*tick)
+    if warm:
+        assert loop.current_regime != -1 and loop.risk_leverage_coefficient > 0.0
+    before = _feature_state(loop)
+
+    result = loop.process_tick(*bad_tick)  # must not raise
+    assert result["regime_valid"] is False and result["dominant_regime"] == -1
+    assert result["invalid_reason"] == "TICK_INVALID"
+    assert _feature_state(loop) == before, "a refused tick must not move any tracker or standardizer"
+    assert loop.current_regime == -1 and loop.requoter.current_regime == -1
+    assert loop.risk_leverage_coefficient == 0.0 and result["risk_leverage_coefficient"] == 0.0
+
+    decision, dispatched = await _preflight_buy(loop)
+    assert decision.approved is False and decision.scaled_size == 0.0 and dispatched == []
+
+    recovered = [loop.process_tick(*tick) for tick in ticks[warmup:46]]
+    assert [_comparable(r) for r in recovered] == [_comparable(r) for r in expected[warmup:46]]
+    assert loop.current_regime != -1 and loop.risk_leverage_coefficient > 0.0
+    decision, dispatched = await _preflight_buy(loop)
+    assert decision.approved is True and dispatched
+
+
+@pytest.mark.parametrize(
+    "tick",
+    [
+        pytest.param((_MIN_PRICE, _MIN_PRICE, _MIN_PRICE), id="all_three_at_the_floor"),
+        pytest.param((100.0, 100.0, 100.0), id="bid_eq_ask_eq_mid"),
+        pytest.param((99.9, 100.1, 99.9), id="mid_on_the_bid"),
+        pytest.param((100.1, 100.1, 99.9), id="mid_on_the_ask"),
+        pytest.param((100.0, 100.1, 99.9), id="mid_inside"),
+    ],
+)
+def test_the_floor_and_the_book_edges_are_inclusive(tick, tmp_path):
+    """A price exactly at the floor is accepted, and so is a mid exactly on the bid or ask
+    (a locked book has bid == mid == ask). Only strictly outside is refused."""
+
+    from backend.trading_loop import LiveTradingLoop
+
+    loop = LiveTradingLoop(_StubManager(), shipped_params(), telemetry_db_path=str(tmp_path / "t.db"))
+    assert loop.process_tick(*tick)["regime_valid"] is True
+
+
+def test_the_floor_constants_keep_the_worst_case_variance_finite_through_the_real_trackers(tmp_path):
+    """Numerical proof, not a check on the constants. The worst relative return the loop can see is
+    from a price at the floor to one just under the ceiling. Push it, and repeated bounces
+    between the extremes, through the real volatility tracker and Welford standardizers (and
+    the whole loop) and require every state number to stay finite with headroom."""
+
+    import backend.trading_loop as loop_module
+    from backend.features.online_vol import OnlineVolatility
+    from backend.features.welford import WelfordStandardizer
+    from backend.trading_loop import LiveTradingLoop
+
+    assert loop_module._MIN_TICK_PRICE == _MIN_PRICE
+    low, high = loop_module._MIN_TICK_PRICE, float(np.nextafter(loop_module._MAX_TICK_PRICE, 0.0))
+    worst_return = (high - low) / low
+    headroom = np.finfo(np.float64).max / 1e100  # the squared return must sit far below overflow
+    assert worst_return**2 < headroom
+
+    for alpha in (1.0, 0.5, 0.05):  # alpha 1.0 puts the whole squared return into the EMA at once
+        tracker, standardizer = OnlineVolatility(alpha=alpha), WelfordStandardizer()
+        for price in [low, high, low, high] * 250:
+            standardizer.update(tracker.update(price))
+        for name, number in (
+            ("var", tracker.var), ("vol", tracker.vol), ("mean", standardizer.mean),
+            ("M2", standardizer.M2), ("variance", standardizer.variance),
+        ):
+            assert math.isfinite(number), f"{name} overflowed at alpha={alpha}"
+            assert number < headroom
+        assert math.isfinite(standardizer.zscore(tracker.vol))
+
+    # The same extremes through the loop itself, after a warm start with the shipped scalers.
+    loop = LiveTradingLoop(_StubManager(), shipped_params(), telemetry_db_path=str(tmp_path / "t.db"))
+    for tick in _tick_stream()[:40]:
+        loop.process_tick(*tick)
+    for _ in range(100):
+        loop.process_tick(low, low, low)
+        loop.process_tick(high, high, high)
+    for number in (
+        loop.vol_tracker.var, loop.vol_tracker.vol, loop.vol_standardizer.mean, loop.vol_standardizer.M2,
+        loop.spread_standardizer.mean, loop.spread_standardizer.M2,
+    ):
+        assert math.isfinite(number) and number < headroom
+
+
+def test_without_the_floor_a_tiny_price_would_poison_the_volatility_state():
+    """The reason for the floor, shown on the real tracker: one 1e-200 price followed by a normal
+    one leaves an infinite variance that no later tick unwinds."""
+
+    from backend.features.online_vol import OnlineVolatility
+
+    tracker = OnlineVolatility(alpha=0.05)
+    for price in (100.0, 1e-200, 100.0):
+        tracker.update(price)
+    assert not math.isfinite(tracker.var)
+    for _ in range(50):
+        tracker.update(100.0)
+    assert not math.isfinite(tracker.var), "the poison does not decay"

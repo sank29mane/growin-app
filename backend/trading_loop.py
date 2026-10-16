@@ -53,26 +53,44 @@ class InvalidTickError(ValueError):
 # return, and a price near 1e308 gives an infinite variance that no later tick can unwind.
 _MAX_TICK_PRICE = 1e12
 
+# Lower bound on any quoted price the loop will classify (inclusive). The smallest realistic
+# quote scales are sub-cent crypto and satoshi-denominated pairs, which sit near 1e-8, so 1e-9
+# leaves one order of magnitude of headroom below them. The point is again overflow, from the
+# other side: the volatility EMA squares (price - last) / last, so a jump from a denormal-scale
+# price like 1e-200 to a normal one gives an infinite variance that no later tick can unwind.
+# At the floor the worst relative return is _MAX_TICK_PRICE / _MIN_TICK_PRICE = 1e21, its
+# square 1e42, which float64 (about 1e308) carries through the EMA and Welford state with room
+# to spare. A test pushes that worst case through the real trackers.
+_MIN_TICK_PRICE = 1e-9
+
 
 def _validate_tick(mid_price: object, ask: object, bid: object) -> None:
     """Reject a tick that would poison the feature state or be sized on nonsense, before any update.
 
     Refused: a non-real value or a bool; NaN or infinity; a price at or below zero; a price
-    at or above ``_MAX_TICK_PRICE``; a crossed book (bid above ask). The volatility tracker
+    at or above ``_MAX_TICK_PRICE`` or below ``_MIN_TICK_PRICE``; a crossed book (bid above
+    ask); a mid outside the book (below bid or above ask). The volatility tracker
     returns 0.0 on its very first update, which hides a NaN or infinite mid on a cold loop,
     and one such value poisons the EMA and Welford state for good, so the check comes first.
     A refused tick leaves every feature state untouched and the next good tick classifies
-    normally. ``bid == ask`` (a zero spread) is accepted; only ``bid > ask`` is crossed.
+    normally. ``bid == ask`` (a zero spread) is accepted; only ``bid > ask`` is crossed. Both
+    bounds are inclusive: a mid exactly at the bid or the ask is accepted (a locked book has
+    ``bid == mid == ask``), only a mid strictly below the bid or above the ask is refused.
+    There is deliberately no jump or gap filter against the previous tick; legitimate gaps exist.
     """
 
     for name, value in (("mid", mid_price), ("ask", ask), ("bid", bid)):
         if isinstance(value, bool) or not isinstance(value, numbers.Real):
             raise InvalidTickError(f"{name} price is not a real number")
         # Written as a positive range test so NaN (every comparison False) is refused too.
-        if not (0 < value < _MAX_TICK_PRICE):
-            raise InvalidTickError(f"{name} price is not finite and inside (0, {_MAX_TICK_PRICE:g})")
+        if not (_MIN_TICK_PRICE <= value < _MAX_TICK_PRICE):
+            raise InvalidTickError(
+                f"{name} price is not finite and inside [{_MIN_TICK_PRICE:g}, {_MAX_TICK_PRICE:g})"
+            )
     if bid > ask:
         raise InvalidTickError("the book is crossed (bid above ask)")
+    if mid_price < bid or mid_price > ask:
+        raise InvalidTickError("the mid price lies outside the book (below bid or above ask)")
 
 
 def _failure_reason(exc: BaseException) -> str:
