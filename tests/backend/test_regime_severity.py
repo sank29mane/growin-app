@@ -687,26 +687,48 @@ def test_the_requoter_accepts_a_numpy_integer_id_and_refuses_other_non_labels():
 
 
 class _SwitchableManager(_StubManager):
-    """Adapter manager whose swap can be made to fail or raise."""
+    """Adapter manager whose swap and slot lookup can be made to fail, return None or raise."""
 
     def __init__(self):
         super().__init__()
         self.mode = "ok"
 
+    @property
+    def preloaded_weights(self):
+        if self.mode == "slots_unreadable":
+            raise RuntimeError("adapter slots are unreadable")
+        if self.mode == "slots_unorderable":
+            return {"not-a-slot-number": object(), 1: object()}
+        return self._slots
+
+    @preloaded_weights.setter
+    def preloaded_weights(self, value):
+        self._slots = value
+
     def swap_adapter(self, adapter_id):
         if self.mode == "raise":
             raise RuntimeError("adapter swap blew up")
+        if self.mode == "none":
+            return None  # a swap that reports nothing is not a swap that worked
         self.swapped.append(adapter_id)
         return self.mode == "ok"
 
 
-@pytest.mark.parametrize("mode", ["failed_swap", "swap_raises", "inference_raises"])
+_LOOKUP_FAILURES = ["slots_unreadable", "slots_unorderable"]
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["failed_swap", "swap_raises", "swap_returns_none", "inference_raises", *_LOOKUP_FAILURES],
+)
 @pytest.mark.asyncio
 async def test_a_failed_swap_or_inference_error_invalidates_the_regime_until_the_next_good_classification(
     mode, tmp_path, monkeypatch
 ):
     """P1-c: a crisis posterior with a failed swap used to leave the previous calm regime in
-    place and dispatch 10 of 10. Any inference or adapter failure now invalidates the regime."""
+    place and dispatch 10 of 10. Any inference, adapter-lookup or adapter failure now
+    invalidates the regime, including a swap that returns None and a slot lookup that raises
+    after a good posterior (66 follow-up: those lookups sat outside the try)."""
 
     import backend.trading_loop as loop_module
     from backend.trading_loop import LiveTradingLoop
@@ -722,12 +744,13 @@ async def test_a_failed_swap_or_inference_error_invalidates_the_regime_until_the
 
     crisis_id = shipped_map().id_by_rank[3]
     assert previous != crisis_id
-    if mode == "failed_swap":
-        manager.mode = "fail"
+    swap_modes = {"failed_swap": "fail", "swap_raises": "raise", "swap_returns_none": "none"}
+    if mode in swap_modes:
+        manager.mode = swap_modes[mode]
         monkeypatch.setattr(loop_module, "fast_gmm_predict_proba", lambda *a, **k: np.eye(4)[crisis_id])
-    elif mode == "swap_raises":
-        manager.mode = "raise"
-        monkeypatch.setattr(loop_module, "fast_gmm_predict_proba", lambda *a, **k: np.eye(4)[crisis_id])
+    elif mode in _LOOKUP_FAILURES:
+        # The posterior stays valid and the regime unchanged: only the slot lookup fails.
+        manager.mode = mode
     else:
         def boom(*args, **kwargs):
             raise RuntimeError("inference failed")

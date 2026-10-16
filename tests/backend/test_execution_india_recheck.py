@@ -623,3 +623,33 @@ def test_a_bound_india_ledger_with_no_guard_is_refused_too(bound_world):
         service.create_approval_challenge("bound-a", workspace="india", india_quote=fresh())
     assert str(refused.value) == "india_limits_unavailable"
     assert bound_world.ledger.get_order("bound-a").state == "REJECTED"
+
+
+def test_a_registered_only_intent_over_the_cap_is_refused_at_its_requested_quantity(world):
+    """63-04 follow-up: with no admission on file the recheck sizes the order at the request.
+
+    The intent is registered but never admitted, so there is no ``final_quantity`` to read.
+    The guard falls back to the quantity the intent asked for, and 7 x 100.00 is over the
+    600.00 per-position cap. The challenge is refused, the order is closed, and no approval
+    challenge row exists to sign.
+    """
+
+    intent = ils.make_intent("registered-only", quantity=7)
+    world.ledger.register_intent(intent)
+    assert world.ledger.get_admission("registered-only") is None
+    assert world.ledger.get_order("registered-only").state == "PENDING"
+
+    with pytest.raises(ApprovalConflict) as refused:
+        world.service.create_approval_challenge("registered-only", workspace="india", india_quote=fresh())
+
+    assert str(refused.value) == "per_position_cap"
+    assert world.ledger.get_order("registered-only").state == "REJECTED"
+    assert world.dispatcher.calls == 0
+
+
+def test_a_registered_only_intent_inside_the_cap_is_not_refused_by_the_recheck(world):
+    """The control for the test above: the same path with a quantity inside the cap passes."""
+
+    world.ledger.register_intent(ils.make_intent("registered-ok", quantity=5))
+    assert world.service._recheck_india_buy("registered-ok", fresh()) is None  # noqa: SLF001
+    assert world.ledger.get_order("registered-ok").state == "PENDING"

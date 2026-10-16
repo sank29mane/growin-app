@@ -187,20 +187,22 @@ class LiveTradingLoop:
                 scaler_var
             )
             probabilities = validate_posterior(probabilities, self.severity_map.component_count)
+            dominant_regime = int(np.argmax(probabilities))
+            # The adapter follows the component's severity rank (K=4 GMM, 3 adapters: the two
+            # most severe ranks share the last adapter), never the raw component id. These
+            # lookups sit inside the try on purpose: a manager with no readable slots or a
+            # severity map that cannot place the component leaves no usable regime.
+            available_adapters = list(self.model_manager.preloaded_weights.keys())
+            adapter_id = self.severity_map.adapter_id(dominant_regime, available_adapters)
         except Exception as exc:  # noqa: BLE001 - any inference failure invalidates the regime
             # A failed inference leaves no current classification, and a NaN or malformed
             # posterior has an argmax of 0, which would silently pick whichever component is
-            # numbered 0. Either way the regime is invalidated: nothing is sized or dispatched
+            # numbered 0. A failed adapter lookup is the same: the regime cannot be bound to a
+            # slot. Either way the regime is invalidated: nothing is sized or dispatched
             # until a later tick classifies successfully.
             return self._invalidate_regime(vol, spread, getattr(exc, "code", type(exc).__name__))
-        dominant_regime = int(np.argmax(probabilities))
 
         # 4. Trigger the MLX adapter hot-swapper when a regime change is identified
-        # The adapter follows the component's severity rank (K=4 GMM, 3 adapters: the two
-        # most severe ranks share the last adapter), never the raw component id.
-        available_adapters = list(self.model_manager.preloaded_weights.keys())
-        adapter_id = self.severity_map.adapter_id(dominant_regime, available_adapters)
-            
         regime_changed = False
         if dominant_regime != self.current_regime:
             try:
