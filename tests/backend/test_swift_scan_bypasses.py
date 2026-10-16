@@ -78,25 +78,68 @@ ALIAS_PATTERNS = (
         "typealias of KeychainStore",
         re.compile(r"\btypealias\s+\w+\s*(?:<[^>]*>)?\s*=\s*KeychainStore" + _NOT_BEFORE_IDENT),
     ),
-    (
-        # `: KeychainStore = .shared`, `var s: KeychainStore { .shared }`, `-> KeychainStore { return .shared }`
-        ".shared default or body for a KeychainStore value",
-        re.compile(
-            _NOT_AFTER_IDENT_OR_QUOTE
-            + r"KeychainStore\s*\??\s*(?:=|\{\s*(?:return\s+)?)\s*\.shared"
-            + _NOT_BEFORE_IDENT
-        ),
-    ),
+    # `: KeychainStore = .shared`, `var s: KeychainStore { .shared }` and the rest of the implicit
+    # forms are caught by `implicit_shared_uses`, which reads code with strings removed, so a test
+    # that plants such a line inside a string literal is not a finding.
 )
 # An argument or default written `store: .shared`. Read on code with strings removed: a planted
 # line inside a test string is not an argument.
 STORE_ARGUMENT = re.compile(_NOT_AFTER_IDENT + r"store\s*:\s*\.shared" + _NOT_BEFORE_IDENT)
 
+# `.shared` with no type in front of it takes its type from context, so the scan cannot tell a
+# KeychainStore from anything else: `Self.cleanUp(.shared)`, `run(on: .shared)`, `store = .shared`,
+# `var s: KeychainStore! = .shared`, `{ .shared }`, `return .shared`. The only implicit `.shared`
+# allowed is the KeychainScope enum case, in these four shapes. They are removed before the scan.
+KEYCHAIN_SCOPE_CONTEXTS = re.compile(
+    r"scope\s*:\s*\.shared(?![A-Za-z0-9_])"
+    r"|[=!]=\s*\.shared(?![A-Za-z0-9_])"
+    r"|\ballows\s*\(\s*\.shared(?![A-Za-z0-9_])"
+    r"|\bcase\s+\.shared(?![A-Za-z0-9_])"
+)
+DOT_SHARED = re.compile(r"\.\s*shared(?![A-Za-z0-9_])")
+STORE_LABEL_BEFORE = re.compile(r"(?<![A-Za-z0-9_])store\s*:\s*$")
+# A keyword before `.shared` still takes an implicit member (`return .shared`, `{ _ in .shared }`).
+KEYWORDS_BEFORE_IMPLICIT = frozenset({"return", "in", "else", "try", "await", "throw"})
+EXTENSION_OF_STORE = re.compile(r"\bextension\s+KeychainStore" + _NOT_BEFORE_IDENT)
+PRODUCTION_SERVICE = re.compile(_NOT_AFTER_IDENT + r"productionService" + _NOT_BEFORE_IDENT)
 
-def keychain_alias_offences(text: str, store_argument_pin: int = 0) -> list[str]:
-    """Ways one Swift file holds `KeychainStore.shared`, or the type, as a value."""
-    code = strip_swift_comments_and_strings(text, keep_strings=True)
-    bare = strip_swift_comments_and_strings(text)
+
+def implicit_shared_uses(code: str) -> list[str]:
+    """Each `.shared` written without a type in front of it, other than the KeychainScope case.
+
+    A `.shared` is a member access, and fine here, when the previous non-space character is part of
+    an identifier or is `)` or `]`. Anything else (`(`, `,`, `=`, `{`, `:`, a line start) or a
+    keyword such as `return` means the type comes from context. A `store: .shared` argument is
+    left to the pin check.
+    """
+    code = KEYCHAIN_SCOPE_CONTEXTS.sub(" ", code)
+    found = []
+    for match in DOT_SHARED.finditer(code):
+        before = code[: match.start()].rstrip()
+        if STORE_LABEL_BEFORE.search(before):
+            continue
+        last = before[-1:]
+        if last and (last.isalnum() or last in "_)]"):
+            word = re.search(r"([A-Za-z_][A-Za-z0-9_]*)$", before)
+            if not (word and word.group(1) in KEYWORDS_BEFORE_IMPLICIT):
+                continue
+        context = " ".join(before[-24:].split())
+        found.append(f"implicit .shared (type from context): {context} .shared")
+    return found
+
+
+def keychain_alias_offences(
+    text: str,
+    store_argument_pin: int = 0,
+    implicit_shared: bool = True,
+    allow_extension: bool = False,
+) -> list[str]:
+    """Ways one Swift file holds `KeychainStore.shared`, or the type, as a value.
+
+    Backticks are removed first, so KeychainStore.`shared` is read as KeychainStore.shared.
+    """
+    code = strip_swift_comments_and_strings(text, keep_strings=True).replace("`", "")
+    bare = strip_swift_comments_and_strings(text).replace("`", "")
     found = []
     for label, pattern in ALIAS_PATTERNS:
         for match in pattern.finditer(code):
@@ -104,6 +147,10 @@ def keychain_alias_offences(text: str, store_argument_pin: int = 0) -> list[str]
     arguments = len(STORE_ARGUMENT.findall(bare))
     if arguments != store_argument_pin:
         found.append(f"`store: .shared` appears {arguments}x, allowed {store_argument_pin}")
+    if implicit_shared:
+        found += implicit_shared_uses(bare)
+    if not allow_extension and EXTENSION_OF_STORE.search(bare):
+        found.append("extension KeychainStore outside KeychainStore.swift")
     return found
 
 
@@ -112,7 +159,11 @@ def app_keychain_offences(
     namers: frozenset[Path] = KEYCHAIN_STORE_NAMERS,
     pins: dict[Path, int] = STORE_ARGUMENT_PINS,
 ) -> list[str]:
-    """App files that name KeychainStore without being allow-listed, plus every alias offence."""
+    """App files that name KeychainStore without being allow-listed, plus every alias offence.
+
+    The implicit `.shared` rule runs on the allow-listed files only: every other app file cannot
+    name the type, and uses `.shared` legitimately for URLSession and the signer router.
+    """
     found = []
     for path in sorted(root.rglob("*.swift")):
         relative = path.relative_to(root)
@@ -120,7 +171,25 @@ def app_keychain_offences(
         code = strip_swift_comments_and_strings(text, keep_strings=True)
         if relative not in namers and KEYCHAIN_STORE_NAME.search(code):
             found.append(f"{relative}: names KeychainStore and is not on the allow-list")
-        found += [f"{relative}: {item}" for item in keychain_alias_offences(text, pins.get(relative, 0))]
+        offences = keychain_alias_offences(
+            text,
+            pins.get(relative, 0),
+            implicit_shared=relative in namers,
+            allow_extension=relative == Path("Security") / "KeychainStore.swift",
+        )
+        found += [f"{relative}: {item}" for item in offences]
+    return found
+
+
+def keychain_test_text_offences(text: str) -> list[str]:
+    """One test file: the alias rules, any implicit `.shared`, and the production service name.
+
+    `KeychainStore(service: KeychainStore.productionService)` is the shared store under another name,
+    so a test may not name `productionService` at all.
+    """
+    found = keychain_alias_offences(text)
+    if PRODUCTION_SERVICE.search(strip_swift_comments_and_strings(text)):
+        found.append("names productionService")
     return found
 
 
@@ -129,7 +198,7 @@ def keychain_offences_in_test_sources(root: Path) -> list[str]:
     found = []
     for path in sorted(root.rglob("*.swift")):
         text = path.read_text(encoding="utf-8")
-        found += [f"{path.relative_to(root)}: {item}" for item in keychain_alias_offences(text)]
+        found += [f"{path.relative_to(root)}: {item}" for item in keychain_test_text_offences(text)]
     return found
 
 
@@ -273,6 +342,107 @@ def test_no_test_source_holds_the_shared_keychain_store_as_a_value():
     assert keychain_offences_in_test_sources(APP_TESTS) == []
 
 
+# Implicit `.shared`: the type comes from context, so nothing here spells `KeychainStore.shared`.
+# The first three are real helper shapes: `cleanUp(_ store: KeychainStore)` exists in three test files,
+# and in ApprovalWorkspaceTests it removes the signing keys of every workspace.
+IMPLICIT_SAMPLES = {
+    "helper call": "Self.cleanUp(.shared)\n",
+    "bare helper call": "cleanUp(.shared)\n",
+    "function taking a store": "func migrate(_ s: KeychainStore) { _ = s.migrateFlatItemsToScoped() }\nmigrate(.shared)\n",
+    "assignment in setUp": "var store: KeychainStore!\nfunc setUp() { store = .shared }\n",
+    "other label": "run(on: .shared)\n",
+    "implicitly unwrapped default": "var s: KeychainStore! = .shared\n",
+    "optional generic": "var s: Optional<KeychainStore> = .shared\n",
+    "backticked member": "let s = KeychainStore.`shared`\n",
+    "backticked implicit": "let s: KeychainStore = .`shared`\n",
+    "getter": "var s: KeychainStore { get { .shared } }\n",
+    "closure initialiser": "let s: KeychainStore = { .shared }()\n",
+    "extension alias": "extension KeychainStore { static var alias: KeychainStore { shared } }\n",
+    "return": "func f() -> KeychainStore { return .shared }\n",
+    "closure with in": "let f: (Int) -> KeychainStore = { _ in .shared }\n",
+    "nil coalescing": "let s: KeychainStore = maybe ?? .shared\n",
+    "ternary": "let s: KeychainStore = flag ? .shared : other\n",
+    "array element": "let all: [KeychainStore] = [.shared]\n",
+    "argument on its own line": "cleanUp(\n    .shared\n)\n",
+    "dot then space": "cleanUp(. shared)\n",
+}
+IMPLICIT_LEGITIMATE = {
+    "URLSession member": "let s = URLSession.shared\n",
+    "scope label": "store.set(v, for: .x, scope: .shared)\n",
+    "policy comparison": "#expect(name.policy == .shared)\n#expect(a != .shared)\n",
+    "policy allows": "#expect(!policy.allows(.shared))\n",
+    "pattern": "case .shared: return true\n",
+    "router": "ApprovalSignerRouter.shared.sign(x)\n",
+    "member chain on the next line": "let r = ApprovalSignerRouter\n    .shared\n",
+    "member of a call result": "make().shared\nlist[0].shared\n",
+    "longer names": "let sharedCount = 1\nlet x = a.shared2\n",
+    "commented and quoted": '// cleanUp(.shared)\nlet n = "cleanUp(.shared)"\n',
+    "own store": "let own = KeychainStore(service: unique)\ncleanUp(own)\n",
+    "extension of the error": "extension KeychainStoreError { var x: Int { 1 } }\n",
+}
+PRODUCTION_SERVICE_SAMPLES = {
+    "named through the type": "let s = KeychainStore(service: KeychainStore.productionService)\n",
+    "bare": "let s = KeychainStore(service: productionService)\n",
+    "with a space": "let s = KeychainStore(service: KeychainStore . productionService)\n",
+}
+
+
+def test_every_planted_implicit_shared_is_caught_in_test_sources():
+    for name, text in IMPLICIT_SAMPLES.items():
+        assert keychain_test_text_offences(text), f"went undetected: {name}"
+
+
+def test_legitimate_shared_uses_are_not_flagged_in_test_sources():
+    for name, text in IMPLICIT_LEGITIMATE.items():
+        assert keychain_test_text_offences(text) == [], name
+    # Everything the alias rules already allowed stays allowed.
+    # (The production service constant is legal in the app and refused in tests, see below.)
+    for name, text in LEGITIMATE_SAMPLES.items():
+        if name != "production service constant":
+            assert keychain_test_text_offences(text) == [], name
+
+
+def test_the_production_service_name_is_refused_in_test_sources():
+    for name, text in PRODUCTION_SERVICE_SAMPLES.items():
+        assert keychain_test_text_offences(text), f"went undetected: {name}"
+    assert keychain_test_text_offences('let n = "productionService"\n// productionService\n') == []
+    assert keychain_test_text_offences("let n = productionServiceName\n") == []
+
+
+def test_the_implicit_rule_is_stronger_than_the_alias_rules_alone():
+    """The first-round rules (no implicit scan, no extension ban) missed most of these."""
+    missed = [
+        name
+        for name, text in IMPLICIT_SAMPLES.items()
+        if not keychain_alias_offences(text, implicit_shared=False, allow_extension=True)
+    ]
+    assert len(missed) >= 15, missed
+
+
+def test_the_implicit_rule_runs_on_allow_listed_app_files_only(tmp_path):
+    (tmp_path / "Security").mkdir()
+    (tmp_path / "Views").mkdir()
+    namers = frozenset({Path("Security") / "LaunchMigrations.swift"})
+    (tmp_path / "Security" / "LaunchMigrations.swift").write_text(
+        "func f() { Self.cleanUp(.shared) }\n", encoding="utf-8"
+    )
+    # Not a namer, so the type cannot be written here and URLSession's `.shared` stays legal.
+    (tmp_path / "Views" / "Net.swift").write_text("init(session: URLSession = .shared) {}\n", encoding="utf-8")
+    hits = app_keychain_offences(tmp_path, namers, {})
+    assert any(hit.startswith("Security/LaunchMigrations.swift") and "implicit .shared" in hit for hit in hits)
+    assert not any(hit.startswith("Views/") for hit in hits)
+
+
+def test_extension_of_the_store_is_allowed_only_in_its_own_file(tmp_path):
+    (tmp_path / "Security").mkdir()
+    own = Path("Security") / "KeychainStore.swift"
+    (tmp_path / own).write_text("extension KeychainStore { func x() {} }\n", encoding="utf-8")
+    assert app_keychain_offences(tmp_path, frozenset({own}), {}) == []
+    other = Path("Security") / "LaunchMigrations.swift"
+    (tmp_path / other).write_text("extension KeychainStore { func x() {} }\n", encoding="utf-8")
+    assert app_keychain_offences(tmp_path, frozenset({own, other}), {})
+
+
 # --------------------------------------------------------------------------------------------
 # 2. GrowinUITests launch scan
 # --------------------------------------------------------------------------------------------
@@ -287,16 +457,55 @@ LAUNCH_ENVIRONMENT = re.compile(_NOT_AFTER_IDENT + r"launchEnvironment" + _NOT_B
 OTHER_LAUNCHERS = re.compile(
     _NOT_AFTER_IDENT + r"(?:NSWorkspace|NSTask|posix_spawn|Process\s*\()"
 )
-APP_CREATION = re.compile(UI_APP_TYPE + r"\s*(?:\(|\.\s*init" + _NOT_BEFORE_IDENT + ")")
+MAKE_APP_SIGNATURE = re.compile(r"\bfunc\s+makeApp\s*\(\s*\)\s*->\s*" + UI_APP_TYPE + r"\s*\{")
 
 
-def _helper_shape(skip_key: str) -> re.Pattern[str]:
-    """create the app, set the suppression key on it, return it: nothing else."""
+def _make_app_body_pattern(skip_key: str) -> re.Pattern[str]:
+    """The whole body of makeApp: create the app, set the suppression key on it, return it."""
     return re.compile(
-        r"(?:let|var)\s+(\w+)\s*=\s*" + UI_APP_TYPE + r"\s*\(\s*\)\s*"
-        r"\1\s*\.\s*launchEnvironment\s*\[\s*\"" + re.escape(skip_key) + r"\"\s*\]\s*=\s*\"1\"\s*"
-        r"return\s+\1" + _NOT_BEFORE_IDENT
+        r"\s*let\s+(\w+)\s*=\s*" + UI_APP_TYPE + r"\s*\(\s*\)\s*;?\s*"
+        r"\1\s*\.\s*launchEnvironment\s*\[\s*\"" + re.escape(skip_key) + r"\"\s*\]\s*=\s*\"1\"\s*;?\s*"
+        r"return\s+\1\s*"
     )
+
+
+def _split_make_app(code: str) -> tuple[str, str] | None:
+    """(body of makeApp, the helper code with the whole function removed), or None if not found once."""
+    found = list(MAKE_APP_SIGNATURE.finditer(code))
+    if len(found) != 1:
+        return None
+    open_at = found[0].end() - 1
+    depth = 0
+    for index in range(open_at, len(code)):
+        if code[index] == "{":
+            depth += 1
+        elif code[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return code[open_at + 1 : index], code[: found[0].start()] + code[index + 1 :]
+    return None
+
+
+def helper_offences(helper: str, skip_key: str) -> list[str]:
+    """The helper must be one makeApp that creates the app, sets the key and returns that app.
+
+    The whole body is matched, not a substring, so an early `return .init(bundleIdentifier:)`, a
+    second return, a different returned variable or any extra statement fails. Outside makeApp the
+    helper may not name the application type or call an initializer at all.
+    """
+    code = strip_swift_comments_and_strings(helper, keep_strings=True)
+    split = _split_make_app(code)
+    if split is None:
+        return [f"{UI_HELPER}: must declare makeApp() -> {UI_APP_TYPE} exactly once"]
+    body, outside = split
+    found = []
+    if not _make_app_body_pattern(skip_key).fullmatch(body):
+        found.append(f"{UI_HELPER}: makeApp body is not exactly create, set the suppression key, return")
+    if UI_APP_TYPE in outside:
+        found.append(f"{UI_HELPER}: names {UI_APP_TYPE} outside makeApp")
+    if re.search(r"\.\s*init(?![A-Za-z0-9_])", outside):
+        found.append(f"{UI_HELPER}: calls an initializer outside makeApp")
+    return found
 
 
 def ui_launch_offences(sources: dict[str, str], skip_key: str) -> list[str]:
@@ -307,12 +516,7 @@ def ui_launch_offences(sources: dict[str, str], skip_key: str) -> list[str]:
     helper = sources.get(UI_HELPER)
     if helper is None:
         return [f"{UI_HELPER}: helper missing"]
-    found = []
-    helper_code = strip_swift_comments_and_strings(helper, keep_strings=True)
-    if not _helper_shape(skip_key).search(helper_code):
-        found.append(f"{UI_HELPER}: makeApp is not create, set the suppression key, return")
-    if len(APP_CREATION.findall(helper_code)) != 1:
-        found.append(f"{UI_HELPER}: must create exactly one application")
+    found = helper_offences(helper, skip_key)
     for path, text in sorted(sources.items()):
         if path == UI_HELPER:
             continue
@@ -419,27 +623,84 @@ def test_the_ui_launch_scan_catches_other_launchers():
     assert ui_launch_offences(_with("OkUITests.swift", "let info = ProcessInfo.processInfo\n"), KEY) == []
 
 
-def test_the_helper_is_pinned_to_create_set_the_key_and_return():
-    def helper_offences(helper: str, key: str = KEY) -> list[str]:
+EARLY_RETURN_HELPER = (
+    "enum GrowinLaunch {\n"
+    "    @MainActor\n"
+    "    static func makeApp() -> XCUIApplication {\n"
+    '        if condition { return .init(bundleIdentifier: "san.Growin") }\n'
+    "        let app = XCUIApplication()\n"
+    f'        app.launchEnvironment["{KEY}"] = "1"\n'
+    "        return app\n"
+    "    }\n"
+    "}\n"
+)
+
+
+def test_the_whole_makeapp_body_is_pinned_not_a_substring_of_it():
+    def offences_for(helper: str, key: str = KEY) -> list[str]:
         return ui_launch_offences({UI_HELPER: helper, "GoodUITests.swift": GOOD_TEST}, key)
 
+    body = f'        let app = XCUIApplication()\n        app.launchEnvironment["{KEY}"] = "1"\n        return app\n'
+    assert body in GOOD_HELPER
+
+    def with_body(new_body: str) -> str:
+        return GOOD_HELPER.replace(body, new_body)
+
+    tail = "}\n}\n"
     broken = {
-        "no key": GOOD_HELPER.replace(f'        app.launchEnvironment["{KEY}"] = "1"\n', ""),
-        "other key": GOOD_HELPER.replace(KEY, "OTHER"),
-        "wrong value": GOOD_HELPER.replace('= "1"', '= "0"'),
-        "second creator": GOOD_HELPER.replace("}\n}\n", "}\n    static func raw() -> XCUIApplication { XCUIApplication() }\n}\n"),
-        "returns a different app": GOOD_HELPER.replace("return app", "return XCUIApplication()"),
-        "key only in a comment": GOOD_HELPER.replace(
-            f'        app.launchEnvironment["{KEY}"] = "1"\n', f'        // app.launchEnvironment["{KEY}"] = "1"\n'
+        # Codex r1 P2: a safe-looking tail after an unsafe early return.
+        "early return of an inferred init": EARLY_RETURN_HELPER,
+        "early return of a named creation": with_body("        if condition { return XCUIApplication() }\n" + body),
+        "early return in a guard": with_body("        guard ok else { return .init(url: u) }\n" + body),
+        "early return of a bundle id": with_body(
+            '        if x { return XCUIApplication(bundleIdentifier: "b") }\n' + body
         ),
-        "key set before the app exists": GOOD_HELPER.replace(
-            "        let app = XCUIApplication()\n", ""
-        ).replace("        return app\n", "        let app = XCUIApplication()\n        return app\n"),
+        "second return after the safe one": with_body(body + "        return XCUIApplication()\n"),
+        "returns a different variable": with_body(body.replace("return app", "return other")),
+        "returns a different app": with_body(body.replace("return app", "return XCUIApplication()")),
+        "returns an inferred init": with_body(body.replace("return app", "return .init()")),
+        "key set on another variable": with_body(
+            f'        let app = XCUIApplication()\n        other.launchEnvironment["{KEY}"] = "1"\n        return app\n'
+        ),
+        "extra statement": with_body(body.replace("        return app", "        app.launchArguments = []\n        return app")),
+        "extra statement before": with_body("        setup()\n" + body),
+        "no key": with_body(body.replace(f'        app.launchEnvironment["{KEY}"] = "1"\n', "")),
+        "wrong value": with_body(body.replace('= "1"', '= "0"')),
+        "key only in a comment": with_body(
+            body.replace(f'app.launchEnvironment["{KEY}"] = "1"', f'// app.launchEnvironment["{KEY}"] = "1"')
+        ),
+        "key set before the app exists": with_body(
+            f'        app.launchEnvironment["{KEY}"] = "1"\n        let app = XCUIApplication()\n        return app\n'
+        ),
+        "second creator beside it": GOOD_HELPER.replace(
+            tail, "}\n    static func raw() -> XCUIApplication { XCUIApplication() }\n}\n"
+        ),
+        "inferred init beside it": GOOD_HELPER.replace(
+            tail, "}\n    static func raw() -> XCUIApplication { .init() }\n}\n"
+        ),
+        "typealias beside it": GOOD_HELPER.replace(tail, "}\n    typealias App = XCUIApplication\n}\n"),
+        "makeApp declared twice": GOOD_HELPER.replace(
+            tail, "}\n    static func makeApp() -> XCUIApplication { XCUIApplication() }\n}\n"
+        ),
+        "other key": GOOD_HELPER.replace(KEY, "OTHER"),
     }
     for name, helper in broken.items():
-        assert helper_offences(helper), f"went undetected: {name}"
-    assert helper_offences(GOOD_HELPER, key="DIFFERENT"), "a helper key that differs from the app's must fail"
+        assert offences_for(helper), f"went undetected: {name}"
+        assert helper_offences(helper, KEY), f"helper_offences missed: {name}"
+    assert offences_for(GOOD_HELPER) == []
+    assert helper_offences(GOOD_HELPER, KEY) == []
+    assert offences_for(GOOD_HELPER, key="DIFFERENT"), "a helper key that differs from the app's must fail"
     assert ui_launch_offences({"GoodUITests.swift": GOOD_TEST}, KEY) == [f"{UI_HELPER}: helper missing"]
+    assert helper_offences("enum GrowinLaunch {}\n", KEY)
+    # Non-plants: comments and formatting do not matter, a semicolon after a statement is the same code.
+    commented = GOOD_HELPER.replace(
+        "enum GrowinLaunch {", "/// XCUIApplication() and .init() are named here only in a comment.\nenum GrowinLaunch {"
+    )
+    assert helper_offences(commented, KEY) == []
+    reflowed = with_body(
+        f'        let app = XCUIApplication() ; app\n            .launchEnvironment["{KEY}"] = "1";\n        return app\n'
+    )
+    assert helper_offences(reflowed, KEY) == []
 
 
 def test_the_real_ui_tests_launch_only_through_the_helper_with_the_apps_key():
