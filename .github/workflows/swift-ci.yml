@@ -1,9 +1,29 @@
 name: Swift CI
 
-# ADVISORY. Not a required check. Builds the macOS app and runs the
+# REQUIRED check: "Swift unit tests". Builds the macOS app and runs the
 # GrowinTests unit tests on a GitHub macOS runner with the newest Xcode it
-# has. GrowinUITests are skipped. Secure Enclave and Touch ID UAT tests stay
-# skipped because TEST_RUNNER_GROWIN_SE_UAT is never set here.
+# has. GrowinUITests are not run here, but a change under GrowinUITests/
+# triggers the job because GrowinTests hold source scans over that folder.
+# Secure Enclave and Touch ID UAT tests stay skipped because
+# TEST_RUNNER_GROWIN_SE_UAT is never set here.
+#
+# How skipping works. GitHub leaves a required check "Expected" forever when
+# its workflow never starts, which is what a `paths:` filter on pull_request
+# does. So this workflow starts on EVERY pull request to main. A cheap ubuntu
+# job (`changes`) runs `git diff --name-only` against the PR base to see
+# whether any Swift-relevant file changed. The macOS job `needs: changes`.
+# When nothing relevant changed, the macOS job is skipped by its `if:`, and
+# GitHub reports a job skipped by a conditional as success, which satisfies
+# the required check. The job name stays "Swift unit tests" on both paths.
+# https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks
+#
+# Fail closed. The macOS job is skipped only when `changes` succeeded AND said
+# swift=false. If the diff cannot be computed, if `changes` itself fails, or
+# if its output is empty, the macOS job runs.
+#
+# The `push` trigger keeps its path filter. No required check applies to a
+# push, so a backend-only merge to main need not spend a macOS runner. Keep
+# its paths in step with the detection globs below (a test checks this).
 #
 # The operator builds with Xcode-beta. If the project adopts APIs newer than
 # the runner's SDK, raise MIN_SDK. Then, when the runner's SDK is older than
@@ -17,16 +37,12 @@ name: Swift CI
 on:
   pull_request:
     branches: [ main ]
-    paths:
-      - "Growin/**"
-      - "GrowinTests/**"
-      - "Growin.xcodeproj/**"
-      - ".github/workflows/swift-ci.yml"
   push:
     branches: [ main ]
     paths:
       - "Growin/**"
       - "GrowinTests/**"
+      - "GrowinUITests/**"
       - "Growin.xcodeproj/**"
       - ".github/workflows/swift-ci.yml"
   workflow_dispatch:
@@ -39,8 +55,63 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Detect Swift changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      swift: ${{ steps.detect.outputs.swift }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Full history so the PR base and head commits are both present for
+          # a three-dot diff. The repo is small. No third-party action.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Did any Swift-relevant file change?
+        id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -uo pipefail
+          # Every failure path below answers swift=true: when in doubt, run.
+          run_swift() { echo "swift=true" >> "$GITHUB_OUTPUT"; exit 0; }
+          if [[ "$EVENT_NAME" != "pull_request" ]]; then
+            echo "Event $EVENT_NAME has no PR diff. Running the Swift job."
+            run_swift
+          fi
+          if [[ -z "${BASE_SHA:-}" || -z "${HEAD_SHA:-}" ]]; then
+            echo "::warning::PR base or head SHA missing. Running the Swift job."
+            run_swift
+          fi
+          if ! files=$(git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA" -- \
+              'Growin/**' \
+              'GrowinTests/**' \
+              'GrowinUITests/**' \
+              'Growin.xcodeproj/**' \
+              '.github/workflows/swift-ci.yml'); then
+            echo "::warning::Could not diff $BASE_SHA...$HEAD_SHA. Running the Swift job."
+            run_swift
+          fi
+          if [[ -n "$files" ]]; then
+            echo "Swift-relevant files changed:"
+            echo "$files"
+            echo "swift=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No Swift-relevant file changed. The Swift job will be skipped, which reports success."
+            echo "swift=false" >> "$GITHUB_OUTPUT"
+          fi
+
   unit-tests:
-    name: Swift unit tests (advisory)
+    name: Swift unit tests
+    needs: changes
+    # Skip only when `changes` succeeded and said swift=false. Anything else
+    # (failed, empty output) runs. !cancelled() lets this job still evaluate
+    # when `changes` failed; a bare `needs` would skip it instead.
+    if: ${{ !cancelled() && !(needs.changes.result == 'success' && needs.changes.outputs.swift == 'false') }}
     runs-on: macos-latest
     timeout-minutes: 45
     env:
@@ -135,7 +206,7 @@ jobs:
             missing=$(sed -E 's/^.*error: //' <<< "$errors" | sort -u | head -n 8)
             echo "::warning::Swift CI skipped: the runner's newest Xcode is $XCODE with the macOS $SDK SDK, and the project needs the macOS $MIN_SDK SDK or newer. Not a code failure."
             {
-              echo "## Swift CI: degraded (advisory)"
+              echo "## Swift CI: degraded"
               echo
               echo "The runner's newest Xcode is \`$XCODE\` with the macOS \`$SDK\` SDK."
               echo "The project needs the macOS \`$MIN_SDK\` SDK or newer. The build failed on APIs the older SDK does not have, so tests were not run."
@@ -180,7 +251,7 @@ jobs:
           OUTCOME: ${{ steps.test.outcome }}
         run: |
           {
-            echo "## Swift CI: ${OUTCOME} (advisory)"
+            echo "## Swift CI: ${OUTCOME}"
             echo
             echo "Xcode \`$XCODE\`, macOS SDK \`$SDK\`. Unit tests: GrowinTests only."
           } >> "$GITHUB_STEP_SUMMARY"

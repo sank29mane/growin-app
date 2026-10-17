@@ -514,7 +514,9 @@ def test_dashboard_workflow_security():
         assert re.fullmatch(r"[\w/-]+@[0-9a-f]{40} # v[\w.]+", action)
 
 
-def test_swift_ci_is_advisory_and_pinned():
+def test_swift_ci_is_required_and_pinned():
+    # The trigger, detection, fail-closed and name rules live in
+    # test_swift_ci_workflow.py. This one keeps the build and pinning rules.
     import yaml
     text = SWIFT.read_text()
     wf = yaml.safe_load(text)
@@ -522,8 +524,9 @@ def test_swift_ci_is_advisory_and_pinned():
     assert set(on) == {"pull_request", "push", "workflow_dispatch"}
     for key in ("pull_request", "push"):
         assert on[key]["branches"] == ["main"]
-        assert set(on[key]["paths"]) == {"Growin/**", "GrowinTests/**", "Growin.xcodeproj/**",
-                                         ".github/workflows/swift-ci.yml"}
+    assert "paths" not in on["pull_request"]
+    assert set(on["push"]["paths"]) == {"Growin/**", "GrowinTests/**", "GrowinUITests/**",
+                                        "Growin.xcodeproj/**", ".github/workflows/swift-ci.yml"}
     assert wf["permissions"] == {"contents": "read"}
     job = wf["jobs"]["unit-tests"]
     assert job["runs-on"] == "macos-latest"
@@ -627,7 +630,7 @@ def test_swift_build_step_degrades_only_on_an_sdk_gap(tmp_path, older, status, l
     if degraded:
         assert "::warning::Swift CI skipped" in r.stdout
         text = summary.read_text()
-        assert "## Swift CI: degraded (advisory)" in text and "macOS `26.5` SDK or newer" in text
+        assert "## Swift CI: degraded" in text and "macOS `26.5` SDK or newer" in text
         for line in log.splitlines():
             if "error: " in line:
                 assert line.split("error: ", 1)[1] in text
