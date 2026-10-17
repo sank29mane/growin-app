@@ -508,12 +508,29 @@ def keychain_test_text_offences(text: str) -> list[str]:
     return found
 
 
+# The one exemption from the shared-store ban. The tripwire (issue #66, PR #575) calls the REAL shared
+# store inside the real test host and only expects a refusal. It is exempt by EXACT relative path, never
+# a pattern, and only for the ONE exact expression below: that text is removed from this one file before
+# scanning, so any other mention of the shared store in the same file, and every other rule, still fires.
+# `tests/backend/test_keychain_test_host_guard.py` pins the tripwire file's shape.
+TRIPWIRE_PATH = Path("WorkspaceIsolation") / "ProductionTripwireTests.swift"
+TRIPWIRE_SHARED_CALL = "KeychainStore.shared.string(for: .alpacaApiKey, scope: .workspace(.uk))"
+
+
+def tripwire_exempted(relative: Path, text: str) -> str:
+    """`text` with the one allowed shared-store expression removed, in the exact tripwire path only."""
+    if relative != TRIPWIRE_PATH:
+        return text
+    return text.replace(TRIPWIRE_SHARED_CALL, "refusedRead()")
+
+
 def keychain_offences_in_test_sources(root: Path) -> list[str]:
     """Test files that reach the shared store or build one on a non-test service."""
     found = []
     for path in sorted(root.rglob("*.swift")):
-        text = path.read_text(encoding="utf-8")
-        found += [f"{path.relative_to(root)}: {item}" for item in keychain_test_text_offences(text)]
+        relative = path.relative_to(root)
+        text = tripwire_exempted(relative, path.read_text(encoding="utf-8"))
+        found += [f"{relative}: {item}" for item in keychain_test_text_offences(text)]
     return found
 
 
@@ -997,6 +1014,9 @@ def test_logical_lines_join_only_inside_a_declaration():
 UI_HELPER = "LaunchSupport.swift"
 UI_APP_TYPE = "XCUIApplication"
 HELPER_CALL = "GrowinLaunch.makeApp()"
+# The second key makeApp sets: it marks the UI-test app process as a test host for the Keychain guard
+# (TestHostDetection reads it). Do not reuse the suppression key for that.
+UI_TEST_HOST_KEY = "GROWIN_UI_TEST_HOST"
 SKIP_KEY_DECLARATION = re.compile(r'static\s+let\s+skipEnvironmentKey\s*=\s*"([A-Z0-9_]+)"')
 LAUNCH_OR_ACTIVATE = re.compile(r"\.\s*(?:launch|activate)\s*\(")
 LAUNCH_ENVIRONMENT = re.compile(_NOT_AFTER_IDENT + r"launchEnvironment" + _NOT_BEFORE_IDENT)
@@ -1030,10 +1050,11 @@ def launcher_offences(text: str, reduced: Reduced | None = None) -> list[str]:
 
 
 def _make_app_body_pattern(skip_key: str) -> re.Pattern[str]:
-    """The whole body of makeApp: create the app, set the suppression key on it, return it."""
+    """The whole body of makeApp: create the app, set the suppression key, set the UI-test-host key, return it."""
     return re.compile(
         r"\s*let\s+(\w+)\s*=\s*" + UI_APP_TYPE + r"\s*\(\s*\)\s*;?\s*"
         r"\1\s*\.\s*launchEnvironment\s*\[\s*\"" + re.escape(skip_key) + r"\"\s*\]\s*=\s*\"1\"\s*;?\s*"
+        r"\1\s*\.\s*launchEnvironment\s*\[\s*\"" + re.escape(UI_TEST_HOST_KEY) + r"\"\s*\]\s*=\s*\"1\"\s*;?\s*"
         r"return\s+\1\s*"
     )
 
@@ -1069,7 +1090,9 @@ def helper_offences(helper: str, skip_key: str) -> list[str]:
     body, outside = split
     found = []
     if not _make_app_body_pattern(skip_key).fullmatch(body):
-        found.append(f"{UI_HELPER}: makeApp body is not exactly create, set the suppression key, return")
+        found.append(
+            f"{UI_HELPER}: makeApp body is not exactly create, set the suppression key, set the UI-test-host key, return"
+        )
     if UI_APP_TYPE in outside:
         found.append(f"{UI_HELPER}: names {UI_APP_TYPE} outside makeApp")
     if re.search(r"\.\s*init(?![A-Za-z0-9_])", outside):
@@ -1121,6 +1144,7 @@ GOOD_HELPER = (
     "    static func makeApp() -> XCUIApplication {\n"
     "        let app = XCUIApplication()\n"
     f'        app.launchEnvironment["{KEY}"] = "1"\n'
+    f'        app.launchEnvironment["{UI_TEST_HOST_KEY}"] = "1"\n'
     "        return app\n"
     "    }\n"
     "}\n"
@@ -1266,6 +1290,7 @@ EARLY_RETURN_HELPER = (
     '        if condition { return .init(bundleIdentifier: "san.Growin") }\n'
     "        let app = XCUIApplication()\n"
     f'        app.launchEnvironment["{KEY}"] = "1"\n'
+    f'        app.launchEnvironment["{UI_TEST_HOST_KEY}"] = "1"\n'
     "        return app\n"
     "    }\n"
     "}\n"
@@ -1276,7 +1301,8 @@ def test_the_whole_makeapp_body_is_pinned_not_a_substring_of_it():
     def offences_for(helper: str, key: str = KEY) -> list[str]:
         return ui_launch_offences({UI_HELPER: helper, "GoodUITests.swift": GOOD_TEST}, key)
 
-    body = f'        let app = XCUIApplication()\n        app.launchEnvironment["{KEY}"] = "1"\n        return app\n'
+    ui_line = f'        app.launchEnvironment["{UI_TEST_HOST_KEY}"] = "1"\n'
+    body = f'        let app = XCUIApplication()\n        app.launchEnvironment["{KEY}"] = "1"\n{ui_line}        return app\n'
     assert body in GOOD_HELPER
 
     def with_body(new_body: str) -> str:
@@ -1319,6 +1345,16 @@ def test_the_whole_makeapp_body_is_pinned_not_a_substring_of_it():
             tail, "}\n    static func makeApp() -> XCUIApplication { XCUIApplication() }\n}\n"
         ),
         "other key": GOOD_HELPER.replace(KEY, "OTHER"),
+        # The UI-test-host key line (Keychain guard): present, exact value, exact name, on the app, in order.
+        "UI-test-host key missing": with_body(body.replace(ui_line, "")),
+        "UI-test-host key set to 0": with_body(body.replace(ui_line, ui_line.replace('"1"', '"0"'))),
+        "UI-test-host key misspelled": with_body(body.replace(ui_line, ui_line.replace("UI_TEST_HOST", "UI_TEST_HOS"))),
+        "UI-test-host key set on another variable": with_body(body.replace(ui_line, ui_line.replace("app.", "other."))),
+        "UI-test-host key only in a comment": with_body(body.replace(ui_line, "        // " + ui_line.strip() + "\n")),
+        "UI-test-host key before the suppression key": with_body(
+            body.replace(ui_line, "").replace(f'        app.launchEnvironment["{KEY}"] = "1"\n', ui_line + f'        app.launchEnvironment["{KEY}"] = "1"\n')
+        ),
+        "UI-test-host key twice": with_body(body.replace(ui_line, ui_line + ui_line)),
     }
     for name, helper in broken.items():
         assert offences_for(helper), f"went undetected: {name}"
@@ -1334,7 +1370,8 @@ def test_the_whole_makeapp_body_is_pinned_not_a_substring_of_it():
     )
     assert helper_offences(commented, KEY) == []
     reflowed = with_body(
-        f'        let app = XCUIApplication() ; app\n            .launchEnvironment["{KEY}"] = "1";\n        return app\n'
+        f'        let app = XCUIApplication() ; app\n            .launchEnvironment["{KEY}"] = "1";\n'
+        f'        app.launchEnvironment["{UI_TEST_HOST_KEY}"] = "1";\n        return app\n'
     )
     assert helper_offences(reflowed, KEY) == []
 
@@ -1368,3 +1405,57 @@ def test_the_ui_test_target_compiles_only_the_directory_the_scan_reads():
     # tests/macos-ui holds old UI tests that create XCUIApplication() directly. They are not in the
     # project. If they are ever added, this fails and the scan must be pointed at them first.
     assert "macos-ui" not in project
+
+
+# --------------------------------------------------------------------------------------------
+# The tripwire exemption (PR #575): one exact path, one exact expression, nothing else loosened
+# --------------------------------------------------------------------------------------------
+
+
+def _tree(tmp_path: Path, files: dict[str, str]) -> Path:
+    for name, text in files.items():
+        target = tmp_path / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    return tmp_path
+
+
+def test_the_tripwire_exemption_is_one_exact_path_and_one_exact_call(tmp_path):
+    allowed = f"func f() {{ _ = try {TRIPWIRE_SHARED_CALL} }}\n"
+    exact = str(TRIPWIRE_PATH)
+    assert keychain_offences_in_test_sources(_tree(tmp_path / "a", {exact: allowed})) == []
+    # The same text anywhere else is still the ban: another folder, another name, the same name elsewhere.
+    for other in (
+        "Other/ProductionTripwireTests.swift",
+        "WorkspaceIsolation/ProductionTripwireTests2.swift",
+        "WorkspaceIsolation/OtherTests.swift",
+        "ProductionTripwireTests.swift",
+    ):
+        found = keychain_offences_in_test_sources(_tree(tmp_path / other.replace("/", "_"), {other: allowed}))
+        assert any("shared store" in item for item in found), other
+
+
+def test_the_tripwire_exemption_does_not_loosen_anything_else_in_the_exact_file(tmp_path):
+    exact = str(TRIPWIRE_PATH)
+    planted = {
+        "a second shared-store call": f"{TRIPWIRE_SHARED_CALL.replace('string(', 'set(')}\n",
+        "the same call with another credential": "KeychainStore.shared.string(for: .openaiApiKey, scope: .shared)\n",
+        "an alias": "let s = KeychainStore.shared\n",
+        "the production service name": "let n = KeychainStore." + "production" + "Service\n",
+        "a store built on a non-test literal": 'let s = KeychainStore(service: "x")\n',
+        "an extension": "extension KeychainStore {}\n",
+    }
+    for label, extra in planted.items():
+        text = f"func f() {{ _ = try {TRIPWIRE_SHARED_CALL} }}\n{extra}"
+        found = keychain_offences_in_test_sources(_tree(tmp_path / label.replace(" ", "_"), {exact: text}))
+        assert found, f"went undetected: {label}"
+
+
+def test_the_real_tripwire_file_is_the_only_file_the_exemption_changes():
+    changed = [
+        str(path.relative_to(APP_TESTS))
+        for path in sorted(APP_TESTS.rglob("*.swift"))
+        if tripwire_exempted(path.relative_to(APP_TESTS), path.read_text(encoding="utf-8"))
+        != path.read_text(encoding="utf-8")
+    ]
+    assert changed == [str(TRIPWIRE_PATH)]

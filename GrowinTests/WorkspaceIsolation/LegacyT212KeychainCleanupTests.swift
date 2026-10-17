@@ -76,9 +76,11 @@ struct LegacyT212KeychainCleanupTests {
     @Test func removesExactlyTheLegacyAccountsAndNothingElse() throws {
         let rig = Rig()
         // One neighbour service sorts before the test service and one after, so a delete
-        // that ignores the service cannot get lucky whichever order Keychain picks.
-        let neighbours = [rig.service.replacingOccurrences(of: ".test.", with: ".test!."),
-                          rig.service.replacingOccurrences(of: ".test.", with: ".test~.")]
+        // that ignores the service cannot get lucky whichever order Keychain picks. Both keep
+        // the test prefix (RawKeychain refuses anything else): the first suffix character is
+        // "!" (sorts before a UUID) or "~" (sorts after it).
+        let neighbours = [rig.service.replacingOccurrences(of: ".test.", with: ".test.!"),
+                          rig.service.replacingOccurrences(of: ".test.", with: ".test.~")]
             .map { RawKeychain(service: $0) }
         defer {
             rig.tearDown(extra: Self.decoyAccounts)
@@ -244,6 +246,53 @@ struct LegacyT212KeychainCleanupTests {
         for key in Cleanup.legacyDefaultsKeys { #expect(rig.defaults.object(forKey: key) == nil) }
         #expect(rig.defaults.string(forKey: WorkspaceSelection.defaultsKey) == "uk")
         #expect(rig.defaults.string(forKey: CredentialName.openaiApiKey.rawValue) == "CANARY-OTHER")
+    }
+
+    // MARK: Service isolation canary
+
+    /// A delete aimed at A finds nothing when A holds nothing, removes only A's own copies, and the whole
+    /// run with the real default delete does the same. B is byte-identical throughout. Only booleans
+    /// reach a failure message: never an item's bytes, never an account name.
+    @Test func theRealDeleteNeverTouchesAnotherServicesItem() throws {
+        let a = Rig()
+        let b = Rig()
+        defer {
+            a.tearDown()
+            b.tearDown()
+        }
+        try b.seed(Cleanup.legacyAccounts)
+
+        for account in Cleanup.legacyAccounts {
+            let notFound = Cleanup.deleteExactItem(service: a.service, account: account) == errSecItemNotFound
+            #expect(notFound, "A holds nothing, so the real delete finds nothing")
+        }
+        for account in Cleanup.legacyAccounts {
+            let untouched = try b.raw.data(account: account) == Self.canary
+            #expect(untouched, "B untouched after deletes aimed at A")
+        }
+
+        try a.seed(Cleanup.legacyAccounts)
+        for account in Cleanup.legacyAccounts {
+            let deleted = Cleanup.deleteExactItem(service: a.service, account: account) == errSecSuccess
+            let goneFromA = try a.raw.data(account: account) == nil
+            #expect(deleted, "the real delete removes A's own item")
+            #expect(goneFromA, "A's item is gone")
+        }
+        for account in Cleanup.legacyAccounts {
+            let untouched = try b.raw.data(account: account) == Self.canary
+            #expect(untouched, "B untouched after A's items were deleted")
+        }
+
+        try a.seed(Cleanup.legacyAccounts)
+        let outcome = Cleanup.runOnce(service: a.service, defaults: a.defaults, log: { _ in })
+        let removedAll = outcome.removed == Cleanup.legacyAccounts.count
+        #expect(removedAll)
+        for account in Cleanup.legacyAccounts {
+            let goneFromA = try a.raw.data(account: account) == nil
+            let untouched = try b.raw.data(account: account) == Self.canary
+            #expect(goneFromA, "A's item is gone after the run")
+            #expect(untouched, "B untouched after the run")
+        }
     }
 
     // MARK: Source guards

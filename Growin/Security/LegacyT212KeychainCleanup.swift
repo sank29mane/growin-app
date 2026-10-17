@@ -62,6 +62,9 @@ nonisolated enum LegacyT212KeychainCleanup {
         var failedStatuses: [OSStatus]
         /// True on the launch that hit `maxFailedLaunches`.
         var gaveUp = false
+        /// True when a test host asked to run against the production service. Nothing ran:
+        /// no Keychain call, no UserDefaults write, no completion mark.
+        var refused = false
     }
 
     typealias Deleter = (_ service: String, _ account: String) -> OSStatus
@@ -77,16 +80,26 @@ nonisolated enum LegacyT212KeychainCleanup {
     /// the key stays. Not verified against an item saved by a differently signed build.
     static func exactQuery(service: String, account: String) -> [String: Any] {
         [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
+            Security.kSecClass as String: Security.kSecClassGenericPassword,
+            Security.kSecAttrService as String: service,
+            Security.kSecAttrAccount as String: account,
+            Security.kSecUseAuthenticationUI as String: Security.kSecUseAuthenticationUIFail,
         ]
     }
 
+    /// Reported by `deleteExactItem` when a test host asks to delete from the production
+    /// service. Not an Apple status: it sits outside the Security framework's documented
+    /// range so it cannot be mistaken for one. No SecItem call was made.
+    static let refusedUnderTestsStatus: OSStatus = -9_900_001
+
     /// Deletes at most one generic-password item: this service, this account.
+    /// A test host is refused on the production service before any SecItem call.
     static func deleteExactItem(service: String, account: String) -> OSStatus {
-        SecItemDelete(exactQuery(service: service, account: account) as CFDictionary)
+        guard !ProductionKeychainGuard.refusesCurrentProcess(service: service) else {
+            ProductionKeychainGuard.recordRefusal(site: .delete)
+            return refusedUnderTestsStatus
+        }
+        return Security.SecItemDelete(exactQuery(service: service, account: account) as CFDictionary)
     }
 
     private static let logger = Logger(subsystem: "san.Growin", category: "legacy-t212-cleanup")
@@ -98,7 +111,8 @@ nonisolated enum LegacyT212KeychainCleanup {
     }
 
     /// Deletes every match of one exact pair. Stops at not-found (done), at any
-    /// other error (reported), or at the bound (reported as an error).
+    /// other error (reported), or at the bound (reported as an error). A refused delete
+    /// (`refusedUnderTestsStatus`) comes back as that error, and `performRun` treats it as terminal.
     private static func deleteAllMatches(
         service: String, account: String, delete: Deleter
     ) -> (removed: Int, error: OSStatus?) {
@@ -128,6 +142,49 @@ nonisolated enum LegacyT212KeychainCleanup {
         delete: Deleter = deleteExactItem,
         log: (String) -> Void = defaultLog
     ) -> Outcome {
+        // Refuse first, before the injected `delete` or any defaults write, so a test host
+        // pointed at the production service changes nothing.
+        if ProductionKeychainGuard.refusesCurrentProcess(service: service) {
+            return refusedOutcome(log: log)
+        }
+        return performRun(service: service, defaults: defaults, delete: delete, log: log)
+    }
+
+    /// The guard's inputs made explicit so a test can prove a refusal with a test-prefixed
+    /// service pair. The real-process refusal is unconditional and runs first. The injected
+    /// pair can only add a refusal: `testHost: false` never lifts the real one. No defaults on
+    /// purpose, and no file in `Growin/` outside the Security guard files may pass
+    /// `protectedService:` or `testHost:` (a source scan enforces it).
+    @discardableResult
+    static func runOnce(
+        service: String,
+        protectedService: String,
+        testHost: Bool,
+        defaults: UserDefaults,
+        delete: Deleter,
+        log: (String) -> Void
+    ) -> Outcome {
+        if ProductionKeychainGuard.refusesCurrentProcess(service: service)
+            || ProductionKeychainGuard.refuses(service: service, protectedService: protectedService, testHost: testHost) {
+            return refusedOutcome(log: log)
+        }
+        return performRun(service: service, defaults: defaults, delete: delete, log: log)
+    }
+
+    /// The refusal result. The log line is the stable code only: no service, no account.
+    private static func refusedOutcome(log: (String) -> Void) -> Outcome {
+        ProductionKeychainGuard.recordRefusal(site: .cleanup)
+        log("legacy cleanup refused: \(ProductionKeychainGuard.refusalCode)")
+        return Outcome(skipped: true, removed: 0, failedStatuses: [], refused: true)
+    }
+
+    /// The work. Only the two entry points above call it, each after its refusal check.
+    private static func performRun(
+        service: String,
+        defaults: UserDefaults,
+        delete: Deleter,
+        log: (String) -> Void
+    ) -> Outcome {
         if defaults.bool(forKey: completionKey)
             || defaults.integer(forKey: failedLaunchesKey) >= maxFailedLaunches {
             return Outcome(skipped: true, removed: 0, failedStatuses: [])
@@ -139,6 +196,9 @@ nonisolated enum LegacyT212KeychainCleanup {
             let result = deleteAllMatches(service: service, account: account, delete: delete)
             removed += result.removed
             if let status = result.error {
+                // A refused delete is terminal, not an ordinary Keychain error: stop before any
+                // defaults write, failure count or completion mark, exactly like the front check.
+                if status == refusedUnderTestsStatus { return refusedOutcome(log: log) }
                 failed.append(status)
                 log("legacy cleanup keychain status \(status)")
             }

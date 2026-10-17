@@ -6,6 +6,22 @@ enum KeychainStoreError: LocalizedError {
     case unexpectedData
     case status(OSStatus)
     case scopeNotAllowed(CredentialName)
+    /// The production service was asked for from a test host. Nothing was read or written.
+    case productionKeychainRefusedUnderTests
+
+    /// A stable code for each failure. Tests assert on this, never on the message.
+    var code: String {
+        switch self {
+        case .unexpectedData:
+            return "KEYCHAIN_UNEXPECTED_DATA"
+        case .status:
+            return "KEYCHAIN_STATUS"
+        case .scopeNotAllowed:
+            return "KEYCHAIN_SCOPE_NOT_ALLOWED"
+        case .productionKeychainRefusedUnderTests:
+            return ProductionKeychainGuard.refusalCode
+        }
+    }
 
     var errorDescription: String? {
         switch self {
@@ -15,12 +31,15 @@ enum KeychainStoreError: LocalizedError {
             return SecCopyErrorMessageString(status, nil) as String? ?? "Keychain error \(status)."
         case .scopeNotAllowed(let name):
             return "The credential \(name.rawValue) is not available in that scope."
+        case .productionKeychainRefusedUnderTests:
+            return "\(ProductionKeychainGuard.refusalCode): the production Keychain is not available in a test host."
         }
     }
 }
 
 final class KeychainStore: @unchecked Sendable {
-    nonisolated static let productionService = "san.Growin.credentials.v1"
+    /// Defined in `ProductionKeychainGuard` so the guard and the legacy cleanup see the same value.
+    nonisolated static let productionService = ProductionKeychainGuard.productionService
     static let shared = KeychainStore(service: productionService)
 
     private let service: String
@@ -28,6 +47,34 @@ final class KeychainStore: @unchecked Sendable {
     /// Tests pass a unique service so the operator's real items are never touched.
     init(service: String) {
         self.service = service
+    }
+
+    // MARK: Production guard
+
+    /// True when this store is the operator's real Keychain service.
+    var isProductionStore: Bool {
+        service == ProductionKeychainGuard.productionService
+    }
+
+    /// The guard's decision with its input made explicit, so a test can prove the refusal
+    /// with a test-prefixed service pair instead of the production service. The store's own
+    /// check (`assertAccessAllowed`) is this with the real production service and the real
+    /// process.
+    static func checkAccess(service: String, protectedService: String, testHost: Bool, site: RefusalSite) throws {
+        if ProductionKeychainGuard.refuses(service: service, protectedService: protectedService, testHost: testHost) {
+            ProductionKeychainGuard.recordRefusal(site: site)
+            throw KeychainStoreError.productionKeychainRefusedUnderTests
+        }
+    }
+
+    /// Runs first in every raw Keychain call, before any SecItem call. A test host that
+    /// reaches the production service gets a typed error and nothing is read or written.
+    private func assertAccessAllowed(for site: RefusalSite) throws {
+        try Self.checkAccess(
+            service: service,
+            protectedService: ProductionKeychainGuard.productionService,
+            testHost: TestHostDetection.isTestHost(),
+            site: site)
     }
 
     // MARK: Scoped API
@@ -79,12 +126,13 @@ final class KeychainStore: @unchecked Sendable {
     // MARK: Raw account access (private: callers can only reach scoped or legacy-flat accounts)
 
     private func rawData(account: String) throws -> Data? {
+        try assertAccessAllowed(for: .read)
         var query = baseQuery(account: account)
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        query[Security.kSecReturnData as String] = true
+        query[Security.kSecMatchLimit as String] = Security.kSecMatchLimitOne
 
         var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        let status = Security.SecItemCopyMatching(query as CFDictionary, &item)
         if status == errSecItemNotFound {
             return nil
         }
@@ -98,20 +146,21 @@ final class KeychainStore: @unchecked Sendable {
     }
 
     private func rawSet(_ data: Data, account: String) throws {
+        try assertAccessAllowed(for: .write)
         if data.isEmpty {
             try rawRemove(account: account)
             return
         }
 
         let query = baseQuery(account: account)
-        let attributes: [String: Any] = [kSecValueData as String: data]
-        let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        let attributes: [String: Any] = [Security.kSecValueData as String: data]
+        let updateStatus = Security.SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
 
         if updateStatus == errSecItemNotFound {
             var item = query
-            item[kSecValueData as String] = data
-            item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-            let addStatus = SecItemAdd(item as CFDictionary, nil)
+            item[Security.kSecValueData as String] = data
+            item[Security.kSecAttrAccessible as String] = Security.kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            let addStatus = Security.SecItemAdd(item as CFDictionary, nil)
             guard addStatus == errSecSuccess else {
                 throw KeychainStoreError.status(addStatus)
             }
@@ -124,7 +173,8 @@ final class KeychainStore: @unchecked Sendable {
     }
 
     private func rawRemove(account: String) throws {
-        let status = SecItemDelete(baseQuery(account: account) as CFDictionary)
+        try assertAccessAllowed(for: .delete)
+        let status = Security.SecItemDelete(baseQuery(account: account) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw KeychainStoreError.status(status)
         }
@@ -138,6 +188,8 @@ final class KeychainStore: @unchecked Sendable {
     /// The approval key was never in UserDefaults and is skipped.
     @discardableResult
     func migrateLegacyUserDefaults(_ defaults: UserDefaults = .standard) -> [CredentialName] {
+        // A refused store moves nothing and leaves UserDefaults alone. Every candidate is a failure.
+        guard accessIsAllowed() else { return migratableNames }
         var failures: [CredentialName] = []
 
         for name in CredentialName.allCases {
@@ -166,6 +218,8 @@ final class KeychainStore: @unchecked Sendable {
     /// The flat approval key is not moved here; 58-09 adopts it after a key-ID check.
     @discardableResult
     func migrateFlatItemsToScoped() -> [CredentialName] {
+        // A refused store moves nothing. Every candidate is a failure.
+        guard accessIsAllowed() else { return migratableNames }
         var failures: [CredentialName] = []
 
         for name in CredentialName.allCases {
@@ -193,11 +247,26 @@ final class KeychainStore: @unchecked Sendable {
         return failures
     }
 
+    /// The credentials the two migrations move: those with a fixed scope.
+    private var migratableNames: [CredentialName] {
+        CredentialName.allCases.filter { $0.fixedScope != nil }
+    }
+
+    /// False when the guard refuses this store. The migrations return instead of throwing.
+    private func accessIsAllowed() -> Bool {
+        do {
+            try assertAccessAllowed(for: .write)
+            return true
+        } catch {
+            return false
+        }
+    }
+
     private func baseQuery(account: String) -> [String: Any] {
         [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
+            Security.kSecClass as String: Security.kSecClassGenericPassword,
+            Security.kSecAttrService as String: service,
+            Security.kSecAttrAccount as String: account,
         ]
     }
 }

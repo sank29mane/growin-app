@@ -19,11 +19,8 @@ import Foundation
 ///   app in its own process, where none of the XCTest signals are present, so every
 ///   `XCUIApplication` in GrowinUITests sets this (see `GrowinUITests/LaunchSupport.swift`).
 enum LaunchMigrations {
-    static let testHostEnvironmentKeys = [
-        "XCTestConfigurationFilePath",
-        "XCTestBundlePath",
-        "XCTestSessionIdentifier",
-    ]
+    /// The detection itself lives in `TestHostDetection`, shared with the production Keychain guard.
+    static let testHostEnvironmentKeys = TestHostDetection.environmentKeys
     static let previewEnvironmentKey = "XCODE_RUNNING_FOR_PREVIEWS"
     static let skipEnvironmentKey = "GROWIN_SKIP_LAUNCH_MIGRATIONS"
 
@@ -31,8 +28,7 @@ enum LaunchMigrations {
         environment: [String: String] = ProcessInfo.processInfo.environment,
         xctestCaseClassLoaded: Bool = NSClassFromString("XCTestCase") != nil
     ) -> Bool {
-        xctestCaseClassLoaded
-            || testHostEnvironmentKeys.contains { environment[$0] != nil }
+        TestHostDetection.isTestHost(environment: environment, xctestCaseClassLoaded: xctestCaseClassLoaded)
             || environment[previewEnvironmentKey] == "1"
             || environment[skipEnvironmentKey] == "1"
     }
