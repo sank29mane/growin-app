@@ -27,7 +27,9 @@ must be caught by its rule and by nothing else: with that rule switched off the 
   R7  The tripwire and the canaries keep their @Test names and plain @Test, a top-level
       `@Suite(.serialized)`, no `#if` or `@available`; the tripwire writes nothing; no assertion argument
       reads a credential.
-  R9  None of the 8 named test bodies contains `return`, `withKnownIssue` or a stored closure
+  R9  None of the 8 named test bodies contains `return`, `withKnownIssue`, a stored closure, or a branch,
+      catch, Task or nested func that could keep its assertions from running
+  R12 Each scope canary body still runs its checks through `Self.requireKeychain {`
       (`let x = { ... }`), the three ways to keep every `#expect` in the text and stop it mattering.
   R11 `requireKeychain`, the helper that runs every canary body, keeps its exact (layout-normalised) body.
   R8  GrowinTests mentions SecItem or SecKeychain only in RawKeychain.swift.
@@ -285,16 +287,19 @@ def log_rule(every_logger_call: bool):
 
 
 SILENCERS = re.compile(
-    r"(?<![A-Za-z0-9_])(?:return|withKnownIssue)(?![A-Za-z0-9_])"
+    r"(?<![A-Za-z0-9_])(?:return|withKnownIssue|if|guard|switch|catch|Task|func)(?![A-Za-z0-9_])"
     r"|(?<![A-Za-z0-9_])(?:let|var)\s+\w+\s*(?::[^=\n]+)?=\s*\{"
 )
 
 
 def silenced_rule(names: tuple[str, ...]):
-    """R9: no named test body contains `return`, `withKnownIssue` or a stored closure.
+    """R9: no named test body contains `return`, `withKnownIssue`, a stored closure, a branch, a catch,
+    a `Task` or a nested `func`.
 
     Each keeps every `#expect` in the text while stopping it from mattering: an early return, a known-issue
-    wrapper that turns a failure into a pass, or checks parked in a closure nobody calls.
+    wrapper that turns a failure into a pass, an `if CI == nil { ... }` around the checks, a `do/catch` that
+    swallows the throw, or checks parked in a closure, Task or nested function nobody runs. None of the 8
+    bodies uses any of these today, so the ban costs nothing.
     """
 
     def rule(src: Source) -> list[str]:
@@ -308,6 +313,19 @@ def silenced_rule(names: tuple[str, ...]):
         return found
 
     return rule
+
+
+def require_keychain_call_rule(src: Source) -> list[str]:
+    """R12: every scope canary runs its checks inside `Self.requireKeychain {`.
+
+    R11 pins the helper's body; this pins the call site, so a canary rewritten as `do { ... } catch {}` or
+    a bare block cannot go around the helper and swallow a throw before its first `#expect`.
+    """
+    return [
+        f"{func.name}() no longer calls `Self.requireKeychain {{`"
+        for func in functions(src.bare)
+        if func.name in SCOPE_CANARIES and "Self.requireKeychain {" not in func.body(src.bare)
+    ]
 
 
 SERVICE_SYMBOLS = re.compile(r"(?<![A-Za-z0-9_])(?:kSecClass|kSecAttrService|kSecAttrAccount)(?![A-Za-z0-9_])")
@@ -463,6 +481,7 @@ RULES = {
         ("R7s", secrets_rule(SCOPE_CANARIES)),
         ("R9", silenced_rule(SCOPE_CANARIES)),
         ("R11", require_keychain_rule),
+        ("R12", require_keychain_call_rule),
     ],
     "legacy": [
         ("R7", suite_rule(LEGACY_CANARIES, exact=False)),
@@ -664,6 +683,24 @@ PLANTS.update(
             "legacy",
             "        try b.seed(Cleanup.legacyAccounts)\n",
             "        return\n        try b.seed(Cleanup.legacyAccounts)\n",
+        ),
+        "R9 an if around the tripwire checks instead of a return": (
+            "R9",
+            "tripwire",
+            "        #expect(refusal == Self.refused)\n",
+            '        if ProcessInfo.processInfo.environment["CI"] == nil { #expect(refusal == Self.refused) }\n',
+        ),
+        "R9 the legacy canary checks inside a Task nobody awaits": (
+            "R9",
+            "legacy",
+            "        #expect(removedAll)\n",
+            "        Task { #expect(removedAll) }\n",
+        ),
+        "R12 a scope canary swaps requireKeychain for do/catch": (
+            "R12",
+            "scope",
+            "        Self.requireKeychain {\n            let bytesB = Data(\"CANARY-RAW-B\".utf8)\n",
+            "        do {\n            let bytesB = Data(\"CANARY-RAW-B\".utf8)\n",
         ),
         "R9 checks moved into a closure nobody calls": (
             "R9",
