@@ -821,7 +821,12 @@ SECURITY_LOOP_OR_TUPLE = re.compile(
     r"|(?<![A-Za-z0-9_.])(?:let|var)\s*\([^)]*(?<![A-Za-z0-9_.])" + SECURITY_NAME + r"(?![A-Za-z0-9_])[^)]*\)"
 )
 # A lookup by built string reaches SecItem without ever spelling it, so the scans cannot see it.
-DYNAMIC_LOOKUP = re.compile(r"(?<![A-Za-z0-9_.])(?:dlsym|dlopen|NSSelectorFromString)(?![A-Za-z0-9_])")
+# Module-qualified forms count too (`Darwin.dlsym`, `Foundation.NSSelectorFromString`), so the lookbehind
+# only excludes identifier characters. `@_silgen_name` binds a Swift declaration to a C symbol by name.
+DYNAMIC_LOOKUP = re.compile(
+    r"(?<![A-Za-z0-9_])(?:dlsym|dlopen|NSSelectorFromString|CFBundleGetFunctionPointerForName)(?![A-Za-z0-9_])"
+    r"|@_silgen_name(?![A-Za-z0-9_])"
+)
 TYPEALIAS = re.compile(r"(?<![A-Za-z0-9_])typealias\s+(?P<name>[A-Za-z_]\w*)(?:\s*<[^>]*>)?\s*=\s*(?P<rhs>[^\n;{]+)")
 STANDARD_RIGHT_HAND_SIDE = re.compile(r"(?:(?:Swift|Foundation)\s*\.\s*)?" + STANDARD_TYPES + r"(?![A-Za-z0-9_])|\[")
 SUGARED_EXTENSION = re.compile(r"(?<![A-Za-z0-9_])extension\s+(?:\[|[A-Za-z_][\w.]*\?)")
@@ -1500,9 +1505,31 @@ SCOPE_TESTS_PATH = APP_TESTS / "WorkspaceIsolation" / "KeychainScopeTests.swift"
 LEGACY_TESTS_PATH = APP_TESTS / "WorkspaceIsolation" / "LegacyT212KeychainCleanupTests.swift"
 
 
+SCOPE_SUITE_HEADER = "@Suite(.serialized)\nstruct KeychainScopeTests {"
+LEGACY_SUITE_HEADER = "@Suite(.serialized)\nstruct LegacyT212KeychainCleanupTests {"
+
+
+def suite_header_offences(source: Source, expected: str) -> list[str]:
+    """The one @Suite attribute is exactly `expected`: `.serialized` and no other trait.
+
+    A `.disabled()` or `.enabled(if: false)` on the suite skips every test in it, the canaries included,
+    without touching a line of any test. A second @Suite attribute, or a suite with the attribute removed,
+    is refused for the same reason.
+    """
+    if len(re.findall(r"@Suite(?![A-Za-z0-9_])", source.bare)) != 1:
+        return [f"{source.name}: there must be exactly one @Suite attribute"]
+    hit = re.search(r"@Suite(?![A-Za-z0-9_])", source.code)
+    brace = source.code.find("{", hit.start()) if hit else -1
+    got = source.code[hit.start() : brace + 1] if hit and brace >= 0 else ""
+    if got != expected:
+        return [f"{source.name}: the suite header is not exactly `{squash(expected)}` (found `{squash(got)[:80]}`)"]
+    return []
+
+
 def canary_scope_offences(text: str) -> list[str]:
     source = read("KeychainScopeTests.swift", text)
     found = list(source.errors)
+    found += suite_header_offences(source, SCOPE_SUITE_HEADER)
     for name, expected in CANARY_SCOPE.items():
         found += exact_block(source, at_test_header(name), expected, name)
         found += secret_expect_offences(f"KeychainScopeTests.swift: {name}", expected)
@@ -1516,6 +1543,7 @@ def canary_scope_offences(text: str) -> list[str]:
 def canary_legacy_offences(text: str) -> list[str]:
     source = read("LegacyT212KeychainCleanupTests.swift", text)
     found = list(source.errors)
+    found += suite_header_offences(source, LEGACY_SUITE_HEADER)
     for name, expected in CANARY_LEGACY.items():
         found += exact_block(source, at_test_header(name), expected, name)
         found += secret_expect_offences(f"LegacyT212KeychainCleanupTests.swift: {name}", expected)
@@ -2741,6 +2769,33 @@ _add_generated_plants("tripwire", TRIPWIRE_TEXT, TRIPWIRE_TEST_BLOCKS, "r4 item 
 _add_generated_plants("canary_scope", SCOPE_TESTS_TEXT, CANARY_SCOPE, "r4 item 4")
 _add_generated_plants("canary_legacy", LEGACY_TESTS_TEXT, CANARY_LEGACY, "r4 item 4")
 
+SUITE_VARIANTS = {
+    "a .disabled() trait": "@Suite(.serialized, .disabled())",
+    'a .disabled("flaky") trait': '@Suite(.serialized, .disabled("flaky"))',
+    "an .enabled(if: false) trait": "@Suite(.serialized, .enabled(if: false))",
+    "a .tags(...) trait plus .disabled": "@Suite(.serialized, .tags(.keychain), .disabled())",
+    "the traits in another order": "@Suite(.disabled(), .serialized)",
+    "the .serialized trait dropped": "@Suite",
+    "the .serialized trait replaced by .disabled": "@Suite(.disabled())",
+}
+for _kind, _text, _header, _struct in (
+    ("canary_scope", SCOPE_TESTS_TEXT, SCOPE_SUITE_HEADER, "KeychainScopeTests"),
+    ("canary_legacy", LEGACY_TESTS_TEXT, LEGACY_SUITE_HEADER, "LegacyT212KeychainCleanupTests"),
+):
+    for _label, _attribute in SUITE_VARIANTS.items():
+        PLANTS[f"{_kind}: {_struct}: {_label} (r5 item 1)"] = (
+            _kind,
+            replaced(_text, _header, _header.replace("@Suite(.serialized)", _attribute, 1)),
+        )
+    PLANTS[f"{_kind}: {_struct}: a second @Suite attribute (r5 item 1)"] = (
+        _kind,
+        replaced(_text, _header, "@Suite(.disabled())\n" + _header),
+    )
+    PLANTS[f"{_kind}: {_struct}: a second @Suite attribute after the first (r5 item 1)"] = (
+        _kind,
+        replaced(_text, _header, _header.replace("\nstruct", '\n@Suite("renamed")\nstruct', 1)),
+    )
+
 DELETE_ARGUMENT = "account: UUID().uuidString"
 PLANTS.update(
     {
@@ -3079,6 +3134,27 @@ SHADOW_PLANTS.update(
         "a dlopen in the app (r4 Opus 7)": {Path("Growin/Util/Lookup.swift"): "let handle = dlopen(nil, 0)\n"},
         "an NSSelectorFromString (r4 Opus 7)": {Path("Growin/Util/Lookup.swift"): 'let selector = NSSelectorFromString("x")\n'},
         "a dlsym in a test (r4 Opus 7)": {Path("GrowinTests/Lookup.swift"): 'let symbol = dlsym(nil, "x")\n'},
+        # --- r5 item 2: module-qualified lookups, @_silgen_name, CFBundleGetFunctionPointerForName ---
+        "a Darwin-qualified dlsym on a built string (r5 item 2)": {
+            Path("Growin/Util/Lookup.swift"): 'let handle = Darwin.dlsym(nil, "Sec" + "ItemDelete")\n'
+        },
+        "a Darwin-qualified dlopen (r5 item 2)": {Path("Growin/Util/Lookup.swift"): "let handle = Darwin.dlopen(nil, 0)\n"},
+        "a Foundation-qualified NSSelectorFromString (r5 item 2)": {
+            Path("Growin/Util/Lookup.swift"): 'let selector = Foundation.NSSelectorFromString("x")\n'
+        },
+        "an @_silgen_name bound to SecItemDelete (r5 item 2)": {
+            Path("Growin/Util/Lookup.swift"): '@_silgen_name("SecItemDelete") func zap(_ query: CFDictionary) -> OSStatus\n'
+        },
+        "a CFBundleGetFunctionPointerForName lookup (r5 item 2)": {
+            Path("Growin/Util/Lookup.swift"): 'let pointer = CFBundleGetFunctionPointerForName(bundle, "SecItemDelete" as CFString)\n'
+        },
+        "a Darwin-qualified dlsym in a test (r5 item 2)": {Path("GrowinTests/Lookup.swift"): 'let symbol = Darwin.dlsym(nil, "x")\n'},
+        "an @_silgen_name in a test (r5 item 2)": {
+            Path("GrowinTests/Lookup.swift"): '@_silgen_name("SecItemDelete") func zap(_ query: CFDictionary) -> OSStatus\n'
+        },
+        "a CFBundleGetFunctionPointerForName in a test (r5 item 2)": {
+            Path("GrowinTests/Lookup.swift"): 'let pointer = CFBundleGetFunctionPointerForName(bundle, "x" as CFString)\n'
+        },
         # --- r4 item 1: the testing vocabulary in GrowinTests ---
         "a local func expect (r4 item 1)": {Path("GrowinTests/Shim.swift"): "func expect(_ condition: Bool) {}\n"},
         "a macro named expect (r4 item 1)": {
@@ -3094,6 +3170,15 @@ SHADOW_PLANTS.update(
         "a let expect closure (r4 item 1)": {Path("GrowinTests/Shim.swift"): "let expect = { (c: Bool) in }\n"},
     }
 )
+
+
+def test_the_lookup_words_in_strings_and_comments_are_not_findings():
+    files = swift_files()
+    files[Path("Growin/Models/Fine4.swift")] = (
+        '// Darwin.dlsym and @_silgen_name are only named in this comment\n'
+        'let note = "Foundation.NSSelectorFromString CFBundleGetFunctionPointerForName dlopen"\n'
+    )
+    assert shadow_offences(files) == []
 
 
 def test_a_switch_pattern_named_like_a_security_constant_is_not_a_declaration():
