@@ -16,13 +16,20 @@ must be caught by its rule and by nothing else: with that rule switched off the 
 
   R1  Only allow-listed functions may call SecItem, and each opens with the guard (first statement).
   R2  SecItem and SecKeychain appear only in KeychainStore.swift and LegacyT212KeychainCleanup.swift.
-  R3  Each query builder carries `kSecAttrService ... : service`; owners never strip a query.
+  R3  Each query builder carries `kSecAttrService ... : service`; an owner never calls `removeValue`,
+      `filter` or `merge` on a query.
+  R10 `kSecClass`, `kSecAttrService` and `kSecAttrAccount` appear only inside that file's query builder, so an
+      inline query, a nil-ed service key or a second dictionary cannot be built in an owner.
   R4  TestHostDetection keeps its four env keys and the XCTestCase check; `refuses` stays `a && b`.
-  R5  The cleanup refuses on the real process first, and a refused delete ends before any defaults write.
+  R5  The cleanup refuses on the real process first (the complete opening condition and its return, in
+      both entry points), and a refused delete ends before any defaults write.
   R6  The refusal log line interpolates only the code and the call-site kind.
   R7  The tripwire and the canaries keep their @Test names and plain @Test, a top-level
       `@Suite(.serialized)`, no `#if` or `@available`; the tripwire writes nothing; no assertion argument
       reads a credential.
+  R9  None of the 8 named test bodies contains `return`, `withKnownIssue` or a stored closure
+      (`let x = { ... }`), the three ways to keep every `#expect` in the text and stop it mattering.
+  R11 `requireKeychain`, the helper that runs every canary body, keeps its exact (layout-normalised) body.
   R8  GrowinTests mentions SecItem or SecKeychain only in RawKeychain.swift.
 """
 
@@ -218,13 +225,29 @@ def detection_rule(src: Source) -> list[str]:
     return found
 
 
+PUBLIC_REFUSAL = "if ProductionKeychainGuard.refusesCurrentProcess(service: service) { return refusedOutcome(log: log) }"
+EXPLICIT_REFUSAL = (
+    "if ProductionKeychainGuard.refusesCurrentProcess(service: service) "
+    "|| ProductionKeychainGuard.refuses(service: service, protectedService: protectedService, testHost: testHost) "
+    "{ return refusedOutcome(log: log) }"
+)
+
+
 def cleanup_refusal_rule(src: Source) -> list[str]:
-    """R5a: both runOnce entry points refuse on the real process first."""
+    """R5a: both runOnce entry points open with their COMPLETE refusal: the whole condition and its return.
+
+    The explicit overload may only ADD a refusal (`||`); `&&` would let an injected `testHost: false` lift
+    the real one.
+    """
     entries = [f for f in functions(src.code) if f.name == "runOnce"]
-    first = norm("if ProductionKeychainGuard.refusesCurrentProcess(service: service)")
-    if len(entries) != 2 or not all(norm(f.body(src.code)).startswith(first) for f in entries):
-        return ["both runOnce entry points must start with `if ProductionKeychainGuard.refusesCurrentProcess(service: service)`"]
-    return []
+    found = []
+    if len(entries) != 2:
+        return ["there must be exactly two runOnce entry points"]
+    for func in entries:
+        want = EXPLICIT_REFUSAL if "protectedService" in func.params else PUBLIC_REFUSAL
+        if not norm(func.body(src.code)).startswith(norm(want)):
+            found.append(f"a runOnce entry point must open with `{want}`")
+    return found
 
 
 def cleanup_terminal_rule(src: Source) -> list[str]:
@@ -259,6 +282,70 @@ def log_rule(every_logger_call: bool):
         return found
 
     return rule
+
+
+SILENCERS = re.compile(
+    r"(?<![A-Za-z0-9_])(?:return|withKnownIssue)(?![A-Za-z0-9_])"
+    r"|(?<![A-Za-z0-9_])(?:let|var)\s+\w+\s*(?::[^=\n]+)?=\s*\{"
+)
+
+
+def silenced_rule(names: tuple[str, ...]):
+    """R9: no named test body contains `return`, `withKnownIssue` or a stored closure.
+
+    Each keeps every `#expect` in the text while stopping it from mattering: an early return, a known-issue
+    wrapper that turns a failure into a pass, or checks parked in a closure nobody calls.
+    """
+
+    def rule(src: Source) -> list[str]:
+        found = []
+        for func in functions(src.bare):
+            if func.name in names:
+                found += [
+                    f"{func.name}() contains `{squash(hit.group(0))}`, which can silence its assertions"
+                    for hit in SILENCERS.finditer(func.body(src.bare))
+                ]
+        return found
+
+    return rule
+
+
+SERVICE_SYMBOLS = re.compile(r"(?<![A-Za-z0-9_])(?:kSecClass|kSecAttrService|kSecAttrAccount)(?![A-Za-z0-9_])")
+
+
+def service_symbols_rule(builder: str):
+    """R10: the class, service and account keys appear only inside the file's query builder."""
+
+    def rule(src: Source) -> list[str]:
+        funcs = functions(src.bare)
+        found = []
+        for hit in SERVICE_SYMBOLS.finditer(src.bare):
+            owner = enclosing(funcs, hit.start())
+            if owner is None or owner.name != builder:
+                where = f"{owner.name}()" if owner else "no function"
+                found.append(f"{hit.group(0)} is used in {where}, outside {builder}()")
+        return found
+
+    return rule
+
+
+REQUIRE_KEYCHAIN_BODY = """
+do {
+    try body()
+} catch KeychainStoreError.status(let status) {
+    Issue.record("Keychain blocked with OSStatus \\(status)", sourceLocation: sourceLocation)
+} catch {
+    Issue.record("Unexpected error: \\(error)", sourceLocation: sourceLocation)
+}
+"""
+
+
+def require_keychain_rule(src: Source) -> list[str]:
+    """R11: the helper that runs every canary body keeps its exact body (layout aside)."""
+    helper = [f for f in functions(src.code) if f.name == "requireKeychain"]
+    if len(helper) != 1 or norm(helper[0].body(src.code)) != norm(REQUIRE_KEYCHAIN_BODY):
+        return ["requireKeychain() must run its body, record every error and nothing else"]
+    return []
 
 
 TRIPWIRE_TESTS = (
@@ -346,10 +433,15 @@ def secrets_rule(names: tuple[str, ...] | None):
 
 
 RULES = {
-    "store": [("R1", owners_rule(STORE_OWNERS)), ("R3", query_rule("baseQuery", list(STORE_OWNERS)))],
+    "store": [
+        ("R1", owners_rule(STORE_OWNERS)),
+        ("R3", query_rule("baseQuery", list(STORE_OWNERS))),
+        ("R10", service_symbols_rule("baseQuery")),
+    ],
     "cleanup": [
         ("R1", owners_rule(CLEANUP_OWNERS)),
         ("R3", query_rule("exactQuery", list(CLEANUP_OWNERS))),
+        ("R10", service_symbols_rule("exactQuery")),
         ("R5a", cleanup_refusal_rule),
         ("R5b", cleanup_terminal_rule),
         ("R6", log_rule(every_logger_call=False)),
@@ -358,14 +450,25 @@ RULES = {
     "raw": [
         ("R1", lambda src: owners_rule(RAW_OWNERS)(src) + raw_init_rule(src)),
         ("R3", query_rule("query", list(RAW_OWNERS))),
+        ("R10", service_symbols_rule("query")),
     ],
     "tripwire": [
         ("R7", suite_rule(TRIPWIRE_TESTS, exact=True)),
         ("R7w", tripwire_readonly_rule),
         ("R7s", secrets_rule(None)),
+        ("R9", silenced_rule(TRIPWIRE_TESTS)),
     ],
-    "scope": [("R7", suite_rule(SCOPE_CANARIES, exact=False)), ("R7s", secrets_rule(SCOPE_CANARIES))],
-    "legacy": [("R7", suite_rule(LEGACY_CANARIES, exact=False)), ("R7s", secrets_rule(LEGACY_CANARIES))],
+    "scope": [
+        ("R7", suite_rule(SCOPE_CANARIES, exact=False)),
+        ("R7s", secrets_rule(SCOPE_CANARIES)),
+        ("R9", silenced_rule(SCOPE_CANARIES)),
+        ("R11", require_keychain_rule),
+    ],
+    "legacy": [
+        ("R7", suite_rule(LEGACY_CANARIES, exact=False)),
+        ("R7s", secrets_rule(LEGACY_CANARIES)),
+        ("R9", silenced_rule(LEGACY_CANARIES)),
+    ],
 }
 
 
@@ -530,6 +633,84 @@ PLANTS = {
         "            #expect(try a.string(for: .alpacaApiKey, scope: .workspace(.uk)) == nil)\n",
     ),
 }
+PLANTS.update(
+    {
+        "R5a the explicit overload's || flipped to &&": (
+            "R5a",
+            "cleanup",
+            "            || ProductionKeychainGuard.refuses(",
+            "            && ProductionKeychainGuard.refuses(",
+        ),
+        "R9 a canary assertion inside withKnownIssue": (
+            "R9",
+            "legacy",
+            "        #expect(removedAll)\n",
+            '        withKnownIssue("flaky", isIntermittent: true) { #expect(removedAll) }\n',
+        ),
+        "R9 a tripwire #expect inside withKnownIssue": (
+            "R9",
+            "tripwire",
+            "        #expect(refusal == Self.refused)\n",
+            '        withKnownIssue("flaky", isIntermittent: true) { #expect(refusal == Self.refused) }\n',
+        ),
+        "R9 a CI guard with an early return in the tripwire": (
+            "R9",
+            "tripwire",
+            "        #expect(refusal == Self.refused)\n",
+            '        guard ProcessInfo.processInfo.environment["CI"] == nil else { return }\n        #expect(refusal == Self.refused)\n',
+        ),
+        "R9 a bare return in the legacy canary": (
+            "R9",
+            "legacy",
+            "        try b.seed(Cleanup.legacyAccounts)\n",
+            "        return\n        try b.seed(Cleanup.legacyAccounts)\n",
+        ),
+        "R9 checks moved into a closure nobody calls": (
+            "R9",
+            "tripwire",
+            "        #expect(TestHostDetection.isTestHost())\n        #expect(ProductionKeychainGuard.refusesCurrentProcess(service: Self.protectedName))\n",
+            "        let checks = {\n            #expect(TestHostDetection.isTestHost())\n"
+            "            #expect(ProductionKeychainGuard.refusesCurrentProcess(service: Self.protectedName))\n        }\n",
+        ),
+        "R10 an inline account-only query in rawRemove": (
+            "R10",
+            "store",
+            "        let status = Security.SecItemDelete(baseQuery(account: account) as CFDictionary)\n",
+            "        let status = Security.SecItemDelete(\n"
+            "            [Security.kSecClass as String: Security.kSecClassGenericPassword, Security.kSecAttrAccount as String: account]\n"
+            "                as CFDictionary)\n",
+        ),
+        "R10 the service key set to nil in rawData": (
+            "R10",
+            "store",
+            "        query[Security.kSecMatchLimit as String] = Security.kSecMatchLimitOne\n",
+            "        query[Security.kSecMatchLimit as String] = Security.kSecMatchLimitOne\n        query[Security.kSecAttrService as String] = nil\n",
+        ),
+        "R10 an inline query in RawKeychain.remove": (
+            "R10",
+            "raw",
+            "        Security.SecItemDelete(query(account) as CFDictionary)\n",
+            "        Security.SecItemDelete(\n"
+            "            [Security.kSecClass as String: Security.kSecClassGenericPassword, Security.kSecAttrAccount as String: account]\n"
+            "                as CFDictionary)\n",
+        ),
+        "R11 requireKeychain uses try? on the body": ("R11", "scope", "            try body()\n", "            try? body()\n"),
+        "R11 requireKeychain prints instead of recording": (
+            "R11",
+            "scope",
+            'Issue.record("Unexpected error: \\(error)", sourceLocation: sourceLocation)',
+            'print("Unexpected error: \\(error)")',
+        ),
+        "R11 requireKeychain has an empty catch-all": (
+            "R11",
+            "scope",
+            '            Issue.record("Unexpected error: \\(error)", sourceLocation: sourceLocation)\n',
+            "",
+        ),
+        "R11 requireKeychain no longer calls the body": ("R11", "scope", "            try body()\n", "            _ = body\n"),
+    }
+)
+
 # R7 plants that wrap the whole file need no anchor.
 WHOLE_FILE_PLANTS = {
     "R7 the tripwire inside #if false": ("R7", "tripwire", "#if false\n{text}#endif\n"),
