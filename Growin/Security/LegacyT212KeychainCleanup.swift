@@ -62,6 +62,9 @@ nonisolated enum LegacyT212KeychainCleanup {
         var failedStatuses: [OSStatus]
         /// True on the launch that hit `maxFailedLaunches`.
         var gaveUp = false
+        /// True when a test host asked to run against the production service. Nothing ran:
+        /// no Keychain call, no UserDefaults write, no completion mark.
+        var refused = false
     }
 
     typealias Deleter = (_ service: String, _ account: String) -> OSStatus
@@ -84,9 +87,18 @@ nonisolated enum LegacyT212KeychainCleanup {
         ]
     }
 
+    /// Reported by `deleteExactItem` when a test host asks to delete from the production
+    /// service. Not an Apple status: it sits outside the Security framework's documented
+    /// range so it cannot be mistaken for one. No SecItem call was made.
+    static let refusedUnderTestsStatus: OSStatus = -9_900_001
+
     /// Deletes at most one generic-password item: this service, this account.
+    /// A test host is refused on the production service before any SecItem call.
     static func deleteExactItem(service: String, account: String) -> OSStatus {
-        SecItemDelete(exactQuery(service: service, account: account) as CFDictionary)
+        guard !ProductionKeychainGuard.refusesCurrentProcess(service: service) else {
+            return refusedUnderTestsStatus
+        }
+        return SecItemDelete(exactQuery(service: service, account: account) as CFDictionary)
     }
 
     private static let logger = Logger(subsystem: "san.Growin", category: "legacy-t212-cleanup")
@@ -128,6 +140,34 @@ nonisolated enum LegacyT212KeychainCleanup {
         delete: Deleter = deleteExactItem,
         log: (String) -> Void = defaultLog
     ) -> Outcome {
+        runOnce(
+            service: service,
+            protectedService: ProductionKeychainGuard.productionService,
+            testHost: TestHostDetection.isTestHost(),
+            defaults: defaults,
+            delete: delete,
+            log: log)
+    }
+
+    /// The guard's inputs made explicit so a test can prove the refusal with a test-prefixed
+    /// service pair. No defaults on purpose, and no file in `Growin/` outside the Security
+    /// guard files may pass `protectedService:` (a source scan enforces it), so the app cannot
+    /// weaken the guard by calling this form.
+    @discardableResult
+    static func runOnce(
+        service: String,
+        protectedService: String,
+        testHost: Bool,
+        defaults: UserDefaults,
+        delete: Deleter,
+        log: (String) -> Void
+    ) -> Outcome {
+        // Refuse first, before the injected `delete` or any defaults write, so a test host
+        // pointed at the production service changes nothing. The log line is the code only.
+        if ProductionKeychainGuard.refuses(service: service, protectedService: protectedService, testHost: testHost) {
+            log("legacy cleanup refused: \(ProductionKeychainGuard.refusalCode)")
+            return Outcome(skipped: true, removed: 0, failedStatuses: [], refused: true)
+        }
         if defaults.bool(forKey: completionKey)
             || defaults.integer(forKey: failedLaunchesKey) >= maxFailedLaunches {
             return Outcome(skipped: true, removed: 0, failedStatuses: [])

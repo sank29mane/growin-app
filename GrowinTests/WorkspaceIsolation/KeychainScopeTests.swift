@@ -103,6 +103,38 @@ struct KeychainScopeTests {
         }
     }
 
+    // MARK: Production guard (a test-prefixed store is never refused)
+
+    @Test func aTestPrefixedStoreIsNotTheProductionStore() {
+        let (store, _) = Self.makeStore()
+        #expect(!store.isProductionStore)
+    }
+
+    @Test func aTestPrefixedStoreIsNeverRefusedInsideTheTestHost() {
+        // Positive control: this process really is a test host, so the production guard is live.
+        #expect(TestHostDetection.isTestHost())
+        let (store, _) = Self.makeStore()
+        defer { Self.cleanUp(store) }
+        // requireKeychain records any thrown error, so a refusal here is a failure.
+        Self.requireKeychain {
+            try store.set("CANARY-GUARD-1", for: .alpacaApiKey, scope: .workspace(.uk))
+            #expect(try store.string(for: .alpacaApiKey, scope: .workspace(.uk)) == "CANARY-GUARD-1")
+            try store.remove(.alpacaApiKey, scope: .workspace(.uk))
+            #expect(try store.string(for: .alpacaApiKey, scope: .workspace(.uk)) == nil)
+        }
+    }
+
+    @Test func theMigrationsRunOnATestPrefixedStore() {
+        let (store, _) = Self.makeStore()
+        defer { Self.cleanUp(store) }
+        let suite = "growin.test.guard.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        // Nothing to move, so nothing fails. A refused store would list every candidate.
+        #expect(store.migrateLegacyUserDefaults(defaults) == [])
+        #expect(store.migrateFlatItemsToScoped() == [])
+    }
+
     @Test func approvalKeyIsPerWorkspaceAndNeverShared() {
         let (store, _) = Self.makeStore()
         defer { Self.cleanUp(store) }
