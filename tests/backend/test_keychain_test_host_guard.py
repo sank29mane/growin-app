@@ -30,6 +30,14 @@ this scan reads the source and proves:
    exact path and for one exact expression, in Python and in the Swift mirror.
 10. The refusal log line is the code and the call-site kind only, and changes no control flow. The
    UI-test app process carries `GROWIN_UI_TEST_HOST`, which `TestHostDetection` reads.
+11. Every SecItem owner is pinned WHOLE (not only its first statement and its query builder), so the
+   service cannot be stripped, swapped or merged over after the builder runs. The runtime canaries in
+   `KeychainScopeTests` and `LegacyT212KeychainCleanupTests` prove the same thing without any scan.
+12. The tripwire cannot be compiled out (`#if`), or disabled (traits), or moved out of a `@Test`, and it
+   cannot write through the `KeychainStorage` property wrapper.
+13. The guard is not shadowed one layer down: `TestHostDetection` calls `Foundation.`-qualified names and
+   a plain loop, and `Growin/` may not extend the standard types, overload `==`, `&&`, `||` or `!` on
+   them, or declare names that stand in for `NSClassFromString`, `ProcessInfo` or a system module.
 
 Each rule has planted-sample break-proofs further down: a copy of the real source with the guard
 removed, moved, wrapped, bypassed or weakened must produce offences. Reading uses `reduce_swift`
@@ -340,6 +348,92 @@ CLEANUP_QUERY_BODY = """
 ]
 """
 
+STORE_RAW_DATA_BODY = """
+try assertAccessAllowed(for: .read)
+var query = baseQuery(account: account)
+query[kSecReturnData as String] = true
+query[kSecMatchLimit as String] = kSecMatchLimitOne
+
+var item: CFTypeRef?
+let status = SecItemCopyMatching(query as CFDictionary, &item)
+if status == errSecItemNotFound {
+    return nil
+}
+guard status == errSecSuccess else {
+    throw KeychainStoreError.status(status)
+}
+guard let data = item as? Data else {
+    throw KeychainStoreError.unexpectedData
+}
+return data
+"""
+STORE_RAW_SET_BODY = """
+try assertAccessAllowed(for: .write)
+if data.isEmpty {
+    try rawRemove(account: account)
+    return
+}
+
+let query = baseQuery(account: account)
+let attributes: [String: Any] = [kSecValueData as String: data]
+let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+
+if updateStatus == errSecItemNotFound {
+    var item = query
+    item[kSecValueData as String] = data
+    item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+    let addStatus = SecItemAdd(item as CFDictionary, nil)
+    guard addStatus == errSecSuccess else {
+        throw KeychainStoreError.status(addStatus)
+    }
+    return
+}
+
+guard updateStatus == errSecSuccess else {
+    throw KeychainStoreError.status(updateStatus)
+}
+"""
+STORE_RAW_REMOVE_BODY = """
+try assertAccessAllowed(for: .delete)
+let status = SecItemDelete(baseQuery(account: account) as CFDictionary)
+guard status == errSecSuccess || status == errSecItemNotFound else {
+    throw KeychainStoreError.status(status)
+}
+"""
+CLEANUP_DELETE_ALL_BODY = """
+var removed = 0
+for _ in 0..<maxDeletesPerAccount {
+    let status = delete(service, account)
+    switch status {
+    case errSecSuccess:
+        removed += 1
+    case errSecItemNotFound:
+        return (removed, nil)
+    default:
+        return (removed, status)
+    }
+}
+return (removed, tooManyMatchesStatus)
+"""
+RAW_SET_BODY = """
+var item = query(account)
+item[kSecValueData as String] = data
+item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+let status = SecItemAdd(item as CFDictionary, nil)
+guard status == errSecSuccess else { throw KeychainStoreError.status(status) }
+"""
+RAW_REMOVE_BODY = "SecItemDelete(query(account) as CFDictionary)"
+RAW_DATA_BODY = """
+var item = query(account)
+item[kSecReturnData as String] = true
+item[kSecMatchLimit as String] = kSecMatchLimitOne
+var result: CFTypeRef?
+let status = SecItemCopyMatching(item as CFDictionary, &result)
+if status == errSecItemNotFound { return nil }
+guard status == errSecSuccess else { throw KeychainStoreError.status(status) }
+return result as? Data
+"""
+
 STORE_ASSERT_BODY = """
 try Self.checkAccess(
     service: service,
@@ -377,6 +471,11 @@ def keychain_store_offences(text: str) -> list[str]:
             if not opens_with(func.body(source.code), statement):
                 found.append(f"KeychainStore.swift: {name}() does not open with `{statement}`")
 
+    # The WHOLE body of every SecItem owner is pinned, so nothing can strip, swap or merge over the
+    # service between the query builder and the SecItem call.
+    found += pinned(source, "rawData", STORE_RAW_DATA_BODY, params_norm=norm("account: String"))
+    found += pinned(source, "rawSet", STORE_RAW_SET_BODY, params_norm=norm("_ data: Data, account: String"))
+    found += pinned(source, "rawRemove", STORE_RAW_REMOVE_BODY, params_norm=norm("account: String"))
     found += pinned(source, "assertAccessAllowed", STORE_ASSERT_BODY, params_norm=norm("for site: RefusalSite"))
     found += pinned(source, "checkAccess", STORE_CHECK_BODY)
     found += pinned(source, "accessIsAllowed", STORE_ALLOWED_BODY)
@@ -462,6 +561,12 @@ def legacy_cleanup_offences(text: str) -> list[str]:
     # deleteExactItem owns the one SecItem call and refuses before it.
     found += sec_item_offences(source, CLEANUP_DELETE_GUARD, CLEANUP_OWNERS)
     found += pinned(source, "deleteExactItem", CLEANUP_DELETE_BODY)
+    found += pinned(
+        source,
+        "deleteAllMatches",
+        CLEANUP_DELETE_ALL_BODY,
+        params_norm=norm("service: String, account: String, delete: Deleter"),
+    )
     # The service the guard checks is the service the delete query uses.
     found += query_binding_offences(
         source,
@@ -520,11 +625,17 @@ refuses(
     protectedService: productionService,
     testHost: TestHostDetection.isTestHost())
 """
-GUARD_DETECT_BODY = "xctestCaseClassLoaded || environmentKeys.contains { environment[$0] != nil }"
+GUARD_DETECT_BODY = """
+if xctestCaseClassLoaded { return true }
+for key in environmentKeys {
+    if environment[key] != nil { return true }
+}
+return false
+"""
 GUARD_DETECT_SIGNATURE = (
     "static func isTestHost("
-    "environment: [String: String] = ProcessInfo.processInfo.environment,"
-    'xctestCaseClassLoaded: Bool = NSClassFromString("XCTestCase") != nil'
+    "environment: [String: String] = Foundation.ProcessInfo.processInfo.environment,"
+    'xctestCaseClassLoaded: Bool = Foundation.NSClassFromString("XCTestCase") != nil'
     ") -> Bool {"
 )
 UI_TEST_HOST_KEY = "GROWIN_UI_TEST_HOST"
@@ -655,6 +766,61 @@ FUNCTION_HOMES = {
 }
 
 
+# One layer down: the guard's own calls (`NSClassFromString`, `ProcessInfo`, `environment`, `==`, `&&`, `!`,
+# `contains`) must not resolve to something the app module declares. The real tree extends none of the
+# standard types and overloads no operator on them, so the rules are strict, not allow-listed.
+STANDARD_TYPES = (
+    r"(?:Array|ContiguousArray|ArraySlice|Sequence|Collection|MutableCollection|BidirectionalCollection"
+    r"|RandomAccessCollection|RangeReplaceableCollection|LazySequenceProtocol|IteratorProtocol|Dictionary|Set"
+    r"|ProcessInfo|NSDictionary|NSArray|NSString|NSObject|String|Substring|Character|Optional|Bool|Data|Int|UInt8"
+    r"|Equatable|Hashable|Comparable|Never|CFDictionary)"
+)
+STANDARD_EXTENSION = re.compile(
+    r"(?<![A-Za-z0-9_])extension\s+(?:(?:Swift|Foundation)\s*\.\s*)?`?" + STANDARD_TYPES + r"`?(?![A-Za-z0-9_])"
+)
+OPERATOR_DECLARATION = re.compile(
+    r"(?P<static>(?<![A-Za-z0-9_])static\s+)?(?:(?:prefix|postfix|infix)\s+)?func\s+(?P<op>==|!=|&&|\|\||!|~=)\s*"
+    r"\((?P<params>[^)]*)\)"
+)
+OPERATOR_STANDARD_PARAMETER = re.compile(
+    r"(?<![A-Za-z0-9_])(?:Bool|String|Optional|Any|AnyClass|AnyObject|Self|T|Element|Key|Value|Substring"
+    r"|_OptionalNilComparisonType)(?![A-Za-z0-9_])|\?|<"
+)
+STAND_IN_DECLARATION = re.compile(
+    r"(?<![A-Za-z0-9_])(?:func|var|let|class|struct|enum|actor|protocol|typealias|case|associatedtype)\s+`?"
+    r"(?:NSClassFromString|ProcessInfo|processInfo|environment|Foundation|Swift|Darwin|Security|os|Dispatch)`?"
+    r"(?![A-Za-z0-9_])"
+)
+
+
+def declaration_scope(bare: str, position: int) -> str:
+    """Where a declaration sits: `top` (module level), `extension`, `type` or `code` (a function or closure body).
+
+    A member named `environment` inside a model struct only shadows inside that struct, so it is harmless.
+    A declaration at module level or in an extension is visible to the type it extends, or to the whole
+    module, so it can stand in for the call the guard makes.
+    """
+    headers: list[str] = []
+    boundary = 0
+    for index in range(position):
+        char = bare[index]
+        if char == "{":
+            headers.append(bare[boundary:index])
+            boundary = index + 1
+        elif char == "}":
+            if headers:
+                headers.pop()
+            boundary = index + 1
+    if not headers:
+        return "top"
+    header = headers[-1]
+    if re.search(r"(?<![A-Za-z0-9_])extension\b[^{};]*\Z", header):
+        return "extension"
+    if re.search(r"(?<![A-Za-z0-9_])(?:struct|class|enum|actor|protocol)\b[^{};]*\Z", header):
+        return "type"
+    return "code"
+
+
 def swift_files() -> dict[Path, str]:
     files = {}
     for root in (APP, APP_TESTS):
@@ -678,6 +844,18 @@ def shadow_offences(files: dict[Path, str]) -> list[str]:
         ):
             for hit in pattern.finditer(bare):
                 found.append(f"{relative}: {label} named like a guard type ({squash(hit.group(0))})")
+        if relative.parts[0] == "Growin":
+            for hit in STANDARD_EXTENSION.finditer(bare):
+                found.append(f"{relative}: extends a standard type, which can replace a call the guard makes ({squash(hit.group(0))})")
+            for hit in OPERATOR_DECLARATION.finditer(bare):
+                if not hit.group("static") or OPERATOR_STANDARD_PARAMETER.search(hit.group("params")):
+                    found.append(f"{relative}: an operator {hit.group('op')} that is global or takes a standard type ({squash(hit.group(0))[:70]})")
+            for hit in STAND_IN_DECLARATION.finditer(bare):
+                if declaration_scope(bare, hit.start()) in ("top", "extension"):
+                    found.append(
+                        f"{relative}: declares a module-level or extension name that can stand in for a call the guard makes "
+                        f"({squash(hit.group(0))})"
+                    )
         for fname, (home, count) in FUNCTION_HOMES.items():
             declared = re.findall(
                 r"(?<![A-Za-z0-9_])(?:func|var|let|case)\s+`?" + re.escape(fname) + r"`?(?![A-Za-z0-9_])", bare
@@ -719,8 +897,12 @@ def raw_keychain_offences(text: str) -> list[str]:
         found.append(f"{name}: conditional compilation ({squash(hit.group(0))}) can switch the check off")
     if len(re.findall(r"(?<![A-Za-z0-9_])init\s*\(", source.bare)) != 1:
         found.append(f"{name}: must have exactly one initializer")
-    # Only set, remove and data may call SecItem, and the query they use carries the checked service.
+    # Only set, remove and data may call SecItem, each pinned whole, and the query they use carries the
+    # checked service.
     found += sec_item_offences(source, None, RAW_OWNERS)
+    found += pinned(source, "set", RAW_SET_BODY, params_norm=norm("_ data: Data, account: String"))
+    found += pinned(source, "remove", RAW_REMOVE_BODY, params_norm=norm("account: String"))
+    found += pinned(source, "data", RAW_DATA_BODY, params_norm=norm("account: String"))
     found += query_binding_offences(
         source,
         "query",
@@ -782,6 +964,23 @@ do {
 }
 """
 TRIPWIRE_DELETE_ARGUMENTS = "service: Self.protectedName, account: UUID().uuidString"
+# The tripwire's exact structure: one unconditional suite, four plain @Test funcs, each holding its checks.
+TRIPWIRE_HEADER = "@MainActor @Suite(.serialized) struct ProductionTripwireTests {"
+TRIPWIRE_TESTS = (
+    "thisProcessIsATestHost",
+    "theSharedStoreRefusesARead",
+    "theSignersReportNotConfigured",
+    "theCleanupRefusesADeleteOnTheProductionService",
+)
+TRIPWIRE_OWNERS = {
+    "KeychainStore": "theSharedStoreRefusesARead",
+    "LocalApprovalSigner": "theSignersReportNotConfigured",
+    "ApprovalSignerRouter": "theSignersReportNotConfigured",
+    "delete": "theCleanupRefusesADeleteOnTheProductionService",
+    "guard": "thisProcessIsATestHost",
+}
+TRIPWIRE_WRAPPER = re.compile(r"(?<![A-Za-z0-9_])(?:KeychainStorage|wrappedValue|projectedValue)(?![A-Za-z0-9_])")
+TRIPWIRE_ASSIGNMENT = re.compile(r"\.\s*[A-Za-z_]\w*\s*=(?!=)|\]\s*=(?!=)")
 TRIPWIRE_GUARD_EXPECT = "ProductionKeychainGuard.refusesCurrentProcess(service: Self.protectedName)"
 
 
@@ -804,7 +1003,15 @@ def tripwire_offences(text: str) -> list[str]:
         start, end = max(inner, key=lambda span: span[0])
         return bare[start + 1 : end].strip()
 
-    def check_in_assertion(position: int, what: str) -> None:
+    funcs = source.bare_funcs
+
+    def check_in_assertion(position: int, what: str, required_owner: str) -> None:
+        owner = enclosing(funcs, position)
+        if owner is None or owner.name != required_owner:
+            found.append(
+                f"{name}: {what} must sit in the @Test func {required_owner}, not in "
+                f"{owner.name + '()' if owner else 'no function'}"
+            )
         body = expectation(position)
         if body is None:
             found.append(f"{name}: {what} is outside an #expect, so nothing asserts the refusal")
@@ -823,7 +1030,7 @@ def tripwire_offences(text: str) -> list[str]:
             found.append(f"{name}: {kind}.shared is used for something other than the allowed call")
         if kind == "KeychainStore" and not re.search(r"_\s*=\s*try\s+$", bare[: hit.start()]):
             found.append(f"{name}: the shared store read must be discarded with `_ = try`, never bound")
-        check_in_assertion(hit.start(), f"{kind}.shared")
+        check_in_assertion(hit.start(), f"{kind}.shared", TRIPWIRE_OWNERS[kind])
     for hit in KEYCHAIN_STORE_WORD.finditer(bare):
         if not re.match(r"\s*\.\s*shared(?![A-Za-z0-9_])", bare[hit.end() :]):
             found.append(f"{name}: names the Keychain store other than the one allowed shared read")
@@ -835,7 +1042,7 @@ def tripwire_offences(text: str) -> list[str]:
         if member not in CLEANUP_MEMBERS:
             found.append(f"{name}: LegacyT212KeychainCleanup.{member} is not allowed")
             continue
-        check_in_assertion(hit.start(), f"LegacyT212KeychainCleanup.{member}")
+        check_in_assertion(hit.start(), f"LegacyT212KeychainCleanup.{member}", TRIPWIRE_OWNERS["delete"])
         if member == "deleteExactItem":
             touched["delete"] += 1
             open_paren = bare.find("(", hit.end())
@@ -847,7 +1054,7 @@ def tripwire_offences(text: str) -> list[str]:
         if hit.group("member") not in GUARD_MEMBERS:
             found.append(f"{name}: ProductionKeychainGuard.{hit.group('member')} is not allowed")
         else:
-            check_in_assertion(hit.start(), "ProductionKeychainGuard.refusesCurrentProcess")
+            check_in_assertion(hit.start(), "ProductionKeychainGuard.refusesCurrentProcess", TRIPWIRE_OWNERS["guard"])
     for kind, count in touched.items():
         if count < 1:
             found.append(f"{name}: no {kind} check is left, so the tripwire no longer covers it")
@@ -864,6 +1071,37 @@ def tripwire_offences(text: str) -> list[str]:
         found.append(f"{name}: could print, log, attach or hide a failure ({squash(hit.group(0))})")
     if re.search(r"\\\(", code):
         found.append(f"{name}: string interpolation could put a value in a message")
+
+    # It cannot be compiled out, disabled, or moved out of a @Test.
+    for hit in CONDITIONAL_COMPILATION.finditer(bare):
+        found.append(f"{name}: conditional compilation ({squash(hit.group(0))}) can compile the tripwire out")
+    if norm(TRIPWIRE_HEADER) not in norm(code):
+        found.append(f"{name}: the suite is not exactly `{TRIPWIRE_HEADER}`")
+    if len(re.findall(r"@Suite(?![A-Za-z0-9_])", bare)) != 1:
+        found.append(f"{name}: there must be exactly one @Suite")
+    declared = []
+    for hit in re.finditer(r"@Test(?![A-Za-z0-9_])", bare):
+        shape = re.match(r"\s+func\s+(\w+)\s*\(\s*\)\s*\{", bare[hit.end() :])
+        if shape is None:
+            found.append(f"{name}: an @Test with arguments or traits, or not directly on a parameterless func")
+        else:
+            declared.append(shape.group(1))
+    if sorted(declared) != sorted(TRIPWIRE_TESTS):
+        found.append(f"{name}: the @Test funcs are {sorted(declared)}, expected exactly {sorted(TRIPWIRE_TESTS)}")
+    for func in funcs:
+        if func.name not in TRIPWIRE_TESTS and func.name != "code":
+            found.append(f"{name}: an extra function {func.name}() could hold the assertions out of a @Test")
+        if func.name in TRIPWIRE_TESTS and "#expect(" not in func.body(bare):
+            found.append(f"{name}: {func.name}() asserts nothing")
+    for test in TRIPWIRE_TESTS:
+        if len(by_name(funcs, test)) != 1:
+            found.append(f"{name}: the @Test func {test}() must exist exactly once")
+
+    # It cannot write through the KeychainStorage property wrapper, or assign to any member.
+    for hit in TRIPWIRE_WRAPPER.finditer(bare):
+        found.append(f"{name}: the KeychainStorage property wrapper can write ({hit.group(0)})")
+    for hit in TRIPWIRE_ASSIGNMENT.finditer(bare):
+        found.append(f"{name}: an assignment to a member or subscript ({squash(hit.group(0))})")
 
     # The helpers the assertions lean on are pinned too.
     found += pinned(source, "code", TRIPWIRE_CODE_BODY, params_norm=norm("of body: () throws -> Void"))
@@ -1026,8 +1264,24 @@ def test_the_other_banned_needles_stay_out_of_the_files_this_change_touches():
 # --------------------------------------------------------------------------------------------
 
 
+class BrokenPlant(str):
+    """A plant whose anchor text is gone from the source.
+
+    It is returned instead of raising, so editing a line a plant refers to fails ONE named test
+    (`test_every_plant_applies_to_the_current_source`, and the plant's own test) with the anchor text,
+    not the whole module at collection time. Chained `replaced` calls pass it through unchanged.
+    """
+
+    message = ""
+
+
 def replaced(text: str, old: str, new: str, count: int = 1) -> str:
-    assert text.count(old) >= 1, f"the plant did not apply: {old!r}"
+    if isinstance(text, BrokenPlant):
+        return text
+    if old not in text:
+        broken = BrokenPlant(text)
+        broken.message = f"the plant did not apply, its anchor text is gone from the source: {old!r}"
+        return broken
     return text.replace(old, new, count)
 
 
@@ -1088,8 +1342,221 @@ TRIPWIRE_DELETE = (
 )
 UI_KEY_LINE = f'        app.launchEnvironment["{UI_TEST_HOST_KEY}"] = "1"\n'
 
+STORE_DATA_MATCH_LINE = "        query[kSecMatchLimit as String] = kSecMatchLimitOne\n"
+STORE_SET_QUERY_LINE = "        let query = baseQuery(account: account)\n"
+STORE_SET_ITEM_LINE = "            item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly\n"
+STORE_REMOVE_LINE = "        let status = SecItemDelete(baseQuery(account: account) as CFDictionary)\n"
+CLEANUP_DELETE_QUERY_LINE = "        return SecItemDelete(exactQuery(service: service, account: account) as CFDictionary)\n"
+CLEANUP_LOOP_LINE = "            let status = delete(service, account)\n"
+RAW_REMOVE_LINE = "        SecItemDelete(query(account) as CFDictionary)\n"
+RAW_SET_FIRST = "        var item = query(account)\n        item[kSecValueData as String] = data\n"
+RAW_DATA_FIRST = "        var item = query(account)\n        item[kSecReturnData as String] = true\n"
+GUARD_DETECT_TEXT = (
+    "        if xctestCaseClassLoaded { return true }\n"
+    "        for key in environmentKeys {\n"
+    "            if environment[key] != nil { return true }\n"
+    "        }\n"
+    "        return false\n"
+)
+TRIPWIRE_SIGNER_BLOCK = (
+    "    @Test func theSignersReportNotConfigured() {\n"
+    "        #expect(LocalApprovalSigner.shared.isConfigured(for: .uk) == false)\n"
+    "        #expect(LocalApprovalSigner.shared.isConfigured(for: .india) == false)\n"
+    "        #expect(ApprovalSignerRouter.shared.isConfigured(for: .uk) == false)\n"
+    "        #expect(ApprovalSignerRouter.shared.isConfigured(for: .india) == false)\n"
+    "    }\n"
+)
+TRIPWIRE_HEADER_TEXT = "@MainActor\n@Suite(.serialized)\nstruct ProductionTripwireTests {\n"
+TRIPWIRE_FIRST_TEST = "    @Test func thisProcessIsATestHost() {\n"
+
 # label -> (scan kind, planted text). With the guard broken, the scan must report something.
 PLANTS: dict[str, tuple[str, str]] = {
+    # === round 3, item 1: the service stripped, swapped or merged over AFTER the query builder ===
+    "store: rawData strips the service with removeValue(forKey: svce) (r3 item 1)": (
+        "store",
+        replaced(STORE_TEXT, STORE_DATA_MATCH_LINE, STORE_DATA_MATCH_LINE + '        query.removeValue(forKey: "svce")\n'),
+    ),
+    "store: rawData strips the service by key constant (r3 item 1)": (
+        "store",
+        replaced(
+            STORE_TEXT,
+            STORE_DATA_MATCH_LINE,
+            STORE_DATA_MATCH_LINE + "        query.removeValue(forKey: kSecAttrService as String)\n",
+        ),
+    ),
+    "store: rawRemove deletes a service-less copy (r3 item 1)": (
+        "store",
+        replaced(
+            STORE_TEXT,
+            STORE_REMOVE_LINE,
+            "        var wide = baseQuery(account: account)\n"
+            '        wide.removeValue(forKey: "svce")\n'
+            "        _ = SecItemDelete(wide as CFDictionary)\n"
+            "        let status = errSecSuccess\n",
+        ),
+    ),
+    "store: rawSet filters the service out of its query (r3 item 1)": (
+        "store",
+        replaced(
+            STORE_TEXT,
+            STORE_SET_QUERY_LINE,
+            '        let query = baseQuery(account: account).filter { $0.key != "svce" }\n',
+        ),
+    ),
+    "store: rawData merges the production service over the query (r3 item 1)": (
+        "store",
+        replaced(
+            STORE_TEXT,
+            STORE_DATA_MATCH_LINE,
+            STORE_DATA_MATCH_LINE + '        query.merge(["svce": "san.Growin.credentials." + "v1"]) { _, new in new }\n',
+        ),
+    ),
+    "store: rawSet overwrites the service on the add item (r3 item 1)": (
+        "store",
+        replaced(
+            STORE_TEXT,
+            STORE_SET_ITEM_LINE,
+            STORE_SET_ITEM_LINE + '            item["svce"] = ProductionKeychainGuard.productionService\n',
+        ),
+    ),
+    "store: rawData builds its query from the shared instance (r3 item 1)": (
+        "store",
+        replaced(
+            STORE_TEXT,
+            "        var query = baseQuery(account: account)\n",
+            "        var query = Self.shared.baseQuery(account: account)\n",
+        ),
+    ),
+    "cleanup: deleteExactItem strips the service from its query (r3 item 1)": (
+        "cleanup",
+        replaced(
+            CLEANUP_TEXT,
+            CLEANUP_DELETE_QUERY_LINE,
+            '        return SecItemDelete(exactQuery(service: service, account: account).filter { $0.key != "svce" } as CFDictionary)\n',
+        ),
+    ),
+    "cleanup: deleteAllMatches deletes on another service (r3 item 1)": (
+        "cleanup",
+        replaced(CLEANUP_TEXT, CLEANUP_LOOP_LINE, '            let status = delete("other", account)\n'),
+    ),
+    "raw: remove deletes a service-less query (r3 item 1)": (
+        "raw",
+        replaced(
+            RAW_TEXT,
+            RAW_REMOVE_LINE,
+            "        var wide = query(account)\n"
+            '        wide.removeValue(forKey: "svce")\n'
+            "        SecItemDelete(wide as CFDictionary)\n",
+        ),
+    ),
+    "raw: data strips the service (r3 item 1)": (
+        "raw",
+        replaced(RAW_TEXT, RAW_DATA_FIRST, RAW_DATA_FIRST + "        item.removeValue(forKey: kSecAttrService as String)\n"),
+    ),
+    "raw: set strips the service (r3 item 1)": (
+        "raw",
+        replaced(RAW_TEXT, RAW_SET_FIRST, RAW_SET_FIRST + '        item.removeValue(forKey: "svce")\n'),
+    ),
+    # === round 3, item 2: the tripwire compiled out, disabled or moved out of a @Test ===
+    "tripwire: the whole file inside #if false (r3 item 2)": (
+        "tripwire",
+        "#if false\n" + TRIPWIRE_TEXT + "#endif\n",
+    ),
+    "tripwire: one assertion inside #if false (r3 item 2)": (
+        "tripwire",
+        replaced(TRIPWIRE_TEXT, TRIPWIRE_SIGNER, "#if false\n" + TRIPWIRE_SIGNER + "#endif\n"),
+    ),
+    "tripwire: an @Test attribute removed (r3 item 2)": (
+        "tripwire",
+        replaced(TRIPWIRE_TEXT, "    @Test func theSharedStoreRefusesARead() {", "    func theSharedStoreRefusesARead() {"),
+    ),
+    "tripwire: an .enabled(if: false) trait (r3 item 2)": (
+        "tripwire",
+        replaced(
+            TRIPWIRE_TEXT,
+            "    @Test func theSharedStoreRefusesARead() {",
+            "    @Test(.enabled(if: false)) func theSharedStoreRefusesARead() {",
+        ),
+    ),
+    "tripwire: a .disabled trait on another test (r3 item 2)": (
+        "tripwire",
+        replaced(
+            TRIPWIRE_TEXT,
+            "    @Test func theSignersReportNotConfigured() {",
+            '    @Test(.disabled("x")) func theSignersReportNotConfigured() {',
+        ),
+    ),
+    "tripwire: the suite disabled (r3 item 2)": (
+        "tripwire",
+        replaced(TRIPWIRE_TEXT, "@Suite(.serialized)", '@Suite(.disabled("x"))'),
+    ),
+    "tripwire: the suite attribute removed (r3 item 2)": (
+        "tripwire",
+        replaced(TRIPWIRE_TEXT, "@Suite(.serialized)\n", ""),
+    ),
+    "tripwire: the signer checks moved into a non-test helper (r3 item 2)": (
+        "tripwire",
+        replaced(
+            TRIPWIRE_TEXT,
+            TRIPWIRE_SIGNER_BLOCK,
+            TRIPWIRE_SIGNER_BLOCK.replace("    @Test func theSignersReportNotConfigured() {", "    private static func signerChecks() {")
+            + "\n    @Test func theSignersReportNotConfigured() {\n        #expect(Self.protectedName.isEmpty == false)\n    }\n",
+        ),
+    ),
+    "tripwire: a test that asserts nothing (r3 item 2)": (
+        "tripwire",
+        replaced(
+            TRIPWIRE_TEXT,
+            TRIPWIRE_SIGNER_BLOCK,
+            "    @Test func theSignersReportNotConfigured() {\n    }\n",
+        ),
+    ),
+    # === round 3, item 3: the tripwire writing through the KeychainStorage property wrapper ===
+    "tripwire: KeychainStorage(...).wrappedValue = x (r3 item 3)": (
+        "tripwire",
+        replaced(
+            TRIPWIRE_TEXT,
+            TRIPWIRE_FIRST_TEST,
+            TRIPWIRE_FIRST_TEST + '        KeychainStorage(wrappedValue: "", .alpacaApiKey, scope: .workspace(.uk)).wrappedValue = "x"\n',
+        ),
+    ),
+    "tripwire: an @KeychainStorage property (r3 item 3)": (
+        "tripwire",
+        replaced(
+            TRIPWIRE_TEXT,
+            TRIPWIRE_FIRST_TEST,
+            '    @KeychainStorage(.alpacaApiKey, scope: .workspace(.uk)) private var stored = ""\n\n' + TRIPWIRE_FIRST_TEST,
+        ),
+    ),
+    "tripwire: an assignment to a member (r3 item 3)": (
+        "tripwire",
+        replaced(TRIPWIRE_TEXT, TRIPWIRE_FIRST_TEST, TRIPWIRE_FIRST_TEST + "        Self.state.value = 1\n"),
+    ),
+    "tripwire: an assignment to a subscript (r3 item 3)": (
+        "tripwire",
+        replaced(TRIPWIRE_TEXT, TRIPWIRE_FIRST_TEST, TRIPWIRE_FIRST_TEST + '        Self.table["x"] = 1\n'),
+    ),
+    # === round 3, item 4: the guard's own calls shadowed one layer down ===
+    "guard: ProcessInfo no longer module-qualified (r3 item 4)": (
+        "guard",
+        replaced(GUARD_TEXT, "Foundation.ProcessInfo.processInfo", "ProcessInfo.processInfo"),
+    ),
+    "guard: NSClassFromString no longer module-qualified (r3 item 4)": (
+        "guard",
+        replaced(GUARD_TEXT, 'Foundation.NSClassFromString("XCTestCase")', 'NSClassFromString("XCTestCase")'),
+    ),
+    "guard: detection back to contains(where:) (r3 item 4)": (
+        "guard",
+        replaced(
+            GUARD_TEXT,
+            GUARD_DETECT_TEXT,
+            "        xctestCaseClassLoaded || environmentKeys.contains { environment[$0] != nil }\n",
+        ),
+    ),
+    "guard: detection loop returns false on a hit (r3 item 4)": (
+        "guard",
+        replaced(GUARD_TEXT, "if environment[key] != nil { return true }", "if environment[key] != nil { return false }"),
+    ),
     # === item 1: a SecItem function that is not on the allow-list, or a guard that is not unconditional ===
     "store: a new named owner with a ternary guard (Codex probeDelete)": (
         "store",
@@ -1567,7 +2034,7 @@ PLANTS: dict[str, tuple[str, str]] = {
         "guard",
         replaced(
             GUARD_TEXT,
-            'xctestCaseClassLoaded: Bool = NSClassFromString("XCTestCase") != nil',
+            'xctestCaseClassLoaded: Bool = Foundation.NSClassFromString("XCTestCase") != nil',
             "xctestCaseClassLoaded: Bool = false",
         ),
     ),
@@ -1575,8 +2042,8 @@ PLANTS: dict[str, tuple[str, str]] = {
         "guard",
         replaced(
             GUARD_TEXT,
-            'xctestCaseClassLoaded: Bool = NSClassFromString("XCTestCase") != nil',
-            'xctestCaseClassLoaded: Bool = false // NSClassFromString("XCTestCase") != nil',
+            'xctestCaseClassLoaded: Bool = Foundation.NSClassFromString("XCTestCase") != nil',
+            'xctestCaseClassLoaded: Bool = false // Foundation.NSClassFromString("XCTestCase") != nil',
         ),
     ),
     "guard: typo in an env key, correct name in a comment (finding 5)": (
@@ -1585,7 +2052,7 @@ PLANTS: dict[str, tuple[str, str]] = {
     ),
     "guard: detection ignores the class signal": (
         "guard",
-        replaced(GUARD_TEXT, "xctestCaseClassLoaded || environmentKeys", "environmentKeys"),
+        replaced(GUARD_TEXT, "        if xctestCaseClassLoaded { return true }\n", ""),
     ),
     "guard: refusal code changed": ("guard", replaced(GUARD_TEXT, "PRODUCTION_KEYCHAIN_REFUSED_UNDER_TESTS", "REFUSED")),
     # === the UI-test app process carries the key (item B) ===
@@ -1630,8 +2097,10 @@ PLANTS: dict[str, tuple[str, str]] = {
     ),
     "raw: check wrapped in #if DEBUG": (
         "raw",
-        replaced(RAW_TEXT, "        precondition(\n", "        #if DEBUG\n        precondition(\n").replace(
-            'test-prefixed service")\n', 'test-prefixed service")\n        #endif\n', 1
+        replaced(
+            replaced(RAW_TEXT, "        precondition(\n", "        #if DEBUG\n        precondition(\n"),
+            'test-prefixed service")\n',
+            'test-prefixed service")\n        #endif\n',
         ),
     ),
     # === item 4: the tripwire stays read-only, refusal-only and silent ===
@@ -1777,12 +2246,25 @@ REAL = {
 @pytest.mark.parametrize("label", sorted(PLANTS))
 def test_each_planted_guard_break_is_caught(label):
     kind, planted = PLANTS[label]
+    if isinstance(planted, BrokenPlant):
+        pytest.fail(f"{label}: {planted.message}")
     assert planted != REAL[kind], "the plant changed nothing"
     assert run_scan(kind, planted), f"the scan missed: {label}"
 
 
+def test_every_plant_applies_to_the_current_source():
+    broken = {label: text.message for label, (_, text) in PLANTS.items() if isinstance(text, BrokenPlant)}
+    assert broken == {}, "plants whose anchor text is gone (update them with the source change): " + "; ".join(
+        f"{label}: {message}" for label, message in sorted(broken.items())
+    )
+
+
 def test_no_planted_break_goes_undetected():
-    undetected = [label for label, (kind, text) in PLANTS.items() if not run_scan(kind, text)]
+    undetected = [
+        label
+        for label, (kind, text) in PLANTS.items()
+        if not isinstance(text, BrokenPlant) and not run_scan(kind, text)
+    ]
     assert undetected == [], f"{len(undetected)} planted breaks go undetected"
     assert len(PLANTS) >= 100
 
@@ -1790,6 +2272,56 @@ def test_no_planted_break_goes_undetected():
 # --- planted shadows (item 3): extra or changed files in the Growin/ and GrowinTests/ tree ---
 
 SHADOW_PLANTS: dict[str, dict[Path, str]] = {
+    # --- round 3, item 4: one layer down (Opus CompatShims.swift) ---
+    "a top-level NSClassFromString that returns nil (Opus)": {
+        Path("Growin/Util/CompatShims.swift"): "func NSClassFromString(_ name: String) -> AnyClass? { nil }\n"
+    },
+    "an Array extension that overrides contains(where:) (Opus)": {
+        Path("Growin/Util/CompatShims.swift"): "extension Array where Element == String {\n"
+        "    func contains(where predicate: (String) throws -> Bool) rethrows -> Bool { false }\n}\n"
+    },
+    "a Sequence extension": {
+        Path("Growin/Util/CompatShims.swift"): "extension Sequence {\n    func contains(where p: (Element) throws -> Bool) rethrows -> Bool { false }\n}\n"
+    },
+    "a Dictionary extension with a more specific subscript": {
+        Path("Growin/Util/CompatShims.swift"): "extension Dictionary where Key == String, Value == String {\n"
+        "    subscript(key: String) -> String? { nil }\n}\n"
+    },
+    "a ProcessInfo extension with an environment": {
+        Path("Growin/Util/CompatShims.swift"): "extension ProcessInfo {\n    var environment: [String: String] { [:] }\n}\n"
+    },
+    "an Optional extension": {Path("Growin/Util/CompatShims.swift"): "extension Optional {\n    var isNil: Bool { false }\n}\n"},
+    "a Foundation-qualified String extension": {
+        Path("Growin/Util/CompatShims.swift"): "extension Swift.String {\n    var isEmpty: Bool { false }\n}\n"
+    },
+    "a global == on Bool": {Path("Growin/Util/CompatShims.swift"): "func == (lhs: Bool, rhs: Bool) -> Bool { true }\n"},
+    "a global && on Bool": {
+        Path("Growin/Util/CompatShims.swift"): "func && (lhs: Bool, rhs: @autoclosure () -> Bool) -> Bool { false }\n"
+    },
+    "a global || on Bool": {
+        Path("Growin/Util/CompatShims.swift"): "func || (lhs: Bool, rhs: @autoclosure () throws -> Bool) rethrows -> Bool { false }\n"
+    },
+    "a global prefix ! on Bool": {Path("Growin/Util/CompatShims.swift"): "prefix func ! (value: Bool) -> Bool { value }\n"},
+    "a global != on an optional class": {
+        Path("Growin/Util/CompatShims.swift"): "func != (lhs: AnyClass?, rhs: _OptionalNilComparisonType) -> Bool { false }\n"
+    },
+    "a static == inside a type that takes String": {
+        Path("Growin/Util/CompatShims.swift"): "enum Shim {\n    static func == (lhs: String, rhs: String) -> Bool { true }\n}\n"
+    },
+    "a static && inside a type that takes Bool": {
+        Path("Growin/Util/CompatShims.swift"): "enum Shim {\n    static func && (lhs: Bool, rhs: Bool) -> Bool { false }\n}\n"
+    },
+    "a module-level enum named Foundation": {Path("Growin/Util/CompatShims.swift"): "enum Foundation {}\n"},
+    "a module-level struct named ProcessInfo": {Path("Growin/Util/CompatShims.swift"): "struct ProcessInfo {}\n"},
+    "a module-level let environment": {Path("Growin/Util/CompatShims.swift"): "let environment: [String: String] = [:]\n"},
+    "a module-level var processInfo": {Path("Growin/Util/CompatShims.swift"): "var processInfo = 1\n"},
+    "an extension that declares a static environment": {
+        Path("Growin/Util/CompatShims.swift"): "extension KeychainStore {\n    static var environment: [String: String] { [:] }\n}\n"
+    },
+    "a nested Foundation type inside an extension": {
+        Path("Growin/Util/CompatShims.swift"): "extension KeychainStore {\n    enum Foundation {}\n}\n"
+    },
+    "a module-level typealias of Darwin": {Path("Growin/Util/CompatShims.swift"): "typealias Darwin = Int\n"},
     "a nested TestHostDetection in an extension of the store (Opus)": {
         Path("Growin/Models/Shadow.swift"): "extension KeychainStore {\n    enum TestHostDetection {\n"
         "        static func isTestHost() -> Bool { false }\n    }\n}\n"
@@ -1852,6 +2384,18 @@ def test_each_planted_shadow_is_caught(label):
     files = swift_files()
     files.update(SHADOW_PLANTS[label])
     assert shadow_offences(files), f"the scan missed: {label}"
+
+
+def test_the_shadow_scan_leaves_members_and_custom_type_operators_alone():
+    files = swift_files()
+    files[Path("Growin/Models/Fine2.swift")] = (
+        "struct Status {\n    let environment: String?\n    var processInfo: Int = 0\n}\n"
+        "enum Mode { case environment }\n"
+        "struct Card: Equatable {\n    static func == (lhs: Card, rhs: Card) -> Bool { true }\n}\n"
+        "extension Card {\n    var title: String { \"\" }\n}\n"
+        "func run() {\n    let environment = 1\n    _ = environment\n}\n"
+    )
+    assert shadow_offences(files) == []
 
 
 def test_the_shadow_scan_leaves_ordinary_uses_alone():
@@ -2022,3 +2566,15 @@ def test_a_pinned_body_ignores_layout_and_comments_but_nothing_else():
     assert pinned(source, "f", "a && b") == []
     assert pinned(source, "f", "a || b") != []
     assert pinned(source, "g", "a && b") != []
+
+
+def test_a_plant_whose_anchor_is_gone_fails_by_name_not_at_collection():
+    broken = replaced("some source text", "an anchor that is gone", "x")
+    assert isinstance(broken, BrokenPlant)
+    assert "an anchor that is gone" in broken.message
+    # Chained plants pass the marker through, so the final text still reports the first missing anchor.
+    chained = replaced(broken, "some", "any")
+    assert isinstance(chained, BrokenPlant) and chained.message == broken.message
+    # A plant that applies is an ordinary string.
+    assert replaced("some source text", "source", "other") == "some other text"
+    assert not isinstance(replaced("some source text", "source", "other"), BrokenPlant)

@@ -248,6 +248,48 @@ struct LegacyT212KeychainCleanupTests {
         #expect(rig.defaults.string(forKey: CredentialName.openaiApiKey.rawValue) == "CANARY-OTHER")
     }
 
+    // MARK: Service isolation canary
+
+    /// Runtime proof that the cleanup's REAL delete (not an injected one) carries its own service. If
+    /// the query lost its service, a delete aimed at service A would remove service B's item. Both
+    /// services are test-prefixed and everything is removed again.
+    @Test func theRealDeleteNeverTouchesAnotherServicesItem() throws {
+        let a = Rig()
+        let b = Rig()
+        defer {
+            a.tearDown()
+            b.tearDown()
+        }
+        try b.seed(Cleanup.legacyAccounts)
+
+        // A holds nothing: the real delete reports not-found for every account and B is untouched.
+        for account in Cleanup.legacyAccounts {
+            #expect(Cleanup.deleteExactItem(service: a.service, account: account) == errSecItemNotFound, "\(account)")
+        }
+        for account in Cleanup.legacyAccounts {
+            #expect(try b.raw.data(account: account) == Self.canary, "B untouched: \(account)")
+        }
+
+        // A holds its own copies: the real delete removes A's and leaves B's byte-identical.
+        try a.seed(Cleanup.legacyAccounts)
+        for account in Cleanup.legacyAccounts {
+            #expect(Cleanup.deleteExactItem(service: a.service, account: account) == errSecSuccess, "\(account)")
+            #expect(try a.raw.data(account: account) == nil, "A removed: \(account)")
+        }
+        for account in Cleanup.legacyAccounts {
+            #expect(try b.raw.data(account: account) == Self.canary, "B untouched: \(account)")
+        }
+
+        // The whole run with the real default delete does the same.
+        try a.seed(Cleanup.legacyAccounts)
+        let outcome = Cleanup.runOnce(service: a.service, defaults: a.defaults, log: { _ in })
+        #expect(outcome.removed == Cleanup.legacyAccounts.count)
+        for account in Cleanup.legacyAccounts {
+            #expect(try a.raw.data(account: account) == nil, "A removed: \(account)")
+            #expect(try b.raw.data(account: account) == Self.canary, "B untouched: \(account)")
+        }
+    }
+
     // MARK: Source guards
 
     private static let migrationPath = "Growin/Security/LegacyT212KeychainCleanup.swift"

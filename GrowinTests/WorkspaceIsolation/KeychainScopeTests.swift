@@ -135,6 +135,104 @@ struct KeychainScopeTests {
         #expect(store.migrateFlatItemsToScoped() == [])
     }
 
+    // MARK: Service isolation canary
+    //
+    // Runtime proof, independent of the source scans, that every Keychain query carries its own
+    // service. If a query lost its service (stripped, swapped, merged over) a call on store A would
+    // read, overwrite or delete the item that lives under store B. Both services are test-prefixed
+    // and every item is removed again. This is the failure that would let `cleanUp` below wipe the
+    // operator's real items.
+
+    private static let canaryScopedAccount = "uk:alpacaApiKey"
+    private static let canaryFlatAccount = CredentialName.alpacaApiKey.rawValue
+    private static let canaryApprovalAccount = "uk:" + CredentialName.approvalSigningKey.rawValue
+
+    @Test func aStoreNeverSeesOrChangesAnotherServicesItem() {
+        let (a, _) = Self.makeStore()
+        let (b, serviceB) = Self.makeStore()
+        defer {
+            Self.cleanUp(a)
+            Self.cleanUp(b)
+        }
+        Self.requireKeychain {
+            let planted = Data("CANARY-B".utf8)
+            try b.set(planted, for: .alpacaApiKey, scope: .workspace(.uk))
+            let rawB = RawKeychain(service: serviceB)
+            #expect(try rawB.data(account: Self.canaryScopedAccount) == planted, "positive control")
+
+            // Store A holds nothing of its own, so every read is nil whatever B holds.
+            #expect(try a.data(for: .alpacaApiKey, scope: .workspace(.uk)) == nil)
+            #expect(try a.string(for: .alpacaApiKey, scope: .workspace(.uk)) == nil)
+
+            // A remove, an empty set and a real set on A all leave B byte-identical.
+            try a.remove(.alpacaApiKey, scope: .workspace(.uk))
+            #expect(try rawB.data(account: Self.canaryScopedAccount) == planted)
+            try a.set("", for: .alpacaApiKey, scope: .workspace(.uk))
+            #expect(try rawB.data(account: Self.canaryScopedAccount) == planted)
+            try a.set("CANARY-A", for: .alpacaApiKey, scope: .workspace(.uk))
+            #expect(try rawB.data(account: Self.canaryScopedAccount) == planted)
+            #expect(try a.string(for: .alpacaApiKey, scope: .workspace(.uk)) == "CANARY-A")
+            try a.remove(.alpacaApiKey, scope: .workspace(.uk))
+            #expect(try rawB.data(account: Self.canaryScopedAccount) == planted)
+            #expect(try b.string(for: .alpacaApiKey, scope: .workspace(.uk)) == "CANARY-B")
+        }
+    }
+
+    @Test func aStoreCleanUpAndLegacyCallsLeaveAnotherServicesItemsAlone() {
+        let (a, _) = Self.makeStore()
+        let (b, serviceB) = Self.makeStore()
+        defer {
+            Self.cleanUp(a)
+            Self.cleanUp(b)
+        }
+        Self.requireKeychain {
+            let rawB = RawKeychain(service: serviceB)
+            let scoped = Data("CANARY-SCOPED-B".utf8)
+            let flat = Data("CANARY-FLAT-B".utf8)
+            let approval = Data("CANARY-APPROVAL-B".utf8)
+            try b.set(scoped, for: .alpacaApiKey, scope: .workspace(.uk))
+            try rawB.set(flat, account: Self.canaryFlatAccount)
+            try b.set(approval, for: .approvalSigningKey, scope: .workspace(.uk))
+
+            #expect(try a.legacyFlatData(for: .alpacaApiKey) == nil)
+            try a.removeLegacyFlatItem(.alpacaApiKey)
+            // The helper every test here uses to tidy up wipes every credential name on A. It must not
+            // reach B's items.
+            Self.cleanUp(a)
+            #expect(a.migrateFlatItemsToScoped() == [])
+
+            #expect(try rawB.data(account: Self.canaryScopedAccount) == scoped)
+            #expect(try rawB.data(account: Self.canaryFlatAccount) == flat)
+            #expect(try rawB.data(account: Self.canaryApprovalAccount) == approval)
+        }
+    }
+
+    @Test func rawKeychainOnOneServiceCannotSeeOrRemoveAnother() {
+        let (_, serviceA) = Self.makeStore()
+        let (_, serviceB) = Self.makeStore()
+        let rawA = RawKeychain(service: serviceA)
+        let rawB = RawKeychain(service: serviceB)
+        let account = "canary-raw"
+        defer {
+            rawA.remove(account: account)
+            rawB.remove(account: account)
+        }
+        Self.requireKeychain {
+            let bytesB = Data("CANARY-RAW-B".utf8)
+            try rawB.set(bytesB, account: account)
+            #expect(try rawA.data(account: account) == nil)
+            rawA.remove(account: account)
+            #expect(try rawB.data(account: account) == bytesB)
+
+            let bytesA = Data("CANARY-RAW-A".utf8)
+            try rawA.set(bytesA, account: account)
+            #expect(try rawA.data(account: account) == bytesA)
+            rawB.remove(account: account)
+            #expect(try rawA.data(account: account) == bytesA)
+            #expect(try rawB.data(account: account) == nil)
+        }
+    }
+
     @Test func approvalKeyIsPerWorkspaceAndNeverShared() {
         let (store, _) = Self.makeStore()
         defer { Self.cleanUp(store) }

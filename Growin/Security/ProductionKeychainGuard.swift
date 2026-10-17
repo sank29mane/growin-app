@@ -24,11 +24,19 @@ nonisolated enum TestHostDetection {
         "GROWIN_UI_TEST_HOST",
     ]
 
+    /// `Foundation.` is spelled out on purpose: a declaration of the same name elsewhere in the app
+    /// module cannot shadow a module-qualified call. The loop, not `contains(where:)`, so the check
+    /// does not go through a generic member an app extension could replace (a source scan also bans
+    /// extensions of the standard types in `Growin/`).
     static func isTestHost(
-        environment: [String: String] = ProcessInfo.processInfo.environment,
-        xctestCaseClassLoaded: Bool = NSClassFromString("XCTestCase") != nil
+        environment: [String: String] = Foundation.ProcessInfo.processInfo.environment,
+        xctestCaseClassLoaded: Bool = Foundation.NSClassFromString("XCTestCase") != nil
     ) -> Bool {
-        xctestCaseClassLoaded || environmentKeys.contains { environment[$0] != nil }
+        if xctestCaseClassLoaded { return true }
+        for key in environmentKeys {
+            if environment[key] != nil { return true }
+        }
+        return false
     }
 }
 
