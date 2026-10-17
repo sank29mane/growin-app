@@ -329,6 +329,11 @@ if ProductionKeychainGuard.refusesCurrentProcess(service: service)
 }
 return performRun(service: service, defaults: defaults, delete: delete, log: log)
 """
+# Directly under `if let status = result.error {`, so nothing runs between the error and the return.
+CLEANUP_TERMINAL_REFUSAL = """
+if let status = result.error {
+    if status == refusedUnderTestsStatus { return refusedOutcome(log: log) }
+"""
 CLEANUP_REFUSED_BODY = """
 log("legacy cleanup refused: \\(ProductionKeychainGuard.refusalCode)")
 return Outcome(skipped: true, removed: 0, failedStatuses: [], refused: true)
@@ -354,6 +359,22 @@ def legacy_cleanup_offences(text: str) -> list[str]:
     found += pinned(source, "runOnce", CLEANUP_PUBLIC_RUN_BODY, params_lack="protectedService")
     found += pinned(source, "runOnce", CLEANUP_EXPLICIT_RUN_BODY, params_have="protectedService")
     found += pinned(source, "refusedOutcome", CLEANUP_REFUSED_BODY)
+
+    # A refused delete is terminal inside the work: it returns the refusal before any defaults write.
+    work = by_name(source.code_funcs, "performRun")
+    if len(work) != 1:
+        found.append(f"{name}: performRun() must exist exactly once")
+    else:
+        body = norm(work[0].body(source.code))
+        terminal = norm(CLEANUP_TERMINAL_REFUSAL)
+        at = body.find(terminal)
+        writes = [i for i in (body.find("defaults.removeObject("), body.find("defaults.set(")) if i >= 0]
+        if at < 0:
+            found.append(f"{name}: performRun() does not treat a refused delete as terminal")
+        elif not writes or at > min(writes):
+            found.append(f"{name}: performRun() writes defaults before it returns on a refused delete")
+        elif body.count(terminal) != 1:
+            found.append(f"{name}: performRun() has the terminal refusal more than once")
 
     # The work is reachable only from the two entry points, and drives the match loop alone.
     for call in re.finditer(r"(?<![A-Za-z0-9_])performRun\s*\(", source.bare):
@@ -593,6 +614,11 @@ CLEANUP_PUBLIC_TEXT = (
     "            return refusedOutcome(log: log)\n"
     "        }\n"
 )
+CLEANUP_TERMINAL_TEXT = (
+    "                // A refused delete is terminal, not an ordinary Keychain error: stop before any\n"
+    "                // defaults write, failure count or completion mark, exactly like the front check.\n"
+    "                if status == refusedUnderTestsStatus { return refusedOutcome(log: log) }\n"
+)
 CLEANUP_EXPLICIT_COND = (
     "        if ProductionKeychainGuard.refusesCurrentProcess(service: service)\n"
     "            || ProductionKeychainGuard.refuses(service: service, protectedService: protectedService, testHost: testHost) {\n"
@@ -806,6 +832,30 @@ PLANTS: dict[str, tuple[str, str]] = {
             "    static func sneaky(service: String) -> OSStatus {\n"
             '        SecItemDelete(exactQuery(service: service, account: "x") as CFDictionary)\n'
             "    }\n\n    private static let logger",
+        ),
+    ),
+    "cleanup: a refused delete is not terminal, only recorded as a failure (round 1 item A)": (
+        "cleanup",
+        replaced(CLEANUP_TEXT, CLEANUP_TERMINAL_TEXT, ""),
+    ),
+    "cleanup: the terminal check moved after the failure is recorded (item A)": (
+        "cleanup",
+        replaced(
+            CLEANUP_TEXT,
+            CLEANUP_TERMINAL_TEXT + "                failed.append(status)\n",
+            "                failed.append(status)\n" + CLEANUP_TERMINAL_TEXT,
+        ),
+    ),
+    "cleanup: the terminal check tests the wrong status (item A)": (
+        "cleanup",
+        replaced(CLEANUP_TEXT, "if status == refusedUnderTestsStatus {", "if status == errSecSuccess {"),
+    ),
+    "cleanup: the terminal check returns an ordinary outcome (item A)": (
+        "cleanup",
+        replaced(
+            CLEANUP_TEXT,
+            "if status == refusedUnderTestsStatus { return refusedOutcome(log: log) }",
+            "if status == refusedUnderTestsStatus { break }",
         ),
     ),
     "cleanup: SecItem function reference, not a call (finding 6)": (

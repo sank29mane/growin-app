@@ -110,7 +110,8 @@ nonisolated enum LegacyT212KeychainCleanup {
     }
 
     /// Deletes every match of one exact pair. Stops at not-found (done), at any
-    /// other error (reported), or at the bound (reported as an error).
+    /// other error (reported), or at the bound (reported as an error). A refused delete
+    /// (`refusedUnderTestsStatus`) comes back as that error, and `performRun` treats it as terminal.
     private static func deleteAllMatches(
         service: String, account: String, delete: Deleter
     ) -> (removed: Int, error: OSStatus?) {
@@ -193,6 +194,9 @@ nonisolated enum LegacyT212KeychainCleanup {
             let result = deleteAllMatches(service: service, account: account, delete: delete)
             removed += result.removed
             if let status = result.error {
+                // A refused delete is terminal, not an ordinary Keychain error: stop before any
+                // defaults write, failure count or completion mark, exactly like the front check.
+                if status == refusedUnderTestsStatus { return refusedOutcome(log: log) }
                 failed.append(status)
                 log("legacy cleanup keychain status \(status)")
             }

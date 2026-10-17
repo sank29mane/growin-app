@@ -150,6 +150,38 @@ struct ProductionKeychainGuardTests {
         }
     }
 
+    @Test func aRefusedDeleteIsTerminalAndLeavesTheDefaultsAlone() {
+        let service = Self.testService()
+        let suite = "growin.test.guard.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        for key in LegacyT212KeychainCleanup.legacyDefaultsKeys {
+            defaults.set("CANARY-LEGACY", forKey: key)
+        }
+        var deleteCalls = 0
+
+        // The service is not protected, so the front check passes. The delete itself reports a refusal.
+        let outcome = LegacyT212KeychainCleanup.runOnce(
+            service: service,
+            defaults: defaults,
+            delete: { _, _ in
+                deleteCalls += 1
+                return LegacyT212KeychainCleanup.refusedUnderTestsStatus
+            },
+            log: { _ in })
+
+        #expect(outcome.refused)
+        #expect(outcome.skipped)
+        #expect(outcome.failedStatuses.isEmpty, "a refusal is not an ordinary Keychain failure")
+        #expect(!outcome.gaveUp)
+        #expect(deleteCalls == 1, "stops at the first refusal")
+        for key in LegacyT212KeychainCleanup.legacyDefaultsKeys {
+            #expect(defaults.string(forKey: key) == "CANARY-LEGACY", "legacy defaults key kept")
+        }
+        #expect(!defaults.bool(forKey: LegacyT212KeychainCleanup.completionKey))
+        #expect(defaults.object(forKey: LegacyT212KeychainCleanup.failedLaunchesKey) == nil)
+    }
+
     @Test func theRefusedStatusIsOutsideTheSecurityFrameworkRange() {
         let status = LegacyT212KeychainCleanup.refusedUnderTestsStatus
         #expect(status != errSecSuccess)
