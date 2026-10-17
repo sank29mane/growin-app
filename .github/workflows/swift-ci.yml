@@ -8,6 +8,10 @@ name: Swift CI
 # signing vectors, through RelayVectors), so a change there triggers the job
 # too. A test scans GrowinTests for other paths outside the three Swift
 # folders and fails if one is not in the list below.
+# The step "Require the Keychain tripwire and canary tests" fails the job unless
+# every test named in .github/required-swift-tests.txt both ran and passed in
+# the xcresult, so deleting, renaming, disabling or skipping one cannot go
+# green. Editing that list also triggers this job.
 # Secure Enclave and Touch ID UAT tests stay skipped because
 # TEST_RUNNER_GROWIN_SE_UAT is never set here.
 #
@@ -69,6 +73,7 @@ on:
       - "GrowinUITests/**"
       - "Growin.xcodeproj/**"
       - ".github/workflows/swift-ci.yml"
+      - ".github/required-swift-tests.txt"
       - "tests/backend/fixtures/relay_orders/**"
   workflow_dispatch:
 
@@ -118,6 +123,7 @@ jobs:
               ':(icase)GrowinUITests/**' \
               ':(icase)Growin.xcodeproj/**' \
               ':(icase).github/workflows/swift-ci.yml' \
+              ':(icase).github/required-swift-tests.txt' \
               ':(icase)tests/backend/fixtures/relay_orders/**'); then
             echo "::warning::Could not diff $BASE_SHA...$HEAD_SHA. Running the Swift job."
             run_swift
@@ -290,6 +296,61 @@ jobs:
             2>&1 | tee "$RUNNER_TEMP/test.log"
           status=${PIPESTATUS[0]}
           exit "$status"
+
+      - name: Require the Keychain tripwire and canary tests
+        id: required
+        # Runs whenever the tests were attempted, pass or fail, so a missing
+        # test is named even when the test step is red. Not cancelled only.
+        if: ${{ !cancelled() && steps.build.outputs.built == 'true' }}
+        run: |
+          set -uo pipefail
+          list=".github/required-swift-tests.txt"
+          result="$RUNNER_TEMP/GrowinTests.xcresult"
+          fail() { echo "::error::Required Swift tests: $*"; exit 1; }
+          [[ -f "$list" ]] || fail "$list is missing."
+          [[ -d "$result" ]] || fail "no result bundle at $result, so the tests did not finish and none of the required tests can be confirmed."
+          command -v jq >/dev/null || fail "jq is not available on this runner."
+          json="$RUNNER_TEMP/required-tests.json"
+          xcrun xcresulttool get test-results tests --path "$result" --format json > "$json" \
+            || fail "xcresulttool could not read $result."
+          # Every Test Case node, with the names of the nodes above it.
+          # Swift Testing names a case "function()"; the "()" is dropped.
+          jq -c '
+            def cases($anc):
+              . as $n | ($anc + [$n.name // ""]) as $p
+              | if $n.nodeType == "Test Case"
+                then {path: $p, result: ($n.result // "unknown")}
+                else ($n.children // [])[] | cases($p) end;
+            .testNodes[]? | cases([])
+          ' "$json" > "$RUNNER_TEMP/required-cases.jsonl" || fail "could not read the test tree in $result."
+          total=$(wc -l < "$RUNNER_TEMP/required-cases.jsonl" | tr -d ' ')
+          [[ "$total" -gt 0 ]] || fail "the result bundle holds no test cases, so the xcresulttool output format may have changed."
+          required=0; bad=0
+          while IFS= read -r line || [[ -n "$line" ]]; do
+            line="${line//$'\r'/}"
+            [[ -z "${line//[[:space:]]/}" || "$line" == \#* ]] && continue
+            suite="${line%%/*}"; name="${line#*/}"
+            if [[ "$suite" == "$line" || -z "$suite" || -z "$name" ]]; then
+              echo "::error::Required Swift tests: bad line '$line' in $list (want Suite/testFunction)."; bad=$((bad+1)); continue
+            fi
+            required=$((required+1))
+            results=$(jq -r --arg suite "$suite" --arg name "$name" '
+              select((.path | last | sub("\\(\\)$"; "")) == $name and any(.path[:-1][]; . == $suite))
+              | .result' "$RUNNER_TEMP/required-cases.jsonl")
+            if [[ -z "$results" ]]; then
+              echo "::error::Required Swift test $suite/$name did not run: no such test case in the result bundle (deleted, renamed, or compiled out)."; bad=$((bad+1))
+            elif grep -qvx 'Passed' <<< "$results"; then
+              echo "::error::Required Swift test $suite/$name did not pass: result $(sort -u <<< "$results" | paste -sd, -)."; bad=$((bad+1))
+            else
+              echo "ok  $suite/$name"
+            fi
+          done < "$list"
+          [[ "$required" -gt 0 ]] || fail "$list names no tests."
+          {
+            echo
+            echo "Required tests: $((required-bad)) of $required ran and passed."
+          } >> "$GITHUB_STEP_SUMMARY"
+          [[ "$bad" -eq 0 ]] || exit 1
 
       - name: Summarise
         if: always() && steps.build.outputs.built == 'true'
