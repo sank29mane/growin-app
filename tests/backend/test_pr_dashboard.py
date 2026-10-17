@@ -514,7 +514,9 @@ def test_dashboard_workflow_security():
         assert re.fullmatch(r"[\w/-]+@[0-9a-f]{40} # v[\w.]+", action)
 
 
-def test_swift_ci_is_advisory_and_pinned():
+def test_swift_ci_is_required_and_pinned():
+    # The trigger, detection, fail-closed and name rules live in
+    # test_swift_ci_workflow.py. This one keeps the build and pinning rules.
     import yaml
     text = SWIFT.read_text()
     wf = yaml.safe_load(text)
@@ -522,8 +524,10 @@ def test_swift_ci_is_advisory_and_pinned():
     assert set(on) == {"pull_request", "push", "workflow_dispatch"}
     for key in ("pull_request", "push"):
         assert on[key]["branches"] == ["main"]
-        assert set(on[key]["paths"]) == {"Growin/**", "GrowinTests/**", "Growin.xcodeproj/**",
-                                         ".github/workflows/swift-ci.yml"}
+    assert "paths" not in on["pull_request"]
+    assert set(on["push"]["paths"]) == {"Growin/**", "GrowinTests/**", "GrowinUITests/**",
+                                        "Growin.xcodeproj/**", ".github/workflows/swift-ci.yml",
+                                        "tests/backend/fixtures/relay_orders/**"}
     assert wf["permissions"] == {"contents": "read"}
     job = wf["jobs"]["unit-tests"]
     assert job["runs-on"] == "macos-latest"
@@ -603,7 +607,13 @@ ANCHOR = '/w/x:1:2: error: SDK "y.swift:4:1: error: expected \'}\' in struct" ca
     ("true", 65, "error: linker command failed with exit code 1", 1, False),
     ("false", 0, "", 0, False),
 ])
-def test_swift_build_step_degrades_only_on_an_sdk_gap(tmp_path, older, status, log, code, degraded):
+@pytest.mark.parametrize("allow", ["true", None], ids=["override-true", "strict-default"])
+def test_swift_build_step_degrades_only_on_an_sdk_gap(tmp_path, older, status, log, code, degraded, allow):
+    # `code` is the exit code under the operator's override. By default the
+    # SDK-gap case ends red as well (test_swift_ci_workflow.py has the full
+    # override matrix); every other case is red or green regardless.
+    if degraded and allow is None:
+        code = 1
     import os
     import subprocess
     import yaml
@@ -619,6 +629,9 @@ def test_swift_build_step_degrades_only_on_an_sdk_gap(tmp_path, older, status, l
                GITHUB_OUTPUT=str(out), GITHUB_STEP_SUMMARY=str(summary), MIN_SDK="26.5",
                OLDER_SDK=older, SDK="26.2", XCODE="Xcode_26.2.app",
                FAKE_LOG=log, FAKE_STATUS=str(status))
+    env.pop("ALLOW_SDK_DEGRADE", None)
+    if allow is not None:
+        env["ALLOW_SDK_DEGRADE"] = allow
     r = subprocess.run(["bash", "-e", "-c", step["run"]], env=env, capture_output=True, text=True)
     assert r.returncode == code, r.stdout + r.stderr
     outputs = out.read_text()
@@ -627,9 +640,13 @@ def test_swift_build_step_degrades_only_on_an_sdk_gap(tmp_path, older, status, l
     if degraded:
         assert "::warning::Swift CI skipped" in r.stdout
         text = summary.read_text()
-        assert "## Swift CI: degraded (advisory)" in text and "macOS `26.5` SDK or newer" in text
+        assert "## Swift CI: degraded" in text and "macOS `26.5` SDK or newer" in text
         for line in log.splitlines():
             if "error: " in line:
                 assert line.split("error: ", 1)[1] in text
+        if allow is None:
+            assert "::error::Swift CI failed: tests did NOT run" in r.stdout
+        else:
+            assert "SDK degrade override is ON (repo variable SWIFT_CI_ALLOW_SDK_DEGRADE)" in r.stdout
     elif code:
         assert "::error::Swift build failed" in r.stdout
