@@ -76,9 +76,11 @@ struct LegacyT212KeychainCleanupTests {
     @Test func removesExactlyTheLegacyAccountsAndNothingElse() throws {
         let rig = Rig()
         // One neighbour service sorts before the test service and one after, so a delete
-        // that ignores the service cannot get lucky whichever order Keychain picks.
-        let neighbours = [rig.service.replacingOccurrences(of: ".test.", with: ".test!."),
-                          rig.service.replacingOccurrences(of: ".test.", with: ".test~.")]
+        // that ignores the service cannot get lucky whichever order Keychain picks. Both keep
+        // the test prefix (RawKeychain refuses anything else): the first suffix character is
+        // "!" (sorts before a UUID) or "~" (sorts after it).
+        let neighbours = [rig.service.replacingOccurrences(of: ".test.", with: ".test.!"),
+                          rig.service.replacingOccurrences(of: ".test.", with: ".test.~")]
             .map { RawKeychain(service: $0) }
         defer {
             rig.tearDown(extra: Self.decoyAccounts)

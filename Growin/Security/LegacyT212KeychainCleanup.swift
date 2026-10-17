@@ -140,19 +140,19 @@ nonisolated enum LegacyT212KeychainCleanup {
         delete: Deleter = deleteExactItem,
         log: (String) -> Void = defaultLog
     ) -> Outcome {
-        runOnce(
-            service: service,
-            protectedService: ProductionKeychainGuard.productionService,
-            testHost: TestHostDetection.isTestHost(),
-            defaults: defaults,
-            delete: delete,
-            log: log)
+        // Refuse first, before the injected `delete` or any defaults write, so a test host
+        // pointed at the production service changes nothing.
+        if ProductionKeychainGuard.refusesCurrentProcess(service: service) {
+            return refusedOutcome(log: log)
+        }
+        return performRun(service: service, defaults: defaults, delete: delete, log: log)
     }
 
-    /// The guard's inputs made explicit so a test can prove the refusal with a test-prefixed
-    /// service pair. No defaults on purpose, and no file in `Growin/` outside the Security
-    /// guard files may pass `protectedService:` (a source scan enforces it), so the app cannot
-    /// weaken the guard by calling this form.
+    /// The guard's inputs made explicit so a test can prove a refusal with a test-prefixed
+    /// service pair. The real-process refusal is unconditional and runs first. The injected
+    /// pair can only add a refusal: `testHost: false` never lifts the real one. No defaults on
+    /// purpose, and no file in `Growin/` outside the Security guard files may pass
+    /// `protectedService:` or `testHost:` (a source scan enforces it).
     @discardableResult
     static func runOnce(
         service: String,
@@ -162,12 +162,26 @@ nonisolated enum LegacyT212KeychainCleanup {
         delete: Deleter,
         log: (String) -> Void
     ) -> Outcome {
-        // Refuse first, before the injected `delete` or any defaults write, so a test host
-        // pointed at the production service changes nothing. The log line is the code only.
-        if ProductionKeychainGuard.refuses(service: service, protectedService: protectedService, testHost: testHost) {
-            log("legacy cleanup refused: \(ProductionKeychainGuard.refusalCode)")
-            return Outcome(skipped: true, removed: 0, failedStatuses: [], refused: true)
+        if ProductionKeychainGuard.refusesCurrentProcess(service: service)
+            || ProductionKeychainGuard.refuses(service: service, protectedService: protectedService, testHost: testHost) {
+            return refusedOutcome(log: log)
         }
+        return performRun(service: service, defaults: defaults, delete: delete, log: log)
+    }
+
+    /// The refusal result. The log line is the stable code only: no service, no account.
+    private static func refusedOutcome(log: (String) -> Void) -> Outcome {
+        log("legacy cleanup refused: \(ProductionKeychainGuard.refusalCode)")
+        return Outcome(skipped: true, removed: 0, failedStatuses: [], refused: true)
+    }
+
+    /// The work. Only the two entry points above call it, each after its refusal check.
+    private static func performRun(
+        service: String,
+        defaults: UserDefaults,
+        delete: Deleter,
+        log: (String) -> Void
+    ) -> Outcome {
         if defaults.bool(forKey: completionKey)
             || defaults.integer(forKey: failedLaunchesKey) >= maxFailedLaunches {
             return Outcome(skipped: true, removed: 0, failedStatuses: [])
