@@ -4,6 +4,10 @@ name: Swift CI
 # GrowinTests unit tests on a GitHub macOS runner with the newest Xcode it
 # has. GrowinUITests are not run here, but a change under GrowinUITests/
 # triggers the job because GrowinTests hold source scans over that folder.
+# GrowinTests also read tests/backend/fixtures/relay_orders/ (the relay
+# signing vectors, through RelayVectors), so a change there triggers the job
+# too. A test scans GrowinTests for other paths outside the three Swift
+# folders and fails if one is not in the list below.
 # Secure Enclave and Touch ID UAT tests stay skipped because
 # TEST_RUNNER_GROWIN_SE_UAT is never set here.
 #
@@ -24,16 +28,36 @@ name: Swift CI
 # The `push` trigger keeps its path filter. No required check applies to a
 # push, so a backend-only merge to main need not spend a macOS runner. Keep
 # its paths in step with the detection globs below (a test checks this).
+# Detection matches case-insensitively (:(icase)); GitHub's push path filter
+# cannot, so the two lists are compared with that prefix removed.
+#
+# `pull_request` keeps the default activity types (opened, synchronize,
+# reopened). `edited` is left out on purpose: it also fires on every title and
+# body edit, and this workflow's concurrency group cancels the in-flight run
+# of the same PR, so a body edit would kill a running 45-minute macOS job and
+# start it again. A stacked PR retargeted to main gets its run from the push
+# that the stack flow already requires (rebase, then force-push), or from a
+# close and reopen.
 #
 # The operator builds with Xcode-beta. If the project adopts APIs newer than
 # the runner's SDK, raise MIN_SDK. Then, when the runner's SDK is older than
 # MIN_SDK and the MESSAGE of every error line (the text after "error: ") is
 # one a newer SDK fixes ("... is only available in macOS N or newer", or an
-# explicit Xcode or SDK version error), the job ends with a warning and a
-# step summary saying what is missing instead of a red X. Anything else keeps
-# it red: "cannot find ... in scope", syntax errors, mixed logs, and plain
+# explicit Xcode or SDK version error), the build step writes a warning and a
+# step summary saying what is missing, and then FAILS: the tests did not run,
+# so a required check must not be green. Anything else keeps it red as well:
+# "cannot find ... in scope", syntax errors, mixed logs, and plain
 # "is unavailable in macOS" (@available(macOS, unavailable) is permanent).
 # On an SDK at least MIN_SDK, every build or test failure is red.
+#
+# SDK degrade override. If the repository variable SWIFT_CI_ALLOW_SDK_DEGRADE
+# is exactly the string "true" (not TRUE, 1, empty or unset), the SDK-gap case
+# above ends green instead, with a loud warning that the tests did NOT run.
+# Only the operator can set a repository variable, and nothing in a PR (label,
+# commit message, repo file) can turn it on. It is meant to be temporary:
+#   gh variable set SWIFT_CI_ALLOW_SDK_DEGRADE --body true
+#   gh variable delete SWIFT_CI_ALLOW_SDK_DEGRADE
+# It never rescues a non-availability error or a build on an SDK >= MIN_SDK.
 on:
   pull_request:
     branches: [ main ]
@@ -45,6 +69,7 @@ on:
       - "GrowinUITests/**"
       - "Growin.xcodeproj/**"
       - ".github/workflows/swift-ci.yml"
+      - "tests/backend/fixtures/relay_orders/**"
   workflow_dispatch:
 
 permissions:
@@ -88,11 +113,12 @@ jobs:
             run_swift
           fi
           if ! files=$(git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA" -- \
-              'Growin/**' \
-              'GrowinTests/**' \
-              'GrowinUITests/**' \
-              'Growin.xcodeproj/**' \
-              '.github/workflows/swift-ci.yml'); then
+              ':(icase)Growin/**' \
+              ':(icase)GrowinTests/**' \
+              ':(icase)GrowinUITests/**' \
+              ':(icase)Growin.xcodeproj/**' \
+              ':(icase).github/workflows/swift-ci.yml' \
+              ':(icase)tests/backend/fixtures/relay_orders/**'); then
             echo "::warning::Could not diff $BASE_SHA...$HEAD_SHA. Running the Swift job."
             run_swift
           fi
@@ -159,6 +185,9 @@ jobs:
           OLDER_SDK: ${{ steps.xcode.outputs.older_sdk }}
           SDK: ${{ steps.xcode.outputs.sdk }}
           XCODE: ${{ steps.xcode.outputs.app }}
+          # Operator-only switch (a repository variable). Read through env,
+          # never inline in `run`. Anything but the exact string "true" is strict.
+          ALLOW_SDK_DEGRADE: ${{ vars.SWIFT_CI_ALLOW_SDK_DEGRADE }}
         run: |
           set +e -uo pipefail  # the runner uses bash -e; keep going to read the status
           xcodebuild build-for-testing \
@@ -204,7 +233,17 @@ jobs:
           fi
           if [[ "$OLDER_SDK" == "true" && "$all_gap" == "true" ]]; then
             missing=$(sed -E 's/^.*error: //' <<< "$errors" | sort -u | head -n 8)
-            echo "::warning::Swift CI skipped: the runner's newest Xcode is $XCODE with the macOS $SDK SDK, and the project needs the macOS $MIN_SDK SDK or newer. Not a code failure."
+            # Strict by default. Only the exact string "true" (not TRUE, 1,
+            # empty or unset) turns the degrade into a green warning. The
+            # value is a repository variable, which only the operator sets.
+            override=false
+            if [[ "${ALLOW_SDK_DEGRADE:-}" == "true" ]]; then override=true; fi
+            loud="tests did NOT run; SDK degrade override is ON (repo variable SWIFT_CI_ALLOW_SDK_DEGRADE)"
+            if [[ "$override" == "true" ]]; then
+              echo "::warning::Swift CI skipped: $loud. The runner's newest Xcode is $XCODE with the macOS $SDK SDK, and the project needs the macOS $MIN_SDK SDK or newer. Not a code failure."
+            else
+              echo "::warning::Swift CI skipped: the runner's newest Xcode is $XCODE with the macOS $SDK SDK, and the project needs the macOS $MIN_SDK SDK or newer. Not a code failure."
+            fi
             {
               echo "## Swift CI: degraded"
               echo
@@ -217,10 +256,19 @@ jobs:
               echo "$missing"
               echo '```'
               echo
+              if [[ "$override" == "true" ]]; then
+                echo "**Warning: $loud.** This job is green only because of that override."
+                echo "The operator turns it off with \`gh variable delete SWIFT_CI_ALLOW_SDK_DEGRADE\`."
+              else
+                echo "**This job is red: tests did NOT run.** The operator can set the repository variable \`SWIFT_CI_ALLOW_SDK_DEGRADE\` to \`true\` to turn this into a warning, temporarily."
+              fi
+              echo
               echo "Nothing to fix in the code. This clears once GitHub ships a macOS runner with a new enough Xcode."
             } >> "$GITHUB_STEP_SUMMARY"
             echo "degraded=true" >> "$GITHUB_OUTPUT"
-            exit 0
+            if [[ "$override" == "true" ]]; then exit 0; fi
+            echo "::error::Swift CI failed: tests did NOT run because the runner's macOS $SDK SDK is older than the macOS $MIN_SDK SDK the project needs. The operator can set repo variable SWIFT_CI_ALLOW_SDK_DEGRADE to true to allow this temporarily."
+            exit 1
           fi
           echo "::error::Swift build failed on Xcode $XCODE (macOS $SDK SDK). See the log above."
           exit 1

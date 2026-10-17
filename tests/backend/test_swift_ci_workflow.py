@@ -18,6 +18,7 @@ import copy
 import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,9 @@ SWIFT_GLOBS = (
     "GrowinUITests/**",
     "Growin.xcodeproj/**",
     ".github/workflows/swift-ci.yml",
+    # RelayVectors in GrowinTests reads signing_vectors.json and
+    # swift_signature.json from this directory.
+    "tests/backend/fixtures/relay_orders/**",
 )
 SWIFT_JOB = "unit-tests"
 DETECT_JOB = "changes"
@@ -49,6 +53,16 @@ def triggers(wf: dict) -> dict:
 
 def detect_step(wf: dict) -> dict:
     return next(s for s in wf["jobs"][DETECT_JOB]["steps"] if s.get("id") == "detect")
+
+
+def detection_globs(wf: dict) -> list[str]:
+    """The pathspecs the detection step passes to git diff, minus the :(icase) magic."""
+    script = detect_step(wf)["run"]
+    return re.findall(r"'(?::\(icase\))?([^'\s]+)'", script[script.index("git diff"):])
+
+
+def find_test_step(wf: dict) -> dict:
+    return next(s for s in wf["jobs"][SWIFT_JOB]["steps"] if s.get("id") == "test")
 
 
 def _if_text(job: dict) -> str:
@@ -115,7 +129,8 @@ def check_detection_job_has_all_globs(wf):
     assert job["runs-on"] == "ubuntu-latest"
     script = detect_step(wf)["run"]
     for glob in SWIFT_GLOBS:
-        assert f"'{glob}'" in script, f"detection is missing {glob}"
+        assert f"':(icase){glob}'" in script, f"detection is missing a case-insensitive {glob}"
+    assert detection_globs(wf) == list(SWIFT_GLOBS)
     assert "git diff --name-only" in script
 
 
@@ -174,10 +189,184 @@ def check_timeout_and_concurrency_kept(wf):
 
 
 def check_push_paths_match_detection(wf):
-    assert triggers(wf)["push"]["paths"] == list(SWIFT_GLOBS)
+    # The push filter is case-sensitive and the detection is not, so compare
+    # the lists with the :(icase) magic removed. Equal means neither can drift.
+    push = triggers(wf)["push"]["paths"]
+    assert push == list(SWIFT_GLOBS)
+    assert push == detection_globs(wf)
+
+
+def check_pull_request_types_default(wf):
+    # `edited` would cancel a running macOS job on every title or body edit.
+    assert "types" not in (triggers(wf)["pull_request"] or {})
+
+
+# ---- the test step (build-for-testing is covered in test_pr_dashboard.py)
+
+
+def run_test_step(wf: dict, status: int) -> tuple[int, list[str], str]:
+    """Run the real test-step script against a fake xcodebuild.
+
+    Returns (exit code of the step, argv xcodebuild received, what it saw in
+    TEST_RUNNER_GROWIN_SE_UAT).
+    """
+    step = find_test_step(wf)
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        fake = tmp_path / "bin" / "xcodebuild"
+        fake.parent.mkdir()
+        fake.write_text(
+            '#!/bin/bash\n'
+            'printf "%s\\n" "$@" > "$FAKE_ARGV"\n'
+            'printf "%s\\n" "${TEST_RUNNER_GROWIN_SE_UAT-UNSET}" > "$FAKE_ENV"\n'
+            'echo "Test case \'-[X y]\' passed"\n'
+            'exit "$FAKE_STATUS"\n')
+        fake.chmod(0o755)
+        env = dict(os.environ, PATH=f"{fake.parent}:{os.environ['PATH']}", RUNNER_TEMP=str(tmp_path),
+                   FAKE_ARGV=str(tmp_path / "argv"), FAKE_ENV=str(tmp_path / "env"),
+                   FAKE_STATUS=str(status), TEST_RUNNER_GROWIN_SE_UAT="1")
+        proc = subprocess.run(["bash", "-e", "-c", step["run"]], env=env, capture_output=True, text=True)
+        argv = (tmp_path / "argv").read_text().splitlines() if (tmp_path / "argv").exists() else []
+        seen = (tmp_path / "env").read_text().strip() if (tmp_path / "env").exists() else ""
+        return proc.returncode, argv, seen
+
+
+def check_test_step_propagates_xcodebuild_status(wf):
+    for status in (0, 1, 65):
+        code, argv, _ = run_test_step(wf, status)
+        assert argv, "the step never called xcodebuild"
+        assert code == status, f"xcodebuild exited {status} but the step exited {code}"
+
+
+def check_test_step_runs_whenever_the_build_succeeded(wf):
+    # Exactly this, nothing narrower: any extra `&&` could skip tests after a good build.
+    assert find_test_step(wf).get("if") == "steps.build.outputs.built == 'true'"
+    steps = wf["jobs"][SWIFT_JOB]["steps"]
+    assert [s.get("id") for s in steps].index("build") < [s.get("id") for s in steps].index("test")
+    assert find_test_step(wf).get("continue-on-error") in (None, False)
+
+
+def check_test_target_selection(wf):
+    _, argv, seen_uat = run_test_step(wf, 0)
+    assert argv[0] == "test-without-building"
+    assert argv[argv.index("-scheme") + 1] == "Growin"
+    assert argv[argv.index("-project") + 1] == "Growin.xcodeproj"
+    assert [a for a in argv if a.startswith("-only-testing")] == ["-only-testing:GrowinTests"]
+    assert [a for a in argv if a.startswith("-skip-testing")] == ["-skip-testing:GrowinUITests"]
+    assert seen_uat == "UNSET", "the Secure Enclave UAT switch must be unset for the test run"
+
+
+# ---- the SDK degrade override (operator-only repository variable)
+
+LOUD = "tests did NOT run; SDK degrade override is ON (repo variable SWIFT_CI_ALLOW_SDK_DEGRADE)"
+AVAILABILITY = "A.swift:3:9: error: 'glassEffect(_:in:)' is only available in macOS 27.0 or newer"
+NOT_AVAILABILITY = "B.swift:1:8: error: cannot find 'Foo' in scope"
+
+
+def find_build_step(wf: dict) -> dict:
+    return next(s for s in wf["jobs"][SWIFT_JOB]["steps"] if s.get("id") == "build")
+
+
+def run_build_step(wf: dict, *, older: str = "true", log: str = AVAILABILITY, allow: str | None = None,
+                   status: int = 65) -> tuple[int, str, str, str]:
+    """Run the real build step against a fake xcodebuild.
+
+    Runner SDK 26.2 against MIN_SDK 26.5, as in the degrade case. The working
+    directory holds files and the event payload an attacker-influenced PR might
+    use to ask for the override, so a script that reads them gets caught.
+    Returns (exit code, stdout, step summary, GITHUB_OUTPUT).
+    """
+    step = find_build_step(wf)
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        fake = tmp_path / "bin" / "xcodebuild"
+        fake.parent.mkdir()
+        fake.write_text('#!/bin/bash\nprintf "%s\\n" "$FAKE_LOG"\nexit "$FAKE_STATUS"\n')
+        fake.chmod(0o755)
+        work = tmp_path / "work"
+        (work / ".github").mkdir(parents=True)
+        for marker in (".swift-ci-allow-degrade", "SWIFT_CI_ALLOW_SDK_DEGRADE", ".github/swift-ci-allow-degrade",
+                       ".allow-sdk-degrade"):
+            (work / marker).write_text("true\n")
+        event = tmp_path / "event.json"
+        event.write_text('{"pull_request": {"title": "allow-sdk-degrade SWIFT_CI_ALLOW_SDK_DEGRADE=true", '
+                         '"body": "SWIFT_CI_ALLOW_SDK_DEGRADE=true", '
+                         '"labels": [{"name": "allow-sdk-degrade"}, {"name": "sdk-degrade"}]}}')
+        out, summary = tmp_path / "out", tmp_path / "summary"
+        env = {k: v for k, v in os.environ.items() if k != "ALLOW_SDK_DEGRADE"}
+        env.update(PATH=f"{fake.parent}:{os.environ['PATH']}", RUNNER_TEMP=str(tmp_path),
+                   GITHUB_OUTPUT=str(out), GITHUB_STEP_SUMMARY=str(summary), GITHUB_EVENT_PATH=str(event),
+                   MIN_SDK="26.5", OLDER_SDK=older, SDK="26.2", XCODE="Xcode_26.2.app",
+                   FAKE_LOG=log, FAKE_STATUS=str(status),
+                   PR_TITLE="allow-sdk-degrade", PR_LABELS="allow-sdk-degrade")
+        if allow is not None:
+            env["ALLOW_SDK_DEGRADE"] = allow
+        proc = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=work, env=env,
+                              capture_output=True, text=True)
+        return (proc.returncode, proc.stdout, summary.read_text() if summary.exists() else "",
+                out.read_text() if out.exists() else "")
+
+
+STRICT_VALUES = [None, "", "TRUE", "True", "1", "yes", "false", " true", "true ", "tru"]
+
+
+def check_sdk_degrade_is_strict_by_default(wf):
+    for allow in STRICT_VALUES:
+        code, stdout, summary, outputs = run_build_step(wf, allow=allow)
+        label = f"ALLOW_SDK_DEGRADE={allow!r}"
+        assert code == 1, f"{label}: an SDK-gap build must end red, exit was {code}"
+        # The annotation and summary stay, so the red X says what is missing.
+        assert "::warning::Swift CI skipped" in stdout, label
+        assert "::error::Swift CI failed: tests did NOT run" in stdout, label
+        assert "## Swift CI: degraded" in summary and "macOS `26.5` SDK or newer" in summary, label
+        assert "only available in macOS 27.0 or newer" in summary, label
+        assert "tests did NOT run" in stdout and "override is ON" not in stdout + summary, label
+        assert "built=false" in outputs, label
+
+
+def check_sdk_degrade_override_true_is_green_and_loud(wf):
+    code, stdout, summary, outputs = run_build_step(wf, allow="true")
+    assert code == 0, stdout
+    warning = next((ln for ln in stdout.splitlines() if ln.startswith("::warning::")), "")
+    assert LOUD in warning, "the annotation must say the override is ON and tests did NOT run"
+    assert LOUD in summary, "the step summary must say the override is ON and tests did NOT run"
+    assert "## Swift CI: degraded" in summary and "macOS `26.5` SDK or newer" in summary
+    assert "built=false" in outputs and "::error::" not in stdout
+
+
+def check_sdk_degrade_override_only_rescues_sdk_gaps(wf):
+    for kwargs in (
+        dict(log=NOT_AVAILABILITY),
+        dict(log=f"{AVAILABILITY}\n{NOT_AVAILABILITY}"),
+        dict(log="** BUILD FAILED **"),
+        dict(older="false", log=AVAILABILITY),        # SDK >= MIN_SDK: real failure
+    ):
+        code, stdout, _, _ = run_build_step(wf, allow="true", **kwargs)
+        assert code == 1, f"override must not rescue {kwargs}"
+        assert "::error::Swift build failed" in stdout
+
+
+def check_sdk_degrade_switch_is_operator_only(wf):
+    step = find_build_step(wf)
+    # Exactly one source: the repository variable, read through env.
+    assert step["env"]["ALLOW_SDK_DEGRADE"] == "${{ vars.SWIFT_CI_ALLOW_SDK_DEGRADE }}"
+    assert set(step["env"]) == {"OLDER_SDK", "SDK", "XCODE", "ALLOW_SDK_DEGRADE"}
+    assert "${{" not in step["run"], "no inline expressions in run"
+    text = WORKFLOW.read_text()
+    assert text.count("SWIFT_CI_ALLOW_SDK_DEGRADE }}") == 1
+    for pr_controlled in ("labels", "pull_request.title", "pull_request.body", "head_commit", "commits"):
+        assert pr_controlled not in step["env"]["ALLOW_SDK_DEGRADE"]
+    # Behavior: with the variable unset, no marker file, label, title or event
+    # payload the PR can influence flips the result.
+    code, _, _, _ = run_build_step(wf, allow=None)
+    assert code == 1, "something other than the repository variable turned the override on"
 
 
 CHECKS = [
+    check_sdk_degrade_is_strict_by_default,
+    check_sdk_degrade_override_true_is_green_and_loud,
+    check_sdk_degrade_override_only_rescues_sdk_gaps,
+    check_sdk_degrade_switch_is_operator_only,
     check_no_pr_paths_filter,
     check_detection_job_has_all_globs,
     check_swift_job_name,
@@ -187,6 +376,10 @@ CHECKS = [
     check_no_continue_on_error,
     check_timeout_and_concurrency_kept,
     check_push_paths_match_detection,
+    check_pull_request_types_default,
+    check_test_step_propagates_xcodebuild_status,
+    check_test_step_runs_whenever_the_build_succeeded,
+    check_test_target_selection,
 ]
 
 
@@ -203,7 +396,7 @@ def _plant_pr_paths(wf):
 
 
 def drop_ui_glob(script: str) -> str:
-    return re.sub(r"\n\s*'GrowinUITests/\*\*' \\", "", script)
+    return re.sub(r"\n\s*':\(icase\)GrowinUITests/\*\*' \\", "", script)
 
 
 def fail_open_on_diff_error(script: str) -> str:
@@ -273,7 +466,181 @@ def _plant_push_drift(wf):
     triggers(wf)["push"]["paths"].remove("GrowinUITests/**")
 
 
+def _plant_push_missing_fixtures(wf):
+    triggers(wf)["push"]["paths"].remove("tests/backend/fixtures/relay_orders/**")
+
+
+def _plant_detection_missing_fixtures(wf):
+    step = detect_step(wf)
+    step["run"] = re.sub(r" \\\n\s*':\(icase\)tests/backend/fixtures/relay_orders/\*\*'", "", step["run"])
+
+
+def _plant_case_sensitive_detection(wf):
+    step = detect_step(wf)
+    step["run"] = step["run"].replace(":(icase)", "")
+
+
+def _plant_edited_type(wf):
+    triggers(wf)["pull_request"]["types"] = ["opened", "synchronize", "reopened", "edited"]
+
+
+def _plant_test_step_exit_zero(wf):
+    step = find_test_step(wf)
+    step["run"] = step["run"].replace('exit "$status"', "exit 0")
+
+
+def _plant_test_step_masked_status(wf):
+    # Reads tee's status (index 1) instead of xcodebuild's, so a failing run exits 0.
+    step = find_test_step(wf)
+    step["run"] = step["run"].replace("status=${PIPESTATUS[0]}", "status=${PIPESTATUS[1]}")
+
+
+def _plant_test_step_never_runs(wf):
+    find_test_step(wf)["if"] = "steps.build.outputs.built == 'never'"
+
+
+def _plant_test_step_if_false(wf):
+    find_test_step(wf)["if"] = "false"
+
+
+def _plant_test_step_narrowed_if(wf):
+    find_test_step(wf)["if"] = "steps.build.outputs.built == 'true' && steps.xcode.outputs.older_sdk == 'false'"
+
+
+def _plant_test_step_continue_on_error(wf):
+    find_test_step(wf)["continue-on-error"] = True
+
+
+def _plant_narrowed_only_testing(wf):
+    step = find_test_step(wf)
+    step["run"] = step["run"].replace("-only-testing:GrowinTests ", "-only-testing:GrowinTests/OneSuite ", 1)
+
+
+def _plant_widened_only_testing(wf):
+    step = find_test_step(wf)
+    step["run"] = step["run"].replace("-only-testing:GrowinTests ",
+                                      "-only-testing:GrowinTests -only-testing:GrowinUITests ", 1)
+
+
+def _plant_dropped_skip_testing(wf):
+    step = find_test_step(wf)
+    step["run"] = re.sub(r"\n\s*-skip-testing:GrowinUITests \\", "", step["run"])
+
+
+def _plant_se_uat_left_set(wf):
+    step = find_test_step(wf)
+    step["run"] = step["run"].replace("unset TEST_RUNNER_GROWIN_SE_UAT", "true")
+
+
+OVERRIDE_TEST = 'if [[ "${ALLOW_SDK_DEGRADE:-}" == "true" ]]; then override=true; fi'
+
+
+def _edit_build_run(wf, old: str, new: str):
+    step = find_build_step(wf)
+    assert old in step["run"], f"plant target not found: {old!r}"
+    step["run"] = step["run"].replace(old, new, 1)
+
+
+def _edit_build_run_re(wf, pattern: str, repl: str):
+    step = find_build_step(wf)
+    new, count = re.subn(pattern, repl, step["run"], count=1)
+    assert count == 1, f"plant target not found: {pattern!r}"
+    step["run"] = new
+
+
+def _plant_degrade_default_permissive(wf):
+    # Unset or empty now means "allow"; only an explicit "false" is strict.
+    _edit_build_run(wf, OVERRIDE_TEST,
+                    'if [[ "${ALLOW_SDK_DEGRADE:-}" != "false" ]]; then override=true; fi')
+
+
+def _plant_degrade_case_insensitive(wf):
+    _edit_build_run(wf, OVERRIDE_TEST,
+                    'if [[ "${ALLOW_SDK_DEGRADE:-}" == [Tt][Rr][Uu][Ee] ]]; then override=true; fi')
+
+
+def _plant_degrade_one_accepted(wf):
+    _edit_build_run(wf, OVERRIDE_TEST,
+                    'if [[ "${ALLOW_SDK_DEGRADE:-}" == "true" || "${ALLOW_SDK_DEGRADE:-}" == "1" ]]; '
+                    'then override=true; fi')
+
+
+def _plant_degrade_from_label(wf):
+    # The override read from a PR-controlled source: a label.
+    find_build_step(wf)["env"]["ALLOW_SDK_DEGRADE"] = (
+        "${{ contains(github.event.pull_request.labels.*.name, 'allow-sdk-degrade') && 'true' || '' }}")
+
+
+def _plant_degrade_from_repo_file(wf):
+    # ...or a file in the repo checkout.
+    _edit_build_run(wf, OVERRIDE_TEST,
+                    'if [[ "${ALLOW_SDK_DEGRADE:-}" == "true" || -f .swift-ci-allow-degrade ]]; '
+                    'then override=true; fi')
+
+
+def _plant_degrade_from_event_payload(wf):
+    # ...or the event payload (title, body or labels).
+    _edit_build_run(wf, OVERRIDE_TEST,
+                    'if [[ "${ALLOW_SDK_DEGRADE:-}" == "true" ]] || grep -q "SWIFT_CI_ALLOW_SDK_DEGRADE=true" '
+                    '"${GITHUB_EVENT_PATH:-/dev/null}"; then override=true; fi')
+
+
+def _plant_degrade_warning_dropped_in_override(wf):
+    _edit_build_run(wf, 'echo "::warning::Swift CI skipped: $loud. ', 'echo "::warning::Swift CI skipped: ')
+
+
+def _plant_degrade_summary_not_loud(wf):
+    _edit_build_run(wf, 'echo "**Warning: $loud.** This job is green only because of that override."',
+                    'echo "This job is green."')
+
+
+def _plant_degrade_strict_exits_zero(wf):
+    _edit_build_run_re(wf, r"(to allow this temporarily\.\"\n\s*)exit 1", r"\1exit 0")
+
+
+def _plant_degrade_strict_loses_summary(wf):
+    _edit_build_run_re(wf, r"\n\s*echo \"## Swift CI: degraded\"", "")
+
+
+def _plant_degrade_override_rescues_any_error(wf):
+    _edit_build_run(wf, 'if [[ "$OLDER_SDK" == "true" && "$all_gap" == "true" ]]; then',
+                    'if [[ "$OLDER_SDK" == "true" && ( "$all_gap" == "true" || "${ALLOW_SDK_DEGRADE:-}" == "true" ) ]]; then')
+
+
+def _plant_degrade_override_rescues_new_sdk(wf):
+    _edit_build_run(wf, 'if [[ "$OLDER_SDK" == "true" && "$all_gap" == "true" ]]; then',
+                    'if [[ ( "$OLDER_SDK" == "true" || "${ALLOW_SDK_DEGRADE:-}" == "true" ) && "$all_gap" == "true" ]]; then')
+
+
 PLANTS = [
+    (_plant_degrade_default_permissive, check_sdk_degrade_is_strict_by_default),
+    (_plant_degrade_case_insensitive, check_sdk_degrade_is_strict_by_default),
+    (_plant_degrade_one_accepted, check_sdk_degrade_is_strict_by_default),
+    (_plant_degrade_from_label, check_sdk_degrade_switch_is_operator_only),
+    (_plant_degrade_from_repo_file, check_sdk_degrade_switch_is_operator_only),
+    (_plant_degrade_from_event_payload, check_sdk_degrade_switch_is_operator_only),
+    (_plant_degrade_warning_dropped_in_override, check_sdk_degrade_override_true_is_green_and_loud),
+    (_plant_degrade_summary_not_loud, check_sdk_degrade_override_true_is_green_and_loud),
+    (_plant_degrade_strict_exits_zero, check_sdk_degrade_is_strict_by_default),
+    (_plant_degrade_strict_loses_summary, check_sdk_degrade_is_strict_by_default),
+    (_plant_degrade_override_rescues_any_error, check_sdk_degrade_override_only_rescues_sdk_gaps),
+    (_plant_degrade_override_rescues_new_sdk, check_sdk_degrade_override_only_rescues_sdk_gaps),
+    (_plant_push_missing_fixtures, check_push_paths_match_detection),
+    (_plant_detection_missing_fixtures, check_detection_job_has_all_globs),
+    (_plant_detection_missing_fixtures, check_push_paths_match_detection),
+    (_plant_case_sensitive_detection, check_detection_job_has_all_globs),
+    (_plant_edited_type, check_pull_request_types_default),
+    (_plant_test_step_exit_zero, check_test_step_propagates_xcodebuild_status),
+    (_plant_test_step_masked_status, check_test_step_propagates_xcodebuild_status),
+    (_plant_test_step_never_runs, check_test_step_runs_whenever_the_build_succeeded),
+    (_plant_test_step_if_false, check_test_step_runs_whenever_the_build_succeeded),
+    (_plant_test_step_narrowed_if, check_test_step_runs_whenever_the_build_succeeded),
+    (_plant_test_step_continue_on_error, check_test_step_runs_whenever_the_build_succeeded),
+    (_plant_test_step_continue_on_error, check_no_continue_on_error),
+    (_plant_narrowed_only_testing, check_test_target_selection),
+    (_plant_widened_only_testing, check_test_target_selection),
+    (_plant_dropped_skip_testing, check_test_target_selection),
+    (_plant_se_uat_left_set, check_test_target_selection),
     (_plant_pr_paths, check_no_pr_paths_filter),
     (_plant_missing_ui_glob, check_detection_job_has_all_globs),
     (_plant_advisory_name, check_swift_job_name),
@@ -344,6 +711,10 @@ BASE_FILES = {
     ".github/workflows/ci.yml": "a",
     "GrowinOther/Thing.txt": "a",
     "backend/app.py": "a",
+    "tests/backend/fixtures/relay_orders/signing_vectors.json": "{}",
+    "tests/backend/fixtures/relay_orders/swift_signature.json": "{}",
+    "tests/backend/fixtures/relay_orders/limits_vectors.json": "{}",
+    "tests/backend/fixtures/other/data.json": "{}",
     "README.md": "a",
 }
 
@@ -353,6 +724,8 @@ def repo(tmp_path):
     root = tmp_path / "repo"
     root.mkdir()
     _git(root, "init", "-q", "-b", "main")
+    # macOS defaults to core.ignorecase=true, which would blur the icase tests.
+    _git(root, "config", "core.ignorecase", "false")
     for rel, text in BASE_FILES.items():
         _write(root, rel, text)
     _git(root, "add", "-A")
@@ -397,6 +770,12 @@ def make_pr(root: Path, changes: dict[str, str | None]) -> tuple[str, str]:
     ("GrowinUITests/Brand/New.swift", "true"),
     ("Growin.xcodeproj/project.pbxproj", "true"),
     (".github/workflows/swift-ci.yml", "true"),
+    # GrowinTests read these through RelayVectors.
+    ("tests/backend/fixtures/relay_orders/signing_vectors.json", "true"),
+    ("tests/backend/fixtures/relay_orders/swift_signature.json", "true"),
+    ("tests/backend/fixtures/relay_orders/new_vectors.json", "true"),
+    ("tests/backend/fixtures/other/data.json", "false"),
+    ("tests/backend/test_pr_dashboard.py", "false"),
     (".github/workflows/ci.yml", "false"),
     ("GrowinOther/Thing.txt", "false"),
     ("backend/app.py", "false"),
@@ -405,6 +784,34 @@ def make_pr(root: Path, changes: dict[str, str | None]) -> tuple[str, str]:
 def test_detection_by_changed_path(repo, tmp_path, path, expected):
     base, head = make_pr(repo, {path: "changed"})
     assert run_detect(repo, tmp_path, base=base, head=head) == expected
+
+
+@pytest.mark.parametrize("path", [
+    "growin/X.swift",
+    "GROWIN/X.swift",
+    "growintests/X.swift",
+    "GROWINUITESTS/Deep/X.swift",
+    "growin.xcodeproj/project.pbxproj",
+    ".GitHub/Workflows/Swift-CI.yml",
+    "Tests/Backend/Fixtures/Relay_Orders/signing_vectors.json",
+])
+def test_detection_ignores_case_in_the_path(tmp_path, path):
+    # A bare repo with none of the mixed-case folders, so the file system's own
+    # case folding cannot hide a case-sensitive pathspec.
+    root = tmp_path / "bare"
+    root.mkdir()
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "config", "core.ignorecase", "false")
+    _write(root, "README.md", "a")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "base")
+    base, head = make_pr(root, {path: "changed"})
+    assert run_detect(root, tmp_path, base=base, head=head) == "true"
+    # Break-proof: the same script without :(icase) misses it.
+    script = detect_step(load())["run"]
+    case_sensitive = script.replace(":(icase)", "")
+    assert case_sensitive != script
+    assert run_detect(root, tmp_path, script=case_sensitive, base=base, head=head) == "false"
 
 
 def test_detection_sees_a_deleted_swift_file(repo, tmp_path):
@@ -484,6 +891,78 @@ def test_break_proof_fail_open_script_skips_on_unknown_base(repo, tmp_path):
     missing_base = "0123456789abcdef0123456789abcdef01234567"
     assert run_detect(repo, tmp_path, script=broken, base=missing_base, head=head) == "false"
     assert run_detect(repo, tmp_path, base=missing_base, head=head) == "true"
+
+
+# ------------------------------- Swift tests reading files outside the globs
+
+SWIFT_DIRS = ("Growin", "GrowinTests", "GrowinUITests")
+STRING_LITERAL = re.compile(r'"((?:[^"\\\n]|\\.)*)"')
+LINE_COMMENT = re.compile(r'^((?:[^"\\]|\\.|"(?:[^"\\]|\\.)*")*?)//.*$')
+TOP_LEVEL_FILE = re.compile(r"^[\w.-]+\.(?:md|json|ya?ml|plist|txt|py|sh|toml|xcconfig|entitlements|swift)$")
+
+
+def out_of_tree_reads(swift_root: Path, repo_top: set[str]) -> dict[str, set[str]]:
+    """Repo paths named in Swift string literals that sit outside the three Swift folders.
+
+    A literal counts when it starts with a real top-level repo entry other than
+    Growin, GrowinTests or GrowinUITests (`tests/backend/...`, `.github/...`),
+    or is a bare top-level file name (`README.md`). Line comments are ignored.
+    """
+    found: dict[str, set[str]] = {}
+    for swift in sorted(swift_root.rglob("*.swift")):
+        for line in swift.read_text().splitlines():
+            code = LINE_COMMENT.sub(r"\1", line)
+            for literal in STRING_LITERAL.findall(code):
+                first = literal.split("/", 1)[0]
+                outside = "/" in literal and first in repo_top and first not in SWIFT_DIRS
+                bare_file = "/" not in literal and TOP_LEVEL_FILE.match(literal) and literal in repo_top
+                if outside or bare_file:
+                    found.setdefault(literal, set()).add(swift.name)
+    return found
+
+
+def is_covered(path: str, globs: list[str]) -> bool:
+    probe = path.rstrip("/") + "/"
+    return path in globs or any(g.endswith("/**") and probe.startswith(g[:-2]) for g in globs)
+
+
+def repo_top_level() -> set[str]:
+    return {p.name for p in REPO_ROOT.iterdir() if p.name != ".git"}
+
+
+def test_swift_tests_read_no_path_outside_the_detection_globs():
+    found = {}
+    for folder in SWIFT_DIRS:
+        for lit, files in out_of_tree_reads(REPO_ROOT / folder, repo_top_level()).items():
+            found.setdefault(lit, set()).update(files)
+    # The one known dependency. If this set grows, add the path to BOTH lists in swift-ci.yml.
+    assert "tests/backend/fixtures/relay_orders" in found, "scanner no longer sees the RelayVectors fixture dir"
+    globs = detection_globs(load())
+    uncovered = {lit: sorted(files) for lit, files in found.items() if not is_covered(lit, globs)}
+    assert not uncovered, f"Swift tests read paths the Swift job is not triggered by: {uncovered}"
+    assert (REPO_ROOT / "tests/backend/fixtures/relay_orders/signing_vectors.json").is_file()
+
+
+def test_break_proof_scanner_flags_an_uncovered_read(tmp_path):
+    swift = tmp_path / "T.swift"
+    swift.write_text(
+        'let a = root.appendingPathComponent("scripts/vectors.json")\n'
+        'let b = "tests/backend/fixtures/relay_orders"   // trailing comment\n'
+        '// let c = "docs/commented-out.md"\n'
+        'let d = "Growin/App.swift"\n'
+        'let e = "README.md"\n'
+        'let f = "not/a/top/level/entry.json"\n')
+    top = {"scripts", "tests", "docs", "Growin", "README.md"}
+    found = out_of_tree_reads(tmp_path, top)
+    assert set(found) == {"scripts/vectors.json", "tests/backend/fixtures/relay_orders", "README.md"}
+    uncovered = [lit for lit in found if not is_covered(lit, detection_globs(load()))]
+    assert sorted(uncovered) == ["README.md", "scripts/vectors.json"]
+
+
+def test_break_proof_dropping_the_fixture_glob_leaves_the_scanned_read_uncovered():
+    wf = copy.deepcopy(load())
+    _plant_detection_missing_fixtures(wf)
+    assert not is_covered("tests/backend/fixtures/relay_orders", detection_globs(wf))
 
 
 # ------------------------------------------------------- repo-wide hygiene
