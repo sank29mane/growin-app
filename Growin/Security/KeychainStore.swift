@@ -60,19 +60,21 @@ final class KeychainStore: @unchecked Sendable {
     /// with a test-prefixed service pair instead of the production service. The store's own
     /// check (`assertAccessAllowed`) is this with the real production service and the real
     /// process.
-    static func checkAccess(service: String, protectedService: String, testHost: Bool) throws {
+    static func checkAccess(service: String, protectedService: String, testHost: Bool, site: RefusalSite) throws {
         if ProductionKeychainGuard.refuses(service: service, protectedService: protectedService, testHost: testHost) {
+            ProductionKeychainGuard.recordRefusal(site: site)
             throw KeychainStoreError.productionKeychainRefusedUnderTests
         }
     }
 
     /// Runs first in every raw Keychain call, before any SecItem call. A test host that
     /// reaches the production service gets a typed error and nothing is read or written.
-    private func assertAccessAllowed() throws {
+    private func assertAccessAllowed(for site: RefusalSite) throws {
         try Self.checkAccess(
             service: service,
             protectedService: ProductionKeychainGuard.productionService,
-            testHost: TestHostDetection.isTestHost())
+            testHost: TestHostDetection.isTestHost(),
+            site: site)
     }
 
     // MARK: Scoped API
@@ -124,7 +126,7 @@ final class KeychainStore: @unchecked Sendable {
     // MARK: Raw account access (private: callers can only reach scoped or legacy-flat accounts)
 
     private func rawData(account: String) throws -> Data? {
-        try assertAccessAllowed()
+        try assertAccessAllowed(for: .read)
         var query = baseQuery(account: account)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -144,7 +146,7 @@ final class KeychainStore: @unchecked Sendable {
     }
 
     private func rawSet(_ data: Data, account: String) throws {
-        try assertAccessAllowed()
+        try assertAccessAllowed(for: .write)
         if data.isEmpty {
             try rawRemove(account: account)
             return
@@ -171,7 +173,7 @@ final class KeychainStore: @unchecked Sendable {
     }
 
     private func rawRemove(account: String) throws {
-        try assertAccessAllowed()
+        try assertAccessAllowed(for: .delete)
         let status = SecItemDelete(baseQuery(account: account) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw KeychainStoreError.status(status)
@@ -253,7 +255,7 @@ final class KeychainStore: @unchecked Sendable {
     /// False when the guard refuses this store. The migrations return instead of throwing.
     private func accessIsAllowed() -> Bool {
         do {
-            try assertAccessAllowed()
+            try assertAccessAllowed(for: .write)
             return true
         } catch {
             return false

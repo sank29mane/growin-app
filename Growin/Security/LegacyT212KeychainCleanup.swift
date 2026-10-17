@@ -96,6 +96,7 @@ nonisolated enum LegacyT212KeychainCleanup {
     /// A test host is refused on the production service before any SecItem call.
     static func deleteExactItem(service: String, account: String) -> OSStatus {
         guard !ProductionKeychainGuard.refusesCurrentProcess(service: service) else {
+            ProductionKeychainGuard.recordRefusal(site: .delete)
             return refusedUnderTestsStatus
         }
         return SecItemDelete(exactQuery(service: service, account: account) as CFDictionary)
@@ -172,6 +173,7 @@ nonisolated enum LegacyT212KeychainCleanup {
 
     /// The refusal result. The log line is the stable code only: no service, no account.
     private static func refusedOutcome(log: (String) -> Void) -> Outcome {
+        ProductionKeychainGuard.recordRefusal(site: .cleanup)
         log("legacy cleanup refused: \(ProductionKeychainGuard.refusalCode)")
         return Outcome(skipped: true, removed: 0, failedStatuses: [], refused: true)
     }

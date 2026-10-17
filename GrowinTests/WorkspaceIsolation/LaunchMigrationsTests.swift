@@ -601,6 +601,18 @@ struct LaunchMigrationsTests {
         return found
     }
 
+    /// The one exemption from the shared-store ban (PR #575). The tripwire calls the REAL shared store
+    /// in the real test host and only expects a refusal. Exempt by exact path, for one exact expression,
+    /// removed from that one file before scanning: any other mention in it, and every other rule, still
+    /// fires. Mirrors `TRIPWIRE_PATH` and `TRIPWIRE_SHARED_CALL` in tests/backend/test_swift_scan_bypasses.py.
+    private static let tripwirePath = "GrowinTests/WorkspaceIsolation/ProductionTripwireTests.swift"
+    private static let tripwireSharedCall =
+        "KeychainStore" + ".shared.string(for: .alpacaApiKey, scope: .workspace(.uk))"
+
+    private static func tripwireExempted(path: String, text: String) -> String {
+        path == tripwirePath ? text.replacingOccurrences(of: tripwireSharedCall, with: "refusedRead()") : text
+    }
+
     /// Every way a test source could get back to the operator's real Keychain through a launch migration.
     private static func productionReach(in sources: [(path: String, text: String)]) -> [String] {
         var findings: [String] = []
@@ -611,7 +623,7 @@ struct LaunchMigrationsTests {
             if text.contains(productionSteps) {
                 findings.append("\(path): uses the production steps")
             }
-            for problem in storeReach(in: text) {
+            for problem in storeReach(in: tripwireExempted(path: path, text: text)) {
                 findings.append("\(path): \(problem)")
             }
             // GrowinTests is app-hosted: a second Growin started from a unit test would run without
@@ -648,6 +660,34 @@ struct LaunchMigrationsTests {
         for sample in samples {
             let findings = Self.productionReach(in: [("T.swift", sample.text)])
             #expect(!findings.isEmpty, "\(sample.label) went undetected")
+        }
+    }
+
+    @Test func theTripwireExemptionIsOneExactPathAndOneExactCall() {
+        let call = Self.tripwireSharedCall
+        let allowed = "func f() { _ = try " + call + " }"
+        #expect(Self.productionReach(in: [(Self.tripwirePath, allowed)]) == [])
+        // The same text anywhere else is still the ban.
+        for other in [
+            "GrowinTests/Other.swift",
+            "GrowinTests/WorkspaceIsolation/ProductionTripwireTests2.swift",
+            "GrowinTests/Other/ProductionTripwireTests.swift",
+            "ProductionTripwireTests.swift",
+        ] {
+            #expect(!Self.productionReach(in: [(other, allowed)]).isEmpty, "\(other)")
+        }
+        // Inside the exact file, anything beyond the one expression is still the ban.
+        let extras: [(label: String, text: String)] = [
+            ("a second call", call.replacingOccurrences(of: "string(", with: "set(")),
+            ("another credential", "KeychainStore" + ".shared.string(for: .openaiApiKey, scope: .shared)"),
+            ("an alias", "let s = " + Self.storeValueNeedles[0]),
+            ("the type as a value", "let t = " + Self.storeValueNeedles[1]),
+            ("the production literal", "let n = " + Self.quotedProductionService),
+            ("a store on a non-test literal", "let s = KeychainStore(service: \"x\")"),
+        ]
+        for extra in extras {
+            let found = Self.productionReach(in: [(Self.tripwirePath, allowed + "\n" + extra.text)])
+            #expect(!found.isEmpty, "\(extra.label) went undetected")
         }
     }
 
@@ -758,8 +798,12 @@ struct LaunchMigrationsTests {
             .joined(separator: "\n")
     }
 
-    /// The whole body of `makeApp` must be: create the app, set the suppression key on it, return
-    /// it. A substring check would pass an early `return .init(bundleIdentifier:)` placed before an
+    /// The second key `makeApp` sets. `TestHostDetection` reads it, so the UI-test app process is a
+    /// test host for the Keychain guard. Mirrors `UI_TEST_HOST_KEY` in the Python scan.
+    private static let uiTestHostKey = "GROWIN_UI_" + "TEST_HOST"
+
+    /// The whole body of `makeApp` must be: create the app, set the suppression key on it, set the
+    /// UI-test-host key on it, return it. A substring check would pass an early `return .init(bundleIdentifier:)` placed before an
     /// honest tail. Outside `makeApp` the helper may not name the application type or call an
     /// initializer. Mirrors `helper_offences` in tests/backend/test_swift_scan_bypasses.py.
     private static func helperShapeProblems(_ helperText: String, key: String) -> [String] {
@@ -788,10 +832,11 @@ struct LaunchMigrationsTests {
         }
         var problems: [String] = []
         let escapedKey = NSRegularExpression.escapedPattern(for: key)
+        let escapedUIKey = NSRegularExpression.escapedPattern(for: uiTestHostKey)
         let shape = #"^\s*let (\w+) = "# + appType + #"\(\)\s*\1\.launchEnvironment\[""# + escapedKey
-            + #""\] = "1"\s*return \1\s*$"#
+            + #""\] = "1"\s*\1\.launchEnvironment\[""# + escapedUIKey + #""\] = "1"\s*return \1\s*$"#
         if body.range(of: shape, options: .regularExpression) == nil {
-            problems.append("makeApp body is not exactly create, set the suppression key, return")
+            problems.append("makeApp body is not exactly create, set the suppression key, set the UI-test-host key, return")
         }
         let outside = parts[0] + rest
         if outside.contains(appType) { problems.append("names the application type outside makeApp") }
@@ -812,6 +857,7 @@ struct LaunchMigrationsTests {
     private static let goodMakeAppBody: [String] = [
         "let app = " + "XCUI" + "Application()",
         "app.launchEnvironment[\"GROWIN_SKIP_LAUNCH_MIGRATIONS\"] = \"1\"",
+        "app.launchEnvironment[\"" + uiTestHostKey + "\"] = \"1\"",
         "return app",
     ]
 
@@ -831,6 +877,9 @@ struct LaunchMigrationsTests {
         }
         if !helper.text.contains(helperAssignment) {
             findings.append("\(helper.path): does not set the suppression key")
+        }
+        if !helper.text.contains("launchEnvironment[\"\(uiTestHostKey)\"] = \"1\"") {
+            findings.append("\(helper.path): does not set the UI-test-host key")
         }
         for problem in helperShapeProblems(helper.text, key: LaunchMigrations.skipEnvironmentKey) {
             findings.append("\(helper.path): \(problem)")
@@ -873,17 +922,27 @@ struct LaunchMigrationsTests {
         var earlyNamed = good
         earlyNamed.insert("if flag { return " + appType + "() }", at: 0)
         var differentVariable = good
-        differentVariable[2] = "return other"
+        differentVariable[3] = "return other"
         var inferredReturn = good
-        inferredReturn[2] = "return .init()"
+        inferredReturn[3] = "return .init()"
         var extraStatement = good
-        extraStatement.insert("app.launchArguments = []", at: 2)
+        extraStatement.insert("app.launchArguments = []", at: 3)
         var secondReturn = good
         secondReturn.append("return " + appType + "()")
         var keyOnOtherVariable = good
         keyOnOtherVariable[1] = good[1].replacingOccurrences(of: "app.", with: "other.")
         var keyBeforeApp = good
         keyBeforeApp.swapAt(0, 1)
+        var noUIKey = good
+        noUIKey.remove(at: 2)
+        var uiKeyZero = good
+        uiKeyZero[2] = good[2].replacingOccurrences(of: "\"1\"", with: "\"0\"")
+        var uiKeyMisspelled = good
+        uiKeyMisspelled[2] = good[2].replacingOccurrences(of: "TEST_HOST", with: "TEST_HOS")
+        var uiKeyOnOther = good
+        uiKeyOnOther[2] = good[2].replacingOccurrences(of: "app.", with: "other.")
+        var uiKeyBeforeSkip = good
+        uiKeyBeforeSkip.swapAt(1, 2)
         let variants: [(label: String, lines: [String])] = [
             ("early inferred init", earlyInit),
             ("early named creation", earlyNamed),
@@ -893,6 +952,11 @@ struct LaunchMigrationsTests {
             ("second return", secondReturn),
             ("key set on another variable", keyOnOtherVariable),
             ("key set before the app exists", keyBeforeApp),
+            ("UI-test-host key missing", noUIKey),
+            ("UI-test-host key set to 0", uiKeyZero),
+            ("UI-test-host key misspelled", uiKeyMisspelled),
+            ("UI-test-host key on another variable", uiKeyOnOther),
+            ("UI-test-host key before the suppression key", uiKeyBeforeSkip),
         ]
         for variant in variants {
             let source = Self.helperSource(lines: variant.lines)

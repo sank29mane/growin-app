@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// The one definition of "this process is a test host". `LaunchMigrations` and the
 /// production Keychain guard both read it, so the two can never disagree.
@@ -6,17 +7,21 @@ import Foundation
 /// A signal is any one of these, because a false positive only costs one skipped
 /// migration or one refused read, while a false negative touches the operator's real
 /// Keychain: `XCTestConfigurationFilePath`, `XCTestBundlePath` or
-/// `XCTestSessionIdentifier` in the environment, or the `XCTestCase` class loaded.
-/// A release build of the app never links XCTest.
+/// `XCTestSessionIdentifier` in the environment, the `XCTestCase` class loaded, or
+/// `GROWIN_UI_TEST_HOST` in the environment. The last one is for the process an
+/// `XCUIApplication` launches: it has none of the XCTest signals, and
+/// `GrowinLaunch.makeApp()` (GrowinUITests) is the only place that sets it. A release
+/// build of the app never links XCTest and no normal launch sets the key.
 ///
-/// Not a signal here: Xcode previews and the UI-test suppression key. Those are launch
+/// Not a signal here: Xcode previews and `GROWIN_SKIP_LAUNCH_MIGRATIONS`. Those are launch
 /// migration concerns only (see `LaunchMigrations.shouldSkip`). Treating them as a test
-/// host would stop a debug launch from reading its own Keychain items.
+/// host would stop a manual launch from reading its own Keychain items.
 nonisolated enum TestHostDetection {
     static let environmentKeys = [
         "XCTestConfigurationFilePath",
         "XCTestBundlePath",
         "XCTestSessionIdentifier",
+        "GROWIN_UI_TEST_HOST",
     ]
 
     static func isTestHost(
@@ -25,6 +30,12 @@ nonisolated enum TestHostDetection {
     ) -> Bool {
         xctestCaseClassLoaded || environmentKeys.contains { environment[$0] != nil }
     }
+}
+
+/// The kind of call a refusal stopped. It is logged with the refusal code and nothing about
+/// the item: no service, account, credential name or value.
+nonisolated enum RefusalSite: String {
+    case read, write, delete, cleanup
 }
 
 /// Refuses every Keychain call on the operator's production service when the process is
@@ -46,6 +57,15 @@ nonisolated enum ProductionKeychainGuard {
 
     /// Stable code for the refusal. Tests assert on this, never on message text.
     static let refusalCode = "PRODUCTION_KEYCHAIN_REFUSED_UNDER_TESTS"
+
+    private static let logger = Logger(subsystem: "san.Growin", category: "production-keychain-guard")
+
+    /// One log line per refusal: the stable code and the kind of call. Never the service, the
+    /// account, a credential name or a value. Returns nothing and cannot throw, so it changes no
+    /// control flow. Error level, so the operator can see a refusal after a test run.
+    static func recordRefusal(site: RefusalSite) {
+        logger.error("\(refusalCode, privacy: .public) site=\(site.rawValue, privacy: .public)")
+    }
 
     /// The whole decision, as a pure function so it is testable without the production service.
     static func refuses(isProductionStore: Bool, testHost: Bool) -> Bool {

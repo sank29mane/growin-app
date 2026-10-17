@@ -20,7 +20,7 @@ struct ProductionKeychainGuardTests {
     /// The code of the refusal, nil when the call is allowed, a marker for any other error.
     private static func refusalCode(service: String, guarding: String, testHost: Bool) -> String? {
         do {
-            try KeychainStore.checkAccess(service: service, protectedService: guarding, testHost: testHost)
+            try KeychainStore.checkAccess(service: service, protectedService: guarding, testHost: testHost, site: .read)
             return nil
         } catch let error as KeychainStoreError {
             return error.code
@@ -73,7 +73,7 @@ struct ProductionKeychainGuardTests {
         let service = Self.testService()
         var message: String?
         do {
-            try KeychainStore.checkAccess(service: service, protectedService: service, testHost: true)
+            try KeychainStore.checkAccess(service: service, protectedService: service, testHost: true, site: .read)
             Issue.record("expected a refusal")
         } catch let error as KeychainStoreError {
             guard case .productionKeychainRefusedUnderTests = error else {
@@ -191,14 +191,32 @@ struct ProductionKeychainGuardTests {
         #expect(status < -30000)
     }
 
+    // MARK: The refusal log line
+
+    @Test func theRefusalLogNamesOnlyTheKindOfCall() {
+        let sites: [RefusalSite] = [.read, .write, .delete, .cleanup]
+        #expect(sites.map(\.rawValue) == ["read", "write", "delete", "cleanup"])
+        // Logging is fire and forget: it neither throws nor returns anything that could change a result.
+        for site in sites {
+            ProductionKeychainGuard.recordRefusal(site: site)
+        }
+    }
+
     // MARK: Shared test-host detection
+
+    @Test func theUITestHostKeyAloneIsATestHost() {
+        #expect(TestHostDetection.isTestHost(environment: ["GROWIN_UI_TEST_HOST": "1"], xctestCaseClassLoaded: false))
+        // Presence is the signal, so a manual launch that never sets it is not a test host.
+        #expect(!TestHostDetection.isTestHost(environment: ["HOME": "/Users/x"], xctestCaseClassLoaded: false))
+    }
 
     @Test func eachTestHostSignalAloneIsDetected() {
         for key in TestHostDetection.environmentKeys {
             #expect(TestHostDetection.isTestHost(environment: [key: "x"], xctestCaseClassLoaded: false), "\(key)")
         }
         #expect(TestHostDetection.isTestHost(environment: [:], xctestCaseClassLoaded: true))
-        #expect(TestHostDetection.environmentKeys.count == 3)
+        #expect(TestHostDetection.environmentKeys.count == 4)
+        #expect(TestHostDetection.environmentKeys.contains("GROWIN_UI_TEST_HOST"))
     }
 
     @Test func aNormalLaunchIsNotATestHost() {
