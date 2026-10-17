@@ -142,11 +142,16 @@ struct KeychainScopeTests {
     // read, overwrite or delete the item that lives under store B. Both services are test-prefixed
     // and every item is removed again. This is the failure that would let `cleanUp` below wipe the
     // operator's real items.
+    //
+    // A failure message must never show a credential, so no `#expect` argument holds a String or Data
+    // read from the Keychain: each comparison is computed into a Bool first and only the Bool is asserted.
 
     private static let canaryScopedAccount = "uk:alpacaApiKey"
     private static let canaryFlatAccount = CredentialName.alpacaApiKey.rawValue
     private static let canaryApprovalAccount = "uk:" + CredentialName.approvalSigningKey.rawValue
 
+    /// Store A holds nothing of its own, so its reads are nil whatever store B holds. A remove, an empty
+    /// set, a real set and a second remove on A all leave B's item byte-identical.
     @Test func aStoreNeverSeesOrChangesAnotherServicesItem() {
         let (a, _) = Self.makeStore()
         let (b, serviceB) = Self.makeStore()
@@ -158,26 +163,35 @@ struct KeychainScopeTests {
             let planted = Data("CANARY-B".utf8)
             try b.set(planted, for: .alpacaApiKey, scope: .workspace(.uk))
             let rawB = RawKeychain(service: serviceB)
-            #expect(try rawB.data(account: Self.canaryScopedAccount) == planted, "positive control")
+            let plantedReadsBack = try rawB.data(account: Self.canaryScopedAccount) == planted
+            #expect(plantedReadsBack, "positive control")
 
-            // Store A holds nothing of its own, so every read is nil whatever B holds.
-            #expect(try a.data(for: .alpacaApiKey, scope: .workspace(.uk)) == nil)
-            #expect(try a.string(for: .alpacaApiKey, scope: .workspace(.uk)) == nil)
+            let aDataIsNil = try a.data(for: .alpacaApiKey, scope: .workspace(.uk)) == nil
+            let aStringIsNil = try a.string(for: .alpacaApiKey, scope: .workspace(.uk)) == nil
+            #expect(aDataIsNil)
+            #expect(aStringIsNil)
 
-            // A remove, an empty set and a real set on A all leave B byte-identical.
             try a.remove(.alpacaApiKey, scope: .workspace(.uk))
-            #expect(try rawB.data(account: Self.canaryScopedAccount) == planted)
+            let afterRemove = try rawB.data(account: Self.canaryScopedAccount) == planted
+            #expect(afterRemove, "B survives a remove on A")
             try a.set("", for: .alpacaApiKey, scope: .workspace(.uk))
-            #expect(try rawB.data(account: Self.canaryScopedAccount) == planted)
+            let afterEmptySet = try rawB.data(account: Self.canaryScopedAccount) == planted
+            #expect(afterEmptySet, "B survives an empty set on A")
             try a.set("CANARY-A", for: .alpacaApiKey, scope: .workspace(.uk))
-            #expect(try rawB.data(account: Self.canaryScopedAccount) == planted)
-            #expect(try a.string(for: .alpacaApiKey, scope: .workspace(.uk)) == "CANARY-A")
+            let afterSet = try rawB.data(account: Self.canaryScopedAccount) == planted
+            #expect(afterSet, "B survives a set on A")
+            let aReadsItsOwn = try a.string(for: .alpacaApiKey, scope: .workspace(.uk)) == "CANARY-A"
+            #expect(aReadsItsOwn)
             try a.remove(.alpacaApiKey, scope: .workspace(.uk))
-            #expect(try rawB.data(account: Self.canaryScopedAccount) == planted)
-            #expect(try b.string(for: .alpacaApiKey, scope: .workspace(.uk)) == "CANARY-B")
+            let afterSecondRemove = try rawB.data(account: Self.canaryScopedAccount) == planted
+            #expect(afterSecondRemove, "B survives a second remove on A")
+            let bStillReadsItsOwn = try b.string(for: .alpacaApiKey, scope: .workspace(.uk)) == "CANARY-B"
+            #expect(bStillReadsItsOwn)
         }
     }
 
+    /// The helper every test here uses to tidy up wipes every credential name on A, and the legacy
+    /// calls and migrations run on A. None of it may reach B's scoped, flat or approval items.
     @Test func aStoreCleanUpAndLegacyCallsLeaveAnotherServicesItemsAlone() {
         let (a, _) = Self.makeStore()
         let (b, serviceB) = Self.makeStore()
@@ -194,19 +208,23 @@ struct KeychainScopeTests {
             try rawB.set(flat, account: Self.canaryFlatAccount)
             try b.set(approval, for: .approvalSigningKey, scope: .workspace(.uk))
 
-            #expect(try a.legacyFlatData(for: .alpacaApiKey) == nil)
+            let aFlatIsNil = try a.legacyFlatData(for: .alpacaApiKey) == nil
+            #expect(aFlatIsNil)
             try a.removeLegacyFlatItem(.alpacaApiKey)
-            // The helper every test here uses to tidy up wipes every credential name on A. It must not
-            // reach B's items.
             Self.cleanUp(a)
-            #expect(a.migrateFlatItemsToScoped() == [])
+            let migrationsMoved = a.migrateFlatItemsToScoped()
+            #expect(migrationsMoved.isEmpty)
 
-            #expect(try rawB.data(account: Self.canaryScopedAccount) == scoped)
-            #expect(try rawB.data(account: Self.canaryFlatAccount) == flat)
-            #expect(try rawB.data(account: Self.canaryApprovalAccount) == approval)
+            let scopedSurvives = try rawB.data(account: Self.canaryScopedAccount) == scoped
+            let flatSurvives = try rawB.data(account: Self.canaryFlatAccount) == flat
+            let approvalSurvives = try rawB.data(account: Self.canaryApprovalAccount) == approval
+            #expect(scopedSurvives, "B's scoped item survives A's cleanUp and legacy calls")
+            #expect(flatSurvives, "B's flat item survives A's cleanUp and legacy calls")
+            #expect(approvalSurvives, "B's approval item survives A's cleanUp and legacy calls")
         }
     }
 
+    /// The raw test helper is bound to its service in both directions.
     @Test func rawKeychainOnOneServiceCannotSeeOrRemoveAnother() {
         let (_, serviceA) = Self.makeStore()
         let (_, serviceB) = Self.makeStore()
@@ -220,16 +238,21 @@ struct KeychainScopeTests {
         Self.requireKeychain {
             let bytesB = Data("CANARY-RAW-B".utf8)
             try rawB.set(bytesB, account: account)
-            #expect(try rawA.data(account: account) == nil)
+            let aSeesNothing = try rawA.data(account: account) == nil
+            #expect(aSeesNothing, "A cannot see B's item")
             rawA.remove(account: account)
-            #expect(try rawB.data(account: account) == bytesB)
+            let bSurvivesARemove = try rawB.data(account: account) == bytesB
+            #expect(bSurvivesARemove, "B survives a raw remove on A")
 
             let bytesA = Data("CANARY-RAW-A".utf8)
             try rawA.set(bytesA, account: account)
-            #expect(try rawA.data(account: account) == bytesA)
+            let aReadsItsOwn = try rawA.data(account: account) == bytesA
+            #expect(aReadsItsOwn)
             rawB.remove(account: account)
-            #expect(try rawA.data(account: account) == bytesA)
-            #expect(try rawB.data(account: account) == nil)
+            let aSurvivesBRemove = try rawA.data(account: account) == bytesA
+            let bIsGone = try rawB.data(account: account) == nil
+            #expect(aSurvivesBRemove, "A survives a raw remove on B")
+            #expect(bIsGone)
         }
     }
 

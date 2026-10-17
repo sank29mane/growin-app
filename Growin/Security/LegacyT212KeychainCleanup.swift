@@ -80,10 +80,10 @@ nonisolated enum LegacyT212KeychainCleanup {
     /// the key stays. Not verified against an item saved by a differently signed build.
     static func exactQuery(service: String, account: String) -> [String: Any] {
         [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
+            Security.kSecClass as String: Security.kSecClassGenericPassword,
+            Security.kSecAttrService as String: service,
+            Security.kSecAttrAccount as String: account,
+            Security.kSecUseAuthenticationUI as String: Security.kSecUseAuthenticationUIFail,
         ]
     }
 
@@ -99,7 +99,7 @@ nonisolated enum LegacyT212KeychainCleanup {
             ProductionKeychainGuard.recordRefusal(site: .delete)
             return refusedUnderTestsStatus
         }
-        return SecItemDelete(exactQuery(service: service, account: account) as CFDictionary)
+        return Security.SecItemDelete(exactQuery(service: service, account: account) as CFDictionary)
     }
 
     private static let logger = Logger(subsystem: "san.Growin", category: "legacy-t212-cleanup")

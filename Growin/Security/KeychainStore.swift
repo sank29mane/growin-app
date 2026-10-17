@@ -128,11 +128,11 @@ final class KeychainStore: @unchecked Sendable {
     private func rawData(account: String) throws -> Data? {
         try assertAccessAllowed(for: .read)
         var query = baseQuery(account: account)
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        query[Security.kSecReturnData as String] = true
+        query[Security.kSecMatchLimit as String] = Security.kSecMatchLimitOne
 
         var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        let status = Security.SecItemCopyMatching(query as CFDictionary, &item)
         if status == errSecItemNotFound {
             return nil
         }
@@ -153,14 +153,14 @@ final class KeychainStore: @unchecked Sendable {
         }
 
         let query = baseQuery(account: account)
-        let attributes: [String: Any] = [kSecValueData as String: data]
-        let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        let attributes: [String: Any] = [Security.kSecValueData as String: data]
+        let updateStatus = Security.SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
 
         if updateStatus == errSecItemNotFound {
             var item = query
-            item[kSecValueData as String] = data
-            item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-            let addStatus = SecItemAdd(item as CFDictionary, nil)
+            item[Security.kSecValueData as String] = data
+            item[Security.kSecAttrAccessible as String] = Security.kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            let addStatus = Security.SecItemAdd(item as CFDictionary, nil)
             guard addStatus == errSecSuccess else {
                 throw KeychainStoreError.status(addStatus)
             }
@@ -174,7 +174,7 @@ final class KeychainStore: @unchecked Sendable {
 
     private func rawRemove(account: String) throws {
         try assertAccessAllowed(for: .delete)
-        let status = SecItemDelete(baseQuery(account: account) as CFDictionary)
+        let status = Security.SecItemDelete(baseQuery(account: account) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw KeychainStoreError.status(status)
         }
@@ -264,9 +264,9 @@ final class KeychainStore: @unchecked Sendable {
 
     private func baseQuery(account: String) -> [String: Any] {
         [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
+            Security.kSecClass as String: Security.kSecClassGenericPassword,
+            Security.kSecAttrService as String: service,
+            Security.kSecAttrAccount as String: account,
         ]
     }
 }

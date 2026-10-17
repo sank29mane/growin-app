@@ -250,9 +250,9 @@ struct LegacyT212KeychainCleanupTests {
 
     // MARK: Service isolation canary
 
-    /// Runtime proof that the cleanup's REAL delete (not an injected one) carries its own service. If
-    /// the query lost its service, a delete aimed at service A would remove service B's item. Both
-    /// services are test-prefixed and everything is removed again.
+    /// A delete aimed at A finds nothing when A holds nothing, removes only A's own copies, and the whole
+    /// run with the real default delete does the same. B is byte-identical throughout. Only booleans
+    /// reach a failure message: never an item's bytes, never an account name.
     @Test func theRealDeleteNeverTouchesAnotherServicesItem() throws {
         let a = Rig()
         let b = Rig()
@@ -262,31 +262,36 @@ struct LegacyT212KeychainCleanupTests {
         }
         try b.seed(Cleanup.legacyAccounts)
 
-        // A holds nothing: the real delete reports not-found for every account and B is untouched.
         for account in Cleanup.legacyAccounts {
-            #expect(Cleanup.deleteExactItem(service: a.service, account: account) == errSecItemNotFound, "\(account)")
+            let notFound = Cleanup.deleteExactItem(service: a.service, account: account) == errSecItemNotFound
+            #expect(notFound, "A holds nothing, so the real delete finds nothing")
         }
         for account in Cleanup.legacyAccounts {
-            #expect(try b.raw.data(account: account) == Self.canary, "B untouched: \(account)")
+            let untouched = try b.raw.data(account: account) == Self.canary
+            #expect(untouched, "B untouched after deletes aimed at A")
         }
 
-        // A holds its own copies: the real delete removes A's and leaves B's byte-identical.
         try a.seed(Cleanup.legacyAccounts)
         for account in Cleanup.legacyAccounts {
-            #expect(Cleanup.deleteExactItem(service: a.service, account: account) == errSecSuccess, "\(account)")
-            #expect(try a.raw.data(account: account) == nil, "A removed: \(account)")
+            let deleted = Cleanup.deleteExactItem(service: a.service, account: account) == errSecSuccess
+            let goneFromA = try a.raw.data(account: account) == nil
+            #expect(deleted, "the real delete removes A's own item")
+            #expect(goneFromA, "A's item is gone")
         }
         for account in Cleanup.legacyAccounts {
-            #expect(try b.raw.data(account: account) == Self.canary, "B untouched: \(account)")
+            let untouched = try b.raw.data(account: account) == Self.canary
+            #expect(untouched, "B untouched after A's items were deleted")
         }
 
-        // The whole run with the real default delete does the same.
         try a.seed(Cleanup.legacyAccounts)
         let outcome = Cleanup.runOnce(service: a.service, defaults: a.defaults, log: { _ in })
-        #expect(outcome.removed == Cleanup.legacyAccounts.count)
+        let removedAll = outcome.removed == Cleanup.legacyAccounts.count
+        #expect(removedAll)
         for account in Cleanup.legacyAccounts {
-            #expect(try a.raw.data(account: account) == nil, "A removed: \(account)")
-            #expect(try b.raw.data(account: account) == Self.canary, "B untouched: \(account)")
+            let goneFromA = try a.raw.data(account: account) == nil
+            let untouched = try b.raw.data(account: account) == Self.canary
+            #expect(goneFromA, "A's item is gone after the run")
+            #expect(untouched, "B untouched after the run")
         }
     }
 

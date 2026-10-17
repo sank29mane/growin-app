@@ -36,13 +36,23 @@ this scan reads the source and proves:
 12. The tripwire cannot be compiled out (`#if`), or disabled (traits), or moved out of a `@Test`, and it
    cannot write through the `KeychainStorage` property wrapper.
 13. The guard is not shadowed one layer down: `TestHostDetection` calls `Foundation.`-qualified names and
-   a plain loop, and `Growin/` may not extend the standard types, overload `==`, `&&`, `||` or `!` on
-   them, or declare names that stand in for `NSClassFromString`, `ProcessInfo` or a system module.
-
-Each rule has planted-sample break-proofs further down: a copy of the real source with the guard
-removed, moved, wrapped, bypassed or weakened must produce offences. Reading uses `reduce_swift`
-from `test_swift_scan_bypasses` (comments and strings gone) for call scans, and comment-stripped
-code with strings kept for the pinned bodies and literals.
+   a plain loop, and `Growin/` may not extend the standard types (sugared or aliased forms included),
+   overload `==`, `&&`, `||` or `!` on them, or declare names that stand in for `NSClassFromString`,
+   `ProcessInfo` or a system module.
+14. The four tripwire tests are pinned WHOLE, byte for byte: the attribute line, the signature, every
+   statement in order and the closing brace. `#expect` being present is not enough: a `return`, a closure
+   that is never called, `if false`, `guard false else { return }`, an unreachable `defer`, a `try?`, a
+   no-op local `expect`, inverted arguments or a changed account all keep an `#expect` in the text and
+   skip or weaken it. No function, macro or type named `expect`, `require`, `Issue` or `withKnownIssue`
+   may be declared anywhere in GrowinTests.
+15. The four service-isolation canaries and the helper that runs their body are pinned WHOLE too, so an
+   assertion cannot be removed, the test disabled, or the body skipped. No `#expect` or `#require`
+   argument in a canary or the tripwire may read a credential (`.string(`, `.data(`, `rawData`,
+   `legacyFlatData`): a failure message must only ever show a Bool.
+16. The Security symbols that build and send a query (`kSec*`, `SecItem*`) are `Security.`-qualified in
+   every pinned owner and query builder, nothing in `Growin/` or `GrowinTests/` may declare a name that
+   starts `kSec`, `errSec`, `SecItem` or `SecKeychain`, and in GrowinTests only `RawKeychain.swift` may
+   mention `SecItem*` or `SecKeychain*`. `dlsym`, `dlopen` and `NSSelectorFromString` are banned in both.
 """
 
 import re
@@ -334,28 +344,28 @@ def query_binding_offences(source: Source, builder: str, builder_params: str, ex
 
 QUERY_BODY = """
 [
-    kSecClass as String: kSecClassGenericPassword,
-    kSecAttrService as String: service,
-    kSecAttrAccount as String: account,
+    Security.kSecClass as String: Security.kSecClassGenericPassword,
+    Security.kSecAttrService as String: service,
+    Security.kSecAttrAccount as String: account,
 ]
 """
 CLEANUP_QUERY_BODY = """
 [
-    kSecClass as String: kSecClassGenericPassword,
-    kSecAttrService as String: service,
-    kSecAttrAccount as String: account,
-    kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
+    Security.kSecClass as String: Security.kSecClassGenericPassword,
+    Security.kSecAttrService as String: service,
+    Security.kSecAttrAccount as String: account,
+    Security.kSecUseAuthenticationUI as String: Security.kSecUseAuthenticationUIFail,
 ]
 """
 
 STORE_RAW_DATA_BODY = """
 try assertAccessAllowed(for: .read)
 var query = baseQuery(account: account)
-query[kSecReturnData as String] = true
-query[kSecMatchLimit as String] = kSecMatchLimitOne
+query[Security.kSecReturnData as String] = true
+query[Security.kSecMatchLimit as String] = Security.kSecMatchLimitOne
 
 var item: CFTypeRef?
-let status = SecItemCopyMatching(query as CFDictionary, &item)
+let status = Security.SecItemCopyMatching(query as CFDictionary, &item)
 if status == errSecItemNotFound {
     return nil
 }
@@ -375,14 +385,14 @@ if data.isEmpty {
 }
 
 let query = baseQuery(account: account)
-let attributes: [String: Any] = [kSecValueData as String: data]
-let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+let attributes: [String: Any] = [Security.kSecValueData as String: data]
+let updateStatus = Security.SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
 
 if updateStatus == errSecItemNotFound {
     var item = query
-    item[kSecValueData as String] = data
-    item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-    let addStatus = SecItemAdd(item as CFDictionary, nil)
+    item[Security.kSecValueData as String] = data
+    item[Security.kSecAttrAccessible as String] = Security.kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+    let addStatus = Security.SecItemAdd(item as CFDictionary, nil)
     guard addStatus == errSecSuccess else {
         throw KeychainStoreError.status(addStatus)
     }
@@ -395,7 +405,7 @@ guard updateStatus == errSecSuccess else {
 """
 STORE_RAW_REMOVE_BODY = """
 try assertAccessAllowed(for: .delete)
-let status = SecItemDelete(baseQuery(account: account) as CFDictionary)
+let status = Security.SecItemDelete(baseQuery(account: account) as CFDictionary)
 guard status == errSecSuccess || status == errSecItemNotFound else {
     throw KeychainStoreError.status(status)
 }
@@ -417,18 +427,18 @@ return (removed, tooManyMatchesStatus)
 """
 RAW_SET_BODY = """
 var item = query(account)
-item[kSecValueData as String] = data
-item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-let status = SecItemAdd(item as CFDictionary, nil)
+item[Security.kSecValueData as String] = data
+item[Security.kSecAttrAccessible as String] = Security.kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+let status = Security.SecItemAdd(item as CFDictionary, nil)
 guard status == errSecSuccess else { throw KeychainStoreError.status(status) }
 """
-RAW_REMOVE_BODY = "SecItemDelete(query(account) as CFDictionary)"
+RAW_REMOVE_BODY = "Security.SecItemDelete(query(account) as CFDictionary)"
 RAW_DATA_BODY = """
 var item = query(account)
-item[kSecReturnData as String] = true
-item[kSecMatchLimit as String] = kSecMatchLimitOne
+item[Security.kSecReturnData as String] = true
+item[Security.kSecMatchLimit as String] = Security.kSecMatchLimitOne
 var result: CFTypeRef?
-let status = SecItemCopyMatching(item as CFDictionary, &result)
+let status = Security.SecItemCopyMatching(item as CFDictionary, &result)
 if status == errSecItemNotFound { return nil }
 guard status == errSecSuccess else { throw KeychainStoreError.status(status) }
 return result as? Data
@@ -524,7 +534,7 @@ guard !ProductionKeychainGuard.refusesCurrentProcess(service: service) else {
     ProductionKeychainGuard.recordRefusal(site: .delete)
     return refusedUnderTestsStatus
 }
-return SecItemDelete(exactQuery(service: service, account: account) as CFDictionary)
+return Security.SecItemDelete(exactQuery(service: service, account: account) as CFDictionary)
 """
 CLEANUP_PUBLIC_RUN_BODY = """
 if ProductionKeychainGuard.refusesCurrentProcess(service: service) {
@@ -793,6 +803,31 @@ STAND_IN_DECLARATION = re.compile(
 )
 
 
+# A declaration named like a Security symbol, at any scope, can replace the symbol a query is built from
+# (`let kSecAttrService: CFString = kSecUseOperationPrompt` makes every query service-less). The pinned
+# owners also write these symbols `Security.`-qualified, which no app declaration can shadow.
+SECURITY_NAME = r"(?:kSec\w*|errSec\w*|SecItem\w*|SecKeychain\w*)"
+SECURITY_KEYWORD_DECLARATION = re.compile(
+    r"(?<![A-Za-z0-9_.])(?:let|var|func|static|class|struct|enum|actor|protocol|typealias|associatedtype)\s+`?"
+    + SECURITY_NAME
+    + r"`?(?![A-Za-z0-9_])"
+)
+SECURITY_CASE_LIST = re.compile(r"(?<![A-Za-z0-9_.])case\s+(?P<names>[^\n:{]*)")
+SECURITY_PARAMETER = re.compile(
+    r"(?<=[(,])\s*(?:(?:_|[A-Za-z]\w*)\s+)?" + SECURITY_NAME + r"\s*(?:[A-Za-z_]\w*\s*)?:(?!:)"
+)
+SECURITY_LOOP_OR_TUPLE = re.compile(
+    r"(?<![A-Za-z0-9_.])for\s+`?" + SECURITY_NAME + r"`?(?![A-Za-z0-9_])"
+    r"|(?<![A-Za-z0-9_.])(?:let|var)\s*\([^)]*(?<![A-Za-z0-9_.])" + SECURITY_NAME + r"(?![A-Za-z0-9_])[^)]*\)"
+)
+# A lookup by built string reaches SecItem without ever spelling it, so the scans cannot see it.
+DYNAMIC_LOOKUP = re.compile(r"(?<![A-Za-z0-9_.])(?:dlsym|dlopen|NSSelectorFromString)(?![A-Za-z0-9_])")
+TYPEALIAS = re.compile(r"(?<![A-Za-z0-9_])typealias\s+(?P<name>[A-Za-z_]\w*)(?:\s*<[^>]*>)?\s*=\s*(?P<rhs>[^\n;{]+)")
+STANDARD_RIGHT_HAND_SIDE = re.compile(r"(?:(?:Swift|Foundation)\s*\.\s*)?" + STANDARD_TYPES + r"(?![A-Za-z0-9_])|\[")
+SUGARED_EXTENSION = re.compile(r"(?<![A-Za-z0-9_])extension\s+(?:\[|[A-Za-z_][\w.]*\?)")
+RAW_KEYCHAIN_REL = RAW_KEYCHAIN.relative_to(REPO)
+
+
 def declaration_scope(bare: str, position: int) -> str:
     """Where a declaration sits: `top` (module level), `extension`, `type` or `code` (a function or closure body).
 
@@ -821,6 +856,15 @@ def declaration_scope(bare: str, position: int) -> str:
     return "code"
 
 
+# The tripwire's assertions are Swift Testing's `#expect`. A function, macro or type called `expect`,
+# `require`, `Issue` or `withKnownIssue` declared anywhere in GrowinTests (module level or local) could
+# stand in for it and turn an assertion into a no-op, so none may be declared.
+TESTING_VOCABULARY_DECLARATION = re.compile(
+    r"(?<![A-Za-z0-9_.])(?:func|macro|struct|class|enum|actor|protocol|typealias|associatedtype|let|var|case)"
+    r"\s+`?(?:expect|require|Issue|withKnownIssue)`?(?![A-Za-z0-9_])"
+)
+
+
 def swift_files() -> dict[Path, str]:
     files = {}
     for root in (APP, APP_TESTS):
@@ -831,8 +875,38 @@ def swift_files() -> dict[Path, str]:
 
 def shadow_offences(files: dict[Path, str]) -> list[str]:
     found = []
+    # Typealiases in Growin/ whose right-hand side is a standard type or sugar for one: extending the alias
+    # extends the type.
+    aliases: set[str] = set()
+    for relative, text in files.items():
+        if relative.parts[0] != "Growin":
+            continue
+        for hit in TYPEALIAS.finditer(reduce_swift(text).bare):
+            if STANDARD_RIGHT_HAND_SIDE.match(hit.group("rhs").strip()):
+                aliases.add(hit.group("name"))
     for relative, text in sorted(files.items()):
         bare = reduce_swift(text).bare
+        if relative.parts[0] in ("Growin", "GrowinTests"):
+            for hit in DYNAMIC_LOOKUP.finditer(bare):
+                found.append(f"{relative}: {hit.group(0)} can reach SecItem through a built string")
+            for pattern, label in (
+                (SECURITY_KEYWORD_DECLARATION, "declares"),
+                (SECURITY_PARAMETER, "takes a parameter or label named"),
+                (SECURITY_LOOP_OR_TUPLE, "binds"),
+            ):
+                for hit in pattern.finditer(bare):
+                    found.append(f"{relative}: {label} a name that can replace a Security symbol ({squash(hit.group(0))[:60]})")
+            for hit in SECURITY_CASE_LIST.finditer(bare):
+                if declaration_scope(bare, hit.start()) != "type":
+                    continue  # a switch pattern such as `case errSecSuccess:` is a use, not a declaration
+                for part in hit.group("names").split(","):
+                    word = re.match(r"\s*`?([A-Za-z_]\w*)", part)
+                    if word and re.fullmatch(SECURITY_NAME, word.group(1)):
+                        found.append(f"{relative}: an enum case named like a Security symbol ({word.group(1)})")
+        if relative.parts[0] == "GrowinTests" and relative != RAW_KEYCHAIN_REL:
+            for pattern in (SEC_ITEM_ANY, SEC_KEYCHAIN_ANY):
+                for hit in pattern.finditer(bare):
+                    found.append(f"{relative}: mentions {hit.group(0)}; only RawKeychain.swift may call SecItem or SecKeychain in tests")
         types = [squash(m.group(0)) for m in TYPE_DECLARATION.finditer(bare)]
         expected = ["enum TestHostDetection", "enum ProductionKeychainGuard"] if relative == GUARD_REL else []
         if sorted(types) != sorted(expected):
@@ -844,7 +918,15 @@ def shadow_offences(files: dict[Path, str]) -> list[str]:
         ):
             for hit in pattern.finditer(bare):
                 found.append(f"{relative}: {label} named like a guard type ({squash(hit.group(0))})")
+        if relative.parts[0] == "GrowinTests":
+            for hit in TESTING_VOCABULARY_DECLARATION.finditer(bare):
+                found.append(f"{relative}: declares a name that can stand in for Swift Testing ({squash(hit.group(0))})")
         if relative.parts[0] == "Growin":
+            for hit in SUGARED_EXTENSION.finditer(bare):
+                found.append(f"{relative}: extends sugared array, dictionary or optional syntax ({squash(hit.group(0))})")
+            for alias in sorted(aliases):
+                for hit in re.finditer(r"(?<![A-Za-z0-9_])extension\s+`?" + re.escape(alias) + r"`?(?![A-Za-z0-9_])", bare):
+                    found.append(f"{relative}: extends {alias}, an alias of a standard type")
             for hit in STANDARD_EXTENSION.finditer(bare):
                 found.append(f"{relative}: extends a standard type, which can replace a call the guard makes ({squash(hit.group(0))})")
             for hit in OPERATOR_DECLARATION.finditer(bare):
@@ -972,6 +1054,37 @@ TRIPWIRE_TESTS = (
     "theSignersReportNotConfigured",
     "theCleanupRefusesADeleteOnTheProductionService",
 )
+# Each test, from its attribute to its closing brace, exactly as it appears in the file (indentation and
+# line breaks included, no wildcards). The scan compares the text of the block, found structurally, to this.
+TRIPWIRE_TEST_BLOCKS = {
+    "thisProcessIsATestHost": (
+        "@Test func thisProcessIsATestHost() {\n"
+        "        #expect(TestHostDetection.isTestHost())\n"
+        "        #expect(ProductionKeychainGuard.refusesCurrentProcess(service: Self.protectedName))\n"
+        "    }"
+    ),
+    "theSharedStoreRefusesARead": (
+        "@Test func theSharedStoreRefusesARead() {\n"
+        "        let refusal = Self.code(of: { _ = try KeychainStore.shared.string(for: .alpacaApiKey, scope: .workspace(.uk)) })\n"
+        "        #expect(refusal == Self.refused)\n"
+        "    }"
+    ),
+    "theSignersReportNotConfigured": (
+        "@Test func theSignersReportNotConfigured() {\n"
+        "        #expect(LocalApprovalSigner.shared.isConfigured(for: .uk) == false)\n"
+        "        #expect(LocalApprovalSigner.shared.isConfigured(for: .india) == false)\n"
+        "        #expect(ApprovalSignerRouter.shared.isConfigured(for: .uk) == false)\n"
+        "        #expect(ApprovalSignerRouter.shared.isConfigured(for: .india) == false)\n"
+        "    }"
+    ),
+    "theCleanupRefusesADeleteOnTheProductionService": (
+        "@Test func theCleanupRefusesADeleteOnTheProductionService() {\n"
+        "        #expect(\n"
+        "            LegacyT212KeychainCleanup.deleteExactItem(service: Self.protectedName, account: UUID().uuidString)\n"
+        "                == LegacyT212KeychainCleanup.refusedUnderTestsStatus)\n"
+        "    }"
+    ),
+}
 TRIPWIRE_OWNERS = {
     "KeychainStore": "theSharedStoreRefusesARead",
     "LocalApprovalSigner": "theSignersReportNotConfigured",
@@ -984,7 +1097,7 @@ TRIPWIRE_ASSIGNMENT = re.compile(r"\.\s*[A-Za-z_]\w*\s*=(?!=)|\]\s*=(?!=)")
 TRIPWIRE_GUARD_EXPECT = "ProductionKeychainGuard.refusesCurrentProcess(service: Self.protectedName)"
 
 
-def tripwire_offences(text: str) -> list[str]:
+def tripwire_offences(text: str, *, pin_blocks: bool = True) -> list[str]:
     source = read("ProductionTripwireTests.swift", text)
     name = source.name
     bare, code = source.bare, source.code
@@ -1030,7 +1143,15 @@ def tripwire_offences(text: str) -> list[str]:
             found.append(f"{name}: {kind}.shared is used for something other than the allowed call")
         if kind == "KeychainStore" and not re.search(r"_\s*=\s*try\s+$", bare[: hit.start()]):
             found.append(f"{name}: the shared store read must be discarded with `_ = try`, never bound")
-        check_in_assertion(hit.start(), f"{kind}.shared", TRIPWIRE_OWNERS[kind])
+        if kind == "KeychainStore":
+            # The read is discarded inside Self.code(of:), and only its refusal code is asserted.
+            owner = enclosing(funcs, hit.start())
+            if owner is None or owner.name != TRIPWIRE_OWNERS[kind]:
+                found.append(f"{name}: KeychainStore.shared must sit in the @Test func {TRIPWIRE_OWNERS[kind]}")
+            if not re.search(r"let\s+refusal\s*=\s*Self\s*\.\s*code\s*\(\s*of\s*:\s*\{\s*_\s*=\s*try\s+$", bare[: hit.start()]):
+                found.append(f"{name}: the shared read must be `let refusal = Self.code(of: {{ _ = try ... }})`")
+        else:
+            check_in_assertion(hit.start(), f"{kind}.shared", TRIPWIRE_OWNERS[kind])
     for hit in KEYCHAIN_STORE_WORD.finditer(bare):
         if not re.match(r"\s*\.\s*shared(?![A-Za-z0-9_])", bare[hit.end() :]):
             found.append(f"{name}: names the Keychain store other than the one allowed shared read")
@@ -1097,6 +1218,32 @@ def tripwire_offences(text: str) -> list[str]:
         if len(by_name(funcs, test)) != 1:
             found.append(f"{name}: the @Test func {test}() must exist exactly once")
 
+    # Every test is pinned WHOLE and exactly: attribute, signature, each statement in order, closing brace.
+    # An #expect that is merely present can be skipped (return, an uncalled closure, `if false`, `guard false`),
+    # weakened (`try?`, a no-op `expect`, inverted arguments) or aimed elsewhere (a changed account).
+    blocks: dict[str, list[str]] = {}
+    for hit in re.finditer(r"@Test(?![A-Za-z0-9_])", bare):
+        shape = re.match(r"\s+func\s+(\w+)\s*\(\s*\)\s*\{", bare[hit.end() :])
+        if shape is None:
+            continue
+        brace = hit.end() + shape.end() - 1
+        close = _match(bare, brace, "{", "}")
+        if close is not None:
+            blocks.setdefault(shape.group(1), []).append(bare[hit.start() : close + 1])
+    for test, expected in TRIPWIRE_TEST_BLOCKS.items() if pin_blocks else ():
+        got = blocks.get(test, [])
+        if got == [expected]:
+            continue
+        if len(got) != 1:
+            found.append(f"{name}: {test}() is declared {len(got)}x as an @Test, expected exactly once")
+            continue
+        want_lines, got_lines = expected.split("\n"), got[0].split("\n")
+        at = next((i for i, (a, b) in enumerate(zip(want_lines, got_lines)) if a != b), min(len(want_lines), len(got_lines)))
+        shown = got_lines[at].strip() if at < len(got_lines) else "(the block ends early)"
+        found.append(f"{name}: {test}() is not byte for byte the pinned test (line {at + 1}: {shown[:80]})")
+
+    found += secret_expect_offences(name, text)
+
     # It cannot write through the KeychainStorage property wrapper, or assign to any member.
     for hit in TRIPWIRE_WRAPPER.finditer(bare):
         found.append(f"{name}: the KeychainStorage property wrapper can write ({hit.group(0)})")
@@ -1109,6 +1256,269 @@ def tripwire_offences(text: str) -> list[str]:
         found.append(f"{name}: the expected refusal code is not the pinned one")
     if norm(TRIPWIRE_NAME_DECL) not in norm(code):
         found.append(f"{name}: the protected service name is not the pinned two-piece literal")
+    return found
+
+
+SECRET_READ_IN_EXPECT = re.compile(
+    r"\.\s*(?:string|data)\s*\(|(?<![A-Za-z0-9_])(?:rawData|legacyFlatData)(?![A-Za-z0-9_])"
+)
+
+
+def secret_expect_offences(label: str, text: str) -> list[str]:
+    """No `#expect` or `#require` argument may read a credential: a failure message shows its operands.
+
+    A String or Data read from the Keychain inside the expression would be printed on a failing run, and
+    under a stripped or swapped service on the operator's Mac that could be a real credential. Compute a
+    Bool (or a hash) first and assert only that.
+    """
+    bare = reduce_swift(text).bare
+    found = []
+    for hit in re.finditer(r"#(?:expect|require)\s*\(", bare):
+        close = _match(bare, hit.end() - 1, "(", ")")
+        if close is None:
+            found.append(f"{label}: an unterminated assertion")
+            continue
+        argument = bare[hit.end() : close]
+        for read in SECRET_READ_IN_EXPECT.finditer(argument):
+            found.append(f"{label}: an assertion reads a credential ({squash(read.group(0))}) and would print it on failure")
+    return found
+
+
+def exact_block(source: Source, header: re.Pattern[str], expected: str, label: str) -> list[str]:
+    """The one declaration matched by `header`, from its first character to its closing brace, equals `expected`.
+
+    Located in the string-free text (so a decoy copy inside a multi-line string cannot be mistaken for the
+    real one), then compared in the comment-free text with string contents kept, so a changed literal
+    counts. No comments may sit inside a pinned block.
+    """
+    bare_hits = list(header.finditer(source.bare))
+    code_hits = list(header.finditer(source.code))
+    if len(bare_hits) != 1 or len(code_hits) != 1:
+        return [f"{source.name}: {label} must be declared exactly once ({len(bare_hits)} real, {len(code_hits)} in the text)"]
+    hit = code_hits[0]
+    position = hit.end()
+    if source.code[position : position + 1] == "(":
+        close_paren = _match(source.code, position, "(", ")")
+        if close_paren is None:
+            return [f"{source.name}: {label} has unbalanced parameters"]
+        position = close_paren + 1
+    brace = source.code.find("{", position)
+    close = _match(source.code, brace, "{", "}") if brace >= 0 else None
+    if close is None:
+        return [f"{source.name}: {label} has no readable body"]
+    got = source.code[hit.start() : close + 1]
+    if got == expected:
+        return []
+    want_lines, got_lines = expected.split("\n"), got.split("\n")
+    at = next((i for i, (a, b) in enumerate(zip(want_lines, got_lines)) if a != b), min(len(want_lines), len(got_lines)))
+    shown = got_lines[at].strip() if at < len(got_lines) else "(the block ends early)"
+    return [f"{source.name}: {label} is not byte for byte the pinned text (line {at + 1}: {shown[:80]})"]
+
+
+def at_test_header(name: str) -> re.Pattern[str]:
+    return re.compile(r"@Test(?![A-Za-z0-9_])\s+func\s+" + re.escape(name) + r"(?![A-Za-z0-9_])")
+
+
+CANARY_SCOPE_NEVER_SEES = (
+    '@Test func aStoreNeverSeesOrChangesAnotherServicesItem() {\n'
+    '        let (a, _) = Self.makeStore()\n'
+    '        let (b, serviceB) = Self.makeStore()\n'
+    '        defer {\n'
+    '            Self.cleanUp(a)\n'
+    '            Self.cleanUp(b)\n'
+    '        }\n'
+    '        Self.requireKeychain {\n'
+    '            let planted = Data("CANARY-B".utf8)\n'
+    '            try b.set(planted, for: .alpacaApiKey, scope: .workspace(.uk))\n'
+    '            let rawB = RawKeychain(service: serviceB)\n'
+    '            let plantedReadsBack = try rawB.data(account: Self.canaryScopedAccount) == planted\n'
+    '            #expect(plantedReadsBack, "positive control")\n'
+    '\n'
+    '            let aDataIsNil = try a.data(for: .alpacaApiKey, scope: .workspace(.uk)) == nil\n'
+    '            let aStringIsNil = try a.string(for: .alpacaApiKey, scope: .workspace(.uk)) == nil\n'
+    '            #expect(aDataIsNil)\n'
+    '            #expect(aStringIsNil)\n'
+    '\n'
+    '            try a.remove(.alpacaApiKey, scope: .workspace(.uk))\n'
+    '            let afterRemove = try rawB.data(account: Self.canaryScopedAccount) == planted\n'
+    '            #expect(afterRemove, "B survives a remove on A")\n'
+    '            try a.set("", for: .alpacaApiKey, scope: .workspace(.uk))\n'
+    '            let afterEmptySet = try rawB.data(account: Self.canaryScopedAccount) == planted\n'
+    '            #expect(afterEmptySet, "B survives an empty set on A")\n'
+    '            try a.set("CANARY-A", for: .alpacaApiKey, scope: .workspace(.uk))\n'
+    '            let afterSet = try rawB.data(account: Self.canaryScopedAccount) == planted\n'
+    '            #expect(afterSet, "B survives a set on A")\n'
+    '            let aReadsItsOwn = try a.string(for: .alpacaApiKey, scope: .workspace(.uk)) == "CANARY-A"\n'
+    '            #expect(aReadsItsOwn)\n'
+    '            try a.remove(.alpacaApiKey, scope: .workspace(.uk))\n'
+    '            let afterSecondRemove = try rawB.data(account: Self.canaryScopedAccount) == planted\n'
+    '            #expect(afterSecondRemove, "B survives a second remove on A")\n'
+    '            let bStillReadsItsOwn = try b.string(for: .alpacaApiKey, scope: .workspace(.uk)) == "CANARY-B"\n'
+    '            #expect(bStillReadsItsOwn)\n'
+    '        }\n'
+    '    }'
+)
+
+CANARY_SCOPE_CLEANUP = (
+    '@Test func aStoreCleanUpAndLegacyCallsLeaveAnotherServicesItemsAlone() {\n'
+    '        let (a, _) = Self.makeStore()\n'
+    '        let (b, serviceB) = Self.makeStore()\n'
+    '        defer {\n'
+    '            Self.cleanUp(a)\n'
+    '            Self.cleanUp(b)\n'
+    '        }\n'
+    '        Self.requireKeychain {\n'
+    '            let rawB = RawKeychain(service: serviceB)\n'
+    '            let scoped = Data("CANARY-SCOPED-B".utf8)\n'
+    '            let flat = Data("CANARY-FLAT-B".utf8)\n'
+    '            let approval = Data("CANARY-APPROVAL-B".utf8)\n'
+    '            try b.set(scoped, for: .alpacaApiKey, scope: .workspace(.uk))\n'
+    '            try rawB.set(flat, account: Self.canaryFlatAccount)\n'
+    '            try b.set(approval, for: .approvalSigningKey, scope: .workspace(.uk))\n'
+    '\n'
+    '            let aFlatIsNil = try a.legacyFlatData(for: .alpacaApiKey) == nil\n'
+    '            #expect(aFlatIsNil)\n'
+    '            try a.removeLegacyFlatItem(.alpacaApiKey)\n'
+    '            Self.cleanUp(a)\n'
+    '            let migrationsMoved = a.migrateFlatItemsToScoped()\n'
+    '            #expect(migrationsMoved.isEmpty)\n'
+    '\n'
+    '            let scopedSurvives = try rawB.data(account: Self.canaryScopedAccount) == scoped\n'
+    '            let flatSurvives = try rawB.data(account: Self.canaryFlatAccount) == flat\n'
+    '            let approvalSurvives = try rawB.data(account: Self.canaryApprovalAccount) == approval\n'
+    '            #expect(scopedSurvives, "B\'s scoped item survives A\'s cleanUp and legacy calls")\n'
+    '            #expect(flatSurvives, "B\'s flat item survives A\'s cleanUp and legacy calls")\n'
+    '            #expect(approvalSurvives, "B\'s approval item survives A\'s cleanUp and legacy calls")\n'
+    '        }\n'
+    '    }'
+)
+
+CANARY_SCOPE_RAW = (
+    '@Test func rawKeychainOnOneServiceCannotSeeOrRemoveAnother() {\n'
+    '        let (_, serviceA) = Self.makeStore()\n'
+    '        let (_, serviceB) = Self.makeStore()\n'
+    '        let rawA = RawKeychain(service: serviceA)\n'
+    '        let rawB = RawKeychain(service: serviceB)\n'
+    '        let account = "canary-raw"\n'
+    '        defer {\n'
+    '            rawA.remove(account: account)\n'
+    '            rawB.remove(account: account)\n'
+    '        }\n'
+    '        Self.requireKeychain {\n'
+    '            let bytesB = Data("CANARY-RAW-B".utf8)\n'
+    '            try rawB.set(bytesB, account: account)\n'
+    '            let aSeesNothing = try rawA.data(account: account) == nil\n'
+    '            #expect(aSeesNothing, "A cannot see B\'s item")\n'
+    '            rawA.remove(account: account)\n'
+    '            let bSurvivesARemove = try rawB.data(account: account) == bytesB\n'
+    '            #expect(bSurvivesARemove, "B survives a raw remove on A")\n'
+    '\n'
+    '            let bytesA = Data("CANARY-RAW-A".utf8)\n'
+    '            try rawA.set(bytesA, account: account)\n'
+    '            let aReadsItsOwn = try rawA.data(account: account) == bytesA\n'
+    '            #expect(aReadsItsOwn)\n'
+    '            rawB.remove(account: account)\n'
+    '            let aSurvivesBRemove = try rawA.data(account: account) == bytesA\n'
+    '            let bIsGone = try rawB.data(account: account) == nil\n'
+    '            #expect(aSurvivesBRemove, "A survives a raw remove on B")\n'
+    '            #expect(bIsGone)\n'
+    '        }\n'
+    '    }'
+)
+
+CANARY_SCOPE_REQUIRE = (
+    'private static func requireKeychain(_ body: () throws -> Void, sourceLocation: SourceLocation = #_sourceLocation) {\n'
+    '        do {\n'
+    '            try body()\n'
+    '        } catch KeychainStoreError.status(let status) {\n'
+    '            Issue.record("Keychain blocked with OSStatus \\(status)", sourceLocation: sourceLocation)\n'
+    '        } catch {\n'
+    '            Issue.record("Unexpected error: \\(error)", sourceLocation: sourceLocation)\n'
+    '        }\n'
+    '    }'
+)
+
+CANARY_LEGACY_REAL_DELETE = (
+    '@Test func theRealDeleteNeverTouchesAnotherServicesItem() throws {\n'
+    '        let a = Rig()\n'
+    '        let b = Rig()\n'
+    '        defer {\n'
+    '            a.tearDown()\n'
+    '            b.tearDown()\n'
+    '        }\n'
+    '        try b.seed(Cleanup.legacyAccounts)\n'
+    '\n'
+    '        for account in Cleanup.legacyAccounts {\n'
+    '            let notFound = Cleanup.deleteExactItem(service: a.service, account: account) == errSecItemNotFound\n'
+    '            #expect(notFound, "A holds nothing, so the real delete finds nothing")\n'
+    '        }\n'
+    '        for account in Cleanup.legacyAccounts {\n'
+    '            let untouched = try b.raw.data(account: account) == Self.canary\n'
+    '            #expect(untouched, "B untouched after deletes aimed at A")\n'
+    '        }\n'
+    '\n'
+    '        try a.seed(Cleanup.legacyAccounts)\n'
+    '        for account in Cleanup.legacyAccounts {\n'
+    '            let deleted = Cleanup.deleteExactItem(service: a.service, account: account) == errSecSuccess\n'
+    '            let goneFromA = try a.raw.data(account: account) == nil\n'
+    '            #expect(deleted, "the real delete removes A\'s own item")\n'
+    '            #expect(goneFromA, "A\'s item is gone")\n'
+    '        }\n'
+    '        for account in Cleanup.legacyAccounts {\n'
+    '            let untouched = try b.raw.data(account: account) == Self.canary\n'
+    '            #expect(untouched, "B untouched after A\'s items were deleted")\n'
+    '        }\n'
+    '\n'
+    '        try a.seed(Cleanup.legacyAccounts)\n'
+    '        let outcome = Cleanup.runOnce(service: a.service, defaults: a.defaults, log: { _ in })\n'
+    '        let removedAll = outcome.removed == Cleanup.legacyAccounts.count\n'
+    '        #expect(removedAll)\n'
+    '        for account in Cleanup.legacyAccounts {\n'
+    '            let goneFromA = try a.raw.data(account: account) == nil\n'
+    '            let untouched = try b.raw.data(account: account) == Self.canary\n'
+    '            #expect(goneFromA, "A\'s item is gone after the run")\n'
+    '            #expect(untouched, "B untouched after the run")\n'
+    '        }\n'
+    '    }'
+)
+
+TRIP_READ = (
+    '@Test func theSharedStoreRefusesARead() {\n'
+    '        let refusal = Self.code(of: { _ = try KeychainStore.shared.string(for: .alpacaApiKey, scope: .workspace(.uk)) })\n'
+    '        #expect(refusal == Self.refused)\n'
+    '    }'
+)
+
+
+CANARY_SCOPE = {
+    "aStoreNeverSeesOrChangesAnotherServicesItem": CANARY_SCOPE_NEVER_SEES,
+    "aStoreCleanUpAndLegacyCallsLeaveAnotherServicesItemsAlone": CANARY_SCOPE_CLEANUP,
+    "rawKeychainOnOneServiceCannotSeeOrRemoveAnother": CANARY_SCOPE_RAW,
+}
+CANARY_LEGACY = {"theRealDeleteNeverTouchesAnotherServicesItem": CANARY_LEGACY_REAL_DELETE}
+SCOPE_TESTS_PATH = APP_TESTS / "WorkspaceIsolation" / "KeychainScopeTests.swift"
+LEGACY_TESTS_PATH = APP_TESTS / "WorkspaceIsolation" / "LegacyT212KeychainCleanupTests.swift"
+
+
+def canary_scope_offences(text: str) -> list[str]:
+    source = read("KeychainScopeTests.swift", text)
+    found = list(source.errors)
+    for name, expected in CANARY_SCOPE.items():
+        found += exact_block(source, at_test_header(name), expected, name)
+        found += secret_expect_offences(f"KeychainScopeTests.swift: {name}", expected)
+    # The helper that runs every canary's body: if it stopped calling the body, each canary would pass untested.
+    found += exact_block(
+        source, re.compile(r"private\s+static\s+func\s+requireKeychain(?![A-Za-z0-9_])"), CANARY_SCOPE_REQUIRE, "requireKeychain"
+    )
+    return found
+
+
+def canary_legacy_offences(text: str) -> list[str]:
+    source = read("LegacyT212KeychainCleanupTests.swift", text)
+    found = list(source.errors)
+    for name, expected in CANARY_LEGACY.items():
+        found += exact_block(source, at_test_header(name), expected, name)
+        found += secret_expect_offences(f"LegacyT212KeychainCleanupTests.swift: {name}", expected)
     return found
 
 
@@ -1161,6 +1571,8 @@ CLEANUP_TEXT = LEGACY_CLEANUP.read_text(encoding="utf-8")
 GUARD_TEXT = GUARD.read_text(encoding="utf-8")
 RAW_TEXT = RAW_KEYCHAIN.read_text(encoding="utf-8")
 TRIPWIRE_TEXT = TRIPWIRE_FILE.read_text(encoding="utf-8")
+SCOPE_TESTS_TEXT = SCOPE_TESTS_PATH.read_text(encoding="utf-8")
+LEGACY_TESTS_TEXT = LEGACY_TESTS_PATH.read_text(encoding="utf-8")
 UI_HELPER_TEXT = (REPO / "GrowinUITests" / "LaunchSupport.swift").read_text(encoding="utf-8")
 MIRROR_TEXT = MIRROR_PATH.read_text(encoding="utf-8")
 
@@ -1195,6 +1607,39 @@ def test_nothing_in_the_app_or_the_tests_shadows_the_guard():
     files = swift_files()
     assert GUARD_REL in files and STORE_REL in files  # positive control
     assert shadow_offences(files) == []
+
+
+def test_the_canaries_are_pinned_whole_and_read_no_credential_in_an_assertion():
+    assert canary_scope_offences(SCOPE_TESTS_TEXT) == []
+    assert canary_legacy_offences(LEGACY_TESTS_TEXT) == []
+
+
+SKIPPING_VARIANTS = (
+    "return as the first statement",
+    "return after the first assertion",
+    "assertions in a closure that is never called",
+    "assertions inside if false",
+    "assertions inside if 1 == 2",
+    "assertions after guard false else { return }",
+)
+
+
+def test_the_whole_body_pin_is_what_catches_a_skipped_tripwire_assertion():
+    """With the pin on each skipping variant fails; with it off every other tripwire rule passes it.
+
+    That is the proof the pin is needed: a `return`, an uncalled closure, `if false` or `guard false` keeps
+    every #expect in the text, in the right function, in the right shape, and only the pin sees it skipped.
+    """
+    checked = 0
+    for name, block in TRIPWIRE_TEST_BLOCKS.items():
+        variants = block_variants(block)
+        for label in SKIPPING_VARIANTS:
+            planted = replaced(TRIPWIRE_TEXT, block, variants[label])
+            assert not isinstance(planted, BrokenPlant), planted.message if isinstance(planted, BrokenPlant) else ""
+            assert tripwire_offences(planted), f"{name}: {label} slipped past the pin"
+            assert tripwire_offences(planted, pin_blocks=False) == [], f"{name}: {label} is caught without the pin too"
+            checked += 1
+    assert checked == len(TRIPWIRE_TEST_BLOCKS) * len(SKIPPING_VARIANTS)
 
 
 def test_the_tripwire_runs_the_real_wiring_and_only_expects_refusals():
@@ -1304,7 +1749,7 @@ STORE_CHECK_HEAD = (
     "        if ProductionKeychainGuard.refuses(service: service, protectedService: protectedService, testHost: testHost) {\n"
 )
 STORE_RECORD_LINE = "            ProductionKeychainGuard.recordRefusal(site: site)\n"
-SERVICE_LINE = "            kSecAttrService as String: service,\n"
+SERVICE_LINE = "            Security.kSecAttrService as String: service,\n"
 CLEANUP_DELETE_TEXT = (
     "        guard !ProductionKeychainGuard.refusesCurrentProcess(service: service) else {\n"
     "            ProductionKeychainGuard.recordRefusal(site: .delete)\n"
@@ -1330,9 +1775,8 @@ GUARD_RECORD_LINE = (
     '        logger.error("\\(refusalCode, privacy: .public) site=\\(site.rawValue, privacy: .public)")\n'
 )
 TRIPWIRE_READ = (
-    "        #expect(\n"
-    "            Self.code(of: { _ = try KeychainStore.shared.string(for: .alpacaApiKey, scope: .workspace(.uk)) })\n"
-    "                == Self.refused)\n"
+    "        let refusal = Self.code(of: { _ = try KeychainStore.shared.string(for: .alpacaApiKey, scope: .workspace(.uk)) })\n"
+    "        #expect(refusal == Self.refused)\n"
 )
 TRIPWIRE_SIGNER = "        #expect(LocalApprovalSigner.shared.isConfigured(for: .uk) == false)\n"
 TRIPWIRE_DELETE = (
@@ -1342,15 +1786,15 @@ TRIPWIRE_DELETE = (
 )
 UI_KEY_LINE = f'        app.launchEnvironment["{UI_TEST_HOST_KEY}"] = "1"\n'
 
-STORE_DATA_MATCH_LINE = "        query[kSecMatchLimit as String] = kSecMatchLimitOne\n"
+STORE_DATA_MATCH_LINE = "        query[Security.kSecMatchLimit as String] = Security.kSecMatchLimitOne\n"
 STORE_SET_QUERY_LINE = "        let query = baseQuery(account: account)\n"
-STORE_SET_ITEM_LINE = "            item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly\n"
-STORE_REMOVE_LINE = "        let status = SecItemDelete(baseQuery(account: account) as CFDictionary)\n"
-CLEANUP_DELETE_QUERY_LINE = "        return SecItemDelete(exactQuery(service: service, account: account) as CFDictionary)\n"
+STORE_SET_ITEM_LINE = "            item[Security.kSecAttrAccessible as String] = Security.kSecAttrAccessibleWhenUnlockedThisDeviceOnly\n"
+STORE_REMOVE_LINE = "        let status = Security.SecItemDelete(baseQuery(account: account) as CFDictionary)\n"
+CLEANUP_DELETE_QUERY_LINE = "        return Security.SecItemDelete(exactQuery(service: service, account: account) as CFDictionary)\n"
 CLEANUP_LOOP_LINE = "            let status = delete(service, account)\n"
-RAW_REMOVE_LINE = "        SecItemDelete(query(account) as CFDictionary)\n"
-RAW_SET_FIRST = "        var item = query(account)\n        item[kSecValueData as String] = data\n"
-RAW_DATA_FIRST = "        var item = query(account)\n        item[kSecReturnData as String] = true\n"
+RAW_REMOVE_LINE = "        Security.SecItemDelete(query(account) as CFDictionary)\n"
+RAW_SET_FIRST = "        var item = query(account)\n        item[Security.kSecValueData as String] = data\n"
+RAW_DATA_FIRST = "        var item = query(account)\n        item[Security.kSecReturnData as String] = true\n"
 GUARD_DETECT_TEXT = (
     "        if xctestCaseClassLoaded { return true }\n"
     "        for key in environmentKeys {\n"
@@ -1684,8 +2128,8 @@ PLANTS: dict[str, tuple[str, str]] = {
         "cleanup",
         replaced(
             CLEANUP_TEXT,
-            "return SecItemDelete(exactQuery(service: service, account: account) as CFDictionary)",
-            'return SecItemDelete(exactQuery(service: "san.Growin.credentials." + "v1", account: account) as CFDictionary)',
+            "return Security.SecItemDelete(exactQuery(service: service, account: account) as CFDictionary)",
+            'return Security.SecItemDelete(exactQuery(service: "san.Growin.credentials." + "v1", account: account) as CFDictionary)',
         ),
     ),
     "raw: query drops the service line (item 2)": ("raw", replaced(RAW_TEXT, SERVICE_LINE, "")),
@@ -1716,8 +2160,8 @@ PLANTS: dict[str, tuple[str, str]] = {
         "store",
         replaced(
             replaced(STORE_TEXT, RAW_REMOVE_HEAD + GUARD_LINE["rawRemove"], RAW_REMOVE_HEAD),
-            "SecItemDelete(baseQuery(account: account) as CFDictionary)\n",
-            "SecItemDelete(baseQuery(account: account) as CFDictionary)\n        try assertAccessAllowed(for: .delete)\n",
+            "Security.SecItemDelete(baseQuery(account: account) as CFDictionary)\n",
+            "Security.SecItemDelete(baseQuery(account: account) as CFDictionary)\n        try assertAccessAllowed(for: .delete)\n",
         ),
     ),
     "store: guard nested in an if": (
@@ -2175,11 +2619,13 @@ PLANTS: dict[str, tuple[str, str]] = {
     ),
     "tripwire: an assertion with != (item 4)": (
         "tripwire",
-        replaced(TRIPWIRE_TEXT, "                == Self.refused)\n", "                != Self.refused)\n"),
+        replaced(TRIPWIRE_TEXT, "        #expect(refusal == Self.refused)\n", "        #expect(refusal != Self.refused)\n"),
     ),
     "tripwire: an assertion that is always true (item 4)": (
         "tripwire",
-        replaced(TRIPWIRE_TEXT, "                == Self.refused)\n", "                == Self.refused || true)\n"),
+        replaced(
+            TRIPWIRE_TEXT, "        #expect(refusal == Self.refused)\n", "        #expect(refusal == Self.refused || true)\n"
+        ),
     ),
     "tripwire: the helper always reports a refusal (item 4)": (
         "tripwire",
@@ -2220,6 +2666,176 @@ PLANTS: dict[str, tuple[str, str]] = {
 }
 
 
+def _indent(lines: list[str]) -> list[str]:
+    return [("    " + line) if line.strip() else line for line in lines]
+
+
+def block_variants(block: str) -> dict[str, str]:
+    """Every way to keep a pinned test's #expect in its text yet skip, weaken or disable it."""
+    lines = block.split("\n")
+    head, body, tail = lines[0], lines[1:-1], lines[-1]
+
+    def build(new_head: str, new_body: list[str]) -> str:
+        return "\n".join([new_head, *new_body, tail])
+
+    def statement_end(start: int) -> int:
+        depth = 0
+        for index in range(start, len(body)):
+            depth += body[index].count("(") - body[index].count(")")
+            if depth <= 0:
+                return index
+        return len(body) - 1
+
+    firsts = [i for i, line in enumerate(body) if "#expect(" in line]
+    first, last = firsts[0], firsts[-1]
+    first_end, last_end = statement_end(first), statement_end(last)
+    throwing = head.replace(") {", ") throws {", 1) if "throws" not in head else head
+    first_statement = "\n".join(body[first : first_end + 1])
+    variants = {
+        "return as the first statement": build(head, ["        return", *body]),
+        "return after the first assertion": build(head, [*body[: first_end + 1], "        return", *body[first_end + 1 :]]),
+        "assertions in a closure that is never called": build(head, ["        let run = {", *_indent(body), "        }"]),
+        "assertions inside if false": build(head, ["        if false {", *_indent(body), "        }"]),
+        "assertions inside if 1 == 2": build(head, ["        if 1 == 2 {", *_indent(body), "        }"]),
+        "assertions after guard false else { return }": build(head, ["        guard false else { return }", *body]),
+        "the first assertion removed": build(head, [*body[:first], *body[first_end + 1 :]]),
+        "the last assertion removed": build(head, [*body[:last], *body[last_end + 1 :]]),
+        "assertions in a defer that a throw precedes": build(
+            throwing,
+            ["        if true { throw KeychainStoreError.unexpectedData }", "        defer {", *_indent(body), "        }"],
+        ),
+        "the @Test attribute dropped": build(head.replace("@Test ", "", 1), body),
+        "a .disabled trait": build(head.replace("@Test ", '@Test(.disabled("x")) ', 1), body),
+        "an .enabled(if: false) trait": build(head.replace("@Test ", "@Test(.enabled(if: false)) ", 1), body),
+        "renamed so the pinned test disappears": build(re.sub(r"(func\s+)(\w+)", r"\1\2Copy", head, count=1), body),
+        "a duplicated test": block + "\n\n    " + block,
+        "#expect swapped for a no-op local expect": build(
+            head,
+            ["        func expect(_ condition: Bool) {}", *[line.replace("#expect(", "expect(") for line in body]],
+        ),
+        "the first assertion inverted": "\n".join(
+            [head, *body[:first], first_statement.replace("#expect(", "#expect(!", 1), *body[first_end + 1 :], tail]
+        ),
+        "the first assertion or true": "\n".join(
+            [head, *body[:first], first_statement.replace("#expect(", "#expect(true || ", 1), *body[first_end + 1 :], tail]
+        ),
+    }
+    if any("try " in line for line in body):
+        swallowed = []
+        done = False
+        for line in body:
+            if not done and "try " in line:
+                line, done = line.replace("try ", "try? ", 1), True
+            swallowed.append(line)
+        variants["a try? swallowing the throwing expression"] = build(head, swallowed)
+    return variants
+
+
+def _add_generated_plants(kind: str, text: str, blocks: dict[str, str], tag: str) -> None:
+    for name, block in blocks.items():
+        for label, variant in block_variants(block).items():
+            PLANTS[f"{kind}: {name}: {label} ({tag})"] = (kind, replaced(text, block, variant))
+
+
+_add_generated_plants("tripwire", TRIPWIRE_TEXT, TRIPWIRE_TEST_BLOCKS, "r4 item 1")
+_add_generated_plants("canary_scope", SCOPE_TESTS_TEXT, CANARY_SCOPE, "r4 item 4")
+_add_generated_plants("canary_legacy", LEGACY_TESTS_TEXT, CANARY_LEGACY, "r4 item 4")
+
+DELETE_ARGUMENT = "account: UUID().uuidString"
+PLANTS.update(
+    {
+        # the delete's account must stay a fresh UUID: a fixed one could, with the guard broken, delete a real item
+        "tripwire: the delete account becomes a literal (r4 item 1)": (
+            "tripwire",
+            replaced(TRIPWIRE_TEXT, DELETE_ARGUMENT, 'account: "legacy"'),
+        ),
+        "tripwire: the delete account hoisted into a fixed let (r4 item 1)": (
+            "tripwire",
+            replaced(
+                replaced(TRIPWIRE_TEXT, DELETE_ARGUMENT, "account: account"),
+                "        #expect(\n            LegacyT212KeychainCleanup.deleteExactItem(",
+                '        let account = "legacy"\n        #expect(\n            LegacyT212KeychainCleanup.deleteExactItem(',
+            ),
+        ),
+        "tripwire: the delete account becomes a shared static (r4 item 1)": (
+            "tripwire",
+            replaced(TRIPWIRE_TEXT, DELETE_ARGUMENT, "account: Self.refused"),
+        ),
+        # a credential read inside an assertion would be printed by a failing run
+        "tripwire: an assertion reads the shared store inside #expect (r4 item 5)": (
+            "tripwire",
+            replaced(
+                TRIPWIRE_TEXT,
+                TRIPWIRE_READ,
+                "        #expect(try KeychainStore.shared.string(for: .alpacaApiKey, scope: .workspace(.uk)) == nil)\n",
+            ),
+        ),
+        "canary_scope: a store string read inside #expect (r4 item 5)": (
+            "canary_scope",
+            replaced(
+                SCOPE_TESTS_TEXT,
+                "            #expect(aStringIsNil)\n",
+                "            #expect(try a.string(for: .alpacaApiKey, scope: .workspace(.uk)) == nil)\n",
+            ),
+        ),
+        "canary_scope: a raw data read inside #expect (r4 item 5)": (
+            "canary_scope",
+            replaced(
+                SCOPE_TESTS_TEXT,
+                '            #expect(afterRemove, "B survives a remove on A")\n',
+                "            #expect(try rawB.data(account: Self.canaryScopedAccount) == planted)\n",
+            ),
+        ),
+        "canary_scope: a legacy flat read inside #expect (r4 item 5)": (
+            "canary_scope",
+            replaced(
+                SCOPE_TESTS_TEXT,
+                "            #expect(aFlatIsNil)\n",
+                "            #expect(try a.legacyFlatData(for: .alpacaApiKey) == nil)\n",
+            ),
+        ),
+        "canary_legacy: a raw data read inside #expect (r4 item 5)": (
+            "canary_legacy",
+            replaced(
+                LEGACY_TESTS_TEXT,
+                '            #expect(untouched, "B untouched after deletes aimed at A")\n',
+                "            #expect(try b.raw.data(account: account) == Self.canary)\n",
+            ),
+        ),
+        # the helper that runs every canary body
+        "canary_scope: requireKeychain no longer calls the body (r4 item 4)": (
+            "canary_scope",
+            replaced(SCOPE_TESTS_TEXT, "            try body()\n", "            _ = body\n"),
+        ),
+        "canary_scope: requireKeychain swallows every error (r4 item 4)": (
+            "canary_scope",
+            replaced(SCOPE_TESTS_TEXT, "            try body()\n", "            try? body()\n"),
+        ),
+        "canary_scope: the positive control removed (r4 item 4)": (
+            "canary_scope",
+            replaced(
+                SCOPE_TESTS_TEXT,
+                "            let plantedReadsBack = try rawB.data(account: Self.canaryScopedAccount) == planted\n"
+                '            #expect(plantedReadsBack, "positive control")\n',
+                "",
+            ),
+        ),
+        "canary_scope: a string literal in a canary changed (r4 item 4)": (
+            "canary_scope",
+            replaced(SCOPE_TESTS_TEXT, 'let planted = Data("CANARY-B".utf8)', 'let planted = Data("".utf8)'),
+        ),
+        "canary_legacy: the loop over the accounts emptied (r4 item 4)": (
+            "canary_legacy",
+            replaced(
+                LEGACY_TESTS_TEXT,
+                "        try b.seed(Cleanup.legacyAccounts)\n\n        for account in Cleanup.legacyAccounts {\n            let notFound",
+                "        try b.seed([])\n\n        for account in Cleanup.legacyAccounts {\n            let notFound",
+            ),
+        ),
+    }
+)
+
+
 def run_scan(kind: str, text: str) -> list[str]:
     if kind == "ui":
         return ui_helper_key_offences(text, GUARD_TEXT)
@@ -2229,6 +2845,8 @@ def run_scan(kind: str, text: str) -> list[str]:
         "guard": guard_file_offences,
         "raw": raw_keychain_offences,
         "tripwire": tripwire_offences,
+        "canary_scope": canary_scope_offences,
+        "canary_legacy": canary_legacy_offences,
     }
     return scans[kind](text)
 
@@ -2239,6 +2857,8 @@ REAL = {
     "guard": GUARD_TEXT,
     "raw": RAW_TEXT,
     "tripwire": TRIPWIRE_TEXT,
+    "canary_scope": SCOPE_TESTS_TEXT,
+    "canary_legacy": LEGACY_TESTS_TEXT,
     "ui": UI_HELPER_TEXT,
 }
 
@@ -2377,6 +2997,125 @@ SHADOW_PLANTS: dict[str, dict[Path, str]] = {
         Path("GrowinTests/Shadow.swift"): "struct S {\n    static let isTestHost = { false }\n}\n"
     },
 }
+
+
+_SCOPE_WITH_WIPE = replaced(
+    SCOPE_TESTS_TEXT,
+    "    private static func cleanUp(_ store: KeychainStore) {",
+    "    private static func wipe() { _ = SecItemDelete([:] as CFDictionary) }\n\n    private static func cleanUp(_ store: KeychainStore) {",
+)
+SHADOW_PLANTS.update(
+    {
+        # --- r4 item 1 (Opus 1): Security names ---
+        "Opus: a file that redefines kSecAttrService as another constant (r4 Opus 1)": {
+            Path("Growin/Util/KeychainKeys.swift"): "import Security\nlet kSecAttrService: CFString = kSecUseOperationPrompt\n"
+        },
+        "Opus: a static var kSecAttrService in an extension of the cleanup (r4 Opus 1)": {
+            Path("Growin/Models/CleanupShim.swift"): "extension LegacyT212KeychainCleanup {\n"
+            "    static var kSecAttrService: CFString { kSecUseOperationPrompt }\n}\n"
+        },
+        "a parameter named kSecAttrService (r4 Opus 1)": {
+            Path("Growin/Models/Shim.swift"): "func build(kSecAttrService: String) {}\n"
+        },
+        "an underscore parameter whose name is kSecAttrService (r4 Opus 1)": {
+            Path("Growin/Models/Shim.swift"): "func build(_ kSecAttrService: String) {}\n"
+        },
+        "an external label that is kSecAttrService (r4 Opus 1)": {
+            Path("Growin/Models/Shim.swift"): "func build(kSecAttrService service: String) {}\n"
+        },
+        "a local let kSecClass (r4 Opus 1)": {
+            Path("Growin/Models/Shim.swift"): "func f() {\n    let kSecClass = 1\n    _ = kSecClass\n}\n"
+        },
+        "a function named SecItemDelete (r4 Opus 1)": {
+            Path("Growin/Models/Shim.swift"): "func SecItemDelete(_ query: CFDictionary) -> OSStatus { 0 }\n"
+        },
+        "a var named errSecItemNotFound (r4 Opus 1)": {Path("Growin/Models/Shim.swift"): "var errSecItemNotFound: OSStatus { 0 }\n"},
+        "a typealias named SecKeychainRef (r4 Opus 1)": {Path("Growin/Models/Shim.swift"): "typealias SecKeychainRef = Int\n"},
+        "an enum case named kSecClass (r4 Opus 1)": {Path("Growin/Models/Shim.swift"): "enum Keys {\n    case kSecClass\n}\n"},
+        "an enum case list that includes errSecSuccess (r4 Opus 1)": {
+            Path("Growin/Models/Shim.swift"): "enum Keys {\n    case ok, errSecSuccess\n}\n"
+        },
+        "a for loop variable named kSecClass (r4 Opus 1)": {
+            Path("Growin/Models/Shim.swift"): "func f() {\n    for kSecClass in [1] { _ = kSecClass }\n}\n"
+        },
+        "a tuple binding that includes kSecAttrAccount (r4 Opus 1)": {
+            Path("Growin/Models/Shim.swift"): "func f() {\n    let (a, kSecAttrAccount) = (1, 2)\n    _ = (a, kSecAttrAccount)\n}\n"
+        },
+        "a static var kSecAttrService in the tests (r4 Opus 1)": {
+            Path("GrowinTests/Shim.swift"): "struct S {\n    static var kSecAttrService: String { \"x\" }\n}\n"
+        },
+        # --- r4 item 2 (Opus 2): SecItem mentions in tests ---
+        "a direct SecItemDelete in another test file (r4 Opus 2)": {
+            Path("GrowinTests/WorkspaceIsolation/OtherTests.swift"): "import Security\nfunc wipe() { _ = SecItemDelete([:] as CFDictionary) }\n"
+        },
+        "a direct SecItemDelete in a test helper (r4 Opus 2)": {
+            Path("GrowinTests/WorkspaceIsolation/KeychainScopeTests.swift"): _SCOPE_WITH_WIPE
+        },
+        "a Security-qualified SecItemCopyMatching in a test (r4 Opus 2)": {
+            Path("GrowinTests/WorkspaceIsolation/OtherTests.swift"): "func peek() { _ = Security.SecItemCopyMatching([:] as CFDictionary, nil) }\n"
+        },
+        "a SecKeychain call in a test (r4 Opus 2)": {
+            Path("GrowinTests/WorkspaceIsolation/OtherTests.swift"): "func old() { _ = SecKeychainCopyDefault(nil) }\n"
+        },
+        # --- r4 item 3 (Opus 6): sugared and aliased extensions ---
+        "an extension of the dictionary sugar (r4 Opus 6)": {
+            Path("Growin/Util/Shim.swift"): "extension [String: String] {\n    var isEmpty: Bool { false }\n}\n"
+        },
+        "an extension of the array sugar (r4 Opus 6)": {
+            Path("Growin/Util/Shim.swift"): "extension [String] {\n    func contains(where p: (String) -> Bool) -> Bool { false }\n}\n"
+        },
+        "an extension of an alias of Dictionary (r4 Opus 6)": {
+            Path("Growin/Util/Shim.swift"): "typealias D = Dictionary<String, Any>\nextension D {\n    var isEmpty: Bool { false }\n}\n"
+        },
+        "an alias in one file extended in another (r4 Opus 6)": {
+            Path("Growin/Util/Alias.swift"): "typealias Words = [String]\n",
+            Path("Growin/Util/Shim.swift"): "extension Words {\n    var first: String? { nil }\n}\n",
+        },
+        "an extension of an optional sugar (r4 Opus 6)": {Path("Growin/Util/Shim.swift"): "extension String? {\n}\n"},
+        # --- r4 item 7 (Opus 7): dynamic lookup ---
+        "a dlsym on a built string (r4 Opus 7)": {
+            Path("Growin/Util/Lookup.swift"): 'let handle = dlsym(dlopen(nil, 0), "Sec" + "ItemDelete")\n'
+        },
+        "a dlopen in the app (r4 Opus 7)": {Path("Growin/Util/Lookup.swift"): "let handle = dlopen(nil, 0)\n"},
+        "an NSSelectorFromString (r4 Opus 7)": {Path("Growin/Util/Lookup.swift"): 'let selector = NSSelectorFromString("x")\n'},
+        "a dlsym in a test (r4 Opus 7)": {Path("GrowinTests/Lookup.swift"): 'let symbol = dlsym(nil, "x")\n'},
+        # --- r4 item 1: the testing vocabulary in GrowinTests ---
+        "a local func expect (r4 item 1)": {Path("GrowinTests/Shim.swift"): "func expect(_ condition: Bool) {}\n"},
+        "a macro named expect (r4 item 1)": {
+            Path("GrowinTests/Shim.swift"): 'macro expect(_ condition: Bool) = #externalMacro(module: "X", type: "Y")\n'
+        },
+        "a func named require (r4 item 1)": {Path("GrowinTests/Shim.swift"): "func require(_ condition: Bool) throws {}\n"},
+        "a struct named Issue (r4 item 1)": {Path("GrowinTests/Shim.swift"): "struct Issue {}\n"},
+        "a typealias named Issue (r4 item 1)": {Path("GrowinTests/Shim.swift"): "typealias Issue = Int\n"},
+        "a func named withKnownIssue (r4 item 1)": {Path("GrowinTests/Shim.swift"): "func withKnownIssue(_ body: () -> Void) {}\n"},
+        "a nested func expect inside a test (r4 item 1)": {
+            Path("GrowinTests/Shim.swift"): "struct S {\n    @Test func t() {\n        func expect(_ c: Bool) {}\n    }\n}\n"
+        },
+        "a let expect closure (r4 item 1)": {Path("GrowinTests/Shim.swift"): "let expect = { (c: Bool) in }\n"},
+    }
+)
+
+
+def test_a_switch_pattern_named_like_a_security_constant_is_not_a_declaration():
+    files = swift_files()
+    files[Path("Growin/Models/Fine3.swift")] = (
+        "func f(status: Int32) -> Bool {\n    switch status {\n    case errSecSuccess: return true\n"
+        "    case errSecItemNotFound: return false\n    default: return false\n    }\n}\n"
+        "func g() { _ = [Security.kSecClass as String: 1] }\n"
+    )
+    assert shadow_offences(files) == []
+
+
+def test_the_secret_in_expect_rule_reads_only_assertion_arguments():
+    bad = "#expect(try store.string(for: .x, scope: .y) == nil)\n"
+    assert secret_expect_offences("x", bad)
+    assert secret_expect_offences("x", "#require(try raw.data(account: a) != nil)\n")
+    assert secret_expect_offences("x", "#expect(try a.legacyFlatData(for: .x) == nil)\n")
+    assert secret_expect_offences("x", "#expect(rawData(a) == nil)\n")
+    # A credential read outside the assertion, with only a Bool asserted, is the allowed shape.
+    good = "let isNil = try store.string(for: .x, scope: .y) == nil\n#expect(isNil)\n"
+    assert secret_expect_offences("x", good) == []
+    assert secret_expect_offences("x", '// #expect(try store.string(for: .x) == nil)\nlet s = "#expect(a.string(b))"\n') == []
 
 
 @pytest.mark.parametrize("label", sorted(SHADOW_PLANTS))

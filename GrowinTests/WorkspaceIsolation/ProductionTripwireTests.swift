@@ -39,10 +39,11 @@ struct ProductionTripwireTests {
         #expect(ProductionKeychainGuard.refusesCurrentProcess(service: Self.protectedName))
     }
 
+    /// The read is discarded and only its refusal code reaches the assertion, so a failure message can
+    /// never show a credential.
     @Test func theSharedStoreRefusesARead() {
-        #expect(
-            Self.code(of: { _ = try KeychainStore.shared.string(for: .alpacaApiKey, scope: .workspace(.uk)) })
-                == Self.refused)
+        let refusal = Self.code(of: { _ = try KeychainStore.shared.string(for: .alpacaApiKey, scope: .workspace(.uk)) })
+        #expect(refusal == Self.refused)
     }
 
     @Test func theSignersReportNotConfigured() {

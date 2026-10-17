@@ -24,31 +24,31 @@ struct RawKeychain {
 
     private func query(_ account: String) -> [String: Any] {
         [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
+            Security.kSecClass as String: Security.kSecClassGenericPassword,
+            Security.kSecAttrService as String: service,
+            Security.kSecAttrAccount as String: account,
         ]
     }
 
     func set(_ data: Data, account: String) throws {
         var item = query(account)
-        item[kSecValueData as String] = data
-        item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        let status = SecItemAdd(item as CFDictionary, nil)
+        item[Security.kSecValueData as String] = data
+        item[Security.kSecAttrAccessible as String] = Security.kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        let status = Security.SecItemAdd(item as CFDictionary, nil)
         guard status == errSecSuccess else { throw KeychainStoreError.status(status) }
     }
 
     /// Removes one raw account from the (test-only) service. Used by test cleanup.
     func remove(account: String) {
-        SecItemDelete(query(account) as CFDictionary)
+        Security.SecItemDelete(query(account) as CFDictionary)
     }
 
     func data(account: String) throws -> Data? {
         var item = query(account)
-        item[kSecReturnData as String] = true
-        item[kSecMatchLimit as String] = kSecMatchLimitOne
+        item[Security.kSecReturnData as String] = true
+        item[Security.kSecMatchLimit as String] = Security.kSecMatchLimitOne
         var result: CFTypeRef?
-        let status = SecItemCopyMatching(item as CFDictionary, &result)
+        let status = Security.SecItemCopyMatching(item as CFDictionary, &result)
         if status == errSecItemNotFound { return nil }
         guard status == errSecSuccess else { throw KeychainStoreError.status(status) }
         return result as? Data
