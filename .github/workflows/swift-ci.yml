@@ -331,7 +331,7 @@ jobs:
             [[ -z "${line//[[:space:]]/}" || "$line" == \#* ]] && continue
             suite="${line%%/*}"; name="${line#*/}"
             if [[ "$suite" == "$line" || -z "$suite" || -z "$name" ]]; then
-              echo "::error::Required Swift tests: bad line '$line' in $list (want Suite/testFunction)."; bad=$((bad+1)); continue
+              echo "::error::Required Swift tests: bad line '$line' in $list (want Suite/testFunction)."; required=$((required+1)); bad=$((bad+1)); continue
             fi
             required=$((required+1))
             results=$(jq -r --arg suite "$suite" --arg name "$name" '
