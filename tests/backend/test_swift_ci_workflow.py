@@ -993,3 +993,120 @@ def test_every_action_is_pinned_by_full_sha_and_no_inline_expressions_in_run():
                 assert re.fullmatch(r"[\w./-]+@[0-9a-f]{40}", step["uses"]), step["uses"]
             assert "${{" not in step.get("run", ""), "pass event data through env, not inline"
     assert wf["permissions"] == {"contents": "read"}
+
+
+# ------------------------------------------------ the build gate output
+#
+# Every Swift step after the build is gated on `steps.build.outputs.built ==
+# 'true'`. If a refactor renamed the step id or the output, or stopped writing
+# `built=true` on success, every gated step would be skipped and the job would
+# go green with no tests run. These checks pin both ends of that wire.
+
+BUILD_GATE = "steps.build.outputs.built == 'true'"
+GATED_STEP_IDS = ("test", "required")
+STEP_REF = re.compile(r"steps\.([\w-]+)\.outputs\.([\w-]+)")
+SUCCESS_BRANCH = re.compile(
+    r'if \[\[ \$status -eq 0 \]\]; then\s+echo "built=true" >> "\$GITHUB_OUTPUT";\s*exit 0;\s*fi')
+
+
+def check_build_gate_output_is_written(wf):
+    steps = wf["jobs"][SWIFT_JOB]["steps"]
+    assert [s.get("id") for s in steps].count("build") == 1, "want exactly one step with id: build"
+    run = find_build_step(wf)["run"]
+    assert SUCCESS_BRANCH.search(run), "the `$status -eq 0` branch no longer writes built=true and exits"
+    assert run.count("built=true") == 1, "built=true must be written on the success path only"
+    assert run.index("built=true") < run.index('echo "built=false" >> "$GITHUB_OUTPUT"'), \
+        "built=false must follow the success branch"
+    # Behavior: the real script, a fake xcodebuild.
+    code, _, _, out = run_build_step(wf, status=0)
+    assert code == 0 and out.splitlines() == ["built=true"], f"success wrote {out!r}"
+    code, _, _, out = run_build_step(wf, status=65, log=NOT_AVAILABILITY)
+    assert code != 0 and out.splitlines() == ["built=false"], f"failure wrote {out!r}"
+
+
+def check_every_build_gate_reference_is_exact(wf):
+    steps = wf["jobs"][SWIFT_JOB]["steps"]
+    ids = {s.get("id") for s in steps if s.get("id")}
+    for step in steps:
+        if "if" not in step:
+            continue
+        expr = _if_text(step)
+        refs = STEP_REF.findall(expr)
+        label = step.get("name") or step.get("id")
+        assert expr.count("steps.") == len(refs), f"{label}: malformed step reference in {expr!r}"
+        for step_id, output in refs:
+            assert step_id in ids, f"{label}: refers to unknown step {step_id!r}"
+            assert (step_id == "build") == (output in ("build", "built")), \
+                f"{label}: {step_id}.{output} is not the build gate"
+        if any(step_id == "build" for step_id, _ in refs):
+            assert "||" not in expr, f"{label}: an `||` can run the step without a good build"
+            assert BUILD_GATE in [part.strip() for part in expr.split("&&")], \
+                f"{label}: want exactly {BUILD_GATE!r} in {expr!r}"
+
+
+def check_test_steps_carry_the_build_gate(wf):
+    steps = {s.get("id"): s for s in wf["jobs"][SWIFT_JOB]["steps"]}
+    for step_id in GATED_STEP_IDS:
+        assert step_id in steps, f"no step with id: {step_id}"
+        parts = [p.strip() for p in _if_text(steps[step_id]).split("&&")]
+        assert BUILD_GATE in parts, f"step {step_id} is not gated on the build output"
+
+
+BUILD_GATE_CHECKS = [
+    check_build_gate_output_is_written,
+    check_every_build_gate_reference_is_exact,
+    check_test_steps_carry_the_build_gate,
+]
+
+
+def check_build_gate(wf):
+    for check in BUILD_GATE_CHECKS:
+        check(wf)
+
+
+def replace_nth(text: str, old: str, new: str, n: int) -> str:
+    """Replace only the n-th (0-based) occurrence of old."""
+    pos = -1
+    for _ in range(n + 1):
+        pos = text.index(old, pos + 1)
+    return text[:pos] + new + text[pos + len(old):]
+
+
+SUCCESS_LINE = 'if [[ $status -eq 0 ]]; then echo "built=true" >> "$GITHUB_OUTPUT"; exit 0; fi\n'
+
+
+@pytest.mark.parametrize("check", BUILD_GATE_CHECKS, ids=lambda c: c.__name__)
+def test_real_workflow_satisfies_build_gate_check(check):
+    check(load())
+
+
+def test_real_workflow_has_the_expected_gated_steps():
+    # The mutants below index into these; fewer than three would make them vacuous.
+    assert WORKFLOW.read_text().count(BUILD_GATE) >= 3
+
+
+BUILD_GATE_MUTANTS = {
+    "build_id_renamed": lambda t: t.replace("        id: build\n", "        id: compile\n", 1),
+    "output_renamed_to_ok": lambda t: t.replace('echo "built=true"', 'echo "ok=true"', 1),
+    "both_outputs_renamed": lambda t: t.replace('echo "built=true"', 'echo "ok=true"').replace(
+        'echo "built=false"', 'echo "ok=false"'),
+    "success_line_removed": lambda t: t.replace(SUCCESS_LINE, "", 1),
+    "failure_path_writes_true": lambda t: t.replace('echo "built=false"', 'echo "built=true"', 1),
+    "success_path_writes_false": lambda t: t.replace('echo "built=true"', 'echo "built=false"', 1),
+}
+for _n in range(3):
+    BUILD_GATE_MUTANTS[f"gate_{_n}_wrong_output"] = (
+        lambda t, n=_n: replace_nth(t, BUILD_GATE, "steps.build.outputs.build == 'true'", n))
+    BUILD_GATE_MUTANTS[f"gate_{_n}_typo_in_step_id"] = (
+        lambda t, n=_n: replace_nth(t, BUILD_GATE, "steps.biuld.outputs.built == 'true'", n))
+    BUILD_GATE_MUTANTS[f"gate_{_n}_wrong_literal"] = (
+        lambda t, n=_n: replace_nth(t, BUILD_GATE, "steps.build.outputs.built == 'True'", n))
+
+
+@pytest.mark.parametrize("name", BUILD_GATE_MUTANTS)
+def test_break_proof_build_gate_mutant_fails(name):
+    original = WORKFLOW.read_text()
+    mutated = BUILD_GATE_MUTANTS[name](original)
+    assert mutated != original, "the mutation changed nothing, so the break-proof proves nothing"
+    with pytest.raises(AssertionError):
+        check_build_gate(yaml.safe_load(mutated))
