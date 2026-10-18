@@ -203,6 +203,60 @@ def test_daily_bars_v2_request_shape():
     assert "X-Checksum" not in headers
 
 
+DEFAULT_V2_URL = (
+    bc.V2_HISTORICAL_URL
+    + "?stock_code=RELIND&exch_code=NSE&from_date=2025-06-09T00:00:00.000Z"
+    "&to_date=2025-06-20T23:59:59.000Z&interval=1day&product_type=cash"
+)
+
+
+def _v2_raw(**knobs):
+    client, fake = client_for(HttpResponse(200, {}, body([])))
+    client.daily_bars_v2_raw(
+        app_key="K", session_token="T", stock_code="RELIND", exch_code="NSE",
+        from_iso="2025-06-09T00:00:00.000Z", to_iso="2025-06-20T23:59:59.000Z", **knobs,
+    )
+    return fake.requests[0]
+
+
+def test_daily_bars_v2_default_request_is_byte_identical():
+    method, url, headers, sent = _v2_raw()
+    assert (method, sent) == ("GET", None)
+    assert url == DEFAULT_V2_URL
+    assert headers == {"Content-Type": "application/json", "apikey": "K", "X-SessionToken": "T"}
+
+
+def test_daily_bars_v2_user_agent_knob_adds_only_the_header():
+    _, url, headers, _ = _v2_raw(user_agent=True)
+    assert url == DEFAULT_V2_URL
+    assert headers == {
+        "Content-Type": "application/json", "apikey": "K", "X-SessionToken": "T",
+        "User-Agent": bc.SDK_USER_AGENT,
+    }
+
+
+def test_daily_bars_v2_encode_colons_knob_changes_only_the_colons():
+    _, url, headers, _ = _v2_raw(encode_colons=True)
+    assert url == DEFAULT_V2_URL.replace(":", "%3A").replace("https%3A", "https:")
+    assert url.count("%3A") == 4 and ":" not in url.split("?", 1)[1]
+    assert "User-Agent" not in headers
+
+
+def test_daily_bars_v2_exchange_param_name_knob_renames_only_that_key():
+    _, url, _, _ = _v2_raw(exchange_param_name="exchange_code")
+    assert url == DEFAULT_V2_URL.replace("exch_code=", "exchange_code=")
+
+
+def test_daily_bars_v2_rejects_unknown_exchange_param_name_before_sending():
+    client, fake = client_for(HttpResponse(200, {}, body([])))
+    with pytest.raises(ValueError):
+        client.daily_bars_v2_raw(
+            app_key="K", session_token="T", stock_code="RELIND", exch_code="NSE",
+            from_iso="a", to_iso="b", exchange_param_name="stock_code",
+        )
+    assert fake.requests == [] and client.calls == 0
+
+
 def test_customer_details_request_has_no_checksum():
     client, fake = client_for(HttpResponse(200, {}, body(GOOD_CUSTOMER)))
     details = CALLS["customer_details"](client)
