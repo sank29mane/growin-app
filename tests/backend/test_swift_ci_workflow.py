@@ -1004,9 +1004,49 @@ def test_every_action_is_pinned_by_full_sha_and_no_inline_expressions_in_run():
 
 BUILD_GATE = "steps.build.outputs.built == 'true'"
 GATED_STEP_IDS = ("test", "required")
-STEP_REF = re.compile(r"steps\.([\w-]+)\.outputs\.([\w-]+)")
+# `steps.<id>.outputs.<name>`, or a bare `steps.<id>.outcome` / `.conclusion`.
+STEP_REF = re.compile(r"steps\.([\w-]+)\.(outputs|outcome|conclusion)(?:\.([\w-]+))?")
+OUTPUT_WRITE = re.compile(r'echo "(\w+)=[^"]*" >> "\$GITHUB_OUTPUT"')
+# The structure only; the fake-xcodebuild run below is the authority on behaviour.
+# Accepts the one-line form and the same branch spread over several lines.
 SUCCESS_BRANCH = re.compile(
-    r'if \[\[ \$status -eq 0 \]\]; then\s+echo "built=true" >> "\$GITHUB_OUTPUT";\s*exit 0;\s*fi')
+    r'if \[\[ \$status -eq 0 \]\];\s*then\s+echo "built=true" >> "\$GITHUB_OUTPUT"\s*(?:;|\n)\s*'
+    r'exit 0\s*(?:;|\n)\s*fi\b')
+
+
+def _scan(expr: str):
+    """Yield (index, char, depth) outside string literals; a paren reports its outer depth."""
+    depth, quoted = 0, False
+    for i, ch in enumerate(expr):
+        if ch == "'":
+            quoted = not quoted
+        elif not quoted:
+            if ch == ")":
+                depth -= 1
+            yield i, ch, depth
+            if ch == "(":
+                depth += 1
+
+
+def _wrapped(expr: str) -> bool:
+    """True when one pair of parentheses encloses the whole expression."""
+    if not (expr.startswith("(") and expr.endswith(")")):
+        return False
+    return not any(ch == ")" and depth == 0 for i, ch, depth in _scan(expr) if i < len(expr) - 1)
+
+
+def conjuncts(expr: str) -> list[str]:
+    """The operands of a top-level `&&` chain, looking through grouping parentheses."""
+    cuts = [i for i, ch, depth in _scan(expr) if depth == 0 and expr[i:i + 2] == "&&" and ch == "&"]
+    if cuts:
+        bounds = [-2, *cuts, len(expr)]
+        return [c for a, b in zip(bounds, bounds[1:]) for c in conjuncts(expr[a + 2:b])]
+    expr = expr.strip()
+    return conjuncts(expr[1:-1]) if _wrapped(expr) else [expr]
+
+
+def build_outputs_written(wf) -> set[str]:
+    return set(OUTPUT_WRITE.findall(find_build_step(wf)["run"]))
 
 
 def check_build_gate_output_is_written(wf):
@@ -1027,6 +1067,7 @@ def check_build_gate_output_is_written(wf):
 def check_every_build_gate_reference_is_exact(wf):
     steps = wf["jobs"][SWIFT_JOB]["steps"]
     ids = {s.get("id") for s in steps if s.get("id")}
+    written = build_outputs_written(wf)
     for step in steps:
         if "if" not in step:
             continue
@@ -1034,13 +1075,18 @@ def check_every_build_gate_reference_is_exact(wf):
         refs = STEP_REF.findall(expr)
         label = step.get("name") or step.get("id")
         assert expr.count("steps.") == len(refs), f"{label}: malformed step reference in {expr!r}"
-        for step_id, output in refs:
+        for step_id, kind, name in refs:
             assert step_id in ids, f"{label}: refers to unknown step {step_id!r}"
-            assert (step_id == "build") == (output in ("build", "built")), \
-                f"{label}: {step_id}.{output} is not the build gate"
-        if any(step_id == "build" for step_id, _ in refs):
+            if kind == "outputs":
+                assert name, f"{label}: steps.{step_id}.outputs needs an output name"
+                if step_id == "build":
+                    assert name in written, \
+                        f"{label}: build writes {sorted(written)}, not {name!r}"
+            else:
+                assert not name, f"{label}: steps.{step_id}.{kind}.{name} is not a step reference"
+        if ("build", "outputs", "built") in refs:
             assert "||" not in expr, f"{label}: an `||` can run the step without a good build"
-            assert BUILD_GATE in [part.strip() for part in expr.split("&&")], \
+            assert BUILD_GATE in conjuncts(expr), \
                 f"{label}: want exactly {BUILD_GATE!r} in {expr!r}"
 
 
@@ -1048,8 +1094,8 @@ def check_test_steps_carry_the_build_gate(wf):
     steps = {s.get("id"): s for s in wf["jobs"][SWIFT_JOB]["steps"]}
     for step_id in GATED_STEP_IDS:
         assert step_id in steps, f"no step with id: {step_id}"
-        parts = [p.strip() for p in _if_text(steps[step_id]).split("&&")]
-        assert BUILD_GATE in parts, f"step {step_id} is not gated on the build output"
+        assert BUILD_GATE in conjuncts(_if_text(steps[step_id])), \
+            f"step {step_id} is not gated on the build output"
 
 
 BUILD_GATE_CHECKS = [
@@ -1085,6 +1131,41 @@ def test_real_workflow_has_the_expected_gated_steps():
     assert WORKFLOW.read_text().count(BUILD_GATE) >= 3
 
 
+def multi_line_success_branch(t: str) -> str:
+    pad = " " * 10
+    return t.replace(SUCCESS_LINE, "if [[ $status -eq 0 ]]; then\n"
+                     f'{pad}  echo "built=true" >> "$GITHUB_OUTPUT"\n{pad}  exit 0\n{pad}fi\n', 1)
+
+
+# Legitimate future edits to the real workflow text. Each must keep passing.
+# Gate occurrences: 0 is `test` (pinned elsewhere), 1 is `required`, 2 is the always() step.
+BUILD_GATE_LEGIT_EDITS = {
+    "outcome_ref": lambda t: replace_nth(
+        t, BUILD_GATE, f"{BUILD_GATE} && steps.test.outcome == 'success'", 2),
+    "conclusion_ref": lambda t: replace_nth(
+        t, BUILD_GATE, f"{BUILD_GATE} && steps.test.conclusion != 'cancelled'", 2),
+    "outcome_ref_beside_gate_in_required": lambda t: replace_nth(
+        t, BUILD_GATE, f"{BUILD_GATE} && steps.test.outcome == 'success'", 1),
+    "degraded_ref_beside_gate": lambda t: replace_nth(
+        t, BUILD_GATE, f"{BUILD_GATE} && steps.build.outputs.degraded == 'true'", 2),
+    "degraded_ref_alone": lambda t: replace_nth(
+        t, "always() && " + BUILD_GATE, "always() && steps.build.outputs.degraded == 'true'", 0),
+    "parenthesised_gate": lambda t: replace_nth(t, BUILD_GATE, f"({BUILD_GATE})", 2),
+    "parenthesised_gate_in_required": lambda t: replace_nth(t, BUILD_GATE, f"({BUILD_GATE})", 1),
+    "parenthesised_conjunction": lambda t: replace_nth(
+        t, "always() && " + BUILD_GATE, f"(always() && {BUILD_GATE})", 0),
+    "multi_line_success_branch": multi_line_success_branch,
+}
+
+
+@pytest.mark.parametrize("name", BUILD_GATE_LEGIT_EDITS)
+def test_build_gate_accepts_legitimate_edit(name):
+    original = WORKFLOW.read_text()
+    edited = BUILD_GATE_LEGIT_EDITS[name](original)
+    assert edited != original, "the edit changed nothing, so this proves nothing"
+    check_build_gate(yaml.safe_load(edited))
+
+
 BUILD_GATE_MUTANTS = {
     "build_id_renamed": lambda t: t.replace("        id: build\n", "        id: compile\n", 1),
     "output_renamed_to_ok": lambda t: t.replace('echo "built=true"', 'echo "ok=true"', 1),
@@ -1094,6 +1175,24 @@ BUILD_GATE_MUTANTS = {
     "failure_path_writes_true": lambda t: t.replace('echo "built=false"', 'echo "built=true"', 1),
     "success_path_writes_false": lambda t: t.replace('echo "built=true"', 'echo "built=false"', 1),
 }
+BUILD_GATE_MUTANTS.update({
+    "outcome_ref_to_unknown_step": lambda t: replace_nth(
+        t, BUILD_GATE, f"{BUILD_GATE} && steps.tset.outcome == 'success'", 2),
+    "outcome_ref_with_trailing_name": lambda t: replace_nth(
+        t, BUILD_GATE, f"{BUILD_GATE} && steps.test.outcome.x == 'success'", 2),
+    "degraded_output_typo": lambda t: replace_nth(
+        t, BUILD_GATE, f"{BUILD_GATE} && steps.build.outputs.degrade == 'true'", 2),
+    "or_inside_parenthesised_gate": lambda t: replace_nth(
+        t, BUILD_GATE, f"({BUILD_GATE} || steps.test.outcome == 'failure')", 1),
+    "or_beside_gate_in_always_step": lambda t: replace_nth(
+        t, "always() && " + BUILD_GATE, "always() && " + BUILD_GATE + " || failure()", 0),
+    "gate_negated_in_parentheses": lambda t: replace_nth(
+        t, BUILD_GATE, "(steps.build.outputs.built != 'true')", 1),
+    "multi_line_success_branch_writes_false": lambda t: multi_line_success_branch(t).replace(
+        'echo "built=true"', 'echo "built=false"', 1),
+    "multi_line_success_branch_no_exit": lambda t: multi_line_success_branch(t).replace(
+        "exit 0\n", "true\n", 1),
+})
 for _n in range(3):
     BUILD_GATE_MUTANTS[f"gate_{_n}_wrong_output"] = (
         lambda t, n=_n: replace_nth(t, BUILD_GATE, "steps.build.outputs.build == 'true'", n))
