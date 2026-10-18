@@ -666,6 +666,10 @@ _S2_VARIANTS: tuple[tuple[str, dict[str, Any], str], ...] = (
 )
 _S2_VARIANT_IDS = tuple(v[0] for v in _S2_VARIANTS)
 _S2_VARIANT_INTERVALS = (V2_DAILY_INTERVAL, "1minute")
+# Expected ex-date close ratio for the BAJFI window, shared by S2a, S2d and the
+# daily variants so a passing fallback still records raw versus adjusted.
+_BAJFI_EXPECTED_RATIO = 0.10
+S2_NOTE_DAILY_SHAPE_WRONG = "s2_endpoint_alive_daily_shape_wrong"
 
 
 def _variant_knobs_record(knobs: Mapping[str, Any], interval: str) -> dict:
@@ -681,13 +685,13 @@ def _variant_knobs_record(knobs: Mapping[str, Any], interval: str) -> dict:
 def _step_s2(st: _State, result: dict) -> None:
     plan = st.plan
     items = [
-        _bars_item(st, "S2a", plan.bajfi, V2_DAILY_INTERVAL, 0.10),
+        _bars_item(st, "S2a", plan.bajfi, V2_DAILY_INTERVAL, _BAJFI_EXPECTED_RATIO),
         _bars_item(st, "S2b", plan.relind, V2_DAILY_INTERVAL, 0.5),
         _bars_item(st, "S2c", plan.depth, V2_DAILY_INTERVAL, None),
     ]
     wire = "1day" if any(i["rows"] > 0 for i in items) else None
     if wire is None:
-        retry = _bars_item(st, "S2d", plan.bajfi, "day", 0.10)
+        retry = _bars_item(st, "S2d", plan.bajfi, "day", _BAJFI_EXPECTED_RATIO)
         items.append(retry)
         wire = "day" if retry["rows"] > 0 else "none"
     passed: str | None = None
@@ -696,13 +700,17 @@ def _step_s2(st: _State, result: dict) -> None:
         one_day = replace(plan.bajfi, to_date=plan.bajfi.from_date, ex_date=None)
         for variant_id, knobs, interval in _S2_VARIANTS:
             window = one_day if interval != V2_DAILY_INTERVAL else plan.bajfi
-            item = _bars_item(st, variant_id, window, interval, None, knobs)
+            # Only the daily window spans the ex-date; the one-day S2g window cannot.
+            ratio = _BAJFI_EXPECTED_RATIO if interval == V2_DAILY_INTERVAL else None
+            item = _bars_item(st, variant_id, window, interval, ratio, knobs)
             items.append(item)
             if item["rows"] > 0:
                 passed = variant_id
                 passed_knobs = _variant_knobs_record(knobs, interval)
                 # Only a daily interval is a daily wire; S2g leaves it "none".
                 wire = "1day" if interval == V2_DAILY_INTERVAL else "none"
+                if wire == "none":
+                    st.note(S2_NOTE_DAILY_SHAPE_WRONG)
                 break
     result["s2_bars"] = items
     result["s2_interval_wire"] = wire

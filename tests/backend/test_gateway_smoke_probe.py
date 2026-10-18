@@ -584,8 +584,10 @@ ICICI_500 = '{"Error":"Something went wrong","Status":500}'
 VARIANT_IDS = ["S2e", "S2f", "S2g"]
 
 
-def _variant_run(tmp_path, accept, secrets_obj=None):
-    """accept(url, headers) -> True answers with bars, False with the Saturday error."""
+def _variant_run(tmp_path, accept, secrets_obj=None, closes=None):
+    """accept(url, headers) -> True answers with bars, False with the Saturday error.
+
+    closes overrides the bar closes by date for a passing answer."""
     s = secrets_obj or Secrets()
     routes = full_routes(s)
     seen: list[tuple[str, dict]] = []
@@ -596,7 +598,9 @@ def _variant_run(tmp_path, accept, secrets_obj=None):
         headers = transport.requests[-1][2]
         seen.append((url, headers))
         if accept(url, headers):
-            return _bars_response({d: 100.0 + i for i, d in enumerate(BAJFI_DAYS)})
+            return _bars_response(
+                closes or {d: 100.0 + i for i, d in enumerate(BAJFI_DAYS)}
+            )
         return ok(ICICI_500)
 
     routes[V2_HISTORICAL_URL] = v2_answer
@@ -659,6 +663,53 @@ def test_s2e_passing_stops_the_chain_and_records_knobs(tmp_path):
     assert result["s2_interval_wire"] == "1day"
     assert result["s2_bars"][4]["rows"] == 10
     assert sp.validate_result(result) == []
+
+
+# Closes that straddle the BAJFI ex-date (2025-06-16): a raw tape drops tenfold, an
+# adjusted tape does not move.
+RAW_STRADDLE = {d: (9400.0 if d < "2025-06-16" else 940.0) for d in BAJFI_DAYS}
+ADJUSTED_STRADDLE = {d: 940.0 + 0.1 * i for i, d in enumerate(BAJFI_DAYS)}
+
+
+@pytest.mark.parametrize(
+    ("closes", "reading"), [(RAW_STRADDLE, "raw"), (ADJUSTED_STRADDLE, "adjusted")]
+)
+@pytest.mark.parametrize("variant", ["S2e", "S2f"])
+def test_passing_daily_variant_records_the_adjustment_reading(tmp_path, closes, reading, variant):
+    accept = (
+        (lambda url, headers: _has_ua(headers))
+        if variant == "S2e"
+        else (lambda url, headers: "exchange_code=NSE" in url)
+    )
+    result, _, _ = _variant_run(tmp_path, accept, closes=closes)
+    item = next(i for i in result["s2_bars"] if i["id"] == variant)
+    assert item["adjustment_reading"] == reading
+    assert item["pre_ex_close"] is not None and item["close_ratio"] is not None
+    assert sp.validate_result(result) == []
+
+
+def test_s2g_one_day_window_keeps_no_adjustment_reading(tmp_path):
+    result, _, _ = _variant_run(tmp_path, lambda url, headers: "interval=1minute" in url)
+    item = next(i for i in result["s2_bars"] if i["id"] == "S2g")
+    assert item["rows"] > 0 and item["adjustment_reading"] == "n/a"
+
+
+@pytest.mark.parametrize(
+    ("accept", "expected"),
+    [
+        (lambda url, headers: "interval=1minute" in url, True),
+        (lambda url, headers: _has_ua(headers), False),
+        (lambda url, headers: "exchange_code=NSE" in url, False),
+        (lambda url, headers: False, False),
+    ],
+    ids=["only_s2g", "s2e", "s2f", "nothing"],
+)
+def test_daily_shape_wrong_note_only_when_s2g_alone_passes(tmp_path, accept, expected):
+    result, _, _ = _variant_run(tmp_path, accept)
+    assert (sp.S2_NOTE_DAILY_SHAPE_WRONG in result["notes"]) is expected
+    assert sp.validate_result(result) == []
+    if expected:
+        assert "s2_endpoint_alive_daily_shape_wrong" in result["notes"]
 
 
 def test_s2f_runs_only_after_s2e_fails_and_stops_on_pass(tmp_path):
