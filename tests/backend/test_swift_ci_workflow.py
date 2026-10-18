@@ -1005,7 +1005,7 @@ def test_every_action_is_pinned_by_full_sha_and_no_inline_expressions_in_run():
 BUILD_GATE = "steps.build.outputs.built == 'true'"
 GATED_STEP_IDS = ("test", "required")
 # `steps.<id>.outputs.<name>`, or a bare `steps.<id>.outcome` / `.conclusion`.
-STEP_REF = re.compile(r"steps\.([\w-]+)\.(outputs|outcome|conclusion)(?:\.([\w-]+))?")
+STEP_REF = re.compile(r"steps\.([\w-]+)\.(outputs|outcome|conclusion)(?:\.([\w-]+))?(?![\w-])")
 OUTPUT_WRITE = re.compile(r'echo "(\w+)=[^"]*" >> "\$GITHUB_OUTPUT"')
 # The structure only; the fake-xcodebuild run below is the authority on behaviour.
 # Accepts the one-line form and the same branch spread over several lines.
@@ -1139,19 +1139,17 @@ def multi_line_success_branch(t: str) -> str:
 
 # Legitimate future edits to the real workflow text. Each must keep passing.
 # Gate occurrences: 0 is `test` (pinned elsewhere), 1 is `required`, 2 is the always() step.
+# `required` is left out here: test_required_swift_tests_list.py pins its `if` exactly.
 BUILD_GATE_LEGIT_EDITS = {
     "outcome_ref": lambda t: replace_nth(
         t, BUILD_GATE, f"{BUILD_GATE} && steps.test.outcome == 'success'", 2),
     "conclusion_ref": lambda t: replace_nth(
         t, BUILD_GATE, f"{BUILD_GATE} && steps.test.conclusion != 'cancelled'", 2),
-    "outcome_ref_beside_gate_in_required": lambda t: replace_nth(
-        t, BUILD_GATE, f"{BUILD_GATE} && steps.test.outcome == 'success'", 1),
     "degraded_ref_beside_gate": lambda t: replace_nth(
         t, BUILD_GATE, f"{BUILD_GATE} && steps.build.outputs.degraded == 'true'", 2),
     "degraded_ref_alone": lambda t: replace_nth(
         t, "always() && " + BUILD_GATE, "always() && steps.build.outputs.degraded == 'true'", 0),
     "parenthesised_gate": lambda t: replace_nth(t, BUILD_GATE, f"({BUILD_GATE})", 2),
-    "parenthesised_gate_in_required": lambda t: replace_nth(t, BUILD_GATE, f"({BUILD_GATE})", 1),
     "parenthesised_conjunction": lambda t: replace_nth(
         t, "always() && " + BUILD_GATE, f"(always() && {BUILD_GATE})", 0),
     "multi_line_success_branch": multi_line_success_branch,
@@ -1180,6 +1178,10 @@ BUILD_GATE_MUTANTS.update({
         t, BUILD_GATE, f"{BUILD_GATE} && steps.tset.outcome == 'success'", 2),
     "outcome_ref_with_trailing_name": lambda t: replace_nth(
         t, BUILD_GATE, f"{BUILD_GATE} && steps.test.outcome.x == 'success'", 2),
+    "outcome_property_typo": lambda t: replace_nth(
+        t, BUILD_GATE, f"{BUILD_GATE} && steps.test.outcomes == 'success'", 2),
+    "conclusion_property_typo": lambda t: replace_nth(
+        t, BUILD_GATE, f"{BUILD_GATE} && steps.test.conclusions != 'cancelled'", 2),
     "degraded_output_typo": lambda t: replace_nth(
         t, BUILD_GATE, f"{BUILD_GATE} && steps.build.outputs.degrade == 'true'", 2),
     "or_inside_parenthesised_gate": lambda t: replace_nth(
