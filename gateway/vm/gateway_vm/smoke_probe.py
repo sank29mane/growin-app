@@ -32,17 +32,18 @@ import platform
 import re
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from functools import reduce
 from math import gcd
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import quote_plus
 
 from .breeze_client import (
     V2_DAILY_INTERVAL,
+    V2_EXCHANGE_PARAM_NAMES,
     BreezeClient,
     BreezeError,
     classify_payload,
@@ -532,7 +533,12 @@ def _ratio(after: float | None, before: float | None) -> float | None:
 
 
 def _bars_item(
-    st: _State, item_id: str, window: Window, interval: str, expected_ratio: float | None
+    st: _State,
+    item_id: str,
+    window: Window,
+    interval: str,
+    expected_ratio: float | None,
+    request_knobs: Mapping[str, Any] | None = None,
 ) -> dict:
     upstream_from = f"{window.from_date}T00:00:00.000Z"
     upstream_to = f"{window.to_date}T23:59:59.000Z"
@@ -579,6 +585,7 @@ def _bars_item(
             from_iso=upstream_from,
             to_iso=upstream_to,
             interval=interval,
+            **(request_knobs or {}),
         )
     except BreezeError as exc:
         item["error_class"] = "other"
@@ -644,20 +651,71 @@ def _bars_item(
     return item
 
 
+# Fallback request shapes, tried only when every S2a-d attempt failed. Saturday
+# 2026-10-16 returned HTTP 200 with Status 500 "Something went wrong" for all of
+# them. Each differs from S2a in exactly the knobs listed: the vendor SDK sends a
+# User-Agent and percent-encodes the colons in the dates, the docs table names the
+# exchange parameter exchange_code, and S2g checks whether the endpoint answers at
+# all for another interval over a one-day window. S2g keeps the default shape so
+# its pass or fail is about the interval alone.
+_S2_VARIANT_KNOBS = {"user_agent": True, "encode_colons": True}
+_S2_VARIANTS: tuple[tuple[str, dict[str, Any], str], ...] = (
+    ("S2e", dict(_S2_VARIANT_KNOBS), V2_DAILY_INTERVAL),
+    ("S2f", {**_S2_VARIANT_KNOBS, "exchange_param_name": "exchange_code"}, V2_DAILY_INTERVAL),
+    ("S2g", {}, "1minute"),
+)
+_S2_VARIANT_IDS = tuple(v[0] for v in _S2_VARIANTS)
+_S2_VARIANT_INTERVALS = (V2_DAILY_INTERVAL, "1minute")
+# Expected ex-date close ratio for the BAJFI window, shared by S2a, S2d and the
+# daily variants so a passing fallback still records raw versus adjusted.
+_BAJFI_EXPECTED_RATIO = 0.10
+S2_NOTE_DAILY_SHAPE_WRONG = "s2_endpoint_alive_daily_shape_wrong"
+
+
+def _variant_knobs_record(knobs: Mapping[str, Any], interval: str) -> dict:
+    """What 61-05 must apply to reproduce the passing request. Fixed shape, no values."""
+    return {
+        "user_agent": bool(knobs.get("user_agent", False)),
+        "encode_colons": bool(knobs.get("encode_colons", False)),
+        "exchange_param_name": knobs.get("exchange_param_name", "exch_code"),
+        "interval": interval,
+    }
+
+
 def _step_s2(st: _State, result: dict) -> None:
     plan = st.plan
     items = [
-        _bars_item(st, "S2a", plan.bajfi, V2_DAILY_INTERVAL, 0.10),
+        _bars_item(st, "S2a", plan.bajfi, V2_DAILY_INTERVAL, _BAJFI_EXPECTED_RATIO),
         _bars_item(st, "S2b", plan.relind, V2_DAILY_INTERVAL, 0.5),
         _bars_item(st, "S2c", plan.depth, V2_DAILY_INTERVAL, None),
     ]
     wire = "1day" if any(i["rows"] > 0 for i in items) else None
     if wire is None:
-        retry = _bars_item(st, "S2d", plan.bajfi, "day", 0.10)
+        retry = _bars_item(st, "S2d", plan.bajfi, "day", _BAJFI_EXPECTED_RATIO)
         items.append(retry)
         wire = "day" if retry["rows"] > 0 else "none"
+    passed: str | None = None
+    passed_knobs: dict | None = None
+    if wire == "none":
+        one_day = replace(plan.bajfi, to_date=plan.bajfi.from_date, ex_date=None)
+        for variant_id, knobs, interval in _S2_VARIANTS:
+            window = one_day if interval != V2_DAILY_INTERVAL else plan.bajfi
+            # Only the daily window spans the ex-date; the one-day S2g window cannot.
+            ratio = _BAJFI_EXPECTED_RATIO if interval == V2_DAILY_INTERVAL else None
+            item = _bars_item(st, variant_id, window, interval, ratio, knobs)
+            items.append(item)
+            if item["rows"] > 0:
+                passed = variant_id
+                passed_knobs = _variant_knobs_record(knobs, interval)
+                # Only a daily interval is a daily wire; S2g leaves it "none".
+                wire = "1day" if interval == V2_DAILY_INTERVAL else "none"
+                if wire == "none":
+                    st.note(S2_NOTE_DAILY_SHAPE_WRONG)
+                break
     result["s2_bars"] = items
     result["s2_interval_wire"] = wire
+    result["s2_variant_passed"] = passed
+    result["s2_variant_knobs"] = passed_knobs
 
 
 def tick_gcd_paise(values: Sequence[float | None]) -> int | None:
@@ -864,6 +922,9 @@ _TOP_KEYS = (
     "s1_customer_details", "s2_bars", "s2_interval_wire", "s3_quotes", "s4_preview",
     "s5_replay", "notes",
 )
+# Written by every run that reaches S2, but absent from older result files.
+_TOP_OPTIONAL_KEYS = ("s2_variant_passed", "s2_variant_knobs")
+_S2_KNOB_KEYS = ("user_agent", "encode_colons", "exchange_param_name", "interval")
 _S0_KEYS = ("ok", "metadata_match", "echo_match")
 _S1_KEYS = (
     "pass", "http", "status_value", "status_type", "error_class", "success_keys",
@@ -949,12 +1010,44 @@ def _check_s1_shapes(s1: object, problems: list[str]) -> None:
         problems.append("s1_customer_details success_keys has an unexpected shape")
 
 
+def _check_s2_variant(obj: dict, problems: list[str]) -> None:
+    present = [k for k in _TOP_OPTIONAL_KEYS if k in obj]
+    if not present:
+        return
+    if len(present) != len(_TOP_OPTIONAL_KEYS):
+        problems.append("s2_variant_passed and s2_variant_knobs must come together")
+        return
+    passed, knobs = obj["s2_variant_passed"], obj["s2_variant_knobs"]
+    if passed is not None and passed not in _S2_VARIANT_IDS:
+        problems.append("s2_variant_passed invalid")
+    if passed is None:
+        if knobs is not None:
+            problems.append("s2_variant_knobs set without a passing variant")
+        return
+    if not isinstance(knobs, dict) or set(knobs) != set(_S2_KNOB_KEYS):
+        problems.append("s2_variant_knobs has an unexpected shape")
+        return
+    if not (
+        isinstance(knobs["user_agent"], bool)
+        and isinstance(knobs["encode_colons"], bool)
+        and knobs["exchange_param_name"] in V2_EXCHANGE_PARAM_NAMES
+        and knobs["interval"] in _S2_VARIANT_INTERVALS
+    ):
+        problems.append("s2_variant_knobs has an unexpected value")
+
+
 def validate_result(obj: object) -> list[str]:
     """Return a list of problems; empty means valid."""
     problems: list[str] = []
     if not isinstance(obj, dict):
         return ["result is not an object"]
-    _check_keys(obj, _TOP_KEYS, "result", problems)
+    _check_keys(
+        {k: v for k, v in obj.items() if k not in _TOP_OPTIONAL_KEYS},
+        _TOP_KEYS,
+        "result",
+        problems,
+    )
+    _check_s2_variant(obj, problems)
     if obj.get("schema") != RESULT_SCHEMA:
         problems.append("schema mismatch")
     calls = obj.get("calls")

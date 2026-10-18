@@ -29,6 +29,7 @@ V1_BASE = "https://api.icicidirect.com/breezeapi/api/v1/"
 V2_HISTORICAL_URL = "https://breezeapi.icicidirect.com/api/v2/historicalcharts"
 V1_ENDPOINTS = frozenset({"customerdetails", "quotes", "preview_order"})
 V2_DAILY_INTERVAL = "1day"  # 61-05 may change this from the smoke result
+V2_EXCHANGE_PARAM_NAMES = ("exch_code", "exchange_code")  # docs table vs docs samples
 ERROR_CLASSES = (
     "invalid_session",
     "resource_not_available",
@@ -297,28 +298,37 @@ class BreezeClient:
         from_iso: str,
         to_iso: str,
         interval: str = V2_DAILY_INTERVAL,
+        user_agent: bool = False,
+        encode_colons: bool = False,
+        exchange_param_name: str = "exch_code",
     ) -> RawUpstream:
+        """The defaults send the one request shape 61-04 shipped, byte for byte.
+
+        The knobs exist for the smoke probe's fallback variants (the SDK sends a
+        User-Agent and percent-encodes the colons in the dates). Anything else
+        for exchange_param_name is a ValueError before a request leaves.
+        """
+        if exchange_param_name not in V2_EXCHANGE_PARAM_NAMES:
+            raise ValueError("unsupported exchange parameter name")
         query = urlencode(
             {
                 "stock_code": stock_code,
-                "exch_code": exch_code,
+                exchange_param_name: exch_code,
                 "from_date": from_iso,
                 "to_date": to_iso,
                 "interval": interval,
                 "product_type": "cash",
             },
-            safe=":",
+            safe="" if encode_colons else ":",
         )
-        return self._send(
-            "GET",
-            f"{V2_HISTORICAL_URL}?{query}",
-            headers={
-                "Content-Type": "application/json",
-                "apikey": app_key,
-                "X-SessionToken": session_token,
-            },
-            body=None,
-        )
+        headers = {
+            "Content-Type": "application/json",
+            "apikey": app_key,
+            "X-SessionToken": session_token,
+        }
+        if user_agent:
+            headers["User-Agent"] = SDK_USER_AGENT
+        return self._send("GET", f"{V2_HISTORICAL_URL}?{query}", headers=headers, body=None)
 
     def daily_bars_v2(
         self,

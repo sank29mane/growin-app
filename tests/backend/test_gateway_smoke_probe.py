@@ -16,7 +16,7 @@ import string
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote_plus
+from urllib.parse import parse_qsl, quote_plus, urlsplit
 
 import pytest
 
@@ -25,7 +25,12 @@ if str(ROOT / "gateway" / "vm") not in sys.path:
     sys.path.insert(0, str(ROOT / "gateway" / "vm"))
 
 from gateway_vm import smoke_probe as sp  # noqa: E402
-from gateway_vm.breeze_client import V1_BASE, BreezeClient, compact_json  # noqa: E402
+from gateway_vm.breeze_client import (  # noqa: E402
+    SDK_USER_AGENT,
+    V1_BASE,
+    BreezeClient,
+    compact_json,
+)
 from gateway_vm.egress import METADATA_URL, EgressChecker  # noqa: E402
 from gateway_vm.transport import HttpResponse, TransportError  # noqa: E402
 
@@ -569,6 +574,264 @@ def test_step_exception_is_recorded_and_run_continues(tmp_path, monkeypatch):
     assert "s2_exception" in result["notes"]
     assert "s3_quotes" in result
     assert "secret-looking" not in json.dumps(result)
+
+
+# ------------------------------------------------------ S2 fallback variants
+# S2e to S2g run only after S2a-d all failed. The fake answers by the raw request
+# (URL and headers), so each test sees exactly what would have left the process.
+
+ICICI_500 = '{"Error":"Something went wrong","Status":500}'
+VARIANT_IDS = ["S2e", "S2f", "S2g"]
+
+
+def _variant_run(tmp_path, accept, secrets_obj=None, closes=None):
+    """accept(url, headers) -> True answers with bars, False with the Saturday error.
+
+    closes overrides the bar closes by date for a passing answer."""
+    s = secrets_obj or Secrets()
+    routes = full_routes(s)
+    seen: list[tuple[str, dict]] = []
+
+    transport = FakeTransport(routes)
+
+    def v2_answer(url, body):
+        headers = transport.requests[-1][2]
+        seen.append((url, headers))
+        if accept(url, headers):
+            return _bars_response(
+                closes or {d: 100.0 + i for i, d in enumerate(BAJFI_DAYS)}
+            )
+        return ok(ICICI_500)
+
+    routes[V2_HISTORICAL_URL] = v2_answer
+    clock = FakeClock()
+    client = BreezeClient(transport, clock=clock)
+
+    def egress_factory(expected_ip: str) -> EgressChecker:
+        return EgressChecker(transport, expected_ip=expected_ip, echo_url=ECHO, clock=clock)
+
+    result, _ = run(s, tmp_path, (transport, client, egress_factory), steps=sp.ALL_STEPS)
+    return result, seen, s
+
+
+def _has_ua(headers):
+    return headers.get("User-Agent") == SDK_USER_AGENT
+
+
+def _query_raw(url):
+    return url.split("?", 1)[1]
+
+
+def test_variants_do_not_run_when_s2a_passes(tmp_path):
+    s = Secrets()
+    transport, client, egress_factory = build_full(s)
+    result, _ = run(s, tmp_path, (transport, client, egress_factory), steps=sp.ALL_STEPS)
+    assert [i["id"] for i in result["s2_bars"]] == ["S2a", "S2b", "S2c"]
+    assert result["s2_variant_passed"] is None and result["s2_variant_knobs"] is None
+    assert not any("exchange_code=" in u or "%3A" in u for u in breeze_urls(transport))
+    assert not any("User-Agent" in r[2] for r in transport.requests if r[1].startswith(V2_HISTORICAL_URL))
+
+
+def test_variants_do_not_run_when_only_the_day_retry_passes(tmp_path):
+    s = Secrets()
+    result, _ = run(s, tmp_path, build_full(s, interval_ok=("day",)), steps=sp.ALL_STEPS)
+    assert [i["id"] for i in result["s2_bars"]] == ["S2a", "S2b", "S2c", "S2d"]
+    assert result["s2_variant_passed"] is None
+
+
+def test_variants_run_in_order_and_all_three_fail(tmp_path):
+    result, seen, _ = _variant_run(tmp_path, lambda url, headers: False)
+    assert [i["id"] for i in result["s2_bars"]] == ["S2a", "S2b", "S2c", "S2d"] + VARIANT_IDS
+    assert len(seen) == 7
+    assert result["s2_interval_wire"] == "none"
+    assert result["s2_variant_passed"] is None and result["s2_variant_knobs"] is None
+    for item in result["s2_bars"][4:]:
+        assert item["http"] == 200 and item["status_value"] == 500
+        assert item["error_text"] == "Something went wrong" and item["rows"] == 0
+    assert sp.validate_result(result) == []
+
+
+def test_s2e_passing_stops_the_chain_and_records_knobs(tmp_path):
+    result, seen, _ = _variant_run(tmp_path, lambda url, headers: _has_ua(headers))
+    assert [i["id"] for i in result["s2_bars"]][4:] == ["S2e"]
+    assert len(seen) == 5  # S2a-d plus S2e, nothing after the first pass
+    assert result["s2_variant_passed"] == "S2e"
+    assert result["s2_variant_knobs"] == {
+        "user_agent": True, "encode_colons": True, "exchange_param_name": "exch_code",
+        "interval": "1day",
+    }
+    assert result["s2_interval_wire"] == "1day"
+    assert result["s2_bars"][4]["rows"] == 10
+    assert sp.validate_result(result) == []
+
+
+# Closes that straddle the BAJFI ex-date (2025-06-16): a raw tape drops tenfold, an
+# adjusted tape does not move.
+RAW_STRADDLE = {d: (9400.0 if d < "2025-06-16" else 940.0) for d in BAJFI_DAYS}
+ADJUSTED_STRADDLE = {d: 940.0 + 0.1 * i for i, d in enumerate(BAJFI_DAYS)}
+
+
+@pytest.mark.parametrize(
+    ("closes", "reading"), [(RAW_STRADDLE, "raw"), (ADJUSTED_STRADDLE, "adjusted")]
+)
+@pytest.mark.parametrize("variant", ["S2e", "S2f"])
+def test_passing_daily_variant_records_the_adjustment_reading(tmp_path, closes, reading, variant):
+    accept = (
+        (lambda url, headers: _has_ua(headers))
+        if variant == "S2e"
+        else (lambda url, headers: "exchange_code=NSE" in url)
+    )
+    result, _, _ = _variant_run(tmp_path, accept, closes=closes)
+    item = next(i for i in result["s2_bars"] if i["id"] == variant)
+    assert item["adjustment_reading"] == reading
+    assert item["pre_ex_close"] is not None and item["close_ratio"] is not None
+    assert sp.validate_result(result) == []
+
+
+def test_s2g_one_day_window_keeps_no_adjustment_reading(tmp_path):
+    result, _, _ = _variant_run(tmp_path, lambda url, headers: "interval=1minute" in url)
+    item = next(i for i in result["s2_bars"] if i["id"] == "S2g")
+    assert item["rows"] > 0 and item["adjustment_reading"] == "n/a"
+
+
+@pytest.mark.parametrize(
+    ("accept", "expected"),
+    [
+        (lambda url, headers: "interval=1minute" in url, True),
+        (lambda url, headers: _has_ua(headers), False),
+        (lambda url, headers: "exchange_code=NSE" in url, False),
+        (lambda url, headers: False, False),
+    ],
+    ids=["only_s2g", "s2e", "s2f", "nothing"],
+)
+def test_daily_shape_wrong_note_only_when_s2g_alone_passes(tmp_path, accept, expected):
+    result, _, _ = _variant_run(tmp_path, accept)
+    assert (sp.S2_NOTE_DAILY_SHAPE_WRONG in result["notes"]) is expected
+    assert sp.validate_result(result) == []
+    if expected:
+        assert "s2_endpoint_alive_daily_shape_wrong" in result["notes"]
+
+
+def test_s2f_runs_only_after_s2e_fails_and_stops_on_pass(tmp_path):
+    result, seen, _ = _variant_run(
+        tmp_path, lambda url, headers: "exchange_code=NSE" in url
+    )
+    assert [i["id"] for i in result["s2_bars"]][4:] == ["S2e", "S2f"]
+    assert len(seen) == 6
+    assert result["s2_variant_passed"] == "S2f"
+    assert result["s2_variant_knobs"] == {
+        "user_agent": True, "encode_colons": True, "exchange_param_name": "exchange_code",
+        "interval": "1day",
+    }
+    assert result["s2_interval_wire"] == "1day"
+
+
+def test_s2g_passing_records_interval_and_leaves_the_daily_wire_none(tmp_path):
+    result, seen, _ = _variant_run(tmp_path, lambda url, headers: "interval=1minute" in url)
+    assert [i["id"] for i in result["s2_bars"]][4:] == VARIANT_IDS
+    assert result["s2_variant_passed"] == "S2g"
+    assert result["s2_variant_knobs"] == {
+        "user_agent": False, "encode_colons": False, "exchange_param_name": "exch_code",
+        "interval": "1minute",
+    }
+    assert result["s2_interval_wire"] == "none"
+    assert sp.validate_result(result) == []
+
+
+def test_each_variant_sends_exactly_its_wire_difference(tmp_path):
+    result, seen, _ = _variant_run(tmp_path, lambda url, headers: False)
+    default = seen[0]
+    a_query = _query_raw(default[0])
+    assert ":" in a_query and "%3A" not in a_query and not _has_ua(default[1])
+    assert "exch_code=NSE" in a_query and "exchange_code" not in a_query
+
+    e_url, e_headers = seen[4]
+    assert _query_raw(e_url) == a_query.replace(":", "%3A")
+    assert e_headers == {**default[1], "User-Agent": SDK_USER_AGENT}
+
+    f_url, f_headers = seen[5]
+    assert _query_raw(f_url) == _query_raw(e_url).replace("exch_code=", "exchange_code=")
+    assert f_headers == e_headers
+
+    g_url, g_headers = seen[6]
+    g_params = dict(parse_qsl(urlsplit(g_url).query))
+    a_params = dict(parse_qsl(urlsplit(default[0]).query))
+    assert g_params == {
+        **a_params, "interval": "1minute",
+        "from_date": "2025-06-09T00:00:00.000Z", "to_date": "2025-06-09T23:59:59.000Z",
+    }
+    assert ":" in _query_raw(g_url) and "%3A" not in _query_raw(g_url)  # default shape
+    assert g_headers == default[1]
+    # same symbol and same S2a window start for every variant
+    assert {dict(parse_qsl(urlsplit(u).query))["stock_code"] for u, _ in (default, seen[4], seen[5], seen[6])} == {"BAJFI"}
+    assert [i["from"] for i in result["s2_bars"][4:]] == ["2025-06-09"] * 3
+    assert [i["to"] for i in result["s2_bars"][4:]] == ["2025-06-20", "2025-06-20", "2025-06-09"]
+
+
+def test_attempts_a_to_d_are_unchanged_when_variants_run(tmp_path):
+    _, seen, _ = _variant_run(tmp_path, lambda url, headers: False)
+    for url, headers in seen[:4]:
+        assert "%3A" not in url and "exchange_code" not in url and not _has_ua(headers)
+        assert set(headers) == {"Content-Type", "apikey", "X-SessionToken"}
+
+
+def test_variant_calls_stay_inside_the_call_cap(tmp_path):
+    result, seen, _ = _variant_run(tmp_path, lambda url, headers: False)
+    assert result["calls"]["breeze"] <= result["calls"]["max"] == 20
+    assert len(seen) - 4 <= 3
+
+
+def test_variant_json_holds_no_secret_in_any_form(tmp_path):
+    result, _, s = _variant_run(tmp_path, lambda url, headers: _has_ua(headers))
+    text = (tmp_path / "out" / sp.RESULT_FILENAME).read_text()
+    for value in s.values() + [EXPECTED_IP]:
+        for form in (value, quote_plus(value), base64.b64encode(value.encode()).decode()):
+            assert form not in text
+    assert SDK_USER_AGENT not in text and "apikey" not in text.lower()
+    assert sp.validate_result(json.loads(text)) == []
+
+
+def test_validator_accepts_old_files_without_the_variant_keys(full_result):
+    del full_result["s2_variant_passed"], full_result["s2_variant_knobs"]
+    assert sp.validate_result(full_result) == []
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda r: r.pop("s2_variant_knobs"),
+        lambda r: r.update(s2_variant_passed="S2z"),
+        lambda r: r.update(s2_variant_knobs={"user_agent": True}),
+        lambda r: r.update(s2_variant_passed="S2e", s2_variant_knobs=None),
+        lambda r: r.update(
+            s2_variant_passed="S2e",
+            s2_variant_knobs={"user_agent": "yes", "encode_colons": True,
+                              "exchange_param_name": "exch_code", "interval": "1day"},
+        ),
+        lambda r: r.update(
+            s2_variant_passed="S2f",
+            s2_variant_knobs={"user_agent": True, "encode_colons": True,
+                              "exchange_param_name": "stock_code", "interval": "1day"},
+        ),
+        lambda r: r.update(
+            s2_variant_passed=None,
+            s2_variant_knobs={"user_agent": True, "encode_colons": True,
+                              "exchange_param_name": "exch_code", "interval": "1day"},
+        ),
+    ],
+)
+def test_validator_rejects_malformed_variant_keys(full_result, mutate):
+    mutate(full_result)
+    assert sp.validate_result(full_result) != []
+
+
+def test_validator_accepts_a_passing_variant_record(full_result):
+    full_result["s2_variant_passed"] = "S2f"
+    full_result["s2_variant_knobs"] = {
+        "user_agent": True, "encode_colons": True, "exchange_param_name": "exchange_code",
+        "interval": "1day",
+    }
+    assert sp.validate_result(full_result) == []
 
 
 # ------------------------------------------------------------ helper units
