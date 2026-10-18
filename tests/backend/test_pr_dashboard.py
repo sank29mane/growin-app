@@ -527,6 +527,7 @@ def test_swift_ci_is_required_and_pinned():
     assert "paths" not in on["pull_request"]
     assert set(on["push"]["paths"]) == {"Growin/**", "GrowinTests/**", "GrowinUITests/**",
                                         "Growin.xcodeproj/**", ".github/workflows/swift-ci.yml",
+                                        ".github/required-swift-tests.txt",
                                         "tests/backend/fixtures/relay_orders/**"}
     assert wf["permissions"] == {"contents": "read"}
     job = wf["jobs"]["unit-tests"]

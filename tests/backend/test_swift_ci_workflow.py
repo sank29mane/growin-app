@@ -33,6 +33,7 @@ SWIFT_GLOBS = (
     "GrowinUITests/**",
     "Growin.xcodeproj/**",
     ".github/workflows/swift-ci.yml",
+    ".github/required-swift-tests.txt",
     # RelayVectors in GrowinTests reads signing_vectors.json and
     # swift_signature.json from this directory.
     "tests/backend/fixtures/relay_orders/**",

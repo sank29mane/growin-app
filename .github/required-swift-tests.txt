@@ -1,0 +1,15 @@
+# Swift Testing tests that "Swift unit tests" (swift-ci.yml) requires to have
+# both run and passed. One per line as Suite/testFunction. Blank lines and
+# lines starting with # are ignored. A rename in Swift must change this file
+# too (tests/backend/test_required_swift_tests_list.py checks the match).
+#
+# Production Keychain tripwires (ProductionTripwireTests.swift)
+ProductionTripwireTests/thisProcessIsATestHost
+ProductionTripwireTests/theSharedStoreRefusesARead
+ProductionTripwireTests/theSignersReportNotConfigured
+ProductionTripwireTests/theCleanupRefusesADeleteOnTheProductionService
+# Service isolation canaries
+KeychainScopeTests/aStoreNeverSeesOrChangesAnotherServicesItem
+KeychainScopeTests/aStoreCleanUpAndLegacyCallsLeaveAnotherServicesItemsAlone
+KeychainScopeTests/rawKeychainOnOneServiceCannotSeeOrRemoveAnother
+LegacyT212KeychainCleanupTests/theRealDeleteNeverTouchesAnotherServicesItem
