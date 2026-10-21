@@ -174,10 +174,16 @@ def install_network_guard(monkeypatch: pytest.MonkeyPatch) -> NetworkGuard:
 # --- fixtures (import into a test module to use) -----------------------------------
 
 
-# Arguments the stub returns when magentic forces a structured-output tool.
+# Arguments the stub returns when magentic forces a structured-output tool
+# (``run_magentic`` only; no production call site uses it any more).
 STUB_TOOL_ARGUMENTS = {
     "return_list_of_toolcall": {"value": []},
-    "return_riskassessment": {
+}
+
+# What the stub answers to a ``response_format`` json_schema request, by schema name.
+STUB_STRUCTURED_REPLIES = {
+    "ToolCallList": {"tool_calls": []},
+    "RiskAssessment": {
         "status": "APPROVED",
         "confidence_score": 0.5,
         "risk_assessment": "stub",
@@ -186,17 +192,53 @@ STUB_TOOL_ARGUMENTS = {
         "debate_refutation": "stub",
         "requires_hitl": False,
     },
-    "return_newsdataqueryparams": {"q": "stub query"},
+    "NewsDataQueryParams": {"q": "stub query"},
 }
 
 
 @pytest.fixture
 def stub():
-    server = ModelStubServer(tool_arguments=dict(STUB_TOOL_ARGUMENTS)).start()
+    server = ModelStubServer(
+        tool_arguments=dict(STUB_TOOL_ARGUMENTS), structured=dict(STUB_STRUCTURED_REPLIES)
+    ).start()
     try:
         yield server
     finally:
         server.stop()
+
+
+@pytest.fixture
+def risk_workspace(tmp_path, monkeypatch):
+    """The India workspace config, loaded by the real loader, as the loaded app state.
+
+    The critic reads its limits and currency from ``state.workspace_config``.
+    Values are the synthetic ones ``build_private_config`` writes.
+    """
+
+    from app_context import state
+    from conftest import build_private_config
+    from private_config import load_workspace_config
+
+    (tmp_path / "ws").mkdir()
+    config = load_workspace_config(build_private_config(tmp_path / "ws"), "india")
+    monkeypatch.setattr(state, "workspace_config", config)
+    return config
+
+
+def uk_practice_config(root: Path, capital_cap: str, per_position_cap: str):
+    """A UK practice ``WorkspaceConfig`` (GBP, limits.json) built by the real loader."""
+
+    from conftest import build_private_config
+    from private_config import load_workspace_config
+    from venue_seam_testkit import SYNTH_LIMITS, write_practice_files
+
+    root.mkdir(parents=True, exist_ok=True)
+    private = build_private_config(root)
+    write_practice_files(
+        private,
+        limits={**SYNTH_LIMITS, "capital_cap": capital_cap, "per_position_cap": per_position_cap},
+    )
+    return load_workspace_config(private, "uk")
 
 
 @pytest.fixture

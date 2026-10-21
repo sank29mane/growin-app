@@ -4,9 +4,17 @@ Answers ``POST /{prefix}/v1/chat/completions`` in plain JSON or SSE and records
 the path, headers and JSON body of every request. One server stands in for xAI,
 LM Studio and Ollama: the test chooses the prefix per provider.
 
-Structured outputs: when a request forces a tool (magentic does this for every
-pydantic return type) the stub answers with a tool call whose arguments come
-from ``tool_arguments[function_name]``.
+Structured outputs, two shapes:
+
+* ``response_format`` json_schema (the registry's ``run_structured``): the stub
+  answers with plain content taken from ``structured[schema_name]``. A dict is
+  sent as JSON; a string is sent verbatim, so a test can send JSON text with
+  fences, prose, or anything else a model might emit.
+* a forced tool (magentic): the stub answers with a tool call whose arguments
+  come from ``tool_arguments[function_name]``.
+
+``served_model`` makes every reply name that model instead of the requested one,
+the way LM Studio answers an unknown id with its loaded model.
 """
 
 from __future__ import annotations
@@ -38,6 +46,8 @@ class RecordedRequest:
 class ModelStubServer:
     reply_text: str = "stub reply"
     tool_arguments: Dict[str, Any] = field(default_factory=dict)
+    structured: Dict[str, Any] = field(default_factory=dict)
+    served_model: Optional[str] = None
     requests: List[RecordedRequest] = field(default_factory=list)
     _server: Optional[ThreadingHTTPServer] = None
     _thread: Optional[threading.Thread] = None
@@ -133,14 +143,27 @@ class ModelStubServer:
                 return function.get("name")
         return None
 
+    def _schema_name(self, body: Dict[str, Any]) -> Optional[str]:
+        fmt = body.get("response_format")
+        if isinstance(fmt, dict) and fmt.get("type") == "json_schema":
+            spec = fmt.get("json_schema")
+            if isinstance(spec, dict):
+                return spec.get("name")
+        return None
+
     def _respond(self, handler: BaseHTTPRequestHandler, body: Dict[str, Any]) -> None:
-        model = body.get("model", "")
+        model = self.served_model if self.served_model is not None else body.get("model", "")
         tool_name = self._forced_tool(body)
         arguments = json.dumps(self.tool_arguments.get(tool_name, {})) if tool_name else None
         if body.get("stream"):
             self._respond_sse(handler, body, model, tool_name, arguments)
             return
-        message: Dict[str, Any] = {"role": "assistant", "content": self.reply_text}
+        content = self.reply_text
+        schema_name = self._schema_name(body)
+        if schema_name is not None:
+            reply = self.structured.get(schema_name, {})
+            content = reply if isinstance(reply, str) else json.dumps(reply)
+        message: Dict[str, Any] = {"role": "assistant", "content": content}
         finish = "stop"
         if tool_name:
             message = {
