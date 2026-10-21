@@ -8,13 +8,18 @@ Tokens, codes and URLs in this file are generated fakes.
 
 from __future__ import annotations
 
+import getpass
 import hashlib
+import io
 import json
 import logging
+import re
+import sys
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 
 import httpx
 import pytest
@@ -26,7 +31,15 @@ from test_gateway_relay_app import (  # the harness of the 61-05 tests
     Stack,
 )
 
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT / "gateway" / "vm") not in sys.path:
+    sys.path.insert(0, str(ROOT / "gateway" / "vm"))
+
+from gateway_vm import contract as vm  # noqa: E402
+
+from brokers.breeze_gateway import cli as cli_mod
 from brokers.breeze_gateway import client as client_mod
+from brokers.breeze_gateway.config import ConfigError
 from brokers.breeze_gateway import (
     CODE_TO_CLASS,
     CONTRACT,
@@ -52,6 +65,7 @@ from brokers.breeze_gateway import (
     RelayUnavailable,
     RelayValidationError,
     SessionExpired,
+    TunnelError,
     Unauthorized,
     UpstreamError,
     UpstreamPayload,
@@ -949,3 +963,375 @@ def test_a_transport_failure_is_relay_unavailable_and_is_not_resent():
     with pytest.raises(RelayUnavailable) as info:
         relay_with(slow).health()
     assert info.value.reason == "timeout"
+
+
+# ------------------------------------------------------------------- CLI
+
+
+class _Tunnel:
+    """A fake Tunnel for `cli tunnel`."""
+
+    def __init__(self, port: int = 50123, alive_after_wait: bool = True) -> None:
+        self.port = port
+        self.alive_after_wait = alive_after_wait
+        self.handle = _FakeHandle(port)
+        self.stopped = 0
+
+    def start(self):
+        outer = self
+
+        class Handle(_FakeHandle):
+            def stop(self_inner) -> None:
+                outer.stopped += 1
+                self_inner._alive = False
+
+        self.handle = Handle(self.port)
+        return self.handle
+
+
+def run_cli(args, *, handler=None, store=None, isatty=True, **kwargs):
+    """Returns (exit code, text, handler). The client is built on the Canned relay."""
+    handler = handler if handler is not None else Canned()
+    out = io.StringIO()
+    kwargs.setdefault("client_factory", lambda: relay_with(handler, store=store))
+    code = cli_mod.main(args, isatty=lambda: isatty, out=out, **kwargs)
+    return code, out.getvalue(), handler
+
+
+def test_health_prints_one_key_value_line_per_field_in_order():
+    code, text, _ = run_cli(["health"])
+    assert code == 0
+    assert text.splitlines() == [
+        "state none", "login_pending false", "expires_at_ist none", "egress_ok unknown",
+    ]
+    active = {
+        **HEALTH_JSON, "state": "active", "login_pending": True,
+        "expires_at_ist": EXPIRY.isoformat(), "egress": {"ok": True, "checked_at_utc": FETCHED},
+    }
+    code, text, _ = run_cli(["health"], handler=lambda request: json_response(active))
+    assert text.splitlines() == [
+        "state active", "login_pending true", f"expires_at_ist {EXPIRY.isoformat()}", "egress_ok true",
+    ]
+    failing = {**HEALTH_JSON, "egress": {"ok": False, "checked_at_utc": FETCHED}}
+    assert "egress_ok false" in run_cli(["health"], handler=lambda r: json_response(failing))[1]
+
+
+def test_budget_and_revoke_print_their_fields():
+    code, text, _ = run_cli(["budget"])
+    assert code == 0 and text.splitlines() == [
+        "calls_last_minute 1", "calls_today_ist 20", "per_minute_limit 80", "per_day_limit 4500",
+        "remaining_today 4480", "ist_date 2026-10-21",
+    ]
+    code, text, _ = run_cli(["revoke"])
+    assert code == 0 and text.splitlines() == ["state none"]
+
+
+def test_login_paste_completes_over_the_relay_and_prints_no_secret():
+    prompts = []
+    opened = []
+
+    def ask(prompt):
+        prompts.append(prompt)
+        return f" {CODE} "
+
+    store = MemoryTokenStore()
+    code, text, handler = run_cli(
+        ["login", "--paste", "--no-open"], store=store, getpass_fn=ask, opener=opened.append
+    )
+    assert code == 0
+    assert text.splitlines()[-2:] == ["state active", f"expires_at_ist {EXPIRY.isoformat()}"]
+    assert "ICICI API portal" in text
+    assert opened == [] and len(prompts) == 1
+    for secret in (CODE, LOGIN_URL, "CANARY-LOGIN-URL", TOKEN):
+        assert secret not in text
+    complete = [r for r in handler.requests if r.url.path == "/v1/login/complete"]
+    assert json.loads(complete[0].content) == {"attempt_id": ATTEMPT, "apisession": CODE}
+    assert complete[0].headers["authorization"] == f"Bearer {TOKEN}"
+    saved = store.load()
+    assert saved is not None and saved.token == TOKEN
+
+
+def test_login_without_no_open_hands_the_url_only_to_the_opener():
+    opened = []
+    code, text, _ = run_cli(
+        ["login", "--paste"], getpass_fn=lambda prompt: CODE, opener=opened.append
+    )
+    assert code == 0 and opened == [LOGIN_URL]
+    assert LOGIN_URL not in text and CODE not in text and TOKEN not in text
+
+
+def test_login_survives_an_opener_that_fails_without_printing_the_url():
+    def broken(url):
+        raise OSError("no browser")
+
+    code, text, _ = run_cli(["login", "--paste"], getpass_fn=lambda p: CODE, opener=broken)
+    assert code == 0 and "could not open a browser" in text
+    assert LOGIN_URL not in text
+
+
+def test_login_without_a_terminal_returns_2_before_arming():
+    def never():
+        raise AssertionError("the relay must not be touched")
+
+    asked = []
+    code, text, _ = run_cli(
+        ["login", "--paste"], isatty=False, client_factory=never,
+        getpass_fn=lambda p: asked.append(p) or CODE,
+    )
+    assert code == 2 and asked == []
+    assert CODE not in text
+
+
+def test_login_without_paste_is_a_usage_error():
+    code, text, handler = run_cli(["login"], getpass_fn=lambda p: CODE)
+    assert code == 2 and handler.requests == []
+
+
+@pytest.mark.parametrize("typed", ["", "   ", "12 34", "abc"])
+def test_a_bad_code_is_refused_before_it_is_sent_and_never_echoed(typed):
+    code, text, handler = run_cli(["login", "--paste", "--no-open"], getpass_fn=lambda p: typed)
+    assert code == 2
+    assert all(r.url.path != "/v1/login/complete" for r in handler.requests)
+    assert typed.strip() == "" or typed not in text
+
+
+def test_a_rejected_code_prints_only_the_code_and_the_request_id():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/login/complete":
+            return error_response("LOGIN_ATTEMPT_INVALID", 409)
+        return Canned()(request)
+
+    code, text, _ = run_cli(["login", "--paste", "--no-open"], handler=handler,
+                            getpass_fn=lambda p: CODE)
+    assert code == 1
+    assert text.splitlines()[-1] == f"LOGIN_ATTEMPT_INVALID (request {RID})"
+    assert CODE not in text and TOKEN not in text
+
+
+def test_the_hidden_prompt_is_getpass_by_default():
+    import inspect
+
+    assert inspect.signature(cli_mod.main).parameters["getpass_fn"].default is getpass.getpass
+
+
+def test_probe_daily_reports_and_writes_nothing(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    before = set(tmp_path.iterdir())
+    code, text, handler = run_cli(
+        ["probe-daily", "--stock-code", "RELIND", "--from", "2025-06-02", "--to", "2025-06-13"]
+    )
+    assert code == 0
+    assert text.splitlines() == [f"request_id {RID}", "rows 1", "empty false", "sha256 verified"]
+    assert set(tmp_path.iterdir()) == before
+    assert dict(handler.requests[0].url.params)["stock_code"] == "RELIND"
+
+
+def test_probe_daily_counts_rows_and_reports_unknown_for_other_shapes():
+    many = json.dumps({"Success": [{}, {}, {}], "Status": 200, "Error": None}).encode()
+    args = ["probe-daily", "--stock-code", "RELIND", "--from", "2025-06-02", "--to", "2025-06-13"]
+    assert "rows 3" in run_cli(args, handler=lambda r: bars_response(many))[1]
+    odd = b'{"Success": "text"}'
+    text = run_cli(args, handler=lambda r: bars_response(odd))[1]
+    assert "rows unknown" in text and text.splitlines()[-1] == "sha256 verified"
+    empty = b'{"Success": []}'
+    assert "empty true" in run_cli(args, handler=lambda r: bars_response(empty, **{client_mod.HDR_EMPTY: "true"}))[1]
+
+
+def test_probe_daily_rejects_bad_dates_and_codes():
+    assert run_cli(["probe-daily", "--stock-code", "RELIND", "--from", "x", "--to", "2025-06-13"])[0] == 2
+    code, text, handler = run_cli(
+        ["probe-daily", "--stock-code", "reliance", "--from", "2025-06-02", "--to", "2025-06-13"]
+    )
+    assert code == 2 and handler.requests == []
+    assert "reliance" not in text
+
+
+def test_tunnel_prints_the_url_and_a_note_then_stops_on_interrupt():
+    fake = _Tunnel(port=50321)
+
+    def interrupt(handle):
+        raise KeyboardInterrupt
+
+    out = io.StringIO()
+    code = cli_mod.main(
+        ["tunnel"], tunnel_factory=lambda cfg, verbose: fake, config_loader=lambda: object(),
+        wait=interrupt, out=out,
+    )
+    assert code == 0 and fake.stopped == 1
+    assert out.getvalue().splitlines() == [
+        "RELAY_URL=http://127.0.0.1:50321",
+        "for manual inspection only; the relay token is not printed",
+    ]
+
+
+def test_tunnel_verbose_reaches_the_factory_and_a_dead_child_is_exit_4():
+    seen = []
+    fake = _Tunnel()
+
+    def factory(cfg, verbose):
+        seen.append(verbose)
+        return fake
+
+    def child_dies(handle):
+        handle._alive = False
+
+    out = io.StringIO()
+    code = cli_mod.main(["tunnel", "--verbose"], tunnel_factory=factory,
+                        config_loader=lambda: object(), wait=child_dies, out=out)
+    assert code == 4 and seen == [True] and fake.stopped == 1
+    assert "tunnel_exited" in out.getvalue()
+
+
+def test_exit_codes_for_relay_config_and_tunnel_errors():
+    code, text, _ = run_cli(["budget"], handler=lambda r: error_response("NO_SESSION", 503))
+    assert code == 1 and text.strip() == f"NO_SESSION (request {RID})"
+
+    def bad_config():
+        raise ConfigError("bad_mode", "file")
+
+    out = io.StringIO()
+    assert cli_mod.main(["tunnel"], config_loader=bad_config, out=out) == 3
+    assert "bad_mode" in out.getvalue()
+
+    def no_tunnel():
+        raise TunnelError("gcloud_not_found")
+
+    out = io.StringIO()
+    assert cli_mod.main(["health"], client_factory=no_tunnel, out=out) == 4
+    assert out.getvalue().strip() == "tunnel_error gcloud_not_found"
+
+    def bad_config_for_client():
+        raise ConfigError("unreadable", "file")
+
+    assert cli_mod.main(["health"], client_factory=bad_config_for_client, out=io.StringIO()) == 3
+    assert cli_mod.main([], out=io.StringIO()) == 2
+    assert cli_mod.main(["nonsense"], out=io.StringIO()) == 2
+
+
+def test_cli_prints_a_relay_error_without_its_parameters():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return error_response("UPSTREAM_ERROR", 502, reason="no_data", fields=["stock_code"])
+
+    code, text, _ = run_cli(
+        ["probe-daily", "--stock-code", "RELIND", "--from", "2025-06-02", "--to", "2025-06-13"],
+        handler=handler,
+    )
+    assert code == 1 and text.strip() == f"UPSTREAM_ERROR (request {RID})"
+
+
+# ------------------------------------------------------- contract parity
+
+PENDING_ROUTES = {
+    "/v1/budget", "/v1/quotes", "/v1/preview-order", "/v1/security-master",
+}  # served by the VM from the plan after the relay core; the client already speaks them
+
+
+def test_contract_string_and_header_names_equal_the_vm():
+    assert CONTRACT == client_mod.CONTRACT == vm.CONTRACT == "growin-relay/1"
+    pairs = {
+        client_mod.HDR_CONTRACT: vm.HDR_CONTRACT,
+        client_mod.HDR_REQUEST_ID: vm.HDR_REQUEST_ID,
+        client_mod.HDR_CACHE_CONTROL: vm.HDR_CACHE_CONTROL,
+        client_mod.HDR_UP_SHA256: vm.HDR_UP_SHA256,
+        client_mod.HDR_UP_FETCHED_AT: vm.HDR_UP_FETCHED_AT,
+        client_mod.HDR_UP_API: vm.HDR_UP_API,
+        client_mod.HDR_UP_REQUEST: vm.HDR_UP_REQUEST,
+        client_mod.HDR_UP_INTERVAL: vm.HDR_UP_INTERVAL,
+        client_mod.HDR_BREEZE_STATUS: vm.HDR_BREEZE_STATUS,
+        client_mod.HDR_EMPTY: vm.HDR_EMPTY,
+        client_mod.HDR_AUTHORIZATION: vm.HDR_AUTHORIZATION,
+    }
+    for mine, theirs in pairs.items():
+        assert mine == theirs
+    assert len(set(pairs)) == len(pairs)
+
+
+def test_route_set_equals_the_vm_apart_from_the_routes_still_to_come():
+    assert vm.ROUTES <= client_mod.ROUTES
+    assert client_mod.ROUTES - vm.ROUTES <= PENDING_ROUTES
+    assert {client_mod.ROUTE_HEALTH, client_mod.ROUTE_LOGIN_ARM, client_mod.ROUTE_LOGIN_COMPLETE,
+            client_mod.ROUTE_SESSION_REVOKE, client_mod.ROUTE_BARS_DAILY} <= vm.ROUTES
+
+
+def test_error_codes_and_statuses_equal_the_vm():
+    assert set(CODE_TO_CLASS) == set(vm.ERRORS)
+    assert {code: status for code, (status, _) in C6.items()} == {
+        code: status for code, (status, _) in vm.ERRORS.items()
+    }
+    for code, (_, retryable) in vm.ERRORS.items():
+        assert isinstance(retryable, bool) and code in CODE_TO_CLASS
+
+
+def test_upstream_names_patterns_and_limits_equal_the_vm():
+    assert client_mod.API_BARS_V2 == vm.API_BARS_V2
+    assert client_mod.API_QUOTES_V1 == vm.API_QUOTES_V1
+    assert client_mod.API_PREVIEW_V1 == vm.API_PREVIEW_V1
+    assert client_mod.API_SECURITY_MASTER == vm.API_SECURITY_MASTER
+    assert client_mod.DAILY_INTERVAL == vm.DAILY_INTERVAL_SEMANTIC
+    assert client_mod.MAX_RANGE_DAYS == vm.MAX_RANGE_DAYS
+    for name in ("REQUEST_ID_RE", "ATTEMPT_ID_RE", "STOCK_CODE_RE"):
+        assert getattr(client_mod, name).pattern == getattr(vm, name).pattern
+    token = vm.BEARER_RE.pattern.removeprefix("^Bearer (").removesuffix(")$")
+    assert client_mod.RELAY_TOKEN_RE.pattern.strip("^$") == token
+    # the client's code filter is a superset of the VM's, so the VM is the one that decides
+    for sample in ("123456", "A1b2C3d4", "9" * 64, "ab" * 32):
+        assert vm.API_SESSION_RE.fullmatch(sample) and client_mod.API_SESSION_RE.fullmatch(sample)
+
+
+# ------------------------------------------------------------ RELAY-API.md
+
+DOC = (ROOT / "gateway" / "RELAY-API.md").read_text()
+
+
+def test_the_doc_carries_every_contract_heading_and_the_observed_section():
+    for number in range(1, 10):
+        assert re.search(rf"^### C{number}\. ", DOC, re.M), f"C{number}"
+    assert "## Observed upstream behaviour" in DOC
+    assert "## Consumers" in DOC and "## Daily use" in DOC
+
+
+def test_the_doc_names_every_route_header_and_code_the_code_uses():
+    for name in [*vm.ROUTES, *client_mod.ROUTES, *vm.ERRORS]:
+        assert name in DOC, name
+    for header in (client_mod.HDR_CONTRACT, client_mod.HDR_REQUEST_ID, client_mod.HDR_UP_SHA256,
+                   client_mod.HDR_UP_FETCHED_AT, client_mod.HDR_UP_API, client_mod.HDR_UP_REQUEST,
+                   client_mod.HDR_UP_INTERVAL, client_mod.HDR_BREEZE_STATUS, client_mod.HDR_EMPTY,
+                   client_mod.HDR_UP_LAST_MODIFIED):
+        assert header in DOC, header
+    assert "growin-relay/1" in DOC
+
+
+def test_the_observed_section_records_the_smoke_findings():
+    observed = DOC.split("## Observed upstream behaviour", 1)[1].split("\n## Consumers", 1)[0]
+    for needle in (
+        "YYYY-MM-DD HH:MM:SS", "00:00:00", "RAW", "NEWEST", "1000", "Boundary days are included",
+        "HTTP 200 with a `Status` 500 body is an upstream error", "NIFBEE", "1day",
+        "DD-Mon-YYYY HH:MM:SS", "IST",
+    ):
+        assert needle in observed, needle
+
+
+def test_the_doc_holds_no_account_value():
+    assert not re.search(r"[\w.+-]+@[\w-]+\.[A-Za-z]{2,}", DOC)  # no email
+    assert set(re.findall(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", DOC)) <= {
+        "127.0.0.1",
+        "35.235.240.0",
+        "0.0.0.0",  # named in C1 as an address the relay refuses
+    }
+    assert not re.search(r"[A-Za-z0-9_-]{40,}", DOC)  # no token or key shaped run
+    ssh_line = "gcloud compute " + "ssh"
+    internal_flag = "--internal" + "-ip"
+    assert not re.search(
+        rf"(?i){ssh_line}|{internal_flag}|\.planning|api_key=[A-Za-z0-9]", DOC
+    )
+
+
+def test_the_daily_use_block_runs_only_the_cli_and_every_command_exists():
+    block = DOC.split("## Daily use", 1)[1].split("```")[1]
+    commands = [line for line in block.splitlines() if line and line != "export PYTHONPATH=backend"]
+    assert commands and all(
+        line.startswith("uv run --project backend --no-sync python -m brokers.breeze_gateway.cli ")
+        for line in commands
+    )
+    known = set(cli_mod._parser()._subparsers._group_actions[0].choices)
+    assert {line.split("breeze_gateway.cli ")[1].split()[0] for line in commands} == known
