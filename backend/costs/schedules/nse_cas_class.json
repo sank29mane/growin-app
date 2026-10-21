@@ -1,0 +1,6 @@
+{
+  "schema": "growin.costs.cas_class/1",
+  "source_id": "nse-closing-auction-scope",
+  "status": "UNPOPULATED: the operator saves the NSE publication that fixes closing-auction scope per date, and the rows are transcribed from that saved file only (64-02 S-1). Until a version with an operator approval line is added, every lookup fails closed and the intraday fill model reports session_scope_unknown.",
+  "versions": []
+}
