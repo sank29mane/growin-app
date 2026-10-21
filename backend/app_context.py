@@ -31,18 +31,22 @@ from execution import (
 )
 from execution.venue import (
     PRICE_SOURCE_OPERATOR_RECORDED,
+    PRICE_SOURCE_RELAY_QUOTE,
     PracticeCaps,
     VenueBinding,
     VenueContext,
     VenueError,
     DispatcherFactoryMap,
     execution_mode_label,
+    is_shadow_binding,
     resolve_factory,
     spec_for,
 )
+from execution.approval import ApprovalService
 from execution.india_guard import IndiaAdmissionGuard, IndiaQuoteEvidence
 from private_config import PrivateConfigError, load_workspace_config
-from risk_india.drawdown import SessionResult, pending_batches
+from risk_india.drawdown import MarkMissing, SessionResult, pending_batches
+from risk_india.rules import IST, RiskConfigError
 from risk_india.exits import ExitBatch, Position
 from workspace_credentials import process_workspace
 from model_registry import (
@@ -107,6 +111,12 @@ class AppState:
         self.venue_adapter: Any = None
         # Loaded private WorkspaceConfig for Phases 62 and 63; None until a successful start.
         self.workspace_config = None
+        # Phase 63-05: the relay's quote source and link. Set only for an India ledger bound to
+        # the SHADOW relay venue; None everywhere else, so no route can reach the relay from a
+        # paper or UK ledger. The link opens its tunnel on first use, never at start.
+        self.relay_quotes: Any = None
+        self.relay_link: Any = None
+        self._india_session_fed: Optional[date] = None
         self.lm_studio_client = None  # Lazy init to avoid startup blocking
         self.start_time = time.time()
         # On-device ANE configuration (default off; auto-detect on startup)
@@ -272,9 +282,38 @@ class AppState:
             # The Mac's own India limits, latch file and slippage cap (63-04). A config or
             # limits error here leaves execution disabled, like every other start failure.
             india_guard = None
+            approval_service = None
+            relay_link = None
+            relay_quotes = None
             if ws is Workspace.INDIA:
                 clock_args = {} if india_clock is None else {"clock": india_clock}
                 india_guard = IndiaAdmissionGuard.from_config(config, ledger, **clock_args)
+                if is_shadow_binding(binding):
+                    # The relay ledger holds the same two caps the India limits file names, in
+                    # the bound-ledger tables (a change later needs a new ledger).
+                    ledger.configure_venue_limits(
+                        india_guard.limits.capital_cap,
+                        india_guard.limits.per_position_cap,
+                        workspace=ws,
+                    )
+                    relay_link = getattr(dispatcher, "link", None)
+                    if relay_link is None or config.strategy is None:
+                        raise VenueError("VENUE_UNAVAILABLE", venue)
+                    from brokers.breeze_gateway.india_quote import RelayQuoteSource
+                    from execution.relay_dispatcher import OrderRelayMinter
+
+                    relay_quotes = RelayQuoteSource(relay_link, **clock_args)
+                    approval_service = ApprovalService(
+                        ledger,
+                        **clock_args,
+                        relay_minter=OrderRelayMinter(
+                            relay_link,
+                            relay_quotes,
+                            ledger=ledger,
+                            limits_sha256=india_guard.limits_sha256,
+                            params_sha256=config.strategy.params_sha256,
+                        ),
+                    )
         except (
             LedgerError,
             OSError,
@@ -291,6 +330,8 @@ class AppState:
             self.execution_venue_binding = None
             self.venue_adapter = None
             self.workspace_config = None
+            self.relay_quotes = None
+            self.relay_link = None
             # Error text carries codes, field names and paths, never config values.
             if isinstance(exc, MarketDataError):
                 # The regime model's stable refusal code (for example REGIME_SEVERITY_AMBIGUOUS).
@@ -305,10 +346,14 @@ class AppState:
         if binding is not None and callable(attach):
             attach(ledger)
         self._preflight_policy_connection = self._local_preflight_policy_connection(severity_map)
+        self.relay_link = relay_link
+        self.relay_quotes = relay_quotes
+        self._india_session_fed = None
         self._execution_service = ExecutionService(
             dispatcher,
             ledger,
             require_approval=True,
+            approval_service=approval_service,
             simulator=PreFlightSimulator(),
             risk_gate=RiskSwarmGate(),
             require_runtime_preflight=True,
@@ -333,6 +378,10 @@ class AppState:
         self.execution_venue_binding = None
         self.venue_adapter = None
         self.workspace_config = None
+        self.relay_quotes = None
+        link, self.relay_link = self.relay_link, None
+        if link is not None:
+            link.close()
 
     async def verify_execution_ready(self) -> bool:
         """Prove the broker account behind a bound venue (D-13); disable execution if it fails.
@@ -437,9 +486,26 @@ class AppState:
         if self._execution_ledger.workspace != Workspace.INDIA:
             raise LedgerError("India market admission requires the India execution workspace")
         intent = self.execution_service.register_proposal(proposal)
+        # 63-05: an India ledger bound to the SHADOW relay admits from the order's own LIMIT,
+        # pinned and labelled ``relay-quote``; the quote that bounds it came from the relay.
+        pins: Dict[str, Any] = {}
+        feed_denial: Optional[str] = None
+        if is_shadow_binding(self._execution_ledger.venue_binding):
+            pins = {
+                "price": intent.limit_price,
+                "price_divisor": Decimal(1),
+                "price_source": PRICE_SOURCE_RELAY_QUOTE,
+            }
+            try:
+                # The first admission of an IST session feeds the Mac's Option B latches.
+                self.feed_india_session_from_relay()
+            except Exception:  # noqa: BLE001 - an unfed session never admits a BUY
+                feed_denial = "SESSION_EVALUATION_FAILED"
         session = self._market_data_session
         if session is None:
-            return self.execution_service.admit(intent, currency="INR", india_quote=quote)
+            return self.execution_service.admit(
+                intent, currency="INR", india_quote=quote, deny_reason=feed_denial, **pins
+            )
         try:
             classifier = self._regime_classifier or RegimeClassifier()
             self._regime_classifier = classifier
@@ -452,7 +518,7 @@ class AppState:
             )
         except MarketDataError as exc:
             return self.execution_service.admit(
-                intent, currency="INR", deny_reason=exc.code, india_quote=quote
+                intent, currency="INR", deny_reason=exc.code, india_quote=quote, **pins
             )
         return self.execution_service.prepare(
             intent,
@@ -460,7 +526,8 @@ class AppState:
             portfolio_state=portfolio_state,
             risk_db_connection=self._preflight_policy_connection,
             india_quote=quote,
-            **context.execution_kwargs(),
+            deny_reason=feed_denial,
+            **{**context.execution_kwargs(), **pins},
         )
 
     # --- UK practice admission (Phase 66-04, D-02, D-03, D-18, D-19, D-20, D-26) -----
@@ -730,15 +797,34 @@ class AppState:
         if self._execution_ledger is None:
             raise LedgerError("local paper execution authority is unavailable")
         instrument = IndiaInstrument(symbol=symbol)
+        binding = self._execution_ledger.venue_binding
+        shadow = is_shadow_binding(binding)
+        if binding is not None and not shadow:
+            raise LedgerError("India preparation is unavailable in this ledger")
+        if self.relay_quotes is not None:
+            # A relay is attached (the SHADOW ledger only): the quote and, when the caller gave
+            # none, a limit price at the relay's last traded price floored to the tick.
+            if quote is None:
+                quote = self.india_quote_from_relay(instrument.symbol)
+            if limit_price is None and quote is not None:
+                limit_price = self.india_limit_from_quote(quote)
         proposal = {
             "proposal_id": str(uuid.uuid4()),
-            "client_order_id": f"india-paper-local-{uuid.uuid4()}",
+            "client_order_id": (
+                f"india-shadow-{uuid.uuid4()}" if shadow else f"india-paper-local-{uuid.uuid4()}"
+            ),
             # Decision 2: the server stamps the workspace from the open ledger.
             # A non-India ledger is then refused by admit_india_paper_proposal.
             "workspace": self._execution_ledger.workspace.value,
-            "account": "paper", "broker": "paper", "mode": "PAPER",
+            "account": binding.account_id if shadow else "paper",
+            "broker": binding.venue if shadow else "paper",
+            "mode": "SHADOW" if shadow else "PAPER",
             "ticker": instrument.execution_ticker, "action": "BUY", "quantity": quantity,
-            "reasoning": "Explicit local India paper preparation. No broker is contacted.",
+            "reasoning": (
+                "India SHADOW order. The relay verifies the signed order and never places it."
+                if shadow
+                else "Explicit local India paper preparation. No broker is contacted."
+            ),
             "status": "PENDING",
         }
         if limit_price is not None:
@@ -750,6 +836,93 @@ class AppState:
             quote=quote,
         )
         return proposal, admission
+
+    # --- India relay quote and session feed (Phase 63-05) --------------------------------
+
+    def india_quote_from_relay(self, symbol: str) -> Optional[IndiaQuoteEvidence]:
+        """One fresh relay quote for ``symbol``, or None when there is no relay or no trusted read.
+
+        None is never a guess: the Mac's India limits answer it ``quote_unavailable``. This does
+        blocking relay reads (quote, daily bars, security master): call it off the event loop.
+        """
+
+        source = self.relay_quotes
+        if source is None:
+            return None
+        try:
+            return source.evidence(symbol)
+        except Exception:  # noqa: BLE001 - QuoteUnavailable, a relay error or a bad symbol
+            return None
+
+    def prefetch_india_relay(self, symbol: str) -> Optional[IndiaQuoteEvidence]:
+        """The blocking relay reads of one India admission, done ahead of it.
+
+        Returns the relay quote evidence (None when there is no relay or no trusted read) and
+        feeds the session's Option B latches. Routes call this in a worker thread and then run
+        the admission itself on the event loop thread, because the regime policy tables are an
+        in-memory SQLite connection that belongs to the thread that built it. A feed failure is
+        not raised here: the admission retries the feed and denies on a second failure.
+        """
+
+        quote = self.india_quote_from_relay(symbol)
+        if self.relay_quotes is not None:
+            try:
+                self.feed_india_session_from_relay()
+            except Exception:  # noqa: BLE001 - admission retries it and denies on failure
+                pass
+        return quote
+
+    @staticmethod
+    def india_limit_from_quote(evidence: IndiaQuoteEvidence) -> Optional[Decimal]:
+        """The last traded price floored to the NSE tick, or None when no tick can be resolved."""
+
+        from brokers.breeze_gateway.india_quote import QuoteUnavailable, aligned_limit
+
+        try:
+            return aligned_limit(evidence.quote)
+        except QuoteUnavailable:
+            return None
+
+    def feed_india_session_from_relay(self, now: Optional[datetime] = None) -> list[SessionResult]:
+        """Evaluate every missed session close for held tickers from relay daily bars (D-05).
+
+        Runs once per IST day, on the first India admission. With nothing held there is no
+        position to mark and nothing to evaluate. A held ticker with no trusted close raises,
+        writes nothing, and the caller denies the admission. Only reads from the relay.
+        """
+
+        ledger, guard = self._india_authority()
+        source = self.relay_quotes
+        if source is None:
+            return []
+        today = (now or datetime.now(timezone.utc)).astimezone(IST).date()
+        if self._india_session_fed == today:
+            return []
+        positions = self._india_positions(ledger.india_account_view())
+        results: list[SessionResult] = []
+        if positions:
+            from datetime import timedelta
+
+            last_session = guard.store.load().last_session
+            first = last_session + timedelta(days=1) if last_session else today - timedelta(days=7)
+            last = today - timedelta(days=1)
+            if first <= last:
+                closes = {
+                    position.isin: source.closes(position.stock_code, first, last)
+                    for position in positions
+                }
+                cash = guard.limits.capital_cap - sum(
+                    (position.cost for position in positions), Decimal(0)
+                )
+                for day in sorted({day for series in closes.values() for day in series}):
+                    marks = {
+                        isin: series[day] for isin, series in closes.items() if day in series
+                    }
+                    results.append(
+                        guard.store.evaluate_session(marks, day, cash=cash, positions=positions)
+                    )
+        self._india_session_fed = today
+        return results
 
     # --- India Option B latches and exit batches (Phase 63-04, D-05 to D-08) -------------
 

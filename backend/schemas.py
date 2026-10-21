@@ -122,6 +122,12 @@ class WorkspaceScopedRequest(BaseModel):
     workspace: Workspace
 
 
+class UatProposalRequest(WorkspaceScopedRequest):
+    """The UAT proposal request. ``symbol`` names the one NSE stock of the India SHADOW check."""
+
+    symbol: Optional[str] = Field(default=None, min_length=1, max_length=10, pattern=r"^[A-Z0-9]+$")
+
+
 class TradeApprovalRequest(BaseModel):
     proposal_id: str
     decision: str  # APPROVED, REJECTED
