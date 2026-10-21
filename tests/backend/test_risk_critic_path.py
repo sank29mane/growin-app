@@ -13,6 +13,8 @@ from unittest.mock import MagicMock
 import pytest
 
 import model_registry_testkit as kit
+from model_registry.wire_schema import wire_spec
+from model_stub_server import strict_subset_violations
 from agents.orchestrator_agent import OrchestratorAgent
 from agents.risk_agent import (
     RISK_AUDIT_TEMPLATE,
@@ -87,7 +89,8 @@ async def test_the_audit_request_is_a_json_schema_request_for_risk_assessment(
     [request] = stub.snapshot()
     body = request.json
     assert body["response_format"]["type"] == "json_schema"
-    assert body["response_format"]["json_schema"]["schema"] == RiskAssessment.model_json_schema()
+    assert body["response_format"]["json_schema"]["schema"] == wire_spec(RiskAssessment).schema
+    assert strict_subset_violations(body["response_format"]["json_schema"]["schema"]) == []
     assert "tool_choice" not in body and "tools" not in body
     assert body["model"] == kit.model_id_for("risk_critic")
     assert request.prefix == "lmstudio"

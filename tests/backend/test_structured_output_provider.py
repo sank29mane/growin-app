@@ -23,6 +23,8 @@ from model_registry import (
     set_active_registry,
 )
 from model_registry.provider import build_chat_model, check_served_model, run_structured
+from model_registry.wire_schema import wire_spec
+from model_stub_server import strict_subset_violations
 from model_registry_testkit import (  # noqa: F401  (fixtures)
     key_env,
     network_guard,
@@ -64,7 +66,9 @@ async def test_request_carries_the_json_schema_response_format_and_no_tool_choic
     assert body["response_format"]["type"] == "json_schema"
     spec = body["response_format"]["json_schema"]
     assert spec["name"] == "RiskAssessment"
-    assert spec["schema"] == RiskAssessment.model_json_schema()
+    assert spec["schema"] == wire_spec(RiskAssessment).schema
+    assert spec["strict"] is True
+    assert strict_subset_violations(spec["schema"]) == []
     # A forced tool call is what LM Studio rejects; none may be sent.
     assert "tool_choice" not in body
     assert "tools" not in body
@@ -163,7 +167,7 @@ async def test_nothing_lenient_rescues_fenced_json(stub, registry_factory):
     assert RiskAssessment.model_validate_json(json.dumps(VALID_VERDICT), strict=True).status == "BLOCKED"
 
 
-# --- error mapping parity with run_magentic -------------------------------------------------------
+# --- error mapping -------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -304,6 +308,31 @@ async def test_the_langchain_stream_path_checks_the_served_model(stub, registry_
     assert caught.value.code == "MODEL_MISMATCH"
 
 
+async def test_a_stream_that_never_names_its_model_is_a_mismatch(stub, registry_factory):
+    """No chunk carries a model name: the stream must end in MODEL_MISMATCH, not as a verified reply."""
+    registry = registry_factory()
+    chat = build_chat_model(registry.resolve("decision"))
+    stub.omit_model = True
+    finished = False
+    with pytest.raises(ProviderError) as caught:
+        async for _ in chat.astream([HumanMessage(content="hi")]):
+            pass
+        finished = True
+    assert not finished
+    assert caught.value.code == "MODEL_MISMATCH"
+    assert caught.value.role == "decision"
+    assert stub.count == 1
+
+
+async def test_run_structured_refuses_a_completion_with_no_model_name(stub, registry_factory):
+    registry_factory()
+    stub.structured["RiskAssessment"] = VALID_VERDICT
+    stub.omit_model = True
+    with pytest.raises(ProviderError) as caught:
+        await run_structured("risk_critic", MESSAGES, RiskAssessment)
+    assert caught.value.code == "MODEL_MISMATCH"
+
+
 async def test_the_langchain_paths_still_work_for_the_requested_model(stub, registry_factory):
     registry = registry_factory()
     chat = build_chat_model(registry.resolve("decision"))
@@ -318,14 +347,23 @@ async def test_the_langchain_paths_still_work_for_the_requested_model(stub, regi
 async def test_extract_tool_calls_sends_the_tool_call_list_schema(stub, registry_factory):
     registry_factory()
     stub.structured["ToolCallList"] = {
-        "tool_calls": [{"tool_name": "get_quote", "arguments": {"ticker": "INFY"}, "conviction_level": 7}]
+        "tool_calls": [
+            {
+                "tool_name": "get_quote",
+                "arguments_json": json.dumps({"ticker": "INFY"}),
+                "conviction_level": 7,
+                "is_high_conviction": None,
+            }
+        ]
     }
     calls = await extract_tool_calls("[TOOL:get_quote({\"ticker\": \"INFY\"})]", "")
     assert [c.tool_name for c in calls] == ["get_quote"]
     assert calls[0].arguments == {"ticker": "INFY"}
+    assert calls[0].conviction_level == 7
+    assert calls[0].is_high_conviction is False  # null on the wire: the model default
     [request] = stub.snapshot()
     assert request.model == kit.model_id_for("decision")
-    assert request.json["response_format"]["json_schema"]["schema"] == ToolCallList.model_json_schema()
+    assert request.json["response_format"]["json_schema"]["schema"] == wire_spec(ToolCallList).schema
     assert "tool_choice" not in request.json and "tools" not in request.json
 
 
@@ -351,7 +389,7 @@ async def test_research_query_sends_the_news_query_schema(stub, registry_factory
     assert params["q"] == "stub query"
     [request] = stub.snapshot()
     assert request.model == kit.model_id_for("research")
-    assert request.json["response_format"]["json_schema"]["schema"] == NewsDataQueryParams.model_json_schema()
+    assert request.json["response_format"]["json_schema"]["schema"] == wire_spec(NewsDataQueryParams).schema
     assert "tool_choice" not in request.json and "tools" not in request.json
 
 

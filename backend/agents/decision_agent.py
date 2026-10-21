@@ -39,7 +39,15 @@ decision_circuit_breaker = get_circuit_breaker("decision", failure_threshold=3, 
 class ToolCall(BaseModel):
     """Structured tool call extracted from agent reasoning."""
     tool_name: str = Field(..., description="Name of the tool to execute")
-    arguments: Dict[str, Any] = Field(default_factory=dict, description="Arguments for the tool call")
+    # An open object has no strict json_schema form, so on the wire it is the string
+    # ``arguments_json`` (one JSON object). model_registry.wire_schema decodes it
+    # back to this dict; a non-object string is STRUCTURED_OUTPUT_INVALID. A null
+    # means the default, an empty dict.
+    arguments: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Arguments for the tool call",
+        json_schema_extra={"x-wire-encoding": "json_string"},
+    )
     conviction_level: int = Field(default=5, ge=1, le=10, description="Confidence in this decision (1-10)")
     is_high_conviction: bool = Field(default=False, description="Explicitly marked as high conviction setup")
 

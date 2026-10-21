@@ -1,9 +1,9 @@
 """The one OpenAI-compatible provider.
 
-Every chat role goes through ``build_chat_model`` (LangChain) or
-``role_magentic_model`` (magentic). Both take their endpoint, key and model from
-a ``ResolvedRole`` and pass them explicitly, so ``OPENAI_*`` and ``MAGENTIC_*``
-environment variables cannot redirect a role (P8). xAI, LM Studio and Ollama
+Every chat role goes through ``build_chat_model`` (LangChain), ``run_structured``
+(``response_format`` json_schema) or ``role_pydantic_ai_model``. Each takes its
+endpoint, key and model from a ``ResolvedRole`` and passes them explicitly, so
+``OPENAI_*`` and ``MAGENTIC_*`` environment variables cannot redirect a role (P8). xAI, LM Studio and Ollama
 differ only in ``base_url`` and ``api_key_env`` inside ``models.json``.
 
 There is no fallback. A failed call raises ``ProviderError`` and nothing else is
@@ -19,7 +19,6 @@ kind. Provider ids and model strings are never inspected.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any, AsyncIterator, Callable, List, Optional, Sequence, Type, TypeVar
 
@@ -29,6 +28,7 @@ from pydantic import BaseModel, ValidationError
 from .errors import ModelRegistryError, ProviderError
 from .loader import ResolvedRole, get_active_registry
 from .schemas import KIND_OPENAI_COMPATIBLE
+from .wire_schema import WireReplyError, wire_spec
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +74,11 @@ def check_served_model(role: str, requested: str, served: Any) -> None:
     pinned, and every runtime in the 2026-10 evidence reports that same id back.
     No case folding, prefix stripping or alias table, so nothing is loosened
     beyond what was observed. A reply with no model name is a mismatch too.
+
+    Residual: on the LangChain ``ainvoke`` path ``langchain_openai`` fills
+    ``response_metadata["model_name"]`` with the requested id when the server
+    omits ``model``, so "no model name" cannot fire there. LM Studio always sends
+    ``model``; ``run_structured`` reads the raw completion and has no such gap.
     """
 
     if not isinstance(served, str) or served != requested:
@@ -250,30 +255,6 @@ def role_pydantic_ai_model(resolved: ResolvedRole) -> Any:
     return OpenAIModel(resolved.model, provider=OpenAIProvider(openai_client=client))
 
 
-async def run_magentic(role: str, func: Callable[..., Any], *args: Any) -> Any:
-    """Run a magentic prompt function inside the model bound to ``role``.
-
-    The role resolves first: a missing role raises ``ModelRoleMissing`` before
-    any thread starts or request leaves the process. The prompt function runs in
-    a worker thread because magentic's sync API blocks.
-    """
-
-    resolved = get_active_registry().resolve(role)
-    model = role_magentic_model(resolved)
-
-    def _call() -> Any:
-        with model:
-            return func(*args)
-
-    try:
-        return await asyncio.to_thread(_call)
-    except Exception as exc:
-        mapped = map_exception(exc, role)
-        if mapped is exc:
-            raise
-        raise mapped from None
-
-
 # --- structured output path ------------------------------------------------
 
 
@@ -288,17 +269,22 @@ async def run_structured(
 ) -> _ModelT:
     """One chat call whose answer must be a ``schema`` instance, via ``response_format``.
 
-    The request carries ``response_format={"type": "json_schema", ...}`` built from
-    ``schema.model_json_schema()``. It has no ``tools`` and no ``tool_choice``:
-    servers differ on forced tool choice (LM Studio rejects it, others accept it
-    unenforced), and every OpenAI-compatible server in use honours json_schema.
+    The request carries ``response_format={"type": "json_schema", "strict": true,
+    ...}``. The targets are LM Studio and Ollama, which constrain output to the
+    schema. The schema is the strict-subset wire form of ``schema``
+    (``wire_schema.wire_spec``: ``additionalProperties: false``, every property
+    required, defaults as nullable, no open objects), so a server that enforces
+    OpenAI's strict mode, OpenAI or Azure, accepts it too. The request has no
+    ``tools`` and no ``tool_choice``: servers differ on forced tool choice (LM
+    Studio rejects it, others accept it unenforced).
 
     The role resolves first: a missing role raises before any request leaves the
-    process. Errors map like ``run_magentic``. The reply is accepted only if it
-    names the requested model and its content parses as strict JSON that
-    validates against ``schema``. Anything else raises ``ProviderError``
-    (``MODEL_MISMATCH`` or ``STRUCTURED_OUTPUT_INVALID``). There is no lenient
-    parse, no fence stripping, no retry and no second model.
+    process. Transport and API errors map through ``map_exception``. The reply is
+    accepted only if it names the requested model and its content is strict JSON
+    that matches the wire schema exactly and then validates, strictly, against the
+    real ``schema``. Anything else raises ``ProviderError`` (``MODEL_MISMATCH`` or
+    ``STRUCTURED_OUTPUT_INVALID``). There is no lenient parse, no fence stripping,
+    no retry and no second model.
     """
 
     import openai
@@ -307,6 +293,7 @@ async def run_structured(
     if resolved.kind != KIND_OPENAI_COMPATIBLE:
         raise ProviderError("PROVIDER_KIND_UNSUPPORTED", role)
     key = _require_key(resolved)
+    spec = wire_spec(schema)
     request: dict[str, Any] = {
         "model": resolved.model,
         "messages": list(messages),
@@ -315,7 +302,7 @@ async def run_structured(
             "json_schema": {
                 "name": _schema_name(schema),
                 "strict": True,
-                "schema": schema.model_json_schema(),
+                "schema": spec.schema,
             },
         },
     }
@@ -343,8 +330,8 @@ async def run_structured(
         if not isinstance(content, str) or not content:
             raise ProviderError("STRUCTURED_OUTPUT_INVALID", role)
         try:
-            return schema.model_validate_json(content, strict=True)
-        except ValidationError:
+            return schema.model_validate_json(spec.to_native_json(content), strict=True)
+        except (ValidationError, WireReplyError):
             # The model's text is never put in the error: it can echo the prompt.
             raise ProviderError("STRUCTURED_OUTPUT_INVALID", role) from None
     except Exception as exc:

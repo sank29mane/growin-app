@@ -192,7 +192,10 @@ STUB_STRUCTURED_REPLIES = {
         "debate_refutation": "stub",
         "requires_hitl": False,
     },
-    "NewsDataQueryParams": {"q": "stub query"},
+    # Wire shape: every property present, null for a defaulted field left unset.
+    "NewsDataQueryParams": {
+        "q": "stub query", "qInTitle": None, "country": None, "category": None, "domain": None,
+    },
 }
 
 

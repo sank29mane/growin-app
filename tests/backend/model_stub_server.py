@@ -13,8 +13,14 @@ Structured outputs, two shapes:
 * a forced tool (magentic): the stub answers with a tool call whose arguments
   come from ``tool_arguments[function_name]``.
 
+The stub enforces OpenAI's strict ``json_schema`` subset: a request that sends
+``strict: true`` with a schema outside it gets a 400, the way OpenAI and Azure
+answer. ``strict_subset_violations`` is the checker, written independently of the
+production builder.
+
 ``served_model`` makes every reply name that model instead of the requested one,
-the way LM Studio answers an unknown id with its loaded model.
+the way LM Studio answers an unknown id with its loaded model. ``omit_model`` leaves
+the ``model`` field out of every reply and stream chunk.
 """
 
 from __future__ import annotations
@@ -42,12 +48,64 @@ class RecordedRequest:
         return self.json.get("model") if isinstance(self.json, dict) else None
 
 
+_STRICT_KEYWORDS = {
+    "type", "properties", "required", "additionalProperties", "items", "enum",
+    "anyOf", "description", "title", "$ref", "$defs",
+}
+
+
+def strict_subset_violations(schema: Any, path: str = "$", root: Any = None) -> List[str]:
+    """Why ``schema`` is outside OpenAI's strict structured-output subset (empty if inside)."""
+
+    root = schema if root is None else root
+    found: List[str] = []
+    if path == "$" and not (isinstance(schema, dict) and schema.get("type") == "object"):
+        found.append(f"{path}: the root must be an object")
+    if not isinstance(schema, dict):
+        return found + [f"{path}: schema node is not an object"]
+    for keyword in schema:
+        if keyword not in _STRICT_KEYWORDS:
+            found.append(f"{path}: keyword {keyword!r} is not supported in strict mode")
+    if "$ref" in schema:
+        name = str(schema["$ref"]).rpartition("/")[2]
+        target = (root.get("$defs") or {}).get(name) if isinstance(root, dict) else None
+        if target is None:
+            found.append(f"{path}: unresolvable $ref")
+        return found
+    if "anyOf" in schema:
+        for i, branch in enumerate(schema["anyOf"]):
+            found += strict_subset_violations(branch, f"{path}.anyOf[{i}]", root)
+        return found
+    kind = schema.get("type")
+    if kind == "object" or "properties" in schema:
+        props = schema.get("properties")
+        if not isinstance(props, dict) or not props:
+            found.append(f"{path}: an open object (no properties) is not supported")
+            props = {}
+        if schema.get("additionalProperties") is not False:
+            found.append(f"{path}: additionalProperties must be false")
+        if set(schema.get("required", [])) != set(props):
+            missing = sorted(set(props) - set(schema.get("required", [])))
+            found.append(f"{path}: every property must be required (not required: {missing})")
+        for name, sub in props.items():
+            found += strict_subset_violations(sub, f"{path}.{name}", root)
+    elif kind == "array":
+        if "items" not in schema:
+            found.append(f"{path}: an array needs items")
+        else:
+            found += strict_subset_violations(schema["items"], f"{path}[]", root)
+    elif kind is None and "enum" not in schema:
+        found.append(f"{path}: no type")
+    return found
+
+
 @dataclass
 class ModelStubServer:
     reply_text: str = "stub reply"
     tool_arguments: Dict[str, Any] = field(default_factory=dict)
     structured: Dict[str, Any] = field(default_factory=dict)
     served_model: Optional[str] = None
+    omit_model: bool = False
     requests: List[RecordedRequest] = field(default_factory=list)
     _server: Optional[ThreadingHTTPServer] = None
     _thread: Optional[threading.Thread] = None
@@ -143,6 +201,14 @@ class ModelStubServer:
                 return function.get("name")
         return None
 
+    def _json_schema_spec(self, body: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        fmt = body.get("response_format")
+        if isinstance(fmt, dict) and fmt.get("type") == "json_schema":
+            spec = fmt.get("json_schema")
+            if isinstance(spec, dict):
+                return spec
+        return None
+
     def _schema_name(self, body: Dict[str, Any]) -> Optional[str]:
         fmt = body.get("response_format")
         if isinstance(fmt, dict) and fmt.get("type") == "json_schema":
@@ -152,13 +218,25 @@ class ModelStubServer:
         return None
 
     def _respond(self, handler: BaseHTTPRequestHandler, body: Dict[str, Any]) -> None:
-        model = self.served_model if self.served_model is not None else body.get("model", "")
+        model: Optional[str] = self.served_model if self.served_model is not None else body.get("model", "")
+        if self.omit_model:
+            model = None
         tool_name = self._forced_tool(body)
         arguments = json.dumps(self.tool_arguments.get(tool_name, {})) if tool_name else None
         if body.get("stream"):
             self._respond_sse(handler, body, model, tool_name, arguments)
             return
         content = self.reply_text
+        spec = self._json_schema_spec(body)
+        if spec is not None and spec.get("strict") is True:
+            violations = strict_subset_violations(spec.get("schema"))
+            if violations:
+                handler._send_json(
+                    400,
+                    {"error": {"message": "Invalid schema for response_format: " + "; ".join(violations),
+                               "type": "invalid_request_error", "param": "response_format"}},
+                )
+                return
         schema_name = self._schema_name(body)
         if schema_name is not None:
             reply = self.structured.get(schema_name, {})
@@ -182,7 +260,7 @@ class ModelStubServer:
             "id": "chatcmpl-stub",
             "object": "chat.completion",
             "created": 0,
-            "model": model,
+            **({} if model is None else {"model": model}),
             "choices": [{"index": 0, "message": message, "finish_reason": finish}],
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         }
@@ -197,7 +275,7 @@ class ModelStubServer:
         self,
         handler: BaseHTTPRequestHandler,
         body: Dict[str, Any],
-        model: str,
+        model: Optional[str],
         tool_name: Optional[str],
         arguments: Optional[str],
     ) -> None:
@@ -206,7 +284,7 @@ class ModelStubServer:
                 "id": "chatcmpl-stub",
                 "object": "chat.completion.chunk",
                 "created": 0,
-                "model": model,
+                **({} if model is None else {"model": model}),
                 "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
             }
 
@@ -242,7 +320,7 @@ class ModelStubServer:
                     "id": "chatcmpl-stub",
                     "object": "chat.completion.chunk",
                     "created": 0,
-                    "model": model,
+                    **({} if model is None else {"model": model}),
                     "choices": [],
                     "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
                 }
