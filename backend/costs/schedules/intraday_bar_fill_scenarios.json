@@ -1,0 +1,32 @@
+{
+  "schema": "growin.costs.intraday_fill_scenarios/1",
+  "version": "intraday-bar-limit-fills-2026-10-22.r1",
+  "assumption_note": "Simulation assumptions, not evidence of actual fill probability.",
+  "fill_price_rule": "at_limit",
+  "interval": "1minute",
+  "lifetime_end_ist": "15:15",
+  "admission_rule": "label_minus_interval_ge_submission",
+  "label_semantics": "unproven",
+  "label_evidence_ref": null,
+  "label_approval_ref": null,
+  "gap_policy": "inconclusive",
+  "volume_basis": "threshold_crossing_post_submission_ohlcv",
+  "lower_bound_status": "provisional",
+  "volume_ratio_band": {
+    "cas": {"lower": null, "upper": "1.02"},
+    "non_cas": {"lower": null, "upper": "1.02"}
+  },
+  "day_check_window_ist": ["09:15", "15:35"],
+  "price_range_tolerance_ticks": "1",
+  "session_timing_version": "nse-closing-auction-2026-08-03",
+  "continuous_end_ist": {"cas": "15:15", "non_cas": "15:30"},
+  "no_band_single_price": "not_credited_ambiguous",
+  "earliest_fetch_ist": "15:40",
+  "latest_fetch_ist": "23:30",
+  "next_day_fetch": null,
+  "scenarios": [
+    {"id": "base", "k_ticks": 1, "volume_participation": "0.01"},
+    {"id": "adverse", "k_ticks": 2, "volume_participation": "0.005"},
+    {"id": "pessimistic", "k_ticks": 3, "volume_participation": "0.0025"}
+  ]
+}
