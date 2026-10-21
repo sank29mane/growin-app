@@ -1217,6 +1217,7 @@ def route_table(app) -> list[tuple[str, frozenset]]:
 
 DATA_ROUTES = [
     ("/v1/bars/daily", frozenset({"GET"})),
+    ("/v1/bars/intraday", frozenset({"GET"})),
     ("/v1/budget", frozenset({"GET"})),
     ("/v1/health", frozenset({"GET"})),
     ("/v1/login/arm", frozenset({"POST"})),

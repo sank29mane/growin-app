@@ -1119,6 +1119,7 @@ MAC_FILES = [
     "backend/brokers/breeze_gateway/client.py",
     "backend/brokers/breeze_gateway/errors.py",
     "backend/brokers/breeze_gateway/cli.py",
+    "backend/brokers/breeze_gateway/intraday_probe.py",
     "backend/execution/relay_dispatcher.py",
     "backend/execution/service.py",
     "backend/execution/approval.py",

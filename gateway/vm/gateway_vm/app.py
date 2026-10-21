@@ -31,6 +31,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from .breeze_client import (
     V2_DAILY_INTERVAL,
     V2_DEFAULT_EXCHANGE_PARAM,
+    V2_INTRADAY_INTERVAL,
     BreezeClient,
     BreezeError,
     RawUpstream,
@@ -69,6 +70,8 @@ from .contract import (
     HDR_UP_SHA256,
     HOST_RE,
     HTTP_DATE_RE,
+    INTRADAY_INTERVAL_SEMANTIC,
+    INTRADAY_INTERVALS,
     MAX_QUANTITY,
     MAX_RANGE_DAYS,
     PREVIEW_ACTIONS,
@@ -77,6 +80,7 @@ from .contract import (
     PRICE_RE,
     QUANTITY_RE,
     ROUTE_BARS_DAILY,
+    ROUTE_BARS_INTRADAY,
     ROUTE_BUDGET,
     ROUTE_HEALTH,
     ROUTE_LOGIN_ARM,
@@ -224,6 +228,39 @@ def _parse_bars_query(request: Request) -> tuple[str, date, date]:
     if bad:
         raise RelayFailure("VALIDATION", fields=sorted(bad))
     return stock_code, parsed["from"], parsed["to"]
+
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _parse_intraday_query(request: Request, today_ist: date) -> tuple[str, date]:
+    """C3 for /v1/bars/intraday: stock_code, date (not after today IST), interval (enum), exchange."""
+    seen, bad = _read_query(request, ROUTE_BARS_INTRADAY)
+    for required in ("stock_code", "date", "interval"):
+        if required not in seen:
+            bad.add(required)
+    stock_code = seen.get("stock_code", "")
+    if "stock_code" in seen and not STOCK_CODE_RE.fullmatch(stock_code):
+        bad.add("stock_code")
+    if "exchange" in seen and seen["exchange"] != BARS_EXCHANGE:
+        bad.add("exchange")
+    if "interval" in seen and seen["interval"] not in INTRADAY_INTERVALS:
+        bad.add("interval")
+    day: date | None = None
+    if "date" in seen:
+        try:
+            if not DATE_RE.fullmatch(seen["date"]):
+                raise ValueError
+            day = date.fromisoformat(seen["date"])
+        except ValueError:
+            bad.add("date")
+        else:
+            if day > today_ist:
+                bad.add("date")
+    if bad:
+        raise RelayFailure("VALIDATION", fields=sorted(bad))
+    assert day is not None
+    return stock_code, day
 
 
 def _is_empty_success(body: bytes) -> bool:
@@ -551,6 +588,48 @@ def create_app(
                 "to_date": to_iso,
             },
             interval=DAILY_INTERVAL_SEMANTIC,
+        )
+
+    @app.get(ROUTE_BARS_INTRADAY)
+    def bars_intraday(request: Request, token: Optional[str] = Depends(_bearer)):
+        """One session of minute bars as the exact upstream bytes. Nothing is stored (OD-17)."""
+        authorization = session.authorize(token)  # same order as bars_daily: 401, 422, 503, budget, Breeze
+        today_ist = clock.now_utc().astimezone(IST).date()
+        stock_code, day = _parse_intraday_query(request, today_ist)
+        session_token = session.require_active(authorization)
+        charge_budget(budget, events)
+
+        # A whole-day window: the label timezone is unproven (U-3), so the Mac filters by label.
+        from_iso = day.isoformat() + "T00:00:00.000Z"
+        to_iso = day.isoformat() + "T23:59:59.000Z"
+        try:
+            raw = breeze.intraday_bars_v2_raw(
+                app_key=credentials.app_key,
+                session_token=session_token,
+                stock_code=stock_code,
+                exch_code=BARS_EXCHANGE,
+                from_iso=from_iso,
+                to_iso=to_iso,
+                **BARS_REQUEST_KNOBS,
+            )
+        except BreezeError as exc:
+            raise breeze_exception_failure(exc) from None
+
+        exchange_param = BARS_REQUEST_KNOBS.get("exchange_param_name", V2_DEFAULT_EXCHANGE_PARAM)
+        return _breeze_bytes_response(
+            request,
+            session,
+            raw,
+            api=API_BARS_V2,
+            upstream_request={
+                exchange_param: BARS_EXCHANGE,
+                "from_date": from_iso,
+                "interval": V2_INTRADAY_INTERVAL,
+                "product_type": "cash",
+                "stock_code": stock_code,
+                "to_date": to_iso,
+            },
+            interval=INTRADAY_INTERVAL_SEMANTIC,
         )
 
     # ------------------------------------------------------------ quotes

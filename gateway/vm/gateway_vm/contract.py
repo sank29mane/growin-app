@@ -43,11 +43,12 @@ ROUTE_LOGIN_ARM = "/v1/login/arm"
 ROUTE_LOGIN_COMPLETE = "/v1/login/complete"
 ROUTE_SESSION_REVOKE = "/v1/session/revoke"
 ROUTE_BARS_DAILY = "/v1/bars/daily"
+ROUTE_BARS_INTRADAY = "/v1/bars/intraday"  # 64-02: additive, growin-relay/1 stays (C8)
 ROUTE_BUDGET = "/v1/budget"
 ROUTE_QUOTES = "/v1/quotes"
 ROUTE_PREVIEW_ORDER = "/v1/preview-order"  # a brokerage calculator, places nothing
 ROUTE_SECURITY_MASTER = "/v1/security-master"
-# The nine C3 routes and nothing else. Order routes arrive in Phase 63 under a
+# The ten C3 routes and nothing else. Order routes arrive in Phase 63 under a
 # new contract version.
 ROUTES = frozenset(
     {
@@ -57,6 +58,7 @@ ROUTES = frozenset(
         ROUTE_LOGIN_COMPLETE,
         ROUTE_SESSION_REVOKE,
         ROUTE_BARS_DAILY,
+        ROUTE_BARS_INTRADAY,
         ROUTE_QUOTES,
         ROUTE_PREVIEW_ORDER,
         ROUTE_SECURITY_MASTER,
@@ -151,6 +153,10 @@ API_SECURITY_MASTER = "icici-security-master-zip"
 
 LOGIN_URL_BASE = "https://api.icicidirect.com/apiuser/login?api_key="
 DAILY_INTERVAL_SEMANTIC = "1day"  # what X-Growin-Upstream-Interval reports, whatever the wire value
+# 64-02: the one interval the intraday route accepts. The enum has a single member on purpose;
+# adding another interval is a reviewed change to the 64 fill model, not a request parameter.
+INTRADAY_INTERVALS = ("1minute",)
+INTRADAY_INTERVAL_SEMANTIC = "1minute"
 BARS_EXCHANGE = "NSE"
 
 # -------------------------------------------------------------- patterns
@@ -191,6 +197,7 @@ ARM_WINDOW_S = 120
 EGRESS_MAX_AGE_S = 300
 MAX_RANGE_DAYS = 3000
 ALLOWED_BARS_QUERY = ("stock_code", "from", "to", "exchange")
+ALLOWED_INTRADAY_QUERY = ("stock_code", "date", "interval", "exchange")
 ALLOWED_QUOTES_QUERY = ("stock_code", "exchange")
 ALLOWED_PREVIEW_QUERY = ("stock_code", "action", "quantity", "price", "exchange")
 PREVIEW_ACTIONS = ("buy", "sell")
@@ -211,6 +218,7 @@ ALLOWED_QUERY_BY_ROUTE: Mapping[str, tuple[str, ...]] = {
     ROUTE_LOGIN_COMPLETE: (),
     ROUTE_SESSION_REVOKE: (),
     ROUTE_BARS_DAILY: ALLOWED_BARS_QUERY,
+    ROUTE_BARS_INTRADAY: ALLOWED_INTRADAY_QUERY,
     ROUTE_QUOTES: ALLOWED_QUOTES_QUERY,
     ROUTE_PREVIEW_ORDER: ALLOWED_PREVIEW_QUERY,
     ROUTE_SECURITY_MASTER: (),

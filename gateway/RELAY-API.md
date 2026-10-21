@@ -7,7 +7,7 @@ is `RelayClient` in `backend/brokers/breeze_gateway/client.py`; later phases imp
 it and build no other. `tests/backend/test_gateway_relay_client.py` checks that the
 client and the VM constants cannot drift apart.
 
-Status: the VM serves health, login arm and complete, revoke and bars today. The
+Status: the VM serves health, login arm and complete, revoke, daily bars and (Phase 64) intraday bars today. The
 client already implements budget, quotes, preview-order and security-master, tested
 against canned relay answers, because those four routes arrive on the VM side in a
 later change. If any text below disagrees with `gateway_vm/contract.py`, fix the
@@ -40,6 +40,7 @@ The client checks `X-Growin-Relay-Contract` before it looks at the status or the
 | POST | /v1/login/complete | body `{"attempt_id": str, "apisession": str}` | the arm's token | 200 JSON session |
 | POST | /v1/session/revoke | body `{}` | session | 200 JSON session |
 | GET | /v1/bars/daily | `stock_code`, `from`, `to`, `exchange` (optional) | session | 200 upstream bytes |
+| GET | /v1/bars/intraday | `stock_code`, `date`, `interval`, `exchange` (optional) | session | 200 upstream bytes |
 | GET | /v1/quotes | `stock_code`, `exchange` (optional) | session | 200 upstream bytes |
 | GET | /v1/preview-order | `stock_code`, `action`, `quantity`, `price`, `exchange` (optional) | session | 200 upstream bytes |
 | GET | /v1/security-master | none | session | 200 upstream bytes (zip) |
@@ -51,22 +52,24 @@ Parameter rules (any violation is 422 VALIDATION with `fields` listing names onl
 - `stock_code`: `^[A-Z0-9]{1,10}$` (the Breeze ShortName, for example RELIND, not RELIANCE).
 - `exchange`: exactly `NSE` when present.
 - `from`, `to`: `YYYY-MM-DD` calendar dates, `from <= to`, `to - from <= 3000` days.
+- `date` (intraday): one `YYYY-MM-DD` calendar date, not after today in IST. `interval` (intraday): required, exactly `1minute`; the enum has one member and any other value is 422.
 - `action`: `buy` or `sell`. `quantity`: integer 1 to 100000. `price`: decimal string, greater than 0, at most 2 decimal places, at most 1000000.
 - `attempt_id`: 16 to 64 characters of `[A-Za-z0-9_-]`. `apisession`: the relay's API_Session filter, `^[A-Za-z0-9]{6,64}$` (OD-14, tightened from `{6,256}` by the 61-04 smoke: 8 digits observed). Mac and VM use the same pattern.
 
 Route semantics:
 - bars: Breeze v2 historicalcharts only (never v1), interval daily, product cash. The relay sends `from_date=<from>T00:00:00.000Z` and `to_date=<to>T23:59:59.000Z`, widened by one day on a side where the 61-04 smoke showed that boundary day missing; the exact values are in `X-Growin-Upstream-Request`. Callers request a wider window and filter rows by parsed trading date. Observed upstream behaviour (datetime format, raw or adjusted, 1000-row cap) is in `gateway/RELAY-API.md`, section "Observed upstream behaviour".
+- bars/intraday (added by Phase 64, version unchanged under C8): Breeze v2 historicalcharts only, interval `1minute`, product cash. The relay sends `from_date=<date>T00:00:00.000Z` and `to_date=<date>T23:59:59.000Z`, a whole-day window, because the label timezone is unproven; the caller filters by label. The check order is the daily route's: 401, then 422, then 503, then the day counter is charged, then the one Breeze call. A 1000-row answer is a capped answer: the relay relays the bytes unchanged, and the caller treats the row count as the flag. An empty answer carries `X-Growin-Empty: true`. Nothing is written to disk.
 - quotes: Breeze v1 quotes, product cash. preview-order: Breeze v1 preview_order, product cash, order_type limit; it is a brokerage calculator and places nothing.
 - security-master: the ICICI SecurityMaster.zip download; needs a fresh egress check but no Breeze session; at most 6 per rolling hour.
 - No route places, modifies or cancels an order, and there are no funds, holdings, positions or trades routes. Order routes arrive in Phase 63 under a new contract version.
 
-### C4. Upstream byte responses (bars, quotes, preview-order, security-master)
+### C4. Upstream byte responses (bars, bars/intraday, quotes, preview-order, security-master)
 The relay checks the Breeze JSON `Status` on every Breeze response (OD-18). Only a good body (Status 200, Error null or empty, Success present and not an empty string) is returned, as the exact upstream bytes, unmodified. Content-Type is `application/json` for the three Breeze routes and `application/zip` for the security master. Headers:
 - `X-Growin-Upstream-Sha256`: 64 lowercase hex, sha256 of the body as sent.
 - `X-Growin-Upstream-Fetched-At`: UTC time the upstream body finished arriving, `YYYY-MM-DDTHH:MM:SS.mmmZ`.
 - `X-Growin-Upstream-Api`: `breeze-historicalcharts-v2`, `breeze-quotes-v1`, `breeze-preview-order-v1` or `icici-security-master-zip`.
 - `X-Growin-Upstream-Request`: compact JSON (sorted keys, ASCII only) of the exact non-secret parameters sent upstream (for the master: `{"url": "<url>"}`). Never contains the AppKey, session token, checksum or secret.
-- `X-Growin-Upstream-Interval: 1day` (bars only; the semantic interval, whatever wire value the smoke chose).
+- `X-Growin-Upstream-Interval: 1day` (daily bars; the semantic interval, whatever wire value the smoke chose) or `1minute` (intraday bars).
 - `X-Growin-Breeze-Status: 200` (Breeze routes only).
 - `X-Growin-Empty: true` or `false` (Breeze routes only): true when Success is an empty list or object. Callers treat true as "flag and retry once", never as zero volume.
 - `X-Growin-Upstream-Last-Modified` (security master only, copied when upstream sent it).
@@ -134,6 +137,11 @@ class RelayClient:
         # sends the kept relay token; on success saves it to the token store with the IST expiry
     def revoke(self) -> SessionStatus: ...                      # session token; clears the stored token
     def daily_bars(self, stock_code: str, from_date: date, to_date: date, *, exchange: str = "NSE") -> UpstreamPayload: ...
+    def intraday_bars(self, stock_code: str, session_date: date, *, interval: str = "1minute",
+                      exchange: str = "NSE") -> UpstreamPayload: ...
+        # one session of minute bars; sha256 verified; no retry. Any other interval is RelayArgumentError.
+        # An older VM answers 404: raised as IntradayRouteUnavailable (a NotFound), never retried and
+        # never sent to the daily route.
     def quote(self, stock_code: str, *, exchange: str = "NSE") -> UpstreamPayload: ...
     def preview_order(self, stock_code: str, *, action: str, quantity: int, price: Decimal,
                       exchange: str = "NSE") -> UpstreamPayload: ...
@@ -185,6 +193,7 @@ class RelayError(Exception):
 # One subclass per server code: Unauthorized, NoSession, SessionExpired, EgressMismatch, BudgetUnavailable,
 # BudgetExhausted, UpstreamError, UpstreamTimeout, RelayValidationError, LoginAttemptInvalid, IdentityMismatch,
 # ForbiddenClient, ContractMismatch, NotFound, MethodNotAllowed, InternalRelayError.
+# IntradayRouteUnavailable is a NotFound raised only by intraday_bars (VM older than Phase 64).
 # Client-side: RelayContractMismatch (response header missing or different), RelayHashMismatch,
 # RelayProtocolError (missing or malformed header, bad JSON, redirect, body over the cap, unknown code),
 # RelayUnavailable (tunnel child gone, connect error, client timeout), TunnelError (tunnel would not start).
@@ -199,7 +208,7 @@ Rules a caller of growin-relay/1 follows. Each is checked against the VM at `gat
 - A 409 LOGIN_ATTEMPT_INVALID from `login/complete` ends that `attempt_id` for good (expired, already used, or cut off by a revoke or a drop while the exchange ran). A complete superseded by a later arm answers 401 or 409: the VM checks the relay token before the attempt id, so a second arm before the first complete shows up as 401 UNAUTHORIZED (the token differs), and 409 when no attempt is pending. Both mean re-arm. Never arm twice in parallel: the VM keeps one pending attempt, so a second arm kills the first. `RelayClient` enforces both: it serialises arm and complete, and refuses a spent or non-current attempt locally without sending anything.
 - EGRESS_MISMATCH is mapped on the code. Its reason can be `egress_mismatch`, `egress_unavailable` or `ip_mismatch`; do not branch on one value of it.
 - `health`, `login/arm`, `login/complete` and `session/revoke` answer 422 VALIDATION for any query string, before any auth check. Never add a query to them, not even a cache-buster.
-- `bars/daily` checks in this order: 401 (token), then 422 (query), then 503 (no session or expired). A 422 never means the session is bad, so it never means log in again.
+- `bars/daily` and `bars/intraday` check in this order: 401 (token), then 422 (query), then 503 (no session or expired). A 422 never means the session is bad, so it never means log in again.
 - A client from `open()` replaces a dead tunnel child itself, outside its internal lock: one request starts the replacement, requests that arrive meanwhile wait for it and then use the new tunnel, and `close()` never waits for it (it marks the client closed, and a replacement that finishes later is stopped and discarded). After a failed replacement (`RelayUnavailable` reason `tunnel_restart_failed`) the client refuses further replacements for 2 s, doubling per consecutive failure up to 60 s, and a refused request fails fast with reason `tunnel_restart_backoff` and is never sent. A successful replacement resets the window. These are transport restarts, never request retries.
 - A parent killed by SIGKILL, or by SIGTERM without a handler, leaves its `gcloud` child running, idle, until IAP drops it. A library cannot catch SIGKILL and must not install signal handlers, so callers close the client with `with` or `close()`; the CLI turns SIGTERM into a clean exit.
 
@@ -275,6 +284,7 @@ what a caller will see in the body.
   records (source, symbol, ISIN, fetch time, hash). It chunks windows below 1000
   rows, applies corporate actions locally and rejects a capped chunk as incomplete.
 - Phase 60 (costs): `preview_order` for the brokerage cross-check.
+- Phase 64 (shadow pilot): `intraday_bars` for the minute-bar fill model, and the `probe-intraday` CLI commands for the operator's one-off probe. Each charged answer is saved on the Mac only.
 - Phase 63 (orders): a new contract version (`growin-relay/2`). Version 1 has no
   order, funds, holdings, positions or trades route.
 
@@ -293,6 +303,8 @@ uv run --project backend --no-sync python -m brokers.breeze_gateway.cli revoke
 uv run --project backend --no-sync python -m brokers.breeze_gateway.cli orders-state
 uv run --project backend --no-sync python -m brokers.breeze_gateway.cli orders-audit --after-seq 0
 uv run --project backend --no-sync python -m brokers.breeze_gateway.cli tunnel
+uv run --project backend --no-sync python -m brokers.breeze_gateway.cli probe-intraday step --step S-3 --probe-dir DIR
+uv run --project backend --no-sync python -m brokers.breeze_gateway.cli probe-intraday compare --saved DIR --pilot-store ROOT
 ```
 
 - `health` prints `state`, `login_pending`, `expires_at_ist` and `egress_ok`, one per line.
@@ -303,6 +315,7 @@ uv run --project backend --no-sync python -m brokers.breeze_gateway.cli tunnel
 - `probe-daily` fetches one window, verifies the sha256 header against the bytes,
   prints the request id, the row count, the empty flag and `sha256 verified`, and
   writes nothing to disk.
+- `probe-intraday step` runs one step of the Phase 64 operator checklist (S-3 to S-10, S-12) through one ledger under `--probe-dir`: it reads `/v1/budget` before every charged request, stops at 20 charged requests a day, saves each answer (exact bytes, C4 headers, sha256) under the directory on the Mac, and prints counts and labels only. `probe-intraday compare` is offline: it re-hashes the saved bytes and reads the local pilot store, and builds no relay client. Neither command has any order route.
 - `orders-state` and `orders-audit` read the order side of the VM (`GET /v1/orders/state` and
   `GET /v1/orders/audit`) and print numbers, ids and decision names only. Both are read only.
 - `tunnel` prints `RELAY_URL=http://127.0.0.1:<port>` for manual inspection and waits

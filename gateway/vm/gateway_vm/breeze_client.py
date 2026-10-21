@@ -35,6 +35,8 @@ V1_ENDPOINTS = frozenset({"customerdetails", "quotes", "preview_order"}) | V1_RE
 # From 61-SMOKE-BREEZE.json, run 2026-10-21, key s2_interval_wire ("1day"): the
 # v2 daily wire value the smoke confirmed. Pinned in test_gateway_relay_config.py.
 V2_DAILY_INTERVAL = "1day"
+# 64-02: the one intraday wire value (design 5.1). It is a GET with no checksum, like the daily call.
+V2_INTRADAY_INTERVAL = "1minute"
 V2_EXCHANGE_PARAM_NAMES = ("exch_code", "exchange_code")  # docs table vs docs samples
 V2_DEFAULT_EXCHANGE_PARAM = V2_EXCHANGE_PARAM_NAMES[0]
 ERROR_CLASSES = (
@@ -382,6 +384,33 @@ class BreezeClient:
         if user_agent:
             headers["User-Agent"] = SDK_USER_AGENT
         return self._send("GET", f"{V2_HISTORICAL_URL}?{query}", headers=headers, body=None)
+
+    def intraday_bars_v2_raw(
+        self,
+        *,
+        app_key: str,
+        session_token: str,
+        stock_code: str,
+        exch_code: str,
+        from_iso: str,
+        to_iso: str,
+        **knobs,
+    ) -> RawUpstream:
+        """The v2 historicalcharts GET at the approved intraday interval, and nothing else.
+
+        The interval is fixed here, not a parameter: a caller cannot ask this method for any
+        other wire value. Same request shape, knobs and headers as the daily call.
+        """
+        return self.daily_bars_v2_raw(
+            app_key=app_key,
+            session_token=session_token,
+            stock_code=stock_code,
+            exch_code=exch_code,
+            from_iso=from_iso,
+            to_iso=to_iso,
+            interval=V2_INTRADAY_INTERVAL,
+            **knobs,
+        )
 
     def daily_bars_v2(
         self,
