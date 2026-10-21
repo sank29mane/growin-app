@@ -27,6 +27,10 @@ class TestChatEndpoints(unittest.IsolatedAsyncioTestCase):
         kit.activate(kit.make_registry(Path(self._tmp.name), "http://127.0.0.1:9"))
 
         # Use in-memory DB for testing
+        # Restore the shared singletons in tearDown: left closed, they break whichever
+        # test the same xdist worker runs next.
+        self._prev_chat_manager = state._chat_manager
+        self._prev_mcp_client = state._mcp_client
         self.chat_manager = ChatManager(db_path=":memory:")
         state.chat_manager = self.chat_manager
         
@@ -59,6 +63,8 @@ class TestChatEndpoints(unittest.IsolatedAsyncioTestCase):
             os.environ[kit.XAI_KEY_ENV] = self._old_key
         self._tmp.cleanup()
         self.chat_manager.close()
+        state._chat_manager = self._prev_chat_manager
+        state._mcp_client = self._prev_mcp_client
         self.orchestrator_patcher.stop()
 
     async def test_chat_message_success_and_timestamp(self):

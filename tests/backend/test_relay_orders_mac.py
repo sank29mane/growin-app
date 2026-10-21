@@ -192,6 +192,8 @@ def test_master_leaves_out_an_ambiguous_code_and_a_shared_isin():
         master([("1", "AAA", "EQ", "INE000A01012")], header="Token,ShortName,Series"),
         master([("1", "AAA", "EQ")]),  # a short row
     ],
+    # Zip bytes embed the build time, so the default ids differ between xdist workers.
+    ids=["not-a-zip", "wrong-member", "missing-column", "short-row"],
 )
 def test_an_unreadable_master_is_refused(content):
     with pytest.raises(iq.QuoteUnavailable):
