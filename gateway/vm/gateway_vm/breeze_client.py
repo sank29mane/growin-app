@@ -27,7 +27,11 @@ SDK_USER_AGENT = (
 )
 V1_BASE = "https://api.icicidirect.com/breezeapi/api/v1/"
 V2_HISTORICAL_URL = "https://breezeapi.icicidirect.com/api/v2/historicalcharts"
-V1_ENDPOINTS = frozenset({"customerdetails", "quotes", "preview_order"})
+# Three account READS joined the set in 63-05 (dematholdings, trades, order). The order list
+# is a GET: it lists orders and places nothing. Every one goes through _checksummed_get, which
+# can only send a GET (test_gateway_breeze_client pins the call sites).
+V1_READ_ENDPOINTS = frozenset({"dematholdings", "trades", "order"})
+V1_ENDPOINTS = frozenset({"customerdetails", "quotes", "preview_order"}) | V1_READ_ENDPOINTS
 # From 61-SMOKE-BREEZE.json, run 2026-10-21, key s2_interval_wire ("1day"): the
 # v2 daily wire value the smoke confirmed. Pinned in test_gateway_relay_config.py.
 V2_DAILY_INTERVAL = "1day"
@@ -511,6 +515,52 @@ class BreezeClient:
             price=price,
         )
         return normalize(raw.http_status, raw.body)
+
+    # --- 63-05 account reads: GET only, listed in V1_READ_ENDPOINTS ---
+    # The response shapes are from the ICICI docs and are UNVERIFIED for NSE cash until the
+    # 63-06 probe (gateway/ORDERS-API.md). Callers parse them strictly and refuse on any doubt.
+
+    def demat_holdings_raw(self, *, app_key: str, secret_key: str, session_token: str) -> RawUpstream:
+        return self._checksummed_get(
+            "dematholdings", {}, app_key=app_key, secret_key=secret_key, session_token=session_token
+        )
+
+    def trade_list_raw(
+        self,
+        *,
+        app_key: str,
+        secret_key: str,
+        session_token: str,
+        exchange_code: str,
+        from_iso: str,
+        to_iso: str,
+    ) -> RawUpstream:
+        return self._checksummed_get(
+            "trades",
+            {"from_date": from_iso, "to_date": to_iso, "exchange_code": exchange_code},
+            app_key=app_key,
+            secret_key=secret_key,
+            session_token=session_token,
+        )
+
+    def order_list_raw(
+        self,
+        *,
+        app_key: str,
+        secret_key: str,
+        session_token: str,
+        exchange_code: str,
+        from_iso: str,
+        to_iso: str,
+    ) -> RawUpstream:
+        """The day's order list (a read). Nothing here sends, changes or withdraws an order."""
+        return self._checksummed_get(
+            "order",
+            {"exchange_code": exchange_code, "from_date": from_iso, "to_date": to_iso},
+            app_key=app_key,
+            secret_key=secret_key,
+            session_token=session_token,
+        )
 
     # --- security master: a zip, not JSON, so it never goes through normalize ---
 

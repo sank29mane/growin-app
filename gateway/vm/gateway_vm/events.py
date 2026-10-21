@@ -13,6 +13,7 @@ import threading
 from typing import TextIO
 
 from .contract import EVENT_ONLY_REASONS, REQUEST_ID_RE, RELAY_REASONS, ROUTES
+from .orders import CODE_TABLE, ORDER_ROUTES
 from .transport import Clock
 
 ALLOWED_KEYS = frozenset(
@@ -45,9 +46,11 @@ EVENTS = frozenset(
     }
 )
 RESULTS = frozenset({"ok", "rejected", "error"})
-REASONS = RELAY_REASONS | EVENT_ONLY_REASONS
+# 63-05: an order refusal logs its O6 code, and any strict-parse failure logs intent_invalid.
+ORDER_REASONS = frozenset(CODE_TABLE) | {"intent_invalid"}
+REASONS = RELAY_REASONS | EVENT_ONLY_REASONS | ORDER_REASONS
 STATES = frozenset({"none", "active", "expired", "suspended_egress"})
-ROUTE_VALUES = ROUTES | frozenset(
+ROUTE_VALUES = ROUTES | ORDER_ROUTES | frozenset(
     {"/v1/budget", "/v1/quotes", "/v1/preview-order", "/v1/security-master", "other"}
 )
 

@@ -21,9 +21,9 @@ import threading
 import time
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Callable, Protocol, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from . import (
     CHALLENGE_TTL_SECONDS,
@@ -46,7 +46,15 @@ from .limits import (
     session_open,
     to_ist,
 )
-from .risk import apply_trades, detect_mismatch
+from ..session import RelayFailure
+from .risk import (
+    apply_trades,
+    assert_marks_agree,
+    detect_mismatch,
+    evaluate_session,
+    net_quantities,
+)
+from .sessions import expected_sessions, load_holidays
 from .store import StateStore
 from .verify import PinnedKey
 
@@ -159,6 +167,7 @@ class OrderPipeline:
         monotonic: Monotonic = time.monotonic,
         ids: SecretIds | None = None,
         lock: AbstractContextManager[Any] | None = None,
+        recheck: Callable[[], None] | None = None,
     ) -> None:
         if type(forward) is not RefusalForward:
             raise TypeError("63 forwards nothing: only RefusalForward is accepted")
@@ -173,6 +182,9 @@ class OrderPipeline:
         self._ids = ids or SecretIds()
         self._challenges = ChallengeStore()
         self._lock: AbstractContextManager[Any] = lock or threading.RLock()
+        # Called after the guard's reads and before a success is recorded. It must
+        # raise if the authority behind those reads (the Breeze session) is gone.
+        self._recheck = recheck
 
     # -- helpers -----------------------------------------------------------
 
@@ -282,6 +294,22 @@ class OrderPipeline:
             )
         return fields
 
+    def _recheck_authority(self) -> None:
+        if self._recheck is not None:
+            self._recheck()
+
+    def _audit_no_session(
+        self, route: str, intent: Intent | None, result: GuardResult | None
+    ) -> None:
+        """Record REFUSED no_session. The caller re-raises the RelayFailure.
+
+        require_active drops the session lock before it returns, and authorize
+        consumes the intent before the check finishes. A session that dies in
+        either gap must leave an audit line. The client still gets the
+        RelayFailure (503 NO_SESSION), not an order refusal.
+        """
+        self._append(self._entry(route, intent, "REFUSED", ["no_session"], result))
+
     def _require_audit(self) -> None:
         """Refuse before any side effect if the audit log does not verify.
 
@@ -341,6 +369,7 @@ class OrderPipeline:
             # clocks again: the cutoff is judged, and the challenge is issued
             # (wall and monotonic), at the time the reads finished, not the time
             # the request arrived. A wall clock that moved backward is refused.
+            self._recheck_authority()
             s1 = self._sample()
             late = self._time_codes(s0, s1)
             if late:
@@ -357,6 +386,16 @@ class OrderPipeline:
                 self._append(self._entry("intents", intent, "CHALLENGED", [], result))
             except OrderRefusal:
                 self._challenges.take(challenge.challenge_id)
+                raise
+            # require_active dropped the session lock when the pre-write recheck
+            # returned, and the fsync is a second gap. A revoke in either must not
+            # hand out the challenge. The CHALLENGED line may already be durable;
+            # the refusal is the last word.
+            try:
+                self._recheck_authority()
+            except RelayFailure:
+                self._challenges.take(challenge.challenge_id)
+                self._audit_no_session("intents", intent, result)
                 raise
             # Last look, immediately before success is returned: the audit
             # write is also blocking. A challenge that is already dead, past the
@@ -394,13 +433,24 @@ class OrderPipeline:
             if self._intents.is_consumed(intent.intent_id):
                 raise self._refuse("authorize", intent, ["intent_consumed"])
             self._intents.consume(intent.intent_id)
-            result = self._guard.check(intent, s0.wall)
+            try:
+                result = self._guard.check(intent, s0.wall)
+            except RelayFailure:
+                # The intent id is already consumed. A session that died inside
+                # the check must not leave that with no audit line.
+                self._audit_no_session("authorize", intent, None)
+                raise
             if result.codes:
                 raise self._refuse("authorize", intent, result.codes, result)
             # Reads are done: sample again and recheck both deadlines (and that
             # the clocks stayed consistent) before a success is recorded. A
             # check that started at 15:09:59, or inside the challenge's last
             # second, and finished after the deadline is refused.
+            try:
+                self._recheck_authority()
+            except RelayFailure:
+                self._audit_no_session("authorize", intent, result)
+                raise
             s1 = self._sample()
             late = self._time_codes(s0, s1, challenge)
             if late:
@@ -408,6 +458,15 @@ class OrderPipeline:
             entry = self._append(
                 self._entry("authorize", intent, "VERIFIED_NOT_FORWARDED", [], result)
             )
+            # require_active has already dropped the session lock. Recheck after
+            # the fsync: a revoke in that gap is an audited refusal, never a
+            # 200. The success line above forwards nothing (63). The refusal is
+            # the last word on the intent.
+            try:
+                self._recheck_authority()
+            except RelayFailure:
+                self._audit_no_session("authorize", intent, result)
+                raise
             # The audit write is blocking too. Sample once more, immediately
             # before success is returned: a write that finished after 15:10 or
             # after the challenge died is answered with an audited refusal, never
@@ -484,6 +543,20 @@ class TickReferencePort(Protocol):
     def band_reference(self, isin: str, session_date: date) -> DatedTickReference: ...
 
 
+class MarksPort(Protocol):
+    """Closes and reference prices for the Option B session evaluation (P-08, A2). Bound in 63-05.
+
+    ``closes`` returns the raw (unadjusted) daily close by session date for one ISIN
+    between two dates inclusive, and raises if the answer could be incomplete.
+    ``reference`` returns that ISIN's quote previous_close and one tick, for the A2
+    check that the latest bar close and the quote agree within a tick.
+    """
+
+    def closes(self, isin: str, first: date, last: date) -> Mapping[date, Decimal]: ...
+
+    def reference(self, isin: str) -> tuple[Decimal, Decimal]: ...
+
+
 class RuleGuard:
     """Guard over the real modules: kill reader, durable state, account and
     market ports, and the pure evaluator.
@@ -507,6 +580,8 @@ class RuleGuard:
         tick_reference: TickReferencePort,
         audit: AuditLog,
         tick_table: TickTable | None = None,
+        marks: MarksPort | None = None,
+        holidays: frozenset[date] | None = None,
     ) -> None:
         if getattr(audit, "anchor", None) is not store:
             # An unanchored log cannot see its own deletion or truncation.
@@ -519,6 +594,8 @@ class RuleGuard:
         self._tick_reference = tick_reference
         self._audit = audit
         self._tick_table = tick_table
+        self._marks = marks
+        self._holidays = load_holidays() if holidays is None else frozenset(holidays)
 
     def _state(self):
         return self._store.load_or_init(
@@ -535,9 +612,23 @@ class RuleGuard:
                 )
             try:
                 snapshot = self._account.snapshot()
+            except RelayFailure:
+                raise  # the session is gone: not an account problem, not a pass
             except Exception:
                 raise refusal("account_read_failed") from None
-            changed = apply_trades(state, snapshot.trades)
+            if self._marks is None:
+                changed = apply_trades(state, snapshot.trades)
+            else:
+                changed, evaluated = self._replay_sessions(state, snapshot, now)
+                if not evaluated:
+                    # No mark could be trusted: nothing past the last good session is
+                    # applied or judged, and every order is refused. Progress up to the
+                    # last good session stays saved.
+                    if changed:
+                        self._store.save(state)
+                    return GuardResult(
+                        codes=("quote_unavailable",), kill=kill.label, latches=state.latch_names()
+                    )
             if not state.account_mismatch and detect_mismatch(state, snapshot.holdings):
                 state.account_mismatch = True
                 changed = True
@@ -545,6 +636,8 @@ class RuleGuard:
                 self._store.save(state)
             try:
                 quote: Quote | None = self._market.quote(intent.stock_code)
+            except RelayFailure:
+                raise
             except Exception:
                 quote = None
             reference = self._band_reference(quote)
@@ -561,12 +654,78 @@ class RuleGuard:
             )
             return GuardResult(codes=codes, kill=kill.label, latches=state.latch_names())
 
+    def _replay_sessions(self, state, snapshot: AccountSnapshot, now: datetime) -> tuple[bool, bool]:
+        """Apply the trade list and every session close since the last evaluated one, in order.
+
+        evaluate_session reads the CURRENT net quantities, so each missed session is
+        judged after the trades dated on or before it and before any later trade. Only
+        sessions strictly before today (IST) are evaluated: today's close is unknown.
+        Returns (state changed, marks trusted). Any failure to read, align or agree on a
+        mark (a held ISIN with no bar, a capped response, a bar that disagrees with the
+        quote's previous close by more than a tick) is (changed so far, False).
+        """
+        marks = self._marks
+        assert marks is not None
+        today = to_ist(now).date()
+        yesterday = today - timedelta(days=1)
+        changed = False
+
+        def trade_day(trade) -> date | None:
+            return None if trade.executed_at is None else to_ist(trade.executed_at).date()
+
+        try:
+            if state.last_evaluated_session is not None:
+                first: date | None = date.fromisoformat(state.last_evaluated_session) + timedelta(days=1)
+            else:
+                days = [d for d in (trade_day(t) for t in snapshot.trades) if d is not None]
+                first = min(days) if days else None
+            isins = sorted(
+                {f.isin for f in state.fills.values()}
+                | {t.isin for t in snapshot.trades}
+                | {h.isin for h in snapshot.holdings}
+            )
+            calendar: list[date] = []
+            closes: dict[str, Mapping[date, Decimal]] = {}
+            if first is not None and first <= yesterday and isins:
+                closes = {isin: marks.closes(isin, first, yesterday) for isin in isins}
+                # The required sessions do not come from what the bars happened to
+                # return: an empty or truncated history must not look complete. A held
+                # ISIN with no close for a required session raises MarkMissing below.
+                calendar = expected_sessions(first, yesterday, self._holidays)
+            for session in calendar:
+                due = [t for t in snapshot.trades if (day := trade_day(t)) is not None and day <= session]
+                changed = apply_trades(state, due) or changed
+                if session == calendar[-1]:
+                    # A2, before the newest close is accepted: it must agree with the
+                    # quote's previous close within a tick, or it is never evaluated.
+                    held = sorted(i for i, q in net_quantities(state).items() if q > 0)
+                    previous: dict[str, Decimal] = {}
+                    ticks: dict[str, Decimal] = {}
+                    for isin in held:
+                        previous[isin], ticks[isin] = marks.reference(isin)
+                    assert_marks_agree({i: closes[i][session] for i in held}, previous, ticks)
+                evaluate_session(
+                    state,
+                    self._limits,
+                    session,
+                    {isin: series[session] for isin, series in closes.items() if session in series},
+                )
+                changed = True
+            changed = apply_trades(state, snapshot.trades) or changed
+            return changed, True
+        except RelayFailure:
+            raise
+        except Exception:  # MarkMissing, MarkMismatch, a failed read, a missing bar: all refuse
+            return changed, False
+
     def _band_reference(self, quote: Quote | None) -> Decimal | None:
         """Fresh band reference for this quote, or None (fail closed) on any problem."""
         if quote is None:
             return None
         try:
             value = self._tick_reference.band_reference(quote.isin, quote.session_date)
+        except RelayFailure:
+            raise
         except Exception:
             return None
         if not isinstance(value, DatedTickReference):

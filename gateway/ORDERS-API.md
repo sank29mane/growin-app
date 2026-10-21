@@ -111,6 +111,81 @@ wins and this file is wrong.
 - **Vectors.** `tests/backend/fixtures/relay_orders/signing_vectors.json` (canonical bytes, signatures, negatives) and
   `limits_vectors.json` (rule decisions with expected codes, drawdown paths, `limits_sha256`). Both are TEST ONLY.
 
+## The VM routes and reads (63-05)
+
+- **Where.** `create_app(..., orders=OrderService)` mounts the five O2 routes. `main.build_app` always builds the
+  service from `limits_path` and `order_key_path` in relay.json (defaults `/etc/growin-gateway/limits.json` and
+  `/etc/growin-gateway/order-key.json`) and the StateDirectory. The limits and key files are loaded once, at start.
+- **Contract per path.** `/v1/orders/` (trailing slash) is `growin-orders/1`; everything else, including the bare
+  `/v1/orders`, stays `growin-relay/1`. The header is checked against the path's own contract in both directions
+  and every answer, error or not, carries that contract string.
+- **Order of a Breeze-backed route** (`intents`, `authorize`): relay bearer, order configuration ready, body
+  validation (a malformed or LIVE intent is answered here, before any session or read), the Breeze session
+  (`require_active`), then the pipeline, whose ports charge the relay budget before every Breeze GET. `halt`,
+  `state` and `audit` need only the bearer: they never read Breeze, and `halt` only restricts (body `{}`).
+- **Errors.** O6 body: `{contract, error: {code: CATEGORY, reason: o6_code, breeze_status: null, retryable: false,
+  retry_after_s: null, fields: null}}`. `code` is the category (`LIMIT_REJECTED`), `reason` the O6 code
+  (`capital_cap`). Inherited relay errors (401, 403, 400, 422 validation, 503 `NO_SESSION`) keep their relay shape
+  with the orders contract string.
+- **config_invalid.** A missing, symlinked, group- or other-writable or wrongly owned limits or key file, the
+  committed test key, or no usable StateDirectory makes every order route answer 503 `config_invalid` (or the
+  state error) while health and the data routes keep working. One `config_alarm` event is logged at start.
+- **`GET /v1/orders/state`** adds `alerts_logged`: the number of stop-exit alerts written to `alerts.jsonl` in the
+  StateDirectory (below). The other fields are as O2.
+- **Alert channel.** The external channel is deferred by the operator, so `session_end_check` writes each alert to
+  `alerts.jsonl` (append only, mode 0600, fsynced, ISIN and session date and quantity, nothing else). The Mac reads
+  the `stop_exit_open` and `alert_failed` entries from the audit and the count from `state`. An unreadable alert
+  log makes `state` answer 503 `state_unreadable`. An alert never unblocks anything.
+- **Budget and session failures inside a check.** The guard turns any other exception from a port into
+  `account_read_failed` or `quote_unavailable` (503), so a budget refusal met while the pipeline reads is reported
+  with those codes. The Breeze session is different: it is revalidated (`require_active`) before every upstream
+  read and again before a challenge or a verified decision is recorded, and a session that ended in between is the
+  inherited 503 `NO_SESSION` (a revoke during `authorize` stops the next read, and the intent id stays consumed).
+
+### Account reads (all GET, all checksummed, all charged to the relay budget)
+
+| Read | Breeze call | Shape used | Status |
+| --- | --- | --- | --- |
+| Holdings | `GET dematholdings` | rows `stock_ISIN`, `quantity` (digit string) | UNVERIFIED for NSE cash until the 63-06 probe |
+| Trades | `GET trades`, `{from_date, to_date, exchange_code}`, 365 days back | rows `order_id`, `stock_code`, `action` (Buy/Sell), `quantity`, `average_cost`, `trade_date` (`DD-Mon-YYYY`), optional `brokerage_amount`, `total_taxes` | UNVERIFIED |
+| Open orders | `GET order`, `{exchange_code, from_date, to_date}`, today only | rows `order_id`, `stock_code`, `action`, `quantity`, `price`, `pending_quantity`, `status` | UNVERIFIED |
+| Quote | `GET quotes` | the 21 keys of the 61 smoke; `ltt` is `DD-Mon-YYYY HH:MM:SS`; numbers are JSON numbers | smoke-verified |
+| Bars | v2 daily | raw daily rows `YYYY-MM-DD 00:00:00`, newest 1000 kept by Breeze | smoke-verified |
+
+Every shape the docs leave open fails closed: a missing key, a wrong type, a bool, a non-finite or negative number,
+a repeated `order_id`, a stock code the master cannot bind, a working market buy, an empty `Success`, or a bars
+response of 1000 rows (it may have been cut) is a read failure, and a read failure is never an empty account.
+Holdings carry no price, so their cost is zero and the cap rules read the VM ledger's cost. The trade id is the
+`order_id`. An `order_id` the ledger already holds is never re-applied and must not change: the same id listed
+again with another quantity, side or ISIN (a cumulative partial fill that grew, or shrank) latches `account_mismatch`
+(fail closed, durable, cleared only by the operator), so the caps never keep reading the first quantity while the
+demat holding lags. A changed price alone is not a latch. Holdings lag fills by a settlement day, so sales dated
+today or on the previous weekday are netted off the demat quantity before it is compared with the ledger.
+
+### ISIN binding
+
+The ISIN on an intent is never trusted. The VM fetches the security master (the same budget kind and egress check as
+the data route) once per IST day and keeps it in memory only: the zip member `NSEScripMaster.txt`, columns `Token`,
+`ShortName`, `Series`, `ISINCode`, live rows (Token not 0) in series EQ and BE. A stock code or ISIN that maps to
+more than one row is left out. A code the master cannot bind gets an empty ISIN, which the evaluator answers as
+`isin_mismatch`.
+
+### Session evaluation (Option B)
+
+Each check replays, in order, every session close since `last_evaluated_session` (or since the first trade) up to
+yesterday IST: trades dated on or before a session are applied first, then `evaluate_session` runs on raw daily
+closes. The newest close must agree with the quote's `previous_close` within one tick (A2) before it is accepted.
+A held ISIN with no bar for a session, a capped bars response, a failed read or an A2 mismatch refuses every order
+as `quote_unavailable`; progress up to the last good session stays saved. Evaluation does not write `EVALUATED`
+audit entries in 63-05.
+
+The sessions that must be covered do not come from the bars. They are every weekday from the first unevaluated day
+to yesterday IST, less the dated exchange holidays in `orders/data/nse_trading_holidays.json` (loaded at start,
+malformed means `config_invalid`). So no bars, bars that stop early, or a missing weekday all stop the replay at the
+last complete session (`quote_unavailable`; there is no separate wire code, so the Mac mapping is unchanged). The
+shipped holiday table is **unpopulated**: until the operator fills it from the NSE trading-holiday circular, a real
+holiday inside the range refuses orders instead of being skipped. That is the fail-closed direction.
+
 ## Mac admission codes (63-04)
 
 The Mac enforces its own India limits before any approval challenge exists
@@ -145,6 +220,7 @@ the same on both sides (lower case), so a Mac refusal and a VM refusal of one or
   `limits_sha256` and the same decision codes, using its own code.
 - **63-03, Swift signer.** Reads `signing_vectors.json`: checks purpose and `key_id` first, shows fields parsed from
   the bytes it signs, signs those exact bytes with the Secure Enclave key (DER output).
-- **63-05, Mac relay client and VM routes.** Wraps the pipeline in the three routes above, binds the operator alert
-  channel, and sends the Mac's own signature to `/v1/orders/authorize` (P-20).
+- **63-05, VM routes (this section) and Mac relay client.** The VM half wraps the pipeline in the five routes, binds the
+  account, quote and bars reads and the alert log. The Mac half sends the Mac's own signature to
+  `/v1/orders/authorize` (P-20).
 - **64, preview forwarding.** A new forward decision is a breaking change and ships as `growin-orders/2` (O8).

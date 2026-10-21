@@ -28,7 +28,7 @@ from gateway_vm.orders import OrderRefusal  # noqa: E402
 from gateway_vm.orders import admin, risk  # noqa: E402
 from gateway_vm.orders import limits as vm_limits  # noqa: E402
 from gateway_vm.orders import store as store_mod  # noqa: E402
-from gateway_vm.orders.audit import AuditBroken, AuditLog  # noqa: E402
+from gateway_vm.orders.audit import AuditBroken, AuditLog, _hash_entry  # noqa: E402
 from gateway_vm.orders.limits import (  # noqa: E402
     AccountSnapshot,
     Holding,
@@ -757,6 +757,35 @@ def test_audit_chain_break_and_truncation_are_detected(tmp_path):
         audit.verify()
 
 
+def _forge(audit: AuditLog, line_index: int, **changes) -> None:
+    """Rewrite one line with new field values and a hash that is correct for the new content."""
+    lines = audit.path.read_bytes().splitlines(keepends=True)
+    entry = json.loads(lines[line_index])
+    entry.update(changes)
+    entry["entry_sha256"] = _hash_entry(entry)
+    lines[line_index] = (json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+    audit.path.write_bytes(b"".join(lines))
+
+
+@pytest.mark.parametrize(
+    "forged,line",
+    [
+        ({"codes": ["forged"]}, 1),  # content rewritten, own hash recomputed: the next line's prev link breaks
+        ({"prev_sha256": "0" * 64}, 1),  # own prev link rewritten, own hash recomputed
+        ({"prev_sha256": "0" * 64, "codes": ["forged"]}, 2),  # the same on the last line
+    ],
+    ids=["middle_content", "middle_prev", "last_prev"],
+)
+def test_a_forged_entry_with_a_valid_own_hash_still_breaks_the_prev_link(tmp_path, forged, line):
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    for n in range(3):
+        audit.append({"decision": "EVALUATED", "route": "test", "codes": [f"c{n}"]})
+    assert audit.verify()[0] == 3
+    _forge(audit, line, **forged)
+    with pytest.raises(AuditBroken, match="chain breaks"):
+        audit.verify()
+
+
 # ------------------------------------- audit anchor: deletion and tail truncation
 
 
@@ -1313,8 +1342,14 @@ def test_admin_session_end_check_exits_nonzero_when_the_alert_fails(tmp_path):
     code, out, _ = _run(store.directory, "session-end-check", clock=clock, port=Port(fail=True))
     assert code == 1 and json.loads(out)["alerts_failed"] == 1
     assert store.load().stops  # nothing blocked or unblocked
-    # No port bound at all (63-05 not landed): also non-zero, never silent.
-    assert _run(store.directory, "session-end-check", clock=clock)[0] == 1
+    # 63-05 binds the durable local alert log as the default port: the alert lands on disk
+    # (private, append-only) and the run succeeds. The unbound port itself still fails loudly
+    # (test_unbound_alert_port_fails_loudly).
+    code, out, _ = _run(store.directory, "session-end-check", clock=clock)
+    assert code == 0 and json.loads(out)["alerts_sent"] == 1
+    log = store.directory / "alerts.jsonl"
+    assert log.stat().st_mode & 0o777 == 0o600
+    assert [json.loads(line)["kind"] for line in log.read_text().splitlines()] == ["stop_exit_open"]
 
 
 def test_admin_usage_errors_exit_2(tmp_path):

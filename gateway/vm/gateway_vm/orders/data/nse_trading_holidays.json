@@ -1,0 +1,5 @@
+{
+  "schema": "growin.gateway.nse_trading_holidays/1",
+  "status": "UNPOPULATED: the operator fills this from the NSE trading-holiday circular before the 63-06 window. Every weekday with no entry here is treated as a session that needs a close; an empty table therefore refuses orders across a real holiday (fail closed), never skips it.",
+  "holidays": []
+}

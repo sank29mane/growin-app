@@ -5,9 +5,10 @@ BreezeClient is synchronous. Order on every Breeze-backed route: authorize the
 relay token and read the session in one step (authorize), validate parameters,
 require_active() on what authorize returned, charge the budget, then the one
 Breeze call. The data routes are bars, quotes, preview-order (a brokerage
-calculator that places nothing) and the security master. There is no order
-route and no funds, holdings, positions or trades route here (Phase 63 owns
-order relay).
+calculator that places nothing) and the security master. There is no funds,
+holdings, positions or trades route here. The five growin-orders/1 routes
+(/v1/orders/...) are mounted from orders/routes.py when an OrderService is given;
+they speak their own contract string and place nothing (63-05).
 
 Nothing is written to disk and no body, query value, token, code or Breeze
 Error text reaches a response or a log line.
@@ -90,6 +91,9 @@ from .contract import (
     ZIP_MAGIC,
 )
 from .events import ROUTE_VALUES, EventLog
+from .orders import CONTRACT as ORDERS_CONTRACT
+from .orders import ORDERS_PATH_PREFIX, OrderRefusal
+from .orders.routes import OrderFailure, OrderService, mount_order_routes, order_error_response
 from .session import (
     Credentials,
     RelayFailure,
@@ -121,9 +125,14 @@ def _iso_utc(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-def _error_response(failure: RelayFailure) -> JSONResponse:
+def _contract_for(path: str) -> str:
+    """O1: every path under /v1/orders/ speaks growin-orders/1, every other path growin-relay/1."""
+    return ORDERS_CONTRACT if path.startswith(ORDERS_PATH_PREFIX) else CONTRACT
+
+
+def _error_response(failure: RelayFailure, contract: str = CONTRACT) -> JSONResponse:
     body = {
-        "contract": CONTRACT,
+        "contract": contract,
         "error": {
             "code": failure.code,
             "reason": failure.reason,
@@ -311,6 +320,8 @@ class _Guard:
     Refuses a non-loopback Host or a wrong contract header before routing, adds
     the C2 headers to every response (including Starlette's own 404 and 405),
     turns any escaped exception into 500 INTERNAL, and emits one request event.
+    The contract string is per path: growin-orders/1 under /v1/orders/, growin-relay/1
+    everywhere else, and a request carrying the other one is 400 CONTRACT_MISMATCH.
     """
 
     def __init__(self, app, *, events: EventLog, clock: Clock) -> None:
@@ -327,6 +338,7 @@ class _Guard:
             return
 
         request_id = secrets.token_hex(8)
+        expected_contract = _contract_for(scope.get("path", ""))
         scope["state"] = {**(scope.get("state") or {}), "request_id": request_id}
         started_at = self._clock.monotonic()
         sent = {"status": 0}
@@ -335,7 +347,7 @@ class _Guard:
             if message["type"] == "http.response.start":
                 sent["status"] = message["status"]
                 headers = MutableHeaders(scope=message)
-                headers[HDR_CONTRACT] = CONTRACT
+                headers[HDR_CONTRACT] = expected_contract
                 headers[HDR_REQUEST_ID] = request_id
                 headers[HDR_CACHE_CONTROL] = CACHE_CONTROL_VALUE
             await send(message)
@@ -348,12 +360,12 @@ class _Guard:
             refusal = RelayFailure("FORBIDDEN_CLIENT")
         elif not contracts:
             refusal = RelayFailure("FORBIDDEN_CLIENT")
-        elif len(contracts) != 1 or contracts[0] != CONTRACT:
+        elif len(contracts) != 1 or contracts[0] != expected_contract:
             refusal = RelayFailure("CONTRACT_MISMATCH")
 
         if refusal is not None:
             _record(scope, refusal)
-            await _error_response(refusal)(scope, receive, send_with_headers)
+            await _error_response(refusal, expected_contract)(scope, receive, send_with_headers)
         else:
             try:
                 await self.app(scope, receive, send_with_headers)
@@ -361,7 +373,7 @@ class _Guard:
                 failure = RelayFailure("INTERNAL")
                 _record(scope, failure)
                 if sent["status"] == 0:
-                    await _error_response(failure)(scope, receive, send_with_headers)
+                    await _error_response(failure, expected_contract)(scope, receive, send_with_headers)
 
         self._emit(scope, sent["status"], started_at)
 
@@ -403,6 +415,7 @@ def create_app(
     clock: Clock,
     version: str = "61.0.0",
     security_master_url: str | None = None,
+    orders: OrderService | None = None,
 ) -> FastAPI:
     app = FastAPI(
         title="growin-relay",
@@ -416,7 +429,12 @@ def create_app(
     @app.exception_handler(RelayFailure)
     async def _relay_failure(request: Request, exc: RelayFailure):
         _record(request.scope, exc)
-        return _error_response(exc)
+        return _error_response(exc, _contract_for(request.url.path))
+
+    @app.exception_handler(OrderRefusal)
+    async def _order_refusal(request: Request, exc: OrderRefusal):
+        _record(request.scope, OrderFailure(exc))
+        return order_error_response(exc)
 
     @app.exception_handler(RequestValidationError)
     async def _validation(request: Request, exc: RequestValidationError):
@@ -427,7 +445,7 @@ def create_app(
             names.add(last if last in ALLOWED_BODY_FIELDS else "body")
         failure = RelayFailure("VALIDATION", fields=sorted(names) or ["body"])
         _record(request.scope, failure)
-        return _error_response(failure)
+        return _error_response(failure, _contract_for(request.url.path))
 
     @app.exception_handler(StarletteHTTPException)
     async def _http_exception(request: Request, exc: StarletteHTTPException):
@@ -440,7 +458,7 @@ def create_app(
         else:
             failure = RelayFailure("INTERNAL")
         _record(request.scope, failure)
-        return _error_response(failure)
+        return _error_response(failure, _contract_for(request.url.path))
 
     # ------------------------------------------------------------ health
 
@@ -631,5 +649,10 @@ def create_app(
     def budget_snapshot(token: Optional[str] = Depends(_bearer)):
         session.authorize(token)  # the bearer is checked while a session is bound; the state is not
         return JSONResponse({"contract": CONTRACT, **budget.snapshot()})
+
+    # ------------------------------------------------------------ orders
+
+    if orders is not None:
+        mount_order_routes(app, orders, session=session, bearer=_bearer, require_json=_require_json)
 
     return app
