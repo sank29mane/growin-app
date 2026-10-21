@@ -451,9 +451,10 @@ class RelayClient:
                         continue
                     dead = self._tunnel
                     if dead is None or dead.alive():
-                        reserved = self._pool
-                        reserved.inflight += 1
-                        return reserved
+                        pool = self._pool
+                        pool.inflight += 1
+                        reserved = pool  # only now is it counted, so cleanup gives back exactly that
+                        return pool
                     if self._restart is None:
                         raise RelayUnavailable(reason="tunnel_down")
                     if self._restart_failures and self._monotonic() < self._restart_retry_at:

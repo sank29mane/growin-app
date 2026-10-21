@@ -962,6 +962,43 @@ def test_an_interrupt_at_the_exit_of_the_fast_path_gives_the_reservation_back():
     relay.close()
 
 
+def test_an_interrupt_before_the_fast_path_counts_the_request_does_not_release_anothers_reservation():
+    class InterruptedPool(client_mod._Pool):
+        """Raises SystemExit when the count is about to be raised, after the pool was picked."""
+
+        armed = False
+
+        @property
+        def inflight(self):
+            return self._inflight
+
+        @inflight.setter
+        def inflight(self, value):
+            if self.armed and value > self._inflight:
+                self.armed = False
+                raise SystemExit(143)  # the increment never landed
+            self._inflight = value
+
+    handle, fresh = FakeHandle(50123), FakeHandle(50124)
+    factory, restart = Factory(), _ScriptedRestart(fresh)
+    relay = RelayClient(tunnel=handle, http_factory=factory, restart=restart)
+    pool = InterruptedPool(factory.clients[0])
+    relay._pool = pool
+    active = relay._acquire()  # a request genuinely in flight on the pool
+    assert active is pool and pool.inflight == 1
+    pool.armed = True
+    with pytest.raises(SystemExit):
+        relay.health()
+    assert pool.inflight == 1  # the interrupted request never counted, so it gives nothing back
+    handle._alive = False
+    assert isinstance(relay.health(), RelayHealth)  # restarts: the in-use pool is retired
+    assert restart.calls == 1 and pool.retired
+    assert not pool.http.is_closed  # still held by the request that is in flight
+    relay._release(active)
+    assert pool.http.is_closed
+    relay.close()
+
+
 def test_a_failing_http_client_is_a_failed_restart_that_stops_the_child_and_arms_the_backoff():
     dead = FakeHandle(50123)
     dead._alive = False
