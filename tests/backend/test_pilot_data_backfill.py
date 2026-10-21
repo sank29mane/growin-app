@@ -2,8 +2,10 @@
 Phase 61's real RelayClient over a fake growin-relay/1 server. Nothing here reaches a network."""
 
 import dataclasses
+import fcntl
 import io
 import json
+import os
 from contextlib import redirect_stdout
 from datetime import date, datetime, timedelta, timezone
 
@@ -105,6 +107,20 @@ def ready(store, relay, clock_time, codes=CODES, **engine_extra):
     relay.requests.clear()
     clock_time.sleeps.clear()
     return eng, plan
+
+
+def lock_held(eng) -> bool:
+    """True when some open file description holds the engine's flock (the OS is the lock, not the file)."""
+    fd = os.open(eng._lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True
+    else:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
 
 
 def count(store, sql, params=()):
@@ -369,15 +385,15 @@ def refused(eng, code, relay):
         eng.preflight(today_ist=TODAY)
     assert info.value.code == code
     assert relay.bars_requests == []
-    assert not (eng._lock_path).exists(), "the lock must be released when preflight fails"
+    assert not lock_held(eng), "the lock must be released when preflight fails"
 
 
 def test_preflight_passes_when_everything_is_good_and_holds_the_lock(store, relay, clock_time):
     eng, _ = ready(store, relay, clock_time)
     eng.preflight(today_ist=TODAY)
-    assert eng._lock_path.exists()
+    assert lock_held(eng)
     eng.release_lock()
-    assert not eng._lock_path.exists()
+    assert not lock_held(eng)
 
 
 @pytest.mark.parametrize(
@@ -429,21 +445,21 @@ def test_preflight_refuses_without_a_conclusive_probe(store, relay, clock_time):
     refused(engine(store, relay, clock_time), "probe_missing", relay)
 
 
-def test_a_held_lock_blocks_a_second_run_and_break_lock_clears_it(store, relay, clock_time):
+def test_a_stale_owner_record_blocks_a_run_until_break_lock_clears_it(store, relay, clock_time):
     eng, plan = ready(store, relay, clock_time)
-    eng._lock_path.write_text("123 stale\n")
+    eng._lock_path.write_text("123 stale\n")  # a run that died without releasing: no flock holds it
     with pytest.raises(PilotDataError) as info:
         eng.run(plan, today_ist=TODAY)
-    assert info.value.code == "backfill_locked" and eng._lock_path.exists() and relay.bars_requests == []
+    assert info.value.code == "backfill_lock_stale" and relay.bars_requests == [] and not lock_held(eng)
     report = eng.run(plan, today_ist=TODAY, break_lock=True)
-    assert report.status == "complete" and not eng._lock_path.exists()
+    assert report.status == "complete" and not lock_held(eng)
 
 
 def test_the_lock_is_released_after_a_stopped_run(store, relay, clock_time):
     eng, plan = ready(store, relay, clock_time)
     relay.bars_script = lambda index, params: err_response(503, "NO_SESSION")
     report = eng.run(plan, today_ist=TODAY)
-    assert report.status == "stopped_fail_closed" and not eng._lock_path.exists()
+    assert report.status == "stopped_fail_closed" and not lock_held(eng)
 
 
 def test_engine_construction_enforces_pacing_and_cap_bounds(store, relay, clock_time):
@@ -635,7 +651,7 @@ def test_an_empty_answer_is_retried_once_then_quarantined_not_stored_as_zero(sto
     eng, plan = ready(store, relay, clock_time, codes=("RELIND",))
     relay.bars_script = lambda index, params: _empty_body(params) if index in (0, 1) else None
     report = eng.run(plan, today_ist=TODAY)
-    assert report.status == "complete" and report.counts["empty_flagged"] == 1 and report.counts["done"] == 1
+    assert report.status == "complete_with_flags" and report.counts["empty_flagged"] == 1 and report.counts["done"] == 1
     assert report.error_codes == {"breeze_empty_response": 1}
     assert len(relay.bars_requests) == 3  # two for the empty window, one for the other
     rows = store.query("SELECT check_name, reason_code, stock_code FROM quarantine_records "
@@ -857,7 +873,7 @@ def cli(argv, relay=None, clock_time=None, **extra):
     out = io.StringIO()
     source = relay.client() if relay is not None else None
     with redirect_stdout(out):
-        code = bf.main(argv, source=source, **kwargs(clock_time), **extra)
+        code = bf.main(argv, source=source, **kwargs(clock_time, **extra))
     return code, json.loads(out.getvalue())
 
 
@@ -948,3 +964,429 @@ def test_cli_relay_error_prints_a_classified_code_only(root, relay):
     code, payload = cli(["health", "--root", str(root), "--workspace", "india"], relay)
     assert code == 2 and payload["error_code"] == "breeze_session_missing"
     assert set(payload) == {"caveats", "error_code"}
+
+
+# ================================================================ review round 2
+
+from brokers.breeze_gateway import RelayUnavailable  # noqa: E402
+
+from pilot_data.models import DailyBarConvention  # noqa: E402
+
+MIDNIGHT_IST = datetime(2026, 10, 21, 18, 31, tzinfo=timezone.utc)  # 00:01 IST on 22 October
+
+
+def bar_row(code, day, stamp="00:00:00"):
+    return kit.breeze_row(code, f"{day.isoformat()} {stamp}", "100.00", "101.00", "99.00", "100.50")
+
+
+def bars_body(params, *, skip=(), extra=()):
+    """Every session in the window as one 00:00:00 bar, minus `skip`, plus any `extra` rows."""
+    days = sessions(date.fromisoformat(params["from"]), date.fromisoformat(params["to"]))
+    rows = [bar_row(params["stock_code"], day) for day in days if day not in skip]
+    return kit.breeze_v2_json([*rows, *extra])
+
+
+def newest_only(params):
+    day = sessions(date.fromisoformat(params["from"]), date.fromisoformat(params["to"]))[-1]
+    return kit.breeze_v2_json([bar_row(params["stock_code"], day)])
+
+
+class FlakySource:
+    """Wraps a real client; `script(call_index)` returns an exception to raise instead of the call."""
+
+    def __init__(self, inner, script):
+        self.inner, self.script, self.calls = inner, script, 0
+
+    def health(self):
+        return self.inner.health()
+
+    def budget(self):
+        return self.inner.budget()
+
+    def security_master(self):
+        return self.inner.security_master()
+
+    def daily_bars(self, *args, **kwargs):
+        index, self.calls = self.calls, self.calls + 1
+        failure = self.script(index)
+        if failure is not None:
+            raise failure
+        return self.inner.daily_bars(*args, **kwargs)
+
+
+def flaky_run(store, relay, clock_time, script, codes=("RELIND",), **engine_extra):
+    eng, plan = ready(store, relay, clock_time, codes=codes, **engine_extra)
+    source = FlakySource(relay.client(), script)
+    eng._source = source
+    return eng, plan, source
+
+
+# ---------------------------------------------------------------- 1. completeness evidence
+
+
+def test_a_window_answered_with_only_the_newest_bar_is_not_done_and_resume_refetches_it(store, relay, clock_time):
+    eng, plan = ready(store, relay, clock_time, codes=("RELIND",))
+    relay.bars_script = lambda index, params: newest_only(params) if index in (0, 1) else None
+    report = eng.run(plan, today_ist=TODAY)
+    assert report.counts == {"pending": 0, "done": 1, "empty_flagged": 0, "failed": 1}
+    assert report.error_codes == {"breeze_incomplete_window": 1} and report.windows_remaining == 1
+    assert report.status == "completed_with_failed_windows" and len(relay.bars_requests) == 3  # one retry
+    assert count(store, "SELECT count(*) FROM relay_call_outcomes WHERE outcome = 'incomplete'") == 2
+    assert count(store, "SELECT count(*) FROM breeze_responses WHERE requested_from = ?", [plan.windows[0][0]]) == 0
+    assert count(store, "SELECT count(*) FROM breeze_bars_raw WHERE source_sha256 IN "
+                        "(SELECT source_sha256 FROM relay_call_outcomes WHERE outcome = 'incomplete')") == 0
+    assert count(store, "SELECT count(*) FROM quarantine_records WHERE reason_code = 'breeze_incomplete_window'") == 1
+
+    relay.bars_script, relay.bars_requests = None, []
+    again = eng.run(plan, today_ist=TODAY)
+    assert again.status == "complete" and len(relay.bars_requests) == 1 and again.counts["done"] == 2
+
+
+def test_a_missing_interior_session_keeps_the_window_out_of_done(store, relay, clock_time):
+    eng, plan = ready(store, relay, clock_time, codes=("RELIND",))
+    gap = date(2024, 3, 13)
+    assert is_session(gap)
+    relay.bars_script = lambda index, params: bars_body(params, skip=(gap,)) if index in (0, 1) else None
+    report = eng.run(plan, today_ist=TODAY)
+    assert report.counts["failed"] == 1 and report.error_codes == {"breeze_incomplete_window": 1}
+    detail = store.query("SELECT detail_json FROM quarantine_records WHERE reason_code = 'breeze_incomplete_window'")
+    assert "missing_sessions" in detail[0][0] and gap.isoformat() in detail[0][0]
+
+
+def test_a_quarantined_date_keeps_the_window_out_of_done_even_when_the_day_has_a_good_bar(store, relay, clock_time):
+    eng, plan = ready(store, relay, clock_time, codes=("RELIND",))
+    day = date(2024, 3, 13)
+    odd = bar_row("RELIND", day, stamp="09:15:00")  # a second, off-convention row for the same day
+    relay.bars_script = lambda index, params: bars_body(params, extra=(odd,)) if index in (0, 1) else None
+    report = eng.run(plan, today_ist=TODAY)
+    assert report.counts["failed"] == 1 and report.error_codes == {"breeze_incomplete_window": 1}
+    assert count(store, "SELECT count(*) FROM quarantine_records WHERE reason_code = 'timestamp_unexpected'") >= 1
+    assert count(store, "SELECT count(*) FROM breeze_responses WHERE requested_from = ?", [plan.windows[0][0]]) == 0
+
+
+CONVENTION = DailyBarConvention(allowed_times=("00:00:00",), source="test")
+
+
+def parse_days(code, days):
+    return bf.parse_breeze_v2_daily(
+        kit.breeze_v2_json([bar_row(code, day) for day in days]), stock_code=code, convention=CONVENTION
+    )
+
+
+def test_without_a_calendar_the_oldest_bar_must_reach_the_window_start_and_the_count_be_plausible(store, relay, clock_time):
+    eng, _ = ready(store, relay, clock_time, codes=("RELIND",))
+    window = (date(2021, 5, 3), date(2021, 6, 30))  # before the stored calendar: every day is unknown
+    days = sessions(*window)
+    assert eng._incompleteness(parse_days("RELIND", days), window, None) is None
+    newest = eng._incompleteness(parse_days("RELIND", days[-1:]), window, None)
+    assert newest is not None and newest["basis"] == "heuristic"
+    late = eng._incompleteness(parse_days("RELIND", days[15:]), window, None)  # oldest bar 3 weeks after the start
+    assert late is not None and "oldest_bar" in late
+    sparse = eng._incompleteness(parse_days("RELIND", days[:1] + days[-1:] + days[5:9]), window, None)
+    assert sparse is not None and "bars_in_window" in sparse
+    tolerated = eng._incompleteness(parse_days("RELIND", days[3:]), window, None)  # 5 calendar days late: a long weekend
+    assert tolerated is None
+
+
+def test_days_before_the_probed_depth_are_not_expected(store, relay, clock_time):
+    eng, _ = ready(store, relay, clock_time, codes=("RELIND",))
+    window = (date(2023, 5, 29), date(2024, 12, 31))
+    floor = date(2024, 6, 3)
+    parsed = parse_days("RELIND", sessions(floor, window[1]))
+    assert eng._incompleteness(parsed, window, None) is not None
+    assert eng._incompleteness(parsed, window, floor) is None
+
+
+# ---------------------------------------------------------------- 2. flagged windows are not complete
+
+
+def test_a_run_of_only_flagged_windows_is_complete_with_flags_not_complete_and_can_be_requeued(store, relay, clock_time):
+    eng, plan = ready(store, relay, clock_time, codes=("RELIND",))
+    relay.bars_script = lambda index, params: _empty_body(params)
+    report = eng.run(plan, today_ist=TODAY)
+    assert report.status == "complete_with_flags" and report.counts["empty_flagged"] == 2
+    assert report.windows_remaining == 0 and bf._exit_for_report(report) == 4
+    assert eng.status(plan).status == "complete_with_flags"
+
+    relay.bars_requests.clear()
+    same = eng.run(plan, today_ist=TODAY)  # the plan hash is deterministic: flagged windows are not refetched
+    assert same.status == "complete_with_flags" and same.calls_this_run == 0 and relay.bars_requests == []
+
+    relay.bars_script = None
+    fixed = eng.run(plan, today_ist=TODAY, retry_flagged=True)
+    assert fixed.status == "complete" and fixed.counts["done"] == 2 and fixed.counts["empty_flagged"] == 0
+    assert len(relay.bars_requests) == 2 and bf._exit_for_report(fixed) == 0
+    attempts = store.query("SELECT attempt, status FROM backfill_events WHERE window_from = ? "
+                           "AND status IN ('empty_flagged', 'done') ORDER BY attempt", [plan.windows[0][0]])
+    assert attempts == [(1, "empty_flagged"), (2, "done")]
+
+
+def test_retry_flagged_leaves_failed_windows_and_done_windows_alone_unless_they_are_due(store, relay, clock_time):
+    eng, plan = ready(store, relay, clock_time, codes=("RELIND",))
+    eng.run(plan, today_ist=TODAY)
+    relay.bars_requests.clear()
+    assert eng.run(plan, today_ist=TODAY, retry_flagged=True).calls_this_run == 0  # nothing flagged, nothing done again
+    assert relay.bars_requests == []
+
+
+def test_cli_exit_4_for_flagged_windows_and_retry_flagged_clears_them(store, relay, clock_time):
+    eng, plan = ready(store, relay, clock_time, codes=("RELIND",))
+    store.close()
+    base = ["--root", str(store.root), "--workspace", "india"]
+    relay.bars_script = lambda index, params: _empty_body(params)
+    code, payload = cli(["run", *base], relay, clock_time)
+    assert code == 4 and payload["result"]["status"] == "complete_with_flags"
+    assert cli(["status", *base], None, clock_time)[0] == 4
+    relay.bars_script = None
+    assert cli(["run", *base], relay, clock_time)[0] == 4  # without the flag nothing is retried
+    code, payload = cli(["run", *base, "--retry-flagged"], relay, clock_time)
+    assert code == 0 and payload["result"]["status"] == "complete"
+    assert cli(["status", *base], None, clock_time)[0] == 0
+
+
+# ---------------------------------------------------------------- 3. the envelope comes first
+
+
+def test_a_status_500_answer_with_an_empty_header_is_an_upstream_error_never_empty(store, relay, clock_time):
+    eng, plan = ready(store, relay, clock_time, codes=("RELIND",))
+    body = kit.breeze_v2_json([], status=500, error="Something went wrong")
+    relay.bars_script = lambda index, params: relay.bars_ok(params, body) if index == 0 else None
+    assert relay.bars_ok({"stock_code": "RELIND", "from": "2024-01-01", "to": "2024-01-31"}, body).headers[
+        "X-Growin-Empty"] == "true"
+    report = eng.run(plan, today_ist=TODAY)
+    assert report.counts == {"pending": 0, "done": 1, "empty_flagged": 0, "failed": 1}
+    assert report.error_codes == {"breeze_upstream_error": 1} and len(relay.bars_requests) == 2  # not retried as empty
+    assert count(store, "SELECT count(*) FROM quarantine_records WHERE check_name = 'breeze_backfill'") == 0
+    assert count(store, "SELECT count(*) FROM relay_call_outcomes WHERE outcome = 'empty'") == 0
+    assert count(store, "SELECT count(*) FROM relay_call_outcomes WHERE error_code = 'breeze_upstream_error'") == 1
+    import hashlib
+
+    assert count(store, "SELECT count(*) FROM source_files WHERE source_sha256 = ?",
+                 [hashlib.sha256(body).hexdigest()]) == 0
+
+
+def test_an_empty_header_that_disagrees_with_the_body_stops_the_run(store, relay, clock_time):
+    eng, plan = ready(store, relay, clock_time, codes=("RELIND",))
+    relay.bars_script = lambda index, params: relay.bars_ok(params, bars_body(params), **{"X-Growin-Empty": "true"})
+    report = eng.run(plan, today_ist=TODAY)
+    assert report.status == "stopped_fail_closed" and report.stop_code == "relay_response_invalid"
+    assert len(relay.bars_requests) == 1 and report.counts["done"] == 0
+
+
+def test_a_status_500_probe_answer_is_refused_not_read_as_empty(store, relay, clock_time):
+    refresh(store, relay)
+    body = kit.breeze_v2_json([], status=500, error="Something went wrong")
+    relay.bars_script = lambda index, params: relay.bars_ok(params, body)
+    with pytest.raises(PilotDataError) as info:
+        probe(store, relay, clock_time)
+    assert info.value.code == "breeze_upstream_error"
+
+
+# ---------------------------------------------------------------- 4. pace, then reserve, then dispatch
+
+
+def rollover_clock(clock_time):
+    state = {"now": NOW}
+
+    def sleeper(seconds):
+        clock_time.sleep(seconds)
+        state["now"] = MIDNIGHT_IST  # the pacing sleep crosses IST midnight
+
+    return {"clock": lambda: state["now"], "sleeper": sleeper}
+
+
+def test_a_pacing_sleep_across_ist_midnight_sends_no_next_day_call_and_stops_resumable(store, relay, clock_time):
+    eng, plan = ready(store, relay, clock_time, codes=("RELIND", "NIFBEE"))
+    crossing = rollover_clock(clock_time)
+    late = bf.BackfillEngine(store, relay.client(), workspace="india", monotonic=clock_time.monotonic, **crossing)
+    report = late.run(plan, today_ist=TODAY)
+    assert report.status == "stopped_ist_rollover" and report.stop_code == "ist_date_rollover"
+    assert len(relay.bars_requests) == 1 and report.calls_this_run == 1 and report.counts["done"] == 1
+    assert count(store, "SELECT count(*) FROM relay_call_ledger WHERE ist_date = '2026-10-22'") == 0
+    assert bf._exit_for_report(report) == 3 and not lock_held(late)
+
+
+def test_cli_ist_rollover_exits_3_not_2(store, relay, clock_time):
+    eng, plan = ready(store, relay, clock_time, codes=("RELIND",))
+    store.close()
+    code, payload = cli(["run", "--root", str(store.root), "--workspace", "india"], relay, clock_time,
+                        **rollover_clock(clock_time))
+    assert code == 3 and payload["result"]["stop_code"] == "ist_date_rollover"
+
+
+def test_a_clock_before_the_run_date_is_still_a_clock_mismatch_and_fail_closed(store, relay, clock_time):
+    eng, plan = ready(store, relay, clock_time, codes=("RELIND",))
+    behind = bf.BackfillEngine(store, relay.client(), workspace="india", monotonic=clock_time.monotonic,
+                               sleeper=clock_time.sleep, clock=lambda: NOW - timedelta(days=1))
+    report = behind.run(plan, today_ist=TODAY)
+    assert report.status == "stopped_fail_closed" and report.stop_code == "relay_clock_mismatch"
+    assert relay.bars_requests == [] and bf._exit_for_report(report) == 2
+
+
+def test_the_ledger_row_is_reserved_after_the_pacing_sleep_not_before_it(store, relay, clock_time):
+    eng, plan = ready(store, relay, clock_time, codes=("RELIND",))
+    seen = []
+    base_sleep = clock_time.sleep
+
+    def sleeper(seconds):
+        seen.append(count(store, "SELECT count(*) FROM relay_call_ledger"))
+        base_sleep(seconds)
+
+    late = bf.BackfillEngine(store, relay.client(), workspace="india", clock=lambda: NOW,
+                             monotonic=clock_time.monotonic, sleeper=sleeper)
+    late.run(plan, today_ist=TODAY)
+    assert seen == [5], seen  # master + 3 probe calls + the first window; the second window's row comes after the sleep
+
+
+# ---------------------------------------------------------------- 6. relay unavailable
+
+
+@pytest.mark.parametrize("reason,code", [("closed", "relay_closed"), ("tunnel_restart_failed", "relay_tunnel_restart_failed"),
+                                         ("tunnel_down", "relay_tunnel_down"), ("brand_new", "relay_unavailable_unknown")])
+def test_closed_and_failed_restart_stop_at_once_without_retry_or_failed_windows(store, relay, clock_time, reason, code):
+    eng, plan, source = flaky_run(store, relay, clock_time, lambda index: RelayUnavailable(reason=reason))
+    report = eng.run(plan, today_ist=TODAY)
+    assert report.status == "stopped_fail_closed" and report.stop_code == code and bf._exit_for_report(report) == 2
+    assert source.calls == 1, "no retry"
+    assert report.counts == {"pending": 2, "done": 0, "empty_flagged": 0, "failed": 0}
+    assert clock_time.sleeps == []
+
+
+def test_a_refused_before_send_call_is_recorded_not_sent_and_does_not_count_toward_the_cap(store, relay, clock_time):
+    # the probe used 3 of 4; a refused call that counted would leave no room for the retry
+    eng, plan, source = flaky_run(
+        store, relay, clock_time, lambda index: RelayUnavailable(reason="tunnel_restart_backoff") if index == 0 else None,
+        daily_call_cap=4,
+    )
+    report = eng.run(plan, today_ist=TODAY)
+    assert report.status == "daily_cap_reached" and report.counts["done"] == 1  # the retry went out, then the cap
+    assert clock_time.sleeps == [60.0, bf.PACE_SECONDS]
+    assert count(store, "SELECT count(*) FROM relay_call_outcomes WHERE outcome = 'not_sent' "
+                        "AND error_code = 'relay_tunnel_restart_backoff'") == 1
+    assert count(store, "SELECT count(*) FROM relay_call_ledger WHERE endpoint = 'historical'") == 3 + 2
+    assert report.calls_used_today == 4 and report.calls_this_run == 1
+
+
+def test_the_backoff_wait_is_one_bounded_sleep_then_one_retry_then_a_stop(store, relay, clock_time):
+    eng, plan, source = flaky_run(
+        store, relay, clock_time, lambda index: RelayUnavailable(reason="tunnel_restart_backoff")
+    )
+    report = eng.run(plan, today_ist=TODAY)
+    assert report.status == "stopped_fail_closed" and report.stop_code == "relay_tunnel_restart_backoff"
+    assert source.calls == 2 and 60.0 in clock_time.sleeps and sum(clock_time.sleeps) <= 60.0 + 2 * bf.PACE_SECONDS
+    assert report.counts["failed"] == 0 and report.calls_used_today == 3  # both refusals were not sent
+    assert count(store, "SELECT count(*) FROM relay_call_outcomes WHERE outcome = 'not_sent'") == 2
+
+
+def test_a_transport_blip_twice_stops_the_run_instead_of_failing_windows(store, relay, clock_time):
+    eng, plan, source = flaky_run(
+        store, relay, clock_time, lambda index: RelayUnavailable(reason="connect_error"), codes=CODES
+    )
+    report = eng.run(plan, today_ist=TODAY)
+    assert report.status == "stopped_fail_closed" and report.stop_code == "relay_unavailable"
+    assert source.calls == 2 and report.counts["failed"] == 0 and 2.0 in clock_time.sleeps
+    assert report.calls_this_run == 2  # a connect error may have reached the relay, so both calls count
+
+
+def test_a_single_blip_is_retried_after_a_pause_and_the_run_completes(store, relay, clock_time):
+    eng, plan, source = flaky_run(
+        store, relay, clock_time, lambda index: RelayUnavailable(reason="connect_error") if index == 0 else None
+    )
+    report = eng.run(plan, today_ist=TODAY)
+    assert report.status == "complete" and source.calls == 3 and 2.0 in clock_time.sleeps
+
+
+def test_a_stopped_transport_run_resumes_to_complete(store, relay, clock_time):
+    eng, plan, source = flaky_run(store, relay, clock_time, lambda index: RelayUnavailable(reason="closed"))
+    assert eng.run(plan, today_ist=TODAY).status == "stopped_fail_closed"
+    eng._source = relay.client()
+    assert eng.run(plan, today_ist=TODAY).status == "complete"
+
+
+# ---------------------------------------------------------------- 7. the lock
+
+
+def test_break_lock_never_displaces_a_live_owner_and_the_owner_keeps_its_record(store, relay, clock_time):
+    owner, _ = ready(store, relay, clock_time, codes=("RELIND",))
+    owner.preflight(today_ist=TODAY)
+    record = owner._lock_path.read_bytes()
+    assert record.strip()
+    intruder = engine(store, relay, clock_time)
+    for flag in (False, True):
+        with pytest.raises(PilotDataError) as info:
+            intruder.preflight(today_ist=TODAY, break_lock=flag)
+        assert info.value.code == "backfill_locked"
+    assert lock_held(owner) and owner._lock_path.read_bytes() == record
+    owner.release_lock()
+    assert not lock_held(owner)
+    intruder.preflight(today_ist=TODAY)  # free once the owner is done
+    assert lock_held(intruder)
+    intruder.release_lock()
+
+
+def test_a_second_run_during_a_run_is_refused_even_with_break_lock(store, relay, clock_time):
+    eng, plan = ready(store, relay, clock_time, codes=("RELIND",))
+    other = engine(store, relay, clock_time)
+    outcomes = []
+
+    def while_running(params):
+        if outcomes:  # one attempt, on the first call; a lock that fails open would otherwise recurse here
+            return
+        outcomes.append("tried")
+        try:
+            other.run(plan, today_ist=TODAY, break_lock=True)
+        except PilotDataError as exc:
+            outcomes.append(exc.code)
+
+    relay.on_bars = while_running
+    report = eng.run(plan, today_ist=TODAY)
+    assert report.status == "complete" and outcomes == ["tried", "backfill_locked"]
+    assert len(relay.bars_requests) == 2, "the intruder made no call"
+
+
+def test_release_clears_only_its_own_owner_record(store, relay, clock_time):
+    eng, _ = ready(store, relay, clock_time, codes=("RELIND",))
+    eng.preflight(today_ist=TODAY)
+    eng._lock_path.write_text("999 successor-token\n")  # someone else's record replaced ours
+    eng.release_lock()
+    assert eng._lock_path.read_text() == "999 successor-token\n"
+    assert not lock_held(eng)
+
+
+def test_the_lock_file_is_kept_so_a_late_opener_locks_the_same_file(store, relay, clock_time):
+    eng, plan = ready(store, relay, clock_time, codes=("RELIND",))
+    eng.run(plan, today_ist=TODAY)
+    assert eng._lock_path.exists() and eng._lock_path.read_bytes() == b""
+
+
+# ---------------------------------------------------------------- 8. windows end on a completed day
+
+
+def test_no_window_ends_after_the_last_completed_trading_day(store, relay, clock_time):
+    refresh(store, relay)
+    probe(store, relay, clock_time)
+    eng = engine(store, relay, clock_time)
+    plan = eng.build_plan(members(("TATMOT",)), window_start=date(2025, 1, 1), window_end=date(2026, 10, 19))
+    assert plan.windows[-1][1] == date(2026, 10, 20) and eng._last_completed_day() == date(2026, 10, 20)
+    assert all(end <= date(2026, 10, 20) for _, end in plan.windows)
+    relay.bars_requests.clear()
+    assert eng.run(plan, today_ist=TODAY).status == "complete"
+    assert max(r["to"] for r in relay.bars_requests) == "2026-10-20"
+    assert count(store, "SELECT max(requested_to) FROM breeze_responses WHERE stock_code = 'TATMOT'") == date(2026, 10, 20)
+
+
+def test_the_last_completed_day_skips_a_weekend_and_today(store, relay, clock_time):
+    monday = datetime(2026, 10, 19, 4, 30, tzinfo=timezone.utc)
+    eng = bf.BackfillEngine(store, relay.client(), workspace="india", clock=lambda: monday,
+                            monotonic=clock_time.monotonic, sleeper=clock_time.sleep)
+    assert eng._last_completed_day() == date(2026, 10, 16)  # Sunday is no session, Monday is today
+
+
+def test_plan_windows_clamps_and_refuses_a_window_wholly_in_the_future():
+    windows = bf.plan_windows(date(2026, 1, 1), date(2026, 10, 19), "two_windows", last_completed=date(2026, 10, 20))
+    assert windows[-1][1] == date(2026, 10, 20)
+    unclamped = bf.plan_windows(date(2026, 1, 1), date(2026, 10, 19), "two_windows")
+    assert unclamped[-1][1] == date(2026, 10, 22)
+    with pytest.raises(PilotDataError) as info:
+        bf.plan_windows(date(2026, 10, 19), date(2026, 10, 25), "two_windows", last_completed=date(2026, 10, 10))
+    assert info.value.code == "window_invalid"

@@ -4,24 +4,32 @@ Every Breeze byte arrives through Phase 61's RelayClient (contract growin-relay/
 has no transport code, takes no relay URL and never reads a credential. Rules it keeps:
 
 * each relay payload is re-validated (contract, sha256, fetch time, request echo) before it is stored;
-* a ledger row is written before every Breeze call, and the daily cap counts those rows;
+* calls are paced first, then a ledger row is written, then the call goes out; the daily cap counts those
+  rows (a call the relay client refused before sending is recorded as `not_sent` and not counted), and a
+  run that crosses IST midnight stops instead of charging the next day's call to the old date;
+* a window is `done` only when the rows prove it: they cover every NSE session in the window and nothing
+  in it was quarantined, else it is retried once and then failed as `breeze_incomplete_window`;
+* an upstream error envelope (Status other than 200, Error text) fails the window and is never read as empty;
 * a request that returns 1000 rows was capped upstream (the cap keeps the newest rows), so it is
   never stored as a complete window;
 * prices are stored raw, exactly as Breeze sent them; corporate actions are applied later, locally;
-* an empty answer is retried once, then flagged and quarantined, never read as zero volume;
+* an empty answer is retried once, then flagged and quarantined, never read as zero volume; a run with
+  flagged windows ends `complete_with_flags` (exit 4) until they are re-queued with `run --retry-flagged`;
 * anything unrecognised stops the run.
 
-Tables are append-only. The only file written outside the store is the run lock.
+Tables are append-only. The only file written outside the store is the run lock, an OS file lock (flock).
 """
 
 from __future__ import annotations
 
 import argparse
 import contextlib
+import fcntl
 import json
 import os
 import re
 import time
+import uuid
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -32,7 +40,8 @@ from typing import Literal
 from brokers.breeze_gateway import UpstreamPayload
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from .breeze_bars import ingest_breeze_response
+from .bhavcopy import quarantines_from_inputs
+from .breeze_bars import BreezeParse, ingest_breeze_response, parse_breeze_v2_daily
 from .core import (
     BREEZE_RAW_UNVERIFIED_CAVEAT,
     IST,
@@ -52,14 +61,16 @@ from .relay_contract import (
     KIND_SECURITY_MASTER,
     STOCK_CODE_RE,
     RelaySource,
+    check_bars_envelope,
     classify_gateway_error,
     gate_budget,
     gate_health,
     open_relay_source,
+    refused_before_send,
     validate_payload,
 )
 from .security_master import MasterIngestOutcome, ingest_security_master, require_fresh_snapshot
-from .sessions import sessions_between
+from .sessions import previous_sessions, sessions_between
 from .store import PilotDataStore
 from .targets import TargetMember, TargetUniverseResult, latest_target_universe
 
@@ -76,13 +87,21 @@ PROBE_RECENT_DAYS = 30
 PROBE_DEPTH_TOLERANCE_DAYS = 30
 PROBE_MIN_COVERAGE_PERCENT = 99
 DEFAULT_WINDOW_YEARS = 5
+# Completeness evidence when the session calendar does not cover a window: the oldest returned bar must
+# be within this many calendar days of the window start (a long weekend plus a holiday), and the bars
+# must be at least this share of the window's calendar days (a trading year is about 68 percent of one).
+COMPLETENESS_OLDEST_TOLERANCE_DAYS = 7
+COMPLETENESS_MIN_DENSITY_PERCENT = 50
+INCOMPLETE_WINDOW_CODE = "breeze_incomplete_window"
 
 Strategy = Literal["two_windows", "yearly"]
 WindowStatus = Literal["pending", "done", "empty_flagged", "failed"]
 RunStatus = Literal[
     "complete",
+    "complete_with_flags",
     "completed_with_failed_windows",
     "daily_cap_reached",
+    "stopped_ist_rollover",
     "stopped_fail_closed",
     "stopped_consecutive_failures",
     "incomplete",
@@ -165,7 +184,11 @@ def add_years(day: date, years: int) -> date:
 
 
 class _CallLedger:
-    """Reserve a ledger row before each relay call, pace calls, and count the day's historical calls."""
+    """Pace calls, reserve a ledger row just before each one, and count the day's historical calls.
+
+    Order for a call: pace(), then reserve(), then dispatch. reserve() re-checks the IST date and the
+    daily cap, so a long pacing sleep across midnight can not send a call charged to the old date.
+    """
 
     def __init__(
         self,
@@ -188,9 +211,11 @@ class _CallLedger:
         self._last_start: float | None = None
 
     def used_today(self, ist_date: date) -> int:
+        # A `not_sent` outcome means the client refused the call before anything left the machine.
         rows = self._store.query(
-            "SELECT count(*) FROM relay_call_ledger WHERE workspace = ? AND ist_date = ? "
-            "AND endpoint = 'historical'",
+            "SELECT count(*) FROM relay_call_ledger AS l WHERE l.workspace = ? AND l.ist_date = ? "
+            "AND l.endpoint = 'historical' AND NOT EXISTS ("
+            "SELECT 1 FROM relay_call_outcomes AS o WHERE o.call_id = l.call_id AND o.outcome = 'not_sent')",
             [self._workspace, ist_date],
         )
         return int(rows[0][0])
@@ -204,8 +229,11 @@ class _CallLedger:
         window_from: date | None = None,
         window_to: date | None = None,
     ) -> str:
-        if self._clock().astimezone(IST).date() != ist_date:
-            raise PilotDataError("relay_clock_mismatch", "the clock's IST date differs from the run date")
+        now_ist = self._clock().astimezone(IST).date()
+        if now_ist > ist_date:
+            raise PilotDataError("ist_date_rollover", "the IST date moved on during the run; resume tomorrow")
+        if now_ist < ist_date:
+            raise PilotDataError("relay_clock_mismatch", "the clock's IST date is before the run date")
         if endpoint == "historical" and self.used_today(ist_date) >= self._cap:
             raise PilotDataError("daily_cap_reached", "the local daily Breeze call cap is reached")
         total = self._store.query(
@@ -227,16 +255,15 @@ class _CallLedger:
         outcome = self._store.append_rows("relay_call_ledger", [row], check="relay_call_ledger")
         if outcome.inserted != 1:
             raise PilotDataError("ledger_write_failed", "the call reservation was not written")
+        self._last_start = self._monotonic()  # the call goes out right after this row is written
         return call_id
 
     def pace(self) -> None:
-        now = self._monotonic()
+        """Wait out the pacing gap since the last reservation. Call before reserve()."""
         if self._last_start is not None:
-            wait = self._pace - (now - self._last_start)
+            wait = self._pace - (self._monotonic() - self._last_start)
             if wait > 0:
                 self._sleeper(wait)
-                now = self._monotonic()
-        self._last_start = now
 
     def finish(self, call_id: str, outcome: str, error_code: str | None, source_sha256: str | None) -> None:
         row = {
@@ -346,21 +373,26 @@ def _fetch_for_probe(
     end: date,
     today_ist: date,
 ) -> UpstreamPayload:
+    ledger.pace()
     call_id = ledger.reserve(
         endpoint="historical", ist_date=today_ist, stock_code=stock_code, window_from=start, window_to=end
     )
-    ledger.pace()
     try:
         payload = source.daily_bars(stock_code, start, end)
     except Exception as exc:
         failure = _relay_failure(exc)
-        ledger.finish(call_id, "error", failure.code, None)
+        ledger.finish(call_id, "not_sent" if refused_before_send(exc) else "error", failure.code, None)
         raise failure from exc
     query = {"stock_code": stock_code, "from": start.isoformat(), "to": end.isoformat(), "exchange": "NSE"}
     try:
         descriptor = validate_payload(
             payload, expected_api=API_DAILY_BARS, kind=KIND_DAILY_BARS, expected_query=query
         )
+    except PilotDataError as exc:
+        ledger.finish(call_id, "rejected", exc.code, None)
+        raise
+    try:
+        check_bars_envelope(payload)
     except PilotDataError as exc:
         ledger.finish(call_id, "rejected", exc.code, None)
         raise
@@ -525,7 +557,7 @@ def refresh_security_master(
         payload = source.security_master()
     except Exception as exc:
         failure = _relay_failure(exc)
-        ledger.finish(call_id, "error", failure.code, None)
+        ledger.finish(call_id, "not_sent" if refused_before_send(exc) else "error", failure.code, None)
         raise failure from exc
     try:
         descriptor = validate_payload(payload, expected_api=API_SECURITY_MASTER, kind=KIND_SECURITY_MASTER)
@@ -545,12 +577,19 @@ def refresh_security_master(
 
 
 def plan_windows(
-    window_start: date, window_end: date, strategy: Strategy, *, pad_days: int = PAD_DAYS
+    window_start: date,
+    window_end: date,
+    strategy: Strategy,
+    *,
+    pad_days: int = PAD_DAYS,
+    last_completed: date | None = None,
 ) -> tuple[tuple[date, date], ...]:
     """Split [window_start, window_end] and pad each piece by pad_days on both sides.
 
     Padding is wider than needed on purpose: rows are filtered by parsed trading date later, and the
-    overlap is harmless because identical bars from two responses count once.
+    overlap is harmless because identical bars from two responses count once. With `last_completed`
+    (the last completed IST trading day), no window ends after it: a padded end in the future would
+    make breeze_responses claim coverage of days that have not happened.
     """
     if window_end < window_start:
         raise PilotDataError("window_invalid", "window_end is before window_start")
@@ -577,6 +616,10 @@ def plan_windows(
     padded = tuple(
         (start - timedelta(days=pad_days), end + timedelta(days=pad_days)) for start, end in pieces
     )
+    if last_completed is not None:
+        if any(start > last_completed for start, _ in padded):
+            raise PilotDataError("window_invalid", "a window starts after the last completed trading day")
+        padded = tuple((start, min(end, last_completed)) for start, end in padded)
     for start, end in padded:
         if (end - start).days + 1 > MAX_WINDOW_CALENDAR_DAYS:
             raise PilotDataError(
@@ -684,6 +727,15 @@ def _row_count(body: bytes) -> int | None:
     return len(rows) if isinstance(rows, list) else None
 
 
+def _settled_status(report: BackfillRunReport) -> RunStatus:
+    """The status of a run that stopped for no reason: failed windows and flagged windows are not `complete`."""
+    if report.windows_remaining:
+        return "completed_with_failed_windows"
+    if report.counts["empty_flagged"]:
+        return "complete_with_flags"
+    return "complete"
+
+
 # --------------------------------------------------------------------------- engine
 
 
@@ -720,7 +772,8 @@ class BackfillEngine:
             pace_seconds=pace_seconds, daily_call_cap=daily_call_cap,
         )
         self._lock_path = store.root / "backfill.lock"
-        self._holds_lock = False
+        self._lock_fd: int | None = None
+        self._lock_record: bytes | None = None
 
     def _relay(self) -> RelaySource:
         if self._source is None:
@@ -729,22 +782,43 @@ class BackfillEngine:
 
     # ---------------------------------------------------------------- lock
     def _acquire_lock(self, break_lock: bool) -> None:
-        if break_lock:
-            with contextlib.suppress(FileNotFoundError):
-                self._lock_path.unlink()
+        """Hold an OS file lock (flock) on the lock file for the whole run.
+
+        The OS drops the lock when the holder dies, so a live owner is never displaced: a held lock is
+        refused even with break_lock. What break_lock clears is only a stale owner record, left by a run
+        that died without releasing, and only after the flock itself was won. The file is never deleted
+        (deleting an flock file lets two runs lock two different files).
+        """
+        if self._lock_fd is not None:
+            raise PilotDataError("backfill_locked", "this engine already holds the backfill lock")
+        fd = os.open(self._lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            fd = os.open(self._lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
             raise PilotDataError("backfill_locked", "another backfill run holds the lock") from None
-        with os.fdopen(fd, "w") as handle:
-            handle.write(f"{os.getpid()} {self._clock().isoformat()}\n")
-        self._holds_lock = True
+        try:
+            if os.pread(fd, 4096, 0).strip() and not break_lock:
+                raise PilotDataError("backfill_lock_stale", "an earlier run died holding the lock; use break-lock")
+            record = f"{os.getpid()} {uuid.uuid4().hex} {self._clock().isoformat()}\n".encode()
+            os.ftruncate(fd, 0)
+            os.pwrite(fd, record, 0)
+        except BaseException:
+            os.close(fd)  # closing drops the flock
+            raise
+        self._lock_fd, self._lock_record = fd, record
 
     def release_lock(self) -> None:
-        if self._holds_lock:
-            with contextlib.suppress(FileNotFoundError):
-                self._lock_path.unlink()
-            self._holds_lock = False
+        """Release the flock; clear the owner record only if it is still this run's (pid and start token)."""
+        fd, record = self._lock_fd, self._lock_record
+        if fd is None:
+            return
+        self._lock_fd = self._lock_record = None
+        try:
+            if os.pread(fd, 4096, 0) == record:
+                os.ftruncate(fd, 0)
+        finally:
+            os.close(fd)  # closing drops the flock
 
     # ----------------------------------------------------------- preflight
     def preflight(self, *, today_ist: date, break_lock: bool = False) -> None:
@@ -800,7 +874,9 @@ class BackfillEngine:
         plan = BackfillPlan.create(
             workspace=self._workspace, window_start=window_start, window_end=window_end,
             strategy=probe.strategy, pad_days=PAD_DAYS,
-            windows=plan_windows(window_start, window_end, probe.strategy, pad_days=PAD_DAYS),
+            windows=plan_windows(
+                window_start, window_end, probe.strategy, pad_days=PAD_DAYS, last_completed=self._last_completed_day()
+            ),
             stock_codes=tuple(codes), probe_sha256=probe.probe_sha256(), targets_sha256=targets_sha256,
         )
         _append_one(
@@ -823,6 +899,16 @@ class BackfillEngine:
         if outcome.conflicts:
             raise PilotDataError("backfill_row_conflict", "backfill_events already holds a different row")
         return plan
+
+    def _last_completed_day(self) -> date:
+        """The last IST trading day that is over: yesterday or earlier, never today (still in session)."""
+        yesterday = self._clock().astimezone(IST).date() - timedelta(days=1)
+        try:
+            return previous_sessions(self._store, yesterday, 1)[0]
+        except PilotDataError as exc:
+            if exc.code != "calendar_unknown_dates":
+                raise
+            return yesterday  # an unknown calendar can only lower this, never raise it past yesterday
 
     # ------------------------------------------------------------- events
     def _event_row(
@@ -874,11 +960,19 @@ class BackfillEngine:
         )
 
     # ---------------------------------------------------------------- run
-    def run(self, plan: BackfillPlan, *, today_ist: date, break_lock: bool = False) -> BackfillRunReport:
+    def run(
+        self,
+        plan: BackfillPlan,
+        *,
+        today_ist: date,
+        break_lock: bool = False,
+        retry_flagged: bool = False,
+    ) -> BackfillRunReport:
+        """Run the plan's unfinished windows. `retry_flagged` also re-queues `empty_flagged` windows."""
         self._check_plan(plan)
         self.preflight(today_ist=today_ist, break_lock=break_lock)
         try:
-            return self._run_locked(plan, today_ist)
+            return self._run_locked(plan, today_ist, retry_flagged)
         finally:
             self.release_lock()
 
@@ -888,18 +982,19 @@ class BackfillEngine:
         if not stored[0][0]:
             raise PilotDataError("plan_missing", "the plan was not stored with build_plan")
 
-    def _run_locked(self, plan: BackfillPlan, today_ist: date) -> BackfillRunReport:
+    def _run_locked(self, plan: BackfillPlan, today_ist: date, retry_flagged: bool) -> BackfillRunReport:
         probe = latest_conclusive_probe(self._store)
         if probe is None:
             raise PilotDataError("probe_missing", "no conclusive Breeze probe is stored")
         convention = probe.convention()
+        depth_floor = probe.earliest_date if probe.depth_limited else None
+        finished = TERMINAL_STATUSES - {"empty_flagged"} if retry_flagged else TERMINAL_STATUSES
         states = self._states(plan)
         todo = [
             (code, window)
             for code in plan.stock_codes
             for window in plan.windows
-            if states.get((code, window[0], window[1]), _WindowState("pending", 0, None)).status
-            not in TERMINAL_STATUSES
+            if states.get((code, window[0], window[1]), _WindowState("pending", 0, None)).status not in finished
         ]
         used_before = self._ledger.used_today(today_ist)
         status: RunStatus = "complete"
@@ -909,7 +1004,7 @@ class BackfillEngine:
             prior = states.get((code, window[0], window[1]))
             attempt = (prior.attempt if prior is not None else 0) + 1
             try:
-                outcome, detail = self._process_window(plan, code, window, attempt, convention, today_ist)
+                outcome, detail = self._process_window(plan, code, window, attempt, convention, today_ist, depth_floor)
             except _Stop as stop:
                 status, stop_code = stop.status, stop.code
                 break
@@ -921,8 +1016,8 @@ class BackfillEngine:
             else:
                 consecutive = 0
         report = self._report(plan, today_ist, status, stop_code, self._ledger.used_today(today_ist) - used_before)
-        if report.status == "complete" and report.windows_remaining:
-            return report.model_copy(update={"status": "completed_with_failed_windows"})
+        if report.status == "complete":
+            return report.model_copy(update={"status": _settled_status(report)})
         return report
 
     def _process_window(
@@ -933,13 +1028,17 @@ class BackfillEngine:
         attempt: int,
         convention: DailyBarConvention,
         today_ist: date,
+        depth_floor: date | None,
     ) -> tuple[WindowStatus, str | None]:
         """Fetch one window with at most one retry. Returns the window's new status and a code."""
         w_from, w_to = window
         query = {"stock_code": code, "from": w_from.isoformat(), "to": w_to.isoformat(), "exchange": "NSE"}
         empty_code: str | None = None
         empty_sha: str | None = None
+        incomplete: dict[str, str] = {}
+        incomplete_sha: str | None = None
         for try_number in (1, 2):
+            self._ledger.pace()
             try:
                 call_id = self._ledger.reserve(
                     endpoint="historical", ist_date=today_ist, stock_code=code, window_from=w_from, window_to=w_to
@@ -947,13 +1046,14 @@ class BackfillEngine:
             except PilotDataError as exc:
                 if exc.code == "daily_cap_reached":
                     raise _Stop("daily_cap_reached", exc.code) from None
+                if exc.code == "ist_date_rollover":
+                    raise _Stop("stopped_ist_rollover", exc.code) from None
                 raise _Stop("stopped_fail_closed", exc.code) from None
-            self._ledger.pace()
             try:
                 payload = self._relay().daily_bars(code, w_from, w_to)
             except Exception as exc:
                 action, error_code, sleep_for = classify_gateway_error(exc)
-                self._ledger.finish(call_id, "error", error_code, None)
+                self._ledger.finish(call_id, "not_sent" if refused_before_send(exc) else "error", error_code, None)
                 if action == "stop":
                     raise _Stop("stopped_fail_closed", error_code) from None
                 if action == "fail_window":
@@ -963,10 +1063,12 @@ class BackfillEngine:
                     if try_number == 1:
                         continue
                     return self._flag_empty(plan, code, window, attempt, empty_code, empty_sha)
-                if try_number == 1:  # retry_once
+                if try_number == 1:  # retry_once and retry_then_stop
                     if sleep_for > 0:
                         self._sleeper(sleep_for)
                     continue
+                if action == "retry_then_stop":
+                    raise _Stop("stopped_fail_closed", error_code) from None
                 return self._fail(plan, code, window, attempt, error_code, None)
             try:
                 descriptor = validate_payload(
@@ -974,6 +1076,13 @@ class BackfillEngine:
                 )
             except PilotDataError as exc:
                 self._ledger.finish(call_id, "rejected", exc.code, None)
+                raise _Stop("stopped_fail_closed", exc.code) from None
+            try:
+                check_bars_envelope(payload)
+            except PilotDataError as exc:
+                self._ledger.finish(call_id, "rejected", exc.code, None)
+                if exc.code.startswith("breeze_"):  # an upstream error or a wrong envelope: never empty, never stored
+                    return self._fail(plan, code, window, attempt, exc.code, None)
                 raise _Stop("stopped_fail_closed", exc.code) from None
             if payload.empty:
                 self._store.register_source(descriptor, payload.body)
@@ -991,30 +1100,88 @@ class BackfillEngine:
             self._store.register_source(descriptor, payload.body)
             _record_provenance(self._store, payload)
             try:
-                ingested = ingest_breeze_response(
-                    self._store, descriptor, payload.body, stock_code=code, requested_from=w_from,
-                    requested_to=w_to, convention=convention,
-                )
+                parsed = parse_breeze_v2_daily(payload.body, stock_code=code, convention=convention)
             except PilotDataError as exc:
-                if exc.code == "breeze_empty_response":
-                    self._ledger.finish(call_id, "empty", exc.code, payload.sha256)
-                    empty_code, empty_sha = exc.code, payload.sha256
-                    if try_number == 1:
-                        continue
-                    return self._flag_empty(plan, code, window, attempt, empty_code, empty_sha)
                 if exc.code.startswith("breeze_"):
                     self._ledger.finish(call_id, "rejected", exc.code, payload.sha256)
                     return self._fail(plan, code, window, attempt, exc.code, payload.sha256)
                 self._ledger.finish(call_id, "error", exc.code, payload.sha256)
                 raise _Stop("stopped_fail_closed", exc.code) from None
-            if ingested.bars_inserted + ingested.bars_identical == 0:
+            if not parsed.bars:
                 # Every row was quarantined by the parser: nothing usable arrived for this window.
+                self._quarantine_parse(parsed, payload.sha256)
                 self._ledger.finish(call_id, "rejected", "breeze_no_usable_bars", payload.sha256)
                 return self._fail(plan, code, window, attempt, "breeze_no_usable_bars", payload.sha256)
+            problem = self._incompleteness(parsed, window, depth_floor)
+            if problem is not None:
+                # Not stored as bars: breeze_responses would claim the whole requested range as covered.
+                self._quarantine_parse(parsed, payload.sha256)
+                self._ledger.finish(call_id, "incomplete", INCOMPLETE_WINDOW_CODE, payload.sha256)
+                incomplete, incomplete_sha = problem, payload.sha256
+                if try_number == 1:
+                    continue
+                return self._flag_incomplete(plan, code, window, attempt, incomplete, incomplete_sha)
+            try:
+                ingest_breeze_response(
+                    self._store, descriptor, payload.body, stock_code=code, requested_from=w_from,
+                    requested_to=w_to, convention=convention,
+                )
+            except PilotDataError as exc:
+                self._ledger.finish(call_id, "error", exc.code, payload.sha256)
+                raise _Stop("stopped_fail_closed", exc.code) from None
             self._ledger.finish(call_id, "ok", None, payload.sha256)
             self._write_event(plan, code, window, "done", attempt, None, payload.sha256)
             return "done", None
         raise AssertionError("unreachable: the loop returns or continues on both tries")  # pragma: no cover
+
+    def _quarantine_parse(self, parsed: BreezeParse, source_sha256: str) -> None:
+        self._store.record_quarantine(
+            quarantines_from_inputs(
+                parsed.parse_quarantine_inputs, check="breeze_parse", source_sha256=source_sha256
+            )
+        )
+
+    def _incompleteness(
+        self, parsed: BreezeParse, window: tuple[date, date], depth_floor: date | None
+    ) -> dict[str, str] | None:
+        """None when the rows prove the window complete, else a description of what is missing.
+
+        Evidence: every NSE session in the window (the stored calendar) has a bar, and no date in the
+        window was quarantined by the parser. Where the calendar does not cover the window, the oldest
+        bar must reach the window start within COMPLETENESS_OLDEST_TOLERANCE_DAYS and the bars must be a
+        plausible share of the window's days. When the probe found Breeze depth-limited, days before its
+        earliest date are not expected.
+        """
+        w_from, w_to = window
+        start = max(w_from, depth_floor) if depth_floor is not None else w_from
+        returned = {bar.trade_date for bar in parsed.bars if start <= bar.trade_date <= w_to}
+        flagged = {
+            item.trade_date for item in parsed.parse_quarantine_inputs
+            if item.trade_date is not None and start <= item.trade_date <= w_to
+        }
+        problem: dict[str, str] = {}
+        if flagged:
+            problem["quarantined_dates"] = str(len(flagged))
+            problem["first_quarantined"] = min(flagged).isoformat()
+        try:
+            expected = sessions_between(self._store, start, w_to)
+        except PilotDataError as exc:
+            if exc.code != "calendar_unknown_dates":
+                raise
+            days = (w_to - start).days + 1
+            if not returned:
+                problem["bars_in_window"] = "0"
+            else:
+                if (min(returned) - start).days > COMPLETENESS_OLDEST_TOLERANCE_DAYS:
+                    problem["oldest_bar"] = min(returned).isoformat()
+                if len(returned) * 100 < days * COMPLETENESS_MIN_DENSITY_PERCENT:
+                    problem["bars_in_window"] = str(len(returned))
+            return {**problem, "basis": "heuristic"} if problem else None
+        missing = [day for day in expected if day not in returned]
+        if missing:
+            problem["missing_sessions"] = str(len(missing))
+            problem["first_missing"] = missing[0].isoformat()
+        return problem or None
 
     def _fail(
         self,
@@ -1050,11 +1217,32 @@ class BackfillEngine:
         self._write_event(plan, code, window, "empty_flagged", attempt, reason_code, source_sha256)
         return "empty_flagged", reason_code
 
+    def _flag_incomplete(
+        self,
+        plan: BackfillPlan,
+        code: str,
+        window: tuple[date, date],
+        attempt: int,
+        problem: dict[str, str],
+        source_sha256: str | None,
+    ) -> tuple[WindowStatus, str | None]:
+        self._store.record_quarantine(
+            [
+                QuarantineRecord(
+                    workspace=self._workspace, check="breeze_backfill", reason_code=INCOMPLETE_WINDOW_CODE,
+                    scope="raw", stock_code=code, date_from=window[0], date_to=window[1],
+                    detail={"plan_sha256": plan.plan_sha256, "calls": "2", **problem},
+                    evidence_sha256s=(source_sha256,) if source_sha256 else (),
+                )
+            ]
+        )
+        return self._fail(plan, code, window, attempt, INCOMPLETE_WINDOW_CODE, source_sha256)
+
     # ------------------------------------------------------------- status
     def status(self, plan: BackfillPlan) -> BackfillRunReport:
         today_ist = self._clock().astimezone(IST).date()
         report = self._report(plan, today_ist, "incomplete", None, 0)
-        return report.model_copy(update={"status": "complete" if report.windows_remaining == 0 else "incomplete"})
+        return report.model_copy(update={"status": "incomplete" if report.windows_remaining else _settled_status(report)})
 
     def _report(
         self, plan: BackfillPlan, today_ist: date, status: RunStatus, stop_code: str | None, calls_this_run: int
@@ -1094,6 +1282,7 @@ class BackfillEngine:
 # --------------------------------------------------------------------------- CLI
 
 _RELAY_COMMANDS = frozenset({"health", "probe", "refresh-master", "run"})
+_EXIT_FLAGGED = 4
 _EXIT_RESUME_LATER = 3
 _EXIT_FAIL_CLOSED = 2
 _EXIT_INCOMPLETE = 1
@@ -1130,7 +1319,12 @@ def _health_payload(source: RelaySource) -> dict[str, object]:
 def _exit_for_report(report: BackfillRunReport) -> int:
     if report.status == "complete":
         return 0
-    if report.status == "daily_cap_reached" or report.stop_code == "relay_budget_day":
+    if report.status == "complete_with_flags":
+        return _EXIT_FLAGGED
+    if (
+        report.status in ("daily_cap_reached", "stopped_ist_rollover")
+        or report.stop_code == "relay_budget_day"
+    ):
         return _EXIT_RESUME_LATER
     if report.status == "completed_with_failed_windows" or report.status == "incomplete":
         return _EXIT_INCOMPLETE
@@ -1141,8 +1335,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pilot_data.backfill",
         description="Breeze daily-bar backfill through the Phase 61 relay client. Exit codes: 0 complete, "
-        "1 finished with failed windows, 2 fail-closed stop, 3 daily cap or relay day budget reached "
-        "(resume next IST day).",
+        "1 finished with failed windows, 2 fail-closed stop, 3 daily cap, relay day budget or IST midnight "
+        "reached (resume next IST day), 4 every window finished but some were flagged empty (re-queue them "
+        "with run --retry-flagged).",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1162,7 +1357,8 @@ def _build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--window-end", required=True, type=date.fromisoformat)
     run = common("run")
     run.add_argument("--plan-sha256")
-    run.add_argument("--break-lock", action="store_true")
+    run.add_argument("--break-lock", action="store_true", help="clear a stale owner record; never a held lock")
+    run.add_argument("--retry-flagged", action="store_true", help="also re-queue windows flagged empty")
     status = common("status")
     status.add_argument("--plan-sha256")
     return parser
@@ -1213,7 +1409,7 @@ def _dispatch(
         }, 0
     plan = load_plan(store, args.plan_sha256)
     report = (
-        engine.run(plan, today_ist=today_ist, break_lock=args.break_lock)
+        engine.run(plan, today_ist=today_ist, break_lock=args.break_lock, retry_flagged=args.retry_flagged)
         if command == "run"
         else engine.status(plan)
     )
@@ -1247,7 +1443,7 @@ def main(
                 args, store, relay, today_ist=today_ist, clock=clock, monotonic=monotonic, sleeper=sleeper
             )
     except PilotDataError as exc:
-        resume = exc.code in ("daily_cap_reached", "relay_budget_day")
+        resume = exc.code in ("daily_cap_reached", "relay_budget_day", "ist_date_rollover")
         print(json.dumps({"caveats": _caveat_payload(), "error_code": exc.code, "error": str(exc)}, indent=2))
         return _EXIT_RESUME_LATER if resume else _EXIT_FAIL_CLOSED
     except Exception as exc:

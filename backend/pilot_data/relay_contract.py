@@ -11,6 +11,7 @@ Exception messages carry stable codes and relay request ids, never bodies, heade
 from __future__ import annotations
 
 import hmac
+import json
 import re
 from collections.abc import Mapping
 from datetime import date, datetime, timedelta
@@ -153,10 +154,21 @@ COPIED_POLICY_REASONS: frozenset[str] = frozenset(
 # keeps the newest rows, so the answer is missing its oldest days.
 BREEZE_ROW_CAP = 1000
 
+# The VM's upstream request (gateway_vm.contract, 61-SMOKE-BREEZE S2a): no widening on either side,
+# a fixed time of day on each end, NSE cash. The exchange parameter goes by either documented name.
+BARS_FROM_PAD_DAYS = 0
+BARS_TO_PAD_DAYS = 0
+UPSTREAM_EXCHANGE_KEYS: tuple[str, ...] = ("exch_code", "exchange_code")
+UPSTREAM_EXCHANGE = "NSE"
+UPSTREAM_PRODUCT_TYPE = "cash"
+UPSTREAM_FROM_SUFFIX = "T00:00:00.000Z"
+UPSTREAM_TO_SUFFIX = "T23:59:59.000Z"
+
 _REQUEST_ID = re.compile(REQUEST_ID_RE)
 _SHA256 = re.compile(SHA256_RE)
 _STOCK_CODE = re.compile(STOCK_CODE_RE)
 _DATE = re.compile(DATE_RE)
+_UPSTREAM_STAMP = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$")
 
 RELAY_RESPONSE_INVALID = "relay_response_invalid"
 
@@ -211,8 +223,9 @@ def _query_ok(route: str, query: Mapping[str, str]) -> bool:
     return all(_DATE.fullmatch(query[name]) for name in ("from", "to")) and start <= end
 
 
-def _day_part(value: object) -> date | None:
-    if not isinstance(value, str) or len(value) < 10:
+def _upstream_day(value: object, suffix: str) -> date | None:
+    """The date of an upstream timestamp, only if the whole string is `<date><suffix>` and parses."""
+    if not isinstance(value, str) or not _UPSTREAM_STAMP.fullmatch(value) or not value.endswith(suffix):
         return None
     try:
         return date.fromisoformat(value[:10])
@@ -221,18 +234,31 @@ def _day_part(value: object) -> date | None:
 
 
 def _upstream_echo_ok(upstream_request: Mapping[str, str], query: Mapping[str, str]) -> bool:
-    """The exact upstream parameters must echo the request: same code, same days (at most one day wider)."""
-    if upstream_request.get("stock_code") != query["stock_code"]:
+    """The exact upstream parameter set the VM documents, echoing the request.
+
+    Exactly stock_code, one exchange parameter (NSE), from_date, to_date, interval and product_type; no
+    other field. The timestamps parse, carry the fixed time of day, and name the requested days widened
+    by the VM's pad (0 days on each side).
+    """
+    exchange_keys = [key for key in UPSTREAM_EXCHANGE_KEYS if key in upstream_request]
+    if len(exchange_keys) != 1:
         return False
-    if upstream_request.get("interval") != INTERVAL_DAILY or upstream_request.get("product_type") != "cash":
+    if set(upstream_request) != {"stock_code", "from_date", "to_date", "interval", "product_type", exchange_keys[0]}:
         return False
-    sent_from, sent_to = _day_part(upstream_request.get("from_date")), _day_part(upstream_request.get("to_date"))
-    want_from, want_to = date.fromisoformat(query["from"]), date.fromisoformat(query["to"])
+    if upstream_request[exchange_keys[0]] != UPSTREAM_EXCHANGE or query.get("exchange", "NSE") != UPSTREAM_EXCHANGE:
+        return False
+    if upstream_request["stock_code"] != query["stock_code"]:
+        return False
+    if upstream_request["interval"] != INTERVAL_DAILY or upstream_request["product_type"] != UPSTREAM_PRODUCT_TYPE:
+        return False
+    sent_from = _upstream_day(upstream_request["from_date"], UPSTREAM_FROM_SUFFIX)
+    sent_to = _upstream_day(upstream_request["to_date"], UPSTREAM_TO_SUFFIX)
     if sent_from is None or sent_to is None:
         return False
+    want_from, want_to = date.fromisoformat(query["from"]), date.fromisoformat(query["to"])
     return (
-        want_from - timedelta(days=1) <= sent_from <= want_from
-        and want_to <= sent_to <= want_to + timedelta(days=1)
+        sent_from == want_from - timedelta(days=BARS_FROM_PAD_DAYS)
+        and sent_to == want_to + timedelta(days=BARS_TO_PAD_DAYS)
     )
 
 
@@ -303,6 +329,28 @@ def validate_payload(
     )
 
 
+def check_bars_envelope(payload: UpstreamPayload) -> None:
+    """Re-read the Breeze envelope inside a validated bars payload, before it is stored or read as empty.
+
+    Raises `breeze_upstream_error` for a Status other than 200 or any Error text (HTTP 200 carrying a
+    Status 500 is an upstream error, never "no data"), `breeze_schema_mismatch` for an envelope of the
+    wrong shape, and `relay_response_invalid` when the X-Growin-Empty header disagrees with the body.
+    """
+    try:
+        envelope = json.loads(payload.body)
+    except (ValueError, UnicodeDecodeError):
+        raise PilotDataError("breeze_schema_mismatch", "response is not valid JSON") from None
+    if not isinstance(envelope, dict) or not {"Success", "Status", "Error"} <= set(envelope):
+        raise PilotDataError("breeze_schema_mismatch", "envelope needs Success, Status and Error")
+    if envelope["Status"] != 200 or envelope["Error"] is not None:
+        raise PilotDataError("breeze_upstream_error", "upstream reported an error status")
+    success = envelope["Success"]
+    if not isinstance(success, list):
+        raise PilotDataError("breeze_schema_mismatch", "Success is not a list")
+    if payload.empty is not (not success):
+        raise _invalid(payload)
+
+
 # --------------------------------------------------------------------------- gating
 
 
@@ -331,7 +379,29 @@ def gate_budget(budget: RelayBudget, *, today_ist: date) -> None:
 
 # ------------------------------------------------------------------ error classification
 
-GatewayAction = Literal["stop", "retry_once", "empty", "fail_window"]
+# retry_once: sleep, try once more, and a second failure fails the window.
+# retry_then_stop: sleep, try once more, and a second failure ends the run (a transport problem is not the
+# window's fault, so it never counts as a failed window).
+GatewayAction = Literal["stop", "retry_once", "retry_then_stop", "empty", "fail_window"]
+
+# RelayUnavailable.reason values. Refused-before-send reasons never reached the relay, so the call spent
+# nothing of the budget. `tunnel_restart_backoff` (PR #583) is refused during a 2 s doubling to 60 s window.
+RELAY_CLOSED = "closed"
+RELAY_TUNNEL_RESTART_FAILED = "tunnel_restart_failed"
+RELAY_TUNNEL_RESTART_BACKOFF = "tunnel_restart_backoff"
+RELAY_TUNNEL_DOWN = "tunnel_down"
+RELAY_TUNNEL_RESTARTED = "tunnel_restarted"
+NOT_SENT_REASONS: frozenset[str] = frozenset(
+    {
+        RELAY_CLOSED,
+        RELAY_TUNNEL_RESTART_FAILED,
+        RELAY_TUNNEL_RESTART_BACKOFF,
+        RELAY_TUNNEL_DOWN,
+        RELAY_TUNNEL_RESTARTED,
+    }
+)
+TUNNEL_BACKOFF_MAX_WAIT_S = 60.0  # the longest the client's restart backoff window can be
+RELAY_BLIP_RETRY_S = 2.0  # a pause before the one retry of a transport blip
 
 _STOP_BY_CLASS: tuple[tuple[type[BaseException], str], ...] = (
     (NoSession, "breeze_session_missing"),
@@ -352,6 +422,11 @@ _STOP_BY_CLASS: tuple[tuple[type[BaseException], str], ...] = (
     (RelayProtocolError, "relay_protocol_error"),
     (TunnelError, "relay_tunnel_error"),
 )
+
+
+def refused_before_send(exc: BaseException) -> bool:
+    """True when the client refused the call without sending anything, so no budget was spent."""
+    return isinstance(exc, RelayUnavailable) and exc.reason in NOT_SENT_REASONS
 
 
 def classify_gateway_error(exc: BaseException) -> tuple[GatewayAction, str, float]:
@@ -377,7 +452,18 @@ def classify_gateway_error(exc: BaseException) -> tuple[GatewayAction, str, floa
     if isinstance(exc, UpstreamTimeout):
         return ("retry_once", "upstream_timeout", 0.0)
     if isinstance(exc, RelayUnavailable):
-        return ("retry_once", "relay_unavailable", 0.0)
+        reason = exc.reason
+        if reason == RELAY_CLOSED:
+            return ("stop", "relay_closed", 0.0)
+        if reason == RELAY_TUNNEL_RESTART_FAILED:
+            return ("stop", "relay_tunnel_restart_failed", 0.0)
+        if reason == RELAY_TUNNEL_DOWN:
+            return ("stop", "relay_tunnel_down", 0.0)
+        if reason == RELAY_TUNNEL_RESTART_BACKOFF:
+            return ("retry_then_stop", "relay_tunnel_restart_backoff", TUNNEL_BACKOFF_MAX_WAIT_S)
+        if reason in (RELAY_TUNNEL_RESTARTED, "timeout", "connect_error"):
+            return ("retry_then_stop", "relay_unavailable", RELAY_BLIP_RETRY_S)
+        return ("stop", "relay_unavailable_unknown", 0.0)
     for cls, code in _STOP_BY_CLASS:
         if isinstance(exc, cls):
             return ("stop", code, 0.0)

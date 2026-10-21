@@ -222,7 +222,10 @@ class FakeRelay:
         return httpx.Response(200, headers=self.headers(), content=json.dumps({"contract": CONTRACT, **payload}).encode())
 
     def bars_ok(self, params: dict[str, str], body: bytes, **override: str) -> httpx.Response:
-        empty = json.loads(body)["Success"] == []
+        try:
+            empty = json.loads(body)["Success"] == []
+        except (ValueError, KeyError, TypeError):  # a malformed body, served on purpose by a test
+            empty = False
         headers = {
             **self.headers(),
             "X-Growin-Upstream-Sha256": sha(body), "X-Growin-Upstream-Fetched-At": self.fetched_at,
@@ -396,6 +399,12 @@ def test_security_master_payload_becomes_a_source_descriptor(relay):
     assert descriptor.source == "breeze_relay"
 
 
+ECHO = {
+    "exch_code": "NSE", "from_date": "2021-09-28T00:00:00.000Z", "to_date": "2024-04-03T23:59:59.000Z",
+    "interval": "1day", "product_type": "cash", "stock_code": "RELIND",
+}
+
+
 def good(relay=None) -> UpstreamPayload:
     return bars_payload(relay or FakeRelay())
 
@@ -470,11 +479,56 @@ def test_other_contract_version_is_a_contract_mismatch():
                               "to_date": "2024-04-03T23:59:59.000Z", "interval": "1day", "product_type": "cash"}},
         {"upstream_request": {"stock_code": "RELIND", "from_date": "2021-09-28T00:00:00.000Z",
                               "to_date": "2024-04-03T23:59:59.000Z", "interval": "1week", "product_type": "cash"}},
+    ] + [
+        {"upstream_request": {**ECHO, **change}}
+        for change in (
+            {"from_date": "2021-09-28NOT_A_TIMESTAMP"},
+            {"to_date": "2024-04-03NOT_A_TIMESTAMP"},
+            {"from_date": "2021-09-28"},
+            {"from_date": "2021-09-28T00:00:00Z"},
+            {"from_date": "2021-09-28T09:15:00.000Z"},
+            {"to_date": "2024-04-03T00:00:00.000Z"},
+            {"from_date": "2021-02-30T00:00:00.000Z"},
+            {"from_date": "2021-09-27T00:00:00.000Z"},  # widened a day: the VM pads 0
+            {"to_date": "2024-04-04T23:59:59.000Z"},
+            {"from_date": "2021-09-29T00:00:00.000Z"},
+            {"exch_code": "BSE"},
+            {"exch_code": "nse"},
+            {"product_type": "futures"},
+            {"product_type": "options"},
+            {"interval": "1minute"},
+            {"expiry_date": "2024-04-25T06:00:00.000Z"},
+            {"right": "call"},
+            {"strike_price": "100"},
+            {"exchange_code": "NSE"},  # both exchange parameter names at once
+            {"stock_code": "RELIND ", },
+        )
+    ] + [
+        {"upstream_request": {key: value for key, value in ECHO.items() if key != missing}}
+        for missing in ("exch_code", "from_date", "to_date", "interval", "product_type", "stock_code")
+    ] + [
+        {"upstream_request": {**{k: v for k, v in ECHO.items() if k != "exch_code"}, "exchange_code": "BSE"}},
     ],
     ids=lambda change: next(iter(change)) + "-" + str(abs(hash(str(change))) % 1000),
 )
 def test_every_other_defect_is_a_response_invalid(change):
     assert code_of(dataclasses.replace(good(), **change)) == "relay_response_invalid"
+
+
+def test_both_documented_exchange_parameter_names_pass():
+    echo = {k: v for k, v in ECHO.items() if k != "exch_code"}
+    check(dataclasses.replace(good(), upstream_request={**echo, "exchange_code": "NSE"}))
+    check(dataclasses.replace(good(), upstream_request=ECHO))
+
+
+def test_the_upstream_request_rules_match_the_vm_contract():
+    from gateway_vm import breeze_client as vm_client
+
+    assert rc.BARS_FROM_PAD_DAYS == vm.BARS_FROM_PAD_DAYS and rc.BARS_TO_PAD_DAYS == vm.BARS_TO_PAD_DAYS
+    assert rc.UPSTREAM_EXCHANGE_KEYS == vm_client.V2_EXCHANGE_PARAM_NAMES
+    assert rc.INTERVAL_DAILY == vm_client.V2_DAILY_INTERVAL
+    # the header the real VM builds is the header the fake relay serves, so the rule accepts the real thing
+    assert json.loads(upstream_request_header({"stock_code": "RELIND", "from": "2021-09-28", "to": "2024-04-03"})) == ECHO
 
 
 def test_request_echo_must_match_the_request_the_caller_sent():
@@ -483,6 +537,62 @@ def test_request_echo_must_match_the_request_the_caller_sent():
     wrong_stock = {"stock_code": "NIFBEE", "from": "2021-09-28", "to": "2024-04-03", "exchange": "NSE"}
     assert code_of(payload, expected_query=wrong_window) == "relay_response_invalid"
     assert code_of(payload, expected_query=wrong_stock) == "relay_response_invalid"
+
+
+def envelope_payload(relay, body: bytes, **override: str) -> UpstreamPayload:
+    relay.bars_script = lambda index, params: relay.bars_ok(params, body, **override)
+    return relay.client().daily_bars("RELIND", date(2021, 9, 28), date(2024, 4, 3))
+
+
+def envelope_code(relay, body: bytes, **override: str) -> str | None:
+    payload = envelope_payload(relay, body, **override)
+    try:
+        rc.check_bars_envelope(payload)
+    except PilotDataError as exc:
+        return exc.code
+    return None
+
+
+ROW = kit.breeze_row("RELIND", "2024-01-02 00:00:00", "1", "2", "0.5", "1.5")
+
+
+def test_a_status_500_envelope_is_an_upstream_error_even_with_an_empty_header_and_list(relay):
+    # HTTP 200, Status 500, Success [] and X-Growin-Empty: true: the shape that reads as "no data" if unchecked
+    body = kit.breeze_v2_json([], status=500, error="Something went wrong")
+    assert envelope_payload(relay, body).empty is True
+    assert envelope_code(relay, body) == "breeze_upstream_error"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        kit.breeze_v2_json([ROW], status=500, error=None),
+        kit.breeze_v2_json([ROW], status=200, error="Something went wrong"),
+        kit.breeze_v2_json([ROW], status=200, error=""),
+        kit.breeze_v2_json([ROW], status="200", error=None),
+        kit.breeze_v2_json([], status=0, error=None),
+    ],
+)
+def test_any_non_200_status_or_error_text_is_an_upstream_error(relay, body):
+    assert envelope_code(relay, body) == "breeze_upstream_error"
+
+
+def test_good_and_empty_envelopes_pass_the_check(relay):
+    assert envelope_code(relay, kit.breeze_v2_json([ROW])) is None
+    assert envelope_code(relay, kit.breeze_v2_json([])) is None
+
+
+def test_the_empty_header_must_agree_with_the_body(relay):
+    assert envelope_code(relay, kit.breeze_v2_json([ROW]), **{"X-Growin-Empty": "true"}) == "relay_response_invalid"
+    assert envelope_code(relay, kit.breeze_v2_json([]), **{"X-Growin-Empty": "false"}) == "relay_response_invalid"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [b"not json", b"[]", b'{"Success": [], "Status": 200}', b'{"Success": {}, "Status": 200, "Error": null}'],
+)
+def test_a_malformed_envelope_is_a_schema_mismatch(relay, body):
+    assert envelope_code(relay, body, **{"X-Growin-Empty": "false"}) == "breeze_schema_mismatch"
 
 
 def test_security_master_payload_must_have_an_empty_query_and_the_master_api(relay):
@@ -625,7 +735,16 @@ POLICY = [
     (make(UpstreamError), ("stop", "upstream_unknown", 0.0)),
     (make(UpstreamTimeout, reason="upstream_timeout"), ("retry_once", "upstream_timeout", 0.0)),
     (make(UpstreamTimeout, reason="upstream_unreachable"), ("retry_once", "upstream_timeout", 0.0)),
-    (make(RelayUnavailable, reason="timeout"), ("retry_once", "relay_unavailable", 0.0)),
+    (make(RelayUnavailable, reason="timeout"), ("retry_then_stop", "relay_unavailable", 2.0)),
+    (make(RelayUnavailable, reason="connect_error"), ("retry_then_stop", "relay_unavailable", 2.0)),
+    (make(RelayUnavailable, reason="tunnel_restarted"), ("retry_then_stop", "relay_unavailable", 2.0)),
+    (make(RelayUnavailable, reason="tunnel_restart_backoff"),
+     ("retry_then_stop", "relay_tunnel_restart_backoff", 60.0)),
+    (make(RelayUnavailable, reason="closed"), ("stop", "relay_closed", 0.0)),
+    (make(RelayUnavailable, reason="tunnel_restart_failed"), ("stop", "relay_tunnel_restart_failed", 0.0)),
+    (make(RelayUnavailable, reason="tunnel_down"), ("stop", "relay_tunnel_down", 0.0)),
+    (make(RelayUnavailable, reason="something_new"), ("stop", "relay_unavailable_unknown", 0.0)),
+    (make(RelayUnavailable), ("stop", "relay_unavailable_unknown", 0.0)),
     (make(Unauthorized), ("stop", "relay_unauthorized", 0.0)),
     (make(BudgetUnavailable, reason="counter_unreadable"), ("stop", "relay_budget_unavailable", 0.0)),
     (make(RelayValidationError), ("stop", "relay_validation", 0.0)),
@@ -664,7 +783,7 @@ def test_every_server_error_class_is_covered_by_the_policy_test():
 def test_every_relay_class_ends_in_a_stop_retry_empty_or_fail_window_action():
     for exc, _ in POLICY:
         action, code, sleep = rc.classify_gateway_error(exc)
-        assert action in ("stop", "retry_once", "empty", "fail_window")
+        assert action in ("stop", "retry_once", "retry_then_stop", "empty", "fail_window")
         assert code and sleep >= 0
 
 
@@ -694,11 +813,31 @@ def test_errors_from_the_real_client_classify_per_the_table(relay, response, exp
     assert rc.classify_gateway_error(info.value) == expected
 
 
-def test_connection_failure_through_the_real_client_is_retry_once(relay):
+def test_connection_failure_through_the_real_client_is_retry_then_stop(relay):
     relay.bars_script = lambda index, params: httpx.ConnectError("boom")
     with pytest.raises(Exception) as info:
         relay.client().daily_bars("RELIND", date(2026, 1, 1), date(2026, 2, 1))
-    assert rc.classify_gateway_error(info.value) == ("retry_once", "relay_unavailable", 0.0)
+    assert rc.classify_gateway_error(info.value) == ("retry_then_stop", "relay_unavailable", 2.0)
+    assert not rc.refused_before_send(info.value)  # a connect error may have reached the relay: it counts
+
+
+def test_a_closed_client_refuses_before_sending_and_stops(relay):
+    client = relay.client()
+    client.close()
+    with pytest.raises(Exception) as info:
+        client.daily_bars("RELIND", date(2026, 1, 1), date(2026, 2, 1))
+    assert rc.classify_gateway_error(info.value) == ("stop", "relay_closed", 0.0)
+    assert rc.refused_before_send(info.value) and relay.bars_requests == []
+
+
+@pytest.mark.parametrize(
+    "reason,sent",
+    [("closed", False), ("tunnel_restart_failed", False), ("tunnel_restart_backoff", False), ("tunnel_down", False),
+     ("tunnel_restarted", False), ("timeout", True), ("connect_error", True), ("something_new", True)],
+)
+def test_only_refused_before_send_reasons_spend_no_budget(reason, sent):
+    assert rc.refused_before_send(make(RelayUnavailable, reason=reason)) is not sent
+    assert not rc.refused_before_send(ValueError("x")) and not rc.refused_before_send(make(UpstreamTimeout))
 
 
 def test_header_and_hash_tampering_through_the_real_client_stops(relay):
