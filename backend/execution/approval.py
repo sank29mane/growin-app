@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable, Optional, Protocol
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
@@ -70,6 +70,36 @@ class ControlChallenge:
     expires_at_epoch: int
 
 
+@dataclass(frozen=True)
+class RelayMint:
+    """One VM-minted order challenge that has passed the Mac's own checks (63-05, P-20)."""
+
+    challenge_id: str
+    signed_payload: bytes
+    issued_at_epoch: int
+    expires_at_epoch: int
+    intent_sha256: str
+
+
+class RelayChallengeRefused(ApprovalConflict):
+    """A SHADOW challenge could not be issued. ``reason_code`` is a short closed code.
+
+    The VM's O6 name, or a Mac-side word such as ``mint_mismatch`` or ``quote_unavailable``.
+    ``intent_sha256`` is set when the Mac had built the intent the VM was asked about.
+    """
+
+    def __init__(self, reason_code: str, intent_sha256: Optional[str] = None) -> None:
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+        self.intent_sha256 = intent_sha256
+
+
+class RelayMinter(Protocol):
+    """Builds the order intent, asks the VM to mint it and checks the bytes that come back."""
+
+    def mint(self, *, order: Any, admission: Any, key_id: str) -> RelayMint: ...
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -77,9 +107,16 @@ def _utc_now() -> datetime:
 class ApprovalService:
     """Create and verify short-lived approvals using one workspace-bound key."""
 
-    def __init__(self, ledger: ExecutionLedger, *, clock: Clock = _utc_now) -> None:
+    def __init__(
+        self,
+        ledger: ExecutionLedger,
+        *,
+        clock: Clock = _utc_now,
+        relay_minter: Optional[RelayMinter] = None,
+    ) -> None:
         self._ledger = ledger
         self._clock = clock
+        self._relay_minter = relay_minter
         self.ensure_enrollment_token_file()
 
     @property
@@ -218,6 +255,8 @@ class ApprovalService:
         if key is None:
             raise ApprovalConflict("approval signer is not enrolled")
 
+        if str(intent.get("mode")) == "SHADOW":
+            return self._create_relay_challenge(order, admission, key.key_id)
         issued_at = _epoch(self._clock())
         expires_at = issued_at + ttl_seconds
         challenge_id = str(uuid.uuid4())
@@ -267,6 +306,70 @@ class ApprovalService:
             signed_payload=stored.signed_payload,
             issued_at_epoch=stored.issued_at_epoch,
             expires_at_epoch=stored.expires_at_epoch,
+        )
+
+    def _create_relay_challenge(self, order: Any, admission: Any, key_id: str) -> ApprovalChallenge:
+        """A SHADOW order is signed over the bytes the VM minted, never over bytes the Mac built.
+
+        The minter has already compared the embedded intent, ``limits_sha256`` and ``key_id``
+        with the Mac's own and refused on any difference. The ledger stores the VM's bytes as
+        the local challenge, so the signature the Mac verifies and claims is the same one the
+        dispatcher later sends to ``/v1/orders/authorize``.
+        """
+
+        minter = self._relay_minter
+        if minter is None:
+            raise RelayChallengeRefused("relay_unavailable")
+        try:
+            minted = minter.mint(order=order, admission=admission, key_id=key_id)
+        except RelayChallengeRefused as refused:
+            if refused.intent_sha256 is not None:
+                self._record_relay_event(
+                    order.proposal_id,
+                    "RELAY_CHALLENGED",
+                    refused.intent_sha256,
+                    "REFUSED",
+                    {"reason_code": refused.reason_code},
+                )
+            raise
+        stored = self._ledger.store_approval_challenge(
+            challenge_id=minted.challenge_id,
+            proposal_id=order.proposal_id,
+            key_id=key_id,
+            intent_hash=order.intent_hash,
+            signed_payload=minted.signed_payload,
+            issued_at_epoch=minted.issued_at_epoch,
+            expires_at_epoch=minted.expires_at_epoch,
+        )
+        self._record_relay_event(
+            order.proposal_id,
+            "RELAY_CHALLENGED",
+            minted.intent_sha256,
+            "CHALLENGED",
+            {"challenge_id": minted.challenge_id},
+        )
+        return ApprovalChallenge(
+            challenge_id=stored.challenge_id,
+            proposal_id=stored.proposal_id,
+            key_id=stored.key_id,
+            intent_hash=stored.intent_hash,
+            signed_payload=stored.signed_payload,
+            issued_at_epoch=stored.issued_at_epoch,
+            expires_at_epoch=stored.expires_at_epoch,
+        )
+
+    def _record_relay_event(
+        self,
+        proposal_id: str,
+        event_type: str,
+        intent_sha256: str,
+        decision: str,
+        extra: dict,
+    ) -> None:
+        self._ledger.record_audit_event(
+            proposal_id,
+            event_type,
+            {"intent_sha256": intent_sha256, "decision": decision, **extra},
         )
 
     def approve_signed(
@@ -440,4 +543,7 @@ __all__ = [
     "ApprovalVerificationError",
     "ControlChallenge",
     "EnrollmentError",
+    "RelayChallengeRefused",
+    "RelayMint",
+    "RelayMinter",
 ]

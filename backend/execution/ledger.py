@@ -746,6 +746,26 @@ _AUDIT_EVENT_TYPES = frozenset(
         "CANCEL_RESPONSE",
         "RECONCILIATION_ESCALATED",
         "RECONCILIATION_ANOMALY",
+        # 63-05: the Mac's side of the VM's order audit. Each carries the intent_sha256 and the
+        # decision, so the operator can match it to a ``GET /v1/orders/audit`` entry.
+        "RELAY_CHALLENGED",
+        "RELAY_AUTHORIZE_RESULT",
+    }
+)
+# The purpose of a VM-minted order challenge (growin-orders/1, O4). The Mac verifies and claims
+# these bytes exactly as the VM minted them; the Mac never builds them.
+RELAY_ORDER_PURPOSE = "growin.relay.order"
+_RELAY_PAYLOAD_KEYS = frozenset(
+    {
+        "version",
+        "purpose",
+        "challenge_id",
+        "nonce",
+        "issued_at",
+        "expires_at",
+        "key_id",
+        "limits_sha256",
+        "intent",
     }
 )
 # States in which an order may already be at the broker (Phase 66, D-16).
@@ -757,6 +777,44 @@ EXIT_BATCH_EVENT = "EXIT_BATCH_REGISTERED"
 EXIT_BATCH_REASONS = frozenset({"halve", "flatten", "stop"})
 _BATCH_ID_PATTERN = re.compile(r"^[a-z0-9-]{8,64}$")
 SELL_EXCEEDS_HOLDING = "sell_exceeds_holding"
+
+
+def _relay_intent_matches(
+    embedded: Any, intent: Mapping[str, Any], proposal_id: str, admission: Any
+) -> bool:
+    """True when the VM-minted intent is the order the Mac admitted, field by field.
+
+    The Mac already compared the whole embedded intent when it stored the challenge
+    (``check_minted_bytes``). This is the claim-time check against the durable order and the
+    admission, so a challenge row cannot be claimed for any other order.
+    """
+
+    if not isinstance(embedded, Mapping):
+        return False
+    try:
+        limit = Decimal(str(embedded.get("limit_price")))
+        stored_limit = Decimal(str(intent.get("limit_price")))
+        quantity = embedded.get("quantity")
+        symbol = str(intent.get("ticker", "")).rsplit(":", 1)[-1]
+        return (
+            embedded.get("proposal_id") == proposal_id
+            and embedded.get("workspace") == "india"
+            and embedded.get("broker") == "icici-breeze"
+            and embedded.get("mode") == "SHADOW"
+            and embedded.get("exchange") == "NSE"
+            and embedded.get("product") == "cash"
+            and embedded.get("order_type") == "limit"
+            and embedded.get("validity") == "day"
+            and str(embedded.get("side", "")).upper() == str(intent.get("side")).upper()
+            and embedded.get("stock_code") == symbol
+            and isinstance(quantity, int)
+            and not isinstance(quantity, bool)
+            and Decimal(quantity) == Decimal(str(admission["final_quantity"]))
+            and Decimal(quantity) == Decimal(str(intent.get("quantity")))
+            and limit == stored_limit
+        )
+    except (InvalidOperation, ValueError, TypeError):
+        return False
 
 
 def _install_quantity_reservations_table(connection: sqlite3.Connection) -> None:
@@ -2495,7 +2553,11 @@ class ExecutionLedger:
                 signed_payload = json.loads(bytes(challenge["signed_payload"]))
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise ApprovalConflict("approval payload is not canonical JSON") from exc
-            expected_payload = {
+            relay_order = (
+                isinstance(signed_payload, Mapping)
+                and signed_payload.get("purpose") == RELAY_ORDER_PURPOSE
+            )
+            expected_payload = {} if relay_order else {
                 "version": 1,
                 "purpose": "growin.execution.dispatch",
                 "challenge_id": challenge_id,
@@ -2522,6 +2584,17 @@ class ExecutionLedger:
                 for field, value in expected_payload.items()
             ):
                 raise ApprovalConflict("approval payload does not match stored intent")
+            if relay_order and (
+                self.venue_binding is None
+                or str(intent.get("mode")) != "SHADOW"
+                or set(signed_payload) != _RELAY_PAYLOAD_KEYS
+                or signed_payload.get("version") != 1
+                or signed_payload.get("challenge_id") != challenge_id
+                or signed_payload.get("key_id") != key_id
+                or signed_payload.get("issued_at") != int(challenge["issued_at_epoch"])
+                or signed_payload.get("expires_at") != int(challenge["expires_at_epoch"])
+            ):
+                raise ApprovalConflict("relay order payload does not match the challenge")
             if not isinstance(signed_payload.get("nonce"), str) or not signed_payload[
                 "nonce"
             ]:
@@ -2550,7 +2623,12 @@ class ExecutionLedger:
                 raise ApprovalConflict("admitted evidence is required before signed claim")
             if str(admission["intent_hash"]) != stored_intent_hash:
                 raise ApprovalConflict("signed claim admission does not match the immutable intent")
-            if (
+            if relay_order:
+                if not _relay_intent_matches(
+                    signed_payload.get("intent"), intent, proposal_id, admission
+                ):
+                    raise ApprovalConflict("relay order intent does not match the admitted order")
+            elif (
                 str(signed_payload.get("admitted_quantity", "")) != str(admission["final_quantity"])
                 or str(signed_payload.get("currency", "")) != str(admission["currency"])
                 or str(signed_payload.get("price", "")) != str(admission["price"])
