@@ -556,15 +556,26 @@ class SessionManager:
                 },
             }
 
-    def egress_failure(self) -> RelayFailure:
-        """The EGRESS_MISMATCH error that matches the last egress result (reason included)."""
-        with self._lock:
-            return self._egress_unusable_failure_locked()
+    def require_egress(self, presented_token: str | None) -> None:
+        """Gate a route that needs good egress evidence but no Breeze session.
 
-    def egress_fresh(self) -> bool:
+        Same pattern as require_active: under the lock the bearer (when a session
+        is bound) must be current and the last egress result must be ok and
+        fresh. If it is not, one check runs outside the lock and all of it is
+        repeated, so a result that aged out or failed during the refresh, a
+        failed concurrent check or a bearer replaced meanwhile never passes.
+        """
+        digest = _digest(presented_token)
+        missing = presented_token is None
         with self._lock:
+            self._tick_locked()
+            self._authorize_digest_locked(digest, missing)
             stale = self._egress_stale_locked()
-        if stale:
-            self._refresh_egress()
+        if not stale:
+            return
+        self._refresh_egress()
         with self._lock:
-            return self._last_egress is not None and self._last_egress.ok
+            self._tick_locked()
+            self._authorize_digest_locked(digest, missing)
+            if self._egress_stale_locked():
+                raise self._egress_unusable_failure_locked()

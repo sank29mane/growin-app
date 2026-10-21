@@ -431,16 +431,17 @@ def test_security_master_egress_unreachable_is_refused_without_a_directlink_requ
 def test_security_master_digest_is_rechecked_after_an_egress_refresh(rs: Stack):
     """A bearer replaced while the egress check ran must not read the file."""
     token = rs.login()
-    real = rs.session.egress_fresh
+    rs.clock.advance(301)  # stale: the request refreshes
+    real = rs.session._refresh_egress
 
     def refresh_then_relogin():
-        rs.session.egress_fresh = real  # type: ignore[method-assign]
+        rs.session._refresh_egress = real  # type: ignore[method-assign]
         fresh = real()
         armed = rs.arm(token).json()  # a new login binds another bearer mid-request
         assert rs.complete(armed["attempt_id"], armed["relay_token"]).status_code == 200
         return fresh
 
-    rs.session.egress_fresh = refresh_then_relogin  # type: ignore[method-assign]
+    rs.session._refresh_egress = refresh_then_relogin  # type: ignore[method-assign]
     resp = get(rs, MASTER, token)
     assert resp.status_code == 401 and code_of(resp) == "UNAUTHORIZED"
     assert rs.transport.master_requests() == []
@@ -639,3 +640,116 @@ def test_nothing_secret_leaks_from_the_new_routes(rs: Stack):
     blob = rs.sink.getvalue()
     for secret in (APP_KEY, SECRET_KEY, BREEZE_TOKEN, token):
         assert secret not in blob
+
+
+# ------------------------------- security-master egress evidence (PR #582 round 2)
+
+
+def echo_requests(stack: Stack) -> list:
+    return [r for r in stack.transport.requests if urlsplit(r[1]).hostname == "api.ipify.org"]
+
+
+def test_security_master_refuses_egress_that_aged_out_during_its_own_refresh(rs: Stack):
+    """Codex P2 repro A: the refresh recorded ok, then 301 s passed before it returned."""
+    real = rs.events.emit
+
+    def age_after_record(name, **fields):
+        if name == "egress_check":  # runs right after the result was recorded
+            rs.clock.advance(301)
+        return real(name, **fields)
+
+    rs.events.emit = age_after_record  # type: ignore[method-assign]
+    resp = get(rs, MASTER)
+    assert resp.status_code == 503 and code_of(resp) == "EGRESS_MISMATCH"
+    assert resp.json()["error"]["reason"] == "egress_unavailable"
+    assert rs.transport.master_requests() == []
+
+
+def test_security_master_refuses_when_a_concurrent_check_failed_after_its_own_refresh(rs: Stack):
+    """Codex P2 repro B: a failed check landed after this request's refresh and before its download."""
+    real = rs.budget.charge
+    hit: list[bool] = []
+
+    def charge_then_fail_a_concurrent_check(kind: str) -> None:
+        real(kind)
+        if not hit:
+            hit.append(True)
+            rs.transport.echo_ip = "203.0.113.99"
+            rs.session._refresh_egress()  # another request's failing check, recorded now
+
+    rs.budget.charge = charge_then_fail_a_concurrent_check  # type: ignore[method-assign]
+    resp = get(rs, MASTER)
+    assert resp.status_code == 503 and code_of(resp) == "EGRESS_MISMATCH"
+    assert rs.session.snapshot(refresh_egress_if_stale=False)["egress"]["ok"] is False
+    assert rs.transport.master_requests() == []
+
+
+def test_security_master_still_works_with_no_session_and_no_token_on_fresh_egress(rs: Stack):
+    assert get(rs, MASTER).status_code == 200
+    assert len(rs.transport.master_requests()) == 1
+
+
+def test_security_master_failing_egress_calls_are_bounded_by_the_hourly_cap(rs: Stack):
+    """Opus: the cap was charged after egress, so every failing call cost an egress request."""
+    rs.transport.echo_ip = "203.0.113.99"
+    statuses = []
+    for _ in range(10):
+        statuses.append(get(rs, MASTER).status_code)
+        rs.clock.advance(31)  # past the checker's own failing-recheck window
+    assert statuses == [503] * 6 + [429] * 4
+    assert len(echo_requests(rs)) == 6  # one per slot, never one per call
+
+
+def test_security_master_capped_call_makes_no_egress_request(rs: Stack):
+    for _ in range(6):
+        assert get(rs, MASTER).status_code == 200
+        rs.clock.advance(31)
+    rs.transport.echo_ip = "203.0.113.99"
+    rs.clock.advance(400)  # the cached ok result is stale: only the cap stands in the way
+    before = len(rs.transport.requests)
+    resp = get(rs, MASTER)
+    assert resp.status_code == 429 and resp.json()["error"]["reason"] == "security_master_hourly"
+    assert len(rs.transport.requests) == before
+
+
+# ---------------------------------------- directory fsync (PR #582 round 2)
+
+
+def test_quotes_refuse_and_call_nothing_upstream_when_the_directory_fsync_fails(rs: Stack, tmp_path, monkeypatch):
+    import errno
+    import os
+    import stat as stat_mod
+
+    token = rs.login()
+    real_fsync = os.fsync
+
+    def fsync(fd):
+        if stat_mod.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.EIO, "injected")
+        return real_fsync(fd)
+
+    monkeypatch.setattr("gateway_vm.counter_store.os.fsync", fsync)
+    resp = get(rs, QUOTES_QUERY, token)
+    assert resp.status_code == 503 and code_of(resp) == "BUDGET_UNAVAILABLE"
+    assert rs.transport.quote_requests() == []
+
+
+def test_directory_fsync_failure_is_counter_unreadable_with_a_save_failed_reason(tmp_path, monkeypatch):
+    import errno
+    import os
+    import stat as stat_mod
+    from datetime import date
+
+    from gateway_vm.counter_store import CounterUnreadable
+
+    real_fsync = os.fsync
+
+    def fsync(fd):
+        if stat_mod.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.EIO, "injected")
+        return real_fsync(fd)
+
+    monkeypatch.setattr("gateway_vm.counter_store.os.fsync", fsync)
+    with pytest.raises(CounterUnreadable) as err:
+        FileCounterStore(tmp_path).save(date(2026, 1, 5), 1)
+    assert err.value.reason == "save_failed"

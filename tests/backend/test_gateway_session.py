@@ -379,6 +379,7 @@ def test_egress_mismatch_reasons_are_distinguished():
     stack.transport.echo_ip = TransportError("timeout", "api.ipify.org")
     armed = stack.arm().json()
     assert reason_of(stack.complete(armed["attempt_id"], armed["relay_token"])) == "egress_unavailable"
+    stack.clock.advance(31)  # past the checker's failing-recheck window
     stack.transport.echo_ip = OTHER_IP
     armed = stack.arm().json()
     assert reason_of(stack.complete(armed["attempt_id"], armed["relay_token"])) == "egress_mismatch"
@@ -405,15 +406,17 @@ def test_stale_egress_is_rechecked_and_a_mismatch_suspends_the_session():
     assert before > 0
 
 
-def test_egress_fresh_refreshes_when_older_than_the_limit():
+def test_require_egress_refreshes_when_older_than_the_limit():
     stack = Stack()
-    assert stack.session.egress_fresh() is True
+    stack.session.require_egress(None)
     n = len(stack.transport.requests)
-    assert stack.session.egress_fresh() is True
+    stack.session.require_egress(None)
     assert len(stack.transport.requests) == n
     stack.clock.advance(301)
     stack.transport.metadata_ip = OTHER_IP
-    assert stack.session.egress_fresh() is False
+    with pytest.raises(RelayFailure) as err:
+        stack.session.require_egress(None)
+    assert err.value.code == "EGRESS_MISMATCH"
 
 
 # -------------------------------------------------------------- identity
@@ -1090,7 +1093,8 @@ def test_a_failed_egress_check_with_no_session_still_refuses_an_exchange_in_flig
 
     stack.clock.advance(301)
     stack.transport.echo_ip = OTHER_IP
-    assert stack.session.egress_fresh() is False  # a concurrent check fails; no session to drop
+    with pytest.raises(RelayFailure):  # a concurrent check fails; no session to drop
+        stack.session.require_egress(None)
     assert stack.session.state is SessionState.NONE
     release.set()
 

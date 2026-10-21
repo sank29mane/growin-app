@@ -51,7 +51,7 @@ from gateway_vm.budget import Budget  # noqa: E402
 from gateway_vm.config import load_relay_config  # noqa: E402
 from gateway_vm.counter_store import COUNTER_FILE, CounterUnreadable, FileCounterStore  # noqa: E402
 from gateway_vm.events import EventLog  # noqa: E402
-from gateway_vm.secrets import (  # noqa: E402
+from gateway_vm.secret_source import (  # noqa: E402
     SecretManagerSource,
     SecretsUnavailable,
     load_credentials,
@@ -1285,7 +1285,7 @@ def test_handlers_sync_only_the_transports_import_a_network_library():
             continue
         checked.append(path.name)
         assert network_imports(path.read_text()) == [], path.name
-    assert {"app.py", "session.py", "main.py", "secrets.py", "budget.py", "egress.py", "breeze_client.py"} <= set(checked)
+    assert {"app.py", "session.py", "main.py", "secret_source.py", "budget.py", "egress.py", "breeze_client.py"} <= set(checked)
 
 
 @pytest.mark.parametrize(
@@ -1304,3 +1304,18 @@ def test_handlers_sync_only_the_transports_import_a_network_library():
 )
 def test_handlers_sync_scanner_flags_planted_network_imports(source, expected):
     assert network_imports(source) == expected
+
+
+def test_a_colon_separated_state_directory_is_refused_loudly_with_exit_3(tmp_path, capsys):
+    one, two = tmp_path / "a", tmp_path / "b"
+    one.mkdir()
+    two.mkdir()
+    code, runner, transport, _ = run_main(tmp_path, environ={"STATE_DIRECTORY": f"{one}:{two}"})
+    assert code == 3 and runner.servers == [] and transport.requests == []
+    events = stdout_events(capsys)
+    assert [(e["event"], e["result"], e["reason"]) for e in events] == [("service_start", "error", "config_invalid")]
+
+
+def test_the_secret_reader_module_does_not_shadow_the_stdlib_secrets_module():
+    assert not (PKG / "secrets.py").exists()
+    assert (PKG / "secret_source.py").is_file()

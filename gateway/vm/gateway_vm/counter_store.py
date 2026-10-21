@@ -26,7 +26,11 @@ _MAX_BYTES = 4096
 
 
 class CounterUnreadable(Exception):
-    """Absent state dir, unreadable, malformed or unwritable. No detail is kept."""
+    """Absent state dir, unreadable, malformed or unwritable. Only a fixed reason is kept."""
+
+    def __init__(self, reason: str = "counter_unreadable") -> None:
+        super().__init__()  # str() stays empty: nothing but the fixed reason is carried
+        self.reason = reason
 
 
 class CounterStore(Protocol):
@@ -140,12 +144,12 @@ class FileCounterStore:
                 os.unlink(tmp)
             except OSError:
                 pass  # a leftover temp file is harmless; the refusal below is what matters
-            raise CounterUnreadable from None
-        try:  # make the rename itself durable; best effort, the data is already replaced
+            raise CounterUnreadable("save_failed") from None
+        try:  # the rename must be durable before the count counts: refuse the call if it is not
             dir_fd = os.open(directory, os.O_RDONLY)
             try:
                 os.fsync(dir_fd)
             finally:
                 os.close(dir_fd)
         except OSError:
-            pass
+            raise CounterUnreadable("save_failed") from None

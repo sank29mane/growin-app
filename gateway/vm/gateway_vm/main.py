@@ -38,7 +38,7 @@ from .counter_store import CounterStore, FileCounterStore
 from .egress import EgressChecker
 from .events import EventLog
 from .pool import PooledTransport
-from .secrets import SecretManagerSource, SecretSource, SecretsUnavailable, load_credentials
+from .secret_source import SecretManagerSource, SecretSource, SecretsUnavailable, load_credentials
 from .session import SessionManager
 from .transport import Clock, SystemClock, Timeouts, Transport, TransportError
 
@@ -244,6 +244,8 @@ def main(
         return fail(EXIT_BAD_CONFIG, "config_invalid")
 
     state_dir = environ.get("STATE_DIRECTORY")
+    if state_dir and ":" in state_dir:  # systemd joins several StateDirectory= entries with ":"
+        return fail(EXIT_BAD_CONFIG, "config_invalid")
     store = FileCounterStore(Path(state_dir) if state_dir and os.path.isdir(state_dir) else None)
     if state_dir is None or not os.path.isdir(state_dir):
         events.emit("config_alarm", result="error", reason="counter_unreadable")

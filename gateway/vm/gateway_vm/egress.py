@@ -8,6 +8,7 @@ string.
 from __future__ import annotations
 
 import ipaddress
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -20,6 +21,7 @@ METADATA_URL = (
 _METADATA_TIMEOUTS = Timeouts(connect_s=2.0, read_s=3.0, total_s=3.0)
 _ECHO_TIMEOUTS = Timeouts(connect_s=5.0, read_s=6.0, total_s=6.0)
 _MAX_BYTES = 256
+FAILED_RECHECK_COOLDOWN_S = 30.0
 
 
 @dataclass(frozen=True)
@@ -31,13 +33,32 @@ class EgressResult:
 
 
 class EgressChecker:
+    """Two network fetches per check. A failing check is not repeated for a while.
+
+    After a failed result, calls inside `failed_recheck_cooldown_s` return that
+    same failed result without any request, so a broken echo service or an IP
+    mismatch cannot cost a probe per incoming request. Only a failure is ever
+    reused: a success is never cached here (the session decides how long one
+    stays fresh), so this cannot turn a failed or stale result into a pass.
+    """
+
     def __init__(
-        self, transport: Transport, *, expected_ip: str, echo_url: str, clock: Clock
+        self,
+        transport: Transport,
+        *,
+        expected_ip: str,
+        echo_url: str,
+        clock: Clock,
+        failed_recheck_cooldown_s: float = FAILED_RECHECK_COOLDOWN_S,
     ) -> None:
         self._transport = transport
         self._expected_ip = expected_ip
         self._echo_url = echo_url
         self._clock = clock
+        self._cooldown_s = failed_recheck_cooldown_s
+        self._lock = threading.Lock()
+        self._last_failed: EgressResult | None = None
+        self._last_failed_mono: float | None = None
 
     def _fetch_ip(self, url: str, headers: dict[str, str], timeouts: Timeouts):
         resp = self._transport.request(
@@ -49,6 +70,23 @@ class EgressChecker:
 
     def check(self) -> EgressResult:
         """Never raises: any fetch or parse failure gives ok=False."""
+        with self._lock:
+            cached, since = self._last_failed, self._last_failed_mono
+        if (
+            cached is not None
+            and since is not None
+            and 0 <= self._clock.monotonic() - since < self._cooldown_s
+        ):
+            return cached
+        result = self._check_now()
+        with self._lock:
+            if result.ok:
+                self._last_failed, self._last_failed_mono = None, None
+            else:
+                self._last_failed, self._last_failed_mono = result, self._clock.monotonic()
+        return result
+
+    def _check_now(self) -> EgressResult:
         try:
             expected = ipaddress.ip_address(str(self._expected_ip).strip())
         except Exception:

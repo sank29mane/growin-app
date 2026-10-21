@@ -600,11 +600,8 @@ def create_app(
         if security_master_url is None:  # create_app was built without the URL: fail closed
             events.emit("config_alarm", result="error", reason="config_invalid")
             raise RelayFailure("INTERNAL", reason="config_invalid")
-        fresh = session.egress_fresh()  # refreshes when stale; may suspend an active session
-        session.authorize(token)  # the bearer must still be the current one after the refresh
-        if not fresh:
-            raise session.egress_failure()
-        charge_budget(budget, events, "security_master")
+        charge_budget(budget, events, "security_master")  # the cap first: a refusal makes no egress request
+        session.require_egress(token)  # ok and fresh evidence, same bearer, under one lock hold
         try:
             raw = breeze.security_master_raw(
                 security_master_url,
