@@ -55,3 +55,16 @@ def test_get_mcp_servers_active_only(chat_manager):
 
     inactive_in_all = any(s["name"] == "Inactive Server" for s in all_servers)
     assert inactive_in_all
+
+
+def test_real_default_db_path_opens_in_a_clean_cwd(tmp_path, monkeypatch):
+    """ChatManager() with no argument must resolve and open its own default path.
+
+    The suite never patches that default, so a broken default would fail here.
+    """
+    monkeypatch.chdir(tmp_path)
+    manager = ChatManager()
+    try:
+        assert (tmp_path / manager.db_path).exists()
+    finally:
+        manager.close()

@@ -179,3 +179,19 @@ def test_changing_only_the_workspace_of_a_new_line_breaks_its_hash(audit_logger)
     line["workspace"] = "india"
 
     assert AuditEntry(**line).compute_hash() != line["hash"]
+
+
+def test_session_audit_log_is_private_to_this_process():
+    """conftest points AUDIT_LOG_PATH at a per-process temp file (xdist safety).
+
+    A shared file would interleave entries from several workers and break the hash chain.
+    """
+    from utils.audit_log import get_audit_logger
+
+    log_path = os.path.abspath(get_audit_logger().log_path)
+    assert os.path.abspath(os.environ["AUDIT_LOG_PATH"]) == log_path
+    assert os.path.basename(os.path.dirname(log_path)).startswith("growin-audit-")
+
+    get_audit_logger().log_event("XDIST_ISOLATION", "test", {}, workspace="unscoped")
+    get_audit_logger().log_event("XDIST_ISOLATION", "test", {}, workspace="unscoped")
+    assert get_audit_logger().verify_integrity()["status"] == "success"

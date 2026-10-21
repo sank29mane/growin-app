@@ -1,7 +1,9 @@
 import asyncio
 import importlib.util
 import os
+import shutil
 import sys
+import tempfile
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -65,23 +67,27 @@ async def cleanup_resources():
 
 @pytest.fixture(scope="session", autouse=True)
 def isolated_default_chat_db(tmp_path_factory):
-    """Point ChatManager's cwd-relative default ("growin.db") at a per-process temp file.
+    """Give the shared ``state`` a temp ChatManager so no worker opens ./growin.db.
 
-    app_context lazily builds ``ChatManager()`` with that default, so under pytest-xdist
-    every worker would otherwise open and write the same file in the working directory.
+    app_context lazily builds ``ChatManager()`` with its cwd-relative default, so under
+    pytest-xdist every worker would otherwise open and write the same file. The manager is
+    injected through the public setter; ChatManager's own default is left untouched so a
+    broken default path still fails here (see test_chat_manager_functional).
     """
     try:
+        from app_context import state
         from chat_manager import ChatManager
     except ImportError:
         yield
         return
-    original = ChatManager.__init__.__defaults__
-    db_path = str(tmp_path_factory.mktemp("chat_default") / "growin.db")
-    ChatManager.__init__.__defaults__ = (db_path,)
+    previous = state._chat_manager
+    manager = ChatManager(str(tmp_path_factory.mktemp("chat_default") / "growin.db"))
+    state.chat_manager = manager
     try:
         yield
     finally:
-        ChatManager.__init__.__defaults__ = original
+        state._chat_manager = previous
+        manager.close()
 
 
 @pytest.fixture(autouse=True)
@@ -231,6 +237,14 @@ def private_config_dir(tmp_path):
 
 
 def pytest_configure(config):
+    # The audit log is a hash chain; one file appended by several xdist workers breaks
+    # its links. get_audit_logger() reads this env var on first use, so set it here,
+    # before any test or import-time code can create the singleton. Every process
+    # (the xdist controller and each worker) gets its own file.
+    audit_dir = tempfile.mkdtemp(prefix="growin-audit-")
+    os.environ["AUDIT_LOG_PATH"] = os.path.join(audit_dir, "audit.log")
+    config.add_cleanup(lambda: shutil.rmtree(audit_dir, ignore_errors=True))
+
     config.addinivalue_line(
         "markers",
         "live_local: runs against a local model runtime named by environment variables; "
