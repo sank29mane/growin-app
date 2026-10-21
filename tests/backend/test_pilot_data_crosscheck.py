@@ -7,7 +7,7 @@ from decimal import Decimal
 import pytest
 
 from pilot_data.bhavcopy import ingest_pr_zip, ingest_udiff
-from pilot_data.breeze_bars import breeze_bars_for, ingest_breeze_response
+from pilot_data.breeze_bars import WindowAssessment, breeze_bars_for, ingest_breeze_response
 from pilot_data.core import PilotDataError, SourceDescriptor, standard_caveats
 from pilot_data.corporate_actions import derive_corporate_actions
 from pilot_data.crosscheck import accepted_bars, main, run_crosscheck
@@ -74,6 +74,7 @@ def load_breeze(store, code, rows, start=START, end=END, locator=None):
     return ingest_breeze_response(
         store, desc("breeze_relay", "breeze_v2_1day", locator or f"relay/{code}/{start}"), kit.breeze_v2_json(rows),
         stock_code=code, requested_from=start, requested_to=end, convention=CONVENTION,
+        assessment=WindowAssessment.complete_over(start, end),
     )
 
 

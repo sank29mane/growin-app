@@ -454,6 +454,10 @@ def classify_gateway_error(exc: BaseException) -> tuple[GatewayAction, str, floa
         if reason == RELAY_TUNNEL_DOWN:
             return ("stop", "relay_tunnel_down", 0.0)
         if reason == RELAY_TUNNEL_RESTART_BACKOFF:
+            # Defensive only. The client raises the backoff refusal only after an earlier restart failed in the
+            # same client, and that failure surfaces first as `tunnel_restart_failed`, which stops the run above.
+            # Each CLI process opens a fresh RelayClient, so inside one run this branch is effectively unreachable.
+            # It stays so a client that reports the backoff first still gets one bounded wait, one retry, then a stop.
             return ("retry_then_stop", "relay_tunnel_restart_backoff", TUNNEL_BACKOFF_MAX_WAIT_S)
         if reason in (RELAY_TUNNEL_RESTARTED, "timeout", "connect_error"):
             return ("retry_then_stop", "relay_unavailable", RELAY_BLIP_RETRY_S)

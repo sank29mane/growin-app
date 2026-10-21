@@ -14,8 +14,14 @@ has no transport code, takes no relay URL and never reads a credential. Rules it
   re-checks it against the calendar later without a Breeze call. A calendar-known window that still lacks
   sessions after one retry is stored as `stored_with_gaps` (gap dates recorded, terminal until
   `run --retry-flagged`); no row is ever invented for a gap day;
-* a `breeze_responses` coverage row is written only for a window judged complete: gap and unverified windows
-  keep their bars and provenance but claim no coverage, so a backtest never reads a bar-less session as covered;
+* a `breeze_responses` coverage row is written only for an answer judged complete, by one function
+  (`breeze_bars.write_breeze_coverage`), and spans only the range that judgement checked (the listing or depth
+  floor through the window end), never the range that was asked for. Gap and unverified windows keep their bars
+  and provenance but claim no coverage, so a backtest never reads a bar-less session as covered. The probe's
+  own answer goes through the same assessment; bars outside the window are never stored;
+* a window that keeps failing is not retried forever: after `MAX_WINDOW_ATTEMPTS` attempts across runs it is
+  `failed_exhausted` (terminal, flagged, re-queued by `run --retry-flagged`), and never-attempted windows run
+  before failed ones, so a few bad symbols can not starve the rest of the plan;
 * an upstream error envelope (Status other than 200, Error text) fails the window and is never read as empty;
 * a request that returns 1000 rows was capped upstream (the cap keeps the newest rows), so it is
   never stored as a complete window;
@@ -45,15 +51,16 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Literal
 
-from brokers.breeze_gateway import UpstreamPayload
+from brokers.breeze_gateway import RelayError, TunnelError, UpstreamPayload
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from .bhavcopy import quarantines_from_inputs
 from .breeze_bars import (
     BreezeParse,
-    ensure_breeze_tables,
+    WindowAssessment,
     ingest_breeze_response,
     parse_breeze_v2_daily,
+    write_breeze_coverage,
 )
 from .core import (
     BREEZE_RAW_UNVERIFIED_CAVEAT,
@@ -96,6 +103,7 @@ from .targets import TargetMember, TargetUniverseResult, latest_target_universe
 PACE_SECONDS = 1.2  # 50 calls a minute, below the relay's 80
 DAILY_CALL_CAP = 3500  # per IST day, below the relay's 4,500
 MAX_CONSECUTIVE_FAILURES = 3
+MAX_WINDOW_ATTEMPTS = 3  # attempts per window across runs before it is failed_exhausted
 PAD_DAYS = 3
 # Calendar days in one request. About 0.7 trading days per calendar day, so this stays far
 # below the 1000-row cap that Breeze applies (and that keeps the newest rows).
@@ -115,7 +123,9 @@ LISTING_DATE_FORMATS = (
 )
 
 Strategy = Literal["two_windows", "yearly"]
-WindowStatus = Literal["pending", "done", "empty_flagged", "failed", "stored_unverified", "stored_with_gaps"]
+WindowStatus = Literal[
+    "pending", "done", "empty_flagged", "failed", "failed_exhausted", "stored_unverified", "stored_with_gaps"
+]
 RunStatus = Literal[
     "complete",
     "complete_with_flags",
@@ -126,11 +136,11 @@ RunStatus = Literal[
     "stopped_consecutive_failures",
     "incomplete",
 ]
-# Terminal: a plain run never touches these again. `run --retry-flagged` re-queues empty_flagged and
-# stored_with_gaps (a new Breeze call); `verify` promotes stored_unverified (no Breeze call).
-FLAGGED_STATUSES = frozenset({"empty_flagged", "stored_unverified", "stored_with_gaps"})
+# Terminal: a plain run never touches these again. `run --retry-flagged` re-queues empty_flagged,
+# stored_with_gaps and failed_exhausted (a new Breeze call); `verify` promotes stored_unverified (no Breeze call).
+FLAGGED_STATUSES = frozenset({"empty_flagged", "stored_unverified", "stored_with_gaps", "failed_exhausted"})
 TERMINAL_STATUSES = frozenset({"done"}) | FLAGGED_STATUSES
-RETRY_FLAGGED_STATUSES = frozenset({"empty_flagged", "stored_with_gaps"})
+RETRY_FLAGGED_STATUSES = frozenset({"empty_flagged", "stored_with_gaps", "failed_exhausted"})
 _STOCK_CODE = re.compile(STOCK_CODE_RE)
 
 PROBE_DDL = (
@@ -535,11 +545,22 @@ def run_probe(
         check="breeze_probe",
     )
     if conclusive and not (truncated or depth_limited):
-        # A capped or depth-limited body would claim coverage of days it lost, so only a whole answer is ingested.
+        # A capped or depth-limited body is not ingested at all (it lost days, and the engine fetches them again).
+        # A whole answer goes through the same assessment as an engine window: its bars are always kept, and it
+        # claims coverage only if every expected session has a bar, over the range that was checked. One missing
+        # day still leaves the probe conclusive (>= 99 percent), but it must not cover the hole.
         descriptor = validate_payload(full, expected_api=API_DAILY_BARS, kind=KIND_DAILY_BARS)
+        convention = record.convention()
+        assessment = assess_window(
+            store,
+            parse_breeze_v2_daily(full.body, stock_code=PROBE_STOCK_CODE, convention=convention),
+            (window_start, window_end),
+            None,
+            _listing_date_from_master(store, PROBE_STOCK_CODE, today_ist),
+        )
         ingest_breeze_response(
             store, descriptor, full.body, stock_code=PROBE_STOCK_CODE, requested_from=window_start,
-            requested_to=window_end, convention=record.convention(),
+            requested_to=window_end, convention=convention, assessment=assessment,
         )
     return record
 
@@ -790,19 +811,69 @@ def _ranges(expected: Iterable[date], gaps: set[date]) -> str:
     return ",".join(runs)
 
 
-@dataclass(frozen=True)
-class _Assessment:
-    """What the rows of one answer prove about a window.
+def _listing_date_from_master(store: PilotDataStore, code: str, today_ist: date) -> date | None:
+    """DateOfListing from the newest security master snapshot; None (strict) when absent or unparseable."""
+    snapshot = latest_snapshot(store, on_or_before=today_ist)
+    if snapshot is None:
+        return None
+    try:
+        row = lookup_stock_code(store, snapshot, code)
+    except PilotDataError:  # an ambiguous code gives no listing floor
+        return None
+    return None if row is None else _parse_listing_date(row.listing_raw)
 
-    complete: every expected session has a bar (and at least one bar is in the window). gaps: the calendar is
-    known and sessions are missing (or the parser quarantined their rows, or no bar fell in the window).
-    unverified: the calendar does not establish the expected sessions. before_listing: no bar or flagged row
-    in the window and the stock listed after it. Only `complete` may claim coverage.
+
+def assess_window(
+    store: PilotDataStore,
+    parsed: BreezeParse,
+    window: tuple[date, date],
+    depth_floor: date | None,
+    listing_date: date | None,
+) -> WindowAssessment:
+    """What the rows prove about a window. The engine and the probe both judge an answer here.
+
+    Expected sessions: the stored NSE calendar's sessions from the window start, raised to the probed
+    depth and to the stock's listing date. The listing date is a floor only when it is consistent with
+    the answer (no later than the first in-window bar or quarantined row); a later date is evidently
+    wrong and the floor stays at the window start, so the leading sessions are gaps. A date the parser
+    quarantined counts as a gap, and a window with no good bar in it is never `complete`. When the
+    calendar does not cover the window nothing can be established and the answer is `unverified`;
+    there is no density guess. A `complete` verdict carries the range it checked as `span`: the floor
+    used through the window end. That span, not the requested window, is what a coverage row may claim.
     """
-
-    verdict: Literal["complete", "gaps", "unverified", "before_listing"]
-    gap_days: tuple[date, ...]
-    detail: dict[str, str]
+    w_from, w_to = window
+    start = w_from if depth_floor is None else max(w_from, depth_floor)
+    returned = {bar.trade_date for bar in parsed.bars if start <= bar.trade_date <= w_to}
+    flagged = {
+        item.trade_date for item in parsed.parse_quarantine_inputs
+        if item.trade_date is not None and start <= item.trade_date <= w_to
+    }
+    if listing_date is not None and listing_date > start:
+        evidence = returned | flagged
+        if not evidence and listing_date > w_to:
+            # Nothing of the window itself came back (out-of-window bars do not count): the stock was not listed.
+            return WindowAssessment("before_listing", (), {})
+        if not evidence or listing_date <= min(evidence):
+            start = listing_date
+        # else the master's date is later than a day the stock evidently traded: it is wrong, the floor stays
+    try:
+        expected = sessions_between(store, start, w_to)
+    except PilotDataError as exc:
+        if exc.code != "calendar_unknown_dates":
+            raise
+        return WindowAssessment("unverified", (), {"reason": "calendar_unknown_dates", "bars": str(len(returned))})
+    missing = {day for day in expected if day not in returned}
+    gaps = sorted(missing | flagged)
+    if not gaps and returned:
+        return WindowAssessment("complete", (), {}, (start, w_to))
+    detail = {"gap_sessions": str(len(gaps)), "gap_ranges": _ranges(sorted(set(expected) | flagged), set(gaps))}
+    if gaps:
+        detail["first_gap"] = gaps[0].isoformat()
+    if not returned:
+        detail["reason"] = "no_bars_in_window"
+    if flagged:
+        detail["quarantined_dates"] = str(len(flagged))
+    return WindowAssessment("gaps", tuple(gaps), detail)
 
 
 # --------------------------------------------------------------------------- engine
@@ -821,6 +892,7 @@ class BackfillEngine:
         pace_seconds: float = PACE_SECONDS,
         daily_call_cap: int = DAILY_CALL_CAP,
         max_consecutive_failures: int = MAX_CONSECUTIVE_FAILURES,
+        max_window_attempts: int = MAX_WINDOW_ATTEMPTS,
     ) -> None:
         _check_workspace(store, workspace)
         if pace_seconds < PACE_SECONDS:
@@ -829,6 +901,8 @@ class BackfillEngine:
             raise PilotDataError("cap_invalid", f"the daily call cap must be between 1 and {DAILY_CALL_CAP}")
         if max_consecutive_failures < 1:
             raise PilotDataError("cap_invalid", "max_consecutive_failures must be at least 1")
+        if max_window_attempts < 1:
+            raise PilotDataError("cap_invalid", "max_window_attempts must be at least 1")
         ensure_backfill_tables(store)
         self._store = store
         self._source = source
@@ -836,6 +910,7 @@ class BackfillEngine:
         self._clock = clock
         self._sleeper = sleeper
         self._max_failures = max_consecutive_failures
+        self._max_attempts = max_window_attempts
         self._ledger = _CallLedger(
             store, workspace=workspace, clock=clock, monotonic=monotonic, sleeper=sleeper,
             pace_seconds=pace_seconds, daily_call_cap=daily_call_cap,
@@ -1038,8 +1113,8 @@ class BackfillEngine:
         break_lock: bool = False,
         retry_flagged: bool = False,
     ) -> BackfillRunReport:
-        """Run the plan's unfinished windows. `retry_flagged` also re-queues `empty_flagged` and
-        `stored_with_gaps` windows (a new Breeze call each); `stored_unverified` is left to `verify`."""
+        """Run the plan's unfinished windows. `retry_flagged` also re-queues `empty_flagged`, `stored_with_gaps`
+        and `failed_exhausted` windows (a new Breeze call each); `stored_unverified` is left to `verify`."""
         self._check_plan(plan)
         self.preflight(today_ist=today_ist, break_lock=break_lock)
         try:
@@ -1068,6 +1143,10 @@ class BackfillEngine:
             for window in plan.windows
             if states.get((code, window[0], window[1]), _WindowState("pending", 0, None)).status not in finished
         ]
+        # Never-attempted windows first, then the ones that already failed, fewest attempts first (the sort is
+        # stable, so plan order holds within a group). Without this, the same few bad windows sort first on every
+        # resume, trip the consecutive-failure stop and starve everything behind them.
+        todo.sort(key=lambda item: states.get((item[0], item[1][0], item[1][1]), _WindowState("pending", 0, None)).attempt)
         used_before = self._ledger.used_today(today_ist)
         status: RunStatus = "complete"
         stop_code: str | None = None
@@ -1083,7 +1162,7 @@ class BackfillEngine:
             except _Stop as stop:
                 status, stop_code = stop.status, stop.code
                 break
-            if outcome == "failed":
+            if outcome in ("failed", "failed_exhausted"):
                 consecutive += 1
                 if consecutive >= self._max_failures:
                     status, stop_code = "stopped_consecutive_failures", detail
@@ -1200,15 +1279,12 @@ class BackfillEngine:
                 self._ledger.finish(call_id, "ok", None, payload.sha256)
                 return self._before_listing(plan, code, window, attempt, payload.sha256)
             try:
-                if assessment.verdict == "complete":
-                    ingest_breeze_response(
-                        self._store, descriptor, payload.body, stock_code=code, requested_from=w_from,
-                        requested_to=w_to, convention=convention,
-                    )
-                else:
-                    # gaps or unverified: the bars and their provenance are kept, but breeze_responses must not
-                    # claim days that lack a verified bar.
-                    self._store_bars_only(payload.body, code, parsed, payload.sha256, window)
+                # Bars in the window are always kept (with their parse quarantines); the coverage row is written,
+                # by write_breeze_coverage, only for a complete verdict and only over the range it checked.
+                ingest_breeze_response(
+                    self._store, descriptor, payload.body, stock_code=code, requested_from=w_from,
+                    requested_to=w_to, convention=convention, assessment=assessment,
+                )
             except PilotDataError as exc:
                 self._ledger.finish(call_id, "error", exc.code, payload.sha256)
                 raise _Stop("stopped_fail_closed", exc.code) from None
@@ -1227,20 +1303,10 @@ class BackfillEngine:
         )
 
     def _listing_date(self, code: str, today_ist: date) -> date | None:
-        """DateOfListing from the newest security master snapshot; None (strict) when absent or unparseable."""
-        if code in self._listing_dates:
-            return self._listing_dates[code]
-        found: date | None = None
-        snapshot = latest_snapshot(self._store, on_or_before=today_ist)
-        if snapshot is not None:
-            try:
-                row = lookup_stock_code(self._store, snapshot, code)
-            except PilotDataError:  # an ambiguous code gives no listing floor
-                row = None
-            if row is not None:
-                found = _parse_listing_date(row.listing_raw)
-        self._listing_dates[code] = found
-        return found
+        """DateOfListing from the newest security master snapshot, cached for the run."""
+        if code not in self._listing_dates:
+            self._listing_dates[code] = _listing_date_from_master(self._store, code, today_ist)
+        return self._listing_dates[code]
 
     def _assess(
         self,
@@ -1248,91 +1314,8 @@ class BackfillEngine:
         window: tuple[date, date],
         depth_floor: date | None,
         listing_date: date | None,
-    ) -> _Assessment:
-        """What the rows prove about a window.
-
-        Expected sessions: the stored NSE calendar's sessions from the window start, raised to the probed
-        depth and to the stock's listing date. The listing date is a floor only when it is consistent with
-        the answer (no later than the first in-window bar or quarantined row); a later date is evidently
-        wrong and the floor stays at the window start, so the leading sessions are gaps. A date the parser
-        quarantined counts as a gap, and a window with no good bar in it is never `complete`. When the
-        calendar does not cover the window nothing can be established and the answer is `unverified`;
-        there is no density guess.
-        """
-        w_from, w_to = window
-        start = w_from if depth_floor is None else max(w_from, depth_floor)
-        returned = {bar.trade_date for bar in parsed.bars if start <= bar.trade_date <= w_to}
-        flagged = {
-            item.trade_date for item in parsed.parse_quarantine_inputs
-            if item.trade_date is not None and start <= item.trade_date <= w_to
-        }
-        if listing_date is not None and listing_date > start:
-            evidence = returned | flagged
-            if not evidence and listing_date > w_to:
-                # Nothing of the window itself came back (out-of-window bars do not count): the stock was not listed.
-                return _Assessment("before_listing", (), {})
-            if not evidence or listing_date <= min(evidence):
-                start = listing_date
-            # else the master's date is later than a day the stock evidently traded: it is wrong, the floor stays
-        try:
-            expected = sessions_between(self._store, start, w_to)
-        except PilotDataError as exc:
-            if exc.code != "calendar_unknown_dates":
-                raise
-            return _Assessment("unverified", (), {"reason": "calendar_unknown_dates", "bars": str(len(returned))})
-        missing = {day for day in expected if day not in returned}
-        gaps = sorted(missing | flagged)
-        if not gaps and returned:
-            return _Assessment("complete", (), {})
-        detail = {"gap_sessions": str(len(gaps)), "gap_ranges": _ranges(sorted(set(expected) | flagged), set(gaps))}
-        if gaps:
-            detail["first_gap"] = gaps[0].isoformat()
-        if not returned:
-            detail["reason"] = "no_bars_in_window"
-        if flagged:
-            detail["quarantined_dates"] = str(len(flagged))
-        return _Assessment("gaps", tuple(gaps), detail)
-
-    def _store_bars_only(
-        self, body: bytes, code: str, parsed: BreezeParse, source_sha256: str, window: tuple[date, date]
-    ) -> None:
-        """Append the parsed in-window bars and parse quarantines but no breeze_responses row (no coverage claim)."""
-        ensure_breeze_tables(self._store)
-        rows = [
-            {
-                "stock_code": bar.stock_code, "trade_date": bar.trade_date, "source_sha256": source_sha256,
-                "raw_datetime": bar.raw_datetime, "open": bar.open, "high": bar.high, "low": bar.low,
-                "close": bar.close, "volume": bar.volume, "api": bar.api, "interval": bar.interval,
-                "adjustment_basis": bar.adjustment_basis, "row_sha256": bar.row_sha256(),
-            }
-            for bar in parsed.bars
-            if window[0] <= bar.trade_date <= window[1]
-        ]
-        self._store.append_rows("breeze_bars_raw", rows, check="breeze_bars")
-        self._quarantine_parse(parsed, source_sha256)
-
-    def _claim_coverage(
-        self, code: str, window: tuple[date, date], parsed: BreezeParse, source_sha256: str,
-        convention: DailyBarConvention,
-    ) -> None:
-        """The breeze_responses row that `_store_bars_only` left out, once the window is verified complete."""
-        ensure_breeze_tables(self._store)
-        convention_json = json.dumps(convention.model_dump(mode="json"), sort_keys=True)
-        self._store.append_rows(
-            "breeze_responses",
-            [
-                {
-                    "source_sha256": source_sha256, "stock_code": code, "requested_from": window[0],
-                    "requested_to": window[1], "convention_json": convention_json,
-                    "bars_parsed": len(parsed.bars), "parsed_at_utc": utc_naive(self._clock()),
-                    "row_sha256": canonical_sha256(
-                        {"stock_code": code, "from": window[0].isoformat(), "to": window[1].isoformat(),
-                         "convention": convention_json, "bars": len(parsed.bars)}
-                    ),
-                }
-            ],
-            check="breeze_response",
-        )
+    ) -> WindowAssessment:
+        return assess_window(self._store, parsed, window, depth_floor, listing_date)
 
     def _fail(
         self,
@@ -1343,8 +1326,10 @@ class BackfillEngine:
         error_code: str,
         source_sha256: str | None,
     ) -> tuple[WindowStatus, str | None]:
-        self._write_event(plan, code, window, "failed", attempt, error_code, source_sha256)
-        return "failed", error_code
+        # The attempt count is the budget: the Nth failed attempt, across runs, is terminal until --retry-flagged.
+        status: WindowStatus = "failed_exhausted" if attempt >= self._max_attempts else "failed"
+        self._write_event(plan, code, window, status, attempt, error_code, source_sha256)
+        return status, error_code
 
     def _flag_empty(
         self,
@@ -1385,7 +1370,7 @@ class BackfillEngine:
         code: str,
         window: tuple[date, date],
         attempt: int,
-        assessment: _Assessment,
+        assessment: WindowAssessment,
         source_sha256: str,
         *,
         calls: int,
@@ -1435,7 +1420,13 @@ class BackfillEngine:
                 if assessment.verdict == "unverified":
                     continue
                 if assessment.verdict == "complete":
-                    self._claim_coverage(code, window, parsed, state.source_sha256, convention)
+                    span = assessment.span
+                    assert span is not None  # a complete verdict always carries the range it checked
+                    write_breeze_coverage(
+                        self._store, assessment, source_sha256=state.source_sha256, stock_code=code,
+                        convention=convention,
+                        bars_parsed=sum(1 for bar in parsed.bars if span[0] <= bar.trade_date <= span[1]),
+                    )
                     self._write_event(plan, code, window, "done", state.attempt, None, state.source_sha256)
                 elif assessment.verdict == "before_listing":
                     self._before_listing(plan, code, window, state.attempt, state.source_sha256)
@@ -1460,7 +1451,10 @@ class BackfillEngine:
         self, plan: BackfillPlan, today_ist: date, status: RunStatus, stop_code: str | None, calls_this_run: int
     ) -> BackfillRunReport:
         states = self._states(plan)
-        counts = {"pending": 0, "done": 0, "empty_flagged": 0, "failed": 0, "stored_unverified": 0, "stored_with_gaps": 0}
+        counts = {
+            "pending": 0, "done": 0, "empty_flagged": 0, "failed": 0, "failed_exhausted": 0,
+            "stored_unverified": 0, "stored_with_gaps": 0,
+        }
         errors: dict[str, int] = {}
         flagged: list[dict[str, str | None]] = []
         for code in plan.stock_codes:
@@ -1500,6 +1494,7 @@ class BackfillEngine:
 
 # --------------------------------------------------------------------------- CLI
 
+INTERNAL_ERROR_CODE = "internal_error"
 _RELAY_COMMANDS = frozenset({"health", "probe", "refresh-master", "run"})
 _EXIT_FLAGGED = 4
 _EXIT_RESUME_LATER = 3
@@ -1555,8 +1550,9 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="pilot_data.backfill",
         description="Breeze daily-bar backfill through the Phase 61 relay client. Exit codes: 0 complete, "
         "1 finished with failed windows, 2 fail-closed stop, 3 daily cap, relay day budget or IST midnight "
-        "reached (resume next IST day), 4 every window finished but some are flagged: empty, stored with gaps "
-        "(re-queue them with run --retry-flagged) or stored unverified (re-check with verify).",
+        "reached (resume next IST day), 4 every window finished but some are flagged: empty, stored with gaps or "
+        "failed after the attempt budget (re-queue them with run --retry-flagged) or stored unverified (re-check "
+        "with verify).",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1577,7 +1573,7 @@ def _build_parser() -> argparse.ArgumentParser:
     run = common("run")
     run.add_argument("--plan-sha256")
     run.add_argument("--break-lock", action="store_true", help="clear a stale owner record; never a held lock")
-    run.add_argument("--retry-flagged", action="store_true", help="also re-queue windows flagged empty or stored with gaps")
+    run.add_argument("--retry-flagged", action="store_true", help="also re-queue windows flagged empty, stored with gaps or failed_exhausted")
     verify = common("verify")
     verify.add_argument("--plan-sha256")
     verify.add_argument("--break-lock", action="store_true", help="clear a stale owner record; never a held lock")
@@ -1669,10 +1665,14 @@ def main(
         resume = exc.code in ("daily_cap_reached", "relay_budget_day", "ist_date_rollover")
         print(json.dumps({"caveats": _caveat_payload(), "error_code": exc.code, "error": str(exc)}, indent=2))
         return _EXIT_RESUME_LATER if resume else _EXIT_FAIL_CLOSED
-    except Exception as exc:
+    except (RelayError, TunnelError) as exc:
         _, error_code, _ = classify_gateway_error(exc)
         print(json.dumps({"caveats": _caveat_payload(), "error_code": error_code}, indent=2))
         return _EXIT_RESUME_LATER if error_code == "relay_budget_day" else _EXIT_FAIL_CLOSED
+    except Exception:
+        # A local fault (DuckDB, the lock file, a bug) is not a gateway problem; say so, and print no message.
+        print(json.dumps({"caveats": _caveat_payload(), "error_code": INTERNAL_ERROR_CODE}, indent=2))
+        return _EXIT_FAIL_CLOSED
     print(json.dumps({"caveats": _caveat_payload(), "result": payload}, indent=2))
     return code
 
