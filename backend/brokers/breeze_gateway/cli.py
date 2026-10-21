@@ -12,7 +12,8 @@ Mac-side ledger (see intraday_probe.py); `probe-intraday compare` is offline and
 is read with getpass, sent only as a JSON body over the IAP tunnel and never
 printed, logged or written to disk. Output never holds the code, the login URL or
 the relay token. Exit codes: 0 ok, 1 relay error, 2 usage or no terminal,
-3 config error, 4 tunnel error, 5 saved evidence refused (probe-intraday compare).
+3 config error, 4 tunnel error, 5 saved evidence refused (probe-intraday compare). A
+`probe-intraday step` whose slot ended in an upstream error prints `status INCONCLUSIVE` and exits 1.
 """
 
 from __future__ import annotations
@@ -190,7 +191,7 @@ def main(
                         f"codes {','.join(entry.codes) or 'none'}"
                     )
             elif args.command == "probe-intraday":
-                run_step(
+                code = run_step(
                     relay,
                     args.probe_dir,
                     args.step,
@@ -200,6 +201,8 @@ def main(
                     symbol=args.symbol,
                     holiday=args.holiday,
                 )
+                if code != EXIT_OK:
+                    return code  # an INCONCLUSIVE step: no answer, so no success
             else:  # probe-daily
                 payload = relay.daily_bars(args.stock_code, args.from_date, args.to_date)
                 say(f"request_id {payload.request_id}")

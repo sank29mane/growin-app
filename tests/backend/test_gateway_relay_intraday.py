@@ -130,6 +130,47 @@ def test_401_without_a_token_before_anything_else(stack: Stack):
     assert len(stack.transport.requests) == n and len(stack.budget.kinds) == charged
 
 
+def test_401_on_a_good_query_without_a_token_reaches_nothing(stack: Stack):
+    stack.login()
+    n = len(stack.transport.requests)
+    charged = len(stack.budget.kinds)
+    resp = get(stack, None)  # a valid query: only the missing token refuses it
+    assert resp.status_code == 401 and code_of(resp) == "UNAUTHORIZED"
+    assert len(stack.transport.requests) == n and len(stack.budget.kinds) == charged
+    assert "RELIND" not in resp.text
+
+
+@pytest.mark.parametrize("presented", ["not-the-relay-token", "x" * 64, "", "A" * 43, "-_" * 21 + "-"])  # the last two are well formed
+def test_401_with_a_wrong_token_on_a_good_query_reaches_nothing(stack: Stack, presented):
+    token = stack.login()
+    assert presented != token
+    n = len(stack.transport.requests)
+    charged = len(stack.budget.kinds)
+    resp = get(stack, presented)
+    assert resp.status_code == 401 and code_of(resp) == "UNAUTHORIZED"
+    assert len(stack.transport.requests) == n and len(stack.budget.kinds) == charged
+    assert presented not in resp.text or presented == ""
+
+
+def test_401_with_a_non_bearer_scheme_reaches_nothing(stack: Stack):
+    token = stack.login()
+    n = len(stack.transport.requests)
+    resp = stack.client.get(URL, headers={**CONTRACT_HDR, "Authorization": f"Basic {token}"})
+    assert resp.status_code == 401
+    assert len(stack.transport.requests) == n
+
+
+def test_401_for_a_token_from_an_earlier_login(stack: Stack):
+    old = stack.login()
+    stack.revoke(old)
+    fresh = stack.login()
+    assert fresh != old
+    n = len(stack.transport.requests)
+    assert get(stack, old).status_code == 401  # the old relay token is dead, not just the session
+    assert len(stack.transport.requests) == n
+    assert get(stack, fresh).status_code == 200
+
+
 @pytest.mark.parametrize(
     "query,fields",
     [

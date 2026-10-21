@@ -15,6 +15,13 @@ calls in a day:
   more that day. A retry that cannot be sent is recorded ``probe_retry_skipped`` and keeps the
   first answer; it does not stop later base steps.
 * The ledger is written before the request goes out, so a crash leaves the call counted.
+* Two invocations on one date cannot both pass the check at the same relay count: every attempt
+  (reload the ledger, read the budget, reserve, send, record) runs under an exclusive ``flock`` on
+  ``DIR/ledger-<ist date>.lock``, so the second waits and then sees the first one's count.
+* S-7 is one slot whatever symbol the operator picks: a later S-7 with another symbol is a retry,
+  so it spends retry slots and can never starve S-10.
+* A slot whose tries all ended in an upstream error has no answer: the step reports ``INCONCLUSIVE``
+  and the command exits non-zero.
 
 Saved answers stay on the Mac under ``DIR/answers/<ist date>/`` (exact bytes, the C4 headers and
 the sha256). Nothing here writes to the VM, and nothing printed carries a token, an id or the login
@@ -24,15 +31,17 @@ URL. No order route and no ``preview_order`` is reachable from this module.
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import hmac
 import json
 import os
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 from .client import UpstreamPayload
 from .errors import RelayError, UpstreamError, UpstreamTimeout
@@ -65,6 +74,9 @@ NEVER_RETRIED = frozenset({"S-8"})
 
 BUDGET_STOP = "probe_budget_stop"
 RETRY_SKIPPED = "probe_retry_skipped"
+INCONCLUSIVE = "INCONCLUSIVE"
+EXIT_OK = 0
+EXIT_INCONCLUSIVE = 1  # the same code as a relay error: the step produced no answer
 
 U23_NOTE = (
     "U-23: pre-open and block-deal window volume can sit in bhavcopy TTQ outside D, so a shortfall "
@@ -255,6 +267,10 @@ class Ledger:
         return probe_dir / f"ledger-{probe_date.isoformat()}.json"
 
     @classmethod
+    def lock_path_for(cls, probe_dir: Path, probe_date: date) -> Path:
+        return probe_dir / f"ledger-{probe_date.isoformat()}.lock"
+
+    @classmethod
     def load(cls, probe_dir: Path, probe_date: date) -> "Ledger | None":
         path = cls.path_for(probe_dir, probe_date)
         if not path.exists():
@@ -333,7 +349,7 @@ def _slots(step: str, today: date, symbol: str | None, holiday: date | None) -> 
     if step == "S-7":
         if not symbol:
             raise ProbeError("probe_symbol_required")
-        return [Slot(f"intraday-{symbol}", "intraday", symbol, today)]
+        return [Slot("intraday-s7", "intraday", symbol, today)]  # one slot: another symbol is a retry
     if step == "S-8":
         if holiday is None:
             raise ProbeError("probe_holiday_required")
@@ -372,34 +388,71 @@ class IntradayProbe:
     # -- entry point
 
     def run(self, step: str, *, symbol: str | None = None, holiday: date | None = None) -> int:
-        """Run one step. Returns 0; raises ProbeError before sending or RelayError after recording."""
+        """Run one step. Returns 0, or 1 when a slot ended INCONCLUSIVE; raises ProbeError before sending
+        or RelayError after recording."""
         if step not in STEPS:
             raise ProbeError("probe_step_unknown")
         budget = self.relay.budget()  # free read: gives the IST date and the S-3 baseline
         self.probe_date = budget.ist_date
-        existing = Ledger.load(self.probe_dir, self.probe_date)
-        if step == "S-3" and existing is None:
-            existing = Ledger.create(self.probe_dir, self.probe_date, budget.calls_today_ist)
-        if existing is None:
-            raise ProbeError("probe_baseline_missing")
-        self.ledger = existing
-        if step == "S-12":
-            return self._reconcile(budget.calls_today_ist)
+        if step != "S-3" and not Ledger.path_for(self.probe_dir, self.probe_date).exists():
+            raise ProbeError("probe_baseline_missing")  # before the lock: a refusal creates nothing
+        with self._locked():
+            existing = Ledger.load(self.probe_dir, self.probe_date)
+            if step == "S-3" and existing is None:
+                existing = Ledger.create(self.probe_dir, self.probe_date, budget.calls_today_ist)
+            if existing is None:
+                raise ProbeError("probe_baseline_missing")
+            self.ledger = existing
+            if step == "S-12":
+                return self._reconcile(budget.calls_today_ist)
         slots = _slots(step, self.probe_date, symbol, holiday)
+        answered = []
         for index, slot in enumerate(slots):
-            if slot.kind == "quote" and index > 0 and not self.ledger.stopped:
+            if slot.kind == "quote" and index > 0 and not self._stopped():
                 self.sleep(QUOTE_GAP_S)
-            self._run_slot(step, slot)
-        statuses = {self.ledger.slot(step, slot.key)["result"] for slot in slots}
-        status = (
-            BUDGET_STOP
-            if BUDGET_STOP in statuses
-            else RETRY_SKIPPED
-            if RETRY_SKIPPED in statuses
-            else "complete"
-        )
-        self.say(f"step {step} status {status} sent {self.ledger.sent}")
-        return 0
+            answered.append(self._run_slot(step, slot))
+        with self._locked():
+            self.ledger = self._reload()
+            statuses = {self.ledger.slot(step, slot.key)["result"] for slot in slots}
+            if BUDGET_STOP in statuses:
+                status = BUDGET_STOP
+            elif not all(answered):
+                status = INCONCLUSIVE  # every try of some slot ended in an upstream error
+            elif RETRY_SKIPPED in statuses:
+                status = RETRY_SKIPPED
+            else:
+                status = "complete"
+            self.say(f"step {step} status {status} sent {self.ledger.sent}")
+        return EXIT_INCONCLUSIVE if status == INCONCLUSIVE else EXIT_OK
+
+    # -- cross-process lock
+
+    @contextmanager
+    def _locked(self) -> Iterator[None]:
+        """Exclusive lock on this date's ledger, held across load, check, reserve and send.
+
+        flock is per open file description, so a second invocation (another process, or another
+        thread with its own handle) waits here and then reloads the first one's count. The kernel
+        drops the lock if the holder dies.
+        """
+        path = Ledger.lock_path_for(self.probe_dir, self.probe_date)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)  # closing releases the lock
+
+    def _reload(self) -> Ledger:
+        ledger = Ledger.load(self.probe_dir, self.probe_date)
+        if ledger is None:
+            raise ProbeError("probe_baseline_missing")
+        return ledger
+
+    def _stopped(self) -> bool:
+        with self._locked():
+            return self._reload().stopped
 
     # -- the stop rule
 
@@ -414,46 +467,53 @@ class IntradayProbe:
         need = 1 if kind == "base" else 1 + self.ledger.unsent_base_slots()
         return spent + need <= HARD_STOP
 
-    def _run_slot(self, step: str, slot: Slot) -> None:
-        record = self.ledger.slot(step, slot.key)
-        kind = "base" if record["requests"] == 0 else "retry"  # a repeated step spends retry slots
+    def _run_slot(self, step: str, slot: Slot) -> bool:
+        """Run one slot to its end. True when it holds an answer (or was not sent: a stop is its own status)."""
         retried = False
         while True:
-            if not self._allowed(kind):
-                result = BUDGET_STOP if kind == "base" else RETRY_SKIPPED
-                if kind == "base":
-                    self.ledger.data["stopped"] = True  # nothing more is sent today
-                record["result"] = result
+            # One attempt, start to finish, under the lock: a second invocation cannot read the
+            # relay count between this check and this send.
+            with self._locked():
+                self.ledger = self._reload()
+                record = self.ledger.slot(step, slot.key)
+                kind = "base" if record["requests"] == 0 else "retry"  # a repeated step spends retry slots
+                if not self._allowed(kind):
+                    if kind == "base":
+                        self.ledger.data["stopped"] = True  # nothing more is sent today
+                        record["result"] = BUDGET_STOP
+                    elif not str(record["result"]).startswith("error_"):
+                        record["result"] = RETRY_SKIPPED  # the first answer is kept
+                    # after an error there is no answer to keep: the error stays the slot's result
+                    self.ledger.save()
+                    self.say(f"slot {step} {slot.kind} {slot.symbol} {BUDGET_STOP if kind == 'base' else RETRY_SKIPPED}")
+                    return kind == "retry" and not str(record["result"]).startswith("error_")
+                # Durable before acting: a crash after this line leaves the call counted.
+                self.ledger.data["sent"] += 1
+                record["requests"] += 1
+                seq = self.ledger.sent
                 self.ledger.save()
-                self.say(f"slot {step} {slot.kind} {slot.symbol} {result}")
-                return
-            # Durable before acting: a crash after this line leaves the call counted.
-            self.ledger.data["sent"] += 1
-            record["requests"] += 1
-            seq = self.ledger.sent
-            self.ledger.save()
-            try:
-                payload = self._fetch(slot)
-            except (UpstreamError, UpstreamTimeout) as err:
-                record["result"] = f"error_{err.code}"
+                try:
+                    payload = self._fetch(slot)
+                except (UpstreamError, UpstreamTimeout) as err:
+                    record["result"] = f"error_{err.code}"
+                    self.ledger.save()
+                    self.say(f"slot {step} {slot.kind} {slot.symbol} error {err.code}")
+                    if step in NEVER_RETRIED or retried:
+                        return False
+                    retried = True
+                    continue
+                except RelayError as err:
+                    record["result"] = f"error_{err.code}"
+                    self.ledger.save()
+                    raise
+                self._save_answer(step, slot, seq, payload)
+                record["result"] = "empty" if payload.empty else "answered"
                 self.ledger.save()
-                self.say(f"slot {step} {slot.kind} {slot.symbol} error {err.code}")
-                if step in NEVER_RETRIED or retried:
-                    return
-                retried, kind = True, "retry"
-                continue
-            except RelayError as err:
-                record["result"] = f"error_{err.code}"
-                self.ledger.save()
-                raise
-            self._save_answer(step, slot, seq, payload)
-            record["result"] = "empty" if payload.empty else "answered"
-            self.ledger.save()
-            self._print_answer(step, slot, seq, payload)
-            if payload.empty and step not in NEVER_RETRIED and not retried:
-                retried, kind = True, "retry"
-                continue
-            return
+                self._print_answer(step, slot, seq, payload)
+                if payload.empty and step not in NEVER_RETRIED and not retried:
+                    retried = True
+                    continue
+                return True
 
     def _fetch(self, slot: Slot) -> UpstreamPayload:
         if slot.kind == "intraday":

@@ -10,6 +10,8 @@ import hashlib
 import io
 import json
 import socket
+import threading
+import time as clock
 from datetime import date, datetime, time, timezone
 from pathlib import Path
 
@@ -331,6 +333,153 @@ def test_probe_never_reaches_an_order_route():
     assert "OrdersClient" not in imported and "RelayClient" not in imported  # no client is built here
 
 
+# ------------------------------------------------- r2: concurrency, S-7 pinning, exhausted errors
+
+
+class SlowRelay(FakeRelay):
+    """A relay whose charged calls take a moment, so two invocations really overlap."""
+
+    def _send(self, kind: str, symbol: str, day: date) -> UpstreamPayload:
+        clock.sleep(0.15)
+        return super()._send(kind, symbol, day)
+
+
+def run_concurrently(first, second) -> None:
+    gate = threading.Barrier(2)
+
+    def go(call):
+        gate.wait()
+        call()
+
+    threads = [threading.Thread(target=go, args=(call,)) for call in (first, second)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=20)
+        assert not thread.is_alive()
+
+
+def test_probe_two_concurrent_invocations_cannot_both_pass_the_check(tmp_path: Path):
+    relay = SlowRelay()
+    first = Env(tmp_path, relay)
+    first.step("S-3")
+    relay.counted += 16  # other callers: the relay delta is 19, the ledger says 3
+    second = Env(tmp_path, relay)  # a second invocation: same probe dir, same relay
+    run_concurrently(lambda: first.step("S-4"), lambda: second.step("S-9"))
+    assert len(relay.calls) == 4  # S-3's three plus exactly one of S-4 and S-9
+    assert max(delta for *_, delta in relay.calls) == probe.HARD_STOP  # never the 21st
+    ledger = first.ledger()
+    assert ledger["stopped"] is True and ledger["sent"] == 4
+    assert relay.counted - relay.baseline == probe.HARD_STOP
+
+
+def test_probe_the_ledger_lock_is_a_real_cross_process_flock(env: Env, tmp_path: Path):
+    import fcntl
+    import os
+
+    env.step("S-3")
+    lock = env.dir / f"ledger-{TODAY.isoformat()}.lock"
+    held = os.open(lock, os.O_RDWR)
+    fcntl.flock(held, fcntl.LOCK_EX)  # another invocation is mid-request
+    try:
+        done = threading.Event()
+        worker = threading.Thread(target=lambda: (env.step("S-4"), done.set()))
+        worker.start()
+        assert not done.wait(0.3)  # blocked behind the holder, nothing sent
+        assert len(env.relay.calls) == 3
+    finally:
+        os.close(held)
+    worker.join(timeout=20)
+    assert done.is_set() and len(env.relay.calls) == 4
+
+
+def test_probe_s7_with_eight_symbols_cannot_starve_s10(env: Env):
+    for step in ("S-3", "S-4", "S-5", "S-6"):
+        env.step(step)
+    assert sent(env) == 9
+    for code in ("AAA", "BBB", "CCC", "DDD", "EEE", "FFF", "GGG", "HHH"):
+        env.step("S-7", "--symbol", code)
+    assert sent(env) == 16  # one base call, then retries only while the later base steps keep their slots
+    ledger = env.ledger()
+    assert ledger["stopped"] is False
+    env.step("S-8", "--date", HOLIDAY.isoformat())
+    env.step("S-9")
+    code, lines = env.step("S-10")
+    assert code == 0 and any("today_row true" in line for line in lines)
+    assert sent(env) == probe.HARD_STOP
+    assert [c[0] for c in env.relay.calls[-2:]] == ["daily", "daily"]  # S-10 ran both its base calls
+    assert max(delta for *_, delta in env.relay.calls) <= probe.HARD_STOP
+
+
+def test_probe_s7_another_symbol_is_a_retry_not_a_second_base_call(env: Env):
+    env.step("S-3")
+    env.step("S-7", "--symbol", "AAA")
+    base = env.ledger()["steps"]["S-7"]["slots"]
+    assert list(base) == ["intraday-s7"] and base["intraday-s7"]["requests"] == 1
+    env.step("S-7", "--symbol", "BBB")
+    assert env.ledger()["steps"]["S-7"]["slots"]["intraday-s7"]["requests"] == 2
+    assert [c[1] for c in env.relay.calls[3:]] == ["AAA", "BBB"]
+
+
+def test_probe_exhausted_upstream_errors_are_inconclusive_and_exit_nonzero(env: Env):
+    env.step("S-3")
+    boom = UpstreamError("UPSTREAM_ERROR", http_status=502)
+    env.relay.answers[("intraday", "RELIND")] = [boom, UpstreamError("UPSTREAM_ERROR", http_status=502)]
+    code, lines = env.step("S-9")
+    assert code == cli_mod.EXIT_RELAY != 0
+    assert sent(env) == 5  # tried twice, never a third time
+    assert lines[-1] == "step S-9 status INCONCLUSIVE sent 5"
+    assert not any("status complete" in line for line in lines)
+    assert not any(line.startswith("answer S-9") for line in lines)
+
+
+def test_probe_a_retry_that_recovers_is_not_inconclusive(env: Env):
+    env.step("S-3")
+    env.relay.answers[("intraday", "RELIND")] = [UpstreamError("UPSTREAM_ERROR", http_status=502)]
+    code, lines = env.step("S-9")
+    assert code == 0 and lines[-1] == "step S-9 status complete sent 5"
+
+
+def test_probe_s8_error_is_inconclusive_with_a_nonzero_exit(env: Env):
+    env.step("S-3")
+    env.relay.answers[("intraday", "RELIND")] = [UpstreamError("UPSTREAM_ERROR", http_status=502)]
+    code, lines = env.step("S-8", "--date", HOLIDAY.isoformat())
+    assert code != 0 and lines[-1] == "step S-8 status INCONCLUSIVE sent 4"
+
+
+def test_probe_an_error_whose_retry_is_not_affordable_is_inconclusive_not_retry_skipped(env: Env):
+    env.step("S-3")
+    env.relay.counted += 14  # relay delta 17: a base call fits, a retry (needs 1 + 12 more) does not
+    env.relay.answers[("intraday", "RELIND")] = [UpstreamError("UPSTREAM_ERROR", http_status=502)]
+    code, lines = env.step("S-4")
+    assert code != 0
+    assert lines[-1].startswith("step S-4 status INCONCLUSIVE")
+    assert "slot S-4 intraday RELIND probe_retry_skipped" in lines
+
+
+def test_probe_the_stop_latch_survives_a_new_invocation_even_when_the_budget_would_allow(env: Env):
+    env.step("S-3")
+    env.relay.counted += 17  # delta 20: the next base call is refused
+    env.step("S-4")
+    assert env.ledger()["stopped"] is True and sent(env) == 3
+    env.relay.counted = START  # the relay now reads as if nothing had been spent
+    for step, extra in (("S-6", []), ("S-7", ["--symbol", "TCS"]), ("S-10", [])):
+        code, lines = env.step(step, *extra)
+        assert code == 0
+    assert sent(env) == 3  # only the latch holds the probe back
+    assert env.ledger()["stopped"] is True
+
+
+def test_probe_a_base_stop_sets_the_latch_in_the_ledger_file(env: Env):
+    env.step("S-3")
+    assert env.ledger()["stopped"] is False
+    env.relay.counted += 17
+    env.step("S-4")
+    persisted = json.loads((env.dir / f"ledger-{TODAY.isoformat()}.json").read_text())
+    assert persisted["stopped"] is True
+    assert persisted["steps"]["S-4"]["slots"]["intraday-RELIND"]["result"] == probe.BUDGET_STOP
+
+
 # ------------------------------------------------------------ saved answers and printed lines
 
 
@@ -350,7 +499,11 @@ def test_probe_answers_saved_on_mac_only(env: Env, tmp_path: Path):
         assert meta["step"] == "S-3" and meta["empty"] is False
     written = {p.relative_to(tmp_path).parts[0] for p in tmp_path.rglob("*") if p.is_file()}
     assert written == {"probe"}  # nothing written anywhere but the probe directory
-    assert {p.name for p in env.dir.iterdir()} == {f"ledger-{TODAY.isoformat()}.json", "answers"}
+    assert {p.name for p in env.dir.iterdir()} == {
+        f"ledger-{TODAY.isoformat()}.json",
+        f"ledger-{TODAY.isoformat()}.lock",
+        "answers",
+    }
     blob = "\n".join(lines)
     assert RID not in blob and "http" not in blob and "token" not in blob.lower()
 
@@ -597,3 +750,31 @@ def test_the_cli_documents_exit_code_5_and_both_probe_modes():
     assert (ns.command, ns.probe_mode) == ("probe-intraday", "compare")
     ns = parser.parse_args(["probe-intraday", "step", "--step", "S-3", "--probe-dir", "a"])
     assert (ns.command, ns.probe_mode, ns.step) == ("probe-intraday", "step", "S-3")
+
+
+def test_relay_api_documents_the_probe_flags_and_every_exit_code():
+    text = (Path(__file__).resolve().parents[2] / "gateway" / "RELAY-API.md").read_text()
+    exits = text[text.index("- Exit codes:") :]
+    for code in ("0 ok", "1 relay error", "2 usage", "3 config error", "4 tunnel error", "5 saved evidence refused"):
+        assert code in exits
+    assert "INCONCLUSIVE" in exits
+    for flag in ("--symbol", "--date", "--probe-dir", "--pilot-store"):
+        assert flag in text
+    status = text[text.index("Status:") : text.index("## Contract growin-relay/1")]
+    for stale in ("arrive on the VM side", "later change"):
+        assert stale not in status
+    for route in ("budget", "quotes", "preview-order", "security-master", "intraday"):
+        assert route in status
+
+
+def test_probe_a_latched_stop_refuses_a_later_step_and_names_it(env: Env):
+    env.step("S-3")
+    env.relay.counted += 17
+    env.step("S-6")  # a base call refused: the latch is set
+    env.relay.counted = START  # a later invocation sees a relay that would allow the call
+    code, lines = env.step("S-9")
+    assert code == 0 and sent(env) == 3
+    assert "slot S-9 intraday RELIND probe_budget_stop" in lines
+    assert lines[-1] == "step S-9 status probe_budget_stop sent 3"
+    _, closing = env.step("S-12")
+    assert closing[0] == f"step S-12 relay_delta 0 ledger_sent 3"
