@@ -20,8 +20,10 @@ calls in a day:
   ``DIR/ledger-<ist date>.lock``, so the second waits and then sees the first one's count.
 * S-7 is one slot whatever symbol the operator picks: a later S-7 with another symbol is a retry,
   so it spends retry slots and can never starve S-10.
-* A slot whose tries all ended in an upstream error has no answer: the step reports ``INCONCLUSIVE``
-  and the command exits non-zero.
+* A slot's outcome comes from its attempt list by one rule (``slot_outcome``): any try that returned
+  a payload (an empty one is saved evidence) makes it answered; otherwise any upstream error makes it
+  errored, even when the retry was refused by the stop rule; otherwise a refused base call is a budget
+  cut. A step with an errored slot reports ``INCONCLUSIVE`` and exits non-zero, whatever else stopped.
 
 Saved answers stay on the Mac under ``DIR/answers/<ist date>/`` (exact bytes, the C4 headers and
 the sha256). Nothing here writes to the VM, and nothing printed carries a token, an id or the login
@@ -75,6 +77,11 @@ NEVER_RETRIED = frozenset({"S-8"})
 BUDGET_STOP = "probe_budget_stop"
 RETRY_SKIPPED = "probe_retry_skipped"
 INCONCLUSIVE = "INCONCLUSIVE"
+# Slot outcomes, derived from the attempt list by slot_outcome() and nowhere else.
+ANSWERED = "answered"  # some try returned a payload (an empty one is evidence too: it is saved)
+ERRORED = "errored"  # no payload, at least one upstream error (second try failed or was cut off)
+BUDGET_CUT = "budget_cut"  # nothing sent, the stop rule refused the base call
+NOT_RUN = "not_run"
 EXIT_OK = 0
 EXIT_INCONCLUSIVE = 1  # the same code as a relay error: the step produced no answer
 
@@ -325,7 +332,14 @@ class Ledger:
 
     def slot(self, step: str, key: str) -> dict[str, Any]:
         slots = self.data["steps"].setdefault(step, {}).setdefault("slots", {})
-        return slots.setdefault(key, {"requests": 0, "result": "not_run"})
+        record = slots.setdefault(key, {"requests": 0, "result": "not_run"})
+        record.setdefault("attempts", [])
+        record.setdefault("cut", False)
+        return record
+
+    def outcome(self, step: str, key: str) -> str:
+        record = self.slot(step, key)
+        return slot_outcome(record["attempts"], record["cut"])
 
     def unsent_base_slots(self) -> int:
         remaining = 0
@@ -334,6 +348,35 @@ class Ledger:
             attempted = sum(1 for record in slots.values() if record["requests"] > 0)
             remaining += max(0, base - attempted)
         return remaining
+
+
+# ------------------------------------------------------------------------- outcome rule
+
+
+def slot_outcome(attempts: Sequence[str], cut: bool) -> str:
+    """The one rule for a slot's outcome.
+
+    ``attempts`` is every try in order: ``answered``, ``empty`` or ``error_<code>``. ``cut`` is True
+    when the stop rule refused a try. Order never matters: an answer beats an error, an error beats
+    a cut, so a retry that errors after an empty answer, or is refused after an error, cannot
+    change what the slot already holds.
+    """
+    if any(a in ("answered", "empty") for a in attempts):
+        return ANSWERED
+    if any(a.startswith("error_") for a in attempts):
+        return ERRORED
+    return BUDGET_CUT if cut else NOT_RUN
+
+
+def step_verdict(outcomes: Sequence[str], results: Sequence[str]) -> tuple[str, int]:
+    """(status word, exit code) for a step from its slot outcomes and slot results."""
+    if ERRORED in outcomes or NOT_RUN in outcomes:
+        return INCONCLUSIVE, EXIT_INCONCLUSIVE  # a slot with no answer, whatever else happened
+    if BUDGET_CUT in outcomes:
+        return BUDGET_STOP, EXIT_OK
+    if RETRY_SKIPPED in results:
+        return RETRY_SKIPPED, EXIT_OK
+    return "complete", EXIT_OK
 
 
 # ------------------------------------------------------------------------- step
@@ -406,24 +449,17 @@ class IntradayProbe:
             if step == "S-12":
                 return self._reconcile(budget.calls_today_ist)
         slots = _slots(step, self.probe_date, symbol, holiday)
-        answered = []
         for index, slot in enumerate(slots):
             if slot.kind == "quote" and index > 0 and not self._stopped():
                 self.sleep(QUOTE_GAP_S)
-            answered.append(self._run_slot(step, slot))
+            self._run_slot(step, slot)
         with self._locked():
             self.ledger = self._reload()
-            statuses = {self.ledger.slot(step, slot.key)["result"] for slot in slots}
-            if BUDGET_STOP in statuses:
-                status = BUDGET_STOP
-            elif not all(answered):
-                status = INCONCLUSIVE  # every try of some slot ended in an upstream error
-            elif RETRY_SKIPPED in statuses:
-                status = RETRY_SKIPPED
-            else:
-                status = "complete"
+            outcomes = [self.ledger.outcome(step, slot.key) for slot in slots]
+            results = [self.ledger.slot(step, slot.key)["result"] for slot in slots]
+            status, code = step_verdict(outcomes, results)
             self.say(f"step {step} status {status} sent {self.ledger.sent}")
-        return EXIT_INCONCLUSIVE if status == INCONCLUSIVE else EXIT_OK
+        return code
 
     # -- cross-process lock
 
@@ -467,8 +503,8 @@ class IntradayProbe:
         need = 1 if kind == "base" else 1 + self.ledger.unsent_base_slots()
         return spent + need <= HARD_STOP
 
-    def _run_slot(self, step: str, slot: Slot) -> bool:
-        """Run one slot to its end. True when it holds an answer (or was not sent: a stop is its own status)."""
+    def _run_slot(self, step: str, slot: Slot) -> None:
+        """Run one slot to its end, recording every try in the slot's attempt list."""
         retried = False
         while True:
             # One attempt, start to finish, under the lock: a second invocation cannot read the
@@ -478,15 +514,16 @@ class IntradayProbe:
                 record = self.ledger.slot(step, slot.key)
                 kind = "base" if record["requests"] == 0 else "retry"  # a repeated step spends retry slots
                 if not self._allowed(kind):
+                    record["cut"] = True
                     if kind == "base":
                         self.ledger.data["stopped"] = True  # nothing more is sent today
                         record["result"] = BUDGET_STOP
-                    elif not str(record["result"]).startswith("error_"):
+                    elif slot_outcome(record["attempts"], False) == ANSWERED:
                         record["result"] = RETRY_SKIPPED  # the first answer is kept
-                    # after an error there is no answer to keep: the error stays the slot's result
+                    # with no answer the error stays the slot's result; the outcome rule says ERRORED
                     self.ledger.save()
                     self.say(f"slot {step} {slot.kind} {slot.symbol} {BUDGET_STOP if kind == 'base' else RETRY_SKIPPED}")
-                    return kind == "retry" and not str(record["result"]).startswith("error_")
+                    return
                 # Durable before acting: a crash after this line leaves the call counted.
                 self.ledger.data["sent"] += 1
                 record["requests"] += 1
@@ -495,25 +532,29 @@ class IntradayProbe:
                 try:
                     payload = self._fetch(slot)
                 except (UpstreamError, UpstreamTimeout) as err:
-                    record["result"] = f"error_{err.code}"
+                    record["attempts"].append(f"error_{err.code}")
+                    if slot_outcome(record["attempts"], False) != ANSWERED:
+                        record["result"] = f"error_{err.code}"  # an earlier answer stays the result
                     self.ledger.save()
                     self.say(f"slot {step} {slot.kind} {slot.symbol} error {err.code}")
                     if step in NEVER_RETRIED or retried:
-                        return False
+                        return
                     retried = True
                     continue
                 except RelayError as err:
+                    record["attempts"].append(f"error_{err.code}")
                     record["result"] = f"error_{err.code}"
                     self.ledger.save()
                     raise
                 self._save_answer(step, slot, seq, payload)
+                record["attempts"].append("empty" if payload.empty else "answered")
                 record["result"] = "empty" if payload.empty else "answered"
                 self.ledger.save()
                 self._print_answer(step, slot, seq, payload)
                 if payload.empty and step not in NEVER_RETRIED and not retried:
                     retried = True
                     continue
-                return True
+                return
 
     def _fetch(self, slot: Slot) -> UpstreamPayload:
         if slot.kind == "intraday":

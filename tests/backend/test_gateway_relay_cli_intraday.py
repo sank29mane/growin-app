@@ -778,3 +778,143 @@ def test_probe_a_latched_stop_refuses_a_later_step_and_names_it(env: Env):
     assert lines[-1] == "step S-9 status probe_budget_stop sent 3"
     _, closing = env.step("S-12")
     assert closing[0] == f"step S-12 relay_delta 0 ledger_sent 3"
+
+
+# ------------------------------------------------------- one rule for a slot's outcome (review r3)
+
+_A, _E, _X = "answered", "empty", "error_UPSTREAM_ERROR"
+
+
+@pytest.mark.parametrize(
+    ("attempts", "cut", "expected"),
+    [
+        ([], False, probe.NOT_RUN),
+        ([], True, probe.BUDGET_CUT),
+        ([_A], False, probe.ANSWERED),
+        ([_E], False, probe.ANSWERED),
+        ([_X], False, probe.ERRORED),
+        ([_A], True, probe.ANSWERED),  # retry refused: the first answer stays
+        ([_E], True, probe.ANSWERED),
+        ([_X], True, probe.ERRORED),  # retry refused after an error: no answer exists (codex-r2-1)
+        ([_X, _A], False, probe.ANSWERED),
+        ([_X, _E], False, probe.ANSWERED),
+        ([_X, _X], False, probe.ERRORED),
+        ([_A, _A], False, probe.ANSWERED),
+        ([_A, _E], False, probe.ANSWERED),
+        ([_A, _X], False, probe.ANSWERED),
+        ([_E, _A], False, probe.ANSWERED),
+        ([_E, _E], False, probe.ANSWERED),
+        ([_E, _X], False, probe.ANSWERED),  # empty then 502: the empty answer is saved evidence (codex-r2-2)
+        ([_X, _X], True, probe.ERRORED),
+        ([_E, _X], True, probe.ANSWERED),
+    ],
+)
+def test_slot_outcome_table(attempts, cut, expected):
+    assert probe.slot_outcome(attempts, cut) == expected
+
+
+def test_slot_outcome_does_not_depend_on_the_order_of_the_tries():
+    import itertools
+
+    tries = (_A, _E, _X)
+    for first, second in itertools.product(tries, tries):
+        for cut in (False, True):
+            assert probe.slot_outcome([first, second], cut) == probe.slot_outcome([second, first], cut)
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "results", "verdict"),
+    [
+        ([probe.ANSWERED], ["answered"], ("complete", 0)),
+        ([probe.ANSWERED], [probe.RETRY_SKIPPED], (probe.RETRY_SKIPPED, 0)),
+        ([probe.BUDGET_CUT], [probe.BUDGET_STOP], (probe.BUDGET_STOP, 0)),
+        ([probe.ANSWERED, probe.BUDGET_CUT], ["answered", probe.BUDGET_STOP], (probe.BUDGET_STOP, 0)),
+        ([probe.ERRORED], ["error_X"], (probe.INCONCLUSIVE, 1)),
+        ([probe.ERRORED, probe.BUDGET_CUT], ["error_X", probe.BUDGET_STOP], (probe.INCONCLUSIVE, 1)),
+        ([probe.BUDGET_CUT, probe.ERRORED], [probe.BUDGET_STOP, "error_X"], (probe.INCONCLUSIVE, 1)),
+        ([probe.ERRORED, probe.ANSWERED], ["error_X", probe.RETRY_SKIPPED], (probe.INCONCLUSIVE, 1)),
+        ([probe.NOT_RUN], ["not_run"], (probe.INCONCLUSIVE, 1)),
+    ],
+)
+def test_step_verdict_table(outcomes, results, verdict):
+    assert probe.step_verdict(outcomes, results) == verdict
+
+
+def _s9(env: Env, first, second, *, bump: int = 0):
+    """Run S-9 (one RELIND slot, one retry allowed) with scripted answers; ``bump`` makes the retry unaffordable."""
+    env.step("S-3")
+    script = [x for x in (first, second) if x is not None]
+    env.relay.answers[("intraday", "RELIND")] = script
+    if bump:
+        env.relay.bump = {len(env.relay.calls) + 1: bump}
+    return env.step("S-9")
+
+
+def _err():
+    return UpstreamError("UPSTREAM_ERROR", http_status=502)
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "retry_fits", "status", "code", "tries"),
+    [
+        # first try is an answer: only an empty one is retried
+        ("ok", None, True, "complete", 0, 1),
+        ("ok", None, False, "complete", 0, 1),
+        ("empty", "ok", True, "complete", 0, 2),
+        ("empty", "empty", True, "complete", 0, 2),
+        ("empty", "err", True, "complete", 0, 2),  # codex-r2-2: was INCONCLUSIVE despite saved evidence
+        ("empty", None, False, probe.RETRY_SKIPPED, 0, 1),
+        # first try is an error
+        ("err", "ok", True, "complete", 0, 2),
+        ("err", "empty", True, "complete", 0, 2),
+        ("err", "err", True, probe.INCONCLUSIVE, 1, 2),
+        ("err", None, False, probe.INCONCLUSIVE, 1, 1),
+    ],
+)
+def test_s9_every_combination_of_two_tries_and_a_budget_refusal(env: Env, first, second, retry_fits, status, code, tries):
+    make = {"ok": lambda: None, "empty": lambda: empty_payload(), "err": _err}
+    first_try = make[first]() if first != "ok" else make_payload(body_of(minute_rows()))
+    second_try = None
+    if second is not None:
+        second_try = make[second]() if second != "ok" else make_payload(body_of(minute_rows()))
+    got, lines = _s9(env, first_try, second_try, bump=0 if retry_fits else 13)
+    assert (got != 0) == (code != 0)
+    assert lines[-1].startswith(f"step S-9 status {status} ")
+    assert sent(env) == 3 + tries
+
+
+def test_a_budget_cut_after_an_error_keeps_the_step_inconclusive_when_later_slots_stop(env: Env):
+    """codex-r2-1: S-6 RELIND 502 at relay delta 19, its retry refused, BAJFI fits, NIFBEE is cut."""
+    env.step("S-3")
+    env.relay.answers[("intraday", "RELIND")] = [_err()]
+    env.relay.bump = {len(env.relay.calls) + 1: 15}
+    code, lines = env.step("S-6")
+    assert code == cli_mod.EXIT_RELAY != 0
+    assert "slot S-6 intraday RELIND probe_retry_skipped" in lines
+    assert "slot S-6 intraday NIFBEE probe_budget_stop" in lines
+    assert lines[-1].startswith("step S-6 status INCONCLUSIVE ")
+    assert env.ledger()["stopped"] is True
+
+
+def test_every_later_slot_cut_after_an_early_error_still_exits_nonzero(env: Env):
+    env.step("S-3")
+    env.relay.answers[("intraday", "RELIND")] = [_err()]
+    env.relay.bump = {len(env.relay.calls) + 1: 16}  # delta 20 after the send: every later base call is cut
+    code, lines = env.step("S-6")
+    assert code != 0 and lines[-1].startswith("step S-6 status INCONCLUSIVE ")
+    assert sum(1 for line in lines if line.endswith("probe_budget_stop")) == 2
+
+
+def test_a_pure_budget_cut_still_exits_zero_with_its_own_status(env: Env):
+    env.step("S-3")
+    env.relay.counted += 17
+    code, lines = env.step("S-6")
+    assert code == 0 and lines[-1].startswith("step S-6 status probe_budget_stop ")
+
+
+def test_a_repeated_step_whose_earlier_run_errored_and_now_answers_is_complete(env: Env):
+    env.step("S-3")
+    env.relay.answers[("intraday", "RELIND")] = [_err(), _err()]
+    assert env.step("S-9")[0] != 0
+    code, lines = env.step("S-9")
+    assert code == 0 and lines[-1].startswith("step S-9 status complete ")
