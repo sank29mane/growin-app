@@ -26,8 +26,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .breeze_client import BreezeClient, BreezeError, V2_DAILY_INTERVAL, classify_payload
 from .contract import (
-    ALLOWED_BARS_QUERY,
     ALLOWED_BODY_FIELDS,
+    ALLOWED_QUERY_BY_ROUTE,
     API_BARS_V2,
     API_SESSION_RE,
     ATTEMPT_ID_RE,
@@ -124,17 +124,39 @@ def _require_json(request: Request) -> None:
         raise RelayFailure("VALIDATION", fields=["body"])
 
 
-def _parse_bars_query(request: Request) -> tuple[str, date, date]:
-    """Strict C3 rules. A violation lists parameter names only, never values."""
+def _read_query(request: Request, route: str) -> tuple[dict[str, str], set[str]]:
+    """C3: only the route's listed names, each at most once.
+
+    Returns the accepted values and the offending parameter names. A name that is
+    not listed is reported as "unknown": the submitted name is never echoed.
+    """
+    allowed = ALLOWED_QUERY_BY_ROUTE[route]
     seen: dict[str, str] = {}
     bad: set[str] = set()
     for name, value in request.query_params.multi_items():
-        if name not in ALLOWED_BARS_QUERY:
-            bad.add("unknown")  # the submitted name itself is never echoed
+        if name not in allowed:
+            bad.add("unknown")
         elif name in seen:
             bad.add(name)
         else:
             seen[name] = value
+    return seen, bad
+
+
+def _query_allowlist(route: str):
+    """Dependency for a route that takes no query parameters at all."""
+
+    def check(request: Request) -> None:
+        _seen, bad = _read_query(request, route)
+        if bad:
+            raise RelayFailure("VALIDATION", fields=sorted(bad))
+
+    return check
+
+
+def _parse_bars_query(request: Request) -> tuple[str, date, date]:
+    """Strict C3 rules. A violation lists parameter names only, never values."""
+    seen, bad = _read_query(request, ROUTE_BARS_DAILY)
     for required in ("stock_code", "from", "to"):
         if required not in seen:
             bad.add(required)
@@ -311,7 +333,7 @@ def create_app(
 
     # ------------------------------------------------------------ health
 
-    @app.get(ROUTE_HEALTH)
+    @app.get(ROUTE_HEALTH, dependencies=[Depends(_query_allowlist(ROUTE_HEALTH))])
     def health():
         snap = session.snapshot(refresh_egress_if_stale=True)
         return JSONResponse(
@@ -325,7 +347,10 @@ def create_app(
 
     # ------------------------------------------------------------- login
 
-    @app.post(ROUTE_LOGIN_ARM, dependencies=[Depends(_require_json)])
+    @app.post(
+        ROUTE_LOGIN_ARM,
+        dependencies=[Depends(_require_json), Depends(_query_allowlist(ROUTE_LOGIN_ARM))],
+    )
     def login_arm(body: _EmptyBody, token: Optional[str] = Depends(_bearer)):
         attempt_id, login_url, relay_token, expires = session.arm(token)
         return JSONResponse(
@@ -338,14 +363,20 @@ def create_app(
             }
         )
 
-    @app.post(ROUTE_LOGIN_COMPLETE, dependencies=[Depends(_require_json)])
+    @app.post(
+        ROUTE_LOGIN_COMPLETE,
+        dependencies=[Depends(_require_json), Depends(_query_allowlist(ROUTE_LOGIN_COMPLETE))],
+    )
     def login_complete(body: _CompleteBody, token: Optional[str] = Depends(_bearer)):
         expires = session.complete(body.attempt_id, body.apisession, token)
         return JSONResponse(
             {"contract": CONTRACT, "state": "active", "expires_at_ist": expires.isoformat()}
         )
 
-    @app.post(ROUTE_SESSION_REVOKE, dependencies=[Depends(_require_json)])
+    @app.post(
+        ROUTE_SESSION_REVOKE,
+        dependencies=[Depends(_require_json), Depends(_query_allowlist(ROUTE_SESSION_REVOKE))],
+    )
     def session_revoke(body: _EmptyBody, token: Optional[str] = Depends(_bearer)):
         session.revoke(token)
         return JSONResponse({"contract": CONTRACT, "state": "none", "expires_at_ist": None})

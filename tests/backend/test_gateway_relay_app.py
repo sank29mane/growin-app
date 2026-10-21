@@ -810,3 +810,64 @@ def test_event_log_accepts_every_documented_key_and_enum():
     for event in sorted(events_mod.EVENTS):
         log.emit(event, count=0)
     assert len(sink.getvalue().splitlines()) == 4 + len(events_mod.REASONS) + len(events_mod.EVENTS)
+
+
+# ---------------------------------------- C3 query allowlist on every route
+
+
+@pytest.mark.parametrize(
+    "method, path",
+    [
+        ("get", "/v1/health"),
+        ("post", "/v1/login/arm"),
+        ("post", "/v1/login/complete"),
+        ("post", "/v1/session/revoke"),
+    ],
+)
+@pytest.mark.parametrize("extra", ["debug=1", "stock_code=RELIND", "a=1&a=2"])
+def test_unlisted_query_parameters_are_422_on_every_route(stack: Stack, method, path, extra):
+    token = stack.login()
+    n = len(stack.transport.requests)
+    kwargs = {"json": {}} if method == "post" else {}
+    if path == "/v1/login/complete":
+        armed = stack.arm(token).json()
+        n = len(stack.transport.requests)
+        kwargs = {"json": {"attempt_id": armed["attempt_id"], "apisession": CODE}}
+        token = armed["relay_token"]
+    resp = getattr(stack.client, method)(
+        f"{path}?{extra}", headers={**CONTRACT_HDR, **auth(token)}, **kwargs
+    )
+    assert resp.status_code == 422 and code_of(resp) == "VALIDATION"
+    assert resp.json()["error"]["fields"] == ["unknown"]
+    assert len(stack.transport.requests) == n  # the handler never ran
+    for value in ("debug", "stock_code", "RELIND"):
+        assert value not in resp.text
+    assert_envelope(resp)
+    # and the same call without the query string is fine, so the query was the only fault
+    again = getattr(stack.client, method)(path, headers={**CONTRACT_HDR, **auth(token)}, **kwargs)
+    assert again.status_code == 200
+
+
+def test_an_unlisted_query_on_arm_does_not_arm_or_clear_the_pending_attempt(stack: Stack):
+    armed = stack.arm().json()
+    resp = stack.client.post(
+        "/v1/login/arm?x=1", json={}, headers={**CONTRACT_HDR}
+    )
+    assert resp.status_code == 422
+    assert len(stack.events_named("login_armed")) == 1
+    assert stack.complete(armed["attempt_id"], armed["relay_token"]).status_code == 200
+
+
+def test_unlisted_query_on_revoke_leaves_the_session_alone(stack: Stack):
+    token = stack.login()
+    resp = stack.client.post(
+        "/v1/session/revoke?force=1", json={}, headers={**CONTRACT_HDR, **auth(token)}
+    )
+    assert resp.status_code == 422
+    assert stack.bars(token).status_code == 200
+
+
+def test_every_route_in_the_app_has_a_query_allowlist(stack: Stack):
+    assert set(contract.ALLOWED_QUERY_BY_ROUTE) == set(contract.ROUTES)
+    assert {route.path for route in stack.app.routes} == set(contract.ALLOWED_QUERY_BY_ROUTE)
+    assert contract.ALLOWED_QUERY_BY_ROUTE[contract.ROUTE_BARS_DAILY] == contract.ALLOWED_BARS_QUERY

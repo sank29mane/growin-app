@@ -174,4 +174,13 @@ ARM_WINDOW_S = 120
 EGRESS_MAX_AGE_S = 300
 MAX_RANGE_DAYS = 3000
 ALLOWED_BARS_QUERY = ("stock_code", "from", "to", "exchange")
+# C3: only the listed query names, on every route. A route with no parameters
+# lists none, so any query string on it is a 422.
+ALLOWED_QUERY_BY_ROUTE: Mapping[str, tuple[str, ...]] = {
+    ROUTE_HEALTH: (),
+    ROUTE_LOGIN_ARM: (),
+    ROUTE_LOGIN_COMPLETE: (),
+    ROUTE_SESSION_REVOKE: (),
+    ROUTE_BARS_DAILY: ALLOWED_BARS_QUERY,
+}
 ALLOWED_BODY_FIELDS = ("attempt_id", "apisession")
