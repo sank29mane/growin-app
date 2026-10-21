@@ -666,19 +666,25 @@ def test_security_master_refuses_egress_that_aged_out_during_its_own_refresh(rs:
 
 
 def test_security_master_refuses_when_a_concurrent_check_failed_after_its_own_refresh(rs: Stack):
-    """Codex P2 repro B: a failed check landed after this request's refresh and before its download."""
-    real = rs.budget.charge
+    """Codex P2 repro B: a failed check landed after this request's refresh and before its download.
+
+    The failure is injected inside the request's own refresh, after the real one returned
+    ok, so only require_egress's re-check of the stored evidence can catch it.
+    """
+    real = rs.session._refresh_egress
     hit: list[bool] = []
 
-    def charge_then_fail_a_concurrent_check(kind: str) -> None:
-        real(kind)
+    def refresh_then_fail_a_concurrent_check():
+        own = real()  # this request's check: ok
         if not hit:
             hit.append(True)
             rs.transport.echo_ip = "203.0.113.99"
-            rs.session._refresh_egress()  # another request's failing check, recorded now
+            real()  # another request's failing check, recorded right after
+        return own
 
-    rs.budget.charge = charge_then_fail_a_concurrent_check  # type: ignore[method-assign]
+    rs.session._refresh_egress = refresh_then_fail_a_concurrent_check  # type: ignore[method-assign]
     resp = get(rs, MASTER)
+    assert hit == [True]
     assert resp.status_code == 503 and code_of(resp) == "EGRESS_MISMATCH"
     assert rs.session.snapshot(refresh_egress_if_stale=False)["egress"]["ok"] is False
     assert rs.transport.master_requests() == []

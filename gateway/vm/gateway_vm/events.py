@@ -27,6 +27,7 @@ ALLOWED_KEYS = frozenset(
         "breeze_status",
         "ms",
         "count",
+        "cached",
         "request_id",
     }
 )
@@ -75,6 +76,7 @@ _VALIDATORS = {
     "breeze_status": lambda v: v is None or _is_int(v),
     "ms": _non_negative_int,
     "count": _non_negative_int,
+    "cached": lambda v: isinstance(v, bool),
     "request_id": lambda v: isinstance(v, str) and REQUEST_ID_RE.fullmatch(v) is not None,
 }
 
