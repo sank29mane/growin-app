@@ -443,7 +443,7 @@ def test_event_log_holds_the_audit_trail_with_allowlisted_keys(stack: Stack):
             assert isinstance(line["ms"], int) and line["ms"] >= 0
 
 
-def test_nothing_secret_in_bodies_events_or_401s(stack: Stack):
+def test_no_leak_of_secrets_in_bodies_events_or_401s(stack: Stack):
     armed = stack.arm()
     body = armed.json()
     token = body["relay_token"]
@@ -564,7 +564,7 @@ def test_post_bodies_must_be_json_objects_without_unknown_keys(stack: Stack, kwa
     assert stack.events_named("login_armed") == []
 
 
-def test_complete_body_rejects_unknown_keys_and_never_echoes_them(stack: Stack):
+def test_complete_body_no_leak_of_unknown_keys_and_rejects_them(stack: Stack):
     armed = stack.arm().json()
     resp = stack.client.post(
         "/v1/login/complete",
@@ -644,8 +644,11 @@ def test_no_order_style_url_is_reachable(stack: Stack):
 # The OD-4 day counter (61-08) is the only relay module allowed to write, and
 # smoke_probe.py is the operator tool. gateway_vm/orders/ is Phase 63's own
 # audited writer (ledger and audit log) and is not part of this relay core.
+# Exemptions are paths relative to the package root, so a module of the same name
+# in a new subpackage is scanned.
 WRITE_EXEMPT = frozenset({"smoke_probe.py", "counter_store.py"})
-WRITE_ATTRS = frozenset({"write_text", "write_bytes", "truncate"})
+WRITE_EXEMPT_DIRS = frozenset({"orders"})
+WRITE_ATTRS = frozenset({"write_text", "write_bytes", "truncate", "mkdir"})
 WRITE_OS_ATTRS = frozenset(
     {"write", "open", "replace", "rename", "remove", "unlink", "mkdir", "makedirs", "truncate", "fsync"}
 )
@@ -666,6 +669,7 @@ def _mode_offence(node: ast.Call, mode: ast.AST | None) -> list[tuple[int, str]]
 
 
 def write_offences(source: str) -> list[tuple[int, str]]:
+    """Honest-mistake scan: it flags the usual ways to write, not hostile code."""
     found: list[tuple[int, str]] = []
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
@@ -689,34 +693,71 @@ def write_offences(source: str) -> list[tuple[int, str]]:
                         mode = kw.value
                 found.extend(_mode_offence(node, mode))
             elif isinstance(func, ast.Attribute) and func.attr == "open":
-                # Path.open(mode) takes the mode first, io.open(path, mode) second.
+                # Path.open(mode) takes the mode first, io.open(path, mode) second:
+                # look at both places. A string that is not mode-shaped is a path.
                 candidates = list(node.args[:2]) + [kw.value for kw in node.keywords if kw.arg == "mode"]
                 for cand in candidates:
                     if isinstance(cand, ast.Constant) and isinstance(cand.value, str):
                         if MODE_SHAPE.fullmatch(cand.value):
                             found.extend(_mode_offence(node, cand))
-                if len(node.args) > 1 and not isinstance(node.args[1], ast.Constant):
-                    found.append((node.lineno, "open with a non-literal mode"))
+                    else:
+                        found.append((node.lineno, "open with a non-literal mode"))
     return found
 
 
-def relay_modules() -> list[Path]:
-    return sorted(p for p in PKG.glob("*.py") if p.name not in WRITE_EXEMPT)
+def relay_modules(root: Path = PKG) -> list[Path]:
+    """Every module under the package, subpackages included, minus the named exemptions."""
+    kept = []
+    for path in root.rglob("*.py"):
+        rel = path.relative_to(root)
+        if rel.parts[0] in WRITE_EXEMPT_DIRS and len(rel.parts) > 1:
+            continue
+        if rel.as_posix() in WRITE_EXEMPT:
+            continue
+        kept.append(path)
+    return sorted(kept)
 
 
-def test_relay_modules_never_write_to_disk():
-    modules = relay_modules()
-    names = {p.name for p in modules}
+def scan_package(root: Path = PKG) -> list[str]:
+    offences: list[str] = []
+    for path in relay_modules(root):
+        rel = path.relative_to(root).as_posix()
+        offences += [f"{rel}:{line}: {kind}" for line, kind in write_offences(path.read_text())]
+    return offences
+
+
+def test_no_write_relay_modules_never_write_to_disk():
+    names = {p.name for p in relay_modules()}
     assert {"app.py", "session.py", "events.py", "contract.py", "config.py", "breeze_client.py",
             "transport.py", "egress.py"} <= names  # the scan really covers the relay
-    offences = []
-    for path in modules:
-        offences += [f"{path.name}:{line}: {kind}" for line, kind in write_offences(path.read_text())]
-    assert offences == []
+    assert scan_package() == []
 
 
-def test_write_exemptions_are_exactly_the_two_named_modules():
+def test_no_write_exemptions_are_exactly_the_named_modules():
     assert WRITE_EXEMPT == {"smoke_probe.py", "counter_store.py"}
+    assert WRITE_EXEMPT_DIRS == {"orders"}
+
+
+def test_no_write_scan_recurses_into_subpackages_and_exempts_only_orders(tmp_path):
+    root = tmp_path / "gateway_vm"
+    planted = {
+        "ok.py": "x = 1\n",
+        "smoke_probe.py": "open('x', 'w')\n",  # exempt at the package root
+        "counter_store.py": "open('x', 'w')\n",  # exempt at the package root
+        "orders/ledger.py": "open('x', 'w')\n",  # Phase 63's audited writer
+        "orders/deep/more.py": "open('x', 'w')\n",
+        "cache/store.py": "open('x', 'w')\n",  # a new subpackage: scanned
+        "cache/deeper/blob.py": "import os\nos.makedirs('d')\n",
+        "cache/smoke_probe.py": "open('x', 'w')\n",  # same name, not at the root: scanned
+        "orders.py": "open('x', 'w')\n",  # a module called orders is not the orders package
+    }
+    for rel, source in planted.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source)
+    offences = scan_package(root)
+    flagged = {line.split(":")[0] for line in offences}
+    assert flagged == {"cache/store.py", "cache/deeper/blob.py", "cache/smoke_probe.py", "orders.py"}
 
 
 PLANTED_WRITES = {
@@ -725,7 +766,12 @@ PLANTED_WRITES = {
     "open append": "f = open('x', 'a')\n",
     "open read write": "f = open('x', 'r+')\n",
     "open dynamic mode": "m = 'w'\nf = open('x', m)\n",
+    "open dynamic mode keyword": "m = 'w'\nf = open('x', mode=m)\n",
     "path open": "from pathlib import Path\nPath('x').open('w')\n",
+    "path open w keyword": "from pathlib import Path\nPath('x').open(mode='w')\n",
+    "path open dynamic mode": "from pathlib import Path\nm = 'w'\nPath('x').open(m)\n",
+    "path open dynamic mode keyword": "from pathlib import Path\nm = 'w'\nPath('x').open(mode=m)\n",
+    "io.open dynamic mode": "import io\nm = 'w'\nio.open('x', m)\n",
     "os.open": "import os\nos.open('x', os.O_WRONLY)\n",
     "os.write": "import os\nos.write(3, b'x')\n",
     "write_text": "from pathlib import Path\nPath('x').write_text('y')\n",
@@ -734,16 +780,23 @@ PLANTED_WRITES = {
     "tempfile from": "from tempfile import mkstemp\n",
     "shutil": "import shutil\n",
     "os.replace": "import os\nos.replace('a', 'b')\n",
+    "os.makedirs": "import os\nos.makedirs('d')\n",
+    "os.mkdir": "import os\nos.mkdir('d')\n",
+    "path mkdir": "from pathlib import Path\nPath('d').mkdir()\n",
+    "path mkdir parents": "from pathlib import Path\nPath('d').mkdir(parents=True, exist_ok=True)\n",
 }
 
 
 @pytest.mark.parametrize("name", list(PLANTED_WRITES))
-def test_write_scanner_flags_planted_offence(name):
+def test_no_write_scanner_flags_planted_offence(name):
     assert write_offences(PLANTED_WRITES[name]), f"scanner missed: {name}"
 
 
-def test_write_scanner_accepts_reads():
-    source = "f = open('x')\ng = open('x', 'rb')\nh = open('x', mode='r')\nimport json, os\nos.stat('x')\n"
+def test_no_write_scanner_accepts_reads():
+    source = (
+        "f = open('x')\ng = open('x', 'rb')\nh = open('x', mode='r')\nimport json, os\nos.stat('x')\n"
+        "from pathlib import Path\nPath('x').open()\nPath('x').open('rb')\nPath('x').exists()\n"
+    )
     assert write_offences(source) == []
 
 
@@ -939,3 +992,16 @@ def test_a_trailing_newline_is_422_in_the_attempt_id_apisession_and_stock_code(s
         "stock_code=RELIND&from=2025-06-02&to=2025-06-13&exchange=NSE%0A",
     ):
         assert stack.bars(token, "/v1/bars/daily?" + query).status_code == 422
+
+
+def test_no_leak_a_bad_apisession_is_not_echoed_in_the_422(stack: Stack):
+    armed = stack.arm().json()
+    marker = "SUPERSECRET-MARKER-9f2c!"
+    resp = stack.client.post(
+        "/v1/login/complete",
+        json={"attempt_id": armed["attempt_id"], "apisession": marker},
+        headers={**CONTRACT_HDR, **auth(armed["relay_token"])},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["error"]["fields"] == ["apisession"]
+    assert marker not in resp.text + stack.sink.getvalue()
