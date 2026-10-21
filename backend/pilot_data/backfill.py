@@ -1147,19 +1147,25 @@ class BackfillEngine:
             "ORDER BY l.call_id",
             [self._workspace, plan.plan_sha256],
         )
-        latest: dict[tuple[str, date, date], tuple[int, str, str | None, bool, bool]] = {}
+        newest: dict[tuple[str, date, date], tuple[int, str, str | None, bool, bool]] = {}
         calls: dict[tuple[str, date, date, int], int] = {}
         for code, start, end, attempt, error_code, source, stopped, outcome in rows:
             key = (code, start, end)
             calls[(*key, int(attempt))] = calls.get((*key, int(attempt)), 0) + 1  # a refused send is still a try
             if outcome == "not_sent":
                 continue
-            if key in latest and int(attempt) < latest[key][0]:
+            if key in newest and int(attempt) < newest[key][0]:
                 continue
-            lone_non_final = calls[(*key, int(attempt))] == 1 and (
-                outcome in NON_FINAL_TRY1_OUTCOMES or (outcome == "error" and error_code in NON_FINAL_TRY1_ERROR_CODES)
+            non_final = outcome in NON_FINAL_TRY1_OUTCOMES or (
+                outcome == "error" and error_code in NON_FINAL_TRY1_ERROR_CODES
             )
-            latest[key] = (int(attempt), error_code or INTERRUPTED_ATTEMPT_CODE, source, bool(stopped), lone_non_final)
+            newest[key] = (int(attempt), error_code or INTERRUPTED_ATTEMPT_CODE, source, bool(stopped), non_final)
+        # "Lone" is decided once every row is in: a refused try 2 (not_sent) lands after the counted try 1 and
+        # must still end the release, or the attempt resumes at try 3 and has no send left to make.
+        latest = {
+            key: (attempt, code, source, stopped, non_final and calls[(*key, attempt)] == 1)
+            for key, (attempt, code, source, stopped, non_final) in newest.items()
+        }
         return latest, calls
 
     def _released_tries(
@@ -1262,7 +1268,7 @@ class BackfillEngine:
             try:
                 outcome, detail = self._process_window(
                     plan, code, window, attempt, convention, depth_floor, self._listing_date(code, today_ist),
-                    today_ist, first_try=tries_used + 1 if resumed_attempt == attempt else 1,
+                    today_ist, first_try=min(tries_used + 1, 2) if resumed_attempt == attempt else 1,
                 )
             except _Stop as stop:
                 status, stop_code = stop.status, stop.code

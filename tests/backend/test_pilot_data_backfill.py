@@ -2308,6 +2308,43 @@ def test_a_refused_try_one_then_a_failed_try_two_and_a_crash_stays_spent(store, 
     ) == [("failed", 1), ("done", 2)]
 
 
+def test_a_timeout_then_a_refused_try_two_that_stops_the_run_does_not_wedge_the_window(store, relay, clock_time):
+    """Codex r2 and Opus r2 P2: try 1 times out (a lone non-final row), try 2 is refused before send and halts the
+    run. The refused row lands after the flag was set, so the attempt used to stay "released" with two rows, resume at
+    try 3 and hit the unreachable AssertionError on every rerun."""
+    eng, plan = ready(store, relay, clock_time, codes=("RELIND",))
+    sent = {"n": 0}
+
+    class TimeoutThenRefused:
+        def __getattr__(self, name):
+            return getattr(relay.client(), name)
+
+        def daily_bars(self, *args, **kw):
+            sent["n"] += 1
+            if sent["n"] == 1:
+                raise UpstreamTimeout()
+            raise RelayUnavailable(reason="tunnel_restart_backoff")
+
+    stopped = engine(store, relay, clock_time, source=TimeoutThenRefused()).run(plan, today_ist=TODAY)
+    assert stopped.status == "stopped_fail_closed"
+    assert store.query(
+        "SELECT o.outcome FROM relay_call_ledger AS l JOIN relay_call_outcomes AS o USING (call_id) "
+        "WHERE l.plan_sha256 = ? ORDER BY l.call_id", [plan.plan_sha256],
+    ) == [("error",), ("not_sent",)]
+    for _ in range(2):  # every rerun used to raise; the window now progresses
+        resumed = engine(store, relay, clock_time).run(plan, today_ist=TODAY)
+        assert resumed.status == "complete" and resumed.counts["done"] == 2
+    first = plan.windows[0][0]
+    assert store.query(
+        "SELECT status, attempt FROM backfill_events WHERE window_from = ? AND status <> 'pending' ORDER BY attempt",
+        [first],
+    ) == [("failed", 1), ("done", 2)]
+    assert store.query(
+        "SELECT attempt, count(*) FROM relay_call_ledger WHERE window_from = ? AND plan_sha256 = ? GROUP BY attempt "
+        "ORDER BY attempt", [first, plan.plan_sha256],
+    ) == [(1, 2), (2, 1)]
+
+
 def test_a_refused_send_followed_by_an_ist_rollover_does_not_spend_the_attempt(store, relay, clock_time):
     """Opus r6 R6-3: `not_sent` used nothing. Try 1 is refused, midnight lands before try 2, and the next run's
     window is still attempt 1."""
