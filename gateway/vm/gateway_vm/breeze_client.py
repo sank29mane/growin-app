@@ -28,7 +28,9 @@ SDK_USER_AGENT = (
 V1_BASE = "https://api.icicidirect.com/breezeapi/api/v1/"
 V2_HISTORICAL_URL = "https://breezeapi.icicidirect.com/api/v2/historicalcharts"
 V1_ENDPOINTS = frozenset({"customerdetails", "quotes", "preview_order"})
-V2_DAILY_INTERVAL = "1day"  # 61-05 may change this from the smoke result
+# From 61-SMOKE-BREEZE.json, run 2026-10-21, key s2_interval_wire ("1day"): the
+# v2 daily wire value the smoke confirmed. Pinned in test_gateway_relay_config.py.
+V2_DAILY_INTERVAL = "1day"
 V2_EXCHANGE_PARAM_NAMES = ("exch_code", "exchange_code")  # docs table vs docs samples
 ERROR_CLASSES = (
     "invalid_session",
@@ -143,6 +145,9 @@ def _evaluate(http_status: int, body: bytes) -> tuple[object, str, PayloadVerdic
     if not isinstance(payload, dict):
         return _BAD, "UPSTREAM_SHAPE", PayloadVerdict(False, None, "other")
     status = payload.get("Status")
+    # Status is checked as an int only: 61-SMOKE-BREEZE.json, run 2026-10-21,
+    # s1_customer_details.status_type is "int" and no S2 call recorded a string
+    # Status, so the string "200" stays rejected (fail closed).
     error = payload.get("Error")
     success = payload.get("Success")
     good = (

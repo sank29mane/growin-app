@@ -707,7 +707,7 @@ def relay_modules() -> list[Path]:
 def test_relay_modules_never_write_to_disk():
     modules = relay_modules()
     names = {p.name for p in modules}
-    assert {"app.py", "session.py", "events.py", "contract.py", "breeze_client.py",
+    assert {"app.py", "session.py", "events.py", "contract.py", "config.py", "breeze_client.py",
             "transport.py", "egress.py"} <= names  # the scan really covers the relay
     offences = []
     for path in modules:
