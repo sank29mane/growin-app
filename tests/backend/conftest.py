@@ -207,3 +207,11 @@ def build_private_config(root: _P58Path) -> _P58Path:
 def private_config_dir(tmp_path):
     """A valid synthetic private/ directory. Reads no environment variable."""
     return build_private_config(tmp_path)
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "live_local: runs against a local model runtime named by environment variables; "
+        "skipped unless they are set and always skipped in CI",
+    )
