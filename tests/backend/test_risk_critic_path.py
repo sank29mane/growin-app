@@ -320,3 +320,20 @@ async def test_a_flagged_or_blocked_proposal_is_still_registered_and_broadcast(
         assert "ADVERSARIAL WARNING" in result["content"]
     finally:
         state.close_execution()
+
+
+# --- review round 2: numbers a parser cannot hold are a typed critic failure -------------------
+
+
+@pytest.mark.parametrize(
+    "literal", ["1e400", "-1e400", "NaN", "Infinity", "-Infinity"], ids=["pos", "neg", "nan", "inf", "neg_inf"]
+)
+async def test_a_non_finite_confidence_score_is_critic_output_invalid(stub, registry_factory, risk_workspace, literal):
+    registry_factory()
+    text = json.dumps(_verdict()).replace('"confidence_score": 0.8', f'"confidence_score": {literal}')
+    assert literal in text
+    stub.structured["RiskAssessment"] = text
+    with pytest.raises(ProviderError) as caught:
+        await RiskAgent().review(_context(), "BUY 1 share of AAPL")
+    assert caught.value.code == "CRITIC_OUTPUT_INVALID"
+    assert stub.count == 1  # no retry, no other model

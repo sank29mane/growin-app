@@ -985,3 +985,35 @@ async def test_refused_registration_cannot_reuse_binding_for_broadcast(tmp_path,
     assert caught.value.code == "RISK_REVIEW_REQUIRED"
     register.assert_called_once()
     orchestrator.messenger.send_message.assert_not_awaited()
+
+
+# --- review round 2: an unparseable number or nesting is the typed error, not text -----------
+
+
+def _bad_arguments_reply(arguments_json: str) -> str:
+    return json.dumps(
+        {
+            "tool_calls": [
+                {"tool_name": "get_quote", "arguments_json": arguments_json, "conviction_level": 5, "is_high_conviction": False}
+            ]
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "arguments_json",
+    ['{"qty": 1e400}', '{"qty": -1e400}', '{"qty": NaN}', '{"qty": Infinity}', '{"a": ' + "[" * 100_000 + "}"],
+    ids=["pos_overflow", "neg_overflow", "nan", "infinity", "deep_nesting"],
+)
+async def test_make_decision_raises_structured_output_invalid_for_an_unparseable_reply(
+    tmp_path, stub, key_env, arguments_json
+):
+    _activate(tmp_path, stub)
+    stub.reply_text = "Looks fine. [TOOL:get_quote(AAPL)]"
+    stub.structured["ToolCallList"] = _bad_arguments_reply(arguments_json)
+    agent = DecisionAgent(mcp_client=MagicMock())
+    with patch.object(agent, "_inject_context_layers", side_effect=lambda p, q: p):
+        with pytest.raises(ProviderError) as caught:
+            await agent.make_decision(_context(), "Buy AAPL")
+    assert caught.value.code == "STRUCTURED_OUTPUT_INVALID"
+    assert caught.value.role == "decision"

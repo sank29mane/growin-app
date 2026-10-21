@@ -28,7 +28,8 @@ model, with one generic walk and no provider branching:
   ``WireSchemaError``.
 
 The decoder is as strict as the schema it sent. The reply must be strict JSON
-(no ``NaN``, no duplicate keys), every object must carry exactly the wire
+(no ``NaN``, no number that overflows to infinity, no duplicate keys, no nesting
+deep enough to exhaust the parser; each is a ``WireReplyError``), every object must carry exactly the wire
 properties (a missing or extra key is an error), and the result is handed back as
 JSON text for ``model_validate_json(..., strict=True)`` against the real model.
 There is no lenient parse and no repair.
@@ -37,6 +38,7 @@ There is no lenient parse and no repair.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Callable, Dict, Tuple
@@ -80,6 +82,12 @@ def _strict_loads(text: str) -> Any:
     def reject_constant(name: str) -> Any:
         raise WireReplyError(f"non-JSON constant {name}")
 
+    def finite_float(literal: str) -> float:
+        value = float(literal)
+        if not math.isfinite(value):
+            raise WireReplyError("number out of range")
+        return value
+
     def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         keys = [k for k, _ in pairs]
         if len(set(keys)) != len(keys):
@@ -87,8 +95,17 @@ def _strict_loads(text: str) -> Any:
         return dict(pairs)
 
     try:
-        return json.loads(text, parse_constant=reject_constant, object_pairs_hook=reject_duplicates)
-    except json.JSONDecodeError:
+        return json.loads(
+            text,
+            parse_constant=reject_constant,
+            parse_float=finite_float,
+            object_pairs_hook=reject_duplicates,
+        )
+    except WireReplyError:
+        raise
+    except RecursionError:
+        raise WireReplyError("nested too deeply") from None
+    except ValueError:  # JSONDecodeError, or an integer literal past the interpreter's digit limit
         raise WireReplyError("not JSON") from None
 
 
@@ -103,7 +120,10 @@ class WireSpec:
         """Strict-parse a reply, undo the wire encodings, and return JSON for the real model."""
 
         native = self._decode(_strict_loads(text))
-        return json.dumps(native, allow_nan=False)
+        try:
+            return json.dumps(native, allow_nan=False)
+        except (ValueError, RecursionError):
+            raise WireReplyError("reply cannot be re-encoded as JSON") from None
 
 
 class _Builder:

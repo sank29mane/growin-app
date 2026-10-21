@@ -399,3 +399,75 @@ async def test_a_conviction_outside_the_model_bounds_still_fails_after_the_wire_
     with pytest.raises(ProviderError) as caught:
         await extract_tool_calls("c", "r")
     assert caught.value.code == "STRUCTURED_OUTPUT_INVALID"
+
+
+# --- review round 2: numbers and nesting a parser cannot hold are typed failures -------------
+
+# Python parses 1e400 to inf, and json.dumps(allow_nan=False) then raises a bare
+# ValueError. A very deep array raises RecursionError. Neither is a WireReplyError
+# unless the decoder makes it one.
+_DEEP = "[" * 100_000
+_OUT_OF_RANGE = {
+    "pos_overflow": "1e400",
+    "neg_overflow": "-1e400",
+    "nan": "NaN",
+    "pos_infinity": "Infinity",
+    "neg_infinity": "-Infinity",
+}
+
+
+def _verdict_text(confidence_literal: str) -> str:
+    """The critic verdict as reply text with a raw number literal for confidence_score."""
+    text = json.dumps({**VERDICT, "confidence_score": 0.5})
+    assert '"confidence_score": 0.5' in text
+    return text.replace('"confidence_score": 0.5', f'"confidence_score": {confidence_literal}')
+
+
+@pytest.mark.parametrize("literal", _OUT_OF_RANGE.values(), ids=_OUT_OF_RANGE.keys())
+def test_a_non_finite_number_at_the_top_level_is_a_wire_reply_error(literal):
+    with pytest.raises(WireReplyError):
+        wire_spec(RiskAssessment).to_native_json(_verdict_text(literal))
+
+
+@pytest.mark.parametrize("literal", _OUT_OF_RANGE.values(), ids=_OUT_OF_RANGE.keys())
+def test_a_non_finite_number_inside_arguments_json_is_a_wire_reply_error(literal):
+    with pytest.raises(WireReplyError):
+        wire_spec(ToolCallList).to_native_json(_call('{"qty": ' + literal + "}"))
+
+
+def test_a_deeply_nested_arguments_json_is_a_wire_reply_error():
+    with pytest.raises(WireReplyError):
+        wire_spec(ToolCallList).to_native_json(_call('{"a": ' + _DEEP + "}"))
+
+
+def test_a_deeply_nested_top_level_reply_is_a_wire_reply_error():
+    with pytest.raises(WireReplyError):
+        wire_spec(RiskAssessment).to_native_json(_DEEP)
+
+
+def test_finite_numbers_still_pass_through():
+    spec = wire_spec(ToolCallList)
+    for literal in ["0", "-0.5", "1e5", "1.5E-3", "123456789012345678901234567890"]:
+        out = spec.to_native_json(_call('{"qty": ' + literal + "}"))
+        assert "qty" in out
+
+
+@pytest.mark.parametrize("literal", _OUT_OF_RANGE.values(), ids=_OUT_OF_RANGE.keys())
+@pytest.mark.asyncio
+async def test_extract_tool_calls_with_a_non_finite_argument_is_structured_output_invalid(stub, registry_factory, literal):
+    registry_factory()
+    stub.structured["ToolCallList"] = _call('{"qty": ' + literal + "}")
+    with pytest.raises(ProviderError) as caught:
+        await extract_tool_calls("c", "r")
+    assert caught.value.code == "STRUCTURED_OUTPUT_INVALID"
+    assert stub.count == 1
+
+
+@pytest.mark.asyncio
+async def test_extract_tool_calls_with_deeply_nested_arguments_is_structured_output_invalid(stub, registry_factory):
+    registry_factory()
+    stub.structured["ToolCallList"] = _call('{"a": ' + _DEEP + "}")
+    with pytest.raises(ProviderError) as caught:
+        await extract_tool_calls("c", "r")
+    assert caught.value.code == "STRUCTURED_OUTPUT_INVALID"
+    assert stub.count == 1
