@@ -49,6 +49,7 @@ from .service import (
     ExecutionConflictError,
     ExecutionDisabledError,
     ExecutionService,
+    OrderNotPlacedError,
 )
 from .venue import (
     VENUE_PAPER,
@@ -81,6 +82,7 @@ __all__ = [
     "AdmissionDecision",
     "BrokerExecutionError",
     "BrokerOutcomeUnknownError",
+    "OrderNotPlacedError",
     "ExecutionConflictError",
     "ExecutionDisabledError",
     "ExecutionLedger",

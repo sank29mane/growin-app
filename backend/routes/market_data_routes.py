@@ -1,5 +1,6 @@
 """Explicit, local-only market-data replay lifecycle and snapshot resources."""
 
+import asyncio
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Annotated, Literal
@@ -151,8 +152,14 @@ async def prepare_india_paper(payload: IndiaPaperPreparationRequest, request: Re
     """Prepare a server-owned local PAPER intent; it never approves or dispatches."""
     _require_loopback(request)
     try:
+        quote = None
+        if state.relay_quotes is not None:
+            # A relay is attached: the preparation reads its quote and sets a limit price from
+            # it. Those reads block, so they run off the event loop. The admission itself stays
+            # on this thread: its regime policy tables belong to the thread that built them.
+            quote = await asyncio.to_thread(state.prefetch_india_relay, payload.symbol)
         proposal, admission = state.prepare_india_paper_local(
-            symbol=payload.symbol, quantity=payload.quantity,
+            symbol=payload.symbol, quantity=payload.quantity, quote=quote,
         )
     except MarketDataError as exc:
         raise _market_error(exc) from exc

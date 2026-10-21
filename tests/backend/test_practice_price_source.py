@@ -15,6 +15,7 @@ from execution import ExecutionLedger, ExecutionService, VenueBinding
 from execution.venue import (
     ADMISSIBLE_PRICE_SOURCES,
     PRICE_SOURCE_OPERATOR_RECORDED,
+    PRICE_SOURCE_RELAY_QUOTE,
     PRICE_SOURCE_TEST_REPLAY,
     admissible_price_sources,
 )
@@ -41,6 +42,13 @@ def test_the_production_price_source_set_has_only_the_operator_recorded_source()
     assert ADMISSIBLE_PRICE_SOURCES == frozenset({PRICE_SOURCE_OPERATOR_RECORDED})
     assert PRICE_SOURCE_TEST_REPLAY not in admissible_price_sources()
     assert PRICE_SOURCE_TEST_REPLAY in admissible_price_sources(allow_test_sources=True)
+
+
+def test_the_india_relay_quote_source_is_not_a_practice_source():
+    # Opus G3: relay-quote belongs to the India SHADOW binding alone.
+    assert PRICE_SOURCE_RELAY_QUOTE not in ADMISSIBLE_PRICE_SOURCES
+    assert PRICE_SOURCE_RELAY_QUOTE not in admissible_price_sources()
+    assert PRICE_SOURCE_RELAY_QUOTE not in admissible_price_sources(allow_test_sources=True)
 
 
 async def production_stack(tmp_path, private_dir, monkeypatch):
@@ -80,6 +88,15 @@ async def test_a_production_started_practice_service_refuses_local_replay(
             **stack.app._local_paper_preflight(),
         )
         assert recorded.reason_code != "PRICE_SOURCE_NOT_ADMISSIBLE"
+        # Opus G3: the India relay source is refused on a practice admission.
+        relay = stack.service.admit(
+            practice_proposal_dict("prod-relay", quantity="1", limit_price="50"),
+            currency="GBP", price="0.5", price_divisor="100", price_source=PRICE_SOURCE_RELAY_QUOTE,
+            **stack.app._local_paper_preflight(),
+        )
+        assert relay.decision.value == "DENIED"
+        assert relay.reason_code == "PRICE_SOURCE_NOT_ADMISSIBLE"
+        assert stack.ledger.get_reservation("prod-relay") is None
     finally:
         stack.close()
 

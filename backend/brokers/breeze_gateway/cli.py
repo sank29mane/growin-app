@@ -2,7 +2,8 @@
 
     PYTHONPATH=backend uv run --project backend --no-sync python -m brokers.breeze_gateway.cli <command>
 
-Commands: health, budget, revoke, tunnel, probe-daily, login --paste.
+Commands: health, budget, revoke, tunnel, probe-daily, login --paste, orders-state,
+orders-audit (growin-orders/1 reads: names, numbers and ids only, never a price or a quantity).
 
 `login --paste` is the hidden-prompt fallback (D-12, OD-12): the API session code
 is read with getpass, sent only as a JSON body over the IAP tunnel and never
@@ -26,6 +27,7 @@ from typing import Callable, Sequence, TextIO
 from .client import RelayClient
 from .config import ConfigError, GatewayConfig, load_gateway_config
 from .errors import RelayArgumentError, RelayError, TunnelError
+from .orders import OrdersClient
 from .tunnel import Tunnel
 
 EXIT_OK = 0
@@ -64,6 +66,9 @@ def _parser() -> argparse.ArgumentParser:
     probe.add_argument("--stock-code", required=True)
     probe.add_argument("--from", dest="from_date", required=True, type=_day)
     probe.add_argument("--to", dest="to_date", required=True, type=_day)
+    sub.add_parser("orders-state", help="VM order state: kill, latches, drawdown (read only)")
+    audit = sub.add_parser("orders-audit", help="VM order audit entries (read only)")
+    audit.add_argument("--after-seq", type=int, default=0)
     login = sub.add_parser("login", help="log in through the relay")
     login.add_argument("--paste", action="store_true", help="type the code at a hidden prompt")
     login.add_argument("--no-open", action="store_true", help="do not open the browser")
@@ -145,6 +150,24 @@ def main(
                 say(f"ist_date {budget.ist_date.isoformat()}")
             elif args.command == "revoke":
                 say(f"state {relay.revoke().state}")
+            elif args.command == "orders-state":
+                order_state = OrdersClient(relay).state()
+                say(f"kill {order_state.kill}")
+                say(f"latches {','.join(order_state.latches) or 'none'}")
+                say(f"drawdown {order_state.drawdown}")
+                say(f"peak_date {order_state.peak_date or 'none'}")
+                say(f"last_evaluated_session {order_state.last_evaluated_session or 'none'}")
+                say(f"alerts_logged {order_state.alerts_logged}")
+            elif args.command == "orders-audit":
+                if args.after_seq < 0:
+                    raise RelayArgumentError("after_seq")
+                for entry in OrdersClient(relay).audit(args.after_seq):
+                    say(
+                        f"seq {entry.seq} decision {entry.decision} "
+                        f"intent_id {entry.intent_id or 'none'} "
+                        f"intent_sha256 {entry.intent_sha256 or 'none'} "
+                        f"codes {','.join(entry.codes) or 'none'}"
+                    )
             else:  # probe-daily
                 payload = relay.daily_bars(args.stock_code, args.from_date, args.to_date)
                 say(f"request_id {payload.request_id}")

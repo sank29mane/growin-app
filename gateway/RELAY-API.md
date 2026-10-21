@@ -290,6 +290,8 @@ uv run --project backend --no-sync python -m brokers.breeze_gateway.cli login --
 uv run --project backend --no-sync python -m brokers.breeze_gateway.cli budget
 uv run --project backend --no-sync python -m brokers.breeze_gateway.cli probe-daily --stock-code RELIND --from 2025-06-02 --to 2025-06-13
 uv run --project backend --no-sync python -m brokers.breeze_gateway.cli revoke
+uv run --project backend --no-sync python -m brokers.breeze_gateway.cli orders-state
+uv run --project backend --no-sync python -m brokers.breeze_gateway.cli orders-audit --after-seq 0
 uv run --project backend --no-sync python -m brokers.breeze_gateway.cli tunnel
 ```
 
@@ -301,6 +303,8 @@ uv run --project backend --no-sync python -m brokers.breeze_gateway.cli tunnel
 - `probe-daily` fetches one window, verifies the sha256 header against the bytes,
   prints the request id, the row count, the empty flag and `sha256 verified`, and
   writes nothing to disk.
+- `orders-state` and `orders-audit` read the order side of the VM (`GET /v1/orders/state` and
+  `GET /v1/orders/audit`) and print numbers, ids and decision names only. Both are read only.
 - `tunnel` prints `RELAY_URL=http://127.0.0.1:<port>` for manual inspection and waits
   for Ctrl-C. The relay token is not printed, so only health answers without it.
 - Exit codes: 0 ok, 1 relay error (`<CODE> (request <id>)`), 2 usage or no terminal,

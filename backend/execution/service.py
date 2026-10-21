@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import logging
 import math
 import re
 from datetime import datetime, timezone
@@ -50,8 +51,11 @@ from .venue import (
     LIVE_DISABLED,
     CancelResult,
     intent_refusal,
+    is_shadow_binding,
     refusal_text,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ExecutionDisabledError(RuntimeError):
@@ -64,6 +68,20 @@ class ExecutionConflictError(RuntimeError):
 
 class BrokerExecutionError(RuntimeError):
     """Raised for a definite broker rejection or invalid acknowledgement."""
+
+
+class OrderNotPlacedError(BrokerExecutionError):
+    """The relay answered and nothing was placed (63-05). Never raised for a LIVE order.
+
+    ``reason_code`` is ``RELAY_FORWARD_DISABLED`` when the VM verified the signed order and
+    refused to forward it, or the VM's O6 code when it refused. ``rejected`` is True for a
+    VM refusal and False for the verified, not forwarded result.
+    """
+
+    def __init__(self, reason_code: str, *, rejected: bool) -> None:
+        super().__init__("The relay did not place the order")
+        self.reason_code = reason_code
+        self.rejected = rejected
 
 
 class BrokerOutcomeUnknownError(RuntimeError):
@@ -100,7 +118,10 @@ class ExecutionService:
         self._regime_severity_map = regime_severity_map
         # Explicit, test-only injection of the ``local-replay`` price source. The
         # default refuses it, so a production service can never admit from it.
-        self._price_sources = admissible_price_sources(allow_test_price_sources)
+        self._price_sources = admissible_price_sources(
+            allow_test_price_sources,
+            None if ledger is None else ledger.venue_binding,
+        )
         self._dispatcher = dispatcher
         self._ledger = ledger
         self._require_approval = require_approval
@@ -673,7 +694,13 @@ class ExecutionService:
                 )
             except (ApprovalConflict, InvalidTransition, OrderNotFound) as exc:
                 raise ExecutionConflictError(str(exc)) from exc
-            return await self._dispatch_durable_claim(intent, None, claim)
+            signed = None
+            if intent.mode is OrderMode.SHADOW:
+                stored = self._ledger.get_approval_challenge(challenge_id)
+                if stored is None:
+                    raise ExecutionConflictError("approval challenge was not found")
+                signed = (challenge_id, bytes(signature_der), bytes(stored.signed_payload))
+            return await self._dispatch_durable_claim(intent, None, claim, signed=signed)
 
     def reconcile(self, snapshot: ReconciliationSnapshot):
         if self._ledger is None:
@@ -718,7 +745,16 @@ class ExecutionService:
         if self._ledger is None:
             raise ExecutionDisabledError("durable workspace control is unavailable")
         self._ledger.require_workspace(workspace)
-        return self._ledger.engage_workspace_control(reason_code, workspace=workspace)
+        control = self._ledger.engage_workspace_control(reason_code, workspace=workspace)
+        halt = getattr(self._dispatcher, "halt", None)
+        if callable(halt) and is_shadow_binding(self._ledger.venue_binding):
+            # The Mac may only SET the VM's mac_halt, never clear it. The local control is
+            # already engaged and stays engaged whether or not the VM could be told.
+            try:
+                halt()
+            except Exception:  # noqa: BLE001 - the VM keeps its own kill switch and latches
+                logger.warning("The relay halt call failed; the local control stays engaged")
+        return control
 
     def create_control_challenge(
         self, *, workspace: Union[Workspace, str], ttl_seconds: int = 60
@@ -764,6 +800,8 @@ class ExecutionService:
         intent: OrderIntent,
         proposal: Optional[Dict[str, Any]],
         claim: ClaimResult,
+        *,
+        signed: Optional[tuple[str, bytes, bytes]] = None,
     ) -> OrderAck:
 
         if claim.status is ClaimStatus.REPLAY:
@@ -780,6 +818,9 @@ class ExecutionService:
 
         if proposal is not None:
             _sync_projection(proposal, OrderState.SUBMITTING.value)
+
+        if intent.mode is OrderMode.SHADOW:
+            return await self._dispatch_shadow(intent, proposal, signed)
 
         try:
             ack = await self._dispatcher.dispatch(intent)
@@ -826,6 +867,65 @@ class ExecutionService:
         if proposal is not None:
             _sync_projection(proposal, OrderState.ACKNOWLEDGED.value, stored_ack)
         return stored_ack
+
+    async def _dispatch_shadow(
+        self,
+        intent: OrderIntent,
+        proposal: Optional[Dict[str, Any]],
+        signed: Optional[tuple[str, bytes, bytes]],
+    ) -> OrderAck:
+        """Send one SHADOW order to the VM to be verified. Nothing can come back as placed.
+
+        The claim is already committed (SUBMITTING). The signature sent is the one the Mac just
+        verified and claimed. The outcome is always an exception: a verified, not forwarded
+        order and a VM refusal are definite non-placements (FAILED, reservation released), and
+        an untrusted answer is UNKNOWN. There is no retry and no second send.
+        """
+
+        send = getattr(self._dispatcher, "dispatch_signed", None)
+        if signed is None or not callable(send):
+            self._ledger.mark_failed(intent.proposal_id, "SIGNED_DISPATCH_REQUIRED")
+            if proposal is not None:
+                _sync_projection(proposal, OrderState.FAILED.value)
+            raise BrokerExecutionError("Broker execution failed")
+        challenge_id, signature_der, signed_payload = signed
+        outcome = await send(
+            intent,
+            challenge_id=challenge_id,
+            signature_der=signature_der,
+            signed_payload=signed_payload,
+        )
+        if outcome.kind == "UNKNOWN":
+            self._ledger.mark_unknown(intent.proposal_id, outcome.reason_code)
+            state = OrderState.UNKNOWN.value
+        else:
+            self._ledger.mark_failed(intent.proposal_id, outcome.reason_code)
+            state = OrderState.FAILED.value
+        self._record_relay_result(intent.proposal_id, outcome)
+        if proposal is not None:
+            _sync_projection(proposal, state)
+        if outcome.kind == "UNKNOWN":
+            raise BrokerOutcomeUnknownError(
+                "Relay outcome is unknown and requires reconciliation"
+            )
+        raise OrderNotPlacedError(outcome.reason_code, rejected=outcome.kind == "REFUSED")
+
+    def _record_relay_result(self, proposal_id: str, outcome: Any) -> None:
+        """Best effort: the Mac's half of the VM audit entry. The order state is already final."""
+
+        if outcome.intent_sha256 is None:
+            return
+        payload: Dict[str, Any] = {
+            "intent_sha256": outcome.intent_sha256,
+            "decision": outcome.decision,
+            "reason_code": outcome.reason_code,
+        }
+        if outcome.audit_seq is not None:
+            payload["audit_seq"] = outcome.audit_seq
+        try:
+            self._ledger.record_audit_event(proposal_id, "RELAY_AUTHORIZE_RESULT", payload)
+        except Exception:  # noqa: BLE001 - never turn a recorded outcome into a second failure
+            logger.warning("Could not record the relay authorize result for %s", proposal_id)
 
     async def _approve_in_memory(
         self, intent: OrderIntent, proposal: Dict[str, Any]

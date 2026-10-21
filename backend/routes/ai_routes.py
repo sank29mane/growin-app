@@ -21,6 +21,7 @@ from schemas import (
     ApprovalChallengeRequest,
     ApprovalKeyEnrollmentRequest,
     SignedApprovalRequest,
+    UatProposalRequest,
     WorkspaceScopedRequest,
 )
 from execution import (
@@ -33,11 +34,14 @@ from execution import (
     ExecutionDisabledError,
     EnrollmentError,
     LedgerError,
+    OrderNotPlacedError,
     ReconciliationSnapshot,
     ReconciliationStatus,
     Workspace,
     WorkspaceMismatch,
 )
+from execution.approval import RelayChallengeRefused
+from execution.venue import is_shadow_binding
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/ai", tags=["AI Intelligence"])
@@ -73,6 +77,23 @@ def _strict_b64(value: str, *, expected_length: int | None = None) -> bytes:
     if expected_length is not None and len(decoded) != expected_length:
         raise HTTPException(status_code=422, detail="Invalid cryptographic encoding")
     return decoded
+
+
+async def _relay_quote_for(proposal_id: str):
+    """The relay quote evidence for a proposal's India ticker, read off the event loop.
+
+    None when no relay is attached (a paper or UK ledger) or the proposal is not an India
+    ticker. A relay that cannot give a trusted quote also gives None, which the Mac's India
+    limits answer ``quote_unavailable``.
+    """
+
+    if state.relay_quotes is None:
+        return None
+    proposal = state.get_trade_proposal(proposal_id)
+    ticker = proposal.get("ticker") if proposal else None
+    if not isinstance(ticker, str) or not ticker.startswith("NSE:CASH:"):
+        return None
+    return await asyncio.to_thread(state.india_quote_from_relay, ticker.rsplit(":", 1)[-1])
 
 
 @router.post("/trade/approval/enroll")
@@ -113,9 +134,19 @@ async def get_trade_approval_status(workspace: Workspace = Query(...)):
 
 
 @router.post("/trade/approval/uat-proposal")
-async def create_paper_approval_uat_proposal(request: WorkspaceScopedRequest):
-    """Create an explicit local-only paper proposal for manual approval UAT."""
+async def create_paper_approval_uat_proposal(request: UatProposalRequest):
+    """Create an explicit local-only paper proposal for manual approval UAT.
+
+    On an India ledger bound to the SHADOW relay it creates one SHADOW proposal instead: one
+    share of the operator-named ``symbol``, limited at the relay's last traded price floored
+    to the tick, through normal admission. Any other India mode is refused.
+    """
     _reject_workspace_mismatch(request.workspace)
+    ledger = state._execution_ledger
+    if ledger is not None and ledger.workspace is Workspace.INDIA:
+        return await _create_shadow_uat_proposal(request.symbol)
+    if request.symbol is not None:
+        raise HTTPException(status_code=422, detail="A symbol is only used for the India SHADOW check")
     try:
         proposal = state.create_paper_approval_check()
         # Do not expose the durable projection as an ad-hoc UI contract. Swift
@@ -132,6 +163,36 @@ async def create_paper_approval_uat_proposal(request: WorkspaceScopedRequest):
         raise HTTPException(status_code=409, detail=WORKSPACE_MISMATCH_DETAIL) from exc
     except (ExecutionDisabledError, LedgerError, ExecutionConflictError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+async def _create_shadow_uat_proposal(symbol: Optional[str]):
+    ledger = state._execution_ledger
+    if ledger is None or not is_shadow_binding(ledger.venue_binding):
+        raise HTTPException(status_code=409, detail="India UAT proposals are SHADOW only")
+    if not symbol:
+        raise HTTPException(status_code=422, detail="Name one NSE stock with symbol")
+    try:
+        # The relay reads run off the event loop; the admission stays on it (see the
+        # preparation route).
+        quote = await asyncio.to_thread(state.prefetch_india_relay, symbol)
+        proposal, admission = state.prepare_india_paper_local(
+            symbol=symbol, quantity="1", quote=quote
+        )
+    except (ExecutionDisabledError, LedgerError, ExecutionConflictError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if admission.decision.value != "ADMITTED":
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "ADMISSION_DENIED", "reason_code": admission.reason_code},
+        )
+    return {
+        "proposal_id": str(proposal["proposal_id"]),
+        "ticker": str(proposal["ticker"]),
+        "action": str(proposal["action"]),
+        "quantity": float(proposal["quantity"]),
+        "reasoning": str(proposal.get("reasoning", "")),
+        "status": str(proposal.get("status", "PENDING")),
+    }
 
 
 @router.post("/trade/requote/uat-proposal")
@@ -159,13 +220,24 @@ async def create_trade_approval_challenge(request: ApprovalChallengeRequest):
     """Return exact immutable bytes for native review and Touch ID signing."""
     _reject_workspace_mismatch(request.workspace)
     try:
-        challenge = state.execution_service.create_approval_challenge(
-            request.proposal_id, workspace=request.workspace
+        # A SHADOW challenge asks the VM to mint the bytes, so it runs off the event loop.
+        india_quote = await _relay_quote_for(request.proposal_id)
+        challenge = await asyncio.to_thread(
+            lambda: state.execution_service.create_approval_challenge(
+                request.proposal_id,
+                workspace=request.workspace,
+                india_quote=india_quote,
+            )
         )
     except WorkspaceMismatch:
         raise HTTPException(status_code=409, detail=WORKSPACE_MISMATCH_DETAIL)
     except ExecutionDisabledError:
         raise HTTPException(status_code=503, detail="Signed approval is unavailable")
+    except RelayChallengeRefused as refused:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "CHALLENGE_REFUSED", "reason_code": refused.reason_code},
+        )
     except (ApprovalError, ApprovalConflict, LedgerError):
         raise HTTPException(status_code=409, detail="Approval challenge is unavailable")
     except (ValueError, TypeError):
@@ -192,11 +264,13 @@ async def complete_trade_approval(request: SignedApprovalRequest):
             detail="Local re-quote UAT never dispatches; use its verify-only action.",
         )
     try:
+        india_quote = await _relay_quote_for(request.proposal_id)
         ack = await state.execution_service.approve_signed(
             request.proposal_id,
             request.challenge_id,
             signature,
             workspace=request.workspace,
+            india_quote=india_quote,
         )
     except WorkspaceMismatch:
         raise HTTPException(status_code=409, detail=WORKSPACE_MISMATCH_DETAIL)
@@ -207,6 +281,22 @@ async def complete_trade_approval(request: SignedApprovalRequest):
         raise HTTPException(status_code=503, detail="Signed approval is unavailable")
     except ExecutionConflictError:
         raise HTTPException(status_code=409, detail="Signed approval could not be completed")
+    except OrderNotPlacedError as not_placed:
+        # The relay answered and nothing was placed. Verified but not forwarded is the
+        # expected SHADOW result (200); a VM refusal is a rejection with its O6 code (409).
+        if not not_placed.rejected:
+            return {
+                "status": "not_placed",
+                "reason_code": not_placed.reason_code,
+                "message": (
+                    "The relay verified the signature and did not forward the order. "
+                    "Nothing was placed."
+                ),
+            }
+        raise HTTPException(
+            status_code=409,
+            detail={"status": "REJECTED", "reason_code": not_placed.reason_code},
+        )
     except BrokerExecutionError:
         raise HTTPException(status_code=502, detail="Broker rejected the trade")
     except BrokerOutcomeUnknownError:
