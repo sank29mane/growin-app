@@ -13,14 +13,16 @@ import hmac
 import json
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
-from typing import Any, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 import httpx
 
+from .config import GatewayConfig, load_gateway_config
 from .errors import (
     CODE_TO_CLASS,
     NoSession,
@@ -31,9 +33,11 @@ from .errors import (
     RelayProtocolError,
     RelayUnavailable,
     SessionExpired,
+    TunnelError,
     Unauthorized,
 )
-from .token_store import MemoryTokenStore, TokenStore, same_token
+from .tunnel import Tunnel
+from .token_store import RELAY_TOKEN_RE, FileTokenStore, MemoryTokenStore, TokenStore, same_token
 
 CONTRACT = "growin-relay/1"
 
@@ -99,7 +103,6 @@ POOL_TIMEOUT_S = 5.0
 REQUEST_ID_RE = re.compile(r"^[0-9a-f]{16}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 FETCHED_AT_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$")
-RELAY_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 ATTEMPT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
 STOCK_CODE_RE = re.compile(r"^[A-Z0-9]{1,10}$")
 API_SESSION_RE = re.compile(r"^[A-Za-z0-9]{6,256}$")
@@ -115,6 +118,8 @@ class TunnelHandleLike(Protocol):
     local_port: int
 
     def alive(self) -> bool: ...
+
+    def stop(self) -> None: ...
 
 
 # -------------------------------------------------------------- dataclasses
@@ -305,11 +310,22 @@ class RelayClient:
         tunnel: TunnelHandleLike | None = None,
         http: httpx.Client | None = None,
         token_store: TokenStore | None = None,
+        http_factory: Callable[[int], httpx.Client] | None = None,
+        restart: Callable[[], TunnelHandleLike] | None = None,
     ) -> None:
+        """`http_factory` and `restart` are supervisor seams used by open().
+
+        With `restart` the client owns its tunnel: it starts one replacement when the
+        child has exited, and close() stops it. Without it a dead tunnel is an error.
+        """
         if (tunnel is None) == (http is None):
             raise TypeError("RelayClient needs exactly one of tunnel or http")
         self._tunnel: TunnelHandleLike | None = tunnel
-        self._http: httpx.Client = http if http is not None else self._build_http(tunnel.local_port)  # type: ignore[union-attr]
+        self._http_factory = http_factory if http_factory is not None else self._build_http
+        self._restart = restart
+        self._http: httpx.Client = (
+            http if http is not None else self._http_factory(tunnel.local_port)  # type: ignore[union-attr]
+        )
         self._store: TokenStore = token_store if token_store is not None else MemoryTokenStore()
         self._slots = threading.BoundedSemaphore(MAX_IN_FLIGHT)
         self._lock = threading.RLock()
@@ -349,16 +365,84 @@ class RelayClient:
             if self._closed:
                 raise RelayUnavailable(reason="closed")
             if self._tunnel is not None and not self._tunnel.alive():
-                raise RelayUnavailable(reason="tunnel_down")
+                if self._restart is None:
+                    raise RelayUnavailable(reason="tunnel_down")
+                self._restart_tunnel()
             return self._http
+
+    def _restart_tunnel(self) -> None:
+        """One replacement tunnel on a fresh port. A transport restart, never a request retry."""
+        assert self._restart is not None and self._tunnel is not None
+        self._tunnel.stop()
+        try:
+            handle = self._restart()
+        except TunnelError:
+            raise RelayUnavailable(reason="tunnel_restart_failed") from None
+        old = self._http
+        self._tunnel = handle
+        self._http = self._http_factory(handle.local_port)
+        old.close()
 
     def close(self) -> None:
         with self._lock:
             if self._closed:
                 return
             self._closed = True
-            http = self._http
-        http.close()
+            http, tunnel = self._http, self._tunnel
+            owned = self._restart is not None
+        try:
+            http.close()
+        finally:
+            if owned and tunnel is not None:
+                tunnel.stop()
+
+    @classmethod
+    def open(
+        cls,
+        config: GatewayConfig | None = None,
+        *,
+        token_store: TokenStore | None = None,
+        tunnel: Tunnel | None = None,
+        http_factory: Callable[[int], httpx.Client] | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> "RelayClient":
+        """Start this client's own IAP tunnel, wait for /v1/health and return the client.
+
+        `tunnel`, `http_factory`, `sleep` and `monotonic` are test seams. A TunnelError
+        from the tunnel is raised unchanged.
+        """
+        cfg = config if config is not None else load_gateway_config()
+        store = token_store if token_store is not None else FileTokenStore()
+        supervisor = tunnel if tunnel is not None else Tunnel(cfg)
+        handle = supervisor.start()
+        try:
+            relay = cls(
+                tunnel=handle,
+                token_store=store,
+                http_factory=http_factory,
+                restart=supervisor.start,
+            )
+        except BaseException:
+            handle.stop()
+            raise
+        try:
+            deadline = monotonic() + cfg.tunnel.ready_timeout_s
+            while True:
+                try:
+                    relay.health()
+                    break
+                except RelayUnavailable:
+                    if monotonic() >= deadline:
+                        raise RelayUnavailable(reason="relay_not_ready") from None
+                    sleep(0.5)
+            # The port must still belong to our own child once the relay has answered.
+            if relay._tunnel is None or not relay._tunnel.alive():
+                raise RelayUnavailable(reason="tunnel_down")
+        except BaseException:
+            relay.close()
+            raise
+        return relay
 
     def __enter__(self) -> "RelayClient":
         return self

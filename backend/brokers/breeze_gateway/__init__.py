@@ -41,7 +41,7 @@ from .errors import (
     UpstreamError,
     UpstreamTimeout,
 )
-from .token_store import MemoryTokenStore, StoredToken, TokenStore
+from .token_store import FileTokenStore, MemoryTokenStore, StoredToken, TokenStore
 
 __all__ = [
     "BudgetExhausted",
@@ -50,6 +50,7 @@ __all__ = [
     "CONTRACT",
     "ContractMismatch",
     "EgressMismatch",
+    "FileTokenStore",
     "ForbiddenClient",
     "IdentityMismatch",
     "InternalRelayError",
