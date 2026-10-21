@@ -229,8 +229,9 @@ struct SignerSourceScanTests {
         #expect(Scan.routerConstructionCount(in: planted) > 0, "scan missed: \(planted)")
     }
 
-    /// A typealias lets `R(india:uk:)` build a router with the name nowhere near the call. The alias
-    /// itself is the violation, so none of these needs the construction to be resolved.
+    /// A typealias lets `R(india:uk:)` build a router with the name nowhere near the call. The
+    /// declaration is a violation on its own. A backticked right-hand side and a generic alias are
+    /// the same kind of declaration, and constructions through the alias name are counted too.
     @Test(arguments: [
         // The Codex round 2 probe: SettingsView's configuration check rewritten through an alias.
         "typealias R = ApprovalSignerRouter\nreturn R(india: .shared, uk: .shared).isConfigured(for: workspace)",
@@ -248,9 +249,68 @@ struct SignerSourceScanTests {
         "typealias `R` = ApprovalSignerRouter",
         "typealias R<T> = ApprovalSignerRouter",
         "associatedtype R = ApprovalSignerRouter",
+        // Backticked right-hand side. `R(india:)` is not `.init(india:)`, so the india-label rule
+        // cannot see it, and the declaration itself has to recognise the backticks.
+        "typealias R = `ApprovalSignerRouter`",
+        "typealias R =\n    `ApprovalSignerRouter`",
+        "typealias   R   = `ApprovalSignerRouter`",
+        "private typealias R = `ApprovalSignerRouter`",
+        "typealias R = `ApprovalSignerRouter`\nlet r = R(india: .shared, uk: .shared)",
+        "typealias R = `ApprovalSignerRouter`\nlet r = R.init(a, b)",
+        "typealias R = `ApprovalSignerRouter`\nlet make = R.init",
+        "typealias R = `ApprovalSignerRouter`\nlet r = `R`(india: a, uk: b)",
+        "typealias R = Growin.`ApprovalSignerRouter`",
+        "typealias R = Growin . `ApprovalSignerRouter`\nlet r = R.init(india: .shared, uk: .shared)",
+        "typealias R = Growin.`ApprovalSignerRouter`\nlet r = R.init(a, b)",
+        "typealias R = Optional<`ApprovalSignerRouter`>",
+        "associatedtype R = `ApprovalSignerRouter`",
+        "typealias R = `ApprovalSignerRouter`?\nlet r: R? = .init(a, b)",
+        // Generic alias. `Box<Int>(india:)` does not spell the router, and `Box<Int>.init(a, b)` /
+        // `Box<Int> = .init(a, b)` do not use the india label, so only alias resolution sees them.
+        "typealias Box<T> = ApprovalSignerRouter\nlet r = Box<Int>(india: .shared, uk: .shared)",
+        "typealias Box<T> = ApprovalSignerRouter\nlet r = Box<Int>.init(a, b)",
+        "typealias Box<T> = ApprovalSignerRouter\nlet r: Box<Int> = .init(a, b)",
+        "typealias Box<T> = ApprovalSignerRouter\nlet r: Box<Int> =\n    .init(india: .shared, uk: .shared)",
+        "typealias Box<T> = ApprovalSignerRouter\nlet r: Box<Int>? = .init(a, b)",
+        "typealias Box < T > = ApprovalSignerRouter\nlet r = Box< Int >(india: a, uk: b)",
+        "typealias Box<T: Sendable> = ApprovalSignerRouter\nlet r = Box<Int>(india: a, uk: b)",
+        "typealias Box<T> = `ApprovalSignerRouter`\nlet r = Box<Int>(india: a, uk: b)",
+        "typealias Box<T> = Growin.`ApprovalSignerRouter`\nlet r = Box<Int>.init(a, b)",
+        "typealias Box<T> = Growin.`ApprovalSignerRouter`\nlet r: Box<Int> = .init(india: a, uk: b)",
     ])
     func aTypealiasOfTheRouterIsFlagged(planted: String) {
         #expect(Scan.routerConstructionCount(in: planted) > 0, "scan missed: \(planted)")
+    }
+
+    /// The declaration is already a hit. The use has to add another, or a backticked / generic call
+    /// would still pass when the declaration rule is the only thing that fired.
+    @Test func constructionsThroughAResolvedAliasAddAHit() {
+        let backticked = "typealias R = `ApprovalSignerRouter`"
+        let backtickedCount = Scan.routerConstructionCount(in: backticked)
+        #expect(backtickedCount > 0)
+        #expect(Scan.routerConstructionCount(in: backticked + "\nlet r = R(india: a, uk: b)") > backtickedCount)
+        #expect(Scan.routerConstructionCount(in: backticked + "\nlet r = R.init(a, b)") > backtickedCount)
+        #expect(Scan.routerConstructionCount(in: backticked + "\nlet d = Date.init(timeIntervalSince1970: 0)") == backtickedCount)
+
+        let generic = "typealias Box<T> = ApprovalSignerRouter"
+        let genericCount = Scan.routerConstructionCount(in: generic)
+        #expect(genericCount > 0)
+        #expect(Scan.routerConstructionCount(in: generic + "\nlet r = Box<Int>(india: a, uk: b)") > genericCount)
+        #expect(Scan.routerConstructionCount(in: generic + "\nlet r = Box<Int>.init(a, b)") > genericCount)
+        #expect(Scan.routerConstructionCount(in: generic + "\nlet r: Box<Int> = .init(a, b)") > genericCount)
+        #expect(Scan.routerConstructionCount(in: generic + "\nlet d = Date.init(timeIntervalSince1970: 0)") == genericCount)
+    }
+
+    /// The router's own file is allowed to construct the router. The same text in any other file is not.
+    @Test func theRouterFileItselfIsNotScannedForConstruction() {
+        let planted = "typealias R = `ApprovalSignerRouter`\nstatic let shared = ApprovalSignerRouter(india: a, uk: b)\nlet r = R(india: a, uk: b)"
+        let sources = [
+            (Scan.routerPath, planted),
+            ("Growin/Views/Other.swift", "let x = 1"),
+        ]
+        let outside = sources.filter { $0.0 != Scan.routerPath }
+        #expect(outside.allSatisfy { Scan.routerConstructionCount(in: $0.1) == 0 })
+        #expect(Scan.routerConstructionCount(in: planted) > 0)
     }
 
     /// Inside `extension ApprovalSignerRouter`, `Self(...)` and `Self.init(...)` build a router without
@@ -275,6 +335,17 @@ struct SignerSourceScanTests {
         #expect(Scan.routerConstructionCount(in: "typealias Router2 = ApprovalSignerRouterConfig") == 0)
         #expect(Scan.routerConstructionCount(in: "typealias R = MyApprovalSignerRouter") == 0)
         #expect(Scan.routerConstructionCount(in: "typealias R = ApprovalSignerRouterError") == 0)
+        #expect(Scan.routerConstructionCount(in: "typealias R = `UnrelatedRouter`") == 0)
+        #expect(Scan.routerConstructionCount(in: "typealias R = `ApprovalSignerRouterConfig`") == 0)
+        #expect(Scan.routerConstructionCount(in: "typealias R = `ApprovalSignerRouterError`") == 0)
+        #expect(Scan.routerConstructionCount(in: "typealias R = Growin.`UnrelatedRouter`") == 0)
+        #expect(Scan.routerConstructionCount(in: "typealias Box<T> = Handler\nlet r = Box<Int>(value)") == 0)
+        #expect(Scan.routerConstructionCount(in: "typealias Box<T> = Handler\nlet r = Box<Int>.init(value)") == 0)
+        #expect(Scan.routerConstructionCount(in: "typealias Box<T> = Handler\nlet r: Box<Int> = .init(value)") == 0)
+        #expect(Scan.routerConstructionCount(in: "typealias Box<T> = `Handler`\nlet r = Box<Int>(india: a, uk: b)") == 0)
+        #expect(Scan.routerConstructionCount(in: "typealias Box<T> = Foo<ApprovalSignerRouter>") == 0)
+        #expect(Scan.routerConstructionCount(in: "// typealias R = `ApprovalSignerRouter`") == 0)
+        #expect(Scan.routerConstructionCount(in: "/* typealias Box<T> = ApprovalSignerRouter */ let x = 1") == 0)
         // An alias line followed by an unrelated mention must not be read as one declaration.
         #expect(Scan.routerConstructionCount(in: "typealias Handler = () -> Void\nfunc run(r: ApprovalSignerRouter) {}") == 0)
         #expect(Scan.routerConstructionCount(in: "typealias R = Foo\nlet r: ApprovalSignerRouter = .shared") == 0)

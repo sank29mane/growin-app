@@ -207,10 +207,14 @@ nonisolated enum SignerSourceScan {
     ///   `init(india:uk:)`, so this catches inference from a return type, a property or a generic that
     ///   never spells the name next to the `.init`.
     /// - A `typealias` (or `associatedtype` default) whose right side is the router, with an optional
-    ///   `Growin.` prefix and `Optional<` / `Array<` / `(` / `[` wrappers. An alias lets `R(india:uk:)`
-    ///   build a router without the name appearing at the call, and nothing outside the router's file
-    ///   needs one, so the alias itself is the violation. `ApprovalSignerRouterConfig` is a different
-    ///   identifier and does not count.
+    ///   `Growin.` prefix and `Optional<` / `Array<` / `(` / `[` wrappers. The router name on the right
+    ///   may be backticked (`` `ApprovalSignerRouter` ``, including `` Growin.`ApprovalSignerRouter` ``).
+    ///   The alias name may be backticked and may take a generic parameter clause
+    ///   (`typealias Box<T> = ApprovalSignerRouter`). Nothing outside the router's file needs an alias,
+    ///   so the declaration itself is a violation. Constructions through that name are counted too:
+    ///   `R(` / `R.init`, and the same with explicit generic arguments (`Box<Int>(`, `Box<Int>.init`,
+    ///   `let r: Box<Int> = .init`). `ApprovalSignerRouterConfig` is a different identifier and does not
+    ///   count.
     /// - An `extension` whose header (up to the first `{`) names the router, such as
     ///   `extension ApprovalSignerRouter` or `extension P where Self == ApprovalSignerRouter`. Inside it
     ///   `Self(india:uk:)` constructs a router without the name or `.init`. Nothing outside the router's
@@ -226,15 +230,48 @@ nonisolated enum SignerSourceScan {
             in: code
         )
         let inferred = matchCount(#"\.\s*`?init`?\s*\(\s*`?india`?\s*:"#, in: code)
-        let aliased = matchCount(
-            #"(?<![A-Za-z0-9_])(?:typealias|associatedtype)\s+[^=;{}]*=\s*(?:(?:Optional|Array)\s*<\s*|[(\[]\s*|Growin\s*\.\s*)*ApprovalSignerRouter(?![A-Za-z0-9_])"#,
-            in: code
-        )
+        let aliasNames = routerAliasNames(in: code)
+        let aliased = aliasNames.count
+        var viaAlias = 0
+        for name in Set(aliasNames) {
+            viaAlias += aliasConstructionCount(name, in: code)
+        }
         let extended = matchCount(
             #"(?<![A-Za-z0-9_])extension\s+[^{;]*?(?<![A-Za-z0-9_])ApprovalSignerRouter(?![A-Za-z0-9_])"#,
             in: code
         )
-        return spelled + annotated + inferred + aliased + extended
+        return spelled + annotated + inferred + aliased + extended + viaAlias
+    }
+
+    /// Alias declarations whose right side is the router. Group 1 is the alias identifier, without
+    /// backticks. A generic parameter clause on the alias (`Box<T>`) is part of the declaration, not a
+    /// use. The right-hand name may be wrapped and may be backticked.
+    private static let routerAliasDeclaration =
+        #"(?<![A-Za-z0-9_])(?:typealias|associatedtype)\s+`?([A-Za-z_][A-Za-z0-9_]*)`?(?:\s*<[^={};]*>)?\s*=\s*(?:(?:Optional|Array)\s*<\s*|[(\[]\s*|Growin\s*\.\s*)*`?ApprovalSignerRouter`?(?![A-Za-z0-9_])"#
+
+    private static func routerAliasNames(in code: String) -> [String] {
+        guard let expression = try? NSRegularExpression(pattern: routerAliasDeclaration) else { return [] }
+        let range = NSRange(code.startIndex..., in: code)
+        return expression.matches(in: code, range: range).compactMap { match in
+            guard match.numberOfRanges > 1, let captured = Range(match.range(at: 1), in: code) else { return nil }
+            return String(code[captured])
+        }
+    }
+
+    /// `Name(`, `Name.init`, `Name<Args>(`, `Name<Args>.init`, and `Name<Args> = .init` (optional `?`).
+    /// The generic argument list cannot contain `=`, so the declaration `Box<T> = ApprovalSignerRouter`
+    /// is not itself a call.
+    private static func aliasConstructionCount(_ name: String, in code: String) -> Int {
+        let head = "(?<![A-Za-z0-9_])`?" + name + "`?(?:\\s*<[^(){}=;]*>)?"
+        let called = matchCount(
+            head + #"\s*(?:\(|\.\s*`?init`?(?![A-Za-z0-9_]))"#,
+            in: code
+        )
+        let annotated = matchCount(
+            head + #"\s*\??\s*=\s*\.\s*`?init`?(?![A-Za-z0-9_])"#,
+            in: code
+        )
+        return called + annotated
     }
 
     /// Router sign call sites per file, for every file but the router itself, zeros omitted.
