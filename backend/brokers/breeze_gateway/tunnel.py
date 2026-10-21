@@ -5,6 +5,29 @@ the daily identity (`--account=<daily account>`), listening on a random free
 loopback port. The argv is a list and never goes through a shell; it never holds
 ssh or the internal-IP flag. gcloud's stderr is discarded unless the operator
 asks for it in their own terminal, because it can print project and host names.
+
+Orphans: the child runs in its own session (`start_new_session=True`) so a Ctrl-C at the
+parent does not reach it, and close() or stop() ends the whole group. If the parent dies
+without running them (SIGKILL, or SIGTERM with no handler) the child keeps running, idle,
+until IAP drops it; it holds no credential beyond the daily gcloud login and listens only
+on loopback. A library cannot fix that from inside: SIGKILL cannot be caught, and a SIGTERM
+handler or atexit hook here would hijack the host process's own signals. A stdin-EOF wrapper
+would change the C1 argv and the stdin=DEVNULL pin. So the host closes the client in a
+`with` block, and the CLI turns SIGTERM into a clean exit (see cli.py). A SIGKILLed host
+leaves at most one idle child per tunnel it had open.
+
+Residuals, accepted and not fixable from here:
+- A multi-threaded host that exits while a daemon thread is mid-restart can orphan one child.
+- A second SIGTERM during stop()'s 5 s wait can skip the SIGKILL fallback; the group has
+  already had SIGTERM.
+- A gcloud that passes the readiness probe and then dies within seconds resets the client's
+  restart backoff each cycle. Restarts stay single-flight, so respawns are serialized at
+  roughly one per gcloud startup.
+- A signal that lands inside Popen itself, before it returns the child, leaves that child
+  with nothing to stop it.
+- A restart interrupted a second time inside the client's own cleanup, or in the few
+  bytecodes between `self._tunnel = handle` and `handed_off = True`, can leave one unowned
+  child or one pool counted busy; the next request sees a live tunnel and carries on.
 """
 
 from __future__ import annotations
@@ -185,8 +208,9 @@ class Tunnel:
         except OSError:
             raise TunnelError("tunnel_spawn_failed") from None
 
-        deadline = self._monotonic() + self._config.tunnel.ready_timeout_s
         try:
+            # Inside the try: an interrupt before the first poll must still kill the child.
+            deadline = self._monotonic() + self._config.tunnel.ready_timeout_s
             while True:
                 code = proc.poll()
                 if code is not None:

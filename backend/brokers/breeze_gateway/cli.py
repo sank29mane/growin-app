@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import signal
 import subprocess
 import sys
 import time
@@ -79,6 +80,18 @@ def _row_count(body: bytes) -> str:
     except (ValueError, AttributeError):
         return "unknown"
     return str(len(success)) if isinstance(success, list) else "unknown"
+
+
+def _on_sigterm(signum: int, frame: object) -> None:
+    raise SystemExit(128 + signum)
+
+
+def _raise_on_sigterm() -> None:
+    """Make SIGTERM unwind like Ctrl-C so `with` blocks and `finally` stop the tunnel child.
+
+    Only the CLI entry point installs this. The library never touches the host's signals.
+    """
+    signal.signal(signal.SIGTERM, _on_sigterm)
 
 
 def _wait_for_interrupt(handle) -> None:
@@ -209,4 +222,5 @@ def _login(
 
 
 if __name__ == "__main__":
+    _raise_on_sigterm()
     raise SystemExit(main())

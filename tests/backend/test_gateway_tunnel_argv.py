@@ -11,6 +11,7 @@ import json
 import os
 import signal
 import subprocess
+import threading
 from pathlib import Path
 
 import httpx
@@ -18,13 +19,15 @@ import pytest
 
 from test_gateway_relay_client import HEALTH_JSON, Canned, json_response, mock_http
 
-from brokers.breeze_gateway import RelayClient, RelayUnavailable, TunnelError
+from brokers.breeze_gateway import RelayClient, RelayHealth, RelayUnavailable, TunnelError
 from brokers.breeze_gateway.config import (
     ConfigError,
     GatewayConfig,
     load_gateway_config,
     parse_gateway_config,
 )
+from brokers.breeze_gateway import client as client_mod
+from brokers.breeze_gateway.client import REASON_RE
 from brokers.breeze_gateway.tunnel import STOP_GRACE_S, Tunnel, TunnelHandle, pick_free_port, tunnel_argv
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -563,6 +566,480 @@ def test_the_default_http_client_is_built_on_the_handles_loopback_port():
         assert str(relay._http.base_url) == "http://127.0.0.1:50999"
     finally:
         relay.close()
+
+
+# ----------------------------------- restart outside the lock, backoff (review round 3)
+
+
+class _CountingCond:
+    """A Condition that tells a test when a request has begun to wait on it."""
+
+    def __init__(self, lock, waiting: threading.Semaphore) -> None:
+        self._cond = threading.Condition(lock)
+        self._waiting = waiting
+
+    def __enter__(self):
+        self._cond.acquire()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._cond.release()
+
+    def wait(self, *args) -> bool:
+        self._waiting.release()  # the lock is still held, so the restarter cannot finish first
+        return self._cond.wait(*args)
+
+    def notify_all(self) -> None:
+        self._cond.notify_all()
+
+
+class _GatedRestart:
+    """The restart callable: blocks on `gate`, then hands out the next scripted handle."""
+
+    def __init__(self, handles) -> None:
+        self.handles = list(handles)
+        self.calls = 0
+        self.entered = threading.Event()
+        self.gate = threading.Event()
+
+    def __call__(self):
+        self.calls += 1
+        self.entered.set()
+        assert self.gate.wait(timeout=10)
+        return self.handles.pop(0)
+
+
+def _call(relay: RelayClient, outcomes: dict, key) -> threading.Thread:
+    def run() -> None:
+        try:
+            outcomes[key] = relay.health()
+        except BaseException as exc:  # a thread must report, never vanish
+            outcomes[key] = exc
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread
+
+
+def _blocked_restart_client(waiters: int):
+    """A client with a dead tunnel whose restart is blocked, plus `waiters` queued behind it."""
+    dead, fresh = FakeHandle(50123), FakeHandle(50124)
+    dead._alive = False
+    factory = Factory()
+    restart = _GatedRestart([fresh])
+    relay = RelayClient(tunnel=dead, http_factory=factory, restart=restart)
+    waiting = threading.Semaphore(0)
+    relay._cond = _CountingCond(relay._lock, waiting)
+    outcomes: dict = {}
+    threads = [_call(relay, outcomes, "leader")]
+    assert restart.entered.wait(timeout=10)
+    for index in range(waiters):
+        threads.append(_call(relay, outcomes, index))
+    return relay, dead, fresh, factory, restart, waiting, outcomes, threads
+
+
+def test_close_returns_while_a_restart_is_blocked_and_discards_its_result():
+    relay, dead, fresh, factory, restart, waiting, outcomes, threads = _blocked_restart_client(1)
+    try:
+        assert waiting.acquire(timeout=10)  # a second request is queued behind the restart
+        closed = threading.Event()
+        closer = threading.Thread(target=lambda: (relay.close(), closed.set()), daemon=True)
+        closer.start()
+        assert closed.wait(timeout=5), "close() waited for the restart"
+        threads[1].join(timeout=5)  # the queued request is woken by close(), not by the restart
+        assert isinstance(outcomes.get(0), RelayUnavailable) and outcomes[0].reason == "closed"
+        assert "leader" not in outcomes  # the restart is still blocked
+    finally:
+        restart.gate.set()
+        for thread in threads:
+            thread.join(timeout=10)
+    assert isinstance(outcomes["leader"], RelayUnavailable) and outcomes["leader"].reason == "closed"
+    assert fresh.stops == 1 and not fresh.alive()  # the child the restart started is killed
+    assert all(client.is_closed for client in factory.clients)  # and its client discarded
+    assert restart.calls == 1
+
+
+def test_requests_during_one_restart_wait_for_it_and_cause_exactly_one_restart():
+    relay, dead, fresh, factory, restart, waiting, outcomes, threads = _blocked_restart_client(4)
+    try:
+        for _ in range(4):
+            assert waiting.acquire(timeout=10), "a request was not waiting on the restart"
+    finally:
+        restart.gate.set()
+        for thread in threads:
+            thread.join(timeout=10)
+    assert restart.calls == 1 and dead.stops == 1
+    assert all(isinstance(outcomes[key], RelayHealth) for key in ("leader", 0, 1, 2, 3))
+    assert factory.ports == [50123, 50124]  # the first client, then one new one for the one new tunnel
+    assert len(factory.handler.requests) == 5  # each request sent once, none resent
+    relay.close()
+    assert fresh.stops == 1
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class _ScriptedRestart:
+    """Each call takes the next outcome: a TunnelError to raise or a handle to return."""
+
+    def __init__(self, *outcomes) -> None:
+        self.outcomes = list(outcomes)
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+        outcome = self.outcomes.pop(0) if self.outcomes else TunnelError("tunnel_exited", returncode=1)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+def _backoff_client(restart):
+    dead = FakeHandle(50123)
+    dead._alive = False
+    factory, clock = Factory(), _Clock()
+    relay = RelayClient(tunnel=dead, http_factory=factory, restart=restart)
+    relay._monotonic = clock
+    return relay, factory, clock
+
+
+def _reason(relay: RelayClient) -> str:
+    with pytest.raises(RelayUnavailable) as info:
+        relay.health()
+    assert REASON_RE.fullmatch(info.value.reason)
+    return info.value.reason
+
+
+def test_requests_after_a_failed_restart_fail_fast_without_spawning_again():
+    restart = _ScriptedRestart()
+    relay, factory, clock = _backoff_client(restart)
+    reasons = [_reason(relay) for _ in range(25)]
+    assert reasons[0] == "tunnel_restart_failed"
+    assert set(reasons[1:]) == {"tunnel_restart_backoff"}
+    assert restart.calls == 1  # not one gcloud per request
+    assert factory.handler.requests == []  # a refused request never reaches the relay
+
+
+def test_spawns_while_the_tunnel_stays_down_follow_the_capped_backoff():
+    restart = _ScriptedRestart()
+    relay, factory, clock = _backoff_client(restart)
+    attempts, due, window = [], 0.0, client_mod.RESTART_BACKOFF_BASE_S
+    horizon = 1000
+    for second in range(horizon):  # one request per simulated second
+        clock.now = float(second)
+        _reason(relay)
+        if second >= due:
+            attempts.append(second)
+            due = second + window
+            window = min(client_mod.RESTART_BACKOFF_MAX_S, window * 2)
+    assert restart.calls == len(attempts) == 21  # 1000 requests, 21 spawns
+    assert attempts[:6] == [0, 2, 6, 14, 30, 62]
+    assert attempts[-1] - attempts[-2] == client_mod.RESTART_BACKOFF_MAX_S
+
+
+def test_a_restart_is_tried_again_once_the_window_has_elapsed_and_success_resets_it():
+    fresh, again = FakeHandle(50124), FakeHandle(50125)
+    restart = _ScriptedRestart(
+        TunnelError("tunnel_exited", returncode=1), TunnelError("tunnel_exited", returncode=1),
+        fresh, TunnelError("tunnel_exited", returncode=1), again,
+    )
+    relay, factory, clock = _backoff_client(restart)
+    base = client_mod.RESTART_BACKOFF_BASE_S
+    assert _reason(relay) == "tunnel_restart_failed" and restart.calls == 1
+    clock.now = base - 0.5
+    assert _reason(relay) == "tunnel_restart_backoff" and restart.calls == 1
+    clock.now = base  # first window over: the second attempt fails and the window doubles
+    assert _reason(relay) == "tunnel_restart_failed" and restart.calls == 2
+    clock.now = base + 2 * base - 0.5
+    assert _reason(relay) == "tunnel_restart_backoff" and restart.calls == 2
+    clock.now = base + 2 * base  # second window over: the third attempt works
+    assert relay.health().state == "none" and restart.calls == 3
+    assert factory.ports == [50123, 50124]
+    fresh._alive = False  # it drops again: the failure count started over, so the window is the base
+    clock.now += 1
+    assert _reason(relay) == "tunnel_restart_failed" and restart.calls == 4
+    clock.now += base - 0.5
+    assert _reason(relay) == "tunnel_restart_backoff" and restart.calls == 4
+    clock.now += 0.5
+    assert relay.health().state == "none" and restart.calls == 5
+    relay.close()
+    assert again.stops == 1
+
+
+def test_open_hands_its_clock_to_the_client_for_the_backoff_window():
+    clock = _Clock()
+    relay = RelayClient.open(
+        make_config(), tunnel=FakeTunnel(), http_factory=Factory(), monotonic=clock
+    )
+    assert relay._monotonic is clock
+    relay.close()
+
+
+# ------------------------------- interrupts and setup failures during a restart (round 2)
+
+
+class _HookedCond:
+    """A Condition that raises SystemExit (SIGTERM in the CLI) at chosen points.
+
+    `on_enter` / `on_exit` are 1-based counts of `with` entries and exits; `on_notify` the
+    same for notify_all (raised before it notifies); `after_wait` the same for wait (raised
+    once it has woken). `waiting` is released each time a request begins to wait.
+    """
+
+    def __init__(self, lock, *, on_enter=(), on_exit=(), on_notify=(), after_wait=(), waiting=None) -> None:
+        self._cond = threading.Condition(lock)
+        self._on_enter, self._on_exit = set(on_enter), set(on_exit)
+        self._on_notify, self._after_wait = set(on_notify), set(after_wait)
+        self._waiting = waiting
+        self.enters = self.exits = self.notifies = self.waits = 0
+
+    def __enter__(self):
+        self.enters += 1
+        if self.enters in self._on_enter:
+            raise SystemExit(143)  # the lock was never taken
+        self._cond.acquire()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.exits += 1
+        self._cond.release()
+        if self.exits in self._on_exit:
+            raise SystemExit(143)  # the lock is already free, the restart flag still set
+
+    def wait(self, *args) -> bool:
+        self.waits += 1
+        number = self.waits
+        if self._waiting is not None:
+            self._waiting.release()  # the lock is still held, so nothing can notify first
+        woke = self._cond.wait(*args)
+        if number in self._after_wait:
+            raise SystemExit(143)  # an interrupt delivered to a request that was waiting
+        return woke
+
+    def notify_all(self) -> None:
+        self.notifies += 1
+        if self.notifies in self._on_notify:
+            raise SystemExit(143)  # the flag is already cleared, nobody was told
+        self._cond.notify_all()
+
+
+class _FlakyFactory(Factory):
+    """Serves clients, except that the listed calls (1-based) raise `error`."""
+
+    def __init__(self, fail_on, error) -> None:
+        super().__init__()
+        self.fail_on, self.error, self.calls = set(fail_on), error, 0
+
+    def __call__(self, port: int) -> httpx.Client:
+        self.calls += 1
+        if self.calls in self.fail_on:
+            raise self.error
+        return super().__call__(port)
+
+
+def _next_request_does_not_hang(relay: RelayClient) -> object:
+    outcomes: dict = {}
+    thread = _call(relay, outcomes, "next")
+    thread.join(timeout=5)
+    assert not thread.is_alive(), "the restart flag was left set and the request waits forever"
+    return outcomes["next"]
+
+
+def test_an_interrupt_at_the_commit_reacquire_stops_the_new_child_and_closes_its_client():
+    dead, fresh, second = FakeHandle(50123), FakeHandle(50124), FakeHandle(50125)
+    dead._alive = False
+    factory, restart = Factory(), _ScriptedRestart(fresh, second)
+    relay = RelayClient(tunnel=dead, http_factory=factory, restart=restart)
+    relay._cond = _HookedCond(relay._lock, on_enter={2})  # 1 is _acquire, 2 is the commit block
+    with pytest.raises(SystemExit):
+        relay.health()
+    assert fresh.stops == 1 and not fresh.alive()
+    assert factory.ports == [50123, 50124] and factory.clients[1].is_closed
+    assert relay._restarting is None
+    assert isinstance(_next_request_does_not_hang(relay), RelayHealth)
+    assert restart.calls == 2  # an interrupt is not a failed restart: no backoff
+    relay.close()
+    assert second.stops == 1
+
+
+def test_an_interrupt_before_the_replacement_starts_releases_the_restart_flag():
+    dead, fresh = FakeHandle(50123), FakeHandle(50124)
+    dead._alive = False
+    restart = _ScriptedRestart(fresh)
+    relay = RelayClient(tunnel=dead, http_factory=Factory(), restart=restart)
+    relay._cond = _HookedCond(relay._lock, on_exit={1})  # right after `_restarting` is set
+    with pytest.raises(SystemExit):
+        relay.health()
+    assert restart.calls == 0 and relay._restarting is None
+    assert isinstance(_next_request_does_not_hang(relay), RelayHealth)
+    assert restart.calls == 1
+    relay.close()
+    assert fresh.stops == 1
+
+
+def test_an_interrupt_after_the_flag_is_cleared_but_before_the_notify_still_wakes_a_waiter():
+    dead, fresh, second = FakeHandle(50123), FakeHandle(50124), FakeHandle(50125)
+    dead._alive = False
+    factory, restart = Factory(), _GatedRestart([fresh, second])
+    relay = RelayClient(tunnel=dead, http_factory=factory, restart=restart)
+    waiting = threading.Semaphore(0)
+    relay._cond = _HookedCond(relay._lock, on_notify={1}, waiting=waiting)  # 1: the commit block
+    outcomes: dict = {}
+    leader = _call(relay, outcomes, "leader")
+    assert restart.entered.wait(timeout=10)
+    waiter = _call(relay, outcomes, "waiter")
+    assert waiting.acquire(timeout=10), "the request never began to wait on the restart"
+    restart.gate.set()
+    leader.join(timeout=10)
+    waiter.join(timeout=5)
+    assert not waiter.is_alive(), "the interrupted restarter never woke the waiting request"
+    assert isinstance(outcomes["leader"], SystemExit)
+    assert isinstance(outcomes["waiter"], RelayHealth)  # it took over and restarted
+    assert fresh.stops == 1 and restart.calls == 2  # no backoff after an interrupt
+    assert len(factory.handler.requests) == 1  # the interrupted request never sent
+    relay.close()
+    assert second.stops == 1
+
+
+def test_an_interrupt_delivered_to_a_waiting_request_does_not_free_the_restarters_flag():
+    dead, fresh = FakeHandle(50123), FakeHandle(50124)
+    dead._alive = False
+    factory, restart = Factory(), _GatedRestart([fresh])
+    relay = RelayClient(tunnel=dead, http_factory=factory, restart=restart)
+    waiting = threading.Semaphore(0)
+    relay._cond = _HookedCond(relay._lock, after_wait={1}, waiting=waiting)  # the first waiter
+    outcomes: dict = {}
+    leader = _call(relay, outcomes, "leader")
+    assert restart.entered.wait(timeout=10)
+    first = _call(relay, outcomes, "first")
+    assert waiting.acquire(timeout=10)
+    with relay._cond:
+        relay._cond.notify_all()  # wakes it; the interrupt lands as it wakes
+    first.join(timeout=10)
+    assert isinstance(outcomes["first"], SystemExit)
+    assert relay._restarting is not None  # the restarter's flag is untouched
+    second = _call(relay, outcomes, "second")
+    assert waiting.acquire(timeout=5), "a second restart started while the first was in flight"
+    assert restart.calls == 1
+    restart.gate.set()
+    for thread in (leader, second):
+        thread.join(timeout=10)
+    assert isinstance(outcomes["leader"], RelayHealth) and isinstance(outcomes["second"], RelayHealth)
+    assert restart.calls == 1 and factory.ports == [50123, 50124]  # one restart, one new child
+    relay.close()
+    assert fresh.stops == 1
+
+
+def test_an_interrupt_at_the_handoff_exit_retires_the_old_client_and_gives_back_the_reservation():
+    dead, fresh = FakeHandle(50123), FakeHandle(50124)
+    dead._alive = False
+    factory, restart = Factory(), _ScriptedRestart(fresh)
+    relay = RelayClient(tunnel=dead, http_factory=factory, restart=restart)
+    relay._cond = _HookedCond(relay._lock, on_exit={2})  # 1 is _acquire, 2 is the handoff block
+    with pytest.raises(SystemExit):
+        relay.health()
+    assert relay._tunnel is fresh and fresh.stops == 0 and fresh.alive()  # the handoff happened
+    assert factory.clients[0].is_closed  # the old client is not left open
+    assert relay._pool.inflight == 0 and relay._restarting is None  # nothing sent, nothing held
+    assert factory.handler.requests == []
+    assert isinstance(_next_request_does_not_hang(relay), RelayHealth)
+    assert restart.calls == 1  # the new tunnel is used, not replaced
+    relay.close()
+    assert fresh.stops == 1
+
+
+def test_an_interrupt_at_the_exit_of_the_fast_path_gives_the_reservation_back():
+    relay = RelayClient(tunnel=FakeHandle(50123), http_factory=Factory())
+    relay._cond = _HookedCond(relay._lock, on_exit={1})  # after the request was counted
+    with pytest.raises(SystemExit):
+        relay.health()
+    assert relay._pool.inflight == 0
+    relay.close()
+
+
+def test_an_interrupt_before_the_fast_path_counts_the_request_does_not_release_anothers_reservation():
+    class InterruptedPool(client_mod._Pool):
+        """Raises SystemExit when the count is about to be raised, after the pool was picked."""
+
+        armed = False
+
+        @property
+        def inflight(self):
+            return self._inflight
+
+        @inflight.setter
+        def inflight(self, value):
+            if self.armed and value > self._inflight:
+                self.armed = False
+                raise SystemExit(143)  # the increment never landed
+            self._inflight = value
+
+    handle, fresh = FakeHandle(50123), FakeHandle(50124)
+    factory, restart = Factory(), _ScriptedRestart(fresh)
+    relay = RelayClient(tunnel=handle, http_factory=factory, restart=restart)
+    pool = InterruptedPool(factory.clients[0])
+    relay._pool = pool
+    active = relay._acquire()  # a request genuinely in flight on the pool
+    assert active is pool and pool.inflight == 1
+    pool.armed = True
+    with pytest.raises(SystemExit):
+        relay.health()
+    assert pool.inflight == 1  # the interrupted request never counted, so it gives nothing back
+    handle._alive = False
+    assert isinstance(relay.health(), RelayHealth)  # restarts: the in-use pool is retired
+    assert restart.calls == 1 and pool.retired
+    assert not pool.http.is_closed  # still held by the request that is in flight
+    relay._release(active)
+    assert pool.http.is_closed
+    relay.close()
+
+
+def test_a_failing_http_client_is_a_failed_restart_that_stops_the_child_and_arms_the_backoff():
+    dead = FakeHandle(50123)
+    dead._alive = False
+    spawned = [FakeHandle(50124 + n) for n in range(5)]
+    restart = _ScriptedRestart(*spawned)
+    factory = _FlakyFactory(fail_on=range(2, 100), error=OSError("no fds"))
+    relay = RelayClient(tunnel=dead, http_factory=factory, restart=restart)
+    relay._monotonic = _Clock()
+    reasons = [_reason(relay) for _ in range(5)]
+    assert reasons == ["tunnel_restart_failed"] + ["tunnel_restart_backoff"] * 4
+    assert restart.calls == 1  # five requests, one child
+    assert spawned[0].stops == 1 and not spawned[0].alive()
+    assert factory.handler.requests == []
+
+
+def test_an_interrupt_while_building_the_http_client_stops_the_child_and_frees_the_flag():
+    dead, fresh, second = FakeHandle(50123), FakeHandle(50124), FakeHandle(50125)
+    dead._alive = False
+    restart = _ScriptedRestart(fresh, second)
+    factory = _FlakyFactory(fail_on={2}, error=KeyboardInterrupt())
+    relay = RelayClient(tunnel=dead, http_factory=factory, restart=restart)
+    with pytest.raises(KeyboardInterrupt):
+        relay.health()
+    assert fresh.stops == 1 and relay._restarting is None
+    assert isinstance(_next_request_does_not_hang(relay), RelayHealth)
+    assert restart.calls == 2
+    relay.close()
+    assert second.stops == 1
+
+
+def test_an_interrupt_right_after_the_child_spawns_kills_it():
+    proc = FakeProc(pid=781)
+    rig = Rig([proc])
+
+    def terminated():
+        raise SystemExit(143)
+
+    with pytest.raises(SystemExit):
+        rig.tunnel(monotonic=terminated).start()  # the first thing start() does with the child
+    assert rig.killpg_calls == [(781, signal.SIGKILL)]
+    assert proc.waits == [STOP_GRACE_S]
 
 
 # ----------------------------------------------------------------- config

@@ -13,7 +13,9 @@ import hashlib
 import io
 import json
 import logging
+import os
 import re
+import signal
 import sys
 import threading
 import time
@@ -1522,6 +1524,60 @@ def test_tunnel_prints_the_url_and_a_note_then_stops_on_interrupt():
         "RELAY_URL=http://127.0.0.1:50321",
         "for manual inspection only; the relay token is not printed",
     ]
+
+
+@pytest.fixture
+def sigterm_restored():
+    previous = signal.getsignal(signal.SIGTERM)
+    yield
+    signal.signal(signal.SIGTERM, previous)
+
+
+def test_sigterm_in_the_cli_unwinds_and_stops_the_tunnel_child(sigterm_restored):
+    install = cli_mod._raise_on_sigterm  # looked up before anything is signalled
+    install()
+    fake = _Tunnel(port=50321)
+
+    def terminated(handle):
+        signal.raise_signal(signal.SIGTERM)
+
+    with pytest.raises(SystemExit) as info:
+        cli_mod.main(
+            ["tunnel"], tunnel_factory=lambda cfg, verbose: fake, config_loader=lambda: object(),
+            wait=terminated, out=io.StringIO(),
+        )
+    assert info.value.code == 128 + signal.SIGTERM
+    assert fake.stopped == 1
+
+
+def test_sigterm_during_a_relay_command_closes_the_client_that_owns_the_tunnel(sigterm_restored):
+    cli_mod._raise_on_sigterm()
+    built = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        signal.raise_signal(signal.SIGTERM)  # lands while the request is in flight
+        return json_response(HEALTH_JSON)
+
+    def factory():
+        built.append(relay_with(handler))
+        return built[0]
+
+    with pytest.raises(SystemExit):
+        cli_mod.main(["health"], client_factory=factory, out=io.StringIO())
+    assert built[0]._closed is True and built[0]._pool.http.is_closed
+
+
+def test_the_library_installs_no_signal_handler_and_the_cli_does_it_only_when_run():
+    before = signal.getsignal(signal.SIGTERM)
+    relay = relay_with(Canned())
+    relay.health()
+    relay.close()
+    assert signal.getsignal(signal.SIGTERM) is before
+    source = Path(cli_mod.__file__).read_text()
+    assert source.rstrip().endswith('_raise_on_sigterm()\n    raise SystemExit(main())')
+    for module in (client_mod, sys.modules["brokers.breeze_gateway.tunnel"]):
+        assert "signal.signal(" not in Path(module.__file__).read_text()
+        assert "atexit" not in Path(module.__file__).read_text().replace("atexit hook", "")
 
 
 def test_tunnel_verbose_reaches_the_factory_and_a_dead_child_is_exit_4():

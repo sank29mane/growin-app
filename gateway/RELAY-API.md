@@ -200,6 +200,8 @@ Rules a caller of growin-relay/1 follows. Each is checked against the VM at `gat
 - EGRESS_MISMATCH is mapped on the code. Its reason can be `egress_mismatch`, `egress_unavailable` or `ip_mismatch`; do not branch on one value of it.
 - `health`, `login/arm`, `login/complete` and `session/revoke` answer 422 VALIDATION for any query string, before any auth check. Never add a query to them, not even a cache-buster.
 - `bars/daily` checks in this order: 401 (token), then 422 (query), then 503 (no session or expired). A 422 never means the session is bad, so it never means log in again.
+- A client from `open()` replaces a dead tunnel child itself, outside its internal lock: one request starts the replacement, requests that arrive meanwhile wait for it and then use the new tunnel, and `close()` never waits for it (it marks the client closed, and a replacement that finishes later is stopped and discarded). After a failed replacement (`RelayUnavailable` reason `tunnel_restart_failed`) the client refuses further replacements for 2 s, doubling per consecutive failure up to 60 s, and a refused request fails fast with reason `tunnel_restart_backoff` and is never sent. A successful replacement resets the window. These are transport restarts, never request retries.
+- A parent killed by SIGKILL, or by SIGTERM without a handler, leaves its `gcloud` child running, idle, until IAP drops it. A library cannot catch SIGKILL and must not install signal handlers, so callers close the client with `with` or `close()`; the CLI turns SIGTERM into a clean exit.
 
 ## Observed upstream behaviour
 
