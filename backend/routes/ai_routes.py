@@ -223,10 +223,11 @@ async def create_trade_approval_challenge(request: ApprovalChallengeRequest):
         # A SHADOW challenge asks the VM to mint the bytes, so it runs off the event loop.
         india_quote = await _relay_quote_for(request.proposal_id)
         challenge = await asyncio.to_thread(
-            state.execution_service.create_approval_challenge,
-            request.proposal_id,
-            workspace=request.workspace,
-            india_quote=india_quote,
+            lambda: state.execution_service.create_approval_challenge(
+                request.proposal_id,
+                workspace=request.workspace,
+                india_quote=india_quote,
+            )
         )
     except WorkspaceMismatch:
         raise HTTPException(status_code=409, detail=WORKSPACE_MISMATCH_DETAIL)
