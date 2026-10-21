@@ -331,15 +331,22 @@ class Ledger:
         return self.data["stopped"]
 
     def slot(self, step: str, key: str) -> dict[str, Any]:
+        """The quota record: ``requests`` is shared by everything the slot covers (S-7 symbols, S-8 dates)."""
         slots = self.data["steps"].setdefault(step, {}).setdefault("slots", {})
-        record = slots.setdefault(key, {"requests": 0, "result": "not_run"})
-        record.setdefault("attempts", [])
-        record.setdefault("cut", False)
+        record = slots.setdefault(key, {"requests": 0})
+        record.setdefault("evidence", {})
         return record
 
-    def outcome(self, step: str, key: str) -> str:
-        record = self.slot(step, key)
-        return slot_outcome(record["attempts"], record["cut"])
+    def evidence(self, step: str, slot: "Slot") -> dict[str, Any]:
+        """The tries for one (step, symbol, date). A shared slot never lets one symbol's answer stand for another's."""
+        record = self.slot(step, slot.key)
+        return record["evidence"].setdefault(
+            f"{slot.symbol}@{slot.day.isoformat()}", {"attempts": [], "cut": False, "result": "not_run"}
+        )
+
+    def outcome(self, step: str, slot: "Slot") -> str:
+        evidence = self.evidence(step, slot)
+        return slot_outcome(evidence["attempts"], evidence["cut"])
 
     def unsent_base_slots(self) -> int:
         remaining = 0
@@ -455,8 +462,8 @@ class IntradayProbe:
             self._run_slot(step, slot)
         with self._locked():
             self.ledger = self._reload()
-            outcomes = [self.ledger.outcome(step, slot.key) for slot in slots]
-            results = [self.ledger.slot(step, slot.key)["result"] for slot in slots]
+            outcomes = [self.ledger.outcome(step, slot) for slot in slots]
+            results = [self.ledger.evidence(step, slot)["result"] for slot in slots]
             status, code = step_verdict(outcomes, results)
             self.say(f"step {step} status {status} sent {self.ledger.sent}")
         return code
@@ -511,15 +518,16 @@ class IntradayProbe:
             # relay count between this check and this send.
             with self._locked():
                 self.ledger = self._reload()
-                record = self.ledger.slot(step, slot.key)
+                record = self.ledger.slot(step, slot.key)  # quota: shared by every symbol or date the slot covers
+                evidence = self.ledger.evidence(step, slot)  # outcome: this symbol and date only
                 kind = "base" if record["requests"] == 0 else "retry"  # a repeated step spends retry slots
                 if not self._allowed(kind):
-                    record["cut"] = True
+                    evidence["cut"] = True
                     if kind == "base":
                         self.ledger.data["stopped"] = True  # nothing more is sent today
-                        record["result"] = BUDGET_STOP
-                    elif slot_outcome(record["attempts"], False) == ANSWERED:
-                        record["result"] = RETRY_SKIPPED  # the first answer is kept
+                        evidence["result"] = BUDGET_STOP
+                    elif slot_outcome(evidence["attempts"], False) == ANSWERED:
+                        evidence["result"] = RETRY_SKIPPED  # the first answer is kept
                     # with no answer the error stays the slot's result; the outcome rule says ERRORED
                     self.ledger.save()
                     self.say(f"slot {step} {slot.kind} {slot.symbol} {BUDGET_STOP if kind == 'base' else RETRY_SKIPPED}")
@@ -532,9 +540,9 @@ class IntradayProbe:
                 try:
                     payload = self._fetch(slot)
                 except (UpstreamError, UpstreamTimeout) as err:
-                    record["attempts"].append(f"error_{err.code}")
-                    if slot_outcome(record["attempts"], False) != ANSWERED:
-                        record["result"] = f"error_{err.code}"  # an earlier answer stays the result
+                    evidence["attempts"].append(f"error_{err.code}")
+                    if slot_outcome(evidence["attempts"], False) != ANSWERED:
+                        evidence["result"] = f"error_{err.code}"  # an earlier answer stays the result
                     self.ledger.save()
                     self.say(f"slot {step} {slot.kind} {slot.symbol} error {err.code}")
                     if step in NEVER_RETRIED or retried:
@@ -542,13 +550,13 @@ class IntradayProbe:
                     retried = True
                     continue
                 except RelayError as err:
-                    record["attempts"].append(f"error_{err.code}")
-                    record["result"] = f"error_{err.code}"
+                    evidence["attempts"].append(f"error_{err.code}")
+                    evidence["result"] = f"error_{err.code}"
                     self.ledger.save()
                     raise
                 self._save_answer(step, slot, seq, payload)
-                record["attempts"].append("empty" if payload.empty else "answered")
-                record["result"] = "empty" if payload.empty else "answered"
+                evidence["attempts"].append("empty" if payload.empty else "answered")
+                evidence["result"] = "empty" if payload.empty else "answered"
                 self.ledger.save()
                 self._print_answer(step, slot, seq, payload)
                 if payload.empty and step not in NEVER_RETRIED and not retried:

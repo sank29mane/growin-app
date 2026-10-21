@@ -477,7 +477,7 @@ def test_probe_a_base_stop_sets_the_latch_in_the_ledger_file(env: Env):
     env.step("S-4")
     persisted = json.loads((env.dir / f"ledger-{TODAY.isoformat()}.json").read_text())
     assert persisted["stopped"] is True
-    assert persisted["steps"]["S-4"]["slots"]["intraday-RELIND"]["result"] == probe.BUDGET_STOP
+    assert persisted["steps"]["S-4"]["slots"]["intraday-RELIND"]["evidence"][f"RELIND@{TODAY.isoformat()}"]["result"] == probe.BUDGET_STOP
 
 
 # ------------------------------------------------------------ saved answers and printed lines
@@ -918,3 +918,72 @@ def test_a_repeated_step_whose_earlier_run_errored_and_now_answers_is_complete(e
     assert env.step("S-9")[0] != 0
     code, lines = env.step("S-9")
     assert code == 0 and lines[-1].startswith("step S-9 status complete ")
+
+
+# ------------------------------- evidence is scoped to (step, symbol, date), quota to the slot (review r4)
+
+
+def test_s7_a_answered_then_b_with_two_502s_is_inconclusive(env: Env):
+    """codex-r3: B's two 502s were hidden by A's persisted answer and the step exited 0."""
+    env.step("S-3")
+    assert env.step("S-7", "--symbol", "AAA")[0] == 0
+    env.relay.answers[("intraday", "BBB")] = [_err(), _err()]
+    code, lines = env.step("S-7", "--symbol", "BBB")
+    assert code == cli_mod.EXIT_RELAY != 0
+    assert lines[-1].startswith("step S-7 status INCONCLUSIVE ")
+    assert sent(env) == 3 + 1 + 2
+
+
+def test_s7_b_with_two_502s_then_a_answered_is_complete_for_a(env: Env):
+    env.step("S-3")
+    env.relay.answers[("intraday", "BBB")] = [_err(), _err()]
+    assert env.step("S-7", "--symbol", "BBB")[0] != 0
+    code, lines = env.step("S-7", "--symbol", "AAA")
+    assert code == 0 and lines[-1].startswith("step S-7 status complete ")  # B's errors do not taint A
+
+
+def test_s7_an_empty_answer_for_b_is_still_valid_evidence_for_b(env: Env):
+    env.step("S-3")
+    env.step("S-7", "--symbol", "AAA")
+    env.relay.answers[("intraday", "BBB")] = [empty_payload("BBB"), _err()]
+    code, lines = env.step("S-7", "--symbol", "BBB")
+    assert code == 0 and lines[-1].startswith("step S-7 status complete ")
+
+
+def test_s7_two_symbols_still_share_one_quota_slot(env: Env):
+    env.step("S-3")
+    env.step("S-7", "--symbol", "AAA")
+    env.step("S-7", "--symbol", "BBB")
+    slots = env.ledger()["steps"]["S-7"]["slots"]
+    assert list(slots) == ["intraday-s7"] and slots["intraday-s7"]["requests"] == 2
+    assert sorted(slots["intraday-s7"]["evidence"]) == [f"AAA@{TODAY.isoformat()}", f"BBB@{TODAY.isoformat()}"]
+    assert probe.Ledger.load(env.dir, TODAY).unsent_base_slots() == probe.BASE_CALLS - 3 - 1
+
+
+def test_s7_a_refused_retry_for_b_is_a_budget_cut_for_b_not_a_pass_from_a(env: Env):
+    env.step("S-3")
+    env.step("S-7", "--symbol", "AAA")
+    env.relay.counted += 12  # B is a retry-kind call that no longer fits
+    code, lines = env.step("S-7", "--symbol", "BBB")
+    assert "slot S-7 intraday BBB probe_retry_skipped" in lines
+    assert lines[-1].startswith("step S-7 status probe_budget_stop ") and code == 0
+
+
+def test_s8_a_date_answered_then_another_date_with_a_502_is_inconclusive(env: Env):
+    env.step("S-3")
+    other = HOLIDAY.replace(day=HOLIDAY.day - 1)
+    assert env.step("S-8", "--date", HOLIDAY.isoformat())[0] == 0
+    env.relay.answers[("intraday", "RELIND")] = [_err()]
+    code, lines = env.step("S-8", "--date", other.isoformat())
+    assert code != 0 and lines[-1].startswith("step S-8 status INCONCLUSIVE ")
+    slots = env.ledger()["steps"]["S-8"]["slots"]
+    assert len(slots) == 1 and next(iter(slots.values()))["requests"] == 2  # one quota slot, two dates
+
+
+def test_s8_a_date_with_a_502_then_another_date_answered_is_complete(env: Env):
+    env.step("S-3")
+    other = HOLIDAY.replace(day=HOLIDAY.day - 1)
+    env.relay.answers[("intraday", "RELIND")] = [_err()]
+    assert env.step("S-8", "--date", HOLIDAY.isoformat())[0] != 0
+    code, lines = env.step("S-8", "--date", other.isoformat())
+    assert code == 0 and lines[-1].startswith("step S-8 status complete ")
