@@ -1008,3 +1008,93 @@ def test_egress_that_went_stale_after_authorize_is_refreshed_before_the_token_is
     stack.transport.echo_ip = OTHER_IP  # and the refresh will find a different IP
     resp = finish_parked(stack, request, resume, len(stack.transport.bars_requests()))
     assert resp.status_code == 503 and code_of(resp) == "EGRESS_MISMATCH"
+
+
+# ---- egress must be usable at the last lock hold, not only fresh at the first (Codex r3 P2, Opus r3)
+
+
+def park_next_egress_check_event(stack: Stack):
+    """Park the next egress_check event emission, which runs right after the
+    check recorded its result and released the lock. Returns (entered, release)."""
+    entered, release = threading.Event(), threading.Event()
+    real = stack.events.emit
+    armed = [True]
+
+    def gated(name, **fields):
+        if armed[0] and name == "egress_check":
+            armed[0] = False
+            entered.set()
+            assert release.wait(WAIT_S), "test never released the parked egress check"
+        return real(name, **fields)
+
+    stack.events.emit = gated  # type: ignore[method-assign]
+    return entered, release
+
+
+def test_egress_that_ages_out_during_the_refresh_is_refused_not_served():
+    """Codex r3 P2: the refresh recorded success, then 301 s passed and the IP
+    changed before the final lock hold. That hold must not hand out the token."""
+    stack = Stack()
+    token = stack.login()
+    stack.clock.advance(301)  # stale: the bars request refreshes (and passes)
+    entered, release = park_next_egress_check_event(stack)
+    client = stack.new_client()
+    request = Parked(lambda: stack.bars(token, client=client)).start()
+    assert entered.wait(WAIT_S)  # the refresh recorded ok and is paused
+
+    stack.clock.advance(301)  # that result is stale again
+    stack.transport.echo_ip = OTHER_IP
+    bars_before = len(stack.transport.bars_requests())
+    release.set()
+
+    resp = request.join()
+    assert resp.status_code == 503 and code_of(resp) == "EGRESS_MISMATCH"
+    assert reason_of(resp) == "egress_unavailable"
+    assert len(stack.transport.bars_requests()) == bars_before
+
+
+def test_a_failed_egress_check_is_not_fresh_in_the_gap_before_the_session_is_suspended():
+    """Opus r3 gap 1: a failed check was recorded as fresh and the lock released
+    before the session was suspended; a concurrent request saw an active session
+    with fresh egress and was served."""
+    stack = Stack()
+    token = stack.login()
+    stack.clock.advance(301)
+    stack.transport.echo_ip = OTHER_IP
+    entered, release = park_next_egress_check_event(stack)
+    client = stack.new_client()
+    first = Parked(lambda: stack.bars(token, client=client)).start()
+    assert entered.wait(WAIT_S)  # the failure is recorded, the suspension has not happened yet
+
+    bars_before = len(stack.transport.bars_requests())
+    concurrent = stack.bars(token)
+    assert concurrent.status_code == 503 and code_of(concurrent) == "EGRESS_MISMATCH"
+    release.set()
+
+    resp = first.join()
+    assert resp.status_code == 503 and code_of(resp) == "EGRESS_MISMATCH"
+    assert reason_of(resp) == "egress_mismatch"
+    assert len(stack.transport.bars_requests()) == bars_before
+    assert stack.session.state is SessionState.SUSPENDED_EGRESS
+
+
+def test_a_failed_egress_check_with_no_session_still_refuses_an_exchange_in_flight():
+    """Opus r3 gap 2: with nothing active a failed check suspends nothing, so
+    only the generation bump stops a first login that is mid-exchange."""
+    stack = Stack()
+    armed = stack.arm().json()
+    entered, release = park_next_request(stack, is_customerdetails)
+    exchange = start_complete(stack, armed)
+    assert entered.wait(WAIT_S)  # past its own egress check, inside customerdetails
+    assert stack.session.state is SessionState.NONE
+
+    stack.clock.advance(301)
+    stack.transport.echo_ip = OTHER_IP
+    assert stack.session.egress_fresh() is False  # a concurrent check fails; no session to drop
+    assert stack.session.state is SessionState.NONE
+    release.set()
+
+    done = exchange.join()
+    assert done.status_code == 409 and code_of(done) == "LOGIN_ATTEMPT_INVALID"
+    assert stack.session.state is SessionState.NONE
+    assert stack.bars(armed["relay_token"]).status_code == 503
