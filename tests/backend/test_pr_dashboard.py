@@ -336,8 +336,13 @@ def pull_json(number, base="main", head=None, mergeable=True, draft=False, label
 
 
 class FakeGitHub:
-    def __init__(self, issues=(), comments=(), label=True, mergeable_first=True):
+    def __init__(self, issues=(), comments=(), label=True, mergeable_first=True,
+                 listings=None, fail=()):
         self.calls = []
+        # `listings`: one issue list per read of the bot-issue listing; the last repeats.
+        self.listings = [list(x) for x in listings] if listings is not None else None
+        self.fail = set(fail)  # (method, path) pairs that raise like a failed `gh api`
+        self.list_reads = 0
         self.pulls = {
             553: pull_json(553, labels=("safety-reviewed",)),
             557: pull_json(557, base="feat/553", body="Operator gate: wait for UAT", draft=True),
@@ -350,6 +355,8 @@ class FakeGitHub:
 
     def __call__(self, path, method="GET", payload=None):
         self.calls.append((method, path, payload))
+        if (method, path) in self.fail:
+            raise dash.subprocess.CalledProcessError(1, ["gh", "api", path])
         if method == "POST" and path == "repos/owner/repo/issues":
             return {"number": 77}
         m = re.fullmatch(r"repos/owner/repo/issues/(\d+)/comments(\?.*)?", path)
@@ -379,7 +386,11 @@ class FakeGitHub:
             return [{"number": 552, "title": "merged", "merged_at": "2026-10-08T01:00:00Z",
                      "html_url": "https://github.com/owner/repo/pull/552"}]
         if path.startswith("repos/owner/repo/issues?state=open&creator=github-actions%5Bbot%5D"):
-            return self.issues
+            if self.listings is None:
+                return self.issues
+            read = min(self.list_reads, len(self.listings) - 1)
+            self.list_reads += 1
+            return self.listings[read]
         if path == "repos/owner/repo/labels/dashboard" and self.label:
             return {"name": "dashboard"}
         raise dash.subprocess.CalledProcessError(1, ["gh", "api", path])
@@ -473,6 +484,92 @@ def test_update_rereads_unknown_mergeability_once_and_dry_run_writes_nothing():
     assert gh.writes() == []
     assert "computing" not in body
     assert all(m == "GET" for m, _, _ in gh.calls)
+
+
+def _slept_run(gh, **kw):
+    slept = []
+    body = dash.update(REPO, "schedule", patterns(), api=gh, now=NOW, sleep=slept.append, **kw)
+    return body, [s for s in slept if s != 3]  # 3 is the mergeability wait
+
+
+def test_update_rereads_the_listing_after_a_miss_and_adopts_the_dashboard(capsys):
+    # The 14:00 and 14:30 UTC orphans: the first read came back without #564.
+    gh = FakeGitHub(listings=[[], [issue(564)]])
+    _, waits = _slept_run(gh)
+    assert waits == [dash.RELIST_WAIT]
+    assert [(m, p) for m, p, _ in gh.writes()] == [
+        ("POST", "repos/owner/repo/issues/564/comments"), ("PATCH", "repos/owner/repo/issues/564")]
+    assert not any(p == "repos/owner/repo/issues" for m, p, _ in gh.writes())
+    out = capsys.readouterr().out
+    assert "Listed 0 open bot issues; dashboard candidates: none." in out
+    assert "Re-read 1 open bot issues; dashboard candidates: #564." in out
+    assert "Updated issue #564." in out
+
+
+def test_update_creates_only_when_both_reads_miss(capsys):
+    gh = FakeGitHub(listings=[[], [issue(5, login="attacker")]])
+    _, waits = _slept_run(gh)
+    assert waits == [dash.RELIST_WAIT]
+    assert gh.list_reads == 2
+    assert gh.writes()[0][:2] == ("POST", "repos/owner/repo/issues")
+    assert "Created issue #77" in capsys.readouterr().out
+
+
+def test_update_does_not_wait_or_reread_when_the_dashboard_is_listed():
+    gh = FakeGitHub(listings=[[issue(564)]])
+    _, waits = _slept_run(gh)
+    assert waits == [] and gh.list_reads == 1
+
+
+def test_dry_run_does_not_wait_for_a_second_read():
+    gh = FakeGitHub(listings=[[], [issue(564)]])
+    _, waits = _slept_run(gh, dry_run=True)
+    assert waits == [] and gh.list_reads == 1 and gh.writes() == []
+
+
+def test_marked_issues_returns_only_open_marked_bot_issues_oldest_first():
+    issues = [issue(588), issue(9, login="attacker"), issue(564), issue(7, body="no marker"),
+              issue(8, pull_request={"url": "x"}), issue(6, state="closed"), issue(587)]
+    assert [i["number"] for i in dash.marked_issues(issues)] == [564, 587, 588]
+
+
+def test_update_closes_duplicate_dashboards_and_touches_nothing_else(capsys):
+    gh = FakeGitHub(issues=[issue(588), issue(564), issue(587),
+                            issue(570, login="attacker"), issue(571, body="no marker"),
+                            issue(572, pull_request={"url": "x"})])
+    run(gh)
+    assert [(m, p) for m, p, _ in gh.writes()] == [
+        ("POST", "repos/owner/repo/issues/564/comments"),
+        ("PATCH", "repos/owner/repo/issues/564"),
+        ("POST", "repos/owner/repo/issues/587/comments"),
+        ("PATCH", "repos/owner/repo/issues/587"),
+        ("POST", "repos/owner/repo/issues/588/comments"),
+        ("PATCH", "repos/owner/repo/issues/588"),
+    ]
+    writes = {(m, p): b for m, p, b in gh.writes()}
+    for dup in (587, 588):
+        assert "#564" in writes[("POST", f"repos/owner/repo/issues/{dup}/comments")]["body"]
+        assert writes[("PATCH", f"repos/owner/repo/issues/{dup}")]["state"] == "closed"
+    assert dash.MARKER in writes[("PATCH", "repos/owner/repo/issues/564")]["body"]
+    assert "Closed duplicate dashboard issue #587 in favour of #564." in capsys.readouterr().out
+
+
+def test_dry_run_closes_no_duplicates(capsys):
+    gh = FakeGitHub(issues=[issue(564), issue(587)])
+    run(gh, dry_run=True)
+    assert gh.writes() == []
+    assert "would close duplicate issues #587 in favour of #564" in capsys.readouterr().out
+
+
+def test_a_failed_duplicate_close_is_logged_and_the_rest_still_close(capsys):
+    gh = FakeGitHub(issues=[issue(564), issue(587), issue(588)],
+                    fail={("POST", "repos/owner/repo/issues/587/comments")})
+    run(gh)
+    patched = [p for m, p, _ in gh.writes() if m == "PATCH"]
+    assert patched == ["repos/owner/repo/issues/564", "repos/owner/repo/issues/588"]
+    out = capsys.readouterr().out
+    assert "::warning::Could not close duplicate dashboard issue #587: CalledProcessError" in out
+    assert "Command" not in out  # no command line or token-bearing text in the log
 
 
 def test_update_rejects_a_bad_repo():
