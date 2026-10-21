@@ -14,6 +14,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SAFETY_PATHS = REPO_ROOT / ".github" / "safety-paths.txt"
+SAFETY_GUARD = REPO_ROOT / ".github" / "scripts" / "safety-guard.sh"
 
 EXISTING_ENTRIES = (
     "backend/execution/*",
@@ -37,6 +38,13 @@ EXISTING_ENTRIES = (
     "backend/routes/market_data_routes.py",
     "Growin/Security/*",
     ".github/*",
+)
+
+# Phase 63 and 64 entries sit contiguously between the existing block and the Phase 58 block.
+PHASE_63_64_ENTRIES = (
+    "gateway/vm/gateway_vm/orders/*",
+    "backend/risk_india/*",
+    "backend/shadow_india/*",
 )
 
 # (pattern, a sample path it must match)
@@ -81,6 +89,44 @@ def test_phase_58_entries_are_present_in_order_at_the_end():
     assert present[-len(expected):] == expected
     assert present[: len(EXISTING_ENTRIES)] == list(EXISTING_ENTRIES), "existing lines were reordered"
     assert "# Phase 58:" in SAFETY_PATHS.read_text(encoding="utf-8")
+
+
+def test_phase_63_64_entries_are_present_in_order_before_phase_58():
+    present = entries()
+    start = len(EXISTING_ENTRIES)
+    assert present[start : start + len(PHASE_63_64_ENTRIES)] == list(PHASE_63_64_ENTRIES)
+    assert present[start + len(PHASE_63_64_ENTRIES) :] == [pattern for pattern, _ in PHASE_58_ENTRIES]
+
+
+def run_guard(tmp_path: Path, changed_path: str, *, reviewed: bool) -> subprocess.CompletedProcess[str]:
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.fail("bash is required to run the Safety Guard script")
+    changes = tmp_path / "changes.tsv"
+    changes.write_text(f"modified\t{changed_path}\t\n", encoding="utf-8")
+    return subprocess.run(
+        [bash, str(SAFETY_GUARD), str(changes), str(SAFETY_PATHS)],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin", "REVIEWED": "true" if reviewed else "false"},
+    )
+
+
+@pytest.mark.parametrize("path", ["backend/shadow_india/runner.py", "backend/shadow_india/sub/deep.py"])
+def test_guard_blocks_shadow_india_unless_reviewed(tmp_path, path):
+    assert run_guard(tmp_path, path, reviewed=False).returncode == 1
+    assert run_guard(tmp_path, path, reviewed=True).returncode == 0
+
+
+def test_guard_still_blocks_risk_india_unless_reviewed(tmp_path):
+    assert run_guard(tmp_path, "backend/risk_india/rules.py", reviewed=False).returncode == 1
+    assert run_guard(tmp_path, "backend/risk_india/rules.py", reviewed=True).returncode == 0
+
+
+def test_guard_ignores_an_unrelated_path(tmp_path):
+    result = run_guard(tmp_path, "docs/README.md", reviewed=False)
+    assert result.returncode == 0
+    assert "No safety-critical paths touched." in result.stdout
 
 
 @pytest.mark.parametrize(("pattern", "sample"), PHASE_58_ENTRIES)
