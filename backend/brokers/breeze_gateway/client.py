@@ -25,6 +25,12 @@ import httpx
 from .config import GatewayConfig, load_gateway_config
 from .errors import (
     CODE_TO_CLASS,
+    BudgetExhausted,
+    BudgetUnavailable,
+    EgressMismatch,
+    IdentityMismatch,
+    InternalRelayError,
+    LoginAttemptInvalid,
     NoSession,
     RelayArgumentError,
     RelayContractMismatch,
@@ -35,6 +41,8 @@ from .errors import (
     SessionExpired,
     TunnelError,
     Unauthorized,
+    UpstreamError,
+    UpstreamTimeout,
 )
 from .tunnel import Tunnel
 from .token_store import RELAY_TOKEN_RE, FileTokenStore, MemoryTokenStore, TokenStore, same_token
@@ -108,6 +116,19 @@ STOCK_CODE_RE = re.compile(r"^[A-Z0-9]{1,10}$")
 API_SESSION_RE = re.compile(r"^[A-Za-z0-9]{6,256}$")
 REASON_RE = re.compile(r"^[a-z_]{1,40}$")
 HEALTH_STATES = frozenset({"none", "active", "expired", "suspended_egress"})
+
+# After one of these the server has disarmed (or never had) the attempt: it cannot be completed.
+_ATTEMPT_SPENT = (
+    LoginAttemptInvalid,
+    IdentityMismatch,
+    EgressMismatch,
+    BudgetExhausted,
+    BudgetUnavailable,
+    UpstreamError,
+    UpstreamTimeout,
+    InternalRelayError,
+    RelayProtocolError,  # the answer was unusable, so the outcome is unknown
+)
 
 _AUTH_NONE = "none"
 _AUTH_SESSION = "session"  # the session token, when this client holds one
@@ -197,6 +218,29 @@ class _Reply:
     request_id: str
     headers: httpx.Headers
     body: bytes
+
+
+@dataclass(frozen=True)
+class _Attempt:
+    """The armed login attempt this client may complete: its id and the token bound to it."""
+
+    attempt_id: str
+    token: str = field(repr=False)
+
+
+class _Pool:
+    """One httpx client plus the requests that hold it.
+
+    A retired pool is closed by whoever lets go of it last, so a restart never closes a
+    client under a request that already picked it.
+    """
+
+    __slots__ = ("http", "inflight", "retired")
+
+    def __init__(self, http: httpx.Client) -> None:
+        self.http = http
+        self.inflight = 0
+        self.retired = False
 
 
 @dataclass(frozen=True)
@@ -323,15 +367,17 @@ class RelayClient:
         self._tunnel: TunnelHandleLike | None = tunnel
         self._http_factory = http_factory if http_factory is not None else self._build_http
         self._restart = restart
-        self._http: httpx.Client = (
+        self._pool = _Pool(
             http if http is not None else self._http_factory(tunnel.local_port)  # type: ignore[union-attr]
         )
         self._store: TokenStore = token_store if token_store is not None else MemoryTokenStore()
         self._slots = threading.BoundedSemaphore(MAX_IN_FLIGHT)
-        self._lock = threading.RLock()
+        self._lock = threading.RLock()  # guards the fields below; never held across a request
+        self._login_lock = threading.RLock()  # one login transition (arm or complete) at a time
         self._closed = False
         self._session_token: str | None = None
-        self._attempt_token: str | None = None
+        self._attempt: _Attempt | None = None
+        self._token_saved: bool | None = None
         try:
             stored = self._store.load()
             if stored is not None:
@@ -360,7 +406,17 @@ class RelayClient:
             trust_env=False,
         )
 
-    def _ready_http(self) -> httpx.Client:
+    @property
+    def _http(self) -> httpx.Client:
+        return self._pool.http
+
+    @property
+    def token_saved(self) -> bool | None:
+        """Whether the last completed login reached the token store; None before any."""
+        return self._token_saved
+
+    def _acquire(self) -> _Pool:
+        """The current pool with this request counted on it. Pair with _release()."""
         with self._lock:
             if self._closed:
                 raise RelayUnavailable(reason="closed")
@@ -368,7 +424,16 @@ class RelayClient:
                 if self._restart is None:
                     raise RelayUnavailable(reason="tunnel_down")
                 self._restart_tunnel()
-            return self._http
+            pool = self._pool
+            pool.inflight += 1
+            return pool
+
+    def _release(self, pool: _Pool) -> None:
+        with self._lock:
+            pool.inflight -= 1
+            last = pool.retired and pool.inflight == 0
+        if last:
+            pool.http.close()  # idempotent: close() may have closed it already
 
     def _restart_tunnel(self) -> None:
         """One replacement tunnel on a fresh port. A transport restart, never a request retry."""
@@ -378,20 +443,23 @@ class RelayClient:
             handle = self._restart()
         except TunnelError:
             raise RelayUnavailable(reason="tunnel_restart_failed") from None
-        old = self._http
+        old = self._pool
         self._tunnel = handle
-        self._http = self._http_factory(handle.local_port)
-        old.close()
+        self._pool = _Pool(self._http_factory(handle.local_port))
+        old.retired = True
+        if old.inflight == 0:
+            old.http.close()  # otherwise the last request holding it closes it
 
     def close(self) -> None:
         with self._lock:
             if self._closed:
                 return
             self._closed = True
-            http, tunnel = self._http, self._tunnel
+            pool, tunnel = self._pool, self._tunnel
+            pool.retired = True
             owned = self._restart is not None
         try:
-            http.close()
+            pool.http.close()
         finally:
             if owned and tunnel is not None:
                 tunnel.stop()
@@ -457,7 +525,7 @@ class RelayClient:
             if auth == _AUTH_SESSION:
                 return self._session_token
             if auth == _AUTH_ATTEMPT:
-                return self._attempt_token
+                return self._attempt.token if self._attempt is not None else None
             return None
 
     def _forget(self, sent: str | None) -> None:
@@ -467,8 +535,8 @@ class RelayClient:
         with self._lock:
             if self._session_token is not None and same_token(self._session_token, sent):
                 self._session_token = None
-            if self._attempt_token is not None and same_token(self._attempt_token, sent):
-                self._attempt_token = None
+            if self._attempt is not None and same_token(self._attempt.token, sent):
+                self._attempt = None
         try:
             stored = self._store.load()
             if stored is not None and same_token(stored.token, sent):
@@ -487,7 +555,22 @@ class RelayClient:
         body: Mapping[str, str] | None = None,
         auth: str,
     ) -> _Reply:
-        http = self._ready_http()
+        pool = self._acquire()
+        try:
+            return self._send_on(pool, method, path, params=params, body=body, auth=auth)
+        finally:
+            self._release(pool)
+
+    def _send_on(
+        self,
+        pool: _Pool,
+        method: str,
+        path: str,
+        *,
+        params: list[tuple[str, str]] | None,
+        body: Mapping[str, str] | None,
+        auth: str,
+    ) -> _Reply:
         headers = {HDR_CONTRACT: CONTRACT}
         sent = self._bearer(auth)
         if sent is not None:
@@ -498,7 +581,9 @@ class RelayClient:
             content = json.dumps(body, separators=(",", ":")).encode("utf-8")
         try:
             with self._slots:
-                with http.stream(
+                if pool.retired:  # the tunnel was replaced (or the client closed) while we waited
+                    raise RelayUnavailable(reason="closed" if self._closed else "tunnel_restarted")
+                with pool.http.stream(
                     method, path, params=params, content=content, headers=headers
                 ) as response:
                     return self._read(response)
@@ -509,6 +594,12 @@ class RelayClient:
             raise RelayUnavailable(reason="timeout") from None
         except httpx.TransportError:
             raise RelayUnavailable(reason="connect_error") from None
+        except RuntimeError:
+            if pool.retired:  # httpx refuses a request on a client that was closed under it
+                raise RelayUnavailable(
+                    reason="closed" if self._closed else "tunnel_restarted"
+                ) from None
+            raise
 
     @staticmethod
     def _read(response: httpx.Response) -> _Reply:
@@ -688,6 +779,10 @@ class RelayClient:
         )
 
     def login_arm(self) -> LoginAttempt:
+        with self._login_lock:  # never two arms in flight: the later answer must be the newer one
+            return self._login_arm()
+
+    def _login_arm(self) -> LoginAttempt:
         data, rid = self._json("POST", ROUTE_LOGIN_ARM, auth=_AUTH_SESSION, body={})
         attempt_id = _field(data, "attempt_id", str, rid)
         login_url = _field(data, "login_url", str, rid)
@@ -701,7 +796,7 @@ class RelayClient:
             raise _protocol("bad_field", rid)
         expires = _aware(data.get("expires_at_utc"), rid)
         with self._lock:
-            self._attempt_token = token
+            self._attempt = _Attempt(attempt_id, token)  # replaces any older attempt
         return LoginAttempt(
             attempt_id=attempt_id,
             login_url=login_url,
@@ -714,31 +809,51 @@ class RelayClient:
             raise RelayArgumentError("attempt_id")
         if not isinstance(apisession, str) or not API_SESSION_RE.fullmatch(apisession):
             raise RelayArgumentError("apisession")
-        sent = self._bearer(_AUTH_ATTEMPT)
-        data, rid = self._json(
-            "POST",
-            ROUTE_LOGIN_COMPLETE,
-            auth=_AUTH_ATTEMPT,
-            body={"attempt_id": attempt_id, "apisession": apisession},
-        )
-        status = self._session(data, rid)
-        if status.state != "active" or status.expires_at_ist is None or sent is None:
-            raise _protocol("bad_field", rid)
+        with self._login_lock:
+            return self._login_complete(attempt_id, apisession)
+
+    def _login_complete(self, attempt_id: str, apisession: str) -> SessionStatus:
+        with self._lock:
+            attempt = self._attempt
+        # A 409 from the relay ends an attempt for good (expired, superseded, revoked or
+        # dropped), and so does a completed login. Only the current attempt is ever sent.
+        if attempt is None or not same_token(attempt.attempt_id, attempt_id):
+            raise LoginAttemptInvalid(reason="attempt_not_current")
+        sent = attempt.token
+        try:
+            data, rid = self._json(
+                "POST",
+                ROUTE_LOGIN_COMPLETE,
+                auth=_AUTH_ATTEMPT,
+                body={"attempt_id": attempt_id, "apisession": apisession},
+            )
+            status = self._session(data, rid)
+            if status.state != "active" or status.expires_at_ist is None:
+                raise _protocol("bad_field", rid)
+        except _ATTEMPT_SPENT:
+            self._end_attempt(attempt)
+            raise
         with self._lock:
             self._session_token = sent
-            self._attempt_token = None
+        self._end_attempt(attempt)
         try:
             self._store.save(sent, status.expires_at_ist)
+            self._token_saved = True
         except OSError:
-            pass  # in memory the token still works for this process; the file is only a convenience
+            self._token_saved = False  # in memory the token still works; the file is a convenience
         return status
+
+    def _end_attempt(self, attempt: _Attempt) -> None:
+        with self._lock:
+            if self._attempt is attempt:
+                self._attempt = None
 
     def revoke(self) -> SessionStatus:
         data, rid = self._json("POST", ROUTE_SESSION_REVOKE, auth=_AUTH_SESSION, body={})
         status = self._session(data, rid)
         with self._lock:
             self._session_token = None
-            self._attempt_token = None
+            self._attempt = None
         try:
             self._store.clear()
         except OSError:

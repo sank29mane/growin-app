@@ -202,6 +202,8 @@ def _login(
             code = ""
         say(f"state {status.state}")
         say(f"expires_at_ist {_iso(status.expires_at_ist)}")
+        if relay.token_saved is False:
+            say("warning: the relay token was not saved; later CLI runs will need a fresh login")
     return EXIT_OK
 
 

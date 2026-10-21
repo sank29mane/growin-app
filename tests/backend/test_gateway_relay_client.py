@@ -60,6 +60,7 @@ from brokers.breeze_gateway import (
     RelayClient,
     RelayContractMismatch,
     RelayError,
+    RelayHealth,
     RelayHashMismatch,
     RelayProtocolError,
     RelayUnavailable,
@@ -542,7 +543,7 @@ def test_the_arm_answer_is_validated_before_anything_uses_it(key, value):
     relay = one_response(json_response({**ARM_JSON, key: value}))
     with pytest.raises(RelayProtocolError):
         relay.login_arm()
-    assert relay._attempt_token is None
+    assert relay._attempt is None
 
 
 def test_complete_requires_an_active_session_with_an_expiry():
@@ -987,6 +988,225 @@ def test_a_transport_failure_is_relay_unavailable_and_is_not_resent():
     assert info.value.reason == "timeout"
 
 
+# ------------------------------------------- login transitions (review round 1)
+
+
+def test_a_409_on_complete_ends_that_attempt_and_a_fresh_arm_is_needed(stack_fixture: Stack):
+    stack = stack_fixture
+    seen: list[str] = []
+    stack.client.event_hooks["request"].append(lambda request: seen.append(request.url.path))
+    with RelayClient(http=stack.client) as relay:
+        attempt = relay.login_arm()
+        stack.clock.advance(121)  # past the 120 s arm window
+        with pytest.raises(LoginAttemptInvalid) as first:
+            relay.login_complete(attempt.attempt_id, CODE)
+        assert first.value.http_status == 409
+        sent = seen.count("/v1/login/complete")
+        assert sent == 1
+
+        for _ in range(2):  # the attempt is dead: no request, a typed client error
+            with pytest.raises(LoginAttemptInvalid) as again:
+                relay.login_complete(attempt.attempt_id, CODE)
+            assert again.value.http_status is None and again.value.reason == "attempt_not_current"
+        assert seen.count("/v1/login/complete") == sent
+
+        fresh = relay.login_arm()
+        assert relay.login_complete(fresh.attempt_id, CODE).state == "active"
+        with pytest.raises(LoginAttemptInvalid):  # a finished attempt is not reusable either
+            relay.login_complete(fresh.attempt_id, CODE)
+        assert seen.count("/v1/login/complete") == sent + 1
+
+
+def test_completing_an_attempt_that_is_not_the_current_one_sends_nothing(stack_fixture: Stack):
+    stack = stack_fixture
+    seen: list[str] = []
+    stack.client.event_hooks["request"].append(lambda request: seen.append(request.url.path))
+    with RelayClient(http=stack.client) as relay:
+        attempt = relay.login_arm()
+        with pytest.raises(LoginAttemptInvalid) as info:
+            relay.login_complete("z" * 22, CODE)
+        assert info.value.http_status is None
+        assert "/v1/login/complete" not in seen
+        assert relay.login_complete(attempt.attempt_id, CODE).state == "active"  # still armed
+
+
+class _WatchedLock:
+    """An RLock that reports the first moment another thread has to wait for it."""
+
+    def __init__(self, on_contend) -> None:
+        self._lock = threading.RLock()
+        self._on_contend = on_contend
+
+    def __enter__(self) -> "_WatchedLock":
+        if not self._lock.acquire(blocking=False):
+            self._on_contend()
+            self._lock.acquire()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._lock.release()
+
+
+def test_two_arms_never_run_in_parallel_and_the_newer_attempt_completes():
+    b_id, b_token = "b" * 22, OTHER_TOKEN
+    answers = [(ATTEMPT, TOKEN), (b_id, b_token)]
+    first_in = threading.Event()
+    release_first = threading.Event()
+    settled = threading.Event()  # the second arm is either waiting for the first or finished
+    guard = threading.Lock()
+    arms = 0
+    active = 0
+    peak = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal arms, active, peak
+        if request.url.path == "/v1/login/complete":
+            body = json.loads(request.content)
+            if (
+                body["attempt_id"] == b_id
+                and request.headers["authorization"] == f"Bearer {b_token}"
+            ):
+                return json_response(SESSION_JSON)
+            return error_response("UNAUTHORIZED", 401)
+        assert request.url.path == "/v1/login/arm"
+        with guard:
+            index = arms
+            arms += 1
+            active += 1
+            peak = max(peak, active)
+        if index == 0:
+            first_in.set()
+            assert release_first.wait(timeout=10)
+        with guard:
+            active -= 1
+        attempt_id, token = answers[index]
+        return json_response({**ARM_JSON, "attempt_id": attempt_id, "relay_token": token})
+
+    relay = relay_with(handler)
+    relay._login_lock = _WatchedLock(settled.set)
+    got: dict[str, LoginAttempt] = {}
+
+    def arm(name: str) -> None:
+        got[name] = relay.login_arm()
+        if name == "second":
+            settled.set()
+
+    first = threading.Thread(target=arm, args=("first",), daemon=True)
+    second = threading.Thread(target=arm, args=("second",), daemon=True)
+    first.start()
+    assert first_in.wait(timeout=10)
+    second.start()
+    assert settled.wait(timeout=10)
+    release_first.set()
+    first.join(timeout=10)
+    second.join(timeout=10)
+
+    assert peak == 1 and arms == 2
+    assert got["first"].attempt_id == ATTEMPT and got["second"].attempt_id == b_id
+    assert relay.login_complete(b_id, CODE).state == "active"
+    with pytest.raises(LoginAttemptInvalid) as stale:
+        relay.login_complete(ATTEMPT, CODE)  # the older attempt can never come back
+    assert stale.value.http_status is None
+
+
+# ----------------------------------------- tunnel restart under load (round 1)
+
+
+class _RestartHandle:
+    def __init__(self, port: int) -> None:
+        self.local_port = port
+        self._alive = True
+        self.stopped = 0
+
+    def alive(self) -> bool:
+        return self._alive
+
+    def stop(self) -> None:
+        self.stopped += 1
+        self._alive = False
+
+
+class _WatchedSlots:
+    """Counts entries into the in-flight semaphore so a test knows who is waiting."""
+
+    def __init__(self, inner, entered: threading.Semaphore) -> None:
+        self._inner = inner
+        self._entered = entered
+
+    def __enter__(self) -> "_WatchedSlots":
+        self._entered.release()
+        self._inner.acquire()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._inner.release()
+
+
+def test_a_restart_never_closes_a_client_a_waiting_request_still_holds():
+    release = threading.Event()
+    in_handler = threading.Semaphore(0)
+    at_slots = threading.Semaphore(0)
+    clients: list[httpx.Client] = []
+    new_paths: list[str] = []
+
+    def old_handler(request: httpx.Request) -> httpx.Response:
+        in_handler.release()
+        assert release.wait(timeout=10)
+        return json_response(HEALTH_JSON)
+
+    def new_handler(request: httpx.Request) -> httpx.Response:
+        new_paths.append(request.url.path)
+        return json_response(HEALTH_JSON)
+
+    def factory(port: int) -> httpx.Client:
+        http = mock_http(old_handler if not clients else new_handler)
+        clients.append(http)
+        return http
+
+    first = _RestartHandle(50123)
+    second = _RestartHandle(50124)
+    relay = RelayClient(tunnel=first, http_factory=factory, restart=lambda: second)
+    relay._slots = _WatchedSlots(relay._slots, at_slots)
+    outcomes: dict[int, object] = {}
+
+    def call(index: int) -> None:
+        try:
+            outcomes[index] = relay.health()
+        except BaseException as exc:  # a thread must report, never vanish
+            outcomes[index] = exc
+
+    threads = [threading.Thread(target=call, args=(i,), daemon=True) for i in range(6)]
+    for thread in threads[:4]:  # fill the four in-flight slots
+        thread.start()
+    for _ in range(4):
+        assert in_handler.acquire(timeout=10)
+    threads[4].start()  # the fifth waits for a slot, holding the old client
+    assert at_slots.acquire(timeout=10) and at_slots.acquire(timeout=10)
+    assert at_slots.acquire(timeout=10) and at_slots.acquire(timeout=10)
+    assert at_slots.acquire(timeout=10)
+
+    first._alive = False  # the child exits: the next call restarts the tunnel
+    threads[5].start()  # restarts before it waits for a slot, then waits like the fifth
+    assert at_slots.acquire(timeout=10)
+    assert len(clients) == 2 and first.stopped == 1
+    assert clients[0].is_closed is False  # five requests still hold it
+
+    release.set()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    for index in range(4):
+        assert isinstance(outcomes[index], RelayHealth)
+    waiter = outcomes[4]
+    assert isinstance(waiter, RelayUnavailable), repr(waiter)
+    assert waiter.reason == "tunnel_restarted"
+    assert isinstance(outcomes[5], RelayHealth)
+    assert new_paths == ["/v1/health"]  # only the call that arrived after the restart; no resend
+    assert clients[0].is_closed is True  # closed once the last holder let go
+    relay.close()
+    assert second.stopped == 1
+
+
 # ------------------------------------------------------------------- CLI
 
 
@@ -1071,6 +1291,24 @@ def test_login_paste_completes_over_the_relay_and_prints_no_secret():
     assert complete[0].headers["authorization"] == f"Bearer {TOKEN}"
     saved = store.load()
     assert saved is not None and saved.token == TOKEN
+
+
+def test_login_warns_when_the_token_could_not_be_saved():
+    class FullDisk(MemoryTokenStore):
+        def save(self, token, expires_at_ist):
+            raise OSError("disk full: CANARY-PATH")
+
+    code, text, _ = run_cli(
+        ["login", "--paste", "--no-open"], store=FullDisk(), getpass_fn=lambda p: CODE
+    )
+    assert code == 0
+    assert text.splitlines()[-3:] == [
+        "state active",
+        f"expires_at_ist {EXPIRY.isoformat()}",
+        "warning: the relay token was not saved; later CLI runs will need a fresh login",
+    ]
+    for secret in (CODE, TOKEN, LOGIN_URL, "CANARY"):
+        assert secret not in text
 
 
 def test_login_without_no_open_hands_the_url_only_to_the_opener():
