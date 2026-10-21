@@ -100,13 +100,13 @@ async def test_the_audit_request_carries_the_risk_assessment_schema_in_the_promp
 @pytest.mark.parametrize(
     "reply",
     [
-        "```json\n" + json.dumps(_verdict()) + "\n```",
+        "Here:\n```json\n" + json.dumps(_verdict()) + "\n```",
         "Verdict: " + json.dumps(_verdict()),
         json.dumps(_verdict("NOT_A_VERDICT")),
         json.dumps({}),
         "",
     ],
-    ids=["fenced", "prose", "unknown_status", "empty_object", "empty_text"],
+    ids=["prose_then_fence", "prose", "unknown_status", "empty_object", "empty_text"],
 )
 async def test_a_reply_that_is_not_a_strict_verdict_is_critic_output_invalid(
     stub, registry_factory, risk_workspace, reply
@@ -117,6 +117,12 @@ async def test_a_reply_that_is_not_a_strict_verdict_is_critic_output_invalid(
         await RiskAgent().review(_context(), "BUY 1 share of AAPL")
     assert caught.value.code == "CRITIC_OUTPUT_INVALID"
     assert stub.count == 1  # no retry, no other model
+
+
+async def test_a_verdict_in_one_whole_content_json_fence_is_accepted(stub, registry_factory, risk_workspace):
+    registry_factory()
+    stub.structured["RiskAssessment"] = "```json\n" + json.dumps(_verdict("BLOCKED")) + "\n```"
+    assert (await RiskAgent().review(_context(), "BUY 1 share of AAPL"))["status"] == "BLOCKED"
 
 
 async def test_a_reply_from_another_model_is_a_mismatch_and_the_verdict_is_not_used(

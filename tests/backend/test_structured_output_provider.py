@@ -171,10 +171,10 @@ async def test_a_named_but_unset_key_fails_before_any_request(stub, registry_fac
 
 # --- F1: a reply that is not a strict RiskAssessment fails closed ---------------------------------
 
-_FENCED = "```json\n" + json.dumps(VALID_VERDICT) + "\n```"
+_VERDICT_JSON = json.dumps(VALID_VERDICT)
+_FENCED = "```json\n" + _VERDICT_JSON + "\n```"
 _PROSE = "Here is my verdict: " + json.dumps(VALID_VERDICT)
 _BAD_REPLIES = {
-    "fenced_json": _FENCED,
     "prose_then_json": _PROSE,
     "not_json": "I would block this trade.",
     "empty": "",
@@ -204,15 +204,109 @@ async def test_a_non_conforming_reply_is_structured_output_invalid_and_not_retri
     assert {r.model for r in stub.snapshot()} == {kit.model_id_for("risk_critic")}
 
 
-async def test_nothing_lenient_rescues_fenced_json(stub, registry_factory):
-    """The fenced text above is a valid verdict once the fence is stripped. It must still fail."""
+# --- 67-FU2: the one fence rule ---------------------------------------------------------------------
+
+_FENCE_REJECTED = {
+    "prose_then_fence": "Here you go:\n" + _FENCED,
+    "fence_then_prose": _FENCED + "\nHope that helps.",
+    "two_fences": _FENCED + "\n" + _FENCED,
+    "two_blocks_one_wrapper": "```json\n" + _VERDICT_JSON + "\n```\n```json\n" + _VERDICT_JSON + "\n```",
+    "uppercase_tag": "```JSON\n" + _VERDICT_JSON + "\n```",
+    "mixed_case_tag": "```Json\n" + _VERDICT_JSON + "\n```",
+    "no_tag": "```\n" + _VERDICT_JSON + "\n```",
+    "other_tag": "```javascript\n" + _VERDICT_JSON + "\n```",
+    "missing_newline_after_tag": "```json" + _VERDICT_JSON + "\n```",
+    "space_instead_of_newline_after_tag": "```json " + _VERDICT_JSON + "\n```",
+    "missing_newline_before_close": "```json\n" + _VERDICT_JSON + "```",
+    "trailing_newline": _FENCED + "\n",
+    "trailing_space": _FENCED + " ",
+    "leading_newline": "\n" + _FENCED,
+    "leading_space": " " + _FENCED,
+    "crlf": "```json\r\n" + _VERDICT_JSON + "\r\n```",
+    "tilde_fence": "~~~json\n" + _VERDICT_JSON + "\n~~~",
+    "four_backticks": "````json\n" + _VERDICT_JSON + "\n````",
+    "unclosed": "```json\n" + _VERDICT_JSON,
+    "open_only_close_only": _VERDICT_JSON + "\n```",
+    "empty_block": "```json\n```",
+    "empty_inner": "```json\n\n```",
+    "inner_is_not_json": "```json\nBLOCKED\n```",
+    "inner_is_a_nested_fence": "```json\n```json\n" + _VERDICT_JSON + "\n```\n```",
+    # One wrapper, valid JSON, but a second fence marker inside a string: not "a single
+    # block", refused conservatively (this is the only input the single-block check decides).
+    "fence_marker_inside_a_string": "```json\n"
+    + json.dumps({**VALID_VERDICT, "risk_assessment": "see ```json\n{}\n``` here"})
+    + "\n```",
+    "inner_is_prose_plus_json": "```json\nverdict: " + _VERDICT_JSON + "\n```",
+}
+
+
+@pytest.mark.parametrize("name", sorted(_FENCE_REJECTED))
+async def test_the_fence_rule_accepts_only_the_exact_anchored_form(stub, registry_factory, name):
+    """Each near miss is a valid verdict wearing the wrong wrapper. All of them still fail closed."""
     registry_factory()
-    stub.structured["RiskAssessment"] = _FENCED
+    stub.structured["RiskAssessment"] = _FENCE_REJECTED[name]
     with pytest.raises(ProviderError) as caught:
         await run_structured("risk_critic", MESSAGES, RiskAssessment)
     assert caught.value.code == "STRUCTURED_OUTPUT_INVALID"
-    # The unfenced text is a valid verdict, so a lenient parser would have accepted it.
-    assert RiskAssessment.model_validate_json(json.dumps(VALID_VERDICT), strict=True).status == "BLOCKED"
+    assert stub.count == 1
+
+
+async def test_one_whole_content_json_fence_is_accepted(stub, registry_factory):
+    registry_factory()
+    stub.structured["RiskAssessment"] = _FENCED
+    result = await run_structured("risk_critic", MESSAGES, RiskAssessment)
+    assert result == RiskAssessment.model_validate(VALID_VERDICT)
+    assert stub.count == 1
+
+
+async def test_the_fenced_inner_text_is_still_strictly_validated(stub, registry_factory):
+    """The fence only removes the wrapper: an invalid verdict inside it fails like an unfenced one."""
+    registry_factory()
+    for inner in (
+        {**VALID_VERDICT, "status": "NOT_A_VERDICT"},
+        {**VALID_VERDICT, "confidence_score": "0.9"},
+        {k: v for k, v in VALID_VERDICT.items() if k != "debate_refutation"},
+        {**VALID_VERDICT, "extra": 1},
+    ):
+        stub.structured["RiskAssessment"] = "```json\n" + json.dumps(inner) + "\n```"
+        with pytest.raises(ProviderError) as caught:
+            await run_structured("risk_critic", MESSAGES, RiskAssessment)
+        assert caught.value.code == "STRUCTURED_OUTPUT_INVALID"
+
+
+async def test_a_fenced_reply_gets_every_other_check(stub, registry_factory):
+    """Fence acceptance does not bypass finish_reason, the served model or the reasoning guard."""
+    registry_factory()
+    stub.structured["RiskAssessment"] = _FENCED
+    stub.finish_reason = "length"
+    with pytest.raises(ProviderError) as caught:
+        await run_structured("risk_critic", MESSAGES, RiskAssessment)
+    assert caught.value.code == "STRUCTURED_OUTPUT_INVALID"
+    stub.finish_reason = "stop"
+    stub.reasoning_tokens = 0
+    with pytest.raises(ProviderError) as caught:
+        await run_structured("risk_critic", MESSAGES, RiskAssessment)
+    assert caught.value.code == "REASONING_ABSENT"
+    stub.reasoning_tokens = 5
+    stub.served_model = "some-other-loaded-model"
+    with pytest.raises(ProviderError) as caught:
+        await run_structured("risk_critic", MESSAGES, RiskAssessment)
+    assert caught.value.code == "MODEL_MISMATCH"
+
+
+async def test_decision_and_research_accept_the_fenced_form(stub, registry_factory):
+    registry_factory()
+    stub.structured["ToolCallList"] = "```json\n" + json.dumps({"tool_calls": []}) + "\n```"
+    assert await extract_tool_calls("text", "") == []
+    query = {"q": "AAPL earnings", "qInTitle": None, "country": None, "category": None, "domain": None}
+    stub.structured["NewsDataQueryParams"] = "```json\n" + json.dumps(query) + "\n```"
+    assert (await ResearchAgent()._generate_smart_query("AAPL"))["q"] == "AAPL earnings"
+
+
+async def test_research_still_degrades_to_the_basic_query_on_a_near_miss_fence(stub, registry_factory):
+    registry_factory()
+    stub.structured["NewsDataQueryParams"] = "```JSON\n" + json.dumps({"q": "x"}) + "\n```"
+    assert (await ResearchAgent()._generate_smart_query("AAPL"))["q"] == "AAPL stock market news"
 
 
 # --- 67-FU2: finish_reason must be "stop" ----------------------------------------------------------

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, AsyncIterator, Callable, List, Optional, Sequence, Type, TypeVar
 
 import httpx
@@ -290,6 +291,26 @@ def _with_schema_instruction(
     raise ProviderError("PROVIDER_REQUEST_REJECTED", role)
 
 
+# The one rule for fenced output: the whole content is a single ```json block.
+# Lowercase tag, a newline after it and before the closing fence, nothing outside.
+_WHOLE_FENCE = re.compile(r"```json\n(.*)\n```", re.DOTALL)
+
+
+def _unwrap_whole_fence(content: str) -> str:
+    """The inner text when ``content`` is exactly one whole-content json fence, else ``content``.
+
+    Local servers sometimes wrap a correct answer in ```json ... ```. This accepts
+    that and nothing else: a full match (no prose before, no text after, no
+    trailing newline), one block (the inner text holds no further fence) and the
+    lowercase tag. The inner text is then strict-validated like any other reply.
+    """
+
+    match = _WHOLE_FENCE.fullmatch(content)
+    if match is None or "```" in match.group(1):
+        return content
+    return match.group(1)
+
+
 def _has_reasoning_evidence(completion: Any, message: Any) -> bool:
     """True when the server reports that the model reasoned.
 
@@ -326,12 +347,13 @@ async def run_structured(
     process. Transport and API errors map through ``map_exception``. The reply is
     accepted only if it names the requested model, its ``finish_reason`` is
     ``"stop"`` (a reply cut off at the token limit is never parsed), and its content
-    is strict JSON that matches the wire schema exactly and then validates,
-    strictly, against the real ``schema``. For the risk critic the reply must also
+    is strict JSON (optionally as one whole-content ```json fence, see
+    ``_unwrap_whole_fence``) that matches the wire schema exactly and then
+    validates, strictly, against the real ``schema``. For the risk critic the reply must also
     show that the model reasoned (``REASONING_ABSENT``): a verdict from a model that
     did not think is the no-think failure the critic evals recorded. Anything else
     raises ``ProviderError`` (``MODEL_MISMATCH``, ``STRUCTURED_OUTPUT_INVALID`` or
-    ``REASONING_ABSENT``). There is no lenient parse, no retry and no second model.
+    ``REASONING_ABSENT``). There is no other lenient parse, no retry and no second model.
     """
 
     import openai
@@ -374,7 +396,7 @@ async def run_structured(
         if not isinstance(content, str) or not content:
             raise ProviderError("STRUCTURED_OUTPUT_INVALID", role)
         try:
-            return schema.model_validate_json(spec.to_native_json(content), strict=True)
+            return schema.model_validate_json(spec.to_native_json(_unwrap_whole_fence(content)), strict=True)
         except (ValidationError, WireReplyError):
             # The model's text is never put in the error: it can echo the prompt.
             raise ProviderError("STRUCTURED_OUTPUT_INVALID", role) from None
