@@ -237,7 +237,13 @@ async def test_swarm_uses_the_coordinator_role(stub, registry_factory):
     registry_factory()
     from agents.orchestrator import SwarmOrchestrator
 
-    swarm = SwarmOrchestrator(reflex_timeout=0.05, synthesis_timeout=0.05)
+    # With an empty buffer the orchestrator starts a simulated specialist that
+    # pushes after 0.05 s. The reflex wait must outlast that push by a wide
+    # margin: if it expires first, reflex runs with no data, the late push
+    # counts as slow data, and synthesis calls the model a second time. The wait
+    # returns as soon as the push lands, so the large value costs nothing.
+    # Nothing ever pushes slow data, so the short synthesis wait cannot race.
+    swarm = SwarmOrchestrator(reflex_timeout=30.0, synthesis_timeout=0.05)
     assert swarm.model_name == kit.model_id_for("coordinator")
     result = await swarm.execute_swarm_run("What now?")
     assert stub.reply_text in result.reflex_conclusion
