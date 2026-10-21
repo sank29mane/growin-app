@@ -309,6 +309,22 @@ def test_stop_does_not_kill_when_the_child_exits_on_terminate():
     assert handle.alive() is False
 
 
+def test_alive_is_false_after_stop_even_if_the_child_ignores_both_signals():
+    class Stubborn(FakeProc):
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            raise subprocess.TimeoutExpired("fake", timeout)
+
+    proc = Stubborn(pid=902)
+    rig = Rig([proc])
+    handle = rig.tunnel().start()
+    assert handle.alive()
+    handle.stop()
+    assert handle.alive() is False  # a stopped handle is never reused
+
+
 def test_alive_is_false_once_the_child_has_exited():
     proc = FakeProc()
     handle = Rig([proc]).tunnel().start()
@@ -628,6 +644,15 @@ def test_file_mode_owner_and_kind_are_checked(tmp_path):
         load_gateway_config(tmp_path / "missing.json")
     with pytest.raises(ConfigError):
         load_gateway_config(tmp_path)  # a directory
+
+
+def test_a_file_owned_by_someone_else_is_refused(tmp_path, monkeypatch):
+    path = write_config(tmp_path, VALID)
+    assert load_gateway_config(path)
+    monkeypatch.setattr(os, "geteuid", lambda: os.stat(path).st_uid + 1)
+    with pytest.raises(ConfigError) as info:
+        load_gateway_config(path)
+    assert info.value.code == "bad_owner"
 
 
 def test_an_oversized_file_is_refused(tmp_path):

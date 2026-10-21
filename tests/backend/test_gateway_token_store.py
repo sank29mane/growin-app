@@ -111,6 +111,16 @@ def test_save_creates_the_directory_at_0700_and_the_file_at_0600_whatever_the_um
     assert [p.name for p in target.iterdir()] == ["relay-session.json"]  # no temp left behind
 
 
+def test_save_forces_0600_even_under_a_restrictive_umask(vault):
+    old = os.umask(0o277)  # open(..., 0o600) alone would leave 0400
+    try:
+        store_at(vault).save(TOKEN, EXPIRY)
+    finally:
+        os.umask(old)
+    assert mode_of(vault / "relay-session.json") == 0o600
+    assert store_at(vault).load() is not None
+
+
 def test_save_goes_through_an_exclusive_no_follow_temp_file_that_is_synced_and_renamed(vault, monkeypatch):
     opened, synced, replaced = [], [], []
     real_open, real_fsync, real_replace = os.open, os.fsync, os.replace
@@ -237,6 +247,36 @@ def test_load_refuses_a_parent_directory_other_than_0700(vault, mode):
 def test_load_refuses_a_parent_owned_by_someone_else(vault):
     plant(vault, payload())
     assert store_at(vault, uid=os.geteuid() + 1).load() is None
+
+
+def _other_owner(real):
+    def wrapped(*args, **kwargs):
+        info = real(*args, **kwargs)
+        fields = list(info)[:10]
+        fields[4] = info.st_uid + 1
+        return os.stat_result(fields)
+
+    return wrapped
+
+
+def test_the_file_owner_is_checked_on_its_own(vault, monkeypatch):
+    plant(vault, payload())
+    monkeypatch.setattr(os, "fstat", _other_owner(os.fstat))  # only the open file looks foreign
+    assert store_at(vault).load() is None
+
+
+def test_the_parent_owner_is_checked_on_its_own(vault, monkeypatch):
+    plant(vault, payload())
+    monkeypatch.setattr(os, "lstat", _other_owner(os.lstat))  # only the directory looks foreign
+    assert store_at(vault).load() is None
+
+
+def test_load_refuses_a_file_over_the_size_cap_even_when_it_is_valid_json(vault):
+    pad = b" " * token_store_mod.MAX_FILE_BYTES
+    plant(vault, json.dumps(payload()).encode() + pad)
+    assert store_at(vault).load() is None
+    plant(vault, json.dumps(payload()).encode())
+    assert store_at(vault).load() is not None
 
 
 def test_load_refuses_a_symlink_even_to_a_valid_file(vault, tmp_path):
