@@ -745,3 +745,68 @@ def test_write_scanner_flags_planted_offence(name):
 def test_write_scanner_accepts_reads():
     source = "f = open('x')\ng = open('x', 'rb')\nh = open('x', mode='r')\nimport json, os\nos.stat('x')\n"
     assert write_offences(source) == []
+
+
+# --------------------------------------------------- event log allowlist
+
+
+def make_log():
+    sink = io.StringIO()
+    return EventLog(sink, FakeClock()), sink
+
+
+def test_event_lines_are_compact_sorted_ascii_json():
+    log, sink = make_log()
+    log.emit("request", route="/v1/health", result="ok", reason=None, http=200, ms=3,
+             request_id="0123456789abcdef", breeze_status=None)
+    line = sink.getvalue()
+    assert line.endswith("\n") and line.count("\n") == 1
+    record = json.loads(line)
+    assert list(record) == sorted(record)
+    assert record["ts"] == "2026-10-21T04:30:00.000Z"
+    assert " " not in line.strip()
+
+
+@pytest.mark.parametrize(
+    "event, fields",
+    [
+        ("unknown_event", {}),
+        ("request", {"body": "x"}),
+        ("request", {"token": "x"}),
+        ("request", {"ts": "2026-01-01"}),  # the log stamps the time itself
+        ("request", {"result": "maybe"}),
+        ("request", {"reason": "Invalid session."}),  # free text is not a reason
+        ("request", {"reason": 5}),
+        ("request", {"route": "/v1/anything-else"}),
+        ("request", {"route": "/v1/bars/daily?stock_code=RELIND"}),
+        ("request", {"state": "logged_in"}),
+        ("request", {"http": -1}),
+        ("request", {"http": True}),
+        ("request", {"http": "200"}),
+        ("request", {"ms": 1.5}),
+        ("request", {"count": -3}),
+        ("request", {"breeze_status": "200"}),
+        ("request", {"request_id": "ABCDEF0123456789"}),
+        ("request", {"request_id": "0123456789abcde"}),
+        ("request", {"request_id": "0123456789abcdef0"}),
+    ],
+)
+def test_event_log_refuses_anything_outside_its_vocabulary(event, fields):
+    log, sink = make_log()
+    with pytest.raises(ValueError) as err:
+        log.emit(event, **fields)
+    assert sink.getvalue() == ""  # nothing was written
+    for value in fields.values():
+        if isinstance(value, str) and len(value) > 3:
+            assert value not in str(err.value)  # the error never echoes the value
+
+
+def test_event_log_accepts_every_documented_key_and_enum():
+    log, sink = make_log()
+    for state in ("none", "active", "expired", "suspended_egress"):
+        log.emit("session_expired", state=state, result="error", reason="deadline")
+    for reason in sorted(events_mod.REASONS):
+        log.emit("request", result="rejected", reason=reason)
+    for event in sorted(events_mod.EVENTS):
+        log.emit(event, count=0)
+    assert len(sink.getvalue().splitlines()) == 4 + len(events_mod.REASONS) + len(events_mod.EVENTS)
