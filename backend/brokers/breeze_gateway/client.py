@@ -25,6 +25,7 @@ import httpx
 from .config import GatewayConfig, load_gateway_config
 from .errors import (
     CODE_TO_CLASS,
+    ORDER_CODE_TO_CLASS,
     BudgetExhausted,
     BudgetUnavailable,
     EgressMismatch,
@@ -76,6 +77,9 @@ ROUTE_BARS_DAILY = "/v1/bars/daily"
 ROUTE_QUOTES = "/v1/quotes"
 ROUTE_PREVIEW_ORDER = "/v1/preview-order"
 ROUTE_SECURITY_MASTER = "/v1/security-master"
+# growin-orders/1 (Phase 63) shares the tunnel, the Host rule and the session token. Its routes
+# are not in ROUTES: the contract header names which route family a request belongs to.
+ORDERS_CONTRACT = "growin-orders/1"
 ROUTES = frozenset(
     {
         ROUTE_HEALTH,
@@ -120,6 +124,8 @@ ATTEMPT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
 STOCK_CODE_RE = re.compile(r"^[A-Z0-9]{1,10}$")
 API_SESSION_RE = re.compile(r"^[A-Za-z0-9]{6,64}$")
 REASON_RE = re.compile(r"^[a-z_]{1,40}$")
+# An order reason is an O6 name, or a strict-parse code such as ``bad_field:limit_price``.
+ORDER_REASON_RE = re.compile(r"^[a-z_]{1,40}(:[A-Za-z0-9_]{1,40})?$")
 HEALTH_STATES = frozenset({"none", "active", "expired", "suspended_egress"})
 
 # After one of these the server has disarmed (or never had) the attempt: it cannot be completed.
@@ -671,12 +677,15 @@ class RelayClient:
         path: str,
         *,
         params: list[tuple[str, str]] | None = None,
-        body: Mapping[str, str] | None = None,
+        body: Mapping[str, Any] | None = None,
         auth: str,
+        contract: str = CONTRACT,
     ) -> _Reply:
         pool = self._acquire()
         try:
-            return self._send_on(pool, method, path, params=params, body=body, auth=auth)
+            return self._send_on(
+                pool, method, path, params=params, body=body, auth=auth, contract=contract
+            )
         finally:
             self._release(pool)
 
@@ -687,10 +696,11 @@ class RelayClient:
         path: str,
         *,
         params: list[tuple[str, str]] | None,
-        body: Mapping[str, str] | None,
+        body: Mapping[str, Any] | None,
         auth: str,
+        contract: str = CONTRACT,
     ) -> _Reply:
-        headers = {HDR_CONTRACT: CONTRACT}
+        headers = {HDR_CONTRACT: contract}
         sent = self._bearer(auth)
         if sent is not None:
             headers[HDR_AUTHORIZATION] = f"Bearer {sent}"
@@ -705,7 +715,7 @@ class RelayClient:
                 with pool.http.stream(
                     method, path, params=params, content=content, headers=headers
                 ) as response:
-                    return self._read(response)
+                    return self._read(response, contract)
         except (Unauthorized, NoSession, SessionExpired):
             self._forget(sent)
             raise
@@ -721,9 +731,9 @@ class RelayClient:
             raise
 
     @staticmethod
-    def _read(response: httpx.Response) -> _Reply:
+    def _read(response: httpx.Response, contract: str = CONTRACT) -> _Reply:
         # C2: the contract header comes before the status, the id and the body.
-        if response.headers.get(HDR_CONTRACT) != CONTRACT:
+        if response.headers.get(HDR_CONTRACT) != contract:
             raise RelayContractMismatch(reason="contract_header", http_status=response.status_code)
         rid = response.headers.get(HDR_REQUEST_ID, "")
         if not REQUEST_ID_RE.fullmatch(rid):
@@ -743,24 +753,28 @@ class RelayClient:
                 )
         body = bytes(buffer)
         if status != 200:
-            raise RelayClient._error_from(status, body, rid)
+            raise RelayClient._error_from(status, body, rid, contract)
         return _Reply(request_id=rid, headers=response.headers, body=body)
 
     @staticmethod
-    def _error_from(status: int, body: bytes, rid: str) -> RelayError:
+    def _error_from(
+        status: int, body: bytes, rid: str, contract: str = CONTRACT
+    ) -> RelayError:
         try:
             data = json.loads(body)
         except ValueError:
             return RelayProtocolError(reason="bad_error_body", http_status=status, request_id=rid)
         if not isinstance(data, dict):
             return RelayProtocolError(reason="bad_error_body", http_status=status, request_id=rid)
-        if data.get("contract") != CONTRACT:
+        if data.get("contract") != contract:
             return RelayContractMismatch(reason="body_contract", http_status=status, request_id=rid)
         err = data.get("error")
         if not isinstance(err, dict):
             return RelayProtocolError(reason="bad_error_body", http_status=status, request_id=rid)
         code = err.get("code")
-        cls = CODE_TO_CLASS.get(code) if isinstance(code, str) else None
+        codes = ORDER_CODE_TO_CLASS if contract == ORDERS_CONTRACT else CODE_TO_CLASS
+        reason_re = ORDER_REASON_RE if contract == ORDERS_CONTRACT else REASON_RE
+        cls = codes.get(code) if isinstance(code, str) else None
         if cls is None:
             return RelayProtocolError(reason="unknown_code", http_status=status, request_id=rid)
         reason = err.get("reason")
@@ -768,7 +782,7 @@ class RelayClient:
         retryable = err.get("retryable")
         retry_after = err.get("retry_after_s")
         if (
-            (reason is not None and not (isinstance(reason, str) and REASON_RE.fullmatch(reason)))
+            (reason is not None and not (isinstance(reason, str) and reason_re.fullmatch(reason)))
             or (breeze_status is not None and not _is_int(breeze_status))
             or not isinstance(retryable, bool)
             or (retry_after is not None and not _is_int(retry_after))
@@ -790,9 +804,11 @@ class RelayClient:
         path: str,
         *,
         auth: str,
-        body: Mapping[str, str] | None = None,
+        body: Mapping[str, Any] | None = None,
+        params: list[tuple[str, str]] | None = None,
+        contract: str = CONTRACT,
     ) -> tuple[dict, str]:
-        reply = self._send(method, path, body=body, auth=auth)
+        reply = self._send(method, path, params=params, body=body, auth=auth, contract=contract)
         rid = reply.request_id
         if _media_type(reply.headers) != "application/json":
             raise _protocol("content_type", rid)
@@ -802,7 +818,7 @@ class RelayClient:
             raise _protocol("bad_json", rid) from None
         if not isinstance(data, dict):
             raise _protocol("bad_json", rid)
-        if data.get("contract") != CONTRACT:
+        if data.get("contract") != contract:
             raise RelayContractMismatch(reason="body_contract", request_id=rid)
         return data, rid
 

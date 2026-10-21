@@ -129,6 +129,62 @@ CODE_TO_CLASS: dict[str, type[RelayError]] = {
 }
 
 
+# ------------------------------------------- order codes (growin-orders/1, O6)
+#
+# The VM answers an order refusal with the category in ``code`` and the O6 name in
+# ``reason`` (for example LIMIT_REJECTED / capital_cap). Every class is a refusal by the
+# VM: nothing was placed. ``Order*`` data routes also return the inherited codes above.
+
+
+class OrderError(RelayError):
+    """A refusal from an order route. ``reason`` carries the O6 name when there is one."""
+
+
+class Replay(OrderError):
+    code = "REPLAY"
+
+
+class LimitRejected(OrderError):
+    code = "LIMIT_REJECTED"
+
+
+class OrdersBlocked(OrderError):
+    code = "ORDERS_BLOCKED"
+
+
+class SignatureInvalid(OrderError):
+    code = "SIGNATURE_INVALID"
+
+
+class ChallengeCapacity(OrderError):
+    code = "CHALLENGE_CAPACITY"
+
+
+class OrdersUnavailable(OrderError):
+    code = "ORDERS_UNAVAILABLE"
+
+
+class IntentInvalid(OrderError):
+    code = "INTENT_INVALID"
+
+
+ORDER_CODE_TO_CLASS: dict[str, type[RelayError]] = {
+    **CODE_TO_CLASS,
+    **{
+        cls.code: cls
+        for cls in (
+            Replay,
+            LimitRejected,
+            OrdersBlocked,
+            SignatureInvalid,
+            ChallengeCapacity,
+            OrdersUnavailable,
+            IntentInvalid,
+        )
+    },
+}
+
+
 # ------------------------------------------------------------ client side
 
 
