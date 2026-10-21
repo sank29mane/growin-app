@@ -39,6 +39,7 @@ jobs:
           export PYTHONPATH=$PYTHONPATH:$(pwd)/backend
           mkdir -p pr-impact
           uv run --project backend pytest tests/backend/ \
+            -n auto \
             --junitxml=pr-impact/tests-junit.xml \
             --cov --cov-config=.github/pr-impact.coveragerc \
             --cov-report=json:pr-impact/coverage.json
