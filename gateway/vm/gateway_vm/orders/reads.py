@@ -36,7 +36,7 @@ from ..contract import (
     ZIP_MAGIC,
 )
 from ..events import EventLog
-from ..session import BudgetGate, Credentials, SessionManager, charge_budget
+from ..session import Authorization, BudgetGate, Credentials, SessionManager, charge_budget
 from ..transport import Timeouts
 from .limits import IST, ZERO, AccountSnapshot, Holding, OpenOrder, Quote, TickTable, Trade, load_tick_table
 from .master import MasterHolder, MasterMap
@@ -65,26 +65,31 @@ class ReadFailed(Exception):
 
 
 class ReadContext:
-    """The relay bearer and the Breeze session token of the request being served.
+    """The relay bearer and the session authorization of the request being served.
 
     The handler binds both for the length of one pipeline call; the ports read them
-    from here. Per thread, so two requests never see each other's token. Reading an
-    unbound context is a ReadFailed: a port can never run outside a request.
+    from here. Per thread, so two requests never see each other's authority. Reading
+    an unbound context is a ReadFailed: a port can never run outside a request.
+
+    The Breeze session token is NOT kept here. Every upstream call gets it from
+    ``SessionManager.require_active(authorization)``, which re-reads the session
+    under its lock, so a revoke, expiry or re-login in the middle of a request stops
+    the next read instead of letting it ride on a token captured at the start.
     """
 
     def __init__(self) -> None:
         self._local = threading.local()
 
     @contextmanager
-    def bound(self, bearer: str | None, session_token: str) -> Iterator[None]:
+    def bound(self, bearer: str | None, authorization: Authorization) -> Iterator[None]:
         previous = getattr(self._local, "value", None)
-        self._local.value = (bearer, session_token)
+        self._local.value = (bearer, authorization)
         try:
             yield
         finally:
             self._local.value = previous
 
-    def values(self) -> tuple[str | None, str]:
+    def values(self) -> tuple[str | None, Authorization]:
         value = getattr(self._local, "value", None)
         if value is None:
             raise ReadFailed("no_request")
@@ -123,8 +128,13 @@ class BreezeReads:
         return self._breeze
 
     def success(self, call: str, **arguments: Any) -> object:
-        """Run BreezeClient.<call> and return payload["Success"], or raise ReadFailed."""
-        _bearer, session_token = self._context.values()
+        """Run BreezeClient.<call> and return payload["Success"], or raise ReadFailed.
+
+        The session is revalidated first (RelayFailure, not ReadFailed, if it is gone),
+        so no upstream call leaves on a session that ended after the request began.
+        """
+        _bearer, authorization = self._context.values()
+        session_token = self.session_token(authorization)
         charge_budget(self._budget, self._events)
         method = getattr(self._breeze, call)
         keys: dict[str, Any] = {"app_key": self._credentials.app_key, "session_token": session_token}
@@ -148,9 +158,18 @@ class BreezeReads:
             raise ReadFailed("shape")
         return payload["Success"]
 
+    def session_token(self, authorization: Authorization) -> str:
+        return self._session.require_active(authorization)
+
+    def revalidate(self) -> None:
+        """Raise RelayFailure if the bound request's session is no longer live."""
+        _bearer, authorization = self._context.values()
+        self._session.require_active(authorization)
+
     def security_master_bytes(self, url: str) -> bytes:
         """The master zip, through the same budget kind and egress check as the data route."""
-        bearer, _token = self._context.values()
+        bearer, authorization = self._context.values()
+        self.session_token(authorization)
         charge_budget(self._budget, self._events, "security_master")
         self._session.require_egress(bearer)
         try:

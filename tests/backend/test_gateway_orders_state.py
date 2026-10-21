@@ -28,7 +28,7 @@ from gateway_vm.orders import OrderRefusal  # noqa: E402
 from gateway_vm.orders import admin, risk  # noqa: E402
 from gateway_vm.orders import limits as vm_limits  # noqa: E402
 from gateway_vm.orders import store as store_mod  # noqa: E402
-from gateway_vm.orders.audit import AuditBroken, AuditLog  # noqa: E402
+from gateway_vm.orders.audit import AuditBroken, AuditLog, _hash_entry  # noqa: E402
 from gateway_vm.orders.limits import (  # noqa: E402
     AccountSnapshot,
     Holding,
@@ -754,6 +754,35 @@ def test_audit_chain_break_and_truncation_are_detected(tmp_path):
     lines = raw.splitlines(keepends=True)
     audit.path.write_bytes(lines[1] + lines[0] + lines[2])  # reordered
     with pytest.raises(AuditBroken):
+        audit.verify()
+
+
+def _forge(audit: AuditLog, line_index: int, **changes) -> None:
+    """Rewrite one line with new field values and a hash that is correct for the new content."""
+    lines = audit.path.read_bytes().splitlines(keepends=True)
+    entry = json.loads(lines[line_index])
+    entry.update(changes)
+    entry["entry_sha256"] = _hash_entry(entry)
+    lines[line_index] = (json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+    audit.path.write_bytes(b"".join(lines))
+
+
+@pytest.mark.parametrize(
+    "forged,line",
+    [
+        ({"codes": ["forged"]}, 1),  # content rewritten, own hash recomputed: the next line's prev link breaks
+        ({"prev_sha256": "0" * 64}, 1),  # own prev link rewritten, own hash recomputed
+        ({"prev_sha256": "0" * 64, "codes": ["forged"]}, 2),  # the same on the last line
+    ],
+    ids=["middle_content", "middle_prev", "last_prev"],
+)
+def test_a_forged_entry_with_a_valid_own_hash_still_breaks_the_prev_link(tmp_path, forged, line):
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    for n in range(3):
+        audit.append({"decision": "EVALUATED", "route": "test", "codes": [f"c{n}"]})
+    assert audit.verify()[0] == 3
+    _forge(audit, line, **forged)
+    with pytest.raises(AuditBroken, match="chain breaks"):
         audit.verify()
 
 

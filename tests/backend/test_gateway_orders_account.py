@@ -26,6 +26,8 @@ if str(ROOT / "gateway" / "vm") not in sys.path:
 from test_gateway_orders_routes import (  # noqa: E402
     ISIN_A,
     ISIN_B,
+    OrderStack,
+    VECTORS,
     HttpResponse,
     breeze_body,
     code_of,
@@ -41,6 +43,11 @@ from test_gateway_orders_routes import (  # noqa: E402
 from gateway_vm.orders import limits as limits_mod  # noqa: E402
 from gateway_vm.orders import master as master_mod  # noqa: E402
 from gateway_vm.orders import reads  # noqa: E402
+from gateway_vm.orders import sessions  # noqa: E402
+from gateway_vm.orders.limits import LimitsError  # noqa: E402
+from gateway_vm.orders.risk import apply_trades, initial_state  # noqa: E402
+from gateway_vm.orders import sessions  # noqa: E402
+from gateway_vm.orders.risk import apply_trades, initial_state  # noqa: E402
 from gateway_vm.orders.alerts import ALERT_FILE, AlertLogError, FileAlertPort  # noqa: E402
 from gateway_vm.orders.limits import IST  # noqa: E402
 from gateway_vm.orders.risk import StopExitAlert  # noqa: E402
@@ -603,6 +610,137 @@ def test_replay_is_resumable_and_does_not_re_evaluate_a_session(stack, token):
     first = stack.state(token)
     assert code_of(stack.mint(token, intent_id="intent-test-0002"))[2] == "stop_open"
     assert stack.state(token) == first  # nothing moved: the same sessions are not applied twice
+
+
+def test_bars_that_never_arrive_for_a_held_isin_refuse_and_evaluate_nothing(stack, token):
+    """The calendar used to come only from the bars returned, so no bars meant no sessions."""
+    seed_abc_stopped(stack)
+    stack.transport.bar_book["ABC"] = {date(2026, 9, 30): 500.0}  # only the tick-reference month
+    assert code_of(stack.mint(token)) == (503, "ORDERS_UNAVAILABLE", "quote_unavailable")
+    state = stack.state(token)
+    assert state["last_evaluated_session"] is None and state["latches"] == []
+    assert code_of(stack.mint(token, intent_id="intent-test-0002")) == (503, "ORDERS_UNAVAILABLE", "quote_unavailable")
+
+
+def test_bars_that_stop_early_refuse_and_keep_only_the_verified_prefix(stack, token):
+    seed_abc_stopped(stack)
+    bars = stack.transport.bar_book["ABC"]
+    for day in [d for d in bars if d > date(2026, 10, 14)]:
+        del bars[day]  # the vendor answers through 14 Oct and nothing after
+    assert code_of(stack.mint(token)) == (503, "ORDERS_UNAVAILABLE", "quote_unavailable")
+    assert stack.state(token)["last_evaluated_session"] == "2026-10-14"
+
+
+def test_a_weekday_with_no_close_is_a_gap_and_stops_the_replay_before_it(stack, token):
+    seed_abc_stopped(stack)
+    del stack.transport.bar_book["ABC"][date(2026, 10, 12)]  # a Monday inside the range
+    assert code_of(stack.mint(token)) == (503, "ORDERS_UNAVAILABLE", "quote_unavailable")
+    assert stack.state(token)["last_evaluated_session"] == "2026-10-09"
+
+
+def test_the_same_gap_is_complete_when_the_holiday_table_lists_the_day(tmp_path, metadata):
+    stack = OrderStack(tmp_path, metadata, holidays=frozenset({date(2026, 10, 12)}))
+    token = stack.login()
+    seed_abc_stopped(stack)
+    del stack.transport.bar_book["ABC"][date(2026, 10, 12)]
+    assert code_of(stack.mint(token)) == (423, "ORDERS_BLOCKED", "stop_open")
+    assert stack.state(token)["last_evaluated_session"] == "2026-10-20"
+    assert stack.transport.non_get() == [] and set(metadata.methods) <= {"GET"}
+
+
+def test_expected_sessions_are_the_weekdays_less_the_listed_holidays():
+    days = sessions.expected_sessions(date(2026, 10, 9), date(2026, 10, 14), {date(2026, 10, 13)})
+    assert days == [date(2026, 10, 9), date(2026, 10, 12), date(2026, 10, 14)]  # no 10 and 11 Oct, no 13 Oct
+    assert sessions.expected_sessions(date(2026, 10, 10), date(2026, 10, 11), ()) == []
+    assert sessions.expected_sessions(date(2026, 10, 14), date(2026, 10, 9), ()) == []
+    with pytest.raises(TypeError):
+        sessions.expected_sessions(datetime(2026, 10, 9), date(2026, 10, 14), ())
+
+
+def test_the_packaged_holiday_table_loads_and_is_marked_unpopulated():
+    assert sessions.load_holidays() == frozenset()
+    assert "UNPOPULATED" in sessions.HOLIDAY_TABLE_PATH.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "[]",
+        '{"schema":"other","holidays":[]}',
+        '{"schema":"growin.gateway.nse_trading_holidays/1"}',
+        '{"schema":"growin.gateway.nse_trading_holidays/1","holidays":"2026-10-02"}',
+        '{"schema":"growin.gateway.nse_trading_holidays/1","holidays":["2026-13-40"]}',
+        '{"schema":"growin.gateway.nse_trading_holidays/1","holidays":["2026-10-03"]}',  # a Saturday
+        '{"schema":"growin.gateway.nse_trading_holidays/1","holidays":["2026-10-02","2026-10-02"]}',
+        '{"schema":"growin.gateway.nse_trading_holidays/1","holidays":[20261002]}',
+        '{"schema":"growin.gateway.nse_trading_holidays/1","holidays":[],"holidays":[]}',
+    ],
+)
+def test_a_malformed_holiday_table_is_refused(tmp_path, text):
+    path = tmp_path / "holidays.json"
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(LimitsError):
+        sessions.load_holidays(path)
+    with pytest.raises(LimitsError):
+        sessions.load_holidays(tmp_path / "missing.json")
+
+
+# ------------------------------------------- a known order id that grows
+
+
+def test_a_growing_partial_fill_latches_account_mismatch_instead_of_keeping_the_first_quantity(stack, token):
+    """One share at 100, then the same order id at 175 while the demat holding still lags."""
+    t = stack.transport
+    t.trades = HttpResponse(200, {}, breeze_body([trade_row("ord-partial", "TESTCO", "Buy", 1, 100, "21-Oct-2026")]))
+    assert stack.verify_ok(token).status_code == 200
+    t.trades = HttpResponse(200, {}, breeze_body([trade_row("ord-partial", "TESTCO", "Buy", 175, 100, "21-Oct-2026")]))
+    # A second buy that the stale one-share ledger would have let through (175 x 100 is over the cap).
+    assert code_of(stack.mint(token, intent_id="intent-test-0002", quantity=10, limit_price="100.05")) == (
+        423,
+        "ORDERS_BLOCKED",
+        "account_mismatch",
+    )
+    assert "account_mismatch" in stack.state(token)["latches"]
+    stack.restart()  # the latch is durable and nothing here clears it
+    assert code_of(stack.mint(token, intent_id="intent-test-0003")) == (423, "ORDERS_BLOCKED", "account_mismatch")
+
+
+def _trade(trade_id="t1", isin=ISIN_A, side="buy", quantity=1, price="100"):
+    return limits_mod.Trade(trade_id, isin, side, quantity, D(price), D("0"))
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"quantity": 175},  # grew
+        {"quantity": 1, "side": "sell"},  # flipped
+        {"isin": ISIN_B},  # rebound
+    ],
+    ids=["grew", "side", "isin"],
+)
+def test_apply_trades_latches_when_a_known_order_id_comes_back_changed(changed):
+    state = initial_state(_limits())
+    apply_trades(state, [_trade(quantity=5)])
+    assert state.account_mismatch is False
+    fields = {"quantity": 5, **changed}
+    assert apply_trades(state, [_trade(**fields)]) is True
+    assert state.account_mismatch is True
+    assert state.fills["t1"].quantity == 5  # the ledger itself keeps what it explained
+
+
+def test_apply_trades_shrunk_fill_latches_and_an_identical_repeat_does_not():
+    state = initial_state(_limits())
+    apply_trades(state, [_trade(quantity=5)])
+    assert apply_trades(state, [_trade(quantity=5)]) is False
+    assert apply_trades(state, [_trade(quantity=5, price="101")]) is False  # price alone cannot bypass a cap
+    assert state.account_mismatch is False
+    apply_trades(state, [_trade(quantity=3)])
+    assert state.account_mismatch is True
+
+
+def _limits():
+    return limits_mod.Limits.from_fields(VECTORS["limits"])
 
 
 # ------------------------------------------------------------- alert log

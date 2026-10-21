@@ -136,10 +136,11 @@ wins and this file is wrong.
   `alerts.jsonl` (append only, mode 0600, fsynced, ISIN and session date and quantity, nothing else). The Mac reads
   the `stop_exit_open` and `alert_failed` entries from the audit and the count from `state`. An unreadable alert
   log makes `state` answer 503 `state_unreadable`. An alert never unblocks anything.
-- **Budget and session failures inside a check.** The guard turns any exception from a port into
-  `account_read_failed` or `quote_unavailable` (503). So a budget refusal or a Breeze session fault met while the
-  pipeline reads is reported with those codes, not the inherited 429 or 503 relay codes; only the handler's own
-  pre-flight returns those.
+- **Budget and session failures inside a check.** The guard turns any other exception from a port into
+  `account_read_failed` or `quote_unavailable` (503), so a budget refusal met while the pipeline reads is reported
+  with those codes. The Breeze session is different: it is revalidated (`require_active`) before every upstream
+  read and again before a challenge or a verified decision is recorded, and a session that ended in between is the
+  inherited 503 `NO_SESSION` (a revoke during `authorize` stops the next read, and the intent id stays consumed).
 
 ### Account reads (all GET, all checksummed, all charged to the relay budget)
 
@@ -155,9 +156,11 @@ Every shape the docs leave open fails closed: a missing key, a wrong type, a boo
 a repeated `order_id`, a stock code the master cannot bind, a working market buy, an empty `Success`, or a bars
 response of 1000 rows (it may have been cut) is a read failure, and a read failure is never an empty account.
 Holdings carry no price, so their cost is zero and the cap rules read the VM ledger's cost. The trade id is the
-`order_id`; partial-fill growth on an order already seen is not re-read, which under-counts and then latches
-`account_mismatch` (fail closed). Holdings lag fills by a settlement day, so sales dated today or on the previous
-weekday are netted off the demat quantity before it is compared with the ledger.
+`order_id`. An `order_id` the ledger already holds is never re-applied and must not change: the same id listed
+again with another quantity, side or ISIN (a cumulative partial fill that grew, or shrank) latches `account_mismatch`
+(fail closed, durable, cleared only by the operator), so the caps never keep reading the first quantity while the
+demat holding lags. A changed price alone is not a latch. Holdings lag fills by a settlement day, so sales dated
+today or on the previous weekday are netted off the demat quantity before it is compared with the ledger.
 
 ### ISIN binding
 
@@ -175,6 +178,13 @@ closes. The newest close must agree with the quote's `previous_close` within one
 A held ISIN with no bar for a session, a capped bars response, a failed read or an A2 mismatch refuses every order
 as `quote_unavailable`; progress up to the last good session stays saved. Evaluation does not write `EVALUATED`
 audit entries in 63-05.
+
+The sessions that must be covered do not come from the bars. They are every weekday from the first unevaluated day
+to yesterday IST, less the dated exchange holidays in `orders/data/nse_trading_holidays.json` (loaded at start,
+malformed means `config_invalid`). So no bars, bars that stop early, or a missing weekday all stop the replay at the
+last complete session (`quote_unavailable`; there is no separate wire code, so the Mac mapping is unchanged). The
+shipped holiday table is **unpopulated**: until the operator fills it from the NSE trading-holiday circular, a real
+holiday inside the range refuses orders instead of being skipped. That is the fail-closed direction.
 
 ## Mac admission codes (63-04)
 

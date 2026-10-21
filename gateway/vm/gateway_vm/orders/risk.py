@@ -355,8 +355,25 @@ def apply_trades(state: OrderState, trades: Sequence[Trade]) -> bool:
     brings an ISIN's net quantity to zero is the fill evidence that clears its
     stop latch. It never touches halt. A sell that would take net quantity
     below zero cannot have come from this ledger, so it latches account_mismatch.
+
+    A trade_id the ledger already holds is never re-applied, and it must not
+    change: the same order id listed again with another quantity, side or ISIN
+    (a cumulative partial fill that grew) is a fill this ledger cannot explain,
+    and it latches account_mismatch. Taking the first quantity forever would let
+    the caps see a position far smaller than the broker's while the demat
+    holding lags (T+1).
     """
     changed = False
+    for trade in trades:
+        known = state.fills.get(trade.trade_id)
+        if (
+            known is not None
+            and (known.isin, known.side, known.quantity)
+            != (trade.isin, trade.side, trade.quantity)
+            and not state.account_mismatch
+        ):
+            state.account_mismatch = True
+            changed = True
     # Unseen trades only (idempotent by trade_id, also within one batch), applied
     # in exchange-time order so a snapshot that lists a later fill first cannot
     # make a sell look larger than the holding. Untimed trades go last, in

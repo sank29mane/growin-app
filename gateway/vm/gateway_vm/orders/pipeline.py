@@ -46,6 +46,7 @@ from .limits import (
     session_open,
     to_ist,
 )
+from ..session import RelayFailure
 from .risk import (
     apply_trades,
     assert_marks_agree,
@@ -53,6 +54,7 @@ from .risk import (
     evaluate_session,
     net_quantities,
 )
+from .sessions import expected_sessions, load_holidays
 from .store import StateStore
 from .verify import PinnedKey
 
@@ -165,6 +167,7 @@ class OrderPipeline:
         monotonic: Monotonic = time.monotonic,
         ids: SecretIds | None = None,
         lock: AbstractContextManager[Any] | None = None,
+        recheck: Callable[[], None] | None = None,
     ) -> None:
         if type(forward) is not RefusalForward:
             raise TypeError("63 forwards nothing: only RefusalForward is accepted")
@@ -179,6 +182,9 @@ class OrderPipeline:
         self._ids = ids or SecretIds()
         self._challenges = ChallengeStore()
         self._lock: AbstractContextManager[Any] = lock or threading.RLock()
+        # Called after the guard's reads and before a success is recorded. It must
+        # raise if the authority behind those reads (the Breeze session) is gone.
+        self._recheck = recheck
 
     # -- helpers -----------------------------------------------------------
 
@@ -288,6 +294,10 @@ class OrderPipeline:
             )
         return fields
 
+    def _recheck_authority(self) -> None:
+        if self._recheck is not None:
+            self._recheck()
+
     def _require_audit(self) -> None:
         """Refuse before any side effect if the audit log does not verify.
 
@@ -347,6 +357,7 @@ class OrderPipeline:
             # clocks again: the cutoff is judged, and the challenge is issued
             # (wall and monotonic), at the time the reads finished, not the time
             # the request arrived. A wall clock that moved backward is refused.
+            self._recheck_authority()
             s1 = self._sample()
             late = self._time_codes(s0, s1)
             if late:
@@ -407,6 +418,7 @@ class OrderPipeline:
             # the clocks stayed consistent) before a success is recorded. A
             # check that started at 15:09:59, or inside the challenge's last
             # second, and finished after the deadline is refused.
+            self._recheck_authority()
             s1 = self._sample()
             late = self._time_codes(s0, s1, challenge)
             if late:
@@ -528,6 +540,7 @@ class RuleGuard:
         audit: AuditLog,
         tick_table: TickTable | None = None,
         marks: MarksPort | None = None,
+        holidays: frozenset[date] | None = None,
     ) -> None:
         if getattr(audit, "anchor", None) is not store:
             # An unanchored log cannot see its own deletion or truncation.
@@ -541,6 +554,7 @@ class RuleGuard:
         self._audit = audit
         self._tick_table = tick_table
         self._marks = marks
+        self._holidays = load_holidays() if holidays is None else frozenset(holidays)
 
     def _state(self):
         return self._store.load_or_init(
@@ -557,6 +571,8 @@ class RuleGuard:
                 )
             try:
                 snapshot = self._account.snapshot()
+            except RelayFailure:
+                raise  # the session is gone: not an account problem, not a pass
             except Exception:
                 raise refusal("account_read_failed") from None
             if self._marks is None:
@@ -579,6 +595,8 @@ class RuleGuard:
                 self._store.save(state)
             try:
                 quote: Quote | None = self._market.quote(intent.stock_code)
+            except RelayFailure:
+                raise
             except Exception:
                 quote = None
             reference = self._band_reference(quote)
@@ -629,7 +647,10 @@ class RuleGuard:
             closes: dict[str, Mapping[date, Decimal]] = {}
             if first is not None and first <= yesterday and isins:
                 closes = {isin: marks.closes(isin, first, yesterday) for isin in isins}
-                calendar = sorted({d for series in closes.values() for d in series})
+                # The required sessions do not come from what the bars happened to
+                # return: an empty or truncated history must not look complete. A held
+                # ISIN with no close for a required session raises MarkMissing below.
+                calendar = expected_sessions(first, yesterday, self._holidays)
             for session in calendar:
                 due = [t for t in snapshot.trades if (day := trade_day(t)) is not None and day <= session]
                 changed = apply_trades(state, due) or changed
@@ -651,6 +672,8 @@ class RuleGuard:
                 changed = True
             changed = apply_trades(state, snapshot.trades) or changed
             return changed, True
+        except RelayFailure:
+            raise
         except Exception:  # MarkMissing, MarkMismatch, a failed read, a missing bar: all refuse
             return changed, False
 
@@ -660,6 +683,8 @@ class RuleGuard:
             return None
         try:
             value = self._tick_reference.band_reference(quote.isin, quote.session_date)
+        except RelayFailure:
+            raise
         except Exception:
             return None
         if not isinstance(value, DatedTickReference):

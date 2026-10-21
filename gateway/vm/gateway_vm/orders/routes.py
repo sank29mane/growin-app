@@ -28,6 +28,7 @@ import binascii
 import json
 import re
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any, Callable
 
@@ -66,6 +67,7 @@ from .reads import (
     ReadContext,
     ReadFailed,
 )
+from .sessions import load_holidays
 from .store import AUDIT_FILE, StateStore
 from .verify import KeyConfigError, load_order_key
 
@@ -92,6 +94,7 @@ class OrderSettings:
     allow_test_key: bool = False
     kill_base_url: str = DEFAULT_BASE_URL
     tick_table: TickTable | None = None
+    holidays: frozenset[date] | None = None  # None: the packaged table (data/nse_trading_holidays.json)
 
 
 class OrderFailure:
@@ -178,6 +181,7 @@ def build_order_service(
         store = StateStore(state_dir)
         audit = AuditLog(Path(state_dir) / AUDIT_FILE, clock=clock.now_utc, anchor=store)
         store.load_or_init(limits, audit_has_entries=audit.has_entries())
+        holidays = load_holidays() if settings.holidays is None else frozenset(settings.holidays)
     except (LimitsError, KeyConfigError):
         events.emit("config_alarm", result="error", reason="config_invalid")
         return OrderService(context=context, unavailable=refusal("config_invalid"))
@@ -212,6 +216,7 @@ def build_order_service(
         tick_reference=tick_reference,
         audit=audit,
         tick_table=settings.tick_table,
+        holidays=holidays,
         marks=BarsMarks(
             bars=bars,
             market=market,
@@ -230,6 +235,7 @@ def build_order_service(
         monotonic=clock.monotonic,
         forward=RefusalForward(),
         lock=store.lock(),
+        recheck=reads.revalidate,
     )
     return OrderService(
         context=context,
@@ -339,8 +345,8 @@ def mount_order_routes(
         authorization = session.authorize(token)
         order = pipeline()
         parse_intent(raw)  # a malformed or LIVE intent is answered before any session or read
-        session_token = session.require_active(authorization)
-        with service.context.bound(token, session_token):
+        session.require_active(authorization)
+        with service.context.bound(token, authorization):
             return JSONResponse(order.mint(raw).body())
 
     @app.post(ROUTE_AUTHORIZE, dependencies=[Depends(require_json), Depends(_no_query)])
@@ -348,8 +354,8 @@ def mount_order_routes(
         authorization = session.authorize(token)
         order = pipeline()
         challenge_id, signature = _authorize_body(raw)
-        session_token = session.require_active(authorization)
-        with service.context.bound(token, session_token):
+        session.require_active(authorization)
+        with service.context.bound(token, authorization):
             return JSONResponse(order.authorize(challenge_id, signature).body())
 
     @app.post(ROUTE_HALT, dependencies=[Depends(require_json), Depends(_no_query)])

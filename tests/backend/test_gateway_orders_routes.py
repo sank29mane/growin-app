@@ -145,10 +145,15 @@ class OrderTransport(FakeTransport):
         self.holdings: HttpResponse | Exception = HttpResponse(200, {}, breeze_body([]))
         self.trades: HttpResponse | Exception = HttpResponse(200, {}, breeze_body([]))
         self.orders: HttpResponse | Exception = HttpResponse(200, {}, breeze_body([]))
+        # Called with the URL path of every Breeze read as it is served, so a test can
+        # change the world (revoke the session) while a request is in flight.
+        self.on_read = None
 
     def request(self, method, url, *, headers, body, timeouts, max_bytes):
         parts = urlsplit(url)
         host, path = parts.hostname, parts.path
+        if self.on_read is not None and host in ("api.icicidirect.com", "breezeapi.icicidirect.com"):
+            self.on_read(path)
         if host == "api.icicidirect.com" and path.endswith("/quotes"):
             with self.lock:
                 self.requests.append((method, url, dict(headers), body))
@@ -258,7 +263,9 @@ class OrderStack(Stack):
         limits: bool | int = True,
         key: bool | int = True,
         state_dir: bool = True,
+        holidays: frozenset[date] | None = None,
     ) -> None:
+        self.holidays = holidays
         self.tmp = tmp_path
         self.metadata = metadata
         self.state_dir = tmp_path / "state"
@@ -322,6 +329,7 @@ class OrderStack(Stack):
                 owner_uid=os.getuid(),
                 allow_test_key=True,
                 kill_base_url=self.metadata.base,
+                holidays=self.holidays,
             ),
             session=self.session,
             breeze=self.breeze,
@@ -567,6 +575,31 @@ def test_kill_enabled_again_allows_a_new_intent(stack, token, metadata):
     assert code_of(stack.mint(token)) == (423, "ORDERS_BLOCKED", "kill_switch")
     metadata.body = b"enabled"
     assert stack.verify_ok(token, intent_id="intent-test-0002").status_code == 200
+
+
+@pytest.mark.parametrize("body", [b"ENABLED", b"Enabled", b"enabled\n", b" enabled", b""])
+def test_only_the_exact_lowercase_enabled_body_passes_the_kill_switch(stack, token, metadata, body):
+    metadata.body = body
+    assert code_of(stack.mint(token)) == (423, "ORDERS_BLOCKED", "kill_switch")
+    metadata.body = b"enabled"
+    assert stack.mint(token, intent_id="intent-test-0002").status_code == 200
+
+
+def test_a_blocked_kill_switch_makes_no_account_read_at_mint_or_authorize(stack, token, metadata):
+    challenge_id, signature = stack.signed(token)
+    metadata.body = b"disabled"
+    reads = len(stack.transport.requests)
+    assert code_of(stack.mint(token, intent_id="intent-test-0002")) == (423, "ORDERS_BLOCKED", "kill_switch")
+    assert code_of(stack.authorize(token, challenge_id, signature)) == (423, "ORDERS_BLOCKED", "kill_switch")
+    assert len(stack.transport.requests) == reads  # not one Breeze GET behind a closed switch
+
+
+def test_the_option_b_halt_latch_refuses_a_buy_and_survives_a_restart(stack, token):
+    stack.edit_state(lambda state: setattr(state, "halt", True))
+    assert code_of(stack.mint(token)) == (423, "ORDERS_BLOCKED", "halt_latch")
+    stack.restart()
+    assert code_of(stack.mint(token, intent_id="intent-test-0002")) == (423, "ORDERS_BLOCKED", "halt_latch")
+    assert "halt" in stack.state(token)["latches"]
 
 
 def test_over_cap_buy_is_refused_with_every_code_audited(stack, token):
@@ -852,6 +885,53 @@ def test_a_revoked_breeze_session_refuses_mint_and_authorize_but_not_halt_state_
     assert stack.post("/v1/orders/halt", {}, token).status_code == 200
 
 
+def revoke_on_read(stack: OrderStack, token: str, nth: int) -> list[str]:
+    """Revoke the Breeze session while the nth upstream read is in flight. Returns the read log."""
+    seen: list[str] = []
+
+    def hook(path: str) -> None:
+        seen.append(path)
+        if len(seen) == nth:
+            stack.session.revoke(token)
+
+    stack.transport.on_read = hook
+    return seen
+
+
+def decisions(stack: OrderStack, token: str) -> list[str]:
+    return [entry["decision"] for entry in stack.audit(token)]
+
+
+def test_a_session_revoked_during_authorize_stops_the_next_read_and_never_verifies(stack, token):
+    challenge_id, signature = stack.signed(token)
+    seen = revoke_on_read(stack, token, 1)  # the first read (holdings) is the last one allowed
+    resp = stack.authorize(token, challenge_id, signature)
+    assert code_of(resp)[:2] == (503, "NO_SESSION")
+    assert len(seen) == 1  # trades, orders, quote and bars never left on the dead session
+    assert decisions(stack, token) == ["CHALLENGED"]  # no VERIFIED_NOT_FORWARDED entry
+
+
+def test_a_session_revoked_during_mint_stops_the_next_read_and_issues_no_challenge(stack, token):
+    seen = revoke_on_read(stack, token, 2)
+    assert code_of(stack.mint(token))[:2] == (503, "NO_SESSION")
+    assert len(seen) == 2
+    assert decisions(stack, token) == []
+
+
+@pytest.mark.parametrize("route", ["mint", "authorize"])
+def test_a_session_revoked_during_the_last_read_is_caught_before_the_decision(stack, token, route):
+    challenge_id, signature = stack.signed(token)
+    before = len(stack.audit(token))
+    seen = revoke_on_read(stack, token, 5)  # holdings, trades, orders, quote, tick-reference bars
+    if route == "mint":
+        resp = stack.mint(token, intent_id="intent-test-0002")
+    else:
+        resp = stack.authorize(token, challenge_id, signature)
+    assert code_of(resp)[:2] == (503, "NO_SESSION")
+    assert len(seen) == 5  # every read ran; only the final decision was left to stop
+    assert len(stack.audit(token)) == before  # nothing was recorded as challenged or verified
+
+
 def test_contract_mismatch_both_ways(stack, token):
     wrong = {contract.HDR_CONTRACT: contract.CONTRACT}  # the data contract on an order route
     assert stack.post("/v1/orders/intents", intent(), token, headers=wrong).status_code == 400
@@ -961,14 +1041,87 @@ def test_route_table_audit(stack):
             assert path.startswith(ORDERS_PATH_PREFIX)
 
 
-def test_orders_package_has_no_write_verbs_to_the_metadata_server():
+GATEWAY_DIR = ROOT / "gateway" / "vm" / "gateway_vm"
+METADATA_SCAN_FILES = sorted((GATEWAY_DIR / "orders").glob("*.py")) + [GATEWAY_DIR / "app.py"]
+_WRITE_VERBS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+_HTTP_CALLS = frozenset({"request", "Request", "urlopen"})
+_VERB_METHODS = frozenset({"post", "put", "patch", "delete"})
+_METADATA_MARKERS = ("computemetadata", "metadata.google.internal", "169.254.169.254")
+_PROCESS_ATTRS = frozenset({"system", "popen", "posix_spawn", "execv", "execve", "execvp", "spawnv", "spawnl"})
+
+
+def metadata_write_violations(source: str) -> list[str]:
+    """Why this source could write instance metadata or shell out to gcloud. Empty means clean.
+
+    Anywhere in the file: no subprocess or pty import, no os.system-style call, no
+    "gcloud" or "add-metadata" string. In a file that names the metadata server: no
+    string that is a write verb, no http call that sets a method other than the constant
+    "GET" or sends a body, and no post/put/patch/delete call.
+    """
     import ast
 
-    for file in (ROOT / "gateway" / "vm" / "gateway_vm" / "orders").glob("*.py"):
-        tree = ast.parse(file.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if file.name == "kill.py" and isinstance(node, ast.Constant) and isinstance(node.value, str):
-                assert node.value not in ("POST", "PUT", "PATCH", "DELETE"), file.name
+    tree = ast.parse(source)
+    found: list[str] = []
+    constants = [n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+    names_metadata = any(marker in value.lower() for value in constants for marker in _METADATA_MARKERS)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import) and any(a.name.split(".")[0] in ("subprocess", "pty") for a in node.names):
+            found.append("process import")
+        if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] in ("subprocess", "pty"):
+            found.append("process import")
+        if isinstance(node, ast.Attribute) and node.attr in _PROCESS_ATTRS:
+            found.append("process call " + node.attr)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            lowered = node.value.lower()
+            if "gcloud" in lowered or "add-metadata" in lowered:
+                found.append("gcloud")
+            if names_metadata and node.value.upper() in _WRITE_VERBS:
+                found.append("write verb " + node.value)
+        if names_metadata and isinstance(node, ast.Call):
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if name in _VERB_METHODS:
+                found.append("verb call " + name)
+            if name in _HTTP_CALLS:
+                for keyword in node.keywords:
+                    if keyword.arg in ("data", "body", "json"):
+                        found.append("http body")
+                    if keyword.arg == "method" and not (
+                        isinstance(keyword.value, ast.Constant) and keyword.value.value == "GET"
+                    ):
+                        found.append("http method")
+    return found
+
+
+def test_orders_package_and_relay_app_cannot_write_metadata_or_run_gcloud():
+    assert len(METADATA_SCAN_FILES) > 10
+    for file in METADATA_SCAN_FILES:
+        assert metadata_write_violations(file.read_text(encoding="utf-8")) == [], file.name
+    # The scanner has to see the one file that does read the metadata server.
+    kill = (GATEWAY_DIR / "orders" / "kill.py").read_text(encoding="utf-8")
+    assert any(marker in kill.lower() for marker in _METADATA_MARKERS)
+
+
+@pytest.mark.parametrize(
+    "plant",
+    [
+        "import subprocess\nsubprocess.run(['gcloud', 'compute', 'instances', 'add-metadata', 'vm', '--metadata=growin-order-relay=enabled'])\n",
+        "import os\nos.system('true')\n",
+        "from urllib.request import Request, urlopen\n"
+        "urlopen(Request('http://metadata.google.internal/computeMetadata/v1/instance/attributes/growin-order-relay', method='PUT'))\n",
+        "import http.client\n"
+        "http.client.HTTPConnection('metadata.google.internal').request('PUT', '/computeMetadata/v1/instance/attributes/growin-order-relay', body=b'enabled')\n",
+        "import http.client\nverb = 'GET'\nhttp.client.HTTPConnection('x').request(verb, '/computeMetadata/v1/', body=b'enabled')\n",
+        "import httpx\nhttpx.put('http://metadata.google.internal/computeMetadata/v1/instance/attributes/growin-order-relay')\n",
+    ],
+    ids=["gcloud_subprocess", "os_system", "request_put", "connection_put_body", "connection_body", "httpx_put"],
+)
+@pytest.mark.parametrize("target", ["routes.py", "app.py"])
+def test_the_metadata_write_scan_catches_a_plant_in_the_order_routes_and_the_relay_app(plant, target):
+    path = GATEWAY_DIR / ("orders/routes.py" if target == "routes.py" else "app.py")
+    clean = path.read_text(encoding="utf-8")
+    assert metadata_write_violations(clean) == []
+    assert metadata_write_violations(clean + "\n" + plant) != []
 
 
 # ----------------------------------------------- config_invalid isolation
