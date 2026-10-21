@@ -755,6 +755,8 @@ _AUDIT_EVENT_TYPES = frozenset(
 # The purpose of a VM-minted order challenge (growin-orders/1, O4). The Mac verifies and claims
 # these bytes exactly as the VM minted them; the Mac never builds them.
 RELAY_ORDER_PURPOSE = "growin.relay.order"
+# The Mac's own O3 intent for a relay challenge, written beside the stored challenge (fix r1).
+RELAY_INTENT_EXPECTED_EVENT = "RELAY_INTENT_EXPECTED"
 _RELAY_PAYLOAD_KEYS = frozenset(
     {
         "version",
@@ -777,6 +779,43 @@ EXIT_BATCH_EVENT = "EXIT_BATCH_REGISTERED"
 EXIT_BATCH_REASONS = frozenset({"halve", "flatten", "stop"})
 _BATCH_ID_PATTERN = re.compile(r"^[a-z0-9-]{8,64}$")
 SELL_EXCEEDS_HOLDING = "sell_exceeds_holding"
+
+
+def _canonical_ascii(value: Any) -> bytes:
+    """The VM's canonical form (O3): sorted keys, compact, ASCII. ``true`` and ``1`` differ."""
+
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+    ).encode("ascii")
+
+
+def _relay_intent_is_expected(
+    connection: sqlite3.Connection, proposal_id: str, challenge_id: str, embedded: Any
+) -> bool:
+    """True when the embedded intent is, byte for byte, the intent the Mac stored for this challenge.
+
+    The record is the ``RELAY_INTENT_EXPECTED`` event written with the challenge. No record means
+    the challenge did not come through the Mac's minter, so it cannot be claimed.
+    """
+
+    rows = connection.execute(
+        "SELECT payload_json FROM execution_events WHERE proposal_id = ? AND event_type = ?",
+        (proposal_id, RELAY_INTENT_EXPECTED_EVENT),
+    ).fetchall()
+    expected = []
+    for row in rows:
+        try:
+            recorded = json.loads(str(row["payload_json"]))
+        except ValueError:
+            return False
+        if isinstance(recorded, Mapping) and recorded.get("challenge_id") == challenge_id:
+            expected.append(recorded.get("intent"))
+    if len(expected) != 1 or not isinstance(expected[0], Mapping):
+        return False
+    try:
+        return _canonical_ascii(embedded) == _canonical_ascii(expected[0])
+    except (TypeError, ValueError):
+        return False
 
 
 def _relay_intent_matches(
@@ -2394,7 +2433,15 @@ class ExecutionLedger:
         signed_payload: bytes,
         issued_at_epoch: int,
         expires_at_epoch: int,
+        expected_intent: Optional[Mapping[str, Any]] = None,
     ) -> LedgerApprovalChallenge:
+        """Store one challenge. ``expected_intent`` is the Mac's own O3 intent for a relay order.
+
+        It is written as an immutable ``RELAY_INTENT_EXPECTED`` event in the same transaction, so
+        the claim can compare the VM's bytes with what the Mac built, not with a copy derived
+        from those bytes.
+        """
+
         if expires_at_epoch <= issued_at_epoch:
             raise ValueError("approval challenge expiry must follow issuance")
         now = _now()
@@ -2465,6 +2512,16 @@ class ExecutionLedger:
                     now,
                 ),
             )
+            if expected_intent is not None:
+                self._append_event(
+                    connection,
+                    proposal_id,
+                    RELAY_INTENT_EXPECTED_EVENT,
+                    "PENDING",
+                    "PENDING",
+                    {"challenge_id": challenge_id, "intent": dict(expected_intent)},
+                    now,
+                )
             self._append_event(
                 connection,
                 proposal_id,
@@ -2624,6 +2681,10 @@ class ExecutionLedger:
             if str(admission["intent_hash"]) != stored_intent_hash:
                 raise ApprovalConflict("signed claim admission does not match the immutable intent")
             if relay_order:
+                if not _relay_intent_is_expected(
+                    connection, proposal_id, challenge_id, signed_payload.get("intent")
+                ):
+                    raise ApprovalConflict("relay order intent is not the intent the Mac expected")
                 if not _relay_intent_matches(
                     signed_payload.get("intent"), intent, proposal_id, admission
                 ):

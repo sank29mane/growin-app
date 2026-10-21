@@ -434,10 +434,21 @@ async def test_an_untrusted_or_missing_answer_is_unknown_and_sent_once(error):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reason", ["closed", "tunnel_restarted"])
-async def test_a_request_that_never_left_is_a_definite_refusal(reason):
+@pytest.mark.parametrize("reason", ["tunnel_down", "tunnel_restart_backoff", "tunnel_restart_failed"])
+async def test_a_request_that_provably_never_left_is_a_definite_refusal(reason):
     outcome, _sent = await run(RelayUnavailable(reason=reason))
     assert (outcome.kind, outcome.reason_code) == (OUTCOME_REFUSED, "RELAY_UNAVAILABLE")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["closed", "tunnel_restarted"])
+async def test_a_closed_or_restarted_client_may_have_sent_so_it_is_unknown(reason):
+    # The client raises these from the RuntimeError httpx throws after a send as well as before
+    # one, so they prove nothing. Fix r1: they used to count as "never left" and settle FAILED
+    # while the VM had already logged VERIFIED_NOT_FORWARDED.
+    outcome, sent = await run(RelayUnavailable(reason=reason))
+    assert (outcome.kind, outcome.reason_code) == (OUTCOME_UNKNOWN, "BROKER_TIMEOUT")
+    assert sent == 1  # never retried
 
 
 @pytest.mark.asyncio

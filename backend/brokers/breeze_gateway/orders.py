@@ -261,7 +261,13 @@ def check_minted_bytes(
         raise MintMismatch("key_id")
     if payload["limits_sha256"] != limits_sha256:
         raise MintMismatch("limits_sha256")
-    if payload["intent"] != dict(expected_intent):
+    # Compare the canonical bytes, not the parsed values: ``True == 1`` in Python, so a VM that
+    # minted ``"quantity": true`` for an expected ``1`` would pass a ``!=`` on the objects.
+    try:
+        same_intent = canonical_bytes(payload["intent"]) == canonical_bytes(dict(expected_intent))
+    except (TypeError, ValueError):
+        same_intent = False
+    if not same_intent:
         raise MintMismatch("intent")
     return MintedChallenge(
         challenge_id=challenge_id,

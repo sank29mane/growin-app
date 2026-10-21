@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional, Protocol
+from typing import Any, Callable, Mapping, Optional, Protocol
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
@@ -79,6 +79,7 @@ class RelayMint:
     issued_at_epoch: int
     expires_at_epoch: int
     intent_sha256: str
+    intent: Mapping[str, Any]
 
 
 class RelayChallengeRefused(ApprovalConflict):
@@ -340,6 +341,7 @@ class ApprovalService:
             signed_payload=minted.signed_payload,
             issued_at_epoch=minted.issued_at_epoch,
             expires_at_epoch=minted.expires_at_epoch,
+            expected_intent=minted.intent,
         )
         self._record_relay_event(
             order.proposal_id,

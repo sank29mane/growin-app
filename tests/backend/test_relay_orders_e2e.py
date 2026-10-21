@@ -9,11 +9,12 @@ metadata fake. The signing key is the TEST ONLY vector key; no network, Keychain
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import shutil
 import threading
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -39,6 +40,8 @@ from execution.approval import RelayChallengeRefused
 from execution.relay_dispatcher import RELAY_FORWARD_DISABLED, RelayDispatcher
 from execution.venue import (
     LIVE_DISABLED,
+    PRICE_SOURCE_OPERATOR_RECORDED,
+    PRICE_SOURCE_RELAY_QUOTE,
     VENUE_BREEZE_RELAY,
     execution_mode_label,
     intent_refusal,
@@ -188,6 +191,27 @@ async def test_live_stays_refused_on_the_shadow_venue(world):
     assert world.http.order_calls() == []
 
 
+@pytest.mark.asyncio
+async def test_a_shadow_binding_admits_only_the_relay_quote_source(world):
+    # Opus G3 (S1b): the UK practice source is not admissible on the India SHADOW venue.
+    assert world.service.admissible_price_sources == frozenset({PRICE_SOURCE_RELAY_QUOTE})
+    shadow = ils.make_intent(
+        "src-1", account=ros.SHADOW_ACCOUNT, broker=VENUE_BREEZE_RELAY, mode="SHADOW",
+        ticker=ros.TICKER,
+    )
+    admission = world.service.admit(
+        shadow, currency="INR", price="100.00", price_divisor="1",
+        price_source=PRICE_SOURCE_OPERATOR_RECORDED,
+        simulator_evidence={"simulated_fill_price": "100.00"},
+        risk_evidence={"scaled_size": "1"}, **bound_admit(),
+        india_quote=world.app.india_quote_from_relay(ros.SYMBOL),
+    )
+    assert admission.decision is AdmissionDecision.DENIED
+    assert admission.reason_code == "PRICE_SOURCE_NOT_ADMISSIBLE"
+    assert world.ledger.get_reservation("src-1") is None
+    assert world.http.order_calls() == []
+
+
 # ---------------------------------------------------- Mac-denied orders never reach the VM
 
 
@@ -307,56 +331,223 @@ async def test_the_mac_refuses_vm_bytes_that_differ_from_its_own_intent(world, m
     assert world.http.count("POST", "/v1/orders/authorize") == 0
 
 
-# limits_sha256 is checked when the Mac stores the VM bytes (the mint tamper cases) and by the VM
-# itself (the limits_hash_mismatch world); the ledger holds no copy of the limits to compare.
-LEDGER_TAMPERS = {
-    "quantity": _mutate(lambda p: p["intent"].__setitem__("quantity", 11)),
-    "limit_price": _mutate(lambda p: p["intent"].__setitem__("limit_price", "100.05")),
-    "key_id": _mutate(lambda p: p.__setitem__("key_id", "2" * 64)),
+# The claim is the second wall. It compares the VM's bytes with the intent the Mac stored beside
+# the challenge (``RELAY_INTENT_EXPECTED``, written from the Mac's own build, never from the VM's
+# bytes) and, separately, with the durable order and its admission. limits_sha256 is checked at
+# mint (the TAMPERS cases) and by the VM itself; the ledger holds no copy of the limits.
+NOT_EXPECTED = "is not the intent the Mac expected"
+NOT_ADMITTED = "does not match the admitted order"
+NOT_CHALLENGE = "does not match the challenge"
+NEW_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+
+def _intent_edit(field, value):
+    return lambda p: p["intent"].__setitem__(field, value)
+
+
+# Every intent field, then the extra field: the VM bytes differ from what the Mac expected.
+INTENT_FIELDS = {
+    "intent_id": "i" + "a" * 40,
+    "proposal_id": "p-other",
+    "workspace": "uk",
+    "broker": "trading212",
+    "mode": "PAPER",
+    "exchange": "BSE",
+    "product": "margin",
+    "order_type": "market",
+    "validity": "ioc",
+    "side": "sell",
+    "stock_code": "ABC",
+    "isin": "INE111B01023",
+    "quantity": 11,
+    "limit_price": "100.05",
+    "reason": "stop",
+    "batch_id": "batch-abcdef",
+    "limits_sha256": "1" * 64,
+    "params_sha256": "2" * 64,
+    "key_id": "3" * 64,
 }
+CLAIM_TAMPERS = {f"intent_{name}": _intent_edit(name, value) for name, value in INTENT_FIELDS.items()}
+CLAIM_TAMPERS["intent_extra_field"] = _intent_edit("extra", 1)
+CLAIM_TAMPERS["intent_field_dropped"] = lambda p: p["intent"].pop("reason")
 
 
-LEDGER_TAMPER_MESSAGE = {
-    "quantity": "relay order intent does not match the admitted order",
-    "limit_price": "relay order intent does not match the admitted order",
-    "key_id": "does not match the challenge",
-}
+async def _claim_forged(world, pid, edit, *, expected="genuine", stored_expires_delta=0, stored_issued_delta=0, stored_id=NEW_ID):
+    """Store bytes the VM would never have minted straight in the ledger, then try to claim them.
 
+    ``expected`` is the Mac's stored intent: "genuine" (what it built), None (no record), or a
+    callable that edits a copy of the genuine one (the Mac's own record disagreeing with the order).
+    """
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("name", sorted(LEDGER_TAMPERS))
-async def test_the_ledger_claim_refuses_relay_bytes_that_differ_even_when_the_enrolled_key_signed_them(
-    world, name
-):
-    """The second wall: bytes put straight into the ledger, bypassing the minter, still fail."""
-
-    pid = await prepared(world)
     challenge = world.challenge(pid)
-    new_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-    _cid, tampered = LEDGER_TAMPERS[name](challenge.challenge_id, challenge.signed_payload)
-    # The forged bytes carry their own challenge id, so only the field under test differs.
-    forged_payload = json.loads(tampered)
-    forged_payload["challenge_id"] = new_id
-    forged = json.dumps(forged_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    genuine = json.loads(challenge.signed_payload)
+    forged_payload = json.loads(challenge.signed_payload)
+    forged_payload["challenge_id"] = stored_id
+    edit(forged_payload)
+    forged = _canonical(forged_payload)
+    if expected == "genuine":
+        recorded = genuine["intent"]
+    elif expected is None:
+        recorded = None
+    else:
+        recorded = json.loads(_canonical(genuine["intent"]))
+        expected(recorded)
     order = world.ledger.get_order(pid)
     key = world.ledger.get_approval_key(workspace="india")
-    payload = json.loads(forged)
     stored = world.ledger.store_approval_challenge(
-        challenge_id=new_id,
+        challenge_id=stored_id,
         proposal_id=pid,
         key_id=key.key_id,
         intent_hash=order.intent_hash,
         signed_payload=forged,
-        issued_at_epoch=payload["issued_at"],
-        expires_at_epoch=payload["expires_at"],
+        issued_at_epoch=genuine["issued_at"] + stored_issued_delta,
+        expires_at_epoch=genuine["expires_at"] + stored_expires_delta,
+        expected_intent=recorded,
     )
-    with pytest.raises(ExecutionConflictError, match=LEDGER_TAMPER_MESSAGE[name]):
-        await world.service.approve_signed(
-            pid, stored.challenge_id, world.signature(forged), workspace="india",
-            india_quote=world.app.india_quote_from_relay(ros.SYMBOL),
-        )
+    claim = world.service.approve_signed(
+        pid, stored.challenge_id, world.signature(forged), workspace="india",
+        india_quote=world.app.india_quote_from_relay(ros.SYMBOL),
+    )
+    return claim
+
+
+async def _assert_claim_refused(world, pid, claim, message):
+    with pytest.raises(ExecutionConflictError, match=message):
+        await claim
     assert world.http.count("POST", "/v1/orders/authorize") == 0
     assert world.ledger.get_order(pid).state == "PENDING"
+    assert world.ledger.get_reservation(pid).state == "ACTIVE"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", sorted(CLAIM_TAMPERS))
+async def test_the_claim_refuses_relay_bytes_that_differ_from_the_intent_the_mac_stored(world, name):
+    """Every intent field, even though the enrolled key signed the bytes and the order is intact."""
+
+    pid = await prepared(world)
+    claim = await _claim_forged(world, pid, CLAIM_TAMPERS[name])
+    await _assert_claim_refused(world, pid, claim, NOT_EXPECTED)
+
+
+# The Mac's own stored record is wrong too (a bad build, or a record written to match forged
+# bytes). The second check, against the durable order and its admission, still refuses.
+ORDER_DISAGREES = {
+    "side": ("side", "sell"),
+    "proposal_id": ("proposal_id", "p-other"),
+    "stock_code": ("stock_code", "ABC"),
+    "workspace": ("workspace", "uk"),
+    "mode": ("mode", "PAPER"),
+    "broker": ("broker", "trading212"),
+    "exchange": ("exchange", "BSE"),
+    "product": ("product", "margin"),
+    "order_type": ("order_type", "market"),
+    "validity": ("validity", "ioc"),
+    "quantity": ("quantity", 11),
+    "limit_price": ("limit_price", "100.05"),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", sorted(ORDER_DISAGREES))
+async def test_the_claim_refuses_an_intent_that_disagrees_with_the_order_even_if_the_record_agrees(
+    world, name
+):
+    field, value = ORDER_DISAGREES[name]
+    edit = _intent_edit(field, value)
+    pid = await prepared(world)
+    claim = await _claim_forged(world, pid, edit, expected=lambda recorded: recorded.__setitem__(field, value))
+    await _assert_claim_refused(world, pid, claim, NOT_ADMITTED)
+
+
+@pytest.mark.asyncio
+async def test_the_claim_refuses_a_boolean_quantity_even_when_the_record_agrees(world):
+    # Mutant M10: Decimal(True) == Decimal(1), so only the explicit bool check refuses this.
+    proposal, admission = world.prepare(quantity="1")
+    assert admission.decision is AdmissionDecision.ADMITTED
+    pid = proposal["proposal_id"]
+    edit = _intent_edit("quantity", True)
+    claim = await _claim_forged(world, pid, edit, expected=lambda recorded: recorded.__setitem__("quantity", True))
+    await _assert_claim_refused(world, pid, claim, NOT_ADMITTED)
+
+
+@pytest.mark.asyncio
+async def test_the_claim_refuses_a_boolean_quantity_the_mac_did_not_store(world):
+    proposal, admission = world.prepare(quantity="1")
+    pid = proposal["proposal_id"]
+    claim = await _claim_forged(world, pid, _intent_edit("quantity", True))
+    await _assert_claim_refused(world, pid, claim, NOT_EXPECTED)
+
+
+@pytest.mark.asyncio
+async def test_the_claim_refuses_relay_bytes_the_mac_never_recorded_an_intent_for(world):
+    pid = await prepared(world)
+    claim = await _claim_forged(world, pid, lambda p: None, expected=None)
+    await _assert_claim_refused(world, pid, claim, NOT_EXPECTED)
+
+
+# The envelope: the part of the signed payload outside the intent.
+ENVELOPE_TAMPERS = {
+    "top_level_key_id": (lambda p: p.__setitem__("key_id", "2" * 64), {}, NOT_CHALLENGE),
+    "extra_top_level_key": (lambda p: p.__setitem__("extra", 1), {}, NOT_CHALLENGE),
+    "version": (lambda p: p.__setitem__("version", 2), {}, NOT_CHALLENGE),
+    "challenge_id": (lambda p: p.__setitem__("challenge_id", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"), {}, NOT_CHALLENGE),
+    "expires_at": (lambda p: None, {"stored_expires_delta": 1}, NOT_CHALLENGE),
+    "issued_at": (lambda p: None, {"stored_issued_delta": -1}, NOT_CHALLENGE),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", sorted(ENVELOPE_TAMPERS))
+async def test_the_claim_refuses_a_relay_envelope_that_differs_from_the_stored_challenge(world, name):
+    edit, options, message = ENVELOPE_TAMPERS[name]
+    pid = await prepared(world)
+    claim = await _claim_forged(world, pid, edit, **options)
+    await _assert_claim_refused(world, pid, claim, message)
+
+
+@pytest.mark.asyncio
+async def test_a_relay_claim_needs_a_venue_bound_ledger(world):
+    """The ledger refuses relay-purpose bytes when it has no venue binding (defence in depth).
+
+    The service refuses earlier for an unbound ledger, so this goes to the ledger claim itself.
+    """
+
+    pid = await prepared(world)
+    challenge = world.challenge(pid)
+    key = world.ledger.get_approval_key(workspace="india")
+    real = world.ledger.venue_binding
+    world.ledger.venue_binding = None
+    try:
+        with pytest.raises(ApprovalConflict, match=NOT_CHALLENGE):
+            world.ledger.claim_with_approval(
+                proposal_id=pid,
+                challenge_id=challenge.challenge_id,
+                key_id=key.key_id,
+                signature_der=world.signature(challenge.signed_payload),
+                verified_payload_hash=hashlib.sha256(challenge.signed_payload).hexdigest(),
+                now_epoch=challenge.issued_at_epoch,
+            )
+    finally:
+        world.ledger.venue_binding = real
+    assert world.ledger.get_order(pid).state == "PENDING"
+
+
+@pytest.mark.asyncio
+async def test_the_mac_refuses_vm_bytes_with_a_boolean_quantity_where_it_expected_one(world, monkeypatch):
+    # Opus G1: ``True == 1`` made a != on the parsed intents pass these bytes. The canonical bytes
+    # differ ("true" against "1"), so the mint is refused.
+    proposal, admission = world.prepare(quantity="1")
+    pid = proposal["proposal_id"]
+    real_mint = OrdersClient.mint
+
+    def mint(self, intent):
+        return _mutate(_intent_edit("quantity", True))(*real_mint(self, intent))
+
+    monkeypatch.setattr(OrdersClient, "mint", mint)
+    with pytest.raises(RelayChallengeRefused) as refused:
+        world.challenge(pid)
+    assert refused.value.reason_code == "mint_intent"
+    assert "APPROVAL_CHALLENGE_CREATED" not in event_types(world, pid)
 
 
 @pytest.mark.asyncio
@@ -493,6 +684,26 @@ async def test_a_transport_failure_at_authorize_is_unknown_because_the_mac_canno
         await world.approve(pid, challenge)
     # A connect error and a read error look alike from here: the Mac never guesses "not sent".
     assert world.ledger.get_order(pid).state == "UNKNOWN"
+    assert world.http.count("POST", "/v1/orders/authorize") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_client_closed_after_the_send_is_unknown_not_a_definite_refusal(world):
+    # Fix r1 (Codex 1): the VM verified (VERIFIED_NOT_FORWARDED) and then the client closed under
+    # the request. "closed" does not prove nothing was sent, so the order is UNKNOWN, not FAILED.
+    pid = await prepared(world)
+    challenge = world.challenge(pid)
+
+    def retire() -> None:
+        world.client._pool.retired = True
+
+    world.http.closed_after_send[("POST", "/v1/orders/authorize")] = retire
+    with pytest.raises(BrokerOutcomeUnknownError):
+        await world.approve(pid, challenge)
+    world.client._pool.retired = False  # the test's own reads go through the same client
+    assert world.ledger.get_order(pid).state == "UNKNOWN"
+    assert world.ledger.get_reservation(pid).state == "ACTIVE"  # still held: it may have been placed
+    assert [e.decision for e in vm_entries(world)] == ["CHALLENGED", "VERIFIED_NOT_FORWARDED"]
     assert world.http.count("POST", "/v1/orders/authorize") == 1
 
 
@@ -803,6 +1014,60 @@ async def test_a_held_ticker_with_no_trusted_close_denies_the_admission(world):
     assert admission.decision is AdmissionDecision.DENIED
     assert admission.reason_code == "SESSION_EVALUATION_FAILED"
     assert world.http.order_calls() == []
+
+
+@pytest.mark.asyncio
+async def test_a_held_ticker_with_no_closes_in_the_window_denies_and_is_not_marked_fed(world):
+    # Fix r1 (Codex 2): the bars call succeeds but returns no October closes at all. That used
+    # to read as "no sessions to evaluate": ADMITTED, last_session None, the day cached as fed.
+    guard = world.service.india_guard
+    ils.seed_position(world.ledger, ros.TICKER, 10, "1000.00", guard=guard)
+    assert not any(date(2026, 10, 1) <= d for d in world.vm.transport.bar_book[ros.SYMBOL])
+    proposal, admission = world.prepare(quantity="1")
+    assert admission.decision is AdmissionDecision.DENIED
+    assert admission.reason_code == "SESSION_CLOSES_MISSING"
+    assert guard.store.load().last_session is None
+    assert world.app._india_session_fed is None  # a later admission feeds again
+    assert world.http.order_calls() == []
+
+
+@pytest.mark.asyncio
+async def test_a_ragged_session_window_writes_no_session_and_denies(world):
+    # Two held tickers, one with a close on a day the other lacks: nothing is evaluated, not
+    # even the days both cover.
+    guard = world.service.india_guard
+    ils.seed_position(world.ledger, ros.TICKER, 10, "1000.00", guard=guard)
+    other = "NSE:CASH:OTHER"
+    ils.seed_position(world.ledger, other, 5, "500.00", guard=guard)
+    book = world.vm.transport.bar_book
+    book[ros.SYMBOL].update({date(2026, 10, 19): 100.0, date(2026, 10, 20): 101.0})
+    book["OTHER"] = {date(2026, 10, 19): 50.0}  # no close for the 20th
+    proposal, admission = world.prepare(quantity="1")
+    assert admission.decision is AdmissionDecision.DENIED
+    assert admission.reason_code == "SESSION_CLOSES_MISSING"
+    assert guard.store.load().last_session is None
+    assert world.app._india_session_fed is None
+
+
+@pytest.mark.asyncio
+async def test_the_session_feed_runs_once_per_ist_day_and_again_the_next_day(world):
+    # Fix r1 (Opus F2): pin the once-per-IST-day cache on the feed itself. A successful feed
+    # moves ``last_session`` forward, so only the "nothing held yet" day shows the cache: a
+    # position that lands later the same day is not fed until the next IST day.
+    guard = world.service.india_guard
+    bars = world.vm.transport.bar_book[ros.SYMBOL]
+    for offset, close in ((3, 99.0), (2, 100.0), (1, 101.0)):
+        bars[date(2026, 10, 21) - timedelta(days=offset)] = close
+    morning = datetime(2026, 10, 21, 4, 0, tzinfo=timezone.utc)  # 09:30 IST
+    evening = datetime(2026, 10, 21, 16, 0, tzinfo=timezone.utc)  # 21:30 IST, same IST day
+    next_day = datetime(2026, 10, 22, 4, 0, tzinfo=timezone.utc)
+    assert world.app.feed_india_session_from_relay(now=morning) == []  # nothing held: no reads
+    assert feed_reads(world) == []
+    ils.seed_position(world.ledger, ros.TICKER, 10, "1000.00", guard=guard)
+    assert world.app.feed_india_session_from_relay(now=evening) == []
+    assert feed_reads(world) == []  # the same IST day reads nothing, whatever is held now
+    assert world.app.feed_india_session_from_relay(now=next_day)  # the next IST day feeds
+    assert feed_reads(world)
 
 
 # -------------------------------------------------------- the AST no-order guard, Mac side

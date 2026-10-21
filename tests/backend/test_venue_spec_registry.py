@@ -30,8 +30,10 @@ from execution.venue import (
     VENUE_T212_PRACTICE,
     VenueBinding,
     VenueError,
+    admissible_price_sources,
     allowed_modes,
     intent_refusal,
+    is_shadow_binding,
     production_dispatcher_factories,
     resolve_factory,
 )
@@ -73,6 +75,26 @@ def with_fake_spec(tmp_path):
 
 def _fake_binding() -> VenueBinding:
     return VenueBinding(venue=FAKE_KIND, account_id=FAKE_ACCOUNT, currency="INR")
+
+
+def test_a_second_shadow_only_venue_does_not_inherit_the_relay_behaviour(tmp_path):
+    """Opus 7: the relay price source and halt follow the venue, not "spec modes == {SHADOW}"."""
+
+    spec = VenueSpec(
+        kind=FAKE_KIND,
+        workspace="india",
+        currency="INR",
+        modes=frozenset({"SHADOW"}),
+        ledger_path=lambda: tmp_path / "fake-india" / "execution.sqlite3",
+        dispatcher_key=FAKE_KEY,
+    )
+    with override_venue_specs({FAKE_KIND: spec}):
+        other = _fake_binding()
+        assert is_shadow_binding(other) is False
+        assert "relay-quote" not in admissible_price_sources(binding=other)
+    relay = VenueBinding(venue=VENUE_BREEZE_RELAY, account_id=FAKE_ACCOUNT, currency="INR")
+    assert is_shadow_binding(relay) is True
+    assert admissible_price_sources(binding=relay) == frozenset({"relay-quote"})
 
 
 def test_production_registry_holds_the_practice_and_relay_specs():

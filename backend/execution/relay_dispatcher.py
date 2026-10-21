@@ -75,8 +75,11 @@ _DEFINITE = (
     NotFound,
     MethodNotAllowed,
 )
-# A RelayUnavailable raised before the request left the process.
-_NOT_SENT = frozenset({"closed", "tunnel_restarted"})
+# RelayUnavailable reasons the client raises only while it is still getting a tunnel, so the request
+# provably never left the process. "closed" and "tunnel_restarted" are NOT here: the client raises
+# them both before a send and from the RuntimeError httpx throws after one, so they prove nothing.
+# Anything not listed is UNKNOWN and never retried (the #585 pattern).
+_NOT_SENT = frozenset({"tunnel_down", "tunnel_restart_backoff", "tunnel_restart_failed"})
 
 
 def reason_code(text: object, default: str) -> str:
@@ -291,6 +294,7 @@ class OrderRelayMinter:
             issued_at_epoch=checked.issued_at_epoch,
             expires_at_epoch=checked.expires_at_epoch,
             intent_sha256=sha,
+            intent=dict(body),
         )
 
 

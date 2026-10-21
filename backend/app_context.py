@@ -85,6 +85,16 @@ import time
 # MAGENTIC_* variables cannot redirect a role.
 
 
+SESSION_CLOSES_MISSING = "SESSION_CLOSES_MISSING"
+SESSION_EVALUATION_FAILED = "SESSION_EVALUATION_FAILED"
+
+
+class SessionCoverageError(LedgerError):
+    """The relay bars do not cover every held position for the sessions to be evaluated."""
+
+    reason_code = SESSION_CLOSES_MISSING
+
+
 class ANEConfig(BaseModel):
     enabled: bool = False
     compute_units: str = "ALL"  # CPU_ONLY | CPU_GPU | ALL
@@ -499,8 +509,12 @@ class AppState:
             try:
                 # The first admission of an IST session feeds the Mac's Option B latches.
                 self.feed_india_session_from_relay()
-            except Exception:  # noqa: BLE001 - an unfed session never admits a BUY
-                feed_denial = "SESSION_EVALUATION_FAILED"
+            except Exception as exc:  # noqa: BLE001 - an unfed session never admits a BUY
+                feed_denial = (
+                    exc.reason_code
+                    if isinstance(exc, SessionCoverageError)
+                    else SESSION_EVALUATION_FAILED
+                )
         session = self._market_data_session
         if session is None:
             return self.execution_service.admit(
@@ -887,8 +901,10 @@ class AppState:
         """Evaluate every missed session close for held tickers from relay daily bars (D-05).
 
         Runs once per IST day, on the first India admission. With nothing held there is no
-        position to mark and nothing to evaluate. A held ticker with no trusted close raises,
-        writes nothing, and the caller denies the admission. Only reads from the relay.
+        position to mark and nothing to evaluate. A held ticker with no trusted close, or bars that
+        leave any held position without a close on a session another one has, raises
+        ``SessionCoverageError`` (``SESSION_CLOSES_MISSING``), writes nothing, does not mark the
+        day as fed, and the caller denies the admission. Only reads from the relay.
         """
 
         ledger, guard = self._india_authority()
@@ -914,7 +930,14 @@ class AppState:
                 cash = guard.limits.capital_cap - sum(
                     (position.cost for position in positions), Decimal(0)
                 )
-                for day in sorted({day for series in closes.values() for day in series}):
+                days = sorted({day for series in closes.values() for day in series})
+                # Coverage is checked before anything is evaluated or cached: a held ticker
+                # with no close in the window (or a ragged one) must not read as "no sessions".
+                if not days or any(
+                    day not in series for series in closes.values() for day in days
+                ):
+                    raise SessionCoverageError("relay bars do not cover every held position")
+                for day in days:
                     marks = {
                         isin: series[day] for isin, series in closes.items() if day in series
                     }

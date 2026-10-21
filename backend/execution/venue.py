@@ -173,9 +173,13 @@ def execution_mode_label(authority: bool, binding: Optional[VenueBinding]) -> st
 
 
 def is_shadow_binding(binding: Optional[VenueBinding]) -> bool:
-    """True when the binding's venue spec accepts SHADOW and nothing else."""
+    """True for the Breeze relay venue, whose spec accepts SHADOW and nothing else.
 
-    if binding is None:
+    The venue name is checked as well as the spec: another venue that happened to be registered
+    SHADOW-only would otherwise inherit the relay price source and halt behaviour.
+    """
+
+    if binding is None or binding.venue != VENUE_BREEZE_RELAY:
         return False
     spec = spec_for(binding.venue)
     return spec is not None and spec.modes == frozenset({OrderMode.SHADOW.value})

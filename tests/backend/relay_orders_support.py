@@ -102,6 +102,9 @@ class RecordingHttp:
         self.calls: list[tuple[str, str]] = []
         self.timeout_after_send: set[tuple[str, str]] = set()
         self.unreachable: set[tuple[str, str]] = set()
+        # The request reaches the VM, then the client is closed under it: httpx raises
+        # StreamClosed (a RuntimeError) and the RelayClient maps it to RelayUnavailable("closed").
+        self.closed_after_send: dict[tuple[str, str], Any] = {}
 
     def stream(self, method, path, **kwargs):
         key = (method, path)
@@ -112,6 +115,11 @@ class RecordingHttp:
             with self._inner.stream(method, path, **kwargs) as response:
                 response.read()
             raise httpx.ReadTimeout("the answer was lost")
+        if key in self.closed_after_send:
+            with self._inner.stream(method, path, **kwargs) as response:
+                response.read()
+            self.closed_after_send[key]()  # retires the pool, as a close under a request does
+            raise httpx.StreamClosed()
         return self._inner.stream(method, path, **kwargs)
 
     def close(self) -> None:
