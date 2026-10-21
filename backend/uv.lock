@@ -356,6 +356,7 @@ dependencies = [
 dev = [
     { name = "deepeval" },
     { name = "pytest-cov" },
+    { name = "pytest-xdist" },
 ]
 
 [package.metadata]
@@ -421,6 +422,7 @@ requires-dist = [
 dev = [
     { name = "deepeval", specifier = ">=3.8.6" },
     { name = "pytest-cov", specifier = ">=7.0.0" },
+    { name = "pytest-xdist", specifier = ">=3.8.0" },
 ]
 
 [[package]]

@@ -361,6 +361,18 @@ def _zip(members: dict[str, bytes]) -> bytes:
         _zip({"NSEScripMaster.txt": b"\xff\xfe\x00bad"}),
         _zip({f"f{i}.txt": b"x" for i in range(9)}),  # too many members
     ],
+    # Zip bytes embed the build time, so the default ids differ between xdist workers.
+    ids=[
+        "not-a-zip",
+        "empty",
+        "zip-without-master",
+        "empty-master",
+        "missing-column",
+        "short-row",
+        "no-usable-row",
+        "bad-utf8",
+        "too-many-members",
+    ],
 )
 def test_a_master_that_cannot_be_read_is_a_MasterError_with_no_content(content):
     with pytest.raises(master_mod.MasterError) as err:

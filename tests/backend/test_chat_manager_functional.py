@@ -1,19 +1,12 @@
 import pytest
-import os
 from chat_manager import ChatManager
 
 @pytest.fixture
-def chat_manager():
-    db_path = "test_functional.db"
-    if os.path.exists(db_path):
-        os.remove(db_path)
-
-    manager = ChatManager(db_path=db_path)
+def chat_manager(tmp_path):
+    manager = ChatManager(db_path=str(tmp_path / "test_functional.db"))
     yield manager
 
     manager.close()
-    if os.path.exists(db_path):
-        os.remove(db_path)
 
 def test_get_mcp_servers_structure(chat_manager):
     # Add a test server
@@ -62,3 +55,16 @@ def test_get_mcp_servers_active_only(chat_manager):
 
     inactive_in_all = any(s["name"] == "Inactive Server" for s in all_servers)
     assert inactive_in_all
+
+
+def test_real_default_db_path_opens_in_a_clean_cwd(tmp_path, monkeypatch):
+    """ChatManager() with no argument must resolve and open its own default path.
+
+    The suite never patches that default, so a broken default would fail here.
+    """
+    monkeypatch.chdir(tmp_path)
+    manager = ChatManager()
+    try:
+        assert (tmp_path / manager.db_path).exists()
+    finally:
+        manager.close()

@@ -41,7 +41,7 @@ def test_block_malicious_commands():
         state.chat_manager.close()
         state.chat_manager = original_manager
 
-def test_allow_safe_command():
+def test_allow_safe_command(tmp_path, monkeypatch):
     """
     Test that safe commands like 'python' are allowed.
     """
@@ -50,6 +50,8 @@ def test_allow_safe_command():
     state.chat_manager = ChatManager(":memory:")
     
     # Create a dummy safe_script.py so the background connection task doesn't complain
+    # A per-test cwd keeps parallel xdist workers from sharing one script file.
+    monkeypatch.chdir(tmp_path)
     safe_script_path = os.path.join(os.getcwd(), "safe_script.py")
     with open(safe_script_path, "w") as f:
         f.write("print('safe')")

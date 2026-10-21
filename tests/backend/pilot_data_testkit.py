@@ -81,11 +81,16 @@ def udiff_csv_text(trade_date: date, rows: Iterable[Mapping[str, str]], header: 
     return "\n".join(lines) + "\n"
 
 
+_ZIP_STAMP = (2025, 1, 2, 0, 0, 0)
+
+
 def _zip_bytes(members: Mapping[str, bytes]) -> bytes:
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         for name, data in members.items():
-            archive.writestr(name, data)
+            # writestr(name, ...) stamps the current time (2 s resolution), so two builds of
+            # the same content straddling a tick hash differently. Pin the stamp.
+            archive.writestr(zipfile.ZipInfo(name, date_time=_ZIP_STAMP), data, zipfile.ZIP_DEFLATED)
     return buffer.getvalue()
 
 

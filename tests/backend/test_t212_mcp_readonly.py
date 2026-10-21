@@ -834,7 +834,7 @@ def test_the_live_key_still_reaches_a_uk_trading212_child(monkeypatch):
 
 
 def test_the_config_route_returns_404_or_405_and_forwards_nothing(monkeypatch):
-    from unittest.mock import AsyncMock
+    from unittest.mock import AsyncMock, MagicMock
 
     from fastapi.testclient import TestClient
 
@@ -842,7 +842,9 @@ def test_the_config_route_returns_404_or_405_and_forwards_nothing(monkeypatch):
     from server import app
 
     forward = AsyncMock()
-    monkeypatch.setattr(state._mcp_client, "call_tool", forward, raising=False)
+    # state._mcp_client is None until some earlier test creates it, so under xdist this
+    # test cannot count on the ambient client: install a stand-in for its own duration.
+    monkeypatch.setattr(state, "_mcp_client", MagicMock(call_tool=forward))
     with TestClient(app) as client:
         response = client.post(
             "/mcp/trading212/config",
