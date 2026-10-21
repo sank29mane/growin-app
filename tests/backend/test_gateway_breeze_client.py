@@ -82,6 +82,15 @@ CALLS = {
     ),
 }
 RAW_CALLS = {
+    "demat_holdings": lambda c: c.demat_holdings_raw(app_key="K", secret_key="X", session_token="T"),
+    "trade_list": lambda c: c.trade_list_raw(
+        app_key="K", secret_key="X", session_token="T", exchange_code="NSE",
+        from_iso="2026-10-01T00:00:00.000Z", to_iso="2026-10-21T23:59:59.000Z",
+    ),
+    "order_list": lambda c: c.order_list_raw(
+        app_key="K", secret_key="X", session_token="T", exchange_code="NSE",
+        from_iso="2026-10-21T00:00:00.000Z", to_iso="2026-10-21T23:59:59.000Z",
+    ),
     "daily_bars_v2": lambda c: c.daily_bars_v2_raw(
         app_key="K", session_token="T", stock_code="RELIND", exch_code="NSE",
         from_iso="2025-06-09T00:00:00.000Z", to_iso="2025-06-20T23:59:59.000Z",
@@ -425,24 +434,56 @@ def test_no_order_function_names():
     assert offences == []
 
 
+def _allowed_read_endpoint_lines(tree: ast.AST) -> set[int]:
+    """Where breeze_client.py may spell a read endpoint (63-05): the first argument of
+    self._checksummed_get (a GET-only sender), and the V1_READ_ENDPOINTS declaration."""
+    lines: set[int] = set()
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_checksummed_get"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+        ):
+            lines.add(node.args[0].lineno)
+        if isinstance(node, ast.Assign) and any(getattr(t, "id", "") == "V1_READ_ENDPOINTS" for t in node.targets):
+            lines.update(range(node.lineno, node.end_lineno + 1))
+    return lines
+
+
 def test_no_order_endpoint_constants():
+    # Nothing in the package may name an account or order endpoint, except the three
+    # account READS (dematholdings, trades, order) in breeze_client.py at the places above.
     banned = {
         "order", "squareoff", "trades", "funds", "margin", "portfolioholdings",
         "portfoliopositions", "dematholdings", "gttorder",
     }
     offences = []
     for path in _modules():
-        for node in ast.walk(ast.parse(path.read_text())):
+        tree = ast.parse(path.read_text())
+        allowed = _allowed_read_endpoint_lines(tree) if path.name == "breeze_client.py" else set()
+        for node in ast.walk(tree):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                if node.value.strip().lower() in banned:
+                if node.value.strip().lower() in banned and node.lineno not in allowed:
                     offences.append(f"{path.name}:{node.lineno}")
                 if "/breezeapi/api/v1/" in node.value and node.value != bc.V1_BASE:
                     offences.append(f"{path.name}:{node.lineno}:v1 url")
     assert offences == []
+    # Exactly three sender sites, one per read endpoint, and no other call shape.
+    tree = ast.parse((PKG / "breeze_client.py").read_text())
+    sent = sorted(
+        n.args[0].value
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "_checksummed_get"
+        and n.args and isinstance(n.args[0], ast.Constant) and n.args[0].value in bc.V1_READ_ENDPOINTS
+    )
+    assert sent == ["dematholdings", "order", "trades"]
 
 
 def test_v1_endpoint_allowlist_is_exact():
-    assert bc.V1_ENDPOINTS == frozenset({"customerdetails", "quotes", "preview_order"})
+    assert bc.V1_READ_ENDPOINTS == frozenset({"dematholdings", "trades", "order"})
+    assert bc.V1_ENDPOINTS == frozenset({"customerdetails", "quotes", "preview_order"}) | bc.V1_READ_ENDPOINTS
 
 
 def test_every_public_method_is_get_only_to_allowlisted_paths():

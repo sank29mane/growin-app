@@ -21,8 +21,10 @@ test, records `rebase_halt_anchor` in the RESET audit entry, and leaves the true
 so the -15% end, alone.
 `session-end-check` reads persisted state only; it may over-alert on a stale
 ledger and never suppresses an alert. It exits non-zero if an alert or its
-audit entry failed. The alert port defaults to an unbound one that fails
-loudly until 63-05 binds the real channel.
+audit entry failed. The alert port defaults to the durable local alert log
+(alerts.jsonl in STATE_DIR, orders/alerts.py); the operator's phone channel is deferred, so
+the Mac reads the log count from GET /v1/orders/state and the audit entries from GET
+/v1/orders/audit.
 
 Exit codes: 0 ok, 1 refused or failed, 2 usage.
 """
@@ -38,12 +40,12 @@ from pathlib import Path
 from typing import Any, Callable, TextIO
 
 from . import OrderRefusal
+from .alerts import FileAlertPort
 from .audit import AuditBroken, AuditLog
 from .limits import DEFAULT_LIMITS_PATH, Limits, LimitsError, load_limits
 from .risk import (
     AlertPort,
     ResetRefused,
-    UnboundAlertPort,
     reset_latch,
     session_end_check,
 )
@@ -190,7 +192,7 @@ def main(
                 result = session_end_check(
                     state,
                     clock,
-                    alert_port or UnboundAlertPort(),
+                    alert_port or FileAlertPort(args.state_dir),
                     audit=audit,
                     limits_sha256=limits_sha256,
                 )

@@ -21,9 +21,9 @@ import threading
 import time
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Callable, Protocol, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from . import (
     CHALLENGE_TTL_SECONDS,
@@ -46,7 +46,13 @@ from .limits import (
     session_open,
     to_ist,
 )
-from .risk import apply_trades, detect_mismatch
+from .risk import (
+    apply_trades,
+    assert_marks_agree,
+    detect_mismatch,
+    evaluate_session,
+    net_quantities,
+)
 from .store import StateStore
 from .verify import PinnedKey
 
@@ -484,6 +490,20 @@ class TickReferencePort(Protocol):
     def band_reference(self, isin: str, session_date: date) -> DatedTickReference: ...
 
 
+class MarksPort(Protocol):
+    """Closes and reference prices for the Option B session evaluation (P-08, A2). Bound in 63-05.
+
+    ``closes`` returns the raw (unadjusted) daily close by session date for one ISIN
+    between two dates inclusive, and raises if the answer could be incomplete.
+    ``reference`` returns that ISIN's quote previous_close and one tick, for the A2
+    check that the latest bar close and the quote agree within a tick.
+    """
+
+    def closes(self, isin: str, first: date, last: date) -> Mapping[date, Decimal]: ...
+
+    def reference(self, isin: str) -> tuple[Decimal, Decimal]: ...
+
+
 class RuleGuard:
     """Guard over the real modules: kill reader, durable state, account and
     market ports, and the pure evaluator.
@@ -507,6 +527,7 @@ class RuleGuard:
         tick_reference: TickReferencePort,
         audit: AuditLog,
         tick_table: TickTable | None = None,
+        marks: MarksPort | None = None,
     ) -> None:
         if getattr(audit, "anchor", None) is not store:
             # An unanchored log cannot see its own deletion or truncation.
@@ -519,6 +540,7 @@ class RuleGuard:
         self._tick_reference = tick_reference
         self._audit = audit
         self._tick_table = tick_table
+        self._marks = marks
 
     def _state(self):
         return self._store.load_or_init(
@@ -537,7 +559,19 @@ class RuleGuard:
                 snapshot = self._account.snapshot()
             except Exception:
                 raise refusal("account_read_failed") from None
-            changed = apply_trades(state, snapshot.trades)
+            if self._marks is None:
+                changed = apply_trades(state, snapshot.trades)
+            else:
+                changed, evaluated = self._replay_sessions(state, snapshot, now)
+                if not evaluated:
+                    # No mark could be trusted: nothing past the last good session is
+                    # applied or judged, and every order is refused. Progress up to the
+                    # last good session stays saved.
+                    if changed:
+                        self._store.save(state)
+                    return GuardResult(
+                        codes=("quote_unavailable",), kill=kill.label, latches=state.latch_names()
+                    )
             if not state.account_mismatch and detect_mismatch(state, snapshot.holdings):
                 state.account_mismatch = True
                 changed = True
@@ -560,6 +594,65 @@ class RuleGuard:
                 tick_table=self._tick_table,
             )
             return GuardResult(codes=codes, kill=kill.label, latches=state.latch_names())
+
+    def _replay_sessions(self, state, snapshot: AccountSnapshot, now: datetime) -> tuple[bool, bool]:
+        """Apply the trade list and every session close since the last evaluated one, in order.
+
+        evaluate_session reads the CURRENT net quantities, so each missed session is
+        judged after the trades dated on or before it and before any later trade. Only
+        sessions strictly before today (IST) are evaluated: today's close is unknown.
+        Returns (state changed, marks trusted). Any failure to read, align or agree on a
+        mark (a held ISIN with no bar, a capped response, a bar that disagrees with the
+        quote's previous close by more than a tick) is (changed so far, False).
+        """
+        marks = self._marks
+        assert marks is not None
+        today = to_ist(now).date()
+        yesterday = today - timedelta(days=1)
+        changed = False
+
+        def trade_day(trade) -> date | None:
+            return None if trade.executed_at is None else to_ist(trade.executed_at).date()
+
+        try:
+            if state.last_evaluated_session is not None:
+                first: date | None = date.fromisoformat(state.last_evaluated_session) + timedelta(days=1)
+            else:
+                days = [d for d in (trade_day(t) for t in snapshot.trades) if d is not None]
+                first = min(days) if days else None
+            isins = sorted(
+                {f.isin for f in state.fills.values()}
+                | {t.isin for t in snapshot.trades}
+                | {h.isin for h in snapshot.holdings}
+            )
+            calendar: list[date] = []
+            closes: dict[str, Mapping[date, Decimal]] = {}
+            if first is not None and first <= yesterday and isins:
+                closes = {isin: marks.closes(isin, first, yesterday) for isin in isins}
+                calendar = sorted({d for series in closes.values() for d in series})
+            for session in calendar:
+                due = [t for t in snapshot.trades if (day := trade_day(t)) is not None and day <= session]
+                changed = apply_trades(state, due) or changed
+                if session == calendar[-1]:
+                    # A2, before the newest close is accepted: it must agree with the
+                    # quote's previous close within a tick, or it is never evaluated.
+                    held = sorted(i for i, q in net_quantities(state).items() if q > 0)
+                    previous: dict[str, Decimal] = {}
+                    ticks: dict[str, Decimal] = {}
+                    for isin in held:
+                        previous[isin], ticks[isin] = marks.reference(isin)
+                    assert_marks_agree({i: closes[i][session] for i in held}, previous, ticks)
+                evaluate_session(
+                    state,
+                    self._limits,
+                    session,
+                    {isin: series[session] for isin, series in closes.items() if session in series},
+                )
+                changed = True
+            changed = apply_trades(state, snapshot.trades) or changed
+            return changed, True
+        except Exception:  # MarkMissing, MarkMismatch, a failed read, a missing bar: all refuse
+            return changed, False
 
     def _band_reference(self, quote: Quote | None) -> Decimal | None:
         """Fresh band reference for this quote, or None (fail closed) on any problem."""

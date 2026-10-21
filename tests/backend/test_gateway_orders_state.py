@@ -1313,8 +1313,14 @@ def test_admin_session_end_check_exits_nonzero_when_the_alert_fails(tmp_path):
     code, out, _ = _run(store.directory, "session-end-check", clock=clock, port=Port(fail=True))
     assert code == 1 and json.loads(out)["alerts_failed"] == 1
     assert store.load().stops  # nothing blocked or unblocked
-    # No port bound at all (63-05 not landed): also non-zero, never silent.
-    assert _run(store.directory, "session-end-check", clock=clock)[0] == 1
+    # 63-05 binds the durable local alert log as the default port: the alert lands on disk
+    # (private, append-only) and the run succeeds. The unbound port itself still fails loudly
+    # (test_unbound_alert_port_fails_loudly).
+    code, out, _ = _run(store.directory, "session-end-check", clock=clock)
+    assert code == 0 and json.loads(out)["alerts_sent"] == 1
+    log = store.directory / "alerts.jsonl"
+    assert log.stat().st_mode & 0o777 == 0o600
+    assert [json.loads(line)["kind"] for line in log.read_text().splitlines()] == ["stop_exit_open"]
 
 
 def test_admin_usage_errors_exit_2(tmp_path):
