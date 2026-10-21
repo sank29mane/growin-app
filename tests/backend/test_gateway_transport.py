@@ -82,9 +82,16 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
 
+class QuietServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):  # a reset prints a traceback into a later test's capture
+        pass
+
+
 @pytest.fixture
 def server():
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    srv = QuietServer(("127.0.0.1", 0), Handler)
     srv.paths = []  # type: ignore[attr-defined]
     thread = threading.Thread(
         target=lambda: srv.serve_forever(poll_interval=0.02), daemon=True
