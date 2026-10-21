@@ -32,6 +32,7 @@ V1_ENDPOINTS = frozenset({"customerdetails", "quotes", "preview_order"})
 # v2 daily wire value the smoke confirmed. Pinned in test_gateway_relay_config.py.
 V2_DAILY_INTERVAL = "1day"
 V2_EXCHANGE_PARAM_NAMES = ("exch_code", "exchange_code")  # docs table vs docs samples
+V2_DEFAULT_EXCHANGE_PARAM = V2_EXCHANGE_PARAM_NAMES[0]
 ERROR_CLASSES = (
     "invalid_session",
     "resource_not_available",
@@ -305,7 +306,7 @@ class BreezeClient:
         interval: str = V2_DAILY_INTERVAL,
         user_agent: bool = False,
         encode_colons: bool = False,
-        exchange_param_name: str = "exch_code",
+        exchange_param_name: str = V2_DEFAULT_EXCHANGE_PARAM,
     ) -> RawUpstream:
         """The defaults send the one request shape 61-04 shipped, byte for byte.
 

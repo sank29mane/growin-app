@@ -1005,3 +1005,29 @@ def test_no_leak_a_bad_apisession_is_not_echoed_in_the_422(stack: Stack):
     assert resp.status_code == 422
     assert resp.json()["error"]["fields"] == ["apisession"]
     assert marker not in resp.text + stack.sink.getvalue()
+
+
+# --------------- X-Growin-Upstream-Request describes the real request
+
+
+def sent_query(stack: Stack) -> dict[str, str]:
+    return dict(parse_qsl(urlsplit(stack.transport.bars_requests()[-1][1]).query))
+
+
+def test_upstream_request_header_equals_the_query_actually_sent(stack: Stack):
+    token = stack.login()
+    resp = stack.bars(token)
+    assert json.loads(resp.headers[contract.HDR_UP_REQUEST]) == sent_query(stack)
+
+
+@pytest.mark.parametrize("name", ["exch_code", "exchange_code"])
+def test_upstream_request_header_follows_the_exchange_param_knob(stack: Stack, monkeypatch, name):
+    monkeypatch.setattr(relay_app, "BARS_REQUEST_KNOBS", {"exchange_param_name": name})
+    token = stack.login()
+    resp = stack.bars(token)
+    assert resp.status_code == 200
+    query = sent_query(stack)
+    assert query[name] == "NSE" and ({"exch_code", "exchange_code"} - {name}).isdisjoint(query)
+    header = json.loads(resp.headers[contract.HDR_UP_REQUEST])
+    assert header == query
+    assert header[name] == "NSE"

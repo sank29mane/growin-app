@@ -24,7 +24,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from .breeze_client import BreezeClient, BreezeError, V2_DAILY_INTERVAL, classify_payload
+from .breeze_client import (
+    V2_DAILY_INTERVAL,
+    V2_DEFAULT_EXCHANGE_PARAM,
+    BreezeClient,
+    BreezeError,
+    classify_payload,
+)
 from .contract import (
     ALLOWED_BODY_FIELDS,
     ALLOWED_QUERY_BY_ROUTE,
@@ -415,9 +421,11 @@ def create_app(
                 http_status=raw.http_status,
             )
 
+        # The same name the request used, so the header describes the real request.
+        exchange_param = BARS_REQUEST_KNOBS.get("exchange_param_name", V2_DEFAULT_EXCHANGE_PARAM)
         upstream_request = json.dumps(
             {
-                "exch_code": BARS_EXCHANGE,
+                exchange_param: BARS_EXCHANGE,
                 "from_date": from_iso,
                 "interval": V2_DAILY_INTERVAL,
                 "product_type": "cash",
