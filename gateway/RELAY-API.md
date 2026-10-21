@@ -93,7 +93,7 @@ Body: `{"contract": "growin-relay/1", "error": {"code", "reason", "breeze_status
 | 502 | UPSTREAM_ERROR | upstream non-200 HTTP, unparsable body, or Breeze logical error (on login/complete this includes a rejected code) | upstream_http, upstream_shape, no_data, invalid_session, public_key_missing, other | true only for no_data |
 | 504 | UPSTREAM_TIMEOUT | upstream timed out, was unreachable, or no upstream connection freed up within 10 s | upstream_timeout, upstream_unreachable | true |
 | 422 | VALIDATION | bad parameters or body | null | false |
-| 409 | LOGIN_ATTEMPT_INVALID | attempt missing, wrong, expired or already used | null | false |
+| 409 | LOGIN_ATTEMPT_INVALID | attempt missing, wrong, expired, already used, or superseded by a later arm, a revoke or a drop | null | false |
 | 403 | IDENTITY_MISMATCH | CustomerDetails user id differs, or Equity or Trading not enabled | identity_mismatch, segment_disabled | false |
 | 403 | FORBIDDEN_CLIENT | missing contract header or non-loopback Host | null | false |
 | 400 | CONTRACT_MISMATCH | request contract header has another value | null | false |
@@ -191,6 +191,15 @@ class RelayError(Exception):
 ```
 
 The client never retries (retry policy belongs to the caller) and logs nothing.
+
+### Client rules
+
+Rules a caller of growin-relay/1 follows. Each is checked against the VM at `gateway/vm/gateway_vm/`.
+
+- A 409 LOGIN_ATTEMPT_INVALID from `login/complete` ends that `attempt_id` for good (expired, already used, superseded by a later arm, or cut off by a revoke or a drop while the exchange ran). Arm again. Never arm twice in parallel: the VM keeps one pending attempt, so a second arm kills the first. `RelayClient` enforces both: it serialises arm and complete, and refuses a spent or non-current attempt locally without sending anything.
+- EGRESS_MISMATCH is mapped on the code. Its reason can be `egress_mismatch`, `egress_unavailable` or `ip_mismatch`; do not branch on one value of it.
+- `health`, `login/arm`, `login/complete` and `session/revoke` answer 422 VALIDATION for any query string, before any auth check. Never add a query to them, not even a cache-buster.
+- `bars/daily` checks in this order: 401 (token), then 422 (query), then 503 (no session or expired). A 422 never means the session is bad, so it never means log in again.
 
 ## Observed upstream behaviour
 
