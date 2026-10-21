@@ -91,14 +91,20 @@ NO_BREEZE_SESSION_ROUTES = frozenset({"security_master"})
 data_route = pytest.mark.parametrize("route", list(DATA_ROUTES.values()), ids=list(DATA_ROUTES))
 
 
-def _create_app_handlers() -> dict[str, ast.FunctionDef]:
-    """The route handlers defined inside create_app(), by function name."""
-    tree = ast.parse(Path(relay_app.__file__).read_text(encoding="utf-8"))
-    create_app = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "create_app")
+_FUNC_DEFS = (ast.FunctionDef, ast.AsyncFunctionDef)
+
+
+def _create_app_handlers(source: str | None = None) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    """The route handlers defined inside create_app(), by function name. Sync and
+    async handlers both count, at any nesting depth inside create_app."""
+    if source is None:
+        source = Path(relay_app.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    create_app = next(n for n in tree.body if isinstance(n, _FUNC_DEFS) and n.name == "create_app")
     return {
         n.name: n
         for n in ast.walk(create_app)
-        if isinstance(n, ast.FunctionDef) and any(_is_route_decorator(d) for d in n.decorator_list)
+        if isinstance(n, _FUNC_DEFS) and any(_is_route_decorator(d) for d in n.decorator_list)
     }
 
 
@@ -108,7 +114,7 @@ def _is_route_decorator(node: ast.expr) -> bool:
     return isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id == "app"
 
 
-def _calls_on(handler: ast.FunctionDef, receiver: str) -> set[str]:
+def _calls_on(handler: ast.FunctionDef | ast.AsyncFunctionDef, receiver: str) -> set[str]:
     return {
         n.func.attr
         for n in ast.walk(handler)
@@ -128,6 +134,56 @@ def test_every_route_that_calls_breeze_is_covered_by_the_session_revalidation_te
         assert "require_active" in _calls_on(handlers[name], "session"), name
     for name in NO_BREEZE_SESSION_ROUTES:
         assert "require_active" not in _calls_on(handlers[name], "session"), name
+
+
+_PLANTED_APP = """
+def create_app():
+    app = make()
+
+    @app.get("/sync_covered")
+    def sync_covered():
+        session.require_active(1)
+        return breeze.quote_raw()
+
+    @app.get("/sync_uncovered")
+    def sync_uncovered():
+        return breeze.quote_raw()
+
+    @app.get("/async_covered")
+    async def async_covered():
+        session.require_active(1)
+        return breeze.quote_raw()
+
+    @app.get("/async_uncovered")
+    async def async_uncovered():
+        return breeze.quote_raw()
+
+    def helper():
+        @app.post("/nested_async_uncovered")
+        async def nested_async_uncovered():
+            return breeze.place_raw()
+
+    @app.get("/no_breeze")
+    async def no_breeze():
+        return 1
+
+    async def not_a_route():
+        return breeze.quote_raw()
+"""
+
+
+def test_the_guard_scan_reports_sync_and_async_handlers_that_call_breeze():
+    handlers = _create_app_handlers(_PLANTED_APP)
+    breeze_backed = {name for name, fn in handlers.items() if _calls_on(fn, "breeze")}
+    assert breeze_backed == {
+        "sync_covered",
+        "sync_uncovered",
+        "async_covered",
+        "async_uncovered",
+        "nested_async_uncovered",
+    }
+    uncovered = {name for name in breeze_backed if "require_active" not in _calls_on(handlers[name], "session")}
+    assert uncovered == {"sync_uncovered", "async_uncovered", "nested_async_uncovered"}
 
 
 @data_route
