@@ -1160,9 +1160,12 @@ def test_verified_sell_leaves_the_halt_latch_set(real: RealRig):
     assert real.pipeline.authorize(sell.challenge_id, real.signed(sell)).decision == "VERIFIED_NOT_FORWARDED"
     assert real.state().halt is True
     # The sell then fills and shows on the trade list: still no clearing.
-    real.account.snap = holding_snapshot(
-        qty=50, cost="5000",
-        extra_trades=(Trade("sell-1", ISIN_A, "sell", 50, D("100"), D("0")),),
+    real.account.snap = AccountSnapshot(
+        holdings=(Holding(ISIN_A, 50, D("5000")),),
+        trades=(
+            Trade(f"seed-{ISIN_A}", ISIN_A, "buy", 100, D("100"), D("0")),  # the buy keeps its 100
+            Trade("sell-1", ISIN_A, "sell", 50, D("100"), D("0")),
+        ),
     )
     with pytest.raises(OrderRefusal) as err:
         real.mint(intent_id="intent-test-0003")
