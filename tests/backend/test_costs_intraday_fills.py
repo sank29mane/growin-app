@@ -186,6 +186,9 @@ def schedule_with(**changes):
     return parse_intraday_scenarios(scenario_text(**changes), "test")
 
 
+NEXT_DAY = {"rule": "next_day_exception_v1", "window_start_ist": "08:00", "window_end_ist": "09:25", "max_calls": 40}
+
+
 def final_schedule(cas_lower="0.90", non_cas_lower="0.90", **extra):
     return schedule_with(
         lower_bound_status="final",
@@ -269,6 +272,73 @@ def test_schedule_matches_the_daily_k_and_participation():
 def test_schedule_loader_refuses(changes):
     with pytest.raises(ScheduleError):
         schedule_with(**changes)
+
+
+@pytest.mark.parametrize("upper", ["1.03", "1.021", "1.0201", "1.01", "1", "2", "0.5", "1.020001"])
+@pytest.mark.parametrize("cas_class", ["cas", "non_cas"])
+def test_R15_loader_refuses_an_upper_bound_other_than_1_02(cas_class, upper):
+    """D-12: the upper bound is fixed. A schedule that moves it never loads, so a 1.021 ratio cannot fill."""
+    bands = {"cas": {"lower": None, "upper": "1.02"}, "non_cas": {"lower": None, "upper": "1.02"}}
+    bands[cas_class] = {"lower": None, "upper": upper}
+    with pytest.raises(ScheduleError, match="D-12"):
+        schedule_with(volume_ratio_band=bands)
+    # Same refusal on a final schedule with numeric lowers.
+    with pytest.raises(ScheduleError, match="D-12"):
+        schedule_with(
+            lower_bound_status="final",
+            volume_ratio_band={
+                **{k: {"lower": "0.90", "upper": "1.02"} for k in bands},
+                cas_class: {"lower": "0.90", "upper": upper},
+            },
+        )
+
+
+def test_R15_loader_accepts_the_fixed_upper_bound_in_any_spelling_of_1_02():
+    assert schedule_with(
+        volume_ratio_band={"cas": {"lower": None, "upper": "1.020"}, "non_cas": {"lower": None, "upper": "1.02"}}
+    ).cas_band.upper == D("1.02")
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"window_start_ist": "00:00", "window_end_ist": "23:59", "max_calls": 4000},  # the codex-r1-2 schedule
+        {"window_start_ist": "00:00"},
+        {"window_start_ist": "07:59"},
+        {"window_end_ist": "09:26"},
+        {"window_end_ist": "18:00"},
+        {"window_end_ist": "23:59"},
+        {"max_calls": 41},
+        {"max_calls": 4000},
+        {"max_calls": 0},
+        {"max_calls": True},
+        {"max_calls": "40"},
+        {"window_start_ist": "09:00", "window_end_ist": "09:00"},
+    ],
+)
+def test_R18_loader_refuses_a_next_day_fetch_outside_d27(changes):
+    with pytest.raises(ScheduleError):
+        schedule_with(next_day_fetch={**NEXT_DAY, **changes})
+
+
+def test_R18_loader_accepts_a_next_day_fetch_inside_d27_and_narrower():
+    assert schedule_with(next_day_fetch=NEXT_DAY).next_day_fetch is not None
+    narrow = schedule_with(next_day_fetch={**NEXT_DAY, "window_start_ist": "08:30", "window_end_ist": "09:00", "max_calls": 20})
+    assert narrow.next_day_fetch.max_calls == 20
+
+
+def test_R18_an_out_of_window_next_day_fetch_does_not_fill():
+    """codex-r1-2: with the window held to 08:00 to 09:25, an 18:00 next-day fetch is INCONCLUSIVE, never a fill."""
+    sched = schedule_with(next_day_fetch=NEXT_DAY)
+    rows = session_rows(t1130=CROSS_ALL_BUY)
+    for hour, minute in ((18, 0), (9, 26), (7, 59), (12, 0), (23, 59)):
+        moment = datetime.combine(NEXT_SESSION, time(hour, minute), tzinfo=IST)
+        (result,) = run(rows, [attempt(schedule=sched)], schedule=sched, fetched_at=moment)
+        assert code_of(result) == ifs.EVIDENCE_FETCHED_TOO_LATE, moment
+        assert all(s.outcome is IntradayOutcome.INCONCLUSIVE and s.filled_quantity == 0 for s in result.scenarios)
+    # The schedule that would have let 18:00 through never loads.
+    with pytest.raises(ScheduleError):
+        schedule_with(next_day_fetch={**NEXT_DAY, "window_start_ist": "00:00", "window_end_ist": "23:59", "max_calls": 4000})
 
 
 def test_final_schedule_without_numeric_lower_is_refused_and_with_one_loads():
@@ -448,7 +518,7 @@ def test_R6_volume_must_be_an_int_at_the_boundary():
         MinuteBar(label("10:00"), 1.0, D(1), D(1), D(1), 1)  # type: ignore[arg-type]
 
 
-def test_R7_duplicate_bar_is_never_summed():
+def test_R7_duplicate_bar():
     rows = session_rows()
     rows.insert(101, rows[100])
     (result,) = simulate_intraday(assess(rows), [attempt()], SCHEDULE)
@@ -505,7 +575,7 @@ class _NoCas:
     pass
 
 
-def test_R9_session_scope_unknown_for_a_missing_or_wrong_row():
+def test_R9_session_scope_unknown():
     (missing,) = run(cas=None, **{}) if False else simulate_intraday(
         assess_day(
             evidence_for(session_rows()), schedule=SCHEDULE, isin=ISIN, series=SERIES, stock_code=CODE,
@@ -623,7 +693,7 @@ def test_R14_a_gap_after_the_lifetime_is_not_a_gap():
 
 
 @pytest.mark.parametrize("cas_class", ["cas", "non_cas"])
-def test_volume_ratio_above_upper_1_02(cas_class):
+def test_R15_volume_ratio_above_upper_1_02(cas_class):
     over = total_rows(1_021_000)
     (result,) = run(over, cas=cas_row(cas_class), bhavcopy=bhavcopy_for(over, total=1_000_000))
     assert code_of(result) == ifs.VOLUME_CHECK_FAILED
@@ -633,7 +703,7 @@ def test_volume_ratio_above_upper_1_02(cas_class):
     assert code_of(at_bound) is None and at_bound.volume_ratio == D("1.02")
 
 
-def test_volume_lower_check_skipped_while_provisional():
+def test_R15_volume_lower_check_skipped_while_provisional():
     low = total_rows(800_000)
     (result,) = run(low, bhavcopy=bhavcopy_for(low, total=1_000_000))
     assert code_of(result) is None
@@ -641,7 +711,7 @@ def test_volume_lower_check_skipped_while_provisional():
     assert result.lower_bound_status == "provisional"
 
 
-def test_volume_lower_bound_provisional_flag_in_hash():
+def test_R15_volume_lower_bound_provisional_flag_in_hash():
     (result,) = run()
     assert result.lower_bound_status == "provisional"
     flipped = dataclasses.replace(result, lower_bound_status="final")
@@ -651,7 +721,7 @@ def test_volume_lower_bound_provisional_flag_in_hash():
     assert other.result_hash != result.result_hash and other.lower_bound_status == "final"
 
 
-def test_volume_below_final_lower_bound_fails():
+def test_R15_volume_below_final_lower_bound_fails():
     sched = final_schedule()
     for total, expected in [(890_000, ifs.VOLUME_CHECK_FAILED), (900_000, None)]:
         rows = total_rows(total)
@@ -661,7 +731,7 @@ def test_volume_below_final_lower_bound_fails():
             assert result.volume_lower_check == "passed"
 
 
-def test_volume_ratio_40pct_final_lower_fails():
+def test_R15_volume_ratio_40pct_final_lower_fails():
     sched = final_schedule()
     rows = total_rows(400_000)
     (result,) = run(rows, [attempt(schedule=sched)], schedule=sched, bhavcopy=bhavcopy_for(rows, total=1_000_000))
@@ -671,7 +741,7 @@ def test_volume_ratio_40pct_final_lower_fails():
     assert code_of(provisional) is None
 
 
-def test_volume_band_per_cas_class():
+def test_R15_volume_band_per_cas_class():
     sched = final_schedule(cas_lower="0.50", non_cas_lower="0.90")
     rows = total_rows(700_000)
     kw = dict(schedule=sched, bhavcopy=bhavcopy_for(rows, total=1_000_000))
@@ -680,7 +750,7 @@ def test_volume_band_per_cas_class():
     assert code_of(cas) is None and code_of(non_cas) == ifs.VOLUME_CHECK_FAILED
 
 
-def test_volume_sum_covers_excluded_bars():
+def test_R15_volume_sum_covers_excluded_bars():
     """A bar before the submission, and one after the lifetime, both count toward the day sum."""
     base = session_rows()
     ttq = sum(r.volume for r in base)
@@ -691,7 +761,7 @@ def test_volume_sum_covers_excluded_bars():
         assert code_of(result) == ifs.VOLUME_CHECK_FAILED, overrides
 
 
-def test_volume_window_is_0915_to_1535_inclusive():
+def test_R15_volume_window_is_0915_to_1535_inclusive():
     base = session_rows()
     ttq = sum(r.volume for r in base)
     inside = base + [row("15:35", vol=100_000)]
@@ -702,7 +772,7 @@ def test_volume_window_is_0915_to_1535_inclusive():
     assert code_of(ignored) is None
 
 
-def test_volume_reference_missing():
+def test_R16_volume_reference_missing():
     for reference in (None, dataclasses.replace(bhavcopy_for(session_rows()), series="BE"),
                       dataclasses.replace(bhavcopy_for(session_rows()), session_date=NEXT_SESSION),
                       dataclasses.replace(bhavcopy_for(session_rows()), isin="INE0TEST0002"),
@@ -711,7 +781,7 @@ def test_volume_reference_missing():
         assert code_of(result) == ifs.VOLUME_REFERENCE_MISSING
 
 
-def test_price_range_below_day_low():
+def test_R16_price_range_below_day_low():
     rows = session_rows(t1130={"low": "399.40", "vol": 1000})
     ref = bhavcopy_for(rows)
     tight = dataclasses.replace(ref, low=D("399.50"))  # the bar low is 0.10 under the day low, two ticks
@@ -722,7 +792,7 @@ def test_price_range_below_day_low():
     assert code_of(ok) is None
 
 
-def test_price_range_above_day_high():
+def test_R16_price_range_above_day_high():
     rows = session_rows(t1130={"high": "400.60", "vol": 1000})
     ref = dataclasses.replace(bhavcopy_for(rows), high=D("400.50"))
     (result,) = run(rows, bhavcopy=ref)
@@ -731,7 +801,7 @@ def test_price_range_above_day_high():
     assert code_of(ok) is None
 
 
-def test_price_range_excluded_bar_extreme():
+def test_R16_price_range_excluded_bar_extreme():
     """A bar the attempt may not use (before submission) still fails the whole day."""
     rows = session_rows(t0920={"low": "395.00", "vol": 1000})
     ref = dataclasses.replace(bhavcopy_for(rows), low=D("399.80"))
@@ -739,7 +809,7 @@ def test_price_range_excluded_bar_extreme():
     assert code_of(result) == ifs.PRICE_RANGE_CHECK_FAILED
 
 
-def test_daily_volume_record_only():
+def test_R17_daily_volume_record_only():
     rows = session_rows(t1130=CROSS_ALL_BUY)
     (agree,) = run(rows, daily=sum(r.volume for r in rows))
     (disagree,) = run(rows, daily=10_000)
@@ -755,7 +825,7 @@ def test_daily_volume_record_only():
 # ---- R-18 / R-19 freshness and hash ------------------------------------------------------
 
 
-def test_fetched_before_close():
+def test_R18_fetched_before_close():
     for moment in (at("15:39", 59), at("14:00"), at("09:00") - timedelta(days=1)):
         (result,) = run(fetched_at=moment)
         assert code_of(result) == ifs.EVIDENCE_FETCHED_BEFORE_CLOSE, moment
@@ -763,19 +833,19 @@ def test_fetched_before_close():
     assert code_of(ok) is None and ok.evidence_fetch_rule == "same_day"
 
 
-def test_fetched_too_late():
+def test_R18_fetched_too_late():
     (late,) = run(fetched_at=at("23:30", 1))
     assert code_of(late) == ifs.EVIDENCE_FETCHED_TOO_LATE
     (edge,) = run(fetched_at=at("23:30"))
     assert code_of(edge) is None
 
 
-def test_fetched_next_day_default_off():
+def test_R18_fetched_next_day_default_off():
     (result,) = run(fetched_at=datetime.combine(NEXT_SESSION, time(8, 30), tzinfo=IST))
     assert code_of(result) == ifs.EVIDENCE_FETCHED_TOO_LATE
 
 
-def test_next_day_fetch_refused_when_unset():
+def test_R18_next_day_fetch_refused_when_unset():
     assert SCHEDULE.next_day_fetch is None
     rows = session_rows(t1130=CROSS_ALL_BUY)
     for moment in (
@@ -788,10 +858,8 @@ def test_next_day_fetch_refused_when_unset():
         assert all(s.filled_quantity == 0 for s in result.scenarios)
 
 
-NEXT_DAY = {"rule": "next_day_exception_v1", "window_start_ist": "08:00", "window_end_ist": "09:25", "max_calls": 40}
 
-
-def test_next_day_fetch_window_pinned():
+def test_R18_next_day_fetch_window_pinned():
     sched = schedule_with(next_day_fetch=NEXT_DAY)
     assert sched.schedule_hash != SCHEDULE.schedule_hash
     rows = session_rows(t1130=CROSS_ALL_BUY)
@@ -812,12 +880,12 @@ def test_next_day_fetch_window_pinned():
     assert code_of(no_date) == ifs.EVIDENCE_FETCHED_TOO_LATE
 
 
-def test_hash_unverified():
+def test_R19_hash_unverified():
     (result,) = run(sha256_verified=False)
     assert code_of(result) == ifs.EVIDENCE_HASH_UNVERIFIED
 
 
-def test_no_evidence_fetched_reasons():
+def test_R18_no_evidence_fetched_reasons():
     for reason in ifs.NO_EVIDENCE_REASONS:
         (result,) = no_evidence_results([attempt()], SCHEDULE, reason=reason)
         assert code_of(result) == ifs.NO_EVIDENCE_FETCHED and result.inconclusive_detail == reason
@@ -829,7 +897,7 @@ def test_no_evidence_fetched_reasons():
 # ---- R-20 to R-22, R-32 screens, thresholds, locked and single-price bars ----------------
 
 
-def test_tick_band_codes():
+def test_R20_tick_band_codes():
     crossing = session_rows(t1130=CROSS_ALL_BUY)
     (off_tick,) = run(crossing, [attempt(limit="399.52")])
     assert {s.reason_code for s in off_tick.scenarios} == {REJECTED_OFF_TICK}
@@ -844,12 +912,12 @@ def test_tick_band_codes():
     assert mismatch.scenarios[0].outcome is IntradayOutcome.NO_ASSUMED_FILL
 
 
-def test_tick_off_grid_wins_over_the_band_verdicts():
+def test_R20_tick_off_grid_wins_over_the_band_verdicts():
     (result,) = run(attempts=[attempt(limit="445.03")])
     assert result.scenarios[0].reason_code == REJECTED_OFF_TICK
 
 
-def test_thresholds_k123():
+def test_R21_thresholds_k123():
     # Buy limit 399.50: thresholds 399.45, 399.40, 399.35.
     cases = [("399.45", (1,)), ("399.40", (1, 2)), ("399.35", (1, 2, 3)), ("399.46", ())]
     for low, filled_ks in cases:
@@ -867,7 +935,7 @@ def test_thresholds_k123():
         assert got == filled_ks, high
 
 
-def test_fill_price_is_limit():
+def test_R21_fill_price_is_limit():
     odd = {"low": "399.10", "open_": "399.15", "close": "399.12", "high": "399.20", "vol": 100_000}
     (result,) = run(session_rows(t1130=odd))
     for scenario in result.scenarios:
@@ -886,7 +954,7 @@ def test_invariant_perturb_open_close():
     ]
 
 
-def test_locked_bar_not_credited():
+def test_R22_locked_bar_not_credited():
     locked = {"low": "440.00", "high": "440.00", "open_": "440.00", "close": "440.00", "vol": 100_000}
     rows = session_rows(NEAR_UPPER, t1130=locked, t1131=locked)
     ref = bhavcopy_for(rows)
@@ -896,20 +964,20 @@ def test_locked_bar_not_credited():
     assert all(s.crossing_bars == 0 and s.volume_cap == 0 for s in result.scenarios)
 
 
-def test_locked_buy_at_upper_gives_missed_locked():
+def test_R22_locked_buy_at_upper_gives_missed_locked():
     rows = [row(h, low="440.00", high="440.00", open_="440.00", close="440.00") for h in hhmm_range()]
     (result,) = run(rows, [attempt(limit="440.00")])
     assert {s.reason_code for s in result.scenarios} == {MISSED_LOCKED_AT_BAND}
     assert {s.outcome for s in result.scenarios} == {IntradayOutcome.MISSED}
 
 
-def test_locked_sell_at_lower_gives_missed_locked():
+def test_R22_locked_sell_at_lower_gives_missed_locked():
     rows = [row(h, low="360.00", high="360.00", open_="360.00", close="360.00") for h in hhmm_range()]
     (result,) = run(rows, [attempt(side=Side.SELL, limit="360.00")])
     assert {s.reason_code for s in result.scenarios} == {MISSED_LOCKED_AT_BAND}
 
 
-def test_locked_check_precedes_threshold():
+def test_R22_locked_check_precedes_threshold():
     """A locked bar is never tested for crossing: its volume adds no allowance next to a real crossing bar."""
     locked = {"low": "440.00", "high": "440.00", "open_": "440.00", "close": "440.00", "vol": 900_000}
     cross = {"low": "439.90", "high": "440.00", "open_": "440.00", "close": "440.00", "vol": 5000}
@@ -920,7 +988,7 @@ def test_locked_check_precedes_threshold():
     assert result.locked_bars == 1
 
 
-def test_single_price_at_other_edge_not_locked():
+def test_R22_single_price_at_other_edge_not_locked():
     low_edge = {"low": "360.00", "high": "360.00", "open_": "360.00", "close": "360.00", "vol": 100_000}
     (buy,) = run(session_rows(t1130=low_edge), [attempt(limit="360.20")])
     assert buy.locked_bars == 0 and by_k(buy)[1].outcome is IntradayOutcome.FILLED
@@ -933,7 +1001,7 @@ def _flat_rows(price: str):
     return [row(h, low=price, high=price, open_=price, close=price) for h in hhmm_range()]
 
 
-def test_no_band_single_price_not_credited():
+def test_R32_no_band_single_price_not_credited():
     rows = _flat_rows("399.30")  # would cross a 399.50 buy if it were credited
     (result,) = run(rows, band=NO_BAND, attempts=[attempt(band=NO_BAND)])
     assert result.ambiguous_single_price_bars > 0
@@ -941,13 +1009,13 @@ def test_no_band_single_price_not_credited():
     assert {s.outcome for s in result.scenarios} == {IntradayOutcome.NO_ASSUMED_FILL}
 
 
-def test_no_band_single_price_precedes_threshold():
+def test_R32_no_band_single_price_precedes_threshold():
     for price in ("399.30", "400.50"):  # at the threshold and short of it
         (result,) = run(_flat_rows(price), band=NO_BAND, attempts=[attempt(band=NO_BAND)])
         assert {s.reason_code for s in result.scenarios} == {NO_FILL_AMBIGUOUS_SINGLE_PRICE}, price
 
 
-def test_no_band_single_price_mixed_partial():
+def test_R32_no_band_single_price_mixed_partial():
     rows = session_rows(
         t1130={"low": "399.30", "high": "399.30", "open_": "399.30", "close": "399.30", "vol": 900_000},
         t1140={"low": "399.30", "high": "399.70", "open_": "399.60", "close": "399.60", "vol": 5000},
@@ -969,17 +1037,21 @@ def _daily_reason(bar_price: str, side: Side, limit: str, band: PriceBand) -> st
     return simulate_session([order], bar, load_fill_scenarios().get("base"))[0].reason_code
 
 
-@pytest.mark.parametrize(
-    "side, limit, price",
-    [(Side.BUY, "440.00", "440.00"), (Side.SELL, "360.00", "360.00")],
-)
-def test_daily_parity_locked_bar(side, limit, price):
+def _assert_daily_parity_locked(side, limit, price):
     (result,) = run(_flat_rows(price), [attempt(side=side, limit=limit)])
     assert by_k(result)[1].reason_code == _daily_reason(price, side, limit, FIXED_BAND) == MISSED_LOCKED_AT_BAND
 
 
+def test_R22_daily_parity_locked_bar_buy():
+    _assert_daily_parity_locked(Side.BUY, "440.00", "440.00")
+
+
+def test_R22_daily_parity_locked_bar_sell():
+    _assert_daily_parity_locked(Side.SELL, "360.00", "360.00")
+
+
 @pytest.mark.parametrize("price", ["399.45", "400.50"])  # at the base threshold and short of it
-def test_daily_parity_no_band_single_price(price):
+def test_R32_daily_parity_no_band_single_price(price):
     (result,) = run(_flat_rows(price), band=NO_BAND, attempts=[attempt(band=NO_BAND)])
     assert by_k(result)[1].reason_code == _daily_reason(price, Side.BUY, "399.50", NO_BAND)
     assert by_k(result)[1].reason_code == NO_FILL_AMBIGUOUS_SINGLE_PRICE
@@ -988,7 +1060,7 @@ def test_daily_parity_no_band_single_price(price):
 # ---- R-23 to R-26 participation, FIFO, siblings ------------------------------------------
 
 
-def test_participation_crossing_volume():
+def test_R23_participation_crossing_volume():
     """The cap comes from crossing post-submission bars only, never from the whole session."""
     rows = session_rows(t1130={"low": "399.30", "high": "399.70", "open_": "399.60", "close": "399.60", "vol": 5000})
     (result,) = run(rows, [attempt(quantity=1000)])
@@ -1000,14 +1072,14 @@ def test_participation_crossing_volume():
     assert by_k(full)[1].outcome is IntradayOutcome.FILLED and by_k(full)[1].reason_code == FILLED_AT_LIMIT
 
 
-def test_participation_zero_cap():
+def test_R23_participation_zero_cap():
     rows = session_rows(t1130={"low": "399.30", "high": "399.70", "open_": "399.60", "close": "399.60", "vol": 30})
     (result,) = run(rows, [attempt(quantity=10)])
     assert by_k(result)[1].reason_code == MISSED_VOLUME_CAP_ZERO  # floor(0.3)
     assert by_k(result)[1].outcome is IntradayOutcome.MISSED
 
 
-def test_participation_ignores_bars_before_submission():
+def test_R23_participation_ignores_bars_before_submission():
     big_before = {"low": "399.30", "high": "399.70", "open_": "399.60", "close": "399.60", "vol": 900_000}
     small_after = {"low": "399.30", "high": "399.70", "open_": "399.60", "close": "399.60", "vol": 1000}
     rows = session_rows(t0930=big_before, t1130=small_after)
@@ -1015,7 +1087,7 @@ def test_participation_ignores_bars_before_submission():
     assert by_k(result)[1].volume_cap == 10  # only the 11:30 bar
 
 
-def test_fifo_shared_allowance():
+def test_R24_fifo_shared_allowance():
     cross = {"low": "399.30", "high": "399.70", "open_": "399.60", "close": "399.60", "vol": 5000}  # allowance 50 at k=1
     rows = session_rows(t1130=cross)
     a = attempt("a", quantity=30, at_time="10:00")
@@ -1026,7 +1098,7 @@ def test_fifo_shared_allowance():
     assert by_k(rb)[1].volume_cap == 20
 
 
-def test_fifo_order_independent():
+def test_R24_fifo_order_independent():
     cross = {"low": "399.30", "high": "399.70", "open_": "399.60", "close": "399.60", "vol": 5000}
     rows = session_rows(t1130=cross)
     attempts = [attempt("c", quantity=30, at_time="10:02"), attempt("a", quantity=30, at_time="10:00"),
@@ -1038,7 +1110,7 @@ def test_fifo_order_independent():
     assert [by_k(r)[1].filled_quantity for r in forward] == [30, 20, 0]
 
 
-def test_fifo_spans_both_sides():
+def test_R24_fifo_spans_both_sides():
     cross_buy = {"low": "399.30", "high": "400.80", "open_": "400.00", "close": "400.00", "vol": 5000}
     rows = session_rows(t1130=cross_buy)  # crosses a 399.50 buy and a 400.50 sell
     buy = attempt("buy", quantity=30, at_time="10:00")
@@ -1047,7 +1119,7 @@ def test_fifo_spans_both_sides():
     assert (by_k(r_buy)[1].filled_quantity, by_k(r_sell)[1].filled_quantity) == (30, 20)
 
 
-def test_fifo_demand_charge_latest_first():
+def test_R24_fifo_demand_charge_latest_first():
     """An earlier partial fill still charges its full quantity, from the latest credited label back."""
     cross = {"low": "399.30", "high": "399.70", "open_": "399.60", "close": "399.60", "vol": 5000}
     rows = session_rows(t1130=cross, t1200=cross)  # allowance 50 on each, k=1
@@ -1065,7 +1137,7 @@ def test_fifo_demand_charge_latest_first():
     assert by_k(rf)[1].filled_quantity == 0 and by_k(rf)[1].reason_code == MISSED_VOLUME_CAP_ZERO
 
 
-def test_fifo_rejected_attempt_charges_nothing():
+def test_R24_fifo_rejected_attempt_charges_nothing():
     cross = {"low": "399.30", "high": "399.70", "open_": "399.60", "close": "399.60", "vol": 5000}
     rows = session_rows(t1130=cross)
     rejected = attempt("a", quantity=500, limit="399.52", at_time="10:00")
@@ -1094,7 +1166,7 @@ def _fractional_book():
     return build
 
 
-def test_fifo_codex_r2_counterexample():
+def test_R24_fifo_codex_r2_counterexample():
     # Integer book from the Codex r2 review: A buys at 10:05 (crosses 10:30 and 11:30), B buys at 11:00 (11:30).
     cross = {"low": "399.30", "high": "399.70", "open_": "399.60", "close": "399.60", "vol": 5000}
 
@@ -1131,7 +1203,7 @@ def test_fifo_codex_r2_counterexample():
     assert by_k(with_outside[0])[1].allowance_charged == D("1.1") - D("0")
 
 
-def test_sibling_unresolved():
+def test_R25_sibling_unresolved():
     rows = session_rows(t1130=CROSS_ALL_BUY, t1500=None)
     early = attempt("a", at_time="10:00")  # its window reaches 15:00, so the missing bar is a gap for it
     late = attempt("b", at_time="15:05")  # window 15:06 to 15:14, no gap, but its earlier sibling is unresolved
@@ -1159,7 +1231,7 @@ def test_invariant_sibling_gap_only_inconclusive():
 # ---- R-26 to R-31 ------------------------------------------------------------------------
 
 
-def test_k1_fill_k3_miss_flag():
+def test_R26_k1_fill_k3_miss_flag():
     rows = session_rows(t1130={"low": "399.44", "high": "399.70", "open_": "399.60", "close": "399.60", "vol": 100_000})
     (result,) = run(rows)
     assert result.k1_fill_k3_miss is True
@@ -1170,13 +1242,13 @@ def test_k1_fill_k3_miss_flag():
     assert none.k1_fill_k3_miss is False
 
 
-def test_k123_come_from_one_call_over_the_same_evidence():
+def test_R26_k123_come_from_one_call_over_the_same_evidence():
     (result,) = run(session_rows(t1130={**CROSS_ALL_BUY, "vol": 100_000}))
     assert [s.scenario_id for s in result.scenarios] == ["base", "adverse", "pessimistic"]
     assert len({result.source_sha256}) == 1
 
 
-def test_label_semantics_unproven():
+def test_R27_label_semantics_unproven():
     assert SCHEDULE.label_semantics == "unproven"
     (result,) = run()
     assert result.label_semantics == "unproven" and code_of(result) is None
@@ -1197,14 +1269,14 @@ HASH_A, HASH_B = sha256_hex("evidence-record"), sha256_hex("approval-record")
         ({"source_kind": "unknown_source", "record_hash": HASH_A}, HASH_B),
     ],
 )
-def test_label_claim_refused(ref, approval):
+def test_R27_label_claim_refused(ref, approval):
     sched = schedule_with(label_semantics="proven", label_evidence_ref=ref, label_approval_ref=approval)
     (result,) = run(session_rows(t1130=CROSS_ALL_BUY), [attempt(schedule=sched)], schedule=sched)
     assert code_of(result) == ifs.LABEL_SEMANTICS_UNPROVEN
     assert all(s.filled_quantity == 0 for s in result.scenarios)
 
 
-def test_label_claim_with_probe_ref_only_refused():
+def test_R27_label_claim_with_probe_ref_only_refused():
     sched = schedule_with(
         label_semantics="proven",
         label_evidence_ref={"source_kind": "breeze_bar_snapshot", "record_hash": HASH_A},
@@ -1213,7 +1285,7 @@ def test_label_claim_with_probe_ref_only_refused():
     assert sched.label_claim_refused()
 
 
-def test_label_claim_without_approval_ref_refused():
+def test_R27_label_claim_without_approval_ref_refused():
     sched = schedule_with(
         label_semantics="proven",
         label_evidence_ref={"source_kind": "icici_written_statement", "record_hash": HASH_A},
@@ -1221,11 +1293,11 @@ def test_label_claim_without_approval_ref_refused():
     assert sched.label_claim_refused()
 
 
-def test_label_claim_without_evidence_ref_refused():
+def test_R27_label_claim_without_evidence_ref_refused():
     assert schedule_with(label_semantics="proven", label_approval_ref=HASH_B).label_claim_refused()
 
 
-def test_label_claim_with_both_refs_changes_no_admission():
+def test_R27_label_claim_with_both_refs_changes_no_admission():
     """Relaxation is a later approved task: a fully backed claim still gets the conservative window."""
     sched = schedule_with(
         label_semantics="proven",
@@ -1237,7 +1309,7 @@ def test_label_claim_with_both_refs_changes_no_admission():
     assert admit_bars(day, attempt(schedule=sched), sched).window_first == "10:04"
 
 
-def test_result_hash_stable():
+def test_R28_result_hash_stable():
     rows = session_rows(t1130=CROSS_ALL_BUY)
     first, second = run(rows)[0], run(rows)[0]
     assert first.result_hash == second.result_hash and len(first.result_hash) == 64
@@ -1249,7 +1321,7 @@ def test_result_hash_stable():
     assert seal(first, "result_hash").result_hash == first.result_hash
 
 
-def test_labels_present():
+def test_R29_labels_present():
     (result,) = run()
     assert result.labels == (
         "OHLCV assumption (OI-3)", "conservative simulated fill from evidence",
@@ -1258,7 +1330,7 @@ def test_labels_present():
     assert SCHEDULE.assumption_note == "Simulation assumptions, not evidence of actual fill probability."
 
 
-def test_result_content():
+def test_R31_result_content():
     (result,) = run(session_rows(t1130={**CROSS_ALL_BUY, "vol": 100_000}), cas=cas_row("non_cas"))
     assert result.lifetime_end == at("15:15") and result.cas_class == "non_cas" and result.continuous_end == "15:30"
     assert result.interval == "1minute" and result.gap_policy == "inconclusive"
@@ -1270,7 +1342,7 @@ def test_result_content():
     assert result.volume_band_upper == D("1.02") and result.volume_band_lower is None
 
 
-def test_deterministic_with_decimal_context_mutated():
+def test_R28_deterministic_with_decimal_context_mutated():
     import decimal
 
     rows = session_rows(t1130=CROSS_ALL_BUY)
@@ -1426,9 +1498,74 @@ def test_no_evidence_means_nothing_is_fetched_for_a_fill_request():
 
 COSTS_DIR = Path(__file__).resolve().parents[2] / "backend" / "costs"
 
+# codex-r1-3: the purity scan bans imports and clocks, not file reads. Stage A and Stage B must read nothing from
+# disk. Only the two loaders below may touch the filesystem, and each does exactly one read of a committed file.
+APPROVED_LOADERS = {"intraday_fills.py": {"load_intraday_scenarios"}, "cas_class.py": {"load_cas_table"}}
+FS_ATTR_CALLS = {
+    "open", "read_text", "read_bytes", "write_text", "write_bytes", "exists", "is_file", "is_dir", "is_symlink",
+    "iterdir", "glob", "rglob", "walk", "scandir", "listdir", "stat", "lstat", "mkdir", "unlink", "rmdir", "touch",
+    "rename", "resolve", "absolute", "samefile", "chmod", "symlink_to", "readlink", "home", "cwd", "expanduser",
+    "getenv", "environ", "fdopen", "popen", "system",
+}
+FS_MODULE_NAMES = {"os", "io", "shutil", "tempfile", "glob", "fnmatch", "sys", "subprocess"}
+
+
+def scan_fs_io(source: str, label: str, approved: frozenset[str] | set[str] = frozenset()) -> list[str]:
+    """Filesystem operations anywhere outside the ``approved`` function names (module level counts as outside)."""
+    import ast
+
+    violations: list[str] = []
+
+    class Visitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.stack: list[str] = []
+
+        def _function(self, node) -> None:
+            self.stack.append(node.name)
+            self.generic_visit(node)
+            self.stack.pop()
+
+        visit_FunctionDef = visit_AsyncFunctionDef = _function
+
+        def _allowed(self) -> bool:
+            return any(name in approved for name in self.stack)
+
+        def visit_Call(self, node: ast.Call) -> None:
+            func = node.func
+            hit = None
+            if isinstance(func, ast.Name) and func.id in {"open", "input", "exec", "eval"}:
+                hit = f"{func.id}()"
+            elif isinstance(func, ast.Attribute) and func.attr in FS_ATTR_CALLS:
+                hit = f".{func.attr}()"
+            if hit and not self._allowed():
+                where = self.stack[-1] if self.stack else "<module>"
+                violations.append(f"{label}:{node.lineno}: filesystem call {hit} in {where}")
+            self.generic_visit(node)
+
+        def visit_Attribute(self, node: ast.Attribute) -> None:
+            if isinstance(node.value, ast.Name) and node.value.id in FS_MODULE_NAMES and not self._allowed():
+                where = self.stack[-1] if self.stack else "<module>"
+                violations.append(f"{label}:{node.lineno}: use of {node.value.id}.{node.attr} in {where}")
+            self.generic_visit(node)
+
+    Visitor().visit(ast.parse(source, filename=label))
+    return violations
+
+
+def plant_in_function(source: str, function: str, statement: str) -> str:
+    """Insert ``statement`` as the first line of ``function``'s body: a mutant inside a function only."""
+    import ast
+
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == function:
+            node.body.insert(0, ast.parse(statement).body[0])
+            return ast.unparse(ast.fix_missing_locations(tree))
+    raise AssertionError(f"{function} not found")
+
 
 @pytest.mark.parametrize("module", ["intraday_fills.py", "cas_class.py"])
-def test_new_modules_are_inside_the_purity_scan(module):
+def test_R30_purity_scan(module):
     from test_costs_purity import scan_source
 
     path = COSTS_DIR / module
@@ -1444,3 +1581,56 @@ def test_new_modules_are_inside_the_purity_scan(module):
         "\nimport random\n",
     ):
         assert scan_source(source + plant, module), plant
+
+
+@pytest.mark.parametrize("module", ["intraday_fills.py", "cas_class.py"])
+def test_R30_no_filesystem_access_outside_the_approved_loaders(module):
+    source = (COSTS_DIR / module).read_text(encoding="utf-8")
+    approved = APPROVED_LOADERS[module]
+    assert scan_fs_io(source, module, approved) == []
+    # The allow-list names real functions that really do the one read, so it cannot rot into a blanket pass.
+    defined = {line.split("(")[0].removeprefix("def ") for line in source.splitlines() if line.startswith("def ")}
+    assert approved <= defined
+    assert scan_fs_io(source, module), "the loaders' own read must be visible to the scanner"
+
+
+FS_MUTANTS = (
+    'Path("/etc/hosts").read_text()',
+    'Path("/etc/hosts").read_bytes()',
+    'Path("/etc/hosts").exists()',
+    'open("/etc/hosts").read()',
+    'Path(__file__).resolve()',
+    'list(Path(".").iterdir())',
+    'list(Path(".").glob("*"))',
+    'Path("x").write_text("y")',
+    'Path("x").stat()',
+    'import_os.getcwd()',
+)
+
+
+@pytest.mark.parametrize("statement", FS_MUTANTS)
+@pytest.mark.parametrize(
+    "module, function",
+    [("intraday_fills.py", "assess_day"), ("intraday_fills.py", "simulate_intraday"),
+     ("intraday_fills.py", "admit_bars"), ("cas_class.py", "resolve_cas_class")],
+)
+def test_R30_filesystem_mutant_inside_a_stage_goes_red(module, function, statement):
+    source = (COSTS_DIR / module).read_text(encoding="utf-8")
+    approved = APPROVED_LOADERS[module]
+    mutant = plant_in_function(source, function, statement.replace("import_os", "os"))
+    found = scan_fs_io(mutant, module, approved)
+    assert found, f"{statement} inside {function} slipped past the filesystem scan"
+    assert any(function in v for v in found), found
+
+
+def test_R30_filesystem_scan_allows_only_the_named_loader():
+    source = (COSTS_DIR / "intraday_fills.py").read_text(encoding="utf-8")
+    approved = APPROVED_LOADERS["intraday_fills.py"]
+    # The same read is fine in the loader and red anywhere else.
+    assert scan_fs_io(plant_in_function(source, "load_intraday_scenarios", 'Path("x").read_text()'), "m", approved) == []
+    assert scan_fs_io(plant_in_function(source, "parse_intraday_scenarios", 'Path("x").read_text()'), "m", approved)
+    # Module level code is outside the allow-list too.
+    assert scan_fs_io(source + '\n_LEAK = Path("x").read_text()\n', "m", approved)
+    # A nested helper inside a Stage function is still that Stage's code.
+    nested = plant_in_function(source, "assess_day", "def _h():\n    return Path('x').read_text()")
+    assert scan_fs_io(nested, "m", approved)

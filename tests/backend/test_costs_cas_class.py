@@ -68,6 +68,18 @@ def no_network(monkeypatch):
     monkeypatch.setattr(socket, "create_connection", refuse)
 
 
+def test_cas_loader_no_network(tmp_path):
+    """The autouse fixture refuses every socket. A load and a resolve, committed and fixture, must not trip it."""
+    with pytest.raises(AssertionError, match="network used"):
+        socket.socket()
+    with pytest.raises(AssertionError, match="network used"):
+        socket.create_connection(("127.0.0.1", 9))
+    resolve_cas_class(ISIN_A, date(2026, 10, 6), table=load(tmp_path, [version()]))
+    committed_cas_table()
+    with pytest.raises(CasClassUnavailable):
+        resolve_cas_class(ISIN_A, date(2026, 10, 6))
+
+
 # ---- committed table ----------------------------------------------------------------------
 
 
@@ -90,7 +102,7 @@ def test_committed_table_fails_closed_for_every_lookup(isin, session):
 # ---- resolver ------------------------------------------------------------------------------
 
 
-def test_resolves_explicit_rows_with_provenance(tmp_path):
+def test_cas_row_resolves_by_isin_and_date(tmp_path):
     table = load(tmp_path, [version()])
     row = resolve_cas_class(ISIN_A, date(2026, 10, 6), table=table)
     assert (row.cas_class, row.symbol, row.session_date) == ("cas", "AAA", date(2026, 10, 6))
@@ -133,7 +145,7 @@ def test_edge_dates_pick_the_right_version(tmp_path):
     assert resolve_cas_class(ISIN_A, date(2026, 8, 3), table=table).table_version == "cas-test-v1"
 
 
-def test_a_row_missing_from_the_covering_version_does_not_fall_back(tmp_path):
+def test_cas_missing_row_raises(tmp_path):
     v1 = version(1, "2026-08-03", "2026-09-30")
     v2 = version(2, "2026-10-01", None, rows=[{"isin": ISIN_B, "symbol": "BBB", "class": "non_cas"}])
     table = load(tmp_path, [v1, v2])
@@ -155,6 +167,23 @@ def test_cas_version_requires_operator_approval(tmp_path):
                      {"line": "ok", "date": "2026-07-31", "extra": 1}):
         with pytest.raises(ScheduleError):
             load(tmp_path, [version(operator_approval=approval)])
+
+
+def test_cas_version_requires_source_and_sha256(tmp_path):
+    """A version names its source publication and carries a lowercase 64-hex sha256 of the saved file."""
+    for key in ("publication_id", "source_sha256"):
+        broken = version()
+        del broken[key]
+        with pytest.raises(ScheduleError):
+            load(tmp_path, [broken])
+    for bad in ("", None, "abc", "A" * 64, "g" * 64, "a" * 63, "a" * 65, 123):
+        with pytest.raises(ScheduleError):
+            load(tmp_path, [version(source_sha256=bad)])
+    for bad in ("", None):
+        with pytest.raises(ScheduleError):
+            load(tmp_path, [version(publication_id=bad)])
+    table = load(tmp_path, [version()])
+    assert table.versions[0].source_sha256 == SHA
 
 
 @pytest.mark.parametrize(
@@ -215,7 +244,7 @@ def test_unverified_rows_refuse_the_load(tmp_path):
 # ---- version chain -------------------------------------------------------------------------
 
 
-def test_versions_must_be_contiguous_without_overlap(tmp_path):
+def test_cas_version_dates_contiguous_no_overlap(tmp_path):
     base = dict(rows=[{"isin": ISIN_A, "symbol": "AAA", "class": "cas"}])
     load(tmp_path, [version(1, "2026-08-03", "2026-09-30", **base), version(2, "2026-10-01", None, **base)])
     with pytest.raises(ScheduleError):  # a gap

@@ -194,6 +194,13 @@ _NEXT_DAY_KEYS = ("rule", "window_start_ist", "window_end_ist", "max_calls")
 _EVIDENCE_REF_KEYS = ("source_kind", "record_hash")
 _HHMM = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d", re.ASCII)
 _LABEL = re.compile(r"(\d{4}-\d{2}-\d{2}) (\d{2}):(\d{2}):00", re.ASCII)
+# D-12: the R-15 upper bound is fixed at 1.02 for every CAS class; a schedule cannot move it.
+R15_UPPER_BOUND = Decimal("1.02")
+# D-27 and design section 10: a next-day fetch, if a schedule ever switches it on, stays inside
+# 08:00 to 09:25 IST and inside 40 calls. A schedule may narrow these, never widen them.
+NEXT_DAY_WINDOW_FLOOR = time(8, 0)
+NEXT_DAY_WINDOW_CEILING = time(9, 25)
+NEXT_DAY_MAX_CALLS = 40
 
 
 @dataclass(frozen=True)
@@ -331,8 +338,8 @@ def _parse_band(raw: Any, path: str, status: str) -> VolumeBand:
     band = _object(raw, path)
     _exact(band, _BAND_KEYS, path)
     upper = _decimal_text(band["upper"], f"{path}.upper")
-    if upper <= 0:
-        raise ScheduleError(f"{path}.upper: must be above 0")
+    if upper != R15_UPPER_BOUND:
+        raise ScheduleError(f"{path}.upper: D-12 fixes the R-15 upper bound at {R15_UPPER_BOUND}, got {upper}")
     lower: Decimal | None = None
     if status == "provisional":
         if band["lower"] is not None:
@@ -356,9 +363,14 @@ def _parse_next_day(raw: Any) -> NextDayFetch | None:
     end = _hhmm(spec["window_end_ist"], f"{path}.window_end_ist")
     if not start < end:
         raise ScheduleError(f"{path}: window_start_ist must precede window_end_ist")
+    if start < NEXT_DAY_WINDOW_FLOOR or end > NEXT_DAY_WINDOW_CEILING:
+        raise ScheduleError(
+            f"{path}: D-27 keeps the next-day window inside "
+            f"{NEXT_DAY_WINDOW_FLOOR:%H:%M} to {NEXT_DAY_WINDOW_CEILING:%H:%M} IST"
+        )
     max_calls = spec["max_calls"]
-    if isinstance(max_calls, bool) or not isinstance(max_calls, int) or max_calls < 1:
-        raise ScheduleError(f"{path}.max_calls: expected an integer of at least 1")
+    if isinstance(max_calls, bool) or not isinstance(max_calls, int) or not 1 <= max_calls <= NEXT_DAY_MAX_CALLS:
+        raise ScheduleError(f"{path}.max_calls: expected an integer from 1 to {NEXT_DAY_MAX_CALLS}")
     return NextDayFetch(_fixed(spec, "rule", "next_day_exception_v1", path), start, end, max_calls)
 
 
