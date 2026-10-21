@@ -58,7 +58,7 @@ from gateway_vm import contract  # noqa: E402
 from gateway_vm.breeze_client import BreezeClient  # noqa: E402
 from gateway_vm.egress import EgressChecker  # noqa: E402
 from gateway_vm.events import EventLog  # noqa: E402
-from gateway_vm.session import Credentials, SessionManager  # noqa: E402
+from gateway_vm.session import BudgetExceeded, Credentials, SessionManager  # noqa: E402
 from gateway_vm.orders import (  # noqa: E402
     CONTRACT as ORDERS_CONTRACT,
     ORDER_ROUTES,
@@ -943,8 +943,10 @@ def test_a_session_revoked_during_the_last_read_is_caught_before_the_decision(st
         assert "VERIFIED_NOT_FORWARDED" not in [e["decision"] for e in entries]
 
 
-def call_while_recheck_is_paused(stack: OrderStack, token: str, call):
+def call_while_recheck_is_paused(stack: OrderStack, token: str, call, disturb=None):
     """Run `call` on another thread. After its post-read recheck returns, revoke.
+
+    `disturb` replaces the revoke (for example an egress drift).
 
     require_active has dropped the session lock by the time the recheck returns.
     Pausing there is the window in which a revoke used to be answered 200.
@@ -973,7 +975,10 @@ def call_while_recheck_is_paused(stack: OrderStack, token: str, call):
     worker.start()
     try:
         assert arrived.wait(timeout=5), "the post-read recheck never returned"
-        stack.session.revoke(token)
+        if disturb is None:
+            stack.session.revoke(token)
+        else:
+            disturb()
         release.set()
     finally:
         worker.join(timeout=5)
@@ -1010,6 +1015,106 @@ def test_a_session_revoked_after_the_mint_recheck_returns_issues_no_challenge(st
     epoch = int(stack.clock.now_utc().timestamp())
     assert stack.service.pipeline._challenges.live_count(epoch) == 0
     assert stack.service.pipeline._forward.calls == 0
+
+
+# ----------------------------------------------- audit carries the failure's own code
+
+
+def drift_egress(stack: OrderStack) -> None:
+    """The echoed egress IP stops matching and the last good check no longer counts.
+
+    The clock is not moved: a clock jump would expire the challenge and the
+    deadline codes would win over the egress failure under test.
+    """
+    stack.transport.echo_ip = "203.0.113.9"
+    stack.session._egress_max_age_s = 0
+
+
+def egress_drift_on_read(stack: OrderStack, nth: int) -> list[str]:
+    seen: list[str] = []
+
+    def hook(path: str) -> None:
+        seen.append(path)
+        if len(seen) == nth:
+            drift_egress(stack)
+
+    stack.transport.on_read = hook
+    return seen
+
+
+def assert_chain_verifies(stack: OrderStack, token: str) -> None:
+    seq, _head = stack.service.pipeline._audit.verify()
+    assert seq == len(stack.audit(token))
+
+
+def test_budget_refusal_during_the_authorize_check_is_audited_as_budget_exhausted(stack, token):
+    challenge_id, signature = stack.signed(token)
+    stack.budget.raises = BudgetExceeded("budget_minute", 30)
+    reads = len(stack.transport.breeze_requests())
+    resp = stack.authorize(token, challenge_id, signature)
+    assert code_of(resp)[:2] == (429, "BUDGET_EXHAUSTED")
+    assert len(stack.transport.breeze_requests()) == reads  # nothing left on an exhausted budget
+    entries = stack.audit(token)
+    assert [e["decision"] for e in entries] == ["CHALLENGED", "REFUSED"]
+    assert entries[-1]["codes"] == ["budget_exhausted"]
+    assert entries[-1]["route"] == "authorize"
+    assert_chain_verifies(stack, token)
+
+
+@pytest.mark.parametrize("nth", [1, 5])
+def test_egress_mismatch_during_the_authorize_check_is_audited_as_egress_mismatch(stack, token, nth):
+    # nth=1: the first read's successor is refused. nth=5: the last read ran, so it is
+    # the post-check recheck that finds the mismatch.
+    challenge_id, signature = stack.signed(token)
+    seen = egress_drift_on_read(stack, nth)
+    resp = stack.authorize(token, challenge_id, signature)
+    assert code_of(resp)[:2] == (503, "EGRESS_MISMATCH")
+    assert len(seen) == nth
+    entries = stack.audit(token)
+    assert [e["decision"] for e in entries] == ["CHALLENGED", "REFUSED"]
+    assert entries[-1]["codes"] == ["egress_mismatch"]
+    assert entries[-1]["route"] == "authorize"
+    assert_chain_verifies(stack, token)
+
+
+def test_egress_mismatch_after_the_authorize_recheck_returns_is_audited_as_egress_mismatch(stack, token):
+    challenge_id, signature = stack.signed(token)
+    resp = call_while_recheck_is_paused(
+        stack,
+        token,
+        lambda: stack.authorize(token, challenge_id, signature),
+        disturb=lambda: drift_egress(stack),
+    )
+    assert code_of(resp)[:2] == (503, "EGRESS_MISMATCH")
+    entries = stack.audit(token)
+    assert [e["decision"] for e in entries] == ["CHALLENGED", "VERIFIED_NOT_FORWARDED", "REFUSED"]
+    assert entries[-1]["codes"] == ["egress_mismatch"]
+    assert stack.service.pipeline._forward.calls == 0
+    assert_chain_verifies(stack, token)
+
+
+def test_egress_mismatch_after_the_mint_recheck_returns_is_audited_as_egress_mismatch(stack, token):
+    resp = call_while_recheck_is_paused(
+        stack, token, lambda: stack.mint(token), disturb=lambda: drift_egress(stack)
+    )
+    assert code_of(resp)[:2] == (503, "EGRESS_MISMATCH")
+    assert "challenge_id" not in resp.json()
+    entries = stack.audit(token)
+    assert [e["decision"] for e in entries] == ["CHALLENGED", "REFUSED"]
+    assert entries[-1]["codes"] == ["egress_mismatch"]
+    assert entries[-1]["route"] == "intents"
+    assert_chain_verifies(stack, token)
+
+
+def test_a_real_session_death_during_the_check_is_still_audited_as_no_session(stack, token):
+    challenge_id, signature = stack.signed(token)
+    revoke_on_read(stack, token, 1)
+    resp = stack.authorize(token, challenge_id, signature)
+    assert code_of(resp)[:2] == (503, "NO_SESSION")
+    entries = stack.audit(token)
+    assert [e["decision"] for e in entries] == ["CHALLENGED", "REFUSED"]
+    assert entries[-1]["codes"] == ["no_session"]
+    assert_chain_verifies(stack, token)
 
 
 def test_security_master_fetch_revalidates_the_session_before_the_download(stack, token):

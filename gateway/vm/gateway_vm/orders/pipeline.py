@@ -298,17 +298,25 @@ class OrderPipeline:
         if self._recheck is not None:
             self._recheck()
 
-    def _audit_no_session(
-        self, route: str, intent: Intent | None, result: GuardResult | None
+    def _audit_relay_failure(
+        self,
+        route: str,
+        intent: Intent | None,
+        result: GuardResult | None,
+        failure: RelayFailure,
     ) -> None:
-        """Record REFUSED no_session. The caller re-raises the RelayFailure.
+        """Record REFUSED with the RelayFailure's own code. The caller re-raises it.
 
         require_active drops the session lock before it returns, and authorize
         consumes the intent before the check finishes. A session that dies in
         either gap must leave an audit line. The client still gets the
-        RelayFailure (503 NO_SESSION), not an order refusal.
+        RelayFailure (503 NO_SESSION, 429 BUDGET_EXHAUSTED, 503 EGRESS_MISMATCH),
+        not an order refusal, and the audit line carries that same code in
+        lower case: a budget refusal or an egress mismatch is never recorded as
+        no_session. The code comes from the fixed ERRORS table, so the line
+        holds no reason text and no upstream value.
         """
-        self._append(self._entry(route, intent, "REFUSED", ["no_session"], result))
+        self._append(self._entry(route, intent, "REFUSED", [failure.code.lower()], result))
 
     def _require_audit(self) -> None:
         """Refuse before any side effect if the audit log does not verify.
@@ -393,9 +401,9 @@ class OrderPipeline:
             # the refusal is the last word.
             try:
                 self._recheck_authority()
-            except RelayFailure:
+            except RelayFailure as failure:
                 self._challenges.take(challenge.challenge_id)
-                self._audit_no_session("intents", intent, result)
+                self._audit_relay_failure("intents", intent, result, failure)
                 raise
             # Last look, immediately before success is returned: the audit
             # write is also blocking. A challenge that is already dead, past the
@@ -435,10 +443,12 @@ class OrderPipeline:
             self._intents.consume(intent.intent_id)
             try:
                 result = self._guard.check(intent, s0.wall)
-            except RelayFailure:
-                # The intent id is already consumed. A session that died inside
-                # the check must not leave that with no audit line.
-                self._audit_no_session("authorize", intent, None)
+            except RelayFailure as failure:
+                # The intent id is already consumed. A RelayFailure inside the
+                # check (a dead session, an exhausted budget, an egress
+                # mismatch) must not leave that with no audit line, and the
+                # line names the failure that happened.
+                self._audit_relay_failure("authorize", intent, None, failure)
                 raise
             if result.codes:
                 raise self._refuse("authorize", intent, result.codes, result)
@@ -448,8 +458,8 @@ class OrderPipeline:
             # second, and finished after the deadline is refused.
             try:
                 self._recheck_authority()
-            except RelayFailure:
-                self._audit_no_session("authorize", intent, result)
+            except RelayFailure as failure:
+                self._audit_relay_failure("authorize", intent, result, failure)
                 raise
             s1 = self._sample()
             late = self._time_codes(s0, s1, challenge)
@@ -464,8 +474,8 @@ class OrderPipeline:
             # the last word on the intent.
             try:
                 self._recheck_authority()
-            except RelayFailure:
-                self._audit_no_session("authorize", intent, result)
+            except RelayFailure as failure:
+                self._audit_relay_failure("authorize", intent, result, failure)
                 raise
             # The audit write is blocking too. Sample once more, immediately
             # before success is returned: a write that finished after 15:10 or
