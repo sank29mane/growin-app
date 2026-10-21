@@ -6,7 +6,7 @@ from decimal import Decimal
 import pytest
 
 from pilot_data.bhavcopy import ingest_udiff
-from pilot_data.breeze_bars import ingest_breeze_response
+from pilot_data.breeze_bars import WindowAssessment, ingest_breeze_response
 from pilot_data.core import PilotDataError, SourceDescriptor
 from pilot_data.crosscheck import crosscheck_window
 from pilot_data.models import CrossCheckTolerances, DailyBarConvention
@@ -39,7 +39,7 @@ def ingest_breeze(store, code, rows, start=D2, end=D3):
     return ingest_breeze_response(
         store, desc("breeze_relay", "breeze_v2_1day", f"relay/{code}/{start}/{end}"),
         kit.breeze_v2_json(rows), stock_code=code, requested_from=start, requested_to=end,
-        convention=CONVENTION,
+        convention=CONVENTION, assessment=WindowAssessment.complete_over(start, end),
     )
 
 

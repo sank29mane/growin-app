@@ -23,6 +23,8 @@ DB_FILE_NAME = "pilot_india.duckdb"
 _TABLE_RE = re.compile(r"^[a-z_]+$")
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _CHECK_RE = re.compile(r"^[a-z_]+$")
+_COLUMN_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+_ADDABLE_TYPES = frozenset({"VARCHAR", "INTEGER", "DATE", "BOOLEAN"})
 
 _CORE_DDL = (
     "CREATE TABLE IF NOT EXISTS pilot_store_identity("
@@ -157,6 +159,22 @@ class PilotDataStore:
             if missing:
                 raise PilotDataError("ddl_invalid", f"key columns missing from {name}: {missing}")
             self._tables[name] = tuple(key_columns)
+
+    def ensure_columns(self, name: str, columns: Mapping[str, str]) -> None:
+        """Add nullable columns an older copy of a registered table lacks. Never alters or drops anything."""
+        self._check_table_name(name)
+        with self._lock:
+            if name not in self._tables:
+                raise PilotDataError("table_not_registered", f"table {name} was not registered with ensure_table")
+            present = self.columns(name)
+            for column, sql_type in columns.items():
+                if not _COLUMN_RE.match(column) or sql_type not in _ADDABLE_TYPES:
+                    raise PilotDataError("ddl_invalid", "column name or type is not allowed")
+                if column in present:
+                    continue
+                if self.read_only:
+                    continue  # a read-only opener sees the old shape; readers check `columns()`
+                self._con.execute(f"ALTER TABLE {name} ADD COLUMN {column} {sql_type}")
 
     # ------------------------------------------------------------------ sources
     def _blob_path(self, digest: str) -> Path:

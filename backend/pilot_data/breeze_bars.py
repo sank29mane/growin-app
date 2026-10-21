@@ -10,7 +10,7 @@ import json
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -50,6 +50,29 @@ def ensure_breeze_tables(store: PilotDataStore) -> None:
 class BreezeParse:
     bars: tuple[BreezeDailyBar, ...]
     parse_quarantine_inputs: tuple[ParseQuarantineInput, ...]
+
+
+@dataclass(frozen=True)
+class WindowAssessment:
+    """What the rows of one Breeze answer prove about a requested window.
+
+    complete: every expected session has a bar (and at least one bar is in the window). gaps: the calendar is
+    known and sessions are missing (or the parser quarantined their rows, or no bar fell in the window).
+    unverified: the calendar does not establish the expected sessions. before_listing: no bar or flagged row
+    in the window and the stock listed after it. `span` is the range the verdict actually checked (the floor
+    it used, raised to the probed depth and the listing date, through the window end); it is set for `complete`
+    and is the only range a coverage row may claim. Only `complete` may claim coverage.
+    """
+
+    verdict: Literal["complete", "gaps", "unverified", "before_listing"]
+    gap_days: tuple[date, ...]
+    detail: dict[str, str]
+    span: tuple[date, date] | None = None
+
+    @classmethod
+    def complete_over(cls, first: date, last: date) -> "WindowAssessment":
+        """A complete verdict over [first, last], for callers that checked the answer themselves."""
+        return cls("complete", (), {}, (first, last))
 
 
 @dataclass(frozen=True)
@@ -145,6 +168,52 @@ def parse_breeze_v2_daily(
     return BreezeParse(tuple(kept), tuple(inputs))
 
 
+def _insert_coverage_row(store: PilotDataStore, row: dict[str, Any]) -> Any:
+    """The one low-level insert into breeze_responses. Only `write_breeze_coverage` may call it."""
+    return store.append_rows("breeze_responses", [row], check="breeze_response")
+
+
+def write_breeze_coverage(
+    store: PilotDataStore,
+    assessment: WindowAssessment,
+    *,
+    source_sha256: str,
+    stock_code: str,
+    convention: DailyBarConvention,
+    bars_parsed: int,
+) -> None:
+    """The only writer of `breeze_responses` rows, the rows `BreezeBarsView.covers()` reads.
+
+    A row says "the store knows every session in this range", so it is written only for an answer that was
+    judged `complete`, and its range is the range that judgement checked (`assessment.span`), never the range
+    that was asked for. Anything else is refused. A static guard (test_pilot_data_guards) fails if any other
+    code in this package inserts into the table.
+    """
+    if assessment.verdict != "complete" or assessment.span is None:
+        raise PilotDataError("coverage_not_complete", "only an answer judged complete may claim coverage")
+    requested_from, requested_to = assessment.span
+    if requested_from > requested_to:
+        raise PilotDataError("coverage_span_invalid", "the assessed range is backwards")
+    ensure_breeze_tables(store)
+    convention_json = json.dumps(convention.model_dump(mode="json"), sort_keys=True)
+    outcome = _insert_coverage_row(
+        store,
+        {
+            "source_sha256": source_sha256, "stock_code": stock_code, "requested_from": requested_from,
+            "requested_to": requested_to, "convention_json": convention_json, "bars_parsed": bars_parsed,
+            "parsed_at_utc": utc_naive(datetime.now(timezone.utc)),
+            "row_sha256": canonical_sha256(
+                {
+                    "stock_code": stock_code, "from": requested_from.isoformat(), "to": requested_to.isoformat(),
+                    "convention": convention_json, "bars": bars_parsed,
+                }
+            ),
+        },
+    )
+    if outcome.conflicts:
+        raise PilotDataError("coverage_row_conflict", "breeze_responses already holds a different row for this answer")
+
+
 def ingest_breeze_response(
     store: PilotDataStore,
     descriptor: SourceDescriptor,
@@ -154,10 +223,18 @@ def ingest_breeze_response(
     requested_from: date,
     requested_to: date,
     convention: DailyBarConvention,
+    assessment: WindowAssessment | None = None,
 ) -> BreezeIngestOutcome:
+    """Store the answer's bars that fall inside [requested_from, requested_to], and its parse quarantines.
+
+    A bar outside the window is never stored, whatever the verdict. A coverage row is written, through
+    `write_breeze_coverage`, only when `assessment` says `complete`; with no assessment, or any other verdict,
+    the bars are kept and nothing claims coverage.
+    """
     ensure_breeze_tables(store)
     ref = store.register_source(descriptor, content)
     parsed = parse_breeze_v2_daily(content, stock_code=stock_code, convention=convention)
+    in_window = [bar for bar in parsed.bars if requested_from <= bar.trade_date <= requested_to]
     rows = [
         {
             "stock_code": bar.stock_code, "trade_date": bar.trade_date, "source_sha256": ref.source_sha256,
@@ -165,32 +242,21 @@ def ingest_breeze_response(
             "close": bar.close, "volume": bar.volume, "api": bar.api, "interval": bar.interval,
             "adjustment_basis": bar.adjustment_basis, "row_sha256": bar.row_sha256(),
         }
-        for bar in parsed.bars
+        for bar in in_window
     ]
     outcome = store.append_rows("breeze_bars_raw", rows, check="breeze_bars")
     records = quarantines_from_inputs(
         parsed.parse_quarantine_inputs, check="breeze_parse", source_sha256=ref.source_sha256
     )
     quarantined = store.record_quarantine(records)
-    convention_json = json.dumps(convention.model_dump(mode="json"), sort_keys=True)
-    store.append_rows(
-        "breeze_responses",
-        [
-            {
-                "source_sha256": ref.source_sha256, "stock_code": stock_code, "requested_from": requested_from,
-                "requested_to": requested_to, "convention_json": convention_json,
-                "bars_parsed": len(parsed.bars), "parsed_at_utc": utc_naive(datetime.now(timezone.utc)),
-                "row_sha256": canonical_sha256(
-                    {
-                        "stock_code": stock_code, "from": requested_from.isoformat(),
-                        "to": requested_to.isoformat(), "convention": convention_json,
-                        "bars": len(parsed.bars),
-                    }
-                ),
-            }
-        ],
-        check="breeze_response",
-    )
+    if assessment is not None and assessment.verdict == "complete":
+        span = assessment.span
+        if span is None or span[0] < requested_from or span[1] > requested_to:
+            raise PilotDataError("coverage_span_invalid", "the assessed range lies outside the requested window")
+        write_breeze_coverage(
+            store, assessment, source_sha256=ref.source_sha256, stock_code=stock_code, convention=convention,
+            bars_parsed=sum(1 for bar in in_window if span[0] <= bar.trade_date <= span[1]),
+        )
     return BreezeIngestOutcome(
         ref.source_sha256, outcome.inserted, outcome.identical, outcome.conflicts, quarantined
     )
