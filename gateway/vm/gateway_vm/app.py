@@ -2,8 +2,9 @@
 
 Route handlers are plain `def` (FastAPI runs them in its threadpool) because
 BreezeClient is synchronous. Order on every Breeze-backed route: authorize the
-relay token, validate parameters, require_active(), charge the budget, then the
-one Breeze call. There is no order route and no funds, holdings, positions or
+relay token and read the session in one step (authorize), validate parameters,
+require_active() on what authorize returned, charge the budget, then the one
+Breeze call. There is no order route and no funds, holdings, positions or
 trades route here (Phase 63 owns order relay).
 
 Nothing is written to disk and no body, query value, token, code or Breeze
@@ -353,9 +354,9 @@ def create_app(
 
     @app.get(ROUTE_BARS_DAILY)
     def bars_daily(request: Request, token: Optional[str] = Depends(_bearer)):
-        session.authorize(token)
+        authorization = session.authorize(token)  # token check and session read, one lock hold
         stock_code, from_day, to_day = _parse_bars_query(request)
-        session_token = session.require_active()
+        session_token = session.require_active(authorization)
         charge_budget(budget, events)
 
         from_iso = (from_day - timedelta(days=BARS_FROM_PAD_DAYS)).isoformat() + "T00:00:00.000Z"

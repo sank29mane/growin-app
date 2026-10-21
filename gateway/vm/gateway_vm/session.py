@@ -188,6 +188,22 @@ def _egress_reason(result: EgressResult) -> str:
     return "egress_unavailable"
 
 
+@dataclass(frozen=True)
+class Authorization:
+    """What one authorize() call decided, read under a single lock hold.
+
+    A data route must use this and nothing else it read earlier: the relay token
+    check and the session read cannot be separated by a login or a revoke.
+    `failure` is why no Breeze call may proceed (the 503 family), raised by
+    require_active() so parameter validation can still run first.
+    """
+
+    presented_digest: bytes = field(repr=False)
+    breeze_token: str | None = field(repr=False)
+    failure: RelayFailure | None
+    egress_stale: bool
+
+
 @dataclass
 class _Pending:
     attempt_id: str = field(repr=False)
@@ -269,10 +285,13 @@ class SessionManager:
         return RelayFailure("NO_SESSION")
 
     def _authorize_locked(self, presented_token: str | None) -> None:
+        self._authorize_digest_locked(_digest(presented_token), presented_token is None)
+
+    def _authorize_digest_locked(self, presented_digest: bytes, missing: bool = False) -> None:
         if self._token_digest is None:
             return
-        same = hmac.compare_digest(_digest(presented_token), self._token_digest)
-        if presented_token is None or not same:
+        same = hmac.compare_digest(presented_digest, self._token_digest)
+        if missing or not same:
             raise RelayFailure("UNAUTHORIZED")
 
     def _egress_stale_locked(self) -> bool:
@@ -402,22 +421,35 @@ class SessionManager:
             self._events.emit("login_completed", state=self._state, result="ok")
             return deadline
 
-    def authorize(self, presented_token: str | None) -> None:
+    def authorize(self, presented_token: str | None) -> Authorization:
         with self._lock:
             self._tick_locked()
             self._authorize_locked(presented_token)
-
-    def require_active(self) -> str:
-        with self._lock:
-            self._tick_locked()
             failure = self._inactive_failure_locked()
-            if failure is not None:
-                raise failure
-            stale = self._egress_stale_locked()
-        if stale:
-            self._refresh_egress()
+            return Authorization(
+                presented_digest=_digest(presented_token),
+                breeze_token=self._breeze_token if failure is None else None,
+                failure=failure,
+                egress_stale=failure is None and self._egress_stale_locked(),
+            )
+
+    def require_active(self, auth: Authorization) -> str:
+        """The Breeze token `auth` was issued for, after the egress freshness check.
+
+        Without a refresh this is the token authorize() read. A refresh runs
+        outside the lock, so afterwards the relay token is checked again and the
+        session re-read in one lock hold: a session that died or was replaced in
+        the meantime never serves this request.
+        """
+        if auth.failure is not None:
+            raise auth.failure
+        if not auth.egress_stale:
+            assert auth.breeze_token is not None
+            return auth.breeze_token
+        self._refresh_egress()
         with self._lock:
             self._tick_locked()
+            self._authorize_digest_locked(auth.presented_digest)
             failure = self._inactive_failure_locked()
             if failure is not None:
                 raise failure

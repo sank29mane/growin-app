@@ -86,14 +86,14 @@ def test_deadline_needs_tz_aware_input():
 def test_either_clock_past_the_deadline_expires_the_session(which):
     stack = Stack()
     token = direct_login(stack)
-    assert stack.session.require_active() == BREEZE_TOKEN
+    assert stack.session.require_active(stack.session.authorize(token)) == BREEZE_TOKEN
     if which == "wall":
         stack.clock.now = stack.clock.now.replace(hour=18, minute=30)  # IST midnight
     else:
         stack.clock.mono += 14 * 3600 + 1
     for _ in range(2):  # second call must still fail closed, one event only
         with pytest.raises(RelayFailure) as err:
-            stack.session.require_active()
+            stack.session.require_active(stack.session.authorize(token))
         assert (err.value.code, err.value.reason, err.value.http) == ("SESSION_EXPIRED", "deadline", 503)
     expired = stack.events_named("session_expired")
     assert len(expired) == 1 and expired[0]["reason"] == "deadline"
@@ -662,3 +662,130 @@ def test_threads_racing_a_session_death_all_get_a_c6_error_or_200():
     assert stack.session.state is SessionState.EXPIRED
     assert stack.session._breeze_token is None
     assert len(stack.events_named("session_expired")) == 1
+
+
+# -------------------------------------------- deterministic interleavings
+#
+# No sleeps: a request is parked inside a fake network call (or between two
+# session calls) with an Event pair, the test does the competing step on the
+# main thread, then releases it.
+
+WAIT_S = 10
+
+
+class Parked:
+    """One request running on its own thread until `release()`."""
+
+    def __init__(self, fn) -> None:
+        self.result = None
+        self.error: BaseException | None = None
+        self._thread = threading.Thread(target=self._run, args=(fn,), daemon=True)
+
+    def _run(self, fn) -> None:
+        try:
+            self.result = fn()
+        except BaseException as exc:  # noqa: BLE001 - the test reports it
+            self.error = exc
+
+    def start(self) -> "Parked":
+        self._thread.start()
+        return self
+
+    def join(self):
+        self._thread.join(WAIT_S)
+        assert not self._thread.is_alive(), "parked request never finished"
+        assert self.error is None, repr(self.error)
+        return self.result
+
+
+def park_next_request(stack: Stack, match):
+    """Park the next transport request whose URL satisfies `match`, once.
+
+    Returns (entered, release): `entered` is set when a request is parked,
+    the parked request resumes when `release` is set.
+    """
+    entered, release = threading.Event(), threading.Event()
+    real = stack.transport.request
+    armed = [True]
+
+    def gated(method, url, **kwargs):
+        if armed[0] and match(url):
+            armed[0] = False
+            entered.set()
+            assert release.wait(WAIT_S), "test never released the parked request"
+        return real(method, url, **kwargs)
+
+    stack.transport.request = gated  # type: ignore[method-assign]
+    return entered, release
+
+
+def is_echo(url: str) -> bool:
+    return "api.ipify.org" in url
+
+
+def test_a_tokenless_bars_request_that_passed_authorize_cannot_ride_a_login_that_lands_meanwhile():
+    """Codex P1: authorize() saw no session, a login completed, the request then
+    read the new session and made an upstream bars call without any token."""
+    stack = Stack()
+    parked_after_authorize = threading.Event()
+    resume = threading.Event()
+    real_authorize = stack.session.authorize
+
+    def authorize_then_park(token):
+        decided = real_authorize(token)  # no session bound: a tokenless caller passes
+        parked_after_authorize.set()
+        assert resume.wait(WAIT_S)
+        return decided
+
+    stack.session.authorize = authorize_then_park  # type: ignore[method-assign]
+    client = stack.new_client()
+    request = Parked(lambda: stack.bars(None, client=client)).start()
+    assert parked_after_authorize.wait(WAIT_S)
+
+    stack.session.authorize = real_authorize  # type: ignore[method-assign]
+    logged_in = stack.login()  # a complete login lands while the request is parked
+    assert stack.bars(logged_in).status_code == 200
+    bars_before = len(stack.transport.bars_requests())
+    resume.set()
+
+    resp = request.join()
+    assert resp.status_code == 503 and code_of(resp) == "NO_SESSION"
+    assert len(stack.transport.bars_requests()) == bars_before  # no upstream call for it
+
+
+def test_the_relay_token_is_rechecked_after_an_egress_refresh():
+    """The snapshot authorize() took is not enough once a refresh ran outside the
+    lock: a revoke and a new login meanwhile must make the old bearer a 401."""
+    stack = Stack()
+    old = stack.login()
+    stack.clock.advance(301)  # the egress check is stale: the bars request refreshes it
+    entered, release = park_next_request(stack, is_echo)
+    client = stack.new_client()
+    request = Parked(lambda: stack.bars(old, client=client)).start()
+    assert entered.wait(WAIT_S)
+
+    assert stack.revoke(old).status_code == 200
+    new = stack.login()
+    bars_before = len(stack.transport.bars_requests())
+    release.set()
+
+    resp = request.join()
+    assert resp.status_code == 401 and code_of(resp) == "UNAUTHORIZED"
+    assert len(stack.transport.bars_requests()) == bars_before
+    assert stack.bars(new).status_code == 200
+
+
+def test_a_session_dropped_during_the_egress_refresh_is_a_503_not_a_200():
+    stack = Stack()
+    token = stack.login()
+    stack.clock.advance(301)
+    entered, release = park_next_request(stack, is_echo)
+    client = stack.new_client()
+    request = Parked(lambda: stack.bars(token, client=client)).start()
+    assert entered.wait(WAIT_S)
+    assert stack.revoke(token).status_code == 200
+    bars_before = len(stack.transport.bars_requests())
+    release.set()
+    resp = request.join()
+    assert resp.status_code == 503 and code_of(resp) == "NO_SESSION"
+    assert len(stack.transport.bars_requests()) == bars_before
