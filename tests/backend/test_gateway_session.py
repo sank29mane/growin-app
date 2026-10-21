@@ -719,8 +719,17 @@ def park_next_request(stack: Stack, match):
     return entered, release
 
 
+def is_customerdetails(url: str) -> bool:
+    return url.endswith("/customerdetails")
+
+
 def is_echo(url: str) -> bool:
     return "api.ipify.org" in url
+
+
+def start_complete(stack: Stack, armed: dict) -> Parked:
+    client = stack.new_client()
+    return Parked(lambda: stack.complete(armed["attempt_id"], armed["relay_token"], client=client)).start()
 
 
 def test_a_tokenless_bars_request_that_passed_authorize_cannot_ride_a_login_that_lands_meanwhile():
@@ -789,3 +798,92 @@ def test_a_session_dropped_during_the_egress_refresh_is_a_503_not_a_200():
     resp = request.join()
     assert resp.status_code == 503 and code_of(resp) == "NO_SESSION"
     assert len(stack.transport.bars_requests()) == bars_before
+
+
+def test_a_newer_attempt_that_completes_first_supersedes_the_older_exchange():
+    """Codex P1 repro (a): B completes while A is exchanging; A must not install."""
+    stack = Stack()
+    first = stack.arm().json()
+    entered, release = park_next_request(stack, is_customerdetails)
+    older = start_complete(stack, first)
+    assert entered.wait(WAIT_S)  # A is past its egress check and inside customerdetails
+
+    second = stack.arm().json()
+    assert stack.complete(second["attempt_id"], second["relay_token"]).status_code == 200
+    release.set()
+
+    done = older.join()
+    assert done.status_code == 409 and code_of(done) == "LOGIN_ATTEMPT_INVALID"
+    assert stack.bars(second["relay_token"]).status_code == 200  # B's token still works
+    refused = stack.bars(first["relay_token"])  # A's token never became the session's
+    assert refused.status_code == 401 and code_of(refused) == "UNAUTHORIZED"
+    assert stack.session.state is SessionState.ACTIVE
+
+
+def test_a_newer_arm_alone_supersedes_the_older_exchange():
+    stack = Stack()
+    first = stack.arm().json()
+    entered, release = park_next_request(stack, is_customerdetails)
+    older = start_complete(stack, first)
+    assert entered.wait(WAIT_S)
+    stack.arm()  # replaces the attempt; the exchange of the old one is still running
+    release.set()
+    done = older.join()
+    assert done.status_code == 409 and code_of(done) == "LOGIN_ATTEMPT_INVALID"
+    assert stack.session.state is SessionState.NONE
+    assert stack.bars(first["relay_token"]).status_code == 503
+
+
+def test_an_egress_suspension_during_the_exchange_blocks_the_older_login():
+    """Codex P1 repro (b): B sees an egress mismatch while A is exchanging."""
+    stack = Stack()
+    first = stack.arm().json()
+    entered, release = park_next_request(stack, is_customerdetails)
+    older = start_complete(stack, first)
+    assert entered.wait(WAIT_S)
+
+    stack.transport.echo_ip = OTHER_IP
+    second = stack.arm().json()
+    detected = stack.complete(second["attempt_id"], second["relay_token"])
+    assert detected.status_code == 503 and code_of(detected) == "EGRESS_MISMATCH"
+    release.set()
+
+    done = older.join()
+    assert done.status_code == 503 and code_of(done) == "EGRESS_MISMATCH"
+    assert reason_of(done) == "egress_mismatch"
+    health = stack.client.get("/v1/health", headers=CONTRACT_HDR).json()
+    assert health["state"] == "suspended_egress" and health["egress"]["ok"] is False
+    n = len(stack.transport.bars_requests())
+    for token in (first["relay_token"], second["relay_token"]):
+        resp = stack.bars(token)
+        assert resp.status_code == 503 and code_of(resp) == "EGRESS_MISMATCH"
+    assert len(stack.transport.bars_requests()) == n
+
+
+def test_a_revoke_during_the_exchange_blocks_the_login():
+    stack = Stack()
+    armed = stack.arm().json()
+    entered, release = park_next_request(stack, is_customerdetails)
+    exchange = start_complete(stack, armed)
+    assert entered.wait(WAIT_S)
+    assert stack.revoke(None).status_code == 200
+    release.set()
+    done = exchange.join()
+    assert done.status_code == 409 and code_of(done) == "LOGIN_ATTEMPT_INVALID"
+    assert stack.session.state is SessionState.NONE
+
+
+def test_the_session_dying_during_the_exchange_blocks_the_login():
+    """The generation also moves on a session-dead Breeze error (an expiry)."""
+    stack = Stack()
+    old = stack.login()
+    armed = stack.arm(old).json()
+    entered, release = park_next_request(stack, is_customerdetails)
+    exchange = start_complete(stack, armed)
+    assert entered.wait(WAIT_S)
+    stack.clock.advance(15 * 3600)  # the old session passes its IST deadline
+    assert stack.session.state is SessionState.EXPIRED
+    release.set()
+    done = exchange.join()
+    assert done.status_code == 409 and code_of(done) == "LOGIN_ATTEMPT_INVALID"
+    assert stack.session.state is SessionState.EXPIRED

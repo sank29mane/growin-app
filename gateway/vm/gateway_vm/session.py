@@ -4,7 +4,7 @@ State lives in memory only (OD-17). A restart starts at NONE. Every way the
 session can be missing, stale, revoked or wrong-account fails closed with a
 typed RelayFailure, and the lock is never held while a network call is in
 flight: copy what is needed, release, call, re-acquire and apply, re-checking
-the attempt or epoch the decision was based on.
+the attempt or generation the decision was based on.
 
 Relay token (OD-16): a 256-bit value minted at arm, returned once and held
 only as a sha256 digest. Every comparison goes through hmac.compare_digest.
@@ -244,7 +244,11 @@ class SessionManager:
         self._mono_deadline: float | None = None
         self._dead_reason: str | None = None
         self._pending: _Pending | None = None
-        self._revoke_epoch = 0
+        # Advances whenever the login picture changes under an in-flight exchange:
+        # an attempt is replaced, the session is dropped (revoke, expiry, session
+        # death, egress suspension) or an egress check fails. complete() refuses
+        # to install a token if it moved.
+        self._generation = 0
         self._last_egress: EgressResult | None = None
         self._last_egress_mono: float | None = None
 
@@ -253,6 +257,7 @@ class SessionManager:
     def _drop_locked(self, state: SessionState, reason: str | None) -> None:
         """Forget the Breeze token and the relay token, keep the reason."""
         had_session = self._breeze_token is not None
+        self._generation += 1
         self._state = state
         self._breeze_token = None
         self._token_digest = None
@@ -294,6 +299,12 @@ class SessionManager:
         if missing or not same:
             raise RelayFailure("UNAUTHORIZED")
 
+    def _superseded_failure_locked(self) -> RelayFailure:
+        """Why an exchange that started under an older generation may not install."""
+        if self._state is SessionState.SUSPENDED_EGRESS:
+            return RelayFailure("EGRESS_MISMATCH", reason=self._dead_reason or "egress_mismatch")
+        return RelayFailure("LOGIN_ATTEMPT_INVALID")
+
     def _egress_stale_locked(self) -> bool:
         return (
             self._last_egress_mono is None
@@ -306,6 +317,8 @@ class SessionManager:
         with self._lock:
             self._last_egress = result
             self._last_egress_mono = self._clock.monotonic()
+            if not result.ok:
+                self._generation += 1  # an exchange already in flight is no longer trustworthy
         self._events.emit(
             "egress_check",
             result="ok" if result.ok else ("rejected" if _egress_reason(result) == "egress_mismatch" else "error"),
@@ -330,6 +343,7 @@ class SessionManager:
             self._authorize_locked(presented_token)
             attempt_id = secrets.token_urlsafe(16)  # 128 bit
             relay_token = secrets.token_urlsafe(32)  # 256 bit
+            self._generation += 1  # an exchange of an earlier attempt must not land
             expires = self._clock.now_utc() + timedelta(seconds=self._arm_window_s)
             self._pending = _Pending(
                 attempt_id=attempt_id,
@@ -378,7 +392,7 @@ class SessionManager:
                 raise RelayFailure("LOGIN_ATTEMPT_INVALID")
             self._pending = None  # disarm before any Breeze call: single use
             new_digest = pending.token_digest
-            epoch = self._revoke_epoch
+            generation = self._generation
 
         egress = self._run_egress()
         if not egress.ok:
@@ -408,8 +422,8 @@ class SessionManager:
             raise RelayFailure("IDENTITY_MISMATCH", reason="segment_disabled")
 
         with self._lock:
-            if self._revoke_epoch != epoch:
-                raise RelayFailure("LOGIN_ATTEMPT_INVALID")  # revoked while exchanging
+            if self._generation != generation:
+                raise self._superseded_failure_locked()  # replaced, revoked or suspended meanwhile
             now = self._clock.now_utc()
             deadline = session_deadline(now)
             self._breeze_token = details.session_token
@@ -479,7 +493,6 @@ class SessionManager:
         with self._lock:
             self._tick_locked()
             self._authorize_locked(presented_token)
-            self._revoke_epoch += 1
             self._pending = None
             self._drop_locked(SessionState.NONE, None)
             self._events.emit("session_revoked", state=self._state, result="ok")
