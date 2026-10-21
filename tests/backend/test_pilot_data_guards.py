@@ -367,6 +367,12 @@ def test_the_coverage_scan_sees_an_aliased_or_stored_use_of_the_low_level_insert
     assert low_level and not set(low_level) <= ALLOWED_LOW_LEVEL_CALL_SITES
 
 
+def test_the_coverage_scan_flags_the_call_site_of_an_aliased_low_level_insert_not_only_its_import():
+    source = "from .breeze_bars import _insert_coverage_row as put\ndef sneak(store, row):\n    put(store, row)\n"
+    _, low_level = coverage_write_sites("other.py", source)
+    assert ("other.py", "sneak") in low_level and ("other.py", "<module>") in low_level
+
+
 def test_the_coverage_scan_leaves_an_unrelated_table_constant_and_append_one_alone():
     source = (
         'TABLE = "backfill_events"\n'
