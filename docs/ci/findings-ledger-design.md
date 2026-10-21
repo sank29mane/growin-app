@@ -92,7 +92,7 @@ or table rows both work, and the backticks are optional:
 
 | Disposition | Rule |
 |---|---|
-| `fixed` | Must name at least one test node id: `path.py::name` (nested classes join with `::`) or `path.swift::testName`. With `--repo-root`, each named test must exist at the head. Python files are parsed with `ast`, and Swift files get a text scan for `func <name>(`, which covers XCTest methods and `@Test func`. Nothing is imported, built or run. A missing `@pytest.mark.finding("<id>")` marker on a Python test is a note, not a problem (idea 3). Swift tests carry no markers. |
+| `fixed` | Must name at least one test node id: `path.py::name` (nested classes join with `::`) or `path.swift::testName`. With `--repo-root`, each named test must exist at the head. Python files are parsed with `ast`. Swift files get a text scan after comments and string literals are blanked: a function counts if it carries `@Test`, or is an XCTest-style `func test...()` instance method with no arguments that is not `private` or `static`. A commented-out test reads as `test-missing`. The scan does not check that the method sits in an `XCTestCase` subclass. Nothing is imported, built or run. A missing `@pytest.mark.finding("<id>")` marker on a Python test is a note, not a problem (idea 3). Swift tests carry no markers. |
 | `residual`, `declined`, `deferred` | Need a reason. |
 | `dup <id>` | Takes the status of the target. Loops are invalid, and so is an unknown target. |
 | `noted` | Only for review summaries (`gh-r…`), which often hold no action. |
@@ -284,25 +284,37 @@ on its first run.
    rewrite the check that judges it. The `fixed` test lookup then needs
    the PR's test files read through the API as data
    (`repos/.../contents/<path>?ref=<head>`), not checked out.
-3. Make it a required check only for PRs that touch
-   `.github/safety-paths.txt` paths, at first.
+3. Make it a required check for every PR, failing on `missing` and
+   `invalid` only. `test-missing` stays a warning until idea 2 runs the
+   named tests, because a test that exists can still prove nothing.
 4. Debounce `edited` events, or re-read the body once after a short delay
    before failing, to absorb transient wrong bodies.
 
-## Open questions for the operator
+## Decisions (operator, 2026-10-22)
 
-1. Should review summaries (`gh-r…`) need a line, or only inline comments?
-   Summaries hold bugs too (the #585 second review's status table), and
-   `noted` is cheap, so the prototype requires them.
-2. Should CodeRabbit count? It is noisy, but on #586 its five inline
-   comments were real minor findings. The prototype counts it.
-3. When enforcement comes, should "missing" block only safety-path PRs, or
-   all of them?
-4. Will the reviewer briefs adopt the `<source>-r<round>-<n>` id
-   convention, and should the fix brief template carry the sticky comment
-   verbatim?
-5. Is it acceptable that a `fixed` claim names a test by node id in the PR
-   body, or should the marker (idea 3) be the only link?
+The operator took the defaults below. Each one holds only while it pays
+for itself on real PRs; the two-week warn-only run is where that gets
+checked.
+
+1. **Review summaries need a line.** `gh-r` ids stay in the ledger and
+   `noted` closes them. Summaries hold bugs too (the #585 second review's
+   status table).
+2. **CodeRabbit counts.** It skips draft PRs, so on this repo it mostly
+   reviews a PR once it is ready. A noisy comment costs one `declined`
+   line.
+3. **Enforcement covers every PR**, but blocks only on `missing` and
+   `invalid` (step 3 above). The #585 miss was a process failure, not a
+   path one.
+4. **Reviewer briefs use `<source>-r<round>-<n>` ids, and every fix brief
+   carries the sticky comment verbatim.** This needs no CI and starts now.
+   It is what would have put the #585 liveness bug in front of the fixer
+   on round 1.
+5. **A `fixed` line names its tests by node id.** The `finding` marker
+   stays optional: Swift tests cannot carry it, and pytest 7.4.4 cannot
+   select on its arguments.
+
+Order of work: brief templates now; this PR merges warn-only; two weeks of
+data; then the enforcement steps above; then idea 2. Idea 4 stays skipped.
 
 ## Deferred
 

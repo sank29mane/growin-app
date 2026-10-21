@@ -70,7 +70,15 @@ TABLE_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 NODE_RE = re.compile(r"(?P<path>[\w./-]+\.(?:py|swift))::(?P<name>[\w:]+)(?:\[[^\]\s]*\])?")
-SWIFT_FUNC_RE = re.compile(r"\bfunc\s+(\w+)\s*\(")
+SWIFT_MODS = (r"(?:@\w+(?:\([^()]*\))?"
+              r"|\b(?:private|fileprivate|internal|public|open|static|class|final|override|nonisolated|mutating)\b)")
+# XCTest runs `func test...()` instance methods that take no arguments.
+SWIFT_XCTEST_RE = re.compile(rf"(?<![\w.])(?P<mods>(?:{SWIFT_MODS}\s+)*)func\s+(?P<name>test\w*)\s*\(\s*\)")
+SWIFT_NOT_RUN = {"static", "class", "private", "fileprivate"}
+# Swift Testing: `@Test` or `@Test(...)`, then attributes or modifiers, then the func.
+SWIFT_TEST_ATTR_RE = re.compile(r"@Test\b")
+SWIFT_DECL_RE = re.compile(rf"(?:\s|{SWIFT_MODS})*func\s+(?P<name>\w+)\s*[(<]")
+SWIFT_STRING_RE = re.compile(r'(#*)("""|")')
 SAFE_PATH_RE = re.compile(r"^[\w./-]{1,200}$")
 SAFE_LOGIN_RE = re.compile(r"^[\w-]{1,39}(\[bot\])?$")
 
@@ -264,9 +272,10 @@ def mentioned_ids(rounds: list[tuple[int, str]]) -> dict[str, int]:
 class TestIndex:
     """Answers "does this test exist, and which finding markers does it carry".
 
-    Python files are parsed with ast. Swift files get a text scan for
-    `func <name>(`, which covers XCTest methods and `@Test func`. Swift tests
-    carry no markers. It never imports, builds or runs PR code."""
+    Python files are parsed with ast. Swift files get a text scan, after
+    comments and string literals are blanked, for `@Test func` and XCTest
+    `func test...()` methods. Swift tests carry no markers. It never imports,
+    builds or runs PR code."""
 
     def __init__(self, root: Path):
         self.root = root.resolve()
@@ -292,13 +301,77 @@ class TestIndex:
             try:
                 text = target.read_text(encoding="utf-8")
                 if target.suffix == ".swift":
-                    result = {name: set() for name in SWIFT_FUNC_RE.findall(text)}
+                    result = _index_swift(text)
                 elif target.suffix == ".py":
                     result = _index_module(ast.parse(text))
             except (SyntaxError, UnicodeDecodeError, OSError):
                 result = None
         self._cache[path] = result
         return result
+
+
+def _swift_code(text: str) -> str:
+    """Swift source with comments removed and string literals emptied, so a
+    commented-out or quoted `func testX(` does not count. Newlines are kept.
+    Block comments nest, as in SignerSourceScan.stripComments. Strings cover
+    "...", multi-line and raw (#"..."#) literals. A `\\(...)` interpolation
+    holding its own string is not tracked, which only matters if a test's
+    declaration sits inside one."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+        elif text.startswith("/*", i):
+            depth, i = 1, i + 2
+            while i < n and depth:
+                if text.startswith("/*", i):
+                    depth, i = depth + 1, i + 2
+                elif text.startswith("*/", i):
+                    depth, i = depth - 1, i + 2
+                else:
+                    if text[i] == "\n":
+                        out.append("\n")
+                    i += 1
+            out.append(" ")
+        elif m := SWIFT_STRING_RE.match(text, i):
+            hashes, quote = m.groups()
+            close, i = quote + hashes, m.end()
+            while i < n and not text.startswith(close, i):
+                if text[i] == "\\" and not hashes:
+                    i += 2
+                    continue
+                if text[i] == "\n":
+                    if quote == '"':
+                        break  # an unterminated one-line string ends at the line
+                    out.append("\n")
+                i += 1
+            if text.startswith(close, i):
+                i += len(close)
+            out.append('""')
+        else:
+            out.append(text[i])
+            i += 1
+    return "".join(out)
+
+
+def _index_swift(text: str) -> dict[str, set[str]]:
+    code = _swift_code(text)
+    names = {m["name"] for m in SWIFT_XCTEST_RE.finditer(code) if not SWIFT_NOT_RUN & set(m["mods"].split())}
+    for m in SWIFT_TEST_ATTR_RE.finditer(code):
+        i = m.end()
+        while i < len(code) and code[i].isspace():
+            i += 1
+        if i < len(code) and code[i] == "(":
+            depth = 0
+            while i < len(code):
+                depth += {"(": 1, ")": -1}.get(code[i], 0)
+                i += 1
+                if depth == 0:
+                    break
+        if d := SWIFT_DECL_RE.match(code, i):
+            names.add(d["name"])
+    return {name: set() for name in names}
 
 
 def _marker_ids(decorators) -> set[str]:

@@ -373,6 +373,64 @@ def test_a_swift_fix_can_be_marked_fixed(repo):
     assert {r.id: r for r in report.rows}["gh-c1"].notes == []
 
 
+SWIFT_TRAPS = r'''
+import XCTest
+import Testing
+
+final class FooTests: XCTestCase {
+    // func testRemoved() { }
+    /* func testAlsoGone() {} */
+    /* outer /* inner */ func testNestedGone() {} */
+    let s = "func testInString("
+    let r = #"func testInRaw() " still raw"#
+    let q = #"a lone " quote"#; func testAfterRaw() {}
+    let m = """
+        func testInMultiline() {}
+        """
+    let url = "http://x"; func testAfterURL() {}
+    /* note */ func testAfterBlock() throws {}
+    private func helper(x: Int) {}
+    private static func testService() -> String { "svc" }
+    func testTakesArgs(x: Int) {}
+    @MainActor func testOnMain() async throws {}
+}
+
+@Suite struct Cases {
+    @Test(arguments: ["a)", "b"])
+    func parameterised(x: String) {}
+    @Test("display (name)") @MainActor
+    static func attributed() async {}
+    @Test(.timeLimit(.minutes(1)), arguments: [1])
+    func timed(x: Int) {}
+    func notATest() {}
+}
+'''
+
+
+def test_swift_comments_strings_and_helpers_are_not_tests(tmp_path):
+    (tmp_path / "GrowinTests").mkdir()
+    (tmp_path / "GrowinTests" / "FooTests.swift").write_text(SWIFT_TRAPS)
+    idx = fl.TestIndex(tmp_path)
+    path = "GrowinTests/FooTests.swift"
+    # The review's probe: commented-out, quoted and helper functions are not tests.
+    for name in ("testRemoved", "testAlsoGone", "testNestedGone", "testInString", "testInRaw",
+                 "testInMultiline", "helper", "testService", "testTakesArgs", "notATest"):
+        assert idx.lookup(path, name) is None, name
+    # A string or comment does not hide the code after it.
+    for name in ("testAfterURL", "testAfterBlock", "testAfterRaw", "testOnMain",
+                 "parameterised", "attributed", "timed"):
+        assert idx.lookup(path, name) == set(), name
+
+
+def test_a_commented_out_swift_test_is_test_missing(repo):
+    path = repo / "GrowinTests" / "SignerSourceScanTests.swift"
+    path.write_text(path.read_text().replace("    func testAliasFlagged()", "    // func testAliasFlagged()"))
+    body = """## Review round 1
+- `gh-c1` fixed `GrowinTests/SignerSourceScanTests.swift::testAliasFlagged`
+"""
+    assert statuses(judge(body, "gh-c1", tests=fl.TestIndex(repo))) == {"gh-c1": "test-missing"}
+
+
 def test_the_index_refuses_paths_outside_the_root(repo):
     idx = fl.TestIndex(repo / "tests")
     assert idx.lookup("../outside.py", "test_secret") is None
