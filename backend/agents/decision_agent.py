@@ -17,12 +17,11 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 from pydantic import BaseModel, Field
-from magentic import prompt as mag_prompt
 from langchain_core.messages import SystemMessage, HumanMessage
 from .critic_binding import clear_review, consume_registration
 from .llm_factory import LLMFactory
 from model_registry import ROLE_DECISION, ModelRegistryError, ProviderError
-from model_registry.provider import image_message_content, run_magentic
+from model_registry.provider import image_message_content, run_structured
 from utils.audit_log import AUDIT_UNSCOPED, log_audit
 from execution import (
     ExecutionConflictError,
@@ -44,15 +43,30 @@ class ToolCall(BaseModel):
     conviction_level: int = Field(default=5, ge=1, le=10, description="Confidence in this decision (1-10)")
     is_high_conviction: bool = Field(default=False, description="Explicitly marked as high conviction setup")
 
-@mag_prompt(
+class ToolCallList(BaseModel):
+    """The structured answer of the tool-call extraction: the calls, possibly none."""
+    tool_calls: List[ToolCall] = Field(default_factory=list, description="Every tool call found, in order; empty when there are none")
+
+EXTRACT_TOOL_CALLS_TEMPLATE = (
     "Extract all tool calls from the following LLM response.\n"
     "Response: {content}\n"
     "Reasoning: {reasoning}\n"
     "Context: Looking for tool calls in the format [TOOL:name(args)].\n"
-    "Return a list of ToolCall objects."
+    "Return every call found as ToolCall objects in tool_calls, or an empty list when there are none."
 )
-def extract_tool_calls(content: str, reasoning: str) -> List[ToolCall]:
-    ...
+
+async def extract_tool_calls(content: str, reasoning: str) -> List[ToolCall]:
+    """Extract tool calls from a reply through the decision role's json_schema output.
+
+    This is plain structured extraction: the model never holds tools. Output that
+    does not validate raises ``ProviderError`` (``STRUCTURED_OUTPUT_INVALID``).
+    """
+    reply = await run_structured(
+        ROLE_DECISION,
+        [{"role": "user", "content": EXTRACT_TOOL_CALLS_TEMPLATE.format(content=content, reasoning=reasoning)}],
+        ToolCallList,
+    )
+    return reply.tool_calls
 
 class ThinkingParser:
     """Helper to extract thinking blocks from a stream of tokens."""
@@ -671,8 +685,8 @@ class DecisionAgent:
 
                 response_id = None
                 
-                # SOTA 2026: Agentic Tool Extraction via Magentic, bound to the decision role
-                tool_calls = await run_magentic(ROLE_DECISION, extract_tool_calls, content, reasoning)
+                # SOTA 2026: Agentic Tool Extraction (json_schema output), bound to the decision role
+                tool_calls = await extract_tool_calls(content, reasoning)
                 
                 if tool_calls:
                     from status_manager import status_manager

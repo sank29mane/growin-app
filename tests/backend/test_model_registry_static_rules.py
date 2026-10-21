@@ -127,6 +127,10 @@ ALLOWLIST: Dict[Tuple[str, str, str], str] = {
         "operator's chosen id against LM Studio's own loaded list; the brief keeps "
         "this file untouched and it selects no runtime role"
     ),
+    ("backend/model_registry/provider.py", "R3", "served != requested"): (
+        "67-FU1 MODEL_MISMATCH: exact equality of the model id the reply names with the id "
+        "the registry sent; compares no literal and infers nothing from the name"
+    ),
     ("backend/routes/agent_routes.py", "R3", "model_id in loaded_models"): (
         "operator route /api/models/lmstudio/load: the same loaded-list membership "
         "check for the LM Studio management tool; it selects no runtime role"
@@ -461,8 +465,12 @@ def test_the_scan_sees_the_tree_and_the_prompt_functions():
     prompts: Set[str] = set()
     for path in backend_files():
         prompts |= prompt_function_names(path.read_text(encoding="utf-8"))
-    assert {"extract_tool_calls", "conduct_risk_audit", "generate_news_query"} <= prompts
-    assert "analyze_portfolio_quality" not in prompts
+    # 67-FU1: the critic, decision and research calls moved to ``run_structured``
+    # (json_schema output), so no magentic prompt function is left in the backend.
+    # The scanner itself is still proven live on planted source.
+    assert prompts == set()
+    planted = '@mag_prompt("hi")\ndef ask(x: str) -> str: ...'
+    assert prompt_function_names(planted) == {"ask"}
 
 
 def test_no_model_guessing_literals_constants_comparisons_or_bare_magentic_calls():

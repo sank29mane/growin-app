@@ -6,17 +6,17 @@ from market_context import MarketContext, PriceData, PortfolioData
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 import model_registry_testkit as kit
-from model_registry_testkit import key_env, network_guard, registry_factory, stub  # noqa: F401
+from model_registry_testkit import key_env, network_guard, registry_factory, risk_workspace, stub  # noqa: F401
 
 @pytest.mark.asyncio
-async def test_wash_sale_blocking(stub, registry_factory):
+async def test_wash_sale_blocking(stub, registry_factory, risk_workspace):
     """Verify that RiskAgent surfaces the risk critic's BLOCKED verdict for a wash-sale BUY.
 
     The critic is the registry's risk_critic role served by the loopback stub; the
     test checks the wash-sale alert reaches the prompt and the verdict comes back.
     """
     registry_factory()
-    stub.tool_arguments["return_riskassessment"] = {
+    stub.structured["RiskAssessment"] = {
         "status": "BLOCKED",
         "confidence_score": 0.1,
         "risk_assessment": "WASH SALE DETECTED: AAPL was sold for a loss recently.",

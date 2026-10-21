@@ -27,6 +27,7 @@ from model_registry_testkit import (  # noqa: F401  (fixtures)
     key_env,
     network_guard,
     registry_factory,
+    risk_workspace,
     stub,
 )
 
@@ -40,6 +41,12 @@ DEAD_RISK = kit.dead_provider_urls("ollama")  # used when risk_critic is moved t
 @pytest.fixture(autouse=True)
 def _no_real_network(network_guard):
     return network_guard
+
+
+@pytest.fixture(autouse=True)
+def _risk_workspace(risk_workspace):
+    """The critic needs the loaded workspace config for its limits and currency."""
+    return risk_workspace
 
 
 @pytest.fixture(autouse=True)
@@ -328,7 +335,7 @@ async def test_risk_review_rejects_ordinary_non_model_failures(tmp_path, stub, k
     from agents.risk_agent import RiskAgent
 
     _activate(tmp_path, stub)
-    with patch("agents.risk_agent.run_magentic", new=AsyncMock(side_effect=ValueError("bad output"))):
+    with patch("agents.risk_agent.run_structured", new=AsyncMock(side_effect=ValueError("bad output"))):
         with pytest.raises(ProviderError) as caught:
             await RiskAgent().review(_context(), "BUY 1 share of AAPL")
     assert caught.value.code == "CRITIC_OUTPUT_INVALID"
@@ -437,8 +444,8 @@ async def test_risk_provider_failure_registers_and_broadcasts_nothing(tmp_path, 
 async def test_rebuttal_failure_registers_and_broadcasts_nothing(tmp_path, stub, key_env):
     """A FLAGGED review triggers a rebuttal from the decision role. If that fails, nothing is registered."""
     _activate(tmp_path, stub)
-    stub.tool_arguments["return_riskassessment"] = {
-        **kit.STUB_TOOL_ARGUMENTS["return_riskassessment"],
+    stub.structured["RiskAssessment"] = {
+        **kit.STUB_STRUCTURED_REPLIES["RiskAssessment"],
         "status": "FLAGGED",
     }
     orchestrator = OrchestratorAgent(mcp_client=MagicMock(), chat_manager=MagicMock())
@@ -573,7 +580,7 @@ async def test_research_still_degrades_on_a_non_model_error(tmp_path, stub, key_
     from agents.research_agent import ResearchAgent
 
     _activate(tmp_path, stub)
-    with patch("agents.research_agent.run_magentic", new=AsyncMock(side_effect=ValueError("bad output"))):
+    with patch("agents.research_agent.run_structured", new=AsyncMock(side_effect=ValueError("bad output"))):
         params = await ResearchAgent()._generate_smart_query("AAPL")
     assert params["q"] == "AAPL stock market news"
 
@@ -755,7 +762,7 @@ async def test_schema_invalid_critic_registers_and_broadcasts_nothing(
     tmp_path, stub, key_env, private_config_dir, streaming, intent
 ):
     _activate(tmp_path, stub)
-    stub.tool_arguments["return_riskassessment"] = {"status": "NOT_A_VERDICT"}
+    stub.structured["RiskAssessment"] = {"status": "NOT_A_VERDICT"}
     assert state.start_execution(tmp_path / "execution.sqlite3", workspace="uk", private_dir=private_config_dir)
     try:
         orchestrator = OrchestratorAgent(mcp_client=MagicMock(), chat_manager=MagicMock())
@@ -802,7 +809,7 @@ async def test_failed_review_clears_previous_success_binding(tmp_path, stub, key
     context.user_context["deferred_proposal"] = proposal
     await RiskAgent().review(context, "BUY AAPL")
     require_review(context, proposal)
-    stub.tool_arguments["return_riskassessment"] = {}
+    stub.structured["RiskAssessment"] = {}
     with pytest.raises(ProviderError):
         await RiskAgent().review(context, "BUY MSFT")
     with pytest.raises(ModelRegistryError):

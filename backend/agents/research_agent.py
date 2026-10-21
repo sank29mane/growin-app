@@ -25,9 +25,8 @@ import os
 import asyncio
 import re
 from pydantic import BaseModel, Field
-from magentic import prompt as mag_prompt
 from model_registry import ROLE_RESEARCH, ModelRegistryError, ProviderError
-from model_registry.provider import run_magentic
+from model_registry.provider import run_structured
 from resilience import get_circuit_breaker, CircuitBreakerOpenError
 from utils.http_client import agent_http_client
 
@@ -44,7 +43,7 @@ class NewsDataQueryParams(BaseModel):
     category: Optional[str] = Field(None, description="News category (e.g. 'business,technology,politics')")
     domain: Optional[str] = Field(None, description="Specific domains to include (e.g. 'reuters.com,bloomberg.com')")
 
-@mag_prompt(
+NEWS_QUERY_TEMPLATE = (
     "Generate optimal NewsData.io API query parameters for a professional financial research agent.\n"
     "Context: Researching news for {ticker} (Company: {company_name}).\n"
     "Goal: High-relevance financial and market-moving news only.\n"
@@ -55,8 +54,14 @@ class NewsDataQueryParams(BaseModel):
     "3. Focus on recent business, economy, or technology categories if applicable.\n"
     "4. Exclude irrelevant buzzwords."
 )
-def generate_news_query(ticker: str, company_name: str, market_context: str) -> NewsDataQueryParams:
-    ...
+
+async def generate_news_query(ticker: str, company_name: str, market_context: str) -> NewsDataQueryParams:
+    """NewsData.io query parameters through the research role's json_schema output."""
+    return await run_structured(
+        ROLE_RESEARCH,
+        [{"role": "user", "content": NEWS_QUERY_TEMPLATE.format(ticker=ticker, company_name=company_name, market_context=market_context)}],
+        NewsDataQueryParams,
+    )
 
 class ResearchAgent(BaseAgent):
     """
@@ -489,16 +494,16 @@ class ResearchAgent(BaseAgent):
 
     async def _generate_smart_query(self, user_query: str) -> Optional[Dict]:
         """
-        SOTA 2026: Agentic News Query Generation via Magentic.
+        SOTA 2026: Agentic News Query Generation (json_schema output).
         Uses structured output via Pydantic to ensure valid API parameters.
         """
         try:
             # Context for the LLM
             market_context = f"Analyzing {user_query} for market-moving events."
             
-            # Execute magentic prompt (async execution)
+            # Structured output through the research role
             # This is significantly more robust than manual string parsing.
-            params_obj = await run_magentic(ROLE_RESEARCH, generate_news_query, user_query, user_query, market_context)
+            params_obj = await generate_news_query(user_query, user_query, market_context)
             
             # Convert Pydantic object to dict for the API client
             params = params_obj.model_dump(exclude_none=True)
@@ -508,22 +513,33 @@ class ResearchAgent(BaseAgent):
             params["language"] = "en"
             params["excludefield"] = "ai_summary"
             
-            logger.info(f"Smart Query Generated (Magentic): {params}")
+            logger.info(f"Smart Query Generated: {params}")
             return params
             
-        except (ModelRegistryError, ProviderError):
-            # A missing role or failing provider must surface, not degrade silently.
+        except ProviderError as e:
+            # A missing role, a failing provider or a model mismatch must surface,
+            # not degrade silently. Only a reply that failed schema validation
+            # falls back to the basic query below, as non-model failures always did.
+            if e.code != "STRUCTURED_OUTPUT_INVALID":
+                raise
+            logger.warning("Smart query reply failed schema validation. Falling back to basic query.")
+            return self._basic_news_query(user_query)
+        except ModelRegistryError:
+            # A missing role or registry must surface, not degrade silently.
             raise
         except Exception as e:
 
 
-            handle_error(e, "Magentic smart query generation failed. Falling back to basic query.", logger, raise_error=False)
+            handle_error(e, "Smart query generation failed. Falling back to basic query.", logger, raise_error=False)
             # Fail-soft: Return a basic query if the structured generation fails
-            return {
-                "q": f"{user_query} stock market news",
-                "apikey": self.newsdata_key,
-                "language": "en"
-            }
+            return self._basic_news_query(user_query)
+
+    def _basic_news_query(self, user_query: str) -> Dict:
+        return {
+            "q": f"{user_query} stock market news",
+            "apikey": self.newsdata_key,
+            "language": "en"
+        }
 
     def _deduplicate_articles(self, articles: List[Dict]) -> List[Dict]:
         """Remove duplicate articles based on normalized title or URL."""
