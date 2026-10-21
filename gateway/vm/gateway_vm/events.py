@@ -75,7 +75,7 @@ _VALIDATORS = {
     "breeze_status": lambda v: v is None or _is_int(v),
     "ms": _non_negative_int,
     "count": _non_negative_int,
-    "request_id": lambda v: isinstance(v, str) and REQUEST_ID_RE.match(v) is not None,
+    "request_id": lambda v: isinstance(v, str) and REQUEST_ID_RE.fullmatch(v) is not None,
 }
 
 

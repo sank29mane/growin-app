@@ -871,3 +871,71 @@ def test_every_route_in_the_app_has_a_query_allowlist(stack: Stack):
     assert set(contract.ALLOWED_QUERY_BY_ROUTE) == set(contract.ROUTES)
     assert {route.path for route in stack.app.routes} == set(contract.ALLOWED_QUERY_BY_ROUTE)
     assert contract.ALLOWED_QUERY_BY_ROUTE[contract.ROUTE_BARS_DAILY] == contract.ALLOWED_BARS_QUERY
+
+
+# ----------------------------- fullmatch, never match (trailing newline)
+
+
+NEWLINE_SAMPLES = {
+    "STOCK_CODE_RE": "RELIND",
+    "ATTEMPT_ID_RE": "A" * 22,
+    "DATE_RE": "2025-06-02",
+    "REQUEST_ID_RE": "0123456789abcdef",
+    "API_SESSION_RE": CODE,
+    "BEARER_RE": "Bearer " + "A" * 43,
+    "HOST_RE": "127.0.0.1:8443",
+}
+
+
+@pytest.mark.parametrize("name", list(NEWLINE_SAMPLES))
+def test_contract_patterns_refuse_a_trailing_newline_under_fullmatch(name):
+    pattern = getattr(contract, name)
+    sample = NEWLINE_SAMPLES[name]
+    assert pattern.fullmatch(sample)
+    assert pattern.fullmatch(sample + "\n") is None
+    assert pattern.fullmatch("\n" + sample) is None
+
+
+def test_every_compiled_pattern_in_contract_is_covered_by_the_newline_check():
+    compiled = {n for n, v in vars(contract).items() if isinstance(v, re.Pattern)}
+    assert compiled == set(NEWLINE_SAMPLES)
+
+
+def test_events_and_contract_never_call_match_or_search():
+    for name in ("events.py", "contract.py"):
+        tree = ast.parse((PKG / name).read_text())
+        calls = [
+            node.func.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        ]
+        assert not {"match", "search"} & set(calls), f"{name} uses a non-anchored pattern call"
+
+
+def test_event_log_refuses_a_request_id_with_a_trailing_newline():
+    log, sink = make_log()
+    log.emit("request", request_id="0123456789abcdef")
+    with pytest.raises(ValueError):
+        log.emit("request", request_id="0123456789abcdef\n")
+    assert sink.getvalue().count("\n") == 1  # only the good line was written
+
+
+def test_a_trailing_newline_is_422_in_the_attempt_id_apisession_and_stock_code(stack: Stack):
+    armed = stack.arm().json()
+    token = armed["relay_token"]
+    for body in (
+        {"attempt_id": armed["attempt_id"] + "\n", "apisession": CODE},
+        {"attempt_id": armed["attempt_id"], "apisession": CODE + "\n"},
+    ):
+        resp = stack.client.post(
+            "/v1/login/complete", json=body, headers={**CONTRACT_HDR, **auth(token)}
+        )
+        assert resp.status_code == 422 and code_of(resp) == "VALIDATION"
+    assert stack.transport.requests == []
+    assert stack.complete(armed["attempt_id"], token).status_code == 200
+    for query in (
+        "stock_code=RELIND%0A&from=2025-06-02&to=2025-06-13",
+        "stock_code=RELIND&from=2025-06-02%0A&to=2025-06-13",
+        "stock_code=RELIND&from=2025-06-02&to=2025-06-13&exchange=NSE%0A",
+    ):
+        assert stack.bars(token, "/v1/bars/daily?" + query).status_code == 422
