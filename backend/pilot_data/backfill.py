@@ -1120,8 +1120,26 @@ class BackfillEngine:
         stopped before its second try could run, so it is released too. The state's code is the last recorded
         outcome's code, or `attempt_interrupted` when the process died before any outcome.
         """
+        latest, _calls = self._scan_attempts(plan)
+        interrupted: dict[tuple[str, date, date], _WindowState] = {}
+        for key, (attempt, error_code, source, stopped, lone_non_final) in latest.items():
+            recorded = events.get(key)
+            if stopped or lone_non_final or (recorded is not None and recorded.attempt >= attempt):
+                continue
+            status: WindowStatus = "failed_exhausted" if attempt >= self._max_attempts else "failed"
+            interrupted[key] = _WindowState(status, attempt, error_code, source)
+        return interrupted
+
+    def _scan_attempts(
+        self, plan: BackfillPlan
+    ) -> tuple[
+        dict[tuple[str, date, date], tuple[int, str, str | None, bool, bool]],
+        dict[tuple[str, date, date, int], int],
+    ]:
+        """Per window, its newest attempt on the ledger (attempt, code, source, stopped, lone non-final try 1),
+        and the ledger rows per (window, attempt). A refused send is still a row, so it is still a try."""
         if "attempt" not in self._store.columns("relay_call_ledger"):
-            return {}
+            return {}, {}
         rows = self._store.query(
             "SELECT l.stock_code, l.window_from, l.window_to, l.attempt, o.error_code, o.source_sha256, o.stopped, "
             "o.outcome FROM relay_call_ledger AS l LEFT JOIN relay_call_outcomes AS o ON o.call_id = l.call_id "
@@ -1129,7 +1147,7 @@ class BackfillEngine:
             "ORDER BY l.call_id",
             [self._workspace, plan.plan_sha256],
         )
-        latest: dict[tuple[str, date, date], tuple[int, str, str | None, bool]] = {}
+        latest: dict[tuple[str, date, date], tuple[int, str, str | None, bool, bool]] = {}
         calls: dict[tuple[str, date, date, int], int] = {}
         for code, start, end, attempt, error_code, source, stopped, outcome in rows:
             key = (code, start, end)
@@ -1141,17 +1159,25 @@ class BackfillEngine:
             lone_non_final = calls[(*key, int(attempt))] == 1 and (
                 outcome in NON_FINAL_TRY1_OUTCOMES or (outcome == "error" and error_code in NON_FINAL_TRY1_ERROR_CODES)
             )
-            latest[key] = (
-                int(attempt), error_code or INTERRUPTED_ATTEMPT_CODE, source, bool(stopped) or lone_non_final
-            )
-        interrupted: dict[tuple[str, date, date], _WindowState] = {}
-        for key, (attempt, error_code, source, stopped) in latest.items():
+            latest[key] = (int(attempt), error_code or INTERRUPTED_ATTEMPT_CODE, source, bool(stopped), lone_non_final)
+        return latest, calls
+
+    def _released_tries(
+        self, plan: BackfillPlan, events: dict[tuple[str, date, date], _WindowState]
+    ) -> dict[tuple[str, date, date], tuple[int, int]]:
+        """Windows whose newest attempt was stopped after try 1: (attempt, tries already on the ledger).
+
+        The released attempt resumes at the next try, so a window never sends more than two calls per attempt
+        however many times a cap or midnight stops it between the tries (the pre-release bound).
+        """
+        latest, calls = self._scan_attempts(plan)
+        released: dict[tuple[str, date, date], tuple[int, int]] = {}
+        for key, (attempt, _code, _source, stopped, lone_non_final) in latest.items():
             recorded = events.get(key)
-            if stopped or (recorded is not None and recorded.attempt >= attempt):
+            if stopped or not lone_non_final or (recorded is not None and recorded.attempt >= attempt):
                 continue
-            status: WindowStatus = "failed_exhausted" if attempt >= self._max_attempts else "failed"
-            interrupted[key] = _WindowState(status, attempt, error_code, source)
-        return interrupted
+            released[key] = (attempt, calls[(*key, attempt)])
+        return released
 
     def _states(self, plan: BackfillPlan) -> dict[tuple[str, date, date], _WindowState]:
         events = self._event_states(plan)
@@ -1212,7 +1238,9 @@ class BackfillEngine:
         self._listing_dates = {}
         finished = TERMINAL_STATUSES - RETRY_FLAGGED_STATUSES if retry_flagged else TERMINAL_STATUSES
         self._recover_interrupted(plan)
-        states = self._states(plan)
+        events = self._event_states(plan)
+        states = {**events, **self._interrupted_attempts(plan, events)}
+        released = self._released_tries(plan, events)
         todo = [
             (code, window)
             for code in plan.stock_codes
@@ -1230,10 +1258,11 @@ class BackfillEngine:
         for code, window in todo:
             prior = states.get((code, window[0], window[1]))
             attempt = (prior.attempt if prior is not None else 0) + 1
+            resumed_attempt, tries_used = released.get((code, window[0], window[1]), (0, 0))
             try:
                 outcome, detail = self._process_window(
                     plan, code, window, attempt, convention, depth_floor, self._listing_date(code, today_ist),
-                    today_ist,
+                    today_ist, first_try=tries_used + 1 if resumed_attempt == attempt else 1,
                 )
             except _Stop as stop:
                 status, stop_code = stop.status, stop.code
@@ -1260,13 +1289,18 @@ class BackfillEngine:
         depth_floor: date | None,
         listing_date: date | None,
         today_ist: date,
+        *,
+        first_try: int = 1,
     ) -> tuple[WindowStatus, str | None]:
-        """Fetch one window with at most one retry. Returns the window's new status and a code."""
+        """Fetch one window with at most one retry. Returns the window's new status and a code.
+
+        `first_try` is 2 for an attempt a stop released after try 1: the tries already on the ledger count.
+        """
         w_from, w_to = window
         query = {"stock_code": code, "from": w_from.isoformat(), "to": w_to.isoformat(), "exchange": "NSE"}
         empty_code: str | None = None
         empty_sha: str | None = None
-        for try_number in (1, 2):
+        for try_number in range(first_try, 3):
             self._ledger.pace()
             try:
                 call_id = self._ledger.reserve(

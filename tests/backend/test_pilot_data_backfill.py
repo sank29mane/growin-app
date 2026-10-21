@@ -2213,6 +2213,101 @@ def test_a_stop_between_the_two_tries_releases_the_first_try_instead_of_spending
     assert store.query("SELECT DISTINCT attempt FROM backfill_events WHERE status = 'done'") == [(1,)]
 
 
+def _run_allowing(store, plan, source, clock_time, calls):
+    """One run that the daily cap stops after `calls` more historical calls (the ledger already holds today's)."""
+    cap = count(store, "SELECT count(*) FROM relay_call_ledger WHERE ist_date = ? AND endpoint = 'historical'",
+                [TODAY]) + calls
+    eng = bf.BackfillEngine(
+        store, source, workspace="india", **kwargs(clock_time), daily_call_cap=cap,
+    )
+    return eng.run(plan, today_ist=TODAY)
+
+
+@pytest.mark.parametrize("caps", [(1,), (1, 2)], ids=["one_call_a_day", "one_then_two_calls"])
+def test_repeated_stops_between_the_tries_never_exceed_two_calls_per_attempt(store, relay, clock_time, caps):
+    """Codex r1 P2: a released attempt must resume at the next try, not replay try 1. Every call times out and
+    the cap stops each run after one (or alternately one and two) calls. Without the resume a window sends a third
+    call in attempt 1 (the try 1 replay) and, with a one-call cap, never leaves attempt 1."""
+    eng, plan, source = flaky_run(store, relay, clock_time, lambda index: UpstreamTimeout())
+    for step in range(40):
+        run = _run_allowing(store, plan, source, clock_time, caps[step % len(caps)])
+        if run.status != "daily_cap_reached":
+            break
+    assert run.status == "complete_with_flags" and run.counts["failed_exhausted"] == len(plan.windows)
+    per_attempt = store.query(
+        "SELECT window_from, attempt, count(*) FROM relay_call_ledger WHERE plan_sha256 = ? AND endpoint = 'historical' "
+        "GROUP BY window_from, attempt", [plan.plan_sha256],
+    )
+    assert per_attempt and all(rows <= 2 for _w, _a, rows in per_attempt), per_attempt
+    per_window = store.query(
+        "SELECT window_from, count(*) FROM relay_call_ledger WHERE plan_sha256 = ? AND endpoint = 'historical' "
+        "GROUP BY window_from", [plan.plan_sha256],
+    )
+    assert len(per_window) == len(plan.windows)
+    assert all(rows <= 2 * bf.MAX_WINDOW_ATTEMPTS for _w, rows in per_window), per_window
+    assert source.calls <= 2 * bf.MAX_WINDOW_ATTEMPTS * len(plan.windows)
+
+
+def test_a_released_attempt_resumes_at_try_two_and_a_failed_try_two_spends_it(store, relay, clock_time):
+    """The cap between try 1 and try 2 costs no attempt: the next run sends try 2 of attempt 1 (not a replayed
+    try 1), and when that one times out too the attempt is spent with exactly two ledger rows."""
+    eng, plan, source = flaky_run(
+        store, relay, clock_time, lambda index: UpstreamTimeout() if index < 2 else None, daily_call_cap=4
+    )
+    assert eng.run(plan, today_ist=TODAY).status == "daily_cap_reached"  # try 1 took the last call
+    first = plan.windows[0][0]
+    resumed = _run_allowing(store, plan, source, clock_time, 100)
+    assert resumed.status == "completed_with_failed_windows"  # try 2 timed out: attempt 1 is spent
+    assert _run_allowing(store, plan, source, clock_time, 100).status == "complete"
+    assert store.query(
+        "SELECT attempt, count(*) FROM relay_call_ledger WHERE window_from = ? AND plan_sha256 = ? GROUP BY attempt "
+        "ORDER BY attempt", [first, plan.plan_sha256],
+    ) == [(1, 2), (2, 1)]
+    assert store.query(
+        "SELECT status, attempt FROM backfill_events WHERE window_from = ? AND status <> 'pending' ORDER BY attempt",
+        [first],
+    ) == [("failed", 1), ("done", 2)]
+
+
+def test_a_refused_try_one_then_a_failed_try_two_and_a_crash_stays_spent(store, relay, clock_time):
+    """Opus r1 gap: a refused send is still a try. Try 1 is refused, try 2 times out, the process dies before the
+    event row: the attempt is spent (one ledger row would otherwise look like a released lone first try)."""
+    eng, plan = ready(store, relay, clock_time, codes=("RELIND",))
+    sent = {"n": 0}
+
+    class RefusedThenTimeout:
+        def __getattr__(self, name):
+            return getattr(relay.client(), name)
+
+        def daily_bars(self, *args, **kw):
+            sent["n"] += 1
+            if sent["n"] == 1:
+                raise RelayUnavailable(reason="tunnel_restart_backoff")
+            if sent["n"] == 2:
+                raise UpstreamTimeout()
+            return relay.client().daily_bars(*args, **kw)
+
+    crashing = engine(store, relay, clock_time, source=RefusedThenTimeout())
+
+    def crash_before_event(*args, **kw):
+        raise Crash("died after the outcome row, before the event row")
+
+    crashing._fail = crash_before_event  # type: ignore[method-assign]
+    with pytest.raises(Crash):
+        crashing.run(plan, today_ist=TODAY)
+    assert store.query(
+        "SELECT o.outcome FROM relay_call_ledger AS l JOIN relay_call_outcomes AS o USING (call_id) "
+        "WHERE l.plan_sha256 = ? ORDER BY l.call_id", [plan.plan_sha256],
+    ) == [("not_sent",), ("error",)]
+    resumed = engine(store, relay, clock_time).run(plan, today_ist=TODAY)
+    assert resumed.status == "complete"
+    first = plan.windows[0][0]
+    assert store.query(
+        "SELECT status, attempt FROM backfill_events WHERE window_from = ? AND status <> 'pending' ORDER BY attempt",
+        [first],
+    ) == [("failed", 1), ("done", 2)]
+
+
 def test_a_refused_send_followed_by_an_ist_rollover_does_not_spend_the_attempt(store, relay, clock_time):
     """Opus r6 R6-3: `not_sent` used nothing. Try 1 is refused, midnight lands before try 2, and the next run's
     window is still attempt 1."""
