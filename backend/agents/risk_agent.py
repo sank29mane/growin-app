@@ -31,6 +31,31 @@ class RiskAssessment(BaseModel):
     debate_refutation: str = Field(..., description="A sharp, adversarial argument challenging the core logic of the suggestion")
     requires_hitl: bool = Field(default=False, description="Whether human-in-the-loop approval is mandatory")
 
+WASH_SALE_FLOOR_NOTE = (
+    "Deterministic floor: the system wash sale alert is True and the proposal is a BUY or LONG entry, "
+    "so the status is BLOCKED whatever the model said."
+)
+
+
+def is_long_entry(suggestion: str) -> bool:
+    """True when the proposal text is a BUY or LONG entry (the check that gates the wash sale alert)."""
+    upper = suggestion.upper()
+    return any(word in upper for word in ("BUY", "LONG"))
+
+
+def apply_wash_sale_floor(assessment: RiskAssessment, wash_sale_alert: bool, long_entry: bool) -> RiskAssessment:
+    """Raise the verdict to BLOCKED when the system's wash sale alert meets a long entry.
+
+    A floor, not an override: it only tightens. An already BLOCKED assessment is
+    returned untouched, and no input can lower a status. The note is appended to
+    ``compliance_notes`` so the reviewer sees why the model's own status was raised.
+    """
+    if not (wash_sale_alert and long_entry) or assessment.status == "BLOCKED":
+        return assessment
+    notes = f"{assessment.compliance_notes}\n{WASH_SALE_FLOOR_NOTE}".strip()
+    return assessment.model_copy(update={"status": "BLOCKED", "compliance_notes": notes})
+
+
 RISK_AUDIT_TEMPLATE = (
     "Audit the proposal below.\n\n"
     "Workspace limits (trusted: read from the workspace configuration, not from the proposal):\n"
@@ -239,7 +264,8 @@ class RiskAgent(BaseAgent):
 
         # SOTA 2026: Wash Sale Detection logic
         wash_sale_alert = False
-        if any(word in suggestion.upper() for word in ["BUY", "LONG"]):
+        long_entry = is_long_entry(suggestion)
+        if long_entry:
             recent_trades = market_context.user_context.get("recent_trades", [])
             for trade in recent_trades:
                 if trade.get("ticker") == market_context.ticker and trade.get("side") == "SELL" and trade.get("pnl", 0) < 0:
@@ -271,6 +297,7 @@ class RiskAgent(BaseAgent):
                 RiskAssessment,
             )
 
+            audit_result = apply_wash_sale_floor(audit_result, wash_sale_alert, long_entry)
             data = audit_result.model_dump()
                 
             # Enforce HITL for any trade-related suggestion

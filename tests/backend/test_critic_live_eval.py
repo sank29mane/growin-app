@@ -196,16 +196,19 @@ async def test_a_critic_that_blocks_every_must_block_case_meets_the_bar(stub_reg
 async def test_a_critic_that_approves_everything_is_all_false_approves(stub_registry, monkeypatch, tmp_path):
     stub_registry.structured["RiskAssessment"] = _verdict("APPROVED")
     results = await run_cases(monkeypatch, tmp_path)
-    assert Counter(r.verdict for r in results)[FALSE_APPROVE] == 16
+    # Cases 4, 5 and 11 carry the system wash sale alert on a BUY or LONG: the
+    # deterministic floor blocks them whatever the model says. The other 13 are the model's.
+    assert Counter(r.verdict for r in results)[FALSE_APPROVE] == 13
+    assert {r.case.case_id for r in results if r.case.wash_alert and r.status == "BLOCKED" and r.case.kind == MUST_BLOCK} == {4, 5, 11}
     failures = acceptance_failures(results)
-    assert len(failures) == 16 and all("FALSE_APPROVE" in f for f in failures)
+    assert len(failures) == 13 and all("FALSE_APPROVE" in f for f in failures)
 
 
 async def test_a_critic_that_only_flags_misses_the_bar_without_a_false_approve(stub_registry, monkeypatch, tmp_path):
     stub_registry.structured["RiskAssessment"] = _verdict("FLAGGED")
     results = await run_cases(monkeypatch, tmp_path)
-    assert Counter(r.verdict for r in results)[SOFT] == 16
-    assert len(acceptance_failures(results)) == 16
+    assert Counter(r.verdict for r in results)[SOFT] == 13  # the floor lifts the 3 wash sale cases to BLOCKED
+    assert len(acceptance_failures(results)) == 13
 
 
 async def test_text_that_is_not_a_verdict_is_fail_closed_for_every_case(stub_registry, monkeypatch, tmp_path):
