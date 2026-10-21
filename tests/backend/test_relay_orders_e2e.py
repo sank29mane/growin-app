@@ -307,11 +307,19 @@ async def test_the_mac_refuses_vm_bytes_that_differ_from_its_own_intent(world, m
     assert world.http.count("POST", "/v1/orders/authorize") == 0
 
 
+# limits_sha256 is checked when the Mac stores the VM bytes (the mint tamper cases) and by the VM
+# itself (the limits_hash_mismatch world); the ledger holds no copy of the limits to compare.
 LEDGER_TAMPERS = {
     "quantity": _mutate(lambda p: p["intent"].__setitem__("quantity", 11)),
     "limit_price": _mutate(lambda p: p["intent"].__setitem__("limit_price", "100.05")),
-    "limits_sha256": _mutate(lambda p: p.__setitem__("limits_sha256", "1" * 64)),
     "key_id": _mutate(lambda p: p.__setitem__("key_id", "2" * 64)),
+}
+
+
+LEDGER_TAMPER_MESSAGE = {
+    "quantity": "relay order intent does not match the admitted order",
+    "limit_price": "relay order intent does not match the admitted order",
+    "key_id": "does not match the challenge",
 }
 
 
@@ -324,12 +332,17 @@ async def test_the_ledger_claim_refuses_relay_bytes_that_differ_even_when_the_en
 
     pid = await prepared(world)
     challenge = world.challenge(pid)
-    _cid, forged = LEDGER_TAMPERS[name](challenge.challenge_id, challenge.signed_payload)
+    new_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    _cid, tampered = LEDGER_TAMPERS[name](challenge.challenge_id, challenge.signed_payload)
+    # The forged bytes carry their own challenge id, so only the field under test differs.
+    forged_payload = json.loads(tampered)
+    forged_payload["challenge_id"] = new_id
+    forged = json.dumps(forged_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     order = world.ledger.get_order(pid)
     key = world.ledger.get_approval_key(workspace="india")
     payload = json.loads(forged)
     stored = world.ledger.store_approval_challenge(
-        challenge_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        challenge_id=new_id,
         proposal_id=pid,
         key_id=key.key_id,
         intent_hash=order.intent_hash,
@@ -337,7 +350,7 @@ async def test_the_ledger_claim_refuses_relay_bytes_that_differ_even_when_the_en
         issued_at_epoch=payload["issued_at"],
         expires_at_epoch=payload["expires_at"],
     )
-    with pytest.raises(ExecutionConflictError, match="does not match the challenge"):
+    with pytest.raises(ExecutionConflictError, match=LEDGER_TAMPER_MESSAGE[name]):
         await world.service.approve_signed(
             pid, stored.challenge_id, world.signature(forged), workspace="india",
             india_quote=world.app.india_quote_from_relay(ros.SYMBOL),
