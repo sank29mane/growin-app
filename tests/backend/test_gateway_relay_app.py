@@ -15,6 +15,7 @@ import base64
 import hashlib
 import io
 import json
+import re
 import sys
 import threading
 from datetime import datetime, timedelta, timezone
@@ -485,3 +486,262 @@ def test_bars_request_shape_is_the_shipped_one(stack: Stack):
     assert "%3A" not in url  # colons stay literal in the dates
     assert dict(parse_qsl(urlsplit(url).query))["exch_code"] == "NSE"
     assert contract.BARS_REQUEST_KNOBS == {}
+
+
+# ------------------------------------------------------- validation (C3)
+
+
+def code_of(resp) -> str:
+    return resp.json()["error"]["code"]
+
+
+@pytest.mark.parametrize(
+    "query, fields",
+    [
+        ("stock_code=relind&from=2025-06-02&to=2025-06-13", ["stock_code"]),
+        ("stock_code=RELIANCEINDUSTRIES&from=2025-06-02&to=2025-06-13", ["stock_code"]),
+        ("from=2025-06-02&to=2025-06-13", ["stock_code"]),
+        ("stock_code=RELIND&to=2025-06-13", ["from"]),
+        ("stock_code=RELIND&from=2025-06-02", ["to"]),
+        ("stock_code=RELIND&from=2025-6-2&to=2025-06-13", ["from"]),
+        ("stock_code=RELIND&from=2025-02-30&to=2025-06-13", ["from"]),
+        ("stock_code=RELIND&from=2025-06-13&to=2025-06-02", ["from", "to"]),
+        ("stock_code=RELIND&from=2015-01-01&to=2025-06-13", ["from", "to"]),
+        ("stock_code=RELIND&from=2025-06-02&to=2025-06-13&exchange=BSE", ["exchange"]),
+        ("stock_code=RELIND&stock_code=TCS&from=2025-06-02&to=2025-06-13", ["stock_code"]),
+        ("stock_code=RELIND&from=2025-06-02&to=2025-06-13&interval=1minute", ["unknown"]),
+        ("stock_code=RELIND&from=2025-06-02&to=2025-06-13&product_type=margin", ["unknown"]),
+    ],
+)
+def test_bars_query_violations_are_422_with_names_only(stack: Stack, query, fields):
+    token = stack.login()
+    n = len(stack.transport.requests)
+    resp = stack.bars(token, "/v1/bars/daily?" + query)
+    assert resp.status_code == 422 and code_of(resp) == "VALIDATION"
+    assert resp.json()["error"]["fields"] == fields
+    assert len(stack.transport.requests) == n
+    for value in ("relind", "RELIANCEINDUSTRIES", "BSE", "1minute", "margin", "2025-02-30"):
+        assert value not in resp.text
+
+
+def test_exchange_nse_and_a_3000_day_span_are_accepted(stack: Stack):
+    token = stack.login()
+    ok = stack.bars(token, "/v1/bars/daily?stock_code=RELIND&from=2017-01-01&to=2025-03-20&exchange=NSE")
+    assert ok.status_code == 200  # exactly 3000 days
+    over = stack.bars(token, "/v1/bars/daily?stock_code=RELIND&from=2017-01-01&to=2025-03-21")
+    assert over.status_code == 422
+
+
+def test_validation_runs_after_authorize_not_before(stack: Stack):
+    stack.login()
+    resp = stack.bars(None, "/v1/bars/daily?stock_code=bad")
+    assert resp.status_code == 401  # no hint about parameters to an unauthenticated caller
+
+
+def test_bars_pad_days_are_the_smoke_derived_zero(stack: Stack):
+    assert (contract.BARS_FROM_PAD_DAYS, contract.BARS_TO_PAD_DAYS) == (0, 0)
+    assert contract.API_SESSION_RE.pattern == "^[A-Za-z0-9]{6,64}$"
+    assert contract.API_SESSION_RE.fullmatch("12345678")
+    assert not contract.API_SESSION_RE.fullmatch("12345")
+    assert not contract.API_SESSION_RE.fullmatch("a" * 65)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"content": b"{}", "headers": {"Content-Type": "text/plain"}},
+        {"content": b"{}", "headers": {}},  # no content type at all
+        {"content": b"{not json", "headers": {"Content-Type": "application/json"}},
+        {"json": {"extra": 1}},
+        {"json": []},
+    ],
+)
+def test_post_bodies_must_be_json_objects_without_unknown_keys(stack: Stack, kwargs):
+    headers = {**CONTRACT_HDR, **kwargs.pop("headers", {})}
+    for path in ("/v1/login/arm", "/v1/session/revoke"):
+        resp = stack.client.post(path, headers=headers, **dict(kwargs))
+        assert resp.status_code == 422 and code_of(resp) == "VALIDATION"
+    assert stack.events_named("login_armed") == []
+
+
+def test_complete_body_rejects_unknown_keys_and_never_echoes_them(stack: Stack):
+    armed = stack.arm().json()
+    resp = stack.client.post(
+        "/v1/login/complete",
+        json={"attempt_id": armed["attempt_id"], "apisession": CODE, "SECRETKEYNAME-xyz": 1},
+        headers={**CONTRACT_HDR, **auth(armed["relay_token"])},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["error"]["fields"] == ["body"]
+    assert "SECRETKEYNAME" not in resp.text
+    assert stack.transport.requests == []
+
+
+def test_no_redirects_cors_or_cookies(stack: Stack):
+    resp = stack.client.get("/v1/health/", headers=CONTRACT_HDR, follow_redirects=False)
+    assert resp.status_code == 404
+    assert "location" not in resp.headers
+    options = stack.client.options("/v1/health", headers={**CONTRACT_HDR, "Origin": "http://evil.example"})
+    assert options.status_code == 405
+    for r in (resp, options, stack.client.get("/v1/health", headers={**CONTRACT_HDR, "Origin": "http://evil.example"})):
+        assert not [h for h in r.headers if h.lower().startswith("access-control")]
+        assert "set-cookie" not in r.headers
+    for path in ("/docs", "/redoc", "/openapi.json"):
+        assert stack.client.get(path, headers=CONTRACT_HDR).status_code == 404
+
+
+def test_an_escaped_exception_is_500_internal_with_no_detail(stack: Stack):
+    token = stack.login()
+
+    def boom(**_kwargs):
+        raise RuntimeError("secret detail " + APP_KEY)
+
+    stack.breeze.daily_bars_v2_raw = boom  # type: ignore[method-assign]
+    resp = stack.bars(token)
+    assert resp.status_code == 500 and code_of(resp) == "INTERNAL"
+    assert "secret detail" not in resp.text and APP_KEY not in resp.text
+    assert_envelope(resp)
+    last = [e for e in stack.lines() if e["event"] == "request"][-1]
+    assert (last["result"], last["reason"], last["http"]) == ("error", "internal", 500)
+    assert APP_KEY not in stack.sink.getvalue()
+
+
+# ---------------------------------------------------------------- route set
+
+
+FORBIDDEN_WORDS = ("order", "fund", "holding", "position", "trade", "margin", "cancel", "modify")
+
+
+def test_route_set_is_exactly_this_plans_five_and_nothing_order_like(stack: Stack):
+    paths = {route.path for route in stack.app.routes}
+    assert paths == {
+        "/v1/health",
+        "/v1/login/arm",
+        "/v1/login/complete",
+        "/v1/session/revoke",
+        "/v1/bars/daily",
+    }
+    assert paths == set(contract.ROUTES)
+    for path in paths:
+        assert not any(word in path.lower() for word in FORBIDDEN_WORDS)
+    methods = {route.path: route.methods for route in stack.app.routes}
+    assert methods["/v1/health"] == {"GET"} and methods["/v1/bars/daily"] == {"GET"}
+    for path in ("/v1/login/arm", "/v1/login/complete", "/v1/session/revoke"):
+        assert methods[path] == {"POST"}
+
+
+def test_no_order_style_url_is_reachable(stack: Stack):
+    token = stack.login()
+    for path in ("/v1/order", "/v1/orders", "/v1/funds", "/v1/holdings", "/v1/positions", "/v1/trades"):
+        for method in ("get", "post"):
+            resp = getattr(stack.client, method)(path, headers={**CONTRACT_HDR, **auth(token)})
+            assert resp.status_code in (404, 405)
+    assert stack.transport.breeze_requests()[-1][1].endswith("customerdetails")  # nothing else left
+
+
+# ------------------------------------------------------ no_write AST scan
+
+# The OD-4 day counter (61-08) is the only relay module allowed to write, and
+# smoke_probe.py is the operator tool. gateway_vm/orders/ is Phase 63's own
+# audited writer (ledger and audit log) and is not part of this relay core.
+WRITE_EXEMPT = frozenset({"smoke_probe.py", "counter_store.py"})
+WRITE_ATTRS = frozenset({"write_text", "write_bytes", "truncate"})
+WRITE_OS_ATTRS = frozenset(
+    {"write", "open", "replace", "rename", "remove", "unlink", "mkdir", "makedirs", "truncate", "fsync"}
+)
+WRITE_MODES = set("wax+")
+
+
+MODE_SHAPE = re.compile(r"^[rwxabtU+]{1,4}$")
+
+
+def _mode_offence(node: ast.Call, mode: ast.AST | None) -> list[tuple[int, str]]:
+    if mode is None:
+        return []  # read-only default
+    if not (isinstance(mode, ast.Constant) and isinstance(mode.value, str)):
+        return [(node.lineno, "open with a non-literal mode")]
+    if WRITE_MODES & set(mode.value):
+        return [(node.lineno, "open for writing")]
+    return []
+
+
+def write_offences(source: str) -> list[tuple[int, str]]:
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] in ("tempfile", "shutil"):
+                    found.append((node.lineno, f"import {alias.name}"))
+        elif isinstance(node, ast.ImportFrom):
+            if (node.module or "").split(".")[0] in ("tempfile", "shutil"):
+                found.append((node.lineno, f"import {node.module}"))
+        elif isinstance(node, ast.Call):
+            func = node.func
+            is_os = isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id == "os"
+            if is_os and func.attr in WRITE_OS_ATTRS:
+                found.append((node.lineno, f"os.{func.attr}"))
+            elif isinstance(func, ast.Attribute) and func.attr in WRITE_ATTRS:
+                found.append((node.lineno, func.attr))
+            elif isinstance(func, ast.Name) and func.id == "open":
+                mode = node.args[1] if len(node.args) > 1 else None
+                for kw in node.keywords:
+                    if kw.arg == "mode":
+                        mode = kw.value
+                found.extend(_mode_offence(node, mode))
+            elif isinstance(func, ast.Attribute) and func.attr == "open":
+                # Path.open(mode) takes the mode first, io.open(path, mode) second.
+                candidates = list(node.args[:2]) + [kw.value for kw in node.keywords if kw.arg == "mode"]
+                for cand in candidates:
+                    if isinstance(cand, ast.Constant) and isinstance(cand.value, str):
+                        if MODE_SHAPE.fullmatch(cand.value):
+                            found.extend(_mode_offence(node, cand))
+                if len(node.args) > 1 and not isinstance(node.args[1], ast.Constant):
+                    found.append((node.lineno, "open with a non-literal mode"))
+    return found
+
+
+def relay_modules() -> list[Path]:
+    return sorted(p for p in PKG.glob("*.py") if p.name not in WRITE_EXEMPT)
+
+
+def test_relay_modules_never_write_to_disk():
+    modules = relay_modules()
+    names = {p.name for p in modules}
+    assert {"app.py", "session.py", "events.py", "contract.py", "breeze_client.py",
+            "transport.py", "egress.py"} <= names  # the scan really covers the relay
+    offences = []
+    for path in modules:
+        offences += [f"{path.name}:{line}: {kind}" for line, kind in write_offences(path.read_text())]
+    assert offences == []
+
+
+def test_write_exemptions_are_exactly_the_two_named_modules():
+    assert WRITE_EXEMPT == {"smoke_probe.py", "counter_store.py"}
+
+
+PLANTED_WRITES = {
+    "open w": "f = open('x', 'w')\n",
+    "open wb keyword": "f = open('x', mode='wb')\n",
+    "open append": "f = open('x', 'a')\n",
+    "open read write": "f = open('x', 'r+')\n",
+    "open dynamic mode": "m = 'w'\nf = open('x', m)\n",
+    "path open": "from pathlib import Path\nPath('x').open('w')\n",
+    "os.open": "import os\nos.open('x', os.O_WRONLY)\n",
+    "os.write": "import os\nos.write(3, b'x')\n",
+    "write_text": "from pathlib import Path\nPath('x').write_text('y')\n",
+    "write_bytes": "from pathlib import Path\nPath('x').write_bytes(b'y')\n",
+    "tempfile": "import tempfile\n",
+    "tempfile from": "from tempfile import mkstemp\n",
+    "shutil": "import shutil\n",
+    "os.replace": "import os\nos.replace('a', 'b')\n",
+}
+
+
+@pytest.mark.parametrize("name", list(PLANTED_WRITES))
+def test_write_scanner_flags_planted_offence(name):
+    assert write_offences(PLANTED_WRITES[name]), f"scanner missed: {name}"
+
+
+def test_write_scanner_accepts_reads():
+    source = "f = open('x')\ng = open('x', 'rb')\nh = open('x', mode='r')\nimport json, os\nos.stat('x')\n"
+    assert write_offences(source) == []
