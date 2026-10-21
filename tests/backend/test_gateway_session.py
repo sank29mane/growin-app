@@ -887,3 +887,124 @@ def test_the_session_dying_during_the_exchange_blocks_the_login():
     done = exchange.join()
     assert done.status_code == 409 and code_of(done) == "LOGIN_ATTEMPT_INVALID"
     assert stack.session.state is SessionState.EXPIRED
+
+
+# ---- require_active revalidates under the lock even with egress fresh (Codex r2 P1)
+
+
+def park_after_authorize(stack: Stack, token: str):
+    """Start a bars request and park it right after authorize(token) returned.
+
+    Egress is fresh, so require_active() takes the no-refresh branch once
+    `resume` is set. Returns (request, resume).
+    """
+    parked, resume = threading.Event(), threading.Event()
+    real_authorize = stack.session.authorize
+
+    def authorize_then_park(presented):
+        decided = real_authorize(presented)
+        parked.set()
+        assert resume.wait(WAIT_S)
+        return decided
+
+    stack.session.authorize = authorize_then_park  # type: ignore[method-assign]
+    client = stack.new_client()
+    request = Parked(lambda: stack.bars(token, client=client)).start()
+    assert parked.wait(WAIT_S)
+    stack.session.authorize = real_authorize  # type: ignore[method-assign]
+    return request, resume
+
+
+def finish_parked(stack: Stack, request: Parked, resume: threading.Event, bars_before: int):
+    resume.set()
+    resp = request.join()
+    assert len(stack.transport.bars_requests()) == bars_before  # zero upstream calls
+    return resp
+
+
+def test_revoke_between_authorize_and_require_active_serves_nothing():
+    stack = Stack()
+    token = stack.login()
+    request, resume = park_after_authorize(stack, token)
+    assert stack.revoke(token).status_code == 200
+    resp = finish_parked(stack, request, resume, len(stack.transport.bars_requests()))
+    assert resp.status_code == 503 and code_of(resp) == "NO_SESSION"
+
+
+@pytest.mark.parametrize("which", ["wall", "mono"])
+def test_a_deadline_passing_between_authorize_and_require_active_serves_nothing(which):
+    stack = Stack()
+    token = stack.login()
+    request, resume = park_after_authorize(stack, token)
+    if which == "wall":
+        stack.clock.now = stack.clock.now.replace(hour=18, minute=30)  # IST midnight
+        stack.clock.mono += 1  # egress stays fresh: only the deadline changed
+    else:
+        stack.clock.mono += 14 * 3600 + 1
+        stack.session._last_egress_mono = stack.clock.mono  # keep egress fresh
+    resp = finish_parked(stack, request, resume, len(stack.transport.bars_requests()))
+    assert resp.status_code == 503 and code_of(resp) == "SESSION_EXPIRED"
+    assert reason_of(resp) == "deadline"
+
+
+@pytest.mark.parametrize(
+    "error_class, code",
+    [
+        ("invalid_session", "SESSION_EXPIRED"),
+        ("resource_not_available", "SESSION_EXPIRED"),
+        ("ip_mismatch", "EGRESS_MISMATCH"),
+        ("public_key_missing", "NO_SESSION"),
+    ],
+)
+def test_a_session_dead_error_between_authorize_and_require_active_serves_nothing(error_class, code):
+    stack = Stack()
+    token = stack.login()
+    request, resume = park_after_authorize(stack, token)
+    stack.session.note_breeze_error(error_class)  # a concurrent request's Breeze error
+    resp = finish_parked(stack, request, resume, len(stack.transport.bars_requests()))
+    assert resp.status_code == 503 and code_of(resp) == code
+
+
+def test_an_egress_suspension_between_authorize_and_require_active_serves_nothing():
+    stack = Stack()
+    token = stack.login()
+    request, resume = park_after_authorize(stack, token)
+    stack.transport.echo_ip = OTHER_IP
+    assert stack.session._refresh_egress().ok is False  # a concurrent refresh sees a new IP
+    resp = finish_parked(stack, request, resume, len(stack.transport.bars_requests()))
+    assert resp.status_code == 503 and code_of(resp) == "EGRESS_MISMATCH"
+
+
+def test_a_relogin_between_authorize_and_require_active_refuses_the_old_bearer():
+    stack = Stack()
+    old = stack.login()
+    request, resume = park_after_authorize(stack, old)
+    assert stack.revoke(old).status_code == 200
+    new = stack.login()
+    bars_before = len(stack.transport.bars_requests())
+    resp = finish_parked(stack, request, resume, bars_before)
+    assert resp.status_code == 401 and code_of(resp) == "UNAUTHORIZED"
+    assert stack.bars(new).status_code == 200  # the new bearer is unaffected
+
+
+def test_require_active_refuses_a_missing_breeze_token_with_a_relay_failure():
+    """A missing Breeze token is a RelayFailure (no assert to strip under -O)."""
+    stack = Stack()
+    token = stack.login()
+    auth = stack.session.authorize(token)
+    stack.session._breeze_token = None  # inconsistent state that must never serve
+    with pytest.raises(RelayFailure) as err:
+        stack.session.require_active(auth)
+    assert err.value.code in {"NO_SESSION", "SESSION_EXPIRED"}
+
+
+def test_egress_that_went_stale_after_authorize_is_refreshed_before_the_token_is_served():
+    """authorize() saw fresh egress; by the time require_active() runs it is stale.
+    The lock-held freshness check, not auth.egress_stale, must trigger the refresh."""
+    stack = Stack()
+    token = stack.login()
+    request, resume = park_after_authorize(stack, token)
+    stack.clock.advance(301)  # the egress check ages out while the request is parked
+    stack.transport.echo_ip = OTHER_IP  # and the refresh will find a different IP
+    resp = finish_parked(stack, request, resume, len(stack.transport.bars_requests()))
+    assert resp.status_code == 503 and code_of(resp) == "EGRESS_MISMATCH"
