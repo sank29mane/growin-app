@@ -25,6 +25,9 @@ Residuals, accepted and not fixable from here:
   roughly one per gcloud startup.
 - A signal that lands inside Popen itself, before it returns the child, leaves that child
   with nothing to stop it.
+- A restart interrupted a second time inside the client's own cleanup, or in the few
+  bytecodes between `self._tunnel = handle` and `handed_off = True`, can leave one unowned
+  child or one pool counted busy; the next request sees a live tunnel and carries on.
 """
 
 from __future__ import annotations

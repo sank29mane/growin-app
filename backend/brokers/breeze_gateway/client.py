@@ -434,10 +434,13 @@ class RelayClient:
         that arrive meanwhile wait for its outcome and then use the new tunnel, as they did
         when the restart ran under the lock. close() wakes them with reason "closed".
 
-        The try covers the whole span from setting `_restarting` to the handoff, so an
-        interrupt anywhere in it (SIGTERM becomes SystemExit in the CLI) clears the flag.
+        Every exit that does not return a pool goes through one cleanup, whatever raised
+        (SIGTERM becomes SystemExit in the CLI) and wherever, including at a `with self._cond`
+        exit: the request's reservation is given back, the restart flag is cleared if this
+        request still holds it, and waiters are woken. The cleanup is safe to run in any state.
         """
         token = object()  # identifies this request as the restarter
+        reserved: _Pool | None = None  # the pool this request has counted itself on
         try:
             with self._cond:
                 while True:
@@ -448,25 +451,31 @@ class RelayClient:
                         continue
                     dead = self._tunnel
                     if dead is None or dead.alive():
-                        pool = self._pool
-                        pool.inflight += 1
-                        return pool
+                        reserved = self._pool
+                        reserved.inflight += 1
+                        return reserved
                     if self._restart is None:
                         raise RelayUnavailable(reason="tunnel_down")
                     if self._restart_failures and self._monotonic() < self._restart_retry_at:
                         raise RelayUnavailable(reason="tunnel_restart_backoff")
                     self._restarting = token
                     break
-            return self._replace_tunnel(dead, token)
+            return self._replace_tunnel(dead, token)  # unwinds its own reservation on failure
         except BaseException:
-            self._end_restart(token)  # a no-op unless this request still holds the flag
+            try:
+                if reserved is not None:
+                    self._release(reserved)
+            finally:
+                self._end_restart(token)
             raise
 
     def _end_restart(self, token: object) -> None:
+        """Clear the restart flag if this request's token still holds it, and always wake the
+        waiters: an interrupt can land after the flag was cleared but before it notified."""
         with self._cond:
             if self._restarting is token:
                 self._restarting = None
-                self._cond.notify_all()
+            self._cond.notify_all()
 
     def _release(self, pool: _Pool) -> None:
         with self._lock:
@@ -481,12 +490,21 @@ class RelayClient:
         A transport restart, never a request retry. Returns the new pool with this request
         counted on it. If close() ran meanwhile the new child is stopped and discarded.
         A tunnel that fails to start, or an http client that fails to build, is one failed
-        restart: the child is stopped and the backoff is armed. Any other exception before
-        the new tunnel is handed to the client stops the child and closes the http client.
+        restart: the child is stopped and the backoff is armed. Any other exception, at any
+        point, runs one cleanup that is safe in every state: before the handoff it stops the
+        new child and closes the new http client; after it, it finishes retiring the old pool
+        and gives back this request's reservation on the new one, because `_acquire` will
+        never return it.
+
+        Accepted residuals (a second signal inside the cleanup, a signal inside Popen, the
+        few bytecodes between `self._tunnel = handle` and `handed_off = True`) leave at worst
+        an unowned child or a pool counted busy until the next restart.
         """
         assert self._restart is not None
         handle: TunnelHandleLike | None = None
         http: httpx.Client | None = None
+        pool: _Pool | None = None
+        previous: _Pool | None = None
         handed_off = False
         try:
             dead.stop()
@@ -500,7 +518,6 @@ class RelayClient:
                 except Exception:
                     http = None
             reason: str | None = None
-            previous: _Pool | None = None
             with self._cond:
                 if self._restarting is token:
                     self._restarting = None
@@ -524,8 +541,21 @@ class RelayClient:
                     self._tunnel = handle
                     self._pool = pool
                     handed_off = True
+            if reason is not None:
+                raise RelayUnavailable(reason=reason)
+            assert previous is not None and pool is not None
+            if previous.inflight == 0:
+                previous.http.close()  # otherwise the last request holding it closes it
+            return pool
         except BaseException:
-            if not handed_off:
+            if handed_off:
+                assert previous is not None and pool is not None
+                try:
+                    if previous.inflight == 0:
+                        previous.http.close()
+                finally:
+                    self._release(pool)
+            else:
                 try:
                     if handle is not None:
                         handle.stop()
@@ -533,18 +563,6 @@ class RelayClient:
                     if http is not None:
                         http.close()
             raise
-        if reason is not None:
-            try:
-                if handle is not None:
-                    handle.stop()
-            finally:
-                if http is not None:
-                    http.close()
-            raise RelayUnavailable(reason=reason)
-        assert previous is not None
-        if previous.inflight == 0:
-            previous.http.close()  # otherwise the last request holding it closes it
-        return pool
 
     def close(self) -> None:
         """Mark the client closed and stop its tunnel. Never waits for a restart in progress:

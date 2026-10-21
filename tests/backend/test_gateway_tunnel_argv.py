@@ -784,12 +784,19 @@ def test_open_hands_its_clock_to_the_client_for_the_backoff_window():
 
 
 class _HookedCond:
-    """A Condition that raises SystemExit (SIGTERM in the CLI) at the Nth enter or exit."""
+    """A Condition that raises SystemExit (SIGTERM in the CLI) at chosen points.
 
-    def __init__(self, lock, *, on_enter=(), on_exit=()) -> None:
+    `on_enter` / `on_exit` are 1-based counts of `with` entries and exits; `on_notify` the
+    same for notify_all (raised before it notifies); `after_wait` the same for wait (raised
+    once it has woken). `waiting` is released each time a request begins to wait.
+    """
+
+    def __init__(self, lock, *, on_enter=(), on_exit=(), on_notify=(), after_wait=(), waiting=None) -> None:
         self._cond = threading.Condition(lock)
         self._on_enter, self._on_exit = set(on_enter), set(on_exit)
-        self.enters = self.exits = 0
+        self._on_notify, self._after_wait = set(on_notify), set(after_wait)
+        self._waiting = waiting
+        self.enters = self.exits = self.notifies = self.waits = 0
 
     def __enter__(self):
         self.enters += 1
@@ -805,9 +812,19 @@ class _HookedCond:
             raise SystemExit(143)  # the lock is already free, the restart flag still set
 
     def wait(self, *args) -> bool:
-        return self._cond.wait(*args)
+        self.waits += 1
+        number = self.waits
+        if self._waiting is not None:
+            self._waiting.release()  # the lock is still held, so nothing can notify first
+        woke = self._cond.wait(*args)
+        if number in self._after_wait:
+            raise SystemExit(143)  # an interrupt delivered to a request that was waiting
+        return woke
 
     def notify_all(self) -> None:
+        self.notifies += 1
+        if self.notifies in self._on_notify:
+            raise SystemExit(143)  # the flag is already cleared, nobody was told
         self._cond.notify_all()
 
 
@@ -863,6 +880,86 @@ def test_an_interrupt_before_the_replacement_starts_releases_the_restart_flag():
     assert restart.calls == 1
     relay.close()
     assert fresh.stops == 1
+
+
+def test_an_interrupt_after_the_flag_is_cleared_but_before_the_notify_still_wakes_a_waiter():
+    dead, fresh, second = FakeHandle(50123), FakeHandle(50124), FakeHandle(50125)
+    dead._alive = False
+    factory, restart = Factory(), _GatedRestart([fresh, second])
+    relay = RelayClient(tunnel=dead, http_factory=factory, restart=restart)
+    waiting = threading.Semaphore(0)
+    relay._cond = _HookedCond(relay._lock, on_notify={1}, waiting=waiting)  # 1: the commit block
+    outcomes: dict = {}
+    leader = _call(relay, outcomes, "leader")
+    assert restart.entered.wait(timeout=10)
+    waiter = _call(relay, outcomes, "waiter")
+    assert waiting.acquire(timeout=10), "the request never began to wait on the restart"
+    restart.gate.set()
+    leader.join(timeout=10)
+    waiter.join(timeout=5)
+    assert not waiter.is_alive(), "the interrupted restarter never woke the waiting request"
+    assert isinstance(outcomes["leader"], SystemExit)
+    assert isinstance(outcomes["waiter"], RelayHealth)  # it took over and restarted
+    assert fresh.stops == 1 and restart.calls == 2  # no backoff after an interrupt
+    assert len(factory.handler.requests) == 1  # the interrupted request never sent
+    relay.close()
+    assert second.stops == 1
+
+
+def test_an_interrupt_delivered_to_a_waiting_request_does_not_free_the_restarters_flag():
+    dead, fresh = FakeHandle(50123), FakeHandle(50124)
+    dead._alive = False
+    factory, restart = Factory(), _GatedRestart([fresh])
+    relay = RelayClient(tunnel=dead, http_factory=factory, restart=restart)
+    waiting = threading.Semaphore(0)
+    relay._cond = _HookedCond(relay._lock, after_wait={1}, waiting=waiting)  # the first waiter
+    outcomes: dict = {}
+    leader = _call(relay, outcomes, "leader")
+    assert restart.entered.wait(timeout=10)
+    first = _call(relay, outcomes, "first")
+    assert waiting.acquire(timeout=10)
+    with relay._cond:
+        relay._cond.notify_all()  # wakes it; the interrupt lands as it wakes
+    first.join(timeout=10)
+    assert isinstance(outcomes["first"], SystemExit)
+    assert relay._restarting is not None  # the restarter's flag is untouched
+    second = _call(relay, outcomes, "second")
+    assert waiting.acquire(timeout=5), "a second restart started while the first was in flight"
+    assert restart.calls == 1
+    restart.gate.set()
+    for thread in (leader, second):
+        thread.join(timeout=10)
+    assert isinstance(outcomes["leader"], RelayHealth) and isinstance(outcomes["second"], RelayHealth)
+    assert restart.calls == 1 and factory.ports == [50123, 50124]  # one restart, one new child
+    relay.close()
+    assert fresh.stops == 1
+
+
+def test_an_interrupt_at_the_handoff_exit_retires_the_old_client_and_gives_back_the_reservation():
+    dead, fresh = FakeHandle(50123), FakeHandle(50124)
+    dead._alive = False
+    factory, restart = Factory(), _ScriptedRestart(fresh)
+    relay = RelayClient(tunnel=dead, http_factory=factory, restart=restart)
+    relay._cond = _HookedCond(relay._lock, on_exit={2})  # 1 is _acquire, 2 is the handoff block
+    with pytest.raises(SystemExit):
+        relay.health()
+    assert relay._tunnel is fresh and fresh.stops == 0 and fresh.alive()  # the handoff happened
+    assert factory.clients[0].is_closed  # the old client is not left open
+    assert relay._pool.inflight == 0 and relay._restarting is None  # nothing sent, nothing held
+    assert factory.handler.requests == []
+    assert isinstance(_next_request_does_not_hang(relay), RelayHealth)
+    assert restart.calls == 1  # the new tunnel is used, not replaced
+    relay.close()
+    assert fresh.stops == 1
+
+
+def test_an_interrupt_at_the_exit_of_the_fast_path_gives_the_reservation_back():
+    relay = RelayClient(tunnel=FakeHandle(50123), http_factory=Factory())
+    relay._cond = _HookedCond(relay._lock, on_exit={1})  # after the request was counted
+    with pytest.raises(SystemExit):
+        relay.health()
+    assert relay._pool.inflight == 0
+    relay.close()
 
 
 def test_a_failing_http_client_is_a_failed_restart_that_stops_the_child_and_arms_the_backoff():
