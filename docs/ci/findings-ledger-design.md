@@ -92,7 +92,7 @@ or table rows both work, and the backticks are optional:
 
 | Disposition | Rule |
 |---|---|
-| `fixed` | Must name at least one test node id (`path.py::name`). With `--repo-root`, each named test must exist at the head, found by `ast` without importing anything. A missing `@pytest.mark.finding("<id>")` marker is a note, not a problem (idea 3). |
+| `fixed` | Must name at least one test node id: `path.py::name` (nested classes join with `::`) or `path.swift::testName`. With `--repo-root`, each named test must exist at the head. Python files are parsed with `ast`, and Swift files get a text scan for `func <name>(`, which covers XCTest methods and `@Test func`. Nothing is imported, built or run. A missing `@pytest.mark.finding("<id>")` marker on a Python test is a note, not a problem (idea 3). Swift tests carry no markers. |
 | `residual`, `declined`, `deferred` | Need a reason. |
 | `dup <id>` | Takes the status of the target. Loops are invalid, and so is an unknown target. |
 | `noted` | Only for review summaries (`gh-r…`), which often hold no action. |
@@ -106,6 +106,14 @@ Only reviews from `OWNER`, `MEMBER` or `COLLABORATOR`, plus named bots
 (`coderabbitai[bot]`), count. Anyone can review a public PR, and a drive-by
 reviewer should not be able to add required work. Dismissed reviews drop
 out, along with their inline comments.
+
+Every top-level inline comment from a trusted author is a finding,
+including the PR author's own notes to reviewers. That is deliberate. The
+automated reviewer posts as the PR author, so association cannot tell the
+two apart. Filtering on severity tags (`**Bug`, `**Nit`) would tie the
+check to one reviewer's style, and an untagged real finding would then
+pass silently, which is the #585 failure again. An author note costs one
+`declined` line.
 
 ### Dry run on #585
 
@@ -153,7 +161,7 @@ The check would have asked for 13 extra lines across the two PRs.
   reviews is roughly 15 runs, so about 5 to 8 minutes. The repo is public,
   so standard runners cost nothing, and it never competes for the macOS
   runners.
-- **Maintenance: low.** About 530 lines of stdlib Python and 41 offline
+- **Maintenance: low.** About 560 lines of stdlib Python and 50 offline
   tests. The fragile parts are the ledger regex and GitHub's event
   payloads.
 - **Fails open or closed:** today it always fails open (`--warn-only`,
@@ -213,7 +221,8 @@ missing marker as a note.
 
 - **Value: medium on its own, high as glue.** A failing test names the
   finding it guards, so a later regression points straight back to the
-  review that found it. `pytest -m` cannot select on marker arguments, so
+  review that found it. The pinned pytest (7.4.4) cannot select on marker
+  arguments with `-m` (8.0 added that, for keyword arguments only), so
   `pytest --collect-only` plus a small plugin or the ast index would list
   every finding-keyed test.
 - **False positives: none** while it stays a note. If enforced, the cost

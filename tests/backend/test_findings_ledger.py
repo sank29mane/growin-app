@@ -145,6 +145,24 @@ def test_latest_round_is_the_highest_number_and_h3_and_fences_stay_inside_it():
     assert set(entries) == {"opus-r3-a", "grok-r3-1"}
 
 
+@pytest.mark.parametrize("fenced, expected", [
+    # Review probe: a ~~~ line inside a ``` block is content, not a close.
+    ("```\n~~~\n```", [1, 2]),
+    ("~~~\n```\n~~~", [1, 2]),
+    # A closing run must be at least as long as the opening one.
+    ("````\n```\n## Review round 7\n````", [1, 2]),
+    # A closing line carries no info string.
+    ("```\n```python\n## Review round 7\n```", [1, 2]),
+    # A backtick info string cannot hold a backtick, so this opens nothing.
+    ("``` a`b", [1, 2]),
+    # An unclosed fence hides everything after it.
+    ("```", [1]),
+])
+def test_fences_close_only_on_the_same_character_and_length(fenced, expected):
+    body = f"## Review round 1\n{fenced}\n## Review round 2\n- `gh-c1` noted\n"
+    assert [n for n, _ in fl.split_rounds(body)] == expected
+
+
 def test_a_repeated_round_number_uses_the_last_section():
     body = "## Review round 2\n- `a-r2-1` residual: first\n## Review round 2\n- `a-r2-2` residual: second\n"
     n, text = fl.latest_round(fl.split_rounds(body))
@@ -279,7 +297,30 @@ class TestGroup:
     @pytest.mark.finding("gh-c4")
     async def test_inner(self):
         pass
+
+class TestOuter:
+    pytestmark = pytest.mark.finding("gh-c6")
+
+    class TestInner:
+        @pytest.mark.finding("gh-c5")
+        def test_deep(self):
+            def test_local():
+                pass
 '''
+
+SWIFT_SOURCE = """
+import XCTest
+import Testing
+
+final class SignerSourceScanTests: XCTestCase {
+    func testAliasFlagged() throws {
+        XCTAssertTrue(true)
+    }
+}
+
+@Test("generic router alias") func genericRouterAliasIsCaught() {
+}
+"""
 
 
 @pytest.fixture
@@ -287,6 +328,10 @@ def repo(tmp_path):
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "test_x.py").write_text(TEST_SOURCE)
     (tmp_path / "outside.py").write_text("def test_secret():\n    pass\n")
+    (tmp_path / "GrowinTests").mkdir()
+    (tmp_path / "GrowinTests" / "SignerSourceScanTests.swift").write_text(SWIFT_SOURCE)
+    (tmp_path / "outside.swift").write_text("func testSecret() {}\n")
+    (tmp_path / "GrowinTests" / "Notes.m").write_text("- (void)testObjc {}\n")
     return tmp_path
 
 
@@ -297,6 +342,35 @@ def test_the_index_finds_functions_methods_and_markers_without_importing(repo):
     assert idx.lookup("tests/test_x.py", "TestGroup::test_inner") == {"mod-r1-1", "gh-c3", "gh-c4"}
     assert idx.lookup("tests/test_x.py", "test_gone") is None
     assert idx.lookup("tests/nope.py", "test_marked") is None
+
+
+def test_nested_test_classes_are_indexed_by_their_full_node_path(repo):
+    idx = fl.TestIndex(repo)
+    assert idx.lookup("tests/test_x.py", "TestOuter::TestInner::test_deep") == {"mod-r1-1", "gh-c5", "gh-c6"}
+    assert idx.lookup("tests/test_x.py", "TestInner::test_deep") is None
+    # A function defined inside a test is not a test.
+    assert idx.lookup("tests/test_x.py", "TestOuter::TestInner::test_deep::test_local") is None
+
+
+def test_swift_tests_are_found_by_a_text_scan_and_carry_no_markers(repo):
+    idx = fl.TestIndex(repo)
+    path = "GrowinTests/SignerSourceScanTests.swift"
+    assert idx.lookup(path, "testAliasFlagged") == set()
+    assert idx.lookup(path, "SignerSourceScanTests::testAliasFlagged") == set()
+    assert idx.lookup(path, "genericRouterAliasIsCaught") == set()
+    assert idx.lookup(path, "testGone") is None
+    assert fl.TestIndex(repo / "GrowinTests").lookup("../outside.swift", "testSecret") is None
+
+
+def test_a_swift_fix_can_be_marked_fixed(repo):
+    body = """## Review round 1
+- `gh-c1` fixed `GrowinTests/SignerSourceScanTests.swift::testAliasFlagged`
+- `gh-c2` fixed `GrowinTests/SignerSourceScanTests.swift::testGone`
+- `gh-c3` fixed `GrowinTests/Notes.m::testObjc`
+"""
+    report = judge(body, "gh-c1", "gh-c2", "gh-c3", tests=fl.TestIndex(repo))
+    assert statuses(report) == {"gh-c1": "ok", "gh-c2": "test-missing", "gh-c3": "invalid"}
+    assert {r.id: r for r in report.rows}["gh-c1"].notes == []
 
 
 def test_the_index_refuses_paths_outside_the_root(repo):
@@ -420,6 +494,7 @@ def test_the_workflow_is_warn_only_and_never_uses_pull_request_target():
     assert "--warn-only" in text
     assert "pull_request_target" not in text
     assert "persist-credentials: false" in text
+    assert "            GrowinTests\n" in text
     for event in ("pull_request:", "pull_request_review:", "pull_request_review_comment:"):
         assert event in text
     assert "types: [ submitted, edited, dismissed ]" in text

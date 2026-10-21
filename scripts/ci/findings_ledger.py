@@ -16,6 +16,7 @@ The latest `## Review round N` section (highest N, last one if repeated)
 must give every known finding one ledger line:
 
   - `gh-c4337853615` fixed `tests/backend/test_x.py::test_y`
+  - `gh-c4339411293` fixed `GrowinTests/SignerSourceScanTests.swift::testAliasFlagged`
   - `codex-r4-p1a` residual: fails closed, tracked under Residuals
   - `grok-r4-2` declined: the window size makes this unreachable
   - `opus-r3-m10` deferred: phase 62
@@ -58,7 +59,7 @@ ID = r"(?:gh-[rc]\d+|[a-z][a-z0-9]*-r\d+-[a-z0-9]+)"
 ID_RE = re.compile(rf"^{ID}$")
 ROUND_RE = re.compile(r"^##[ \t]+Review round[ \t]+(\d+)\b.*$", re.IGNORECASE)
 H2_RE = re.compile(r"^##[ \t]")
-FENCE_RE = re.compile(r"^\s*(```|~~~)")
+FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
 DISP = "|".join(DISPOSITIONS)
 LIST_LINE_RE = re.compile(
     rf"^\s*(?:[-*+]|\d+[.)])\s+`?(?P<id>{ID})`?\s*[:\-]?\s+(?P<disp>{DISP})\b\s*:?\s*(?P<detail>.*)$",
@@ -68,7 +69,8 @@ TABLE_LINE_RE = re.compile(
     rf"^\s*\|\s*`?(?P<id>{ID})`?\s*\|\s*(?P<disp>{DISP})\s*\|(?P<detail>.*?)\|?\s*$",
     re.IGNORECASE,
 )
-NODE_RE = re.compile(r"(?P<path>[\w./-]+\.py)::(?P<name>[\w:]+)(?:\[[^\]\s]*\])?")
+NODE_RE = re.compile(r"(?P<path>[\w./-]+\.(?:py|swift))::(?P<name>[\w:]+)(?:\[[^\]\s]*\])?")
+SWIFT_FUNC_RE = re.compile(r"\bfunc\s+(\w+)\s*\(")
 SAFE_PATH_RE = re.compile(r"^[\w./-]{1,200}$")
 SAFE_LOGIN_RE = re.compile(r"^[\w-]{1,39}(\[bot\])?$")
 
@@ -194,14 +196,25 @@ def _safe_login(item: dict) -> str:
 
 def split_rounds(body: str) -> list[tuple[int, str]]:
     """`## Review round N` sections in body order. A section runs to the next
-    level-2 heading. Headings inside fenced code blocks do not count."""
+    level-2 heading. Headings inside fenced code blocks do not count.
+
+    Fences follow CommonMark: a fence closes only on a bare run of the same
+    character at least as long as the one that opened it, so a `~~~` line
+    inside a ``` block is content. Indentation is not limited to three
+    spaces, because ledger fences often sit inside list items."""
     sections: list[tuple[int, list[str]]] = []
     current: list[str] | None = None
-    in_fence = False
+    fence: tuple[str, int] | None = None
     for line in (body or "").splitlines():
-        if FENCE_RE.match(line):
-            in_fence = not in_fence
-        if not in_fence and H2_RE.match(line):
+        m = FENCE_RE.match(line)
+        if m:
+            run, rest = m.group(1), m.group(2)
+            if fence is None:
+                if not (run[0] == "`" and "`" in rest):  # a backtick info string cannot hold backticks
+                    fence = (run[0], len(run))
+            elif run[0] == fence[0] and len(run) >= fence[1] and not rest.strip():
+                fence = None
+        if fence is None and H2_RE.match(line):
             m = ROUND_RE.match(line)
             if m:
                 current = []
@@ -249,18 +262,24 @@ def mentioned_ids(rounds: list[tuple[int, str]]) -> dict[str, int]:
 # --- test lookup --------------------------------------------------------------
 
 class TestIndex:
-    """Answers "does this test exist, and which finding markers does it carry"
-    by parsing files with ast. It never imports or runs PR code."""
+    """Answers "does this test exist, and which finding markers does it carry".
+
+    Python files are parsed with ast. Swift files get a text scan for
+    `func <name>(`, which covers XCTest methods and `@Test func`. Swift tests
+    carry no markers. It never imports, builds or runs PR code."""
 
     def __init__(self, root: Path):
         self.root = root.resolve()
         self._cache: dict[str, dict[str, set[str]] | None] = {}
 
     def lookup(self, path: str, name: str) -> set[str] | None:
-        """Finding ids marked on the test, or None if the test is not found."""
+        """Finding ids marked on the test, or None if the test is not found.
+        For Swift, only the last `::` segment (the function name) counts."""
         tests = self._load(path)
         if tests is None:
             return None
+        if path.endswith(".swift"):
+            name = name.rsplit("::", 1)[-1]
         return tests.get(name)
 
     def _load(self, path: str):
@@ -271,7 +290,11 @@ class TestIndex:
         if (not Path(path).is_absolute() and ".." not in Path(path).parts
                 and target.is_relative_to(self.root) and target.is_file()):
             try:
-                result = _index_module(ast.parse(target.read_text(encoding="utf-8")))
+                text = target.read_text(encoding="utf-8")
+                if target.suffix == ".swift":
+                    result = {name: set() for name in SWIFT_FUNC_RE.findall(text)}
+                elif target.suffix == ".py":
+                    result = _index_module(ast.parse(text))
             except (SyntaxError, UnicodeDecodeError, OSError):
                 result = None
         self._cache[path] = result
@@ -297,17 +320,19 @@ def _pytestmark_ids(body) -> set[str]:
 
 
 def _index_module(tree: ast.Module) -> dict[str, set[str]]:
-    module_ids = _pytestmark_ids(tree.body)
     out: dict[str, set[str]] = {}
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            out[node.name] = module_ids | _marker_ids(node.decorator_list)
-        elif isinstance(node, ast.ClassDef):
-            class_ids = module_ids | _marker_ids(node.decorator_list) | _pytestmark_ids(node.body)
-            for item in node.body:
-                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    out[f"{node.name}::{item.name}"] = class_ids | _marker_ids(item.decorator_list)
+    _index_body(tree.body, "", _pytestmark_ids(tree.body), out)
     return out
+
+
+def _index_body(body, prefix: str, inherited: set[str], out: dict[str, set[str]]) -> None:
+    """Functions keyed by their pytest node path; nested classes join with `::`."""
+    for node in body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            out[prefix + node.name] = inherited | _marker_ids(node.decorator_list)
+        elif isinstance(node, ast.ClassDef):
+            ids = inherited | _marker_ids(node.decorator_list) | _pytestmark_ids(node.body)
+            _index_body(node.body, f"{prefix}{node.name}::", ids, out)
 
 
 # --- evaluation ---------------------------------------------------------------
@@ -350,7 +375,8 @@ def _judge(fid, entries, earlier, latest, tests, by_id, seen=None) -> Row:
     if disp == "fixed":
         nodes = list(NODE_RE.finditer(detail))
         if not nodes:
-            return Row(fid, INVALID, "`fixed` needs a test node id (`path.py::test_name`)", entry=entry)
+            return Row(fid, INVALID, "`fixed` needs a test node id "
+                       "(`path.py::test_name` or `path.swift::testName`)", entry=entry)
         notes = []
         for m in nodes:
             node = f"{m.group('path')}::{m.group('name')}"
@@ -359,7 +385,7 @@ def _judge(fid, entries, earlier, latest, tests, by_id, seen=None) -> Row:
             markers = tests.lookup(m.group("path"), m.group("name"))
             if markers is None:
                 return Row(fid, TEST_MISSING, f"`{_code(node)}` not found at this head", entry=entry)
-            if fid not in markers:
+            if fid not in markers and m.group("path").endswith(".py"):
                 notes.append(f"`{_code(node)}` has no `finding(\"{fid}\")` marker")
         return Row(fid, OK, "fixed", entry=entry, notes=notes)
     if disp in ("residual", "declined", "deferred"):

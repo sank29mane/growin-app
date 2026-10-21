@@ -9,8 +9,8 @@ name: Findings Ledger
 # SECURITY: the script reads review text, which anyone can post on a public
 # repo. It counts only owner, member and collaborator reviews (plus named
 # bots), and reduces every string to a safe excerpt before it reaches the
-# comment. It reads test files with ast to confirm `fixed` tests exist, and
-# never imports or runs PR code. On fork PRs the token is read-only, so the
+# comment. It reads Python test files with ast and Swift test files as text
+# to confirm `fixed` tests exist, and never imports, builds or runs PR code. On fork PRs the token is read-only, so the
 # comment step only warns.
 on:
   pull_request:
@@ -37,7 +37,8 @@ jobs:
     timeout-minutes: 5
     continue-on-error: true
     steps:
-      # Only the script and the test files (to confirm `fixed` tests exist).
+      # Only the script and the Python and Swift test files (to confirm
+      # `fixed` tests exist). Nothing here is built or run.
       - name: Check out the PR head
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -46,6 +47,8 @@ jobs:
           sparse-checkout: |
             scripts/ci
             tests
+            GrowinTests
+            GrowinUITests
 
       - name: Check the ledger
         env:
