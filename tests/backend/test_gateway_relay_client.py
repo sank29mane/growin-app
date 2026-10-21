@@ -309,21 +309,38 @@ def stack_fixture() -> Stack:
 
 @pytest.mark.parametrize("value", [None, "growin-relay/2", "", "growin-relay/1 "])
 def test_a_missing_or_different_contract_header_fails_closed(value):
+    # the body is a perfectly good health answer: only the header is wrong
     headers = base_headers()
     if value is None:
         headers.pop(client_mod.HDR_CONTRACT)
     else:
         headers[client_mod.HDR_CONTRACT] = value
-    response = httpx.Response(200, headers=headers, content=b"{}")
-    with pytest.raises(RelayContractMismatch):
+    response = httpx.Response(200, headers=headers, content=json.dumps(HEALTH_JSON).encode())
+    with pytest.raises(RelayContractMismatch) as info:
         one_response(response).health()
+    assert info.value.reason == "contract_header"
+
+
+@pytest.mark.parametrize("value", [None, "growin-relay/2"])
+def test_upstream_bytes_with_a_wrong_contract_header_are_refused_even_if_the_hash_matches(value):
+    good = bars_response()
+    headers = httpx.Headers(good.headers)
+    del headers[client_mod.HDR_CONTRACT]
+    if value is not None:
+        headers[client_mod.HDR_CONTRACT] = value
+    response = httpx.Response(200, headers=headers, content=BARS_BODY)
+    with pytest.raises(RelayContractMismatch) as info:
+        bars(one_response(response))
+    assert info.value.reason == "contract_header"
 
 
 def test_the_contract_header_is_checked_before_the_status_and_body():
     headers = base_headers()
     headers[client_mod.HDR_CONTRACT] = "growin-relay/2"
-    # a well-formed error body must not be mapped when the version is wrong
-    body = {"contract": "growin-relay/2", "error": {"code": "NO_SESSION"}}
+    # a well-formed error body must not be mapped when the header says another version
+    body = {"contract": CONTRACT, "error": {"code": "NO_SESSION", "reason": None,
+                                            "breeze_status": None, "retryable": False,
+                                            "retry_after_s": None, "fields": None}}
     response = httpx.Response(503, headers=headers, content=json.dumps(body).encode())
     with pytest.raises(RelayContractMismatch):
         one_response(response).budget()
@@ -573,6 +590,11 @@ C6 = {
 
 def test_every_c6_code_has_exactly_one_subclass():
     assert set(CODE_TO_CLASS) == set(C6)
+    classes = list(CODE_TO_CLASS.values())
+    for first in classes:
+        for second in classes:
+            if first is not second:
+                assert not issubclass(first, second), (first, second)  # no catch-by-accident
     assert len(set(CODE_TO_CLASS.values())) == len(C6)
     for code, (_, cls) in C6.items():
         assert CODE_TO_CLASS[code] is cls and cls.code == code
