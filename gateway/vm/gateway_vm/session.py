@@ -337,7 +337,7 @@ class SessionManager:
         leave fresh ok evidence for the whole age limit.
         """
         started_mono = self._clock.monotonic()
-        result, cached = self._egress.check_reporting_cache()
+        result, cached = self._egress.check_reporting_cache(keep_failure_on_ok=True)
         with self._lock:
             superseded = (
                 result.ok
@@ -345,21 +345,24 @@ class SessionManager:
                 and started_mono <= self._last_failure_mono
             )
             if superseded:
-                kept = self._last_egress  # the failure that outranks this ok
+                kept = self._last_egress  # what the gate keeps: the failure, or a newer ok stored since
             else:
                 self._last_egress = result
                 self._last_egress_mono = started_mono
-                if not result.ok:
+                if result.ok:
+                    self._egress.clear_failure_before(started_mono)  # a dropped ok never gets here
+                else:
                     self._last_failure_mono = self._clock.monotonic()
                     self._generation += 1  # an exchange already in flight is no longer trustworthy
                 kept = result
+        logged = kept if kept is not None else result  # the audit line says what the gate kept
         self._events.emit(
             "egress_check",
-            result="ok" if result.ok else ("rejected" if _egress_reason(result) == "egress_mismatch" else "error"),
-            reason=None if result.ok else _egress_reason(result),
+            result="ok" if logged.ok else ("rejected" if _egress_reason(logged) == "egress_mismatch" else "error"),
+            reason=None if logged.ok else _egress_reason(logged),
             cached=cached,
         )
-        return kept if kept is not None else result
+        return logged
 
     def _refresh_egress(self) -> EgressResult:
         """Check egress and, on failure, suspend an active session."""

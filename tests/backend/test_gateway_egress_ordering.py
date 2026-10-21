@@ -119,3 +119,117 @@ def test_an_ok_check_logs_cached_false(rs: Stack):
     rs.session._refresh_egress()
     (event,) = egress_events(rs)
     assert event["cached"] is False and event["result"] == "ok"
+
+
+# ------------------------------- round 2: equal stamps, record time, kept result, cooldown
+
+
+def run_in_thread(fn) -> tuple[threading.Thread, list]:
+    out: list = []
+    worker = threading.Thread(target=lambda: out.append(fn()))
+    worker.start()
+    return worker, out
+
+
+class EchoGates:
+    """Parks each echo fetch, in call order, after it has been answered, until released."""
+
+    def __init__(self, stack: Stack, count: int) -> None:
+        self.entered = [threading.Event() for _ in range(count)]
+        self.release = [threading.Event() for _ in range(count)]
+        self._calls = 0
+        self._lock = threading.Lock()
+        real = stack.transport.request
+
+        def request(method, url, *, headers, body, timeouts, max_bytes):
+            response = real(method, url, headers=headers, body=body, timeouts=timeouts, max_bytes=max_bytes)
+            if urlsplit(url).hostname == "api.ipify.org":
+                with self._lock:
+                    index, self._calls = self._calls, self._calls + 1
+                if index < count:
+                    self.entered[index].set()
+                    assert self.release[index].wait(timeout=10)
+            return response
+
+        stack.transport.request = request  # type: ignore[method-assign]
+
+
+def test_an_ok_that_started_at_the_same_instant_as_a_failure_is_dropped(rs: Stack):
+    worker, parked = run_parked_check(rs)
+    rs.transport.echo_ip = OTHER_IP
+    rs.session._refresh_egress()  # the clock has not moved: equal stamps
+    parked.release.set()
+    worker.join(timeout=10)
+    assert not worker.is_alive()
+    assert rs.session.snapshot(refresh_egress_if_stale=False)["egress"]["ok"] is False
+    resp = get(rs, MASTER)
+    assert resp.status_code == 503 and code_of(resp) == "EGRESS_MISMATCH"
+    assert rs.transport.master_requests() == []
+
+
+def test_a_failure_is_stamped_when_it_is_recorded_not_when_it_started(rs: Stack):
+    gates = EchoGates(rs, 2)
+    rs.transport.echo_ip = OTHER_IP
+    failing, _ = run_in_thread(rs.session._refresh_egress)  # enters ipify at t0 and waits
+    assert gates.entered[0].wait(timeout=10)
+    rs.clock.advance(5)
+    rs.transport.echo_ip = "203.0.113.7"
+    passing, _ = run_in_thread(rs.session._refresh_egress)  # starts at t0+5, saw a good echo
+    assert gates.entered[1].wait(timeout=10)
+    rs.clock.advance(1)
+    gates.release[0].set()  # the failure records at t0+6, after the ok started
+    failing.join(timeout=10)
+    assert not failing.is_alive()
+    gates.release[1].set()
+    passing.join(timeout=10)
+    assert not passing.is_alive()
+
+    assert rs.session.snapshot(refresh_egress_if_stale=False)["egress"]["ok"] is False
+    resp = get(rs, MASTER)
+    assert resp.status_code == 503 and code_of(resp) == "EGRESS_MISMATCH"
+    assert rs.transport.master_requests() == []
+
+
+def test_run_egress_returns_the_stored_failure_not_the_dropped_ok(rs: Stack):
+    parked = ParkedEcho(rs)
+    slow, slow_out = run_in_thread(rs.session._run_egress)
+    assert parked.entered.wait(timeout=10)
+    rs.clock.advance(1)
+    rs.transport.echo_ip = OTHER_IP
+    fast = rs.session._run_egress()
+    parked.release.set()
+    slow.join(timeout=10)
+    assert not slow.is_alive()
+    assert fast.ok is False
+    (returned,) = slow_out
+    assert returned.ok is False and returned == fast
+
+
+def test_the_event_for_a_dropped_ok_shows_the_result_the_gate_kept(rs: Stack):
+    worker, parked = run_parked_check(rs)
+    rs.clock.advance(1)
+    rs.transport.echo_ip = OTHER_IP
+    rs.session._refresh_egress()
+    parked.release.set()
+    worker.join(timeout=10)
+    assert not worker.is_alive()
+    events = egress_events(rs)
+    assert [e["result"] for e in events] == ["rejected", "rejected"]  # the ok line says what was kept
+    assert [e["reason"] for e in events] == ["egress_mismatch", "egress_mismatch"]
+    assert [e["cached"] for e in events] == [False, False]
+
+
+def test_a_dropped_ok_does_not_end_the_failure_cooldown(rs: Stack):
+    worker, parked = run_parked_check(rs)  # one echo request so far
+    rs.clock.advance(1)
+    rs.transport.echo_ip = OTHER_IP
+    rs.session._refresh_egress()  # two echo requests; the failure starts its cooldown
+    parked.release.set()
+    worker.join(timeout=10)
+    assert not worker.is_alive()
+    assert len(echo_requests(rs)) == 2
+    rs.clock.advance(1)
+    result = rs.session._refresh_egress()  # still inside 30 s of the failure
+    assert result.ok is False
+    assert len(echo_requests(rs)) == 2  # no new request: the cooldown survived the dropped ok
+    assert egress_events(rs)[-1]["cached"] is True

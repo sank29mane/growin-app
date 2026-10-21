@@ -72,8 +72,14 @@ class EgressChecker:
         """Never raises: any fetch or parse failure gives ok=False."""
         return self.check_reporting_cache()[0]
 
-    def check_reporting_cache(self) -> tuple[EgressResult, bool]:
-        """Like check(), and True when the result is a reused failure that made no request."""
+    def check_reporting_cache(self, *, keep_failure_on_ok: bool = False) -> tuple[EgressResult, bool]:
+        """Like check(), and True when the result is a reused failure that made no request.
+
+        By default an ok clears the failure cooldown. The session passes
+        keep_failure_on_ok=True and calls clear_failure_before() only when it
+        commits the ok, so an ok it drops cannot end the cooldown of a failure
+        that outranks it.
+        """
         with self._lock:
             cached, since = self._last_failed, self._last_failed_mono
         if (
@@ -85,10 +91,17 @@ class EgressChecker:
         result = self._check_now()
         with self._lock:
             if result.ok:
-                self._last_failed, self._last_failed_mono = None, None
+                if not keep_failure_on_ok:
+                    self._last_failed, self._last_failed_mono = None, None
             else:
                 self._last_failed, self._last_failed_mono = result, self._clock.monotonic()
         return result, False
+
+    def clear_failure_before(self, started_mono: float) -> None:
+        """End the cooldown of a failure recorded before `started_mono`; a newer one stays."""
+        with self._lock:
+            if self._last_failed_mono is not None and self._last_failed_mono < started_mono:
+                self._last_failed, self._last_failed_mono = None, None
 
     def _check_now(self) -> EgressResult:
         try:
