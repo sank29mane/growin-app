@@ -821,6 +821,10 @@ def tampered_run(store, relay, clock_time, tamper):
             p, upstream_request={**p.upstream_request, "from_date": "2019-01-01T00:00:00.000Z"}),
          "relay_response_invalid"),
         ("query", lambda p: dataclasses.replace(p, query={**p.query, "stock_code": "NIFBEE"}), "relay_response_invalid"),
+        # query and upstream_request swapped together: self-consistent, so only the engine's own query catches it
+        ("swap", lambda p: dataclasses.replace(
+            p, query={**p.query, "stock_code": "NIFBEE"},
+            upstream_request={**p.upstream_request, "stock_code": "NIFBEE"}), "relay_response_invalid"),
         ("api", lambda p: dataclasses.replace(p, upstream_api="icici-security-master-zip"), "relay_response_invalid"),
         ("interval", lambda p: dataclasses.replace(p, upstream_interval="1minute"), "relay_response_invalid"),
     ],
@@ -2073,3 +2077,175 @@ def test_verify_leaves_stored_with_gaps_windows_alone(store, relay, clock_time, 
     report = eng.verify(plan, today_ist=TODAY)
     assert window_states(store) == before and covered(store, "NIFBEE", gap_window[0]) == 0
     assert report.status == "complete_with_flags" and [w["status"] for w in report.flagged_windows] == ["stored_with_gaps"]
+
+
+# ================================================================ review round 6
+
+
+class Crash(BaseException):
+    """A process death: not an Exception, so no `except Exception` in the engine can swallow it."""
+
+
+def run_until_clean(eng, plan, limit=12, **extra):
+    """Run, restart after each simulated crash. Returns (runs, crashes) and the final report."""
+    crashes = 0
+    for number in range(limit):
+        try:
+            return eng.run(plan, today_ist=TODAY, **extra), crashes, number + 1
+        except Crash:
+            crashes += 1
+    return None, crashes, limit
+
+
+def calls_for(relay, code):
+    return sum(1 for request in relay.bars_requests if request["stock_code"] == code)
+
+
+def test_a_crash_between_the_failed_outcome_and_its_event_still_spends_the_attempt(store, relay, clock_time):
+    """Codex r5 P2: the budget counted from events alone, so a crash after the outcome committed but before
+    the event row lost the attempt and a window could cost 4, 5, ... failed calls."""
+    eng, plan = ready(store, relay, clock_time, codes=("RELIND",))
+    relay.bars_script = lambda index, params: err_response(502, "UPSTREAM_ERROR", "upstream_shape")
+
+    def crash_before_event(*args, **kw):
+        raise Crash("died after the outcome row, before the event row")
+
+    eng._fail = crash_before_event  # type: ignore[method-assign]
+    report, crashes, _ = run_until_clean(eng, plan)
+    budget = bf.MAX_WINDOW_ATTEMPTS
+    assert report is not None and crashes == 2 * budget, "every failed call crashed once, and no more than the budget"
+    for window in plan.windows:
+        sent = sum(1 for r in relay.bars_requests if r["from"] == window[0].isoformat())
+        assert sent == budget, "a window may fail at most its budget in calls, crashes included"
+        assert store.query(
+            "SELECT status, attempt, error_code FROM backfill_events WHERE window_from = ? AND status <> 'pending' "
+            "ORDER BY attempt", [window[0]],
+        ) == [("failed", 1, "upstream_upstream_shape"), ("failed", 2, "upstream_upstream_shape"),
+              ("failed_exhausted", 3, "upstream_upstream_shape")]
+    assert report.counts["failed_exhausted"] == 2 and report.status == "complete_with_flags"
+    assert len(relay.bars_requests) == 2 * budget
+
+
+def test_a_crash_after_the_reservation_but_before_any_outcome_is_counted_once(store, relay, clock_time):
+    eng, plan = ready(store, relay, clock_time, codes=("RELIND",))
+    calls = {"n": 0}
+    real = eng._relay().daily_bars
+
+    class DyingOnce:
+        def __getattr__(self, name):
+            return getattr(relay.client(), name)
+
+        def daily_bars(self, *args, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise Crash("died with the call reserved and no outcome")
+            return real(*args, **kw)
+
+    eng._source = DyingOnce()
+    with pytest.raises(Crash):
+        eng.run(plan, today_ist=TODAY)
+    first = plan.windows[0][0]
+    assert count(store, "SELECT count(*) FROM relay_call_ledger WHERE attempt = 1 AND window_from = ?", [first]) == 1
+    assert count(store, "SELECT count(*) FROM relay_call_outcomes AS o JOIN relay_call_ledger AS l "
+                        "ON l.call_id = o.call_id WHERE l.attempt = 1") == 0
+    report = eng.run(plan, today_ist=TODAY)
+    assert report.status == "complete" and report.counts["done"] == 2
+    # the interrupted attempt is recorded once, as attempt 1; the retry that finished is attempt 2
+    assert store.query(
+        "SELECT status, attempt, error_code FROM backfill_events WHERE window_from = ? AND status <> 'pending' "
+        "ORDER BY attempt", [first]
+    ) == [("failed", 1, bf.INTERRUPTED_ATTEMPT_CODE), ("done", 2, None)]
+    eng.run(plan, today_ist=TODAY)  # a further run recovers nothing twice
+    assert count(store, "SELECT count(*) FROM backfill_events WHERE window_from = ? AND status <> 'pending'",
+                 [first]) == 2
+
+
+def test_a_window_that_always_crashes_still_reaches_failed_exhausted(store, relay, clock_time):
+    """Opus r5: a crash before the outcome used to leave no trace, so an always-crashing window was retried forever."""
+    eng, plan = ready(store, relay, clock_time, codes=("RELIND",))
+
+    class AlwaysDies:
+        def __getattr__(self, name):
+            return getattr(relay.client(), name)
+
+        def daily_bars(self, code, w_from, w_to):
+            if w_from == plan.windows[0][0]:
+                raise Crash("this window kills the process")
+            return relay.client().daily_bars(code, w_from, w_to)
+
+    eng._source = AlwaysDies()
+    report, crashes, runs = run_until_clean(eng, plan)
+    assert crashes == bf.MAX_WINDOW_ATTEMPTS and report is not None, (crashes, runs)
+    assert report.counts["failed_exhausted"] == 1 and report.counts["done"] == 1
+    assert report.status == "complete_with_flags"
+    assert [w["error_code"] for w in report.flagged_windows] == [bf.INTERRUPTED_ATTEMPT_CODE]
+
+
+def test_a_halted_attempt_is_released_not_spent_and_a_refused_send_costs_nothing(store, relay, clock_time):
+    """Stops and `not_sent` calls leave a ledger row with the attempt on it, but only crashes spend an attempt."""
+    eng, plan = ready(store, relay, clock_time, codes=("RELIND",))
+    relay.bars_script = lambda index, params: err_response(503, "NO_SESSION")
+    for _ in range(bf.MAX_WINDOW_ATTEMPTS + 2):
+        assert eng.run(plan, today_ist=TODAY).status == "stopped_fail_closed"
+    assert count(store, "SELECT count(*) FROM backfill_events WHERE status IN ('failed', 'failed_exhausted')") == 0
+    relay.bars_script = None
+    assert eng.run(plan, today_ist=TODAY).status == "complete"
+    assert store.query("SELECT DISTINCT attempt FROM backfill_events WHERE status = 'done'") == [(1,)]
+
+
+def test_an_older_ledger_without_the_attempt_columns_is_upgraded_in_place(tmp_path):
+    from pilot_data.store import PilotDataStore
+
+    old_ledger = (
+        "CREATE TABLE IF NOT EXISTS relay_call_ledger(call_id VARCHAR PRIMARY KEY, workspace VARCHAR NOT NULL, "
+        "ist_date DATE NOT NULL, reserved_at_utc TIMESTAMP NOT NULL, endpoint VARCHAR NOT NULL, stock_code VARCHAR, "
+        "window_from DATE, window_to DATE, source_sha256 VARCHAR, row_sha256 VARCHAR NOT NULL)"
+    )
+    with PilotDataStore(tmp_path / "old", workspace="india") as old:
+        old.ensure_table("relay_call_ledger", old_ledger, key_columns=("call_id",))
+        assert "attempt" not in old.columns("relay_call_ledger")
+        bf.ensure_backfill_tables(old)
+        assert {"attempt", "plan_sha256"} <= set(old.columns("relay_call_ledger"))
+        assert "stopped" in old.columns("relay_call_outcomes")
+
+
+def test_verify_claims_the_assessed_span_for_a_depth_limited_window_not_the_requested_one(
+    store, relay, clock_time, monkeypatch
+):
+    """Opus r5 mutant N: verify promotion wrote `complete_over(*window)`. The first yearly window of a depth-limited
+    probe is assessed from the probed floor, so its coverage must start there once the calendar verifies it."""
+    floor = date(2024, 6, 3)
+    relay.depth_cutoff = floor
+    refresh(store, relay)
+    assert probe(store, relay, clock_time).depth_limited
+    eng = engine(store, relay, clock_time)
+    plan = eng.build_plan(members(("RELIND",)), window_start=WINDOW[0], window_end=WINDOW[1])
+    first = plan.windows[0]
+    assert first == (date(2023, 5, 29), floor)
+    with monkeypatch.context() as patch:
+        no_calendar(patch)
+        eng.run(plan, today_ist=TODAY)
+    assert window_states(store)[("RELIND", first[0])] == "stored_unverified"
+    assert covered(store, "RELIND", first[0]) == 0
+    verified = eng.verify(plan, today_ist=TODAY)
+    assert window_states(store)[("RELIND", first[0])] == "done" and verified.counts["stored_unverified"] == 0
+    assert coverage_span(store, "RELIND", first[0]) == (floor, floor)
+    assert not covers(store, "RELIND", date(2023, 5, 29)) and covers(store, "RELIND", floor)
+    for window in plan.windows[2:]:  # a window wholly after the floor claims all of itself
+        assert coverage_span(store, "RELIND", window[0]) == window
+
+
+def test_verify_claims_the_assessed_span_for_a_late_listed_window_not_the_requested_one(
+    store, relay, clock_time, monkeypatch
+):
+    eng, plan = scenario(store, relay, clock_time)
+    late = plan.windows[1]
+    with monkeypatch.context() as patch:
+        no_calendar(patch)
+        eng.run(plan, today_ist=TODAY)
+    assert window_states(store)[("JAIBAL", late[0])] == "stored_unverified"
+    eng.verify(plan, today_ist=TODAY)
+    assert window_states(store)[("JAIBAL", late[0])] == "done"
+    assert coverage_span(store, "JAIBAL", late[0]) == (LISTING, late[1])  # from the listing date, not the window start
+    assert not covers(store, "JAIBAL", late[0]) and covers(store, "JAIBAL", LISTING)
+    assert coverage_span(store, "RELIND", late[0]) == late

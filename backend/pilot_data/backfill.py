@@ -164,13 +164,19 @@ LEDGER_DDL = (
     "CREATE TABLE IF NOT EXISTS relay_call_ledger("
     "call_id VARCHAR PRIMARY KEY, workspace VARCHAR NOT NULL, ist_date DATE NOT NULL, "
     "reserved_at_utc TIMESTAMP NOT NULL, endpoint VARCHAR NOT NULL, stock_code VARCHAR, window_from DATE, "
-    "window_to DATE, source_sha256 VARCHAR, row_sha256 VARCHAR NOT NULL)"
+    "window_to DATE, source_sha256 VARCHAR, row_sha256 VARCHAR NOT NULL, "
+    "plan_sha256 VARCHAR, attempt INTEGER)"
 )
+# Columns an older ledger lacks: the window attempt a call belongs to, written with the reservation itself.
+LEDGER_ATTEMPT_COLUMNS = {"plan_sha256": "VARCHAR", "attempt": "INTEGER"}
+INTERRUPTED_ATTEMPT_CODE = "attempt_interrupted"
 OUTCOMES_DDL = (
     "CREATE TABLE IF NOT EXISTS relay_call_outcomes("
     "call_id VARCHAR PRIMARY KEY, outcome VARCHAR NOT NULL, error_code VARCHAR, source_sha256 VARCHAR, "
-    "finished_at_utc TIMESTAMP NOT NULL, row_sha256 VARCHAR NOT NULL)"
+    "finished_at_utc TIMESTAMP NOT NULL, row_sha256 VARCHAR NOT NULL, stopped BOOLEAN)"
 )
+# A stop (fail-closed halt) is not a window failure: its attempt is released, not spent.
+OUTCOME_COLUMNS = {"stopped": "BOOLEAN"}
 PROVENANCE_DDL = (
     "CREATE TABLE IF NOT EXISTS relay_provenance("
     "source_sha256 VARCHAR NOT NULL, request_id VARCHAR NOT NULL, contract VARCHAR NOT NULL, "
@@ -190,6 +196,8 @@ def ensure_backfill_tables(store: PilotDataStore) -> None:
     store.ensure_table(
         "relay_provenance", PROVENANCE_DDL, key_columns=("source_sha256", "request_id")
     )
+    store.ensure_columns("relay_call_ledger", LEDGER_ATTEMPT_COLUMNS)
+    store.ensure_columns("relay_call_outcomes", OUTCOME_COLUMNS)
 
 
 def _check_workspace(store: PilotDataStore, workspace: str) -> None:
@@ -262,6 +270,8 @@ class _CallLedger:
         stock_code: str | None = None,
         window_from: date | None = None,
         window_to: date | None = None,
+        plan_sha256: str | None = None,
+        attempt: int | None = None,
     ) -> str:
         now_ist = self._clock().astimezone(IST).date()
         if now_ist > ist_date:
@@ -278,13 +288,13 @@ class _CallLedger:
         identity = {
             "call_id": call_id, "workspace": self._workspace, "ist_date": ist_date.isoformat(),
             "endpoint": endpoint, "stock_code": stock_code, "window_from": _iso(window_from),
-            "window_to": _iso(window_to),
+            "window_to": _iso(window_to), "plan_sha256": plan_sha256, "attempt": attempt,
         }
         row = {
             "call_id": call_id, "workspace": self._workspace, "ist_date": ist_date,
             "reserved_at_utc": utc_naive(self._clock()), "endpoint": endpoint, "stock_code": stock_code,
             "window_from": window_from, "window_to": window_to, "source_sha256": None,
-            "row_sha256": canonical_sha256(identity),
+            "row_sha256": canonical_sha256(identity), "plan_sha256": plan_sha256, "attempt": attempt,
         }
         outcome = self._store.append_rows("relay_call_ledger", [row], check="relay_call_ledger")
         if outcome.inserted != 1:
@@ -299,13 +309,17 @@ class _CallLedger:
             if wait > 0:
                 self._sleeper(wait)
 
-    def finish(self, call_id: str, outcome: str, error_code: str | None, source_sha256: str | None) -> None:
+    def finish(
+        self, call_id: str, outcome: str, error_code: str | None, source_sha256: str | None, *, stop: bool = False
+    ) -> None:
+        """Record how a call ended. `stop=True` marks a halt of the run: that attempt is released, not spent."""
         row = {
             "call_id": call_id, "outcome": outcome, "error_code": error_code, "source_sha256": source_sha256,
             "finished_at_utc": utc_naive(self._clock()),
             "row_sha256": canonical_sha256(
                 {"call_id": call_id, "outcome": outcome, "error_code": error_code, "source_sha256": source_sha256}
             ),
+            "stopped": stop,
         }
         _append_one(self._store, "relay_call_outcomes", row, check="relay_call_outcome")
 
@@ -1077,7 +1091,7 @@ class BackfillEngine:
             "row_sha256": canonical_sha256({**identity, "error_code": error_code, "source_sha256": source_sha256}),
         }
 
-    def _states(self, plan: BackfillPlan) -> dict[tuple[str, date, date], _WindowState]:
+    def _event_states(self, plan: BackfillPlan) -> dict[tuple[str, date, date], _WindowState]:
         rows = self._store.query(
             "SELECT stock_code, window_from, window_to, status, attempt, error_code, source_sha256 "
             "FROM backfill_events WHERE plan_sha256 = ? ORDER BY at_utc, rowid",
@@ -1087,6 +1101,50 @@ class BackfillEngine:
         for code, start, end, status, attempt, error_code, source in rows:
             states[(code, start, end)] = _WindowState(status, int(attempt), error_code, source)
         return states
+
+    def _interrupted_attempts(
+        self, plan: BackfillPlan, events: dict[tuple[str, date, date], _WindowState]
+    ) -> dict[tuple[str, date, date], _WindowState]:
+        """Attempts whose calls are on the ledger but whose event row never landed (a crash, or a stop).
+
+        The ledger row carries the attempt it belongs to, written with the reservation, so an attempt is
+        counted once whether or not its event row was written. A call the client refused before sending
+        (`not_sent`) used nothing and a halted attempt (`stopped`) is released; neither is counted. The state's code is the last recorded outcome's code,
+        or `attempt_interrupted` when the process died before any outcome.
+        """
+        if "attempt" not in self._store.columns("relay_call_ledger"):
+            return {}
+        rows = self._store.query(
+            "SELECT l.stock_code, l.window_from, l.window_to, l.attempt, o.error_code, o.source_sha256, o.stopped "
+            "FROM relay_call_ledger AS l LEFT JOIN relay_call_outcomes AS o ON o.call_id = l.call_id "
+            "WHERE l.workspace = ? AND l.plan_sha256 = ? AND l.endpoint = 'historical' AND l.attempt IS NOT NULL "
+            "AND (o.outcome IS NULL OR o.outcome <> 'not_sent') ORDER BY l.call_id",
+            [self._workspace, plan.plan_sha256],
+        )
+        latest: dict[tuple[str, date, date], tuple[int, str, str | None, bool]] = {}
+        for code, start, end, attempt, error_code, source, stopped in rows:
+            key = (code, start, end)
+            if key in latest and int(attempt) < latest[key][0]:
+                continue
+            latest[key] = (int(attempt), error_code or INTERRUPTED_ATTEMPT_CODE, source, bool(stopped))
+        interrupted: dict[tuple[str, date, date], _WindowState] = {}
+        for key, (attempt, error_code, source, stopped) in latest.items():
+            recorded = events.get(key)
+            if stopped or (recorded is not None and recorded.attempt >= attempt):
+                continue
+            status: WindowStatus = "failed_exhausted" if attempt >= self._max_attempts else "failed"
+            interrupted[key] = _WindowState(status, attempt, error_code, source)
+        return interrupted
+
+    def _states(self, plan: BackfillPlan) -> dict[tuple[str, date, date], _WindowState]:
+        events = self._event_states(plan)
+        return {**events, **self._interrupted_attempts(plan, events)}
+
+    def _recover_interrupted(self, plan: BackfillPlan) -> None:
+        """Write the event an interrupted attempt never got, so the budget holds across crashes."""
+        events = self._event_states(plan)
+        for (code, start, end), state in self._interrupted_attempts(plan, events).items():
+            self._write_event(plan, code, (start, end), state.status, state.attempt, state.error_code, state.source_sha256)
 
     def _write_event(
         self,
@@ -1136,6 +1194,7 @@ class BackfillEngine:
         depth_floor = probe.earliest_date if probe.depth_limited else None
         self._listing_dates = {}
         finished = TERMINAL_STATUSES - RETRY_FLAGGED_STATUSES if retry_flagged else TERMINAL_STATUSES
+        self._recover_interrupted(plan)
         states = self._states(plan)
         todo = [
             (code, window)
@@ -1194,7 +1253,8 @@ class BackfillEngine:
             self._ledger.pace()
             try:
                 call_id = self._ledger.reserve(
-                    endpoint="historical", ist_date=today_ist, stock_code=code, window_from=w_from, window_to=w_to
+                    endpoint="historical", ist_date=today_ist, stock_code=code, window_from=w_from, window_to=w_to,
+                    plan_sha256=plan.plan_sha256, attempt=attempt,
                 )
             except PilotDataError as exc:
                 if exc.code == "daily_cap_reached":
@@ -1206,7 +1266,10 @@ class BackfillEngine:
                 payload = self._relay().daily_bars(code, w_from, w_to)
             except Exception as exc:
                 action, error_code, sleep_for = classify_gateway_error(exc)
-                self._ledger.finish(call_id, "not_sent" if refused_before_send(exc) else "error", error_code, None)
+                halts = action == "stop" or (action == "retry_then_stop" and try_number == 2)
+                self._ledger.finish(
+                    call_id, "not_sent" if refused_before_send(exc) else "error", error_code, None, stop=halts
+                )
                 if action == "stop":
                     raise _Stop("stopped_fail_closed", error_code) from None
                 if action == "fail_window":
@@ -1230,13 +1293,14 @@ class BackfillEngine:
                     payload, expected_api=API_DAILY_BARS, kind=KIND_DAILY_BARS, expected_query=query
                 )
             except PilotDataError as exc:
-                self._ledger.finish(call_id, "rejected", exc.code, None)
+                self._ledger.finish(call_id, "rejected", exc.code, None, stop=True)
                 raise _Stop("stopped_fail_closed", exc.code) from None
             try:
                 check_bars_envelope(payload)
             except PilotDataError as exc:
-                self._ledger.finish(call_id, "rejected", exc.code, None)
-                if exc.code.startswith("breeze_"):  # an upstream error or a wrong envelope: never empty, never stored
+                fails_window = exc.code.startswith("breeze_")
+                self._ledger.finish(call_id, "rejected", exc.code, None, stop=not fails_window)
+                if fails_window:  # an upstream error or a wrong envelope: never empty, never stored
                     return self._fail(plan, code, window, attempt, exc.code, None)
                 raise _Stop("stopped_fail_closed", exc.code) from None
             if payload.empty:
@@ -1262,7 +1326,7 @@ class BackfillEngine:
                 if exc.code.startswith("breeze_"):
                     self._ledger.finish(call_id, "rejected", exc.code, payload.sha256)
                     return self._fail(plan, code, window, attempt, exc.code, payload.sha256)
-                self._ledger.finish(call_id, "error", exc.code, payload.sha256)
+                self._ledger.finish(call_id, "error", exc.code, payload.sha256, stop=True)
                 raise _Stop("stopped_fail_closed", exc.code) from None
             if not parsed.bars:
                 # Every row was quarantined by the parser: nothing usable arrived for this window.
@@ -1286,7 +1350,7 @@ class BackfillEngine:
                     requested_to=w_to, convention=convention, assessment=assessment,
                 )
             except PilotDataError as exc:
-                self._ledger.finish(call_id, "error", exc.code, payload.sha256)
+                self._ledger.finish(call_id, "error", exc.code, payload.sha256, stop=True)
                 raise _Stop("stopped_fail_closed", exc.code) from None
             self._ledger.finish(call_id, "ok", None, payload.sha256)
             if assessment.verdict == "complete":
