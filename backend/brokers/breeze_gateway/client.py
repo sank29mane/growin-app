@@ -105,6 +105,11 @@ CONNECT_TIMEOUT_S = 5.0
 READ_TIMEOUT_S = 150.0
 WRITE_TIMEOUT_S = 10.0
 POOL_TIMEOUT_S = 5.0
+# After a failed tunnel restart the client refuses further restarts for a window: BASE after
+# the first failure, doubling per consecutive failure, capped at MAX. A success resets it.
+# With IAP down this bounds gcloud spawns to about one per MAX seconds, not one per request.
+RESTART_BACKOFF_BASE_S = 2.0
+RESTART_BACKOFF_MAX_S = 60.0
 
 # --------------------------------------------------------------- patterns
 
@@ -361,6 +366,8 @@ class RelayClient:
 
         With `restart` the client owns its tunnel: it starts one replacement when the
         child has exited, and close() stops it. Without it a dead tunnel is an error.
+        After a failed restart further restarts are refused for a growing window
+        (RESTART_BACKOFF_BASE_S to RESTART_BACKOFF_MAX_S) with reason "tunnel_restart_backoff".
         """
         if (tunnel is None) == (http is None):
             raise TypeError("RelayClient needs exactly one of tunnel or http")
@@ -372,7 +379,12 @@ class RelayClient:
         )
         self._store: TokenStore = token_store if token_store is not None else MemoryTokenStore()
         self._slots = threading.BoundedSemaphore(MAX_IN_FLIGHT)
-        self._lock = threading.RLock()  # guards the fields below; never held across a request
+        self._lock = threading.RLock()  # guards the fields below; never held across a request or a restart
+        self._cond = threading.Condition(self._lock)  # wakes requests waiting on a restart, and close()
+        self._monotonic: Callable[[], float] = time.monotonic  # open() swaps in its own seam
+        self._restarting = False  # one request runs the restart; the rest wait on _cond
+        self._restart_failures = 0
+        self._restart_retry_at = 0.0
         self._login_lock = threading.RLock()  # one login transition (arm or complete) at a time
         self._closed = False
         self._session_token: str | None = None
@@ -416,17 +428,31 @@ class RelayClient:
         return self._token_saved
 
     def _acquire(self) -> _Pool:
-        """The current pool with this request counted on it. Pair with _release()."""
-        with self._lock:
-            if self._closed:
-                raise RelayUnavailable(reason="closed")
-            if self._tunnel is not None and not self._tunnel.alive():
+        """The current pool with this request counted on it. Pair with _release().
+
+        A dead tunnel is replaced by one request (single-flight) outside `_lock`. Requests
+        that arrive meanwhile wait for its outcome and then use the new tunnel, as they did
+        when the restart ran under the lock. close() wakes them with reason "closed".
+        """
+        with self._cond:
+            while True:
+                if self._closed:
+                    raise RelayUnavailable(reason="closed")
+                if self._restarting:
+                    self._cond.wait()
+                    continue
+                dead = self._tunnel
+                if dead is None or dead.alive():
+                    pool = self._pool
+                    pool.inflight += 1
+                    return pool
                 if self._restart is None:
                     raise RelayUnavailable(reason="tunnel_down")
-                self._restart_tunnel()
-            pool = self._pool
-            pool.inflight += 1
-            return pool
+                if self._restart_failures and self._monotonic() < self._restart_retry_at:
+                    raise RelayUnavailable(reason="tunnel_restart_backoff")
+                self._restarting = True
+                break
+        return self._replace_tunnel(dead)
 
     def _release(self, pool: _Pool) -> None:
         with self._lock:
@@ -435,29 +461,75 @@ class RelayClient:
         if last:
             pool.http.close()  # idempotent: close() may have closed it already
 
-    def _restart_tunnel(self) -> None:
-        """One replacement tunnel on a fresh port. A transport restart, never a request retry."""
-        assert self._restart is not None and self._tunnel is not None
-        self._tunnel.stop()
+    def _replace_tunnel(self, dead: TunnelHandleLike) -> _Pool:
+        """One replacement tunnel on a fresh port, started without `_lock`.
+
+        A transport restart, never a request retry. Returns the new pool with this request
+        counted on it. If close() ran meanwhile the new child is stopped and discarded.
+        """
+        assert self._restart is not None
+        handle: TunnelHandleLike | None = None
+        http: httpx.Client | None = None
         try:
-            handle = self._restart()
-        except TunnelError:
-            raise RelayUnavailable(reason="tunnel_restart_failed") from None
-        old = self._pool
-        self._tunnel = handle
-        self._pool = _Pool(self._http_factory(handle.local_port))
-        old.retired = True
-        if old.inflight == 0:
-            old.http.close()  # otherwise the last request holding it closes it
+            dead.stop()
+            try:
+                handle = self._restart()
+            except TunnelError:
+                pass
+            else:
+                http = self._http_factory(handle.local_port)
+        except BaseException:
+            with self._cond:
+                self._restarting = False
+                self._cond.notify_all()
+            if handle is not None:
+                handle.stop()
+            raise
+        reason: str | None = None
+        previous: _Pool | None = None
+        with self._cond:
+            self._restarting = False
+            self._cond.notify_all()
+            if self._closed:
+                reason = "closed"
+            elif handle is None or http is None:
+                reason = "tunnel_restart_failed"
+                self._restart_failures += 1
+                window = min(
+                    RESTART_BACKOFF_MAX_S,
+                    RESTART_BACKOFF_BASE_S * 2 ** min(self._restart_failures - 1, 16),
+                )
+                self._restart_retry_at = self._monotonic() + window
+            else:
+                self._restart_failures = 0
+                self._tunnel = handle
+                previous = self._pool
+                previous.retired = True
+                pool = _Pool(http)
+                pool.inflight += 1
+                self._pool = pool
+        if reason is not None:
+            if handle is not None:
+                handle.stop()
+            if http is not None:
+                http.close()
+            raise RelayUnavailable(reason=reason)
+        assert previous is not None
+        if previous.inflight == 0:
+            previous.http.close()  # otherwise the last request holding it closes it
+        return pool
 
     def close(self) -> None:
-        with self._lock:
+        """Mark the client closed and stop its tunnel. Never waits for a restart in progress:
+        a restart that finishes later finds the client closed and stops its own child."""
+        with self._cond:
             if self._closed:
                 return
             self._closed = True
             pool, tunnel = self._pool, self._tunnel
             pool.retired = True
             owned = self._restart is not None
+            self._cond.notify_all()
         try:
             pool.http.close()
         finally:
@@ -494,6 +566,7 @@ class RelayClient:
         except BaseException:
             handle.stop()
             raise
+        relay._monotonic = monotonic
         try:
             deadline = monotonic() + cfg.tunnel.ready_timeout_s
             while True:

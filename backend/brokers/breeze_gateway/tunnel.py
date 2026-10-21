@@ -5,6 +5,16 @@ the daily identity (`--account=<daily account>`), listening on a random free
 loopback port. The argv is a list and never goes through a shell; it never holds
 ssh or the internal-IP flag. gcloud's stderr is discarded unless the operator
 asks for it in their own terminal, because it can print project and host names.
+
+Orphans: the child runs in its own session (`start_new_session=True`) so a Ctrl-C at the
+parent does not reach it, and close() or stop() ends the whole group. If the parent dies
+without running them (SIGKILL, or SIGTERM with no handler) the child keeps running, idle,
+until IAP drops it; it holds no credential beyond the daily gcloud login and listens only
+on loopback. A library cannot fix that from inside: SIGKILL cannot be caught, and a SIGTERM
+handler or atexit hook here would hijack the host process's own signals. A stdin-EOF wrapper
+would change the C1 argv and the stdin=DEVNULL pin. So the host closes the client in a
+`with` block, and the CLI turns SIGTERM into a clean exit (see cli.py). A SIGKILLed host
+leaves at most one idle child per tunnel it had open.
 """
 
 from __future__ import annotations
