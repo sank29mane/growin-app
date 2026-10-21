@@ -2193,6 +2193,150 @@ def test_a_halted_attempt_is_released_not_spent_and_a_refused_send_costs_nothing
     assert store.query("SELECT DISTINCT attempt FROM backfill_events WHERE status = 'done'") == [(1,)]
 
 
+def test_a_stop_between_the_two_tries_releases_the_first_try_instead_of_spending_the_attempt(store, relay, clock_time):
+    """Opus r6 P3: the cap (or IST midnight) can land between try 1 and try 2. Try 1's timeout row is not final,
+    so the attempt is released: the next run sees no `failed` event and the retry is still attempt 1."""
+    # the probe used 3 of 4: try 1 takes the last call and try 2 meets the cap
+    eng, plan, source = flaky_run(
+        store, relay, clock_time, lambda index: UpstreamTimeout() if index == 0 else None, daily_call_cap=4
+    )
+    first = eng.run(plan, today_ist=TODAY)
+    assert first.status == "daily_cap_reached" and first.stop_code == "daily_cap_reached"
+    assert source.calls == 1 and first.counts["done"] == 0 and first.counts["failed"] == 0
+    assert count(store, "SELECT count(*) FROM relay_call_outcomes WHERE outcome = 'error' "
+                        "AND error_code = 'upstream_timeout'") == 1
+
+    eng2 = engine(store, relay, clock_time)
+    resumed = eng2.run(plan, today_ist=TODAY)
+    assert resumed.status == "complete" and resumed.counts["done"] == 2
+    assert count(store, "SELECT count(*) FROM backfill_events WHERE status IN ('failed', 'failed_exhausted')") == 0
+    assert store.query("SELECT DISTINCT attempt FROM backfill_events WHERE status = 'done'") == [(1,)]
+
+
+def test_a_refused_send_followed_by_an_ist_rollover_does_not_spend_the_attempt(store, relay, clock_time):
+    """Opus r6 R6-3: `not_sent` used nothing. Try 1 is refused, midnight lands before try 2, and the next run's
+    window is still attempt 1."""
+    eng, plan = ready(store, relay, clock_time, codes=("RELIND",))
+    refused = {"n": 0}
+
+    def after_midnight_once_refused():
+        return NOW + timedelta(days=1) if refused["n"] else NOW
+
+    class RefusesOnce:
+        def __getattr__(self, name):
+            return getattr(relay.client(), name)
+
+        def daily_bars(self, *args, **kw):
+            refused["n"] += 1
+            raise RelayUnavailable(reason="tunnel_restart_backoff")
+
+    midnight = bf.BackfillEngine(
+        store, RefusesOnce(), workspace="india", clock=after_midnight_once_refused,
+        monotonic=clock_time.monotonic, sleeper=clock_time.sleep,
+    )
+    assert midnight.run(plan, today_ist=TODAY).status == "stopped_ist_rollover"
+    assert count(store, "SELECT count(*) FROM relay_call_outcomes WHERE outcome = 'not_sent'") == 1
+    resumed = eng.run(plan, today_ist=TODAY)
+    assert resumed.status == "complete" and resumed.counts["done"] == 2
+    assert count(store, "SELECT count(*) FROM backfill_events WHERE status IN ('failed', 'failed_exhausted')") == 0
+    assert store.query("SELECT DISTINCT attempt FROM backfill_events WHERE status = 'done'") == [(1,)]
+
+
+def test_a_crash_after_a_terminal_first_try_outcome_still_spends_the_attempt(store, relay, clock_time):
+    """The release is only for a non-final first-try outcome. A terminal outcome (a shape error) keeps its attempt."""
+    eng, plan, source = flaky_run(store, relay, clock_time, lambda index: None)
+    relay.bars_script = lambda index, params: err_response(502, "UPSTREAM_ERROR", "upstream_shape") if index == 0 else None
+
+    def crash_before_event(*args, **kw):
+        raise Crash("died after the outcome row, before the event row")
+
+    eng._fail = crash_before_event  # type: ignore[method-assign]
+    with pytest.raises(Crash):
+        eng.run(plan, today_ist=TODAY)
+    relay.bars_script = None
+    resumed = engine(store, relay, clock_time).run(plan, today_ist=TODAY)
+    assert resumed.status == "complete"
+    first = plan.windows[0][0]
+    assert store.query(
+        "SELECT status, attempt FROM backfill_events WHERE window_from = ? AND status <> 'pending' ORDER BY attempt",
+        [first],
+    ) == [("failed", 1), ("done", 2)]
+
+
+class _OnceBadPayload:
+    """Wraps a real client and hands the engine a tampered payload for its first daily_bars call only."""
+
+    def __init__(self, inner, tamper):
+        self.inner, self.tamper, self.calls = inner, tamper, 0
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+    def daily_bars(self, *args, **kwargs):
+        payload = self.inner.daily_bars(*args, **kwargs)
+        self.calls += 1
+        return self.tamper(payload) if self.calls == 1 else payload
+
+
+def _halt_validate_reject(eng, relay, monkeypatch):
+    eng._source = _OnceBadPayload(
+        relay.client(), lambda payload: dataclasses.replace(payload, contract="growin-relay/2")
+    )
+
+
+def _halt_envelope_stop(eng, relay, monkeypatch):
+    relay.bars_script = lambda index, params: (
+        relay.bars_ok(params, bars_body(params), **{"X-Growin-Empty": "true"}) if index == 0 else None
+    )
+
+
+def _halt_parser_non_breeze_error(eng, relay, monkeypatch):
+    real, calls = bf.parse_breeze_v2_daily, {"n": 0}
+
+    def parse_once_then_real(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise PilotDataError("convention_mismatch", "the parser stopped for a non-breeze reason")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(bf, "parse_breeze_v2_daily", parse_once_then_real)
+
+
+def _halt_ingest_error(eng, relay, monkeypatch):
+    real, calls = bf.ingest_breeze_response, {"n": 0}
+
+    def ingest_once_then_real(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise PilotDataError("ingest_failed", "the ingest stopped the run")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(bf, "ingest_breeze_response", ingest_once_then_real)
+
+
+@pytest.mark.parametrize(
+    "arm",
+    [_halt_validate_reject, _halt_envelope_stop, _halt_parser_non_breeze_error, _halt_ingest_error],
+    ids=["validate_reject", "envelope_stop", "parser_non_breeze_error", "ingest_error"],
+)
+def test_every_halt_site_releases_its_attempt_and_the_rerun_is_still_attempt_one(
+    store, relay, clock_time, monkeypatch, arm
+):
+    """Opus r6 test gap: four sites set stop=True on the outcome. Drop it at any one and the halted attempt is
+    spent, so the rerun shows a `failed` event and the window finishes on attempt 2."""
+    eng, plan = ready(store, relay, clock_time, codes=("RELIND",))
+    arm(eng, relay, monkeypatch)
+    assert eng.run(plan, today_ist=TODAY).status == "stopped_fail_closed"
+    assert count(store, "SELECT count(*) FROM relay_call_outcomes WHERE stopped") == 1
+    monkeypatch.undo()
+    relay.bars_script = None
+    eng._source = relay.client()
+    report = eng.run(plan, today_ist=TODAY)
+    assert report.status == "complete" and report.counts["done"] == 2
+    assert count(store, "SELECT count(*) FROM backfill_events WHERE status IN ('failed', 'failed_exhausted')") == 0
+    assert store.query("SELECT DISTINCT attempt FROM backfill_events WHERE status = 'done'") == [(1,)]
+
+
 def test_an_older_ledger_without_the_attempt_columns_is_upgraded_in_place(tmp_path):
     from pilot_data.store import PilotDataStore
 

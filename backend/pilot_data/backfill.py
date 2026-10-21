@@ -170,6 +170,12 @@ LEDGER_DDL = (
 # Columns an older ledger lacks: the window attempt a call belongs to, written with the reservation itself.
 LEDGER_ATTEMPT_COLUMNS = {"plan_sha256": "VARCHAR", "attempt": "INTEGER"}
 INTERRUPTED_ATTEMPT_CODE = "attempt_interrupted"
+# Outcomes a first try records while the window is still open: the second try decides. When a stop lands
+# between the tries (the cap, an IST rollover), that lone first-try row is not a spent attempt.
+NON_FINAL_TRY1_OUTCOMES = frozenset({"empty", "incomplete"})
+NON_FINAL_TRY1_ERROR_CODES = frozenset(
+    {"upstream_timeout", "relay_budget_minute", "relay_unavailable", "relay_tunnel_restart_backoff", "breeze_no_data"}
+)
 OUTCOMES_DDL = (
     "CREATE TABLE IF NOT EXISTS relay_call_outcomes("
     "call_id VARCHAR PRIMARY KEY, outcome VARCHAR NOT NULL, error_code VARCHAR, source_sha256 VARCHAR, "
@@ -1109,24 +1115,35 @@ class BackfillEngine:
 
         The ledger row carries the attempt it belongs to, written with the reservation, so an attempt is
         counted once whether or not its event row was written. A call the client refused before sending
-        (`not_sent`) used nothing and a halted attempt (`stopped`) is released; neither is counted. The state's code is the last recorded outcome's code,
-        or `attempt_interrupted` when the process died before any outcome.
+        (`not_sent`) used nothing and a halted attempt (`stopped`) is released; neither is counted. An attempt
+        whose only call is a non-final first-try outcome (a timeout, an empty answer, an incomplete one) was
+        stopped before its second try could run, so it is released too. The state's code is the last recorded
+        outcome's code, or `attempt_interrupted` when the process died before any outcome.
         """
         if "attempt" not in self._store.columns("relay_call_ledger"):
             return {}
         rows = self._store.query(
-            "SELECT l.stock_code, l.window_from, l.window_to, l.attempt, o.error_code, o.source_sha256, o.stopped "
-            "FROM relay_call_ledger AS l LEFT JOIN relay_call_outcomes AS o ON o.call_id = l.call_id "
+            "SELECT l.stock_code, l.window_from, l.window_to, l.attempt, o.error_code, o.source_sha256, o.stopped, "
+            "o.outcome FROM relay_call_ledger AS l LEFT JOIN relay_call_outcomes AS o ON o.call_id = l.call_id "
             "WHERE l.workspace = ? AND l.plan_sha256 = ? AND l.endpoint = 'historical' AND l.attempt IS NOT NULL "
-            "AND (o.outcome IS NULL OR o.outcome <> 'not_sent') ORDER BY l.call_id",
+            "ORDER BY l.call_id",
             [self._workspace, plan.plan_sha256],
         )
         latest: dict[tuple[str, date, date], tuple[int, str, str | None, bool]] = {}
-        for code, start, end, attempt, error_code, source, stopped in rows:
+        calls: dict[tuple[str, date, date, int], int] = {}
+        for code, start, end, attempt, error_code, source, stopped, outcome in rows:
             key = (code, start, end)
+            calls[(*key, int(attempt))] = calls.get((*key, int(attempt)), 0) + 1  # a refused send is still a try
+            if outcome == "not_sent":
+                continue
             if key in latest and int(attempt) < latest[key][0]:
                 continue
-            latest[key] = (int(attempt), error_code or INTERRUPTED_ATTEMPT_CODE, source, bool(stopped))
+            lone_non_final = calls[(*key, int(attempt))] == 1 and (
+                outcome in NON_FINAL_TRY1_OUTCOMES or (outcome == "error" and error_code in NON_FINAL_TRY1_ERROR_CODES)
+            )
+            latest[key] = (
+                int(attempt), error_code or INTERRUPTED_ATTEMPT_CODE, source, bool(stopped) or lone_non_final
+            )
         interrupted: dict[tuple[str, date, date], _WindowState] = {}
         for key, (attempt, error_code, source, stopped) in latest.items():
             recorded = events.get(key)
