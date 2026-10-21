@@ -1889,8 +1889,13 @@ def descriptor(locator="relay/RELIND/test"):
         WindowAssessment("unverified", (), {}),
         WindowAssessment("before_listing", (), {}),
         WindowAssessment("complete", (), {}),  # a `complete` that names no checked range is refused too
+        # a span alone is not enough: the verdict has to be complete
+        WindowAssessment("gaps", (HOLE,), {}, (date(2024, 1, 2), date(2024, 1, 12))),
+        WindowAssessment("unverified", (), {}, (date(2024, 1, 2), date(2024, 1, 12))),
+        WindowAssessment("before_listing", (), {}, (date(2024, 1, 2), date(2024, 1, 12))),
     ],
-    ids=["gaps", "unverified", "before_listing", "complete_without_span"],
+    ids=["gaps", "unverified", "before_listing", "complete_without_span", "gaps_with_span", "unverified_with_span",
+         "before_listing_with_span"],
 )
 def test_the_single_coverage_writer_refuses_anything_not_complete(store, assessment):
     with pytest.raises(PilotDataError) as info:
