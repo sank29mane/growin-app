@@ -382,7 +382,7 @@ class RelayClient:
         self._lock = threading.RLock()  # guards the fields below; never held across a request or a restart
         self._cond = threading.Condition(self._lock)  # wakes requests waiting on a restart, and close()
         self._monotonic: Callable[[], float] = time.monotonic  # open() swaps in its own seam
-        self._restarting = False  # one request runs the restart; the rest wait on _cond
+        self._restarting: object | None = None  # the restarter's token; the rest wait on _cond
         self._restart_failures = 0
         self._restart_retry_at = 0.0
         self._login_lock = threading.RLock()  # one login transition (arm or complete) at a time
@@ -433,26 +433,40 @@ class RelayClient:
         A dead tunnel is replaced by one request (single-flight) outside `_lock`. Requests
         that arrive meanwhile wait for its outcome and then use the new tunnel, as they did
         when the restart ran under the lock. close() wakes them with reason "closed".
+
+        The try covers the whole span from setting `_restarting` to the handoff, so an
+        interrupt anywhere in it (SIGTERM becomes SystemExit in the CLI) clears the flag.
         """
+        token = object()  # identifies this request as the restarter
+        try:
+            with self._cond:
+                while True:
+                    if self._closed:
+                        raise RelayUnavailable(reason="closed")
+                    if self._restarting is not None:
+                        self._cond.wait()
+                        continue
+                    dead = self._tunnel
+                    if dead is None or dead.alive():
+                        pool = self._pool
+                        pool.inflight += 1
+                        return pool
+                    if self._restart is None:
+                        raise RelayUnavailable(reason="tunnel_down")
+                    if self._restart_failures and self._monotonic() < self._restart_retry_at:
+                        raise RelayUnavailable(reason="tunnel_restart_backoff")
+                    self._restarting = token
+                    break
+            return self._replace_tunnel(dead, token)
+        except BaseException:
+            self._end_restart(token)  # a no-op unless this request still holds the flag
+            raise
+
+    def _end_restart(self, token: object) -> None:
         with self._cond:
-            while True:
-                if self._closed:
-                    raise RelayUnavailable(reason="closed")
-                if self._restarting:
-                    self._cond.wait()
-                    continue
-                dead = self._tunnel
-                if dead is None or dead.alive():
-                    pool = self._pool
-                    pool.inflight += 1
-                    return pool
-                if self._restart is None:
-                    raise RelayUnavailable(reason="tunnel_down")
-                if self._restart_failures and self._monotonic() < self._restart_retry_at:
-                    raise RelayUnavailable(reason="tunnel_restart_backoff")
-                self._restarting = True
-                break
-        return self._replace_tunnel(dead)
+            if self._restarting is token:
+                self._restarting = None
+                self._cond.notify_all()
 
     def _release(self, pool: _Pool) -> None:
         with self._lock:
@@ -461,15 +475,19 @@ class RelayClient:
         if last:
             pool.http.close()  # idempotent: close() may have closed it already
 
-    def _replace_tunnel(self, dead: TunnelHandleLike) -> _Pool:
+    def _replace_tunnel(self, dead: TunnelHandleLike, token: object) -> _Pool:
         """One replacement tunnel on a fresh port, started without `_lock`.
 
         A transport restart, never a request retry. Returns the new pool with this request
         counted on it. If close() ran meanwhile the new child is stopped and discarded.
+        A tunnel that fails to start, or an http client that fails to build, is one failed
+        restart: the child is stopped and the backoff is armed. Any other exception before
+        the new tunnel is handed to the client stops the child and closes the http client.
         """
         assert self._restart is not None
         handle: TunnelHandleLike | None = None
         http: httpx.Client | None = None
+        handed_off = False
         try:
             dead.stop()
             try:
@@ -477,42 +495,51 @@ class RelayClient:
             except TunnelError:
                 pass
             else:
-                http = self._http_factory(handle.local_port)
-        except BaseException:
+                try:
+                    http = self._http_factory(handle.local_port)
+                except Exception:
+                    http = None
+            reason: str | None = None
+            previous: _Pool | None = None
             with self._cond:
-                self._restarting = False
-                self._cond.notify_all()
-            if handle is not None:
-                handle.stop()
+                if self._restarting is token:
+                    self._restarting = None
+                    self._cond.notify_all()
+                if self._closed:
+                    reason = "closed"
+                elif handle is None or http is None:
+                    reason = "tunnel_restart_failed"
+                    self._restart_failures += 1
+                    window = min(
+                        RESTART_BACKOFF_MAX_S,
+                        RESTART_BACKOFF_BASE_S * 2 ** min(self._restart_failures - 1, 16),
+                    )
+                    self._restart_retry_at = self._monotonic() + window
+                else:
+                    self._restart_failures = 0
+                    previous = self._pool
+                    previous.retired = True
+                    pool = _Pool(http)
+                    pool.inflight += 1
+                    self._tunnel = handle
+                    self._pool = pool
+                    handed_off = True
+        except BaseException:
+            if not handed_off:
+                try:
+                    if handle is not None:
+                        handle.stop()
+                finally:
+                    if http is not None:
+                        http.close()
             raise
-        reason: str | None = None
-        previous: _Pool | None = None
-        with self._cond:
-            self._restarting = False
-            self._cond.notify_all()
-            if self._closed:
-                reason = "closed"
-            elif handle is None or http is None:
-                reason = "tunnel_restart_failed"
-                self._restart_failures += 1
-                window = min(
-                    RESTART_BACKOFF_MAX_S,
-                    RESTART_BACKOFF_BASE_S * 2 ** min(self._restart_failures - 1, 16),
-                )
-                self._restart_retry_at = self._monotonic() + window
-            else:
-                self._restart_failures = 0
-                self._tunnel = handle
-                previous = self._pool
-                previous.retired = True
-                pool = _Pool(http)
-                pool.inflight += 1
-                self._pool = pool
         if reason is not None:
-            if handle is not None:
-                handle.stop()
-            if http is not None:
-                http.close()
+            try:
+                if handle is not None:
+                    handle.stop()
+            finally:
+                if http is not None:
+                    http.close()
             raise RelayUnavailable(reason=reason)
         assert previous is not None
         if previous.inflight == 0:

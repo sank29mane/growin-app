@@ -780,6 +780,134 @@ def test_open_hands_its_clock_to_the_client_for_the_backoff_window():
     relay.close()
 
 
+# ------------------------------- interrupts and setup failures during a restart (round 2)
+
+
+class _HookedCond:
+    """A Condition that raises SystemExit (SIGTERM in the CLI) at the Nth enter or exit."""
+
+    def __init__(self, lock, *, on_enter=(), on_exit=()) -> None:
+        self._cond = threading.Condition(lock)
+        self._on_enter, self._on_exit = set(on_enter), set(on_exit)
+        self.enters = self.exits = 0
+
+    def __enter__(self):
+        self.enters += 1
+        if self.enters in self._on_enter:
+            raise SystemExit(143)  # the lock was never taken
+        self._cond.acquire()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.exits += 1
+        self._cond.release()
+        if self.exits in self._on_exit:
+            raise SystemExit(143)  # the lock is already free, the restart flag still set
+
+    def wait(self, *args) -> bool:
+        return self._cond.wait(*args)
+
+    def notify_all(self) -> None:
+        self._cond.notify_all()
+
+
+class _FlakyFactory(Factory):
+    """Serves clients, except that the listed calls (1-based) raise `error`."""
+
+    def __init__(self, fail_on, error) -> None:
+        super().__init__()
+        self.fail_on, self.error, self.calls = set(fail_on), error, 0
+
+    def __call__(self, port: int) -> httpx.Client:
+        self.calls += 1
+        if self.calls in self.fail_on:
+            raise self.error
+        return super().__call__(port)
+
+
+def _next_request_does_not_hang(relay: RelayClient) -> object:
+    outcomes: dict = {}
+    thread = _call(relay, outcomes, "next")
+    thread.join(timeout=5)
+    assert not thread.is_alive(), "the restart flag was left set and the request waits forever"
+    return outcomes["next"]
+
+
+def test_an_interrupt_at_the_commit_reacquire_stops_the_new_child_and_closes_its_client():
+    dead, fresh, second = FakeHandle(50123), FakeHandle(50124), FakeHandle(50125)
+    dead._alive = False
+    factory, restart = Factory(), _ScriptedRestart(fresh, second)
+    relay = RelayClient(tunnel=dead, http_factory=factory, restart=restart)
+    relay._cond = _HookedCond(relay._lock, on_enter={2})  # 1 is _acquire, 2 is the commit block
+    with pytest.raises(SystemExit):
+        relay.health()
+    assert fresh.stops == 1 and not fresh.alive()
+    assert factory.ports == [50123, 50124] and factory.clients[1].is_closed
+    assert relay._restarting is None
+    assert isinstance(_next_request_does_not_hang(relay), RelayHealth)
+    assert restart.calls == 2  # an interrupt is not a failed restart: no backoff
+    relay.close()
+    assert second.stops == 1
+
+
+def test_an_interrupt_before_the_replacement_starts_releases_the_restart_flag():
+    dead, fresh = FakeHandle(50123), FakeHandle(50124)
+    dead._alive = False
+    restart = _ScriptedRestart(fresh)
+    relay = RelayClient(tunnel=dead, http_factory=Factory(), restart=restart)
+    relay._cond = _HookedCond(relay._lock, on_exit={1})  # right after `_restarting` is set
+    with pytest.raises(SystemExit):
+        relay.health()
+    assert restart.calls == 0 and relay._restarting is None
+    assert isinstance(_next_request_does_not_hang(relay), RelayHealth)
+    assert restart.calls == 1
+    relay.close()
+    assert fresh.stops == 1
+
+
+def test_a_failing_http_client_is_a_failed_restart_that_stops_the_child_and_arms_the_backoff():
+    dead = FakeHandle(50123)
+    dead._alive = False
+    spawned = [FakeHandle(50124 + n) for n in range(5)]
+    restart = _ScriptedRestart(*spawned)
+    factory = _FlakyFactory(fail_on=range(2, 100), error=OSError("no fds"))
+    relay = RelayClient(tunnel=dead, http_factory=factory, restart=restart)
+    relay._monotonic = _Clock()
+    reasons = [_reason(relay) for _ in range(5)]
+    assert reasons == ["tunnel_restart_failed"] + ["tunnel_restart_backoff"] * 4
+    assert restart.calls == 1  # five requests, one child
+    assert spawned[0].stops == 1 and not spawned[0].alive()
+    assert factory.handler.requests == []
+
+
+def test_an_interrupt_while_building_the_http_client_stops_the_child_and_frees_the_flag():
+    dead, fresh, second = FakeHandle(50123), FakeHandle(50124), FakeHandle(50125)
+    dead._alive = False
+    restart = _ScriptedRestart(fresh, second)
+    factory = _FlakyFactory(fail_on={2}, error=KeyboardInterrupt())
+    relay = RelayClient(tunnel=dead, http_factory=factory, restart=restart)
+    with pytest.raises(KeyboardInterrupt):
+        relay.health()
+    assert fresh.stops == 1 and relay._restarting is None
+    assert isinstance(_next_request_does_not_hang(relay), RelayHealth)
+    assert restart.calls == 2
+    relay.close()
+    assert second.stops == 1
+
+
+def test_an_interrupt_right_after_the_child_spawns_kills_it():
+    proc = FakeProc(pid=781)
+    rig = Rig([proc])
+
+    def terminated():
+        raise SystemExit(143)
+
+    with pytest.raises(SystemExit):
+        rig.tunnel(monotonic=terminated).start()  # the first thing start() does with the child
+    assert rig.killpg_calls == [(781, signal.SIGKILL)]
+    assert proc.waits == [STOP_GRACE_S]
+
+
 # ----------------------------------------------------------------- config
 
 
