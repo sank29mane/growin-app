@@ -52,7 +52,7 @@ Parameter rules (any violation is 422 VALIDATION with `fields` listing names onl
 - `exchange`: exactly `NSE` when present.
 - `from`, `to`: `YYYY-MM-DD` calendar dates, `from <= to`, `to - from <= 3000` days.
 - `action`: `buy` or `sell`. `quantity`: integer 1 to 100000. `price`: decimal string, greater than 0, at most 2 decimal places, at most 1000000.
-- `attempt_id`: 16 to 64 characters of `[A-Za-z0-9_-]`. `apisession`: the relay's API_Session filter (OD-14; starts as `^[A-Za-z0-9]{6,256}$` and is tightened from the 61-04 smoke).
+- `attempt_id`: 16 to 64 characters of `[A-Za-z0-9_-]`. `apisession`: the relay's API_Session filter, `^[A-Za-z0-9]{6,64}$` (OD-14, tightened from `{6,256}` by the 61-04 smoke: 8 digits observed). Mac and VM use the same pattern.
 
 Route semantics:
 - bars: Breeze v2 historicalcharts only (never v1), interval daily, product cash. The relay sends `from_date=<from>T00:00:00.000Z` and `to_date=<to>T23:59:59.000Z`, widened by one day on a side where the 61-04 smoke showed that boundary day missing; the exact values are in `X-Growin-Upstream-Request`. Callers request a wider window and filter rows by parsed trading date. Observed upstream behaviour (datetime format, raw or adjusted, 1000-row cap) is in `gateway/RELAY-API.md`, section "Observed upstream behaviour".

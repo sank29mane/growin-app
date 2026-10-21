@@ -140,7 +140,8 @@ def main(
                 say("sha256 verified")
         return EXIT_OK
     except RelayError as err:
-        say(str(err))
+        # `reason` is a closed word matching [a-z_]{1,40}; it never holds a value.
+        say(f"{err} reason {err.reason}" if err.reason else str(err))
         return EXIT_RELAY
     except RelayArgumentError as err:
         say(str(err))

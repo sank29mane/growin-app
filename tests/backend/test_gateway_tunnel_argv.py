@@ -25,7 +25,7 @@ from brokers.breeze_gateway.config import (
     load_gateway_config,
     parse_gateway_config,
 )
-from brokers.breeze_gateway.tunnel import Tunnel, TunnelHandle, pick_free_port, tunnel_argv
+from brokers.breeze_gateway.tunnel import STOP_GRACE_S, Tunnel, TunnelHandle, pick_free_port, tunnel_argv
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -190,8 +190,7 @@ class Rig:
         self.killpg_calls.append((pgid, sig))
 
     def tunnel(self, config=None, **extra) -> Tunnel:
-        return Tunnel(
-            config or make_config(),
+        wiring = dict(
             popen=self.popen,
             which=self.which,
             connect=self.connect,
@@ -199,8 +198,9 @@ class Rig:
             sleep=self.sleep,
             pick_port=self.pick,
             killpg=self.killpg,
-            **extra,
         )
+        wiring.update(extra)
+        return Tunnel(config or make_config(), **wiring)
 
 
 def test_start_runs_the_exact_argv_as_a_list_without_a_shell():
@@ -260,6 +260,48 @@ def test_a_tunnel_that_never_listens_is_killed_after_the_ready_timeout():
     assert info.value.code == "tunnel_timeout"
     assert rig.killpg_calls == [(777, signal.SIGKILL)]
     assert rig.now >= 3
+
+
+class NotReady(OSError):
+    """An error that is not the expected not-ready answer of a connect probe."""
+
+
+def test_an_interrupt_while_waiting_kills_the_child_and_propagates():
+    proc = FakeProc(pid=778)
+    rig = Rig([proc], connects=[False])
+
+    def interrupted(seconds):
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        rig.tunnel(sleep=interrupted).start()
+    assert rig.killpg_calls == [(778, signal.SIGKILL)]
+    assert proc.waits == [STOP_GRACE_S]
+
+
+def test_an_unexpected_connect_error_kills_the_child_and_propagates():
+    proc = FakeProc(pid=779)
+    rig = Rig([proc])
+    boom = NotReady("probe failed")
+
+    def broken(port):
+        raise boom
+
+    with pytest.raises(NotReady) as info:
+        rig.tunnel(connect=broken).start()
+    assert info.value is boom
+    assert rig.killpg_calls == [(779, signal.SIGKILL)]
+
+
+def test_the_timeout_and_exit_paths_do_not_kill_twice():
+    rig = Rig([FakeProc(pid=780)], connects=[False])
+    with pytest.raises(TunnelError):
+        rig.tunnel(make_config(tunnel={"ready_timeout_s": 1})).start()
+    assert rig.killpg_calls == [(780, signal.SIGKILL)]
+    rig = Rig([FakeProc(pid=781, exits_at_poll=1, code=2)], connects=[False])
+    with pytest.raises(TunnelError):
+        rig.tunnel().start()
+    assert rig.killpg_calls == []
 
 
 def test_a_missing_gcloud_is_reported_before_anything_runs():

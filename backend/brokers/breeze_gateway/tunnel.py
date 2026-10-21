@@ -186,22 +186,32 @@ class Tunnel:
             raise TunnelError("tunnel_spawn_failed") from None
 
         deadline = self._monotonic() + self._config.tunnel.ready_timeout_s
-        while True:
-            code = proc.poll()
-            if code is not None:
-                raise TunnelError("tunnel_exited", returncode=code)
-            if self._connect(local_port):
-                # Our own child must still be running: a squatter on the port would answer
-                # while the child, unable to bind, is already gone.
+        try:
+            while True:
                 code = proc.poll()
                 if code is not None:
                     raise TunnelError("tunnel_exited", returncode=code)
-                return TunnelHandle(proc, local_port, killpg=self._killpg, _key=_START_KEY)
-            if self._monotonic() >= deadline:
-                _signal_group(proc, self._killpg, signal.SIGKILL)
-                try:
-                    proc.wait(timeout=STOP_GRACE_S)
-                except subprocess.TimeoutExpired:
-                    pass
-                raise TunnelError("tunnel_timeout")
-            self._sleep(POLL_INTERVAL_S)
+                if self._connect(local_port):
+                    # Our own child must still be running: a squatter on the port would answer
+                    # while the child, unable to bind, is already gone.
+                    code = proc.poll()
+                    if code is not None:
+                        raise TunnelError("tunnel_exited", returncode=code)
+                    return TunnelHandle(proc, local_port, killpg=self._killpg, _key=_START_KEY)
+                if self._monotonic() >= deadline:
+                    self._kill(proc)
+                    raise TunnelError("tunnel_timeout")
+                self._sleep(POLL_INTERVAL_S)
+        except TunnelError:
+            raise  # the child is already gone or already killed above
+        except BaseException:
+            # No handle leaves start() on this path, so nothing else could stop the child.
+            self._kill(proc)
+            raise
+
+    def _kill(self, proc) -> None:
+        _signal_group(proc, self._killpg, signal.SIGKILL)
+        try:
+            proc.wait(timeout=STOP_GRACE_S)
+        except subprocess.TimeoutExpired:
+            pass

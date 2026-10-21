@@ -852,6 +852,13 @@ def test_bad_arguments_are_refused_before_anything_is_sent(call):
     assert "RELIND" not in str(info.value) and "2025" not in str(info.value)
 
 
+def test_a_65_character_apisession_is_refused_locally():
+    seen = Canned()
+    with pytest.raises(RelayArgumentError):
+        relay_with(seen).login_complete(ATTEMPT, "9" * 65)
+    assert seen.requests == []
+
+
 def test_a_range_of_exactly_3000_days_is_allowed():
     seen = Canned()
     start = date(2015, 1, 1)
@@ -1569,7 +1576,17 @@ def test_cli_prints_a_relay_error_without_its_parameters():
         ["probe-daily", "--stock-code", "RELIND", "--from", "2025-06-02", "--to", "2025-06-13"],
         handler=handler,
     )
-    assert code == 1 and text.strip() == f"UPSTREAM_ERROR (request {RID})"
+    assert code == 1 and text.strip() == f"UPSTREAM_ERROR (request {RID}) reason no_data"
+    assert "RELIND" not in text and "stock_code" not in text
+
+
+def test_cli_prints_the_reason_of_a_relay_unavailable():
+    def factory():
+        raise RelayUnavailable(reason="tunnel_restart_failed")
+
+    out = io.StringIO()
+    assert cli_mod.main(["health"], client_factory=factory, out=out) == 1
+    assert out.getvalue().strip() == "RELAY_UNAVAILABLE (request None) reason tunnel_restart_failed"
 
 
 # ------------------------------------------------------- contract parity
@@ -1626,9 +1643,11 @@ def test_upstream_names_patterns_and_limits_equal_the_vm():
         assert getattr(client_mod, name).pattern == getattr(vm, name).pattern
     token = vm.BEARER_RE.pattern.removeprefix("^Bearer (").removesuffix(")$")
     assert client_mod.RELAY_TOKEN_RE.pattern.strip("^$") == token
-    # the client's code filter is a superset of the VM's, so the VM is the one that decides
-    for sample in ("123456", "A1b2C3d4", "9" * 64, "ab" * 32):
-        assert vm.API_SESSION_RE.fullmatch(sample) and client_mod.API_SESSION_RE.fullmatch(sample)
+    assert client_mod.API_SESSION_RE.pattern == vm.API_SESSION_RE.pattern == "^[A-Za-z0-9]{6,64}$"
+    for sample in ("123456", "A1b2C3d4", "9" * 64, "ab" * 32, "9" * 65, "12345", "12 34 56"):
+        assert bool(vm.API_SESSION_RE.fullmatch(sample)) == bool(
+            client_mod.API_SESSION_RE.fullmatch(sample)
+        )
 
 
 # ------------------------------------------------------------ RELAY-API.md

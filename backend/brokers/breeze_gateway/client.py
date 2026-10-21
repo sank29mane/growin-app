@@ -113,7 +113,7 @@ SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 FETCHED_AT_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$")
 ATTEMPT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
 STOCK_CODE_RE = re.compile(r"^[A-Z0-9]{1,10}$")
-API_SESSION_RE = re.compile(r"^[A-Za-z0-9]{6,256}$")
+API_SESSION_RE = re.compile(r"^[A-Za-z0-9]{6,64}$")
 REASON_RE = re.compile(r"^[a-z_]{1,40}$")
 HEALTH_STATES = frozenset({"none", "active", "expired", "suspended_egress"})
 
