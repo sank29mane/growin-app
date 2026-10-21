@@ -14,6 +14,7 @@ import pytest
 from brokers.breeze_gateway import RelayClient
 
 from pilot_data import backfill as bf
+from pilot_data.breeze_bars import breeze_bars_for
 from pilot_data.core import PilotDataError
 from pilot_data.targets import TargetMember
 
@@ -1052,6 +1053,11 @@ def covered(store, code, start):
                  [code, start])
 
 
+def covers(store, code, day):
+    """What a backtest asks: does a coverage row say the store knows this day?"""
+    return breeze_bars_for(store, code, start=day, end=day).covers(day)
+
+
 def test_a_window_answered_with_only_the_newest_bar_is_stored_with_gaps_never_done(store, relay, clock_time):
     eng, plan = ready(store, relay, clock_time, codes=("RELIND",))
     relay.bars_script = lambda index, params: newest_only(params) if index in (0, 1) else None
@@ -1066,7 +1072,9 @@ def test_a_window_answered_with_only_the_newest_bar_is_stored_with_gaps_never_do
         "window_to": plan.windows[0][1].isoformat(), "status": "stored_with_gaps", "error_code": "breeze_window_gaps"}]
     assert count(store, "SELECT count(*) FROM relay_call_outcomes WHERE outcome = 'incomplete'") == 1
     assert window_source_bars(store, "RELIND", plan.windows[0][0]) == 1  # the one bar that came back
-    assert covered(store, "RELIND", plan.windows[0][0]) == 1
+    assert covered(store, "RELIND", plan.windows[0][0]) == 0  # a window with gaps claims no coverage
+    first_day = sessions(*plan.windows[0])[0]
+    assert not covers(store, "RELIND", first_day)  # a bar-less session is never read as covered
     assert count(store, "SELECT count(*) FROM quarantine_records WHERE reason_code = 'breeze_window_gaps'") == 1
 
     relay.bars_script, relay.bars_requests = None, []
@@ -1074,6 +1082,7 @@ def test_a_window_answered_with_only_the_newest_bar_is_stored_with_gaps_never_do
     assert again.calls_this_run == 0 and relay.bars_requests == [] and again.status == "complete_with_flags"
     fixed = eng.run(plan, today_ist=TODAY, retry_flagged=True)
     assert len(relay.bars_requests) == 1 and fixed.status == "complete" and fixed.counts["done"] == 2
+    assert covered(store, "RELIND", plan.windows[0][0]) == 1 and covers(store, "RELIND", first_day)  # claimed once whole
 
 
 def test_a_missing_interior_session_is_a_recorded_gap_not_done_and_no_bar_is_invented(store, relay, clock_time):
@@ -1162,8 +1171,9 @@ def test_verify_promotes_an_unverified_window_once_the_calendar_covers_it_withou
     assert verified.counts["stored_unverified"] == 0
     assert verified.status == "complete_with_flags" and bf._exit_for_report(verified) == 4
     assert [row["stock_code"] for row in verified.flagged_windows] == ["NIFBEE"]
-    assert covered(store, "RELIND", plan.windows[0][0]) == 1  # coverage is claimed only once verified
-    assert covered(store, "NIFBEE", plan.windows[0][0]) == 1  # a recorded gap is a truthful hole, not unverified
+    assert covered(store, "RELIND", plan.windows[0][0]) == 1  # coverage is claimed only once verified complete
+    assert covered(store, "NIFBEE", plan.windows[0][0]) == 0  # a window with a gap claims nothing
+    assert covers(store, "RELIND", gap) and not covers(store, "NIFBEE", gap)
     assert eng.verify(plan, today_ist=TODAY).counts["done"] == 3  # idempotent
 
 
@@ -1256,6 +1266,15 @@ def test_a_mid_range_listing_and_a_three_week_suspension_end_in_terminal_statuse
     assert window_source_bars(store, "RELIND", late[0]) == len(sessions(*late))
     detail = store.query("SELECT detail_json FROM quarantine_records WHERE reason_code = 'breeze_window_gaps'")
     assert len(detail) == 1 and "2025-09-01..2025-09-19" in detail[0][0]
+    # coverage rows: only the windows judged complete. NIFBEE's gap window has bars but claims nothing, and the
+    # pre-listing JAIBAL window (done, nothing stored) claims nothing either.
+    assert {(code, start): covered(store, code, start) for code, start in states} == {
+        ("RELIND", early[0]): 1, ("RELIND", late[0]): 1, ("NIFBEE", early[0]): 1, ("NIFBEE", late[0]): 0,
+        ("JAIBAL", early[0]): 0, ("JAIBAL", late[0]): 1,
+    }
+    assert covered(store, "JAIBAL", early[0]) == 0
+    assert not covers(store, "NIFBEE", SUSPENSION[0]) and not covers(store, "NIFBEE", late[1])
+    assert covers(store, "RELIND", SUSPENSION[0]) and covers(store, "JAIBAL", LISTING)
 
     relay.bars_requests.clear()
     second = eng.run(plan, today_ist=TODAY)  # nothing is retried on its own, not even the gap window
@@ -1272,6 +1291,7 @@ def test_retry_flagged_requeues_only_the_gap_window_and_finishes_once_the_data_i
     fixed = eng.run(plan, today_ist=TODAY, retry_flagged=True)
     assert [(r["stock_code"], r["from"]) for r in relay.bars_requests] == [("NIFBEE", plan.windows[1][0].isoformat())]
     assert fixed.status == "complete" and fixed.counts["done"] == 6 and bf._exit_for_report(fixed) == 0
+    assert covered(store, "NIFBEE", plan.windows[1][0]) == 1  # the retry came back whole: coverage is written now
 
 
 @pytest.mark.parametrize("raw", ["", "not a date"])
@@ -1289,10 +1309,92 @@ def test_a_wrong_late_listing_date_does_not_hide_missing_sessions_before_the_fir
     window = (date(2024, 1, 2), date(2024, 3, 28))
     days = sessions(*window)
     parsed = parse_days("RELIND", days[10:20] + days[21:])  # first bar on the 11th session, one hole after it
-    late_listing = days[40]  # the master claims it listed much later than the first bar
+    late_listing = days[40]  # the master claims it listed much later than the first bar: evidently wrong
     assessed = eng._assess(parsed, window, None, late_listing)
-    assert assessed.verdict == "gaps" and assessed.gap_days == (days[20],)
-    assert eng._assess(parse_days("RELIND", days[10:]), window, None, late_listing).verdict == "complete"
+    assert assessed.verdict == "gaps" and assessed.gap_days == (*days[:10], days[20])
+    assert assessed.detail["first_gap"] == days[0].isoformat()
+    assert assessed.detail["gap_ranges"] == f"{days[0].isoformat()}..{days[9].isoformat()},{days[20].isoformat()}"
+    # the same late date over a gap-free tail is still gaps: the leading sessions are not waved through
+    leading = eng._assess(parse_days("RELIND", days[10:]), window, None, late_listing)
+    assert leading.verdict == "gaps" and leading.gap_days == tuple(days[:10])
+    assert leading.detail["gap_ranges"] == f"{days[0].isoformat()}..{days[9].isoformat()}"
+    # a consistent listing date (on or before the first bar) is still trusted as the floor
+    assert eng._assess(parse_days("RELIND", days[10:]), window, None, days[10]).verdict == "complete"
+
+
+def test_a_wrong_late_listing_date_stores_the_window_with_gaps_and_no_coverage(store, relay, clock_time):
+    relay.master_rows = [kit.MASTER_RELIND, listed(kit.MASTER_NIFBEE, "2099-01-01"), kit.MASTER_JAIBAL]
+    eng, plan = ready(store, relay, clock_time, codes=("NIFBEE",))
+    first = sessions(*plan.windows[0])
+    relay.bars_script = lambda index, params: only_from(params, first[10])
+    report = eng.run(plan, today_ist=TODAY)
+    assert window_states(store)[("NIFBEE", plan.windows[0][0])] == "stored_with_gaps"
+    assert covered(store, "NIFBEE", plan.windows[0][0]) == 0 and not covers(store, "NIFBEE", first[10])
+    detail = store.query("SELECT detail_json FROM quarantine_records WHERE reason_code = 'breeze_window_gaps'")
+    assert first[0].isoformat() in detail[0][0]
+    assert bf._exit_for_report(report) == 4
+
+
+def test_out_of_window_bars_with_a_late_listing_and_a_quarantined_row_are_never_complete(store, relay, clock_time):
+    """The Grok repro: listing after the window, one bar after it, a quarantined row inside it."""
+    eng, _ = ready(store, relay, clock_time, codes=("RELIND",))
+    window = (date(2024, 1, 2), date(2024, 3, 28))
+    odd = bar_row("RELIND", date(2024, 2, 1), stamp="09:15:00")  # off-convention: the parser quarantines it
+    parsed = bf.parse_breeze_v2_daily(
+        kit.breeze_v2_json([bar_row("RELIND", date(2024, 6, 3)), odd]), stock_code="RELIND", convention=CONVENTION
+    )
+    assert [bar.trade_date for bar in parsed.bars] == [date(2024, 6, 3)] and parsed.parse_quarantine_inputs
+    assessed = eng._assess(parsed, window, None, date(2024, 6, 1))
+    assert assessed.verdict == "gaps" and assessed.verdict != "complete"
+    assert date(2024, 2, 1) in assessed.gap_days and assessed.detail["reason"] == "no_bars_in_window"
+
+
+def test_a_window_with_no_good_bar_in_it_is_never_complete(store, relay, clock_time):
+    eng, _ = ready(store, relay, clock_time, codes=("RELIND",))
+    window = (date(2024, 1, 2), date(2024, 3, 28))
+    out_of_window = parse_days("RELIND", [date(2024, 6, 3)])
+    for listing in (None, date(2024, 1, 1), date(2024, 2, 1)):  # a listing inside or before the window
+        assessed = eng._assess(out_of_window, window, None, listing)
+        assert assessed.verdict == "gaps" and assessed.detail["reason"] == "no_bars_in_window", listing
+
+
+def test_out_of_window_bars_for_a_stock_listed_after_the_window_are_before_listing_and_store_nothing(
+    store, relay, clock_time
+):
+    relay.master_rows = [kit.MASTER_RELIND, kit.MASTER_NIFBEE, listed(kit.MASTER_JAIBAL, "2026-10-01")]
+    eng, plan = ready(store, relay, clock_time, codes=("JAIBAL",))
+    late_bar = sessions(date(2026, 10, 1), date(2026, 10, 14))[0]
+    relay.bars_script = lambda index, params: kit.breeze_v2_json([bar_row("JAIBAL", late_bar)])
+    eng.run(plan, today_ist=TODAY)
+    states = window_states(store)
+    assert states[("JAIBAL", plan.windows[0][0])] == "done"  # listed after this window: expected nothing
+    assert covered(store, "JAIBAL", plan.windows[0][0]) == 0
+    assert not any(count(store, "SELECT count(*) FROM breeze_bars_raw WHERE source_sha256 = ? AND trade_date < ?",
+                         [sha, late_bar]) for (sha,) in store.query(
+        "SELECT source_sha256 FROM backfill_events WHERE stock_code = 'JAIBAL' AND status = 'done'"))
+    assert not covers(store, "JAIBAL", plan.windows[0][1])
+
+
+def test_before_listing_is_done_but_claims_no_coverage_and_stores_no_bars(store, relay, clock_time):
+    relay.master_rows = [kit.MASTER_RELIND, kit.MASTER_NIFBEE, listed(kit.MASTER_JAIBAL, "2026-10-01")]
+    eng, plan = ready(store, relay, clock_time, codes=("JAIBAL",))
+    relay.bars_script = lambda index, params: _empty_body(params) if index == 0 else None
+    eng.run(plan, today_ist=TODAY)
+    assert window_states(store)[("JAIBAL", plan.windows[0][0])] == "done"
+    assert covered(store, "JAIBAL", plan.windows[0][0]) == 0
+    assert window_source_bars(store, "JAIBAL", plan.windows[0][0]) == 0  # the probe's own bars are left out
+    assert not covers(store, "JAIBAL", plan.windows[0][0])
+
+
+def test_a_mid_window_listing_with_an_empty_answer_is_flagged_not_done(store, relay, clock_time):
+    eng, plan = ready(store, relay, clock_time, codes=("JAIBAL",))
+    mid = sessions(*plan.windows[0])[40]
+    eng._listing_dates = {"JAIBAL": mid}  # listed inside the window: an empty answer proves nothing
+    relay.bars_script = lambda index, params: _empty_body(params) if index in (0, 1) else None
+    report = eng.run(plan, today_ist=TODAY)
+    assert window_states(store)[("JAIBAL", plan.windows[0][0])] == "empty_flagged"
+    assert report.error_codes == {"breeze_empty_response": 1} and len(relay.bars_requests) == 3
+    assert covered(store, "JAIBAL", plan.windows[0][0]) == 0
 
 
 def test_listing_dates_parse_in_the_master_formats_and_nothing_else():

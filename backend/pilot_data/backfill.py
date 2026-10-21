@@ -14,6 +14,8 @@ has no transport code, takes no relay URL and never reads a credential. Rules it
   re-checks it against the calendar later without a Breeze call. A calendar-known window that still lacks
   sessions after one retry is stored as `stored_with_gaps` (gap dates recorded, terminal until
   `run --retry-flagged`); no row is ever invented for a gap day;
+* a `breeze_responses` coverage row is written only for a window judged complete: gap and unverified windows
+  keep their bars and provenance but claim no coverage, so a backtest never reads a bar-less session as covered;
 * an upstream error envelope (Status other than 200, Error text) fails the window and is never read as empty;
 * a request that returns 1000 rows was capped upstream (the cap keeps the newest rows), so it is
   never stored as a complete window;
@@ -792,11 +794,13 @@ def _ranges(expected: Iterable[date], gaps: set[date]) -> str:
 class _Assessment:
     """What the rows of one answer prove about a window.
 
-    complete: every expected session has a bar. gaps: the calendar is known and sessions are missing (or the
-    parser quarantined their rows). unverified: the calendar does not establish the expected sessions.
+    complete: every expected session has a bar (and at least one bar is in the window). gaps: the calendar is
+    known and sessions are missing (or the parser quarantined their rows, or no bar fell in the window).
+    unverified: the calendar does not establish the expected sessions. before_listing: no bar or flagged row
+    in the window and the stock listed after it. Only `complete` may claim coverage.
     """
 
-    verdict: Literal["complete", "gaps", "unverified"]
+    verdict: Literal["complete", "gaps", "unverified", "before_listing"]
     gap_days: tuple[date, ...]
     detail: dict[str, str]
 
@@ -1191,15 +1195,20 @@ class BackfillEngine:
                 # Not stored: one retry first. The first answer stays on record as a source and a provenance row.
                 self._ledger.finish(call_id, "incomplete", GAPS_WINDOW_CODE, payload.sha256)
                 continue
+            if assessment.verdict == "before_listing":
+                # Only out-of-window bars came back for a window that ended before the listing: store none of them.
+                self._ledger.finish(call_id, "ok", None, payload.sha256)
+                return self._before_listing(plan, code, window, attempt, payload.sha256)
             try:
-                if assessment.verdict == "unverified":
-                    # Bars are kept with their provenance, but breeze_responses must not claim days nobody verified.
-                    self._store_bars_only(payload.body, code, parsed, payload.sha256)
-                else:
+                if assessment.verdict == "complete":
                     ingest_breeze_response(
                         self._store, descriptor, payload.body, stock_code=code, requested_from=w_from,
                         requested_to=w_to, convention=convention,
                     )
+                else:
+                    # gaps or unverified: the bars and their provenance are kept, but breeze_responses must not
+                    # claim days that lack a verified bar.
+                    self._store_bars_only(payload.body, code, parsed, payload.sha256, window)
             except PilotDataError as exc:
                 self._ledger.finish(call_id, "error", exc.code, payload.sha256)
                 raise _Stop("stopped_fail_closed", exc.code) from None
@@ -1243,21 +1252,28 @@ class BackfillEngine:
         """What the rows prove about a window.
 
         Expected sessions: the stored NSE calendar's sessions from the window start, raised to the probed
-        depth and to the stock's listing date (never later than its first returned bar, so a wrong master
-        date can not hide a missing day). A date the parser quarantined counts as a gap. When the calendar
-        does not cover the window nothing can be established and the answer is `unverified`; there is no
-        density guess.
+        depth and to the stock's listing date. The listing date is a floor only when it is consistent with
+        the answer (no later than the first in-window bar or quarantined row); a later date is evidently
+        wrong and the floor stays at the window start, so the leading sessions are gaps. A date the parser
+        quarantined counts as a gap, and a window with no good bar in it is never `complete`. When the
+        calendar does not cover the window nothing can be established and the answer is `unverified`;
+        there is no density guess.
         """
         w_from, w_to = window
         start = w_from if depth_floor is None else max(w_from, depth_floor)
         returned = {bar.trade_date for bar in parsed.bars if start <= bar.trade_date <= w_to}
-        if listing_date is not None and listing_date > start:
-            start = min(listing_date, min(returned)) if returned else listing_date
-            returned = {day for day in returned if day >= start}
         flagged = {
             item.trade_date for item in parsed.parse_quarantine_inputs
             if item.trade_date is not None and start <= item.trade_date <= w_to
         }
+        if listing_date is not None and listing_date > start:
+            evidence = returned | flagged
+            if not evidence and listing_date > w_to:
+                # Nothing of the window itself came back (out-of-window bars do not count): the stock was not listed.
+                return _Assessment("before_listing", (), {})
+            if not evidence or listing_date <= min(evidence):
+                start = listing_date
+            # else the master's date is later than a day the stock evidently traded: it is wrong, the floor stays
         try:
             expected = sessions_between(self._store, start, w_to)
         except PilotDataError as exc:
@@ -1266,16 +1282,21 @@ class BackfillEngine:
             return _Assessment("unverified", (), {"reason": "calendar_unknown_dates", "bars": str(len(returned))})
         missing = {day for day in expected if day not in returned}
         gaps = sorted(missing | flagged)
-        if not gaps:
+        if not gaps and returned:
             return _Assessment("complete", (), {})
-        detail = {"gap_sessions": str(len(gaps)), "first_gap": gaps[0].isoformat(),
-                  "gap_ranges": _ranges(sorted(set(expected) | flagged), set(gaps))}
+        detail = {"gap_sessions": str(len(gaps)), "gap_ranges": _ranges(sorted(set(expected) | flagged), set(gaps))}
+        if gaps:
+            detail["first_gap"] = gaps[0].isoformat()
+        if not returned:
+            detail["reason"] = "no_bars_in_window"
         if flagged:
             detail["quarantined_dates"] = str(len(flagged))
         return _Assessment("gaps", tuple(gaps), detail)
 
-    def _store_bars_only(self, body: bytes, code: str, parsed: BreezeParse, source_sha256: str) -> None:
-        """Append the parsed bars and parse quarantines but no breeze_responses row (no coverage claim)."""
+    def _store_bars_only(
+        self, body: bytes, code: str, parsed: BreezeParse, source_sha256: str, window: tuple[date, date]
+    ) -> None:
+        """Append the parsed in-window bars and parse quarantines but no breeze_responses row (no coverage claim)."""
         ensure_breeze_tables(self._store)
         rows = [
             {
@@ -1285,6 +1306,7 @@ class BackfillEngine:
                 "adjustment_basis": bar.adjustment_basis, "row_sha256": bar.row_sha256(),
             }
             for bar in parsed.bars
+            if window[0] <= bar.trade_date <= window[1]
         ]
         self._store.append_rows("breeze_bars_raw", rows, check="breeze_bars")
         self._quarantine_parse(parsed, source_sha256)
@@ -1293,7 +1315,7 @@ class BackfillEngine:
         self, code: str, window: tuple[date, date], parsed: BreezeParse, source_sha256: str,
         convention: DailyBarConvention,
     ) -> None:
-        """The breeze_responses row that `_store_bars_only` left out, once the window is verified."""
+        """The breeze_responses row that `_store_bars_only` left out, once the window is verified complete."""
         ensure_breeze_tables(self._store)
         convention_json = json.dumps(convention.model_dump(mode="json"), sort_keys=True)
         self._store.append_rows(
@@ -1389,8 +1411,9 @@ class BackfillEngine:
     def verify(self, plan: BackfillPlan, *, today_ist: date, break_lock: bool = False) -> BackfillRunReport:
         """Re-evaluate `stored_unverified` windows against the calendar. Makes no Breeze call.
 
-        A window whose expected sessions are now established is promoted to `done` when each has a bar,
-        else it becomes `stored_with_gaps`; a window the calendar still can not establish is left as it is.
+        A window whose expected sessions are now established is promoted to `done` (and only then claims
+        coverage) when each has a bar, else it becomes `stored_with_gaps` with no coverage row; a window the
+        calendar still can not establish is left as it is.
         """
         self._check_plan(plan)
         self._acquire_lock(break_lock)
@@ -1411,9 +1434,11 @@ class BackfillEngine:
                 assessment = self._assess(parsed, window, depth_floor, self._listing_date(code, today_ist))
                 if assessment.verdict == "unverified":
                     continue
-                self._claim_coverage(code, window, parsed, state.source_sha256, convention)
                 if assessment.verdict == "complete":
+                    self._claim_coverage(code, window, parsed, state.source_sha256, convention)
                     self._write_event(plan, code, window, "done", state.attempt, None, state.source_sha256)
+                elif assessment.verdict == "before_listing":
+                    self._before_listing(plan, code, window, state.attempt, state.source_sha256)
                 else:
                     self._flag_stored(
                         plan, code, window, state.attempt, assessment, state.source_sha256, calls=1

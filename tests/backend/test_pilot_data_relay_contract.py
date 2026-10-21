@@ -509,7 +509,7 @@ def test_other_contract_version_is_a_contract_mismatch():
     ] + [
         {"upstream_request": {**{k: v for k, v in ECHO.items() if k != "exch_code"}, "exchange_code": "BSE"}},
     ],
-    ids=lambda change: next(iter(change)) + "-" + str(abs(hash(str(change))) % 1000),
+    ids=lambda change: next(iter(change)) + "-" + hashlib.sha1(repr(change).encode()).hexdigest()[:6],  # stable across xdist workers
 )
 def test_every_other_defect_is_a_response_invalid(change):
     assert code_of(dataclasses.replace(good(), **change)) == "relay_response_invalid"
