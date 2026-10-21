@@ -388,11 +388,16 @@ def test_transport_failures_map_to_upstream_codes():
     with pytest.raises(bc.BreezeError) as err:
         CALLS["quote"](client)
     assert err.value.code == "UPSTREAM_TIMEOUT"
-    for kind in ("connect", "tls", "redirect", "too_large", "protocol"):
+    for kind in ("connect", "tls", "redirect", "protocol"):
         client, _ = client_for(TransportError(kind, "api.icicidirect.com"))
         with pytest.raises(bc.BreezeError) as err:
             RAW_CALLS["quote"](client)
         assert err.value.code == "UPSTREAM_UNREACHABLE"
+    # 61-08: a host that answered with more than the cap is a shape problem (502), not an outage
+    client, _ = client_for(TransportError("too_large", "api.icicidirect.com"))
+    with pytest.raises(bc.BreezeError) as err:
+        RAW_CALLS["quote"](client)
+    assert err.value.code == "UPSTREAM_SHAPE"
 
 
 def test_every_call_is_counted():

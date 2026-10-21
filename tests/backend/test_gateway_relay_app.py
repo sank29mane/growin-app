@@ -76,6 +76,43 @@ BARS_BODY = json.dumps(
 ).encode()
 BARS_QUERY = "/v1/bars/daily?stock_code=RELIND&from=2025-06-02&to=2025-06-13"
 
+# 61-08: generated bodies built from the key sets in 61-SMOKE-BREEZE.json (run 2026-10-21):
+# s3_quotes[].keys (21 keys) and s4_preview[].lines (9 keys). Every value is invented.
+QUOTE_KEYS = (
+    "best_bid_price", "best_bid_quantity", "best_offer_price", "best_offer_quantity",
+    "exchange_code", "expiry_date", "high", "low", "lower_circuit", "ltp", "ltp_percent_change",
+    "ltt", "open", "previous_close", "product_type", "right", "spot_price", "stock_code",
+    "strike_price", "total_quantity_traded", "upper_circuit",
+)
+PREVIEW_LINE_KEYS = (
+    "brokerage", "exchange_turnover_charges", "stamp_duty", "stt", "sebi_charges", "gst",
+    "total_turnover_and_sebi_charges", "total_other_charges", "total_brokerage",
+)
+QUOTE_BODY = json.dumps(
+    {
+        "Success": [
+            {
+                key: ("RELIND" if key == "stock_code" else "NSE" if key == "exchange_code"
+                      else "cash" if key == "product_type" else "21-Oct-2026 15:55:21" if key == "ltt"
+                      else "" if key in ("expiry_date", "right", "strike_price") else 1.5 + i)
+                for i, key in enumerate(QUOTE_KEYS)
+            }
+        ],
+        "Status": 200,
+        "Error": None,
+    },
+    separators=(",", ":"),
+).encode()
+PREVIEW_BODY = json.dumps(
+    {"Success": {key: 0.5 + i for i, key in enumerate(PREVIEW_LINE_KEYS)}, "Status": 200, "Error": None},
+    separators=(",", ":"),
+).encode()
+MASTER_BODY = b"PK\x03\x04" + bytes(range(64))  # a zip local-file header, then invented bytes
+MASTER_LAST_MODIFIED = "Tue, 20 Oct 2026 09:30:00 GMT"
+MASTER_URL = "https://directlink.icicidirect.com/NewSecurityMaster/SecurityMaster.zip"
+QUOTES_QUERY = "/v1/quotes?stock_code=RELIND&exchange=NSE"
+PREVIEW_QUERY = "/v1/preview-order?stock_code=RELIND&action=buy&quantity=35&price=1402.30"
+
 
 def breeze_body(success, status=200, error=None) -> bytes:
     return json.dumps({"Success": success, "Status": status, "Error": error}).encode()
@@ -121,6 +158,11 @@ class FakeTransport:
         self.echo_ip: str | Exception = EXPECTED_IP
         self.customer: HttpResponse | Exception = HttpResponse(200, {}, customer_body())
         self.bars: HttpResponse | Exception = HttpResponse(200, {}, BARS_BODY)
+        self.quotes: HttpResponse | Exception = HttpResponse(200, {}, QUOTE_BODY)
+        self.preview: HttpResponse | Exception = HttpResponse(200, {}, PREVIEW_BODY)
+        self.master: HttpResponse | Exception = HttpResponse(
+            200, {"last-modified": MASTER_LAST_MODIFIED}, MASTER_BODY
+        )
 
     def request(self, method, url, *, headers, body, timeouts, max_bytes):
         with self.lock:
@@ -132,6 +174,12 @@ class FakeTransport:
             return self._ip(self.echo_ip)
         if host == "api.icicidirect.com" and url.endswith("/customerdetails"):
             return self._reply(self.customer)
+        if host == "api.icicidirect.com" and urlsplit(url).path.endswith("/quotes"):
+            return self._reply(self.quotes)
+        if host == "api.icicidirect.com" and urlsplit(url).path.endswith("/preview_order"):
+            return self._reply(self.preview)
+        if host == "directlink.icicidirect.com":
+            return self._reply(self.master)
         if host == "breezeapi.icicidirect.com":
             return self._reply(self.bars)
         raise AssertionError(f"unexpected request to {host}")
@@ -155,6 +203,15 @@ class FakeTransport:
     def bars_requests(self) -> list:
         return [r for r in self.requests if urlsplit(r[1]).hostname == "breezeapi.icicidirect.com"]
 
+    def quote_requests(self) -> list:
+        return [r for r in self.requests if urlsplit(r[1]).path.endswith("/quotes")]
+
+    def preview_requests(self) -> list:
+        return [r for r in self.requests if urlsplit(r[1]).path.endswith("/preview_order")]
+
+    def master_requests(self) -> list:
+        return [r for r in self.requests if urlsplit(r[1]).hostname == "directlink.icicidirect.com"]
+
 
 class BudgetDouble:
     def __init__(self) -> None:
@@ -173,12 +230,12 @@ class BudgetDouble:
 
 
 class Stack:
-    def __init__(self, **session_kwargs) -> None:
+    def __init__(self, *, budget=None, master_url: str | None = None, **session_kwargs) -> None:
         self.clock = FakeClock()
         self.transport = FakeTransport()
         self.sink = io.StringIO()
         self.events = EventLog(self.sink, self.clock)
-        self.budget = BudgetDouble()
+        self.budget = budget if budget is not None else BudgetDouble()
         self.credentials = Credentials(app_key=APP_KEY, secret_key=SECRET_KEY)
         self.breeze = BreezeClient(self.transport, clock=self.clock)
         self.egress = EgressChecker(
@@ -204,6 +261,7 @@ class Stack:
             budget=self.budget,
             events=self.events,
             clock=self.clock,
+            **({"security_master_url": master_url} if master_url is not None else {}),
         )
         self.client = TestClient(self.app, base_url=BASE)
 
@@ -612,20 +670,26 @@ def test_an_escaped_exception_is_500_internal_with_no_detail(stack: Stack):
 FORBIDDEN_WORDS = ("order", "fund", "holding", "position", "trade", "margin", "cancel", "modify")
 
 
-def test_route_set_is_exactly_this_plans_five_and_nothing_order_like(stack: Stack):
+def test_route_set_is_exactly_the_nine_contract_routes_and_nothing_order_like(stack: Stack):
     paths = {route.path for route in stack.app.routes}
     assert paths == {
         "/v1/health",
+        "/v1/budget",
         "/v1/login/arm",
         "/v1/login/complete",
         "/v1/session/revoke",
         "/v1/bars/daily",
+        "/v1/quotes",
+        "/v1/preview-order",
+        "/v1/security-master",
     }
     assert paths == set(contract.ROUTES)
-    for path in paths:
+    # preview-order is the charge calculator (C3): the one path allowed to say "order"
+    for path in paths - {"/v1/preview-order"}:
         assert not any(word in path.lower() for word in FORBIDDEN_WORDS)
     methods = {route.path: route.methods for route in stack.app.routes}
-    assert methods["/v1/health"] == {"GET"} and methods["/v1/bars/daily"] == {"GET"}
+    for path in ("/v1/health", "/v1/budget", "/v1/bars/daily", "/v1/quotes", "/v1/preview-order", "/v1/security-master"):
+        assert methods[path] == {"GET"}
     for path in ("/v1/login/arm", "/v1/login/complete", "/v1/session/revoke"):
         assert methods[path] == {"POST"}
 
@@ -868,37 +932,54 @@ def test_event_log_accepts_every_documented_key_and_enum():
 # ---------------------------------------- C3 query allowlist on every route
 
 
-@pytest.mark.parametrize(
-    "method, path",
-    [
-        ("get", "/v1/health"),
-        ("post", "/v1/login/arm"),
-        ("post", "/v1/login/complete"),
-        ("post", "/v1/session/revoke"),
-    ],
-)
+# One valid call per route. The route list below must equal contract.ROUTES, and the
+# parametrized test takes its routes from contract.ROUTES, so a route added to the
+# contract without a case here, or one that skips the query allowlist, fails.
+ROUTE_VALID_CALLS = {
+    "/v1/health": ("get", ""),
+    "/v1/budget": ("get", ""),
+    "/v1/login/arm": ("post", ""),
+    "/v1/login/complete": ("post", ""),
+    "/v1/session/revoke": ("post", ""),
+    "/v1/bars/daily": ("get", "stock_code=RELIND&from=2025-06-02&to=2025-06-13"),
+    "/v1/quotes": ("get", "stock_code=RELIND&exchange=NSE"),
+    "/v1/preview-order": ("get", "stock_code=RELIND&action=buy&quantity=35&price=1402.30"),
+    "/v1/security-master": ("get", ""),
+}
+
+
+def test_every_contract_route_has_a_valid_call_for_the_422_check():
+    assert set(ROUTE_VALID_CALLS) == set(contract.ROUTES)
+
+
+@pytest.mark.parametrize("path", sorted(contract.ROUTES))
 @pytest.mark.parametrize("extra", ["debug=1", "stock_code=RELIND", "a=1&a=2"])
-def test_unlisted_query_parameters_are_422_on_every_route(stack: Stack, method, path, extra):
+def test_unlisted_query_parameters_are_422_on_every_route(path, extra):
+    stack = Stack(master_url=MASTER_URL)
     token = stack.login()
-    n = len(stack.transport.requests)
+    method, valid_query = ROUTE_VALID_CALLS[path]
     kwargs = {"json": {}} if method == "post" else {}
     if path == "/v1/login/complete":
         armed = stack.arm(token).json()
-        n = len(stack.transport.requests)
         kwargs = {"json": {"attempt_id": armed["attempt_id"], "apisession": CODE}}
         token = armed["relay_token"]
-    resp = getattr(stack.client, method)(
-        f"{path}?{extra}", headers={**CONTRACT_HDR, **auth(token)}, **kwargs
-    )
+    n = len(stack.transport.requests)
+    allowed = contract.ALLOWED_QUERY_BY_ROUTE[path]
+    names = [pair.split("=")[0] for pair in extra.split("&")]
+    # a name the route lists is a duplicate (named), any other name is "unknown"
+    expected = sorted({name if name in allowed else "unknown" for name in names})
+    url = f"{path}?{valid_query}&{extra}" if valid_query else f"{path}?{extra}"
+    resp = getattr(stack.client, method)(url, headers={**CONTRACT_HDR, **auth(token)}, **kwargs)
     assert resp.status_code == 422 and code_of(resp) == "VALIDATION"
-    assert resp.json()["error"]["fields"] == ["unknown"]
+    assert resp.json()["error"]["fields"] == expected
     assert len(stack.transport.requests) == n  # the handler never ran
-    for value in ("debug", "stock_code", "RELIND"):
+    for value in ("debug", "RELIND"):
         assert value not in resp.text
     assert_envelope(resp)
-    # and the same call without the query string is fine, so the query was the only fault
-    again = getattr(stack.client, method)(path, headers={**CONTRACT_HDR, **auth(token)}, **kwargs)
-    assert again.status_code == 200
+    # and the same call without the extra query is fine, so the extra was the only fault
+    again_url = f"{path}?{valid_query}" if valid_query else path
+    again = getattr(stack.client, method)(again_url, headers={**CONTRACT_HDR, **auth(token)}, **kwargs)
+    assert again.status_code == 200, again.text
 
 
 def test_an_unlisted_query_on_arm_does_not_arm_or_clear_the_pending_attempt(stack: Stack):
@@ -937,6 +1018,9 @@ NEWLINE_SAMPLES = {
     "API_SESSION_RE": CODE,
     "BEARER_RE": "Bearer " + "A" * 43,
     "HOST_RE": "127.0.0.1:8443",
+    "QUANTITY_RE": "35",
+    "PRICE_RE": "1402.30",
+    "HTTP_DATE_RE": "Tue, 20 Oct 2026 09:30:00 GMT",
 }
 
 

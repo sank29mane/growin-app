@@ -44,7 +44,7 @@ ERROR_CLASSES = (
 
 JSON_MAX_BYTES = 8 * 1024 * 1024
 _SEGMENT_KEYS = ("Trading", "Equity", "Derivatives", "Currency")
-_PRICE_RE = re.compile(r"^\d+(\.\d{1,2})?$")
+_PRICE_RE = re.compile(r"^[0-9]+(\.[0-9]{1,2})?$")
 
 
 # ---------------------------------------------------------------- helpers
@@ -84,6 +84,11 @@ def checksum_headers(
 
 
 def classify_error_text(text: object) -> str:
+    # 61-SMOKE-BREEZE.json, run 2026-10-21, s2_bars, s3_quotes and s4_preview
+    # recorded no error_text at all (every call passed). The one string seen in
+    # the failed run of 2026-10-16 (key s2_bars[].error_text, "Something went
+    # wrong", Status 500 under HTTP 200) stays "other": it is an upstream error,
+    # not no_data, so it surfaces as 502 UPSTREAM_ERROR reason other.
     if not isinstance(text, str):
         return "other"
     if text == "Invalid session.":
@@ -190,6 +195,7 @@ class RawUpstream:
     http_status: int
     body: bytes
     fetched_at_utc: datetime
+    headers: Mapping[str, str] = field(default_factory=dict, repr=False)  # names lower-cased
 
 
 @dataclass(frozen=True)
@@ -241,6 +247,38 @@ def parse_customer_details(success: object) -> CustomerDetails:
     )
 
 
+def quote_payload(stock_code: str, exchange_code: str) -> dict[str, str]:
+    """The exact JSON object the quotes call hashes and sends (and the relay reports)."""
+    return {
+        "stock_code": stock_code,
+        "exchange_code": exchange_code,
+        "expiry_date": "",
+        "product_type": "cash",
+        "right": "",
+        "strike_price": "",
+    }
+
+
+def preview_payload(
+    stock_code: str, exchange_code: str, action: str, quantity: int, price: str
+) -> dict[str, str]:
+    """The exact JSON object the preview_order call hashes and sends.
+
+    preview_order is a brokerage calculator, not an order: product cash, order
+    type limit, special flag N, every value a string.
+    """
+    return {
+        "stock_code": stock_code,
+        "exchange_code": exchange_code,
+        "product": "cash",
+        "order_type": "limit",
+        "price": price,
+        "action": action,
+        "quantity": str(quantity),
+        "specialflag": "N",
+    }
+
+
 # ----------------------------------------------------------------- client
 
 
@@ -275,9 +313,14 @@ class BreezeClient:
                 max_bytes=max_bytes,
             )
         except TransportError as exc:
-            code = "UPSTREAM_TIMEOUT" if exc.kind == "timeout" else "UPSTREAM_UNREACHABLE"
+            if exc.kind == "timeout":  # includes "no upstream connection freed up in time"
+                code = "UPSTREAM_TIMEOUT"
+            elif exc.kind == "too_large":  # the host answered, with more than the cap
+                code = "UPSTREAM_SHAPE"
+            else:
+                code = "UPSTREAM_UNREACHABLE"
             raise BreezeError(code) from None
-        return RawUpstream(resp.status, resp.body, self.clock.now_utc())
+        return RawUpstream(resp.status, resp.body, self.clock.now_utc(), resp.headers)
 
     def customer_details_raw(self, *, app_key: str, api_session: str) -> RawUpstream:
         body = compact_json({"SessionToken": api_session, "AppKey": app_key})
@@ -394,14 +437,7 @@ class BreezeClient:
     ) -> RawUpstream:
         return self._checksummed_get(
             "quotes",
-            {
-                "stock_code": stock_code,
-                "exchange_code": exchange_code,
-                "expiry_date": "",
-                "product_type": "cash",
-                "right": "",
-                "strike_price": "",
-            },
+            quote_payload(stock_code, exchange_code),
             app_key=app_key,
             secret_key=secret_key,
             session_token=session_token,
@@ -442,20 +478,11 @@ class BreezeClient:
             raise ValueError("action must be buy or sell")
         if not isinstance(quantity, int) or isinstance(quantity, bool) or quantity <= 0:
             raise ValueError("quantity must be a positive int")
-        if not isinstance(price, str) or not _PRICE_RE.match(price) or float(price) <= 0:
+        if not isinstance(price, str) or not _PRICE_RE.fullmatch(price) or float(price) <= 0:
             raise ValueError("price must be a positive decimal string, at most 2 decimals")
         return self._checksummed_get(
             "preview_order",
-            {
-                "stock_code": stock_code,
-                "exchange_code": exchange_code,
-                "product": "cash",
-                "order_type": "limit",
-                "price": price,
-                "action": action,
-                "quantity": str(quantity),
-                "specialflag": "N",
-            },
+            preview_payload(stock_code, exchange_code, action, quantity, price),
             app_key=app_key,
             secret_key=secret_key,
             session_token=session_token,

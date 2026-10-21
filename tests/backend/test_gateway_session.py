@@ -7,8 +7,12 @@ client and egress checker over a FakeTransport. No network.
 
 from __future__ import annotations
 
+import ast
 import hmac
 import threading
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -21,6 +25,8 @@ from test_gateway_relay_app import (
     CONTRACT_HDR,
     EXPECTED_IP,
     OTHER_IP,
+    PREVIEW_QUERY,
+    QUOTES_QUERY,
     T0,
     Stack,
     USERID,
@@ -29,6 +35,7 @@ from test_gateway_relay_app import (
     customer_body,
 )
 
+from gateway_vm import app as relay_app  # noqa: E402
 from gateway_vm import contract  # noqa: E402
 from gateway_vm.session import (  # noqa: E402
     IST,
@@ -55,6 +62,137 @@ def direct_login(stack: Stack) -> str:
     attempt_id, _url, token, _exp = stack.session.arm(None)
     stack.session.complete(attempt_id, CODE, token)
     return token
+
+
+@dataclass(frozen=True)
+class DataRoute:
+    """A Breeze-backed data route: its handler name in app.py, one valid call, and
+    how to count the upstream requests that call produced."""
+
+    handler: str
+    query: str
+    upstream: Callable[[Stack], list]
+
+    def sent(self, stack: Stack) -> int:
+        return len(self.upstream(stack))
+
+
+# Every route that hands the Breeze session token to an upstream call. The session
+# revalidation tests below run over all of them, and the guard test below fails if
+# app.py grows a Breeze-backed route that is not listed here.
+DATA_ROUTES = {
+    "bars_daily": DataRoute("bars_daily", BARS_QUERY, lambda s: s.transport.bars_requests()),
+    "quotes": DataRoute("quotes", QUOTES_QUERY, lambda s: s.transport.quote_requests()),
+    "preview_order": DataRoute("preview_order", PREVIEW_QUERY, lambda s: s.transport.preview_requests()),
+}
+# Calls breeze.* but needs an egress check, not a Breeze session (see its docstring).
+NO_BREEZE_SESSION_ROUTES = frozenset({"security_master"})
+
+data_route = pytest.mark.parametrize("route", list(DATA_ROUTES.values()), ids=list(DATA_ROUTES))
+
+
+_FUNC_DEFS = (ast.FunctionDef, ast.AsyncFunctionDef)
+
+
+def _create_app_handlers(source: str | None = None) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    """The route handlers defined inside create_app(), by function name. Sync and
+    async handlers both count, at any nesting depth inside create_app."""
+    if source is None:
+        source = Path(relay_app.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    create_app = next(n for n in tree.body if isinstance(n, _FUNC_DEFS) and n.name == "create_app")
+    return {
+        n.name: n
+        for n in ast.walk(create_app)
+        if isinstance(n, _FUNC_DEFS) and any(_is_route_decorator(d) for d in n.decorator_list)
+    }
+
+
+def _is_route_decorator(node: ast.expr) -> bool:
+    call = node if isinstance(node, ast.Call) else None
+    func = call.func if call else node
+    return isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id == "app"
+
+
+def _calls_on(handler: ast.FunctionDef | ast.AsyncFunctionDef, receiver: str) -> set[str]:
+    return {
+        n.func.attr
+        for n in ast.walk(handler)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and isinstance(n.func.value, ast.Name)
+        and n.func.value.id == receiver
+    }
+
+
+def test_every_route_that_calls_breeze_is_covered_by_the_session_revalidation_tests():
+    handlers = _create_app_handlers()
+    breeze_backed = {name for name, fn in handlers.items() if _calls_on(fn, "breeze")}
+    assert breeze_backed >= set(DATA_ROUTES)  # the scan itself is finding the routes
+    assert breeze_backed - NO_BREEZE_SESSION_ROUTES == set(DATA_ROUTES)
+    for name in DATA_ROUTES:
+        assert "require_active" in _calls_on(handlers[name], "session"), name
+    for name in NO_BREEZE_SESSION_ROUTES:
+        assert "require_active" not in _calls_on(handlers[name], "session"), name
+
+
+_PLANTED_APP = """
+def create_app():
+    app = make()
+
+    @app.get("/sync_covered")
+    def sync_covered():
+        session.require_active(1)
+        return breeze.quote_raw()
+
+    @app.get("/sync_uncovered")
+    def sync_uncovered():
+        return breeze.quote_raw()
+
+    @app.get("/async_covered")
+    async def async_covered():
+        session.require_active(1)
+        return breeze.quote_raw()
+
+    @app.get("/async_uncovered")
+    async def async_uncovered():
+        return breeze.quote_raw()
+
+    def helper():
+        @app.post("/nested_async_uncovered")
+        async def nested_async_uncovered():
+            return breeze.place_raw()
+
+    @app.get("/no_breeze")
+    async def no_breeze():
+        return 1
+
+    async def not_a_route():
+        return breeze.quote_raw()
+"""
+
+
+def test_the_guard_scan_reports_sync_and_async_handlers_that_call_breeze():
+    handlers = _create_app_handlers(_PLANTED_APP)
+    breeze_backed = {name for name, fn in handlers.items() if _calls_on(fn, "breeze")}
+    assert breeze_backed == {
+        "sync_covered",
+        "sync_uncovered",
+        "async_covered",
+        "async_uncovered",
+        "nested_async_uncovered",
+    }
+    uncovered = {name for name in breeze_backed if "require_active" not in _calls_on(handlers[name], "session")}
+    assert uncovered == {"sync_uncovered", "async_uncovered", "nested_async_uncovered"}
+
+
+@data_route
+def test_each_data_route_serves_a_live_session_with_one_upstream_call(route):
+    stack = Stack()
+    token = stack.login()
+    assert route.sent(stack) == 0
+    assert stack.bars(token, route.query).status_code == 200
+    assert route.sent(stack) == 1
 
 
 # ------------------------------------------------------------- deadline
@@ -379,41 +517,45 @@ def test_egress_mismatch_reasons_are_distinguished():
     stack.transport.echo_ip = TransportError("timeout", "api.ipify.org")
     armed = stack.arm().json()
     assert reason_of(stack.complete(armed["attempt_id"], armed["relay_token"])) == "egress_unavailable"
+    stack.clock.advance(31)  # past the checker's failing-recheck window
     stack.transport.echo_ip = OTHER_IP
     armed = stack.arm().json()
     assert reason_of(stack.complete(armed["attempt_id"], armed["relay_token"])) == "egress_mismatch"
 
 
-def test_stale_egress_is_rechecked_and_a_mismatch_suspends_the_session():
+@data_route
+def test_stale_egress_is_rechecked_and_a_mismatch_suspends_the_session(route):
     stack = Stack()
     token = stack.login()
     before = len(stack.transport.requests)
     stack.clock.advance(200)
-    assert stack.bars(token).status_code == 200
+    assert stack.bars(token, route.query).status_code == 200
     metadata_calls = [r for r in stack.transport.requests if "metadata" in r[1]]
     assert len(metadata_calls) == 1  # still fresh at 200 s: no new check
     stack.clock.advance(101)  # 301 s since the login check
     stack.transport.echo_ip = OTHER_IP
-    resp = stack.bars(token)
+    resp = stack.bars(token, route.query)
     assert resp.status_code == 503 and code_of(resp) == "EGRESS_MISMATCH"
     assert reason_of(resp) == "egress_mismatch"
-    assert len(stack.transport.bars_requests()) == 1  # the second bars call never left
+    assert route.sent(stack) == 1  # the second call never left
     assert stack.session.state is SessionState.SUSPENDED_EGRESS
     assert stack.session._breeze_token is None and stack.session._token_digest is None
-    again = stack.bars(token)
+    again = stack.bars(token, route.query)
     assert again.status_code == 503 and code_of(again) == "EGRESS_MISMATCH"
     assert before > 0
 
 
-def test_egress_fresh_refreshes_when_older_than_the_limit():
+def test_require_egress_refreshes_when_older_than_the_limit():
     stack = Stack()
-    assert stack.session.egress_fresh() is True
+    stack.session.require_egress(None)
     n = len(stack.transport.requests)
-    assert stack.session.egress_fresh() is True
+    stack.session.require_egress(None)
     assert len(stack.transport.requests) == n
     stack.clock.advance(301)
     stack.transport.metadata_ip = OTHER_IP
-    assert stack.session.egress_fresh() is False
+    with pytest.raises(RelayFailure) as err:
+        stack.session.require_egress(None)
+    assert err.value.code == "EGRESS_MISMATCH"
 
 
 # -------------------------------------------------------------- identity
@@ -762,7 +904,8 @@ def test_a_tokenless_bars_request_that_passed_authorize_cannot_ride_a_login_that
     assert len(stack.transport.bars_requests()) == bars_before  # no upstream call for it
 
 
-def test_the_relay_token_is_rechecked_after_an_egress_refresh():
+@data_route
+def test_the_relay_token_is_rechecked_after_an_egress_refresh(route):
     """The snapshot authorize() took is not enough once a refresh ran outside the
     lock: a revoke and a new login meanwhile must make the old bearer a 401."""
     stack = Stack()
@@ -770,34 +913,35 @@ def test_the_relay_token_is_rechecked_after_an_egress_refresh():
     stack.clock.advance(301)  # the egress check is stale: the bars request refreshes it
     entered, release = park_next_request(stack, is_echo)
     client = stack.new_client()
-    request = Parked(lambda: stack.bars(old, client=client)).start()
+    request = Parked(lambda: stack.bars(old, route.query, client=client)).start()
     assert entered.wait(WAIT_S)
 
     assert stack.revoke(old).status_code == 200
     new = stack.login()
-    bars_before = len(stack.transport.bars_requests())
+    bars_before = route.sent(stack)
     release.set()
 
     resp = request.join()
     assert resp.status_code == 401 and code_of(resp) == "UNAUTHORIZED"
-    assert len(stack.transport.bars_requests()) == bars_before
-    assert stack.bars(new).status_code == 200
+    assert route.sent(stack) == bars_before
+    assert stack.bars(new, route.query).status_code == 200
 
 
-def test_a_session_dropped_during_the_egress_refresh_is_a_503_not_a_200():
+@data_route
+def test_a_session_dropped_during_the_egress_refresh_is_a_503_not_a_200(route):
     stack = Stack()
     token = stack.login()
     stack.clock.advance(301)
     entered, release = park_next_request(stack, is_echo)
     client = stack.new_client()
-    request = Parked(lambda: stack.bars(token, client=client)).start()
+    request = Parked(lambda: stack.bars(token, route.query, client=client)).start()
     assert entered.wait(WAIT_S)
     assert stack.revoke(token).status_code == 200
-    bars_before = len(stack.transport.bars_requests())
+    bars_before = route.sent(stack)
     release.set()
     resp = request.join()
     assert resp.status_code == 503 and code_of(resp) == "NO_SESSION"
-    assert len(stack.transport.bars_requests()) == bars_before
+    assert route.sent(stack) == bars_before
 
 
 def test_a_newer_attempt_that_completes_first_supersedes_the_older_exchange():
@@ -892,8 +1036,8 @@ def test_the_session_dying_during_the_exchange_blocks_the_login():
 # ---- require_active revalidates under the lock even with egress fresh (Codex r2 P1)
 
 
-def park_after_authorize(stack: Stack, token: str):
-    """Start a bars request and park it right after authorize(token) returned.
+def park_after_authorize(stack: Stack, token: str, route: DataRoute = DATA_ROUTES["bars_daily"]):
+    """Start a data-route request and park it right after authorize(token) returned.
 
     Egress is fresh, so require_active() takes the no-refresh branch once
     `resume` is set. Returns (request, resume).
@@ -909,44 +1053,47 @@ def park_after_authorize(stack: Stack, token: str):
 
     stack.session.authorize = authorize_then_park  # type: ignore[method-assign]
     client = stack.new_client()
-    request = Parked(lambda: stack.bars(token, client=client)).start()
+    request = Parked(lambda: stack.bars(token, route.query, client=client)).start()
     assert parked.wait(WAIT_S)
     stack.session.authorize = real_authorize  # type: ignore[method-assign]
     return request, resume
 
 
-def finish_parked(stack: Stack, request: Parked, resume: threading.Event, bars_before: int):
+def finish_parked(stack: Stack, request: Parked, resume: threading.Event, bars_before: int, route: DataRoute):
     resume.set()
     resp = request.join()
-    assert len(stack.transport.bars_requests()) == bars_before  # zero upstream calls
+    assert route.sent(stack) == bars_before  # zero upstream calls
     return resp
 
 
-def test_revoke_between_authorize_and_require_active_serves_nothing():
+@data_route
+def test_revoke_between_authorize_and_require_active_serves_nothing(route):
     stack = Stack()
     token = stack.login()
-    request, resume = park_after_authorize(stack, token)
+    request, resume = park_after_authorize(stack, token, route)
     assert stack.revoke(token).status_code == 200
-    resp = finish_parked(stack, request, resume, len(stack.transport.bars_requests()))
+    resp = finish_parked(stack, request, resume, route.sent(stack), route)
     assert resp.status_code == 503 and code_of(resp) == "NO_SESSION"
 
 
+@data_route
 @pytest.mark.parametrize("which", ["wall", "mono"])
-def test_a_deadline_passing_between_authorize_and_require_active_serves_nothing(which):
+def test_a_deadline_passing_between_authorize_and_require_active_serves_nothing(route, which):
     stack = Stack()
     token = stack.login()
-    request, resume = park_after_authorize(stack, token)
+    request, resume = park_after_authorize(stack, token, route)
     if which == "wall":
         stack.clock.now = stack.clock.now.replace(hour=18, minute=30)  # IST midnight
         stack.clock.mono += 1  # egress stays fresh: only the deadline changed
     else:
         stack.clock.mono += 14 * 3600 + 1
         stack.session._last_egress_mono = stack.clock.mono  # keep egress fresh
-    resp = finish_parked(stack, request, resume, len(stack.transport.bars_requests()))
+    resp = finish_parked(stack, request, resume, route.sent(stack), route)
     assert resp.status_code == 503 and code_of(resp) == "SESSION_EXPIRED"
     assert reason_of(resp) == "deadline"
 
 
+@data_route
 @pytest.mark.parametrize(
     "error_class, code",
     [
@@ -956,35 +1103,37 @@ def test_a_deadline_passing_between_authorize_and_require_active_serves_nothing(
         ("public_key_missing", "NO_SESSION"),
     ],
 )
-def test_a_session_dead_error_between_authorize_and_require_active_serves_nothing(error_class, code):
+def test_a_session_dead_error_between_authorize_and_require_active_serves_nothing(route, error_class, code):
     stack = Stack()
     token = stack.login()
-    request, resume = park_after_authorize(stack, token)
+    request, resume = park_after_authorize(stack, token, route)
     stack.session.note_breeze_error(error_class)  # a concurrent request's Breeze error
-    resp = finish_parked(stack, request, resume, len(stack.transport.bars_requests()))
+    resp = finish_parked(stack, request, resume, route.sent(stack), route)
     assert resp.status_code == 503 and code_of(resp) == code
 
 
-def test_an_egress_suspension_between_authorize_and_require_active_serves_nothing():
+@data_route
+def test_an_egress_suspension_between_authorize_and_require_active_serves_nothing(route):
     stack = Stack()
     token = stack.login()
-    request, resume = park_after_authorize(stack, token)
+    request, resume = park_after_authorize(stack, token, route)
     stack.transport.echo_ip = OTHER_IP
     assert stack.session._refresh_egress().ok is False  # a concurrent refresh sees a new IP
-    resp = finish_parked(stack, request, resume, len(stack.transport.bars_requests()))
+    resp = finish_parked(stack, request, resume, route.sent(stack), route)
     assert resp.status_code == 503 and code_of(resp) == "EGRESS_MISMATCH"
 
 
-def test_a_relogin_between_authorize_and_require_active_refuses_the_old_bearer():
+@data_route
+def test_a_relogin_between_authorize_and_require_active_refuses_the_old_bearer(route):
     stack = Stack()
     old = stack.login()
-    request, resume = park_after_authorize(stack, old)
+    request, resume = park_after_authorize(stack, old, route)
     assert stack.revoke(old).status_code == 200
     new = stack.login()
-    bars_before = len(stack.transport.bars_requests())
-    resp = finish_parked(stack, request, resume, bars_before)
+    bars_before = route.sent(stack)
+    resp = finish_parked(stack, request, resume, bars_before, route)
     assert resp.status_code == 401 and code_of(resp) == "UNAUTHORIZED"
-    assert stack.bars(new).status_code == 200  # the new bearer is unaffected
+    assert stack.bars(new, route.query).status_code == 200  # the new bearer is unaffected
 
 
 def test_require_active_refuses_a_missing_breeze_token_with_a_relay_failure():
@@ -998,15 +1147,16 @@ def test_require_active_refuses_a_missing_breeze_token_with_a_relay_failure():
     assert err.value.code in {"NO_SESSION", "SESSION_EXPIRED"}
 
 
-def test_egress_that_went_stale_after_authorize_is_refreshed_before_the_token_is_served():
+@data_route
+def test_egress_that_went_stale_after_authorize_is_refreshed_before_the_token_is_served(route):
     """authorize() saw fresh egress; by the time require_active() runs it is stale.
     The lock-held freshness check, not auth.egress_stale, must trigger the refresh."""
     stack = Stack()
     token = stack.login()
-    request, resume = park_after_authorize(stack, token)
+    request, resume = park_after_authorize(stack, token, route)
     stack.clock.advance(301)  # the egress check ages out while the request is parked
     stack.transport.echo_ip = OTHER_IP  # and the refresh will find a different IP
-    resp = finish_parked(stack, request, resume, len(stack.transport.bars_requests()))
+    resp = finish_parked(stack, request, resume, route.sent(stack), route)
     assert resp.status_code == 503 and code_of(resp) == "EGRESS_MISMATCH"
 
 
@@ -1090,7 +1240,8 @@ def test_a_failed_egress_check_with_no_session_still_refuses_an_exchange_in_flig
 
     stack.clock.advance(301)
     stack.transport.echo_ip = OTHER_IP
-    assert stack.session.egress_fresh() is False  # a concurrent check fails; no session to drop
+    with pytest.raises(RelayFailure):  # a concurrent check fails; no session to drop
+        stack.session.require_egress(None)
     assert stack.session.state is SessionState.NONE
     release.set()
 

@@ -12,6 +12,7 @@ No account value from that file is copied into the repo.
 from __future__ import annotations
 
 import re
+from decimal import Decimal
 from typing import Mapping
 
 CONTRACT = "growin-relay/1"
@@ -30,6 +31,7 @@ HDR_UP_REQUEST = "X-Growin-Upstream-Request"
 HDR_UP_INTERVAL = "X-Growin-Upstream-Interval"
 HDR_BREEZE_STATUS = "X-Growin-Breeze-Status"
 HDR_EMPTY = "X-Growin-Empty"
+HDR_UP_LAST_MODIFIED = "X-Growin-Upstream-Last-Modified"  # security master only
 
 HDR_AUTHORIZATION = "Authorization"
 BEARER_RE = re.compile(r"^Bearer ([A-Za-z0-9_-]{43})$")
@@ -41,15 +43,23 @@ ROUTE_LOGIN_ARM = "/v1/login/arm"
 ROUTE_LOGIN_COMPLETE = "/v1/login/complete"
 ROUTE_SESSION_REVOKE = "/v1/session/revoke"
 ROUTE_BARS_DAILY = "/v1/bars/daily"
-# The routes this plan builds. 61-08 adds budget, quotes, preview-order and
-# security-master and extends this set.
+ROUTE_BUDGET = "/v1/budget"
+ROUTE_QUOTES = "/v1/quotes"
+ROUTE_PREVIEW_ORDER = "/v1/preview-order"  # a brokerage calculator, places nothing
+ROUTE_SECURITY_MASTER = "/v1/security-master"
+# The nine C3 routes and nothing else. Order routes arrive in Phase 63 under a
+# new contract version.
 ROUTES = frozenset(
     {
         ROUTE_HEALTH,
+        ROUTE_BUDGET,
         ROUTE_LOGIN_ARM,
         ROUTE_LOGIN_COMPLETE,
         ROUTE_SESSION_REVOKE,
         ROUTE_BARS_DAILY,
+        ROUTE_QUOTES,
+        ROUTE_PREVIEW_ORDER,
+        ROUTE_SECURITY_MASTER,
     }
 )
 
@@ -147,6 +157,11 @@ BARS_EXCHANGE = "NSE"
 
 STOCK_CODE_RE = re.compile(r"^[A-Z0-9]{1,10}$")
 ATTEMPT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
+# C3 preview-order: quantity 1 to 100000 (no sign, no leading zero); price a plain
+# decimal string with at most two places and no exponent, value checked as a
+# Decimal against PRICE_MIN_EXCLUSIVE and PRICE_MAX.
+QUANTITY_RE = re.compile(r"^[1-9][0-9]{0,5}$")
+PRICE_RE = re.compile(r"^(0|[1-9][0-9]{0,6})(\.[0-9]{1,2})?$")
 DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 REQUEST_ID_RE = re.compile(r"^[0-9a-f]{16}$")
 
@@ -155,6 +170,8 @@ REQUEST_ID_RE = re.compile(r"^[0-9a-f]{16}$")
 # charset [A-Za-z0-9] (s1_customer_details.code_charset is digits, so the
 # alphanumeric charset is the looser, safe superset).
 API_SESSION_RE = re.compile(r"^[A-Za-z0-9]{6,64}$")
+# Upstream Last-Modified is an HTTP-date; copy it only when it looks like one.
+HTTP_DATE_RE = re.compile(r"^[A-Za-z]{3}, [0-9]{2} [A-Za-z]{3} [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT$")
 
 # From 61-SMOKE-BREEZE.json, run 2026-10-21, key s2_bars[id=S2a].boundary_first_included
 # and .boundary_last_included. Both were true, so no widening: pad days are 0.
@@ -174,13 +191,28 @@ ARM_WINDOW_S = 120
 EGRESS_MAX_AGE_S = 300
 MAX_RANGE_DAYS = 3000
 ALLOWED_BARS_QUERY = ("stock_code", "from", "to", "exchange")
+ALLOWED_QUOTES_QUERY = ("stock_code", "exchange")
+ALLOWED_PREVIEW_QUERY = ("stock_code", "action", "quantity", "price", "exchange")
+PREVIEW_ACTIONS = ("buy", "sell")
+MAX_QUANTITY = 100000
+PRICE_MIN_EXCLUSIVE = Decimal("0")
+PRICE_MAX = Decimal("1000000")
+
+# C7 upstream limits for the security master download.
+SECURITY_MASTER_TOTAL_S = 120.0
+SECURITY_MASTER_MAX_BYTES = 64 * 1024 * 1024
+ZIP_MAGIC = b"PK\x03\x04"
 # C3: only the listed query names, on every route. A route with no parameters
 # lists none, so any query string on it is a 422.
 ALLOWED_QUERY_BY_ROUTE: Mapping[str, tuple[str, ...]] = {
     ROUTE_HEALTH: (),
+    ROUTE_BUDGET: (),
     ROUTE_LOGIN_ARM: (),
     ROUTE_LOGIN_COMPLETE: (),
     ROUTE_SESSION_REVOKE: (),
     ROUTE_BARS_DAILY: ALLOWED_BARS_QUERY,
+    ROUTE_QUOTES: ALLOWED_QUOTES_QUERY,
+    ROUTE_PREVIEW_ORDER: ALLOWED_PREVIEW_QUERY,
+    ROUTE_SECURITY_MASTER: (),
 }
 ALLOWED_BODY_FIELDS = ("attempt_id", "apisession")

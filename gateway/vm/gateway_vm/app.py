@@ -1,11 +1,13 @@
-"""The relay's FastAPI app: guard middleware, error envelope, login, bars.
+"""The relay's FastAPI app: guard middleware, error envelope, login, data routes.
 
 Route handlers are plain `def` (FastAPI runs them in its threadpool) because
 BreezeClient is synchronous. Order on every Breeze-backed route: authorize the
 relay token and read the session in one step (authorize), validate parameters,
 require_active() on what authorize returned, charge the budget, then the one
-Breeze call. There is no order route and no funds, holdings, positions or
-trades route here (Phase 63 owns order relay).
+Breeze call. The data routes are bars, quotes, preview-order (a brokerage
+calculator that places nothing) and the security master. There is no order
+route and no funds, holdings, positions or trades route here (Phase 63 owns
+order relay).
 
 Nothing is written to disk and no body, query value, token, code or Breeze
 Error text reaches a response or a log line.
@@ -15,6 +17,7 @@ import hashlib
 import json
 import secrets
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Header, Request
@@ -29,12 +32,18 @@ from .breeze_client import (
     V2_DEFAULT_EXCHANGE_PARAM,
     BreezeClient,
     BreezeError,
+    RawUpstream,
     classify_payload,
+    preview_payload,
+    quote_payload,
 )
 from .contract import (
     ALLOWED_BODY_FIELDS,
     ALLOWED_QUERY_BY_ROUTE,
     API_BARS_V2,
+    API_PREVIEW_V1,
+    API_QUOTES_V1,
+    API_SECURITY_MASTER,
     API_SESSION_RE,
     ATTEMPT_ID_RE,
     BARS_EXCHANGE,
@@ -54,16 +63,31 @@ from .contract import (
     HDR_UP_API,
     HDR_UP_FETCHED_AT,
     HDR_UP_INTERVAL,
+    HDR_UP_LAST_MODIFIED,
     HDR_UP_REQUEST,
     HDR_UP_SHA256,
     HOST_RE,
+    HTTP_DATE_RE,
+    MAX_QUANTITY,
     MAX_RANGE_DAYS,
+    PREVIEW_ACTIONS,
+    PRICE_MAX,
+    PRICE_MIN_EXCLUSIVE,
+    PRICE_RE,
+    QUANTITY_RE,
     ROUTE_BARS_DAILY,
+    ROUTE_BUDGET,
     ROUTE_HEALTH,
     ROUTE_LOGIN_ARM,
     ROUTE_LOGIN_COMPLETE,
+    ROUTE_PREVIEW_ORDER,
+    ROUTE_QUOTES,
+    ROUTE_SECURITY_MASTER,
     ROUTE_SESSION_REVOKE,
+    SECURITY_MASTER_MAX_BYTES,
+    SECURITY_MASTER_TOTAL_S,
     STOCK_CODE_RE,
+    ZIP_MAGIC,
 )
 from .events import ROUTE_VALUES, EventLog
 from .session import (
@@ -74,7 +98,7 @@ from .session import (
     charge_budget,
 )
 from .session import BudgetGate
-from .transport import Clock
+from .transport import Clock, Timeouts
 
 
 # ------------------------------------------------------------- bodies
@@ -198,6 +222,86 @@ def _is_empty_success(body: bytes) -> bool:
     return isinstance(success, (list, dict)) and len(success) == 0
 
 
+def _symbol_query(request: Request, route: str, required: tuple[str, ...]) -> tuple[dict[str, str], set[str]]:
+    """The C3 rules quotes and preview-order share: stock_code and exchange."""
+    seen, bad = _read_query(request, route)
+    for name in required:
+        if name not in seen:
+            bad.add(name)
+    if "stock_code" in seen and not STOCK_CODE_RE.fullmatch(seen["stock_code"]):
+        bad.add("stock_code")
+    if "exchange" in seen and seen["exchange"] != BARS_EXCHANGE:
+        bad.add("exchange")
+    return seen, bad
+
+
+def _parse_quotes_query(request: Request) -> str:
+    seen, bad = _symbol_query(request, ROUTE_QUOTES, ("stock_code",))
+    if bad:
+        raise RelayFailure("VALIDATION", fields=sorted(bad))
+    return seen["stock_code"]
+
+
+def _valid_price(raw: str) -> bool:
+    """A plain decimal string, at most two places, no exponent, 0 < price <= 1,000,000."""
+    if not PRICE_RE.fullmatch(raw):
+        return False
+    return PRICE_MIN_EXCLUSIVE < Decimal(raw) <= PRICE_MAX
+
+
+def _parse_preview_query(request: Request) -> tuple[str, str, int, str]:
+    """stock_code, action, quantity, price. The price goes upstream as the exact string validated."""
+    seen, bad = _symbol_query(request, ROUTE_PREVIEW_ORDER, ("stock_code", "action", "quantity", "price"))
+    if "action" in seen and seen["action"] not in PREVIEW_ACTIONS:
+        bad.add("action")
+    quantity = 0
+    if "quantity" in seen:
+        if QUANTITY_RE.fullmatch(seen["quantity"]) and int(seen["quantity"]) <= MAX_QUANTITY:
+            quantity = int(seen["quantity"])
+        else:
+            bad.add("quantity")
+    if "price" in seen and not _valid_price(seen["price"]):
+        bad.add("price")
+    if bad:
+        raise RelayFailure("VALIDATION", fields=sorted(bad))
+    return seen["stock_code"], seen["action"], quantity, seen["price"]
+
+
+def _compact(obj: dict) -> str:
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _breeze_bytes_response(
+    request: Request,
+    session: SessionManager,
+    raw: RawUpstream,
+    *,
+    api: str,
+    upstream_request: dict,
+    interval: str | None = None,
+) -> Response:
+    """C4 for a Breeze route: only a good body is relayed, as the exact upstream bytes."""
+    verdict = classify_payload(raw.http_status, raw.body)
+    request.scope["state"]["breeze_status"] = verdict.breeze_status
+    if not verdict.ok:
+        raise session.note_breeze_error(
+            verdict.error_class,
+            breeze_status=verdict.breeze_status,
+            http_status=raw.http_status,
+        )
+    headers = {
+        HDR_UP_SHA256: hashlib.sha256(raw.body).hexdigest(),
+        HDR_UP_FETCHED_AT: _iso_utc(raw.fetched_at_utc),
+        HDR_UP_API: api,
+        HDR_UP_REQUEST: _compact(upstream_request),
+        HDR_BREEZE_STATUS: "200",
+        HDR_EMPTY: "true" if _is_empty_success(raw.body) else "false",
+    }
+    if interval is not None:
+        headers[HDR_UP_INTERVAL] = interval
+    return Response(content=raw.body, media_type="application/json", headers=headers)
+
+
 # --------------------------------------------------------- middleware
 
 
@@ -298,6 +402,7 @@ def create_app(
     events: EventLog,
     clock: Clock,
     version: str = "61.0.0",
+    security_master_url: str | None = None,
 ) -> FastAPI:
     app = FastAPI(
         title="growin-relay",
@@ -412,19 +517,14 @@ def create_app(
         except BreezeError as exc:
             raise breeze_exception_failure(exc) from None
 
-        verdict = classify_payload(raw.http_status, raw.body)
-        request.scope["state"]["breeze_status"] = verdict.breeze_status
-        if not verdict.ok:
-            raise session.note_breeze_error(
-                verdict.error_class,
-                breeze_status=verdict.breeze_status,
-                http_status=raw.http_status,
-            )
-
         # The same name the request used, so the header describes the real request.
         exchange_param = BARS_REQUEST_KNOBS.get("exchange_param_name", V2_DEFAULT_EXCHANGE_PARAM)
-        upstream_request = json.dumps(
-            {
+        return _breeze_bytes_response(
+            request,
+            session,
+            raw,
+            api=API_BARS_V2,
+            upstream_request={
                 exchange_param: BARS_EXCHANGE,
                 "from_date": from_iso,
                 "interval": V2_DAILY_INTERVAL,
@@ -432,22 +532,104 @@ def create_app(
                 "stock_code": stock_code,
                 "to_date": to_iso,
             },
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=True,
+            interval=DAILY_INTERVAL_SEMANTIC,
         )
-        return Response(
-            content=raw.body,
-            media_type="application/json",
-            headers={
-                HDR_UP_SHA256: hashlib.sha256(raw.body).hexdigest(),
-                HDR_UP_FETCHED_AT: _iso_utc(raw.fetched_at_utc),
-                HDR_UP_API: API_BARS_V2,
-                HDR_UP_REQUEST: upstream_request,
-                HDR_UP_INTERVAL: DAILY_INTERVAL_SEMANTIC,
-                HDR_BREEZE_STATUS: "200",
-                HDR_EMPTY: "true" if _is_empty_success(raw.body) else "false",
-            },
+
+    # ------------------------------------------------------------ quotes
+
+    @app.get(ROUTE_QUOTES)
+    def quotes(request: Request, token: Optional[str] = Depends(_bearer)):
+        authorization = session.authorize(token)
+        stock_code = _parse_quotes_query(request)
+        session_token = session.require_active(authorization)
+        charge_budget(budget, events)
+        try:
+            raw = breeze.quote_raw(
+                app_key=credentials.app_key,
+                secret_key=credentials.secret_key,
+                session_token=session_token,
+                stock_code=stock_code,
+                exchange_code=BARS_EXCHANGE,
+            )
+        except BreezeError as exc:
+            raise breeze_exception_failure(exc) from None
+        return _breeze_bytes_response(
+            request,
+            session,
+            raw,
+            api=API_QUOTES_V1,
+            upstream_request=quote_payload(stock_code, BARS_EXCHANGE),
         )
+
+    # ----------------------------------------------------- preview-order
+
+    @app.get(ROUTE_PREVIEW_ORDER)
+    def preview_order(request: Request, token: Optional[str] = Depends(_bearer)):
+        """The brokerage-charge calculator. It prices a hypothetical order and places nothing."""
+        authorization = session.authorize(token)
+        stock_code, action, quantity, price = _parse_preview_query(request)
+        session_token = session.require_active(authorization)
+        charge_budget(budget, events)
+        try:
+            raw = breeze.preview_order_raw(
+                app_key=credentials.app_key,
+                secret_key=credentials.secret_key,
+                session_token=session_token,
+                stock_code=stock_code,
+                exchange_code=BARS_EXCHANGE,
+                action=action,
+                quantity=quantity,
+                price=price,
+            )
+        except BreezeError as exc:
+            raise breeze_exception_failure(exc) from None
+        return _breeze_bytes_response(
+            request,
+            session,
+            raw,
+            api=API_PREVIEW_V1,
+            upstream_request=preview_payload(stock_code, BARS_EXCHANGE, action, quantity, price),
+        )
+
+    # --------------------------------------------------- security master
+
+    @app.get(ROUTE_SECURITY_MASTER, dependencies=[Depends(_query_allowlist(ROUTE_SECURITY_MASTER))])
+    def security_master(token: Optional[str] = Depends(_bearer)):
+        """The ICICI SecurityMaster.zip. Needs a fresh egress check, not a Breeze session."""
+        session.authorize(token)  # a bound session still needs its bearer
+        if security_master_url is None:  # create_app was built without the URL: fail closed
+            events.emit("config_alarm", result="error", reason="config_invalid")
+            raise RelayFailure("INTERNAL", reason="config_invalid")
+        charge_budget(budget, events, "security_master")  # the cap first: a refusal makes no egress request
+        session.require_egress(token)  # ok and fresh evidence, same bearer, under one lock hold
+        try:
+            raw = breeze.security_master_raw(
+                security_master_url,
+                timeouts=Timeouts(connect_s=5.0, read_s=30.0, total_s=SECURITY_MASTER_TOTAL_S),
+                max_bytes=SECURITY_MASTER_MAX_BYTES,
+            )
+        except BreezeError as exc:
+            raise breeze_exception_failure(exc) from None
+        if raw.http_status != 200:
+            raise RelayFailure("UPSTREAM_ERROR", reason="upstream_http")
+        if not raw.body.startswith(ZIP_MAGIC):
+            raise RelayFailure("UPSTREAM_ERROR", reason="upstream_shape")
+        headers = {
+            HDR_UP_SHA256: hashlib.sha256(raw.body).hexdigest(),
+            HDR_UP_FETCHED_AT: _iso_utc(raw.fetched_at_utc),
+            HDR_UP_API: API_SECURITY_MASTER,
+            HDR_UP_REQUEST: _compact({"url": security_master_url}),
+        }
+        last_modified = raw.headers.get("last-modified")
+        if last_modified is not None and HTTP_DATE_RE.fullmatch(last_modified):
+            headers[HDR_UP_LAST_MODIFIED] = last_modified
+        return Response(content=raw.body, media_type="application/zip", headers=headers)
+
+    # ------------------------------------------------------------ budget
+
+    @app.get(ROUTE_BUDGET, dependencies=[Depends(_query_allowlist(ROUTE_BUDGET))])
+    def budget_snapshot(token: Optional[str] = Depends(_bearer)):
+        session.authorize(token)  # the bearer is checked while a session is bound; the state is not
+        return JSONResponse({"contract": CONTRACT, **budget.snapshot()})
 
     return app
