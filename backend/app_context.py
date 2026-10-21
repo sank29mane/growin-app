@@ -911,7 +911,8 @@ class AppState:
         source = self.relay_quotes
         if source is None:
             return []
-        today = (now or datetime.now(timezone.utc)).astimezone(IST).date()
+        # guard._clock is the injected india_clock, or the wall clock when none was given.
+        today = (now or guard._clock()).astimezone(IST).date()
         if self._india_session_fed == today:
             return []
         positions = self._india_positions(ledger.india_account_view())

@@ -51,6 +51,10 @@ from gateway_vm.transport import HttpResponse
 from test_gateway_orders_routes import MetadataFake, OTHER, VECTORS
 from test_gateway_relay_app import breeze_body
 
+# A cold `server` import is slow enough to age replay quotes past the 5s session
+# window. Import it before any fixture stamps those quotes.
+from server import app
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -471,6 +475,17 @@ async def test_the_claim_refuses_a_boolean_quantity_even_when_the_record_agrees(
 
 
 @pytest.mark.asyncio
+async def test_the_claim_refuses_a_float_quantity_even_when_the_record_agrees(world):
+    # Decimal(1.0) == Decimal(1) and 1.0 is not a bool, so only isinstance(quantity, int) refuses this.
+    proposal, admission = world.prepare(quantity="1")
+    assert admission.decision is AdmissionDecision.ADMITTED
+    pid = proposal["proposal_id"]
+    edit = _intent_edit("quantity", 1.0)
+    claim = await _claim_forged(world, pid, edit, expected=lambda recorded: recorded.__setitem__("quantity", 1.0))
+    await _assert_claim_refused(world, pid, claim, NOT_ADMITTED)
+
+
+@pytest.mark.asyncio
 async def test_the_claim_refuses_a_boolean_quantity_the_mac_did_not_store(world):
     proposal, admission = world.prepare(quantity="1")
     pid = proposal["proposal_id"]
@@ -829,10 +844,14 @@ async def api(world, monkeypatch):
     # also where the regime policy tables (an in-memory SQLite connection) were built.
     import routes.ai_routes as ai_routes
     import routes.market_data_routes as market_routes
-    from server import app
 
     monkeypatch.setattr(ai_routes, "state", world.app)
     monkeypatch.setattr(market_routes, "state", world.app)
+    # The world fixture stamps quotes before this fixture. Restamp after it so a
+    # slow import cannot push them past the 5s session window. start_replay
+    # refuses an active session, so close first.
+    await world.app.close_market_data()
+    await world.start_replay()
     async with AsyncClient(
         transport=ASGITransport(app=app, client=("127.0.0.1", 50000)), base_url="http://test"
     ) as client:
@@ -982,15 +1001,16 @@ def feed_reads(world):
 async def test_the_first_india_admission_of_a_session_feeds_option_b_from_relay_bars(world):
     guard = world.service.india_guard
     ils.seed_position(world.ledger, ros.TICKER, 10, "1000.00", guard=guard)
+    today = world.mac_now().date()
     bars = world.vm.transport.bar_book[ros.SYMBOL]
     for offset, close in ((7, 99.0), (6, 99.5), (5, 100.0), (4, 100.5), (1, 101.0)):
-        bars[date(2026, 10, 21) - timedelta(days=offset)] = close
+        bars[today - timedelta(days=offset)] = close
     before = guard.store.load().last_session
 
     proposal, admission = world.prepare(quantity="1")
     after = guard.store.load().last_session
     assert before is None
-    assert after is not None and after < date(2026, 10, 21)
+    assert after is not None and after < today
     reads = feed_reads(world)
     assert reads and {r[0] for r in reads} == {"GET"}
     # A second admission on the same IST day does not read the session bars again.
@@ -1039,9 +1059,10 @@ async def test_a_ragged_session_window_writes_no_session_and_denies(world):
     ils.seed_position(world.ledger, ros.TICKER, 10, "1000.00", guard=guard)
     other = "NSE:CASH:OTHER"
     ils.seed_position(world.ledger, other, 5, "500.00", guard=guard)
+    today = world.mac_now().date()
     book = world.vm.transport.bar_book
-    book[ros.SYMBOL].update({date(2026, 10, 19): 100.0, date(2026, 10, 20): 101.0})
-    book["OTHER"] = {date(2026, 10, 19): 50.0}  # no close for the 20th
+    book[ros.SYMBOL].update({today - timedelta(days=2): 100.0, today - timedelta(days=1): 101.0})
+    book["OTHER"] = {today - timedelta(days=2): 50.0}  # no close for the later day
     proposal, admission = world.prepare(quantity="1")
     assert admission.decision is AdmissionDecision.DENIED
     assert admission.reason_code == "SESSION_CLOSES_MISSING"
@@ -1068,6 +1089,26 @@ async def test_the_session_feed_runs_once_per_ist_day_and_again_the_next_day(wor
     assert feed_reads(world) == []  # the same IST day reads nothing, whatever is held now
     assert world.app.feed_india_session_from_relay(now=next_day)  # the next IST day feeds
     assert feed_reads(world)
+
+
+@pytest.mark.asyncio
+async def test_the_session_feed_takes_its_day_from_the_injected_clock(world, monkeypatch):
+    # A wall clock on another day must not choose the window. The bars sit on the
+    # injected clock's previous session only.
+    guard = world.service.india_guard
+    ils.seed_position(world.ledger, ros.TICKER, 10, "1000.00", guard=guard)
+    today = world.mac_now().date()
+    world.vm.transport.bar_book[ros.SYMBOL][today - timedelta(days=1)] = 101.0
+
+    class _WallClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2020, 1, 15, tzinfo=timezone.utc)
+
+    monkeypatch.setattr("app_context.datetime", _WallClock)
+    assert world.app.feed_india_session_from_relay()
+    assert world.app._india_session_fed == today
+    assert guard.store.load().last_session == today - timedelta(days=1)
 
 
 # -------------------------------------------------------- the AST no-order guard, Mac side
