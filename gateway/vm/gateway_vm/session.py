@@ -447,28 +447,42 @@ class SessionManager:
                 egress_stale=failure is None and self._egress_stale_locked(),
             )
 
-    def require_active(self, auth: Authorization) -> str:
-        """The Breeze token `auth` was issued for, after the egress freshness check.
+    def _revalidate_locked(self, auth: Authorization) -> str:
+        """The Breeze token, if the session `auth` was issued for is still live.
 
-        Without a refresh this is the token authorize() read. A refresh runs
-        outside the lock, so afterwards the relay token is checked again and the
-        session re-read in one lock hold: a session that died or was replaced in
-        the meantime never serves this request.
+        Caller holds the lock. Deadline, relay token, then session state, so a
+        deadline, a revoke, a re-login, a session-dead error or an egress
+        suspension that landed since authorize() all refuse here.
+        """
+        self._tick_locked()
+        self._authorize_digest_locked(auth.presented_digest)
+        failure = self._inactive_failure_locked()
+        if failure is not None:
+            raise failure
+        if self._breeze_token is None:
+            raise RelayFailure("NO_SESSION")  # fail closed, not an assert that -O strips
+        return self._breeze_token
+
+    def require_active(self, auth: Authorization) -> str:
+        """The Breeze token for this request, only if the session is live right now.
+
+        Always re-read under the lock, whatever authorize() saw: the deadline
+        is ticked, the relay token must still be the current one and the
+        session must still be active. If egress is stale at that moment the
+        refresh runs outside the lock and all of it is repeated afterwards, so
+        a revoke, expiry, session-dead error, suspension or re-login between
+        authorize() and the Breeze call never yields a token.
         """
         if auth.failure is not None:
             raise auth.failure
-        if not auth.egress_stale:
-            assert auth.breeze_token is not None
-            return auth.breeze_token
+        with self._lock:
+            token = self._revalidate_locked(auth)
+            stale = self._egress_stale_locked()
+        if not stale:
+            return token
         self._refresh_egress()
         with self._lock:
-            self._tick_locked()
-            self._authorize_digest_locked(auth.presented_digest)
-            failure = self._inactive_failure_locked()
-            if failure is not None:
-                raise failure
-            assert self._breeze_token is not None
-            return self._breeze_token
+            return self._revalidate_locked(auth)
 
     def note_breeze_error(
         self,
