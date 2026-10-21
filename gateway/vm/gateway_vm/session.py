@@ -165,10 +165,10 @@ def breeze_exception_failure(exc: BreezeError, *, login: bool = False) -> RelayF
     )
 
 
-def charge_budget(budget: BudgetGate, events: EventLog) -> None:
-    """Charge one Breeze call before the network, mapping refusals to C6 errors."""
+def charge_budget(budget: BudgetGate, events: EventLog, kind: str = "breeze") -> None:
+    """Charge one call before the network, mapping refusals to C6 errors."""
     try:
-        budget.charge("breeze")
+        budget.charge(kind)
     except BudgetExceeded as exc:
         events.emit("budget_exhausted", result="rejected", reason=exc.reason)
         raise RelayFailure(
@@ -555,6 +555,11 @@ class SessionManager:
                     ),
                 },
             }
+
+    def egress_failure(self) -> RelayFailure:
+        """The EGRESS_MISMATCH error that matches the last egress result (reason included)."""
+        with self._lock:
+            return self._egress_unusable_failure_locked()
 
     def egress_fresh(self) -> bool:
         with self._lock:
