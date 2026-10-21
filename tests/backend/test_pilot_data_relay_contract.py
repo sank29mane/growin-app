@@ -827,17 +827,33 @@ def test_a_closed_client_refuses_before_sending_and_stops(relay):
     with pytest.raises(Exception) as info:
         client.daily_bars("RELIND", date(2026, 1, 1), date(2026, 2, 1))
     assert rc.classify_gateway_error(info.value) == ("stop", "relay_closed", 0.0)
-    assert rc.refused_before_send(info.value) and relay.bars_requests == []
+    assert not rc.refused_before_send(info.value) and relay.bars_requests == []  # `closed` can follow a send
 
 
 @pytest.mark.parametrize(
     "reason,sent",
-    [("closed", False), ("tunnel_restart_failed", False), ("tunnel_restart_backoff", False), ("tunnel_down", False),
-     ("tunnel_restarted", False), ("timeout", True), ("connect_error", True), ("something_new", True)],
+    [("tunnel_restart_backoff", False), ("closed", True), ("tunnel_restart_failed", True), ("tunnel_down", True),
+     ("tunnel_restarted", True), ("timeout", True), ("connect_error", True), ("something_new", True)],
 )
 def test_only_refused_before_send_reasons_spend_no_budget(reason, sent):
     assert rc.refused_before_send(make(RelayUnavailable, reason=reason)) is not sent
     assert not rc.refused_before_send(ValueError("x")) and not rc.refused_before_send(make(UpstreamTimeout))
+
+
+def test_only_the_documented_backoff_refusal_is_not_sent_through_the_real_client(relay):
+    client = relay.client()
+    seen = []
+
+    def retire_under_the_request(params):
+        seen.append(params)
+        client.close()
+
+    relay.on_bars = retire_under_the_request
+    relay.bars_script = lambda index, params: RuntimeError("closed under the request")
+    with pytest.raises(Exception) as info:
+        client.daily_bars("RELIND", date(2026, 1, 1), date(2026, 2, 1))
+    assert len(seen) == 1 and getattr(info.value, "reason", None) == "closed"
+    assert not rc.refused_before_send(info.value)  # the relay got the call, so it counts
 
 
 def test_header_and_hash_tampering_through_the_real_client_stops(relay):

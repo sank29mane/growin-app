@@ -482,7 +482,7 @@ def test_a_full_run_fetches_every_window_once_and_stores_raw_bars(store, relay, 
     report = eng.run(plan, today_ist=TODAY)
     assert report.status == "complete" and report.stop_code is None
     assert report.windows_total == 10 == len(relay.bars_requests) and report.windows_remaining == 0
-    assert report.counts == {"pending": 0, "done": 10, "empty_flagged": 0, "failed": 0}
+    assert report.counts == {"pending": 0, "done": 10, "empty_flagged": 0, "failed": 0, "stored_unverified": 0, "stored_with_gaps": 0}
     assert report.calls_this_run == 10 and report.calls_used_today == 13
     assert report.relay_remaining_today == 4000
     assert report.caveats and any("raw" in c.text.lower() or "adjust" in c.text.lower() for c in report.caveats)
@@ -715,7 +715,7 @@ def test_an_upstream_shape_error_fails_only_that_window(store, relay, clock_time
     relay.bars_script = lambda index, params: err_response(502, "UPSTREAM_ERROR", "upstream_shape") if index == 0 else None
     report = eng.run(plan, today_ist=TODAY)
     assert report.status == "completed_with_failed_windows" and report.counts == {
-        "pending": 0, "done": 1, "empty_flagged": 0, "failed": 1}
+        "pending": 0, "done": 1, "empty_flagged": 0, "failed": 1, "stored_unverified": 0, "stored_with_gaps": 0}
     assert report.windows_remaining == 1 and report.error_codes == {"upstream_upstream_shape": 1}
     assert len(relay.bars_requests) == 2  # a shape error is not retried
 
@@ -1024,44 +1024,81 @@ def flaky_run(store, relay, clock_time, script, codes=("RELIND",), **engine_extr
 # ---------------------------------------------------------------- 1. completeness evidence
 
 
-def test_a_window_answered_with_only_the_newest_bar_is_not_done_and_resume_refetches_it(store, relay, clock_time):
+def no_calendar(monkeypatch):
+    """Every window looks like one the stored calendar does not cover."""
+
+    def unknown(store, start, end):
+        raise PilotDataError("calendar_unknown_dates", "the calendar does not cover these dates")
+
+    monkeypatch.setattr(bf, "sessions_between", unknown)
+
+
+def stored_bars(store, code, start, end):
+    return count(store, "SELECT count(*) FROM breeze_bars_raw WHERE stock_code = ? AND trade_date >= ? "
+                        "AND trade_date <= ?", [code, start, end])
+
+
+def window_source_bars(store, code, start, day=None):
+    """Bars stored from the answer a window's latest event points at (the probe's own bars are left out)."""
+    sha = store.query("SELECT source_sha256 FROM backfill_events WHERE stock_code = ? AND window_from = ? "
+                      "AND status <> 'pending' ORDER BY at_utc DESC, rowid DESC LIMIT 1", [code, start])[0][0]
+    if day is None:
+        return count(store, "SELECT count(*) FROM breeze_bars_raw WHERE source_sha256 = ?", [sha])
+    return count(store, "SELECT count(*) FROM breeze_bars_raw WHERE source_sha256 = ? AND trade_date = ?", [sha, day])
+
+
+def covered(store, code, start):
+    return count(store, "SELECT count(*) FROM breeze_responses WHERE stock_code = ? AND requested_from = ?",
+                 [code, start])
+
+
+def test_a_window_answered_with_only_the_newest_bar_is_stored_with_gaps_never_done(store, relay, clock_time):
     eng, plan = ready(store, relay, clock_time, codes=("RELIND",))
     relay.bars_script = lambda index, params: newest_only(params) if index in (0, 1) else None
     report = eng.run(plan, today_ist=TODAY)
-    assert report.counts == {"pending": 0, "done": 1, "empty_flagged": 0, "failed": 1}
-    assert report.error_codes == {"breeze_incomplete_window": 1} and report.windows_remaining == 1
-    assert report.status == "completed_with_failed_windows" and len(relay.bars_requests) == 3  # one retry
-    assert count(store, "SELECT count(*) FROM relay_call_outcomes WHERE outcome = 'incomplete'") == 2
-    assert count(store, "SELECT count(*) FROM breeze_responses WHERE requested_from = ?", [plan.windows[0][0]]) == 0
-    assert count(store, "SELECT count(*) FROM breeze_bars_raw WHERE source_sha256 IN "
-                        "(SELECT source_sha256 FROM relay_call_outcomes WHERE outcome = 'incomplete')") == 0
-    assert count(store, "SELECT count(*) FROM quarantine_records WHERE reason_code = 'breeze_incomplete_window'") == 1
+    assert report.counts == {"pending": 0, "done": 1, "empty_flagged": 0, "failed": 0, "stored_unverified": 0,
+                             "stored_with_gaps": 1}
+    assert report.error_codes == {"breeze_window_gaps": 1} and report.windows_remaining == 0
+    assert report.status == "complete_with_flags" and bf._exit_for_report(report) == 4
+    assert len(relay.bars_requests) == 3  # one retry for the gappy window, then the second window
+    assert report.flagged_windows == [{
+        "stock_code": "RELIND", "window_from": plan.windows[0][0].isoformat(),
+        "window_to": plan.windows[0][1].isoformat(), "status": "stored_with_gaps", "error_code": "breeze_window_gaps"}]
+    assert count(store, "SELECT count(*) FROM relay_call_outcomes WHERE outcome = 'incomplete'") == 1
+    assert window_source_bars(store, "RELIND", plan.windows[0][0]) == 1  # the one bar that came back
+    assert covered(store, "RELIND", plan.windows[0][0]) == 1
+    assert count(store, "SELECT count(*) FROM quarantine_records WHERE reason_code = 'breeze_window_gaps'") == 1
 
     relay.bars_script, relay.bars_requests = None, []
-    again = eng.run(plan, today_ist=TODAY)
-    assert again.status == "complete" and len(relay.bars_requests) == 1 and again.counts["done"] == 2
+    again = eng.run(plan, today_ist=TODAY)  # terminal: never retried automatically
+    assert again.calls_this_run == 0 and relay.bars_requests == [] and again.status == "complete_with_flags"
+    fixed = eng.run(plan, today_ist=TODAY, retry_flagged=True)
+    assert len(relay.bars_requests) == 1 and fixed.status == "complete" and fixed.counts["done"] == 2
 
 
-def test_a_missing_interior_session_keeps_the_window_out_of_done(store, relay, clock_time):
+def test_a_missing_interior_session_is_a_recorded_gap_not_done_and_no_bar_is_invented(store, relay, clock_time):
     eng, plan = ready(store, relay, clock_time, codes=("RELIND",))
     gap = date(2024, 3, 13)
     assert is_session(gap)
     relay.bars_script = lambda index, params: bars_body(params, skip=(gap,)) if index in (0, 1) else None
     report = eng.run(plan, today_ist=TODAY)
-    assert report.counts["failed"] == 1 and report.error_codes == {"breeze_incomplete_window": 1}
-    detail = store.query("SELECT detail_json FROM quarantine_records WHERE reason_code = 'breeze_incomplete_window'")
-    assert "missing_sessions" in detail[0][0] and gap.isoformat() in detail[0][0]
+    assert report.counts["stored_with_gaps"] == 1 and report.error_codes == {"breeze_window_gaps": 1}
+    detail = store.query("SELECT detail_json FROM quarantine_records WHERE reason_code = 'breeze_window_gaps'")
+    assert "gap_ranges" in detail[0][0] and gap.isoformat() in detail[0][0]
+    assert window_source_bars(store, "RELIND", plan.windows[0][0], gap) == 0  # no zero-volume stand-in either
+    assert window_source_bars(store, "RELIND", plan.windows[0][0]) == len(sessions(*plan.windows[0])) - 1
 
 
-def test_a_quarantined_date_keeps_the_window_out_of_done_even_when_the_day_has_a_good_bar(store, relay, clock_time):
+def test_a_quarantined_date_is_a_gap_even_when_the_day_has_a_good_bar(store, relay, clock_time):
     eng, plan = ready(store, relay, clock_time, codes=("RELIND",))
     day = date(2024, 3, 13)
     odd = bar_row("RELIND", day, stamp="09:15:00")  # a second, off-convention row for the same day
     relay.bars_script = lambda index, params: bars_body(params, extra=(odd,)) if index in (0, 1) else None
     report = eng.run(plan, today_ist=TODAY)
-    assert report.counts["failed"] == 1 and report.error_codes == {"breeze_incomplete_window": 1}
+    assert report.counts["stored_with_gaps"] == 1 and report.error_codes == {"breeze_window_gaps": 1}
     assert count(store, "SELECT count(*) FROM quarantine_records WHERE reason_code = 'timestamp_unexpected'") >= 1
-    assert count(store, "SELECT count(*) FROM breeze_responses WHERE requested_from = ?", [plan.windows[0][0]]) == 0
+    detail = store.query("SELECT detail_json FROM quarantine_records WHERE reason_code = 'breeze_window_gaps'")
+    assert "quarantined_dates" in detail[0][0]
 
 
 CONVENTION = DailyBarConvention(allowed_times=("00:00:00",), source="test")
@@ -1073,19 +1110,196 @@ def parse_days(code, days):
     )
 
 
-def test_without_a_calendar_the_oldest_bar_must_reach_the_window_start_and_the_count_be_plausible(store, relay, clock_time):
+def test_where_the_calendar_does_not_reach_the_window_nothing_is_ever_complete(store, relay, clock_time):
     eng, _ = ready(store, relay, clock_time, codes=("RELIND",))
     window = (date(2021, 5, 3), date(2021, 6, 30))  # before the stored calendar: every day is unknown
     days = sessions(*window)
-    assert eng._incompleteness(parse_days("RELIND", days), window, None) is None
-    newest = eng._incompleteness(parse_days("RELIND", days[-1:]), window, None)
-    assert newest is not None and newest["basis"] == "heuristic"
-    late = eng._incompleteness(parse_days("RELIND", days[15:]), window, None)  # oldest bar 3 weeks after the start
-    assert late is not None and "oldest_bar" in late
-    sparse = eng._incompleteness(parse_days("RELIND", days[:1] + days[-1:] + days[5:9]), window, None)
-    assert sparse is not None and "bars_in_window" in sparse
-    tolerated = eng._incompleteness(parse_days("RELIND", days[3:]), window, None)  # 5 calendar days late: a long weekend
-    assert tolerated is None
+    # a full answer, an answer without its newest seven sessions, one with only the newest bar: none is proof
+    for answer in (days, days[:-7], days[-1:]):
+        assessed = eng._assess(parse_days("RELIND", answer), window, None, None)
+        assert assessed.verdict == "unverified" and assessed.detail["reason"] == "calendar_unknown_dates"
+
+
+def test_an_unverified_window_is_stored_but_never_done_and_claims_no_coverage(store, relay, clock_time, monkeypatch):
+    eng, plan = ready(store, relay, clock_time, codes=("RELIND",))
+    no_calendar(monkeypatch)
+    last_seven = lambda index, params: bars_body(  # noqa: E731
+        params, skip=tuple(sessions(date.fromisoformat(params["to"]) - timedelta(days=12),
+                                    date.fromisoformat(params["to"]))))
+    relay.bars_script = last_seven
+    report = eng.run(plan, today_ist=TODAY)
+    assert report.counts["done"] == 0 and report.counts["stored_unverified"] == 2
+    assert report.status == "complete_with_flags" and bf._exit_for_report(report) == 4
+    assert report.error_codes == {"breeze_window_unverified": 2} and len(relay.bars_requests) == 2  # no retry
+    assert window_source_bars(store, "RELIND", plan.windows[0][0]) > 100  # bars and provenance are kept
+    assert covered(store, "RELIND", plan.windows[0][0]) == 0 and covered(store, "RELIND", plan.windows[1][0]) == 0
+    assert count(store, "SELECT count(*) FROM relay_provenance") > 3
+    relay.bars_requests.clear()
+    assert eng.run(plan, today_ist=TODAY, retry_flagged=True).calls_this_run == 0  # verify's job, not a refetch
+    assert relay.bars_requests == []
+
+
+def test_verify_promotes_an_unverified_window_once_the_calendar_covers_it_without_a_breeze_call(
+    store, relay, clock_time, monkeypatch
+):
+    eng, plan = ready(store, relay, clock_time, codes=("RELIND", "NIFBEE"))
+    gap = date(2024, 3, 13)
+    with monkeypatch.context() as patch:
+        no_calendar(patch)
+        relay.bars_script = lambda index, params: (
+            bars_body(params, skip=(gap,)) if params["stock_code"] == "NIFBEE" else None
+        )
+        report = eng.run(plan, today_ist=TODAY)
+    assert report.counts["stored_unverified"] == 4 and report.counts["done"] == 0
+    relay.bars_requests.clear()
+    with monkeypatch.context() as patch:
+        no_calendar(patch)
+        assert eng.verify(plan, today_ist=TODAY).counts["stored_unverified"] == 4  # calendar still unknown
+
+    verified = eng.verify(plan, today_ist=TODAY)
+    assert relay.bars_requests == [] and verified.calls_this_run == 0
+    assert verified.counts["done"] == 3 and verified.counts["stored_with_gaps"] == 1
+    assert verified.counts["stored_unverified"] == 0
+    assert verified.status == "complete_with_flags" and bf._exit_for_report(verified) == 4
+    assert [row["stock_code"] for row in verified.flagged_windows] == ["NIFBEE"]
+    assert covered(store, "RELIND", plan.windows[0][0]) == 1  # coverage is claimed only once verified
+    assert covered(store, "NIFBEE", plan.windows[0][0]) == 1  # a recorded gap is a truthful hole, not unverified
+    assert eng.verify(plan, today_ist=TODAY).counts["done"] == 3  # idempotent
+
+
+def test_verify_leaves_windows_the_calendar_still_can_not_establish(store, relay, clock_time, monkeypatch):
+    eng, plan = ready(store, relay, clock_time, codes=("RELIND",))
+    no_calendar(monkeypatch)
+    eng.run(plan, today_ist=TODAY)
+    report = eng.verify(plan, today_ist=TODAY)
+    assert report.counts["stored_unverified"] == 2 and report.counts["done"] == 0
+    assert covered(store, "RELIND", plan.windows[0][0]) == 0 and bf._exit_for_report(report) == 4
+
+
+def test_cli_verify_makes_no_relay_call_and_promotes_a_checked_window(store, relay, clock_time, monkeypatch):
+    eng, plan = ready(store, relay, clock_time, codes=("RELIND",))
+    with monkeypatch.context() as patch:
+        no_calendar(patch)
+        assert eng.run(plan, today_ist=TODAY).counts["stored_unverified"] == 2
+    store.close()
+    relay.bars_requests.clear()
+    relay.requests.clear()
+    code, payload = cli(["verify", "--root", str(store.root), "--workspace", "india"], None, clock_time)
+    assert "error_code" not in payload, payload
+    assert code == 0 and payload["result"]["status"] == "complete" and payload["result"]["counts"]["done"] == 2
+    assert relay.requests == [] and payload["result"]["calls_this_run"] == 0
+
+
+# ---------------------------------------------------------------- 1b. legitimate gaps do not stall the backfill
+
+
+def listed(row, day):
+    return {**row, "DateOfListing": day}
+
+
+def only_from(params, first, *, skip=()):
+    """Bars for the window's sessions on or after `first`, minus `skip`."""
+    return bars_body(params, skip=tuple(day for day in sessions(date.fromisoformat(params["from"]),
+                                                              date.fromisoformat(params["to"]))
+                                        if day < first or day in skip))
+
+
+LISTING = date(2025, 6, 2)
+SUSPENSION = tuple(sessions(date(2025, 9, 1), date(2025, 9, 19)))  # about three weeks, NIFBEE only
+
+
+def scenario(store, relay, clock_time, listing_raw="2025-06-02"):
+    relay.master_rows = [kit.MASTER_RELIND, kit.MASTER_NIFBEE, listed(kit.MASTER_JAIBAL, listing_raw)]
+    eng, plan = ready(store, relay, clock_time, codes=("RELIND", "NIFBEE", "JAIBAL"))
+
+    def script(index, params):
+        code = params["stock_code"]
+        if code == "JAIBAL":
+            return only_from(params, LISTING)
+        if code == "NIFBEE":
+            return bars_body(params, skip=SUSPENSION)
+        return None
+
+    relay.bars_script = script
+    return eng, plan
+
+
+def window_states(store):
+    return dict(((code, start), status) for code, start, status in store.query(
+        "SELECT stock_code, window_from, status FROM backfill_events WHERE status <> 'pending' "
+        "ORDER BY at_utc, rowid"))
+
+
+def test_a_mid_range_listing_and_a_three_week_suspension_end_in_terminal_statuses_and_stop_costing_calls(
+    store, relay, clock_time
+):
+    eng, plan = scenario(store, relay, clock_time)
+    early, late = plan.windows
+    report = eng.run(plan, today_ist=TODAY)
+    states = window_states(store)
+    assert states == {
+        ("RELIND", early[0]): "done", ("RELIND", late[0]): "done",
+        ("NIFBEE", early[0]): "done", ("NIFBEE", late[0]): "stored_with_gaps",
+        ("JAIBAL", early[0]): "done",  # listed after this window ended: expected nothing, Breeze said nothing
+        ("JAIBAL", late[0]): "done",   # listed inside it: sessions before the listing date are not expected
+    }
+    assert report.counts == {"pending": 0, "done": 5, "empty_flagged": 0, "failed": 0, "stored_unverified": 0,
+                             "stored_with_gaps": 1}
+    assert report.status == "complete_with_flags" and bf._exit_for_report(report) == 4
+    assert [(row["stock_code"], row["status"]) for row in report.flagged_windows] == [("NIFBEE", "stored_with_gaps")]
+    assert len(relay.bars_requests) == 2 + 1 + 2 + 1 + 1  # RELIND 2, NIFBEE 1 + 2 (one retry), JAIBAL 1 + 1
+    # stored bar counts: nothing invented for the suspension, nothing stored for JAIBAL before it was listed
+    assert window_source_bars(store, "NIFBEE", late[0]) == len(sessions(*late)) - len(SUSPENSION)
+    assert not any(stored_bars(store, "NIFBEE", day, day) for day in SUSPENSION)
+    assert window_source_bars(store, "JAIBAL", late[0]) == len(sessions(LISTING, late[1]))
+    assert stored_bars(store, "JAIBAL", early[0], early[1]) == 0
+    assert window_source_bars(store, "RELIND", late[0]) == len(sessions(*late))
+    detail = store.query("SELECT detail_json FROM quarantine_records WHERE reason_code = 'breeze_window_gaps'")
+    assert len(detail) == 1 and "2025-09-01..2025-09-19" in detail[0][0]
+
+    relay.bars_requests.clear()
+    second = eng.run(plan, today_ist=TODAY)  # nothing is retried on its own, not even the gap window
+    assert relay.bars_requests == [] and second.calls_this_run == 0
+    assert second.status == "complete_with_flags" and bf._exit_for_report(second) == 4
+    assert window_states(store) == states
+
+
+def test_retry_flagged_requeues_only_the_gap_window_and_finishes_once_the_data_is_whole(store, relay, clock_time):
+    eng, plan = scenario(store, relay, clock_time)
+    eng.run(plan, today_ist=TODAY)
+    relay.bars_requests.clear()
+    relay.bars_script = lambda index, params: only_from(params, LISTING) if params["stock_code"] == "JAIBAL" else None
+    fixed = eng.run(plan, today_ist=TODAY, retry_flagged=True)
+    assert [(r["stock_code"], r["from"]) for r in relay.bars_requests] == [("NIFBEE", plan.windows[1][0].isoformat())]
+    assert fixed.status == "complete" and fixed.counts["done"] == 6 and bf._exit_for_report(fixed) == 0
+
+
+@pytest.mark.parametrize("raw", ["", "not a date"])
+def test_a_listing_date_that_is_blank_or_unreadable_leaves_the_window_strict(store, relay, clock_time, raw):
+    eng, plan = scenario(store, relay, clock_time, listing_raw=raw)
+    report = eng.run(plan, today_ist=TODAY)
+    # the sessions before the listing count as gaps, and the empty pre-listing window is flagged, not waved through
+    assert {(r["stock_code"], r["status"]) for r in report.flagged_windows} == {
+        ("NIFBEE", "stored_with_gaps"), ("JAIBAL", "stored_with_gaps"), ("JAIBAL", "empty_flagged")}
+    assert bf._exit_for_report(report) == 4
+
+
+def test_a_wrong_late_listing_date_does_not_hide_missing_sessions_before_the_first_bar(store, relay, clock_time):
+    eng, _ = ready(store, relay, clock_time, codes=("RELIND",))
+    window = (date(2024, 1, 2), date(2024, 3, 28))
+    days = sessions(*window)
+    parsed = parse_days("RELIND", days[10:20] + days[21:])  # first bar on the 11th session, one hole after it
+    late_listing = days[40]  # the master claims it listed much later than the first bar
+    assessed = eng._assess(parsed, window, None, late_listing)
+    assert assessed.verdict == "gaps" and assessed.gap_days == (days[20],)
+    assert eng._assess(parse_days("RELIND", days[10:]), window, None, late_listing).verdict == "complete"
+
+
+def test_listing_dates_parse_in_the_master_formats_and_nothing_else():
+    assert bf._parse_listing_date("2025-06-02") == date(2025, 6, 2)
+    assert bf._parse_listing_date("02-Jun-2025") == date(2025, 6, 2)
+    assert bf._parse_listing_date("02/06/2025") == date(2025, 6, 2)
+    assert bf._parse_listing_date("") is None and bf._parse_listing_date("soon") is None
 
 
 def test_days_before_the_probed_depth_are_not_expected(store, relay, clock_time):
@@ -1093,8 +1307,8 @@ def test_days_before_the_probed_depth_are_not_expected(store, relay, clock_time)
     window = (date(2023, 5, 29), date(2024, 12, 31))
     floor = date(2024, 6, 3)
     parsed = parse_days("RELIND", sessions(floor, window[1]))
-    assert eng._incompleteness(parsed, window, None) is not None
-    assert eng._incompleteness(parsed, window, floor) is None
+    assert eng._assess(parsed, window, None, None).verdict == "gaps"
+    assert eng._assess(parsed, window, floor, None).verdict == "complete"
 
 
 # ---------------------------------------------------------------- 2. flagged windows are not complete
@@ -1154,7 +1368,7 @@ def test_a_status_500_answer_with_an_empty_header_is_an_upstream_error_never_emp
     assert relay.bars_ok({"stock_code": "RELIND", "from": "2024-01-01", "to": "2024-01-31"}, body).headers[
         "X-Growin-Empty"] == "true"
     report = eng.run(plan, today_ist=TODAY)
-    assert report.counts == {"pending": 0, "done": 1, "empty_flagged": 0, "failed": 1}
+    assert report.counts == {"pending": 0, "done": 1, "empty_flagged": 0, "failed": 1, "stored_unverified": 0, "stored_with_gaps": 0}
     assert report.error_codes == {"breeze_upstream_error": 1} and len(relay.bars_requests) == 2  # not retried as empty
     assert count(store, "SELECT count(*) FROM quarantine_records WHERE check_name = 'breeze_backfill'") == 0
     assert count(store, "SELECT count(*) FROM relay_call_outcomes WHERE outcome = 'empty'") == 0
@@ -1206,6 +1420,25 @@ def test_a_pacing_sleep_across_ist_midnight_sends_no_next_day_call_and_stops_res
     assert bf._exit_for_report(report) == 3 and not lock_held(late)
 
 
+def test_no_call_is_dispatched_after_the_clock_crossed_ist_midnight(store, relay, clock_time):
+    eng, plan = ready(store, relay, clock_time, codes=("RELIND", "NIFBEE"))
+    state = {"now": NOW}
+    seen = []
+
+    def sleeper(seconds):
+        clock_time.sleep(seconds)
+        state["now"] = MIDNIGHT_IST
+
+    relay.on_bars = lambda params: seen.append(state["now"])  # the clock at the moment the relay got the call
+    late = bf.BackfillEngine(store, relay.client(), workspace="india", clock=lambda: state["now"],
+                             monotonic=clock_time.monotonic, sleeper=sleeper)
+    report = late.run(plan, today_ist=TODAY)
+    assert seen == [NOW], "a call reached the relay after IST midnight while charged to the old date"
+    assert report.status == "stopped_ist_rollover"
+    assert count(store, "SELECT count(*) FROM relay_call_ledger WHERE ist_date = ? AND endpoint = 'historical'",
+                 [TODAY]) == 3 + 1  # the probe's three and the one call that went out before midnight
+
+
 def test_cli_ist_rollover_exits_3_not_2(store, relay, clock_time):
     eng, plan = ready(store, relay, clock_time, codes=("RELIND",))
     store.close()
@@ -1248,7 +1481,7 @@ def test_closed_and_failed_restart_stop_at_once_without_retry_or_failed_windows(
     report = eng.run(plan, today_ist=TODAY)
     assert report.status == "stopped_fail_closed" and report.stop_code == code and bf._exit_for_report(report) == 2
     assert source.calls == 1, "no retry"
-    assert report.counts == {"pending": 2, "done": 0, "empty_flagged": 0, "failed": 0}
+    assert report.counts == {"pending": 2, "done": 0, "empty_flagged": 0, "failed": 0, "stored_unverified": 0, "stored_with_gaps": 0}
     assert clock_time.sleeps == []
 
 
@@ -1265,6 +1498,25 @@ def test_a_refused_before_send_call_is_recorded_not_sent_and_does_not_count_towa
                         "AND error_code = 'relay_tunnel_restart_backoff'") == 1
     assert count(store, "SELECT count(*) FROM relay_call_ledger WHERE endpoint = 'historical'") == 3 + 2
     assert report.calls_used_today == 4 and report.calls_this_run == 1
+
+
+def test_a_call_the_relay_received_before_the_client_reported_closed_counts_toward_the_cap(store, relay, clock_time):
+    eng, plan = ready(store, relay, clock_time, codes=("RELIND",))
+    client = relay.client()
+    eng._source = client
+
+    def retire_under_the_request(params):
+        client.close()  # the pool is retired while the request is already on the wire
+
+    relay.on_bars = retire_under_the_request
+    relay.bars_script = lambda index, params: RuntimeError("client closed under the request")
+    report = eng.run(plan, today_ist=TODAY)
+    assert len(relay.bars_requests) == 1, "the relay did receive the call"
+    assert report.status == "stopped_fail_closed" and report.stop_code == "relay_closed"
+    assert count(store, "SELECT count(*) FROM relay_call_outcomes WHERE outcome = 'not_sent'") == 0
+    assert count(store, "SELECT count(*) FROM relay_call_outcomes WHERE outcome = 'error' "
+                        "AND error_code = 'relay_closed'") == 1
+    assert report.calls_this_run == 1 and report.calls_used_today == 3 + 1
 
 
 def test_the_backoff_wait_is_one_bounded_sleep_then_one_retry_then_a_stop(store, relay, clock_time):

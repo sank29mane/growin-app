@@ -384,22 +384,16 @@ def gate_budget(budget: RelayBudget, *, today_ist: date) -> None:
 # window's fault, so it never counts as a failed window).
 GatewayAction = Literal["stop", "retry_once", "retry_then_stop", "empty", "fail_window"]
 
-# RelayUnavailable.reason values. Refused-before-send reasons never reached the relay, so the call spent
-# nothing of the budget. `tunnel_restart_backoff` (PR #583) is refused during a 2 s doubling to 60 s window.
+# RelayUnavailable.reason values. Only `tunnel_restart_backoff` (PR #583) is documented as refused before
+# any send (RELAY-API.md, client rules: "a refused request fails fast ... and is never sent"), so only it
+# spends no budget. Every other reason can follow a dispatch: the client maps a RuntimeError raised after the
+# request left (pool retired under it) to `closed` or `tunnel_restarted`, so those count as sent.
 RELAY_CLOSED = "closed"
 RELAY_TUNNEL_RESTART_FAILED = "tunnel_restart_failed"
 RELAY_TUNNEL_RESTART_BACKOFF = "tunnel_restart_backoff"
 RELAY_TUNNEL_DOWN = "tunnel_down"
 RELAY_TUNNEL_RESTARTED = "tunnel_restarted"
-NOT_SENT_REASONS: frozenset[str] = frozenset(
-    {
-        RELAY_CLOSED,
-        RELAY_TUNNEL_RESTART_FAILED,
-        RELAY_TUNNEL_RESTART_BACKOFF,
-        RELAY_TUNNEL_DOWN,
-        RELAY_TUNNEL_RESTARTED,
-    }
-)
+NOT_SENT_REASONS: frozenset[str] = frozenset({RELAY_TUNNEL_RESTART_BACKOFF})
 TUNNEL_BACKOFF_MAX_WAIT_S = 60.0  # the longest the client's restart backoff window can be
 RELAY_BLIP_RETRY_S = 2.0  # a pause before the one retry of a transport blip
 
@@ -425,7 +419,7 @@ _STOP_BY_CLASS: tuple[tuple[type[BaseException], str], ...] = (
 
 
 def refused_before_send(exc: BaseException) -> bool:
-    """True when the client refused the call without sending anything, so no budget was spent."""
+    """True only when the client documents the call as refused before any send, so no budget was spent."""
     return isinstance(exc, RelayUnavailable) and exc.reason in NOT_SENT_REASONS
 
 
