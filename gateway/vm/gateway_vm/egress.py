@@ -70,6 +70,10 @@ class EgressChecker:
 
     def check(self) -> EgressResult:
         """Never raises: any fetch or parse failure gives ok=False."""
+        return self.check_reporting_cache()[0]
+
+    def check_reporting_cache(self) -> tuple[EgressResult, bool]:
+        """Like check(), and True when the result is a reused failure that made no request."""
         with self._lock:
             cached, since = self._last_failed, self._last_failed_mono
         if (
@@ -77,14 +81,14 @@ class EgressChecker:
             and since is not None
             and 0 <= self._clock.monotonic() - since < self._cooldown_s
         ):
-            return cached
+            return cached, True
         result = self._check_now()
         with self._lock:
             if result.ok:
                 self._last_failed, self._last_failed_mono = None, None
             else:
                 self._last_failed, self._last_failed_mono = result, self._clock.monotonic()
-        return result
+        return result, False
 
     def _check_now(self) -> EgressResult:
         try:

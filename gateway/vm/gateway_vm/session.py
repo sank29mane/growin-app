@@ -251,6 +251,9 @@ class SessionManager:
         self._generation = 0
         self._last_egress: EgressResult | None = None
         self._last_egress_mono: float | None = None
+        # When the newest failed check was recorded. An ok check that started
+        # before it can never replace that failure (see _run_egress).
+        self._last_failure_mono: float | None = None
 
     # ------------------------------------------------------------ internals
 
@@ -324,19 +327,39 @@ class SessionManager:
         return RelayFailure("EGRESS_MISMATCH", reason=reason)
 
     def _run_egress(self) -> EgressResult:
-        """One network check, outside the lock. Records the result."""
-        result = self._egress.check()
+        """One network check, outside the lock. Records the result.
+
+        The evidence is stamped with the moment the check started, so a slow
+        check cannot look fresher than what it actually observed. A failure
+        always replaces what is stored. An ok whose start is not after the
+        newest recorded failure is dropped and that failure stays: otherwise a
+        slow ok that began before a fast failing check could land after it and
+        leave fresh ok evidence for the whole age limit.
+        """
+        started_mono = self._clock.monotonic()
+        result, cached = self._egress.check_reporting_cache()
         with self._lock:
-            self._last_egress = result
-            self._last_egress_mono = self._clock.monotonic()
-            if not result.ok:
-                self._generation += 1  # an exchange already in flight is no longer trustworthy
+            superseded = (
+                result.ok
+                and self._last_failure_mono is not None
+                and started_mono <= self._last_failure_mono
+            )
+            if superseded:
+                kept = self._last_egress  # the failure that outranks this ok
+            else:
+                self._last_egress = result
+                self._last_egress_mono = started_mono
+                if not result.ok:
+                    self._last_failure_mono = self._clock.monotonic()
+                    self._generation += 1  # an exchange already in flight is no longer trustworthy
+                kept = result
         self._events.emit(
             "egress_check",
             result="ok" if result.ok else ("rejected" if _egress_reason(result) == "egress_mismatch" else "error"),
             reason=None if result.ok else _egress_reason(result),
+            cached=cached,
         )
-        return result
+        return kept if kept is not None else result
 
     def _refresh_egress(self) -> EgressResult:
         """Check egress and, on failure, suspend an active session."""

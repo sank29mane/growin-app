@@ -30,8 +30,15 @@ from test_gateway_relay_app import (  # the harness of the 61-05 tests
     BARS_BODY,
     BASE,
     CODE,
+    MASTER_BODY,
+    MASTER_LAST_MODIFIED,
+    MASTER_URL,
+    PREVIEW_BODY,
+    QUOTE_BODY,
     Stack,
+    auth,
 )
+from test_gateway_relay_routes import real_stack  # the 61-08 harness: real Budget, master URL set
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT / "gateway" / "vm") not in sys.path:
@@ -300,6 +307,66 @@ def test_data_call_without_a_token_is_unauthorized_and_the_saved_token_works(sta
         assert store.load() is None
         with pytest.raises(NoSession):
             bars(holder)
+
+
+def test_tracer_budget_quote_preview_and_master_against_the_real_vm_app(tmp_path):
+    """The client and the VM agree on bytes, headers and price text, not just on route names."""
+    rs = real_stack(tmp_path)
+    store = MemoryTokenStore()
+    with RelayClient(http=rs.client, token_store=store) as relay:
+        attempt = relay.login_arm()
+        relay.login_complete(attempt.attempt_id, CODE)
+        bearer = {vm.HDR_CONTRACT: CONTRACT, **auth(attempt.relay_token)}
+
+        def raw(path: str) -> httpx.Response:  # what the VM itself answers, for comparison
+            response = rs.client.get(path, headers=bearer)
+            assert response.status_code == 200, response.text
+            return response
+
+        def same_as_wire(payload: UpstreamPayload, wire: httpx.Response) -> None:
+            assert payload.body == wire.content
+            assert payload.sha256 == wire.headers[vm.HDR_UP_SHA256] == sha(wire.content)
+            assert payload.contract == wire.headers[vm.HDR_CONTRACT] == CONTRACT
+            assert payload.upstream_api == wire.headers[vm.HDR_UP_API]
+            assert dict(payload.upstream_request) == json.loads(wire.headers[vm.HDR_UP_REQUEST])
+            assert re.fullmatch(r"[0-9a-f]{16}", payload.request_id)
+            assert payload.request_id != wire.headers[vm.HDR_REQUEST_ID]  # one id per request
+            assert payload.fetched_at_utc == datetime(2026, 10, 21, 4, 30, tzinfo=timezone.utc)
+
+        budget = relay.budget()
+        wire_budget = raw("/v1/budget").json()
+        assert wire_budget.pop("contract") == CONTRACT
+        assert budget.calls_today_ist == wire_budget["calls_today_ist"] >= 1
+        assert (budget.per_minute_limit, budget.per_day_limit) == (80, 4500)
+        assert budget.remaining_today == wire_budget["remaining_today"] == 4500 - budget.calls_today_ist
+        assert budget.ist_date.isoformat() == wire_budget["ist_date"]
+
+        quote = relay.quote("RELIND")
+        same_as_wire(quote, raw("/v1/quotes?stock_code=RELIND&exchange=NSE"))
+        assert quote.body == QUOTE_BODY and quote.upstream_api == vm.API_QUOTES_V1
+        assert quote.upstream_interval is None and quote.breeze_status == 200 and quote.empty is False
+        assert dict(quote.upstream_request) == {
+            "stock_code": "RELIND", "exchange_code": "NSE", "expiry_date": "",
+            "product_type": "cash", "right": "", "strike_price": "",
+        }
+        assert dict(quote.query) == {"stock_code": "RELIND", "exchange": "NSE"}
+
+        preview = relay.preview_order("RELIND", action="buy", quantity=35, price=Decimal("2500.5"))
+        assert preview.body == PREVIEW_BODY and preview.upstream_api == vm.API_PREVIEW_V1
+        assert dict(preview.query)["price"] == "2500.50"  # two decimals, as the VM validates them
+        assert preview.upstream_request["price"] == "2500.50"
+        assert preview.upstream_request["quantity"] == "35" and preview.upstream_request["action"] == "buy"
+        wire_preview = raw("/v1/preview-order?stock_code=RELIND&action=buy&quantity=35&price=2500.50&exchange=NSE")
+        same_as_wire(preview, wire_preview)
+        *_, (_, _, _, sent) = rs.transport.preview_requests()
+        assert sent is not None and json.loads(sent) == dict(preview.upstream_request)
+
+        master = relay.security_master()
+        same_as_wire(master, raw("/v1/security-master"))
+        assert master.body == MASTER_BODY and master.upstream_api == vm.API_SECURITY_MASTER
+        assert master.upstream_last_modified == MASTER_LAST_MODIFIED
+        assert dict(master.upstream_request) == {"url": MASTER_URL}
+        assert master.breeze_status is None and master.empty is False and master.upstream_interval is None
 
 
 @pytest.fixture()
@@ -1647,11 +1714,6 @@ def test_cli_prints_the_reason_of_a_relay_unavailable():
 
 # ------------------------------------------------------- contract parity
 
-PENDING_ROUTES = {
-    "/v1/budget", "/v1/quotes", "/v1/preview-order", "/v1/security-master",
-}  # served by the VM from the plan after the relay core; the client already speaks them
-
-
 def test_contract_string_and_header_names_equal_the_vm():
     assert CONTRACT == client_mod.CONTRACT == vm.CONTRACT == "growin-relay/1"
     pairs = {
@@ -1672,9 +1734,8 @@ def test_contract_string_and_header_names_equal_the_vm():
     assert len(set(pairs)) == len(pairs)
 
 
-def test_route_set_equals_the_vm_apart_from_the_routes_still_to_come():
-    assert vm.ROUTES <= client_mod.ROUTES
-    assert client_mod.ROUTES - vm.ROUTES <= PENDING_ROUTES
+def test_route_set_equals_the_vm():
+    assert client_mod.ROUTES == vm.ROUTES  # all nine routes are served: no route is pending any more
     assert {client_mod.ROUTE_HEALTH, client_mod.ROUTE_LOGIN_ARM, client_mod.ROUTE_LOGIN_COMPLETE,
             client_mod.ROUTE_SESSION_REVOKE, client_mod.ROUTE_BARS_DAILY} <= vm.ROUTES
 

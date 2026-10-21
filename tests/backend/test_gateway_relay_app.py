@@ -902,6 +902,8 @@ def test_event_lines_are_compact_sorted_ascii_json():
         ("request", {"http": "200"}),
         ("request", {"ms": 1.5}),
         ("request", {"count": -3}),
+        ("egress_check", {"cached": "yes"}),  # a real bool or nothing
+        ("egress_check", {"cached": 1}),
         ("request", {"breeze_status": "200"}),
         ("request", {"request_id": "ABCDEF0123456789"}),
         ("request", {"request_id": "0123456789abcde"}),
