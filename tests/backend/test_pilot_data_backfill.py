@@ -1358,6 +1358,13 @@ def test_a_window_with_no_good_bar_in_it_is_never_complete(store, relay, clock_t
         assert assessed.verdict == "gaps" and assessed.detail["reason"] == "no_bars_in_window", listing
 
 
+def test_a_window_with_no_session_and_no_bar_in_it_is_not_complete(store, relay, clock_time):
+    eng, _ = ready(store, relay, clock_time, codes=("RELIND",))
+    weekend = (date(2024, 3, 9), date(2024, 3, 10))  # no NSE session at all: nothing is expected, nothing arrived
+    assessed = eng._assess(parse_days("RELIND", [date(2024, 3, 12)]), weekend, None, None)
+    assert assessed.verdict == "gaps" and assessed.detail["reason"] == "no_bars_in_window"
+
+
 def test_out_of_window_bars_for_a_stock_listed_after_the_window_are_before_listing_and_store_nothing(
     store, relay, clock_time
 ):
@@ -1375,6 +1382,20 @@ def test_out_of_window_bars_for_a_stock_listed_after_the_window_are_before_listi
     assert not covers(store, "JAIBAL", plan.windows[0][1])
 
 
+def test_a_stray_out_of_window_bar_is_not_stored_and_the_window_claims_nothing(store, relay, clock_time):
+    relay.master_rows = [kit.MASTER_RELIND, kit.MASTER_NIFBEE, listed(kit.MASTER_JAIBAL, "2024-01-02")]
+    eng, plan = ready(store, relay, clock_time, codes=("JAIBAL",))
+    assert plan.windows[0][0] < date(2024, 1, 2) <= plan.windows[0][1]  # listed inside the window
+    stray = sessions(*plan.windows[1])[-1]  # a day this window never asked for
+    relay.bars_script = lambda index, params: kit.breeze_v2_json([bar_row("JAIBAL", stray)]) if index in (0, 1) else None
+    eng.run(plan, today_ist=TODAY)
+    assert window_states(store)[("JAIBAL", plan.windows[0][0])] == "stored_with_gaps"
+    assert window_source_bars(store, "JAIBAL", plan.windows[0][0]) == 0  # the stray bar is not written for this window
+    assert covered(store, "JAIBAL", plan.windows[0][0]) == 0
+    detail = store.query("SELECT detail_json FROM quarantine_records WHERE reason_code = 'breeze_window_gaps'")
+    assert "no_bars_in_window" in detail[0][0]
+
+
 def test_before_listing_is_done_but_claims_no_coverage_and_stores_no_bars(store, relay, clock_time):
     relay.master_rows = [kit.MASTER_RELIND, kit.MASTER_NIFBEE, listed(kit.MASTER_JAIBAL, "2026-10-01")]
     eng, plan = ready(store, relay, clock_time, codes=("JAIBAL",))
@@ -1387,9 +1408,9 @@ def test_before_listing_is_done_but_claims_no_coverage_and_stores_no_bars(store,
 
 
 def test_a_mid_window_listing_with_an_empty_answer_is_flagged_not_done(store, relay, clock_time):
+    relay.master_rows = [kit.MASTER_RELIND, kit.MASTER_NIFBEE, listed(kit.MASTER_JAIBAL, "2024-01-02")]
     eng, plan = ready(store, relay, clock_time, codes=("JAIBAL",))
-    mid = sessions(*plan.windows[0])[40]
-    eng._listing_dates = {"JAIBAL": mid}  # listed inside the window: an empty answer proves nothing
+    assert plan.windows[0][0] < date(2024, 1, 2) <= plan.windows[0][1]  # listed inside the window: empty proves nothing
     relay.bars_script = lambda index, params: _empty_body(params) if index in (0, 1) else None
     report = eng.run(plan, today_ist=TODAY)
     assert window_states(store)[("JAIBAL", plan.windows[0][0])] == "empty_flagged"
