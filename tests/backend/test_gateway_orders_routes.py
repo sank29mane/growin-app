@@ -796,6 +796,13 @@ def test_no_trusted_mark_refuses_every_order(stack, token):
     assert stack.state(token)["last_evaluated_session"] == "2026-10-19"
 
 
+def test_quote_from_a_prior_session_is_quote_unavailable(stack, token):
+    """P-10: an ltt dated before the current IST session never admits an order."""
+    stack.transport.quote_book["TESTCO"]["ltt"] = "20-Oct-2026 15:29:58"
+    assert code_of(stack.mint(token)) == (503, "ORDERS_UNAVAILABLE", "quote_unavailable")
+    assert stack.transport.non_get() == []
+
+
 # -------------------------------------------------- audit, state, routes
 
 
