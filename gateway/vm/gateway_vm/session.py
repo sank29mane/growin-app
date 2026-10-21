@@ -306,10 +306,22 @@ class SessionManager:
         return RelayFailure("LOGIN_ATTEMPT_INVALID")
 
     def _egress_stale_locked(self) -> bool:
+        """True unless the last check passed and is younger than the limit.
+
+        A failed check counts as stale: it is never a result to ride on, and the
+        window between recording it and suspending the session stays closed.
+        """
         return (
-            self._last_egress_mono is None
+            self._last_egress is None
+            or not self._last_egress.ok
+            or self._last_egress_mono is None
             or self._clock.monotonic() - self._last_egress_mono >= self._egress_max_age_s
         )
+
+    def _egress_unusable_failure_locked(self) -> RelayFailure:
+        last = self._last_egress
+        reason = _egress_reason(last) if last is not None and not last.ok else "egress_unavailable"
+        return RelayFailure("EGRESS_MISMATCH", reason=reason)
 
     def _run_egress(self) -> EgressResult:
         """One network check, outside the lock. Records the result."""
@@ -482,7 +494,10 @@ class SessionManager:
             return token
         self._refresh_egress()
         with self._lock:
-            return self._revalidate_locked(auth)
+            token = self._revalidate_locked(auth)
+            if self._egress_stale_locked():  # failed, or aged out during the refresh: no retry
+                raise self._egress_unusable_failure_locked()
+            return token
 
     def note_breeze_error(
         self,
