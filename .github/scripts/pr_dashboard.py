@@ -66,6 +66,7 @@ GUARD_RUN = (".github/workflows/safety-guard.yml", "pull_request_target")  # job
 MAX_OPEN = 100
 MAX_MERGED = 20
 MAX_BODY = 60_000
+RELIST_WAIT = 5  # seconds before the second read when no dashboard issue is listed
 MERGED_DAYS = 7
 FAILED = {"failure", "timed_out", "startup_failure"}
 ICONS = {"pass": "✅", "fail": "❌", "pending": "⏳", "missing": "➖", "unresolved": "⚠️"}
@@ -384,14 +385,21 @@ def notes_section(comment: dict | None, repo: str) -> str:
     return "\n".join(out)
 
 
-def find_issue(issues: list) -> dict | None:
-    """The oldest open issue the bot created that carries the marker."""
+def marked_issues(issues: list) -> list[dict]:
+    """Open issues the bot created that carry the marker, oldest first. Issues
+    from anyone else, or without the marker, are never returned."""
     hits = [i for i in issues if isinstance(i, dict)
             and "pull_request" not in i
             and i.get("state", "open") == "open"
             and (i.get("user") or {}).get("login") == BOT
             and MARKER in (i.get("body") or "")]
-    return min(hits, key=lambda i: i["number"]) if hits else None
+    return sorted(hits, key=lambda i: i["number"])
+
+
+def find_issue(issues: list) -> dict | None:
+    """The oldest open issue the bot created that carries the marker."""
+    hits = marked_issues(issues)
+    return hits[0] if hits else None
 
 
 def _label_cell(pr: dict) -> str:
@@ -479,6 +487,29 @@ def label_exists(repo: str, api) -> bool:
         return False
 
 
+def list_bot_issues(repo: str, api) -> list:
+    return impact.api_pages(api, f"repos/{repo}/issues?state=open&creator={quote(BOT)}", 500)
+
+
+def _numbers(issues: list[dict]) -> str:
+    return ", ".join(f"#{i['number']}" for i in issues) or "none"
+
+
+def close_duplicates(repo: str, api, keep: int, extras: list[dict]) -> None:
+    """Close surplus dashboard issues with a pointer to the one kept. A failed
+    close is logged and skipped: the dashboard itself is already updated."""
+    for dup in extras:
+        number = int(dup["number"])
+        try:
+            api(f"repos/{repo}/issues/{number}/comments", "POST",
+                {"body": f"Duplicate of the operator dashboard. Closing in favour of #{keep}."})
+            api(f"repos/{repo}/issues/{number}", "PATCH",
+                {"state": "closed", "state_reason": "not_planned"})
+            print(f"Closed duplicate dashboard issue #{number} in favour of #{keep}.")
+        except (subprocess.SubprocessError, OSError, ValueError) as e:
+            print(f"::warning::Could not close duplicate dashboard issue #{number}: {type(e).__name__}")
+
+
 def update(repo: str, trigger: str, patterns: list[str], api=None,
            now: datetime | None = None, dry_run: bool = False, run_url: str | None = None,
            sleep=time.sleep) -> str:
@@ -489,8 +520,17 @@ def update(repo: str, trigger: str, patterns: list[str], api=None,
     rows = order_stacks(collect(repo, api, patterns, sleep))
     closed = api(f"repos/{repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100")
     merged = recently_merged(closed if isinstance(closed, list) else [], now)
-    issues = impact.api_pages(api, f"repos/{repo}/issues?state=open&creator={quote(BOT)}", 500)
-    issue = find_issue(issues)
+    issues = list_bot_issues(repo, api)
+    found = marked_issues(issues)
+    print(f"Listed {len(issues)} open bot issues; dashboard candidates: {_numbers(found)}.")
+    if not found and not dry_run:
+        # A miss means "create a new issue", which is hard to undo and was once
+        # caused by a listing that came back without the dashboard. Read again.
+        sleep(RELIST_WAIT)
+        issues = list_bot_issues(repo, api)
+        found = marked_issues(issues)
+        print(f"Re-read {len(issues)} open bot issues; dashboard candidates: {_numbers(found)}.")
+    issue = found[0] if found else None
 
     def page(comment: dict | None) -> str:
         return render(rows, merged, notes_section(comment, repo), trigger, now, run_url)
@@ -521,10 +561,14 @@ def update(repo: str, trigger: str, patterns: list[str], api=None,
             comment = api(f"repos/{repo}/issues/{number}/comments", "POST", {"body": seed})
             print(f"Created the notes comment on issue #{number}.")
     body = page(comment)
+    extras = found[1:]
     if not dry_run:
         # The bot only ever writes the issue body. Notes comments are never edited.
         api(f"repos/{repo}/issues/{number}", "PATCH", {"body": body})
         print(f"Updated issue #{number}.")
+        close_duplicates(repo, api, number, extras)
+    elif extras:
+        print(f"Dry run: would close duplicate issues {_numbers(extras)} in favour of #{number}.")
     return body
 
 
