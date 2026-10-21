@@ -795,11 +795,22 @@ def test_no_text_or_log_ever_holds_the_token_or_the_login_url(caplog, capsys):
     texts = [repr(attempt), str(attempt), repr(store.load()), str(store.load()), repr(relay)]
 
     for code, status in (("UNAUTHORIZED", 401), ("LOGIN_ATTEMPT_INVALID", 409), ("NO_SESSION", 503)):
-        failing = relay_with(lambda request, c=code, s=status: error_response(c, s), store=store)
-        failing._session_token = TOKEN
+        completes: list[httpx.Request] = []
+
+        def handler(request: httpx.Request, c=code, s=status) -> httpx.Response:
+            if request.url.path == "/v1/login/arm":
+                return json_response(ARM_JSON)
+            assert request.url.path == "/v1/login/complete"
+            completes.append(request)
+            return error_response(c, s)
+
+        failing = relay_with(handler, store=store)
+        armed = failing.login_arm()  # the code must be in flight, not refused locally
         with pytest.raises(RelayError) as info:
-            failing.login_complete(ATTEMPT, CODE)
-        texts += [str(info.value), repr(info.value), repr(info.value.args)]
+            failing.login_complete(armed.attempt_id, CODE)
+        assert len(completes) == 1, code  # the fake server answered exactly this code
+        assert info.value.http_status == status
+        texts += [str(info.value), repr(info.value), repr(info.value.args), repr(armed)]
 
     out = capsys.readouterr()
     haystack = "\n".join(texts) + caplog.text + out.out + out.err
@@ -1109,6 +1120,51 @@ def test_two_arms_never_run_in_parallel_and_the_newer_attempt_completes():
     assert stale.value.http_status is None
 
 
+def test_an_arm_waits_for_a_complete_in_flight_and_never_interleaves_with_it():
+    in_complete = threading.Event()
+    release_complete = threading.Event()
+    settled = threading.Event()  # the arm is either waiting for the lock or has already sent
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/v1/login/complete":
+            in_complete.set()
+            assert release_complete.wait(timeout=10)
+            return json_response(SESSION_JSON)
+        assert request.url.path == "/v1/login/arm"
+        settled.set()
+        return json_response(ARM_JSON)
+
+    relay = relay_with(handler)
+    attempt = relay.login_arm()
+    paths.clear()
+    settled.clear()
+    relay._login_lock = _WatchedLock(settled.set)
+    done: dict[str, object] = {}
+
+    def complete() -> None:
+        done["complete"] = relay.login_complete(attempt.attempt_id, CODE)
+
+    def arm() -> None:
+        done["arm"] = relay.login_arm()
+
+    completing = threading.Thread(target=complete, daemon=True)
+    arming = threading.Thread(target=arm, daemon=True)
+    completing.start()
+    assert in_complete.wait(timeout=10)
+    arming.start()
+    assert settled.wait(timeout=10)
+    assert paths == ["/v1/login/complete"]  # the arm has not been sent while complete is in flight
+    release_complete.set()
+    completing.join(timeout=10)
+    arming.join(timeout=10)
+
+    assert paths == ["/v1/login/complete", "/v1/login/arm"]
+    assert isinstance(done["complete"], client_mod.SessionStatus)
+    assert isinstance(done["arm"], LoginAttempt)
+
+
 # ----------------------------------------- tunnel restart under load (round 1)
 
 
@@ -1205,6 +1261,43 @@ def test_a_restart_never_closes_a_client_a_waiting_request_still_holds():
     assert clients[0].is_closed is True  # closed once the last holder let go
     relay.close()
     assert second.stopped == 1
+
+
+class _CloseUnderRequest:
+    """Closes the client at the last moment before a request reaches httpx."""
+
+    def __init__(self, inner: httpx.Client, relay: RelayClient) -> None:
+        self._inner = inner
+        self._relay = relay
+
+    def stream(self, *args, **kwargs):
+        self._relay.close()  # a caller's close() lands after the retired check, before the send
+        return self._inner.stream(*args, **kwargs)
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+def test_a_close_that_lands_under_a_request_is_relay_unavailable_and_is_not_resent():
+    sent: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request.url.path)
+        return json_response(HEALTH_JSON)
+
+    http = mock_http(handler)
+    relay = RelayClient(http=http)
+    relay._pool.http = _CloseUnderRequest(http, relay)
+    with pytest.raises(RelayUnavailable) as info:
+        relay.health()
+    assert info.value.reason == "closed"  # not a raw RuntimeError from httpx
+    assert sent == []  # the request never reached the transport: nothing to resend
+    assert http.is_closed is True
+    assert relay._pool.inflight == 0
+
+    with pytest.raises(RelayUnavailable) as again:  # and the closed client stays closed
+        relay.health()
+    assert again.value.reason == "closed" and sent == []
 
 
 # ------------------------------------------------------------------- CLI
