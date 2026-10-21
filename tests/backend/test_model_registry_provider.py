@@ -16,6 +16,7 @@ import httpx
 import pytest
 from langchain_core.messages import HumanMessage
 from magentic import prompt as mag_prompt
+from pydantic import BaseModel
 
 import model_registry_testkit as kit
 from model_registry import ModelRegistryError, ProviderError, load_registry_file
@@ -23,7 +24,7 @@ from model_registry.provider import (
     build_chat_model,
     chat_model_for_role,
     role_magentic_model,
-    run_magentic,
+    run_structured,
 )
 from model_registry_testkit import (  # noqa: F401  (fixtures)
     key_env,
@@ -47,6 +48,10 @@ def _no_real_network(network_guard):
 
 @mag_prompt("Say hello to {name}.")
 def greet(name: str) -> str: ...
+
+
+class Answer(BaseModel):
+    text: str
 
 
 # --- AC-5 ---------------------------------------------------------------------------
@@ -122,15 +127,6 @@ async def test_client_class_is_identical_across_providers(registry_factory):
     magentics = [role_magentic_model(registry.resolve(r)) for r in ("decision", "coordinator", "research")]
     assert len({type(m) for m in magentics}) == 1
 
-
-async def test_run_magentic_reaches_the_role_endpoint(stub, registry_factory, key_env):
-    registry_factory()
-    result = await run_magentic("research", greet, "world")
-    assert isinstance(result, str)
-    [request] = stub.snapshot()
-    assert request.prefix == "ollama"
-    assert request.model == kit.model_id_for("research")
-    assert request.headers.get("authorization") is None
 
 
 async def test_registry_sampling_fields_reach_the_request(stub, registry_factory):
@@ -236,23 +232,6 @@ async def test_stream_errors_are_typed_too(stub, registry_factory):
     assert stub.count == 0
 
 
-async def test_magentic_failure_is_typed_and_not_retried_elsewhere(stub, key_env, tmp_path):
-    # Point the research provider at a closed loopback port. The call must fail
-    # with a typed error and must not reach the live stub through any fallback.
-    import model_registry
-
-    document = kit.registry_document("http://127.0.0.1:9")
-    dead = load_registry_file(kit.write_registry(tmp_path / "dead", document))
-    model_registry.set_active_registry(dead)
-    try:
-        with pytest.raises(ProviderError) as caught:
-            await run_magentic("research", greet, "world")
-    finally:
-        model_registry.set_active_registry(None)
-    assert caught.value.code == "PROVIDER_UNREACHABLE"
-    assert stub.count == 0
-
-
 # --- AC-7 ---------------------------------------------------------------------------
 
 
@@ -288,11 +267,12 @@ async def test_ambient_env_cannot_redirect_langchain_path(
 
 
 @pytest.mark.parametrize("role,provider_id", [("decision", "xai"), ("research", "ollama")])
-async def test_ambient_env_cannot_redirect_magentic_path(
+async def test_ambient_env_cannot_redirect_structured_path(
     stub, registry_factory, key_env, decoy_env, role, provider_id
 ):
     registry_factory()
-    await run_magentic(role, greet, "world")
+    stub.structured["Answer"] = {"text": "hi"}
+    await run_structured(role, [{"role": "user", "content": "hi"}], Answer)
     [request] = stub.snapshot()
     assert request.prefix == provider_id
     assert request.model == kit.model_id_for(role)

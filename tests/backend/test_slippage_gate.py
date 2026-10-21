@@ -38,7 +38,14 @@ from agents.decision_agent import DecisionAgent
 from agents.risk_agent import RiskAgent, format_risk_governance
 from risk_india import rules
 import model_registry_testkit as kit
+from model_registry_testkit import risk_workspace  # noqa: F401  (fixture)
 from model_registry_testkit import key_env, network_guard, offline_registry, registry_factory, stub  # noqa: F401
+
+@pytest.fixture(autouse=True)
+def _risk_workspace(risk_workspace):
+    """The critic needs the loaded workspace config for its limits and currency."""
+    return risk_workspace
+
 
 # The India cap, stated here on purpose: the code under test has no default for it.
 INDIA_MAX_SLIPPAGE_BPS = Decimal("25")

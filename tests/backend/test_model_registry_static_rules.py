@@ -17,7 +17,11 @@ and a model or provider expression. These rules close the gaps found in review:
       ``llm_id``, including local aliases of one. ``len(model) > LIMIT`` against
       a numeric constant is not a name comparison and is ignored;
 * R4  a magentic prompt function (``@prompt``, ``@mag_prompt``, ``@chatprompt``)
-      used anywhere except as the function argument of ``run_magentic``.
+      used anywhere. ``run_magentic`` is gone (67-FU1 moved every structured call
+      to ``run_structured``), so there is no sanctioned way left to call one;
+* R5  any magentic call path: the name ``run_magentic``, a use of
+      ``role_magentic_model`` outside the provider module, or a ``magentic``
+      import outside the provider module.
 
 R1 to R3 scan the LLM runtime surface (``SURFACE_GLOBS``); R4 scans all of
 ``backend/``, because a bare magentic call is wrong anywhere. Each exception is
@@ -49,6 +53,9 @@ MODEL_CONSTRUCTORS = {
 STRING_PREDICATES = {"startswith", "endswith", "find", "rfind", "index", "count", "__contains__"}
 PROMPT_DECORATORS = {"prompt", "mag_prompt", "chatprompt", "mag_chatprompt"}
 RUN_MAGENTIC = "run_magentic"
+ROLE_MAGENTIC_MODEL = "role_magentic_model"
+# The one module that may import magentic: it holds role_magentic_model.
+MAGENTIC_MODULE = "backend/model_registry/provider.py"
 
 MODEL_FAMILY = re.compile(
     r"(gpt-?\d|claude|gemini|grok|llama|mistral|mixtral|gemma|qwen|granite|nemotron|"
@@ -126,6 +133,10 @@ ALLOWLIST: Dict[Tuple[str, str, str], str] = {
         "operator LM Studio management tool (load/unload): membership check of the "
         "operator's chosen id against LM Studio's own loaded list; the brief keeps "
         "this file untouched and it selects no runtime role"
+    ),
+    ("backend/model_registry/provider.py", "R3", "served != requested"): (
+        "67-FU1 MODEL_MISMATCH: exact equality of the model id the reply names with the id "
+        "the registry sent; compares no literal and infers nothing from the name"
     ),
     ("backend/routes/agent_routes.py", "R3", "model_id in loaded_models"): (
         "operator route /api/models/lmstudio/load: the same loaded-list membership "
@@ -368,15 +379,39 @@ def prompt_function_names(source: str) -> Set[str]:
     return names
 
 
+def scan_magentic_paths(source: str, relpath: str = "") -> List[Tuple[str, int, str]]:
+    """Rule R5: ``run_magentic``, a ``magentic`` import, or ``role_magentic_model`` use."""
+
+    in_provider = relpath == MAGENTIC_MODULE
+    found: List[Tuple[str, int, str]] = []
+    for node in ast.walk(ast.parse(source)):
+        names: List[str] = []
+        if isinstance(node, ast.Name):
+            names = [node.id]
+        elif isinstance(node, ast.Attribute):
+            names = [node.attr]
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            names = [node.name]
+        elif isinstance(node, ast.alias):
+            names = [node.name.split(".")[-1]]
+        if RUN_MAGENTIC in names or (ROLE_MAGENTIC_MODEL in names and not in_provider):
+            found.append(("R5", node.lineno, _segment(source, node)))
+        if isinstance(node, ast.Import) and any(a.name.split(".")[0] == "magentic" for a in node.names):
+            module = True
+        elif isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "magentic":
+            module = True
+        else:
+            module = False
+        if module and not in_provider:
+            found.append(("R5", node.lineno, _segment(source, node)))
+    return found
+
+
 def scan_prompt_usage(source: str, prompt_names: Set[str]) -> List[Tuple[str, int, str]]:
-    """Rule R4: a magentic prompt function referenced outside ``run_magentic``."""
+    """Rule R4: a magentic prompt function referenced anywhere but its own definition."""
 
     tree = ast.parse(source)
     allowed: Set[int] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and _call_name(node.func) == RUN_MAGENTIC:
-            for arg in node.args[1:2]:
-                allowed.add(id(arg))
     defined_here = {
         id(node)
         for node in ast.walk(tree)
@@ -445,7 +480,7 @@ def scan_tree() -> List[str]:
     findings: List[str] = []
     for path, source in sources.items():
         rel = path.relative_to(REPO_ROOT).as_posix()
-        hits = scan_prompt_usage(source, prompt_names)
+        hits = scan_prompt_usage(source, prompt_names) + scan_magentic_paths(source, rel)
         if path in surface:
             hits += scan_literals_and_comparisons(source, rel)
         for rule, line, segment in hits:
@@ -461,8 +496,12 @@ def test_the_scan_sees_the_tree_and_the_prompt_functions():
     prompts: Set[str] = set()
     for path in backend_files():
         prompts |= prompt_function_names(path.read_text(encoding="utf-8"))
-    assert {"extract_tool_calls", "conduct_risk_audit", "generate_news_query"} <= prompts
-    assert "analyze_portfolio_quality" not in prompts
+    # 67-FU1: the critic, decision and research calls moved to ``run_structured``
+    # (json_schema output), so no magentic prompt function is left in the backend.
+    # The scanner itself is still proven live on planted source.
+    assert prompts == set()
+    planted = '@mag_prompt("hi")\ndef ask(x: str) -> str: ...'
+    assert prompt_function_names(planted) == {"ask"}
 
 
 def test_no_model_guessing_literals_constants_comparisons_or_bare_magentic_calls():
@@ -528,14 +567,31 @@ PLANTED_R4 = [
     ('@mag_prompt("hi")\ndef ask(x: str) -> str: ...\nresult = ask("a")', "R4"),
     ('@prompt("hi")\ndef ask(x: str) -> str: ...\nasyncio.to_thread(ask, "a")', "R4"),
     ('@chatprompt()\ndef ask(x: str) -> str: ...\nvalue = mod.ask("a")', "R4"),
+    # A returning run_magentic is a hit even when the prompt function is passed to it.
+    ('@mag_prompt("hi")\ndef ask(x: str) -> str: ...\nvalue = await run_magentic("decision", ask, "a")', "R4"),
+]
+PLANTED_R5 = [
+    ('value = await run_magentic("decision", ask, "a")', "R5"),
+    ('from model_registry.provider import run_magentic', "R5"),
+    ('from model_registry import provider\nvalue = await provider.run_magentic("decision", ask)', "R5"),
+    ('async def run_magentic(role, func, *args): ...', "R5"),
+    ('from magentic import prompt', "R5"),
+    ('import magentic', "R5"),
+    ('from magentic import OpenaiChatModel', "R5"),
+    ('model = role_magentic_model(resolved)', "R5"),
+    ('from model_registry.provider import role_magentic_model', "R5"),
 ]
 
 
 def _scan_all(source: str):
-    return scan_literals_and_comparisons(source) + scan_prompt_usage(source, prompt_function_names(source))
+    return (
+        scan_literals_and_comparisons(source)
+        + scan_prompt_usage(source, prompt_function_names(source))
+        + scan_magentic_paths(source, "backend/agents/x.py")
+    )
 
 
-@pytest.mark.parametrize("planted,rule", PLANTED_R1 + PLANTED_R2 + PLANTED_R3 + PLANTED_GAP_B + PLANTED_R4)
+@pytest.mark.parametrize("planted,rule", PLANTED_R1 + PLANTED_R2 + PLANTED_R3 + PLANTED_GAP_B + PLANTED_R4 + PLANTED_R5)
 def test_planted_case_is_caught_by_its_rule(planted, rule):
     assert rule in {r for r, _line, _seg in _scan_all(planted)}, planted
 
@@ -555,7 +611,6 @@ def test_planted_case_is_caught_by_its_rule(planted, rule):
         "ok = role == 'decision'",
         "x = CAPS.get(role)",
         "ok = provider is KIND",
-        '@mag_prompt("hi")\ndef ask(x: str) -> str: ...\nvalue = await run_magentic("decision", ask, "a")',
         "client = ChatOpenAI(model=resolved.model)",
         "bad = len(model) > MAX_MODEL_ID_CHARS",
         "bad = len(self.model_name) > 256",
@@ -568,6 +623,15 @@ def test_planted_case_is_caught_by_its_rule(planted, rule):
 )
 def test_ordinary_code_is_not_flagged_by_the_new_rules(clean):
     assert _scan_all(clean) == [], clean
+
+
+def test_the_provider_module_may_hold_role_magentic_model_but_not_run_magentic():
+    allowed = "from magentic import OpenaiChatModel\nmodel = role_magentic_model(resolved)"
+    assert scan_magentic_paths(allowed, MAGENTIC_MODULE) == []
+    assert scan_magentic_paths(allowed, "backend/agents/risk_agent.py")
+    assert scan_magentic_paths("x = run_magentic", MAGENTIC_MODULE)
+    provider = (REPO_ROOT / MAGENTIC_MODULE).read_text(encoding="utf-8")
+    assert RUN_MAGENTIC not in provider
 
 
 def test_allowlist_matches_only_its_own_file_rule_and_text():

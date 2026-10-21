@@ -1,13 +1,17 @@
 """The one OpenAI-compatible provider.
 
-Every chat role goes through ``build_chat_model`` (LangChain) or
-``role_magentic_model`` (magentic). Both take their endpoint, key and model from
-a ``ResolvedRole`` and pass them explicitly, so ``OPENAI_*`` and ``MAGENTIC_*``
-environment variables cannot redirect a role (P8). xAI, LM Studio and Ollama
+Every chat role goes through ``build_chat_model`` (LangChain), ``run_structured``
+(``response_format`` json_schema) or ``role_pydantic_ai_model``. Each takes its
+endpoint, key and model from a ``ResolvedRole`` and passes them explicitly, so
+``OPENAI_*`` and ``MAGENTIC_*`` environment variables cannot redirect a role (P8). xAI, LM Studio and Ollama
 differ only in ``base_url`` and ``api_key_env`` inside ``models.json``.
 
 There is no fallback. A failed call raises ``ProviderError`` and nothing else is
 tried: retries are off, and no other provider or model is consulted.
+
+Every reply names the model that produced it. A server that answers a different
+model than the one asked for (LM Studio serves its loaded model for an unknown
+id) is a ``MODEL_MISMATCH``, and the reply is never used.
 
 The ``kind`` dispatch below is the single place the code branches on provider
 kind. Provider ids and model strings are never inspected.
@@ -15,17 +19,20 @@ kind. Provider ids and model strings are never inspected.
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from typing import Any, AsyncIterator, Callable, List, Optional, Sequence
+from typing import Any, AsyncIterator, Callable, List, Optional, Sequence, Type, TypeVar
 
 import httpx
+from pydantic import BaseModel, ValidationError
 
 from .errors import ModelRegistryError, ProviderError
 from .loader import ResolvedRole, get_active_registry
 from .schemas import KIND_OPENAI_COMPATIBLE
+from .wire_schema import WireReplyError, wire_spec
 
 logger = logging.getLogger(__name__)
+
+_ModelT = TypeVar("_ModelT", bound=BaseModel)
 
 
 # --- error mapping ---------------------------------------------------------
@@ -60,6 +67,24 @@ def map_exception(exc: BaseException, role: str) -> BaseException:
     return exc
 
 
+def check_served_model(role: str, requested: str, served: Any) -> None:
+    """Raise ``MODEL_MISMATCH`` unless the reply names exactly the requested model.
+
+    The comparison is exact string equality: the registry id is what the operator
+    pinned, and every runtime in the 2026-10 evidence reports that same id back.
+    No case folding, prefix stripping or alias table, so nothing is loosened
+    beyond what was observed. A reply with no model name is a mismatch too.
+
+    Residual: on the LangChain ``ainvoke`` path ``langchain_openai`` fills
+    ``response_metadata["model_name"]`` with the requested id when the server
+    omits ``model``, so "no model name" cannot fire there. LM Studio always sends
+    ``model``; ``run_structured`` reads the raw completion and has no such gap.
+    """
+
+    if not isinstance(served, str) or served != requested:
+        raise ProviderError("MODEL_MISMATCH", role)
+
+
 # --- LangChain path --------------------------------------------------------
 
 
@@ -81,7 +106,10 @@ class RoleChatModel:
 
     async def ainvoke(self, messages: Any, **kwargs: Any) -> Any:
         try:
-            return await self.inner.ainvoke(messages, **kwargs)
+            reply = await self.inner.ainvoke(messages, **kwargs)
+            metadata = getattr(reply, "response_metadata", None) or {}
+            check_served_model(self.role, self.model_id, metadata.get("model_name"))
+            return reply
         except Exception as exc:
             mapped = map_exception(exc, self.role)
             if mapped is exc:
@@ -90,8 +118,19 @@ class RoleChatModel:
 
     async def astream(self, messages: Any, **kwargs: Any) -> AsyncIterator[Any]:
         try:
+            named = False
             async for chunk in self.inner.astream(messages, **kwargs):
+                # LangChain puts the served model on the finish chunk only, so
+                # earlier tokens have already gone out. The check still runs before
+                # the finish chunk is passed on, and a stream that never names its
+                # model is a mismatch too.
+                served = (getattr(chunk, "response_metadata", None) or {}).get("model_name")
+                if served is not None:
+                    check_served_model(self.role, self.model_id, served)
+                    named = True
                 yield chunk
+            if not named:
+                raise ProviderError("MODEL_MISMATCH", self.role)
         except Exception as exc:
             mapped = map_exception(exc, self.role)
             if mapped is exc:
@@ -216,23 +255,85 @@ def role_pydantic_ai_model(resolved: ResolvedRole) -> Any:
     return OpenAIModel(resolved.model, provider=OpenAIProvider(openai_client=client))
 
 
-async def run_magentic(role: str, func: Callable[..., Any], *args: Any) -> Any:
-    """Run a magentic prompt function inside the model bound to ``role``.
+# --- structured output path ------------------------------------------------
 
-    The role resolves first: a missing role raises ``ModelRoleMissing`` before
-    any thread starts or request leaves the process. The prompt function runs in
-    a worker thread because magentic's sync API blocks.
+
+def _schema_name(schema: type[BaseModel]) -> str:
+    return "".join(ch if ch.isalnum() or ch in "_-" else "_" for ch in schema.__name__)[:64]
+
+
+async def run_structured(
+    role: str,
+    messages: Sequence[dict[str, Any]],
+    schema: Type[_ModelT],
+) -> _ModelT:
+    """One chat call whose answer must be a ``schema`` instance, via ``response_format``.
+
+    The request carries ``response_format={"type": "json_schema", "strict": true,
+    ...}``. The targets are LM Studio and Ollama, which constrain output to the
+    schema. The schema is the strict-subset wire form of ``schema``
+    (``wire_schema.wire_spec``: ``additionalProperties: false``, every property
+    required, defaults as nullable, no open objects), so a server that enforces
+    OpenAI's strict mode, OpenAI or Azure, accepts it too. The request has no
+    ``tools`` and no ``tool_choice``: servers differ on forced tool choice (LM
+    Studio rejects it, others accept it unenforced).
+
+    The role resolves first: a missing role raises before any request leaves the
+    process. Transport and API errors map through ``map_exception``. The reply is
+    accepted only if it names the requested model and its content is strict JSON
+    that matches the wire schema exactly and then validates, strictly, against the
+    real ``schema``. Anything else raises ``ProviderError`` (``MODEL_MISMATCH`` or
+    ``STRUCTURED_OUTPUT_INVALID``). There is no lenient parse, no fence stripping,
+    no retry and no second model.
     """
 
+    import openai
+
     resolved = get_active_registry().resolve(role)
-    model = role_magentic_model(resolved)
+    if resolved.kind != KIND_OPENAI_COMPATIBLE:
+        raise ProviderError("PROVIDER_KIND_UNSUPPORTED", role)
+    key = _require_key(resolved)
+    spec = wire_spec(schema)
+    request: dict[str, Any] = {
+        "model": resolved.model,
+        "messages": list(messages),
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": _schema_name(schema),
+                "strict": True,
+                "schema": spec.schema,
+            },
+        },
+    }
+    if resolved.temperature is not None:
+        request["temperature"] = resolved.temperature
+    if resolved.max_tokens is not None:
+        request["max_tokens"] = resolved.max_tokens
+    if resolved.top_p is not None:
+        request["top_p"] = resolved.top_p
 
-    def _call() -> Any:
-        with model:
-            return func(*args)
-
+    client = openai.AsyncOpenAI(
+        base_url=resolved.base_url,
+        api_key=key,
+        timeout=resolved.timeout_s,
+        max_retries=0,
+    )
     try:
-        return await asyncio.to_thread(_call)
+        try:
+            completion = await client.chat.completions.create(**request)
+        finally:
+            await client.close()
+        check_served_model(role, resolved.model, getattr(completion, "model", None))
+        choices = completion.choices or []
+        content = choices[0].message.content if choices else None
+        if not isinstance(content, str) or not content:
+            raise ProviderError("STRUCTURED_OUTPUT_INVALID", role)
+        try:
+            return schema.model_validate_json(spec.to_native_json(content), strict=True)
+        except (ValidationError, WireReplyError):
+            # The model's text is never put in the error: it can echo the prompt.
+            raise ProviderError("STRUCTURED_OUTPUT_INVALID", role) from None
     except Exception as exc:
         mapped = map_exception(exc, role)
         if mapped is exc:

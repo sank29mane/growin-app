@@ -70,6 +70,9 @@ growin_core = { path = "./growin_core_src" }
 asyncio_mode = "auto"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+markers = [
+    "live_local: runs against a local model runtime named by environment variables; skipped unless they are set and always skipped in CI",
+]
 filterwarnings = [
     "ignore:The 'app' shortcut is now deprecated:DeprecationWarning",
     "ignore:websockets.legacy is deprecated:DeprecationWarning",

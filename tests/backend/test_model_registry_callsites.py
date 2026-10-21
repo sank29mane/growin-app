@@ -23,11 +23,11 @@ from model_registry import (
     ModelRoleMissing,
     set_active_registry,
 )
-from model_registry.provider import run_magentic
 from model_registry_testkit import (  # noqa: F401  (fixtures)
     key_env,
     network_guard,
     registry_factory,
+    risk_workspace,
     stub,
 )
 
@@ -40,6 +40,12 @@ pytestmark = pytest.mark.asyncio
 @pytest.fixture(autouse=True)
 def _no_real_network(network_guard):
     return network_guard
+
+
+@pytest.fixture(autouse=True)
+def _risk_workspace(risk_workspace):
+    """The critic needs the loaded workspace config for its limits and currency."""
+    return risk_workspace
 
 
 def _models(stub_server):
@@ -153,7 +159,7 @@ async def test_title_generation_uses_the_decision_role(stub, registry_factory):
 
 async def test_extract_tool_calls_uses_the_decision_role(stub, registry_factory):
     registry_factory()
-    calls = await run_magentic("decision", extract_tool_calls, "content", "reasoning")
+    calls = await extract_tool_calls("content", "reasoning")
     assert calls == []
     assert _models(stub) == [kit.model_id_for("decision")]
     assert _prefixes(stub) == ["xai"]
