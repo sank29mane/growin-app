@@ -1,7 +1,8 @@
 """Strict loader for relay.json (OD-5).
 
 The file names the expected egress IP, the expected broker user id and the
-Secret Manager names of the two Breeze secrets, nothing else. Anything
+Secret Manager names of the two Breeze secrets, nothing else (63-05 adds two
+optional paths to the root-owned order configuration). Anything
 unexpected is refused: a missing or unknown key, an unfilled placeholder, a
 wrong type, a URL off the transport allowlist, limits above the broker's own,
 duplicate keys, a file readable by others.
@@ -31,6 +32,9 @@ _SAFE_KEY_RE = re.compile(r"^[A-Za-z0-9_.-]{1,40}$")
 
 DEFAULT_ECHO_URL = "https://api.ipify.org"
 DEFAULT_MASTER_URL = "https://directlink.icicidirect.com/NewSecurityMaster/SecurityMaster.zip"
+DEFAULT_LIMITS_PATH = "/etc/growin-gateway/limits.json"
+DEFAULT_ORDER_KEY_PATH = "/etc/growin-gateway/order-key.json"
+_PATH_RE = re.compile(r"^/[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$")
 MAX_PER_MINUTE = 100
 MAX_PER_DAY = 5000
 
@@ -41,6 +45,8 @@ OPTIONAL = (
     "per_minute",
     "per_day",
     "security_master_per_hour",
+    "limits_path",
+    "order_key_path",
 )
 SECRET_KEYS = ("app_key", "secret_key")
 
@@ -69,6 +75,8 @@ class RelayConfig:
     per_minute: int = 80
     per_day: int = 4500
     security_master_per_hour: int = 6
+    limits_path: str = DEFAULT_LIMITS_PATH
+    order_key_path: str = DEFAULT_ORDER_KEY_PATH
 
 
 def _reject_duplicates(pairs: list[tuple[str, object]]) -> dict:
@@ -138,6 +146,19 @@ def _url(raw: dict, key: str, default: str) -> str:
         or port not in (None, rule.port)
     ):
         raise ConfigError("bad_url", key)
+    return value
+
+
+def _path(raw: dict, key: str, default: str) -> str:
+    """An absolute path of plain name segments: no "..", no spaces, no NUL, at most 200 characters."""
+    value = raw.get(key, default)
+    if (
+        not isinstance(value, str)
+        or len(value) > 200
+        or _PATH_RE.fullmatch(value) is None
+        or ".." in value.split("/")
+    ):
+        raise ConfigError("bad_path", key)
     return value
 
 
@@ -213,4 +234,6 @@ def load_relay_config(path: Path) -> RelayConfig:
         per_minute=_limit(raw, "per_minute", 80, MAX_PER_MINUTE),
         per_day=_limit(raw, "per_day", 4500, MAX_PER_DAY),
         security_master_per_hour=_limit(raw, "security_master_per_hour", 6, None),
+        limits_path=_path(raw, "limits_path", DEFAULT_LIMITS_PATH),
+        order_key_path=_path(raw, "order_key_path", DEFAULT_ORDER_KEY_PATH),
     )

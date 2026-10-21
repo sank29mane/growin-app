@@ -37,6 +37,7 @@ from .config import ConfigError, RelayConfig, load_relay_config
 from .counter_store import CounterStore, FileCounterStore
 from .egress import EgressChecker
 from .events import EventLog
+from .orders.routes import OrderSettings, build_order_service
 from .pool import PooledTransport
 from .secret_source import SecretManagerSource, SecretSource, SecretsUnavailable, load_credentials
 from .session import SessionManager
@@ -130,8 +131,16 @@ def build_app(
     clock: Clock,
     events: EventLog,
     store: CounterStore,
+    state_dir: Path | None = None,
+    order_overrides: OrderSettings | None = None,
 ) -> FastAPI:
-    """Read the secrets, then wire the real relay. SecretsUnavailable propagates."""
+    """Read the secrets, then wire the real relay. SecretsUnavailable propagates.
+
+    The order routes are always mounted (63-05). Their configuration comes from the
+    root-owned files named in relay.json and the StateDirectory; if any of it cannot be
+    trusted the order routes answer 503 and the rest of the relay is unaffected.
+    ``order_overrides`` is for tests (a loopback kill fake, a test uid): main never sets it.
+    """
     credentials = load_credentials(secret_source, config.secret_names)
     egress = EgressChecker(
         transport,
@@ -156,6 +165,19 @@ def build_app(
         events=events,
         budget=budget,
     )
+    settings = order_overrides or OrderSettings(
+        state_dir=state_dir, limits_path=config.limits_path, key_path=config.order_key_path
+    )
+    orders = build_order_service(
+        settings,
+        session=session,
+        breeze=breeze,
+        credentials=credentials,
+        budget=budget,
+        events=events,
+        clock=clock,
+        security_master_url=config.security_master_url,
+    )
     return create_app(
         session=session,
         breeze=breeze,
@@ -164,6 +186,7 @@ def build_app(
         events=events,
         clock=clock,
         security_master_url=config.security_master_url,
+        orders=orders,
     )
 
 
@@ -264,6 +287,7 @@ def main(
                 clock=clock,
                 events=events,
                 store=store,
+                state_dir=Path(state_dir) if state_dir and os.path.isdir(state_dir) else None,
             )
         except SecretsUnavailable:
             return fail(EXIT_NO_SECRETS, "secrets_unavailable")

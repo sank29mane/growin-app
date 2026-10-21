@@ -501,8 +501,10 @@ def test_main_internal_ip_binds_the_metadata_address_and_runs(tmp_path, capsys):
     assert runner.servers[0].config.port == 8443
     assert closed == [True]  # the pool is closed when the server stops
     events = stdout_events(capsys)
-    assert [(e["event"], e["result"]) for e in events] == [("service_start", "ok")]
-    assert "reason" not in events[0]
+    # 63-05: the test has no root-owned order config, so the order routes start refused (one alarm)
+    assert [(e["event"], e["result"]) for e in events] == [("config_alarm", "error"), ("service_start", "ok")]
+    assert events[0]["reason"] == "config_invalid"
+    assert "reason" not in events[1]
     assert len(transport.calls_to("/network-interfaces/0/ip")) == 1
 
 
@@ -641,6 +643,7 @@ def test_state_directory_unset_or_not_a_directory_starts_with_one_alarm_and_refu
         events = stdout_events(capsys)
         assert [(e["event"], e.get("reason")) for e in events] == [
             ("config_alarm", "counter_unreadable"),
+            ("config_alarm", "config_invalid"),  # 63-05: no order config in the test either
             ("service_start", None),
         ]
         client = TestClient(runner.servers[0].config.app, base_url=BASE)

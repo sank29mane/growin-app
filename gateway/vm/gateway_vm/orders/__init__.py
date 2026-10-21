@@ -9,6 +9,15 @@ and never sent anywhere.
 from __future__ import annotations
 
 CONTRACT = "growin-orders/1"
+ORDERS_PATH_PREFIX = "/v1/orders/"  # every path under it speaks growin-orders/1 (O1)
+ROUTE_INTENTS = "/v1/orders/intents"
+ROUTE_AUTHORIZE = "/v1/orders/authorize"
+ROUTE_HALT = "/v1/orders/halt"
+ROUTE_STATE = "/v1/orders/state"
+ROUTE_AUDIT = "/v1/orders/audit"
+# O2: the five order routes. No route clears a latch, edits limits, enrols a key, or
+# places, modifies or cancels an order; test_gateway_orders_routes audits the route table.
+ORDER_ROUTES = frozenset({ROUTE_INTENTS, ROUTE_AUTHORIZE, ROUTE_HALT, ROUTE_STATE, ROUTE_AUDIT})
 ORDER_PURPOSE = "growin.relay.order"
 SIGNED_VERSION = 1
 CHALLENGE_TTL_SECONDS = 60
