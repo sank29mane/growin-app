@@ -556,6 +556,26 @@ def test_probe_refuses_an_unreadable_or_foreign_ledger(env: Env):
     assert sent(env) == 3
 
 
+def test_probe_refuses_a_v1_ledger_in_the_old_slot_level_layout(env: Env):
+    """codex-r4-1: a /1 ledger keeps its tries on the slot, where the /2 reader never looks.
+
+    Read as /2 it would show S-9 with no evidence, so a budget-refused repeat reported a clean
+    ``probe_budget_stop`` with exit 0 over two saved 502s. It must refuse instead.
+    """
+    env.step("S-3")
+    path = env.dir / f"ledger-{TODAY.isoformat()}.json"
+    data = json.loads(path.read_text())
+    data["schema"] = "growin.probe.ledger/1"
+    data["steps"]["S-9"] = {"slots": {"S-9": {"requests": 2, "attempts": ["error_502", "error_502"], "result": "error_502"}}}
+    path.write_text(json.dumps(data))
+    calls = sent(env)
+    code, lines = env.step("S-9")
+    assert code != 0
+    assert lines == ["probe_error ledger_invalid"]
+    assert not any("probe_budget_stop" in line for line in lines)
+    assert sent(env) == calls
+
+
 def test_probe_rejects_an_unknown_step(env: Env):
     out = io.StringIO()
     code = cli_mod.main(["probe-intraday", "step", "--step", "S-11", "--probe-dir", str(env.dir)],
