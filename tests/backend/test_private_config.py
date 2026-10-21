@@ -772,7 +772,7 @@ def test_loader_and_execution_read_the_one_venue_registry():
     from execution import venue as execution_venue
 
     assert execution_venue.known_venues() == venue_registry.known_venues()
-    assert execution_venue.known_venues() == ("paper", "t212_practice")
+    assert execution_venue.known_venues() == ("paper", "breeze_relay", "t212_practice")
     assert execution_venue.spec_for is venue_registry.spec_for
 
 

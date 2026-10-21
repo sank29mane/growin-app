@@ -31,12 +31,13 @@ from typing import Callable, Iterator, Mapping, Optional
 
 VENUE_PAPER = "paper"
 VENUE_T212_PRACTICE = "t212_practice"
+VENUE_BREEZE_RELAY = "breeze_relay"
 
 KNOWN_WORKSPACES = frozenset({"uk", "india"})
 LIVE_MODE = "LIVE"
 # The non-LIVE order modes a spec may allow: ``execution.models.OrderMode``
 # minus LIVE. This module cannot import it, so a test pins the two together.
-KNOWN_ORDER_MODES = frozenset({"PAPER", "PRACTICE"})
+KNOWN_ORDER_MODES = frozenset({"PAPER", "PRACTICE", "SHADOW"})
 # The currency each workspace may bind a venue in.
 WORKSPACE_CURRENCIES: Mapping[str, str] = MappingProxyType({"uk": "GBP", "india": "INR"})
 
@@ -108,6 +109,22 @@ T212_PRACTICE_SPEC = VenueSpec(
     dispatcher_key=VENUE_T212_PRACTICE,
 )
 
+def _breeze_relay_ledger_path() -> Path:
+    return venue_ledger_path("india", VENUE_BREEZE_RELAY)
+
+
+# Phase 63: the India relay. SHADOW is the only mode: the VM verifies a signed order and
+# refuses to forward it, so nothing is ever placed (growin-orders/1, O5).
+BREEZE_RELAY_SPEC = VenueSpec(
+    kind=VENUE_BREEZE_RELAY,
+    workspace="india",
+    currency="INR",
+    modes=frozenset({"SHADOW"}),
+    ledger_path=_breeze_relay_ledger_path,
+    dispatcher_key=VENUE_BREEZE_RELAY,
+)
+
+
 def _validated_copy(kind: object, spec: object) -> VenueSpec:
     """A fresh, fully re-validated copy of one registry entry, or ValueError.
 
@@ -172,7 +189,9 @@ class _SpecsView(Mapping):
 # Built and validated once, at import. Everything below reads _REGISTRY.specs,
 # never a public name, so reassigning VENUE_SPECS or T212_PRACTICE_SPEC at
 # runtime cannot register, replace or remove a venue.
-_REGISTRY = _Registry(_seal({T212_PRACTICE_SPEC.kind: T212_PRACTICE_SPEC}))
+_REGISTRY = _Registry(_seal(
+    {T212_PRACTICE_SPEC.kind: T212_PRACTICE_SPEC, BREEZE_RELAY_SPEC.kind: BREEZE_RELAY_SPEC}
+))
 VENUE_SPECS: Mapping[str, VenueSpec] = _SpecsView()
 
 
@@ -216,10 +235,12 @@ def known_venues() -> tuple[str, ...]:
 
 
 __all__ = [
+    "BREEZE_RELAY_SPEC",
     "KNOWN_ORDER_MODES",
     "KNOWN_WORKSPACES",
     "LIVE_MODE",
     "T212_PRACTICE_SPEC",
+    "VENUE_BREEZE_RELAY",
     "VENUE_PAPER",
     "VENUE_SPECS",
     "VENUE_T212_PRACTICE",

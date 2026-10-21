@@ -39,6 +39,10 @@ class OrderMode(str, Enum):
     # accepted only by a ledger bound to a practice venue (execution.venue);
     # every other ledger refuses it. LIVE stays refused everywhere.
     PRACTICE = "PRACTICE"
+    # Phase 63: the relay path that never places. The Mac and the VM both verify the
+    # signed order and the VM refuses to forward it. Accepted only by a ledger bound to
+    # the breeze_relay venue; every other ledger refuses it. LIVE stays refused everywhere.
+    SHADOW = "SHADOW"
     LIVE = "LIVE"
 
 

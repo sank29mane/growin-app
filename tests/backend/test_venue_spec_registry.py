@@ -36,8 +36,11 @@ from execution.venue import (
     resolve_factory,
 )
 from private_config import PrivateConfigError, load_workspace_config
-from venue_registry import VenueSpec, override_venue_specs
+from venue_registry import VENUE_BREEZE_RELAY, VenueSpec, override_venue_specs
 from venue_seam_testkit import write_json
+
+# Sorted, as ``registered_kinds`` returns them.
+PRODUCTION_KINDS = (VENUE_BREEZE_RELAY, VENUE_T212_PRACTICE)
 
 FAKE_KIND = "fake_india_shadow"
 FAKE_ACCOUNT = "acct-fake-india-0001"
@@ -72,12 +75,16 @@ def _fake_binding() -> VenueBinding:
     return VenueBinding(venue=FAKE_KIND, account_id=FAKE_ACCOUNT, currency="INR")
 
 
-def test_production_registry_holds_only_the_practice_spec():
-    assert venue_registry.registered_kinds() == (VENUE_T212_PRACTICE,)
+def test_production_registry_holds_the_practice_and_relay_specs():
+    assert venue_registry.registered_kinds() == PRODUCTION_KINDS
     spec = venue_registry.spec_for(VENUE_T212_PRACTICE)
     assert (spec.workspace, spec.currency, spec.modes) == ("uk", "GBP", frozenset({"PRACTICE"}))
     assert spec.dispatcher_key == VENUE_T212_PRACTICE
-    assert venue_registry.spec_for("breeze_relay") is None
+    relay = venue_registry.spec_for(VENUE_BREEZE_RELAY)
+    # SHADOW is the relay's only mode: the VM verifies and refuses to forward (63).
+    assert (relay.workspace, relay.currency, relay.modes) == ("india", "INR", frozenset({"SHADOW"}))
+    assert relay.dispatcher_key == VENUE_BREEZE_RELAY
+    assert venue_registry.spec_for("breeze_relay_live") is None
 
 
 def test_the_fake_spec_binding_takes_its_own_currency(with_fake_spec):
@@ -238,10 +245,11 @@ def test_the_binding_ddl_is_enumerated_from_the_registered_specs(with_fake_spec)
 
     insert(FAKE_KIND, "INR")
     insert(VENUE_T212_PRACTICE, "GBP")
+    insert(VENUE_BREEZE_RELAY, "INR")
     for venue, currency in (
         (FAKE_KIND, "GBP"),
         (VENUE_T212_PRACTICE, "INR"),
-        ("breeze_relay", "INR"),
+        (VENUE_BREEZE_RELAY, "GBP"),
         ("paper", "GBP"),
         ("", "INR"),
     ):
@@ -250,8 +258,9 @@ def test_the_binding_ddl_is_enumerated_from_the_registered_specs(with_fake_spec)
     probe.close()
 
 
-def test_the_production_binding_ddl_allows_only_the_practice_pair():
+def test_the_production_binding_ddl_allows_only_the_registered_pairs():
     assert _venue_binding_check() == (
+        f"(venue = '{VENUE_BREEZE_RELAY}' AND currency = 'INR') OR "
         f"(venue = '{VENUE_T212_PRACTICE}' AND currency = 'GBP')"
     )
 
@@ -299,8 +308,8 @@ def test_reassigning_the_public_registry_names_changes_nothing(monkeypatch, tmp_
     # A new venue by reassigning the public name: not registered, not accepted.
     monkeypatch.setattr(venue_registry, "VENUE_SPECS", {FAKE_KIND: spec})
     assert venue_registry.spec_for(FAKE_KIND) is None
-    assert venue_registry.registered_kinds() == (VENUE_T212_PRACTICE,)
-    assert venue_registry.known_venues() == ("paper", VENUE_T212_PRACTICE)
+    assert venue_registry.registered_kinds() == PRODUCTION_KINDS
+    assert venue_registry.known_venues() == ("paper", *PRODUCTION_KINDS)
     assert allowed_modes(binding) == frozenset()
     assert intent_refusal(FAKE_MODE, FAKE_KIND, FAKE_ACCOUNT, binding) == MODE_VENUE_MISMATCH
     with pytest.raises(VenueError):
@@ -329,7 +338,7 @@ def test_reassigning_the_public_registry_names_changes_nothing(monkeypatch, tmp_
 
 def test_the_public_registry_view_is_read_only_and_follows_the_sealed_registry(tmp_path):
     view = venue_registry.VENUE_SPECS
-    assert list(view) == [VENUE_T212_PRACTICE]
+    assert sorted(view) == list(PRODUCTION_KINDS)
     with pytest.raises(TypeError):
         view["x"] = _fake_spec(tmp_path)  # type: ignore[index]
     with override_venue_specs({FAKE_KIND: _fake_spec(tmp_path)}):
@@ -342,7 +351,7 @@ def test_the_override_restores_the_registry_on_exit_and_on_error(tmp_path):
         with override_venue_specs({FAKE_KIND: _fake_spec(tmp_path)}):
             assert venue_registry.spec_for(FAKE_KIND) is not None
             raise RuntimeError("boom")
-    assert venue_registry.registered_kinds() == (VENUE_T212_PRACTICE,)
+    assert venue_registry.registered_kinds() == PRODUCTION_KINDS
 
 
 def _forced(spec: VenueSpec, **fields) -> VenueSpec:
@@ -369,7 +378,7 @@ def _forced(spec: VenueSpec, **fields) -> VenueSpec:
         pytest.param(lambda spec: None, id="none"),
         pytest.param(lambda spec: _forced(spec, modes=frozenset({"LIVE"})), id="live-mode"),
         pytest.param(lambda spec: _forced(spec, modes=frozenset()), id="no-modes"),
-        pytest.param(lambda spec: _forced(spec, modes=frozenset({"SHADOW"})), id="unknown-mode"),
+        pytest.param(lambda spec: _forced(spec, modes=frozenset({"FUTURE"})), id="unknown-mode"),
         pytest.param(lambda spec: _forced(spec, currency="GBP"), id="currency-vs-workspace"),
         pytest.param(lambda spec: _forced(spec, workspace="uk"), id="workspace-vs-currency"),
         pytest.param(lambda spec: _forced(spec, workspace="mars"), id="unknown-workspace"),

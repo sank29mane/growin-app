@@ -68,13 +68,18 @@ def uk_process(monkeypatch):
     monkeypatch.setenv("GROWIN_WORKSPACE", "uk")
 
 
-def test_production_factory_map_holds_paper_and_the_demo_only_practice_adapter():
+def test_production_factory_map_holds_paper_practice_and_the_shadow_relay():
     # 66-03: the map gained the practice adapter, which can reach the demo host only.
-    # It is still not a live-capable entry: no other venue id is in the map.
-    assert set(production_dispatcher_factories()) == {VENUE_PAPER, VENUE_T212_PRACTICE}
+    # 63-05: it gained the relay dispatcher, which can only send a signature for the VM to
+    # verify; the VM refuses to forward. No live-capable entry: no other venue id is in the map.
+    assert set(production_dispatcher_factories()) == {
+        VENUE_PAPER,
+        VENUE_T212_PRACTICE,
+        "breeze_relay",
+    }
 
 
-@pytest.mark.parametrize("venue", ["t212_live", "", "PAPER", "breeze_relay", None])
+@pytest.mark.parametrize("venue", ["t212_live", "", "PAPER", "breeze_relay_live", None])
 def test_resolving_an_unknown_venue_raises_and_never_returns_the_paper_factory(venue):
     from execution.venue import resolve_factory, select_dispatcher, VenueContext
 

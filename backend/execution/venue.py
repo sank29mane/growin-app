@@ -10,8 +10,8 @@ It imports only ``models`` and the stdlib-only ``venue_registry`` so the
 ledger, approval and service layers can all use it without a cycle. Which venue
 kinds exist, and what each one is bound to, is declared once in
 ``venue_registry.VENUE_SPECS``; nothing here names a venue kind in guard logic.
-It contacts no broker, and the production map holds only ``paper``: a practice
-dispatcher is registered by tests, or by a later plan, never here.
+It contacts no broker. The production map holds ``paper``, the demo-only practice adapter and
+the SHADOW relay dispatcher, which builds lazily and forwards nothing (63-05).
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 import venue_registry
 from venue_registry import (
+    VENUE_BREEZE_RELAY,
     VENUE_PAPER,
     VENUE_T212_PRACTICE,
     VenueSpec,
@@ -158,11 +159,26 @@ def refusal_text(code: str) -> str:
 
 
 def execution_mode_label(authority: bool, binding: Optional[VenueBinding]) -> str:
-    """``practice``, ``paper`` or ``disabled``: the one status vocabulary."""
+    """``practice``, ``shadow``, ``paper`` or ``disabled``: the one status vocabulary.
+
+    ``shadow`` is a bound venue whose only mode is SHADOW (the signed relay): the VM verifies
+    the order and never forwards it, so it is neither paper nor a practice account.
+    """
 
     if not authority:
         return "disabled"
-    return "paper" if binding is None else "practice"
+    if binding is None:
+        return "paper"
+    return "shadow" if is_shadow_binding(binding) else "practice"
+
+
+def is_shadow_binding(binding: Optional[VenueBinding]) -> bool:
+    """True when the binding's venue spec accepts SHADOW and nothing else."""
+
+    if binding is None:
+        return False
+    spec = spec_for(binding.venue)
+    return spec is not None and spec.modes == frozenset({OrderMode.SHADOW.value})
 
 
 # Where an admission price may come from in a bound-venue ledger (Phase 66, D-02).
@@ -172,16 +188,27 @@ def execution_mode_label(authority: bool, binding: Optional[VenueBinding]) -> st
 # ``ExecutionService(allow_test_price_sources=True)``); production never does.
 PRICE_SOURCE_OPERATOR_RECORDED = "operator-recorded"
 PRICE_SOURCE_TEST_REPLAY = "local-replay"
+# ``relay-quote`` is the one India SHADOW source (63-05): the admission price is the order's own
+# LIMIT, and the quote that bounds it came from the relay. A UK practice ledger never admits it.
+PRICE_SOURCE_RELAY_QUOTE = "relay-quote"
 ADMISSIBLE_PRICE_SOURCES = frozenset({PRICE_SOURCE_OPERATOR_RECORDED})
+SHADOW_PRICE_SOURCES = frozenset({PRICE_SOURCE_RELAY_QUOTE})
 TEST_ONLY_PRICE_SOURCES = frozenset({PRICE_SOURCE_TEST_REPLAY})
 
 
-def admissible_price_sources(allow_test_sources: bool = False) -> frozenset[str]:
-    """The price sources a bound venue admits from; test sources only on explicit opt-in."""
+def admissible_price_sources(
+    allow_test_sources: bool = False, binding: Optional[VenueBinding] = None
+) -> frozenset[str]:
+    """The price sources a bound venue admits from; test sources only on explicit opt-in.
 
+    A SHADOW-only binding (the India relay) admits ``relay-quote`` and not the UK practice
+    source, so the two venues never share a price source.
+    """
+
+    base = SHADOW_PRICE_SOURCES if is_shadow_binding(binding) else ADMISSIBLE_PRICE_SOURCES
     if allow_test_sources:
-        return ADMISSIBLE_PRICE_SOURCES | TEST_ONLY_PRICE_SOURCES
-    return ADMISSIBLE_PRICE_SOURCES
+        return base | TEST_ONLY_PRICE_SOURCES
+    return base
 
 
 @dataclass(frozen=True)
@@ -242,14 +269,33 @@ def _t212_practice_factory(context: VenueContext) -> VenueDispatcher:
     return practice_factory()(context)
 
 
-def production_dispatcher_factories() -> dict[str, DispatcherFactory]:
-    """The production map: ``paper`` and the practice (demo-only) adapter.
+def _breeze_relay_factory(context: VenueContext) -> VenueDispatcher:
+    """The India SHADOW relay dispatcher. Building it opens no tunnel and no network.
 
-    Nothing here can reach a live broker host: the practice adapter defines only
-    the demo base URL and refuses any other host before a request is sent.
+    The relay link opens on first use, so a process that never approves a SHADOW order never
+    starts the IAP tunnel. The dispatcher can only ask the VM to verify a signed order: the VM
+    forward step is the constant refusal (VERIFIED_NOT_FORWARDED).
     """
 
-    return {VENUE_PAPER: _paper_factory, VENUE_T212_PRACTICE: _t212_practice_factory}
+    from brokers.breeze_gateway.orders import RelayLink
+    from .relay_dispatcher import RelayDispatcher
+
+    return RelayDispatcher(RelayLink.production())
+
+
+def production_dispatcher_factories() -> dict[str, DispatcherFactory]:
+    """The production map: ``paper``, the practice (demo-only) adapter and the SHADOW relay.
+
+    Nothing here can reach a live broker host: the practice adapter defines only the demo
+    base URL and refuses any other host before a request is sent, and the relay dispatcher
+    reaches only the VM's ``/v1/orders/authorize``, which forwards nothing.
+    """
+
+    return {
+        VENUE_PAPER: _paper_factory,
+        VENUE_T212_PRACTICE: _t212_practice_factory,
+        VENUE_BREEZE_RELAY: _breeze_relay_factory,
+    }
 
 
 def resolve_factory(
@@ -283,7 +329,9 @@ __all__ = [
     "ADMISSIBLE_PRICE_SOURCES",
     "CancelResult",
     "PRICE_SOURCE_OPERATOR_RECORDED",
+    "PRICE_SOURCE_RELAY_QUOTE",
     "PRICE_SOURCE_TEST_REPLAY",
+    "SHADOW_PRICE_SOURCES",
     "TEST_ONLY_PRICE_SOURCES",
     "admissible_price_sources",
     "VenueCanceller",
@@ -294,6 +342,7 @@ __all__ = [
     "LIVE_DISABLED",
     "MODE_VENUE_MISMATCH",
     "PracticeCaps",
+    "VENUE_BREEZE_RELAY",
     "VENUE_PAPER",
     "VENUE_T212_PRACTICE",
     "VenueBinding",
@@ -305,6 +354,7 @@ __all__ = [
     "allowed_modes",
     "execution_mode_label",
     "intent_refusal",
+    "is_shadow_binding",
     "known_venues",
     "production_dispatcher_factories",
     "refusal_text",
