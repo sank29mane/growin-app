@@ -10,6 +10,10 @@ runtime. It is skipped unless ``GROWIN_LIVE_CRITIC_BASE_URL`` and
     PYTHONPATH=backend uv run --project backend pytest \\
     tests/backend/test_critic_live_eval.py -m live_local -s -q
 
+The critic needs a reasoning model with thinking on: the call sends no
+``response_format`` (the schema is in the prompt), and a reply with no reasoning
+evidence is refused (D3).
+
 Per case it prints PASS, FALSE_APPROVE, FAIL_CLOSED, SOFT or FALSE_BLOCK. It fails on
 any FALSE_APPROVE, any FAIL_CLOSED (CRITIC_OUTPUT_INVALID or MODEL_MISMATCH) and any
 must_block case that is not BLOCKED. FALSE_BLOCK is reported, not asserted.
@@ -27,7 +31,7 @@ from typing import List, Optional
 import pytest
 
 import model_registry_testkit as kit
-from agents.risk_agent import RiskAgent
+from agents.risk_agent import RiskAgent, RiskAssessment
 from app_context import state
 from critic_cases import (
     CASES,
@@ -44,6 +48,8 @@ from critic_cases import (
     score,
 )
 from market_context import MarketContext, PortfolioData, PriceData
+from model_registry.wire_schema import wire_spec
+from model_stub_server import embedded_schema
 from model_registry import ModelRegistryError, ProviderError, load_registry_file, set_active_registry
 from model_registry_testkit import key_env, network_guard, stub  # noqa: F401  (fixtures)
 
@@ -207,6 +213,34 @@ async def test_text_that_is_not_a_verdict_is_fail_closed_for_every_case(stub_reg
     results = await run_cases(monkeypatch, tmp_path)
     assert {r.verdict for r in results} == {FAIL_CLOSED}
     assert {r.status for r in results} == {"CRITIC_OUTPUT_INVALID"}
+
+
+async def test_a_critic_with_no_reasoning_evidence_is_fail_closed_for_every_case(stub_registry, monkeypatch, tmp_path):
+    """67-FU2 D3: a verdict from a model that did not think is refused, even a correct BLOCKED."""
+    stub_registry.structured["RiskAssessment"] = _verdict("BLOCKED")
+    stub_registry.reasoning_tokens = 0
+    results = await run_cases(monkeypatch, tmp_path)
+    assert {r.verdict for r in results} == {FAIL_CLOSED}
+    assert {r.status for r in results} == {"CRITIC_OUTPUT_INVALID"}
+    assert len(acceptance_failures(results)) == 25
+
+
+async def test_a_critic_cut_off_at_the_token_limit_is_fail_closed_for_every_case(stub_registry, monkeypatch, tmp_path):
+    stub_registry.structured["RiskAssessment"] = _verdict("BLOCKED")
+    stub_registry.finish_reason = "length"
+    results = await run_cases(monkeypatch, tmp_path)
+    assert {r.verdict for r in results} == {FAIL_CLOSED}
+    assert {r.status for r in results} == {"CRITIC_OUTPUT_INVALID"}
+
+
+async def test_every_case_request_has_no_response_format_and_the_schema_in_the_prompt(
+    stub_registry, monkeypatch, tmp_path
+):
+    stub_registry.structured["RiskAssessment"] = _verdict("BLOCKED")
+    await run_cases(monkeypatch, tmp_path, CASES[:3])
+    for request in stub_registry.snapshot():
+        assert "response_format" not in request.json and "tools" not in request.json
+        assert embedded_schema(request.json) == wire_spec(RiskAssessment).schema
 
 
 async def test_a_wrong_model_is_fail_closed_with_its_own_code(stub_registry, monkeypatch, tmp_path):

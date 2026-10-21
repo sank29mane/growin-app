@@ -64,7 +64,7 @@ EXTRACT_TOOL_CALLS_TEMPLATE = (
 )
 
 async def extract_tool_calls(content: str, reasoning: str) -> List[ToolCall]:
-    """Extract tool calls from a reply through the decision role's json_schema output.
+    """Extract tool calls from a reply through the decision role's structured output (schema in the prompt).
 
     This is plain structured extraction: the model never holds tools. Output that
     does not validate raises ``ProviderError`` (``STRUCTURED_OUTPUT_INVALID``).
@@ -693,7 +693,7 @@ class DecisionAgent:
 
                 response_id = None
                 
-                # SOTA 2026: Agentic Tool Extraction (json_schema output), bound to the decision role
+                # SOTA 2026: Agentic Tool Extraction (structured output), bound to the decision role
                 tool_calls = await extract_tool_calls(content, reasoning)
                 
                 if tool_calls:

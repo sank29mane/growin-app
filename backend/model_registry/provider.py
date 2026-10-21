@@ -1,7 +1,7 @@
 """The one OpenAI-compatible provider.
 
 Every chat role goes through ``build_chat_model`` (LangChain), ``run_structured``
-(``response_format`` json_schema) or ``role_pydantic_ai_model``. Each takes its
+(one plain call, the wire schema in the prompt, a strict parse) or ``role_pydantic_ai_model``. Each takes its
 endpoint, key and model from a ``ResolvedRole`` and passes them explicitly, so
 ``OPENAI_*`` and ``MAGENTIC_*`` environment variables cannot redirect a role (P8). xAI, LM Studio and Ollama
 differ only in ``base_url`` and ``api_key_env`` inside ``models.json``.
@@ -19,6 +19,7 @@ kind. Provider ids and model strings are never inspected.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, AsyncIterator, Callable, List, Optional, Sequence, Type, TypeVar
 
@@ -27,7 +28,7 @@ from pydantic import BaseModel, ValidationError
 
 from .errors import ModelRegistryError, ProviderError
 from .loader import ResolvedRole, get_active_registry
-from .schemas import KIND_OPENAI_COMPATIBLE
+from .schemas import KIND_OPENAI_COMPATIBLE, ROLE_RISK_CRITIC
 from .wire_schema import WireReplyError, wire_spec
 
 logger = logging.getLogger(__name__)
@@ -258,8 +259,54 @@ def role_pydantic_ai_model(resolved: ResolvedRole) -> Any:
 # --- structured output path ------------------------------------------------
 
 
-def _schema_name(schema: type[BaseModel]) -> str:
-    return "".join(ch if ch.isalnum() or ch in "_-" else "_" for ch in schema.__name__)[:64]
+_SCHEMA_INSTRUCTION = (
+    "Answer with a single JSON object matching this JSON schema and nothing else.\n"
+    "JSON schema:\n"
+)
+
+
+def _with_schema_instruction(
+    role: str, messages: Sequence[dict[str, Any]], schema_text: str
+) -> list[dict[str, Any]]:
+    """Copies of ``messages`` with the schema instruction appended to the last user message.
+
+    The caller's messages are not changed. No user message at all is a caller bug and
+    is refused before any request leaves the process.
+    """
+
+    copies = [dict(m) for m in messages]
+    for index in range(len(copies) - 1, -1, -1):
+        if copies[index].get("role") != "user":
+            continue
+        addition = "\n\n" + _SCHEMA_INSTRUCTION + schema_text
+        content = copies[index].get("content")
+        if isinstance(content, str):
+            copies[index]["content"] = content + addition
+        elif isinstance(content, list):
+            copies[index]["content"] = [*content, {"type": "text", "text": addition.lstrip("\n")}]
+        else:
+            break
+        return copies
+    raise ProviderError("PROVIDER_REQUEST_REJECTED", role)
+
+
+def _has_reasoning_evidence(completion: Any, message: Any) -> bool:
+    """True when the server reports that the model reasoned.
+
+    Evidence is a positive ``usage.completion_tokens_details.reasoning_tokens`` or a
+    non-empty ``reasoning_content`` / ``reasoning`` on the message. A runtime that
+    reports neither gives no evidence, so the caller that needs it fails closed.
+    """
+
+    details = getattr(getattr(completion, "usage", None), "completion_tokens_details", None)
+    tokens = getattr(details, "reasoning_tokens", None)
+    if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens > 0:
+        return True
+    for name in ("reasoning_content", "reasoning"):
+        text = getattr(message, name, None)
+        if isinstance(text, str) and text.strip():
+            return True
+    return False
 
 
 async def run_structured(
@@ -267,24 +314,24 @@ async def run_structured(
     messages: Sequence[dict[str, Any]],
     schema: Type[_ModelT],
 ) -> _ModelT:
-    """One chat call whose answer must be a ``schema`` instance, via ``response_format``.
+    """One chat call whose answer must be a ``schema`` instance.
 
-    The request carries ``response_format={"type": "json_schema", "strict": true,
-    ...}``. The targets are LM Studio and Ollama, which constrain output to the
-    schema. The schema is the strict-subset wire form of ``schema``
-    (``wire_schema.wire_spec``: ``additionalProperties: false``, every property
-    required, defaults as nullable, no open objects), so a server that enforces
-    OpenAI's strict mode, OpenAI or Azure, accepts it too. The request has no
-    ``tools`` and no ``tool_choice``: servers differ on forced tool choice (LM
-    Studio rejects it, others accept it unenforced).
+    The request carries no ``response_format``, no ``tools`` and no ``tool_choice``.
+    On LM Studio, constrained decoding switches a reasoning model's thinking off or
+    leaves it with no room to answer, so the schema goes in the prompt instead: one
+    fixed instruction and the JSON text of the strict wire schema
+    (``wire_schema.wire_spec``) are appended to the last user message.
 
     The role resolves first: a missing role raises before any request leaves the
     process. Transport and API errors map through ``map_exception``. The reply is
-    accepted only if it names the requested model and its content is strict JSON
-    that matches the wire schema exactly and then validates, strictly, against the
-    real ``schema``. Anything else raises ``ProviderError`` (``MODEL_MISMATCH`` or
-    ``STRUCTURED_OUTPUT_INVALID``). There is no lenient parse, no fence stripping,
-    no retry and no second model.
+    accepted only if it names the requested model, its ``finish_reason`` is
+    ``"stop"`` (a reply cut off at the token limit is never parsed), and its content
+    is strict JSON that matches the wire schema exactly and then validates,
+    strictly, against the real ``schema``. For the risk critic the reply must also
+    show that the model reasoned (``REASONING_ABSENT``): a verdict from a model that
+    did not think is the no-think failure the critic evals recorded. Anything else
+    raises ``ProviderError`` (``MODEL_MISMATCH``, ``STRUCTURED_OUTPUT_INVALID`` or
+    ``REASONING_ABSENT``). There is no lenient parse, no retry and no second model.
     """
 
     import openai
@@ -296,15 +343,7 @@ async def run_structured(
     spec = wire_spec(schema)
     request: dict[str, Any] = {
         "model": resolved.model,
-        "messages": list(messages),
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": _schema_name(schema),
-                "strict": True,
-                "schema": spec.schema,
-            },
-        },
+        "messages": _with_schema_instruction(role, messages, json.dumps(spec.schema)),
     }
     if resolved.temperature is not None:
         request["temperature"] = resolved.temperature
@@ -326,7 +365,12 @@ async def run_structured(
             await client.close()
         check_served_model(role, resolved.model, getattr(completion, "model", None))
         choices = completion.choices or []
-        content = choices[0].message.content if choices else None
+        if not choices or choices[0].finish_reason != "stop":
+            raise ProviderError("STRUCTURED_OUTPUT_INVALID", role)
+        message = choices[0].message
+        if role == ROLE_RISK_CRITIC and not _has_reasoning_evidence(completion, message):
+            raise ProviderError("REASONING_ABSENT", role)
+        content = message.content
         if not isinstance(content, str) or not content:
             raise ProviderError("STRUCTURED_OUTPUT_INVALID", role)
         try:

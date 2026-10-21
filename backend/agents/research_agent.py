@@ -56,7 +56,7 @@ NEWS_QUERY_TEMPLATE = (
 )
 
 async def generate_news_query(ticker: str, company_name: str, market_context: str) -> NewsDataQueryParams:
-    """NewsData.io query parameters through the research role's json_schema output."""
+    """NewsData.io query parameters through the research role's structured output (schema in the prompt)."""
     return await run_structured(
         ROLE_RESEARCH,
         [{"role": "user", "content": NEWS_QUERY_TEMPLATE.format(ticker=ticker, company_name=company_name, market_context=market_context)}],
@@ -494,7 +494,7 @@ class ResearchAgent(BaseAgent):
 
     async def _generate_smart_query(self, user_query: str) -> Optional[Dict]:
         """
-        SOTA 2026: Agentic News Query Generation (json_schema output).
+        SOTA 2026: Agentic News Query Generation (structured output).
         Uses structured output via Pydantic to ensure valid API parameters.
         """
         try:

@@ -1,7 +1,7 @@
 """The strict wire schema of a structured answer, and its strict decoder.
 
-``run_structured`` sends ``response_format.json_schema.strict = true``. OpenAI's
-strict mode accepts only a subset of JSON Schema: every object has
+``run_structured`` puts this schema in the prompt (it sends no ``response_format``).
+It keeps the OpenAI strict-mode subset, which accepts only a subset of JSON Schema: every object has
 ``additionalProperties: false``, every property is listed in ``required``, no
 object is open, and bounds such as ``minimum`` are not enforced. A raw Pydantic
 schema breaks all of that, and a server that enforces strict mode answers 400.

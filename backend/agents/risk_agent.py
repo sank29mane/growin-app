@@ -228,7 +228,7 @@ class RiskAgent(BaseAgent):
     async def analyze(self, context_dict: Dict[str, Any]) -> AgentResponse:
         """
         Main analysis method required by BaseAgent.
-        SOTA 2026: structured risk audit through the risk_critic role (json_schema output).
+        SOTA 2026: structured risk audit through the risk_critic role (schema in the prompt, strict parse).
         """
         # In this context, 'context' is the MarketContext object
         market_context: MarketContext = context_dict.get("context")
@@ -288,8 +288,10 @@ class RiskAgent(BaseAgent):
             )
                 
         except ProviderError as e:
-            if e.code == "STRUCTURED_OUTPUT_INVALID":
-                # Non-conforming critic output keeps its own typed refusal.
+            if e.code in ("STRUCTURED_OUTPUT_INVALID", "REASONING_ABSENT"):
+                # Non-conforming critic output, or a verdict from a model that showed
+                # no reasoning, keeps the critic's own typed refusal. Same downstream
+                # fail-closed path; the provider code stays distinct in its own logs.
                 raise ProviderError("CRITIC_OUTPUT_INVALID", ROLE_RISK_CRITIC) from None
             raise
         except ModelRegistryError:
