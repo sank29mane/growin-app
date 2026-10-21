@@ -210,8 +210,9 @@ nonisolated enum SignerSourceScan {
     ///   `Growin.` prefix and `Optional<` / `Array<` / `(` / `[` wrappers. The router name on the right
     ///   may be backticked (`` `ApprovalSignerRouter` ``, including `` Growin.`ApprovalSignerRouter` ``).
     ///   The alias name may be backticked and may take a generic parameter clause
-    ///   (`typealias Box<T> = ApprovalSignerRouter`). Nothing outside the router's file needs an alias,
-    ///   so the declaration itself is a violation. Constructions through that name are counted too:
+    ///   (`typealias Box<T> = ApprovalSignerRouter`), and an `associatedtype` may carry a constraint
+    ///   clause (`associatedtype R: Sendable & AnyObject = ApprovalSignerRouter`). Nothing outside the
+    ///   router's file needs an alias, so the declaration itself is a violation. Constructions through that name are counted too:
     ///   `R(` / `R.init`, and the same with explicit generic arguments (`Box<Int>(`, `Box<Int>.init`,
     ///   `let r: Box<Int> = .init`). `ApprovalSignerRouterConfig` is a different identifier and does not
     ///   count.
@@ -243,11 +244,19 @@ nonisolated enum SignerSourceScan {
         return spelled + annotated + inferred + aliased + extended + viaAlias
     }
 
+    /// One type in an associated type's constraint clause: a dotted name with optional generic arguments.
+    private static let routerAliasConstraintType =
+        #"`?[A-Za-z_][A-Za-z0-9_]*`?(?:\s*\.\s*`?[A-Za-z_][A-Za-z0-9_]*`?)*(?:\s*<[^={};]*>)?"#
+
     /// Alias declarations whose right side is the router. Group 1 is the alias identifier, without
     /// backticks. A generic parameter clause on the alias (`Box<T>`) is part of the declaration, not a
-    /// use. The right-hand name may be wrapped and may be backticked.
+    /// use. An `associatedtype` may carry a constraint clause before the `=`
+    /// (`associatedtype R: Sendable & AnyObject = ApprovalSignerRouter`). The right-hand name may be
+    /// wrapped and may be backticked.
     private static let routerAliasDeclaration =
-        #"(?<![A-Za-z0-9_])(?:typealias|associatedtype)\s+`?([A-Za-z_][A-Za-z0-9_]*)`?(?:\s*<[^={};]*>)?\s*=\s*(?:(?:Optional|Array)\s*<\s*|[(\[]\s*|Growin\s*\.\s*)*`?ApprovalSignerRouter`?(?![A-Za-z0-9_])"#
+        #"(?<![A-Za-z0-9_])(?:typealias|associatedtype)\s+`?([A-Za-z_][A-Za-z0-9_]*)`?(?:\s*<[^={};]*>)?"#
+        + #"(?:\s*:\s*"# + routerAliasConstraintType + #"(?:\s*&\s*"# + routerAliasConstraintType + #")*)?"#
+        + #"\s*=\s*(?:(?:Optional|Array)\s*<\s*|[(\[]\s*|Growin\s*\.\s*)*`?ApprovalSignerRouter`?(?![A-Za-z0-9_])"#
 
     private static func routerAliasNames(in code: String) -> [String] {
         guard let expression = try? NSRegularExpression(pattern: routerAliasDeclaration) else { return [] }

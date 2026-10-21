@@ -264,6 +264,8 @@ struct SignerSourceScanTests {
         "typealias R = Growin.`ApprovalSignerRouter`\nlet r = R.init(a, b)",
         "typealias R = Optional<`ApprovalSignerRouter`>",
         "associatedtype R = `ApprovalSignerRouter`",
+        "associatedtype R: Sendable = ApprovalSignerRouter",
+        "associatedtype R: Sendable & AnyObject = Growin.`ApprovalSignerRouter`",
         "typealias R = `ApprovalSignerRouter`?\nlet r: R? = .init(a, b)",
         // Generic alias. `Box<Int>(india:)` does not spell the router, and `Box<Int>.init(a, b)` /
         // `Box<Int> = .init(a, b)` do not use the india label, so only alias resolution sees them.
@@ -336,6 +338,7 @@ struct SignerSourceScanTests {
         #expect(Scan.routerConstructionCount(in: "typealias R = MyApprovalSignerRouter") == 0)
         #expect(Scan.routerConstructionCount(in: "typealias R = ApprovalSignerRouterError") == 0)
         #expect(Scan.routerConstructionCount(in: "typealias R = `UnrelatedRouter`") == 0)
+        #expect(Scan.routerConstructionCount(in: "associatedtype R: Sendable = Handler") == 0)
         #expect(Scan.routerConstructionCount(in: "typealias R = `ApprovalSignerRouterConfig`") == 0)
         #expect(Scan.routerConstructionCount(in: "typealias R = `ApprovalSignerRouterError`") == 0)
         #expect(Scan.routerConstructionCount(in: "typealias R = Growin.`UnrelatedRouter`") == 0)
