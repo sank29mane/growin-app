@@ -1,19 +1,12 @@
 import pytest
-import os
 from chat_manager import ChatManager
 
 @pytest.fixture
-def chat_manager():
-    db_path = "test_functional.db"
-    if os.path.exists(db_path):
-        os.remove(db_path)
-
-    manager = ChatManager(db_path=db_path)
+def chat_manager(tmp_path):
+    manager = ChatManager(db_path=str(tmp_path / "test_functional.db"))
     yield manager
 
     manager.close()
-    if os.path.exists(db_path):
-        os.remove(db_path)
 
 def test_get_mcp_servers_structure(chat_manager):
     # Add a test server

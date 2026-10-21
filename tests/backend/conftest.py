@@ -63,6 +63,27 @@ async def cleanup_resources():
     except Exception as e:
         print(f"⚠️ Failed to close MCP sessions: {e}")
 
+@pytest.fixture(scope="session", autouse=True)
+def isolated_default_chat_db(tmp_path_factory):
+    """Point ChatManager's cwd-relative default ("growin.db") at a per-process temp file.
+
+    app_context lazily builds ``ChatManager()`` with that default, so under pytest-xdist
+    every worker would otherwise open and write the same file in the working directory.
+    """
+    try:
+        from chat_manager import ChatManager
+    except ImportError:
+        yield
+        return
+    original = ChatManager.__init__.__defaults__
+    db_path = str(tmp_path_factory.mktemp("chat_default") / "growin.db")
+    ChatManager.__init__.__defaults__ = (db_path,)
+    try:
+        yield
+    finally:
+        ChatManager.__init__.__defaults__ = original
+
+
 @pytest.fixture(autouse=True)
 def clear_cache():
     """Clear the global cache before every test."""
