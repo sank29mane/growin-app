@@ -298,6 +298,18 @@ class OrderPipeline:
         if self._recheck is not None:
             self._recheck()
 
+    def _audit_no_session(
+        self, route: str, intent: Intent | None, result: GuardResult | None
+    ) -> None:
+        """Record REFUSED no_session. The caller re-raises the RelayFailure.
+
+        require_active drops the session lock before it returns, and authorize
+        consumes the intent before the check finishes. A session that dies in
+        either gap must leave an audit line. The client still gets the
+        RelayFailure (503 NO_SESSION), not an order refusal.
+        """
+        self._append(self._entry(route, intent, "REFUSED", ["no_session"], result))
+
     def _require_audit(self) -> None:
         """Refuse before any side effect if the audit log does not verify.
 
@@ -375,6 +387,16 @@ class OrderPipeline:
             except OrderRefusal:
                 self._challenges.take(challenge.challenge_id)
                 raise
+            # require_active dropped the session lock when the pre-write recheck
+            # returned, and the fsync is a second gap. A revoke in either must not
+            # hand out the challenge. The CHALLENGED line may already be durable;
+            # the refusal is the last word.
+            try:
+                self._recheck_authority()
+            except RelayFailure:
+                self._challenges.take(challenge.challenge_id)
+                self._audit_no_session("intents", intent, result)
+                raise
             # Last look, immediately before success is returned: the audit
             # write is also blocking. A challenge that is already dead, past the
             # cutoff, or issued under a clock that stepped backward is never
@@ -411,14 +433,24 @@ class OrderPipeline:
             if self._intents.is_consumed(intent.intent_id):
                 raise self._refuse("authorize", intent, ["intent_consumed"])
             self._intents.consume(intent.intent_id)
-            result = self._guard.check(intent, s0.wall)
+            try:
+                result = self._guard.check(intent, s0.wall)
+            except RelayFailure:
+                # The intent id is already consumed. A session that died inside
+                # the check must not leave that with no audit line.
+                self._audit_no_session("authorize", intent, None)
+                raise
             if result.codes:
                 raise self._refuse("authorize", intent, result.codes, result)
             # Reads are done: sample again and recheck both deadlines (and that
             # the clocks stayed consistent) before a success is recorded. A
             # check that started at 15:09:59, or inside the challenge's last
             # second, and finished after the deadline is refused.
-            self._recheck_authority()
+            try:
+                self._recheck_authority()
+            except RelayFailure:
+                self._audit_no_session("authorize", intent, result)
+                raise
             s1 = self._sample()
             late = self._time_codes(s0, s1, challenge)
             if late:
@@ -426,6 +458,15 @@ class OrderPipeline:
             entry = self._append(
                 self._entry("authorize", intent, "VERIFIED_NOT_FORWARDED", [], result)
             )
+            # require_active has already dropped the session lock. Recheck after
+            # the fsync: a revoke in that gap is an audited refusal, never a
+            # 200. The success line above forwards nothing (63). The refusal is
+            # the last word on the intent.
+            try:
+                self._recheck_authority()
+            except RelayFailure:
+                self._audit_no_session("authorize", intent, result)
+                raise
             # The audit write is blocking too. Sample once more, immediately
             # before success is returned: a write that finished after 15:10 or
             # after the challenge died is answered with an audited refusal, never

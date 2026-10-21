@@ -908,7 +908,11 @@ def test_a_session_revoked_during_authorize_stops_the_next_read_and_never_verifi
     resp = stack.authorize(token, challenge_id, signature)
     assert code_of(resp)[:2] == (503, "NO_SESSION")
     assert len(seen) == 1  # trades, orders, quote and bars never left on the dead session
-    assert decisions(stack, token) == ["CHALLENGED"]  # no VERIFIED_NOT_FORWARDED entry
+    entries = stack.audit(token)
+    # The intent was consumed before the check. The refusal is the audit line.
+    assert [e["decision"] for e in entries] == ["CHALLENGED", "REFUSED"]
+    assert entries[-1]["codes"] == ["no_session"]
+    assert entries[-1]["route"] == "authorize"
 
 
 def test_a_session_revoked_during_mint_stops_the_next_read_and_issues_no_challenge(stack, token):
@@ -929,7 +933,109 @@ def test_a_session_revoked_during_the_last_read_is_caught_before_the_decision(st
         resp = stack.authorize(token, challenge_id, signature)
     assert code_of(resp)[:2] == (503, "NO_SESSION")
     assert len(seen) == 5  # every read ran; only the final decision was left to stop
-    assert len(stack.audit(token)) == before  # nothing was recorded as challenged or verified
+    entries = stack.audit(token)
+    if route == "mint":
+        assert len(entries) == before  # the intent was not consumed, so nothing is recorded
+    else:
+        # Authorize had already consumed the intent. The dead session is audited.
+        assert [e["decision"] for e in entries] == ["CHALLENGED", "REFUSED"]
+        assert entries[-1]["codes"] == ["no_session"]
+        assert "VERIFIED_NOT_FORWARDED" not in [e["decision"] for e in entries]
+
+
+def call_while_recheck_is_paused(stack: OrderStack, token: str, call):
+    """Run `call` on another thread. After its post-read recheck returns, revoke.
+
+    require_active has dropped the session lock by the time the recheck returns.
+    Pausing there is the window in which a revoke used to be answered 200.
+    """
+    arrived = threading.Event()
+    release = threading.Event()
+    original = stack.service.pipeline._recheck
+    box: dict = {}
+
+    def hooked() -> None:
+        original()
+        if arrived.is_set():
+            return
+        arrived.set()
+        if not release.wait(timeout=5):
+            raise RuntimeError("recheck pause was not released")
+
+    def run() -> None:
+        try:
+            box["resp"] = call()
+        except Exception as exc:
+            box["error"] = exc
+
+    stack.service.pipeline._recheck = hooked
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    try:
+        assert arrived.wait(timeout=5), "the post-read recheck never returned"
+        stack.session.revoke(token)
+        release.set()
+    finally:
+        worker.join(timeout=5)
+    assert not worker.is_alive(), "authorize or mint did not finish after the revoke"
+    assert "error" not in box, box.get("error")
+    return box["resp"]
+
+
+def test_a_session_revoked_after_the_authorize_recheck_returns_is_not_verified(stack, token):
+    challenge_id, signature = stack.signed(token)
+    resp = call_while_recheck_is_paused(
+        stack, token, lambda: stack.authorize(token, challenge_id, signature)
+    )
+    assert code_of(resp)[:2] == (503, "NO_SESSION")
+    entries = stack.audit(token)
+    assert [e["decision"] for e in entries] == [
+        "CHALLENGED",
+        "VERIFIED_NOT_FORWARDED",
+        "REFUSED",
+    ]
+    assert entries[-1]["codes"] == ["no_session"]
+    assert entries[-1]["route"] == "authorize"
+    assert stack.service.pipeline._forward.calls == 0
+
+
+def test_a_session_revoked_after_the_mint_recheck_returns_issues_no_challenge(stack, token):
+    resp = call_while_recheck_is_paused(stack, token, lambda: stack.mint(token))
+    assert code_of(resp)[:2] == (503, "NO_SESSION")
+    assert "challenge_id" not in resp.json()
+    entries = stack.audit(token)
+    assert [e["decision"] for e in entries] == ["CHALLENGED", "REFUSED"]
+    assert entries[-1]["codes"] == ["no_session"]
+    assert entries[-1]["route"] == "intents"
+    epoch = int(stack.clock.now_utc().timestamp())
+    assert stack.service.pipeline._challenges.live_count(epoch) == 0
+    assert stack.service.pipeline._forward.calls == 0
+
+
+def test_security_master_fetch_revalidates_the_session_before_the_download(stack, token):
+    """The zip GET in security_master_bytes rechecks the session before it leaves.
+
+    The route-level require_active has already passed. Revoke in the gap after
+    that call returns. The directlink download must not be made.
+    """
+    seen = {"n": 0}
+    original = stack.session.require_active
+
+    def revoke_after_the_route_check(auth):
+        seen["n"] += 1
+        token_value = original(auth)
+        if seen["n"] == 1:
+            stack.session.revoke(token)
+        return token_value
+
+    stack.session.require_active = revoke_after_the_route_check
+    meta_before = len(stack.metadata.methods)
+    resp = stack.mint(token)
+    assert code_of(resp)[:2] == (503, "NO_SESSION")
+    assert len(stack.metadata.methods) == meta_before + 1  # the kill read: the guard was entered
+    assert stack.transport.master_requests() == []
+    assert stack.budget.kinds.count("security_master") == 0
+    assert decisions(stack, token) == []
 
 
 def test_contract_mismatch_both_ways(stack, token):
