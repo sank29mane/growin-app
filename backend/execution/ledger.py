@@ -281,6 +281,45 @@ def intent_hash(intent: OrderIntent) -> str:
     return hashlib.sha256(canonical_json(intent).encode("utf-8")).hexdigest()
 
 
+# SQLite runs no DELETE trigger for the row an INSERT OR REPLACE (or REPLACE INTO, or an upsert)
+# conflict-deletes unless recursive_triggers is on, and that is a per-connection pragma. So the
+# UPDATE/DELETE triggers alone do not make a table append-only. A BEFORE INSERT trigger fires
+# whatever the pragma is, so a replacement is refused on any connection. Each tuple below is one
+# uniqueness constraint (primary key or UNIQUE), because a conflict on any of them removes a row;
+# the rowid is always checked as well.
+#
+# No code path inserts into these tables with OR IGNORE or ON CONFLICT: every writer does a plain
+# INSERT after its own lookup. RAISE(ABORT) is therefore the whole policy. It raises
+# ``sqlite3.IntegrityError`` exactly as the UNIQUE constraint it pre-empts did, so the one caller
+# that catches a duplicate (the approval claim) still maps it to ``ApprovalConflict``.
+_BASE_NO_REPLACE_KEYS: Mapping[str, tuple[tuple[str, ...], ...]] = {
+    "order_intents": (("proposal_id",), ("client_order_id",)),
+    "execution_events": (("event_id",),),
+    "requote_intents": (("requote_id",), ("idempotency_key",)),
+    "requote_events": (("event_id",),),
+    "approval_keys": (("workspace", "key_id"),),
+    "approval_challenges": (("challenge_id",),),
+    "execution_approvals": (("approval_id",), ("challenge_id",), ("proposal_id",)),
+}
+
+
+def _no_replace_trigger_sql(table: str, keys: tuple[tuple[str, ...], ...]) -> str:
+    """The ``<table>_no_replace`` guard: refuse any insert that collides with an existing row."""
+
+    clauses = [
+        "(" + " AND ".join(f"{column} = NEW.{column}" for column in key) + ")" for key in keys
+    ]
+    clauses.append("rowid = NEW.rowid")
+    return f"""
+    CREATE TRIGGER IF NOT EXISTS {table}_no_replace
+    BEFORE INSERT ON {table}
+    WHEN EXISTS (SELECT 1 FROM {table} WHERE {" OR ".join(clauses)})
+    BEGIN
+        SELECT RAISE(ABORT, '{table} rows are append-only');
+    END
+    """
+
+
 _BASE_SCHEMA_STATEMENTS = (
     """
     CREATE TABLE IF NOT EXISTS order_intents (
@@ -593,7 +632,7 @@ _BASE_SCHEMA_STATEMENTS = (
         SELECT RAISE(ABORT, 'execution_approvals are immutable');
     END
     """,
-)
+) + tuple(_no_replace_trigger_sql(table, keys) for table, keys in _BASE_NO_REPLACE_KEYS.items())
 
 
 @dataclass(frozen=True)
@@ -709,6 +748,15 @@ def _venue_binding_check() -> str:
 
 _VENUE_LIMITS_TABLE = "ledger_venue_limits"
 
+# Every write-once table that is not in the base set, plus the base set. A ledger opened for write
+# gets any of these guards it lacks (``_ensure_no_replace_guards``), whatever version created it.
+_NO_REPLACE_KEYS: Mapping[str, tuple[tuple[str, ...], ...]] = {
+    **_BASE_NO_REPLACE_KEYS,
+    "ledger_identity": (("singleton",),),
+    _VENUE_BINDING_TABLE: (("singleton",),),
+    _VENUE_LIMITS_TABLE: (("singleton",),),
+}
+
 
 def _install_venue_limits_table(connection: sqlite3.Connection) -> None:
     """Create the empty, write-once caps table. Idempotent; caller owns the transaction.
@@ -736,6 +784,9 @@ def _install_venue_limits_table(connection: sqlite3.Connection) -> None:
             END
             """
         )
+    connection.execute(
+        _no_replace_trigger_sql(_VENUE_LIMITS_TABLE, _NO_REPLACE_KEYS[_VENUE_LIMITS_TABLE])
+    )
 
 
 _QUANTITY_TABLE = "ledger_quantity_reservations"
@@ -934,6 +985,9 @@ def _install_venue_binding(
             END
             """
         )
+    connection.execute(
+        _no_replace_trigger_sql(_VENUE_BINDING_TABLE, _NO_REPLACE_KEYS[_VENUE_BINDING_TABLE])
+    )
     connection.execute(
         f"INSERT INTO {_VENUE_BINDING_TABLE} (singleton, venue, account_id, currency, bound_at) "
         "VALUES (1, ?, ?, ?, ?)",
@@ -1344,6 +1398,9 @@ def _install_identity(
             """
         )
     connection.execute(
+        _no_replace_trigger_sql("ledger_identity", _NO_REPLACE_KEYS["ledger_identity"])
+    )
+    connection.execute(
         "INSERT INTO ledger_identity (singleton, workspace, pinned_at, pinned_by) "
         "VALUES (1, ?, ?, ?)",
         (pinned.value, pinned_at, pinned_by),
@@ -1491,6 +1548,7 @@ class ExecutionLedger:
             # recovery can touch the file. An existing file was already validated read-only above;
             # this repeats the check on the writer connection and is the only one a fresh file has.
             self._validate_simulation_ledger_locked(self._require_connection())
+            self._ensure_no_replace_guards()
             os.chmod(self.path, 0o600)
             self.recover_abandoned_submissions()
             self.recover_pending_requotes()
@@ -1519,6 +1577,31 @@ class ExecutionLedger:
                 f"ledger is pinned to {self.workspace.value}"
             )
         return requested
+
+    def _ensure_no_replace_guards(self) -> None:
+        """Arm the ``_no_replace`` triggers on a ledger that was created without them.
+
+        Idempotent and schema-only: it adds missing triggers and rewrites no row. A ledger that
+        already has every guard is not written at all.
+        """
+
+        connection = self._require_connection()
+        existing = {
+            (str(row[0]), str(row[1]))
+            for row in connection.execute(
+                "SELECT type, name FROM sqlite_master WHERE type IN ('table', 'trigger')"
+            ).fetchall()
+        }
+        missing = [
+            table
+            for table in _NO_REPLACE_KEYS
+            if ("table", table) in existing and ("trigger", f"{table}_no_replace") not in existing
+        ]
+        if not missing:
+            return
+        with self._transaction() as writer:
+            for table in missing:
+                writer.execute(_no_replace_trigger_sql(table, _NO_REPLACE_KEYS[table]))
 
     def _probe_identity(self) -> Optional[LedgerIdentity]:
         """Read the identity on a mode=ro connection. None means the file does not exist."""

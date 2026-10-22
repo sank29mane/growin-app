@@ -19,7 +19,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any, Callable, Mapping, Optional, Protocol
+from typing import Callable, Mapping, Optional, Protocol
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
