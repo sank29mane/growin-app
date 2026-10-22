@@ -342,6 +342,30 @@ def _exchange(value: str) -> str:
     return value
 
 
+_UPSTREAM_EXCHANGE_KEYS = ("exch_code", "exchange_code")
+
+
+def _intraday_echo_ok(echo: Mapping[str, str], code: str, day: date) -> bool:
+    """The exact upstream parameter set the VM documents for one whole-day minute window.
+
+    Same rigour as the daily backfill's echo check: exactly stock_code, one exchange key (NSE),
+    from_date, to_date, interval and product_type, each equal to what this request implies.
+    """
+    exchange_keys = [key for key in _UPSTREAM_EXCHANGE_KEYS if key in echo]
+    if len(exchange_keys) != 1:
+        return False
+    if set(echo) != {"stock_code", "from_date", "to_date", "interval", "product_type", exchange_keys[0]}:
+        return False
+    return (
+        echo[exchange_keys[0]] == "NSE"
+        and echo["stock_code"] == code
+        and echo["from_date"] == f"{day.isoformat()}T00:00:00.000Z"
+        and echo["to_date"] == f"{day.isoformat()}T23:59:59.000Z"
+        and echo["product_type"] == "cash"
+        and echo["interval"] == INTRADAY_INTERVAL
+    )
+
+
 def _day(value: date, name: str) -> date:
     if not isinstance(value, date) or isinstance(value, datetime):
         raise RelayArgumentError(name)
@@ -1063,7 +1087,7 @@ class RelayClient:
                 reason="route_unavailable",
                 request_id=err.request_id,
             ) from None
-        if payload.upstream_request.get("interval") != INTRADAY_INTERVAL:
+        if not _intraday_echo_ok(payload.upstream_request, code, day):
             raise _protocol("bad_header", payload.request_id)
         return payload
 
