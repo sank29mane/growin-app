@@ -25,9 +25,36 @@ Exits are rebuilt from the latch (``pending_batches``), never from what one eval
 attempt closed INCONCLUSIVE leaves no fill, so the latch keeps it open and the next decide proposes it again
 (``reproposed``), with the stop latch (and so the buy block) intact.
 
-Q-6 (provisional): a recorded split or bonus ex-date on a held name carries that name's last raw close forward for
-the session and records ``carried_ex_date_pause``, so the raw-close drop cannot fire a stop or the drawdown test.
-No factor adjustment is made. The held quantity is not split-adjusted afterwards: see the PR risks.
+What is still due is derived from durable state, not from a notification. ``apply_exit_fill`` subtracts what it is
+told, so a retried or lost hook would over-sell or drop an exit. Instead every mark, every decide and every
+``on_booked_sell`` first reconciles each open exit with the holdings the simulation ledger carries: stop and
+flatten sell what is held; a halve sells ``held - ceil(q / 2)`` where ``q`` is the quantity the evaluation
+recorded in its ``position_mark`` (written BEFORE the latch moves), capped at what the latch still owes. The same
+reconcile run twice, or after a crash between the booking and the hook, gives the same answer, and
+``on_booked_sell`` is a nudge to reconcile: its ``sold_quantity`` is validated and never trusted.
+
+The terminal flatten obligation covers every holding, not only the ones held at the -15% close: once the latch or the
+run says ``ended``, any name still held (a buy admitted before the end that books after it) is owed a flatten. The
+latch cannot hold it (``evaluate_session`` builds the flatten batch only on the transition), so the portfolio adds
+it to the view ``pending_batches`` reads and records a ``latch`` line ``flatten`` for the ISIN the first time it
+sees it. The obligation is a function of the ended flag and the holdings, so a restart changes nothing.
+
+Evaluation inputs are persisted first. The ``position_mark`` lines (quantity, cost, raw close or carried close) are
+appended before ``evaluate_session`` moves the latch, so a crash after the latch write leaves the raw closes in the
+evidence and a later carried close or halve target is read from them, never rebuilt from cost. A retry whose
+inputs differ appends a superseding line (the latest line for the session and ISIN wins), so the evidence always
+matches the evaluation that finally reached the latch.
+
+Q-6 (provisional, fail closed): a recorded split or bonus ex-date on a held name raises the existing
+``unresolved_corporate_action`` pause scoped to that ISIN. While it is open the name keeps carrying its last
+pre-ex raw close (``carried_ex_date_pause``), no stop is evaluated on it (the latch position gets a cost equal to
+the carried value, so the -12% or a tighter vol stop cannot fire), it moves nothing in the drawdown, and a buy of it
+is blocked. Only an operator ``resume`` with a reason clears the pause; the next session then marks the quantity
+the ledger holds at the raw close, which is the operator's reconciled position. No factor adjustment is made here.
+
+Keys: this latch file is keyed by ISIN (``Position.isin`` carries the ISIN and ``RiskState.stops`` and
+``open_exits`` use it), while ``risk_india/state.py`` documents the Mac latch as keyed by the ledger's execution
+ticker. The shadow latch is its own file, so the two key spaces never meet; the 63 CLI ``status`` prints ISINs here.
 
 Pure except for the files the latch store and the evidence store own. No network, no clock, no ``execution``
 import: the account is a Protocol the ledger satisfies.
@@ -36,13 +63,13 @@ import: the account is a Protocol the ledger satisfies.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal
 from typing import Any, Mapping, NoReturn, Protocol, Sequence
 
-from risk_india.drawdown import ResetRefused, RiskState, StateInconsistent, pending_batches
-from risk_india.exits import ExitBatch, ExitError, Position
+from risk_india.drawdown import OpenExit, ResetRefused, RiskState, StateInconsistent, pending_batches
+from risk_india.exits import FLATTEN, HALVE, ExitBatch, ExitError, Position, halve_quantity
 from risk_india.state import LatchStore, StateUnreadable, StateUnwritable
 
 from . import policy
@@ -52,6 +79,8 @@ PEAK_SOURCE = "risk_india_latch_high_water_mark"
 MARK_RAW_CLOSE = "raw_close"
 MARK_CARRIED_EX_DATE = "carried_ex_date_pause"
 STRUCTURAL_ACTIONS = frozenset({"split", "bonus"})
+CORPORATE_ACTION_PAUSE = "unresolved_corporate_action"
+LATCH_FLATTEN = "flatten"
 TICKER_PREFIX = "NSE:CASH:"
 
 _ISIN = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]\Z")
@@ -260,9 +289,19 @@ class ShadowPortfolio:
         )
 
     @staticmethod
-    def _positions(holdings: Sequence[Holding]) -> list[Position]:
+    def _positions(holdings: Sequence[Holding], carried: Mapping[str, Decimal] | None = None) -> list[Position]:
+        """The latch's positions. A name in ``carried`` (Q-6) gets a cost equal to its carried value, so the
+        stop test ``value <= cost x (1 + stop)`` cannot fire for any stop in (-1, 0). Only the stop test reads it."""
+
+        carried = carried or {}
         return [
-            Position(h.instrument.isin, h.instrument.stock_code, h.quantity, h.cost) for h in holdings
+            Position(
+                h.instrument.isin,
+                h.instrument.stock_code,
+                h.quantity,
+                h.quantity * carried[h.instrument.isin] if h.instrument.isin in carried else h.cost,
+            )
+            for h in holdings
         ]
 
     # -- marks -------------------------------------------------------------------------------
@@ -286,11 +325,63 @@ class ShadowPortfolio:
             for r in self._records()
         )
 
-    def _pause_missing_bar(self, isin: str) -> None:
+    def _pause_isin(self, event: str, isin: str, reason: str) -> None:
         scope = f"{policy.SCOPE_ISIN}:{isin}"
-        already = any(p.event == "missing_bar" and p.scope == scope for p in policy.run_state(self._store).open_pauses)
+        already = any(p.event == event and p.scope == scope for p in policy.run_state(self._store).open_pauses)
         if not already:
-            policy.raise_event(self._store, "missing_bar", "no raw close for a held name at the mark", isin=isin)
+            policy.raise_event(self._store, event, reason, isin=isin)
+
+    def _pause_missing_bar(self, isin: str) -> None:
+        self._pause_isin("missing_bar", isin, "no raw close for a held name at the mark")
+
+    def _frozen_isins(self, held: set[str]) -> set[str]:
+        """Held names with an open ``unresolved_corporate_action`` pause: carried, never stopped, never moving."""
+
+        scopes = {
+            p.scope for p in policy.run_state(self._store).open_pauses if p.event == CORPORATE_ACTION_PAUSE
+        }
+        return {isin for isin in held if f"{policy.SCOPE_ISIN}:{isin}" in scopes}
+
+    def _session_position_marks(self, session: date) -> dict[str, Mapping[str, Any]]:
+        """The latest ``position_mark`` line per ISIN for ``session`` (a superseding line wins)."""
+
+        latest: dict[str, Mapping[str, Any]] = {}
+        for record in self._records():
+            if record.get("kind") == "position_mark" and record.get("as_of_date") == session.isoformat():
+                latest[str(record["isin"])] = record
+        return latest
+
+    def _write_position_marks(
+        self,
+        session: date,
+        snap: AccountSnapshot,
+        used: Mapping[str, Decimal],
+        basis: Mapping[str, str],
+        structural: Mapping[str, str],
+        *,
+        supersede: bool,
+    ) -> None:
+        """Persist the evaluation inputs. Appends a line when none exists for (session, ISIN), and, with
+        ``supersede``, when the existing line differs (a retry after a crash before the latch moved)."""
+
+        latest = self._session_position_marks(session)
+        for holding in snap.holdings:
+            isin = holding.instrument.isin
+            payload: dict[str, Any] = {
+                "as_of_date": session.isoformat(),
+                "isin": isin,
+                "symbol": holding.instrument.symbol,
+                "quantity": str(holding.quantity),
+                "close": _dec(used[isin]),
+                "cost": _dec(holding.cost),
+                "mark_basis": basis[isin],
+            }
+            if isin in structural:
+                payload["corporate_action"] = structural[isin]
+            prior = latest.get(isin)
+            if prior is not None and (not supersede or all(prior.get(k) == v for k, v in payload.items())):
+                continue
+            self._append("position_mark", payload)
 
     def mark_session(
         self,
@@ -304,9 +395,10 @@ class ShadowPortfolio:
         """Mark every holding at the raw close of ``session`` and apply Option B.
 
         ``closes`` is keyed by ISIN and holds raw (unadjusted) closes. ``structural_actions`` maps the ISIN of a
-        held name with a recorded split or bonus ex-date on ``session`` to its kind (Q-6). A held name with no
-        close and no structural action records a ``missing_bar`` pause for that ISIN and raises
-        ``PortfolioError("mark_missing")`` before anything reaches the latch. ``simulator_drawdown_pct`` is the
+        held name with a recorded split or bonus ex-date on ``session`` to its kind (Q-6): it raises the
+        ``unresolved_corporate_action`` pause for that ISIN, and every name under that pause is carried (see the
+        module note). A held name with no close that is not carried records a ``missing_bar`` pause for that ISIN and
+        raises ``PortfolioError("mark_missing")`` before anything reaches the latch. ``simulator_drawdown_pct`` is the
         adapter's seed-relative figure, recorded only with its basis stamp.
         """
 
@@ -331,12 +423,19 @@ class ShadowPortfolio:
         self._reconcile(before)
 
         snap = self.snapshot()
+        held = {h.instrument.isin for h in snap.holdings}
+        for isin in sorted(structural.keys() & held):
+            self._pause_isin(
+                CORPORATE_ACTION_PAUSE, isin, "split or bonus ex-date on a held name: marks carried until operator review"
+            )
+        frozen = self._frozen_isins(held)
+        before = self._sync_exits(before, snap)
         used: dict[str, Decimal] = {}
         basis: dict[str, str] = {}
         missing: list[str] = []
         for holding in snap.holdings:
             isin = holding.instrument.isin
-            if isin in structural:
+            if isin in frozen:
                 carried = self._last_raw_close(isin)
                 used[isin] = carried if carried is not None else holding.cost / holding.quantity
                 basis[isin] = MARK_CARRIED_EX_DATE
@@ -355,12 +454,19 @@ class ShadowPortfolio:
             raise PortfolioError("mark_missing")
 
         evaluated = before.last_session is None or session > before.last_session
+        # The inputs reach the evidence BEFORE the latch moves: a crash after the latch write must not lose the raw
+        # close a later carried mark or halve target reads.
+        self._write_position_marks(session, snap, used, basis, structural, supersede=evaluated)
         batches: tuple[ExitBatch, ...] = ()
         config_errors: tuple[str, ...] = ()
         if evaluated:
             try:
                 result = self._latch.evaluate_session(
-                    used, session, cash=snap.cash, positions=self._positions(snap.holdings), vol_stops=vol_stops
+                    used,
+                    session,
+                    cash=snap.cash,
+                    positions=self._positions(snap.holdings, {i: used[i] for i in frozen}),
+                    vol_stops=vol_stops,
                 )
             except (StateUnreadable, StateUnwritable) as exc:
                 self._abort("state_corrupt", exc.code)
@@ -368,27 +474,12 @@ class ShadowPortfolio:
         else:
             after = before
         self._reconcile(after)
+        self._flatten_obligations(after, snap)
         for error in config_errors:
             self._append("latch", {"latch": "stop_config", "scope": "session", "reason": error})
 
         marked_value = sum((h.quantity * used[h.instrument.isin] for h in snap.holdings), Decimal(0))
         if not self._has_mark(session):
-            for holding in snap.holdings:
-                isin = holding.instrument.isin
-                if self._has_position_mark(session, isin):
-                    continue
-                payload: dict[str, Any] = {
-                    "as_of_date": session.isoformat(),
-                    "isin": isin,
-                    "symbol": holding.instrument.symbol,
-                    "quantity": str(holding.quantity),
-                    "close": _dec(used[isin]),
-                    "cost": _dec(holding.cost),
-                    "mark_basis": basis[isin],
-                }
-                if isin in structural:
-                    payload["corporate_action"] = structural[isin]
-                self._append("position_mark", payload)
             mark: dict[str, Any] = {
                 "as_of_date": session.isoformat(),
                 "equity": _dec(after.last_equity if after.last_equity is not None else snap.cash + marked_value),
@@ -413,7 +504,7 @@ class ShadowPortfolio:
             state=after,
             batches=batches,
             config_errors=config_errors,
-            paused_isins=tuple(sorted(structural.keys() & {h.instrument.isin for h in snap.holdings})),
+            paused_isins=tuple(sorted(frozen)),
             stop_open=tuple(sorted(after.stops)),
         )
 
@@ -498,43 +589,117 @@ class ShadowPortfolio:
 
     # -- exits -------------------------------------------------------------------------------------
 
-    def _settle_flat_exits(self, state: RiskState, held: Mapping[str, int]) -> RiskState:
-        """An open exit whose name is no longer held is closed by that fact (the ledger holds the fill)."""
+    def _halve_target(self, isin: str, since: date) -> int | None:
+        """Shares a halve leaves held: ``q - floor(q / 2)`` for the ``q`` the raising evaluation recorded."""
 
+        line = self._session_position_marks(since).get(isin)
+        if line is None:
+            return None
+        quantity = int(Decimal(str(line["quantity"])))
+        return quantity - halve_quantity(quantity)
+
+    def _due(self, isin: str, current: OpenExit, held_quantity: int) -> int:
+        """What the open exit still owes, from the holdings the ledger carries. Pure in (exit, holdings, evidence)."""
+
+        if current.reason != HALVE:
+            return held_quantity  # stop and flatten sell everything still held
+        target = self._halve_target(isin, current.since)
+        owed = held_quantity if target is None else max(0, held_quantity - target)
+        # Never more than the latch still owes: a buy that books later does not grow an old halve.
+        return min(current.quantity, owed, held_quantity)
+
+    def _sync_exits(self, state: RiskState, snap: AccountSnapshot) -> RiskState:
+        """Reconcile every open exit and stop with the ledger holdings (idempotent, crash safe).
+
+        A name no longer held closes its exit and stop (the ledger holds the fill). A halve is reduced by what the
+        holdings show was sold, whether or not any hook was told. The latch is written only when it is stale.
+        """
+
+        held = {h.instrument.isin: h.quantity for h in snap.holdings}
         for isin in sorted(set(state.open_exits) | set(state.stops)):
-            if held.get(isin, 0) == 0:
-                try:
-                    after = self._latch.apply_exit_fill(isin, sold_quantity=0, remaining_quantity=0)
-                except (StateUnreadable, StateUnwritable) as exc:
-                    self._abort("state_corrupt", exc.code)
-                self._record_stop_cleared(state, after, isin)
-                state = after
+            quantity = held.get(isin, 0)
+            current = state.open_exits.get(isin)
+            if quantity == 0:
+                sold, remaining = 0, 0
+            elif current is None:
+                continue
+            else:
+                due = self._due(isin, current, quantity)
+                if due == current.quantity or (current.reason != HALVE and quantity == current.quantity):
+                    continue
+                sold = current.quantity - due if current.reason == HALVE else 0
+                remaining = quantity
+            try:
+                after = self._latch.apply_exit_fill(isin, sold_quantity=sold, remaining_quantity=remaining)
+            except (StateUnreadable, StateUnwritable) as exc:
+                self._abort("state_corrupt", exc.code)
+            except ExitError:
+                self._abort("state_corrupt", "exit_reconcile_invalid")
+            self._record_stop_cleared(state, after, isin)
+            state = after
         return state
 
     def _record_stop_cleared(self, before: RiskState, after: RiskState, isin: str) -> None:
         if isin in before.stops and isin not in after.stops:
             self._append("latch", {"latch": "stop", "scope": f"{policy.SCOPE_ISIN}:{isin}", "reason": "cleared_by_fill"})
 
+    def _flatten_since(self, isin: str) -> date | None:
+        scope = f"{policy.SCOPE_ISIN}:{isin}"
+        for record in self._records():
+            if record.get("kind") == "latch" and record.get("latch") == LATCH_FLATTEN and record.get("scope") == scope:
+                return date.fromisoformat(str(record["reason"]).removeprefix("due_"))
+        return None
+
+    def _flatten_obligations(self, state: RiskState, snap: AccountSnapshot) -> dict[str, OpenExit]:
+        """The terminal flatten owed by every holding once the latch or the run has ended (D-08).
+
+        ``evaluate_session`` builds the flatten batch only on the -15% transition, so a name that books afterwards
+        (a buy admitted before the end) has no open exit in the latch. Each such holding, and each one whose open
+        exit is weaker than a flatten, is returned here and its first sighting is recorded as a ``flatten`` latch
+        line. Derived from the ended flag and the holdings alone, so it is safe to call on every mark and decide.
+        """
+
+        if not (state.ended or policy.run_state(self._store).ended) or state.last_session is None:
+            return {}
+        owed: dict[str, OpenExit] = {}
+        for holding in snap.holdings:
+            isin = holding.instrument.isin
+            current = state.open_exits.get(isin)
+            if current is not None and current.reason == FLATTEN:
+                continue
+            since = self._flatten_since(isin)
+            if since is None:
+                since = state.last_session
+                self._append(
+                    "latch",
+                    {"latch": LATCH_FLATTEN, "scope": f"{policy.SCOPE_ISIN}:{isin}", "reason": f"due_{since.isoformat()}"},
+                )
+            owed[isin] = OpenExit(FLATTEN, holding.quantity, holding.instrument.stock_code, since)
+        return owed
+
     def exit_proposals(self, decide_session: date) -> ExitPlan:
-        """Every open exit, rebuilt from the latch for the decide on ``decide_session``.
+        """Every open exit, rebuilt from the latch and the holdings for the decide on ``decide_session``.
 
         An exit stays open until a fill reduces it, so one whose attempt closed INCONCLUSIVE is proposed
         again here (``reproposed``). A name whose earlier exit order is still open in the ledger is listed
-        as ``waiting`` instead, so the same shares are never offered twice.
+        as ``waiting`` instead, so the same shares are never offered twice. Quantities come from the holdings the
+        ledger carries (see the module note), so a booking whose hook never ran is already netted off. After the
+        run ended, every holding is owed a flatten, including one that booked after the -15% close.
         """
 
         state = self._state()
         snap = self.snapshot()
-        held = {h.instrument.isin: h.quantity for h in snap.holdings}
-        state = self._settle_flat_exits(state, held)
-        if not state.open_exits:
+        state = self._sync_exits(state, snap)
+        owed = self._flatten_obligations(state, snap)
+        if not state.open_exits and not owed:
             return ExitPlan((), ())
         if state.last_session is None:
             raise PortfolioError("marks_missing")
         if state.last_session >= decide_session:
             raise PortfolioError("marks_not_before_decide")
+        view = replace(state, open_exits={**state.open_exits, **owed})
         try:
-            batches = pending_batches(state, self._positions(snap.holdings), state.last_session)
+            batches = pending_batches(view, self._positions(snap.holdings), state.last_session)
         except (ExitError, StateInconsistent):
             self._abort("state_corrupt", "exit_batch_invalid")
         proposals: list[ExitProposal] = []
@@ -544,7 +709,7 @@ class ShadowPortfolio:
                 if snap.open_sells.get(intent.isin):
                     waiting.append(intent.isin)
                     continue
-                since = state.open_exits[intent.isin].since
+                since = view.open_exits[intent.isin].since
                 instrument = self._by_isin[intent.isin]
                 proposals.append(
                     ExitProposal(
@@ -562,22 +727,18 @@ class ShadowPortfolio:
         return ExitPlan(tuple(proposals), tuple(sorted(set(waiting))))
 
     def on_booked_sell(self, isin: str, sold_quantity: int) -> RiskState:
-        """Tell the latch a simulated sell was booked. Only a fill reduces an exit or clears a stop."""
+        """Nudge the latch after a simulated sell booked. Idempotent: it reconciles with the holdings.
+
+        ``sold_quantity`` is validated and not trusted: what is still due is derived from the ledger holdings, so
+        a retry, a repeat or a call that never happens (a crash after the booking) cannot over-sell or drop an
+        exit. Only a fill, seen as a holding that shrank, reduces an exit or clears a stop.
+        """
 
         if isin not in self._by_isin:
             raise PortfolioError("unknown_instrument")
-        before = self._state()
-        held = {h.instrument.isin: h.quantity for h in self.snapshot().holdings}
-        try:
-            after = self._latch.apply_exit_fill(
-                isin, sold_quantity=sold_quantity, remaining_quantity=held.get(isin, 0)
-            )
-        except (StateUnreadable, StateUnwritable) as exc:
-            self._abort("state_corrupt", exc.code)
-        except ExitError:
-            raise PortfolioError("bad_fill_quantity") from None
-        self._record_stop_cleared(before, after, isin)
-        return after
+        if isinstance(sold_quantity, bool) or not isinstance(sold_quantity, int) or sold_quantity < 0:
+            raise PortfolioError("bad_fill_quantity")
+        return self._sync_exits(self._state(), self.snapshot())
 
     def is_flat(self) -> bool:
         snap = self.snapshot()
