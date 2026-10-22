@@ -945,15 +945,19 @@ class ShadowRunner:
 
     # -- hand flatten -------------------------------------------------------------------------------------------
 
-    def hand_flatten(self, session: date, reason: str) -> DecideReport:
-        """The operator flattens every holding by hand: pause entries, then sell under flatten obligation ids."""
+    def hand_flatten(self, session: date, reason: str, *, include_corporate_action: bool = False) -> DecideReport:
+        """The operator flattens every holding by hand: pause entries, then sell under flatten obligation ids.
+
+        A name with an open ``unresolved_corporate_action`` pause is left alone (the runbook default is to leave it
+        paused: its quote may be unadjusted) unless ``include_corporate_action`` says the operator reviewed it.
+        """
 
         if not isinstance(reason, str) or not reason.strip():
             raise DecideRefused("reason_required")
         self._refuse_unless_decidable(session)
         report = DecideReport(session)
         try:
-            asyncio.run(self._hand_flatten(session, reason.strip(), report))
+            asyncio.run(self._hand_flatten(session, reason.strip(), report, include_corporate_action))
         except RunnerAbort:
             report.status, report.stopped = "aborted", "abort"
         except RelayPause:
@@ -963,7 +967,9 @@ class ShadowRunner:
             report.status, report.stopped = "aborted", "abort"
         return report
 
-    async def _hand_flatten(self, session: date, reason: str, report: DecideReport) -> None:
+    async def _hand_flatten(
+        self, session: date, reason: str, report: DecideReport, include_corporate_action: bool
+    ) -> None:
         if self._stopped_all():
             report.status, report.stopped = "paused", "open_pause"
             return
@@ -973,10 +979,14 @@ class ShadowRunner:
             policy.raise_event(self._evidence, "divergence_breach", HAND_FLATTEN_PAUSE_REASON)
         report.recovered = self._recover()
         report.expired = self._expire_day_orders(session, report.recovered)
+        frozen = set() if include_corporate_action else self._open_pause_isins(CORPORATE_ACTION_PAUSE)
         for holding in self._portfolio.snapshot().holdings:
             if self._stopped_all():
                 return
             isin = holding.instrument.isin
+            if isin in frozen:
+                report.skipped.append((isin, "flatten_skipped_corporate_action_pause"))
+                continue
             ref = self._ports.reference.closes(as_of, [isin]).get(isin)
             if ref is None:
                 report.skipped.append((isin, "flatten_no_reference_price"))

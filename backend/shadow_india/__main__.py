@@ -53,6 +53,11 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--session", required=True, type=_day, help="session date, YYYY-MM-DD")
         if name in ("resume", "hand-flatten"):
             command.add_argument("--reason", required=True)
+        if name == "hand-flatten":
+            command.add_argument(
+                "--include-corporate-action", action="store_true",
+                help="also sell names with an open unresolved_corporate_action pause (default: leave them paused)",
+            )
         if name == "resume":
             command.add_argument(
                 "--pause-seq", type=int, action="append", dest="pause_seq", metavar="N",
@@ -134,7 +139,9 @@ def main(
             _print(out, {"outcome": closed.outcome, "released": closed.released, "witness": closed.witness})
             return EXIT_ABORTED if closed.outcome == "aborted" else EXIT_OK
         if args.command == "hand-flatten":
-            report = runner.hand_flatten(args.session, args.reason)
+            report = runner.hand_flatten(
+                args.session, args.reason, include_corporate_action=args.include_corporate_action
+            )
             _print(out, {"status": report.status, "intents": report.intents, "skipped": report.skipped})
             return EXIT_ABORTED if report.status == "aborted" else EXIT_OK
         if args.command == "open-run":

@@ -1451,6 +1451,42 @@ def test_hand_flatten_pauses_entries_and_sells_every_holding_under_a_flatten_obl
     assert len(intents_of(world, "SELL")) == 2 and again.intents == []
 
 
+def test_hand_flatten_sells_a_name_with_an_open_ambiguous_exit_fill_it_is_the_documented_exit(world):
+    own(world, "AAA", 100)
+    own(world, "BBB", 100)
+    premark(world)
+    policy.raise_event(world.evidence, policy.AMBIGUOUS_EXIT_FILL, "a sell booked under the wrong id", isin=ISINS["AAA"])
+    report = world.runner.hand_flatten(S, "operator flattens by hand")
+    assert sorted(r["symbol"] for r in intents_of(world, "SELL")) == ["AAA", "BBB"], report.skipped
+    assert not any("corporate_action" in why for _what, why in report.skipped)
+
+
+def test_hand_flatten_leaves_a_corporate_action_name_paused_unless_the_operator_includes_it(world):
+    """Break-proof: drop the ``frozen`` skip and the default sells the paused name."""
+    own(world, "AAA", 100)
+    own(world, "BBB", 100)
+    premark(world)
+    policy.raise_event(world.evidence, policy.UNRESOLVED_CORPORATE_ACTION, "split", isin=ISINS["AAA"])
+    report = world.runner.hand_flatten(S, "operator flattens by hand")
+    assert [r["symbol"] for r in intents_of(world, "SELL")] == ["BBB"]
+    assert (ISINS["AAA"], "flatten_skipped_corporate_action_pause") in report.skipped
+    assert policy.UNRESOLVED_CORPORATE_ACTION in open_events(world)  # still paused
+    world.runner.hand_flatten(S, "operator reviewed the split", include_corporate_action=True)
+    assert sorted(r["symbol"] for r in intents_of(world, "SELL")) == ["AAA", "BBB"]
+
+
+def test_the_cli_hand_flatten_takes_include_corporate_action_only_when_given(world):
+    own(world, "AAA", 100)
+    premark(world)
+    policy.raise_event(world.evidence, policy.UNRESOLVED_CORPORATE_ACTION, "split", isin=ISINS["AAA"])
+    code, plain = run_cli(cli_args(world, "hand-flatten", "--reason", "x"), runtime_factory=lambda args: world.runner)
+    assert code == 0 and plain["intents"] == [] and plain["skipped"] == [[ISINS["AAA"], "flatten_skipped_corporate_action_pause"]]
+    code, flagged = run_cli(
+        cli_args(world, "hand-flatten", "--reason", "x", "--include-corporate-action"), runtime_factory=lambda args: world.runner
+    )
+    assert code == 0 and len(flagged["intents"]) == 1
+
+
 def test_hand_flatten_is_refused_outside_the_window(world):
     world.clock.now = datetime(2026, 10, 22, 11, 0, tzinfo=IST)
     with pytest.raises(DecideRefused) as caught:
