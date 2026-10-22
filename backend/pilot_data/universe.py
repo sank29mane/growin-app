@@ -17,7 +17,7 @@ import json
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Literal, Mapping, Protocol, Sequence
+from typing import Callable, Literal, Mapping, Protocol, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -286,6 +286,9 @@ def check_smallcap_exposure(
 
 
 # --------------------------------------------------------------------------- evaluation
+LineageOverride = Callable[[TargetMember, Lineage], Lineage]
+
+
 def _evaluate_universe(
     store: PilotDataStore,
     *,
@@ -297,6 +300,7 @@ def _evaluate_universe(
     allow_missing_surveillance_before: date | None,
     workspace: Literal["india"],
     status_source: TradingStatusSource,
+    lineage_override: LineageOverride | None = None,
 ) -> UniverseResult:
     if workspace != store.workspace:
         raise PilotDataError("workspace_mismatch", "workspace differs from the store workspace")
@@ -331,6 +335,7 @@ def _evaluate_universe(
                 store, member=member, data_cutoff=data_cutoff, lineage_as_of=lineage_as_of, policy=policy,
                 workspace=workspace, status_source=status_source, asm=asm_entries, gsm=gsm_entries,
                 smallcap_class=classification.get(member.anchor_isin, "unclassified"), input_hashes=input_hashes,
+                lineage_override=lineage_override,
             )
         )
     decisions.sort(key=lambda d: d.anchor_isin)
@@ -382,6 +387,7 @@ def _decide(
     gsm: Sequence,
     smallcap_class: SmallCapClass,
     input_hashes: dict[str, str],
+    lineage_override: LineageOverride | None = None,
 ) -> UniverseDecision:
     def blank(reasons: tuple[str, ...], isin: str | None = None, **extra) -> UniverseDecision:
         base = dict(
@@ -398,6 +404,8 @@ def _decide(
         if exc.code != "lineage_anchor_not_observed":
             raise
         return blank(("lineage_anchor_not_observed",))
+    if lineage_override is not None:
+        lineage = lineage_override(member, lineage)
     input_hashes[f"lineage:{member.anchor_isin}"] = lineage.content_sha256()
     reasons: list[str] = []
     isin = lineage.isin_on(data_cutoff)
@@ -451,10 +459,15 @@ def evaluate_universe(
     allow_missing_surveillance_before: date | None,
     workspace: Literal["india"],
     status_source: TradingStatusSource,
+    lineage_override: LineageOverride | None = None,
 ) -> UniverseResult:
-    """Evaluate the universe as of a date. The data cutoff is the date itself, never anything later."""
+    """Evaluate the universe as of a date. The data cutoff is the date itself, never anything later.
+
+    ``lineage_override(member, built)`` may return a replacement lineage (64-03: the as-of trimmed one, the pattern of
+    ``run_crosscheck``). None keeps the lineage ``build_lineage`` gave.
+    """
     return _evaluate_universe(
         store, as_of=as_of, data_cutoff=as_of, targets=targets, policy=policy, mode=mode,
         allow_missing_surveillance_before=allow_missing_surveillance_before, workspace=workspace,
-        status_source=status_source,
+        status_source=status_source, lineage_override=lineage_override,
     )

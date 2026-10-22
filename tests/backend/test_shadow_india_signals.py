@@ -22,11 +22,14 @@ from typing import Any
 
 import pytest
 
+from pilot_data import reference_refresh as refresh
 from pilot_data.core import PilotDataError, standard_caveats
+from pilot_data.dataset import DividendAmountUnknownEvent
 from pilot_data.live_bars import LiveBarsResult, bars_as_of
 from pilot_data.models import CrossCheckTolerances
 from pilot_data.nse_http import NseHttp
 from pilot_data.price_bands import BandObservation
+from pilot_data.session_store import SEEDS_DDL
 from pilot_data.store import PilotDataStore
 from pilot_data.surveillance import ingest_surveillance
 from pilot_data.universe import UniversePolicy
@@ -44,7 +47,9 @@ from shadow_india.signals import (
     previous_session,
     sessions_before,
 )
-from strategy_india.data import DatasetView, DecisionView, DividendEvents, events_from_manifest
+from strategy_india.data import (
+    DatasetView, DecisionView, DividendEvents, UniverseEligibility, events_from_manifest,
+)
 from strategy_india.errors import HoldoutViolation
 from strategy_india.holdout import HoldoutRange
 from strategy_india.params import placeholder_params
@@ -54,6 +59,7 @@ import pilot_data_testkit as kit
 import test_pilot_data_crosscheck as cc
 import test_pilot_data_live_bars as lb
 import test_pilot_data_nse_calendar as nc
+import test_pilot_data_reference_refresh as rrt
 import test_strategy_india_support as sup
 
 CANARY_TOKEN = "CANARY-SESSION-TOKEN-7731"
@@ -61,6 +67,7 @@ CANARY_IP = "203.0.113.77"
 CANARY_ACCOUNT = "CANARY-ACCT-48151"
 FORBIDDEN = (CANARY_TOKEN, CANARY_IP, CANARY_ACCOUNT)
 FIXED = datetime(2026, 10, 19, 4, 0, tzinfo=timezone.utc)
+REAL_SEED_ROWS = signals.seed_rows  # the ``stubs`` fixture replaces the module attribute, not this reference
 
 HIST = sup.weekday_sessions(date(2026, 9, 7), 30)  # Mon 7 Sept to Fri 16 Oct 2026
 AS_OF = HIST[-1]
@@ -109,21 +116,23 @@ def make_inputs(tmp_path: Path, *, store: Any = None, config: StrategyConfig | N
         store=store if store is not None else SimpleNamespace(name="session-store"), strategy=config or strategy(),
         targets=targets, universe_policy=UniversePolicy(), calendar=make_calendar(tmp_path),
         tolerances=CrossCheckTolerances(), window_start=window_start, run_start_session=run_start or AS_OF,
-        dataset_sha256=sha("dataset"), tick_sha256=sha("tick"), cost_sha256=sha("cost"),
-        scenario_sha256=sha("scenario"), eligibility=eligibility, **overrides)
+        **{"dataset_sha256": sha("dataset"), "tick_sha256": sha("tick"), "cost_sha256": sha("cost"),
+           "scenario_sha256": sha("scenario"), "eligibility": eligibility, **overrides})
 
 
 def make_evidence(tmp_path: Path, inputs: SignalInputs, *, forbidden=()) -> EvidenceStore:
     return EvidenceStore.create(tmp_path / f"ev-{len(list(tmp_path.glob('ev-*')))}", run_id="run1", run_class="plumbing", session_id="s-1",
-                                hashes=inputs.current_hashes(), clock=lambda: FIXED, forbidden=forbidden)
+                                hashes=inputs.current_hashes(), holdout_dated_inputs=True, clock=lambda: FIXED,
+                                forbidden=forbidden)
 
 
-def live_result(rows, *, as_of: date = AS_OF, decision: date = S, composition: str = "c" * 64) -> LiveBarsResult:
+def live_result(rows, *, as_of: date = AS_OF, decision: date = S, composition: str = "c" * 64, lineages=None,
+                factor_sets=None, unknown=None, sources=()) -> LiveBarsResult:
     return LiveBarsResult(
         workspace="india", caveats=standard_caveats(), decision_session=decision, as_of=as_of, window_start=HIST[0],
-        targets_sha256="t" * 64, tolerances=CrossCheckTolerances(), rows=tuple(rows), lineage_hashes={},
-        factor_set_hashes={}, dividend_amount_unknown_events={}, source_sha256s=(), store_crosscheck_run_id="run",
-        composition_sha256=composition)
+        targets_sha256="t" * 64, tolerances=CrossCheckTolerances(), rows=tuple(rows), lineage_hashes=lineages or {},
+        factor_set_hashes=factor_sets or {}, dividend_amount_unknown_events=unknown or {}, source_sha256s=tuple(sources),
+        store_crosscheck_run_id="run", composition_sha256=composition)
 
 
 def history(**kwargs: Any):
@@ -153,16 +162,27 @@ class Stubs:
     live_error: PilotDataError | None = None
     live_calls: list[dict[str, Any]] = field(default_factory=list)
     fresh_calls: list[date] = field(default_factory=list)
+    fresh_calendars: list[Any] = field(default_factory=list)
+    band_error: PilotDataError | None = None
+    convention: Any = None
+    composition: str = "c" * 64
+    lineages: dict[str, str] = field(default_factory=dict)
+    factor_sets: dict[str, str] = field(default_factory=dict)
+    unknown: dict[str, Any] = field(default_factory=dict)
+    sources: tuple[str, ...] = ()
     band_calls: list[dict[str, Any]] = field(default_factory=list)
 
     def bars(self, store, **kwargs):
         self.live_calls.append(kwargs)
         if self.live_error is not None:
             raise self.live_error
-        return live_result(self.rows, as_of=kwargs["as_of"], decision=kwargs["decision_session"])
+        return live_result(self.rows, as_of=kwargs["as_of"], decision=kwargs["decision_session"],
+                           composition=self.composition, lineages=self.lineages, factor_sets=self.factor_sets,
+                           unknown=self.unknown, sources=self.sources)
 
-    def freshness(self, store, *, today_ist):
+    def freshness(self, store, *, today_ist, calendar=None):
         self.fresh_calls.append(today_ist)
+        self.fresh_calendars.append(calendar)
         if self.fresh_error is not None:
             raise self.fresh_error
 
@@ -174,8 +194,16 @@ class Stubs:
     def entries(self, store, ref):
         return tuple(SimpleNamespace(isin=isin, nse_symbol=symbol) for isin, symbol in self.lists[ref.list_name])
 
+    def seeds(self, store):
+        return [["a" * 64, HIST[0].isoformat(), AS_OF.isoformat()]]
+
+    def band_convention(self, store):
+        return self.convention
+
     def band(self, store, *, isin, prior_session, session, calendar, workspace):
         self.band_calls.append({"isin": isin, "prior_session": prior_session, "session": session})
+        if self.band_error is not None:
+            raise self.band_error
         return BandObservation(isin=isin, session=session, status="fixed", percent=Decimal("20"), nse_symbol="X",
                                series="EQ", source_kind="list", source_sha256s=(sha("band"),), reason=None)
 
@@ -188,12 +216,15 @@ def stubs(monkeypatch):
     monkeypatch.setattr(signals, "snapshot_for", held.snapshot)
     monkeypatch.setattr(signals, "surveillance_entries", held.entries)
     monkeypatch.setattr(signals, "band_for_upcoming_session", held.band)
+    monkeypatch.setattr(signals, "seed_rows", held.seeds)
+    monkeypatch.setattr(signals, "current_band_convention", held.band_convention)
     return held
 
 
 def run_step(tmp_path: Path, *, forbidden=(), **kwargs: Any):
     root = _new_dir(tmp_path, f"run-{len(list(tmp_path.glob('run-*')))}")
-    inputs = make_inputs(root, eligibility=sup.StaticEligibility(ANCHORS), **kwargs)
+    kwargs.setdefault("eligibility", sup.StaticEligibility(ANCHORS))
+    inputs = make_inputs(root, **kwargs)
     evidence = make_evidence(root, inputs, forbidden=forbidden)
     return inputs, evidence, evaluate_session(evidence, inputs, decision_session=S)
 
@@ -325,7 +356,10 @@ def test_an_evaluation_scores_ranks_and_records_every_eligible_name_with_the_nin
     records = kinds(evidence, "signal")
     assert len(records) == 12 == result.recorded
     for record in records:
-        assert {name: record[name] for name in HASH_NAMES} == inputs.current_hashes() == evidence.manifest.hashes
+        pins = inputs.current_hashes()
+        assert pins == evidence.manifest.hashes and set(pins) == set(signals.PIN_NAMES)
+        assert {name: record[name] for name in HASH_NAMES} == {name: pins[name] for name in HASH_NAMES}
+        assert f"{signals.EVALUATION_KEY}={result.evaluation_sha256}" in record["reason"]
         assert record["as_of_date"] == AS_OF.isoformat() and record["run_class"] == "plumbing"
         assert signals.HOLDOUT_FLAG in record["reason"] and f"surveillance_as_of={AS_OF.isoformat()}" in record["reason"]
         assert record["signal_id"] == f"sig-{AS_OF.strftime('%Y%m%d')}-{record['isin']}"
@@ -368,7 +402,7 @@ def test_eligibility_is_asked_at_s_minus_one_in_pilot_mode(tmp_path, stubs, monk
             seen["as_of"] = as_of
             return self.eligibility.snapshot(as_of)
 
-    monkeypatch.setattr(signals, "UniverseEligibility", Spy)
+    monkeypatch.setattr(signals, "AsOfEligibility", Spy)
     inputs = make_inputs(tmp_path, eligibility=None, run_start=S)  # no injected source: the default is built
     result = evaluate_session(make_evidence(tmp_path, inputs), inputs, decision_session=S)
     assert result.status == signals.STATUS_EVALUATED and seen == {"mode": "pilot", "as_of": AS_OF}
@@ -533,7 +567,7 @@ def test_the_band_for_s_is_resolved_from_s_minus_one_for_the_names_that_could_be
 # --- the pins: a hash differing from the manifest pauses all processing (typed code) ---------------------------------------
 
 
-@pytest.mark.parametrize("name", HASH_NAMES)
+@pytest.mark.parametrize("name", signals.PIN_NAMES)
 def test_a_hash_differing_from_the_manifest_pauses_all_processing(name, tmp_path, stubs):
     inputs = make_inputs(tmp_path, eligibility=sup.StaticEligibility(ANCHORS), run_start=S)
     evidence = make_evidence(tmp_path, inputs)
@@ -548,6 +582,7 @@ def test_a_hash_differing_from_the_manifest_pauses_all_processing(name, tmp_path
         "limits_sha256": replace(inputs, strategy=replace(inputs.strategy, limits_sha256=sha("other"))),
         "cost_sha256": replace(inputs, cost_sha256=sha("other")),
         "scenario_sha256": replace(inputs, scenario_sha256=sha("other")),
+        "seed_sha256": replace(inputs, window_start=HIST[1]),  # the run window is pinned with the seed rows
     }[name]
     assert changed.current_hashes()[name] != inputs.current_hashes()[name]
     result = evaluate_session(evidence, changed, decision_session=S)
@@ -573,7 +608,7 @@ def test_a_manifest_missing_a_pin_is_a_mismatch(tmp_path, stubs):
     inputs = make_inputs(tmp_path, eligibility=sup.StaticEligibility(ANCHORS), run_start=S)
     hashes = {k: v for k, v in inputs.current_hashes().items() if k != "tick_sha256"}
     evidence = EvidenceStore.create(tmp_path / "ev-pins", run_id="run1", run_class="plumbing", session_id="s-1",
-                                    hashes=hashes, clock=lambda: FIXED)
+                                    hashes=hashes, holdout_dated_inputs=True, clock=lambda: FIXED)
     result = evaluate_session(evidence, inputs, decision_session=S)
     assert result.status == signals.STATUS_PAUSED and result.pause_reason == "hash_mismatch:tick_sha256"
 
@@ -663,16 +698,24 @@ def real_world(tmp_path: Path, shocks=frozenset(), *, extra=None, name="world") 
     return root
 
 
-def real_step(tmp_path: Path, root: Path, *, free: bool = True, monkeypatch=None):
+_STATIC = object()  # the default eligibility source of ``real_step`` is the injected static one
+WORLD_POLICY = UniversePolicy(lookback_sessions=5, min_known_sessions=4, min_median_traded_value=Decimal("1"),
+                              min_price=Decimal("1"))
+
+
+def real_step(tmp_path: Path, root: Path, *, free: bool = True, monkeypatch=None, eligibility: Any = _STATIC,
+              universe_policy: UniversePolicy | None = None):
     calendar = nc.pinned(_new_dir(tmp_path, f"cal-{root.name}"), coverage=(date(2025, 3, 1), date(2025, 3, 31)))
     with PilotDataStore(root, workspace="india") as store:
         inputs = SignalInputs(
-            store=store, strategy=world_params(), targets=lb.TARGETS, universe_policy=UniversePolicy(),
+            store=store, strategy=world_params(), targets=lb.TARGETS, universe_policy=universe_policy or UniversePolicy(),
             calendar=calendar, tolerances=lb.TOLERANCES, window_start=cc.START, run_start_session=D2,
             dataset_sha256=sha("dataset"), tick_sha256=sha("tick"), cost_sha256=sha("cost"),
-            scenario_sha256=sha("scenario"), eligibility=sup.StaticEligibility(REAL_ELIGIBLE))
+            scenario_sha256=sha("scenario"),
+            eligibility=sup.StaticEligibility(REAL_ELIGIBLE) if eligibility is _STATIC else eligibility)
         evidence = EvidenceStore.create(_new_dir(tmp_path, f"ev-{root.name}"), run_id="run1", run_class="plumbing",
-                                        session_id="s-1", hashes=inputs.current_hashes(), clock=lambda: FIXED)
+                                        session_id="s-1", hashes=inputs.current_hashes(), holdout_dated_inputs=True,
+                                        clock=lambda: FIXED)
         if free and monkeypatch is not None:
             monkeypatch.setattr(signals, "require_reference_freshness", lambda *a, **k: None)
         return inputs, evidence, evaluate_session(evidence, inputs, decision_session=WORLD_S)
@@ -689,7 +732,8 @@ def test_real_the_decision_for_s_is_byte_identical_whatever_is_dated_s_or_later(
         assert result.status == signals.STATUS_EVALUATED, (name, result.pause_reason)
         assert {s.anchor_isin for s in result.signals} == set(REAL_ELIGIBLE) and result.holdout_dated_inputs
         view = (result.decision_bytes(), result.adjusted_inputs_sha256, result.raw_inputs_sha256,
-                result.composition_sha256, sorted(r["signal_id"] for r in kinds(evidence, "signal")))
+                result.composition_sha256, result.eligibility_sha256, result.evaluation_sha256,
+                sorted(r["signal_id"] for r in kinds(evidence, "signal")))
         reference = reference or view
         assert view == reference, name
     assert result.as_of == D5 and result.surveillance_as_of == D5
@@ -735,3 +779,396 @@ def test_real_the_freshness_check_runs_for_s_and_a_store_without_refresh_runs_pa
     _, evidence, result = real_step(tmp_path, root, free=False)  # the real require_reference_freshness
     assert result.status == signals.STATUS_PAUSED and result.pause_event == "freshness_check_failed"
     assert kinds(evidence, "signal") == [] and kinds(evidence, "pause")[0]["scope"] == "all"
+
+
+# --- review round 1 (Codex r1, Opus r1 at 21105911) --------------------------------------------------------------------
+
+
+def fresh_extra(store):
+    surveillance_lists()(store)
+    lb.pb.put_list(store, D5)
+    rrt.record_success(store, D5)
+
+
+def late_split_eligibility(tmp_path, flags, name):
+    """The default eligibility source and 62's, each on the same store, as the decision at S sees it."""
+    root = real_world(tmp_path, flags, name=name, extra=fresh_extra)
+    _, evidence, result = real_step(tmp_path, root, eligibility=None, universe_policy=WORLD_POLICY)
+    with PilotDataStore(root, workspace="india") as store:
+        sixty_two = UniverseEligibility(store, lb.TARGETS, WORLD_POLICY, mode="pilot").snapshot(D5)
+    return evidence, result, sixty_two
+
+
+def test_real_default_eligibility_cannot_see_a_split_first_seen_after_s_minus_one(tmp_path):
+    """codex-r1-1. 62's UniverseEligibility rebuilds lineage without the as-of trim, so a split first seen on S moved
+    S-1's eligible set while the composed bars stayed identical. The default source here uses the same trimmed lineage."""
+    _, base, base_62 = late_split_eligibility(tmp_path, {"no_future"}, "base")
+    _, late, late_62 = late_split_eligibility(tmp_path, {"no_future", "relink"}, "late")
+    assert base.status == late.status == signals.STATUS_EVALUATED
+    assert base.composition_sha256 == late.composition_sha256 and base.adjusted_inputs_sha256 == late.adjusted_inputs_sha256
+    assert base.eligible == base_62.eligible and base.eligibility_sha256 == base_62.result_sha256  # parity when no link is late
+    assert late_62.eligible != base_62.eligible  # the precondition: the shock moves 62's own source
+    assert late.eligible == base.eligible and len(base.eligible) >= 1
+    assert late.eligibility_sha256 == base.eligibility_sha256
+    assert late.decision_bytes() == base.decision_bytes() and late.evaluation_sha256 == base.evaluation_sha256
+
+
+def test_real_default_eligibility_is_identical_under_every_shock_dated_s_or_later(tmp_path, monkeypatch):
+    """codex-r1-1: the shock test with the default eligibility source, asserting eligibility identity as well."""
+    reference = None
+    for name, flags in {"base": set(), "scaled": {"scale"}, "future_deleted": {"no_future"},
+                        "everything": {"scale", "new_breeze", "ca_structural", "bands_surv", "fetch_extra", "quarantine",
+                                       "relink", "factor_event", "old_bonus"}}.items():
+        root = real_world(tmp_path, flags, name=name)
+        _, evidence, result = real_step(tmp_path, root, monkeypatch=monkeypatch, eligibility=None,
+                                        universe_policy=WORLD_POLICY)
+        assert result.status == signals.STATUS_EVALUATED, (name, result.pause_reason)
+        view = (result.eligible, result.eligibility_sha256, result.decision_bytes(), result.evaluation_sha256,
+                sorted(r["signal_id"] for r in kinds(evidence, "signal")))
+        reference = reference or view
+        assert view == reference, name
+    assert reference[0]
+
+
+# restart: the same session twice (codex-r1-2) ---------------------------------------------------------------------------
+
+
+def reopen_evidence(evidence: EvidenceStore) -> EvidenceStore:
+    return EvidenceStore.open(evidence.run_dir.parent, run_id="run1", session_id="s-1", clock=lambda: FIXED)
+
+
+def test_a_restart_with_the_same_evaluation_dedupes_and_appends_nothing(tmp_path, stubs):
+    inputs, evidence, first = run_step(tmp_path, run_start=S)
+    before = evidence.records()
+    reopened = reopen_evidence(evidence)
+    again = evaluate_session(reopened, inputs, decision_session=S)
+    assert again.status == signals.STATUS_EVALUATED and again.recorded == 0
+    assert again.decision_bytes() == first.decision_bytes() and again.evaluation_sha256 == first.evaluation_sha256
+    assert reopened.records() == before and not policy.run_state(reopened).open_pauses
+
+
+def test_a_restart_that_derives_a_different_evaluation_pauses_instead_of_returning_either_value(tmp_path, stubs):
+    inputs, evidence, first = run_step(tmp_path, run_start=S)
+    before = evidence.records()
+    stubs.rows = [row.model_copy(update={"adj_close": row.adj_close * Decimal("1.5")}) if row.trade_date == AS_OF else row
+                  for row in stubs.rows]
+    reopened = reopen_evidence(evidence)
+    again = evaluate_session(reopened, inputs, decision_session=S)
+    assert again.status == signals.STATUS_PAUSED and again.pause_event == "hash_mismatch"
+    assert again.pause_reason == signals.CONFLICT_CODE and again.signals == () and again.evaluation_sha256 is None
+    after = reopened.records()
+    assert after[:len(before)] == before and [r["kind"] for r in after[len(before):]] == ["pause"]
+    assert kinds(reopened, "pause")[0]["scope"] == "all" and len(kinds(reopened, "signal")) == 12
+    assert policy.run_state(reopened).blocks(policy.STEP_BOOK)
+    # still paused for the next call, which reads nothing more
+    calls = len(stubs.live_calls)
+    repeat = evaluate_session(reopened, inputs, decision_session=S)
+    assert repeat.pause_reason == "already_paused" and len(stubs.live_calls) == calls
+
+
+def test_real_a_restart_after_a_late_derived_dividend_pauses_and_the_log_keeps_the_first_decision(tmp_path, monkeypatch):
+    monkeypatch.setitem(cc.STEADY, D4, ("99", "105", "95", "100"))
+    root = real_world(tmp_path, {"no_future"}, name="restart_real", extra=fresh_extra)
+    inputs, evidence, first = real_step(tmp_path, root, free=False)
+    before = evidence.records()
+    assert first.status == signals.STATUS_EVALUATED
+    with PilotDataStore(root, workspace="india") as store:
+        row = kit.bc_row("EQ", "STEADYCO", "STEADY CO", "INTERIM DIVIDEND", ex_date=D4)
+        lb.ingest_pr_zip(store, cc.desc(kind="pr_zip"), lb.pr_zip_on(D2, [row]), trade_date=D2)
+        lb.derive_corporate_actions(store, workspace="india")
+        reopened = reopen_evidence(evidence)
+        again = evaluate_session(reopened, replace(inputs, store=store), decision_session=WORLD_S)
+    assert again.status == signals.STATUS_PAUSED and again.pause_reason == signals.CONFLICT_CODE
+    assert reopened.records()[:len(before)] == before and len(reopened.records()) == len(before) + 1
+    assert [p.scope for p in policy.run_state(reopened).open_pauses] == ["all"]
+
+
+def test_a_signal_record_without_a_fingerprint_is_a_conflict_not_a_dedupe(tmp_path, stubs):
+    inputs = make_inputs(tmp_path, eligibility=sup.StaticEligibility(ANCHORS), run_start=S)
+    evidence = make_evidence(tmp_path, inputs)
+    hashes = inputs.current_hashes()
+    evidence.append("signal", {
+        "signal_id": f"sig-{AS_OF.strftime('%Y%m%d')}-{ANCHORS[0]}", "symbol": "STK00", "isin": ANCHORS[0], "series": "EQ",
+        "as_of_date": AS_OF.isoformat(), **{name: hashes[name] for name in HASH_NAMES}, "reason": signals.HOLDOUT_FLAG})
+    result = evaluate_session(evidence, inputs, decision_session=S)
+    assert result.status == signals.STATUS_PAUSED and result.pause_reason == signals.CONFLICT_CODE
+    assert len(kinds(evidence, "signal")) == 1
+
+
+def test_a_decide_stopped_between_two_records_finishes_under_the_same_fingerprint(tmp_path, stubs, monkeypatch):
+    inputs = make_inputs(tmp_path, eligibility=sup.StaticEligibility(ANCHORS), run_start=S)
+    evidence = make_evidence(tmp_path, inputs)
+    original = signals._Recorder.append
+    written = []
+
+    def stop_after_five(self, kind, payload):
+        if len(written) == 5:
+            raise KeyboardInterrupt("stopped between records")
+        written.append(kind)
+        original(self, kind, payload)
+
+    monkeypatch.setattr(signals._Recorder, "append", stop_after_five)
+    with pytest.raises(KeyboardInterrupt):
+        evaluate_session(evidence, inputs, decision_session=S)
+    monkeypatch.setattr(signals._Recorder, "append", original)
+    reopened = reopen_evidence(evidence)
+    assert len(kinds(reopened, "signal")) == 5
+    again = evaluate_session(reopened, inputs, decision_session=S)
+    assert again.status == signals.STATUS_EVALUATED and again.recorded == 7 and len(kinds(reopened, "signal")) == 12
+    assert {r["reason"].split(f"{signals.EVALUATION_KEY}=")[1][:64] for r in kinds(reopened, "signal")} == {again.evaluation_sha256}
+
+
+# the fingerprint covers what the nine pins miss (codex-r1-3) ---------------------------------------------------------------
+
+
+def test_real_a_derived_dividend_moves_the_fingerprint_though_every_pin_is_unchanged(tmp_path, monkeypatch):
+    monkeypatch.setitem(cc.STEADY, D4, ("99", "105", "95", "100"))
+    results = {}
+    for label, with_event in (("base", False), ("dividend", True)):
+        def extra(store, with_event=with_event):
+            fresh_extra(store)
+            if with_event:
+                row = kit.bc_row("EQ", "STEADYCO", "STEADY CO", "INTERIM DIVIDEND", ex_date=D4)
+                lb.ingest_pr_zip(store, cc.desc(kind="pr_zip"), lb.pr_zip_on(D2, [row]), trade_date=D2)
+                lb.derive_corporate_actions(store, workspace="india")
+
+        root = real_world(tmp_path, {"no_future"}, name=label, extra=extra)
+        _, evidence, results[label] = real_step(tmp_path, root, free=False)
+    base, dividend = results["base"], results["dividend"]
+    assert base.status == dividend.status == signals.STATUS_EVALUATED
+    assert base.hashes == dividend.hashes and base.raw_inputs_sha256 == dividend.raw_inputs_sha256
+    assert base.decision_bytes() != dividend.decision_bytes() and base.composition_sha256 != dividend.composition_sha256
+    assert base.evaluation_sha256 != dividend.evaluation_sha256
+
+
+def test_real_a_different_band_file_moves_the_fingerprint_though_pins_and_composition_are_unchanged(tmp_path):
+    results = {}
+    for value in ("20", "5"):
+        def extra(store, value=value):
+            surveillance_lists()(store)
+            lb.pb.put_list(store, D5, rows=[dict(kit.SEC_LIST_CANBK, Band=value),
+                                            dict(kit.SEC_LIST_RELIANCE, Symbol="STEADYCO", Band=value)])
+            lb.pb.with_convention(store)
+            rrt.record_success(store, D5)
+
+        root = real_world(tmp_path, {"no_future"}, name=f"band{value}", extra=extra)
+        _, evidence, results[value] = real_step(tmp_path, root, free=False)
+    wide, narrow = results["20"], results["5"]
+    assert wide.status == narrow.status == signals.STATUS_EVALUATED
+    assert {b.percent for b in wide.bands.values()} == {Decimal("20")} and {b.percent for b in narrow.bands.values()} == {Decimal("5")}
+    assert wide.hashes == narrow.hashes and wide.composition_sha256 == narrow.composition_sha256
+    assert wide.evaluation_sha256 != narrow.evaluation_sha256
+
+
+def _band_override(stubs, monkeypatch, **update):
+    band = stubs.band
+    monkeypatch.setattr(signals, "band_for_upcoming_session",
+                        lambda *a, **k: band(*a, **k).model_copy(update=update))
+    return {}
+
+
+def _convention(stubs, monkeypatch):
+    stubs.convention = SimpleNamespace(model_dump=lambda mode="json": {"list_rule": "same_date", "basis": "other"})
+    return {}
+
+
+def _overlay_sources(stubs, monkeypatch):
+    monkeypatch.setattr(signals, "snapshot_for", lambda store, kind, effective: SimpleNamespace(
+        source_sha256=sha(f"other-{kind}"), list_name=kind))
+    return {}
+
+
+def _rows(stubs, monkeypatch, column):
+    stubs.rows = [r.model_copy(update={column: getattr(r, column) + 1}) if r.trade_date == AS_OF else r
+                  for r in stubs.rows]
+    return {}
+
+
+def _set(stubs, monkeypatch, **fields):
+    for name, value in fields.items():
+        setattr(stubs, name, value)
+    return {}
+
+
+MUTATIONS = {
+    # each moves exactly one component of the fingerprint (the decision hash too where the input feeds a score)
+    "band_percent": lambda stubs, mp: _band_override(stubs, mp, percent=Decimal("5")),
+    "band_file": lambda stubs, mp: _band_override(stubs, mp, source_sha256s=(sha("corrected-band"),)),
+    "band_convention": _convention,
+    "overlay_list": lambda stubs, mp: _set(stubs, mp, lists={"asm": [(None, "STK07")], "gsm": []}),
+    "overlay_foreign_symbol": lambda stubs, mp: _set(stubs, mp, lists={"asm": [(None, "NOTHELD")], "gsm": []}),
+    "overlay_source": _overlay_sources,
+    "adjusted_price": lambda stubs, mp: _rows(stubs, mp, "adj_close"),
+    "raw_price": lambda stubs, mp: _rows(stubs, mp, "raw_close"),
+    "composition": lambda stubs, mp: _set(stubs, mp, composition="d" * 64),
+    "lineage": lambda stubs, mp: _set(stubs, mp, lineages={ANCHORS[0]: sha("lineage")}),
+    "factor_set": lambda stubs, mp: _set(stubs, mp, factor_sets={ANCHORS[0]: sha("factors")}),
+    "unknown_dividend": lambda stubs, mp: _set(stubs, mp, unknown={ANCHORS[0]: (DividendAmountUnknownEvent(
+        event_id="e" * 64, ex_date=HIST[-3]),)}),
+    "sources": lambda stubs, mp: _set(stubs, mp, sources=(sha("bhavcopy"),)),
+    "smallcap_class": lambda stubs, mp: {"eligibility": sup.StaticEligibility(ANCHORS, smallcap={ANCHORS[0]: "small"})},
+    "pins": lambda stubs, mp: {"cost_sha256": sha("another-cost-table")},
+    "params_without_a_pin_change": lambda stubs, mp: {"config": strategy(lookback_sessions=10)},
+    # same inputs, same ranks, other scores: only the decision itself moves (a scoring code change)
+    "scoring_code": lambda stubs, mp: mp.setattr(signals, "zscores", lambda raw: {
+        anchor: value * 2 for anchor, value in zscores(raw).items()}) or {},
+}
+
+
+@pytest.mark.parametrize("mutation", sorted(MUTATIONS))
+def test_each_decision_input_moves_the_evaluation_fingerprint(mutation, tmp_path, stubs, monkeypatch):
+    _, _, base = run_step(tmp_path, run_start=S)
+    kwargs = MUTATIONS[mutation](stubs, monkeypatch)
+    _, _, changed = run_step(tmp_path, run_start=S, **kwargs)
+    assert changed.status == base.status == signals.STATUS_EVALUATED
+    assert changed.evaluation_sha256 != base.evaluation_sha256
+    if mutation not in ("pins", "params_without_a_pin_change"):
+        assert changed.hashes == base.hashes  # the nine pins alone would not have seen it
+
+
+def test_the_evaluation_fingerprint_is_deterministic(tmp_path, stubs):
+    _, _, one = run_step(tmp_path, run_start=S)
+    _, _, two = run_step(tmp_path, run_start=S)
+    assert one.evaluation_sha256 == two.evaluation_sha256 and len(one.evaluation_sha256) == 64
+
+
+def test_a_corrected_band_file_on_restart_is_a_conflict_not_a_silent_dedupe(tmp_path, stubs, monkeypatch):
+    inputs, evidence, first = run_step(tmp_path, run_start=S)
+    band = stubs.band
+    monkeypatch.setattr(signals, "band_for_upcoming_session", lambda *a, **k: band(*a, **k).model_copy(
+        update={"percent": Decimal("5"), "source_sha256s": (sha("corrected-band"),)}))
+    again = evaluate_session(reopen_evidence(evidence), inputs, decision_session=S)
+    assert again.status == signals.STATUS_PAUSED and again.pause_reason == signals.CONFLICT_CODE
+
+
+# freshness after a weekday holiday (codex-r1-4) ----------------------------------------------------------------------------
+
+
+def holiday_run(tmp_path, monkeypatch, stubs, *, calendar_holidays):
+    decision = date(2026, 10, 20)  # Tuesday; Monday 19 October is a holiday on the operator's calendar
+    monkeypatch.setattr(signals, "require_reference_freshness", refresh.require_reference_freshness)
+    with PilotDataStore(tmp_path / "store", workspace="india") as store:
+        rrt.mark_calendar(store, AS_OF, date(2026, 10, 19), {AS_OF})
+        rrt.snapshots(store, AS_OF)
+        rrt.record_success(store, AS_OF)
+        inputs = make_inputs(tmp_path, store=store, eligibility=sup.StaticEligibility(ANCHORS), run_start=decision)
+        inputs = replace(inputs, calendar=make_calendar(tmp_path, holidays=calendar_holidays))
+        evidence = make_evidence(tmp_path, inputs)
+        return evaluate_session(evidence, inputs, decision_session=decision)
+
+
+def test_a_pinned_monday_holiday_does_not_make_fridays_refresh_stale_for_tuesday(tmp_path, stubs, monkeypatch):
+    result = holiday_run(tmp_path, monkeypatch, stubs, calendar_holidays=[date(2026, 10, 19)])
+    assert result.status == signals.STATUS_EVALUATED and result.as_of == AS_OF
+
+
+def test_without_the_holiday_on_the_calendar_the_same_store_is_still_stale(tmp_path, stubs, monkeypatch):
+    result = holiday_run(tmp_path, monkeypatch, stubs, calendar_holidays=[])
+    assert result.status == signals.STATUS_PAUSED and result.pause_event == "freshness_check_failed"
+    assert result.pause_reason == "reference_refresh_stale"
+
+
+def test_the_pinned_calendar_is_what_freshness_is_given(tmp_path, stubs):
+    inputs, _, _ = run_step(tmp_path, run_start=S)
+    assert stubs.fresh_calendars == [inputs.calendar]
+
+
+# the manifest flag (codex-r1-5, opus-r1-1) ----------------------------------------------------------------------------------
+
+
+def test_the_flag_is_in_manifest_json_for_a_reader_that_never_opens_the_log(tmp_path, stubs):
+    _, evidence, result = run_step(tmp_path, run_start=S)
+    manifest = json.loads((evidence.run_dir / "manifest.json").read_text())
+    assert manifest["holdout_dated_inputs"] is True and result.holdout_dated_inputs is True
+    assert evidence.manifest.holdout_dated_inputs is True
+
+
+def test_a_run_whose_manifest_lacks_the_flag_is_refused_before_anything_is_read(tmp_path, stubs):
+    inputs = make_inputs(tmp_path, eligibility=sup.StaticEligibility(ANCHORS), run_start=S)
+    evidence = EvidenceStore.create(tmp_path / "ev-unflagged", run_id="run1", run_class="plumbing", session_id="s-1",
+                                    hashes=inputs.current_hashes(), clock=lambda: FIXED)  # the default is False
+    assert json.loads((evidence.run_dir / "manifest.json").read_text())["holdout_dated_inputs"] is False
+    with pytest.raises(SignalsError) as refused:
+        evaluate_session(evidence, inputs, decision_session=S)
+    assert refused.value.code == "manifest_not_holdout_dated"
+    assert stubs.live_calls == [] and stubs.fresh_calls == [] and evidence.records() == []
+
+
+# the seed pin (opus-r1-1) ----------------------------------------------------------------------------------------------------
+
+
+def test_reseeding_with_other_rows_moves_only_the_seed_pin(tmp_path, stubs, monkeypatch):
+    inputs = make_inputs(tmp_path, eligibility=sup.StaticEligibility(ANCHORS), run_start=S)
+    evidence = make_evidence(tmp_path, inputs)
+    monkeypatch.setattr(signals, "seed_rows", lambda store: [["a" * 64, HIST[0].isoformat(), AS_OF.isoformat()],
+                                                            ["b" * 64, HIST[2].isoformat(), AS_OF.isoformat()]])
+    assert inputs.current_hashes()["seed_sha256"] != evidence.manifest.hashes["seed_sha256"]
+    result = evaluate_session(evidence, inputs, decision_session=S)
+    assert result.status == signals.STATUS_PAUSED and result.pause_reason == "hash_mismatch:seed_sha256"
+    assert stubs.live_calls == [] and kinds(evidence, "signal") == []
+
+
+def append_seed_row(store, *, report_sha: str, window_start: date, window_end: date, dataset_sha: str = "c" * 64) -> None:
+    store.ensure_table("session_store_seeds", SEEDS_DDL, key_columns=("seed_report_sha256",))
+    store.append_rows("session_store_seeds", [{
+        "seed_report_sha256": report_sha, "research_identity_sha256": "b" * 64, "dataset_sha256": dataset_sha,
+        "window_start": window_start, "window_end": window_end, "seeded_at_utc": cc.LATER.replace(tzinfo=None),
+        "row_sha256": sha("row-" + report_sha), "source_sha256": report_sha}], check="session_store_seed")
+
+
+def test_real_a_reseed_with_other_blobs_and_window_but_the_same_dataset_pauses_on_the_seed_pin(tmp_path, monkeypatch):
+    root = real_world(tmp_path, {"no_future"}, name="reseed", extra=fresh_extra)
+    calendar = nc.pinned(_new_dir(tmp_path, "cal-reseed"), coverage=(date(2025, 3, 1), date(2025, 3, 31)))
+    with PilotDataStore(root, workspace="india") as store:
+        inputs = SignalInputs(
+            store=store, strategy=world_params(), targets=lb.TARGETS, universe_policy=UniversePolicy(),
+            calendar=calendar, tolerances=lb.TOLERANCES, window_start=cc.START, run_start_session=D2,
+            dataset_sha256=sha("dataset"), tick_sha256=sha("tick"), cost_sha256=sha("cost"),
+            scenario_sha256=sha("scenario"), eligibility=sup.StaticEligibility(REAL_ELIGIBLE))
+        pins = inputs.current_hashes()
+        evidence = EvidenceStore.create(_new_dir(tmp_path, "ev-reseed"), run_id="run1", run_class="plumbing",
+                                        session_id="s-1", hashes=pins, holdout_dated_inputs=True, clock=lambda: FIXED)
+        monkeypatch.setattr(signals, "require_reference_freshness", lambda *a, **k: None)
+        assert evaluate_session(evidence, inputs, decision_session=WORLD_S).status == signals.STATUS_EVALUATED
+        append_seed_row(store, report_sha="e" * 64, window_start=D2, window_end=D5)  # same dataset sha, other blobs and window
+        changed = inputs.current_hashes()
+        assert {name for name in pins if pins[name] != changed[name]} == {"seed_sha256"}
+        result = evaluate_session(evidence, inputs, decision_session=WORLD_S)
+    assert result.status == signals.STATUS_PAUSED and result.pause_event == "hash_mismatch"
+    assert result.pause_reason == "hash_mismatch:seed_sha256"
+
+
+def test_a_store_that_was_never_seeded_pauses_with_a_typed_code_and_reads_nothing(tmp_path, stubs, monkeypatch):
+    inputs = make_inputs(tmp_path, eligibility=sup.StaticEligibility(ANCHORS), run_start=S)
+    evidence = make_evidence(tmp_path, inputs)
+    monkeypatch.setattr(signals, "seed_rows", REAL_SEED_ROWS)  # the real seed read, on a real and empty store
+    with PilotDataStore(tmp_path / "empty-store", workspace="india") as store:
+        with pytest.raises(PilotDataError) as unseeded:
+            signals.seed_rows(store)
+        assert unseeded.value.code == "not_a_session_store"
+        result = evaluate_session(evidence, replace(inputs, store=store), decision_session=S)
+    assert result.status == signals.STATUS_PAUSED and result.pause_event == "stale_data"
+    assert result.pause_reason == "not_a_session_store" and kinds(evidence, "signal") == []
+
+
+# a band error is typed (opus-r1-2) -------------------------------------------------------------------------------------------------
+
+
+def test_a_pilot_error_from_the_band_call_pauses_all_with_its_code_and_records_no_signal(tmp_path, stubs):
+    stubs.band_error = PilotDataError("band_convention_conflict", f"{CANARY_TOKEN} {CANARY_IP}")
+    _, evidence, result = run_step(tmp_path, run_start=S, forbidden=FORBIDDEN)
+    assert result.status == signals.STATUS_PAUSED and result.pause_event == "stale_data"
+    assert result.pause_reason == "band_convention_conflict" and result.signals == ()
+    assert kinds(evidence, "signal") == [] and kinds(evidence, "pause")[0]["scope"] == "all"
+    raw = log_bytes(evidence)
+    assert not any(canary.encode() in raw for canary in FORBIDDEN)
+
+
+def test_a_pilot_error_from_the_band_convention_read_pauses_too(tmp_path, stubs, monkeypatch):
+    def broken(store):
+        raise PilotDataError("band_convention_conflict", "two conventions")
+
+    monkeypatch.setattr(signals, "current_band_convention", broken)
+    _, evidence, result = run_step(tmp_path, run_start=S)
+    assert result.status == signals.STATUS_PAUSED and result.pause_reason == "band_convention_conflict"
+    assert kinds(evidence, "signal") == []

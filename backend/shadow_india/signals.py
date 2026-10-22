@@ -11,9 +11,11 @@ Inputs, all through public APIs and no edit to a 59, 60, 62 or 63 module:
   parameter set lives in ``private/india/strategy.json``; the tracked placeholder is never a default;
 - bars: ``pilot_data.live_bars.bars_as_of`` on the session store, with the real decision session. Adjusted prices
   feed signals, raw prices are for marks (62 D-05);
-- freshness: ``reference_refresh.require_reference_freshness`` for S;
-- eligibility: ``strategy_india.data.UniverseEligibility`` in ``mode="pilot"`` at S-1 (62 parity, Q-2), plus a
-  buy-block overlay from the ASM and GSM lists effective S-1;
+- freshness: ``reference_refresh.require_reference_freshness`` for S, with the pinned calendar, so the refresh it asks
+  for is the previous trading session's and a weekday holiday does not make the session before it stale;
+- eligibility: 59's ``evaluate_universe`` in ``mode="pilot"`` at S-1 (62 parity, Q-2) on the same as-of trimmed lineage
+  ``bars_as_of`` composes with, so an ISIN link first seen after S-1 cannot change who is eligible, plus a buy-block
+  overlay from the ASM and GSM lists effective S-1;
 - signals: 62's own ``SignalTable`` and ``MomentumProvider`` on a ``DatasetView`` sealed with ``HoldoutRange(S, S)``
   (D-32), so a read of S or later raises ``HoldoutViolation`` whatever the composed rows hold.
 
@@ -25,8 +27,16 @@ suppresses that one name's signal and records why; no pause is raised for it, be
 be entered (an ``unresolved_corporate_action`` pause is the held-name path in ``portfolio.py``).
 
 D-31: every result carries ``holdout_dated_inputs=True``. The composed rows may be dated inside the sealed 62
-holdout, so this module never imports the 62 engine, gate, report or holdout opener, and the flag is stamped in every
-record's text because the evidence schema has no field for it.
+holdout, so this module never imports the 62 engine, gate, report or holdout opener. A run whose manifest does not
+carry ``holdout_dated_inputs: true`` (hash-bound in ``manifest.json``) is refused before any input is read, and the
+flag is also stamped in every record's text.
+
+Pins. The nine record pins plus ``seed_sha256``, which binds the 64-08 seed rows of the session store (their report
+sha256 and window) and this run's ``window_start``. Re-seeding the store with other blobs or another window moves it
+even when ``dataset_sha256`` is unchanged. Every signal record carries ``evaluation_sha256``, a fingerprint of the
+whole evaluation (pins, composition and factor sets, eligibility, overlay, bands and band convention, the decision).
+A restart that derives a different evaluation for a session already on the record pauses everything with
+``evaluation_conflict`` instead of returning one value while the log keeps the other.
 
 No clock, no network, no randomness. Evidence writes go through the store handed in.
 """
@@ -34,27 +44,28 @@ No clock, no network, no randomness. Evidence writes go through the store handed
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+import re
+from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from pilot_data.core import PilotDataError, canonical_sha256
-from pilot_data.live_bars import LiveBarsResult, bars_as_of
+from pilot_data.live_bars import LiveBarsResult, _as_of_lineage, bars_as_of
 from pilot_data.models import CrossCheckTolerances
 from pilot_data.nse_calendar import PinnedCalendar
-from pilot_data.price_bands import BandObservation, band_for_upcoming_session
+from pilot_data.price_bands import BandObservation, band_for_upcoming_session, current_band_convention
 from pilot_data.reference_refresh import require_reference_freshness
 from pilot_data.store import PilotDataStore
 from pilot_data.surveillance import snapshot_for, surveillance_entries
 from pilot_data.targets import TargetUniverseResult
-from pilot_data.universe import UniversePolicy
+from pilot_data.universe import UniversePolicy, evaluate_universe
 from private_config.errors import PrivateConfigError
 from private_config.loader import load_workspace_config
 from private_config.schemas import IndiaLimits
 from strategy_india.data import (
-    DatasetView, DecisionView, EligibilitySource, UniverseEligibility, events_from_manifest,
+    DatasetView, DecisionView, EligibilitySnapshot, EligibilitySource, NoTradingStatusSource, events_from_manifest,
 )
 from strategy_india.errors import ParamsError
 from strategy_india.holdout import HoldoutRange
@@ -68,12 +79,19 @@ HASH_NAMES = (
     "strategy_sha256", "params_sha256", "dataset_sha256", "universe_sha256", "band_sha256", "tick_sha256",
     "limits_sha256", "cost_sha256", "scenario_sha256",
 )
+SEED_PIN = "seed_sha256"  # manifest-only: the signal record schema carries the nine HASH_NAMES
+PIN_NAMES = (*HASH_NAMES, SEED_PIN)
 BAND_CONTRACT = "band_for_upcoming_session/1"
+SEED_CONTRACT = "session-store-seeds/1"
+EVALUATION_CONTRACT = "shadow-evaluation/1"
 SIGNAL_CONTRACT = "shadow-signals/1"
 STATUS_EVALUATED = "evaluated"
 STATUS_NON_EVALUATION_DAY = "non_evaluation_day"
 STATUS_PAUSED = "paused"
 HOLDOUT_FLAG = "holdout_dated_inputs=true"
+EVALUATION_KEY = "evaluation_sha256"
+_EVALUATION_RE = re.compile(rf"(?:^|;){EVALUATION_KEY}=([0-9a-f]{{64}})(?:;|$)")
+CONFLICT_CODE = "evaluation_conflict"
 SUPPRESS_QUARANTINED = "adjusted_quarantined"
 SUPPRESS_MISSING_BAR = "missing_bar_s1"
 SUPPRESS_HISTORY = "insufficient_history_or_gap"
@@ -132,6 +150,55 @@ def load_strategy_config(private_dir: str | Path | None) -> StrategyConfig:
     )
 
 
+# --- eligibility on the as-of lineage, and the seed pin ---------------------------------------------------------
+
+
+class AsOfEligibility:
+    """59's ``evaluate_universe`` on the lineage ``bars_as_of`` uses (``UniverseEligibility`` with the as-of trim).
+
+    62's ``UniverseEligibility`` rebuilds each lineage with ``build_lineage``, which links an ISIN change to a split
+    event without asking when the event was first seen. Here every lineage is cut with ``_as_of_lineage`` first, so a
+    link first seen after ``as_of`` is invisible to eligibility exactly as it is to the bars. Same snapshot type, same
+    ``result_sha256`` as ``UniverseEligibility`` whenever no such link exists.
+    """
+
+    def __init__(self, store: PilotDataStore, targets: TargetUniverseResult, policy: UniversePolicy, *,
+                 mode: str = "pilot") -> None:
+        self._store = store
+        self._targets = targets
+        self.policy = policy
+        self._mode = mode
+
+    def snapshot(self, as_of: date) -> EligibilitySnapshot:
+        result = evaluate_universe(
+            self._store, as_of=as_of, targets=self._targets, policy=self.policy, mode=self._mode,  # type: ignore[arg-type]
+            allow_missing_surveillance_before=None, workspace="india", status_source=NoTradingStatusSource(),
+            lineage_override=lambda member, built: _as_of_lineage(self._store, built, as_of))
+        if result.as_of != as_of:
+            raise SignalsError("eligibility_not_for_as_of")
+        return EligibilitySnapshot(
+            as_of=result.as_of, eligible=frozenset(result.eligible_isins),
+            smallcap={decision.anchor_isin: decision.smallcap_class for decision in result.decisions},
+            result_sha256=result.result_sha256)
+
+
+def seed_rows(store: PilotDataStore) -> list[list[str]]:
+    """Every 64-08 seed row of the session store (report sha256, window), sorted. A store with none is not a session store."""
+
+    if not store.table_exists("session_store_seeds"):
+        raise PilotDataError("not_a_session_store", "the store has no session_store_seeds table")
+    rows = store.query("SELECT seed_report_sha256, window_start, window_end FROM session_store_seeds "
+                       "ORDER BY seed_report_sha256, window_start, window_end")
+    if not rows:
+        raise PilotDataError("not_a_session_store", "the store has no session_store_seeds row")
+    return [[str(row[0]), row[1].isoformat(), row[2].isoformat()] for row in rows]
+
+
+def seed_pin(store: PilotDataStore, window_start: date) -> str:
+    return canonical_sha256({"contract": SEED_CONTRACT, "seeds": seed_rows(store),
+                             "window_start": window_start.isoformat()})
+
+
 # --- inputs and results -----------------------------------------------------------------------------------------
 
 
@@ -154,9 +221,13 @@ class SignalInputs:
     eligibility: EligibilitySource | None = None  # default: UniverseEligibility in pilot mode
 
     def current_hashes(self) -> dict[str, str]:
-        """The nine pins a manifest carries, recomputed from the live objects."""
+        """The pins a manifest carries (the nine record pins and ``seed_sha256``), recomputed from the live objects.
+
+        Raises ``PilotDataError`` when the store is not a seeded session store.
+        """
 
         return {
+            SEED_PIN: seed_pin(self.store, self.window_start),
             "strategy_sha256": self.strategy.strategy_sha256(),
             "params_sha256": self.strategy.params_sha256,
             "dataset_sha256": self.dataset_sha256,
@@ -208,6 +279,7 @@ class SignalResult:
     bands: Mapping[str, BandObservation] = field(default_factory=dict)
     entries_possible: bool = False  # the cross-section is large enough to z-score (62: min_universe_for_entry)
     recorded: int = 0  # evidence records this call appended
+    evaluation_sha256: str | None = None  # the fingerprint every signal record of this evaluation carries
 
     def decision_payload(self) -> dict[str, Any]:
         """Everything the decision for S consists of, as strings, for the byte-identity tests."""
@@ -349,6 +421,16 @@ class _Recorder:
     def has_signal(self, signal_id: str) -> bool:
         return any(r.get("kind") == "signal" and r.get("signal_id") == signal_id for r in self._existing)
 
+    def signal_fingerprints(self, as_of: date) -> set[str | None]:
+        """The ``evaluation_sha256`` of every signal already on the record for ``as_of``; None for one without."""
+
+        found: set[str | None] = set()
+        for record in self._existing:
+            if record.get("kind") == "signal" and record.get("as_of_date") == as_of.isoformat():
+                match = _EVALUATION_RE.search(str(record.get("reason", "")))
+                found.add(match.group(1) if match else None)
+        return found
+
     def has_non_evaluation(self, as_of: date) -> bool:
         return any(r.get("kind") == "non_evaluation_day" and r.get("as_of_date") == as_of.isoformat()
                    for r in self._existing)
@@ -369,6 +451,37 @@ def _pause(evidence: EvidenceStore, event: str, code: str, *, session: date, as_
     )
 
 
+def _evaluation_fingerprint(result: SignalResult, live: LiveBarsResult, snapshot: EligibilitySnapshot,
+                            blocked_isins: frozenset[str], blocked_symbols: frozenset[str], convention: Any) -> str:
+    """Everything a decision for the session depends on, so two evaluations that differ anywhere differ here.
+
+    The pins alone miss decision inputs (a derived dividend, a band file); composition, factor sets and unknown-dividend
+    events come from 64-08, eligibility, overlay, bands and the band convention from this module, and the decision
+    itself closes it.
+    """
+
+    return canonical_sha256({
+        "contract": EVALUATION_CONTRACT,
+        "pins": dict(sorted(result.hashes.items())),
+        "composition_sha256": live.composition_sha256,
+        "lineages": dict(sorted(live.lineage_hashes.items())),
+        "factor_sets": dict(sorted(live.factor_set_hashes.items())),
+        "dividend_amount_unknown_events": {
+            anchor: sorted([event.ex_date.isoformat(), event.event_id] for event in found)
+            for anchor, found in sorted(live.dividend_amount_unknown_events.items())},
+        "sources": sorted(live.source_sha256s),
+        "eligibility": {"result_sha256": snapshot.result_sha256, "eligible": sorted(snapshot.eligible),
+                        "smallcap": dict(sorted(snapshot.smallcap.items()))},
+        "overlay": {"sha256": result.overlay_sha256, "isins": sorted(blocked_isins), "symbols": sorted(blocked_symbols)},
+        "adjusted_inputs_sha256": result.adjusted_inputs_sha256, "raw_inputs_sha256": result.raw_inputs_sha256,
+        "bands": {isin: [band.status, None if band.percent is None else str(band.percent), band.nse_symbol,
+                         band.series, band.source_kind, sorted(band.source_sha256s), band.reason]
+                  for isin, band in sorted(result.bands.items())},
+        "band_convention": None if convention is None else convention.model_dump(mode="json"),
+        "decision_sha256": result.decision_sha256(),
+    })
+
+
 def evaluate_session(evidence: EvidenceStore, inputs: SignalInputs, *, decision_session: date) -> SignalResult:
     """The signal step of a decide for ``decision_session``. Records evidence, returns the typed result.
 
@@ -379,18 +492,23 @@ def evaluate_session(evidence: EvidenceStore, inputs: SignalInputs, *, decision_
 
     state = policy.run_state(evidence)
     state.require(policy.STEP_READ_ONLY)  # an abort blocks even this
+    if not evidence.manifest.holdout_dated_inputs:  # D-31: the composed rows may be dated inside the sealed holdout
+        raise SignalsError("manifest_not_holdout_dated")
     _require_covered(inputs.calendar, decision_session, inputs.run_start_session)
     if not _is_session(inputs.calendar, decision_session):
         raise SignalsError("decision_session_not_a_session")
     as_of = previous_session(inputs.calendar, decision_session)
-    hashes = inputs.current_hashes()
+    try:
+        hashes = inputs.current_hashes()
+    except PilotDataError as error:  # not a seeded session store: nothing can be pinned, nothing is read
+        return _pause(evidence, "stale_data", error.code, session=decision_session, as_of=as_of, hashes={})
     open_all_pause = next((p for p in state.open_pauses if p.scope == policy.SCOPE_ALL), None)
     if open_all_pause is not None:  # a pause from the P-06 or D-07 list stops all processing: no read, no record
         return SignalResult(status=STATUS_PAUSED, session=decision_session, as_of=as_of, hashes=hashes,
                             pause_event=open_all_pause.event, pause_reason="already_paused")
     # 1. the pins: a hash that differs from the manifest pauses everything before any input is read
     pinned = evidence.manifest.hashes
-    differing = tuple(name for name in HASH_NAMES if pinned.get(name) != hashes[name])
+    differing = tuple(name for name in PIN_NAMES if pinned.get(name) != hashes[name])
     if differing:
         return _pause(evidence, "hash_mismatch", "hash_mismatch:" + ",".join(differing), session=decision_session,
                       as_of=as_of, hashes=hashes)
@@ -410,7 +528,7 @@ def evaluate_session(evidence: EvidenceStore, inputs: SignalInputs, *, decision_
     common = dict(session=decision_session, as_of=as_of, hashes=hashes, cadence_index=index, evaluation=True)
     # 3. reference freshness for S
     try:
-        require_reference_freshness(inputs.store, today_ist=decision_session)
+        require_reference_freshness(inputs.store, today_ist=decision_session, calendar=inputs.calendar)
     except PilotDataError as error:
         return _pause(evidence, "freshness_check_failed", error.code, **common)
     # 4. bars as of S-1, composed with the real decision session
@@ -422,8 +540,7 @@ def evaluate_session(evidence: EvidenceStore, inputs: SignalInputs, *, decision_
     except PilotDataError as error:
         return _pause(evidence, "stale_data", error.code, **common)
     # 5. eligibility at S-1 (pilot mode) and the ASM/GSM overlay effective S-1
-    eligibility = inputs.eligibility or UniverseEligibility(
-        inputs.store, inputs.targets, inputs.universe_policy, mode="pilot")
+    eligibility = inputs.eligibility or AsOfEligibility(inputs.store, inputs.targets, inputs.universe_policy, mode="pilot")
     try:
         snapshot = eligibility.snapshot(as_of)
         blocked_isins, blocked_symbols, overlay_sha = _overlay(inputs.store, as_of)
@@ -466,19 +583,34 @@ def evaluate_session(evidence: EvidenceStore, inputs: SignalInputs, *, decision_
             suppressed=None if score is not None else _suppression(view, anchor, as_of, params)))
     # 7. the band for S of the names that could be bought or held (rank within the hold cutoff)
     bands: dict[str, BandObservation] = {}
-    for name in names:
-        if name.rank is not None and name.rank <= params.hold_rank_cutoff:
-            bands[name.isin] = band_for_upcoming_session(
-                inputs.store, isin=name.isin, prior_session=as_of, session=decision_session,
-                calendar=inputs.calendar, workspace="india")
+    try:
+        for name in names:
+            if name.rank is not None and name.rank <= params.hold_rank_cutoff:
+                bands[name.isin] = band_for_upcoming_session(
+                    inputs.store, isin=name.isin, prior_session=as_of, session=decision_session,
+                    calendar=inputs.calendar, workspace="india")
+        convention = current_band_convention(inputs.store)
+    except PilotDataError as error:  # e.g. band_convention_conflict: no band can be trusted, nothing is recorded
+        return _pause(evidence, "stale_data", error.code, **common)
     adjusted_sha = _inputs_hash(visible, adjusted=True)
     raw_sha = _inputs_hash(visible, adjusted=False)
-    # 8. one signal record per eligible name, ranked or suppressed, with the nine pins
+    result = SignalResult(
+        status=STATUS_EVALUATED, session=decision_session, as_of=as_of, cadence_index=index, evaluation_due=True,
+        hashes=hashes, signals=tuple(names), eligible=snapshot.eligible, eligibility_sha256=snapshot.result_sha256,
+        surveillance_as_of=as_of, overlay_blocked=frozenset(
+            n.anchor_isin for n in names if n.buy_blocked), overlay_sha256=overlay_sha,
+        adjusted_inputs_sha256=adjusted_sha, raw_inputs_sha256=raw_sha, composition_sha256=live.composition_sha256,
+        bands=bands, entries_possible=entries_possible)
+    fingerprint = _evaluation_fingerprint(result, live, snapshot, blocked_isins, blocked_symbols, convention)
+    # a session already on the record under another evaluation (or under none) is a conflict, never a dedupe
+    if recorder.signal_fingerprints(as_of) - {fingerprint}:
+        return _pause(evidence, "hash_mismatch", CONFLICT_CODE, **common)
+    # 8. one signal record per eligible name, ranked or suppressed, with the nine pins and the evaluation fingerprint
     for name in names:
         signal_id = _signal_id(as_of, name.isin)
         if recorder.has_signal(signal_id):
             continue
-        detail = [f"surveillance_as_of={as_of.isoformat()}", HOLDOUT_FLAG]
+        detail = [f"surveillance_as_of={as_of.isoformat()}", HOLDOUT_FLAG, f"{EVALUATION_KEY}={fingerprint}"]
         if name.suppressed is not None:
             detail.insert(0, f"suppressed={name.suppressed}")
         else:
@@ -488,20 +620,14 @@ def evaluate_session(evidence: EvidenceStore, inputs: SignalInputs, *, decision_
             detail.insert(0, "buy_blocked=surveillance")
         recorder.append("signal", {
             "signal_id": signal_id, "symbol": name.symbol, "isin": name.isin, "series": name.series,
-            "as_of_date": as_of.isoformat(), **hashes, "reason": _text(*detail),
+            "as_of_date": as_of.isoformat(), **{pin: hashes[pin] for pin in HASH_NAMES}, "reason": _text(*detail),
             "adjusted_inputs_sha256": adjusted_sha, "raw_inputs_sha256": raw_sha,
         })
-    return SignalResult(
-        status=STATUS_EVALUATED, session=decision_session, as_of=as_of, cadence_index=index, evaluation_due=True,
-        hashes=hashes, signals=tuple(names), eligible=snapshot.eligible, eligibility_sha256=snapshot.result_sha256,
-        surveillance_as_of=as_of, overlay_blocked=frozenset(
-            n.anchor_isin for n in names if n.buy_blocked), overlay_sha256=overlay_sha,
-        adjusted_inputs_sha256=adjusted_sha, raw_inputs_sha256=raw_sha, composition_sha256=live.composition_sha256,
-        bands=bands, entries_possible=entries_possible, recorded=recorder.count)
+    return replace(result, evaluation_sha256=fingerprint, recorded=recorder.count)
 
 
 __all__ = [
-    "HASH_NAMES", "HOLDOUT_FLAG", "NameSignal", "SignalInputs", "SignalResult", "SignalsError", "StrategyConfig",
+    "AsOfEligibility", "CONFLICT_CODE", "EVALUATION_KEY", "HASH_NAMES", "HOLDOUT_FLAG", "PIN_NAMES", "SEED_PIN", "NameSignal", "SignalInputs", "SignalResult", "SignalsError", "StrategyConfig",
     "STATUS_EVALUATED", "STATUS_NON_EVALUATION_DAY", "STATUS_PAUSED", "decision_dataset_view", "evaluate_session",
-    "evaluation_due", "load_strategy_config", "previous_session", "sessions_before",
+    "evaluation_due", "load_strategy_config", "previous_session", "seed_pin", "seed_rows", "sessions_before",
 ]
