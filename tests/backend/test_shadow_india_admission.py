@@ -11,12 +11,11 @@ import ast
 import asyncio
 import hashlib
 import json
-import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 import pytest
 
@@ -34,13 +33,8 @@ from execution.venue import (
 from india_limits_support import NOW, SYMBOL, india_private_dir, make_evidence, make_guard
 from regime_testkit import bound_regime_fields, shipped_map
 from shadow_india.admission import (
-    AuditEntry,
-    AuditPage,
-    MintUnresolved,
     QuoteSample,
     ShadowAdmissionAdapter,
-    ShadowPreparation,
-    VmDecision,
     open_simulation_ledger,
 )
 
@@ -482,7 +476,7 @@ def test_the_shadow_ledger_refuses_every_other_mode(tmp_path, mode):
 def _golden_records(service_module, tmp: Path):
     from execution import ExecutionLedger, ExecutionService, PaperDispatcher
     from india_limits_support import (admit, make_guard, make_service, india_private_dir, open_ledger,
-                                      seed_position, make_intent, make_evidence, TICKER)
+                                      seed_position, make_intent, TICKER)
     from regime_testkit import bound_admit, gated
     out = {}
     seen = []

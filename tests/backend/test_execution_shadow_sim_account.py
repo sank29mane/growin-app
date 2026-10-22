@@ -8,8 +8,10 @@ store and the real relay will have. Helpers come from ``test_shadow_india_admiss
 from __future__ import annotations
 
 import ast
+import asyncio
 import hashlib
 import json
+import os
 import re
 import sqlite3
 import subprocess
@@ -18,6 +20,7 @@ import textwrap
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Iterable
 
 import pytest
@@ -43,9 +46,17 @@ from execution.ledger import (
 )
 from execution.models import AdmissionDecision, Workspace
 from india_limits_support import SYMBOL, TICKER
+from shadow_india.admission import (
+    AuditEntry,
+    AuditPage,
+    MINT_AMBIGUOUS,
+    MintUnresolved,
+    PREP_INTERRUPTED_BEFORE_MINT,
+    ShadowAbort,
+    ShadowPreparation,
+    VmDecision,
+)
 from test_shadow_india_admission import (
-    CAPITAL_CAP,
-    PER_POSITION_CAP,
     RUN_ID,
     SEED,
     Rig,
@@ -1322,22 +1333,6 @@ def test_planted_reconciliation_evidence_makes_the_next_view_raise(tmp_path):
 
 # --- ShadowPreparation: durable preparation, recovery that never mints, booking across stores ----
 
-import asyncio
-from dataclasses import dataclass, field
-from types import SimpleNamespace
-
-from shadow_india.admission import (
-    AuditEntry,
-    AuditPage,
-    MINT_AMBIGUOUS,
-    MintUnresolved,
-    PREP_INTERRUPTED_BEFORE_MINT,
-    ShadowAbort,
-    ShadowPreparation,
-    VmDecision,
-)
-
-
 class Crash(Exception):
     """A planted process death at one evidence append."""
 
@@ -2002,6 +1997,51 @@ def test_a_refused_intent_does_not_block_a_committed_booking_that_never_got_its_
         h.rig.close()
 
 
+def test_a_retry_of_a_refused_booking_id_that_committed_is_adopted_not_treated_as_refused(tmp_path):
+    # Same attempt and scenario set, so the same booking id: refused once (row written), then the
+    # corrected retry commits and the process dies before its done row.
+    h = make_prep(tmp_path)
+    try:
+        pid = go(h).proposal_id
+        bid = _refuse_one(h, pid, attempt="att-1")
+        assert "booking_refused" in h.ev.kinds(pid)
+        h.ev.crash_before = "booking_done"
+        with pytest.raises(Crash):
+            h.prep.book_fill(**_booking_args(pid))
+        assert bid == simulated_booking_id("att-1", sha("scenario-set"))
+        assert h.rig.ledger.simulated_booking(bid) is not None
+        assert h.prep.recover_bookings() == {bid: "adopted"}
+        done = [r for r in h.ev.rows if r["kind"] == "booking_done"]
+        assert [r["booking_id"] for r in done] == [bid]
+        assert h.prep.recover_bookings() == {bid: "done"}
+        assert len(h.rig.ledger.simulated_bookings()) == 1
+    finally:
+        h.rig.close()
+
+
+def test_a_lost_refusal_row_then_a_same_id_commit_is_adopted_against_the_latest_intent(tmp_path):
+    # The first attempt's refusal row never landed, so two intent rows share one booking id with
+    # different payloads. The ledger holds the second, so adoption must compare against the last.
+    h = make_prep(tmp_path)
+    try:
+        pid = go(h).proposal_id
+        h.ev.crash_before = "booking_refused"
+        with pytest.raises(Crash):
+            h.prep.book_fill(**_booking_args(pid, price=Decimal("100.01")))
+        h.ev.crash_before = "booking_done"
+        with pytest.raises(Crash):
+            h.prep.book_fill(**_booking_args(pid))
+        bid = simulated_booking_id("att-1", sha("scenario-set"))
+        intents = [r for r in h.ev.rows if r["kind"] == "booking_intent"]
+        assert len(intents) == 2 and intents[0]["price"] != intents[1]["price"]
+        assert "booking_refused" not in h.ev.kinds() and h.rig.ledger.simulated_booking(bid) is not None
+        assert h.prep.recover_bookings() == {bid: "adopted"}
+        assert [r["booking_id"] for r in h.ev.rows if r["kind"] == "booking_done"] == [bid]
+        assert h.prep.recover_bookings() == {bid: "done"}
+    finally:
+        h.rig.close()
+
+
 def test_an_unexplained_intent_ahead_of_a_committed_booking_is_still_adopted_first(tmp_path):
     # The refused attempt's own row never landed (killed first), so it is unexplained evidence. The
     # later committed booking is adopted before anything is retried, and the refusal is recorded.
@@ -2060,9 +2100,6 @@ def test_a_refusal_row_with_no_intent_is_abort_class(tmp_path):
 
 
 # --- real process death: a child is killed mid-step, a new process reopens and recovers ---------
-
-import os
-
 
 class FileEvidence:
     """An fsync'd JSON-lines evidence file. ``crash`` = ``(kind, "before" | "after")`` kills the process."""
