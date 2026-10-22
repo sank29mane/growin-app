@@ -34,6 +34,7 @@ BACKEND = str(Path(__file__).resolve().parents[2] / "backend")
 HASHES = {"strategy_sha256": "a" * 64}
 ISIN = "INE002A01018"
 OTHER_ISIN = "INE009A01021"
+CLEAR_ISIN = "INE999A01010"  # an instrument no test pauses; entry steps need some valid ISIN
 ALL_STEPS = (policy.STEP_ADMIT, policy.STEP_MINT, policy.STEP_BOOK, policy.STEP_EXPIRE, policy.STEP_READ_ONLY)
 
 
@@ -55,7 +56,7 @@ def reopen(tmp_path: Path) -> EvidenceStore:
     return EvidenceStore.open(tmp_path, run_id="run1", session_id="s-1")
 
 
-def blocked_steps(store: EvidenceStore, *, isin: str | None = None) -> set[str]:
+def blocked_steps(store: EvidenceStore, *, isin: str = CLEAR_ISIN) -> set[str]:
     state = run_state(store)
     return {step for step in ALL_STEPS if state.blocks(step, isin=isin)}
 
@@ -144,6 +145,59 @@ def test_an_instrument_pause_needs_a_real_isin(tmp_path, isin):
     assert caught.value.code == "isin_required" and store.records() == []
 
 
+# --- entry steps need the instrument (fails closed) -------------------------------------------------------
+
+
+@pytest.mark.parametrize("event", D07_PAUSE_ISIN)
+@pytest.mark.parametrize("step", [policy.STEP_ADMIT, policy.STEP_MINT])
+def test_an_instrument_pause_is_enforced_whatever_the_caller_passes(tmp_path, event, step):
+    store = make_store(tmp_path)
+    raise_event(store, event, "data problem", isin=ISIN)
+    state = run_state(store)
+    for bad in (None, "", "ine002a01018", "INE002A0101", "RELIANCE", ISIN + " ", 5):
+        with pytest.raises(PolicyError) as caught:
+            state.blocks(step, isin=bad)  # type: ignore[arg-type]
+        assert caught.value.code == "isin_required"
+        with pytest.raises(PolicyError) as caught:
+            state.require(step, isin=bad)  # type: ignore[arg-type]
+        assert caught.value.code == "isin_required"
+    assert state.blocks(step, isin=ISIN)
+    with pytest.raises(RunPaused):
+        state.require_entry(step, ISIN)
+    assert not state.blocks(step, isin=OTHER_ISIN)
+    state.require_entry(step, OTHER_ISIN)
+
+
+def test_the_instrument_is_not_needed_for_steps_that_are_not_entries(tmp_path):
+    store = make_store(tmp_path)
+    raise_event(store, "missing_bar", "no bar", isin=ISIN)
+    state = run_state(store)
+    for step in (policy.STEP_BOOK, policy.STEP_EXPIRE, policy.STEP_READ_ONLY):
+        assert not state.blocks(step)
+        state.require(step)
+
+
+def test_require_entry_refuses_a_missing_instrument_and_a_non_entry_step(tmp_path):
+    state = run_state(make_store(tmp_path))
+    with pytest.raises(PolicyError) as no_isin:
+        state.require_entry(policy.STEP_ADMIT, None)  # type: ignore[arg-type]
+    assert no_isin.value.code == "isin_required"
+    with pytest.raises(PolicyError) as wrong_step:
+        state.require_entry(policy.STEP_BOOK, ISIN)
+    assert wrong_step.value.code == "not_an_entry_step"
+    state.require_entry(policy.STEP_ADMIT, ISIN)
+
+
+def test_an_abort_still_refuses_entry_steps_and_a_missing_instrument_is_refused_too(tmp_path):
+    store = make_store(tmp_path)
+    raise_event(store, "audit_corrupt", "chain break")
+    state = run_state(store)
+    with pytest.raises(RunAborted):
+        state.require_entry(policy.STEP_ADMIT, ISIN)
+    with pytest.raises(PolicyError):
+        state.require(policy.STEP_ADMIT)
+
+
 # --- what each scope blocks ---------------------------------------------------------------------------
 
 
@@ -178,7 +232,7 @@ def test_a_pause_that_stops_processing_blocks_booking_and_expiry_too(tmp_path, e
     state = run_state(store)
     for step in (policy.STEP_ADMIT, policy.STEP_MINT, policy.STEP_BOOK, policy.STEP_EXPIRE):
         with pytest.raises(RunPaused):
-            state.require(step)
+            state.require(step, isin=CLEAR_ISIN)
     state.require(policy.STEP_READ_ONLY)
 
 
@@ -198,7 +252,7 @@ def test_an_abort_blocks_every_step_and_resume_refuses_it(tmp_path):
     assert state.aborted and state.abort_events == ("audit_corrupt",)
     for step in ALL_STEPS:
         with pytest.raises(RunAborted) as caught:
-            state.require(step)
+            state.require(step, isin=CLEAR_ISIN)
         assert caught.value.code == "run_aborted"
     before = store.records()
     for reason in ("operator reviewed", "x"):
@@ -270,7 +324,7 @@ def test_resume_needs_a_non_empty_reason_and_writes_nothing_without_one(tmp_path
     with pytest.raises(PolicyError) as caught:
         resume(store, reason)  # type: ignore[arg-type]
     assert caught.value.code == "reason_required"
-    assert store.records() == before and run_state(store).blocks(policy.STEP_ADMIT)
+    assert store.records() == before and run_state(store).blocks(policy.STEP_ADMIT, isin=CLEAR_ISIN)
 
 
 def test_resume_clears_only_pauses_after_a_reason(tmp_path):
@@ -297,6 +351,38 @@ def test_resume_can_clear_one_named_pause_and_refuses_unknown_or_closed_ones(tmp
     with pytest.raises(PolicyError) as nothing:
         resume(store, "once more")
     assert nothing.value.code == "nothing_to_resume"
+
+
+def test_resume_refuses_a_drawdown_halt_and_writes_nothing(tmp_path):
+    store = make_store(tmp_path)
+    halt = raise_event(store, "drawdown_halt", "trailing drawdown past 8 percent")
+    before = store.records()
+    for seqs in (None, [halt["seq"]]):
+        with pytest.raises(PolicyError) as caught:
+            resume(store, "operator says it is fine", pause_seqs=seqs)
+        assert caught.value.code == "drawdown_resume_requires_latch"
+    assert store.records() == before
+    assert [p.event for p in run_state(store).open_pauses] == ["drawdown_halt"]
+    assert blocked_steps(store) == {"admit", "mint"}
+
+
+def test_a_drawdown_halt_does_not_hide_behind_another_pause_in_the_same_resume(tmp_path):
+    store = make_store(tmp_path)
+    halt = raise_event(store, "drawdown_halt", "trailing drawdown past 8 percent")
+    stale = raise_event(store, "stale_data", "old bars")
+    with pytest.raises(PolicyError) as caught:
+        resume(store, "bars fixed")  # an all-open resume would have swept the halt away
+    assert caught.value.code == "drawdown_resume_requires_latch"
+    resume(store, "bars fixed", pause_seqs=[stale["seq"]])  # naming only the other pause still works
+    assert [p.seq for p in run_state(store).open_pauses] == [halt["seq"]]
+
+
+@pytest.mark.parametrize("event", ["divergence_breach", "stale_data", "relay_no_session"])
+def test_other_entry_and_all_pauses_stay_resumable(tmp_path, event):
+    store = make_store(tmp_path)
+    raise_event(store, event, "operator review needed")
+    resume(store, "reviewed")
+    assert run_state(store).open_pauses == ()
 
 
 # --- no timer or restart clears anything (T-64-16) ---------------------------------------------------------

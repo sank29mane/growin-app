@@ -8,10 +8,14 @@ clear anything:
 
 - an abort is terminal. It blocks every later step, including read-only ones, and ``resume`` refuses it;
 - a pause blocks by scope and is cleared only by ``resume`` with a non-empty reason;
-- ``resume`` clears pauses and nothing else.
+- ``resume`` clears pauses and nothing else, and it refuses ``drawdown_halt``: the 63 latch in
+  ``risk_india/drawdown.py`` refuses a reset while drawdown is at or below the halt line, so this file may not
+  hold a weaker release. Task 2 adds the latch-backed release record and the terminal ``drawdown_flatten_15``
+  class; until then a drawdown halt stays open. Parity with D-05 is intended.
 
 Scopes: ``all`` blocks every step except read-only checks; ``entries`` blocks admission and mint; ``isin:<ISIN>``
-blocks admission and mint for that instrument. A pause from the P-06 list (r3 ruling e) uses ``all`` so no
+blocks admission and mint for that instrument. Entry steps (admit, mint) always need a valid upper-case ISIN, so
+an ISIN-scoped pause cannot be skipped by omitting the instrument. A pause from the P-06 list (r3 ruling e) uses ``all`` so no
 later admission, mint, booking or expiry runs in the invocation.
 """
 
@@ -36,6 +40,8 @@ STEP_BOOK = "book"
 STEP_EXPIRE = "expire"
 STEP_READ_ONLY = "read_only"
 STEPS = frozenset({STEP_ADMIT, STEP_MINT, STEP_BOOK, STEP_EXPIRE, STEP_READ_ONLY})
+
+DRAWDOWN_HALT = "drawdown_halt"
 
 _ENTRY_STEPS = frozenset({STEP_ADMIT, STEP_MINT})
 _ALL_BLOCKED = frozenset({STEP_ADMIT, STEP_MINT, STEP_BOOK, STEP_EXPIRE})
@@ -108,8 +114,8 @@ POLICY: Mapping[str, Rule] = {
     "contract_mismatch": _pause(SCOPE_ALL),
     "hash_mismatch": _pause(SCOPE_ALL),
     "divergence_breach": _pause(SCOPE_ENTRIES),
-    # D-08: the -8% trailing drawdown halts entries; only `resume` with a reason releases it.
-    "drawdown_halt": _pause(SCOPE_ENTRIES),
+    # D-08: the -8% trailing drawdown halts entries. `resume` refuses it; Task 2 adds the latch-backed release.
+    DRAWDOWN_HALT: _pause(SCOPE_ENTRIES),
     # P-06 pause: relay codes and answers that are not typed.
     "kill_label_unreadable": _pause(SCOPE_ALL),
     "untyped_response": _pause(SCOPE_ALL),
@@ -154,6 +160,8 @@ class RunState:
     def blocks(self, step: str, *, isin: str | None = None) -> bool:
         if step not in STEPS:
             raise PolicyError("unknown_step")
+        if step in _ENTRY_STEPS and (not isinstance(isin, str) or not _ISIN.match(isin)):
+            raise PolicyError("isin_required")
         if self.aborted:
             return True
         for pause in self.open_pauses:
@@ -166,13 +174,23 @@ class RunState:
         return False
 
     def require(self, step: str, *, isin: str | None = None) -> None:
-        """Raise unless ``step`` may run. Call this before every admission, mint, booking and expiry."""
+        """Raise unless ``step`` may run. Call this before every admission, mint, booking and expiry.
+
+        Entry steps raise ``isin_required`` without a valid ISIN. Prefer ``require_entry`` for them.
+        """
 
         if not self.blocks(step, isin=isin):
             return
         if self.aborted:
             raise RunAborted("run_aborted")
         raise RunPaused("run_paused")
+
+    def require_entry(self, step: str, isin: str) -> None:
+        """``require`` for an entry step, with the instrument mandatory so a runner cannot forget it."""
+
+        if step not in _ENTRY_STEPS:
+            raise PolicyError("not_an_entry_step")
+        self.require(step, isin=isin)
 
 
 def state_from_records(records: Sequence[Mapping[str, Any]]) -> RunState:
@@ -226,6 +244,8 @@ def resume(store: EvidenceStore, reason: str, *, pause_seqs: Sequence[int] | Non
     chosen = sorted(open_seqs) if pause_seqs is None else sorted(set(pause_seqs))
     if not chosen or not set(chosen) <= open_seqs:
         raise PolicyError("unknown_pause")
+    if any(pause.event == DRAWDOWN_HALT for pause in state.open_pauses if pause.seq in chosen):
+        raise PolicyError("drawdown_resume_requires_latch")
     return store.append("resume", {"reason": reason.strip(), "cleared_pause_seqs": chosen})
 
 
