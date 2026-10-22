@@ -2492,3 +2492,133 @@ def test_opus_r2_probe_e_a_crashed_attempts_boundary_is_never_read_as_the_sessio
     assert (line["carried_quantity"], Decimal(line["carried_value"])) == ("110", Decimal("15520"))
     assert after.equity == again.account.cash + Decimal("15520") and after.peak == Decimal("55000")
     assert "carry_unreconciled" not in pauses(again)
+
+
+# --- review r3 (Codex r3 + Opus r3 at 1c51cbd7): the past-budget floor is tight, the legacy cost estimate is pinned ------------------------------
+
+
+def cycles_world(tmp_path: Path, cycles: int):
+    """Codex r3 probe on the real ledger: own 100, marked at 120 (12000, unit 120). Then ``cycles`` times: sell all 100
+    through 100 one-share bookings, buy 100 back at 100 through 100 one-share bookings. 100 held, 801 bookings at 4."""
+    rig, store, portfolio = real_world(tmp_path, "RELIANCE")
+    own(rig, "RELIANCE", 100)
+    for cycle in range(cycles):
+        sold = f"sell-{cycle}"
+        admission = run(rig.adapter.prepare(sell_intent(rig, sold, "RELIANCE", 100), samples_for("RELIANCE")))
+        assert admission.decision is AdmissionDecision.ADMITTED, admission.reason_code
+        for part in range(1, 101):
+            book(rig, sold, part, "100", attempt=f"{sold}-{part}")  # the quantity is cumulative: one share per booking
+        bought = f"rebuy-{cycle}"
+        admission = run(rig.adapter.prepare(buy_intent(rig, bought, "RELIANCE", 100), samples_for("RELIANCE")))
+        assert admission.decision is AdmissionDecision.ADMITTED, admission.reason_code
+        for part in range(1, 101):
+            book(rig, bought, part, "100", attempt=f"{bought}-{part}")
+    portfolio.mark_session(D1, {R_ISIN: Decimal("120")})
+    portfolio._booking_boundary = lambda isin, session: None  # type: ignore[method-assign]  # a mark with no booking count
+    return rig, store, portfolio
+
+
+def test_codex_r3_1_four_sell_and_rebuy_cycles_carry_at_the_exhaustive_reading_and_do_not_end_the_run(tmp_path, monkeypatch):
+    """Codex r3 P2. 801 bookings, 100 held, mark of 12000. Every plausible reading is at least 10,000 (100 shares that
+    cost 100 each; no gain is needed at any boundary). The r2 floor read about 2,000 and an equity of 42,000 against a
+    peak of 52,000 set ``ended`` with a flatten owed; the exhaustive 10,000 leaves a halt and ends nothing."""
+    rig, store, portfolio = cycles_world(tmp_path, 4)
+    try:
+        assert len(rig.ledger.simulated_bookings()) == 801
+        steps = spy_on_replays(monkeypatch, 0)
+        after = portfolio.mark_session(D2, {R_ISIN: Decimal("60")}, structural_actions={R_ISIN: "bonus"})
+        assert steps[0] == 0  # one pass, no replay
+        (line,) = [r for r in store.records() if r["kind"] == "position_mark" and r["as_of_date"] == D2.isoformat() and r["isin"] == R_ISIN]
+        value = Decimal(line["carried_value"])
+        assert Decimal("10000") - Decimal("0.001") <= value <= Decimal("10000"), value
+        assert not after.state.ended and not after.state.halt
+    finally:
+        rig.close()
+
+
+def test_codex_r3_1_a_carried_value_as_low_as_the_r2_floor_ends_the_run_on_this_ledger(tmp_path, monkeypatch):
+    """The same ledger with the r2 floor (the dearest opening unit value for every share that left, over the whole
+    window) is what Codex measured. Pin that the exhaustive value on this ledger is 10,000 and that a value as low as the
+    r2 floor ends the run, so the row above cannot pass by accident."""
+    rig, store, portfolio = cycles_world(tmp_path, 4)
+    try:
+        monkeypatch.setattr(portfolio_module.ShadowPortfolio, "_carry_floor", staticmethod(lambda *a, **k: Decimal(2000)))
+        after = portfolio.mark_session(D2, {R_ISIN: Decimal("60")}, structural_actions={R_ISIN: "bonus"})
+        assert after.state.ended  # 2,000 of carried value is enough to tip equity under the drawdown line
+    finally:
+        rig.close()
+
+
+def r3_scenarios(cases: int) -> list[tuple[int, str, list[tuple[str, int, str]], int]]:
+    """Seeded small ledgers whose held quantity sits near the plain replay's stock, so most boundaries need no gain (the
+    shape the r3 floor answers) and some need one (the shape the r2 floor still answers)."""
+    import random
+
+    rng = random.Random(6113)
+    out: list[tuple[int, str, list[tuple[str, int, str]], int]] = []
+    for _ in range(cases):
+        rows = [(rng.choice(["BUY", "SELL"]), rng.randint(1, 30), str(rng.randint(60, 220))) for _ in range(rng.randint(0, 7))]
+        quantity = rng.randint(1, 120)
+        stock = quantity
+        for side, q, _price in rows:
+            stock = stock + q if side == "BUY" else max(0, stock - q)
+        out.append((quantity, str(rng.randint(500, 30000)), rows, max(1, stock + rng.randint(-12, 12))))
+    return out
+
+
+def bookings_of(rows: list[tuple[str, int, str]]) -> list[Any]:
+    return [
+        SimpleNamespace(
+            booking_id=f"b{i}", proposal_id=f"p{i}", side=side, ticker="NSE:CASH:AAA", delta_quantity=Decimal(q),
+            price=Decimal(price), charges=Decimal("0.5"),
+        )
+        for i, (side, q, price) in enumerate(rows)
+    ]
+
+
+@pytest.mark.parametrize("base_bookings", [None, 0], ids=["legacy_count", "known_count"])
+def test_codex_r3_1_the_past_budget_value_is_never_above_the_exhaustive_search_over_seeded_ledgers(tmp_path, monkeypatch, base_bookings):
+    """Fixed seed, 1,500 ledgers per count mode: the past-budget answer is at or below the exhaustive one (up to the share
+    tolerance the search accepts, 1e-9 shares) and above zero, and on a good share of ledgers it is the exhaustive value."""
+    world = Fake(tmp_path)
+    checked = exact = 0
+    for quantity, value, rows, held in r3_scenarios(1500):
+        bookings = bookings_of(rows)
+        holding = Holding(Instrument(A, "AAA", "AAA"), held, Decimal(held) * 100)
+        base = portfolio_module._Carry(Decimal(quantity), Decimal(value), Decimal(quantity) * 100, base_bookings)
+        monkeypatch.setattr(portfolio_module, "CARRY_SEARCH_BUDGET", 10**12)
+        wanted, reconciled = world.portfolio._carried_value(holding, base, bookings)
+        monkeypatch.setattr(portfolio_module, "CARRY_SEARCH_BUDGET", 0)
+        capped, capped_ok = world.portfolio._carried_value(holding, base, bookings)
+        if reconciled:
+            continue
+        assert not capped_ok
+        assert 0 < capped <= wanted + Decimal("0.000001"), (quantity, value, rows, held, capped, wanted)
+        checked += 1
+        exact += abs(capped - wanted) <= Decimal("0.000001")
+    assert checked > 1000 and exact > checked // 2, (checked, exact)
+
+
+@pytest.mark.parametrize(
+    ("quantity", "value", "rows", "held", "exhaustive_value"),
+    [
+        # carried 10 at unit 120, twice sell 10 by single shares and buy 10 back at 100: the cheapest 10 shares cost 100
+        # each, plus the 0.5 charge on each buy booking
+        (10, "1200", [(side, 1, "100") for _ in range(2) for side in ["SELL"] * 10 + ["BUY"] * 10], 10, "1005"),
+        # a sale past the stock is dropped (10 carried, 30 sold, 5 bought): the stock is 5, not -15, so no gain is needed
+        (10, "1200", [("SELL", 30, "100"), ("BUY", 5, "100")], 5, "500.5"),
+    ],
+    ids=["sell_and_rebuy_cycles", "a_sale_past_the_stock_is_dropped"],
+)
+def test_codex_r3_1_a_small_ledger_is_valued_at_the_exhaustive_reading(tmp_path, monkeypatch, quantity, value, rows, held, exhaustive_value):
+    """The past-budget value is the exhaustive one on shapes where no boundary needs a gain."""
+    world = Fake(tmp_path)
+    holding = Holding(Instrument(A, "AAA", "AAA"), held, Decimal(held) * 100)
+    base = portfolio_module._Carry(Decimal(quantity), Decimal(value), Decimal(quantity) * 100, None)
+    values = []
+    for budget in (10**12, 0):
+        monkeypatch.setattr(portfolio_module, "CARRY_SEARCH_BUDGET", budget)
+        values.append(world.portfolio._carried_value(holding, base, bookings_of(rows))[0])
+    exhaustive, capped = values
+    assert exhaustive == Decimal(exhaustive_value)
+    assert exhaustive - Decimal("0.000001") <= capped <= exhaustive, (capped, exhaustive)

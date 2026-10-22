@@ -63,7 +63,8 @@ and then the bought lots in booking order (oldest first), and a buy opens a
 lot at its booked cost. Where the count is missing or the replay does not land on the held quantity, the value is the
 lowest plausible reading and the ISIN gets a ``carry_unreconciled`` pause that only an operator ``resume`` clears: no
 fallback can lift the peak. That search is enumerative and bounded (``CARRY_SEARCH_BUDGET`` replay steps); past the
-bound the value is a floor that no plausible reading can fall below (``_carry_floor``), found in one pass. The release refuses ``corporate_action_not_booked`` for a name that is still
+bound the value is a floor that no plausible reading can fall below (``_carry_floor``), found in one pass: per boundary,
+the cheapest ``held`` shares that opened when no gain is needed, the dearest-unit-value bound when one is. The release refuses ``corporate_action_not_booked`` for a name that is still
 held unless the account exposes an explicit adjustment record (``corporate_action_adjustments``: ticker, kind, ex_date)
 that matches a committed ex-date mark of the name. Nothing is inferred from quantity or cost: equal cost with another
 quantity is also what a buy and a sell give. It also refuses ``exit_owed_in_pre_adjustment_units`` while a halve is open
@@ -85,6 +86,7 @@ import: the account is a Protocol the ledger satisfies.
 
 from __future__ import annotations
 
+import heapq
 import re
 from dataclasses import dataclass, replace
 from datetime import date
@@ -504,45 +506,82 @@ class ShadowPortfolio:
 
     @staticmethod
     def _carry_floor(base: _Carry, window: Sequence[Any], held: Decimal, *, every_boundary: bool) -> Decimal:
-        """A value at or below every reading the exhaustive search could return, computed in one pass over ``window``.
+        """A value at or below every reading the exhaustive search could return, in one backward pass (O(n log n)).
 
-        A reading from boundary ``k`` opens the base lot and every buy of ``window[k:]``, and the lots only ever lose
-        shares afterwards (a sale, a loss adjustment, or a gain adjustment that adds shares at no value). Every lot's
-        value per share is fixed by how it opened (a sale or a loss takes value pro rata) or goes down (a gain adjustment
-        spreads the same value over more shares), so no share ever carries more than ``u_max``, the dearest opening unit
-        value. The value of a reading is therefore at least the value that opened, ``v_in``, less ``u_max`` for every
-        share that left. Shares in are ``q0`` plus the buys plus a gain ``g``, shares out are all but ``held``, and
-        ``g = held - shares`` of the plain replay, which is at most ``held - max(0, q0 + buys - sells)`` (a sale past
-        every lot is dropped, which only keeps shares). The minimum of that bound over the boundaries is returned.
+        Every lot's value per share is fixed when it opens (a sale or a loss takes value pro rata) or only goes down (a
+        gain adjustment spreads the same value over more shares). A reading from boundary ``k`` opens the base lot and
+        every buy of ``window[k:]``, then only loses shares. Each boundary gets its own bound, and the minimum is
+        returned:
 
-        It is also never below ``u_min * held / (1 + held)``. Shares are whole, so a gain is applied to at least one
-        share, and a gain of ``g <= held`` shares scales the unit value of the lots it touches by at least
-        ``1 / (1 + held)``; no unit value is below ``u_min``. That second bound keeps the floor above zero, which
-        ``mark_session`` would read as "no value" and replace by the ledger cost."""
+        * No gain needed (the plain replay's final stock ``F`` is at least ``held``; sales drop what the stock cannot
+          cover, so ``F`` is the stock walk, not buys less sells). The ``held`` shares that survive are a subset of the
+          shares that opened, each at its lot's unit value, so the reading is at least the sum of the ``held`` cheapest
+          opened shares. A bounded heap of the cheapest ``held`` shares answers that as the boundary moves back and
+          opens one more lot at a time. It is a floor, not the reading: a sale that can only take a cheap lot (the dear
+          one has not opened yet) leaves a dearer reading than the cheapest shares.
+        * A gain needed (``F < held``): the opened value less ``u_max`` (the dearest opening unit value) for every share
+          that left. Shares in are ``q0`` plus the buys plus the gain ``held - F``; all but ``held`` leave.
+
+        Both are never below ``u_min * held / (1 + held)``: shares are whole, a gain of ``g <= held`` shares scales the
+        unit value of the lots it touches by at least ``1 / (1 + held)``, and no unit value is below ``u_min``. That
+        keeps the floor above zero, which ``mark_session`` would read as "no value" and replace by the ledger cost."""
 
         zero = Decimal(0)
-        buys = [b for b in window if str(b.side).upper() == "BUY"]
-        units = [base.value / base.quantity] + [(b.delta_quantity * b.price + b.charges) / b.delta_quantity for b in buys]
-        u_min, u_max = min(units), max(units)
-        positive = u_min * held / (1 + held) if u_min > 0 else zero
-        slack = Decimal("1e-9")  # the share tolerance the search accepts a reading within
+        tolerance = Decimal("1e-9")  # the share tolerance the search accepts a reading within
+        buys = [b for b in window if str(b.side).upper() == "BUY" and b.delta_quantity > 0]
+        base_unit = base.value / base.quantity
+        units = [base_unit] + [(b.delta_quantity * b.price + b.charges) / b.delta_quantity for b in buys]
+        positive = min(units) * held / (1 + held) if min(units) > 0 else zero
+
+        cheapest: list[tuple[Decimal, int, Decimal, Decimal]] = []  # max-heap by unit: (-unit, tie, shares, value)
+        held_shares, held_value, tie = zero, zero, 0
+
+        def open_lot(shares: Decimal, value: Decimal) -> None:
+            """Open a lot and keep only the ``held`` cheapest shares of everything opened so far."""
+            nonlocal held_shares, held_value, tie
+            tie += 1
+            heapq.heappush(cheapest, (-(value / shares), tie, shares, value))
+            held_shares += shares
+            held_value += value
+            while held_shares > held:
+                neg_unit, order, shares, value = heapq.heappop(cheapest)
+                excess = held_shares - held
+                if shares <= excess:
+                    held_shares -= shares
+                    held_value -= value
+                    continue
+                kept = value * (shares - excess) / shares
+                held_value -= value - kept
+                held_shares = held
+                heapq.heappush(cheapest, (neg_unit, order, shares - excess, kept))
+
+        open_lot(base.quantity, base.value)
+        u_max = base_unit
+        # the stock walk as a map x -> max(c, x + d), built from the back so every boundary reads its final stock in O(1)
+        floor_stock, shift = zero, zero
+        value_in, bought = base.value, zero
         best: Decimal | None = None
-        value_in, bought, sold = base.value, zero, zero
         for index in range(len(window), -1, -1):
             if index < len(window):
                 booking = window[index]
                 side = str(booking.side).upper()
-                if side == "BUY":
+                if side == "BUY" and booking.delta_quantity > 0:
+                    unit = (booking.delta_quantity * booking.price + booking.charges) / booking.delta_quantity
                     value_in += booking.delta_quantity * booking.price + booking.charges
                     bought += booking.delta_quantity
+                    shift += booking.delta_quantity
+                    u_max = max(u_max, unit)
+                    open_lot(booking.delta_quantity, booking.delta_quantity * booking.price + booking.charges)
                 elif side == "SELL":
-                    sold += booking.delta_quantity
+                    floor_stock = max(floor_stock, shift)
+                    shift -= booking.delta_quantity
             if not every_boundary and index != 0:
                 continue
-            plain = max(zero, base.quantity + bought - sold)
-            gain = max(zero, held - plain)
-            shares_out = max(zero, base.quantity + bought + gain - held)
-            reading = value_in - u_max * (shares_out + slack)
+            final = max(floor_stock, base.quantity + shift)
+            if final >= held - tolerance:
+                reading = held_value - u_max * tolerance
+            else:
+                reading = value_in - u_max * (base.quantity + bought - final + tolerance)
             best = reading if best is None else min(best, reading)
         return max(best if best is not None else zero, positive)
 
