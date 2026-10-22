@@ -320,6 +320,32 @@ def _no_replace_trigger_sql(table: str, keys: tuple[tuple[str, ...], ...]) -> st
     """
 
 
+# ``UPDATE OR REPLACE`` is the same hole from the other side. On a table that permits UPDATE (the
+# requote state machine, the SELL quantity reservations), moving a row's key onto another row's key
+# conflict-deletes that other row, again with no DELETE trigger unless recursive_triggers is on. The
+# ``<table>_no_key_update`` BEFORE UPDATE trigger aborts any UPDATE that changes a uniqueness-key
+# column or the rowid. Writers only ever set state, reason, accounting and replacement columns, so a
+# legitimate UPDATE never trips it. Tables that refuse every UPDATE need no such trigger.
+_KEY_UPDATE_GUARDED = ("requote_intents", "ledger_quantity_reservations")
+
+
+def _no_key_update_trigger_sql(table: str, keys: tuple[tuple[str, ...], ...]) -> str:
+    """The ``<table>_no_key_update`` guard: refuse an UPDATE that moves a key column or the rowid."""
+
+    columns = sorted({column for key in keys for column in key})
+    changed = ["NEW.rowid IS NOT OLD.rowid"] + [
+        f"NEW.{column} IS NOT OLD.{column}" for column in columns
+    ]
+    return f"""
+    CREATE TRIGGER IF NOT EXISTS {table}_no_key_update
+    BEFORE UPDATE ON {table}
+    WHEN {" OR ".join(changed)}
+    BEGIN
+        SELECT RAISE(ABORT, '{table} keys are immutable');
+    END
+    """
+
+
 _BASE_SCHEMA_STATEMENTS = (
     """
     CREATE TABLE IF NOT EXISTS order_intents (
@@ -632,7 +658,9 @@ _BASE_SCHEMA_STATEMENTS = (
         SELECT RAISE(ABORT, 'execution_approvals are immutable');
     END
     """,
-) + tuple(_no_replace_trigger_sql(table, keys) for table, keys in _BASE_NO_REPLACE_KEYS.items())
+) + tuple(
+    _no_replace_trigger_sql(table, keys) for table, keys in _BASE_NO_REPLACE_KEYS.items()
+) + (_no_key_update_trigger_sql("requote_intents", _BASE_NO_REPLACE_KEYS["requote_intents"]),)
 
 
 @dataclass(frozen=True)
@@ -945,6 +973,9 @@ def _install_quantity_reservations_table(connection: sqlite3.Connection) -> None
         """
     )
     connection.execute(_no_replace_trigger_sql(_QUANTITY_TABLE, _NO_REPLACE_KEYS[_QUANTITY_TABLE]))
+    connection.execute(
+        _no_key_update_trigger_sql(_QUANTITY_TABLE, _NO_REPLACE_KEYS[_QUANTITY_TABLE])
+    )
     connection.execute(
         f"""
         CREATE TRIGGER IF NOT EXISTS {_QUANTITY_TABLE}_workspace_insert_guard
@@ -1581,10 +1612,10 @@ class ExecutionLedger:
         return requested
 
     def _ensure_no_replace_guards(self) -> None:
-        """Arm the ``_no_replace`` triggers on a ledger that was created without them.
+        """Arm the ``_no_replace`` and ``_no_key_update`` triggers on a ledger created without them.
 
-        Idempotent and schema-only: it adds missing triggers and rewrites no row. A ledger that
-        already has every guard is not written at all.
+        Idempotent and schema-only: it adds missing triggers, in one transaction, and rewrites no
+        row. A ledger that already has every guard is not written at all.
         """
 
         connection = self._require_connection()
@@ -1594,16 +1625,19 @@ class ExecutionLedger:
                 "SELECT type, name FROM sqlite_master WHERE type IN ('table', 'trigger')"
             ).fetchall()
         }
-        missing = [
-            table
-            for table in _NO_REPLACE_KEYS
-            if ("table", table) in existing and ("trigger", f"{table}_no_replace") not in existing
-        ]
+        missing = []
+        for table, keys in _NO_REPLACE_KEYS.items():
+            if ("table", table) not in existing:
+                continue
+            if ("trigger", f"{table}_no_replace") not in existing:
+                missing.append(_no_replace_trigger_sql(table, keys))
+            if table in _KEY_UPDATE_GUARDED and ("trigger", f"{table}_no_key_update") not in existing:
+                missing.append(_no_key_update_trigger_sql(table, keys))
         if not missing:
             return
         with self._transaction() as writer:
-            for table in missing:
-                writer.execute(_no_replace_trigger_sql(table, _NO_REPLACE_KEYS[table]))
+            for statement in missing:
+                writer.execute(statement)
 
     def _probe_identity(self) -> Optional[LedgerIdentity]:
         """Read the identity on a mode=ro connection. None means the file does not exist."""

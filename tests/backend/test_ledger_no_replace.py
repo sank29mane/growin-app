@@ -277,6 +277,9 @@ def test_every_guarded_table_has_its_trigger_on_a_new_ledger(main_path, venue_pa
         finally:
             plain.close()
         assert {f"{table}_no_replace" for table in tables} <= names
+        updatable = [table for table in ledger_module._KEY_UPDATE_GUARDED if table in tables]
+        assert updatable
+        assert {f"{table}_no_key_update" for table in updatable} <= names
 
 
 def test_a_fresh_ledger_is_guarded_by_its_own_schema_not_only_by_the_open_step(
@@ -290,6 +293,9 @@ def test_a_fresh_ledger_is_guarded_by_its_own_schema_not_only_by_the_open_step(
     for path, tables in ((tmp_path / "main.sqlite3", KEY_TABLES), (tmp_path / "venue.sqlite3", VENUE_TABLES)):
         names = _trigger_names(path)
         assert {f"{table}_no_replace" for table in tables} <= names
+        updatable = [table for table in ledger_module._KEY_UPDATE_GUARDED if table in tables]
+        assert updatable
+        assert {f"{table}_no_key_update" for table in updatable} <= names
 
 
 def test_a_duplicate_key_is_still_an_integrity_error_not_a_silent_no_op(main_path):
@@ -372,6 +378,8 @@ def _strip_guards(path: Path, tables: list[str]) -> None:
     try:
         for table in tables:
             plain.execute(f"DROP TRIGGER {table}_no_replace")
+            if table in ledger_module._KEY_UPDATE_GUARDED:
+                plain.execute(f"DROP TRIGGER {table}_no_key_update")
     finally:
         plain.close()
 
@@ -408,6 +416,7 @@ def test_an_existing_ledger_without_the_guards_gets_them_on_reopen_with_no_data_
         pass
 
     assert {f"{table}_no_replace" for table in KEY_TABLES} <= _trigger_names(main_path)
+    assert "requote_intents_no_key_update" in _trigger_names(main_path)
     after = _table_contents(main_path, KEY_TABLES)
     # Opening runs the ledger's own startup recovery, which may move a requote forward and append
     # its event. Nothing else changes, and no row that was there is rewritten or removed.
@@ -436,6 +445,7 @@ def test_an_existing_venue_ledger_without_the_guards_gets_them_on_reopen(venue_p
     assert {f"{table}_no_replace" for table in VENUE_TABLES + ["ledger_identity"]} <= _trigger_names(
         venue_path
     )
+    assert "ledger_quantity_reservations_no_key_update" in _trigger_names(venue_path)
     assert _table_contents(venue_path, VENUE_TABLES + ["ledger_identity"]) == before
 
 
@@ -475,3 +485,160 @@ def test_the_trigger_set_matches_the_declared_key_map():
         ("challenge_id",),
         ("proposal_id",),
     ]
+
+
+# --- UPDATE OR REPLACE -------------------------------------------------------------------------
+#
+# A table that permits UPDATE can still lose a row: moving one row's key onto another's makes the
+# REPLACE conflict-delete the other with no DELETE trigger. ``<table>_no_key_update`` refuses any
+# UPDATE that changes a key column or the rowid.
+
+
+def _seed_second_row(connection: sqlite3.Connection, table: str) -> None:
+    """Copy the table's row with every key column moved, so there are two rows to collide."""
+
+    columns = _columns(connection, table)
+    key_columns = {column for key in ledger_module._NO_REPLACE_KEYS[table] for column in key}
+    moved = ", ".join(f"'other-' || {c}" if c in key_columns else c for c in columns)
+    connection.execute(
+        f"INSERT INTO {table} ({', '.join(columns)}) SELECT {moved} FROM {table}"
+    )
+    assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 2
+
+
+def _key_update_statements(connection: sqlite3.Connection, table: str) -> list[str]:
+    """Move the second row onto the first, once per key column and once on the rowid."""
+
+    key_columns = sorted({c for key in ledger_module._NO_REPLACE_KEYS[table] for c in key})
+    first = "(SELECT MIN(rowid) FROM {t})".format(t=table)
+    second = "(SELECT MAX(rowid) FROM {t})".format(t=table)
+    statements = []
+    for conflict in ("OR REPLACE", "OR IGNORE", "OR ROLLBACK", ""):
+        for column in key_columns:
+            statements.append(
+                f"UPDATE {conflict} {table} SET {column} = "
+                f"(SELECT {column} FROM {table} WHERE rowid = {first}) WHERE rowid = {second}"
+            )
+        statements.append(f"UPDATE {conflict} {table} SET rowid = {first} WHERE rowid = {second}")
+    return statements
+
+
+KEY_UPDATE_CASES = [("requote_intents", "main"), ("ledger_quantity_reservations", "venue")]
+
+
+@pytest.mark.parametrize(("table", "which"), KEY_UPDATE_CASES)
+def test_updating_a_key_onto_another_row_is_refused_and_nothing_is_deleted(
+    table, which, main_path, venue_path
+):
+    path = main_path if which == "main" else venue_path
+    plain = _plain(path)
+    try:
+        _seed_second_row(plain, table)
+        before = _rows(plain, table)
+        dump = list(plain.iterdump())
+        statements = _key_update_statements(plain, table)
+        assert len(statements) >= 8
+        for statement in statements:
+            with pytest.raises(sqlite3.IntegrityError, match=f"{table} keys are immutable"):
+                plain.execute(statement)
+            assert _rows(plain, table) == before
+        assert list(plain.iterdump()) == dump
+    finally:
+        plain.close()
+
+
+@pytest.mark.parametrize(("table", "which"), KEY_UPDATE_CASES)
+def test_the_key_update_statements_really_delete_a_row_without_the_guard(
+    table, which, main_path, venue_path
+):
+    path = main_path if which == "main" else venue_path
+    plain = _plain(path)
+    try:
+        _seed_second_row(plain, table)
+        plain.execute(f"DROP TRIGGER {table}_no_key_update")
+        first_key = sorted({c for key in ledger_module._NO_REPLACE_KEYS[table] for c in key})[0]
+        plain.execute(
+            f"UPDATE OR REPLACE {table} SET {first_key} = "
+            f"(SELECT {first_key} FROM {table} WHERE rowid = (SELECT MIN(rowid) FROM {table})) "
+            f"WHERE rowid = (SELECT MAX(rowid) FROM {table})"
+        )
+        assert plain.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 1
+    finally:
+        plain.close()
+
+
+def test_a_requote_state_update_still_works_on_a_plain_connection(main_path):
+    plain = _plain(main_path)
+    try:
+        plain.execute(
+            "UPDATE requote_intents SET state = 'REJECTED', reason_code = 'TEST', "
+            "replacement_proposal_id = 'rp-1', updated_at = 'now' WHERE requote_id = 'rq-1'"
+        )
+        row = plain.execute(
+            "SELECT state, reason_code, replacement_proposal_id FROM requote_intents"
+        ).fetchone()
+        assert row == ("REJECTED", "TEST", "rp-1")
+    finally:
+        plain.close()
+
+
+def test_a_quantity_reservation_accounting_update_still_works_on_a_plain_connection(venue_path):
+    plain = _plain(venue_path)
+    try:
+        plain.execute(
+            "UPDATE ledger_quantity_reservations SET consumed = '1', released = '0', "
+            "state = 'SETTLED', updated_at = 'now' WHERE proposal_id = 'res-1'"
+        )
+        row = plain.execute(
+            "SELECT consumed, state FROM ledger_quantity_reservations"
+        ).fetchone()
+        assert row == ("1", "SETTLED")
+    finally:
+        plain.close()
+
+
+def test_the_ledger_own_requote_state_update_is_unaffected(main_path):
+    with ExecutionLedger(main_path, require_approval=True, workspace="uk") as ledger:
+        order = ledger.get_order("nr-1")
+        assert order is not None and order.acknowledgment is not None
+        ledger.record_requote_intent(
+            requote_id="rq-2",
+            proposal_id="nr-1",
+            parent_intent_hash=order.intent_hash,
+            parent_reconciliation_fingerprint=f"ack:{order.acknowledgment.broker_order_id}",
+            idempotency_key="nr-1:snapshot-2",
+            snapshot_hash="snapshot-2",
+            candidate={
+                "side": "BUY",
+                "limit_price": "100.05",
+                "lower_bound": "99.90",
+                "upper_bound": "100.10",
+                "policy_version": "local-paper-v1",
+            },
+        )
+        blocked = ledger.block_requote("rq-2", "TEST_BLOCK")
+        assert blocked.state == "BLOCKED_TEST_BLOCK"
+        assert ledger.get_requote("rq-1") is not None
+
+
+def test_every_guarded_table_that_permits_update_has_a_key_update_guard(main_path, venue_path):
+    # A table with no unconditional BEFORE UPDATE trigger accepts UPDATE OR REPLACE, so it must be
+    # listed for ``_no_key_update``. A table that refuses every UPDATE must not need it.
+    for path in (main_path, venue_path):
+        plain = _plain(path)
+        try:
+            triggers = plain.execute(
+                "SELECT tbl_name, name, sql FROM sqlite_master WHERE type = 'trigger'"
+            ).fetchall()
+        finally:
+            plain.close()
+        refusing = {
+            table
+            for table, name, sql in triggers
+            if name == f"{table}_no_update" and " WHEN " not in sql
+        }
+        present = {table for table, _name, _sql in triggers}
+        for table in ledger_module._NO_REPLACE_KEYS:
+            if table not in present:
+                continue
+            assert (table in refusing) != (table in ledger_module._KEY_UPDATE_GUARDED), table

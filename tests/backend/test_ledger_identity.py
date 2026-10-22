@@ -749,15 +749,22 @@ def test_a_v6_ledger_written_before_66_opens_with_no_structural_change(tmp_path)
         assert ledger.get_order("fixture-1") is not None
 
     after = structure(path)
-    # The one structural addition on reopen is the ``<table>_no_replace`` guard for each write-once
-    # table the file already has (an INSERT OR REPLACE would otherwise skip the DELETE triggers).
-    # Nothing else may appear: no venue table, no other trigger, no index, no table dropped.
+    # The structural additions on reopen are the ``<table>_no_replace`` guard for each write-once
+    # table the file already has (an INSERT OR REPLACE would otherwise skip the DELETE triggers)
+    # and the ``<table>_no_key_update`` guard for each such table that permits UPDATE (an
+    # UPDATE OR REPLACE would do the same). Nothing else may appear: no venue table, no other
+    # trigger, no index, no table dropped.
+    present = {name for kind, name in before["objects"] if kind == "table"}
+    expected = {
+        ("trigger", f"{table}_no_replace") for table in ledger_module._NO_REPLACE_KEYS if table in present
+    } | {
+        ("trigger", f"{table}_no_key_update")
+        for table in ledger_module._KEY_UPDATE_GUARDED
+        if table in present
+    }
     added = sorted(set(after["objects"]) - set(before["objects"]))
-    assert added == sorted(
-        ("trigger", f"{table}_no_replace")
-        for table in ledger_module._NO_REPLACE_KEYS
-        if ("table", table) in set(before["objects"])
-    )
+    assert added == sorted(expected)
+    assert ("trigger", "requote_intents_no_key_update") in expected
     assert set(before["objects"]) <= set(after["objects"])
     assert after["counts"] == before["counts"]
 
