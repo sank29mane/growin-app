@@ -33,6 +33,7 @@ from brokers.breeze_gateway.orders import OrdersClient
 from brokers.breeze_gateway.token_store import MemoryTokenStore
 from india_limits_support import india_private_dir, make_evidence, make_guard
 from relay_orders_support import RecordingHttp
+from pilot_data.core import PilotDataError
 from risk_india import rules
 from risk_india.state import LatchStore
 from shadow_india import __main__ as cli
@@ -68,12 +69,15 @@ from shadow_india.runner import (
     vm_intent_id_for,
     verify_vm_chain,
 )
+from shadow_india import signals as signals_module
 from shadow_india.signals import (
     PIN_NAMES,
     STATUS_EVALUATED,
+    STATUS_NON_EVALUATION_DAY,
     NameSignal,
     SignalInputs,
     SignalResult,
+    held_names_quarantined,
 )
 from test_gateway_orders_routes import PRIMARY, VECTORS, MetadataFake, OrderStack
 from test_shadow_india_admission import _FrozenDatetime, run
@@ -226,6 +230,15 @@ class Script:
     def __init__(self) -> None:
         self.result: SignalResult | None = None
         self.inputs: list[SignalInputs] = []
+        self.quarantined: set[str] = set()  # ISINs the held-name quarantine read reports (``held_names_quarantined``)
+        self.quarantine_error: Exception | None = None
+        self.quarantine_calls: list[tuple[frozenset[str], date, date]] = []
+
+    def held_names_quarantined(self, inputs: SignalInputs, held, as_of: date, session: date) -> frozenset[str]:
+        self.quarantine_calls.append((frozenset(held), as_of, session))
+        if self.quarantine_error is not None:
+            raise self.quarantine_error
+        return frozenset(held) & self.quarantined
 
     def __call__(self, evidence: EvidenceStore, inputs: SignalInputs, *, decision_session: date) -> SignalResult:
         self.inputs.append(inputs)
@@ -426,6 +439,7 @@ def vm(tmp_path, metadata):
 def world(tmp_path, vm, monkeypatch):
     script = Script()
     monkeypatch.setattr(runner_module, "evaluate_session", script)
+    monkeypatch.setattr(runner_module, "held_names_quarantined", script.held_names_quarantined)
     built = build_world(tmp_path, vm, script=script)
     script.result = evaluated("AAA", "BBB", "CCC")
     try:
@@ -1413,6 +1427,118 @@ def test_a_held_name_whose_signal_is_quarantined_pauses_that_isin_and_is_not_sol
     assert len(policy.run_state(world.evidence).open_pauses) == 1
 
 
+def non_evaluation(*, signals: tuple[NameSignal, ...] = ()) -> SignalResult:
+    """The result of a cadence day that is not an evaluation day: no bars were read, so no signal, no suppression."""
+
+    return SignalResult(STATUS_NON_EVALUATION_DAY, S, AS_OF, evaluation_due=False, signals=signals)
+
+
+def quarantine_row_clean(world: World, report) -> None:
+    """What every probe row below proves: the name is paused and carried, never stopped, flattened or sold."""
+
+    pauses = [(p.event, p.scope) for p in policy.run_state(world.evidence).open_pauses]
+    assert pauses == [("unresolved_corporate_action", f"isin:{ISINS['AAA']}")]
+    assert intents_of(world, "SELL") == [] and [r["symbol"] for r in intents_of(world, "BUY")] == ["AAA"]  # the seed only
+    state = policy.run_state(world.evidence)
+    assert not state.ended and not state.aborted and world.latch.load().open_exits == {}
+    assert report.status == "done" and report.marked is True
+
+
+@pytest.mark.parametrize("close", ["50", "88"])  # -16% flattens the run, -12% stops the name: raw marks of a split
+def test_an_evaluated_day_pauses_a_quarantined_held_name_before_the_mark(world, close):
+    own(world, "AAA", 160)
+    premark(world)
+    set_closes(world, AAA=close)
+    world.script.result = evaluated("AAA", "BBB", suppressed={"AAA": "adjusted_quarantined"}, entries=False)
+    quarantine_row_clean(world, world.decide())
+
+
+@pytest.mark.parametrize("close", ["50", "88"])
+def test_a_non_evaluation_day_pauses_a_quarantined_held_name_before_the_mark(world, close):
+    """Break-proof: return early unless the status is ``evaluated`` and the flatten (50) and the stop (88) come back."""
+    own(world, "AAA", 160)
+    premark(world)
+    set_closes(world, AAA=close)
+    world.script.result = non_evaluation()
+    world.script.quarantined = {ISINS["AAA"]}
+    quarantine_row_clean(world, world.decide())
+    assert world.script.quarantine_calls == [(frozenset({ISINS["AAA"]}), AS_OF, S)]
+
+
+@pytest.mark.parametrize("close", ["50", "88"])
+def test_a_non_evaluation_day_with_a_quarantined_signal_attached_pauses_the_name(world, close):
+    own(world, "AAA", 160)
+    premark(world)
+    set_closes(world, AAA=close)
+    attached = evaluated("AAA", suppressed={"AAA": "adjusted_quarantined"}).signals
+    world.script.result = non_evaluation(signals=attached)
+    quarantine_row_clean(world, world.decide())
+
+
+def test_a_held_name_outside_the_eligible_set_is_still_checked_for_a_quarantine(world):
+    own(world, "AAA", 160)
+    premark(world)
+    set_closes(world, AAA="50")
+    world.script.result = evaluated("BBB", "CCC", entries=False)  # AAA has no signal at all
+    world.script.quarantined = {ISINS["AAA"]}
+    quarantine_row_clean(world, world.decide())
+
+
+def test_the_real_held_name_read_uses_the_signal_steps_quarantine_window(tmp_path, monkeypatch):
+    """The helper is ``signals``' own rule over ``bars_as_of``: a bar inside the window flags a held name, one outside does not."""
+
+    import test_shadow_india_signals as sig
+
+    victim, bystander, old = sig.ANCHORS[3], sig.ANCHORS[4], sig.ANCHORS[5]
+    rows = sig.history(quarantined=[(victim, sig.HIST[-12]), (bystander, sig.AS_OF), (old, sig.HIST[0])])
+    calls: list[dict[str, Any]] = []
+
+    def bars(store, **kwargs):
+        calls.append(kwargs)
+        return sig.live_result(rows, as_of=kwargs["as_of"], decision=kwargs["decision_session"])
+
+    monkeypatch.setattr(signals_module, "bars_as_of", bars)
+    inputs = sig.make_inputs(tmp_path)
+    held = [victim, old, sig.ANCHORS[6]]  # the bystander is quarantined but not held
+    found = held_names_quarantined(inputs, held, sig.AS_OF, sig.S)
+    assert found == frozenset({victim}), found  # `old` fell out of the window: only a bar the signal reads counts
+    assert calls[0]["as_of"] == sig.AS_OF and calls[0]["decision_session"] == sig.S
+    assert held_names_quarantined(inputs, [], sig.AS_OF, sig.S) == frozenset() and len(calls) == 1  # nothing held, no read
+    monkeypatch.setattr(signals_module, "bars_as_of", lambda *a, **k: (_ for _ in ()).throw(PilotDataError("x", "y")))
+    with pytest.raises(PilotDataError):
+        held_names_quarantined(inputs, held, sig.AS_OF, sig.S)
+
+
+def test_a_non_evaluation_day_without_a_quarantine_still_marks_and_stops_normally(world):
+    own(world, "AAA", 160)
+    premark(world)
+    set_closes(world, AAA="85")
+    world.script.result = non_evaluation()
+    report = world.decide()
+    assert report.marked is True and policy.run_state(world.evidence).open_pauses == ()
+    sells = intents_of(world, "SELL")
+    assert len(sells) == 1 and sells[0]["symbol"] == "AAA" and sells[0]["leg"] == "exit"
+    assert world.script.quarantine_calls == [(frozenset({ISINS["AAA"]}), AS_OF, S)]
+
+
+def test_no_quarantine_read_runs_while_nothing_is_held(world):
+    world.script.result = non_evaluation()
+    world.decide()
+    assert world.script.quarantine_calls == []
+
+
+def test_held_bars_that_cannot_be_read_pause_everything_before_the_mark(world):
+    own(world, "AAA", 160)
+    premark(world)
+    set_closes(world, AAA="50")
+    world.script.result = non_evaluation()
+    world.script.quarantine_error = PilotDataError("live_bars_empty", "no bars")
+    report = world.decide()
+    assert report.status == "paused" and report.stopped == "held_name_check_failed" and report.marked is False
+    assert open_events(world) == ["stale_data"] and intents_of(world, "SELL") == []
+    assert [r for r in world.records("mark") if r.get("as_of_date") == AS_OF.isoformat()] == []
+
+
 def test_the_tick_cost_and_scenario_pins_are_recomputed_from_the_live_tables_at_every_decide(world):
     world.decide()
     first = world.script.inputs[-1]
@@ -1507,6 +1633,7 @@ def test_the_opened_path_set_is_the_simulation_ledger_and_the_run_evidence_only(
     monkeypatch.setattr(sqlite3, "connect", spy)
     script = Script()
     monkeypatch.setattr(runner_module, "evaluate_session", script)
+    monkeypatch.setattr(runner_module, "held_names_quarantined", script.held_names_quarantined)
     built = build_world(tmp_path, vm, script=script)
     script.result = evaluated("AAA", "BBB")
     built.decide()

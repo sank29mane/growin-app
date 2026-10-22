@@ -10,7 +10,8 @@ Order of a decide, with the reason for each step:
 1. refusals that need no state read (abort, run class, session id, the 09:30-10:00 IST window, relay health);
 2. recovery (``ShadowPreparation.recover``, booking recovery, the audit scan): it never POSTs;
 3. expiry of earlier sessions' open day orders, before the mark, so no stale reservation reads as an open exit;
-4. the signal step for S (it may pause the run), then the quarantine check on held names;
+4. the signal step for S (it may pause the run), then the quarantine check on held names (every decide, not only an
+   evaluation day: an unrecorded split must not mark at the raw close);
 5. the mark of S-1 at raw closes through the portfolio (peak and drawdown come from the 63 latch);
 6. exits, then strategy sells, then entries, one intent at a time. Each intent is admitted and reserved before the
    next is sized, so cash, slots and the cap are read fresh. The policy table is asked before every admission and mint,
@@ -87,6 +88,7 @@ from .signals import (
     SignalResult,
     SignalsError,
     evaluate_session,
+    held_names_quarantined,
     previous_session,
 )
 
@@ -592,7 +594,10 @@ class ShadowRunner:
             return
         as_of = result.as_of
         assert as_of is not None
-        self._pause_quarantined_held_names(result)
+        self._pause_quarantined_held_names(result, inputs, session, as_of)
+        if self._stopped_all():
+            report.status, report.stopped = "paused", "held_name_check_failed"
+            return
         if not self._mark(as_of, report):
             return
         plan = self._portfolio.exit_proposals(session)
@@ -649,18 +654,31 @@ class ShadowRunner:
         prefix = f"{policy.SCOPE_ISIN}:"
         return {p.scope[len(prefix):] for p in self._state().open_pauses if p.event == event and p.scope.startswith(prefix)}
 
-    def _pause_quarantined_held_names(self, result: SignalResult) -> None:
-        """A held name whose adjusted bar is quarantined may carry an unrecorded split or bonus: pause that ISIN."""
+    def _pause_quarantined_held_names(self, result: SignalResult, inputs: SignalInputs, session: date, as_of: date) -> None:
+        """A held name whose adjusted bar is quarantined may carry an unrecorded split or bonus: pause that ISIN.
 
-        if result.status != STATUS_EVALUATED:
-            return
+        Runs on every decide, whatever the signal status: a non-evaluation day still marks at raw closes and still
+        proposes exits, so the check cannot depend on an evaluation. Two readings, one rule (``signals``): the
+        suppression the evaluation just recorded, and ``held_names_quarantined`` over the held names (it also covers a
+        held name that is not in the eligible set). If the bars cannot be read the run pauses (``stale_data``).
+        """
+
         held = {h.instrument.isin for h in self._portfolio.snapshot().holdings}
-        already = self._open_pause_isins(CORPORATE_ACTION_PAUSE)
+        if not held:
+            return
+        found: set[str] = set()
         for signal in result.signals:
             isin = signal.isin if signal.isin in held else signal.anchor_isin
-            if signal.suppressed == SUPPRESS_QUARANTINED and isin in held and isin not in already:
-                policy.raise_event(self._evidence, CORPORATE_ACTION_PAUSE, SUPPRESS_QUARANTINED, isin=isin)
-                already.add(isin)
+            if signal.suppressed == SUPPRESS_QUARANTINED and isin in held:
+                found.add(isin)
+        try:
+            found |= held_names_quarantined(inputs, held, as_of, session)
+        except PilotDataError as error:
+            policy.raise_event(self._evidence, "stale_data", f"held_name_check_failed:{error.code}")
+            return
+        already = self._open_pause_isins(CORPORATE_ACTION_PAUSE)
+        for isin in sorted(found - already):
+            policy.raise_event(self._evidence, CORPORATE_ACTION_PAUSE, SUPPRESS_QUARANTINED, isin=isin)
 
     def _simulator_drawdown(self) -> Decimal:
         state = self._adapter.portfolio_state()
