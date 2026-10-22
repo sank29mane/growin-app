@@ -41,15 +41,29 @@ def _norm(name: str) -> str:
     return name[len("backend."):] if name.startswith("backend.") else name
 
 
+PACKAGE = "shadow_india"
+BEYOND_BACKEND = "__beyond_backend__"
+
+
 def _roots(node: ast.AST) -> list[str]:
-    """The dotted module names an import node binds or reads, with a leading ``backend.`` stripped."""
+    """The absolute dotted module names an import node binds or reads, with a leading ``backend.`` stripped.
+
+    A relative import is resolved against this package (``shadow_india`` sits directly under ``backend/``):
+    one dot is the package itself, two dots are ``backend/`` (so ``from ..execution import x`` names
+    ``execution.x``), and more dots leave ``backend/`` altogether and are reported as such.
+    """
 
     if isinstance(node, ast.Import):
         return [_norm(alias.name) for alias in node.names]
     if isinstance(node, ast.ImportFrom):
-        if node.level:
-            return []  # a relative import stays inside the package
         module = _norm(node.module or "")
+        if node.level:
+            if node.level > 2:
+                return [f"{BEYOND_BACKEND}.{module}".rstrip(".")]
+            base = PACKAGE if node.level == 1 else ""
+            module = ".".join(part for part in (base, module) if part)
+            if not module:  # ``from .. import execution`` names the child directly
+                return [alias.name for alias in node.names]
         names = [alias.name for alias in node.names]
         if module == "backend":
             return list(names)  # ``from backend import execution`` names the package
@@ -66,6 +80,8 @@ def violations(source: str, filename: str) -> list[str]:
             root = dotted.split(".")[0]
             if root == BROKER_SDK or dotted.startswith(BROKER_SDK):
                 found.append(f"broker sdk import {dotted}")
+            if root == BEYOND_BACKEND:
+                found.append(f"relative import beyond backend {dotted}")
             if root in GATEWAY_ROOTS:
                 found.append(f"gateway import {dotted}")
             if root in NETWORK_ROOTS:
@@ -157,6 +173,18 @@ PLANTS = [
     ("import backend.execution.service", "evidence.py", "execution"),
     ("from backend import execution", "policy.py", "execution"),
     ("import execution", "__main__.py", "execution"),
+    ("from ..execution.ledger import ExecutionLedger", "policy.py", "execution"),
+    ("from ..execution import ledger", "evidence.py", "execution"),
+    ("from .. import execution", "policy.py", "execution"),
+    ("from .. import execution as spine", "evidence.py", "execution"),
+    ("from ..execution import *", "evidence.py", "execution"),
+    ("from ..gateway_vm.orders import audit", "evidence.py", "gateway"),
+    ("from .. import gateway", "policy.py", "gateway"),
+    ("from ..socket import create_connection", "evidence.py", "network"),
+    ("from .. import socket", "evidence.py", "network"),
+    (f"from ..{BROKER_SDK} import BreezeConnect", "policy.py", "broker sdk"),
+    ("from ...execution.ledger import ExecutionLedger", "policy.py", "beyond backend"),
+    ("from .. import random", "evidence.py", "banned import"),
     ("import subprocess", "evidence.py", "banned import"),
     ("import random", "policy.py", "banned import"),
     ("import uuid", "evidence.py", "banned import"),
@@ -189,6 +217,10 @@ CLEAN = [
     ("import subprocess", "__main__.py"),
     ("from datetime import datetime", "evidence.py"),
     ("from .evidence import EvidenceStore", "policy.py"),
+    ("from . import evidence", "policy.py"),
+    ("from .admission import E_INTENT", "runner.py"),
+    ("from ..execution.ledger import ExecutionLedger", "admission.py"),
+    ("from ..execution import ExecutionLedger", "runner.py"),
     ("import os, fcntl, hashlib, json, re\nre.compile('x')", "evidence.py"),
     ("from decimal import Decimal", "policy.py"),
 ]
@@ -197,3 +229,13 @@ CLEAN = [
 @pytest.mark.parametrize(("source", "filename"), CLEAN)
 def test_ordinary_imports_are_not_flagged(source, filename):
     assert violations(source, filename) == []
+
+
+def test_a_relative_execution_import_planted_in_a_scratch_copy_of_a_real_module_is_flagged(tmp_path):
+    for name in ("policy.py", "evidence.py"):
+        scratch = tmp_path / name
+        scratch.write_text((PKG / name).read_text() + "\nfrom ..execution.ledger import ExecutionLedger\n")
+        assert (PKG / name).read_text() != scratch.read_text()
+        assert violations((PKG / name).read_text(), name) == []
+        found = violations(scratch.read_text(), name)
+        assert any("execution import execution.ledger" in line for line in found), (name, found)

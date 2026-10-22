@@ -296,6 +296,147 @@ def test_a_killed_torn_append_survives_two_restarts_with_one_set_aside_copy(tmp_
     assert len(list((first.run_dir / TORN_DIR).iterdir())) == 1
 
 
+# --- durability order: nothing is anchored or cut before the bytes it relies on are on disk ---------------
+
+CHILD_RECOVER = r"""
+import os, signal, sys
+import shadow_india.evidence as ev
+
+root, run_id, where = sys.argv[1:4]
+real = ev._replace_file
+
+def die():
+    os.kill(os.getpid(), signal.SIGKILL)
+
+def replace(path, data):
+    if where == "before_anchor":
+        die()
+    real(path, data)
+    die()
+
+ev._replace_file = replace
+ev.EvidenceStore.open(root, run_id=run_id, session_id="s-1")  # recovery adopts the surviving entry
+"""
+
+
+def crash_recovery(root: Path, where: str) -> None:
+    done = subprocess.run(
+        [sys.executable, "-P", "-c", CHILD_RECOVER, str(root), RUN, where],
+        env={**os.environ, "PYTHONPATH": BACKEND},
+        capture_output=True,
+        timeout=60,
+    )
+    assert done.returncode == -signal.SIGKILL, done.stderr.decode()
+
+
+class DiskProbe:
+    """Records every fsync, anchor replace and truncate by what it touches, plus the durability invariant.
+
+    A new process cannot know what an earlier one synced, so ``synced`` starts at zero: an anchor replace is a
+    violation unless this process fsynced the log up to the end of the entry the anchor names first.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, run_dir: Path) -> None:
+        self.run_dir = run_dir
+        self.events: list[str] = []
+        self.violations: list[str] = []
+        self.synced = 0
+        real_fsync, real_replace, real_truncate = os.fsync, os.replace, os.ftruncate
+
+        def fsync(fd: int) -> None:
+            label = self.label(fd)
+            if label == "log":
+                self.synced = os.fstat(fd).st_size
+            self.events.append(f"fsync:{label}")
+            real_fsync(fd)
+
+        def replace(src: Any, dst: Any) -> None:
+            if Path(dst).name == ANCHOR_NAME:
+                seq = json.loads(Path(src).read_text())["seq"]
+                durable_need = sum(len(line) + 1 for line in log_lines(run_dir)[:seq])
+                if self.synced < durable_need:
+                    self.violations.append(f"anchor {seq} replaced with the log synced to {self.synced} of {durable_need}")
+            self.events.append(f"replace:{Path(dst).name}")
+            real_replace(src, dst)
+
+        def ftruncate(fd: int, length: int) -> None:
+            self.events.append(f"truncate:{self.label(fd)}")
+            real_truncate(fd, length)
+
+        monkeypatch.setattr(evidence_module.os, "fsync", fsync)
+        monkeypatch.setattr(evidence_module.os, "replace", replace)
+        monkeypatch.setattr(evidence_module.os, "ftruncate", ftruncate)
+
+    def label(self, fd: int) -> str:
+        ino = os.fstat(fd).st_ino
+        named = {self.run_dir: "rundir", self.run_dir / TORN_DIR: "torn", self.run_dir / LOG_NAME: "log"}
+        torn = self.run_dir / TORN_DIR
+        if torn.is_dir():
+            named.update({p: "archive" for p in torn.iterdir()})
+        for path, name in named.items():
+            if path.exists() and path.stat().st_ino == ino:
+                return name
+        return "other"
+
+
+def test_a_normal_append_keeps_the_anchor_behind_the_synced_log(tmp_path, monkeypatch):
+    store = make_store(tmp_path, count=2)
+    probe = DiskProbe(monkeypatch, store.run_dir)
+    store.append("vm_ambiguous", {"intent_id": "i-1"})
+    assert probe.violations == [] and probe.events.index("fsync:log") < probe.events.index(f"replace:{ANCHOR_NAME}")
+
+
+@pytest.mark.parametrize("stage", ["after_write", "after_fsync"])
+def test_recovery_fsyncs_the_log_before_it_anchors_the_surviving_entry(tmp_path, monkeypatch, stage):
+    make_store(tmp_path, count=3)
+    crash_append(tmp_path, stage)  # one complete entry beyond the anchor; this process cannot know it was synced
+    probe = DiskProbe(monkeypatch, tmp_path.resolve() / RUN)
+    assert [r["seq"] for r in reopen(tmp_path).records()] == [1, 2, 3, 4]
+    assert probe.violations == []
+    assert probe.events.index("fsync:log") < probe.events.index(f"replace:{ANCHOR_NAME}")
+
+
+@pytest.mark.parametrize("where", ["before_anchor", "after_anchor"])
+def test_a_crash_inside_recovery_loses_no_entry_and_the_next_recovery_finishes(tmp_path, where):
+    store = make_store(tmp_path, count=3)
+    run_dir = store.run_dir
+    anchored = log_lines(run_dir)
+    crash_append(tmp_path, "after_write")
+    crash_recovery(tmp_path, where)  # killed while adopting, or just after
+    assert log_lines(run_dir)[:3] == anchored
+    reopened = reopen(tmp_path)
+    assert [r["seq"] for r in reopened.records()] == [1, 2, 3, 4]
+    assert json.loads((run_dir / ANCHOR_NAME).read_text())["seq"] == 4
+    assert log_lines(run_dir)[:3] == anchored and not (run_dir / SIDECAR_NAME).exists()
+    assert reopened.append("vm_ambiguous", {"intent_id": "i-after"})["seq"] == 5
+
+
+def test_the_torn_tail_is_archived_and_synced_before_the_log_is_truncated(tmp_path, monkeypatch):
+    make_store(tmp_path, count=3)
+    crash_append(tmp_path, "mid_write")
+    probe = DiskProbe(monkeypatch, tmp_path.resolve() / RUN)
+    assert len(reopen(tmp_path).records()) == 3
+    cut = probe.events.index("truncate:log")
+    for needed in ("fsync:archive", "fsync:torn", "fsync:rundir"):
+        assert needed in probe.events[:cut], (needed, probe.events)
+
+
+def test_a_torn_tail_already_archived_by_an_earlier_attempt_is_synced_again_before_the_cut(tmp_path, monkeypatch):
+    make_store(tmp_path, count=3)
+    crash_append(tmp_path, "mid_write")
+    run_dir = tmp_path.resolve() / RUN
+    reopen(tmp_path)  # first recovery: archives and cuts
+    (archived,) = list((run_dir / TORN_DIR).iterdir())
+    tail = archived.read_bytes()
+    (run_dir / LOG_NAME).write_bytes((run_dir / LOG_NAME).read_bytes() + tail)  # the same tail shows up again
+    probe = DiskProbe(monkeypatch, run_dir)
+    assert len(reopen(tmp_path).records()) == 3
+    assert len(list((run_dir / TORN_DIR).iterdir())) == 1  # no second copy was written
+    cut = probe.events.index("truncate:log")
+    for needed in ("fsync:archive", "fsync:torn", "fsync:rundir"):
+        assert needed in probe.events[:cut], (needed, probe.events)
+
+
 # --- tamper rows: every one aborts, writes the sidecar, keeps every byte and refuses appends -----------
 
 
@@ -353,6 +494,23 @@ def edit_manifest(run_dir: Path) -> None:
     path.write_bytes(path.read_bytes().replace(b"plumbing", b"qualifying"))
 
 
+def rewrite_entry(index: int):
+    """Edit one entry and recompute its own hash, so only the chain link (or the anchor) can see it."""
+
+    def mutate(run_dir: Path) -> None:
+        lines = log_lines(run_dir)
+        entry = json.loads(lines[index])
+        entry["reason"] = "rewritten"
+        entry["entry_sha256"] = hashlib.sha256(
+            json.dumps({k: v for k, v in entry.items() if k != "entry_sha256"}, sort_keys=True, separators=(",", ":"))
+            .encode("ascii")
+        ).hexdigest()
+        lines[index] = json.dumps(entry, sort_keys=True, separators=(",", ":")).encode("ascii")
+        write_log(run_dir, lines)
+
+    return mutate
+
+
 def flip_final_newline(run_dir: Path) -> None:
     raw = (run_dir / LOG_NAME).read_bytes()
     (run_dir / LOG_NAME).write_bytes(raw[:-1] + b"x")
@@ -368,6 +526,9 @@ TAMPER_ROWS = [
     ("delete_log_and_anchor", delete(LOG_NAME, ANCHOR_NAME), "anchor_missing"),
     ("reorder_two_lines", swap_two_lines, "chain_break"),
     ("duplicate_a_line", duplicate_a_line, "chain_break"),
+    ("middle_entry_rewritten_with_its_hash_recomputed", rewrite_entry(2), "chain_break"),
+    ("first_entry_rewritten_with_its_hash_recomputed", rewrite_entry(0), "chain_break"),
+    ("last_entry_rewritten_with_its_hash_recomputed", rewrite_entry(5), "head_mismatch"),
     ("torn_line_not_at_the_tail", cut_a_middle_line, "line_invalid"),
     ("unterminated_tail_after_a_pending_entry", unterminated_tail_after_a_pending_entry, "torn_tail_not_after_anchor"),
     ("final_newline_flipped", flip_final_newline, "log_shorter_than_anchor"),
@@ -465,9 +626,32 @@ def test_log_tail_and_anchor_rolled_back_together_pass_open_but_fail_the_witness
     write_log(run_dir, log_lines(run_dir)[:3])
     write_anchor(run_dir, 3, entry_hash_at(run_dir, 3))
     assert len(reopen(tmp_path).records()) == 3  # chain and anchor agree: only the witness can see it
+    assert not (run_dir / SIDECAR_NAME).exists()
+    mutated = snapshot(run_dir)
     with pytest.raises(WitnessMismatch) as caught:
         verify_witness(tmp_path, RUN, pasted)
     assert caught.value.code == "witness_head_not_in_chain"
+
+    # The mismatch is terminal: the sidecar is written and every later write is refused, every byte kept.
+    assert (run_dir / SIDECAR_NAME).exists() and stat.S_IMODE((run_dir / SIDECAR_NAME).stat().st_mode) == 0o600
+    assert json.loads((run_dir / SIDECAR_NAME).read_text())["code"] == "witness_head_not_in_chain"
+    with pytest.raises(EvidenceCorrupt) as refused:
+        store.append("vm_ambiguous", {"intent_id": "i-1"})
+    assert refused.value.code == "witness_head_not_in_chain"
+    with pytest.raises(EvidenceCorrupt):
+        reopen(tmp_path).append("vm_ambiguous", {"intent_id": "i-2"})
+    with pytest.raises(EvidenceCorrupt):
+        store.records()
+    assert {k: v for k, v in snapshot(run_dir).items() if k != SIDECAR_NAME} == mutated
+
+
+def test_a_witness_that_matches_or_is_missing_writes_no_sidecar(tmp_path):
+    store = make_store(tmp_path, count=3)
+    verify_witness(tmp_path, RUN, store.witness_line())
+    with pytest.raises(WitnessMismatch):
+        verify_witness(tmp_path, RUN, "nothing pasted")
+    assert not (store.run_dir / SIDECAR_NAME).exists()
+    assert store.append("vm_ambiguous", {"intent_id": "i-1"})["seq"] == 4
 
 
 def test_deleting_the_log_and_the_anchor_fails_the_witness_check(tmp_path):
@@ -697,6 +881,63 @@ def test_ordinary_times_hashes_ids_and_the_simulation_account_are_not_false_posi
     store.append("session_close", {"outcome": "ok"})
     store.append("denied", {"intent_id": "sim-run1:abc", "code": "NOT_AN_IP_1.2.3"})
     assert len(store.records()) == 3
+
+
+@pytest.mark.parametrize("canary", [CANARY_TOKEN, CANARY_ACCOUNT])
+def test_a_registered_canary_as_a_run_id_or_session_id_never_reaches_the_log_or_the_manifest(tmp_path, canary):
+    key = "mykey_sha256"  # a manifest field name is a field too
+    cases: list[tuple[dict[str, Any], tuple[str, ...]]] = [
+        ({"run_id": canary}, (canary,)),
+        ({"session_id": canary}, (canary,)),
+        ({"hashes": {key: "a" * 64}}, (key,)),
+    ]
+    for change, forbidden in cases:
+        arguments: dict[str, Any] = dict(run_id=RUN, run_class="plumbing", session_id=SESSION, hashes=HASHES)
+        with pytest.raises(EvidenceRefused) as caught:
+            EvidenceStore.create(tmp_path, forbidden=forbidden, **{**arguments, **change})
+        assert caught.value.code == "canary_refused", change
+        assert not list(tmp_path.iterdir()), change  # not even the run directory
+
+    # open() scans the identity it will stamp on every record, and writes nothing when it refuses.
+    plain = EvidenceStore.create(tmp_path, run_id=canary, run_class="plumbing", session_id=SESSION, hashes=HASHES)
+    other = make_store(tmp_path / "other", count=1)
+    for root, run_id, session_id in ((tmp_path, canary, SESSION), (tmp_path / "other", RUN, canary)):
+        run_dir = (root / run_id).resolve()
+        before = snapshot(run_dir)
+        with pytest.raises(EvidenceRefused) as caught:
+            EvidenceStore.open(root, run_id=run_id, session_id=session_id, forbidden=(canary,))
+        assert caught.value.code == "canary_refused" and snapshot(run_dir) == before
+    assert plain.records() == [] and len(other.records()) == 1
+
+
+def test_a_canary_session_id_inside_a_payload_is_refused_for_the_log(tmp_path):
+    store = make_store(tmp_path, forbidden=(CANARY_ACCOUNT,))
+    before = snapshot(store.run_dir)
+    with pytest.raises(EvidenceRefused) as caught:
+        store.append("session_excluded", {**GOOD["session_excluded"], "session_id": CANARY_ACCOUNT})
+    assert caught.value.code == "canary_refused" and snapshot(store.run_dir) == before
+
+
+@pytest.mark.parametrize("field", ["run_id", "session_id"])
+def test_the_generated_envelope_is_scanned_before_the_write(tmp_path, field):
+    # A store created before the value was registered (the registry can grow): the append scans the whole envelope.
+    arguments: dict[str, Any] = dict(run_id=RUN, run_class="plumbing", session_id=SESSION, hashes=HASHES)
+    arguments[field] = CANARY_ACCOUNT
+    store = EvidenceStore.create(tmp_path, **arguments)
+    store._forbidden = (CANARY_ACCOUNT,)
+    before = snapshot(store.run_dir)
+    with pytest.raises(EvidenceRefused) as caught:
+        store.append("vm_ambiguous", INTENT)
+    assert caught.value.code == "canary_refused"
+    assert snapshot(store.run_dir) == before and store.records() == []
+    assert CANARY_ACCOUNT.encode() not in (store.run_dir / LOG_NAME).read_bytes()
+
+
+@pytest.mark.parametrize("run_id", ["10.1.2.3", "www.example", "eyJhbGciOiJIUzI1NiJ9.payload"])
+def test_an_address_like_run_id_is_refused_before_anything_exists(tmp_path, run_id):
+    with pytest.raises(EvidenceRefused):
+        EvidenceStore.create(tmp_path, run_id=run_id, run_class="plumbing", session_id=SESSION, hashes=HASHES)
+    assert not list(tmp_path.iterdir())
 
 
 # --- the abort latch at the store ------------------------------------------------------------------------

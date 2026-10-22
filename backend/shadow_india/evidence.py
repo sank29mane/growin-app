@@ -339,6 +339,14 @@ def _fsync_dir(directory: Path) -> None:
         os.close(fd)
 
 
+def _fsync_path(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def _write_new_file(path: Path, data: bytes) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, FILE_MODE)
     try:
@@ -595,6 +603,10 @@ class EvidenceStore:
             for k, v in hashes.items()
         ):
             raise EvidenceRefused("bad_manifest_hashes")
+        # Every field the manifest and later records will carry, scanned before the first byte is written.
+        _scan_for_secrets(
+            {"run_id": run_id, "run_class": run_class, "session_id": session_id, "hashes": dict(hashes)}, forbidden
+        )
         base = _refuse_unsafe_root(Path(root))
         base.mkdir(parents=True, exist_ok=True, mode=DIR_MODE)
         run = _Run(base / run_id, run_id)
@@ -630,6 +642,7 @@ class EvidenceStore:
             raise EvidenceRefused("bad_run_id")
         if not _check_type("id", session_id):
             raise EvidenceRefused("bad_session_id")
+        _scan_for_secrets({"run_id": run_id, "session_id": session_id}, forbidden)
         base = _refuse_unsafe_root(Path(root))
         run = _Run(base / run_id, run_id)
         if run.dir.is_dir():
@@ -671,24 +684,38 @@ class EvidenceStore:
             self._set_aside(scan)
             scan = self._load()
         if len(scan.entries) == scan.anchor_seq + 1:
-            # One complete, chain-verified entry beyond the anchor: the crash window after its fsync.
+            # One complete, chain-verified entry beyond the anchor. It may have been written and never fsynced
+            # (a crash between the write and the fsync), so make it durable BEFORE the anchor names it: an anchor
+            # must never be ahead of the durable log, or a second crash could lose an anchored entry.
+            self._sync_log()
             head = scan.entries[-1]["entry_sha256"]
             self._write_anchor(len(scan.entries), head)
             scan = self._load()
         return scan
 
+    def _sync_log(self) -> None:
+        try:
+            _fsync_path(self._run.log)
+        except OSError as exc:
+            raise EvidenceRefused("evidence_not_written") from exc
+
     def _set_aside(self, scan: _Scan) -> None:
-        """Copy the torn tail into ``torn/`` (fsynced), and only then cut it from the log."""
+        """Archive the torn tail durably (file, ``torn/``, run dir all fsynced), and only then cut it from the log."""
 
         run = self._run
         try:
             run.torn.mkdir(mode=DIR_MODE, exist_ok=True)
             os.chmod(run.torn, DIR_MODE)
             existing = [p for p in sorted(run.torn.iterdir()) if p.is_file()]
-            if not any(p.read_bytes() == scan.tail for p in existing):
-                name = f"tail-after-{scan.anchor_seq:08d}-{len(existing):04d}.bin"
-                _write_new_file(run.torn / name, scan.tail)
-                _fsync_dir(run.torn)
+            archive = next((p for p in existing if p.read_bytes() == scan.tail), None)
+            if archive is None:
+                archive = run.torn / f"tail-after-{scan.anchor_seq:08d}-{len(existing):04d}.bin"
+                _write_new_file(archive, scan.tail)
+            # A matching copy left by an earlier attempt may never have been synced: sync it again, then the
+            # directory entries (``torn/`` itself lives in the run directory). Truncate only after all of it.
+            _fsync_path(archive)
+            _fsync_dir(run.torn)
+            _fsync_dir(run.dir)
             fd = os.open(run.log, os.O_WRONLY | os.O_CLOEXEC)
             try:
                 os.ftruncate(fd, scan.good_bytes)
@@ -725,6 +752,8 @@ class EvidenceStore:
                 "utc": now.astimezone(timezone.utc).isoformat(timespec="microseconds"),
                 "ist": now.astimezone(IST).isoformat(timespec="microseconds"),
             }
+            # The whole envelope, generated fields included (run_id, session_id, times), before any write.
+            _scan_for_secrets(entry, self._forbidden)
             entry["entry_sha256"] = _entry_hash(entry)
             line = _canonical(entry) + b"\n"
             self._checkpoint("before_write")
@@ -793,12 +822,16 @@ class _Flock:
 _WITNESS = re.compile(r"\bwitness run=(\S+) seq=(\d+) head=([0-9a-f]{64})\b")
 
 
+def _run_of(root: str | Path, run_id: str) -> _Run:
+    if not _RUN_ID.match(run_id):
+        raise EvidenceRefused("bad_run_id")
+    return _Run(_refuse_unsafe_root(Path(root)) / run_id, run_id)
+
+
 def read_records(root: str | Path, run_id: str) -> list[dict[str, Any]]:
     """Verify a run read-only and return its records. Raises EvidenceCorrupt without writing a sidecar."""
 
-    if not _RUN_ID.match(run_id):
-        raise EvidenceRefused("bad_run_id")
-    run = _Run(_refuse_unsafe_root(Path(root)) / run_id, run_id)
+    run = _run_of(root, run_id)
     recorded = run.recorded_sidecar_code() if run.dir.is_dir() else None
     if recorded is not None:
         raise EvidenceCorrupt(recorded)
@@ -809,7 +842,8 @@ def verify_witness(root: str | Path, run_id: str, witness_text: str, *, min_head
     """Refuse a store whose chain lacks a head the operator pasted into the witness log.
 
     Returns the verified ``(seq, head)`` pairs. Deleting the log tail and the anchor together passes the
-    chain and anchor checks; only a pasted head from before the deletion exposes it.
+    chain and anchor checks; only a pasted head from before the deletion exposes it. That exposure is terminal:
+    a mismatch writes the abort sidecar, so every later open and append is refused with the bytes kept.
     """
 
     entries = read_records(root, run_id)
@@ -818,6 +852,7 @@ def verify_witness(root: str | Path, run_id: str, witness_text: str, *, min_head
         raise WitnessMismatch("witness_missing")
     for seq, head in pasted:
         if seq > len(entries) or (GENESIS if seq == 0 else entries[seq - 1]["entry_sha256"]) != head:
+            _run_of(root, run_id).write_sidecar("witness_head_not_in_chain")
             raise WitnessMismatch("witness_head_not_in_chain")
     return pasted
 
