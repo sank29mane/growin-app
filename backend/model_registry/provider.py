@@ -314,14 +314,19 @@ def _unwrap_whole_fence(content: str) -> str:
 def _has_reasoning_evidence(completion: Any, message: Any) -> bool:
     """True when the server reports that the model reasoned.
 
-    Evidence is a positive ``usage.completion_tokens_details.reasoning_tokens`` or a
-    non-empty ``reasoning_content`` / ``reasoning`` on the message. A runtime that
-    reports neither gives no evidence, so the caller that needs it fails closed.
+    ``completion`` is the raw JSON body of the reply (a dict), never the SDK model: the
+    SDK coerces ``"7"``, ``true`` and ``1.0`` into the positive int a typed field wants,
+    which would turn garbage into evidence. Evidence is a raw JSON integer (not a bool)
+    above zero in ``usage.completion_tokens_details.reasoning_tokens``, or a non-blank
+    ``reasoning_content`` / ``reasoning`` on the message. Anything else (a string, a
+    bool, a float, null, a negative, a missing field) is no evidence, so the caller
+    that needs it fails closed.
     """
 
-    details = getattr(getattr(completion, "usage", None), "completion_tokens_details", None)
-    tokens = getattr(details, "reasoning_tokens", None)
-    if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens > 0:
+    usage = completion.get("usage") if isinstance(completion, dict) else None
+    details = usage.get("completion_tokens_details") if isinstance(usage, dict) else None
+    tokens = details.get("reasoning_tokens") if isinstance(details, dict) else None
+    if type(tokens) is int and tokens > 0:
         return True
     for name in ("reasoning_content", "reasoning"):
         text = getattr(message, name, None)
@@ -382,7 +387,9 @@ async def run_structured(
     )
     try:
         try:
-            completion = await client.chat.completions.create(**request)
+            raw = await client.chat.completions.with_raw_response.create(**request)
+            completion = raw.parse()
+            wire = raw.http_response.json() if role == ROLE_RISK_CRITIC else None
         finally:
             await client.close()
         check_served_model(role, resolved.model, getattr(completion, "model", None))
@@ -390,7 +397,7 @@ async def run_structured(
         if not choices or choices[0].finish_reason != "stop":
             raise ProviderError("STRUCTURED_OUTPUT_INVALID", role)
         message = choices[0].message
-        if role == ROLE_RISK_CRITIC and not _has_reasoning_evidence(completion, message):
+        if role == ROLE_RISK_CRITIC and not _has_reasoning_evidence(wire, message):
             raise ProviderError("REASONING_ABSENT", role)
         content = message.content
         if not isinstance(content, str) or not content:

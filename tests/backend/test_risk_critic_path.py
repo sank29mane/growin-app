@@ -154,6 +154,25 @@ async def test_a_verdict_from_a_critic_that_did_not_reason_is_critic_output_inva
     assert stub.count == 1
 
 
+@pytest.mark.parametrize(
+    "wire",
+    ["7", True, 1.0, -1, None],
+    ids=["string_7", "bool_true", "float_1_0", "negative", "null"],
+)
+async def test_a_coerced_wire_token_count_cannot_approve_a_critic_that_did_not_reason(
+    stub, registry_factory, risk_workspace, wire
+):
+    """The SDK turns "7" and true into positive ints; the raw wire value is what counts."""
+    registry_factory()
+    stub.structured["RiskAssessment"] = _verdict("APPROVED")
+    stub.reasoning_tokens_raw = wire
+    stub.reasoning_content = ""
+    with pytest.raises(ProviderError) as caught:
+        await RiskAgent().review(_context(), "BUY 1 share of AAPL")
+    assert caught.value.code == "CRITIC_OUTPUT_INVALID"
+    assert stub.count == 1
+
+
 async def test_a_critic_verdict_cut_off_at_the_token_limit_is_critic_output_invalid(
     stub, registry_factory, risk_workspace
 ):
@@ -170,6 +189,8 @@ async def test_a_critic_that_reports_reasoning_tokens_is_accepted(stub, registry
     registry_factory()
     stub.structured["RiskAssessment"] = _verdict("BLOCKED")
     stub.reasoning_tokens = 412
+    assert (await RiskAgent().review(_context(), "BUY 1 share of AAPL"))["status"] == "BLOCKED"
+    stub.reasoning_tokens_raw = 7
     assert (await RiskAgent().review(_context(), "BUY 1 share of AAPL"))["status"] == "BLOCKED"
 
 

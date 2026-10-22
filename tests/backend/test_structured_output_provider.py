@@ -387,6 +387,50 @@ async def test_a_critic_reply_with_no_reasoning_evidence_fails_closed(stub, regi
 
 
 @pytest.mark.parametrize(
+    "wire",
+    ["7", True, 1.0, -1, None, "", [7], {"n": 7}],
+    ids=["string_7", "bool_true", "float_1_0", "negative", "null", "empty_string", "list", "object"],
+)
+async def test_only_a_raw_positive_json_integer_counts_as_reasoning_tokens(stub, registry_factory, wire):
+    """The SDK coerces "7", true and 1.0 into ints; the guard reads the wire value instead."""
+    registry_factory()
+    stub.structured["RiskAssessment"] = {**VALID_VERDICT, "status": "APPROVED"}
+    stub.reasoning_tokens_raw = wire
+    stub.reasoning_content = ""
+    with pytest.raises(ProviderError) as caught:
+        await run_structured("risk_critic", MESSAGES, RiskAssessment)
+    assert caught.value.code == "REASONING_ABSENT"
+    assert stub.count == 1
+
+
+async def test_a_raw_integer_passes_and_a_missing_field_is_no_evidence(stub, registry_factory):
+    registry_factory()
+    stub.structured["RiskAssessment"] = VALID_VERDICT
+    stub.reasoning_tokens_raw = 7
+    assert (await run_structured("risk_critic", MESSAGES, RiskAssessment)).status == "BLOCKED"
+    stub.reasoning_tokens_raw = 0
+    with pytest.raises(ProviderError) as caught:
+        await run_structured("risk_critic", MESSAGES, RiskAssessment)
+    assert caught.value.code == "REASONING_ABSENT"
+
+
+@pytest.mark.parametrize("wire", ["7", True, 1.0, -1, None])
+async def test_a_coerced_token_count_is_still_rescued_by_real_reasoning_text(stub, registry_factory, wire):
+    registry_factory()
+    stub.structured["RiskAssessment"] = VALID_VERDICT
+    stub.reasoning_tokens_raw = wire
+    stub.reasoning_content = "weighed the cap"
+    assert (await run_structured("risk_critic", MESSAGES, RiskAssessment)).status == "BLOCKED"
+
+
+@pytest.mark.parametrize("wire", ["7", True, 1.0, -1, None])
+async def test_other_roles_ignore_the_token_count_entirely(stub, registry_factory, wire):
+    registry_factory()
+    stub.reasoning_tokens_raw = wire
+    assert isinstance(await run_structured("decision", MESSAGES, ToolCallList), ToolCallList)
+
+
+@pytest.mark.parametrize(
     "tokens,field,text",
     [
         (5, "reasoning_content", None),
@@ -456,6 +500,7 @@ async def test_http_errors_map_like_every_other_call_path(stub, registry_factory
         def __init__(self, *args, **kwargs):
             self.chat = self
             self.completions = self
+            self.with_raw_response = self
 
         async def create(self, **kwargs):
             calls.append(kwargs)

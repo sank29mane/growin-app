@@ -148,6 +148,9 @@ def strict_subset_violations(schema: Any, path: str = "$", root: Any = None) -> 
     return found
 
 
+_UNSET: Any = object()
+
+
 @dataclass
 class ModelStubServer:
     reply_text: str = "stub reply"
@@ -159,6 +162,9 @@ class ModelStubServer:
     # What the reply reports about reasoning. None leaves the field out, the way
     # a runtime that does not count reasoning tokens does.
     reasoning_tokens: Optional[int] = 7
+    # Verbatim wire value for reasoning_tokens (a string, a bool, null...). Overrides
+    # ``reasoning_tokens`` when set; ``_UNSET`` leaves ``reasoning_tokens`` in charge.
+    reasoning_tokens_raw: Any = _UNSET
     reasoning_content: Optional[str] = None
     reasoning_field: str = "reasoning_content"  # or "reasoning", the other name runtimes use
     requests: List[RecordedRequest] = field(default_factory=list)
@@ -324,7 +330,9 @@ class ModelStubServer:
                 "completion_tokens": 1,
                 "total_tokens": 2,
                 **(
-                    {}
+                    {"completion_tokens_details": {"reasoning_tokens": self.reasoning_tokens_raw}}
+                    if self.reasoning_tokens_raw is not _UNSET
+                    else {}
                     if self.reasoning_tokens is None
                     else {"completion_tokens_details": {"reasoning_tokens": self.reasoning_tokens}}
                 ),
