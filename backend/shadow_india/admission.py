@@ -71,6 +71,8 @@ MAX_QUOTE_SAMPLES = 20
 MAX_AGE_SECONDS = 30
 VM_CODE_KILL_SWITCH = "kill_switch"
 INCONCLUSIVE_NO_FILL = "inconclusive_no_fill_assumed"
+# What the admission's recorded ``simulator_drawdown_pct`` measures on this path.
+SIMULATOR_DRAWDOWN_BASIS = "seed_relative_at_cost"
 
 # Stable codes the adapter itself raises or records.
 REGIME_WINDOW_INSUFFICIENT = "REGIME_WINDOW_INSUFFICIENT"
@@ -183,8 +185,10 @@ class QuoteSample:
     """One relay quote reading, pinned: the raw body hash, when it was fetched, bid and ask.
 
     ``evidence`` is the India rule input read at the same time (circuits, tick reference, ISIN).
-    The adapter builds the replay from ``fetched_at``, ``bid`` and ``ask``, and hands the last
-    sample's ``evidence`` to the Mac's India guard.
+    It must be the same reading: its ``observed_at`` equals ``fetched_at`` and its quote's bid and
+    ask equal this sample's. The adapter builds the replay from ``fetched_at``, ``bid`` and ``ask``,
+    and hands the newest sample's ``evidence`` to the Mac's India guard, so the regime, the
+    simulator and the P-16 slippage reference all read one reading.
     """
 
     raw_sha256: str
@@ -210,6 +214,12 @@ class QuoteSample:
             raise ValueError("a quote sample bid cannot exceed its ask")
         if not isinstance(self.evidence, IndiaQuoteEvidence):
             raise TypeError("a quote sample carries IndiaQuoteEvidence")
+        if (
+            self.evidence.observed_at != self.fetched_at
+            or self.evidence.quote.bid != self.bid
+            or self.evidence.quote.ask != self.ask
+        ):
+            raise ValueError("a quote sample's evidence must be the same reading as the sample")
 
 
 # --- construction ---------------------------------------------------------------------
@@ -318,7 +328,15 @@ class ShadowAdmissionAdapter:
         )
 
     def portfolio_state(self) -> dict[str, float]:
-        """Equity and peak equity from the simulation account: realised cash plus holdings at cost."""
+        """Equity and peak equity from the simulation account: realised cash plus holdings at cost.
+
+        The peak here is ``max(seed, equity)``, so the ``simulator_drawdown_pct`` the admission
+        records is seed-relative and at cost (``SIMULATOR_DRAWDOWN_BASIS``). It is not the true
+        high-water mark ``risk_india/drawdown.py`` keeps, and an open position's unrealised loss
+        never shows in it. It is recorded only; the halt, ended and stop latches are enforced
+        from the latch file, not from this figure. Read it as a seed-relative figure, not as
+        real drawdown.
+        """
 
         cash = self._ledger.simulated_cash_view()
         view = self._ledger.india_account_view()
@@ -334,7 +352,11 @@ class ShadowAdmissionAdapter:
         if intent.mode is not OrderMode.SHADOW or intent.limit_price is None:
             raise ValueError("a SHADOW admission needs a SHADOW LIMIT intent")
         now = self._clock()
-        india_quote = samples[-1].evidence if samples else None
+        # The newest reading by fetched_at, the same one the regime and the simulator see, so the
+        # verdict never depends on the order the caller passed the samples in.
+        india_quote = (
+            max(samples, key=lambda sample: sample.fetched_at).evidence if samples else None
+        )
         pins: dict[str, Any] = {
             # D-16: the order is admitted at its own LIMIT, labelled as the relay quote it came from.
             "price": intent.limit_price,
@@ -965,6 +987,7 @@ __all__ = [
     "PrepareResult",
     "QuoteSample",
     "REGIME_WINDOW_INSUFFICIENT",
+    "SIMULATOR_DRAWDOWN_BASIS",
     "ShadowAbort",
     "ShadowAdmissionAdapter",
     "ShadowPreparation",

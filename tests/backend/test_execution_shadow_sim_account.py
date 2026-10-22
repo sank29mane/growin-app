@@ -45,7 +45,7 @@ from execution.ledger import (
     simulated_booking_id,
 )
 from execution.models import AdmissionDecision, Workspace
-from india_limits_support import SYMBOL, TICKER
+from india_limits_support import NOW, SYMBOL, TICKER
 from shadow_india.admission import (
     AuditEntry,
     AuditPage,
@@ -61,6 +61,7 @@ from test_shadow_india_admission import (
     SEED,
     Rig,
     buy,
+    frozen_service_clock,  # noqa: F401 - a fixture, used through pytestmark
     make_rig,
     prepare_buy,
     reopen,
@@ -68,6 +69,8 @@ from test_shadow_india_admission import (
     samples,
     sha,
 )
+
+pytestmark = pytest.mark.usefixtures("frozen_service_clock")
 
 SCHEDULE = sha("schedule")
 
@@ -103,7 +106,7 @@ def sell(rig: Rig, proposal_id: str, *, quantity: int, limit: str = "100.00"):
     intent = rig.adapter.build_intent(
         proposal_id, symbol=SYMBOL, side="SELL", quantity=quantity, limit_price=limit
     )
-    return run(rig.adapter.prepare(intent, samples(datetime.now(timezone.utc))))
+    return run(rig.adapter.prepare(intent, samples(NOW)))
 
 
 def file_sha(path: Path) -> str:
@@ -1554,7 +1557,7 @@ def go(
     return run(
         h.prep.prepare(
             session_id=session, signal_id=signal, leg=leg, symbol=SYMBOL, side="BUY",
-            quantity=quantity, limit_price="100.00", samples=samples(datetime.now(timezone.utc), count),
+            quantity=quantity, limit_price="100.00", samples=samples(NOW, count),
         )
     )
 
@@ -1635,7 +1638,7 @@ def test_recovery_during_a_held_mint_defers_and_never_posts_again(tmp_path):
             task = asyncio.ensure_future(
                 h.prep.prepare(
                     session_id="s-1", signal_id="sig-1", leg="entry", symbol=SYMBOL, side="BUY",
-                    quantity=2, limit_price="100.00", samples=samples(datetime.now(timezone.utc)),
+                    quantity=2, limit_price="100.00", samples=samples(NOW),
                 )
             )
             await h.mint.entered.wait()
@@ -1779,7 +1782,7 @@ def _hold_past_timeout_recover_then_release(h, *, codes=None):
         task = asyncio.ensure_future(
             h.prep.prepare(
                 session_id="s-1", signal_id="sig-1", leg="entry", symbol=SYMBOL, side="BUY",
-                quantity=2, limit_price="100.00", samples=samples(datetime.now(timezone.utc)),
+                quantity=2, limit_price="100.00", samples=samples(NOW),
             )
         )
         await h.mint.entered.wait()
@@ -2270,13 +2273,16 @@ _CHILD = textwrap.dedent(
     from test_execution_shadow_sim_account import (
         FileEvidence, ListAudit, ScriptedMint, ShadowPreparation, SCHEDULE, go_with, sha,
     )
-    from test_shadow_india_admission import RUN_ID, SEED, make_guard
+    import execution.service as service_module
+    from india_limits_support import NOW
+    from test_shadow_india_admission import RUN_ID, SEED, _FrozenDatetime, make_guard
     from shadow_india.admission import ShadowAdmissionAdapter, open_simulation_ledger
 
+    service_module.datetime = _FrozenDatetime
     base = Path({base!r})
     ledger = open_simulation_ledger(base / "sim", RUN_ID, SEED)
     guard = make_guard(ledger, base / "private")
-    adapter = ShadowAdmissionAdapter(ledger, guard)
+    adapter = ShadowAdmissionAdapter(ledger, guard, clock=lambda: NOW)
     crash = {crash!r}
     prep = ShadowPreparation(
         run_id=RUN_ID, adapter=adapter, evidence=FileEvidence(base / "evidence.jsonl", crash),
@@ -2297,7 +2303,7 @@ def go_with(prep: ShadowPreparation) -> str:
     result = run(
         prep.prepare(
             session_id="s-1", signal_id="sig-1", leg="entry", symbol=SYMBOL, side="BUY", quantity=2,
-            limit_price="100.00", samples=samples(datetime.now(timezone.utc)),
+            limit_price="100.00", samples=samples(NOW),
         )
     )
     return result.proposal_id
@@ -2326,7 +2332,7 @@ def _reopen_prep(base: Path):
     guard = make_guard(ledger, base / "private")
     evidence, mint, audit, clock = FileEvidence(base / "evidence.jsonl"), ScriptedMint(), ListAudit(), Clock()
     prep = ShadowPreparation(
-        run_id=RUN_ID, adapter=ShadowAdmissionAdapter(ledger, guard), evidence=evidence, mint=mint,
+        run_id=RUN_ID, adapter=ShadowAdmissionAdapter(ledger, guard, clock=lambda: NOW), evidence=evidence, mint=mint,
         audit=audit, clock=clock,
     )
     return SimpleNamespace(ledger=ledger, prep=prep, ev=evidence, mint=mint, audit=audit, clock=clock)

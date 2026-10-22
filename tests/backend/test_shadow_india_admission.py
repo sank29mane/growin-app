@@ -33,6 +33,7 @@ from execution.venue import (
 from india_limits_support import NOW, SYMBOL, india_private_dir, make_evidence, make_guard
 from regime_testkit import bound_regime_fields, shipped_map
 from shadow_india.admission import (
+    SIMULATOR_DRAWDOWN_BASIS,
     QuoteSample,
     ShadowAdmissionAdapter,
     open_simulation_ledger,
@@ -59,20 +60,25 @@ def samples(
     bid: str = "99.90",
     ask: str = "100.00",
     age: int = 2,
-    quote_observed_at: datetime = NOW,
 ) -> list[QuoteSample]:
-    """``count`` distinct relay readings ending ``age`` seconds before ``now``, each pinned."""
+    """``count`` distinct relay readings ending ``age`` seconds before ``now``, each pinned.
+
+    The newest reading carries ``bid`` and ``ask``; older ones sit 0.01 lower per step back. Each
+    sample's evidence is the same reading: its time, bid and ask are the sample's own.
+    """
 
     out = []
     for index in range(count):
-        step = Decimal(index) * Decimal("0.01")
+        step = Decimal(count - 1 - index) * Decimal("0.01")
+        fetched = now - timedelta(seconds=age * (count - index))
+        reading_bid, reading_ask = Decimal(bid) - step, Decimal(ask) - step
         out.append(
             QuoteSample(
                 sha(f"raw-{index}"),
-                now - timedelta(seconds=age * (count - index)),
-                Decimal(bid) + step,
-                Decimal(ask) + step,
-                make_evidence(observed_at=quote_observed_at, ask=Decimal(ask), bid=Decimal(bid)),
+                fetched,
+                reading_bid,
+                reading_ask,
+                make_evidence(observed_at=fetched, ask=reading_ask, bid=reading_bid),
             )
         )
     return out
@@ -116,7 +122,9 @@ def make_rig(
     root = tmp_path / "sim"
     ledger = open_simulation_ledger(root, run_id, seed)
     guard = make_guard(ledger, private)
-    adapter = ShadowAdmissionAdapter(ledger, guard, simulator=simulator, risk_gate=risk_gate)
+    adapter = ShadowAdmissionAdapter(
+        ledger, guard, simulator=simulator, risk_gate=risk_gate, clock=lambda: NOW
+    )
     return Rig(root, private, ledger, guard, adapter)
 
 
@@ -124,7 +132,7 @@ def reopen(rig: Rig, *, seed: Decimal = SEED, run_id: str = RUN_ID) -> Rig:
     rig.close()
     ledger = open_simulation_ledger(rig.root, run_id, seed)
     guard = make_guard(ledger, rig.private)
-    return Rig(rig.root, rig.private, ledger, guard, ShadowAdmissionAdapter(ledger, guard))
+    return Rig(rig.root, rig.private, ledger, guard, ShadowAdmissionAdapter(ledger, guard, clock=lambda: NOW))
 
 
 def buy(rig: Rig, proposal_id: str, *, quantity: int = 2, limit: str = "100.00", symbol: str = SYMBOL):
@@ -134,12 +142,28 @@ def buy(rig: Rig, proposal_id: str, *, quantity: int = 2, limit: str = "100.00",
 
 
 def prepare_buy(rig: Rig, proposal_id: str, *, quantity: int = 2, limit: str = "100.00", **kw):
-    now = datetime.now(timezone.utc)
     return run(
         rig.adapter.prepare(
-            buy(rig, proposal_id, quantity=quantity, limit=limit), samples(now, **kw)
+            buy(rig, proposal_id, quantity=quantity, limit=limit), samples(NOW, **kw)
         )
     )
+
+
+class _FrozenDatetime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return NOW.astimezone(tz) if tz is not None else NOW.replace(tzinfo=None)
+
+
+@pytest.fixture
+def frozen_service_clock(monkeypatch):
+    """``ExecutionService`` reads the wall clock for its own staleness check. Samples, the adapter
+    and the guard all live at ``NOW`` (inside the session), so the service reads ``NOW`` too."""
+
+    monkeypatch.setattr(service_module, "datetime", _FrozenDatetime)
+
+
+pytestmark = pytest.mark.usefixtures("frozen_service_clock")
 
 
 @pytest.fixture
@@ -204,7 +228,7 @@ def test_the_adapter_refuses_an_ordinary_ledger(tmp_path):
     ledger = ExecutionLedger(tmp_path / "paper.sqlite3", workspace="india", require_approval=True)
     try:
         with pytest.raises(ValueError):
-            ShadowAdmissionAdapter(ledger, make_guard(ledger, private))
+            ShadowAdmissionAdapter(ledger, make_guard(ledger, private), clock=lambda: NOW)
     finally:
         ledger.close()
 
@@ -282,7 +306,7 @@ def test_the_cap_edge_is_inclusive_for_the_limit_input(tmp_path):
 def _direct_kwargs(rig: Rig, intent: OrderIntent, **overrides: Any) -> dict[str, Any]:
     """Every runtime input ``admit`` needs, supplied by hand so a test can break one."""
 
-    now = datetime.now(timezone.utc)
+    now = NOW
     values: dict[str, Any] = {
         "currency": "INR",
         "price": intent.limit_price,
@@ -325,7 +349,7 @@ def test_a_caller_simulator_figure_never_overrides_the_configured_simulator(tmp_
         ({"price_source": PRICE_SOURCE_OPERATOR_RECORDED}, "PRICE_SOURCE_NOT_ADMISSIBLE"),
         ({"price_source": "local-replay"}, "PRICE_SOURCE_NOT_ADMISSIBLE"),
         ({"price_divisor": None}, "PRICE_NOT_PINNED_TO_LIMIT"),
-        ({"evidence_at": datetime.now(timezone.utc) - timedelta(seconds=45)}, "ADMISSION_EVIDENCE_IS_STALE"),
+        ({"evidence_at": NOW - timedelta(seconds=45)}, "ADMISSION_EVIDENCE_IS_STALE"),
     ],
 )
 def test_integration_rows_deny_with_a_typed_code_and_no_reservation(tmp_path, overrides, code):
@@ -405,13 +429,81 @@ def test_two_quotes_only_deny_as_a_short_window(tmp_path):
 def test_stale_samples_and_repeated_readings_deny(tmp_path):
     rig = make_rig(tmp_path)
     try:
-        stale = prepare_buy(rig, "stale", age=30)  # newest reading 30 s old, oldest 90 s
+        stale = prepare_buy(rig, "stale", age=40)  # newest reading 40 s old, oldest 120 s
         assert stale.decision is AdmissionDecision.DENIED and stale.reason_code == "STALE_SNAPSHOT"
-        now = datetime.now(timezone.utc)
-        one = samples(now)[0]
+        one = samples(NOW)[0]
         repeated = run(rig.adapter.prepare(buy(rig, "same"), [one, one, one]))
         assert repeated.decision is AdmissionDecision.DENIED
         assert repeated.reason_code == "QUOTE_READINGS_NOT_DISTINCT"
+    finally:
+        rig.close()
+
+
+def _with_oldest_ask(count_now: datetime, oldest_ask: str) -> list[QuoteSample]:
+    """Three readings whose oldest one asks ``oldest_ask``; the newest asks 100.00."""
+
+    readings = samples(count_now)
+    oldest = readings[0]
+    bid, ask = Decimal(oldest_ask) - Decimal("0.10"), Decimal(oldest_ask)
+    readings[0] = QuoteSample(
+        oldest.raw_sha256,
+        oldest.fetched_at,
+        bid,
+        ask,
+        make_evidence(observed_at=oldest.fetched_at, bid=bid, ask=ask),
+    )
+    return readings
+
+
+def test_the_slippage_verdict_does_not_depend_on_the_order_of_the_samples(tmp_path, evidence_spy):
+    # A BUY limited at 100.30. The newest reading asks 100.00 (30 bps below the limit: denied). The
+    # oldest asks 100.30, which would let it through if the guard read the caller's last sample.
+    rig = make_rig(tmp_path, simulator=FixedFill("100.00"))
+    try:
+        chronological = _with_oldest_ask(NOW, "100.30")
+        orders = {
+            "chronological": chronological,
+            "reversed": list(reversed(chronological)),
+            "rotated": chronological[1:] + chronological[:1],
+        }
+        verdicts = {}
+        for name, readings in orders.items():
+            intent = buy(rig, f"order-{name}", limit="100.30")
+            admission = run(rig.adapter.prepare(intent, readings))
+            verdicts[name] = (admission.decision, admission.reason_code)
+            assert evidence_spy[-1]["india"]["slippage_denied_by"] == "slippage_reference"
+        assert set(verdicts.values()) == {(AdmissionDecision.DENIED, "SLIPPAGE_LIMIT")}, verdicts
+    finally:
+        rig.close()
+
+
+@pytest.mark.parametrize(
+    "field, build",
+    [
+        ("observed_at", lambda s: make_evidence(observed_at=s.fetched_at + timedelta(seconds=1), bid=s.bid, ask=s.ask)),
+        ("bid", lambda s: make_evidence(observed_at=s.fetched_at, bid=s.bid - Decimal("0.01"), ask=s.ask)),
+        ("ask", lambda s: make_evidence(observed_at=s.fetched_at, bid=s.bid, ask=s.ask + Decimal("0.01"))),
+        ("no_bid", lambda s: make_evidence(observed_at=s.fetched_at, bid=None, ask=s.ask)),
+        ("no_ask", lambda s: make_evidence(observed_at=s.fetched_at, bid=s.bid, ask=None)),
+    ],
+)
+def test_a_sample_whose_evidence_is_another_reading_is_refused(field, build):
+    good = samples(NOW)[-1]
+    QuoteSample(good.raw_sha256, good.fetched_at, good.bid, good.ask, build_consistent(good))
+    with pytest.raises(ValueError, match="same reading"):
+        QuoteSample(good.raw_sha256, good.fetched_at, good.bid, good.ask, build(good))
+
+
+def build_consistent(sample: QuoteSample):
+    return make_evidence(observed_at=sample.fetched_at, bid=sample.bid, ask=sample.ask)
+
+
+def test_the_recorded_drawdown_is_declared_seed_relative_at_cost(tmp_path):
+    rig = make_rig(tmp_path)
+    try:
+        state = rig.adapter.portfolio_state()
+        assert SIMULATOR_DRAWDOWN_BASIS == "seed_relative_at_cost"
+        assert state["peak_equity"] == float(SEED) == state["equity"]
     finally:
         rig.close()
 
