@@ -30,6 +30,7 @@ from pilot_data.store import PilotDataStore
 from pilot_data.surveillance import ASM_URL, GSM_URL, ingest_surveillance
 
 import pilot_data_testkit as kit
+import test_pilot_data_nse_calendar as nc
 
 FETCHED = datetime(2026, 10, 2, 10, 0, tzinfo=timezone.utc)
 LATER = datetime(2030, 1, 1, 12, 0, tzinfo=timezone.utc)
@@ -614,3 +615,65 @@ def test_the_module_never_starts_a_process_or_calls_launchctl():
             assert name not in {"system", "popen", "run", "Popen", "check_output", "check_call", "call"} or \
                 getattr(getattr(func, "value", None), "id", "") not in {"os", "subprocess"}
             assert "launchctl" not in name
+
+
+# ------------------------------------------------------------------ the pinned calendar (64-03): previous session, not weekday
+MON_HOLIDAY, TUE = date(2026, 10, 19), date(2026, 10, 20)
+FRI = date(2026, 10, 16)
+SAT_SPECIAL = date(2026, 10, 17)
+
+
+def calendar_for(tmp_path, **kwargs):
+    folder = tmp_path / f"cal-{len(list(tmp_path.glob('cal-*')))}"
+    folder.mkdir()
+    return nc.pinned(folder, coverage=(date(2026, 1, 1), date(2026, 12, 31)), **kwargs)
+
+
+def holiday_world(store, *, special=()):
+    """Sessions up to Friday 16 Oct; Monday 19 Oct has no file (a pinned holiday); refresh recorded on Friday only."""
+    sessions = {date(2026, 10, 14), date(2026, 10, 15), FRI, *special}
+    mark_calendar(store, date(2026, 10, 14), MON_HOLIDAY, sessions)
+    for day in sorted(sessions):
+        snapshots(store, day)
+    record_success(store, FRI)
+
+
+def test_a_pinned_weekday_holiday_does_not_make_the_refresh_before_it_stale(store, tmp_path):
+    holiday_world(store)
+    with pytest.raises(PilotDataError) as without:  # no calendar: the previous weekday of Tuesday is Monday
+        require_reference_freshness(store, today_ist=TUE)
+    assert without.value.code == "reference_refresh_stale"
+    uncovering = calendar_for(tmp_path)  # a calendar that does not list Monday as a holiday changes nothing
+    with pytest.raises(PilotDataError) as strict:
+        require_reference_freshness(store, today_ist=TUE, calendar=uncovering)
+    assert strict.value.code == "reference_refresh_stale"
+    holiday = calendar_for(tmp_path, holidays=[MON_HOLIDAY])
+    ok = require_reference_freshness(store, today_ist=TUE, calendar=holiday)
+    assert ok.fresh and ok.last_successful_run_ist_date == FRI
+    assert rr._previous_session(TUE, holiday) == FRI and rr._previous_session(TUE, None) == MON_HOLIDAY
+
+
+def test_a_pinned_special_saturday_is_the_previous_session_and_needs_its_own_refresh(store, tmp_path):
+    holiday_world(store)
+    special = calendar_for(tmp_path, special=[SAT_SPECIAL])
+    assert rr._previous_session(date(2026, 10, 18), special) == SAT_SPECIAL
+    assert rr._previous_session(date(2026, 10, 19), calendar_for(tmp_path)) == FRI  # an ordinary Saturday is skipped
+    with pytest.raises(PilotDataError) as stale:  # Friday's run is older than the Saturday session
+        require_reference_freshness(store, today_ist=date(2026, 10, 19), calendar=special)
+    assert stale.value.code == "reference_refresh_stale"
+
+
+def test_missing_session_checks_stay_strict_with_a_calendar(store, tmp_path):
+    gap_world(store)  # D5 has data and no snapshot: a gap whatever the calendar says
+    calendar = calendar_for(tmp_path)
+    with pytest.raises(PilotDataError) as caught:
+        require_reference_freshness(store, today_ist=D6, calendar=calendar)
+    assert caught.value.code == "reference_refresh_gap" and "2026-10-05" in str(caught.value)
+
+
+def test_a_day_outside_the_calendar_coverage_is_never_called_a_holiday(tmp_path):
+    folder = tmp_path / "narrow"
+    folder.mkdir()
+    narrow = nc.pinned(folder, coverage=(date(2026, 10, 19), date(2026, 10, 31)), holidays=[MON_HOLIDAY])
+    assert rr._previous_session(TUE, narrow) == date(2026, 10, 16)  # Monday is skipped, Friday is not covered: a weekday
+    assert rr._previous_session(date(2026, 10, 15), narrow) == date(2026, 10, 14)

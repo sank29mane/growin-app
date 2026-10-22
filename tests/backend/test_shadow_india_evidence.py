@@ -1226,3 +1226,69 @@ def test_the_real_store_passes_the_adapter_scenarios_written_against_the_port(
     for root in StoreEvidence.roots:
         records = read_records(root, sim.RUN_ID)  # every store a scenario left still verifies
         assert [r["seq"] for r in records] == list(range(1, len(records) + 1))
+
+
+# --- the D-31 manifest flag: structured, hash-bound, readable without the log -----------------------------------------
+
+
+def rewrite_manifest(run_dir: Path, **changes: Any) -> None:
+    """Edit manifest.json and recompute its own hash, so only the schema (not the hash) can refuse it."""
+
+    path = run_dir / MANIFEST_NAME
+    data = json.loads(path.read_text())
+    data.pop("manifest_sha256")
+    data.update(changes)
+    body = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    data["manifest_sha256"] = hashlib.sha256(body).hexdigest()
+    path.write_bytes(json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii") + b"\n")
+
+
+def test_the_manifest_carries_holdout_dated_inputs_as_a_structured_hash_bound_field(tmp_path):
+    flagged = make_store(tmp_path / "a", holdout_dated_inputs=True)
+    plain = make_store(tmp_path / "b")
+    on = json.loads((flagged.run_dir / MANIFEST_NAME).read_text())
+    off = json.loads((plain.run_dir / MANIFEST_NAME).read_text())
+    assert on["holdout_dated_inputs"] is True and off["holdout_dated_inputs"] is False
+    assert on["created_utc"] == off["created_utc"] and on["manifest_sha256"] != off["manifest_sha256"]  # the flag is hashed
+    # a manifest-only reader: no record exists, the flag is on the opened store's manifest
+    reopened = EvidenceStore.open(tmp_path / "a", run_id=RUN, session_id=SESSION, clock=lambda: FIXED)
+    assert reopened.records() == [] and reopened.manifest.holdout_dated_inputs is True
+    assert EvidenceStore.open(tmp_path / "b", run_id=RUN, session_id=SESSION).manifest.holdout_dated_inputs is False
+
+
+def test_flipping_the_flag_in_manifest_json_is_a_hash_mismatch_not_a_silent_change(tmp_path):
+    live = make_store(tmp_path, holdout_dated_inputs=False)
+    path = live.run_dir / MANIFEST_NAME
+    path.write_bytes(path.read_bytes().replace(b'"holdout_dated_inputs":false', b'"holdout_dated_inputs":true'))
+    assert b'"holdout_dated_inputs":true' in path.read_bytes()
+    with pytest.raises(EvidenceCorrupt) as opened:
+        reopen(tmp_path)
+    assert opened.value.code == "manifest_hash_mismatch"
+
+
+@pytest.mark.parametrize("value", ["true", 1, None, "yes"])
+def test_a_manifest_whose_flag_is_not_a_boolean_is_invalid_even_with_its_hash_recomputed(tmp_path, value):
+    live = make_store(tmp_path, holdout_dated_inputs=True)
+    rewrite_manifest(live.run_dir, holdout_dated_inputs=value)
+    with pytest.raises(EvidenceCorrupt) as opened:
+        reopen(tmp_path)
+    assert opened.value.code == "manifest_invalid"
+
+
+def test_a_manifest_from_before_the_field_reads_as_not_holdout_dated(tmp_path):
+    live = make_store(tmp_path, holdout_dated_inputs=True)
+    path = live.run_dir / MANIFEST_NAME
+    data = json.loads(path.read_text())
+    data.pop("holdout_dated_inputs")
+    data.pop("manifest_sha256")
+    canonical = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    data["manifest_sha256"] = hashlib.sha256(canonical).hexdigest()
+    path.write_bytes(json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii") + b"\n")
+    assert reopen(tmp_path).manifest.holdout_dated_inputs is False
+
+
+def test_create_refuses_a_flag_that_is_not_a_boolean(tmp_path):
+    with pytest.raises(EvidenceRefused) as refused:
+        EvidenceStore.create(tmp_path, run_id=RUN, run_class="plumbing", session_id=SESSION, hashes=HASHES,
+                             holdout_dated_inputs="true")  # type: ignore[arg-type]
+    assert refused.value.code == "bad_holdout_flag" and not (tmp_path / RUN).exists()

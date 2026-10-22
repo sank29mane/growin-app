@@ -17,7 +17,7 @@ import json
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Literal, Mapping, Protocol, Sequence
+from typing import Callable, Literal, Mapping, Protocol, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -217,11 +217,18 @@ def classify_liquidity_sessions(
 
 
 # --------------------------------------------------------------------------- small caps
-def classify_smallcap(store: PilotDataStore, targets: TargetUniverseResult) -> dict[str, SmallCapClass]:
-    """D-08: today's Smallcap 250 is small; anything that cannot be classified counts as small for the cap."""
+def classify_smallcap(
+    store: PilotDataStore, targets: TargetUniverseResult, *, as_of: date | None = None
+) -> dict[str, SmallCapClass]:
+    """D-08: today's Smallcap 250 is small; anything that cannot be classified counts as small for the cap.
+
+    ``as_of`` (64-03, None keeps "latest") reads only what was available that day: index lists fetched on or before it
+    (their fetch date) and ETF info of files dated on or before it (a PR file is published on its own file date).
+    Nothing available means "unclassified", which the cap already counts as small.
+    """
     ensure_pr_tables(store)
-    nifty = latest_index_list(store, "nifty500")
-    small = latest_index_list(store, "smallcap250")
+    nifty = latest_index_list(store, "nifty500", fetched_by=as_of)
+    small = latest_index_list(store, "smallcap250", fetched_by=as_of)
     nifty_isins = {m.isin for m in index_members(store, nifty)} if nifty else set()
     small_isins = {m.isin for m in index_members(store, small)} if small else set()
     out: dict[str, SmallCapClass] = {}
@@ -237,8 +244,9 @@ def classify_smallcap(store: PilotDataStore, targets: TargetUniverseResult) -> d
                 out[member.anchor_isin] = "unclassified"
             continue
         found = store.query(
-            "SELECT underlying FROM bhavcopy_etf_info WHERE nse_symbol = ? ORDER BY file_date DESC LIMIT 1",
-            [member.nse_symbol],
+            "SELECT underlying FROM bhavcopy_etf_info WHERE nse_symbol = ?"
+            + ("" if as_of is None else " AND file_date <= ?") + " ORDER BY file_date DESC LIMIT 1",
+            [member.nse_symbol] + ([] if as_of is None else [as_of]),
         )
         underlying = found[0][0] if found else None
         if underlying is None:
@@ -286,6 +294,9 @@ def check_smallcap_exposure(
 
 
 # --------------------------------------------------------------------------- evaluation
+LineageOverride = Callable[[TargetMember, Lineage], Lineage]
+
+
 def _evaluate_universe(
     store: PilotDataStore,
     *,
@@ -297,6 +308,8 @@ def _evaluate_universe(
     allow_missing_surveillance_before: date | None,
     workspace: Literal["india"],
     status_source: TradingStatusSource,
+    lineage_override: LineageOverride | None = None,
+    classification_as_of: date | None = None,
 ) -> UniverseResult:
     if workspace != store.workspace:
         raise PilotDataError("workspace_mismatch", "workspace differs from the store workspace")
@@ -322,7 +335,7 @@ def _evaluate_universe(
         gsm_entries = surveillance_entries(store, gsm_ref)
         input_hashes["asm"] = asm_ref.source_sha256
         input_hashes["gsm"] = gsm_ref.source_sha256
-    classification = classify_smallcap(store, targets)
+    classification = classify_smallcap(store, targets, as_of=classification_as_of)
     lineage_as_of = max(targets.as_of, data_cutoff)
     decisions: list[UniverseDecision] = []
     for member in targets.members:
@@ -331,6 +344,7 @@ def _evaluate_universe(
                 store, member=member, data_cutoff=data_cutoff, lineage_as_of=lineage_as_of, policy=policy,
                 workspace=workspace, status_source=status_source, asm=asm_entries, gsm=gsm_entries,
                 smallcap_class=classification.get(member.anchor_isin, "unclassified"), input_hashes=input_hashes,
+                lineage_override=lineage_override,
             )
         )
     decisions.sort(key=lambda d: d.anchor_isin)
@@ -382,6 +396,7 @@ def _decide(
     gsm: Sequence,
     smallcap_class: SmallCapClass,
     input_hashes: dict[str, str],
+    lineage_override: LineageOverride | None = None,
 ) -> UniverseDecision:
     def blank(reasons: tuple[str, ...], isin: str | None = None, **extra) -> UniverseDecision:
         base = dict(
@@ -398,6 +413,8 @@ def _decide(
         if exc.code != "lineage_anchor_not_observed":
             raise
         return blank(("lineage_anchor_not_observed",))
+    if lineage_override is not None:
+        lineage = lineage_override(member, lineage)
     input_hashes[f"lineage:{member.anchor_isin}"] = lineage.content_sha256()
     reasons: list[str] = []
     isin = lineage.isin_on(data_cutoff)
@@ -451,10 +468,17 @@ def evaluate_universe(
     allow_missing_surveillance_before: date | None,
     workspace: Literal["india"],
     status_source: TradingStatusSource,
+    lineage_override: LineageOverride | None = None,
+    classification_as_of: date | None = None,
 ) -> UniverseResult:
-    """Evaluate the universe as of a date. The data cutoff is the date itself, never anything later."""
+    """Evaluate the universe as of a date. The data cutoff is the date itself, never anything later.
+
+    ``lineage_override(member, built)`` may return a replacement lineage (64-03: the as-of trimmed one, the pattern of
+    ``run_crosscheck``). None keeps the lineage ``build_lineage`` gave. ``classification_as_of`` (64-03) bounds the
+    small-cap classification to index lists and ETF info available by that date; None reads the latest, as before.
+    """
     return _evaluate_universe(
         store, as_of=as_of, data_cutoff=as_of, targets=targets, policy=policy, mode=mode,
         allow_missing_surveillance_before=allow_missing_surveillance_before, workspace=workspace,
-        status_source=status_source,
+        status_source=status_source, lineage_override=lineage_override, classification_as_of=classification_as_of,
     )

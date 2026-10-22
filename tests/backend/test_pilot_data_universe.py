@@ -563,3 +563,30 @@ def test_decisions_carry_the_real_classification(store):
     result = world.evaluate()
     assert decision(result, world, "AAA").smallcap_class == "not_small"
     assert decision(result, world, "BBB").smallcap_class == "small"
+
+
+# ------------------------------------------------------------------ lineage_override (64-03: the as-of trimmed lineage)
+def test_a_lineage_override_replaces_the_lineage_each_member_is_decided_on(store):
+    world = build(store, {"AAA": steady(), "BBB": steady()})
+    plain = world.evaluate()
+    seen = []
+
+    def same(member, built):
+        seen.append((member.anchor_isin, built.anchor_isin))
+        return built
+
+    kept = evaluate_universe(
+        store, as_of=D, targets=world.targets(D), policy=POLICY, mode="pilot", allow_missing_surveillance_before=None,
+        workspace="india", status_source=NoTradingStatusSource(), lineage_override=same)
+    assert kept.result_sha256 == plain.result_sha256 and kept.eligible_isins == plain.eligible_isins
+    assert sorted(seen) == sorted((isin, isin) for isin in world.isins.values())
+
+    def cut(member, built):  # a lineage whose only segment starts after the cutoff: nothing is listed on D
+        late = built.segments[-1].model_copy(update={"valid_from": D + timedelta(days=1), "valid_to": D + timedelta(days=9)})
+        return built.model_copy(update={"segments": (late,), "resolved_from": late.valid_from})
+
+    cut_result = evaluate_universe(
+        store, as_of=D, targets=world.targets(D), policy=POLICY, mode="pilot", allow_missing_surveillance_before=None,
+        workspace="india", status_source=NoTradingStatusSource(), lineage_override=cut)
+    assert plain.eligible_isins and cut_result.eligible_isins == ()
+    assert cut_result.result_sha256 != plain.result_sha256

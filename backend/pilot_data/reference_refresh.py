@@ -46,6 +46,7 @@ from .core import (
     utc_naive,
     utc_now,
 )
+from .nse_calendar import PinnedCalendar
 from .nse_http import NseHttp, build_default_client
 from .nse_ingest import ingest_day, ingest_range
 from .price_bands import ensure_band_tables, fetch_band_files
@@ -119,7 +120,27 @@ def _previous_weekday(day: date) -> date:
     return day
 
 
-def continuity_report(store: PilotDataStore, *, today_ist: date) -> ContinuityReport:
+def _previous_session(day: date, calendar: PinnedCalendar | None) -> date:
+    """The last trading day before ``day``. With no calendar, or a day it does not cover, this is the weekday walk.
+
+    A pinned weekday holiday is skipped and a pinned special session (a Saturday trading day) is not. A day the table
+    does not cover is never called a holiday, so the requirement can only be stricter than the calendar's.
+    """
+    if calendar is None:
+        return _previous_weekday(day)
+    day -= timedelta(days=1)
+    while True:
+        if calendar.covers(day):
+            if calendar.is_special(day) or not (calendar.is_weekend(day) or calendar.is_holiday(day)):
+                return day
+        elif day.weekday() < 5:
+            return day
+        day -= timedelta(days=1)
+
+
+def continuity_report(
+    store: PilotDataStore, *, today_ist: date, calendar: PinnedCalendar | None = None
+) -> ContinuityReport:
     ensure_refresh_tables(store)
     first = first_snapshot_date(store)
     latest: date | None = None
@@ -153,7 +174,7 @@ def continuity_report(store: PilotDataStore, *, today_ist: date) -> ContinuityRe
         "SELECT max(a.ist_date) FROM reference_refresh_runs a JOIN reference_refresh_runs b ON a.run_id = b.run_id "
         "WHERE a.step = 'surveillance' AND a.outcome = 'ok' AND b.step = 'price_bands' AND b.outcome = 'ok'"
     )[0][0]
-    recent = successful is not None and successful >= _previous_weekday(today_ist)
+    recent = successful is not None and successful >= _previous_session(today_ist, calendar)
     codes: list[str] = []
     if unknown:
         codes.append("calendar_unknown_dates")
@@ -176,8 +197,13 @@ def _listed(days: tuple[date, ...]) -> str:
     return text if len(newest) <= _LISTED_MAX else f"{text} (and {len(newest) - _LISTED_MAX} older)"
 
 
-def require_reference_freshness(store: PilotDataStore, *, today_ist: date) -> ContinuityReport:
-    report = continuity_report(store, today_ist=today_ist)
+def require_reference_freshness(
+    store: PilotDataStore, *, today_ist: date, calendar: PinnedCalendar | None = None
+) -> ContinuityReport:
+    """``calendar`` (64-03) is the operator's pinned table: the last successful run must be on or after the previous
+    trading session, so a weekday holiday does not make a refresh of the session before it stale. Gaps and unknown
+    calendar dates are still read from the store and stay strict."""
+    report = continuity_report(store, today_ist=today_ist, calendar=calendar)
     if report.unknown_calendar_dates:
         raise PilotDataError("calendar_unknown_dates",
                              f"unknown calendar dates since collection began: {_listed(report.unknown_calendar_dates)}")

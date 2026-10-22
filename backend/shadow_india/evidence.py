@@ -5,7 +5,7 @@ payload)`` returns the stored record and ``records()`` returns every complete re
 
 Layout, under ``<root>/<run_id>/`` (0700), every file 0600::
 
-    manifest.json       written last by ``create``: run id, run class, the pinned hashes, its own sha256
+    manifest.json       written last by ``create``: run id, run class, the pinned hashes, ``holdout_dated_inputs`` (D-31), its own sha256
     evidence.jsonl      one canonical JSON object per line; each carries the sha256 of the previous one
     evidence.anchor     the durable ``(seq, head sha256)``; replaced atomically, never ahead of the log
     evidence.lock       flock target for writers and readers
@@ -414,6 +414,7 @@ class RunManifest:
     created_ist: str
     hashes: Mapping[str, str]
     manifest_sha256: str
+    holdout_dated_inputs: bool = False  # D-31: the run reads inputs that may be dated inside the sealed 62 holdout
 
     def mismatches(self, current: Mapping[str, str]) -> tuple[str, ...]:
         """Names whose current hash differs from the manifest, or that one side lacks. Sorted."""
@@ -422,7 +423,9 @@ class RunManifest:
         return tuple(sorted(name for name in names if self.hashes.get(name) != current.get(name)))
 
 
-def _manifest_body(run_id: str, run_class: str, created: datetime, hashes: Mapping[str, str]) -> dict[str, Any]:
+def _manifest_body(
+    run_id: str, run_class: str, created: datetime, hashes: Mapping[str, str], holdout_dated_inputs: bool
+) -> dict[str, Any]:
     return {
         "schema": MANIFEST_SCHEMA,
         "run_id": run_id,
@@ -430,6 +433,7 @@ def _manifest_body(run_id: str, run_class: str, created: datetime, hashes: Mappi
         "created_utc": created.astimezone(timezone.utc).isoformat(timespec="microseconds"),
         "created_ist": created.astimezone(IST).isoformat(timespec="microseconds"),
         "hashes": dict(sorted(hashes.items())),
+        "holdout_dated_inputs": holdout_dated_inputs,
     }
 
 
@@ -501,9 +505,10 @@ class _Run:
             data = json.loads(self.manifest_path.read_bytes().decode("ascii"))
         except (OSError, ValueError, UnicodeDecodeError) as exc:
             raise EvidenceCorrupt("manifest_invalid") from exc
-        if not isinstance(data, dict) or set(data) != {
-            "schema", "run_id", "run_class", "created_utc", "created_ist", "hashes", "manifest_sha256",
-        }:
+        base_keys = {"schema", "run_id", "run_class", "created_utc", "created_ist", "hashes", "manifest_sha256"}
+        # ``holdout_dated_inputs`` is written by every ``create``; a manifest from before the field existed lacks it and
+        # reads as False, which a holdout-dated read refuses.
+        if not isinstance(data, dict) or set(data) not in (base_keys, base_keys | {"holdout_dated_inputs"}):
             raise EvidenceCorrupt("manifest_invalid")
         digest = data["manifest_sha256"]
         if not isinstance(digest, str) or hashlib.sha256(_canonical({k: v for k, v in data.items() if k != "manifest_sha256"})).hexdigest() != digest:
@@ -516,10 +521,12 @@ class _Run:
             or not isinstance(hashes, dict)
             or not hashes
             or not all(isinstance(k, str) and re.match(r"^[a-z][a-z0-9_]{0,40}\Z", k) and isinstance(v, str) and _HEX64.match(v) for k, v in hashes.items())
+            or not isinstance(data.get("holdout_dated_inputs", False), bool)
         ):
             raise EvidenceCorrupt("manifest_invalid")
         return RunManifest(
-            self.run_id, data["run_class"], str(data["created_utc"]), str(data["created_ist"]), dict(hashes), digest
+            self.run_id, data["run_class"], str(data["created_utc"]), str(data["created_ist"]), dict(hashes), digest,
+            data.get("holdout_dated_inputs", False),
         )
 
     def read_anchor(self) -> tuple[int, str]:
@@ -635,11 +642,14 @@ class EvidenceStore:
         run_class: str,
         session_id: str,
         hashes: Mapping[str, str],
+        holdout_dated_inputs: bool = False,
         clock: Clock = _utc_now,
         forbidden: Sequence[str] = (),
     ) -> "EvidenceStore":
         if not _RUN_ID.match(run_id):
             raise EvidenceRefused("bad_run_id")
+        if not isinstance(holdout_dated_inputs, bool):
+            raise EvidenceRefused("bad_holdout_flag")
         if run_class not in RUN_CLASSES:
             raise EvidenceRefused("bad_run_class")
         if not _check_type("id", session_id):
@@ -667,7 +677,7 @@ class EvidenceStore:
         _write_new_file(run.anchor, _canonical({"head_sha256": GENESIS, "seq": 0}) + b"\n")
         _write_new_file(run.log, b"")
         _write_new_file(run.lock, b"")
-        body = _manifest_body(run_id, run_class, now, hashes)
+        body = _manifest_body(run_id, run_class, now, hashes, holdout_dated_inputs)
         digest = hashlib.sha256(_canonical(body)).hexdigest()
         _write_new_file(run.manifest_path, _canonical({**body, "manifest_sha256": digest}) + b"\n")  # last: commits create
         _fsync_dir(run.dir)
