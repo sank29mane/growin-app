@@ -28,7 +28,7 @@ import pytest
 
 import shadow_india.runner as runner_module
 from brokers.breeze_gateway.client import RelayClient
-from brokers.breeze_gateway.errors import NoSession, RelayError
+from brokers.breeze_gateway.errors import NoSession, OrdersUnavailable, RelayError
 from brokers.breeze_gateway.orders import OrdersClient
 from brokers.breeze_gateway.token_store import MemoryTokenStore
 from india_limits_support import india_private_dir, make_evidence, make_guard
@@ -991,6 +991,95 @@ def test_a_relay_failure_at_the_quote_read_pauses_and_never_reaches_the_vm(world
     assert world.order_posts() == [] and world.records("vm_intent") == []
 
 
+class AuditDown:
+    """The VM's audit read fails with a relay error while ``down`` is set. Mints and everything else go through."""
+
+    def __init__(self, vm: Vm, monkeypatch, error: Exception | None = None) -> None:
+        self.real, self.down, self.reads = vm.orders.audit, False, 0
+        self.error = error if error is not None else NoSession(http_status=503)
+        monkeypatch.setattr(vm.orders, "audit", self)
+
+    def __call__(self, after_seq: int = 0):
+        self.reads += 1
+        if self.down:
+            raise self.error
+        return self.real(after_seq)
+
+
+def test_a_relay_error_on_the_correlation_read_pauses_and_the_intent_is_adopted_after_resume(world, monkeypatch):
+    """Break-proof: let the ``RelayError`` out of ``_after`` and the run ends with a traceback and no pause."""
+    audit = AuditDown(world.vm, monkeypatch)
+    real_mint, cuts = world.vm.orders.mint, []
+
+    def mint_then_cut_the_audit(body):
+        try:
+            return real_mint(body)
+        finally:
+            if not cuts:  # the scan at the start of the decide read fine; the correlation read after the first 423 fails
+                cuts.append(body["intent_id"])
+                audit.down = True
+
+    monkeypatch.setattr(world.vm.orders, "mint", mint_then_cut_the_audit)
+    report = world.decide()
+    assert report.status == "paused" and open_events(world) == ["relay_no_session"]
+    assert world.order_posts() == [MINT] and len(world.records("vm_intent")) == 1  # nothing else was admitted or minted
+    assert len(world.records("mint_started")) == 1 and world.records("vm_decision") == []
+    assert [p.scope for p in policy.run_state(world.evidence).open_pauses] == ["all"]
+    again = world.decide()
+    assert again.status == "paused" and again.stopped == "open_pause" and again.intents == []
+    assert world.order_posts() == [MINT]  # the next decide refused until resume
+    audit.down = False
+    world.clock.now += timedelta(seconds=11)  # past the mint timeout, so recovery reads the audit
+    world.runner.resume("relay session restored")
+    posts = len(world.order_posts())
+    after = world.decide()
+    assert list(after.recovered.values()) == ["vm_decided"]  # the intent in doubt is adopted from the audit
+    assert len(world.order_posts()) - posts == 2  # the other two names only: zero re-POSTs of the first
+    assert len(world.records("vm_intent")) == 3 and len(world.records("vm_decision")) == 3
+
+
+def test_a_relay_error_on_the_recovery_read_pauses_before_anything_is_decided(world, monkeypatch):
+    hold = Hold(world.vm, monkeypatch, after=0)
+    world.decide()  # the first mint is in doubt and the run is paused
+    hold.release()
+    hold.after = 10**6
+    world.runner.resume("relay is back")
+    world.clock.now += timedelta(seconds=11)
+    audit = AuditDown(world.vm, monkeypatch)
+    audit.down = True
+    posts = len(world.order_posts())
+    report = world.decide()
+    assert report.status == "paused" and open_events(world) == ["relay_no_session"]
+    assert len(world.order_posts()) == posts and world.records("vm_ambiguous") == []  # no guess was written
+    assert audit.reads == 1
+    audit.down = False
+    world.runner.resume("restored")
+    final = world.decide()
+    assert list(final.recovered.values()) == ["mint_ambiguous"] and len(world.records("vm_intent")) == 3
+
+
+def test_a_relay_error_on_the_scan_read_pauses_and_stops_the_invocation(world, monkeypatch):
+    audit = AuditDown(world.vm, monkeypatch)
+    assert world.decide().status == "done"
+    posts, intents = len(world.order_posts()), len(world.records("vm_intent"))
+    audit.down = True
+    report = world.decide()  # nothing is in doubt, so only the audit scan reads
+    assert report.status == "paused" and open_events(world) == ["relay_no_session"] and report.intents == []
+    assert len(world.order_posts()) == posts and len(world.records("vm_intent")) == intents
+    closed = world.runner.close(S)
+    assert closed.outcome == "paused" and closed.attempts == []
+    audit.down = False
+    world.runner.resume("restored")
+    assert world.decide().status == "done"
+
+
+def test_an_audit_read_the_table_calls_corruption_aborts_the_run(world, monkeypatch):
+    audit = AuditDown(world.vm, monkeypatch, OrdersUnavailable(http_status=503, reason="audit_broken"))
+    audit.down = True
+    report = world.decide()
+    assert report.status == "aborted" and policy.run_state(world.evidence).abort_events == ("vm_audit_broken",)
+
+
 # =====================================================================================================================
 # the held-handler race and the SL-9 crash probes
 # =====================================================================================================================
@@ -1761,6 +1850,23 @@ def test_the_cli_exits_3_on_an_abort_and_refuses_a_decide_outside_the_window(wor
     policy.raise_event(world.evidence, "vm_audit_broken", "audit_broken")
     code, aborted = run_cli(cli_args(world, "decide"), runtime_factory=lambda args: world.runner)
     assert (code, aborted) == (3, {"refused": "run_aborted"})
+
+
+def test_the_cli_turns_a_relay_error_into_a_typed_message_and_a_nonzero_exit_never_a_traceback(world):
+    class Boom:
+        def decide(self, session):
+            raise NoSession(http_status=503)
+
+    code, payload = run_cli(cli_args(world, "decide"), runtime_factory=lambda args: Boom())
+    assert code == cli.EXIT_REFUSED
+    assert payload == {"refused": "relay_error", "event": "relay_no_session", "code": "NO_SESSION", "status": 503}
+
+    class Corrupt:
+        def decide(self, session):
+            raise OrdersUnavailable(http_status=503, reason="audit_broken")
+
+    code, payload = run_cli(cli_args(world, "decide"), runtime_factory=lambda args: Corrupt())
+    assert code == cli.EXIT_ABORTED and payload["event"] == "vm_audit_broken"
 
 
 def test_a_missing_argument_is_a_usage_error(world):

@@ -130,6 +130,26 @@ class RunnerAbort(ShadowAbort):
     """The runner already wrote this abort to the evidence. The caller must not write it again."""
 
 
+class RelayPause(Exception):
+    """A relay failure on an audit read. The pause is already in the evidence; everything in flight stops at once."""
+
+    def __init__(self, event: str) -> None:
+        super().__init__(event)
+        self.event = event
+
+
+def record_relay_stop(evidence: EvidenceStore, error: RelayError) -> vm_codes.Classification:
+    """Write the pause or abort the policy table assigns to a relay failure and return the verdict.
+
+    An error the table calls expected (a 423 on a read that is never refused) is not expected here: it is untyped.
+    """
+
+    verdict = vm_codes.classify_error(error)
+    event = verdict.event or "untyped_response"
+    policy.raise_event(evidence, event, f"{verdict.detail} code={verdict.code} status={verdict.status}")
+    return replace(verdict, event=event, kind=verdict.kind if verdict.kind == vm_codes.ABORT else vm_codes.PAUSE)
+
+
 def session_id_for(day: date) -> str:
     return f"s-{day:%Y%m%d}"
 
@@ -293,7 +313,14 @@ class VmAuditReader:
         out: list[VmAuditEntry] = []
         after = from_seq
         while True:
-            page = self._orders.audit(after)
+            try:
+                page = self._orders.audit(after)
+            except RelayError as error:  # every audit read (correlation, recovery, scan) stops the run the way the table says
+                verdict = record_relay_stop(self._evidence, error)
+                assert verdict.event is not None
+                if verdict.kind == vm_codes.ABORT:
+                    raise RunnerAbort(verdict.event) from None
+                raise RelayPause(verdict.event) from None
             out.extend(page)
             if len(page) < 200:
                 return out
@@ -390,7 +417,10 @@ class VmMint:
             policy.raise_event(self._evidence, event, f"{detail} status={verdict.status}")
             raise RunnerAbort(event)
 
-        page = self._reader.page(self._base_seq)
+        try:
+            page = self._reader.page(self._base_seq)
+        except RelayPause as stop:  # the VM answered 423 but the audit cannot be read: the intent stays in doubt
+            raise MintUnresolved(stop.event) from None
         if not page.chain_verified:
             return refuse("vm_audit_chain_break", "audit_chain_not_verified")
         mine = [entry for entry in page.entries if entry.intent_id == request.intent_id]
@@ -556,6 +586,8 @@ class ShadowRunner:
             await self._decide(session, report)
         except RunnerAbort:
             report.status, report.stopped = "aborted", "abort"
+        except RelayPause:
+            report.status, report.stopped = "paused", "pause"
         except (ShadowAbort, PortfolioAborted) as exc:
             self._record_abort(exc)
             report.status, report.stopped = "aborted", "abort"
@@ -787,9 +819,8 @@ class ShadowRunner:
     def _stop_for_relay_error(self, error: RelayError) -> None:
         """A relay failure outside the mint (the quote read): the table says pause or abort, never carry on."""
 
-        verdict = vm_codes.classify_error(error)
+        verdict = record_relay_stop(self._evidence, error)
         assert verdict.event is not None
-        policy.raise_event(self._evidence, verdict.event, f"{verdict.detail} code={verdict.code} status={verdict.status}")
         if verdict.kind == vm_codes.ABORT:
             raise RunnerAbort(verdict.event)
 
@@ -925,6 +956,8 @@ class ShadowRunner:
             asyncio.run(self._hand_flatten(session, reason.strip(), report))
         except RunnerAbort:
             report.status, report.stopped = "aborted", "abort"
+        except RelayPause:
+            report.status, report.stopped = "paused", "pause"
         except (ShadowAbort, PortfolioAborted) as exc:
             self._record_abort(exc)
             report.status, report.stopped = "aborted", "abort"
@@ -974,6 +1007,8 @@ class ShadowRunner:
                 self._close_steps(session, report)
             except RunnerAbort:
                 report.outcome = "aborted"
+            except RelayPause:
+                report.outcome = "paused"
             except (ShadowAbort, PortfolioAborted) as exc:
                 self._record_abort(exc)
                 report.outcome = "aborted"
@@ -1145,6 +1180,7 @@ __all__ = [
     "LiveTablePins",
     "NoPostSubmissionEvidence",
     "OpenRunRefused",
+    "RelayPause",
     "RunnerAbort",
     "RunnerPorts",
     "RunnerPreparation",

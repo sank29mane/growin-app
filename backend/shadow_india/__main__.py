@@ -17,7 +17,9 @@ import sys
 from datetime import date, datetime
 from typing import Any, Callable, Optional, Sequence, TextIO
 
-from . import policy
+from brokers.breeze_gateway.errors import RelayError
+
+from . import policy, vm_codes
 from .evidence import EvidenceCorrupt, EvidenceError, EvidenceStore
 from .runner import (
     DecideRefused,
@@ -115,6 +117,10 @@ def main(
     except policy.RunAborted:
         _print(out, {"refused": "run_aborted"})
         return EXIT_ABORTED
+    except RelayError as error:  # a relay failure nothing recorded (the runner pauses on its own reads): typed, never a traceback
+        verdict = vm_codes.classify_error(error)
+        _print(out, {"refused": "relay_error", "event": verdict.event, "code": verdict.code, "status": verdict.status})
+        return EXIT_ABORTED if verdict.kind == vm_codes.ABORT else EXIT_REFUSED
     except EvidenceCorrupt as exc:
         _print(out, {"aborted": exc.code})
         return EXIT_ABORTED
