@@ -606,6 +606,46 @@ def test_a_contradiction_between_the_store_and_the_calendar_refuses(tmp_path):
     refused(holiday_root, "calendar_conflict", S, decision=S1, calendar=nc.pinned(tmp_path, special=(S,)))
 
 
+def monday_file_without_log(st):
+    """A normal ingest interrupted after Monday's UDiFF committed and before its success log line."""
+    rows = [cc.ohlc_row("CANBK", "EQ", cc.NEW, CANBK_FUTURE[S], S, "11256"),
+            cc.ohlc_row("STEADYCO", "EQ", cc.STEADY_ISIN, STEADY_FUTURE[S], S, "5")]
+    ingest_udiff(st, cc.desc(), kit.udiff_zip(S, rows), trade_date=S)
+
+
+def saturday_pr_ingested(st):
+    """A PR logged as ingested on a Saturday with no primary file: `_after_pr_ingested` reads it as unknown."""
+    _log_attempt(st, d=SAT, kind="pr", outcome="ingested", http_status=200, error_code=None, source_sha256=None,
+                 url="u", attempted_at=cc.LATER)
+
+
+def test_a_wrong_holiday_listing_cannot_rescue_an_unknown_day_that_holds_a_file_or_a_logged_ingest(tmp_path):
+    """Codex r3-1 and Opus r3-1: the calendar fills only days the store has no evidence for."""
+    torn, saturday = tmp_path / "torn", tmp_path / "saturday"
+    build_world(torn, FRIDAY_BOUND, extra=monday_file_without_log)
+    build_world(saturday, FRIDAY_BOUND, extra=saturday_pr_ingested)
+    with PilotDataStore(torn, workspace="india", read_only=True) as st:  # the preconditions: unknown, yet a file and a bar
+        assert sessions.day_status(st, S) == "unknown"
+        assert st.query("SELECT count(*) FROM bhavcopy_files WHERE trade_date = ?", [S])[0][0] == 1
+        assert st.query("SELECT count(*) FROM bhavcopy_bars WHERE trade_date = ?", [S])[0][0] >= 1
+    with PilotDataStore(saturday, workspace="india", read_only=True) as st:
+        assert sessions.day_status(st, SAT) == "unknown"
+    wrong = nc.pinned(tmp_path, holidays=(S,))  # lists Monday, which has a file, as a holiday
+    refused(torn, "session_evidence_unknown_status", S, decision=S1, calendar=wrong)
+    refused(saturday, "session_evidence_unknown_status", SAT, calendar=nc.pinned(tmp_path))
+    for root in (torn, saturday):
+        with PilotDataStore(root, workspace="india", read_only=True) as st:
+            assert not st.table_exists("crosscheck_runs")  # refused before any cross-check ran
+
+
+def test_a_weekend_with_no_fetch_log_file_or_bar_is_still_rescued_next_to_a_day_with_evidence(tmp_path):
+    root = tmp_path / "control"
+    friday_world(root)  # Sat and Sun were never fetched and nothing is stored for them
+    with PilotDataStore(root, workspace="india", read_only=True) as st:
+        assert all(live_bars._local_session_evidence(st, day) is None for day in (SAT, SUN))
+    assert len(compose(root, calendar=nc.pinned(tmp_path)).rows) == 8
+
+
 @pytest.fixture(scope="module")
 def friday_seed(frozen, tmp_path_factory):
     """A real seeded session store through Friday only, with no weekend attempt marked (the `frozen` one marks it)."""

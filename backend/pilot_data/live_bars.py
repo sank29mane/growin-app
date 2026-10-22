@@ -76,6 +76,17 @@ def _calendar_verdict(calendar: PinnedCalendar | None, day: date) -> Literal["no
     return "non_session" if calendar.is_weekend(day) or calendar.is_holiday(day) else "session"
 
 
+def _local_session_evidence(store: PilotDataStore, day: date) -> str | None:
+    """What the store holds for `day` that says a session may have happened, or None when it holds nothing."""
+    if store.table_exists("nse_fetch_log") and store.query(
+            "SELECT 1 FROM nse_fetch_log WHERE trade_date = ? AND outcome = 'ingested' LIMIT 1", [day]):
+        return "an ingested fetch-log attempt"
+    for table, column in (("bhavcopy_files", "trade_date"), ("bhavcopy_bars", "trade_date"), ("breeze_bars_raw", "trade_date")):
+        if store.table_exists(table) and store.query(f"SELECT 1 FROM {table} WHERE {column} = ? LIMIT 1", [day]):
+            return f"a persisted row in {table}"
+    return None
+
+
 def _check_dates(store: PilotDataStore, decision_session: date, as_of: date, window_start: date,
                  calendar: PinnedCalendar | None) -> None:
     if as_of >= decision_session:
@@ -95,7 +106,13 @@ def _check_dates(store: PilotDataStore, decision_session: date, as_of: date, win
                 raise PilotDataError("calendar_conflict", f"{day.isoformat()} is {status} in the store but the pinned "
                                                           f"calendar lists it as a {listed} day")
         elif status == "unknown" and listed == "non_session":
-            pass  # the store has no fetch evidence for the day and the pinned table covers it as a weekend or holiday
+            # the pinned table covers the day as a weekend or holiday; that rescues only a day the store holds no
+            # session evidence for. An unknown status can come from a crash between a file commit and its log line.
+            evidence = _local_session_evidence(store, day)
+            if evidence is not None:
+                raise PilotDataError("session_evidence_unknown_status",
+                                     f"{day.isoformat()} is unknown in the store but it holds {evidence} for the day; "
+                                     "the pinned calendar cannot call it a non-session")
         else:  # pending and inconsistent never pass; an unknown day could be a session: fail closed, as sessions_between does
             raise PilotDataError("calendar_unknown_dates",
                                  f"{day.isoformat()} between as_of and the decision session is {status}, not a known non-session")
@@ -174,8 +191,9 @@ def bars_as_of(store: PilotDataStore, *, targets: TargetUniverseResult, decision
                window_start: date, tolerances: CrossCheckTolerances, workspace: Literal["india"],
                calendar: PinnedCalendar | None = None) -> LiveBarsResult:
     """`calendar` is the operator's pinned table: it lets a day between as_of and the decision session that the store
-    has no fetch evidence for (a weekend a Friday-bounded seed never logged) count as a non-session. It is never read
-    for the decision session itself and never overrides store evidence."""
+    has no evidence for (a weekend a Friday-bounded seed never logged) count as a non-session. A day with an
+    ingested fetch-log attempt or a persisted file or bar is never rescued, whatever its status. The calendar is never
+    read for the decision session itself."""
     if workspace != store.workspace:
         raise PilotDataError("workspace_mismatch", "workspace differs from the store workspace")
     _require_session_store(store)
