@@ -2622,3 +2622,18 @@ def test_codex_r3_1_a_small_ledger_is_valued_at_the_exhaustive_reading(tmp_path,
     exhaustive, capped = values
     assert exhaustive == Decimal(exhaustive_value)
     assert exhaustive - Decimal("0.000001") <= capped <= exhaustive, (capped, exhaustive)
+
+
+def test_opus_r3_a_legacy_window_past_the_estimate_is_never_searched(tmp_path, monkeypatch):
+    """Opus r3: nothing pinned the legacy cost estimate between 30 and 98 bookings. The legacy search tries every boundary,
+    so its cost is the sum over the shrinking windows, not one window's cost. A 41-booking legacy line is over the budget
+    by that sum (about 53,000 steps against 20,000) while one window alone (3,612) is under it: priced as one window, the
+    search ran past the budget. The spy trips the row the moment the replays pass the budget."""
+    world = many_bookings_world(tmp_path, 20)
+    legacy_mark(world)
+    assert len(world.account.bookings) == 41
+    steps = spy_on_replays(monkeypatch, portfolio_module.CARRY_SEARCH_BUDGET)
+    world.mark(D3, AAA="75")
+    assert steps[0] == 0  # over the budget as a whole: the one-pass floor answers, no replay at all
+    assert 0 < Decimal(carried_line(world, D3)["carried_value"]) <= Decimal("15000")
+    assert "carry_unreconciled" in pauses(world)
