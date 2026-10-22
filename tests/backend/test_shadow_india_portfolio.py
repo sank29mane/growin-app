@@ -98,11 +98,12 @@ class FakeAccount:
         self.bookings: list[SimpleNamespace] = []
         self.adjustments: list[SimpleNamespace] = []
 
-    def _book(self, side: str, symbol: str, quantity: int, proposal_id: str) -> None:
+    def _book(self, side: str, symbol: str, quantity: int, proposal_id: str, price: str, charges: str) -> None:
         self.bookings.append(
             SimpleNamespace(
                 booking_id=f"booking-{len(self.bookings) + 1}", proposal_id=proposal_id, side=side,
-                ticker=f"NSE:CASH:{symbol}", delta_quantity=Decimal(quantity),
+                ticker=f"NSE:CASH:{symbol}", delta_quantity=Decimal(quantity), price=Decimal(price),
+                charges=Decimal(charges),
             )
         )
 
@@ -111,7 +112,7 @@ class FakeAccount:
         cost = quantity * Decimal(price)
         self.held[symbol] = (held_q + quantity, held_c + cost)
         self.cash -= cost + Decimal(charges)
-        self._book("BUY", symbol, quantity, f"buy-{len(self.bookings) + 1}")
+        self._book("BUY", symbol, quantity, f"buy-{len(self.bookings) + 1}", price, charges)
 
     def sell(self, symbol: str, quantity: int, price: str, charges: str = "0", *, proposal_id: str | None = None) -> None:
         """A booked sell. ``proposal_id`` is the exit intent id it was booked under; none means a sell that is not
@@ -120,7 +121,7 @@ class FakeAccount:
         left = held_q - quantity
         self.held[symbol] = (left, held_c * left / held_q if held_q else Decimal(0))
         self.cash += quantity * Decimal(price) - Decimal(charges)
-        self._book("SELL", symbol, quantity, proposal_id or f"manual-{len(self.bookings) + 1}")
+        self._book("SELL", symbol, quantity, proposal_id or f"manual-{len(self.bookings) + 1}", price, charges)
 
     def adjust(self, symbol: str, quantity: int, kind: str = "bonus", ex_date: date | None = None) -> None:
         """A split or bonus booked: the quantity changes, the cost basis does not, and an explicit adjustment record
@@ -183,8 +184,8 @@ class Fake:
         return self.portfolio.mark_session(day, {ISINS[s]: Decimal(c) for s, c in closes.items()})
 
     def records(self, kind: str) -> list[dict[str, Any]]:
-        """The evidence lines of ``kind``. The ``sell_baseline`` latch lines are bookkeeping, read through ``store``."""
-        return [r for r in self.store.records() if r["kind"] == kind and r.get("latch") != "sell_baseline"]
+        """The evidence lines of ``kind``. The ``sell_baseline`` and ``booking_baseline`` latch lines are bookkeeping, read through ``store``."""
+        return [r for r in self.store.records() if r["kind"] == kind and r.get("latch") not in ("sell_baseline", "booking_baseline")]
 
     def exit_id(self, isin: str, attempt: int = 1) -> str:
         """The intent id a runner builds for the open exit on ``isin`` (read from the latch, as a runner would)."""
@@ -2104,5 +2105,148 @@ def test_codex_r3_3_a_partial_sale_of_a_carried_name_scales_the_carried_value_by
         (line,) = [r for r in store.records() if r["kind"] == "position_mark" and r["as_of_date"] == D3.isoformat()]
         assert (line["quantity"], line["carried_quantity"], line["carried_value"]) == ("60", "60", "9000.00")
         assert after.equity == Decimal("44000") + Decimal("9000")
+    finally:
+        rig.close()
+
+
+# --- codex r5 residual: a carried value reconciles the sells and the buys booked while paused, separately -----------------------------------
+
+
+def carried_world(tmp_path: Path) -> Fake:
+    """100 AAA bought at 100 (cost 10000), marked at 150 (value 15000), carried through a bonus ex-date at 75."""
+    world = Fake(tmp_path)
+    world.account.buy("AAA", 100, "100")
+    world.mark(D1, AAA="150")
+    carried = world.portfolio.mark_session(D2, {A: Decimal("75")}, structural_actions={A: "bonus"})
+    assert carried.paused_isins == (A,) and carried.equity == Decimal("55000")
+    return world
+
+
+def carried_line(world: Fake, day: date) -> dict[str, Any]:
+    (line,) = [r for r in world.records("position_mark") if r["as_of_date"] == day.isoformat() and r["isin"] == A]
+    return line
+
+
+def test_codex_r5_1_a_sell_alone_while_carried_still_takes_its_shares_out_of_the_carry(tmp_path):
+    """The r4 control: 100 at 15000, 40 sold, 60 x 150 = 9000. Nothing booked beside it."""
+    world = carried_world(tmp_path)
+    world.account.sell("AAA", 40, "75")
+    after = world.mark(D3, AAA="75")
+    line = carried_line(world, D3)
+    assert (line["quantity"], line["carried_quantity"], line["carried_value"]) == ("60", "60", "9000")
+    assert after.equity == world.account.cash + Decimal("9000")
+
+
+def test_codex_r5_1_a_buy_booked_beside_a_hand_sell_adds_its_cost_and_the_sell_removes_only_its_shares(tmp_path):
+    """The probe on the fake account: 100 shares carried at 10000, sell 40 at 100, an earlier admitted buy of 20 books
+    at 101. The 80 shares carry 60 x 100 + 20 x 101 = 8020. Net-quantity scaling gave 8000 and dropped the 2020."""
+    world = Fake(tmp_path)
+    world.account.buy("AAA", 100, "100")
+    world.mark(D1, AAA="100")
+    world.portfolio.mark_session(D2, {A: Decimal("50")}, structural_actions={A: "bonus"})
+    world.account.sell("AAA", 40, "100")
+    world.account.buy("AAA", 20, "101")
+    after = world.mark(D3, AAA="50")
+    line = carried_line(world, D3)
+    assert (line["quantity"], line["carried_quantity"], line["carried_value"]) == ("80", "80", "8020")
+    assert after.equity == world.account.cash + Decimal("8020")
+
+
+def test_codex_r5_1_the_order_of_the_sell_and_the_buy_does_not_change_the_value(tmp_path):
+    for sell_first in (True, False):
+        world = Fake(tmp_path / str(sell_first))
+        world.account.buy("AAA", 100, "100")
+        world.mark(D1, AAA="100")
+        world.portfolio.mark_session(D2, {A: Decimal("50")}, structural_actions={A: "bonus"})
+        if sell_first:
+            world.account.sell("AAA", 40, "100")
+            world.account.buy("AAA", 20, "101")
+        else:
+            world.account.buy("AAA", 20, "101")
+            world.account.sell("AAA", 40, "100")
+        world.mark(D3, AAA="50")
+        assert carried_line(world, D3)["carried_value"] == "8020"
+
+
+def test_codex_r5_1_a_buy_alone_while_carried_adds_its_cost(tmp_path):
+    world = carried_world(tmp_path)
+    world.account.buy("AAA", 20, "101")
+    after = world.mark(D3, AAA="75")
+    line = carried_line(world, D3)
+    assert (line["quantity"], line["carried_quantity"], line["carried_value"]) == ("120", "120", "17020")
+    assert after.equity == world.account.cash + Decimal("17020")
+
+
+def test_codex_r5_1_the_next_carried_mark_starts_from_the_last_one_and_counts_only_new_bookings(tmp_path):
+    world = Fake(tmp_path)
+    world.account.buy("AAA", 100, "100")
+    world.mark(D1, AAA="100")
+    world.portfolio.mark_session(D2, {A: Decimal("50")}, structural_actions={A: "bonus"})
+    world.account.sell("AAA", 40, "100")
+    world.account.buy("AAA", 20, "101")
+    world.mark(D3, AAA="50")
+    world.account.sell("AAA", 10, "100")
+    world.mark(D4, AAA="50")
+    line = carried_line(world, D4)
+    assert (line["carried_quantity"], line["carried_value"]) == ("70", "7017.5")  # 8020 x 70 / 80
+
+
+def test_codex_r5_1_a_full_sale_leaves_nothing_in_the_carry_and_the_pause_releases_by_flat(tmp_path):
+    world = carried_world(tmp_path)
+    world.account.sell("AAA", 100, "150")
+    after = world.mark(D3, AAA="75")
+    assert not [r for r in world.records("position_mark") if r["as_of_date"] == D3.isoformat()]
+    assert after.equity == world.account.cash and after.paused_isins == ()
+    world.portfolio.release_corporate_action(A, "sold flat")
+    assert world.portfolio.entry_block_reasons(A) == ()
+
+
+def test_codex_r5_1_a_sale_past_the_carried_lot_takes_the_rest_from_the_bought_shares(tmp_path):
+    """100 carried at 10000, a buy of 20 at 101 books, 110 are sold: 10 shares left, all from the bought lot."""
+    world = Fake(tmp_path)
+    world.account.buy("AAA", 100, "100")
+    world.mark(D1, AAA="100")
+    world.portfolio.mark_session(D2, {A: Decimal("50")}, structural_actions={A: "bonus"})
+    world.account.buy("AAA", 20, "101")
+    world.account.sell("AAA", 110, "100")
+    world.mark(D3, AAA="50")
+    line = carried_line(world, D3)
+    assert (line["carried_quantity"], line["carried_value"]) == ("10", "1010")
+
+
+def test_codex_r5_1_a_line_with_no_booking_count_falls_back_to_the_net_quantity_rule(tmp_path):
+    world = carried_world(tmp_path)
+    world.account.sell("AAA", 40, "75")
+    holding = world.portfolio.snapshot().holdings[0]
+    base = world.portfolio._carry_base(A)
+    legacy = replace(base, bookings=None)
+    assert world.portfolio._carried_value(holding, legacy, world.account.bookings) == Decimal("9000")
+
+
+def test_codex_r5_1_on_the_real_ledger_a_buy_booked_beside_a_hand_sell_carries_its_cost_and_no_false_halt(tmp_path):
+    """Codex's probe. 100 RELIANCE carried at 10000; while paused 40 are sold at 100 by hand and an admitted buy of 20
+    books at 101. 80 shares carry 8020 (60 x 100 + 20 x 101); net-quantity scaling gave 8000. With TCS and INFY marked
+    near the line the total is 46004 against the 46000 halt: 8000 read 45984 and halted the entries and halved three
+    names."""
+    rig, store, portfolio = real_world(tmp_path, "RELIANCE", "TCS", "INFY")
+    try:
+        for symbol in ("RELIANCE", "TCS", "INFY"):
+            own(rig, symbol, 100)
+        same = {R_ISIN: Decimal("100"), T_ISIN: Decimal("100"), ISINS["INFY"]: Decimal("100")}
+        portfolio.mark_session(D1, same)
+        admission = run(rig.adapter.prepare(buy_intent(rig, "late-buy", "RELIANCE", 20, "101.00"), samples_for("RELIANCE", "101.00")))
+        assert admission.decision is AdmissionDecision.ADMITTED, admission.reason_code
+        carried = portfolio.mark_session(D2, same, structural_actions={R_ISIN: "bonus"})
+        assert carried.paused_isins == (R_ISIN,) and carried.equity == Decimal("50000")
+        sell_and_fill(rig, "trim-by-hand", "RELIANCE", 40)
+        book(rig, "late-buy", 20, "101", attempt="attempt-late")
+        near = {**same, T_ISIN: Decimal("80.02"), ISINS["INFY"]: Decimal("80.02")}
+        after = portfolio.mark_session(D3, near)
+        (line,) = [r for r in store.records() if r["kind"] == "position_mark" and r["as_of_date"] == D3.isoformat() and r["isin"] == R_ISIN]
+        assert (line["quantity"], line["carried_quantity"], Decimal(line["carried_value"])) == ("80", "80", Decimal("8020"))
+        assert after.equity == Decimal("46004.00")
+        # TCS and INFY at 80.02 against a cost of 100 stop out on their own; the carried name must not move the halt.
+        assert not after.state.halt and not [b for b in after.batches if b.reason == "halve"]
+        assert R_ISIN not in after.state.open_exits
     finally:
         rig.close()

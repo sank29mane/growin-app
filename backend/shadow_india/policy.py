@@ -16,9 +16,9 @@ clear anything:
   hold a weaker release. ``shadow_india.portfolio.ShadowPortfolio.release_halt`` is the latch-backed release: it
   resets the 63 latch first and only then writes the ``resume`` record for the halt pause. Parity with D-05;
 - ``resume`` refuses ``unresolved_corporate_action`` too: only the ledger knows whether the split or bonus was booked, so
-  ``ShadowPortfolio.release_corporate_action`` is the release. It refuses ``corporate_action_not_booked`` while the
-  ledger still holds the pre-ex quantity, because resuming then would mark an unadjusted quantity at the adjusted
-  close and read a false -50%.
+  ``ShadowPortfolio.release_corporate_action`` is the release. It refuses ``corporate_action_not_booked`` unless an
+  explicit ``corporate_action_adjustments`` record exists, because resuming then would mark an unadjusted quantity at
+  the adjusted close and read a false -50%.
 
 D-08 says buys stop and sells stay, so admit and mint take a ``side`` (``buy`` or ``sell``). Scopes: ``all`` blocks
 every step except read-only checks, on both sides; ``entries`` blocks the admission and mint of a BUY;

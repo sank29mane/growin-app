@@ -52,13 +52,15 @@ never becomes a valuation. A crash between the latch write and the commit line i
 
 Q-6 (provisional, fail closed): a recorded split or bonus ex-date on a held name raises the existing
 ``unresolved_corporate_action`` pause scoped to that ISIN. While it is open the name is valued at its last committed
-value (``carried_ex_date_pause``), moved only by a change in the ledger cost basis (a buy that booked), never by a
+value (``carried_ex_date_pause``), moved only by what the ledger booked (a buy's cost, a sell's shares), never by a
 quantity the ledger reconciled at the same cost, so it cannot lift the peak. No stop is evaluated on it (the latch
 position gets a cost equal to the carried value), it moves nothing in the drawdown, a buy of it is blocked, and any
 exit owed on it (a halve or the terminal flatten) stays in the latch but is held out of ``exit_proposals`` (``held_out``)
 so it is not sold at the post-adjustment quote. Only ``release_corporate_action`` clears the pause (``policy.resume``
-refuses it). A sell while carried scales the carried value by the shares still held, so the sold shares' value (and a
-loss on them) does not stay in the carry. The release refuses ``corporate_action_not_booked`` for a name that is still
+refuses it). A sell while carried takes the sold shares' value (and a loss on them) out of the carry, and a buy that
+books beside it adds its booked cost: sells and buys are reconciled separately from the bookings since the last
+committed valuation (a ``booking_baseline`` latch line holds the count, written before the latch moves), not from the
+net quantity. The release refuses ``corporate_action_not_booked`` for a name that is still
 held unless the account exposes an explicit adjustment record (``corporate_action_adjustments``: ticker, kind, ex_date)
 that matches a committed ex-date mark of the name. Nothing is inferred from quantity or cost: equal cost with another
 quantity is also what a buy and a sell give. It also refuses ``exit_owed_in_pre_adjustment_units`` while a halve is open
@@ -102,6 +104,7 @@ LATCH_FLATTEN = "flatten"
 LATCH_HALVE_BASELINE = "halve_baseline"
 EVALUATION_COMMIT = "evaluation_commit"
 EVALUATION_INPUTS = "evaluation_inputs"
+LATCH_BOOKING_BASELINE = "booking_baseline"  # how many bookings of a name the ledger held at an evaluation
 LATCH_SELL_BASELINE = "sell_baseline"  # the sell booking boundary, written before the evaluation
 AMBIGUOUS_EXIT_FILL = policy.AMBIGUOUS_EXIT_FILL
 TICKER_PREFIX = "NSE:CASH:"
@@ -165,7 +168,7 @@ class SimulationAccount(Protocol):
 
     def india_account_view(self, *, exclude_proposal_id: str = "") -> Any: ...  # positions, open_buys, open_sells
 
-    def simulated_bookings(self, proposal_id: str | None = None) -> Sequence[Any]: ...  # booking_id, proposal_id, side, ticker, delta_quantity
+    def simulated_bookings(self, proposal_id: str | None = None) -> Sequence[Any]: ...  # booking_id, proposal_id, side, ticker, delta_quantity, price, charges
 
 
 @dataclass(frozen=True)
@@ -223,11 +226,13 @@ class ExitProposal:
 
 @dataclass(frozen=True)
 class _Carry:
-    """What a name was worth when its valuation was last committed: shares, value and ledger cost then."""
+    """What a name was worth when its valuation was last committed: shares, value and ledger cost then, and how many
+    bookings of the name the ledger held (``None`` when no ``booking_baseline`` line was written for that session)."""
 
     quantity: Decimal
     value: Decimal
     cost: Decimal
+    bookings: int | None = None
 
 
 @dataclass(frozen=True)
@@ -412,11 +417,46 @@ class ShadowPortfolio:
             if record.get("isin") != isin:
                 continue
             cost = Decimal(str(record["cost"]))
+            bookings = self._booking_boundary(isin, date.fromisoformat(str(record["as_of_date"])))
             if record.get("mark_basis") == MARK_RAW_CLOSE:
                 quantity = Decimal(str(record["quantity"]))
-                return _Carry(quantity, quantity * Decimal(str(record["close"])), cost)
-            return _Carry(Decimal(str(record["carried_quantity"])), Decimal(str(record["carried_value"])), cost)
+                return _Carry(quantity, quantity * Decimal(str(record["close"])), cost, bookings)
+            return _Carry(
+                Decimal(str(record["carried_quantity"])), Decimal(str(record["carried_value"])), cost, bookings
+            )
         return None
+
+    def _carried_value(self, holding: Holding, base: _Carry, bookings: Sequence[Any]) -> Decimal:
+        """The carried value of ``holding`` given the last committed valuation ``base``.
+
+        Sells and buys booked since ``base`` are reconciled separately, from the bookings and not from the net
+        quantity: a sell takes its shares out of the carried lot at the carried value per share, and a buy adds the
+        cost the ledger booked (price x quantity plus charges). Reading only the net quantity would value a buy that
+        books beside a sell at the old carried price per share and drop its cost. A sell past the carried lot takes
+        the remainder from the bought shares at their cost. When there are no bookings since, the value moves only by
+        the ledger cost (a quantity reconciled at the same cost moves nothing). A line with no booking count, or
+        bookings that do not add up to the holding, falls back to the net-quantity rule."""
+
+        held = Decimal(holding.quantity)
+        if base.bookings is not None and base.quantity > 0:
+            since = bookings[base.bookings :]
+            if not since:
+                return base.value + (holding.cost - base.cost)
+            sells = [b for b in since if str(b.side).upper() == "SELL"]
+            buys = [b for b in since if str(b.side).upper() == "BUY"]
+            sold = sum((b.delta_quantity for b in sells), Decimal(0))
+            bought = sum((b.delta_quantity for b in buys), Decimal(0))
+            bought_cost = sum((b.delta_quantity * b.price + b.charges for b in buys), Decimal(0))
+            kept = max(base.quantity - sold, Decimal(0))
+            overflow = max(sold - base.quantity, Decimal(0))
+            if kept + bought - overflow == held:
+                value = base.value * kept / base.quantity
+                if bought > 0:
+                    value += bought_cost * (bought - overflow) / bought
+                return value
+        if held < base.quantity:
+            return base.value * held / base.quantity
+        return base.value + (holding.cost - base.cost)
 
     def _has_mark(self, session: date) -> bool:
         return any(r.get("kind") == "mark" and r.get("as_of_date") == session.isoformat() for r in self._records())
@@ -543,21 +583,19 @@ class ShadowPortfolio:
         basis: dict[str, str] = {}
         carry: dict[str, _Carry] = {}
         missing: list[str] = []
+        ledger = {h.instrument.isin: self._bookings(h.instrument) for h in snap.holdings}
         for holding in snap.holdings:
             isin = holding.instrument.isin
             if isin in frozen:
-                # Valued at the last COMMITTED value, moved only by a change in the ledger cost basis (a buy that
-                # booked): a quantity the ledger reconciled at the same cost (a bonus or split booked) moves nothing,
-                # so a paused name can neither fire a stop nor lift the peak.
-                base = self._carry_base(isin) or _Carry(Decimal(holding.quantity), holding.cost, holding.cost)
+                # Valued at the last COMMITTED value, moved only by what the ledger booked since: a sell takes its
+                # shares' carried value out, a buy adds its cost, and a quantity the ledger reconciled at the same
+                # cost (a bonus or split booked) moves nothing, so a paused name can neither fire a stop nor lift the
+                # peak.
+                base = self._carry_base(isin) or _Carry(
+                    Decimal(holding.quantity), holding.cost, holding.cost, len(ledger[isin])
+                )
                 held_quantity = Decimal(holding.quantity)
-                if held_quantity < base.quantity:
-                    # A sell while carried: the value of the shares still held is what is left, in proportion. The
-                    # ledger cost falls by the sold shares' cost, which is not their carried value, so the cost delta
-                    # would leave the sold shares' value (and any loss on them) in the carry.
-                    value = base.value * held_quantity / base.quantity
-                else:
-                    value = base.value + (holding.cost - base.cost)
+                value = self._carried_value(holding, base, ledger[isin])
                 if not value > 0:
                     value = holding.cost
                 carry[isin] = _Carry(held_quantity, value, holding.cost)
@@ -585,6 +623,7 @@ class ShadowPortfolio:
             self._record_evaluation_inputs(session, input_seqs)
             # The sell boundary is also persisted before the latch can open an exit, never inferred afterwards.
             self._record_sell_boundaries(session, snap)
+            self._record_booking_boundaries(session, snap)
         batches: tuple[ExitBatch, ...] = ()
         config_errors: tuple[str, ...] = ()
         if evaluated:
@@ -741,14 +780,19 @@ class ShadowPortfolio:
         self._append("latch", {"latch": LATCH_HALVE_BASELINE, "scope": scope, "reason": f"{tag}{current.quantity}"})
         return current.quantity
 
-    def _sell_bookings(self, instrument: Instrument) -> list[Any]:
-        """The SELL bookings of ``instrument`` in ledger order, each booking id once."""
+    def _bookings(self, instrument: Instrument) -> list[Any]:
+        """Every booking of ``instrument`` in ledger order, each booking id once."""
 
         seen: dict[str, Any] = {}
         for booking in self._account.simulated_bookings():
-            if str(booking.side).upper() == "SELL" and booking.ticker == instrument.ticker:
+            if booking.ticker == instrument.ticker:
                 seen.setdefault(str(booking.booking_id), booking)
         return list(seen.values())
+
+    def _sell_bookings(self, instrument: Instrument) -> list[Any]:
+        """The SELL bookings of ``instrument`` in ledger order, each booking id once."""
+
+        return [b for b in self._bookings(instrument) if str(b.side).upper() == "SELL"]
 
     @staticmethod
     def _own_id(obligation_id: str) -> re.Pattern[str]:
@@ -804,6 +848,38 @@ class ShadowPortfolio:
                         "latch": LATCH_SELL_BASELINE,
                         "scope": f"{policy.SCOPE_ISIN}:{isin}",
                         "reason": f"since_{session.isoformat()}_sells_{count}",
+                    },
+                )
+
+    def _booking_boundary(self, isin: str, session: date) -> int | None:
+        """How many bookings of ``isin`` the ledger held at the evaluation of ``session``, from the line
+        ``_record_booking_boundaries`` wrote before that evaluation moved the latch. The latest line for the session
+        stands (a retry that never reached the latch supersedes it). ``None`` when there is none."""
+
+        scope = f"{policy.SCOPE_ISIN}:{isin}"
+        tag = f"since_{session.isoformat()}_bookings_"
+        found: int | None = None
+        for record in self._records():
+            if record.get("kind") == "latch" and record.get("latch") == LATCH_BOOKING_BASELINE and record.get("scope") == scope:
+                reason = str(record["reason"])
+                if reason.startswith(tag):
+                    found = int(reason.removeprefix(tag))
+        return found
+
+    def _record_booking_boundaries(self, session: date, snap: AccountSnapshot) -> None:
+        """Persist the booking count of every held name before the latch moves for ``session``: the point a later
+        carried valuation reads the sells and buys booked since from (``_carried_value``)."""
+
+        for holding in snap.holdings:
+            isin = holding.instrument.isin
+            count = len(self._bookings(holding.instrument))
+            if self._booking_boundary(isin, session) != count:
+                self._append(
+                    "latch",
+                    {
+                        "latch": LATCH_BOOKING_BASELINE,
+                        "scope": f"{policy.SCOPE_ISIN}:{isin}",
+                        "reason": f"since_{session.isoformat()}_bookings_{count}",
                     },
                 )
 
