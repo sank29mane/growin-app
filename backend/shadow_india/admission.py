@@ -33,6 +33,9 @@ from execution.ledger import (
     SIMULATION_RUN_DIRECTORY,
     ExecutionLedger,
     IndiaCapExceeded,
+    IntentConflict,
+    InvalidTransition,
+    OrderNotFound,
     SimulatedBooking,
     SimulatedCashInsufficient,
     SimulationInit,
@@ -88,6 +91,11 @@ E_ATTEMPT_INCONCLUSIVE = "attempt_inconclusive"
 E_SESSION_EXCLUDED = "session_excluded"
 E_BOOKING_INTENT = "booking_intent"
 E_BOOKING_DONE = "booking_done"
+E_BOOKING_REFUSED = "booking_refused"
+
+# A booking the ledger refuses is a deterministic no-op, not a fault: it changes nothing and is
+# closed with a refusal row. Any other ledger error stays abort-class.
+_BOOKING_REFUSALS = (InvalidTransition, IntentConflict, OrderNotFound, ValueError)
 
 PREP_INTERRUPTED_BEFORE_MINT = "prep_interrupted_before_mint"
 MINT_AMBIGUOUS = "mint_ambiguous"
@@ -521,8 +529,40 @@ class ShadowPreparation:
         except (MintUnresolved, asyncio.TimeoutError):
             # Never retried. Recovery decides, from the VM audit, and never POSTs.
             return PrepareResult("mint_unresolved", proposal_id, admission)
+        if self._ambiguous(proposal_id):
+            # Recovery already called this mint ambiguous and the attempt is INCONCLUSIVE. The held
+            # handler answering now is a late entry, never a decision.
+            self._record_late_answer(decision)
+            return PrepareResult("mint_unresolved", proposal_id, admission)
         self._record_decision(session_id, decision, recovered=False)
         return PrepareResult("vm_decided", proposal_id, admission, decision)
+
+    def _ambiguous(self, intent_id: str) -> bool:
+        return any(
+            record.get("kind") == E_VM_AMBIGUOUS and record.get("intent_id") == intent_id
+            for record in self._evidence.records()
+        )
+
+    def _record_late_answer(self, decision: VmDecision) -> None:
+        if tuple(decision.codes) != (VM_CODE_KILL_SWITCH,):
+            raise ShadowAbort("vm_codes_unexpected")
+        late = [
+            record
+            for record in self._evidence.records()
+            if record.get("kind") == E_VM_LATE_ENTRY and record.get("intent_id") == decision.intent_id
+        ]
+        if late:
+            if int(late[0]["audit_seq"]) != decision.audit_seq or late[0]["entry_hash"] != decision.entry_hash:
+                raise ShadowAbort("audit_duplicate_entries")
+            return
+        self._append(
+            E_VM_LATE_ENTRY,
+            {
+                "intent_id": decision.intent_id,
+                "audit_seq": decision.audit_seq,
+                "entry_hash": decision.entry_hash,
+            },
+        )
 
     def _expire_unreserved(self, proposal_id: str, reason: str) -> None:
         order = self._ledger.get_order(proposal_id)
@@ -633,6 +673,11 @@ class ShadowPreparation:
                     {"intent_id": intent_id, "reservation_created_at": reservation[1]},
                 )
                 kinds.add(E_RESERVATION)
+            if E_VM_AMBIGUOUS in kinds:
+                # Wins over any later vm_decision: the attempt was called ambiguous first and stays
+                # INCONCLUSIVE, whatever a held handler wrote afterwards.
+                outcomes[intent_id] = MINT_AMBIGUOUS
+                continue
             decided = self._ledger_vm_decisions(intent_id)
             if E_VM_DECISION in kinds:
                 record = next(r for r in records if r.get("kind") == E_VM_DECISION)
@@ -652,9 +697,6 @@ class ShadowPreparation:
                 if E_ATTEMPT_INCONCLUSIVE not in kinds:
                     self._mark_inconclusive(intent_id, session_id, PREP_INTERRUPTED_BEFORE_MINT)
                 outcomes[intent_id] = PREP_INTERRUPTED_BEFORE_MINT
-                continue
-            if E_VM_AMBIGUOUS in kinds:
-                outcomes[intent_id] = MINT_AMBIGUOUS
                 continue
             started_at = datetime.fromisoformat(
                 str(next(r for r in records if r.get("kind") == E_MINT_STARTED)["at"])
@@ -782,16 +824,21 @@ class ShadowPreparation:
                 "attempt_id": attempt_id,
             },
         )
-        booking = self._ledger.book_simulated_fill(
-            booking_id,
-            proposal_id,
-            cumulative_quantity,
-            price,
-            charges,
-            schedule_sha256,
-            scenario_set_sha256,
-            attempt_id,
-        )
+        try:
+            booking = self._ledger.book_simulated_fill(
+                booking_id,
+                proposal_id,
+                cumulative_quantity,
+                price,
+                charges,
+                schedule_sha256,
+                scenario_set_sha256,
+                attempt_id,
+            )
+        except _BOOKING_REFUSALS as exc:
+            # The ledger changed nothing. Close the intent so recovery never retries it.
+            self._record_booking_refused(proposal_id, booking_id, exc)
+            raise
         self._append(
             E_BOOKING_DONE,
             {
@@ -808,24 +855,56 @@ class ShadowPreparation:
                 return event.event_id
         raise ShadowAbort("booking_event_missing")
 
-    def recover_bookings(self) -> dict[str, str]:
-        """Close every booking that stopped between its evidence and its ledger commit."""
+    def _record_booking_refused(self, proposal_id: str, booking_id: str, exc: Exception) -> None:
+        self._append(
+            E_BOOKING_REFUSED,
+            {
+                "intent_id": proposal_id,
+                "booking_id": booking_id,
+                "code": str(getattr(exc, "code", type(exc).__name__)),
+            },
+        )
 
-        intents: dict[str, Mapping[str, Any]] = {}
+    def recover_bookings(self) -> dict[str, str]:
+        """Close every booking that stopped between its evidence and its ledger commit.
+
+        Pass one adopts each intent whose booking already exists in the ledger. Pass two re-books
+        the rest. A ledger refusal closes its intent with a ``booking_refused`` row and recovery
+        moves on, so one refused intent never blocks another attempt's booking. Anything that is
+        not a refusal still raises.
+        """
+
+        live: dict[str, list[Mapping[str, Any]]] = {}
+        seen: set[str] = set()
+        refused: set[str] = set()
         done: set[str] = set()
         for record in self._evidence.records():
-            if record.get("kind") == E_BOOKING_INTENT:
-                intents[str(record["booking_id"])] = record
-            elif record.get("kind") == E_BOOKING_DONE:
+            kind = record.get("kind")
+            if kind == E_BOOKING_INTENT:
+                booking_id = str(record["booking_id"])
+                live.setdefault(booking_id, []).append(record)
+                seen.add(booking_id)
+            elif kind == E_BOOKING_REFUSED:
+                booking_id = str(record["booking_id"])
+                if not live.get(booking_id):
+                    raise ShadowAbort("booking_refusal_without_intent")
+                live[booking_id].pop()  # the refusal closes the intent just before it
+                refused.add(booking_id)
+            elif kind == E_BOOKING_DONE:
                 done.add(str(record["booking_id"]))
         for booking in self._ledger.simulated_bookings():
-            if booking.booking_id not in intents:
+            if booking.booking_id not in seen:
                 raise ShadowAbort("ledger_booking_without_intent")
         outcomes: dict[str, str] = {}
-        for booking_id, record in intents.items():
+        pending: list[tuple[str, Mapping[str, Any], tuple[Any, ...]]] = []
+        for booking_id, records in live.items():
             if booking_id in done:
                 outcomes[booking_id] = "done"
                 continue
+            if not records:
+                outcomes[booking_id] = "refused"
+                continue
+            record = records[-1]
             proposal_id = str(record["intent_id"])
             args = (
                 Decimal(str(record["cumulative_quantity"])),
@@ -836,28 +915,40 @@ class ShadowPreparation:
                 str(record["attempt_id"]),
             )
             stored = self._ledger.simulated_booking(booking_id)
-            if stored is not None:
-                same = (
-                    stored.proposal_id == proposal_id
-                    and (stored.cumulative_quantity, stored.price, stored.charges) == args[:3]
-                    and (stored.schedule_sha256, stored.scenario_set_sha256, stored.attempt_id)
-                    == args[3:]
-                )
-                if not same:
-                    raise ShadowAbort("booking_payload_mismatch")
-                outcomes[booking_id] = "adopted"
-            else:
-                self._ledger.book_simulated_fill(booking_id, proposal_id, *args)
-                outcomes[booking_id] = "rebooked"
-            self._append(
-                E_BOOKING_DONE,
-                {
-                    "intent_id": proposal_id,
-                    "booking_id": booking_id,
-                    "ledger_event_id": self._booking_event_id(proposal_id, booking_id),
-                },
+            if stored is None:
+                pending.append((booking_id, record, args))
+                continue
+            same = (
+                stored.proposal_id == proposal_id
+                and (stored.cumulative_quantity, stored.price, stored.charges) == args[:3]
+                and (stored.schedule_sha256, stored.scenario_set_sha256, stored.attempt_id)
+                == args[3:]
             )
+            if not same:
+                raise ShadowAbort("booking_payload_mismatch")
+            outcomes[booking_id] = "adopted"
+            self._append_booking_done(proposal_id, booking_id)
+        for booking_id, record, args in pending:
+            proposal_id = str(record["intent_id"])
+            try:
+                self._ledger.book_simulated_fill(booking_id, proposal_id, *args)
+            except _BOOKING_REFUSALS as exc:
+                self._record_booking_refused(proposal_id, booking_id, exc)
+                outcomes[booking_id] = "refused"
+                continue
+            outcomes[booking_id] = "rebooked"
+            self._append_booking_done(proposal_id, booking_id)
         return outcomes
+
+    def _append_booking_done(self, proposal_id: str, booking_id: str) -> None:
+        self._append(
+            E_BOOKING_DONE,
+            {
+                "intent_id": proposal_id,
+                "booking_id": booking_id,
+                "ledger_event_id": self._booking_event_id(proposal_id, booking_id),
+            },
+        )
 
 
 __all__ = [

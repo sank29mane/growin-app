@@ -453,6 +453,18 @@ def test_a_malformed_simulation_init_is_refused(kwargs, message):
         SimulationInit(run_id, kwargs.get("workspace", Workspace.INDIA), venue_binding, kwargs.get("seed", SEED))
 
 
+def test_a_non_sim_account_that_skips_the_init_validation_is_refused_by_the_ledger(tmp_path):
+    # SimulationInit.__post_init__ refuses a non-sim- account; the ledger's own check must hold when
+    # that validation is bypassed.
+    init = SimulationInit(RUN_ID, Workspace.INDIA, binding("breeze_relay", "sim-run1", "INR"), SEED)
+    object.__setattr__(init, "binding", binding("breeze_relay", "1234", "INR"))
+    assert not init.binding.account_id.startswith("sim-")
+    target = tmp_path / "india-shadow" / RUN_ID / "ledger.sqlite3"
+    target.parent.mkdir(parents=True)
+    with pytest.raises(LedgerError, match="marker does not match"):
+        ExecutionLedger(target, workspace="india", require_approval=False, venue=init.binding, simulation=init)
+
+
 def test_the_simulation_ledger_refuses_broker_paths(tmp_path):
     rig = make_rig(tmp_path)
     try:
@@ -1629,6 +1641,92 @@ def test_two_ambiguous_intents_in_one_session_exclude_it_once(tmp_path):
         h.rig.close()
 
 
+def _hold_past_timeout_recover_then_release(h, *, codes=None):
+    """Hold the mint past its timeout, recover (zero audit entries), then let the handler answer."""
+
+    h.mint.gate = asyncio.Event()
+
+    async def scenario():
+        h.mint.entered = asyncio.Event()
+        task = asyncio.ensure_future(
+            h.prep.prepare(
+                session_id="s-1", signal_id="sig-1", leg="entry", symbol=SYMBOL, side="BUY",
+                quantity=2, limit_price="100.00", samples=samples(datetime.now(timezone.utc)),
+            )
+        )
+        await h.mint.entered.wait()
+        h.clock.advance(60)  # held past the mint timeout
+        during = h.prep.recover()
+        assert h.audit.pages == [0]  # recovery read the audit and found no entry
+        if codes is not None:
+            h.mint.codes = codes
+        h.mint.gate.set()  # the held handler now completes
+        return during, await task
+
+    return asyncio.run(asyncio.wait_for(scenario(), 20))
+
+
+def test_a_held_mint_that_answers_after_recovery_called_it_ambiguous_stays_inconclusive(tmp_path):
+    h = make_prep(tmp_path)
+    try:
+        during, result = _hold_past_timeout_recover_then_release(h)
+        pid = pid_of(h)
+        assert during == {pid: MINT_AMBIGUOUS}
+        assert result.status == "mint_unresolved" and result.vm_decision is None
+        for _ in range(2):
+            assert h.prep.recover() == {pid: MINT_AMBIGUOUS}
+        assert h.mint.calls == 1
+        kinds = h.ev.kinds(pid)
+        assert "vm_decision" not in kinds and kinds.count("vm_late_entry") == 1
+        assert kinds.count("attempt_inconclusive") == 1
+        assert [r["kind"] for r in h.ev.rows].count("session_excluded") == 1
+        late = next(r for r in h.ev.rows if r["kind"] == "vm_late_entry")
+        assert (late["audit_seq"], late["entry_hash"]) == (5, sha("e-hash"))
+        assert not [
+            e for e in h.rig.ledger.list_events(pid) if e.event_type == ledger_module.SHADOW_VM_DECISION_EVENT
+        ]
+        # The VM entry the handler wrote is the one the late-entry row names: the scan agrees, once.
+        intent = next(r for r in h.ev.rows if r["kind"] == "intent")
+        h.audit.entries.append(AuditEntry(5, pid, intent["intent_sha256"], ("kill_switch",), sha("e-hash")))
+        assert h.prep.scan_audit() == {}
+        assert len([r for r in h.ev.rows if r["kind"] == "vm_late_entry"]) == 1
+        assert h.prep.release_inconclusive() == [pid]
+    finally:
+        h.rig.close()
+
+
+def test_a_held_mint_answering_with_other_codes_after_ambiguity_aborts(tmp_path):
+    h = make_prep(tmp_path)
+    try:
+        with pytest.raises(ShadowAbort) as caught:
+            _hold_past_timeout_recover_then_release(h, codes=("kill_switch", "other"))
+        assert caught.value.code == "vm_codes_unexpected"
+        assert "vm_late_entry" not in h.ev.kinds() and "vm_decision" not in h.ev.kinds()
+    finally:
+        h.rig.close()
+
+
+def test_recovery_gives_an_ambiguous_mint_precedence_over_a_later_decision_row(tmp_path):
+    # Second layer. Even if a decision row reaches the evidence after the ambiguity record (an older
+    # writer, a replay), the attempt is still INCONCLUSIVE, never vm_decided.
+    h = make_prep(tmp_path)
+    try:
+        h.mint.mode = "unresolved"
+        pid = go(h).proposal_id
+        h.clock.advance(60)
+        assert h.prep.recover() == {pid: MINT_AMBIGUOUS}
+        digest = next(r for r in h.ev.rows if r["kind"] == "intent")["intent_sha256"]
+        h.prep._record_decision(  # noqa: SLF001
+            "s-1", VmDecision(pid, digest, ("kill_switch",), 5, sha("e-hash")), recovered=False
+        )
+        assert "vm_decision" in h.ev.kinds(pid)
+        for _ in range(2):
+            assert h.prep.recover() == {pid: MINT_AMBIGUOUS}
+        assert h.prep.release_inconclusive() == [pid]
+    finally:
+        h.rig.close()
+
+
 def test_a_decided_intent_is_not_released_by_the_close_step(tmp_path):
     h = make_prep(tmp_path)
     try:
@@ -1843,6 +1941,124 @@ def test_booking_recovery_aborts_on_a_payload_mismatch_and_on_an_unknown_ledger_
         h.rig.close()
 
 
+def _refuse_one(h, pid: str, *, attempt: str = "att-bad") -> str:
+    """Book a BUY fill one tick above its limit: the ledger refuses it and changes nothing."""
+
+    with pytest.raises(InvalidTransition):
+        h.prep.book_fill(**_booking_args(pid, price=Decimal("100.01"), attempt_id=attempt))
+    return simulated_booking_id(attempt, sha("scenario-set"))
+
+
+def test_a_refused_booking_is_closed_and_recovery_never_retries_it(tmp_path):
+    h = make_prep(tmp_path)
+    try:
+        pid = go(h).proposal_id
+        cash = h.rig.ledger.simulated_cash_view()
+        bad = _refuse_one(h, pid)
+        refusal = [r for r in h.ev.rows if r["kind"] == "booking_refused"]
+        assert [k for k in h.ev.kinds(pid) if k.startswith("booking")] == ["booking_intent", "booking_refused"]
+        assert refusal[0]["booking_id"] == bad and refusal[0]["code"] == "InvalidTransition"
+        assert set(refusal[0]) == {"kind", "intent_id", "booking_id", "code"}  # the code only
+        for _ in range(3):
+            assert h.prep.recover_bookings() == {bad: "refused"}
+        assert h.rig.ledger.simulated_bookings() == [] and h.rig.ledger.simulated_cash_view() == cash
+        assert len([r for r in h.ev.rows if r["kind"] == "booking_refused"]) == 1
+        assert "booking_done" not in h.ev.kinds()
+    finally:
+        h.rig.close()
+
+
+def test_a_refusal_that_died_before_its_row_is_closed_by_the_next_recovery(tmp_path):
+    h = make_prep(tmp_path)
+    try:
+        pid = go(h).proposal_id
+        h.ev.crash_before = "booking_refused"
+        with pytest.raises(Crash):
+            h.prep.book_fill(**_booking_args(pid, price=Decimal("100.01"), attempt_id="att-bad"))
+        bad = simulated_booking_id("att-bad", sha("scenario-set"))
+        assert "booking_refused" not in h.ev.kinds()
+        assert h.prep.recover_bookings() == {bad: "refused"}
+        assert h.prep.recover_bookings() == {bad: "refused"}
+        assert h.ev.kinds().count("booking_refused") == 1
+        assert h.rig.ledger.simulated_bookings() == []
+    finally:
+        h.rig.close()
+
+
+def test_a_refused_intent_does_not_block_a_committed_booking_that_never_got_its_done_row(tmp_path):
+    h = make_prep(tmp_path)
+    try:
+        pid = go(h).proposal_id
+        bad = _refuse_one(h, pid)
+        h.ev.crash_before = "booking_done"
+        with pytest.raises(Crash):
+            h.prep.book_fill(**_booking_args(pid))
+        good = simulated_booking_id("att-1", sha("scenario-set"))
+        cash = h.rig.ledger.simulated_cash_view()
+        assert h.prep.recover_bookings() == {bad: "refused", good: "adopted"}
+        assert h.rig.ledger.simulated_cash_view() == cash and len(h.rig.ledger.simulated_bookings()) == 1
+        assert h.prep.recover_bookings() == {bad: "refused", good: "done"}
+    finally:
+        h.rig.close()
+
+
+def test_an_unexplained_intent_ahead_of_a_committed_booking_is_still_adopted_first(tmp_path):
+    # The refused attempt's own row never landed (killed first), so it is unexplained evidence. The
+    # later committed booking is adopted before anything is retried, and the refusal is recorded.
+    h = make_prep(tmp_path)
+    try:
+        pid = go(h).proposal_id
+        h.ev.crash_before = "booking_refused"
+        with pytest.raises(Crash):
+            h.prep.book_fill(**_booking_args(pid, price=Decimal("100.01"), attempt_id="att-bad"))
+        bad = simulated_booking_id("att-bad", sha("scenario-set"))
+        h.ev.crash_before = "booking_done"
+        with pytest.raises(Crash):
+            h.prep.book_fill(**_booking_args(pid))
+        good = simulated_booking_id("att-1", sha("scenario-set"))
+        order: list[str] = []
+        book_fill = h.rig.ledger.book_simulated_fill
+        h.rig.ledger.book_simulated_fill = lambda bid, *a, **k: (order.append(bid), book_fill(bid, *a, **k))[1]
+        assert h.prep.recover_bookings() == {bad: "refused", good: "adopted"}
+        assert order == [bad]  # the committed booking was adopted without a ledger call
+        assert [r["kind"] for r in h.ev.rows if r["kind"] in ("booking_done", "booking_refused")] == [
+            "booking_done", "booking_refused"
+        ]  # adoption ran first
+    finally:
+        h.rig.close()
+
+
+def test_an_intent_the_ledger_neither_holds_nor_refuses_still_surfaces(tmp_path):
+    h = make_prep(tmp_path)
+    try:
+        pid = go(h).proposal_id
+        h.ev.crash_after = "booking_intent"
+        with pytest.raises(Crash):
+            h.prep.book_fill(**_booking_args(pid))
+
+        def broken(*args: Any, **kwargs: Any):
+            raise LedgerError("disk gone")
+
+        h.rig.ledger.book_simulated_fill = broken
+        for _ in range(2):
+            with pytest.raises(LedgerError, match="disk gone"):
+                h.prep.recover_bookings()
+        assert "booking_refused" not in h.ev.kinds() and "booking_done" not in h.ev.kinds()
+    finally:
+        h.rig.close()
+
+
+def test_a_refusal_row_with_no_intent_is_abort_class(tmp_path):
+    h = make_prep(tmp_path)
+    try:
+        h.ev.append("booking_refused", {"intent_id": "x", "booking_id": sha("nothing"), "code": "InvalidTransition"})
+        with pytest.raises(ShadowAbort) as caught:
+            h.prep.recover_bookings()
+        assert caught.value.code == "booking_refusal_without_intent"
+    finally:
+        h.rig.close()
+
+
 # --- real process death: a child is killed mid-step, a new process reopens and recovers ---------
 
 import os
@@ -1950,6 +2166,16 @@ def _closed_rig(tmp_path: Path) -> None:
     make_rig(tmp_path).close()
 
 
+RESERVED_AFTER_BUY_ADMISSION = Decimal("200.00")  # 2 shares at the 100.00 limit
+
+
+def _assert_one_reservation(h, *, reserved: Decimal) -> None:
+    """The killed child left exactly one buy reservation and this much simulated cash reserved."""
+
+    assert _reservation_count(h.ledger) == (1, 0)
+    assert h.ledger.simulated_cash_view().reserved == reserved
+
+
 def _kinds(h) -> list[str]:
     return [r["kind"] for r in h.ev.records()]
 
@@ -1960,8 +2186,10 @@ def test_killed_before_the_reservation_record_a_new_process_marks_the_attempt_in
     h = _reopen_prep(tmp_path)
     try:
         pid = h.prep.proposal_id("s-1", "sig-1", "entry")
+        _assert_one_reservation(h, reserved=RESERVED_AFTER_BUY_ADMISSION)
         assert h.prep.recover() == {pid: PREP_INTERRUPTED_BEFORE_MINT}
         assert h.mint.calls == 0 and h.ledger.get_reservation(pid).state == "ACTIVE"
+        _assert_one_reservation(h, reserved=RESERVED_AFTER_BUY_ADMISSION)
         assert h.prep.release_inconclusive() == [pid]
     finally:
         h.ledger.close()
@@ -1973,10 +2201,12 @@ def test_killed_right_after_mint_started_a_new_process_waits_then_calls_it_ambig
     h = _reopen_prep(tmp_path)
     try:
         pid = h.prep.proposal_id("s-1", "sig-1", "entry")
+        _assert_one_reservation(h, reserved=RESERVED_AFTER_BUY_ADMISSION)
         assert h.prep.recover() == {pid: "deferred"}
         h.clock.advance(60)
         assert h.prep.recover() == {pid: MINT_AMBIGUOUS}
         assert h.mint.calls == 0
+        _assert_one_reservation(h, reserved=RESERVED_AFTER_BUY_ADMISSION)
     finally:
         h.ledger.close()
 
@@ -1990,8 +2220,10 @@ def test_killed_with_the_vm_answer_unrecorded_a_new_process_reads_it_from_the_au
         intent = next(r for r in h.ev.records() if r["kind"] == "intent")
         h.audit.entries.append(AuditEntry(5, pid, intent["intent_sha256"], ("kill_switch",), sha("h")))
         h.clock.advance(60)
+        _assert_one_reservation(h, reserved=RESERVED_AFTER_BUY_ADMISSION)
         assert h.prep.recover() == {pid: "vm_decided"}
         assert h.mint.calls == 0  # the child made the one POST; the new process makes none
+        _assert_one_reservation(h, reserved=RESERVED_AFTER_BUY_ADMISSION)
     finally:
         h.ledger.close()
 
@@ -2002,10 +2234,12 @@ def test_killed_between_the_decision_record_and_the_ledger_a_new_process_finishe
     h = _reopen_prep(tmp_path)
     try:
         pid = h.prep.proposal_id("s-1", "sig-1", "entry")
+        _assert_one_reservation(h, reserved=RESERVED_AFTER_BUY_ADMISSION)
         assert not [e for e in h.ledger.list_events(pid) if e.event_type == ledger_module.SHADOW_VM_DECISION_EVENT]
         assert h.prep.recover() == {pid: "vm_decided"}
         assert len([e for e in h.ledger.list_events(pid) if e.event_type == ledger_module.SHADOW_VM_DECISION_EVENT]) == 1
         assert h.mint.calls == 0
+        _assert_one_reservation(h, reserved=RESERVED_AFTER_BUY_ADMISSION)
     finally:
         h.ledger.close()
 
@@ -2016,9 +2250,12 @@ def test_killed_after_the_booking_intent_a_new_process_rebooks_once(tmp_path):
     h = _reopen_prep(tmp_path)
     try:
         assert h.ledger.simulated_bookings() == []
+        _assert_one_reservation(h, reserved=RESERVED_AFTER_BUY_ADMISSION)  # nothing booked yet
         assert list(h.prep.recover_bookings().values()) == ["rebooked"]
         assert len(h.ledger.simulated_bookings()) == 1 and h.ledger.simulated_cash_view().net_cash_out == Decimal("201")
         assert list(h.prep.recover_bookings().values()) == ["done"]
+        # A full fill settles the one reservation; recovery created no second one.
+        _assert_one_reservation(h, reserved=Decimal(0))
     finally:
         h.ledger.close()
 
@@ -2030,8 +2267,10 @@ def test_killed_after_the_ledger_commit_a_new_process_adopts_the_booking(tmp_pat
     try:
         cash = h.ledger.simulated_cash_view()
         assert len(h.ledger.simulated_bookings()) == 1
+        _assert_one_reservation(h, reserved=Decimal(0))  # the ledger commit landed before the kill
         assert list(h.prep.recover_bookings().values()) == ["adopted"]
         assert h.ledger.simulated_cash_view() == cash and len(h.ledger.simulated_bookings()) == 1
+        _assert_one_reservation(h, reserved=Decimal(0))
     finally:
         h.ledger.close()
 
