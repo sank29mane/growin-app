@@ -4,6 +4,14 @@ The job collects the NSE bhavcopy day, the ASM and GSM snapshots and the price b
 session. It cannot recover ASM or GSM history from before collection began: NSE serves those
 lists for today only, so a missed day stays missing and the continuity report keeps it visible.
 
+Before today's bhavcopy it re-attempts every earlier day that is not yet final (the weekend the
+Mon-Fri job never ran on, a weekday holiday still pending from a same-day 404), at most
+SETTLE_LOOKBACK_DAYS back, and records the outcome as the `settle_days` step. Yesterday is only
+attempted from 18:00 IST, so a morning wake of a missed evening run cannot turn a late-published
+file into a final holiday. A day that settles to a session also gets its dated price band files.
+Older non-final days since collection began are listed and fail the step, but never block the
+days inside the window. ASM and GSM are current-only lists, so a settled day never gets them back.
+
 The security master is never downloaded here. All ICICI and Breeze traffic leaves the VM through
 the relay, so in Part 1 that step records `skipped` with `security_master_refresh_requires_relay`.
 
@@ -20,7 +28,7 @@ import plistlib
 import re
 import tempfile
 import uuid
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Literal
 from xml.sax.saxutils import escape
@@ -39,16 +47,19 @@ from .core import (
     utc_now,
 )
 from .nse_http import NseHttp, build_default_client
-from .nse_ingest import ingest_day
+from .nse_ingest import ingest_day, ingest_range
 from .price_bands import ensure_band_tables, fetch_band_files
-from .sessions import FINAL_STATUSES, _statuses, day_status
+from .sessions import FINAL_STATUSES, _statuses, day_status, ensure_fetch_log
 from .store import PilotDataStore
 from .surveillance import ensure_surveillance_tables, fetch_surveillance, first_snapshot_date
 
 LAUNCHD_LABEL = "com.growin.pilot-reference-refresh"
 TEMPLATE_PATH = Path(__file__).parent / "templates" / "com.growin.pilot-reference-refresh.plist.template"
-RefreshStep = Literal["bhavcopy_day", "surveillance", "price_bands", "security_master"]
-STEP_ORDER: tuple[RefreshStep, ...] = ("bhavcopy_day", "surveillance", "price_bands", "security_master")
+RefreshStep = Literal["settle_days", "bhavcopy_day", "surveillance", "price_bands", "security_master"]
+STEP_ORDER: tuple[RefreshStep, ...] = ("settle_days", "bhavcopy_day", "surveillance", "price_bands", "security_master")
+SETTLE_LOOKBACK_DAYS = 10
+SETTLE_YESTERDAY_FROM = time(18, 0)
+_LISTED_MAX = 10
 SURVEILLANCE_NOTE = (
     "ASM and GSM are served for today only; this job cannot recover surveillance history from before "
     "collection began or for a missed day."
@@ -159,7 +170,10 @@ def continuity_report(store: PilotDataStore, *, today_ist: date) -> ContinuityRe
 
 
 def _listed(days: tuple[date, ...]) -> str:
-    return ", ".join(day.isoformat() for day in days[:10])
+    """Newest first, so the days that block today are never the ones cut off."""
+    newest = sorted(days, reverse=True)
+    text = ", ".join(day.isoformat() for day in newest[:_LISTED_MAX])
+    return text if len(newest) <= _LISTED_MAX else f"{text} (and {len(newest) - _LISTED_MAX} older)"
 
 
 def require_reference_freshness(store: PilotDataStore, *, today_ist: date) -> ContinuityReport:
@@ -179,6 +193,34 @@ def require_reference_freshness(store: PilotDataStore, *, today_ist: date) -> Co
 
 
 # --------------------------------------------------------------------------- the daily run
+def _first_logged_date(store: PilotDataStore) -> date | None:
+    ensure_fetch_log(store)
+    return store.query("SELECT min(trade_date) FROM nse_fetch_log")[0][0]
+
+
+def _settle_plan(store: PilotDataStore, today_ist: date) -> tuple[tuple[date, ...], tuple[date, ...]]:
+    """(non-final days inside the lookback window, older non-final days since collection began).
+
+    The job fires Monday to Friday, so a weekend never gets its own run and a weekday holiday's
+    same-day 404s stay pending until a later attempt. Days before the first logged attempt were
+    never collected, and days before this job's own first snapshot belong to the backfill, so
+    neither is listed as too old. With no snapshot yet there is nothing older to list.
+    """
+    first = _first_logged_date(store)
+    if first is None or first >= today_ist:
+        return (), ()
+    floor = today_ist - timedelta(days=SETTLE_LOOKBACK_DAYS)
+    window = tuple(day for day, status in _statuses(store, max(first, floor), today_ist - timedelta(days=1))
+                   if status not in FINAL_STATUSES)
+    collection = first_snapshot_date(store)
+    older_start = max(first, collection) if collection is not None else None
+    if older_start is None or older_start >= floor:
+        return window, ()
+    older = tuple(day for day, status in _statuses(store, older_start, floor - timedelta(days=1))
+                  if status not in FINAL_STATUSES)
+    return window, older
+
+
 def _record_step(store: PilotDataStore, run_id: str, ist_date: date, started: datetime, outcome: StepOutcome) -> None:
     finished = datetime.now(timezone.utc)
     store.append_rows(
@@ -211,6 +253,57 @@ def run_daily(
         outcomes.append(outcome)
         _record_step(store, run_id, today_ist, started, outcome)
 
+    def settle() -> StepOutcome:
+        window, too_old = _settle_plan(store, today_ist)
+        evening = clock().astimezone(IST).time() >= SETTLE_YESTERDAY_FROM
+        # Yesterday before the evening publish proves nothing: a 404 then would settle a late file as a holiday.
+        attempt = tuple(day for day in window if (today_ist - day).days >= 2 or evening)
+        deferred = tuple(day for day in window if day not in attempt)
+        detail = {"attempted": ",".join(day.isoformat() for day in attempt)}
+        if deferred:
+            detail["deferred"] = ",".join(day.isoformat() for day in deferred)
+        if too_old:
+            detail["lookback_days"] = str(SETTLE_LOOKBACK_DAYS)
+            detail["older_non_final"] = _listed(too_old)
+        raised: PilotDataError | None = None
+        failed_dates: tuple[date, ...] = ()
+        unresolved = []
+        band_failed = False
+        if attempt:
+            try:
+                failed_dates = ingest_range(store, http, attempt[0], attempt[-1], workspace=workspace,
+                                            clock=clock).failed_dates
+            except PilotDataError as exc:
+                raised = exc
+            for day in attempt:
+                status = day_status(store, day)
+                detail[day.isoformat()] = status
+                if status not in FINAL_STATUSES:
+                    unresolved.append(day)
+                elif status == "session":
+                    # A day that settled late still needs its dated band files; ASM and GSM cannot be backfilled.
+                    try:
+                        fetched = fetch_band_files(store, http, day, workspace=workspace)
+                    except PilotDataError as exc:
+                        detail[f"bands_{day.isoformat()}"] = exc.code
+                        band_failed = True
+                        continue
+                    detail[f"bands_{day.isoformat()}"] = f"{fetched.list_outcome}/{fetched.changes_outcome}"
+                    if fetched.list_outcome != "ingested" or fetched.changes_outcome == "failed":
+                        band_failed = True
+        if raised is not None:
+            return StepOutcome(step="settle_days", outcome="failed", error_code=raised.code, detail=detail)
+        if failed_dates:
+            return StepOutcome(step="settle_days", outcome="failed", error_code="nse_ingest_failed", detail=detail)
+        if too_old:
+            return StepOutcome(step="settle_days", outcome="failed", error_code="settle_lookback_exceeded", detail=detail)
+        if unresolved:
+            return StepOutcome(step="settle_days", outcome="failed", error_code="settle_days_unresolved", detail=detail)
+        if band_failed:
+            return StepOutcome(step="settle_days", outcome="failed", error_code="price_band_files_unavailable",
+                               detail=detail)
+        return StepOutcome(step="settle_days", outcome="ok", detail=detail)
+
     def bhavcopy() -> StepOutcome:
         if not force and day_status(store, today_ist) == "session":
             return StepOutcome(step="bhavcopy_day", outcome="skipped", error_code="already_session",
@@ -241,6 +334,7 @@ def run_daily(
         return StepOutcome(step="security_master", outcome="skipped",
                            error_code="security_master_refresh_requires_relay")
 
+    run_step("settle_days", settle)
     run_step("bhavcopy_day", bhavcopy)
     run_step("surveillance", surveillance)
     run_step("price_bands", bands)
