@@ -48,6 +48,7 @@ from shadow_india.evidence import (
     read_records,
     verify_witness,
 )
+from test_shadow_india_admission import frozen_service_clock  # noqa: F401 - a fixture, requested by the port wrapper
 
 BACKEND = str(Path(__file__).resolve().parents[2] / "backend")
 RUN = "run1"
@@ -1194,6 +1195,7 @@ def _scenario_ids() -> list[str]:
     return ids
 
 
+@pytest.mark.usefixtures("frozen_service_clock")  # the sim module's own pytestmark never runs on direct calls
 @pytest.mark.parametrize(("name", "params"), PORT_SCENARIOS, ids=_scenario_ids())
 def test_the_real_store_passes_the_adapter_scenarios_written_against_the_port(
     tmp_path, monkeypatch, port_roots, name, params
