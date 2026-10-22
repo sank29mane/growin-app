@@ -218,6 +218,7 @@ def test_a_list_dated_s_is_effective_after_s_and_never_the_basis(store, tmp_path
 def test_the_store_is_never_asked_about_a_day_after_the_prior_session(store, tmp_path, monkeypatch):
     prior_world(store)
     pb.mark_calendar(store, S3, S5, {S3, S4, S5})  # evidence after prior exists and must stay unread
+    pb.put_list(store, S3)  # a list dated S: effective after S, so a resolver that reads past S would index days there
     asked: list[date] = []
     real_status, real_latest = sessions.day_status, sessions._latest_attempts
 
