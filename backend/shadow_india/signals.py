@@ -158,8 +158,10 @@ class AsOfEligibility:
 
     62's ``UniverseEligibility`` rebuilds each lineage with ``build_lineage``, which links an ISIN change to a split
     event without asking when the event was first seen. Here every lineage is cut with ``_as_of_lineage`` first, so a
-    link first seen after ``as_of`` is invisible to eligibility exactly as it is to the bars. Same snapshot type, same
-    ``result_sha256`` as ``UniverseEligibility`` whenever no such link exists.
+    link first seen after ``as_of`` is invisible to eligibility exactly as it is to the bars. The small-cap
+    classification is bounded the same way (``classification_as_of``): index lists fetched and ETF info filed after
+    ``as_of`` do not exist yet. Same snapshot type, same ``result_sha256`` as ``UniverseEligibility`` whenever no such
+    link or later metadata exists.
     """
 
     def __init__(self, store: PilotDataStore, targets: TargetUniverseResult, policy: UniversePolicy, *,
@@ -173,7 +175,8 @@ class AsOfEligibility:
         result = evaluate_universe(
             self._store, as_of=as_of, targets=self._targets, policy=self.policy, mode=self._mode,  # type: ignore[arg-type]
             allow_missing_surveillance_before=None, workspace="india", status_source=NoTradingStatusSource(),
-            lineage_override=lambda member, built: _as_of_lineage(self._store, built, as_of))
+            lineage_override=lambda member, built: _as_of_lineage(self._store, built, as_of),
+            classification_as_of=as_of)
         if result.as_of != as_of:
             raise SignalsError("eligibility_not_for_as_of")
         return EligibilitySnapshot(

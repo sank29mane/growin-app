@@ -1172,3 +1172,119 @@ def test_a_pilot_error_from_the_band_convention_read_pauses_too(tmp_path, stubs,
     _, evidence, result = run_step(tmp_path, run_start=S)
     assert result.status == signals.STATUS_PAUSED and result.pause_reason == "band_convention_conflict"
     assert kinds(evidence, "signal") == []
+
+
+# classification bounded to S-1 (codex-r2-1) -------------------------------------------------------------------------------------
+
+
+def _real_inputs(tmp_path: Path, store, *, targets=None) -> SignalInputs:
+    calendar = nc.pinned(_new_dir(tmp_path, "cal-r2"), coverage=(date(2025, 3, 1), date(2025, 3, 31)))
+    return SignalInputs(
+        store=store, strategy=world_params(), targets=targets or lb.TARGETS, universe_policy=WORLD_POLICY,
+        calendar=calendar, tolerances=lb.TOLERANCES, window_start=cc.START, run_start_session=D2,
+        dataset_sha256=sha("dataset"), tick_sha256=sha("tick"), cost_sha256=sha("cost"), scenario_sha256=sha("scenario"))
+
+
+def _etf_targets():
+    members = tuple(m.model_copy(update={"kind": "liquid_etf"}) if m.anchor_isin == cc.STEADY_ISIN else m
+                    for m in lb.TARGETS.members)
+    return lb.TARGETS.model_copy(update={"members": members})
+
+
+def _ingest_etf_info(store, day: date, underlying: str) -> None:
+    row = kit.etf_row("STEADYCO", "SYNTHETIC ETF", underlying)
+    lb.ingest_pr_zip(store, cc.desc(kind="pr_zip"), kit.pr_zip(day, [kit.pd_index_row()], [], [row]), trade_date=day)
+
+
+def _add_index_lists(store, fetched_at: datetime, small) -> None:
+    from pilot_data.constituents import ingest_index_list
+    from pilot_data.core import SourceDescriptor
+    import test_pilot_data_universe as ut
+
+    def rows(wanted, total, base):
+        ids = list(wanted) + [ut.make_isin(base + n) for n in range(total - len(wanted))]
+        return [{"Company Name": f"C{i}", "Industry": "I", "Symbol": f"X{i}", "Series": "EQ", "ISIN Code": isin}
+                for i, isin in enumerate(ids)]
+
+    for kind, total, wanted, base in (("nifty500", 500, REAL_ELIGIBLE, 50000), ("smallcap250", 250, small, 60000)):
+        descriptor = SourceDescriptor(source="nse_archive", kind="index_list_" + kind,
+                                      locator="https://example.invalid/" + kind, fetched_at=fetched_at)
+        ingest_index_list(store, descriptor, kit.index_list_csv(rows(wanted, total, base)), list_name=kind)
+
+
+@pytest.mark.parametrize("earlier_info", [False, True], ids=["new_etf_info_after_s_minus_one", "corrected_etf_info"])
+def test_real_etf_metadata_filed_after_s_minus_one_cannot_rewrite_the_earlier_evaluation(tmp_path, earlier_info):
+    """codex-r2-1. S-1 was evaluated on S-1's inputs; the next day's ingest adds (or changes) the ETF's underlying. The
+    classification, the eligibility hash and the fingerprint of S-1 stay put and a retry does not conflict."""
+    root = real_world(tmp_path, {"no_future"}, extra=fresh_extra)
+    with PilotDataStore(root, workspace="india") as store:
+        targets = _etf_targets()
+        if earlier_info:
+            _ingest_etf_info(store, D5, "NIFTY 50")
+        inputs = _real_inputs(tmp_path, store, targets=targets)
+        evidence = make_evidence(tmp_path, inputs)
+        source = signals.AsOfEligibility(store, targets, WORLD_POLICY)
+        before = source.snapshot(D5)
+        first = evaluate_session(evidence, inputs, decision_session=WORLD_S)
+        assert first.status == signals.STATUS_EVALUATED, first.pause_reason
+        _ingest_etf_info(store, WORLD_S, "NIFTY SMALLCAP 250")  # the PR file of the decision day, ingested later
+        after = source.snapshot(D5)
+        again = evaluate_session(reopen_evidence(evidence), inputs, decision_session=WORLD_S)
+        from pilot_data.universe import classify_smallcap
+        assert classify_smallcap(store, targets)[cc.STEADY_ISIN] == "small"  # the unbounded read does see it
+    assert after.smallcap == before.smallcap and after.result_sha256 == before.result_sha256
+    assert before.smallcap[cc.STEADY_ISIN] == ("not_small" if earlier_info else "unclassified")
+    assert again.status == signals.STATUS_EVALUATED and again.recorded == 0, again.pause_reason
+    assert again.evaluation_sha256 == first.evaluation_sha256 and again.eligibility_sha256 == first.eligibility_sha256
+
+
+def test_real_an_index_list_fetched_after_s_minus_one_cannot_rewrite_the_earlier_evaluation(tmp_path):
+    root = real_world(tmp_path, {"no_future"}, extra=fresh_extra)
+    with PilotDataStore(root, workspace="india") as store:
+        _add_index_lists(store, datetime(2025, 3, 7, 8, tzinfo=timezone.utc), [])
+        inputs = _real_inputs(tmp_path, store)
+        evidence = make_evidence(tmp_path, inputs)
+        source = signals.AsOfEligibility(store, inputs.targets, WORLD_POLICY)
+        before = source.snapshot(D5)
+        first = evaluate_session(evidence, inputs, decision_session=WORLD_S)
+        assert first.status == signals.STATUS_EVALUATED, first.pause_reason
+        _add_index_lists(store, datetime(2025, 3, 10, 8, tzinfo=timezone.utc), [cc.STEADY_ISIN])  # the STEADY name turns small
+        after = source.snapshot(D5)
+        again = evaluate_session(reopen_evidence(evidence), inputs, decision_session=WORLD_S)
+    assert before.smallcap[cc.STEADY_ISIN] == "not_small"
+    assert after.smallcap == before.smallcap and after.result_sha256 == before.result_sha256
+    assert again.status == signals.STATUS_EVALUATED and again.recorded == 0, again.pause_reason
+    assert again.evaluation_sha256 == first.evaluation_sha256
+
+
+def test_real_a_list_fetched_on_s_minus_one_is_read_and_one_fetched_the_day_after_is_not(tmp_path):
+    root = real_world(tmp_path, {"no_future"}, extra=fresh_extra)
+    with PilotDataStore(root, workspace="india") as store:
+        source = signals.AsOfEligibility(store, lb.TARGETS, WORLD_POLICY)
+        assert source.snapshot(D5).smallcap[cc.STEADY_ISIN] == "unclassified"  # no list yet
+        _add_index_lists(store, datetime(2025, 3, 7, 23, 59, tzinfo=timezone.utc), [])  # the last minute of S-1 (UTC)
+        assert source.snapshot(D5).smallcap[cc.STEADY_ISIN] == "not_small"
+        _add_index_lists(store, datetime(2025, 3, 8, 0, 0, tzinfo=timezone.utc), [cc.STEADY_ISIN])
+        assert source.snapshot(D5).smallcap[cc.STEADY_ISIN] == "not_small"
+
+
+def test_real_the_unbounded_default_callers_are_unchanged(tmp_path):
+    """codex-r2-1 parity: no ``classification_as_of`` keeps 59's and 62's exact behaviour, and with nothing filed after
+    S-1 the bounded source gives the same hash as the unbounded one."""
+    from pilot_data.universe import NoTradingStatusSource, classify_smallcap, evaluate_universe
+    root = real_world(tmp_path, {"no_future"}, extra=fresh_extra)
+    with PilotDataStore(root, workspace="india") as store:
+        _add_index_lists(store, datetime(2025, 3, 7, 8, tzinfo=timezone.utc), [])
+        kwargs = dict(as_of=D5, targets=lb.TARGETS, policy=WORLD_POLICY, mode="pilot", allow_missing_surveillance_before=None,
+                      workspace="india", status_source=NoTradingStatusSource())
+        default = evaluate_universe(store, **kwargs)
+        explicit = evaluate_universe(store, **kwargs, classification_as_of=None)
+        bounded = evaluate_universe(store, **kwargs, classification_as_of=D5)
+        sixty_two = UniverseEligibility(store, lb.TARGETS, WORLD_POLICY, mode="pilot").snapshot(D5)
+        adapter = signals.AsOfEligibility(store, lb.TARGETS, WORLD_POLICY).snapshot(D5)
+        assert default.result_sha256 == explicit.result_sha256 == bounded.result_sha256 == sixty_two.result_sha256
+        assert adapter.result_sha256 == default.result_sha256
+        _add_index_lists(store, datetime(2025, 3, 10, 8, tzinfo=timezone.utc), [cc.STEADY_ISIN])
+        assert classify_smallcap(store, lb.TARGETS)[cc.STEADY_ISIN] == "small"  # default still reads the latest
+        assert classify_smallcap(store, lb.TARGETS, as_of=D5)[cc.STEADY_ISIN] == "not_small"
+        assert evaluate_universe(store, **kwargs).result_sha256 != default.result_sha256  # unbounded callers move, as before

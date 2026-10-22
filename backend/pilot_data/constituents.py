@@ -9,7 +9,7 @@ from __future__ import annotations
 import csv
 import io
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Literal
 
 from market_data.models import is_valid_isin
@@ -150,12 +150,17 @@ def ingest_index_list(
     )
 
 
-def latest_index_list(store: PilotDataStore, list_name: ListName) -> IndexListSnapshotRef | None:
+def latest_index_list(
+    store: PilotDataStore, list_name: ListName, *, fetched_by: date | None = None
+) -> IndexListSnapshotRef | None:
+    """The newest snapshot. ``fetched_by`` (a date) keeps only snapshots fetched on or before that UTC day (64-03)."""
     ensure_constituent_tables(store)
+    cutoff = "" if fetched_by is None else " AND fetched_at_utc < ?"
+    params: list = [list_name] + ([] if fetched_by is None else [datetime.combine(fetched_by + timedelta(days=1), time.min)])
     found = store.query(
         "SELECT source_sha256, fetched_at_utc, member_count, placeholders_json FROM index_list_snapshots "
-        "WHERE list_name = ? ORDER BY fetched_at_utc DESC, rowid DESC LIMIT 1",
-        [list_name],
+        f"WHERE list_name = ?{cutoff} ORDER BY fetched_at_utc DESC, rowid DESC LIMIT 1",
+        params,
     )
     if not found:
         return None
