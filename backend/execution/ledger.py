@@ -44,6 +44,7 @@ from .venue import (
     allowed_mode,
     allowed_modes,
     intent_refusal,
+    is_shadow_binding,
     refusal_text,
     registered_kinds,
     spec_for,
@@ -942,6 +943,292 @@ def _install_venue_binding(
     _install_quantity_reservations_table(connection)
 
 
+# --- the SHADOW simulation account (Phase 64-07) ----------------------------------------
+#
+# A simulation ledger is an ordinary bound ``breeze_relay`` ledger plus a marker table and four
+# more tables that only the 64-07 adapter's ``SimulationInit`` can create, in a fresh file. No
+# existing ledger is migrated and ``SCHEMA_VERSION`` does not move. Everything here is inert in a
+# paper or practice ledger: without the marker the new methods refuse.
+
+SIM_ACCOUNT_PREFIX = "sim-"
+SIMULATION_RUN_DIRECTORY = "india-shadow"
+SIM_BOOKING_KIND = "k3"
+SIM_CASH_NEGATIVE = "SIM_CASH_NEGATIVE"
+SIM_CASH_INSUFFICIENT = "SIM_CASH_INSUFFICIENT"
+SIMULATED_BOOKING_EVENT = "SIMULATED_FILL_BOOKED"
+SIMULATED_EXPIRY_EVENT = "SIMULATED_ORDER_EXPIRED"
+SHADOW_VM_DECISION_EVENT = "SHADOW_VM_DECISION"
+_SIM_MARKER_TABLE = "simulation_account"
+_SIM_FILLS_TABLE = "simulated_fills"
+_SIM_CASH_TABLE = "simulated_cash"
+_SIM_EVENTS_TABLE = "simulated_cash_events"
+_SIMULATION_TABLES = (_SIM_MARKER_TABLE, _SIM_FILLS_TABLE, _SIM_CASH_TABLE, _SIM_EVENTS_TABLE)
+_SIMULATION_TRIGGERS = frozenset(
+    {
+        f"{_SIM_MARKER_TABLE}_no_update",
+        f"{_SIM_MARKER_TABLE}_no_delete",
+        f"{_SIM_MARKER_TABLE}_workspace_insert_guard",
+        f"{_SIM_FILLS_TABLE}_no_update",
+        f"{_SIM_FILLS_TABLE}_no_delete",
+        f"{_SIM_FILLS_TABLE}_workspace_insert_guard",
+        f"{_SIM_CASH_TABLE}_no_delete",
+        f"{_SIM_CASH_TABLE}_workspace_insert_guard",
+        f"{_SIM_CASH_TABLE}_identity_immutable",
+        f"{_SIM_EVENTS_TABLE}_no_update",
+        f"{_SIM_EVENTS_TABLE}_no_delete",
+        f"{_SIM_EVENTS_TABLE}_workspace_insert_guard",
+    }
+)
+_RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,56}$")
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_EXPIRY_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+_SIM_CASH_KINDS = ("RESERVE", "BOOK_BUY", "BOOK_SELL", "EXPIRE")
+
+
+class SimulatedCashInsufficient(ApprovalConflict):
+    """A simulated buy reservation does not fit the simulated cash. Nothing was reserved."""
+
+    code = SIM_CASH_INSUFFICIENT
+
+
+class SimulatedCashNegative(InvalidTransition):
+    """A booking would take simulated cash below zero. Nothing was booked."""
+
+    code = SIM_CASH_NEGATIVE
+
+
+@dataclass(frozen=True)
+class SimulationInit:
+    """What a fresh simulation ledger is created with, and what every reopen must repeat.
+
+    ``account`` is ``sim-<run_id>`` and is also the ledger's bound account id, so a simulated
+    order can never carry a broker account id. ``seed`` is the simulated cash, written once.
+    """
+
+    run_id: str
+    workspace: Workspace
+    binding: VenueBinding
+    seed: Decimal
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.run_id, str) or _RUN_ID_PATTERN.fullmatch(self.run_id) is None:
+            raise ValueError("a simulation run id is 1 to 56 letters, digits, underscores or hyphens")
+        if self.workspace is not Workspace.INDIA:
+            raise ValueError("a simulation account exists only in the India workspace")
+        if not isinstance(self.binding, VenueBinding) or not is_shadow_binding(self.binding):
+            raise ValueError("a simulation account is bound to the breeze_relay SHADOW venue")
+        if self.binding.account_id != self.account:
+            raise ValueError("a simulation account id is sim-<run_id>")
+        if not isinstance(self.seed, Decimal) or not self.seed.is_finite() or self.seed <= 0:
+            raise ValueError("the simulation seed must be a positive finite Decimal")
+
+    @property
+    def account(self) -> str:
+        return f"{SIM_ACCOUNT_PREFIX}{self.run_id}"
+
+
+@dataclass(frozen=True)
+class SimulatedCash:
+    """The simulation account's cash. ``net_cash_out`` is signed: a profitable round trip is below zero."""
+
+    seed: Decimal
+    reserved: Decimal
+    net_cash_out: Decimal
+
+    @property
+    def available(self) -> Decimal:
+        return self.seed - self.net_cash_out - self.reserved
+
+
+@dataclass(frozen=True)
+class SimulatedBooking:
+    """One booked simulated fill, as stored. ``net_cash_out`` and ``realised_pnl`` are signed."""
+
+    booking_id: str
+    proposal_id: str
+    side: str
+    ticker: str
+    delta_quantity: Decimal
+    cumulative_quantity: Decimal
+    price: Decimal
+    gross: Decimal
+    charges: Decimal
+    net_cash_out: Decimal
+    realised_pnl: Decimal
+    schedule_sha256: str
+    scenario_set_sha256: str
+    attempt_id: str
+    payload_sha256: str
+    created_at: str
+
+
+def simulated_booking_id(attempt_id: str, scenario_set_sha256: str) -> str:
+    """``sha256(attempt_id, scenario_set_sha256, "k3")``: one booking per attempt and scenario set."""
+
+    text = json.dumps(
+        [attempt_id, scenario_set_sha256, SIM_BOOKING_KIND],
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _install_simulation_tables(
+    connection: sqlite3.Connection, init: SimulationInit, created_at: str
+) -> None:
+    """Create the marker and the simulation tables with their triggers. Caller owns the transaction.
+
+    Called only from ``_initialize_simulation_locked``, never from ``_pin_fresh_file`` or an
+    ordinary open. The marker is immutable.
+    """
+
+    connection.execute(
+        f"""
+        CREATE TABLE {_SIM_MARKER_TABLE} (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            run_id TEXT NOT NULL,
+            workspace TEXT NOT NULL,
+            venue TEXT NOT NULL,
+            account_id TEXT NOT NULL,
+            currency TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        f"""
+        CREATE TABLE {_SIM_FILLS_TABLE} (
+            booking_id TEXT PRIMARY KEY,
+            proposal_id TEXT NOT NULL REFERENCES order_intents(proposal_id),
+            workspace TEXT NOT NULL,
+            side TEXT NOT NULL CHECK (side IN ('BUY', 'SELL')),
+            ticker TEXT NOT NULL,
+            delta_quantity TEXT NOT NULL,
+            cumulative_quantity TEXT NOT NULL,
+            price TEXT NOT NULL,
+            gross TEXT NOT NULL,
+            charges TEXT NOT NULL,
+            net_cash_out TEXT NOT NULL,
+            realised_pnl TEXT NOT NULL,
+            schedule_sha256 TEXT NOT NULL,
+            scenario_set_sha256 TEXT NOT NULL,
+            attempt_id TEXT NOT NULL,
+            payload_sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        f"""
+        CREATE TABLE {_SIM_CASH_TABLE} (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            workspace TEXT NOT NULL,
+            account TEXT NOT NULL,
+            currency TEXT NOT NULL,
+            seed TEXT NOT NULL,
+            reserved TEXT NOT NULL,
+            net_cash_out TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    kinds = ", ".join(f"'{kind}'" for kind in _SIM_CASH_KINDS)
+    connection.execute(
+        f"""
+        CREATE TABLE {_SIM_EVENTS_TABLE} (
+            event_id TEXT PRIMARY KEY,
+            workspace TEXT NOT NULL,
+            proposal_id TEXT NOT NULL REFERENCES order_intents(proposal_id),
+            kind TEXT NOT NULL CHECK (kind IN ({kinds})),
+            reserved_delta TEXT NOT NULL,
+            cash_out_delta TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    for table, events in (
+        (_SIM_MARKER_TABLE, ("UPDATE", "DELETE")),
+        (_SIM_FILLS_TABLE, ("UPDATE", "DELETE")),
+        (_SIM_CASH_TABLE, ("DELETE",)),
+        (_SIM_EVENTS_TABLE, ("UPDATE", "DELETE")),
+    ):
+        for event in events:
+            connection.execute(
+                f"""
+                CREATE TRIGGER {table}_no_{event.lower()}
+                BEFORE {event} ON {table}
+                BEGIN
+                    SELECT RAISE(ABORT, '{table} rows are append-only');
+                END
+                """
+            )
+    for table in _SIMULATION_TABLES:
+        connection.execute(
+            f"""
+            CREATE TRIGGER {table}_workspace_insert_guard
+            BEFORE INSERT ON {table}
+            WHEN NEW.workspace IS NOT {_PIN_SUBQUERY}
+            BEGIN
+                SELECT RAISE(ABORT, '{_WORKSPACE_GUARD_MESSAGE}');
+            END
+            """
+        )
+    connection.execute(
+        f"""
+        CREATE TRIGGER {_SIM_CASH_TABLE}_identity_immutable
+        BEFORE UPDATE ON {_SIM_CASH_TABLE}
+        WHEN NEW.workspace IS NOT OLD.workspace OR NEW.account IS NOT OLD.account
+          OR NEW.currency IS NOT OLD.currency OR NEW.seed IS NOT OLD.seed
+        BEGIN
+            SELECT RAISE(ABORT, 'simulated cash identity and seed are immutable');
+        END
+        """
+    )
+    connection.execute(
+        f"INSERT INTO {_SIM_MARKER_TABLE} "
+        "(singleton, run_id, workspace, venue, account_id, currency, created_at) "
+        "VALUES (1, ?, ?, ?, ?, ?, ?)",
+        (
+            init.run_id,
+            init.workspace.value,
+            init.binding.venue,
+            init.binding.account_id,
+            init.binding.currency,
+            created_at,
+        ),
+    )
+
+
+def _signed_decimal(value: object) -> Decimal:
+    """A finite Decimal of either sign, for simulation cash and realised P&L only.
+
+    ``_decimal`` refuses negatives and stays that way for every other field. A malformed or
+    non-finite value (``abc``, empty, ``None``, ``NaN``, ``sNaN``, ``Infinity``) is a ledger fault.
+    """
+
+    if isinstance(value, float):
+        raise LedgerError("ledger contains a float where a Decimal is required")
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError) as exc:
+        raise LedgerError("ledger contains an invalid Decimal amount") from exc
+    if not parsed.is_finite():
+        raise LedgerError("ledger contains a non-finite Decimal amount")
+    return parsed
+
+
+def _signed_decimal_str(value: Decimal) -> str:
+    return format(_signed_decimal(value), "f")
+
+
+def _payload_decimal_text(value: Decimal) -> str:
+    """One text per numeric value (``10`` and ``10.0`` are the same), for payload hashes."""
+
+    return format(value.normalize() if value != 0 else Decimal(0), "f")
+
+
 def _apply_base_schema(connection: sqlite3.Connection, from_version: int) -> None:
     """Create or upgrade the v1 to v5 table set. The caller owns the transaction."""
 
@@ -1097,11 +1384,17 @@ class ExecutionLedger:
         busy_timeout_ms: int = 5_000,
         require_approval: bool = False,
         venue: Optional[VenueBinding] = None,
+        simulation: Optional[SimulationInit] = None,
     ) -> None:
         if not 1 <= busy_timeout_ms <= 60_000:
             raise ValueError("busy_timeout_ms must be between 1 and 60000")
 
         self.workspace: Workspace = coerce_workspace(workspace)
+        # Fixed by ``_validate_simulation_ledger_locked`` on every open; false until then.
+        self._simulation_init = simulation
+        self._simulation_active = False
+        if simulation is not None and (simulation.binding != venue or simulation.workspace != self.workspace):
+            raise ValueError("the simulation identity must match the requested workspace and venue")
         if venue is not None:
             if not isinstance(venue, VenueBinding):
                 raise ValueError("venue must be a VenueBinding")
@@ -1129,6 +1422,8 @@ class ExecutionLedger:
             raise LedgerVenueMismatch(
                 "a bound venue ledger must not use the workspace's real ledger path"
             )
+        if simulation is not None:
+            self._require_simulation_path(simulation)
         if self.path.exists() and self.path.is_symlink():
             raise LedgerError("ledger path must not be a symbolic link")
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -1162,6 +1457,10 @@ class ExecutionLedger:
             self._configure(busy_timeout_ms)
             if identity is None or identity.kind == "fresh":
                 self._pin_fresh_file()
+            # Every open, fresh or reopen, validates the simulation marker before any startup
+            # recovery can touch the file. A file that is not exactly what the caller asked for
+            # aborts here, writing nothing.
+            self._validate_simulation_ledger_locked()
             os.chmod(self.path, 0o600)
             self.recover_abandoned_submissions()
             self.recover_pending_requotes()
@@ -1249,6 +1548,126 @@ class ExecutionLedger:
             _install_identity(connection, self.workspace, "first-open", now)
             if self.venue_binding is not None:
                 _install_venue_binding(connection, self.venue_binding, now)
+            if self._simulation_init is not None:
+                # Same transaction as the pin: a crash can never leave a pinned file with no marker.
+                self._initialize_simulation_locked(connection, now)
+
+    def _require_simulation_path(self, simulation: SimulationInit) -> None:
+        """A simulation ledger lives only under ``india-shadow/<run_id>/``, never a live or paper path."""
+
+        parent = self.path.parent
+        if parent.name != simulation.run_id or parent.parent.name != SIMULATION_RUN_DIRECTORY:
+            raise LedgerVenueMismatch(
+                f"a simulation ledger lives only under {SIMULATION_RUN_DIRECTORY}/<run_id>/"
+            )
+        spec = spec_for(simulation.binding.venue)
+        for forbidden in (default_ledger_path(self.workspace), spec.ledger_path() if spec else None):
+            if forbidden is not None and _same_file_path(self.path, forbidden):
+                raise LedgerVenueMismatch("a simulation ledger must not use a live or paper ledger path")
+
+    def _initialize_simulation_locked(self, connection: sqlite3.Connection, now: str) -> None:
+        """Marker, tables, triggers and the one seed row, in the caller's transaction (fresh file only)."""
+
+        init = self._simulation_init
+        if init is None:
+            raise LedgerError("simulation initialization needs a SimulationInit")
+        _install_simulation_tables(connection, init, now)
+        connection.execute(
+            f"INSERT INTO {_SIM_CASH_TABLE} "
+            "(singleton, workspace, account, currency, seed, reserved, net_cash_out, updated_at) "
+            "VALUES (1, ?, ?, ?, ?, '0', '0', ?)",
+            (
+                init.workspace.value,
+                init.account,
+                init.binding.currency,
+                _decimal_str(init.seed),
+                now,
+            ),
+        )
+
+    def _validate_simulation_ledger_locked(self) -> None:
+        """Decide, once per open, whether this file is a simulation ledger. Never repairs.
+
+        (a) No marker, no simulation table, a non-``sim-`` account and no ``SimulationInit``:
+        an ordinary ledger. (b) The marker, every table, trigger and the seed row present and equal
+        to the ledger identity and to the caller's ``SimulationInit``: a simulation ledger.
+        (c) Anything else aborts with ``LedgerError`` and writes nothing.
+        """
+
+        connection = self._require_connection()
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        }
+        present = tables & set(_SIMULATION_TABLES)
+        account = self.venue_binding.account_id if self.venue_binding is not None else ""
+        init = self._simulation_init
+        if not present:
+            if init is not None or account.startswith(SIM_ACCOUNT_PREFIX):
+                raise LedgerError("simulation ledger marker is missing")
+            self._simulation_active = False
+            return
+        if _SIM_MARKER_TABLE not in tables:
+            raise LedgerError("simulation tables exist without the simulation marker")
+        if init is None:
+            raise LedgerError("a simulation ledger must be opened with its SimulationInit")
+        if present != set(_SIMULATION_TABLES):
+            raise LedgerError("simulation ledger is missing a table")
+        triggers = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+            ).fetchall()
+        }
+        if not _SIMULATION_TRIGGERS <= triggers:
+            raise LedgerError("simulation ledger is missing a trigger")
+        marker = connection.execute(
+            f"SELECT run_id, workspace, venue, account_id, currency FROM {_SIM_MARKER_TABLE} "
+            "WHERE singleton = 1"
+        ).fetchone()
+        if marker is None:
+            raise LedgerError("simulation ledger marker row is missing")
+        binding = self.venue_binding
+        if (
+            binding is None
+            or str(marker["workspace"]) != self.workspace.value
+            or str(marker["venue"]) != binding.venue
+            or str(marker["account_id"]) != binding.account_id
+            or str(marker["currency"]) != binding.currency
+            or not binding.account_id.startswith(SIM_ACCOUNT_PREFIX)
+            or str(marker["run_id"]) != init.run_id
+            or binding != init.binding
+        ):
+            raise LedgerError("simulation marker does not match the ledger identity")
+        cash = connection.execute(
+            f"SELECT workspace, account, currency, seed FROM {_SIM_CASH_TABLE} WHERE singleton = 1"
+        ).fetchone()
+        if cash is None:
+            raise LedgerError("simulation ledger cash row is missing")
+        try:
+            seed_matches = _decimal(cash["seed"]) == init.seed
+        except LedgerError:
+            seed_matches = False
+        if (
+            str(cash["workspace"]) != self.workspace.value
+            or str(cash["account"]) != init.account
+            or str(cash["currency"]) != binding.currency
+            or not seed_matches
+        ):
+            raise LedgerError("simulation cash row does not match the simulation identity")
+        self._simulation_active = True
+
+    @property
+    def is_simulation_ledger(self) -> bool:
+        """True only for a file whose marker was validated on this open."""
+
+        return self._simulation_active
+
+    def _refuse_on_simulation(self, operation: str) -> None:
+        if self._simulation_active:
+            raise ApprovalConflict(f"{operation} is not available on a simulation ledger")
 
     def _acquire_writer_lock(self) -> None:
         flags = os.O_RDWR | os.O_CREAT
@@ -1311,6 +1730,9 @@ class ExecutionLedger:
 
         if intent.workspace != self.workspace:
             raise IntentConflict("intent workspace does not match ledger workspace")
+        if self._simulation_active:
+            # A simulation ledger registers SHADOW intents for its own sim-<run_id> account only.
+            self._require_intent_allowed(intent.model_dump(mode="json"))
         snapshot, digest, proposal_id, client_order_id = _intent_identity(intent)
         now = _now()
         with self._transaction() as connection:
@@ -1453,6 +1875,7 @@ class ExecutionLedger:
         workspace: Workspace | str,
     ) -> PaperBudget:
         self.require_workspace(workspace)
+        self._refuse_on_simulation("configuring a paper budget")
         binding = self.venue_binding
         if binding is not None and (
             account != binding.account_id or currency != binding.currency
@@ -1516,6 +1939,7 @@ class ExecutionLedger:
         """
 
         self.require_workspace(workspace)
+        self._refuse_on_simulation("configuring venue limits")
         binding = self.venue_binding
         if binding is None:
             raise ApprovalConflict("venue limits exist only in a bound-venue ledger")
@@ -1568,6 +1992,7 @@ class ExecutionLedger:
         pair refuses the reservation (63-04, C1).
         """
 
+        self._refuse_on_simulation("reserving buying power")
         now = _now()
         with self._transaction() as connection:
             order = self._select_order(connection, proposal_id)
@@ -1842,6 +2267,7 @@ class ExecutionLedger:
         """
 
         self._require_bound()
+        self._refuse_on_simulation("reserving against a broker quantity")
         broker_available = _decimal(broker_available_quantity)
         now = _now()
         with self._transaction() as connection:
@@ -2034,13 +2460,14 @@ class ExecutionLedger:
 
     @staticmethod
     def _india_open_buys_locked(
-        connection: sqlite3.Connection, *, exclude: str = ""
+        connection: sqlite3.Connection, *, exclude: str = "", simulated: bool = False
     ) -> list[tuple[str, Decimal, Decimal]]:
         """``(ticker, unfilled quantity, limit price)`` of every ACTIVE buy reservation.
 
         The limit price is the intent's own, never the admission mid, so a cap check measures
         what the broker could be asked to pay. ``exclude`` leaves one order out (the order
-        being rechecked must not count itself).
+        being rechecked must not count itself). ``simulated`` reads the filled quantity from the
+        simulated fills instead of broker evidence; a simulation ledger holds no evidence rows.
         """
 
         open_buys: list[tuple[str, Decimal, Decimal]] = []
@@ -2056,12 +2483,17 @@ class ExecutionLedger:
             """,
             (exclude,),
         ).fetchall():
-            filled_row = connection.execute(
-                "SELECT cumulative_quantity FROM reconciliation_evidence "
-                "WHERE proposal_id = ? ORDER BY evidence_id DESC LIMIT 1",
-                (str(row["proposal_id"]),),
-            ).fetchone()
-            filled = _decimal(filled_row["cumulative_quantity"]) if filled_row else Decimal("0")
+            if simulated:
+                filled = ExecutionLedger._simulated_filled_quantity_locked(
+                    connection, str(row["proposal_id"])
+                )
+            else:
+                filled_row = connection.execute(
+                    "SELECT cumulative_quantity FROM reconciliation_evidence "
+                    "WHERE proposal_id = ? ORDER BY evidence_id DESC LIMIT 1",
+                    (str(row["proposal_id"]),),
+                ).fetchone()
+                filled = _decimal(filled_row["cumulative_quantity"]) if filled_row else Decimal("0")
             unfilled = _decimal(row["final_quantity"]) - filled
             if unfilled <= 0:
                 continue
@@ -2098,8 +2530,10 @@ class ExecutionLedger:
         for ticker, _quantity, cost in self._india_positions_locked(connection, self.workspace.value):
             costs[ticker] = costs.get(ticker, Decimal("0")) + cost
         pending: dict[str, Decimal] = {}
+        if self._simulation_active:
+            self._assert_no_reconciliation_evidence_locked(connection)
         for ticker, unfilled, limit_price in self._india_open_buys_locked(
-            connection, exclude=proposal_id
+            connection, exclude=proposal_id, simulated=self._simulation_active
         ):
             pending[ticker] = pending.get(ticker, Decimal("0")) + unfilled * limit_price
         deployed = sum(costs.values(), Decimal("0")) + sum(pending.values(), Decimal("0")) + notional
@@ -2121,6 +2555,21 @@ class ExecutionLedger:
         with self._mutex:
             connection = self._require_connection()
             positions = self._india_positions_locked(connection, self.workspace.value)
+            if self._simulation_active:
+                self._assert_no_reconciliation_evidence_locked(connection)
+                return IndiaAccountView(
+                    positions,
+                    tuple(
+                        self._india_open_buys_locked(
+                            connection, exclude=exclude_proposal_id, simulated=True
+                        )
+                    ),
+                    MappingProxyType(
+                        self._simulated_open_sell_quantity_locked(
+                            connection, exclude=exclude_proposal_id
+                        )
+                    ),
+                )
             open_buys = self._india_open_buys_locked(connection, exclude=exclude_proposal_id)
             open_sells: dict[str, Decimal] = {}
             states = ("PENDING",) + _SELL_CLAIMED_STATES
@@ -2139,6 +2588,745 @@ class ExecutionLedger:
                     row["final_quantity"]
                 )
         return IndiaAccountView(positions, tuple(open_buys), MappingProxyType(open_sells))
+
+    # --- the simulation account (Phase 64-07) ---------------------------------
+    #
+    # Everything below branches on the marker validated at open. A paper or practice ledger
+    # refuses each method, and nothing here touches ``paper_budgets``, ``reconciliation_evidence``
+    # or a broker figure. Simulated money moves in Python ``Decimal`` inside the one transaction
+    # that books it, never through SQL arithmetic.
+
+    def _require_simulation(self, operation: str) -> None:
+        if not self._simulation_active:
+            raise ApprovalConflict(f"{operation} exists only on a simulation ledger")
+
+    @staticmethod
+    def _simulated_filled_quantity_locked(
+        connection: sqlite3.Connection, proposal_id: str
+    ) -> Decimal:
+        total = Decimal("0")
+        for row in connection.execute(
+            f"SELECT delta_quantity FROM {_SIM_FILLS_TABLE} WHERE proposal_id = ?",
+            (proposal_id,),
+        ).fetchall():
+            total += _decimal(row["delta_quantity"])
+        return total
+
+    @staticmethod
+    def _simulated_open_sell_quantity_locked(
+        connection: sqlite3.Connection, *, exclude: str = ""
+    ) -> dict[str, Decimal]:
+        """Ticker to the remaining quantity of every admitted SELL not yet FILLED or EXPIRED.
+
+        Remaining is the admitted quantity minus the simulated fills booked so far, so a partial
+        fill shrinks the open sell and a booking that leaves the projection PENDING is visible.
+        """
+
+        open_sells: dict[str, Decimal] = {}
+        for row in connection.execute(
+            """
+            SELECT a.proposal_id, a.ticker, a.final_quantity
+            FROM execution_admissions AS a
+            JOIN order_projection AS p ON p.proposal_id = a.proposal_id
+            WHERE a.side = 'SELL' AND a.decision = 'ADMITTED' AND a.proposal_id != ?
+              AND p.state IN ('PENDING', 'PARTIALLY_FILLED')
+            """,
+            (exclude,),
+        ).fetchall():
+            remaining = _decimal(row["final_quantity"]) - ExecutionLedger._simulated_filled_quantity_locked(
+                connection, str(row["proposal_id"])
+            )
+            if remaining > 0:
+                ticker = str(row["ticker"])
+                open_sells[ticker] = open_sells.get(ticker, Decimal("0")) + remaining
+        return open_sells
+
+    @staticmethod
+    def _assert_no_reconciliation_evidence_locked(connection: sqlite3.Connection) -> None:
+        """A simulation ledger never holds broker evidence, so the two filled sources cannot mix."""
+
+        if connection.execute("SELECT 1 FROM reconciliation_evidence LIMIT 1").fetchone() is not None:
+            raise LedgerError("a simulation ledger holds reconciliation evidence")
+
+    def _simulated_cash_locked(self, connection: sqlite3.Connection) -> SimulatedCash:
+        """The running cash row, checked against the Decimal sum of its events. Abort-class on drift."""
+
+        row = connection.execute(
+            f"SELECT seed, reserved, net_cash_out FROM {_SIM_CASH_TABLE} WHERE singleton = 1"
+        ).fetchone()
+        if row is None:
+            raise LedgerError("simulation cash row is missing")
+        if connection.execute("SELECT 1 FROM paper_budgets LIMIT 1").fetchone() is not None:
+            raise LedgerError("a simulation ledger holds a paper budget row")
+        cash = SimulatedCash(
+            seed=_decimal(row["seed"]),
+            reserved=_decimal(row["reserved"]),
+            net_cash_out=_signed_decimal(row["net_cash_out"]),
+        )
+        events_reserved = Decimal("0")
+        events_cash_out = Decimal("0")
+        for event in connection.execute(
+            f"SELECT reserved_delta, cash_out_delta FROM {_SIM_EVENTS_TABLE} ORDER BY rowid"
+        ).fetchall():
+            events_reserved += _signed_decimal(event["reserved_delta"])
+            events_cash_out += _signed_decimal(event["cash_out_delta"])
+        if events_reserved != cash.reserved or events_cash_out != cash.net_cash_out:
+            raise LedgerError("simulated cash differs from the sum of its events")
+        return cash
+
+    def _apply_simulated_cash_locked(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        event_id: str,
+        proposal_id: str,
+        kind: str,
+        reserved_delta: Decimal,
+        cash_out_delta: Decimal,
+        now: str,
+    ) -> SimulatedCash:
+        """Read the row, add in Decimal, write it back and append the event, in the caller's transaction."""
+
+        cash = self._simulated_cash_locked(connection)
+        reserved = cash.reserved + reserved_delta
+        net_cash_out = cash.net_cash_out + cash_out_delta
+        if reserved < 0:
+            raise LedgerError("simulated cash reserved would go below zero")
+        updated = SimulatedCash(cash.seed, reserved, net_cash_out)
+        if kind == "RESERVE" and updated.available < 0:
+            raise SimulatedCashInsufficient("simulated cash is insufficient for this reservation")
+        if kind == "BOOK_BUY" and updated.available < 0:
+            raise SimulatedCashNegative("this booking would take simulated cash below zero")
+        connection.execute(
+            f"UPDATE {_SIM_CASH_TABLE} SET reserved = ?, net_cash_out = ?, updated_at = ? "
+            "WHERE singleton = 1",
+            (_decimal_str(reserved), _signed_decimal_str(net_cash_out), now),
+        )
+        connection.execute(
+            f"""
+            INSERT INTO {_SIM_EVENTS_TABLE}
+                (event_id, workspace, proposal_id, kind, reserved_delta, cash_out_delta, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                self.workspace,
+                proposal_id,
+                kind,
+                _signed_decimal_str(reserved_delta),
+                _signed_decimal_str(cash_out_delta),
+                now,
+            ),
+        )
+        return updated
+
+    def simulated_cash_view(self) -> SimulatedCash:
+        """The simulation account's cash. Raises ``LedgerError`` on drift from its events."""
+
+        self._require_simulation("the simulated cash view")
+        with self._mutex:
+            return self._simulated_cash_locked(self._require_connection())
+
+    @staticmethod
+    def _apply_simulated_position_fill_locked(
+        connection: sqlite3.Connection,
+        admission: ExecutionAdmission,
+        delta_quantity: Decimal,
+        cost: Decimal,
+        now: str,
+    ) -> None:
+        """Add a simulated buy to the position in Python ``Decimal``, inside the booking transaction.
+
+        ``_apply_position_fill_locked`` adds TEXT through SQLite numeric arithmetic, which rounds
+        ``1166.666666666666666666666667`` to ``1166.66666666667``. A simulation never uses it.
+        """
+
+        row = connection.execute(
+            "SELECT quantity, notional FROM paper_positions "
+            "WHERE workspace = ? AND account = ? AND currency = ? AND ticker = ?",
+            (admission.workspace, admission.account, admission.currency, admission.ticker),
+        ).fetchone()
+        if row is None:
+            connection.execute(
+                """
+                INSERT INTO paper_positions
+                    (workspace, account, currency, ticker, quantity, notional, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    admission.workspace,
+                    admission.account,
+                    admission.currency,
+                    admission.ticker,
+                    _decimal_str(delta_quantity),
+                    _decimal_str(cost),
+                    now,
+                ),
+            )
+            return
+        connection.execute(
+            "UPDATE paper_positions SET quantity = ?, notional = ?, updated_at = ? "
+            "WHERE workspace = ? AND account = ? AND currency = ? AND ticker = ?",
+            (
+                _decimal_str(_decimal(row["quantity"]) + delta_quantity),
+                _decimal_str(_decimal(row["notional"]) + cost),
+                now,
+                admission.workspace,
+                admission.account,
+                admission.currency,
+                admission.ticker,
+            ),
+        )
+
+    def _simulated_order_locked(
+        self, connection: sqlite3.Connection, proposal_id: str, side: OrderSide
+    ) -> tuple[sqlite3.Row, Mapping[str, Any], ExecutionAdmission]:
+        """The stored order, its intent and its ADMITTED admission, checked for a simulation write."""
+
+        order = self._select_order(connection, proposal_id)
+        if order is None:
+            raise OrderNotFound(f"order {proposal_id!r} was not found")
+        intent = json.loads(str(order["canonical_json"]))
+        self._require_intent_allowed(intent)
+        admission_row = connection.execute(
+            "SELECT * FROM execution_admissions WHERE proposal_id = ?", (proposal_id,)
+        ).fetchone()
+        if admission_row is None:
+            raise ApprovalConflict("execution admission is required before reservation")
+        admission = self._admission_from_row(admission_row)
+        if admission.decision is not AdmissionDecision.ADMITTED:
+            raise ApprovalConflict("execution admission denied the intent")
+        if admission.intent_hash != str(order["intent_hash"]):
+            raise IntentConflict("admission intent hash does not match stored intent")
+        if admission.workspace != self.workspace or admission.workspace != str(intent["workspace"]):
+            raise IntentConflict("reservation workspace does not match ledger workspace")
+        if admission.side is not side:
+            raise ApprovalConflict(f"this operation is for {side.value} orders only")
+        if self._workspace_engaged_locked(connection):
+            raise ApprovalConflict("workspace execution control is engaged")
+        return order, intent, admission
+
+    def reserve_simulated_buy(
+        self, proposal_id: str, *, india_caps: tuple[Decimal, Decimal]
+    ) -> PaperReservation:
+        """Reserve an admitted simulated BUY at limit notional, with both India caps, in one transaction.
+
+        The reservation row is the usual ``buying_power_reservations`` row and its ``created_at``
+        is the pinned submission time (P-05). The simulated cash and both caps are checked in the
+        same writer transaction that inserts it, so two admissions racing to reserve cannot both pass.
+        """
+
+        self._require_simulation("reserve_simulated_buy")
+        now = _now()
+        with self._transaction() as connection:
+            order, intent, admission = self._simulated_order_locked(
+                connection, proposal_id, OrderSide.BUY
+            )
+            existing_row = connection.execute(
+                "SELECT * FROM buying_power_reservations WHERE proposal_id = ?", (proposal_id,)
+            ).fetchone()
+            if existing_row is not None:
+                existing = self._reservation_from_row(existing_row)
+                if existing.intent_hash != admission.intent_hash:
+                    raise IntentConflict("reservation intent hash does not match")
+                return existing
+            limit = intent.get("limit_price")
+            if limit is None or admission.notional != admission.final_quantity * _decimal(limit):
+                raise IntentConflict("admission notional is not the limit notional")
+            cash = self._simulated_cash_locked(connection)
+            if cash.available < admission.notional:
+                raise SimulatedCashInsufficient("simulated cash is insufficient for this reservation")
+            self._assert_india_caps_locked(connection, admission, intent, india_caps, proposal_id)
+            connection.execute(
+                """
+                INSERT INTO buying_power_reservations
+                    (proposal_id, workspace, account, currency, intent_hash, reserved,
+                     state, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)
+                """,
+                (
+                    proposal_id,
+                    self.workspace,
+                    admission.account,
+                    admission.currency,
+                    admission.intent_hash,
+                    _decimal_str(admission.notional),
+                    now,
+                    now,
+                ),
+            )
+            self._apply_simulated_cash_locked(
+                connection,
+                event_id=f"reservation:{proposal_id}",
+                proposal_id=proposal_id,
+                kind="RESERVE",
+                reserved_delta=admission.notional,
+                cash_out_delta=Decimal("0"),
+                now=now,
+            )
+            self._append_event(
+                connection,
+                proposal_id,
+                "BUYING_POWER_RESERVED",
+                str(order["state"]),
+                str(order["state"]),
+                {
+                    "workspace": self.workspace,
+                    "account": admission.account,
+                    "currency": admission.currency,
+                    "reserved": _decimal_str(admission.notional),
+                    "intent_hash": admission.intent_hash,
+                },
+                now,
+            )
+            row = connection.execute(
+                "SELECT * FROM buying_power_reservations WHERE proposal_id = ?", (proposal_id,)
+            ).fetchone()
+            if row is None:
+                raise LedgerError("reservation did not persist")
+            return self._reservation_from_row(row)
+
+    def reserve_simulated_sell(self, proposal_id: str) -> PaperReservation:
+        """Reserve simulated holdings for an admitted SELL. Never reads a broker figure."""
+
+        self._require_simulation("reserve_simulated_sell")
+        now = _now()
+        with self._transaction() as connection:
+            order, _intent, admission = self._simulated_order_locked(
+                connection, proposal_id, OrderSide.SELL
+            )
+            existing = connection.execute(
+                f"SELECT * FROM {_QUANTITY_TABLE} WHERE proposal_id = ?", (proposal_id,)
+            ).fetchone()
+            if existing is not None:
+                return self._reservation_from_row(existing)
+            held, _cost = self._held_position_locked(connection, admission)
+            others = self._simulated_open_sell_quantity_locked(
+                connection, exclude=proposal_id
+            ).get(admission.ticker, Decimal("0"))
+            if admission.final_quantity > held - others:
+                raise ApprovalConflict(SELL_EXCEEDS_HOLDING)
+            connection.execute(
+                f"""
+                INSERT INTO {_QUANTITY_TABLE}
+                    (proposal_id, workspace, account, currency, ticker, intent_hash,
+                     reserved, state, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)
+                """,
+                (
+                    proposal_id,
+                    self.workspace,
+                    admission.account,
+                    admission.currency,
+                    admission.ticker,
+                    admission.intent_hash,
+                    _decimal_str(admission.final_quantity),
+                    now,
+                    now,
+                ),
+            )
+            self._append_event(
+                connection,
+                proposal_id,
+                "QUANTITY_RESERVED",
+                str(order["state"]),
+                str(order["state"]),
+                {
+                    "ticker": admission.ticker,
+                    "reserved": _decimal_str(admission.final_quantity),
+                    "intent_hash": admission.intent_hash,
+                },
+                now,
+            )
+            row = connection.execute(
+                f"SELECT * FROM {_QUANTITY_TABLE} WHERE proposal_id = ?", (proposal_id,)
+            ).fetchone()
+            if row is None:
+                raise LedgerError("quantity reservation did not persist")
+            return self._reservation_from_row(row)
+
+    def get_simulated_reservation(
+        self, proposal_id: str
+    ) -> Optional[tuple[PaperReservation, str]]:
+        """The order's reservation and its ``created_at``, buy (buying power) or sell (quantity)."""
+
+        self._require_simulation("get_simulated_reservation")
+        with self._mutex:
+            connection = self._require_connection()
+            row = connection.execute(
+                "SELECT * FROM buying_power_reservations WHERE proposal_id = ?", (proposal_id,)
+            ).fetchone()
+            if row is None:
+                row = connection.execute(
+                    f"SELECT * FROM {_QUANTITY_TABLE} WHERE proposal_id = ?", (proposal_id,)
+                ).fetchone()
+        if row is None:
+            return None
+        return self._reservation_from_row(row), str(row["created_at"])
+
+    @staticmethod
+    def _booking_from_row(row: sqlite3.Row) -> SimulatedBooking:
+        return SimulatedBooking(
+            booking_id=str(row["booking_id"]),
+            proposal_id=str(row["proposal_id"]),
+            side=str(row["side"]),
+            ticker=str(row["ticker"]),
+            delta_quantity=_decimal(row["delta_quantity"]),
+            cumulative_quantity=_decimal(row["cumulative_quantity"]),
+            price=_decimal(row["price"]),
+            gross=_decimal(row["gross"]),
+            charges=_decimal(row["charges"]),
+            net_cash_out=_signed_decimal(row["net_cash_out"]),
+            realised_pnl=_signed_decimal(row["realised_pnl"]),
+            schedule_sha256=str(row["schedule_sha256"]),
+            scenario_set_sha256=str(row["scenario_set_sha256"]),
+            attempt_id=str(row["attempt_id"]),
+            payload_sha256=str(row["payload_sha256"]),
+            created_at=str(row["created_at"]),
+        )
+
+    def simulated_booking(self, booking_id: str) -> Optional[SimulatedBooking]:
+        self._require_simulation("simulated_booking")
+        with self._mutex:
+            row = self._require_connection().execute(
+                f"SELECT * FROM {_SIM_FILLS_TABLE} WHERE booking_id = ?", (booking_id,)
+            ).fetchone()
+        return self._booking_from_row(row) if row is not None else None
+
+    def simulated_bookings(self, proposal_id: Optional[str] = None) -> list[SimulatedBooking]:
+        self._require_simulation("simulated_bookings")
+        sql = f"SELECT * FROM {_SIM_FILLS_TABLE}"
+        parameters: tuple[object, ...] = ()
+        if proposal_id is not None:
+            sql += " WHERE proposal_id = ?"
+            parameters = (proposal_id,)
+        sql += " ORDER BY rowid"
+        with self._mutex:
+            rows = self._require_connection().execute(sql, parameters).fetchall()
+        return [self._booking_from_row(row) for row in rows]
+
+    def book_simulated_fill(
+        self,
+        booking_id: str,
+        proposal_id: str,
+        cumulative_quantity: Decimal | str | int,
+        price: Decimal | str | int,
+        charges: Decimal | str | int,
+        schedule_sha256: str,
+        scenario_set_sha256: str,
+        attempt_id: str,
+    ) -> SimulatedBooking:
+        """Book one simulated fill: fill row, reservation, position, cash, P&L and projection, in one transaction.
+
+        ``cumulative_quantity`` is the order's cumulative booked quantity after this fill. The same
+        booking id with the same payload is a no-op; with another payload it is ``IntentConflict``.
+        Every refusal changes nothing.
+        """
+
+        self._require_simulation("book_simulated_fill")
+        if booking_id != simulated_booking_id(attempt_id, scenario_set_sha256):
+            raise InvalidTransition("booking id is not sha256(attempt, scenario set, k3)")
+        for label, digest in (("schedule", schedule_sha256), ("scenario set", scenario_set_sha256)):
+            if not isinstance(digest, str) or _SHA256_PATTERN.fullmatch(digest) is None:
+                raise ValueError(f"{label} sha256 is malformed")
+        if not isinstance(attempt_id, str) or not 1 <= len(attempt_id) <= 128:
+            raise ValueError("attempt id is malformed")
+        cumulative = _positive_decimal(cumulative_quantity, "cumulative quantity")
+        fill_price = _positive_decimal(price, "fill price")
+        fee = _decimal(charges)
+        payload_sha256 = hashlib.sha256(
+            canonical_json(
+                {
+                    "booking_id": booking_id,
+                    "proposal_id": proposal_id,
+                    "cumulative_quantity": _payload_decimal_text(cumulative),
+                    "price": _payload_decimal_text(fill_price),
+                    "charges": _payload_decimal_text(fee),
+                    "schedule_sha256": schedule_sha256,
+                    "scenario_set_sha256": scenario_set_sha256,
+                    "attempt_id": attempt_id,
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+        now = _now()
+        with self._transaction() as connection:
+            existing = connection.execute(
+                f"SELECT * FROM {_SIM_FILLS_TABLE} WHERE booking_id = ?", (booking_id,)
+            ).fetchone()
+            if existing is not None:
+                if str(existing["payload_sha256"]) != payload_sha256:
+                    raise IntentConflict("booking id was reused with a different payload")
+                return self._booking_from_row(existing)
+            order = self._select_order(connection, proposal_id)
+            if order is None:
+                raise OrderNotFound(f"order {proposal_id!r} was not found")
+            side = OrderSide(str(json.loads(str(order["canonical_json"]))["side"]))
+            order, intent, admission = self._simulated_order_locked(connection, proposal_id, side)
+            state = str(order["state"])
+            if state not in ("PENDING", "PARTIALLY_FILLED"):
+                raise InvalidTransition(f"cannot book a fill on an order in {state}")
+            limit = _decimal(intent["limit_price"])
+            if (side is OrderSide.BUY and fill_price > limit) or (
+                side is OrderSide.SELL and fill_price < limit
+            ):
+                raise InvalidTransition("a simulated fill is never worse than the limit")
+            prior = self._simulated_filled_quantity_locked(connection, proposal_id)
+            if cumulative > admission.final_quantity:
+                raise InvalidTransition("booking overfills the admitted quantity")
+            delta = cumulative - prior
+            if delta <= 0:
+                raise InvalidTransition("booked quantity must advance")
+            gross = delta * fill_price
+            filled = cumulative == admission.final_quantity
+            if side is OrderSide.BUY:
+                reservation = connection.execute(
+                    "SELECT * FROM buying_power_reservations WHERE proposal_id = ?", (proposal_id,)
+                ).fetchone()
+                if reservation is None or str(reservation["state"]) != "ACTIVE":
+                    raise InvalidTransition("an active reservation is required to book a fill")
+                reserved = _decimal(reservation["reserved"])
+                consumed = _decimal(reservation["consumed"]) + delta * limit
+                released = _decimal(reservation["released"])
+                if filled:
+                    released = reserved - consumed
+                if consumed < 0 or released < 0 or consumed + released > reserved:
+                    raise InvalidTransition("reservation accounting is invalid")
+                released_now = released - _decimal(reservation["released"])
+                connection.execute(
+                    "UPDATE buying_power_reservations "
+                    "SET consumed = ?, released = ?, state = ?, updated_at = ? WHERE proposal_id = ?",
+                    (
+                        _decimal_str(consumed),
+                        _decimal_str(released),
+                        "SETTLED" if filled else "ACTIVE",
+                        now,
+                        proposal_id,
+                    ),
+                )
+                cost = gross + fee
+                self._apply_simulated_position_fill_locked(connection, admission, delta, cost, now)
+                cash_out = cost
+                realised = Decimal("0")
+                self._apply_simulated_cash_locked(
+                    connection,
+                    event_id=f"booking:{booking_id}",
+                    proposal_id=proposal_id,
+                    kind="BOOK_BUY",
+                    reserved_delta=-(delta * limit + released_now),
+                    cash_out_delta=cash_out,
+                    now=now,
+                )
+            else:
+                position = connection.execute(
+                    "SELECT quantity, notional FROM paper_positions "
+                    "WHERE workspace = ? AND account = ? AND currency = ? AND ticker = ?",
+                    (admission.workspace, admission.account, admission.currency, admission.ticker),
+                ).fetchone()
+                held = _decimal(position["quantity"]) if position is not None else Decimal("0")
+                held_cost = _decimal(position["notional"]) if position is not None else Decimal("0")
+                if delta > held:
+                    raise InvalidTransition("a simulated SELL exceeds the simulated holding")
+                reservation = connection.execute(
+                    f"SELECT * FROM {_QUANTITY_TABLE} WHERE proposal_id = ?", (proposal_id,)
+                ).fetchone()
+                if reservation is None or str(reservation["state"]) != "ACTIVE":
+                    raise InvalidTransition("an active reservation is required to book a fill")
+                reserved = _decimal(reservation["reserved"])
+                consumed = _decimal(reservation["consumed"]) + delta
+                released = _decimal(reservation["released"])
+                if filled:
+                    released = reserved - consumed
+                if consumed < 0 or released < 0 or consumed + released > reserved:
+                    raise InvalidTransition("quantity reservation accounting is invalid")
+                connection.execute(
+                    f"UPDATE {_QUANTITY_TABLE} "
+                    "SET consumed = ?, released = ?, state = ?, updated_at = ? WHERE proposal_id = ?",
+                    (
+                        _decimal_str(consumed),
+                        _decimal_str(released),
+                        "SETTLED" if filled else "ACTIVE",
+                        now,
+                        proposal_id,
+                    ),
+                )
+                remaining = held - delta
+                remaining_cost = (
+                    Decimal("0") if remaining == 0 else max(Decimal("0"), held_cost - held_cost * delta / held)
+                )
+                cost_removed = held_cost - remaining_cost
+                self._apply_position_sell_locked(connection, admission, delta, now)
+                net_proceeds = gross - fee
+                cash_out = -net_proceeds
+                realised = net_proceeds - cost_removed
+                self._apply_simulated_cash_locked(
+                    connection,
+                    event_id=f"booking:{booking_id}",
+                    proposal_id=proposal_id,
+                    kind="BOOK_SELL",
+                    reserved_delta=Decimal("0"),
+                    cash_out_delta=cash_out,
+                    now=now,
+                )
+            connection.execute(
+                f"""
+                INSERT INTO {_SIM_FILLS_TABLE}
+                    (booking_id, proposal_id, workspace, side, ticker, delta_quantity,
+                     cumulative_quantity, price, gross, charges, net_cash_out, realised_pnl,
+                     schedule_sha256, scenario_set_sha256, attempt_id, payload_sha256, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    booking_id,
+                    proposal_id,
+                    self.workspace,
+                    side.value,
+                    admission.ticker,
+                    _decimal_str(delta),
+                    _decimal_str(cumulative),
+                    _decimal_str(fill_price),
+                    _decimal_str(gross),
+                    _decimal_str(fee),
+                    _signed_decimal_str(cash_out),
+                    _signed_decimal_str(realised),
+                    schedule_sha256,
+                    scenario_set_sha256,
+                    attempt_id,
+                    payload_sha256,
+                    now,
+                ),
+            )
+            target = "FILLED" if filled else "PARTIALLY_FILLED"
+            connection.execute(
+                "UPDATE order_projection SET state = ?, updated_at = ? WHERE proposal_id = ?",
+                (target, now, proposal_id),
+            )
+            self._append_event(
+                connection,
+                proposal_id,
+                SIMULATED_BOOKING_EVENT,
+                state,
+                target,
+                {
+                    "booking_id": booking_id,
+                    "cumulative_quantity": _decimal_str(cumulative),
+                    "price": _decimal_str(fill_price),
+                    "charges": _decimal_str(fee),
+                },
+                now,
+            )
+            row = connection.execute(
+                f"SELECT * FROM {_SIM_FILLS_TABLE} WHERE booking_id = ?", (booking_id,)
+            ).fetchone()
+            return self._booking_from_row(row)
+
+    def expire_simulated_order(self, proposal_id: str, expiry_id: str, reason: str) -> LedgerOrder:
+        """Close a simulated order and release what it still holds, in one transaction.
+
+        Only a recorded expiry releases a DAY remainder: no timer, restart or elapsed time does. The
+        order goes to EXPIRED; a buy releases its outstanding notional and the same amount of
+        simulated cash, a sell releases its quantity. Holdings never change. The same expiry id on
+        an EXPIRED order is a no-op; another id is ``IntentConflict``.
+        """
+
+        self._require_simulation("expire_simulated_order")
+        if not isinstance(reason, str) or _REASON_CODE_PATTERN.fullmatch(reason) is None:
+            raise ValueError("expiry reason must be a short, non-sensitive code")
+        if not isinstance(expiry_id, str) or _EXPIRY_ID_PATTERN.fullmatch(expiry_id) is None:
+            raise ValueError("expiry id is malformed")
+        now = _now()
+        with self._transaction() as connection:
+            row = self._select_order(connection, proposal_id)
+            if row is None:
+                raise OrderNotFound(f"order {proposal_id!r} was not found")
+            state = str(row["state"])
+            if state == "EXPIRED":
+                recorded = [
+                    json.loads(str(event["payload_json"])).get("expiry_id")
+                    for event in connection.execute(
+                        "SELECT payload_json FROM execution_events "
+                        "WHERE proposal_id = ? AND event_type = ?",
+                        (proposal_id, SIMULATED_EXPIRY_EVENT),
+                    ).fetchall()
+                ]
+                if expiry_id not in recorded:
+                    raise IntentConflict("the order was already expired under another expiry id")
+                return self._order_from_row(row)
+            if state not in ("PENDING", "PARTIALLY_FILLED"):
+                raise InvalidTransition(f"cannot expire an order in {state}")
+            released_notional = Decimal("0")
+            reservation = connection.execute(
+                "SELECT * FROM buying_power_reservations WHERE proposal_id = ?", (proposal_id,)
+            ).fetchone()
+            if reservation is not None:
+                released_notional = (
+                    _decimal(reservation["reserved"])
+                    - _decimal(reservation["consumed"])
+                    - _decimal(reservation["released"])
+                )
+                self._release_full_reservation_locked(connection, reservation, now)
+                if released_notional > 0:
+                    self._apply_simulated_cash_locked(
+                        connection,
+                        event_id=f"expiry:{proposal_id}:{expiry_id}",
+                        proposal_id=proposal_id,
+                        kind="EXPIRE",
+                        reserved_delta=-released_notional,
+                        cash_out_delta=Decimal("0"),
+                        now=now,
+                    )
+            self._release_quantity_reservation_locked(connection, proposal_id, now)
+            connection.execute(
+                "UPDATE order_projection SET state = 'EXPIRED', updated_at = ? "
+                "WHERE proposal_id = ? AND state = ?",
+                (now, proposal_id, state),
+            )
+            self._append_event(
+                connection,
+                proposal_id,
+                SIMULATED_EXPIRY_EVENT,
+                state,
+                "EXPIRED",
+                {
+                    "expiry_id": expiry_id,
+                    "reason": reason,
+                    "released_notional": _decimal_str(released_notional),
+                },
+                now,
+            )
+            return self._get_order_locked(connection, proposal_id)
+
+    def record_shadow_vm_decision(
+        self, proposal_id: str, audit_seq: int, decision: Mapping[str, Any]
+    ) -> None:
+        """Record the VM's answer for an intent, keyed by its audit seq. Evidence only.
+
+        A refusal never changes the reservation or the projection. The same seq with the same
+        decision is a no-op; with another decision it is ``IntentConflict``.
+        """
+
+        self._require_simulation("record_shadow_vm_decision")
+        if not isinstance(audit_seq, int) or isinstance(audit_seq, bool) or audit_seq < 0:
+            raise ValueError("audit seq must be a non-negative integer")
+        payload = {"audit_seq": audit_seq, **dict(decision)}
+        text = canonical_json(payload)
+        now = _now()
+        with self._transaction() as connection:
+            row = self._select_order(connection, proposal_id)
+            if row is None:
+                raise OrderNotFound(f"order {proposal_id!r} was not found")
+            for event in connection.execute(
+                "SELECT payload_json FROM execution_events WHERE proposal_id = ? AND event_type = ?",
+                (proposal_id, SHADOW_VM_DECISION_EVENT),
+            ).fetchall():
+                recorded = json.loads(str(event["payload_json"]))
+                if recorded.get("audit_seq") == audit_seq:
+                    if canonical_json(recorded) != text:
+                        raise IntentConflict("the VM decision for this audit seq differs")
+                    return
+            state = str(row["state"])
+            self._append_event(
+                connection, proposal_id, SHADOW_VM_DECISION_EVENT, state, state, payload, now
+            )
 
     def record_exit_batch(self, proposal_id: str, batch_id: str, reason: str) -> None:
         """Store a halve, flatten or stop batch tag with a registered SELL proposal.
@@ -2572,6 +3760,7 @@ class ExecutionLedger:
     ) -> ClaimResult:
         """Atomically consume verified evidence and establish dispatch authority."""
 
+        self._refuse_on_simulation("claiming an order for dispatch")
         now = _now()
         with self._transaction() as connection:
             row = self._select_order(connection, proposal_id)
@@ -2808,6 +3997,7 @@ class ExecutionLedger:
     ) -> ClaimResult:
         """Atomically claim one order and commit before broker dispatch."""
 
+        self._refuse_on_simulation("claiming an order for dispatch")
         if self.require_approval:
             raise ApprovalConflict("signed approval is required before dispatch")
         if not proposal_id:
@@ -3025,6 +4215,7 @@ class ExecutionLedger:
     def reconcile(self, snapshot: ReconciliationSnapshot) -> LedgerOrder:
         """Apply one monotonic typed reconciliation snapshot atomically."""
 
+        self._refuse_on_simulation("a broker reconciliation snapshot")
         now = _now()
         with self._transaction() as connection:
             row = self._select_order(connection, snapshot.proposal_id)
@@ -3373,6 +4564,10 @@ class ExecutionLedger:
         return {"quantity": str(row["quantity"]), "notional": str(row["notional"])}
 
     def reject(self, proposal_id: str, notes: Optional[str] = None) -> LedgerOrder:
+        if self._simulation_active and self.get_reservation(proposal_id) is not None:
+            # A reserved simulated order is closed by ``expire_simulated_order``, which also
+            # returns the simulated cash. A bare reject would leave that cash reserved.
+            raise ApprovalConflict("a reserved simulated order is closed by expire_simulated_order")
         now = _now()
         with self._transaction() as connection:
             row = self._select_order(connection, proposal_id)
@@ -4438,6 +5633,19 @@ __all__ = [
     "ReconciliationSnapshot",
     "RequoteConflict",
     "SCHEMA_VERSION",
+    "SHADOW_VM_DECISION_EVENT",
+    "SIMULATED_BOOKING_EVENT",
+    "SIMULATED_EXPIRY_EVENT",
+    "SIMULATION_RUN_DIRECTORY",
+    "SIM_ACCOUNT_PREFIX",
+    "SIM_BOOKING_KIND",
+    "SIM_CASH_INSUFFICIENT",
+    "SIM_CASH_NEGATIVE",
+    "SimulatedBooking",
+    "SimulatedCash",
+    "SimulatedCashInsufficient",
+    "SimulatedCashNegative",
+    "SimulationInit",
     "practice_ledger_path",
     "Workspace",
     "WorkspaceControl",
@@ -4446,4 +5654,5 @@ __all__ = [
     "coerce_workspace",
     "default_ledger_path",
     "intent_hash",
+    "simulated_booking_id",
 ]

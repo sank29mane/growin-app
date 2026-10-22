@@ -350,8 +350,27 @@ class ExecutionService:
             if risk_evidence.get("allowed") is False:
                 raise ValueError("risk gate denied the intent")
             if india_guard is not None:
-                slippage = india_guard.check_slippage(intent, india_quote, simulator_fill)
+                two_input = bound and intent.limit_price is not None
+                try:
+                    slippage = india_guard.check_slippage(intent, india_quote, simulator_fill)
+                except IndiaLimitDenied:
+                    if two_input:
+                        india_detail["slippage_denied_by"] = "preflight"
+                    raise
                 india_detail["slippage_bps"] = _decimal_text(slippage)
+                if two_input:
+                    # OI-5, OI-17: on a bound India venue the order is also judged at the price it
+                    # would rest at. The check above is unchanged and is the ``preflight`` figure;
+                    # this one runs the same guard on the limit price. Either breach denies.
+                    india_detail["preflight"] = _decimal_text(slippage)
+                    try:
+                        reference = india_guard.check_slippage(
+                            intent, india_quote, intent.limit_price
+                        )
+                    except IndiaLimitDenied:
+                        india_detail["slippage_denied_by"] = "slippage_reference"
+                        raise
+                    india_detail["slippage_reference"] = _decimal_text(reference)
             decision = AdmissionDecision.ADMITTED
             reason = "ADMITTED"
         except Exception as exc:
@@ -420,6 +439,28 @@ class ExecutionService:
         if self._ledger is None:
             raise ExecutionDisabledError("durable execution reservation is unavailable")
         admission = self._ledger.get_admission(proposal_id)
+        if admission is not None and self._ledger.is_simulation_ledger:
+            # The SHADOW simulation account (64-07). It reserves simulated cash and simulated
+            # holdings only, never a broker figure, and the caps come from the guard, not the caller.
+            if admission.side is OrderSide.SELL:
+                if broker_available_quantity is not None:
+                    raise ExecutionConflictError(
+                        "a simulated SELL takes no broker available quantity"
+                    )
+                return self._ledger.reserve_simulated_sell(proposal_id)
+            if self._india_guard is None:
+                raise ExecutionDisabledError("India limits are required to reserve a simulated BUY")
+            limits = self._india_guard.limits
+            try:
+                return self._ledger.reserve_simulated_buy(
+                    proposal_id, india_caps=(limits.capital_cap, limits.per_position_cap)
+                )
+            except IndiaCapExceeded:
+                # Same as the paper path: the order lost the cap race, so it is closed here.
+                self._ledger.expire_simulated_order(
+                    proposal_id, f"reservation-refused:{proposal_id}", "reservation_refused"
+                )
+                raise
         if admission is not None and self._ledger.is_india_paper_sell(admission.side):
             # An India paper SELL reserves no buying power. Its position is checked again,
             # atomically, when the approval is claimed (63-04, D-06).
