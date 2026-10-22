@@ -115,8 +115,11 @@ AMBIGUOUS_EXIT_FILL = policy.AMBIGUOUS_EXIT_FILL
 CARRY_UNRECONCILED = policy.CARRY_UNRECONCILED
 # Work budget of the unreconciled-carry search, in replay steps (one booking applied to the lots = one step). The
 # search tries every boundary x both sale orders x every adjustment position, which grows with the cube of the booking
-# count; past the budget the search is skipped and ``_carry_floor`` answers instead, in a single pass.
-CARRY_SEARCH_BUDGET = 20_000
+# count; past the budget the search is skipped and ``_carry_floor`` answers instead, in a single pass. A step costs
+# about 1 microsecond or less (a worst-case window of one-share buys and one sale past all of them measured 0.9 s at
+# the budget on an M4 Pro, a mark runs once per session per held name), and the budget covers a window of 705
+# bookings after a known baseline, 112 when the line carries no booking count (every boundary is tried).
+CARRY_SEARCH_BUDGET = 1_000_000
 TICKER_PREFIX = "NSE:CASH:"
 
 _ISIN = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]\Z")
@@ -232,6 +235,74 @@ class ExitProposal:
     decided_on: date  # the last evaluated close
     since: date  # the close that first raised the exit
     reproposed: bool  # True when an earlier decide already proposed it and it is still unfilled
+
+
+class _LotBook:
+    """The lots of a name during a replay: [shares, value] pairs. A sale takes shares from a lot and the lot loses value
+    pro rata, so its value per share does not move. The oldest lot goes first (the carried lot, then the bought lots in
+    booking order), or with ``dearest_first`` the lot with the highest value per share, which leaves the lowest value
+    behind (ties go to the oldest). A pointer to the oldest live lot and a heap keyed by value per share keep a sale
+    O(lots touched), where a scan of every lot per share made the unreconciled search cubic in the window."""
+
+    __slots__ = ("lots", "dearest", "head", "heap")
+
+    def __init__(self, lots: list[list[Decimal]], *, dearest_first: bool) -> None:
+        self.lots = lots
+        self.dearest = dearest_first
+        self.head = 0
+        self.heap: list[tuple[Decimal, int]] = []
+        self.reorder()
+
+    def reorder(self) -> None:
+        """Rebuild the heap after the lots changed other than through ``open`` and ``take`` (a gain scales every share)."""
+
+        if self.dearest:
+            self.heap = [(-(lot[1] / lot[0]), index) for index, lot in enumerate(self.lots) if lot[0] > 0]
+            heapq.heapify(self.heap)
+
+    def open(self, shares: Decimal, value: Decimal) -> None:
+        self.lots.append([shares, value])
+        if self.dearest and shares > 0:
+            heapq.heappush(self.heap, (-(value / shares), len(self.lots) - 1))
+
+    def take(self, quantity: Decimal) -> None:
+        """Remove up to ``quantity`` shares. A quantity past every lot drains them and is dropped; the caller sees it as
+        a share count that no longer matches."""
+
+        left = quantity
+        lots = self.lots
+        if self.dearest:
+            heap = self.heap
+            while left > 0 and heap:
+                index = heap[0][1]
+                lot = lots[index]
+                take = min(left, lot[0])
+                lot[1] = lot[1] * (lot[0] - take) / lot[0]
+                lot[0] -= take
+                left -= take
+                if lot[0] > 0:
+                    heapq.heapreplace(heap, (-(lot[1] / lot[0]), index))
+                else:
+                    heapq.heappop(heap)
+            return
+        head = self.head
+        while left > 0:
+            while head < len(lots) and lots[head][0] <= 0:
+                head += 1
+            if head == len(lots):
+                break
+            lot = lots[head]
+            take = min(left, lot[0])
+            lot[1] = lot[1] * (lot[0] - take) / lot[0]
+            lot[0] -= take
+            left -= take
+        self.head = head
+
+    def dearest_take(self, quantity: Decimal) -> None:
+        """A loss the ledger does not explain takes the dearest shares first, whichever order the replay sells in."""
+
+        _LotBook(self.lots, dearest_first=True).take(quantity)
+        self.reorder()
 
 
 @dataclass(frozen=True)
@@ -436,24 +507,6 @@ class ShadowPortfolio:
             )
         return None
 
-    @staticmethod
-    def _take(lots: list[list[Decimal]], quantity: Decimal, *, dearest_first: bool) -> None:
-        """Remove up to ``quantity`` shares from ``lots`` ([shares, value] pairs), each lot losing value pro rata. The
-        oldest lot goes first (the carried lot, then the bought lots in booking order), or with ``dearest_first`` the
-        lot with the highest value per share, which leaves the lowest value behind. A quantity past every lot
-        drains them and is dropped; the caller sees it as a share count that no longer matches."""
-
-        left = quantity
-        while left > 0:
-            live = [lot for lot in lots if lot[0] > 0]
-            if not live:
-                return
-            lot = max(live, key=lambda x: x[1] / x[0]) if dearest_first else live[0]
-            take = min(left, lot[0])
-            lot[1] = lot[1] * (lot[0] - take) / lot[0]
-            lot[0] -= take
-            left -= take
-
     @classmethod
     def _replay(
         cls,
@@ -468,24 +521,26 @@ class ShadowPortfolio:
         moment. ``adjust`` is an unbooked share change (``u`` at position ``i``, before booking ``i``): a gain scales
         every lot's shares at the same value (a bonus or split), a loss removes shares."""
 
-        lots: list[list[Decimal]] = [[base.quantity, base.value]]
+        book = _LotBook([[base.quantity, base.value]], dearest_first=dearest_first)
         for index in range(len(since) + 1):
             if adjust is not None and adjust[0] == index:
                 change = adjust[1]
-                total = sum((lot[0] for lot in lots), Decimal(0))
+                total = sum((lot[0] for lot in book.lots), Decimal(0))
                 if change > 0 and total > 0:
-                    for lot in lots:
+                    for lot in book.lots:
                         lot[0] = lot[0] * (total + change) / total
+                    book.reorder()
                 elif change < 0:
-                    cls._take(lots, -change, dearest_first=True)
+                    book.dearest_take(-change)
             if index == len(since):
                 break
             booking = since[index]
-            if str(booking.side).upper() == "BUY":
-                lots.append([booking.delta_quantity, booking.delta_quantity * booking.price + booking.charges])
-            elif str(booking.side).upper() == "SELL":
-                cls._take(lots, booking.delta_quantity, dearest_first=dearest_first)
-        return sum((lot[0] for lot in lots), Decimal(0)), sum((lot[1] for lot in lots), Decimal(0))
+            side = str(booking.side).upper()
+            if side == "BUY":
+                book.open(booking.delta_quantity, booking.delta_quantity * booking.price + booking.charges)
+            elif side == "SELL":
+                book.take(booking.delta_quantity)
+        return sum((lot[0] for lot in book.lots), Decimal(0)), sum((lot[1] for lot in book.lots), Decimal(0))
 
     def _adjustment_record(self, isin: str) -> bool:
         """True when the account exposes an explicit adjustment record for the open corporate-action pause of ``isin``."""
