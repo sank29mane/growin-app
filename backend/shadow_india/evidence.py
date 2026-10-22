@@ -56,6 +56,9 @@ ANCHOR_NAME = "evidence.anchor"
 LOCK_NAME = "evidence.lock"
 MANIFEST_NAME = "manifest.json"
 SIDECAR_NAME = "abort.json"
+# Fallback abort marker: when the sidecar cannot be written (ENOSPC, a failing disk), the anchor is renamed to
+# ``<prefix><code>``. A rename needs no new blocks, keeps every byte, and a store without its anchor refuses to open.
+ABORT_MARKER_PREFIX = ANCHOR_NAME + ".aborted."
 TORN_DIR = "torn"
 
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -64,6 +67,10 @@ _ENVELOPE = ("seq", "prev_sha256", "entry_sha256", "kind", "run_id", "session_id
 _RESERVED = frozenset(_ENVELOPE) - {"session_id"}
 
 Clock = Callable[[], datetime]
+
+# The abort latch: run directory -> first abort code. Set BEFORE any abort I/O and never cleared, so a failed
+# sidecar write cannot leave a live store (or a second store in this process) accepting appends.
+_LATCHED: dict[str, str] = {}
 
 
 # --- errors --------------------------------------------------------------------------------------
@@ -450,7 +457,20 @@ class _Run:
         except OSError as exc:
             raise EvidenceRefused("run_directory_unreadable") from exc
 
+    def latch(self, code: str) -> None:
+        _LATCHED.setdefault(str(self.dir), code)
+
     def recorded_sidecar_code(self) -> str | None:
+        latched = _LATCHED.get(str(self.dir))
+        if latched is not None:
+            return latched
+        try:
+            marker = next((p for p in sorted(self.dir.iterdir()) if p.name.startswith(ABORT_MARKER_PREFIX)), None)
+        except OSError:
+            marker = None
+        if marker is not None:
+            code = marker.name[len(ABORT_MARKER_PREFIX):]
+            return code if _CODE.match(code) else "abort_marker_invalid"
         if not self.sidecar.exists():
             return None
         try:
@@ -548,14 +568,30 @@ class _Run:
         return _Scan(entries, len(complete), tail, anchor_seq, anchor_head, manifest)
 
     def write_sidecar(self, code: str) -> None:
-        """Record the abort. Never overwrites (the first cause stands) and never touches another file."""
+        """Record the abort durably. Never overwrites (the first cause stands) and never touches the log.
 
+        The in-memory latch is set first, so a failure below cannot reopen the store in this process. If the
+        sidecar cannot be written, the anchor is renamed to a marker that carries the code. If that fails too the
+        abort is not durable, and ``EvidenceRefused("abort_not_recorded")`` says so (the latch still holds).
+        """
+
+        self.latch(code)
         body = _canonical({"abort": "evidence_corruption", "code": code, "schema": "shadow-india-abort/1"}) + b"\n"
         try:
             _write_new_file(self.sidecar, body)
             _fsync_dir(self.dir)
+            return
+        except FileExistsError:
+            return  # a second report: the first sidecar stands
         except OSError:
-            pass  # a second report or an unwritable directory: the refusal itself still stands
+            pass
+        if not self.anchor.exists():
+            return  # no anchor to rename, and a store without its anchor refuses to open
+        try:
+            os.rename(self.anchor, self.dir / (ABORT_MARKER_PREFIX + code))
+            _fsync_dir(self.dir)
+        except OSError as exc:
+            raise EvidenceRefused("abort_not_recorded") from exc
 
 
 class EvidenceStore:

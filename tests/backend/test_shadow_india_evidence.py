@@ -7,6 +7,7 @@ with the sidecar written, every byte kept and every later write refused.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import inspect
 import itertools
@@ -29,6 +30,7 @@ import shadow_india.evidence as evidence_module
 import test_execution_shadow_sim_account as sim
 from shadow_india.evidence import (
     ALLOWED_AFTER_ABORT,
+    ABORT_MARKER_PREFIX,
     ANCHOR_NAME,
     GENESIS,
     LOG_NAME,
@@ -516,6 +518,18 @@ def flip_final_newline(run_dir: Path) -> None:
     (run_dir / LOG_NAME).write_bytes(raw[:-1] + b"x")
 
 
+def log_and_anchor_from_another_run(run_dir: Path) -> None:
+    """A valid chain and anchor, internally consistent, but recorded under another run id."""
+
+    foreign = EvidenceStore.create(
+        run_dir.parent / "foreign", run_id="run2", run_class="plumbing", session_id=SESSION, hashes=HASHES,
+        clock=lambda: FIXED,
+    )
+    fill(foreign, 6)
+    shutil.copyfile(foreign.run_dir / LOG_NAME, run_dir / LOG_NAME)
+    shutil.copyfile(foreign.run_dir / ANCHOR_NAME, run_dir / ANCHOR_NAME)
+
+
 TAMPER_ROWS = [
     ("drop_last_1_valid_prefix", drop_last(1), "log_shorter_than_anchor"),
     ("drop_last_2_valid_prefix", drop_last(2), "log_shorter_than_anchor"),
@@ -536,6 +550,7 @@ TAMPER_ROWS = [
     ("anchor_head_of_another_chain", anchor_head_of_another_chain, "head_mismatch"),
     ("anchor_unreadable", anchor_garbage, "anchor_invalid"),
     ("manifest_edited", edit_manifest, "manifest_hash_mismatch"),
+    ("log_and_anchor_copied_from_another_run", log_and_anchor_from_another_run, "run_mismatch"),
 ]
 
 
@@ -671,6 +686,117 @@ def test_a_wiped_and_recreated_run_fails_the_witness_check(tmp_path):
     with pytest.raises(WitnessMismatch) as caught:
         verify_witness(tmp_path, RUN, pasted)
     assert caught.value.code == "witness_head_not_in_chain"
+
+
+# --- an abort that cannot be written still latches (codex-r2-1) ----------------------------------------
+
+FRESH_OPEN = r"""
+import sys
+import shadow_india.evidence as ev
+
+root, run_id = sys.argv[1:3]
+try:
+    store = ev.EvidenceStore.open(root, run_id=run_id, session_id="s-1")
+    store.append("vm_ambiguous", {"intent_id": "i-fresh"})
+except ev.EvidenceError as exc:
+    print("REFUSED", exc.code)
+else:
+    print("ACCEPTED")
+"""
+
+
+def fresh_process_open_and_append(root: Path) -> str:
+    done = subprocess.run(
+        [sys.executable, "-P", "-c", FRESH_OPEN, str(root), RUN],
+        env={**os.environ, "PYTHONPATH": BACKEND},
+        capture_output=True,
+        timeout=60,
+    )
+    assert done.returncode == 0, done.stderr.decode()
+    return done.stdout.decode().strip()
+
+
+def fail_the_sidecar_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    real = evidence_module._write_new_file
+
+    def write(path: Path, data: bytes) -> None:
+        if Path(path).name == SIDECAR_NAME:
+            raise OSError(errno.ENOSPC, "No space left on device")
+        real(path, data)
+
+    monkeypatch.setattr(evidence_module, "_write_new_file", write)
+
+
+def rolled_back_store_and_pasted_witness(tmp_path: Path) -> tuple[EvidenceStore, str]:
+    store = make_store(tmp_path, count=6)
+    pasted = store.witness_line()
+    write_log(store.run_dir, log_lines(store.run_dir)[:3])
+    write_anchor(store.run_dir, 3, entry_hash_at(store.run_dir, 3))
+    return store, pasted
+
+
+def test_a_witness_mismatch_latches_even_when_the_sidecar_write_fails(tmp_path, monkeypatch):
+    store, pasted = rolled_back_store_and_pasted_witness(tmp_path)
+    run_dir = store.run_dir
+    mutated = snapshot(run_dir)
+    fail_the_sidecar_write(monkeypatch)
+
+    with pytest.raises(EvidenceError):  # the abort is surfaced, not swallowed
+        verify_witness(tmp_path, RUN, pasted)
+    assert not (run_dir / SIDECAR_NAME).exists()
+    # The live store and a second store in this process both refuse, with the abort code.
+    with pytest.raises(EvidenceCorrupt) as live:
+        store.append("vm_ambiguous", {"intent_id": "i-1"})
+    assert live.value.code == "witness_head_not_in_chain"
+    with pytest.raises(EvidenceCorrupt):
+        reopen(tmp_path)
+    with pytest.raises(EvidenceCorrupt):
+        read_records(tmp_path, RUN)
+    # A fresh process refuses too: the fallback marker is durable and carries the code.
+    marker = run_dir / (ABORT_MARKER_PREFIX + "witness_head_not_in_chain")
+    assert marker.exists() and not (run_dir / ANCHOR_NAME).exists()
+    assert fresh_process_open_and_append(tmp_path) == "REFUSED witness_head_not_in_chain"
+    # Every byte is kept: the anchor only changed its name.
+    assert snapshot(run_dir)[marker.name] == mutated[ANCHOR_NAME]
+    assert {k: v for k, v in snapshot(run_dir).items() if k != marker.name} == {
+        k: v for k, v in mutated.items() if k != ANCHOR_NAME
+    }
+
+
+def test_an_abort_that_cannot_be_recorded_anywhere_is_reported_and_still_latches(tmp_path, monkeypatch):
+    store, pasted = rolled_back_store_and_pasted_witness(tmp_path)
+    run_dir = store.run_dir
+    mutated = snapshot(run_dir)
+    fail_the_sidecar_write(monkeypatch)
+
+    def no_rename(src: Any, dst: Any) -> None:
+        raise OSError(errno.EIO, "I/O error")
+
+    monkeypatch.setattr(evidence_module.os, "rename", no_rename)
+    with pytest.raises(EvidenceRefused) as caught:
+        verify_witness(tmp_path, RUN, pasted)
+    assert caught.value.code == "abort_not_recorded"
+    with pytest.raises(EvidenceCorrupt) as live:
+        store.append("vm_ambiguous", {"intent_id": "i-1"})
+    assert live.value.code == "witness_head_not_in_chain"
+    assert snapshot(run_dir) == mutated  # nothing created, cut or rewritten
+
+
+@pytest.mark.parametrize("name", ["delete_the_log", "log_and_anchor_copied_from_another_run"])
+def test_a_corruption_found_by_an_open_store_latches_when_the_sidecar_write_fails(tmp_path, monkeypatch, name):
+    store = make_store(tmp_path, count=6)
+    {row[0]: row[1] for row in TAMPER_ROWS}[name](store.run_dir)
+    mutated = snapshot(store.run_dir)
+    fail_the_sidecar_write(monkeypatch)
+    with pytest.raises(EvidenceCorrupt):
+        store.append("vm_ambiguous", {"intent_id": "i-1"})
+    monkeypatch.undo()  # the disk recovers; the latch and the marker still hold
+    with pytest.raises(EvidenceCorrupt):
+        store.append("vm_ambiguous", {"intent_id": "i-2"})
+    assert fresh_process_open_and_append(tmp_path).startswith("REFUSED ")
+    assert {k: v for k, v in snapshot(store.run_dir).items() if not k.startswith(ABORT_MARKER_PREFIX)} == {
+        k: v for k, v in mutated.items() if k != ANCHOR_NAME
+    }
 
 
 # --- record schemas (D-04) -----------------------------------------------------------------------------
