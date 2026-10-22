@@ -297,8 +297,13 @@ class RiskAgent(BaseAgent):
                 RiskAssessment,
             )
 
+            # The model's own status is kept next to the floored one so an eval can
+            # score floor coverage and model recall separately. It never feeds a decision.
+            model_status = audit_result.status
             audit_result = apply_wash_sale_floor(audit_result, wash_sale_alert, long_entry)
             data = audit_result.model_dump()
+            data["model_status"] = model_status
+            data["floored"] = audit_result.status != model_status
                 
             # Enforce HITL for any trade-related suggestion
             if any(word in suggestion.upper() for word in ["BUY", "SELL", "ORDER", "TRADE"]):
@@ -347,6 +352,10 @@ class RiskAgent(BaseAgent):
             review = RiskAssessment.model_validate(res.data).model_dump()
         except (ValueError, TypeError):
             raise ProviderError("CRITIC_OUTPUT_INVALID", ROLE_RISK_CRITIC) from None
+        # Informational only: the final status above is the verdict; these two say what
+        # the model itself returned before the wash sale floor.
+        review["model_status"] = res.data.get("model_status", review["status"])
+        review["floored"] = bool(res.data.get("floored", False))
         if identity is not None:
             if context.user_context.get("deferred_proposal") is not proposal or proposal_identity(proposal) != identity:
                 raise ModelRegistryError("RISK_REVIEW_REQUIRED", ROLE_RISK_CRITIC)

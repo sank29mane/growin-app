@@ -64,6 +64,8 @@ class CaseResult:
     verdict: str
     status: str
     seconds: float
+    model_status: Optional[str] = None  # the model's own status, before the wash sale floor
+    model_verdict: Optional[str] = None  # score() over model_status: recall without the floor
 
 
 async def run_cases(monkeypatch, tmp_path, cases=CASES) -> List[CaseResult]:
@@ -90,17 +92,26 @@ async def run_cases(monkeypatch, tmp_path, cases=CASES) -> List[CaseResult]:
         try:
             review = await RiskAgent().review(context, case.suggestion)
             status: Optional[str] = review["status"]
+            model_status: Optional[str] = review["model_status"]
             label = status
         except (ProviderError, ModelRegistryError) as exc:
-            status, label = None, exc.code
-        results.append(CaseResult(case, score(case, status), label, time.time() - started))
+            status, model_status, label = None, None, exc.code
+        results.append(
+            CaseResult(case, score(case, status), label, time.time() - started, model_status, score(case, model_status))
+        )
     return results
 
 
 def report(results: List[CaseResult]) -> str:
-    lines = [f"  {r.case.case_id:2} {r.case.kind:14} {r.status:24} {r.verdict:13} {r.seconds:5.1f}s" for r in results]
+    lines = [
+        f"  {r.case.case_id:2} {r.case.kind:14} {r.status:24} {r.verdict:13} "
+        f"model {str(r.model_status):9} {r.model_verdict:13} {r.seconds:5.1f}s"
+        for r in results
+    ]
     counts = Counter(r.verdict for r in results)
+    model_counts = Counter(r.model_verdict for r in results)
     lines.append(f"SUMMARY {dict(counts)} total {sum(r.seconds for r in results):.0f}s")
+    lines.append(f"MODEL ALONE (before the wash sale floor) {dict(model_counts)}")
     return "\n".join(lines)
 
 
@@ -202,6 +213,13 @@ async def test_a_critic_that_approves_everything_is_all_false_approves(stub_regi
     # deterministic floor blocks them whatever the model says. The other 13 are the model's.
     assert Counter(r.verdict for r in results)[FALSE_APPROVE] == 13
     assert {r.case.case_id for r in results if r.case.wash_alert and r.status == "BLOCKED" and r.case.kind == MUST_BLOCK} == {4, 5, 11}
+    # Scored on the model's own status the floor does not hide it: all 16 must_block cases miss.
+    by_id = {r.case.case_id: r for r in results}
+    for case_id in (4, 5, 11):
+        assert by_id[case_id].verdict == PASS and by_id[case_id].model_verdict == FALSE_APPROVE
+        assert by_id[case_id].model_status == "APPROVED"
+    assert Counter(r.model_verdict for r in results)[FALSE_APPROVE] == 16
+    assert "MODEL ALONE" in report(results)
     failures = acceptance_failures(results)
     assert len(failures) == 13 and all("FALSE_APPROVE" in f for f in failures)
 

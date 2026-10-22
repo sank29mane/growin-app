@@ -126,6 +126,7 @@ async def test_a_wash_sale_buy_is_blocked_even_when_the_model_does_not_block(
     stub.structured["RiskAssessment"] = _verdict(model_status)
     review = await RiskAgent().review(_context(), "BUY 10 shares of AAPL")
     assert review["status"] == "BLOCKED"
+    assert review["model_status"] == model_status and review["floored"] is True
     assert WASH_SALE_FLOOR_NOTE in review["compliance_notes"]
     assert "model notes" in review["compliance_notes"]
     assert review["requires_hitl"] is True  # Phase 63: BLOCKED still reaches HITL registration
@@ -139,6 +140,7 @@ async def test_a_model_block_is_left_exactly_as_the_model_wrote_it(stub, registr
     review = await RiskAgent().review(_context(), "BUY 10 shares of AAPL")
     assert review["status"] == "BLOCKED"
     assert review["compliance_notes"] == "the model's own wash sale note"
+    assert review["model_status"] == "BLOCKED" and review["floored"] is False
 
 
 @pytest.mark.asyncio
@@ -148,6 +150,7 @@ async def test_without_the_system_alert_the_model_status_stands(stub, registry_f
     stub.structured["RiskAssessment"] = _verdict(model_status)
     review = await RiskAgent().review(_context(loss_sale=False), "BUY 10 shares of AAPL")
     assert review["status"] == model_status
+    assert review["model_status"] == model_status and review["floored"] is False
     assert WASH_SALE_FLOOR_NOTE not in review["compliance_notes"]
 
 
