@@ -977,7 +977,19 @@ _SIMULATION_TRIGGERS = frozenset(
         f"{_SIM_EVENTS_TABLE}_no_update",
         f"{_SIM_EVENTS_TABLE}_no_delete",
         f"{_SIM_EVENTS_TABLE}_workspace_insert_guard",
+        f"{_SIM_MARKER_TABLE}_no_replace",
+        f"{_SIM_FILLS_TABLE}_no_replace",
+        f"{_SIM_CASH_TABLE}_no_replace",
+        f"{_SIM_EVENTS_TABLE}_no_replace",
     }
+)
+# The key column of each simulation table. A second row with the same key, or the same rowid, is
+# a replacement, never an insert.
+_SIM_KEYS = (
+    (_SIM_MARKER_TABLE, "singleton"),
+    (_SIM_FILLS_TABLE, "booking_id"),
+    (_SIM_CASH_TABLE, "singleton"),
+    (_SIM_EVENTS_TABLE, "event_id"),
 )
 _RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,56}$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -1164,6 +1176,20 @@ def _install_simulation_tables(
                 END
                 """
             )
+    for table, key in _SIM_KEYS:
+        # SQLite runs no DELETE trigger for the row an INSERT OR REPLACE (or REPLACE, or an upsert)
+        # removes unless recursive_triggers is on, and that is a per-connection pragma. A BEFORE
+        # INSERT trigger fires whatever the pragma is, so a replacement is refused on any connection.
+        connection.execute(
+            f"""
+            CREATE TRIGGER {table}_no_replace
+            BEFORE INSERT ON {table}
+            WHEN EXISTS (SELECT 1 FROM {table} WHERE {key} = NEW.{key} OR rowid = NEW.rowid)
+            BEGIN
+                SELECT RAISE(ABORT, '{table} rows are append-only');
+            END
+            """
+        )
     for table in _SIMULATION_TABLES:
         connection.execute(
             f"""
@@ -1445,6 +1471,10 @@ class ExecutionLedger:
             if identity is not None:
                 self._enforce_identity(identity)
                 self._enforce_venue(identity)
+                if identity.kind != "fresh":
+                    # An existing file is validated on a read-only connection, so a file that is
+                    # not exactly what the caller asked for is refused with its bytes untouched.
+                    self._probe_simulation_ledger()
             self._connection = sqlite3.connect(
                 self.path,
                 timeout=busy_timeout_ms / 1_000,
@@ -1458,9 +1488,9 @@ class ExecutionLedger:
             if identity is None or identity.kind == "fresh":
                 self._pin_fresh_file()
             # Every open, fresh or reopen, validates the simulation marker before any startup
-            # recovery can touch the file. A file that is not exactly what the caller asked for
-            # aborts here, writing nothing.
-            self._validate_simulation_ledger_locked()
+            # recovery can touch the file. An existing file was already validated read-only above;
+            # this repeats the check on the writer connection and is the only one a fresh file has.
+            self._validate_simulation_ledger_locked(self._require_connection())
             os.chmod(self.path, 0o600)
             self.recover_abandoned_submissions()
             self.recover_pending_requotes()
@@ -1585,7 +1615,17 @@ class ExecutionLedger:
             ),
         )
 
-    def _validate_simulation_ledger_locked(self) -> None:
+    def _probe_simulation_ledger(self) -> None:
+        """Validate an existing file on a mode=ro connection, before any pragma or write."""
+
+        probe = sqlite3.connect(_ro_uri(self.path), uri=True)
+        try:
+            probe.row_factory = sqlite3.Row
+            self._validate_simulation_ledger_locked(probe)
+        finally:
+            probe.close()
+
+    def _validate_simulation_ledger_locked(self, connection: sqlite3.Connection) -> None:
         """Decide, once per open, whether this file is a simulation ledger. Never repairs.
 
         (a) No marker, no simulation table, a non-``sim-`` account and no ``SimulationInit``:
@@ -1594,7 +1634,6 @@ class ExecutionLedger:
         (c) Anything else aborts with ``LedgerError`` and writes nothing.
         """
 
-        connection = self._require_connection()
         tables = {
             str(row[0])
             for row in connection.execute(

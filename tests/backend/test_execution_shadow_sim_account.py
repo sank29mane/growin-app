@@ -136,9 +136,14 @@ def test_a_fresh_simulation_ledger_reopens_as_a_simulation_ledger(tmp_path, monk
     order: list[str] = []
     validate = ExecutionLedger._validate_simulation_ledger_locked
     recover = ExecutionLedger.recover_abandoned_submissions
+    configure = ExecutionLedger._configure
+    monkeypatch.setattr(
+        ExecutionLedger, "_configure",
+        lambda self, timeout: (order.append("configure"), configure(self, timeout))[1],
+    )
     monkeypatch.setattr(
         ExecutionLedger, "_validate_simulation_ledger_locked",
-        lambda self: (order.append("validate"), validate(self))[1],
+        lambda self, connection: (order.append("validate"), validate(self, connection))[1],
     )
     monkeypatch.setattr(
         ExecutionLedger, "recover_abandoned_submissions",
@@ -148,7 +153,8 @@ def test_a_fresh_simulation_ledger_reopens_as_a_simulation_ledger(tmp_path, monk
     try:
         assert again.ledger.is_simulation_ledger
         assert again.ledger.simulated_cash_view().seed == SEED
-        assert order == ["validate", "recover"]
+        # Read-only validation, then the writable configuration, then the writer-side check.
+        assert order == ["validate", "configure", "validate", "recover"]
     finally:
         again.close()
 
@@ -168,6 +174,8 @@ SIM_TRIGGER_NAMES = (
     "simulated_cash_no_delete", "simulated_cash_workspace_insert_guard",
     "simulated_cash_identity_immutable", "simulated_cash_events_no_update",
     "simulated_cash_events_no_delete", "simulated_cash_events_workspace_insert_guard",
+    "simulation_account_no_replace", "simulated_fills_no_replace", "simulated_cash_no_replace",
+    "simulated_cash_events_no_replace",
 )
 
 
@@ -177,6 +185,10 @@ def _tamper_missing_table(path: Path) -> None:
 
 def _tamper_missing_trigger(path: Path) -> None:
     raw(path, drop=["simulated_fills_no_delete"])
+
+
+def _tamper_missing_no_replace_trigger(path: Path) -> None:
+    raw(path, drop=["simulated_cash_events_no_replace"])
 
 
 def _tamper_missing_seed(path: Path) -> None:
@@ -215,6 +227,7 @@ def _tamper_all_simulation_objects_removed(path: Path) -> None:
 TAMPERS = {
     "missing_table": _tamper_missing_table,
     "missing_trigger": _tamper_missing_trigger,
+    "missing_no_replace_trigger": _tamper_missing_no_replace_trigger,
     "missing_seed_row": _tamper_missing_seed,
     "marker_workspace": _tamper_marker_workspace,
     "marker_binding": _tamper_marker_binding,
@@ -273,6 +286,126 @@ def test_a_simulation_init_on_an_existing_file_without_a_marker_aborts(tmp_path)
             venue=init.binding, simulation=init,
         )
     assert file_sha(root / "ledger.sqlite3") == before
+
+
+def _journal_mode(path: Path) -> str:
+    probe = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return str(probe.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+    finally:
+        probe.close()
+
+
+@pytest.mark.parametrize(
+    "dropped", ["simulated_fills_no_delete", "simulated_fills_no_replace", "simulation_account_no_replace"]
+)
+def test_a_delete_journal_file_missing_a_trigger_is_refused_byte_for_byte(tmp_path, dropped):
+    path = _closed_simulation_file(tmp_path)
+    raw(path, "PRAGMA journal_mode = DELETE", drop=[dropped])
+    assert _journal_mode(path) == "delete"
+    before = file_sha(path)
+    init = SimulationInit(RUN_ID, Workspace.INDIA, binding("breeze_relay", "sim-run1", "INR"), SEED)
+    with pytest.raises(LedgerError, match="missing a trigger"):
+        ExecutionLedger(path, workspace="india", require_approval=False, venue=init.binding, simulation=init)
+    # The refusal came from the read-only pass: no WAL switch, no header rewrite, no side files.
+    assert file_sha(path) == before
+    assert _journal_mode(path) == "delete"
+    assert sorted(p.name for p in path.parent.glob("ledger.sqlite3-*")) == []
+
+
+def test_an_intact_delete_journal_file_still_opens_and_then_runs_in_wal(tmp_path):
+    path = _closed_simulation_file(tmp_path)
+    raw(path, "PRAGMA journal_mode = DELETE")
+    init = SimulationInit(RUN_ID, Workspace.INDIA, binding("breeze_relay", "sim-run1", "INR"), SEED)
+    opened = ExecutionLedger(path, workspace="india", require_approval=False, venue=init.binding, simulation=init)
+    try:
+        assert opened.is_simulation_ledger
+        assert _journal_mode(path) == "wal"
+    finally:
+        opened.close()
+
+
+def _replacement_statements(path: Path, table: str, key: str) -> list[str]:
+    """Four ways to put a row over an existing one, built from the table's own first row."""
+
+    connection = sqlite3.connect(path)
+    try:
+        columns = [row[1] for row in connection.execute(f"PRAGMA table_info({table})")]
+    finally:
+        connection.close()
+    names = ", ".join(columns)
+    statements = [
+        f"INSERT OR REPLACE INTO {table} ({names}) SELECT {names} FROM {table}",
+        f"REPLACE INTO {table} ({names}) SELECT {names} FROM {table}",
+        f"INSERT INTO {table} ({names}) SELECT {names} FROM {table} WHERE true "
+        f"ON CONFLICT DO UPDATE SET {columns[1]} = excluded.{columns[1]}",
+    ]
+    if key != "singleton":
+        other = ", ".join("'other-key'" if column == key else column for column in columns)
+        # A new key on an existing rowid still deletes the old row under REPLACE.
+        statements.append(
+            f"INSERT OR REPLACE INTO {table} (rowid, {names}) SELECT rowid, {other} FROM {table}"
+        )
+    return statements
+
+
+@pytest.mark.parametrize(
+    "table,key",
+    [
+        ("simulation_account", "singleton"),
+        ("simulated_fills", "booking_id"),
+        ("simulated_cash", "singleton"),
+        ("simulated_cash_events", "event_id"),
+    ],
+)
+def test_a_replacing_insert_is_refused_on_every_append_only_simulation_table(tmp_path, table, key):
+    rig = make_rig(tmp_path)
+    try:
+        buy_and_fill(rig, "r1", 4)
+    finally:
+        rig.close()
+    path = rig.ledger.path
+    # A plain connection with default pragmas: recursive_triggers is off, as it is for any tamper tool.
+    plain = sqlite3.connect(path, isolation_level=None)
+    try:
+        assert plain.execute("PRAGMA recursive_triggers").fetchone()[0] == 0
+        before = plain.execute(f"SELECT rowid, * FROM {table} ORDER BY rowid").fetchall()
+        assert before
+        for statement in _replacement_statements(path, table, key):
+            with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+                plain.execute(statement)
+            assert plain.execute(f"SELECT rowid, * FROM {table} ORDER BY rowid").fetchall() == before
+    finally:
+        plain.close()
+
+
+def test_a_replaced_fill_row_cannot_hide_open_exposure_from_the_capital_cap(tmp_path):
+    rig = make_rig(tmp_path, capital_cap="1200.00", per_position_cap="1200.00")
+    try:
+        prepare_buy(rig, "p", quantity=10)
+        book(rig, "p", 4, "100.00", "0")
+    finally:
+        rig.close()
+    path = rig.ledger.path
+    # Rewrite the booked fill as if all 10 had filled: the 6 still open would leave the exposure.
+    plain = sqlite3.connect(path, isolation_level=None)
+    try:
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            plain.execute(
+                "INSERT OR REPLACE INTO simulated_fills SELECT booking_id, proposal_id, workspace, side, "
+                "ticker, '10', '10', price, gross, charges, net_cash_out, realised_pnl, schedule_sha256, "
+                "scenario_set_sha256, attempt_id, payload_sha256, created_at FROM simulated_fills"
+            )
+    finally:
+        plain.close()
+    again = reopen(rig)
+    try:
+        # 400 held + 600 open + 800 new is 1800 against 1200: denied, as it was before the attempt.
+        denied = prepare_buy(again, "q", quantity=8)
+        assert denied.decision is AdmissionDecision.DENIED and denied.reason_code == "capital_cap"
+        assert again.ledger.get_reservation("q") is None
+    finally:
+        again.close()
 
 
 def _paper_ledger(tmp_path: Path) -> Path:
