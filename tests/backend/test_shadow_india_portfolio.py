@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import ast
 import json
-from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -25,6 +24,7 @@ from india_limits_support import NOW, make_evidence
 from risk_india import drawdown, exits, rules
 from risk_india.state import LatchStore, state_path_for, write_state
 from shadow_india import policy
+from shadow_india import portfolio as portfolio_module
 from shadow_india.admission import SIMULATOR_DRAWDOWN_BASIS, QuoteSample
 from shadow_india.evidence import EvidenceStore
 from shadow_india.portfolio import (
@@ -32,6 +32,7 @@ from shadow_india.portfolio import (
     MARK_RAW_CLOSE,
     PEAK_SOURCE,
     ExitPlan,
+    Holding,
     Instrument,
     PortfolioAborted,
     PortfolioError,
@@ -98,11 +99,12 @@ class FakeAccount:
         self.bookings: list[SimpleNamespace] = []
         self.adjustments: list[SimpleNamespace] = []
 
-    def _book(self, side: str, symbol: str, quantity: int, proposal_id: str) -> None:
+    def _book(self, side: str, symbol: str, quantity: int, proposal_id: str, price: str, charges: str) -> None:
         self.bookings.append(
             SimpleNamespace(
                 booking_id=f"booking-{len(self.bookings) + 1}", proposal_id=proposal_id, side=side,
-                ticker=f"NSE:CASH:{symbol}", delta_quantity=Decimal(quantity),
+                ticker=f"NSE:CASH:{symbol}", delta_quantity=Decimal(quantity), price=Decimal(price),
+                charges=Decimal(charges),
             )
         )
 
@@ -111,7 +113,7 @@ class FakeAccount:
         cost = quantity * Decimal(price)
         self.held[symbol] = (held_q + quantity, held_c + cost)
         self.cash -= cost + Decimal(charges)
-        self._book("BUY", symbol, quantity, f"buy-{len(self.bookings) + 1}")
+        self._book("BUY", symbol, quantity, f"buy-{len(self.bookings) + 1}", price, charges)
 
     def sell(self, symbol: str, quantity: int, price: str, charges: str = "0", *, proposal_id: str | None = None) -> None:
         """A booked sell. ``proposal_id`` is the exit intent id it was booked under; none means a sell that is not
@@ -120,7 +122,7 @@ class FakeAccount:
         left = held_q - quantity
         self.held[symbol] = (left, held_c * left / held_q if held_q else Decimal(0))
         self.cash += quantity * Decimal(price) - Decimal(charges)
-        self._book("SELL", symbol, quantity, proposal_id or f"manual-{len(self.bookings) + 1}")
+        self._book("SELL", symbol, quantity, proposal_id or f"manual-{len(self.bookings) + 1}", price, charges)
 
     def adjust(self, symbol: str, quantity: int, kind: str = "bonus", ex_date: date | None = None) -> None:
         """A split or bonus booked: the quantity changes, the cost basis does not, and an explicit adjustment record
@@ -183,8 +185,8 @@ class Fake:
         return self.portfolio.mark_session(day, {ISINS[s]: Decimal(c) for s, c in closes.items()})
 
     def records(self, kind: str) -> list[dict[str, Any]]:
-        """The evidence lines of ``kind``. The ``sell_baseline`` latch lines are bookkeeping, read through ``store``."""
-        return [r for r in self.store.records() if r["kind"] == kind and r.get("latch") != "sell_baseline"]
+        """The evidence lines of ``kind``. The ``sell_baseline`` and ``booking_baseline`` latch lines are bookkeeping, read through ``store``."""
+        return [r for r in self.store.records() if r["kind"] == kind and r.get("latch") not in ("sell_baseline", "booking_baseline")]
 
     def exit_id(self, isin: str, attempt: int = 1) -> str:
         """The intent id a runner builds for the open exit on ``isin`` (read from the latch, as a runner would)."""
@@ -2102,7 +2104,719 @@ def test_codex_r3_3_a_partial_sale_of_a_carried_name_scales_the_carried_value_by
         sell_and_fill(rig, "trim-by-hand", "RELIANCE", 40)
         after = portfolio.mark_session(D3, {R_ISIN: Decimal("75")})
         (line,) = [r for r in store.records() if r["kind"] == "position_mark" and r["as_of_date"] == D3.isoformat()]
-        assert (line["quantity"], line["carried_quantity"], line["carried_value"]) == ("60", "60", "9000.00")
+        assert (line["quantity"], line["carried_quantity"], Decimal(line["carried_value"])) == ("60", "60", Decimal("9000"))
         assert after.equity == Decimal("44000") + Decimal("9000")
     finally:
         rig.close()
+
+
+# --- codex r5 residual: a carried value reconciles the sells and the buys booked while paused, separately -----------------------------------
+
+
+def carried_world(tmp_path: Path) -> Fake:
+    """100 AAA bought at 100 (cost 10000), marked at 150 (value 15000), carried through a bonus ex-date at 75."""
+    world = Fake(tmp_path)
+    world.account.buy("AAA", 100, "100")
+    world.mark(D1, AAA="150")
+    carried = world.portfolio.mark_session(D2, {A: Decimal("75")}, structural_actions={A: "bonus"})
+    assert carried.paused_isins == (A,) and carried.equity == Decimal("55000")
+    return world
+
+
+def carried_line(world: Fake, day: date) -> dict[str, Any]:
+    (line,) = [r for r in world.records("position_mark") if r["as_of_date"] == day.isoformat() and r["isin"] == A]
+    return line
+
+
+def test_codex_r5_1_a_sell_alone_while_carried_still_takes_its_shares_out_of_the_carry(tmp_path):
+    """The r4 control: 100 at 15000, 40 sold, 60 x 150 = 9000. Nothing booked beside it."""
+    world = carried_world(tmp_path)
+    world.account.sell("AAA", 40, "75")
+    after = world.mark(D3, AAA="75")
+    line = carried_line(world, D3)
+    assert (line["quantity"], line["carried_quantity"], line["carried_value"]) == ("60", "60", "9000")
+    assert after.equity == world.account.cash + Decimal("9000")
+
+
+def test_codex_r5_1_a_buy_booked_beside_a_hand_sell_adds_its_cost_and_the_sell_removes_only_its_shares(tmp_path):
+    """The probe on the fake account: 100 shares carried at 10000, sell 40 at 100, an earlier admitted buy of 20 books
+    at 101. The 80 shares carry 60 x 100 + 20 x 101 = 8020. Net-quantity scaling gave 8000 and dropped the 2020."""
+    world = Fake(tmp_path)
+    world.account.buy("AAA", 100, "100")
+    world.mark(D1, AAA="100")
+    world.portfolio.mark_session(D2, {A: Decimal("50")}, structural_actions={A: "bonus"})
+    world.account.sell("AAA", 40, "100")
+    world.account.buy("AAA", 20, "101")
+    after = world.mark(D3, AAA="50")
+    line = carried_line(world, D3)
+    assert (line["quantity"], line["carried_quantity"], line["carried_value"]) == ("80", "80", "8020")
+    assert after.equity == world.account.cash + Decimal("8020")
+
+
+def test_codex_r5_1_the_order_of_the_sell_and_the_buy_does_not_change_the_value(tmp_path):
+    for sell_first in (True, False):
+        world = Fake(tmp_path / str(sell_first))
+        world.account.buy("AAA", 100, "100")
+        world.mark(D1, AAA="100")
+        world.portfolio.mark_session(D2, {A: Decimal("50")}, structural_actions={A: "bonus"})
+        if sell_first:
+            world.account.sell("AAA", 40, "100")
+            world.account.buy("AAA", 20, "101")
+        else:
+            world.account.buy("AAA", 20, "101")
+            world.account.sell("AAA", 40, "100")
+        world.mark(D3, AAA="50")
+        assert carried_line(world, D3)["carried_value"] == "8020"
+
+
+def test_codex_r5_1_a_buy_alone_while_carried_adds_its_cost(tmp_path):
+    world = carried_world(tmp_path)
+    world.account.buy("AAA", 20, "101")
+    after = world.mark(D3, AAA="75")
+    line = carried_line(world, D3)
+    assert (line["quantity"], line["carried_quantity"], line["carried_value"]) == ("120", "120", "17020")
+    assert after.equity == world.account.cash + Decimal("17020")
+
+
+def test_codex_r5_1_the_next_carried_mark_starts_from_the_last_one_and_counts_only_new_bookings(tmp_path):
+    world = Fake(tmp_path)
+    world.account.buy("AAA", 100, "100")
+    world.mark(D1, AAA="100")
+    world.portfolio.mark_session(D2, {A: Decimal("50")}, structural_actions={A: "bonus"})
+    world.account.sell("AAA", 40, "100")
+    world.account.buy("AAA", 20, "101")
+    world.mark(D3, AAA="50")
+    world.account.sell("AAA", 10, "100")
+    world.account.buy("AAA", 5, "102")
+    world.mark(D4, AAA="50")
+    line = carried_line(world, D4)
+    # 8020 x 70 / 80 = 7017.5 from D3's value, plus the 510 the new buy cost. Counting D3's bookings again, or none, misses it.
+    assert (line["carried_quantity"], line["carried_value"]) == ("75", "7527.5")
+
+
+def test_codex_r5_1_a_full_sale_leaves_nothing_in_the_carry_and_the_pause_releases_by_flat(tmp_path):
+    world = carried_world(tmp_path)
+    world.account.sell("AAA", 100, "150")
+    after = world.mark(D3, AAA="75")
+    assert not [r for r in world.records("position_mark") if r["as_of_date"] == D3.isoformat()]
+    assert after.equity == world.account.cash and after.paused_isins == ()
+    world.portfolio.release_corporate_action(A, "sold flat")
+    assert world.portfolio.entry_block_reasons(A) == ()
+
+
+def test_codex_r5_1_a_sale_past_the_carried_lot_takes_the_rest_from_the_bought_shares(tmp_path):
+    """100 carried at 10000, a buy of 20 at 101 books, 110 are sold: 10 shares left, all from the bought lot."""
+    world = Fake(tmp_path)
+    world.account.buy("AAA", 100, "100")
+    world.mark(D1, AAA="100")
+    world.portfolio.mark_session(D2, {A: Decimal("50")}, structural_actions={A: "bonus"})
+    world.account.buy("AAA", 20, "101")
+    world.account.sell("AAA", 110, "100")
+    world.mark(D3, AAA="50")
+    line = carried_line(world, D3)
+    assert (line["carried_quantity"], line["carried_value"]) == ("10", "1010")
+
+
+def test_codex_r5_1_on_the_real_ledger_a_buy_booked_beside_a_hand_sell_carries_its_cost_and_no_false_halt(tmp_path):
+    """Codex's probe. 100 RELIANCE carried at 10000; while paused 40 are sold at 100 by hand and an admitted buy of 20
+    books at 101. 80 shares carry 8020 (60 x 100 + 20 x 101); net-quantity scaling gave 8000. With TCS and INFY marked
+    near the line the total is 46004 against the 46000 halt: 8000 read 45984 and halted the entries and halved three
+    names."""
+    rig, store, portfolio = real_world(tmp_path, "RELIANCE", "TCS", "INFY")
+    try:
+        for symbol in ("RELIANCE", "TCS", "INFY"):
+            own(rig, symbol, 100)
+        same = {R_ISIN: Decimal("100"), T_ISIN: Decimal("100"), ISINS["INFY"]: Decimal("100")}
+        portfolio.mark_session(D1, same)
+        admission = run(rig.adapter.prepare(buy_intent(rig, "late-buy", "RELIANCE", 20, "101.00"), samples_for("RELIANCE", "101.00")))
+        assert admission.decision is AdmissionDecision.ADMITTED, admission.reason_code
+        carried = portfolio.mark_session(D2, same, structural_actions={R_ISIN: "bonus"})
+        assert carried.paused_isins == (R_ISIN,) and carried.equity == Decimal("50000")
+        sell_and_fill(rig, "trim-by-hand", "RELIANCE", 40)
+        book(rig, "late-buy", 20, "101", attempt="attempt-late")
+        near = {**same, T_ISIN: Decimal("80.02"), ISINS["INFY"]: Decimal("80.02")}
+        after = portfolio.mark_session(D3, near)
+        (line,) = [r for r in store.records() if r["kind"] == "position_mark" and r["as_of_date"] == D3.isoformat() and r["isin"] == R_ISIN]
+        assert (line["quantity"], line["carried_quantity"], Decimal(line["carried_value"])) == ("80", "80", Decimal("8020"))
+        assert after.equity == Decimal("46004.00")
+        # TCS and INFY at 80.02 against a cost of 100 stop out on their own; the carried name must not move the halt.
+        assert not after.state.halt and not [b for b in after.batches if b.reason == "halve"]
+        assert R_ISIN not in after.state.open_exits
+    finally:
+        rig.close()
+
+
+# --- review r1 (Codex r1 + Opus r1 at 5c5c6bc5): the fallback is fail-closed, sales replay in order, buys carry charges ------------------------
+
+
+def legacy_mark(world: Fake) -> None:
+    """The last committed mark has no booking count (a line written before the count existed)."""
+    world.portfolio._booking_boundary = lambda isin, session: None  # type: ignore[method-assign]
+
+
+def pauses(world: Fake) -> list[str]:
+    return [p.event for p in policy.run_state(world.store).open_pauses if p.scope == f"isin:{A}"]
+
+
+def test_codex_r1_1_a_mark_with_no_booking_count_never_values_above_the_ledger_reading_and_pauses_the_name(tmp_path):
+    """Codex probe on the fake ledger: 100 carried at 15000, sell 40 at 100, a pre-admitted buy of 20 books at 101. The
+    ledger reading is 60 x 150 + 20 x 101 = 11020; the net-quantity fallback said 12000 and lifted the equity."""
+    world = carried_world(tmp_path)
+    legacy_mark(world)
+    world.account.sell("AAA", 40, "100")
+    world.account.buy("AAA", 20, "101")
+    after = world.mark(D3, AAA="75")
+    value = Decimal(carried_line(world, D3)["carried_value"])
+    assert value <= Decimal("11020") and value > 0
+    assert after.equity <= world.account.cash + Decimal("11020") and after.peak == Decimal("55000")
+    assert "carry_unreconciled" in pauses(world) and world.portfolio.buys_blocked(A)
+
+
+def test_opus_r1_1_a_bonus_with_no_booking_row_then_a_sell_never_lifts_the_peak(tmp_path):
+    """Opus probe B: 100 carried at 15000, a 1:1 bonus booked as a quantity change only (no adjustment record), then 40
+    sold at 75. Held 160, cost 8000. The fallback read 15000 + (8000 - 10000) = 13000 and moved the peak."""
+    world = carried_world(tmp_path)
+    world.account.held["AAA"] = (200, world.account.held["AAA"][1])  # quantity only: no booking, no adjustment record
+    world.account.sell("AAA", 40, "75")
+    after = world.mark(D3, AAA="75")
+    value = Decimal(carried_line(world, D3)["carried_value"])
+    assert 0 < value <= Decimal("12000")  # the fair reading (bonus first, then the sell) is 12000
+    assert after.peak == Decimal("55000") and after.equity <= world.account.cash + Decimal("12000")
+    assert "carry_unreconciled" in pauses(world)
+
+
+def test_opus_r1_1_an_explicit_adjustment_record_explains_the_extra_shares_without_a_second_pause(tmp_path):
+    world = carried_world(tmp_path)
+    world.account.adjust("AAA", 200)
+    world.account.sell("AAA", 40, "75")
+    after = world.mark(D3, AAA="75")
+    assert Decimal(carried_line(world, D3)["carried_value"]) <= Decimal("12000")
+    assert after.peak == Decimal("55000")
+    assert "carry_unreconciled" not in pauses(world)
+
+
+def test_a_replay_that_misses_the_held_quantity_pauses_and_the_operator_clears_it_with_resume(tmp_path):
+    world = carried_world(tmp_path)
+    world.account.held["AAA"] = (90, world.account.held["AAA"][1])  # ten shares gone with no booking
+    after = world.mark(D3, AAA="75")
+    assert Decimal(carried_line(world, D3)["carried_value"]) <= Decimal("13500") and after.peak == Decimal("55000")
+    assert "carry_unreconciled" in pauses(world)
+    seq = next(p.seq for p in policy.run_state(world.store).open_pauses if p.event == "carry_unreconciled")
+    policy.resume(world.store, "operator reviewed the ledger", pause_seqs=[seq])
+    assert "carry_unreconciled" not in pauses(world)
+
+
+def test_a_reconciled_carry_raises_no_unreconciled_pause(tmp_path):
+    world = carried_world(tmp_path)
+    world.account.sell("AAA", 40, "75")
+    world.account.buy("AAA", 20, "101")
+    world.mark(D3, AAA="75")
+    assert Decimal(carried_line(world, D3)["carried_value"]) == Decimal("11020")
+    assert "carry_unreconciled" not in pauses(world)
+
+
+def test_codex_r1_2_a_sale_consumes_only_the_lots_held_when_it_books_not_a_later_buy(tmp_path):
+    """Carry 100 at 10000; buy 20 at 101; sell 110 at 100; buy 20 at 99. The sale takes the carried lot and 10 of the
+    first buy; the second buy was not held yet. Remaining: 10 x 101 + 20 x 99 = 2990. Pooling the buys said 3000."""
+    world = Fake(tmp_path)
+    world.account.buy("AAA", 100, "100")
+    world.mark(D1, AAA="100")
+    world.portfolio.mark_session(D2, {A: Decimal("50")}, structural_actions={A: "bonus"})
+    world.account.buy("AAA", 20, "101")
+    world.account.sell("AAA", 110, "100")
+    world.account.buy("AAA", 20, "99")
+    after = world.mark(D3, AAA="50")
+    line = carried_line(world, D3)
+    assert (line["carried_quantity"], Decimal(line["carried_value"])) == ("30", Decimal("2990"))
+    assert after.equity == world.account.cash + Decimal("2990") and "carry_unreconciled" not in pauses(world)
+
+
+def test_opus_r1_3_a_buy_charge_is_part_of_the_cost_a_carried_buy_adds_on_the_real_ledger(tmp_path):
+    """Codex's probe with a 7.50 charge on the buy: 100 carried at 15000, 40 sold, 20 bought at 101 plus 7.50."""
+    rig, store, portfolio = real_world(tmp_path, "RELIANCE")
+    try:
+        own(rig, "RELIANCE", 100)
+        portfolio.mark_session(D1, {R_ISIN: Decimal("150")})
+        admission = run(rig.adapter.prepare(buy_intent(rig, "late-buy", "RELIANCE", 20, "101.00"), samples_for("RELIANCE", "101.00")))
+        assert admission.decision is AdmissionDecision.ADMITTED, admission.reason_code
+        portfolio.mark_session(D2, {R_ISIN: Decimal("75")}, structural_actions={R_ISIN: "bonus"})
+        sell_and_fill(rig, "trim-by-hand", "RELIANCE", 40)
+        book(rig, "late-buy", 20, "101", charges="7.50", attempt="attempt-late")
+        portfolio.mark_session(D3, {R_ISIN: Decimal("75")})
+        (line,) = [r for r in store.records() if r["kind"] == "position_mark" and r["as_of_date"] == D3.isoformat() and r["isin"] == R_ISIN]
+        assert Decimal(line["carried_value"]) == Decimal("11027.50")
+    finally:
+        rig.close()
+
+
+# --- review r2 (Codex r2 + Opus r2 at 553eb8e6): the unreconciled search is bounded, a crashed attempt's boundary is read by session -----------
+
+
+def spy_on_replays(monkeypatch: pytest.MonkeyPatch, ceiling: int) -> list[int]:
+    """Count the replay steps (one booking applied = one step) and stop the row the moment the work passes ``ceiling``,
+    so a search that lost its bound turns the row red in milliseconds instead of running for a minute."""
+
+    real = ShadowPortfolio._replay
+    steps = [0]
+
+    def counted(base: Any, since: Any, **kwargs: Any):
+        steps[0] += len(since) + 1
+        assert steps[0] <= ceiling, f"the unreconciled search spent {steps[0]} replay steps, past {ceiling}"
+        return real(base, since, **kwargs)
+
+    monkeypatch.setattr(ShadowPortfolio, "_replay", staticmethod(counted))
+    return steps
+
+
+def many_bookings_world(tmp_path: Path, pairs: int) -> Fake:
+    """100 carried at 15000 (unit 150); then ``pairs`` times a buy of 2 at 101 and a sell of 1 at 100, so the ledger holds
+    100 + pairs shares. Every boundary but the first is short of the held quantity: the worst case for the search."""
+    world = carried_world(tmp_path)
+    for _ in range(pairs):
+        world.account.buy("AAA", 2, "101")
+        world.account.sell("AAA", 1, "100")
+    return world
+
+
+@pytest.mark.parametrize("known_count", [False, True], ids=["legacy_line_no_count", "count_known_but_short"])
+def test_codex_r2_1_an_800_booking_unreconciled_row_is_valued_in_bounded_work_and_still_pauses(tmp_path, monkeypatch, known_count):
+    """Codex r2 P2: 401 and 801 bookings each took over 50 seconds. The work is counted, not timed (timing rows flake
+    under xdist): the replays stay inside the budget, the value is at or below a reading the exhaustive search would have
+    had (the first boundary, 50500), above zero, and the name still pauses with its buys blocked."""
+    world = many_bookings_world(tmp_path, 400)
+    if known_count:
+        world.portfolio._booking_boundary = lambda isin, session: 1 if session == D2 else None  # type: ignore[method-assign]
+        world.account.held["AAA"] = (world.account.held["AAA"][0] + 7, world.account.held["AAA"][1])  # 7 shares no booking explains
+    else:
+        legacy_mark(world)
+    assert len(world.account.bookings) == 801
+    steps = spy_on_replays(monkeypatch, portfolio_module.CARRY_SEARCH_BUDGET)
+    after = world.mark(D3, AAA="75")
+    assert steps[0] <= 801  # at most the one plain replay
+    value = Decimal(carried_line(world, D3)["carried_value"])
+    assert 0 < value <= Decimal("50500")
+    assert after.peak == Decimal("55000") and after.equity <= world.account.cash + Decimal("50500")
+    assert "carry_unreconciled" in pauses(world) and world.portfolio.buys_blocked(A)
+
+
+def test_codex_r2_1_the_floor_is_the_one_pass_answer_when_the_search_would_pass_the_budget(tmp_path, monkeypatch):
+    """The legacy line with 801 bookings: the first boundary's reading is 50,500; the floor is the end boundary's
+    (the base lot less its one sale): 15000 - 150 = 14850, found with no search at all."""
+    world = many_bookings_world(tmp_path, 400)
+    legacy_mark(world)
+    steps = spy_on_replays(monkeypatch, 0)
+    world.mark(D3, AAA="75")
+    assert steps[0] == 0
+    value = Decimal(carried_line(world, D3)["carried_value"])
+    assert Decimal("14850") - Decimal("0.0001") <= value <= Decimal("14850.0001"), value
+
+
+def small_scenarios() -> list[tuple[int, str, list[tuple[str, int, str]], int]]:
+    """(base quantity, base value, bookings, held quantity): hand-picked shapes plus seeded random ones, all small."""
+    import random
+
+    rng = random.Random(611)
+    out: list[tuple[int, str, list[tuple[str, int, str]], int]] = [
+        (100, "15000", [("SELL", 40, "100"), ("BUY", 20, "101")], 80),
+        (100, "15000", [("BUY", 20, "101"), ("SELL", 110, "100"), ("BUY", 20, "99")], 30),
+        (100, "15000", [("SELL", 40, "75")], 160),
+        (100, "15000", [("SELL", 40, "75")], 90),
+        (100, "15000", [], 100),
+        (100, "15000", [("SELL", 100, "75"), ("BUY", 3, "90")], 3),
+    ]
+    for _ in range(250):
+        n = rng.randint(0, 5)
+        rows = [(rng.choice(["BUY", "SELL"]), rng.randint(1, 40), str(rng.randint(60, 220))) for _ in range(n)]
+        held = rng.randint(1, 200)
+        out.append((rng.randint(1, 150), str(rng.randint(500, 30000)), rows, held))
+    return out
+
+
+@pytest.mark.parametrize("base_bookings", [None, 0], ids=["legacy_count", "known_count"])
+def test_codex_r2_1_the_capped_value_is_never_above_the_exhaustive_search_and_never_zero(tmp_path, monkeypatch, base_bookings):
+    """The cap path against the exhaustive one over the same ledgers: a budget of zero (floor only) never reads above the
+    full search, and never reads zero (``mark_session`` would turn a zero into the ledger cost)."""
+    world = Fake(tmp_path)
+    holding = Holding(Instrument(A, "AAA", "AAA"), 1, Decimal(0))
+    checked = 0
+    for quantity, value, rows, held in small_scenarios():
+        bookings = [
+            SimpleNamespace(
+                booking_id=f"b{i}", proposal_id=f"p{i}", side=side, ticker="NSE:CASH:AAA", delta_quantity=Decimal(q),
+                price=Decimal(price), charges=Decimal("0.5"),
+            )
+            for i, (side, q, price) in enumerate(rows)
+        ]
+        holding = Holding(Instrument(A, "AAA", "AAA"), held, Decimal(held) * 100)
+        base = portfolio_module._Carry(Decimal(quantity), Decimal(value), Decimal(quantity) * 100, base_bookings)
+        monkeypatch.setattr(portfolio_module, "CARRY_SEARCH_BUDGET", 10**12)
+        exhaustive, exhaustive_ok = world.portfolio._carried_value(holding, base, bookings)
+        monkeypatch.setattr(portfolio_module, "CARRY_SEARCH_BUDGET", 0)
+        capped, capped_ok = world.portfolio._carried_value(holding, base, bookings)
+        if exhaustive_ok:
+            continue  # reconciled to the ledger: the replay answers, the cap never applies
+        assert not capped_ok
+        assert 0 < capped <= exhaustive, (quantity, value, rows, held, capped, exhaustive)
+        checked += 1
+    assert checked > 100
+
+
+def test_codex_r2_1_a_search_inside_the_budget_is_still_exhaustive(tmp_path, monkeypatch):
+    """The r1 probe sits far under the budget: the search still runs (replays are counted) and still reads at or below
+    the ledger reading, 11020."""
+    world = carried_world(tmp_path)
+    legacy_mark(world)
+    steps = spy_on_replays(monkeypatch, portfolio_module.CARRY_SEARCH_BUDGET)
+    world.account.sell("AAA", 40, "100")
+    world.account.buy("AAA", 20, "101")
+    world.mark(D3, AAA="75")
+    assert steps[0] > 0
+    assert 0 < Decimal(carried_line(world, D3)["carried_value"]) <= Decimal("11020")
+
+
+def test_opus_r2_probe_e_a_crashed_attempts_boundary_is_never_read_as_the_session_before_it(tmp_path, monkeypatch):
+    """Opus r2 probe E: carried at D2 (100 at 15000). A buy of 20 at 101 books, the D3 attempt dies before the latch line
+    (its boundary line is written, naming 2 bookings), then a sell of 10 books and the retry writes its own line (3). The
+    carry starts from D2's boundary (1 booking), so it replays buy and sell: 90 x 150 + 2020 = 15520, reconciled, no
+    pause. A boundary that ignores the session reads the retry's line for D2 and sees no bookings since."""
+    world = carried_world(tmp_path)
+    world.account.buy("AAA", 20, "101")
+    crash_before_latch(world, monkeypatch)
+    with pytest.raises(Died):
+        world.mark(D3, AAA="75")
+    monkeypatch.undo()
+    world.account.sell("AAA", 10, "100")
+    again = world.restart()
+    after = again.mark(D3, AAA="75")
+    line = [r for r in again.records("position_mark") if r["as_of_date"] == D3.isoformat() and r["isin"] == A][-1]  # the retry's line supersedes the attempt's
+    assert (line["carried_quantity"], Decimal(line["carried_value"])) == ("110", Decimal("15520"))
+    assert after.equity == again.account.cash + Decimal("15520") and after.peak == Decimal("55000")
+    assert "carry_unreconciled" not in pauses(again)
+
+
+# --- review r3 (Codex r3 + Opus r3 at 1c51cbd7): the past-budget floor is tight, the legacy cost estimate is pinned ------------------------------
+
+
+def cycles_world(tmp_path: Path, cycles: int):
+    """Codex r3 probe on the real ledger: own 100, marked at 120 (12000, unit 120). Then ``cycles`` times: sell all 100
+    through 100 one-share bookings, buy 100 back at 100 through 100 one-share bookings. 100 held, 801 bookings at 4."""
+    rig, store, portfolio = real_world(tmp_path, "RELIANCE")
+    own(rig, "RELIANCE", 100)
+    for cycle in range(cycles):
+        sold = f"sell-{cycle}"
+        admission = run(rig.adapter.prepare(sell_intent(rig, sold, "RELIANCE", 100), samples_for("RELIANCE")))
+        assert admission.decision is AdmissionDecision.ADMITTED, admission.reason_code
+        for part in range(1, 101):
+            book(rig, sold, part, "100", attempt=f"{sold}-{part}")  # the quantity is cumulative: one share per booking
+        bought = f"rebuy-{cycle}"
+        admission = run(rig.adapter.prepare(buy_intent(rig, bought, "RELIANCE", 100), samples_for("RELIANCE")))
+        assert admission.decision is AdmissionDecision.ADMITTED, admission.reason_code
+        for part in range(1, 101):
+            book(rig, bought, part, "100", attempt=f"{bought}-{part}")
+    portfolio.mark_session(D1, {R_ISIN: Decimal("120")})
+    portfolio._booking_boundary = lambda isin, session: None  # type: ignore[method-assign]  # a mark with no booking count
+    return rig, store, portfolio
+
+
+def test_codex_r3_1_four_sell_and_rebuy_cycles_carry_at_the_exhaustive_reading_and_do_not_end_the_run(tmp_path, monkeypatch):
+    """Codex r3 P2. 801 bookings, 100 held, mark of 12000. Every plausible reading is at least 10,000 (100 shares that
+    cost 100 each; no gain is needed at any boundary). The r2 floor read about 2,000 and an equity of 42,000 against a
+    peak of 52,000 set ``ended`` with a flatten owed; the exhaustive 10,000 leaves a halt and ends nothing."""
+    rig, store, portfolio = cycles_world(tmp_path, 4)
+    try:
+        assert len(rig.ledger.simulated_bookings()) == 801
+        steps = spy_on_replays(monkeypatch, 0)
+        after = portfolio.mark_session(D2, {R_ISIN: Decimal("60")}, structural_actions={R_ISIN: "bonus"})
+        assert steps[0] == 0  # one pass, no replay
+        (line,) = [r for r in store.records() if r["kind"] == "position_mark" and r["as_of_date"] == D2.isoformat() and r["isin"] == R_ISIN]
+        value = Decimal(line["carried_value"])
+        assert Decimal("10000") - Decimal("0.001") <= value <= Decimal("10000"), value
+        assert not after.state.ended and not after.state.halt
+    finally:
+        rig.close()
+
+
+def test_codex_r3_1_a_carried_value_as_low_as_the_r2_floor_ends_the_run_on_this_ledger(tmp_path, monkeypatch):
+    """The same ledger with the r2 floor (the dearest opening unit value for every share that left, over the whole
+    window) is what Codex measured. Pin that the exhaustive value on this ledger is 10,000 and that a value as low as the
+    r2 floor ends the run, so the row above cannot pass by accident."""
+    rig, store, portfolio = cycles_world(tmp_path, 4)
+    try:
+        monkeypatch.setattr(portfolio_module.ShadowPortfolio, "_carry_floor", staticmethod(lambda *a, **k: Decimal(2000)))
+        after = portfolio.mark_session(D2, {R_ISIN: Decimal("60")}, structural_actions={R_ISIN: "bonus"})
+        assert after.state.ended  # 2,000 of carried value is enough to tip equity under the drawdown line
+    finally:
+        rig.close()
+
+
+def r3_scenarios(cases: int) -> list[tuple[int, str, list[tuple[str, int, str]], int]]:
+    """Seeded small ledgers whose held quantity sits near the plain replay's stock, so most boundaries need no gain (the
+    shape the r3 floor answers) and some need one (the shape the r2 floor still answers)."""
+    import random
+
+    rng = random.Random(6113)
+    out: list[tuple[int, str, list[tuple[str, int, str]], int]] = []
+    for _ in range(cases):
+        rows = [(rng.choice(["BUY", "SELL"]), rng.randint(1, 30), str(rng.randint(60, 220))) for _ in range(rng.randint(0, 7))]
+        quantity = rng.randint(1, 120)
+        stock = quantity
+        for side, q, _price in rows:
+            stock = stock + q if side == "BUY" else max(0, stock - q)
+        out.append((quantity, str(rng.randint(500, 30000)), rows, max(1, stock + rng.randint(-12, 12))))
+    return out
+
+
+def bookings_of(rows: list[tuple[str, int, str]]) -> list[Any]:
+    return [
+        SimpleNamespace(
+            booking_id=f"b{i}", proposal_id=f"p{i}", side=side, ticker="NSE:CASH:AAA", delta_quantity=Decimal(q),
+            price=Decimal(price), charges=Decimal("0.5"),
+        )
+        for i, (side, q, price) in enumerate(rows)
+    ]
+
+
+@pytest.mark.parametrize("base_bookings", [None, 0], ids=["legacy_count", "known_count"])
+def test_codex_r3_1_the_past_budget_value_is_never_above_the_exhaustive_search_over_seeded_ledgers(tmp_path, monkeypatch, base_bookings):
+    """Fixed seed, 1,500 ledgers per count mode: the past-budget answer is at or below the exhaustive one (up to the share
+    tolerance the search accepts, 1e-9 shares) and above zero, and on a good share of ledgers it is the exhaustive value."""
+    world = Fake(tmp_path)
+    checked = exact = 0
+    for quantity, value, rows, held in r3_scenarios(1500):
+        bookings = bookings_of(rows)
+        holding = Holding(Instrument(A, "AAA", "AAA"), held, Decimal(held) * 100)
+        base = portfolio_module._Carry(Decimal(quantity), Decimal(value), Decimal(quantity) * 100, base_bookings)
+        monkeypatch.setattr(portfolio_module, "CARRY_SEARCH_BUDGET", 10**12)
+        wanted, reconciled = world.portfolio._carried_value(holding, base, bookings)
+        monkeypatch.setattr(portfolio_module, "CARRY_SEARCH_BUDGET", 0)
+        capped, capped_ok = world.portfolio._carried_value(holding, base, bookings)
+        if reconciled:
+            continue
+        assert not capped_ok
+        assert 0 < capped <= wanted + Decimal("0.000001"), (quantity, value, rows, held, capped, wanted)
+        checked += 1
+        exact += abs(capped - wanted) <= Decimal("0.000001")
+    assert checked > 1000 and exact > checked // 2, (checked, exact)
+
+
+@pytest.mark.parametrize(
+    ("quantity", "value", "rows", "held", "exhaustive_value"),
+    [
+        # carried 10 at unit 120, twice sell 10 by single shares and buy 10 back at 100: the cheapest 10 shares cost 100
+        # each, plus the 0.5 charge on each buy booking
+        (10, "1200", [(side, 1, "100") for _ in range(2) for side in ["SELL"] * 10 + ["BUY"] * 10], 10, "1005"),
+        # a sale past the stock is dropped (10 carried, 30 sold, 5 bought): the stock is 5, not -15, so no gain is needed
+        (10, "1200", [("SELL", 30, "100"), ("BUY", 5, "100")], 5, "500.5"),
+    ],
+    ids=["sell_and_rebuy_cycles", "a_sale_past_the_stock_is_dropped"],
+)
+def test_codex_r3_1_a_small_ledger_is_valued_at_the_exhaustive_reading(tmp_path, monkeypatch, quantity, value, rows, held, exhaustive_value):
+    """The past-budget value is the exhaustive one on shapes where no boundary needs a gain."""
+    world = Fake(tmp_path)
+    holding = Holding(Instrument(A, "AAA", "AAA"), held, Decimal(held) * 100)
+    base = portfolio_module._Carry(Decimal(quantity), Decimal(value), Decimal(quantity) * 100, None)
+    values = []
+    for budget in (10**12, 0):
+        monkeypatch.setattr(portfolio_module, "CARRY_SEARCH_BUDGET", budget)
+        values.append(world.portfolio._carried_value(holding, base, bookings_of(rows))[0])
+    exhaustive, capped = values
+    assert exhaustive == Decimal(exhaustive_value)
+    assert exhaustive - Decimal("0.000001") <= capped <= exhaustive, (capped, exhaustive)
+
+
+def test_opus_r3_a_legacy_window_past_the_estimate_is_never_searched(tmp_path, monkeypatch):
+    """Opus r3: nothing pinned the legacy cost estimate between 30 and 98 bookings. The legacy search tries every boundary,
+    so its cost is the sum over the shrinking windows, not one window's cost. A 121-booking legacy line is over the budget
+    by that sum (about 1.2 million steps against 1 million) while one window alone (about 30,000) is far under it: priced
+    as one window, the search ran past the budget. The spy trips the row the moment the replays pass the budget."""
+    world = many_bookings_world(tmp_path, 60)
+    legacy_mark(world)
+    assert len(world.account.bookings) == 121
+    budget = portfolio_module.CARRY_SEARCH_BUDGET
+    window = ShadowPortfolio._search_cost(121)
+    assert window <= budget < sum(ShadowPortfolio._search_cost(121 - k) for k in range(122))
+    steps = spy_on_replays(monkeypatch, budget)
+    world.mark(D3, AAA="75")
+    assert steps[0] == 0  # over the budget as a whole: the one-pass floor answers, no replay at all
+    assert 0 < Decimal(carried_line(world, D3)["carried_value"]) <= Decimal("15000")
+    assert "carry_unreconciled" in pauses(world)
+
+
+# --- review r4 (Grok r4 + Opus r4 at 3ebccd82): realistic windows are searched exactly, the budget is a measured bound ------------------------
+
+
+class ShortLedger:
+    """The real simulation ledger as the portfolio reads it, with ``gap`` more shares of one ticker than the bookings
+    explain (negative: fewer). The real ledger has no adjustment path, so this is the only way to hold a quantity the
+    replay cannot reach. Bookings, cash and admission are the ledger's own."""
+
+    def __init__(self, ledger: Any, ticker: str) -> None:
+        self._ledger = ledger
+        self._ticker = ticker
+        self.gap = 0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._ledger, name)
+
+    def india_account_view(self, **kwargs: Any) -> Any:
+        view = self._ledger.india_account_view(**kwargs)
+        positions = tuple(
+            (ticker, quantity + self.gap, cost * (quantity + self.gap) / quantity)
+            if ticker == self._ticker and quantity > 0 else (ticker, quantity, cost)
+            for ticker, quantity, cost in view.positions
+        )
+        return SimpleNamespace(positions=positions, open_buys=view.open_buys, open_sells=view.open_sells)
+
+
+def samples_at(symbol: str, price: str) -> list[QuoteSample]:
+    """``samples_for`` with the quote's last price and circuit band (plus and minus 10%) moved to ``price``."""
+    out = []
+    for index in range(3):
+        step = Decimal(2 - index) * Decimal("0.01")
+        fetched = NOW - timedelta(seconds=2 * (3 - index))
+        ask, bid = Decimal(price) - step, Decimal(price) - Decimal("0.10") - step
+        out.append(
+            QuoteSample(
+                sha(f"{symbol}-raw-{price}-{index}"), fetched, bid, ask,
+                make_evidence(
+                    observed_at=fetched, ask=ask, bid=bid, isin=ISINS[symbol], stock_code=symbol,
+                    ltp=Decimal(price), lower_circuit=Decimal(price) * Decimal("0.9"), upper_circuit=Decimal(price) * Decimal("1.1"),
+                ),
+            )
+        )
+    return out
+
+
+def fill_in_parts(rig: Rig, proposal_id: str, side: str, quantity: int, price: str, bookings: int) -> None:
+    """Admit one intent of ``quantity`` at ``price`` and book it as ``bookings`` equal partial fills (the quantity is
+    cumulative)."""
+    intent = (buy_intent if side == "BUY" else sell_intent)(rig, proposal_id, "RELIANCE", quantity, price)
+    admission = run(rig.adapter.prepare(intent, samples_at("RELIANCE", price)))
+    assert admission.decision is AdmissionDecision.ADMITTED, admission.reason_code
+    for part in range(1, bookings + 1):
+        book(rig, proposal_id, quantity * part // bookings, price, attempt=f"{proposal_id}-{part}")
+
+
+def paused_book(tmp_path: Path):
+    """Own 100 at 100 (cash 40,000), marked at 150 (peak 55,000), then carried through a bonus ex-date. The booking
+    count of the carried mark is the baseline: everything booked after it is the window."""
+    rig = make_rig(tmp_path)
+    store = make_evidence_store(tmp_path / "evidence")
+    account = ShortLedger(rig.ledger, "NSE:CASH:RELIANCE")
+    portfolio = ShadowPortfolio(account, rig.guard.store, store, instruments("RELIANCE"))
+    own(rig, "RELIANCE", 100)
+    assert portfolio.mark_session(D1, {R_ISIN: Decimal("150")}).peak == Decimal("55000")
+    carried = portfolio.mark_session(D2, {R_ISIN: Decimal("75")}, structural_actions={R_ISIN: "bonus"})
+    assert carried.paused_isins == (R_ISIN,) and carried.equity == Decimal("55000")
+    return rig, store, account, portfolio
+
+
+def carried_after(store: Any, day: date) -> Decimal:
+    (line,) = [r for r in store.records() if r["kind"] == "position_mark" and r["as_of_date"] == day.isoformat() and r["isin"] == R_ISIN]
+    return Decimal(line["carried_value"])
+
+
+def grok_r1_book(rig: Rig, account: ShortLedger, round_trip: str, rebuy_bookings: int) -> None:
+    """Grok r4-1: while paused, sell 100 at 150; buy 100 and sell them back at ``round_trip``; rebuy 97 at 150 (as
+    ``rebuy_bookings`` fills). The ledger holds 97 and the account view reads 96, so the replay (stock 97) misses."""
+    fill_in_parts(rig, "g1-sell", "SELL", 100, "150.00", 1)
+    fill_in_parts(rig, "g1-round-buy", "BUY", 100, round_trip, 1)
+    fill_in_parts(rig, "g1-round-sell", "SELL", 100, round_trip, 1)
+    fill_in_parts(rig, "g1-rebuy", "BUY", 97, "150.00", rebuy_bookings)
+    account.gap = -1
+
+
+@pytest.mark.parametrize(
+    ("round_trip", "rebuy_bookings", "bookings"),
+    [("100.00", 1, 4), ("100.00", 97, 100), ("50.00", 97, 100)],
+    ids=["one_rebuy_booking", "97_fills_round_trip_at_100", "97_fills_round_trip_at_50"],
+)
+def test_grok_r4_1_a_sale_never_leaves_its_consumed_lots_to_lower_the_carry_of_a_window_inside_the_budget(tmp_path, monkeypatch, round_trip, rebuy_bookings, bookings):
+    """Grok r4-1. Held 96, replay stock 97 (97 shares at 150 after the round trip is sold out): every one of the 194
+    exhaustive readings is 14,400 (96 x 150). Cash 40,450 and peak 55,000, so equity 54,850 sits inside the halt line. The
+    past-budget floor kept the sold-out round trip lots in its cheapest-shares heap and read 9,600 (round trip at 100)
+    or 4,800 (at 50): a halt, and an ended run with a flatten owed. The window is 100 bookings (20,604 steps), well inside
+    the budget, so the exact search runs and carries 14,400."""
+    rig, store, account, portfolio = paused_book(tmp_path)
+    try:
+        grok_r1_book(rig, account, round_trip, rebuy_bookings)
+        assert len(rig.ledger.simulated_bookings()) == bookings + 1  # the own booking is the baseline
+        steps = spy_on_replays(monkeypatch, portfolio_module.CARRY_SEARCH_BUDGET)
+        after = portfolio.mark_session(D3, {R_ISIN: Decimal("75")})
+        assert 0 < steps[0] <= portfolio_module.CARRY_SEARCH_BUDGET  # the exact path ran
+        assert carried_after(store, D3) == Decimal("14400")
+        assert rig.ledger.simulated_cash_view().seed - rig.ledger.simulated_cash_view().net_cash_out == Decimal("40450")
+        assert after.equity == Decimal("54850") and after.peak == Decimal("55000")
+        assert not after.state.halt and not after.state.ended
+    finally:
+        rig.close()
+
+
+def test_grok_r4_2_a_shares_sold_and_replaced_are_not_taken_out_of_the_carry_twice(tmp_path, monkeypatch):
+    """Grok r4-2. Held 200, replay stock 100: two sell and rebuy cycles during the pause (the first sale at 150, every
+    rebuy at 100), 400 one-share bookings, 322,404 steps. The readings run from 10,000 to 20,000 and the lowest is 10,000
+    (the 100 shares that cost 100 each, the unexplained 100 a gain at the same value). The past-budget floor subtracted the
+    dearest opening unit for every share that left, sold-and-replaced ones included, and read 5,000: equity 50,000 against
+    a 55,000 peak is a halt. Inside the budget the exact search carries 10,000: equity 55,000, no halt."""
+    rig, store, account, portfolio = paused_book(tmp_path)
+    try:
+        for cycle in range(2):
+            fill_in_parts(rig, f"g2-sell-{cycle}", "SELL", 100, "150.00" if cycle == 0 else "100.00", 100)
+            fill_in_parts(rig, f"g2-rebuy-{cycle}", "BUY", 100, "100.00", 100)
+        account.gap = 100
+        assert len(rig.ledger.simulated_bookings()) == 401  # 400 in the window, the own booking is the baseline
+        steps = spy_on_replays(monkeypatch, portfolio_module.CARRY_SEARCH_BUDGET)
+        after = portfolio.mark_session(D3, {R_ISIN: Decimal("75")})
+        assert 0 < steps[0] <= portfolio_module.CARRY_SEARCH_BUDGET
+        assert steps[0] > 322_000  # the whole search, not a part of it
+        assert carried_after(store, D3) == Decimal("10000")
+        assert after.equity == Decimal("55000") and after.peak == Decimal("55000")
+        assert not after.state.halt and not after.state.ended
+    finally:
+        rig.close()
+
+
+@pytest.mark.parametrize("known_count", [True, False], ids=["known_baseline", "legacy_line_no_count"])
+def test_grok_r4_the_floor_still_answers_past_a_shrunk_budget_with_no_search(tmp_path, monkeypatch, known_count):
+    """Past the budget the search is skipped and the one-pass floor answers, never above the exact value. The budget is
+    shrunk by monkeypatch rather than building a ledger past a million steps. On Grok's r4-1 ledger the floor is the known
+    residual: below the exact 14,400 (it still reads the sold-out round trip lots), never above it. A known baseline
+    spends one plain replay (101 steps) to see whether the window reconciles; a legacy line spends none."""
+    rig, store, account, portfolio = paused_book(tmp_path)
+    try:
+        grok_r1_book(rig, account, "100.00", 97)
+        if not known_count:
+            portfolio._booking_boundary = lambda isin, session: None  # type: ignore[method-assign]
+        monkeypatch.setattr(portfolio_module, "CARRY_SEARCH_BUDGET", ShadowPortfolio._search_cost(100) - 1)
+        plain = 101 if known_count else 0
+        steps = spy_on_replays(monkeypatch, plain)
+        after = portfolio.mark_session(D3, {R_ISIN: Decimal("75")})
+        assert steps[0] == plain
+        value = carried_after(store, D3)
+        assert 0 < value
+        if known_count:
+            assert value <= Decimal("14400")
+        assert "carry_unreconciled" in [p.event for p in policy.run_state(store).open_pauses]
+        assert after.peak == Decimal("55000")
+    finally:
+        rig.close()
+
+
+def test_opus_r4_the_floor_is_the_cheapest_held_shares_not_held_times_the_cheapest_unit(tmp_path, monkeypatch):
+    """Opus r4 optional residual 1. Carried 5 at unit 60 (value 300), two buys of 5 at 200 (0.5 charge each), held 10: the
+    replay stock is 15, so a loss of 5 is unexplained and takes the dearest shares. Exact: 5 x 60 + 5 x 200 + 0.5 =
+    1,300.5. The floor is the cheapest 10 shares opened, the same 1,300.5; held x cheapest unit would be 600. Pinned on
+    the search and on the floor alone, so a floor that dropped the heap (and used u_min) turns this red."""
+    world = Fake(tmp_path)
+    holding = Holding(Instrument(A, "AAA", "AAA"), 10, Decimal(2000))  # the net-quantity rule reads 300 + 1500, above both
+    base = portfolio_module._Carry(Decimal(5), Decimal(300), Decimal(500), 0)
+    rows = [("BUY", 5, "200"), ("BUY", 5, "200")]
+    values = []
+    for budget in (10**12, 0):
+        monkeypatch.setattr(portfolio_module, "CARRY_SEARCH_BUDGET", budget)
+        values.append(world.portfolio._carried_value(holding, base, bookings_of(rows)))
+    (exact, exact_ok), (floor, floor_ok) = values
+    assert not exact_ok and not floor_ok
+    assert exact == Decimal("1300.5")
+    assert Decimal("1300.5") - Decimal("0.000001") <= floor <= Decimal("1300.5")
+    assert floor > 10 * Decimal(60)

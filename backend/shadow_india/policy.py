@@ -16,9 +16,9 @@ clear anything:
   hold a weaker release. ``shadow_india.portfolio.ShadowPortfolio.release_halt`` is the latch-backed release: it
   resets the 63 latch first and only then writes the ``resume`` record for the halt pause. Parity with D-05;
 - ``resume`` refuses ``unresolved_corporate_action`` too: only the ledger knows whether the split or bonus was booked, so
-  ``ShadowPortfolio.release_corporate_action`` is the release. It refuses ``corporate_action_not_booked`` while the
-  ledger still holds the pre-ex quantity, because resuming then would mark an unadjusted quantity at the adjusted
-  close and read a false -50%.
+  ``ShadowPortfolio.release_corporate_action`` is the release. It refuses ``corporate_action_not_booked`` unless an
+  explicit ``corporate_action_adjustments`` record exists, because resuming then would mark an unadjusted quantity at
+  the adjusted close and read a false -50%.
 
 D-08 says buys stop and sells stay, so admit and mint take a ``side`` (``buy`` or ``sell``). Scopes: ``all`` blocks
 every step except read-only checks, on both sides; ``entries`` blocks the admission and mint of a BUY;
@@ -64,6 +64,7 @@ SIDES = frozenset({SIDE_BUY, SIDE_SELL})
 DRAWDOWN_HALT = "drawdown_halt"
 UNRESOLVED_CORPORATE_ACTION = "unresolved_corporate_action"
 AMBIGUOUS_EXIT_FILL = "ambiguous_exit_fill"
+CARRY_UNRECONCILED = "carry_unreconciled"
 DRAWDOWN_FLATTEN_15 = "drawdown_flatten_15"
 
 _ENTRY_STEPS = frozenset({STEP_ADMIT, STEP_MINT})
@@ -133,6 +134,9 @@ POLICY: Mapping[str, Rule] = {
     UNRESOLVED_CORPORATE_ACTION: _pause(SCOPE_ISIN),
     # A sell booked on a name with an open halve under an id that is not that halve's: what the halve still owes is unknown.
     AMBIGUOUS_EXIT_FILL: _pause(SCOPE_ISIN),
+    # A carried name whose ledger bookings do not add up to its held quantity (or whose last mark has no booking count):
+    # it is valued at the lowest plausible reading and the operator reviews it. Cleared by `resume`.
+    CARRY_UNRECONCILED: _pause(SCOPE_ISIN),
     "identity_ambiguity": _pause(SCOPE_ISIN),
     "band_ambiguity": _pause(SCOPE_ISIN),
     "stale_data": _pause(SCOPE_ALL),
@@ -305,6 +309,7 @@ def resume(store: EvidenceStore, reason: str, *, pause_seqs: Sequence[int] | Non
 __all__ = [
     "ABORT",
     "AMBIGUOUS_EXIT_FILL",
+    "CARRY_UNRECONCILED",
     "DRAWDOWN_FLATTEN_15",
     "DRAWDOWN_HALT",
     "PAUSE",

@@ -52,13 +52,19 @@ never becomes a valuation. A crash between the latch write and the commit line i
 
 Q-6 (provisional, fail closed): a recorded split or bonus ex-date on a held name raises the existing
 ``unresolved_corporate_action`` pause scoped to that ISIN. While it is open the name is valued at its last committed
-value (``carried_ex_date_pause``), moved only by a change in the ledger cost basis (a buy that booked), never by a
+value (``carried_ex_date_pause``), moved only by what the ledger booked (a buy's cost, a sell's shares), never by a
 quantity the ledger reconciled at the same cost, so it cannot lift the peak. No stop is evaluated on it (the latch
 position gets a cost equal to the carried value), it moves nothing in the drawdown, a buy of it is blocked, and any
 exit owed on it (a halve or the terminal flatten) stays in the latch but is held out of ``exit_proposals`` (``held_out``)
 so it is not sold at the post-adjustment quote. Only ``release_corporate_action`` clears the pause (``policy.resume``
-refuses it). A sell while carried scales the carried value by the shares still held, so the sold shares' value (and a
-loss on them) does not stay in the carry. The release refuses ``corporate_action_not_booked`` for a name that is still
+refuses it). The bookings since the last committed valuation (a ``booking_baseline`` latch line holds the count, written before
+the latch moves) are replayed in ledger order: a sell takes only the shares held at that moment, the carried lot first
+and then the bought lots in booking order (oldest first), and a buy opens a
+lot at its booked cost. Where the count is missing or the replay does not land on the held quantity, the value is the
+lowest plausible reading and the ISIN gets a ``carry_unreconciled`` pause that only an operator ``resume`` clears: no
+fallback can lift the peak. That search is enumerative and bounded (``CARRY_SEARCH_BUDGET`` replay steps); past the
+bound the value is a floor that no plausible reading can fall below (``_carry_floor``), found in one pass: per boundary,
+the cheapest ``held`` shares that opened when no gain is needed, the dearest-unit-value bound when one is. The release refuses ``corporate_action_not_booked`` for a name that is still
 held unless the account exposes an explicit adjustment record (``corporate_action_adjustments``: ticker, kind, ex_date)
 that matches a committed ex-date mark of the name. Nothing is inferred from quantity or cost: equal cost with another
 quantity is also what a buy and a sell give. It also refuses ``exit_owed_in_pre_adjustment_units`` while a halve is open
@@ -80,6 +86,7 @@ import: the account is a Protocol the ledger satisfies.
 
 from __future__ import annotations
 
+import heapq
 import re
 from dataclasses import dataclass, replace
 from datetime import date
@@ -102,8 +109,17 @@ LATCH_FLATTEN = "flatten"
 LATCH_HALVE_BASELINE = "halve_baseline"
 EVALUATION_COMMIT = "evaluation_commit"
 EVALUATION_INPUTS = "evaluation_inputs"
+LATCH_BOOKING_BASELINE = "booking_baseline"  # how many bookings of a name the ledger held at an evaluation
 LATCH_SELL_BASELINE = "sell_baseline"  # the sell booking boundary, written before the evaluation
 AMBIGUOUS_EXIT_FILL = policy.AMBIGUOUS_EXIT_FILL
+CARRY_UNRECONCILED = policy.CARRY_UNRECONCILED
+# Work budget of the unreconciled-carry search, in replay steps (one booking applied to the lots = one step). The
+# search tries every boundary x both sale orders x every adjustment position, which grows with the cube of the booking
+# count; past the budget the search is skipped and ``_carry_floor`` answers instead, in a single pass. A step costs
+# about 1 microsecond or less (a worst-case window of one-share buys and one sale past all of them measured 0.9 s at
+# the budget on an M4 Pro, a mark runs once per session per held name), and the budget covers a window of 705
+# bookings after a known baseline, 112 when the line carries no booking count (every boundary is tried).
+CARRY_SEARCH_BUDGET = 1_000_000
 TICKER_PREFIX = "NSE:CASH:"
 
 _ISIN = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]\Z")
@@ -165,7 +181,7 @@ class SimulationAccount(Protocol):
 
     def india_account_view(self, *, exclude_proposal_id: str = "") -> Any: ...  # positions, open_buys, open_sells
 
-    def simulated_bookings(self, proposal_id: str | None = None) -> Sequence[Any]: ...  # booking_id, proposal_id, side, ticker, delta_quantity
+    def simulated_bookings(self, proposal_id: str | None = None) -> Sequence[Any]: ...  # booking_id, proposal_id, side, ticker, delta_quantity, price, charges
 
 
 @dataclass(frozen=True)
@@ -221,13 +237,83 @@ class ExitProposal:
     reproposed: bool  # True when an earlier decide already proposed it and it is still unfilled
 
 
+class _LotBook:
+    """The lots of a name during a replay: [shares, value] pairs. A sale takes shares from a lot and the lot loses value
+    pro rata, so its value per share does not move. The oldest lot goes first (the carried lot, then the bought lots in
+    booking order), or with ``dearest_first`` the lot with the highest value per share, which leaves the lowest value
+    behind (ties go to the oldest). A pointer to the oldest live lot and a heap keyed by value per share keep a sale
+    O(lots touched), where a scan of every lot per share made the unreconciled search cubic in the window."""
+
+    __slots__ = ("lots", "dearest", "head", "heap")
+
+    def __init__(self, lots: list[list[Decimal]], *, dearest_first: bool) -> None:
+        self.lots = lots
+        self.dearest = dearest_first
+        self.head = 0
+        self.heap: list[tuple[Decimal, int]] = []
+        self.reorder()
+
+    def reorder(self) -> None:
+        """Rebuild the heap after the lots changed other than through ``open`` and ``take`` (a gain scales every share)."""
+
+        if self.dearest:
+            self.heap = [(-(lot[1] / lot[0]), index) for index, lot in enumerate(self.lots) if lot[0] > 0]
+            heapq.heapify(self.heap)
+
+    def open(self, shares: Decimal, value: Decimal) -> None:
+        self.lots.append([shares, value])
+        if self.dearest and shares > 0:
+            heapq.heappush(self.heap, (-(value / shares), len(self.lots) - 1))
+
+    def take(self, quantity: Decimal) -> None:
+        """Remove up to ``quantity`` shares. A quantity past every lot drains them and is dropped; the caller sees it as
+        a share count that no longer matches."""
+
+        left = quantity
+        lots = self.lots
+        if self.dearest:
+            heap = self.heap
+            while left > 0 and heap:
+                index = heap[0][1]
+                lot = lots[index]
+                take = min(left, lot[0])
+                lot[1] = lot[1] * (lot[0] - take) / lot[0]
+                lot[0] -= take
+                left -= take
+                if lot[0] > 0:
+                    heapq.heapreplace(heap, (-(lot[1] / lot[0]), index))
+                else:
+                    heapq.heappop(heap)
+            return
+        head = self.head
+        while left > 0:
+            while head < len(lots) and lots[head][0] <= 0:
+                head += 1
+            if head == len(lots):
+                break
+            lot = lots[head]
+            take = min(left, lot[0])
+            lot[1] = lot[1] * (lot[0] - take) / lot[0]
+            lot[0] -= take
+            left -= take
+        self.head = head
+
+    def dearest_take(self, quantity: Decimal) -> None:
+        """A loss the ledger does not explain takes the dearest shares first, whichever order the replay sells in."""
+
+        _LotBook(self.lots, dearest_first=True).take(quantity)
+        self.reorder()
+
+
 @dataclass(frozen=True)
 class _Carry:
-    """What a name was worth when its valuation was last committed: shares, value and ledger cost then."""
+    """What a name was worth when its valuation was last committed: shares, value and ledger cost then, and how many
+    bookings of the name the ledger held (``None`` when no ``booking_baseline`` line was written for that session)."""
 
     quantity: Decimal
     value: Decimal
     cost: Decimal
+    bookings: int | None = None
 
 
 @dataclass(frozen=True)
@@ -412,11 +498,204 @@ class ShadowPortfolio:
             if record.get("isin") != isin:
                 continue
             cost = Decimal(str(record["cost"]))
+            bookings = self._booking_boundary(isin, date.fromisoformat(str(record["as_of_date"])))
             if record.get("mark_basis") == MARK_RAW_CLOSE:
                 quantity = Decimal(str(record["quantity"]))
-                return _Carry(quantity, quantity * Decimal(str(record["close"])), cost)
-            return _Carry(Decimal(str(record["carried_quantity"])), Decimal(str(record["carried_value"])), cost)
+                return _Carry(quantity, quantity * Decimal(str(record["close"])), cost, bookings)
+            return _Carry(
+                Decimal(str(record["carried_quantity"])), Decimal(str(record["carried_value"])), cost, bookings
+            )
         return None
+
+    @classmethod
+    def _replay(
+        cls,
+        base: _Carry,
+        since: Sequence[Any],
+        *,
+        dearest_first: bool = False,
+        adjust: tuple[int, Decimal] | None = None,
+    ) -> tuple[Decimal, Decimal]:
+        """(shares, value) after the bookings in ``since``, replayed in ledger order from the committed ``base``: a
+        buy opens a lot at its booked cost (price x quantity plus charges), a sell takes only the shares held at that
+        moment. ``adjust`` is an unbooked share change (``u`` at position ``i``, before booking ``i``): a gain scales
+        every lot's shares at the same value (a bonus or split), a loss removes shares."""
+
+        book = _LotBook([[base.quantity, base.value]], dearest_first=dearest_first)
+        for index in range(len(since) + 1):
+            if adjust is not None and adjust[0] == index:
+                change = adjust[1]
+                total = sum((lot[0] for lot in book.lots), Decimal(0))
+                if change > 0 and total > 0:
+                    for lot in book.lots:
+                        lot[0] = lot[0] * (total + change) / total
+                    book.reorder()
+                elif change < 0:
+                    book.dearest_take(-change)
+            if index == len(since):
+                break
+            booking = since[index]
+            side = str(booking.side).upper()
+            if side == "BUY":
+                book.open(booking.delta_quantity, booking.delta_quantity * booking.price + booking.charges)
+            elif side == "SELL":
+                book.take(booking.delta_quantity)
+        return sum((lot[0] for lot in book.lots), Decimal(0)), sum((lot[1] for lot in book.lots), Decimal(0))
+
+    def _adjustment_record(self, isin: str) -> bool:
+        """True when the account exposes an explicit adjustment record for the open corporate-action pause of ``isin``."""
+
+        seqs = [
+            p.seq
+            for p in policy.run_state(self._store).open_pauses
+            if p.event == CORPORATE_ACTION_PAUSE and p.scope == f"{policy.SCOPE_ISIN}:{isin}"
+        ]
+        return bool(seqs) and self._adjustment_booked(isin, min(seqs))
+
+    @staticmethod
+    def _search_cost(bookings: int) -> int:
+        """Replay steps the exhaustive search spends on a window of ``bookings`` bookings: two sale orders, each one plain
+        replay plus one per adjustment position, every replay applying at most ``bookings`` bookings."""
+
+        return 2 * (bookings + 2) * (bookings + 1)
+
+    @staticmethod
+    def _carry_floor(base: _Carry, window: Sequence[Any], held: Decimal, *, every_boundary: bool) -> Decimal:
+        """A value at or below every reading the exhaustive search could return, in one backward pass (O(n log n)).
+
+        Every lot's value per share is fixed when it opens (a sale or a loss takes value pro rata) or only goes down (a
+        gain adjustment spreads the same value over more shares). A reading from boundary ``k`` opens the base lot and
+        every buy of ``window[k:]``, then only loses shares. Each boundary gets its own bound, and the minimum is
+        returned:
+
+        * No gain needed (the plain replay's final stock ``F`` is at least ``held``; sales drop what the stock cannot
+          cover, so ``F`` is the stock walk, not buys less sells). The ``held`` shares that survive are a subset of the
+          shares that opened, each at its lot's unit value, so the reading is at least the sum of the ``held`` cheapest
+          opened shares. A bounded heap of the cheapest ``held`` shares answers that as the boundary moves back and
+          opens one more lot at a time. It is a floor, not the reading: a sale that can only take a cheap lot (the dear
+          one has not opened yet) leaves a dearer reading than the cheapest shares.
+        * A gain needed (``F < held``): the opened value less ``u_max`` (the dearest opening unit value) for every share
+          that left. Shares in are ``q0`` plus the buys plus the gain ``held - F``; all but ``held`` leave.
+
+        Both are never below ``u_min * held / (1 + held)``: shares are whole, a gain of ``g <= held`` shares scales the
+        unit value of the lots it touches by at least ``1 / (1 + held)``, and no unit value is below ``u_min``. That
+        keeps the floor above zero, which ``mark_session`` would read as "no value" and replace by the ledger cost."""
+
+        zero = Decimal(0)
+        tolerance = Decimal("1e-9")  # the share tolerance the search accepts a reading within
+        buys = [b for b in window if str(b.side).upper() == "BUY" and b.delta_quantity > 0]
+        base_unit = base.value / base.quantity
+        units = [base_unit] + [(b.delta_quantity * b.price + b.charges) / b.delta_quantity for b in buys]
+        positive = min(units) * held / (1 + held) if min(units) > 0 else zero
+
+        cheapest: list[tuple[Decimal, int, Decimal, Decimal]] = []  # max-heap by unit: (-unit, tie, shares, value)
+        held_shares, held_value, tie = zero, zero, 0
+
+        def open_lot(shares: Decimal, value: Decimal) -> None:
+            """Open a lot and keep only the ``held`` cheapest shares of everything opened so far."""
+            nonlocal held_shares, held_value, tie
+            tie += 1
+            heapq.heappush(cheapest, (-(value / shares), tie, shares, value))
+            held_shares += shares
+            held_value += value
+            while held_shares > held:
+                neg_unit, order, shares, value = heapq.heappop(cheapest)
+                excess = held_shares - held
+                if shares <= excess:
+                    held_shares -= shares
+                    held_value -= value
+                    continue
+                kept = value * (shares - excess) / shares
+                held_value -= value - kept
+                held_shares = held
+                heapq.heappush(cheapest, (neg_unit, order, shares - excess, kept))
+
+        open_lot(base.quantity, base.value)
+        u_max = base_unit
+        # the stock walk as a map x -> max(c, x + d), built from the back so every boundary reads its final stock in O(1)
+        floor_stock, shift = zero, zero
+        value_in, bought = base.value, zero
+        best: Decimal | None = None
+        for index in range(len(window), -1, -1):
+            if index < len(window):
+                booking = window[index]
+                side = str(booking.side).upper()
+                if side == "BUY" and booking.delta_quantity > 0:
+                    unit = (booking.delta_quantity * booking.price + booking.charges) / booking.delta_quantity
+                    value_in += booking.delta_quantity * booking.price + booking.charges
+                    bought += booking.delta_quantity
+                    shift += booking.delta_quantity
+                    u_max = max(u_max, unit)
+                    open_lot(booking.delta_quantity, booking.delta_quantity * booking.price + booking.charges)
+                elif side == "SELL":
+                    floor_stock = max(floor_stock, shift)
+                    shift -= booking.delta_quantity
+            if not every_boundary and index != 0:
+                continue
+            final = max(floor_stock, base.quantity + shift)
+            if final >= held - tolerance:
+                reading = held_value - u_max * tolerance
+            else:
+                reading = value_in - u_max * (base.quantity + bought - final + tolerance)
+            best = reading if best is None else min(best, reading)
+        return max(best if best is not None else zero, positive)
+
+    def _carried_value(self, holding: Holding, base: _Carry, bookings: Sequence[Any]) -> tuple[Decimal, bool]:
+        """(carried value, reconciled) of ``holding`` given the last committed valuation ``base``.
+
+        The bookings since ``base`` are replayed in ledger order (``_replay``): a sell takes only the shares held at
+        that moment, the carried lot first and then the bought lots in booking order, and a buy opens a lot at the
+        cost the ledger booked. That is the reconciled value, and it is used when the booking count is known and the
+        replay lands on the held quantity (or the shortfall is a gain the account's own adjustment record explains,
+        a bonus or split, valued as the lowest placement of it).
+
+        Anything else is unreconciled and fails closed: a mark with no booking count, or bookings that do not add up
+        to the held quantity. The value is then the LOWEST of every plausible reading (each boundary the count could
+        have been, the oldest-first and the dearest-first sale order, the unexplained quantity as an adjustment at
+        every position among the bookings, and the net-quantity rule), so the fallback cannot lift the peak, and the
+        caller raises the ISIN-scoped ``carry_unreconciled`` pause for the operator.
+
+        The search is bounded: when its replay steps would pass ``CARRY_SEARCH_BUDGET`` it is not run, and the value is
+        the lower of the net-quantity rule and ``_carry_floor``, which no reading can fall below. A name carried
+        through a bonus with a booked adjustment record is also left unreconciled in that case (the pause stands until
+        the operator reviews it), since its exact lowest placement was not searched."""
+
+        held = Decimal(holding.quantity)
+        if base.quantity <= 0:
+            return holding.cost, False
+        tolerance = Decimal("1e-9")
+
+        def readings(since: Sequence[Any]) -> list[Decimal]:
+            values: list[Decimal] = []
+            for dearest in (False, True):
+                shares, value = self._replay(base, since, dearest_first=dearest)
+                if abs(shares - held) <= tolerance:
+                    values.append(value)
+                    continue
+                gap = held - shares
+                for position in range(len(since) + 1):
+                    shares, value = self._replay(base, since, dearest_first=dearest, adjust=(position, gap))
+                    if abs(shares - held) <= tolerance:
+                        values.append(value)
+            return values
+
+        net = base.value * held / base.quantity if held < base.quantity else base.value + (holding.cost - base.cost)
+        if base.bookings is not None:
+            since = bookings[base.bookings :]
+            shares, value = self._replay(base, since)
+            if abs(shares - held) <= tolerance:
+                return value, True
+            if self._search_cost(len(since)) > CARRY_SEARCH_BUDGET:
+                return min(net, self._carry_floor(base, since, held, every_boundary=False)), False
+            adjusted = readings(since)
+            if adjusted and shares < held and self._adjustment_record(holding.instrument.isin):
+                return min(adjusted), True
+            candidates = adjusted
+        else:
+            if sum(self._search_cost(len(bookings) - k) for k in range(len(bookings) + 1)) > CARRY_SEARCH_BUDGET:
+                return min(net, self._carry_floor(base, bookings, held, every_boundary=True)), False
+            candidates = [v for k in range(len(bookings) + 1) for v in readings(bookings[k:])]
+        return min([net, *candidates]), False
 
     def _has_mark(self, session: date) -> bool:
         return any(r.get("kind") == "mark" and r.get("as_of_date") == session.isoformat() for r in self._records())
@@ -543,21 +822,25 @@ class ShadowPortfolio:
         basis: dict[str, str] = {}
         carry: dict[str, _Carry] = {}
         missing: list[str] = []
+        ledger = {h.instrument.isin: self._bookings(h.instrument) for h in snap.holdings}
         for holding in snap.holdings:
             isin = holding.instrument.isin
             if isin in frozen:
-                # Valued at the last COMMITTED value, moved only by a change in the ledger cost basis (a buy that
-                # booked): a quantity the ledger reconciled at the same cost (a bonus or split booked) moves nothing,
-                # so a paused name can neither fire a stop nor lift the peak.
-                base = self._carry_base(isin) or _Carry(Decimal(holding.quantity), holding.cost, holding.cost)
+                # Valued at the last COMMITTED value, moved only by what the ledger booked since: a sell takes its
+                # shares' carried value out, a buy adds its cost, and a quantity the ledger reconciled at the same
+                # cost (a bonus or split booked) moves nothing, so a paused name can neither fire a stop nor lift the
+                # peak.
+                base = self._carry_base(isin) or _Carry(
+                    Decimal(holding.quantity), holding.cost, holding.cost, len(ledger[isin])
+                )
                 held_quantity = Decimal(holding.quantity)
-                if held_quantity < base.quantity:
-                    # A sell while carried: the value of the shares still held is what is left, in proportion. The
-                    # ledger cost falls by the sold shares' cost, which is not their carried value, so the cost delta
-                    # would leave the sold shares' value (and any loss on them) in the carry.
-                    value = base.value * held_quantity / base.quantity
-                else:
-                    value = base.value + (holding.cost - base.cost)
+                value, reconciled = self._carried_value(holding, base, ledger[isin])
+                if not reconciled:
+                    self._pause_isin(
+                        CARRY_UNRECONCILED,
+                        isin,
+                        "carried value does not reconcile to the ledger bookings: valued at its lowest reading until operator review",
+                    )
                 if not value > 0:
                     value = holding.cost
                 carry[isin] = _Carry(held_quantity, value, holding.cost)
@@ -585,6 +868,7 @@ class ShadowPortfolio:
             self._record_evaluation_inputs(session, input_seqs)
             # The sell boundary is also persisted before the latch can open an exit, never inferred afterwards.
             self._record_sell_boundaries(session, snap)
+            self._record_booking_boundaries(session, snap)
         batches: tuple[ExitBatch, ...] = ()
         config_errors: tuple[str, ...] = ()
         if evaluated:
@@ -741,14 +1025,19 @@ class ShadowPortfolio:
         self._append("latch", {"latch": LATCH_HALVE_BASELINE, "scope": scope, "reason": f"{tag}{current.quantity}"})
         return current.quantity
 
-    def _sell_bookings(self, instrument: Instrument) -> list[Any]:
-        """The SELL bookings of ``instrument`` in ledger order, each booking id once."""
+    def _bookings(self, instrument: Instrument) -> list[Any]:
+        """Every booking of ``instrument`` in ledger order, each booking id once."""
 
         seen: dict[str, Any] = {}
         for booking in self._account.simulated_bookings():
-            if str(booking.side).upper() == "SELL" and booking.ticker == instrument.ticker:
+            if booking.ticker == instrument.ticker:
                 seen.setdefault(str(booking.booking_id), booking)
         return list(seen.values())
+
+    def _sell_bookings(self, instrument: Instrument) -> list[Any]:
+        """The SELL bookings of ``instrument`` in ledger order, each booking id once."""
+
+        return [b for b in self._bookings(instrument) if str(b.side).upper() == "SELL"]
 
     @staticmethod
     def _own_id(obligation_id: str) -> re.Pattern[str]:
@@ -804,6 +1093,38 @@ class ShadowPortfolio:
                         "latch": LATCH_SELL_BASELINE,
                         "scope": f"{policy.SCOPE_ISIN}:{isin}",
                         "reason": f"since_{session.isoformat()}_sells_{count}",
+                    },
+                )
+
+    def _booking_boundary(self, isin: str, session: date) -> int | None:
+        """How many bookings of ``isin`` the ledger held at the evaluation of ``session``, from the line
+        ``_record_booking_boundaries`` wrote before that evaluation moved the latch. The latest line for the session
+        stands (a retry that never reached the latch supersedes it). ``None`` when there is none."""
+
+        scope = f"{policy.SCOPE_ISIN}:{isin}"
+        tag = f"since_{session.isoformat()}_bookings_"
+        found: int | None = None
+        for record in self._records():
+            if record.get("kind") == "latch" and record.get("latch") == LATCH_BOOKING_BASELINE and record.get("scope") == scope:
+                reason = str(record["reason"])
+                if reason.startswith(tag):
+                    found = int(reason.removeprefix(tag))
+        return found
+
+    def _record_booking_boundaries(self, session: date, snap: AccountSnapshot) -> None:
+        """Persist the booking count of every held name before the latch moves for ``session``: the point a later
+        carried valuation reads the sells and buys booked since from (``_carried_value``)."""
+
+        for holding in snap.holdings:
+            isin = holding.instrument.isin
+            count = len(self._bookings(holding.instrument))
+            if self._booking_boundary(isin, session) != count:
+                self._append(
+                    "latch",
+                    {
+                        "latch": LATCH_BOOKING_BASELINE,
+                        "scope": f"{policy.SCOPE_ISIN}:{isin}",
+                        "reason": f"since_{session.isoformat()}_bookings_{count}",
                     },
                 )
 
