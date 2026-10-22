@@ -959,6 +959,36 @@ def test_two_audit_entries_for_one_intent_are_an_abort(world, monkeypatch):
     assert report.status == "aborted" and list(policy.run_state(world.evidence).abort_events) == ["vm_audit_duplicate_entries"]
 
 
+def relabel_decisions(vm: Vm, monkeypatch, decision: str) -> None:
+    """The VM's audit answers with every entry's ``decision`` changed (the chain hashes ``raw``, so it still verifies)."""
+
+    real = vm.orders.audit
+    monkeypatch.setattr(vm.orders, "audit", lambda after_seq=0: tuple(replace(e, decision=decision) for e in real(after_seq)))
+
+
+@pytest.mark.parametrize("decision", ["CHALLENGED", "VERIFIED_NOT_FORWARDED", "EVALUATED"])
+def test_a_kill_switch_entry_whose_decision_is_not_refused_is_an_abort(world, monkeypatch, decision):
+    """Break-proof: drop the ``decisions`` check in ``_correlate`` and the row fails."""
+    relabel_decisions(world.vm, monkeypatch, decision)
+    report = world.decide()
+    assert report.status == "aborted" and list(policy.run_state(world.evidence).abort_events) == ["vm_audit_codes_unexpected"]
+    assert world.records("vm_decision") == [] and len(world.order_posts()) == 1
+
+
+def test_recovery_adopts_an_audit_entry_only_when_its_decision_is_refused(world, monkeypatch):
+    world.script.result = evaluated("AAA")
+    with pytest.MonkeyPatch.context() as probe:
+        crash_after_post(world, probe)
+        with pytest.raises(Crash):
+            world.decide()
+    again = world.rebuild(clock=Clock(NOW + timedelta(seconds=11)))
+    relabel_decisions(again.vm, monkeypatch, "CHALLENGED")
+    report = again.decide()
+    assert report.status == "aborted" and list(policy.run_state(again.evidence).abort_events) == ["vm_audit_codes_unexpected"]
+    assert again.records("vm_decision") == [] and len(again.order_posts()) == 1
+    again.ledger.close()
+
+
 def test_a_challenge_is_an_abort_and_is_never_authorized(world, monkeypatch):
     """Break-proof 1: accept a minted challenge and the abort row fails."""
     monkeypatch.setattr(world.vm.orders, "mint", lambda body: ("challenge-1", b"signed-bytes"))

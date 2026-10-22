@@ -99,6 +99,7 @@ LEG_ENTRY = "entry"
 LEG_EXIT = "exit"  # an exit obligation's sell: its proposal id IS ``exit_intent_id(obligation_id, attempt)``
 LEG_SWING = "swing"  # a strategy sell (a held name fell out of the hold cutoff)
 EXPECTED_KILL_LABEL = "blocked"
+DECISION_REFUSED = "REFUSED"  # the VM audit ``decision`` of an intent the kill flag refused
 NO_FILL_EVIDENCE = "no_post_submission_evidence"
 OUTCOME_INCONCLUSIVE = "INCONCLUSIVE"
 OUTCOME_FILLED = "FILLED"
@@ -308,6 +309,7 @@ class VmAuditReader:
         self._base_seq = base_seq
         self._base_sha256 = base_sha256
         self.labels: dict[int, str] = {}
+        self.decisions: dict[int, str] = {}  # audit seq -> the entry's ``decision`` (the VM refused, or something else)
 
     def _after(self, from_seq: int) -> list[VmAuditEntry]:
         out: list[VmAuditEntry] = []
@@ -355,6 +357,7 @@ class VmAuditReader:
             kill = entry.raw.get("kill")
             if isinstance(kill, str):
                 self.labels[entry.seq] = kill
+            self.decisions[entry.seq] = entry.decision
             mapped = vm_ids.get(entry.intent_id)
             if mapped is not None and entry.intent_sha256 == mapped[1]:
                 out.append(AuditEntry(entry.seq, mapped[0], digests[mapped[0]], entry.codes, entry.entry_sha256))
@@ -431,6 +434,8 @@ class VmMint:
         entry = mine[0]
         if entry.intent_sha256 != request.intent_sha256 or tuple(entry.codes) != (VM_CODE_KILL_SWITCH,):
             return refuse("vm_audit_codes_unexpected", "audit_entry_is_not_the_expected_refusal")
+        if self._reader.decisions.get(entry.seq) != DECISION_REFUSED:  # a challenge carries other codes, but never trust the codes alone
+            return refuse("vm_audit_codes_unexpected", "audit_entry_decision_is_not_refused")
         return RunnerVmDecision(
             request.intent_id, request.intent_sha256, tuple(entry.codes), entry.seq, entry.entry_hash,
             status=verdict.status, code=verdict.code, kill=self._reader.labels.get(entry.seq),
@@ -440,9 +445,12 @@ class VmMint:
 class RunnerPreparation(ShadowPreparation):
     """``ShadowPreparation`` with exit ids from the portfolio and the P-06 fields on ``vm_decision``."""
 
-    def __init__(self, *args: Any, labels: Optional[dict[int, str]] = None, **kwargs: Any) -> None:
+    def __init__(
+        self, *args: Any, labels: Optional[dict[int, str]] = None, decisions: Optional[dict[int, str]] = None, **kwargs: Any
+    ) -> None:
         super().__init__(*args, **kwargs)
         self._labels = labels if labels is not None else {}
+        self._decisions = decisions if decisions is not None else {}
 
     def proposal_id(self, session_id: str, signal_id: str, leg: str) -> str:
         if leg != LEG_EXIT:
@@ -454,6 +462,9 @@ class RunnerPreparation(ShadowPreparation):
     def _record_decision(self, session_id: str, decision: VmDecision, *, recovered: bool) -> None:
         if tuple(decision.codes) != (VM_CODE_KILL_SWITCH,):
             raise ShadowAbort("vm_codes_unexpected")
+        if self._decisions.get(decision.audit_seq) != DECISION_REFUSED:  # recovery adopts an entry on the same terms
+            policy.raise_event(self._evidence, "vm_audit_codes_unexpected", "audit_entry_decision_is_not_refused")
+            raise RunnerAbort("vm_audit_codes_unexpected")
         status = getattr(decision, "status", None)
         kill = getattr(decision, "kill", None) or self._labels.get(decision.audit_seq)
         payload: dict[str, Any] = {
@@ -1171,6 +1182,7 @@ def assemble(
     preparation = RunnerPreparation(
         run_id=evidence.manifest.run_id, adapter=adapter, evidence=evidence, mint=mint, audit=reader,
         audit_base_seq=base_seq, mint_timeout=mint_timeout, clock=clock, labels=reader.labels,
+        decisions=reader.decisions,
     )
     portfolio = ShadowPortfolio(ledger, latch, evidence, instruments)
     return ShadowRunner(
