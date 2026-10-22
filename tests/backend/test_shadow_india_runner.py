@@ -17,13 +17,12 @@ import io
 import json
 import sqlite3
 import threading
-from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Iterator, Sequence
+from typing import Any, Sequence
 
 import pytest
 
@@ -32,7 +31,6 @@ from brokers.breeze_gateway.client import RelayClient
 from brokers.breeze_gateway.errors import NoSession, RelayError
 from brokers.breeze_gateway.orders import OrdersClient
 from brokers.breeze_gateway.token_store import MemoryTokenStore
-from execution.models import AdmissionDecision
 from india_limits_support import india_private_dir, make_evidence, make_guard
 from relay_orders_support import RecordingHttp
 from risk_india import rules
@@ -73,7 +71,6 @@ from shadow_india.runner import (
 from shadow_india.signals import (
     PIN_NAMES,
     STATUS_EVALUATED,
-    STATUS_PAUSED,
     NameSignal,
     SignalInputs,
     SignalResult,
