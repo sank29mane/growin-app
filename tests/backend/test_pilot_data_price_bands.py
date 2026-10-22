@@ -673,3 +673,19 @@ def test_an_empty_published_list_is_settled_and_not_retried(tmp_path):
         calls = len(client.calls)
         assert ingest_range(store, http, S1, S1, workspace="india", min_free_bytes=0)["skipped_final"] == 1
         assert len(client.calls) == calls
+
+
+def test_band_on_still_asks_the_store_for_every_day_status(store, monkeypatch):
+    """The resolver's status hook defaults to the store's own calendar, so band_on keeps its old behaviour."""
+    import pilot_data.price_bands as price_bands_module
+
+    bars(store)
+    with_convention(store)
+    for session in SESS:
+        put_list(store, FILE_FOR[session])
+    expected = band(store, RELIANCE, S3)
+    asked = []
+    real = price_bands_module.day_status
+    monkeypatch.setattr(price_bands_module, "day_status", lambda handle, day: asked.append(day) or real(handle, day))
+    assert band(store, RELIANCE, S3) == expected and expected.status == "no_band"
+    assert asked and max(asked) > S3  # band_on still reads store evidence for later files; only the forecast path may not

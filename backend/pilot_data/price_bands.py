@@ -59,6 +59,7 @@ from .core import (
 from .lineage import lineage_for_target
 from .models import QuarantineRecord
 from .nse_http import NoFile, NseHttp, build_default_client
+from .nse_calendar import PinnedCalendar, upcoming_session_check
 from .nse_ingest import free_bytes
 from .sessions import day_status, ensure_fetch_log, sessions_between
 from .store import PilotDataStore
@@ -523,12 +524,19 @@ class BandResolver:
         day = file_date
         for _ in range(15):
             day += timedelta(days=1)
-            status = day_status(self.store, day)
+            status = self._day_status(day)
             if status == "session":
                 return day
             if status not in ("holiday", "weekend_no_session"):
                 return None
         return None
+
+    # -- status hook: the only place the resolver asks which days were sessions
+    def _day_status(self, day: date) -> str:
+        return day_status(self.store, day)
+
+    def _sessions_between(self, start: date, end: date) -> tuple[date, ...]:
+        return sessions_between(self.store, start, end)
 
     # -- cached row loaders
     def _list_rows(self, source: str) -> dict[tuple[str, str], tuple[str, Decimal | None]]:
@@ -564,7 +572,7 @@ class BandResolver:
         day = session
         for _ in range(15):
             day -= timedelta(days=1)
-            status = day_status(self.store, day)
+            status = self._day_status(day)
             if status == "session":
                 return day
             if status not in ("holiday", "weekend_no_session"):
@@ -616,7 +624,7 @@ class BandResolver:
             return _Basis(None, baseline.reason, baseline.sources)
         baseline_sources = list(baseline.sources)
         chain: list[str] = []
-        for day in sessions_between(self.store, baseline_day, session):
+        for day in self._sessions_between(baseline_day, session):
             if day == baseline_day:
                 continue
             files = sorted({source for _, source in self._changes_by_eff.get(day, [])})
@@ -739,6 +747,102 @@ class BandResolver:
 def band_on(store: PilotDataStore, *, isin: str, session: date, workspace: str) -> BandObservation:
     _check_workspace(store, workspace)
     return BandResolver(store).observe(isin, session)
+
+
+# --------------------------------------------------------------------------- band for a session that has not happened
+class _UpcomingResolver(BandResolver):
+    """A resolver for session S before S's files exist.
+
+    Days on or before `prior_session` come from the store. Days in `(prior_session, session]` come from the pinned
+    calendar (the caller has already had them checked), and every later day is unknown. The ISIN is mapped through
+    `prior_session`'s primary bhavcopy, never S's. Lists are still indexed by the recorded convention rule, so a
+    list dated S is effective after S under `next_session_after_file_date` and is never S's basis.
+    """
+
+    def __init__(self, store: PilotDataStore, *, prior_session: date, session: date) -> None:
+        self._prior = prior_session
+        self._upcoming = session
+        super().__init__(store, record_quarantines=False)  # a forecast writes no evidence
+
+    def _day_status(self, day: date) -> str:
+        if day <= self._prior:
+            return super()._day_status(day)
+        if day == self._upcoming:
+            return "session"
+        if day < self._upcoming:
+            return "weekend_no_session" if day.weekday() >= 5 else "holiday"
+        return "unknown"
+
+    def _sessions_between(self, start: date, end: date) -> tuple[date, ...]:
+        if end > self._upcoming:
+            raise PilotDataError("calendar_unknown_dates", "the upcoming resolver does not know days after the session")
+        found = super()._sessions_between(start, min(end, self._prior))
+        if start <= self._upcoming <= end:
+            found = (*found, self._upcoming)
+        return found
+
+    def _bars_on(self, session: date) -> dict[str, list[tuple[str, str]]]:
+        return super()._bars_on(self._prior)
+
+
+class BandAgreement(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    agree: bool
+    differing: tuple[str, ...]
+
+
+def band_for_upcoming_session(store: PilotDataStore, *, isin: str, prior_session: date, session: date,
+                              calendar: PinnedCalendar | None, workspace: str) -> BandObservation:
+    """The band for `isin` on `session`, before `session`'s own files exist.
+
+    `unknown` with a typed reason unless: the pinned calendar says `session` is expected
+    (`upcoming_session_check`), `prior_session`'s primary bhavcopy maps the ISIN to one regular
+    (symbol, series), a band list effective on `session` exists, and that list still carries the pair.
+    Reads nothing dated on or after `session` except band files the convention makes effective on it, records
+    no quarantine, and writes nothing. The caller pins `calendar.sha256`.
+    """
+    _check_workspace(store, workspace)
+
+    def unknown(reason: str, symbol=None, series=None, sources=()) -> BandObservation:
+        return BandObservation(isin=isin, session=session, status="unknown", percent=None, nse_symbol=symbol,
+                               series=series, source_kind=None, source_sha256s=tuple(sources), reason=reason)
+
+    check = upcoming_session_check(store, prior_session=prior_session, session=session, calendar=calendar)
+    if check.status != "expected":
+        return unknown(check.reason or "session_calendar_unknown")
+    resolver = _UpcomingResolver(store, prior_session=prior_session, session=session)
+    if resolver.convention is None:
+        return unknown("band_convention_unverified")
+    pairs = resolver._bars_on(session).get(isin, [])
+    if not pairs:
+        return unknown("no_bar_on_prior_session")
+    if len(pairs) > 1:
+        return unknown("band_isin_ambiguous")
+    symbol, series = pairs[0]
+    try:
+        basis = resolver.basis(session)
+        if basis.kind == "changes_chain":
+            return unknown("upcoming_band_needs_list", symbol, series, basis.sources)
+        observed = resolver.observe(isin, session)
+    except PilotDataError as error:
+        if error.code != "calendar_unknown_dates":
+            raise
+        return unknown("session_calendar_unknown", symbol, series)
+    if observed.reason == "not_in_band_list":
+        return unknown("band_symbol_not_carried", symbol, series, observed.source_sha256s)
+    return observed
+
+
+def band_agreement(upcoming: BandObservation, actual: BandObservation) -> BandAgreement:
+    """Compare a forecast with `band_on` for the same (isin, session). Band file hashes compare as a set."""
+    differing = [
+        name for name in ("status", "percent", "nse_symbol", "series", "source_kind")
+        if getattr(upcoming, name) != getattr(actual, name)
+    ]
+    if set(upcoming.source_sha256s) != set(actual.source_sha256s):
+        differing.append("source_sha256s")
+    return BandAgreement(agree=not differing, differing=tuple(differing))
 
 
 # --------------------------------------------------------------------------- convention evidence

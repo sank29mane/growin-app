@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -335,7 +336,13 @@ def run_crosscheck(
     as_of: date,
     tolerances: CrossCheckTolerances,
     workspace: Literal["india"],
+    lineage_override: Callable[[object, Lineage], Lineage] | None = None,
 ) -> CrossCheckReport:
+    """`lineage_override(member, built)` may return a replacement lineage (64-08: the as-of trimmed one).
+
+    Everything the run derives from a lineage reads the replacement: the ISINs bhavcopy rows are matched on, which
+    prior quarantines exclude a day, the reference and the factor set. None keeps the lineage `build_lineage` gave.
+    """
     if workspace != store.workspace:
         raise PilotDataError("workspace_mismatch", "workspace differs from the store workspace")
     ensure_universe_crosscheck_tables(store)
@@ -364,6 +371,8 @@ def run_crosscheck(
             not_fetched.append(member)
             continue
         lineage = lineage_for_target(store, member, as_of=as_of, workspace=workspace)
+        if lineage_override is not None:
+            lineage = lineage_override(member, lineage)
         reference = primary_bars_for_lineage(store, lineage, start=window_start, end=window_end)
         candidate = []
         for bar in view.bars:
