@@ -6,7 +6,7 @@ import json
 import shutil
 import socket
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -203,6 +203,8 @@ def frozen(tmp_path_factory):
     session_root = base / "session"
     seed_session_store(session_root, world["root"], dataset_dir=world["dataset"], window_start=D1, window_end=D5,
                        workspace="india", band_parity_offset_days=2)
+    with PilotDataStore(session_root, workspace="india") as st:  # the weekend before S was attempted and found empty
+        cc.mark_calendar(st, D5 + timedelta(days=1), S - timedelta(days=1), set())
     return {**world, "session": session_root}
 
 
@@ -382,6 +384,33 @@ def test_refusals_name_their_reason_and_never_touch_the_research_store(frozen, t
         bars_as_of(st, targets=TARGETS, decision_session=S, as_of=D5, window_start=D1, tolerances=TOLERANCES,
                    workspace="uk")
     assert space.value.code == "workspace_mismatch"
+
+
+@pytest.mark.parametrize("mark", ["unknown", "pending", "inconsistent"])
+def test_an_intervening_day_that_is_not_a_known_non_session_refuses_instead_of_passing_as_fresh(tmp_path, mark):
+    """Codex r1: decision Tue S1 with Mon S not yet known must not accept Fri D5 as_of."""
+    root = tmp_path / mark
+
+    def mark_monday(st):
+        if mark == "pending":  # a 404 on the same IST day proves nothing: NSE publishes in the evening
+            for kind in ("pr", "udiff", "cm_legacy"):
+                _log_attempt(st, d=S, kind=kind, outcome="no_file", http_status=404, error_code=None,
+                             source_sha256=None, url="u", attempted_at=datetime(S.year, S.month, S.day, 8, 0, tzinfo=timezone.utc))
+        if mark == "inconsistent":  # a PR file was ingested, yet both primary files are absent
+            _log_attempt(st, d=S, kind="pr", outcome="ingested", http_status=200, error_code=None,
+                         source_sha256=None, url="u", attempted_at=cc.LATER)
+            for kind in ("udiff", "cm_legacy"):
+                _log_attempt(st, d=S, kind=kind, outcome="no_file", http_status=404, error_code=None,
+                             source_sha256=None, url="u", attempted_at=cc.LATER)
+
+    build_world(root, frozenset({"no_future"}), extra=mark_monday)
+    with PilotDataStore(root, workspace="india", read_only=True) as st:  # the precondition: S has the intended status
+        assert sessions.day_status(st, S) == mark
+    with pytest.raises(PilotDataError) as caught:
+        compose(root, as_of=D5, decision=S1)
+    assert caught.value.code == "calendar_unknown_dates" and S.isoformat() in str(caught.value)
+    with PilotDataStore(root, workspace="india", read_only=True) as st:
+        assert not st.table_exists("crosscheck_runs")  # refused before any cross-check ran
 
 
 # --------------------------------------------------------------------------- 7: strategy fit

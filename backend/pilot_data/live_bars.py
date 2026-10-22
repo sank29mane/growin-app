@@ -32,7 +32,7 @@ from .dataset import DatasetRow, DividendAmountUnknownEvent, read_dataset_rows, 
 from .lineage import build_lineage, primary_bars_for_lineage
 from .models import CrossCheckTolerances, Lineage, RawDailyBar
 from .session_store import load_seed_report
-from .sessions import day_status
+from .sessions import FINAL_STATUSES, day_status
 from .store import PilotDataStore
 from .targets import TargetUniverseResult
 
@@ -71,8 +71,12 @@ def _check_dates(store: PilotDataStore, decision_session: date, as_of: date, win
         raise PilotDataError("as_of_not_session", "as_of is not a session in the store's calendar")
     day = as_of + timedelta(days=1)
     while day < decision_session:  # decision_session itself is never asked about
-        if day_status(store, day) == "session":
+        status = day_status(store, day)
+        if status == "session":
             raise PilotDataError("stale_as_of", f"{day.isoformat()} is a session between as_of and the decision session")
+        if status not in FINAL_STATUSES:  # an unknown day could be a session: fail closed, as sessions_between does
+            raise PilotDataError("calendar_unknown_dates",
+                                 f"{day.isoformat()} between as_of and the decision session is {status}, not a known non-session")
         day += timedelta(days=1)
 
 
