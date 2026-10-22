@@ -49,7 +49,7 @@ from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from pilot_data.core import PilotDataError, canonical_sha256
 from pilot_data.live_bars import LiveBarsResult, _as_of_lineage, bars_as_of
@@ -377,14 +377,52 @@ def _inputs_hash(rows: Sequence[Any], *, adjusted: bool) -> str:
     return canonical_sha256(items)
 
 
+def _window_need(params: StrategyParams) -> int:
+    return max(params.lookback_sessions + params.skip_sessions, params.vol_window) + 1
+
+
+def _recent_quarantined(series: Sequence[Any], params: StrategyParams) -> bool:
+    """The one rule for ``adjusted_quarantined``: a quarantined bar inside the window the signal reads."""
+
+    return any(bar.quarantined for bar in series[-_window_need(params):])
+
+
 def _suppression(view: DatasetView, anchor: str, as_of: date, params: StrategyParams) -> str:
     series = view.series(anchor)
     if not series or series[-1].session != as_of:
         return SUPPRESS_MISSING_BAR
-    need = max(params.lookback_sessions + params.skip_sessions, params.vol_window) + 1
-    if any(bar.quarantined for bar in series[-need:]):
+    if _recent_quarantined(series, params):
         return SUPPRESS_QUARANTINED
     return SUPPRESS_HISTORY
+
+
+def held_names_quarantined(
+    inputs: SignalInputs, held_isins: Iterable[str], as_of: date, decision_session: date
+) -> frozenset[str]:
+    """The held ISINs whose adjusted bars are quarantined as of ``as_of``: the S-1 rule ``evaluate_session`` applies.
+
+    Run on every decide, evaluation day or not, because a mark at raw closes of a name with an unrecorded split or
+    bonus reads as a false drawdown. It writes no evidence and ``evaluate_session`` does not call it; ``bars_as_of``
+    appends the same content-addressed cross-check rows to the session store that an evaluation day appends. Raises ``PilotDataError`` when the bars cannot be composed (the caller fails closed).
+    """
+
+    held = frozenset(held_isins)
+    if not held:
+        return frozenset()
+    live = bars_as_of(
+        inputs.store, targets=inputs.targets, decision_session=decision_session, as_of=as_of,
+        window_start=inputs.window_start, tolerances=inputs.tolerances, workspace="india", calendar=inputs.calendar)
+    visible = [row for row in live.rows if row.trade_date < decision_session]
+    names: dict[str, set[str]] = {}
+    for row in visible:
+        names.setdefault(row.anchor_isin, set()).update((row.anchor_isin, row.isin))
+    view = decision_dataset_view(live.rows, decision_session)
+    hit: set[str] = set()
+    for anchor, isins in names.items():
+        mine = isins & held
+        if mine and _recent_quarantined(view.series(anchor), inputs.strategy.params):
+            hit |= mine
+    return frozenset(hit)
 
 
 def _overlay(store: PilotDataStore, as_of: date) -> tuple[frozenset[str], frozenset[str], str]:
@@ -640,5 +678,5 @@ def evaluate_session(evidence: EvidenceStore, inputs: SignalInputs, *, decision_
 __all__ = [
     "AsOfEligibility", "CONFLICT_CODE", "EVALUATION_KEY", "HASH_NAMES", "HOLDOUT_FLAG", "PIN_NAMES", "SEED_PIN", "NameSignal", "SignalInputs", "SignalResult", "SignalsError", "StrategyConfig",
     "STATUS_EVALUATED", "STATUS_NON_EVALUATION_DAY", "STATUS_PAUSED", "decision_dataset_view", "evaluate_session",
-    "evaluation_due", "load_strategy_config", "previous_session", "seed_pin", "seed_rows", "sessions_before",
+    "evaluation_due", "held_names_quarantined", "load_strategy_config", "previous_session", "seed_pin", "seed_rows", "sessions_before",
 ]

@@ -175,6 +175,13 @@ SCHEMAS: dict[str, tuple[dict[str, str], dict[str, str]]] = {
     "abort": ({"event": "code", "reason": "text"}, {}),
     "resume": ({"reason": "text", "cleared_pause_seqs": "ints"}, {}),
     "session_close": ({"outcome": "code"}, {"record_count": "int"}),
+    # 64-03 Task 3 (runner): the cadence anchor and the VM audit base a restart must not move, and the VM-side
+    # identity of an intent (the VM derives its own id and hash from the O3 body, so the audit cannot be matched
+    # to the ledger's intent without this record).
+    "run_start": (
+        {"run_start_session": "date", "audit_base_seq": "int", "audit_base_sha256": "sha", "window_start": "date"}, {}
+    ),
+    "vm_intent": ({"intent_id": "id", "vm_intent_id": "id", "vm_intent_sha256": "sha"}, {}),
 }
 RECORD_KINDS = frozenset(SCHEMAS)
 # After an abort only these may still be written: a further cause, and the close that prints the witness.
