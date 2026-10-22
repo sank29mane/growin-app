@@ -1262,9 +1262,10 @@ def test_real_a_list_fetched_on_s_minus_one_is_read_and_one_fetched_the_day_afte
     with PilotDataStore(root, workspace="india") as store:
         source = signals.AsOfEligibility(store, lb.TARGETS, WORLD_POLICY)
         assert source.snapshot(D5).smallcap[cc.STEADY_ISIN] == "unclassified"  # no list yet
-        _add_index_lists(store, datetime(2025, 3, 7, 23, 59, tzinfo=timezone.utc), [])  # the last minute of S-1 (UTC)
+        # S-1 ends at 00:00 IST on S, which is 18:30 UTC on S-1 (the IST fetch date is what backfill records)
+        _add_index_lists(store, datetime(2025, 3, 7, 18, 29, 59, tzinfo=timezone.utc), [])  # last second of S-1 (IST)
         assert source.snapshot(D5).smallcap[cc.STEADY_ISIN] == "not_small"
-        _add_index_lists(store, datetime(2025, 3, 8, 0, 0, tzinfo=timezone.utc), [cc.STEADY_ISIN])
+        _add_index_lists(store, datetime(2025, 3, 7, 18, 30, 0, tzinfo=timezone.utc), [cc.STEADY_ISIN])  # 00:00 IST on S
         assert source.snapshot(D5).smallcap[cc.STEADY_ISIN] == "not_small"
 
 

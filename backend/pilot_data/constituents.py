@@ -15,7 +15,7 @@ from typing import Literal
 from market_data.models import is_valid_isin
 from pydantic import BaseModel, ConfigDict
 
-from .core import PilotDataError, SourceDescriptor, canonical_sha256, utc_naive
+from .core import IST, PilotDataError, SourceDescriptor, canonical_sha256, utc_naive
 from .nse_http import NoFile, NseHttp
 from .store import PilotDataStore
 
@@ -153,10 +153,14 @@ def ingest_index_list(
 def latest_index_list(
     store: PilotDataStore, list_name: ListName, *, fetched_by: date | None = None
 ) -> IndexListSnapshotRef | None:
-    """The newest snapshot. ``fetched_by`` (a date) keeps only snapshots fetched on or before that UTC day (64-03)."""
+    """The newest snapshot. ``fetched_by`` (a date) keeps only snapshots whose IST fetch date is on or before it, i.e.
+    fetched before 00:00 IST on the next day (64-03). The column is a naive UTC timestamp."""
     ensure_constituent_tables(store)
     cutoff = "" if fetched_by is None else " AND fetched_at_utc < ?"
-    params: list = [list_name] + ([] if fetched_by is None else [datetime.combine(fetched_by + timedelta(days=1), time.min)])
+    params: list = [list_name]
+    if fetched_by is not None:
+        end_of_ist_day = datetime.combine(fetched_by + timedelta(days=1), time.min, tzinfo=IST)
+        params.append(utc_naive(end_of_ist_day))
     found = store.query(
         "SELECT source_sha256, fetched_at_utc, member_count, placeholders_json FROM index_list_snapshots "
         f"WHERE list_name = ?{cutoff} ORDER BY fetched_at_utc DESC, rowid DESC LIMIT 1",
