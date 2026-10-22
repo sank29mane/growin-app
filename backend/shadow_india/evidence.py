@@ -164,8 +164,9 @@ SCHEMAS: dict[str, tuple[dict[str, str], dict[str, str]]] = {
     "position_mark": (
         {"as_of_date": "date", "isin": "isin", "symbol": "symbol", "quantity": "dec", "close": "dec", "cost": "dec",
          "mark_basis": "code"},
-        {"corporate_action": "code"},
+        {"corporate_action": "code", "carried_quantity": "dec", "carried_value": "dec"},
     ),
+    "evaluation_commit": ({"as_of_date": "date", "position_mark_seqs": "ints"}, {"equity": "dec"}),
     "stop_open_report": ({"as_of_date": "date", "isins": "codes", "buys_blocked": "bool"}, {}),
     "run_ended": ({"event": "code", "reason": "text"}, {}),
     "latch": ({"latch": "code", "scope": "code", "reason": "code"}, {}),

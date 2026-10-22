@@ -385,6 +385,30 @@ def test_a_drawdown_halt_does_not_hide_behind_another_pause_in_the_same_resume(t
     assert [p.seq for p in run_state(store).open_pauses] == [halt["seq"]]
 
 
+def test_resume_refuses_an_unresolved_corporate_action_and_writes_nothing(tmp_path):
+    """Only the ledger knows whether the split or bonus was booked, so the portfolio owns this release (review r2)."""
+    store = make_store(tmp_path)
+    pause = raise_event(store, "unresolved_corporate_action", "bonus on a held name", isin=ISIN)
+    before = store.records()
+    for seqs in (None, [pause["seq"]]):
+        with pytest.raises(PolicyError) as caught:
+            resume(store, "operator says it is fine", pause_seqs=seqs)
+        assert caught.value.code == "corporate_action_resume_requires_portfolio"
+    assert store.records() == before
+    assert [p.event for p in run_state(store).open_pauses] == ["unresolved_corporate_action"]
+
+
+def test_a_corporate_action_pause_does_not_hide_behind_another_pause_in_the_same_resume(tmp_path):
+    store = make_store(tmp_path)
+    action = raise_event(store, "unresolved_corporate_action", "bonus on a held name", isin=ISIN)
+    stale = raise_event(store, "stale_data", "old bars")
+    with pytest.raises(PolicyError) as caught:
+        resume(store, "bars fixed")  # an all-open resume would have swept the pause away
+    assert caught.value.code == "corporate_action_resume_requires_portfolio"
+    resume(store, "bars fixed", pause_seqs=[stale["seq"]])
+    assert [p.seq for p in run_state(store).open_pauses] == [action["seq"]]
+
+
 @pytest.mark.parametrize("event", ["divergence_breach", "stale_data", "relay_no_session"])
 def test_other_entry_and_all_pauses_stay_resumable(tmp_path, event):
     store = make_store(tmp_path)

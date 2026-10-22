@@ -14,7 +14,11 @@ clear anything:
 - ``resume`` clears pauses and nothing else, and it refuses ``drawdown_halt``: the 63 latch in
   ``risk_india/drawdown.py`` refuses a reset while drawdown is at or below the halt line, so this file may not
   hold a weaker release. ``shadow_india.portfolio.ShadowPortfolio.release_halt`` is the latch-backed release: it
-  resets the 63 latch first and only then writes the ``resume`` record for the halt pause. Parity with D-05.
+  resets the 63 latch first and only then writes the ``resume`` record for the halt pause. Parity with D-05;
+- ``resume`` refuses ``unresolved_corporate_action`` too: only the ledger knows whether the split or bonus was booked, so
+  ``ShadowPortfolio.release_corporate_action`` is the release. It refuses ``corporate_action_not_booked`` while the
+  ledger still holds the pre-ex quantity, because resuming then would mark an unadjusted quantity at the adjusted
+  close and read a false -50%.
 
 D-08 says buys stop and sells stay, so admit and mint take a ``side`` (``buy`` or ``sell``). Scopes: ``all`` blocks
 every step except read-only checks, on both sides; ``entries`` blocks the admission and mint of a BUY;
@@ -58,6 +62,7 @@ SIDE_SELL = "sell"
 SIDES = frozenset({SIDE_BUY, SIDE_SELL})
 
 DRAWDOWN_HALT = "drawdown_halt"
+UNRESOLVED_CORPORATE_ACTION = "unresolved_corporate_action"
 DRAWDOWN_FLATTEN_15 = "drawdown_flatten_15"
 
 _ENTRY_STEPS = frozenset({STEP_ADMIT, STEP_MINT})
@@ -124,7 +129,7 @@ POLICY: Mapping[str, Rule] = {
     "vm_audit_chain_break": _ABORT,
     # D-07 pause: data, identity and band problems stay scoped where the instrument is known.
     "missing_bar": _pause(SCOPE_ISIN),
-    "unresolved_corporate_action": _pause(SCOPE_ISIN),
+    UNRESOLVED_CORPORATE_ACTION: _pause(SCOPE_ISIN),
     "identity_ambiguity": _pause(SCOPE_ISIN),
     "band_ambiguity": _pause(SCOPE_ISIN),
     "stale_data": _pause(SCOPE_ALL),
@@ -289,6 +294,8 @@ def resume(store: EvidenceStore, reason: str, *, pause_seqs: Sequence[int] | Non
         raise PolicyError("unknown_pause")
     if any(pause.event == DRAWDOWN_HALT for pause in state.open_pauses if pause.seq in chosen):
         raise PolicyError("drawdown_resume_requires_latch")
+    if any(pause.event == UNRESOLVED_CORPORATE_ACTION for pause in state.open_pauses if pause.seq in chosen):
+        raise PolicyError("corporate_action_resume_requires_portfolio")
     return store.append("resume", {"reason": reason.strip(), "cleared_pause_seqs": chosen})
 
 
@@ -314,6 +321,7 @@ __all__ = [
     "SIDES",
     "SIDE_BUY",
     "SIDE_SELL",
+    "UNRESOLVED_CORPORATE_ACTION",
     "raise_event",
     "resume",
     "rule_for",
