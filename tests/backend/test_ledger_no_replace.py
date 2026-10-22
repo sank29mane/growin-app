@@ -621,6 +621,61 @@ def test_the_ledger_own_requote_state_update_is_unaffected(main_path):
         assert ledger.get_requote("rq-1") is not None
 
 
+# --- the key map against the real schema --------------------------------------------------------
+
+
+def _real_keys(connection: sqlite3.Connection, table: str) -> set[frozenset[str]]:
+    """Every uniqueness constraint SQLite itself knows: UNIQUE and PRIMARY KEY indexes (including
+    the automatic ones) and an INTEGER PRIMARY KEY, which is the rowid and has no index."""
+
+    keys: set[frozenset[str]] = set()
+    for row in connection.execute(f"PRAGMA index_list({table})").fetchall():
+        name, unique = row[1], row[2]
+        if unique:
+            keys.add(
+                frozenset(info[2] for info in connection.execute(f"PRAGMA index_info({name})"))
+            )
+    info = connection.execute(f"PRAGMA table_info({table})").fetchall()
+    primary = [column for column in info if column[5]]
+    if len(primary) == 1 and primary[0][2].upper() == "INTEGER":
+        keys.add(frozenset({primary[0][1]}))
+    return keys
+
+
+def test_the_key_map_equals_the_unique_constraints_of_the_real_tables(main_path, venue_path):
+    for path, tables in ((main_path, KEY_TABLES), (venue_path, VENUE_TABLES)):
+        plain = _plain(path)
+        try:
+            for table in tables:
+                declared = {frozenset(key) for key in ledger_module._NO_REPLACE_KEYS[table]}
+                assert declared == _real_keys(plain, table), table
+        finally:
+            plain.close()
+
+
+def test_a_dropped_key_is_caught_by_the_schema_check(main_path, monkeypatch):
+    # Break-proof of the check itself: the order_intents map without client_order_id (the gap
+    # that review round 1 found) no longer equals the table, and the guard built from it lets a
+    # REPLACE that collides only on client_order_id delete the old intent.
+    weakened = dict(ledger_module._NO_REPLACE_KEYS)
+    weakened["order_intents"] = (("proposal_id",),)
+    plain = _plain(main_path)
+    try:
+        declared = {frozenset(key) for key in weakened["order_intents"]}
+        assert declared != _real_keys(plain, "order_intents")
+        plain.execute("DROP TRIGGER order_intents_no_replace")
+        plain.execute(ledger_module._no_replace_trigger_sql("order_intents", weakened["order_intents"]))
+        columns = _columns(plain, "order_intents")
+        names = ", ".join(columns)
+        moved = ", ".join(
+            "'other-' || proposal_id" if column == "proposal_id" else column for column in columns
+        )
+        plain.execute(f"INSERT OR REPLACE INTO order_intents ({names}) SELECT {moved} FROM order_intents")
+        assert plain.execute("SELECT COUNT(*) FROM order_intents").fetchone()[0] == 1
+    finally:
+        plain.close()
+
+
 def test_every_guarded_table_that_permits_update_has_a_key_update_guard(main_path, venue_path):
     # A table with no unconditional BEFORE UPDATE trigger accepts UPDATE OR REPLACE, so it must be
     # listed for ``_no_key_update``. A table that refuses every UPDATE must not need it.
