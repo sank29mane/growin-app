@@ -137,7 +137,9 @@ def test_raise_event_records_the_scoped_pause_or_the_abort(tmp_path):
     assert (aborted["kind"], aborted["event"]) == ("abort", "audit_corrupt") and "scope" not in aborted
 
 
-@pytest.mark.parametrize("isin", [None, "", "short", "ine002a01018"])
+@pytest.mark.parametrize(
+    "isin", [None, "", "short", "ine002a01018", ISIN + "\n", ISIN + "\r\n", "\n" + ISIN, ISIN + "\n\n"]
+)
 def test_an_instrument_pause_needs_a_real_isin(tmp_path, isin):
     store = make_store(tmp_path)
     with pytest.raises(PolicyError) as caught:
@@ -154,7 +156,7 @@ def test_an_instrument_pause_is_enforced_whatever_the_caller_passes(tmp_path, ev
     store = make_store(tmp_path)
     raise_event(store, event, "data problem", isin=ISIN)
     state = run_state(store)
-    for bad in (None, "", "ine002a01018", "INE002A0101", "RELIANCE", ISIN + " ", 5):
+    for bad in (None, "", "ine002a01018", "INE002A0101", "RELIANCE", ISIN + " ", 5, ISIN + "\n", ISIN + "\r\n", "\n" + ISIN):
         with pytest.raises(PolicyError) as caught:
             state.blocks(step, isin=bad)  # type: ignore[arg-type]
         assert caught.value.code == "isin_required"

@@ -61,8 +61,8 @@ SIDECAR_NAME = "abort.json"
 ABORT_MARKER_PREFIX = ANCHOR_NAME + ".aborted."
 TORN_DIR = "torn"
 
-_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
-_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
+_HEX64 = re.compile(r"^[0-9a-f]{64}\Z")
 _ENVELOPE = ("seq", "prev_sha256", "entry_sha256", "kind", "run_id", "session_id", "run_class", "utc", "ist")
 _RESERVED = frozenset(_ENVELOPE) - {"session_id"}
 
@@ -170,14 +170,14 @@ RECORD_KINDS = frozenset(SCHEMAS)
 # After an abort only these may still be written: a further cause, and the close that prints the witness.
 ALLOWED_AFTER_ABORT = frozenset({"abort", "session_close"})
 
-_ID = re.compile(r"^[A-Za-z0-9_.:@-]{1,128}$")
-_CODE = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
-_TEXT = re.compile(r"^[\x20-\x7e]{1,500}$")
-_SYMBOL = re.compile(r"^[A-Za-z0-9&._-]{1,32}$")
-_ISIN = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
-_SERIES = re.compile(r"^[A-Z0-9]{1,4}$")
-_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_DEC = re.compile(r"^-?\d+(\.\d+)?$")
+_ID = re.compile(r"^[A-Za-z0-9_.:@-]{1,128}\Z")
+_CODE = re.compile(r"^[A-Za-z0-9_.:-]{1,80}\Z")
+_TEXT = re.compile(r"^[\x20-\x7e]{1,500}\Z")
+_SYMBOL = re.compile(r"^[A-Za-z0-9&._-]{1,32}\Z")
+_ISIN = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]\Z")
+_SERIES = re.compile(r"^[A-Z0-9]{1,4}\Z")
+_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}\Z")
+_DEC = re.compile(r"^-?\d+(\.\d+)?\Z")
 
 
 def _is_int(value: Any) -> bool:
@@ -505,7 +505,7 @@ class _Run:
             or data["run_class"] not in RUN_CLASSES
             or not isinstance(hashes, dict)
             or not hashes
-            or not all(isinstance(k, str) and re.match(r"^[a-z][a-z0-9_]{0,40}$", k) and isinstance(v, str) and _HEX64.match(v) for k, v in hashes.items())
+            or not all(isinstance(k, str) and re.match(r"^[a-z][a-z0-9_]{0,40}\Z", k) and isinstance(v, str) and _HEX64.match(v) for k, v in hashes.items())
         ):
             raise EvidenceCorrupt("manifest_invalid")
         return RunManifest(
@@ -635,7 +635,7 @@ class EvidenceStore:
         if not _check_type("id", session_id):
             raise EvidenceRefused("bad_session_id")
         if not hashes or not all(
-            isinstance(k, str) and re.match(r"^[a-z][a-z0-9_]{0,40}$", k) and isinstance(v, str) and _HEX64.match(v)
+            isinstance(k, str) and re.match(r"^[a-z][a-z0-9_]{0,40}\Z", k) and isinstance(v, str) and _HEX64.match(v)
             for k, v in hashes.items()
         ):
             raise EvidenceRefused("bad_manifest_hashes")

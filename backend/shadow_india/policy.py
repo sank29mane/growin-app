@@ -45,7 +45,7 @@ DRAWDOWN_HALT = "drawdown_halt"
 
 _ENTRY_STEPS = frozenset({STEP_ADMIT, STEP_MINT})
 _ALL_BLOCKED = frozenset({STEP_ADMIT, STEP_MINT, STEP_BOOK, STEP_EXPIRE})
-_ISIN = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
+_ISIN = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]\Z")
 
 
 class PolicyError(Exception):

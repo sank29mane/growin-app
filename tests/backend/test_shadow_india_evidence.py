@@ -899,6 +899,14 @@ def test_each_record_type_stores_and_a_missing_required_field_is_refused(tmp_pat
         ("mark", {"as_of_date": "2026-13-45"}, "bad_field"),
         ("pause", {"reason": "   "}, "bad_field"),
         ("signal", {"isin": "not-an-isin"}, "bad_field"),
+        ("signal", {"isin": "INE002A01018\n"}, "bad_field"),
+        ("pause", {"scope": "isin:INE002A01018\n"}, "bad_field"),
+        ("pause", {"event": "stale_data\n"}, "bad_field"),
+        ("pause", {"scope": "all\n"}, "bad_field"),
+        ("denied", {"code": "kill_switch\r\n"}, "bad_field"),
+        ("intent", {"session_id": "abc\n"}, "bad_field"),
+        ("mark", {"as_of_date": "2026-10-22\n"}, "bad_field"),
+        ("intent", {"intent_sha256": "a" * 64 + "\n"}, "bad_field"),
     ],
 )
 def test_a_malformed_record_is_refused_before_anything_is_written(tmp_path, kind, change, code):
@@ -1059,7 +1067,7 @@ def test_the_generated_envelope_is_scanned_before_the_write(tmp_path, field):
     assert CANARY_ACCOUNT.encode() not in (store.run_dir / LOG_NAME).read_bytes()
 
 
-@pytest.mark.parametrize("run_id", ["10.1.2.3", "www.example", "eyJhbGciOiJIUzI1NiJ9.payload"])
+@pytest.mark.parametrize("run_id", ["10.1.2.3", "www.example", "eyJhbGciOiJIUzI1NiJ9.payload", "run1\n"])
 def test_an_address_like_run_id_is_refused_before_anything_exists(tmp_path, run_id):
     with pytest.raises(EvidenceRefused):
         EvidenceStore.create(tmp_path, run_id=run_id, run_class="plumbing", session_id=SESSION, hashes=HASHES)
