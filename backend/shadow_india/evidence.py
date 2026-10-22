@@ -158,8 +158,16 @@ SCHEMAS: dict[str, tuple[dict[str, str], dict[str, str]]] = {
     "mark": (
         {"as_of_date": "date", "equity": "dec", "peak": "dec", "drawdown": "dec", "cash": "dec",
          "held_capital": "dec", "exposure": "dec"},
-        {"symbol": "symbol", "close": "dec"},
+        {"symbol": "symbol", "close": "dec", "peak_source": "code", "simulator_drawdown_pct": "dec",
+         "simulator_drawdown_basis": "code"},
     ),
+    "position_mark": (
+        {"as_of_date": "date", "isin": "isin", "symbol": "symbol", "quantity": "dec", "close": "dec", "cost": "dec",
+         "mark_basis": "code"},
+        {"corporate_action": "code"},
+    ),
+    "stop_open_report": ({"as_of_date": "date", "isins": "codes", "buys_blocked": "bool"}, {}),
+    "run_ended": ({"event": "code", "reason": "text"}, {}),
     "latch": ({"latch": "code", "scope": "code", "reason": "code"}, {}),
     "pause": ({"event": "code", "scope": "code", "reason": "text"}, {}),
     "abort": ({"event": "code", "reason": "text"}, {}),

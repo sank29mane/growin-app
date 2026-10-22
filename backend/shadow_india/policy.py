@@ -8,10 +8,13 @@ clear anything:
 
 - an abort is terminal. It blocks every later step, including read-only ones, and ``resume`` refuses it;
 - a pause blocks by scope and is cleared only by ``resume`` with a non-empty reason;
+- a run end (``drawdown_flatten_15``, D-08) is terminal for entries only: admission and mint are blocked for good,
+  while booking, expiry and read-only steps keep running so the simulated flatten can finish. No record clears it
+  and ``resume`` refuses it;
 - ``resume`` clears pauses and nothing else, and it refuses ``drawdown_halt``: the 63 latch in
   ``risk_india/drawdown.py`` refuses a reset while drawdown is at or below the halt line, so this file may not
-  hold a weaker release. Task 2 adds the latch-backed release record and the terminal ``drawdown_flatten_15``
-  class; until then a drawdown halt stays open. Parity with D-05 is intended.
+  hold a weaker release. ``shadow_india.portfolio.ShadowPortfolio.release_halt`` is the latch-backed release: it
+  resets the 63 latch first and only then writes the ``resume`` record for the halt pause. Parity with D-05.
 
 Scopes: ``all`` blocks every step except read-only checks; ``entries`` blocks admission and mint; ``isin:<ISIN>``
 blocks admission and mint for that instrument. Entry steps (admit, mint) always need a valid upper-case ISIN, so
@@ -29,6 +32,7 @@ from .evidence import EvidenceStore
 
 PAUSE = "pause"
 ABORT = "abort"
+RUN_ENDED = "run_ended"
 
 SCOPE_ALL = "all"
 SCOPE_ENTRIES = "entries"
@@ -42,6 +46,7 @@ STEP_READ_ONLY = "read_only"
 STEPS = frozenset({STEP_ADMIT, STEP_MINT, STEP_BOOK, STEP_EXPIRE, STEP_READ_ONLY})
 
 DRAWDOWN_HALT = "drawdown_halt"
+DRAWDOWN_FLATTEN_15 = "drawdown_flatten_15"
 
 _ENTRY_STEPS = frozenset({STEP_ADMIT, STEP_MINT})
 _ALL_BLOCKED = frozenset({STEP_ADMIT, STEP_MINT, STEP_BOOK, STEP_EXPIRE})
@@ -64,10 +69,14 @@ class RunPaused(PolicyError):
     """An open pause blocks this step."""
 
 
+class RunEnded(PolicyError):
+    """The run ended at the -15% flatten (D-08). Entry steps are blocked for good."""
+
+
 @dataclass(frozen=True)
 class Rule:
-    action: str  # PAUSE or ABORT
-    scope: str  # SCOPE_ALL, SCOPE_ENTRIES or SCOPE_ISIN; aborts end the whole run
+    action: str  # PAUSE, ABORT or RUN_ENDED
+    scope: str  # SCOPE_ALL, SCOPE_ENTRIES or SCOPE_ISIN; aborts end the whole run, a run end blocks entries only
 
 
 def _pause(scope: str) -> Rule:
@@ -116,6 +125,8 @@ POLICY: Mapping[str, Rule] = {
     "divergence_breach": _pause(SCOPE_ENTRIES),
     # D-08: the -8% trailing drawdown halts entries. `resume` refuses it; Task 2 adds the latch-backed release.
     DRAWDOWN_HALT: _pause(SCOPE_ENTRIES),
+    # D-08: the -15% flatten ends the run. Terminal for entries; booking, expiry and marks run until flat.
+    DRAWDOWN_FLATTEN_15: Rule(RUN_ENDED, SCOPE_ENTRIES),
     # P-06 pause: relay codes and answers that are not typed.
     "kill_label_unreadable": _pause(SCOPE_ALL),
     "untyped_response": _pause(SCOPE_ALL),
@@ -152,10 +163,15 @@ class RunState:
 
     abort_events: tuple[str, ...]
     open_pauses: tuple[OpenPause, ...]
+    ended_events: tuple[str, ...] = ()
 
     @property
     def aborted(self) -> bool:
         return bool(self.abort_events)
+
+    @property
+    def ended(self) -> bool:
+        return bool(self.ended_events)
 
     def blocks(self, step: str, *, isin: str | None = None) -> bool:
         if step not in STEPS:
@@ -163,6 +179,8 @@ class RunState:
         if step in _ENTRY_STEPS and (not isinstance(isin, str) or not _ISIN.match(isin)):
             raise PolicyError("isin_required")
         if self.aborted:
+            return True
+        if self.ended and step in _ENTRY_STEPS:
             return True
         for pause in self.open_pauses:
             if pause.scope == SCOPE_ALL and step in _ALL_BLOCKED:
@@ -183,6 +201,8 @@ class RunState:
             return
         if self.aborted:
             raise RunAborted("run_aborted")
+        if self.ended and step in _ENTRY_STEPS:
+            raise RunEnded("run_ended")
         raise RunPaused("run_paused")
 
     def require_entry(self, step: str, isin: str) -> None:
@@ -195,17 +215,20 @@ class RunState:
 
 def state_from_records(records: Sequence[Mapping[str, Any]]) -> RunState:
     aborts: list[str] = []
+    ended: list[str] = []
     pauses: dict[int, OpenPause] = {}
     for record in records:
         kind = record.get("kind")
         if kind == ABORT:
             aborts.append(str(record["event"]))
+        elif kind == RUN_ENDED:
+            ended.append(str(record["event"]))
         elif kind == PAUSE:
             pauses[int(record["seq"])] = OpenPause(int(record["seq"]), str(record["event"]), str(record["scope"]))
         elif kind == "resume":
             for seq in record["cleared_pause_seqs"]:
                 pauses.pop(int(seq), None)
-    return RunState(tuple(aborts), tuple(pauses.values()))
+    return RunState(tuple(aborts), tuple(pauses.values()), tuple(ended))
 
 
 def run_state(store: EvidenceStore) -> RunState:
@@ -213,11 +236,13 @@ def run_state(store: EvidenceStore) -> RunState:
 
 
 def raise_event(store: EvidenceStore, event: str, reason: str, *, isin: str | None = None) -> Mapping[str, Any]:
-    """Record the pause or abort the table assigns to ``event`` and return the stored record."""
+    """Record the pause, abort or run end the table assigns to ``event`` and return the stored record."""
 
     rule = rule_for(event)
     if rule.action == ABORT:
         return store.append(ABORT, {"event": event, "reason": reason})
+    if rule.action == RUN_ENDED:
+        return store.append(RUN_ENDED, {"event": event, "reason": reason})
     if rule.scope == SCOPE_ISIN:
         if isin is None or not _ISIN.match(isin):
             raise PolicyError("isin_required")
@@ -231,6 +256,8 @@ def resume(store: EvidenceStore, reason: str, *, pause_seqs: Sequence[int] | Non
     """Clear open pauses after operator review. Refuses an abort, a blank reason and an empty request.
 
     No timer, restart or caller state reaches this: it reads the evidence and writes one ``resume`` record.
+    A run end is never in the pause list, so no ``pause_seqs`` can name it; with nothing else open the refusal is
+    ``resume_refused_run_ended`` so the terminal class is not mistaken for an empty request.
     """
 
     state = run_state(store)
@@ -240,7 +267,7 @@ def resume(store: EvidenceStore, reason: str, *, pause_seqs: Sequence[int] | Non
         raise PolicyError("reason_required")
     open_seqs = {pause.seq for pause in state.open_pauses}
     if not open_seqs:
-        raise PolicyError("nothing_to_resume")
+        raise PolicyError("resume_refused_run_ended" if state.ended else "nothing_to_resume")
     chosen = sorted(open_seqs) if pause_seqs is None else sorted(set(pause_seqs))
     if not chosen or not set(chosen) <= open_seqs:
         raise PolicyError("unknown_pause")
@@ -251,12 +278,16 @@ def resume(store: EvidenceStore, reason: str, *, pause_seqs: Sequence[int] | Non
 
 __all__ = [
     "ABORT",
+    "DRAWDOWN_FLATTEN_15",
+    "DRAWDOWN_HALT",
     "PAUSE",
     "POLICY",
+    "RUN_ENDED",
     "OpenPause",
     "PolicyError",
     "Rule",
     "RunAborted",
+    "RunEnded",
     "RunPaused",
     "RunState",
     "STEP_ADMIT",

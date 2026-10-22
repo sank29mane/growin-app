@@ -840,6 +840,12 @@ GOOD: dict[str, dict[str, Any]] = {
         "as_of_date": "2026-10-21", "equity": "49990.50", "peak": "50000", "drawdown": "-0.0002", "cash": "49000",
         "held_capital": "990.50", "exposure": "0.02",
     },
+    "position_mark": {
+        "as_of_date": "2026-10-21", "isin": "INE002A01018", "symbol": "RELIANCE", "quantity": "10", "close": "100.50",
+        "cost": "1000", "mark_basis": "raw_close",
+    },
+    "stop_open_report": {"as_of_date": "2026-10-21", "isins": ["INE002A01018"], "buys_blocked": True},
+    "run_ended": {"event": "drawdown_flatten_15", "reason": "equity_at_or_below_minus_15_percent_of_peak"},
     "latch": {"latch": "stop_open", "scope": "all", "reason": "stop_exit_open"},
     "pause": {"event": "stale_data", "scope": "all", "reason": "bars older than one session"},
     "abort": {"event": "audit_corrupt", "reason": "chain break"},

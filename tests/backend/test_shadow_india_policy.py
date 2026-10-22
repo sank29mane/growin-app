@@ -83,6 +83,7 @@ P06_PAUSE_ALL = [
     "relay_forbidden_client",
 ]
 ENTRIES_PAUSE = ["divergence_breach", "drawdown_halt"]
+RUN_END = ["drawdown_flatten_15"]
 
 
 @pytest.mark.parametrize("event", D07_ABORT + P06_ABORT)
@@ -105,12 +106,17 @@ def test_pauses_that_stop_new_entries(event):
     assert rule_for(event) == policy.Rule(PAUSE, policy.SCOPE_ENTRIES)
 
 
-def test_the_table_is_exactly_the_events_above_and_every_row_is_a_pause_or_an_abort():
+@pytest.mark.parametrize("event", RUN_END)
+def test_the_minus_15_flatten_is_a_terminal_run_end_for_entries(event):
+    assert rule_for(event) == policy.Rule(policy.RUN_ENDED, policy.SCOPE_ENTRIES)
+
+
+def test_the_table_is_exactly_the_events_above_and_every_row_is_a_pause_an_abort_or_a_run_end():
     listed = set(
-        D07_ABORT + P06_ABORT + D07_PAUSE_ISIN + D07_PAUSE_ALL + P06_PAUSE_ALL + ENTRIES_PAUSE
+        D07_ABORT + P06_ABORT + D07_PAUSE_ISIN + D07_PAUSE_ALL + P06_PAUSE_ALL + ENTRIES_PAUSE + RUN_END
     )
     assert set(POLICY) == listed
-    assert {rule.action for rule in POLICY.values()} == {PAUSE, ABORT}
+    assert {rule.action for rule in POLICY.values()} == {PAUSE, ABORT, policy.RUN_ENDED}
 
 
 def test_an_unclassified_event_raises_and_writes_nothing(tmp_path):
@@ -453,3 +459,117 @@ def test_the_policy_is_a_function_of_the_records_alone():
     assert [(p.seq, p.event) for p in state.open_pauses] == [(2, "divergence_breach")]
     assert state_from_records(records) == state
     assert state_from_records([]) == policy.RunState((), ())
+
+
+# --- the terminal run end at -15% (D-08, 64-03 Task 2 addendum) -------------------------------------------
+
+
+def end_run(store: EvidenceStore):
+    return raise_event(store, policy.DRAWDOWN_FLATTEN_15, "equity_at_or_below_minus_15_percent_of_peak")
+
+
+def test_the_run_end_is_recorded_without_a_scope_and_is_not_a_pause_or_an_abort(tmp_path):
+    store = make_store(tmp_path)
+    record = end_run(store)
+    assert (record["kind"], record["event"]) == ("run_ended", "drawdown_flatten_15") and "scope" not in record
+    state = run_state(store)
+    assert state.ended and state.ended_events == ("drawdown_flatten_15",)
+    assert not state.aborted and state.open_pauses == ()
+
+
+def test_the_run_end_blocks_entries_for_good_and_lets_booking_expiry_and_reads_run(tmp_path):
+    store = make_store(tmp_path)
+    end_run(store)
+    state = run_state(store)
+    for isin in (ISIN, OTHER_ISIN, CLEAR_ISIN):
+        for step in (policy.STEP_ADMIT, policy.STEP_MINT):
+            assert state.blocks(step, isin=isin)
+            with pytest.raises(policy.RunEnded) as caught:
+                state.require_entry(step, isin)
+            assert caught.value.code == "run_ended"
+    for step in (policy.STEP_BOOK, policy.STEP_EXPIRE, policy.STEP_READ_ONLY):
+        assert not state.blocks(step)
+        state.require(step)
+
+
+def test_resume_refuses_the_run_end_and_writes_nothing(tmp_path):
+    store = make_store(tmp_path)
+    end_run(store)
+    before = store.records()
+    for reason, seqs in (("operator reviewed the flatten", None), ("again", [1]), ("x", [])):
+        with pytest.raises(PolicyError) as caught:
+            resume(store, reason, pause_seqs=seqs)
+        assert caught.value.code in {"resume_refused_run_ended", "unknown_pause"}
+    with pytest.raises(PolicyError) as plain:
+        resume(store, "operator reviewed the flatten")
+    assert plain.value.code == "resume_refused_run_ended"
+    assert store.records() == before and run_state(store).ended
+
+
+def test_resume_of_another_pause_never_clears_the_run_end(tmp_path):
+    store = make_store(tmp_path)
+    end_run(store)
+    pause = raise_event(store, "stale_data", "old bars")
+    resume(store, "bars refreshed", pause_seqs=[pause["seq"]])
+    state = run_state(store)
+    assert state.open_pauses == () and state.ended
+    assert blocked_steps(store) == {"admit", "mint"}
+    with pytest.raises(PolicyError) as again:
+        resume(store, "one more try")
+    assert again.value.code == "resume_refused_run_ended"
+
+
+def test_no_mark_no_time_and_no_restart_clears_the_run_end(tmp_path):
+    clock = Clock()
+    store = make_store(tmp_path, clock)
+    end_run(store)
+    for day in range(1, 8):
+        clock.now += timedelta(days=day)
+        store.append(
+            "mark",
+            {
+                "as_of_date": f"2026-11-{day:02d}", "equity": "60000", "peak": "60000", "drawdown": "0",
+                "cash": "60000", "held_capital": "0", "exposure": "0",
+            },
+        )
+        assert blocked_steps(reopen(tmp_path)) == {"admit", "mint"}
+    assert run_state(reopen(tmp_path)).ended
+
+
+RUN_END_CHILD = r"""
+import json, sys
+from shadow_india.evidence import EvidenceStore
+from shadow_india.policy import run_state
+
+store = EvidenceStore.open(sys.argv[1], run_id="run1", session_id="s-9")
+state = run_state(store)
+print(json.dumps({"ended": state.ended, "admit": state.blocks("admit", isin="INE999A01010"),
+                  "book": state.blocks("book")}))
+"""
+
+
+def test_a_new_process_reads_the_run_end_from_the_records(tmp_path):
+    store = make_store(tmp_path)
+    end_run(store)
+    done = subprocess.run(
+        [sys.executable, "-P", "-c", RUN_END_CHILD, str(tmp_path)],
+        env={**os.environ, "PYTHONPATH": BACKEND},
+        capture_output=True,
+        timeout=60,
+    )
+    assert done.returncode == 0, done.stderr.decode()
+    assert json.loads(done.stdout) == {"ended": True, "admit": True, "book": False}
+
+
+def test_an_abort_outranks_a_run_end_and_a_run_end_outranks_a_pause(tmp_path):
+    store = make_store(tmp_path)
+    raise_event(store, "stale_data", "old bars")
+    end_run(store)
+    with pytest.raises(policy.RunEnded):
+        run_state(store).require_entry(policy.STEP_ADMIT, ISIN)
+    raise_event(store, "audit_corrupt", "chain break")
+    state = run_state(store)
+    with pytest.raises(RunAborted):
+        state.require_entry(policy.STEP_ADMIT, ISIN)
+    with pytest.raises(RunAborted):
+        state.require(policy.STEP_BOOK)
