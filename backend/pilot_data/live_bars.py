@@ -22,11 +22,15 @@ from datetime import date, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
-from .adjustment import AdjustmentPolicy, adjusted_series, compute_factor_set, events_for_lineage, quarantine_unresolved
+from .adjustment import (
+    AdjustmentPolicy, adjusted_series, compute_factor_set, events_for_lineage, quarantine_unresolved,
+    verify_source_unadjusted,
+)
+from .breeze_bars import breeze_bars_for
 from .core import (
     BREEZE_RAW_UNVERIFIED_CAVEAT, CaveatedResult, PilotDataError, canonical_sha256, standard_caveats,
 )
-from .corporate_actions import events_for_symbol
+from .corporate_actions import SIGHTINGS_TABLE, CorporateActionEvent, events_for_symbol
 from .crosscheck import accepted_bars, run_crosscheck
 from .dataset import DatasetRow, DividendAmountUnknownEvent, read_dataset_rows, verify_dataset
 from .lineage import build_lineage, primary_bars_for_lineage
@@ -111,6 +115,38 @@ def _as_of_lineage(store: PilotDataStore, lineage: Lineage, as_of: date) -> Line
     })
 
 
+def _as_of_events(store: PilotDataStore, lineage: Lineage, as_of: date) -> tuple[CorporateActionEvent, ...]:
+    """Events as an earlier run would have read them: unseen events dropped, evidence from sightings on or before as_of only."""
+    out: list[CorporateActionEvent] = []
+    for event in events_for_lineage(store, lineage):
+        if event.first_seen_file_date > as_of:
+            continue
+        seen = store.query(
+            f"SELECT series, file_date, source_sha256 FROM {SIGHTINGS_TABLE} WHERE event_id = ? AND file_date <= ? "
+            "ORDER BY file_date, series", [event.event_id, as_of])
+        out.append(event.model_copy(update={
+            "series_seen": tuple(sorted({row[0] for row in seen})), "last_seen_file_date": max(row[1] for row in seen),
+            "sightings": len(seen), "evidence_sha256s": tuple(sorted({row[2] for row in seen})),
+        }))
+    return tuple(out)
+
+
+def _as_of_rawness(store: PilotDataStore, member, lineage: Lineage, reference, factor_set, *, window_start: date,
+                   as_of: date, workspace: Literal["india"]) -> str:
+    """Rawness of Breeze against the trimmed lineage, the way the cross-check derives it for the lineage it built."""
+    candidate = []
+    for bar in breeze_bars_for(store, member.stock_code, start=window_start, end=as_of).bars:
+        isin = lineage.isin_on(bar.trade_date)
+        if isin is None:
+            continue
+        candidate.append(RawDailyBar(
+            trade_date=bar.trade_date, isin=isin, series=member.anchor_series,
+            nse_symbol=lineage.symbol_on(bar.trade_date) or "", open=bar.open, high=bar.high, low=bar.low,
+            close=bar.close, volume=bar.volume, traded_value=None, source_kind="breeze", source_sha256=bar.source_sha256))
+    return verify_source_unadjusted(reference, candidate, factor_set, source_label="breeze_v2_1day",
+                                    workspace=workspace).overall
+
+
 def _events_payload(events: dict[str, tuple[DividendAmountUnknownEvent, ...]]) -> dict[str, list[list[str]]]:
     return {anchor: sorted([event.ex_date.isoformat(), event.event_id] for event in found)
             for anchor, found in sorted(events.items())}
@@ -124,26 +160,38 @@ def bars_as_of(store: PilotDataStore, *, targets: TargetUniverseResult, decision
     _check_dates(store, decision_session, as_of, window_start)
     report = run_crosscheck(store, targets=targets, window_start=window_start, window_end=as_of, as_of=as_of,
                             tolerances=tolerances, workspace=workspace)
-    if any(member.rawness_overall == "adjusted_detected" for member in report.members):
-        raise PilotDataError("breeze_adjusted_detected", "Breeze history looks adjusted; no bars are composed")
     accepted = accepted_bars(store, report.run_id)
     policy = AdjustmentPolicy()
-    members = {member.stock_code: member for member in report.members if member.status == "checked"}
+    # The cross-check built each lineage from every event in the store. Everything below reads the as-of lineage, so
+    # rawness, the refusal, the basis and the composition never depend on an event first seen after as_of.
+    states: dict[str, dict] = {}
+    for member in report.members:
+        if member.status != "checked":
+            continue
+        built = build_lineage(store, anchor_isin=member.anchor_isin, anchor_series=member.anchor_series, as_of=as_of,
+                              workspace=workspace, stock_code=member.stock_code)
+        if built.content_sha256() != member.lineage_sha256:
+            raise PilotDataError("lineage_drift", f"lineage for {member.stock_code} differs from the cross-check run")
+        lineage = _as_of_lineage(store, built, as_of)
+        reference = primary_bars_for_lineage(store, lineage, start=window_start, end=as_of)
+        factor_set = compute_factor_set(lineage, reference, _as_of_events(store, lineage, as_of), as_of=as_of, policy=policy)
+        if lineage is built:
+            from_store = compute_factor_set(lineage, reference, events_for_lineage(store, lineage), as_of=as_of, policy=policy)
+            if from_store.factor_set_sha256 != member.factor_set_sha256:
+                raise PilotDataError("factor_set_drift", f"factor set for {member.stock_code} differs from the cross-check run")
+            rawness = member.rawness_overall
+        else:
+            rawness = _as_of_rawness(store, member, lineage, reference, factor_set, window_start=window_start,
+                                     as_of=as_of, workspace=workspace)
+        states[member.stock_code] = {"member": member, "lineage": lineage, "factor_set": factor_set, "rawness": rawness}
+    if any(state["rawness"] == "adjusted_detected" for state in states.values()):
+        raise PilotDataError("breeze_adjusted_detected", "Breeze history looks adjusted; no bars are composed")
     parts: list[dict] = []
     for stock_code in sorted({bar.stock_code for bar in accepted}):
-        member = members[stock_code]
-        built = build_lineage(store, anchor_isin=member.anchor_isin, anchor_series=member.anchor_series, as_of=as_of,
-                              workspace=workspace, stock_code=stock_code)
-        if built.content_sha256() != member.lineage_sha256:
-            raise PilotDataError("lineage_drift", f"lineage for {stock_code} differs from the cross-check run")
-        lineage = _as_of_lineage(store, built, as_of)
+        member, lineage, factor_set = (states[stock_code][key] for key in ("member", "lineage", "factor_set"))
         mine = [bar for bar in accepted if bar.stock_code == stock_code and lineage.isin_on(bar.trade_date) == bar.isin]
         if not mine:
             continue
-        reference = primary_bars_for_lineage(store, lineage, start=window_start, end=as_of)
-        factor_set = compute_factor_set(lineage, reference, events_for_lineage(store, lineage), as_of=as_of, policy=policy)
-        if lineage is built and factor_set.factor_set_sha256 != member.factor_set_sha256:
-            raise PilotDataError("factor_set_drift", f"factor set for {stock_code} differs from the cross-check run")
         stored = {
             (row[0], row[1]): row[2:] for row in store.query(
                 "SELECT trade_date, source_sha256, open, high, low, close, volume FROM breeze_bars_raw "
@@ -165,7 +213,8 @@ def bars_as_of(store: PilotDataStore, *, targets: TargetUniverseResult, decision
         series = adjusted_series(raw_bars, factor_set, as_of=as_of, workspace=workspace)
         quarantine_unresolved(store, lineage, factor_set, workspace=workspace)
         parts.append({"stock_code": stock_code, "member": member, "mine": mine, "lineage": lineage,
-                      "factor_set": factor_set, "raw_bars": raw_bars, "fetched": fetched, "series": series})
+                      "factor_set": factor_set, "raw_bars": raw_bars, "fetched": fetched, "series": series,
+                      "rawness": states[stock_code]["rawness"]})
     if not parts:
         raise PilotDataError("live_bars_empty", "the cross-check accepted no bars as of this session")
     unknown_events: dict[str, tuple[DividendAmountUnknownEvent, ...]] = {}
@@ -181,13 +230,13 @@ def bars_as_of(store: PilotDataStore, *, targets: TargetUniverseResult, decision
         "targets": targets.target_sha256, "tolerances": tolerances.model_dump(mode="json"),
         "window": [window_start.isoformat(), as_of.isoformat()], "as_of": as_of.isoformat(),
         "lineages": dict(sorted(lineage_hashes.items())), "factor_sets": dict(sorted(factor_hashes.items())),
-        "rawness": {p["stock_code"]: p["member"].rawness_overall for p in parts}, "accepted": pairs,
+        "rawness": {p["stock_code"]: p["rawness"] for p in parts}, "accepted": pairs,
         "dividend_amount_unknown_events": _events_payload(unknown_events),
     })
     rows: list[DatasetRow] = []
     for part in parts:
         member, series = part["member"], part["series"]
-        basis = ("as_traded_breeze_raw_confirmed" if member.rawness_overall == "raw_confirmed"
+        basis = ("as_traded_breeze_raw_confirmed" if part["rawness"] == "raw_confirmed"
                  else "as_traded_breeze_unverified")
         by_day = {bar.trade_date: bar for bar in part["mine"]}
         symbols = {raw.trade_date: raw.nse_symbol for raw in part["raw_bars"]}
@@ -205,7 +254,7 @@ def bars_as_of(store: PilotDataStore, *, targets: TargetUniverseResult, decision
                 source_sha256=accepted_bar.breeze_source_sha256, fetched_at_utc=part["fetched"][accepted_bar.breeze_source_sha256],
                 bhavcopy_source_sha256=accepted_bar.bhav_source_sha256, crosscheck_run_id=composition))
     rows.sort(key=lambda row: (row.anchor_isin, row.trade_date))
-    all_raw = all(p["member"].rawness_overall == "raw_confirmed" for p in parts)
+    all_raw = all(p["rawness"] == "raw_confirmed" for p in parts)
     sources = sorted({sha for p in parts for bar in p["mine"] for sha in (bar.breeze_source_sha256, bar.bhav_source_sha256)})
     return LiveBarsResult(
         workspace="india", caveats=standard_caveats(*(() if all_raw else (BREEZE_RAW_UNVERIFIED_CAVEAT,))),

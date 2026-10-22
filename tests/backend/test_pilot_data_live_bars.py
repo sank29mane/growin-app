@@ -94,11 +94,16 @@ def build_world(root: Path, shocks=frozenset(), *, extra=None) -> None:
             cc.mark_calendar(st, S, S1, {S, S1})
         for code, prices in (("CANBAN", canbk), ("STEADY", steady)):
             history = {day: p for day, p in prices.items() if day <= cc.END}
+            if code == "CANBAN" and "old_adjusted" in shocks:  # Breeze history already adjusted for the old-ISIN bonus
+                history[D1] = scaled(history[D1], Decimal("0.5"))
             cc.load_breeze(st, code, cc.breeze_rows(code, history), start=cc.START, end=cc.END,
                            locator=f"relay/{code}/history")
             if future:  # a separate answer, as a windowed pull would be: its bytes cannot touch the history's hash
                 ahead = {day: p for day, p in prices.items() if day > cc.END}
                 cc.load_breeze(st, code, cc.breeze_rows(code, ahead), start=S, end=S1, locator=f"relay/{code}/ahead")
+        if "old_bonus" in shocks:  # an old-ISIN bonus ex D2, first seen D1: known long before S
+            ingest_pr_zip(st, cc.desc(kind="pr_zip"),
+                          pr_zip_on(D1, [kit.bc_row("EQ", "CANBK", "CANARA BANK", "BONUS 1:1", ex_date=D2)]), trade_date=D1)
         cas = []
         if "relink" in shocks:  # (h) the split that explains CANBK's ISIN change, first seen on S, ex-date on D3
             cas.append(kit.bc_row("EQ", "CANBK", "CANARA BANK", "FVSPLT FRM RS 10 TO RS 2", ex_date=D3))
@@ -125,7 +130,7 @@ def build_world(root: Path, shocks=frozenset(), *, extra=None) -> None:
             st.record_quarantine([QuarantineRecord(
                 workspace="india", check="bhavcopy_consistency", reason_code="primary_without_pd", scope="raw",
                 nse_symbol="CANBK", stock_code="CANBAN", date_from=S, date_to=S)])
-        if cas or "new_breeze" in shocks:
+        if cas or "new_breeze" in shocks or "old_bonus" in shocks:
             derive_corporate_actions(st, workspace="india")
         if extra is not None:
             extra(st)
@@ -165,8 +170,11 @@ SHOCKS = {
     "d_structural_event": {"ca_structural"}, "e_bands_and_surveillance": {"bands_surv"},
     "f_fetch_log_rows": {"fetch_extra"}, "g_quarantine": {"quarantine"}, "h_relink_split": {"relink"},
     "i_price_factor_event": {"factor_event"},
+    # the relink split is first seen on S, so the old-ISIN bonus is outside the as-of lineage: rawness, the basis and
+    # the composition must not see it (before the fix CANBAN went as_traded_breeze_unverified -> raw_confirmed)
+    "j_old_isin_bonus_then_relink": {"old_bonus", "relink"},
     "all_together": {"scale", "new_breeze", "ca_structural", "bands_surv", "fetch_extra", "quarantine", "relink",
-                     "factor_event"},
+                     "factor_event", "old_bonus"},
 }
 
 
@@ -193,6 +201,64 @@ def test_nothing_dated_on_or_after_the_decision_session_moves_a_row_or_the_compo
     deleted = tmp_path / "gone"
     build_world(deleted, frozenset({"no_future"}))
     assert canon(compose(deleted)) == reference
+
+
+def test_old_isin_evidence_behind_a_late_relink_cannot_flip_the_basis_the_caveat_or_cause_a_refusal(tmp_path):
+    """Opus r1 / Codex r1: the cross-check builds its own untrimmed lineage; its rawness must not reach the output."""
+    outcomes = {}
+    for name, flags in {"bonus_plain": {"old_bonus"}, "bonus_relink": {"old_bonus", "relink"},
+                        "adjusted_plain": {"old_bonus", "old_adjusted"},
+                        "adjusted_relink": {"old_bonus", "old_adjusted", "relink"}}.items():
+        root = tmp_path / name
+        build_world(root, frozenset(flags))
+        outcomes[name] = compose(root)  # the adjusted Breeze history is old-ISIN only: no refusal, with or without the link
+    for plain, linked in (("bonus_plain", "bonus_relink"), ("adjusted_plain", "adjusted_relink")):
+        assert canon(outcomes[plain]) == canon(outcomes[linked]), linked
+        canbk = [row for row in outcomes[linked].rows if row.stock_code == "CANBAN"]
+        assert len(canbk) == 3 and {row.raw_adjustment_basis for row in canbk} == {"as_traded_breeze_unverified"}
+        assert "BREEZE_RAW_UNVERIFIED" in {c.code for c in outcomes[linked].caveats}
+        assert min(row.trade_date for row in canbk) == D3  # no old-ISIN rows: the link was not known yet
+    assert len(outcomes["bonus_relink"].rows) == 8  # Codex r1: the relink does not change the composition by rows either
+
+
+def test_a_relink_known_by_as_of_still_confirms_rawness_and_the_adjusted_check_runs_on_the_as_of_lineage(tmp_path):
+    """The other direction: once the link is known, the old-ISIN bonus counts, so adjusted Breeze history is refused."""
+    root = tmp_path / "known"
+
+    def known_relink(st):  # the split is first seen on D4, before as_of
+        ingest_pr_zip(st, cc.desc(kind="pr_zip"),
+                      pr_zip_on(D4, [kit.bc_row("EQ", "CANBK", "CANARA BANK", "FVSPLT FRM RS 10 TO RS 2", ex_date=D3)]),
+                      trade_date=D4)
+        derive_corporate_actions(st, workspace="india")
+
+    build_world(root, frozenset({"old_bonus", "old_adjusted"}), extra=known_relink)
+    with pytest.raises(PilotDataError) as refused:
+        compose(root)
+    assert refused.value.code == "breeze_adjusted_detected"
+
+
+def test_a_repeated_announcement_in_a_file_after_as_of_moves_no_hash_the_basis_or_the_run_identity(tmp_path):
+    """Codex r1: events keep evidence hashes from every sighting; only sightings dated on or before as_of may count."""
+    rights_row = kit.bc_row("EQ", "STEADYCO", "STEADY CO", "RIGHTS 1:1 @ PRM RS 3/-", ex_date=D4)
+
+    def first_seen_d2(st):
+        ingest_pr_zip(st, cc.desc(kind="pr_zip"), pr_zip_on(D2, [rights_row]), trade_date=D2)
+        derive_corporate_actions(st, workspace="india")
+
+    def and_again_on_s(st):
+        first_seen_d2(st)
+        ingest_pr_zip(st, cc.desc(kind="pr_zip"), pr_zip_on(S, [rights_row]), trade_date=S)
+        derive_corporate_actions(st, workspace="india")
+
+    once, repeated = tmp_path / "once", tmp_path / "repeated"
+    build_world(once, extra=first_seen_d2)
+    build_world(repeated, extra=and_again_on_s)
+    with PilotDataStore(repeated, workspace="india", read_only=True) as st:  # the precondition: S holds a sighting
+        assert {row[0] for row in st.query("SELECT file_date FROM corporate_action_sightings_rev_c")} == {D2, S}
+    first, second = compose(once), compose(repeated)
+    assert "INE002A01018" in first.factor_set_hashes and first.factor_set_hashes == second.factor_set_hashes
+    assert canon(first) == canon(second)
+    assert any(row.adjusted_quarantined for row in first.rows)  # the rights event is in the factor set: evidence counts
 
 
 # --------------------------------------------------------------------------- 2: parity with the frozen dataset
