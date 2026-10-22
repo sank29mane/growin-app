@@ -670,7 +670,7 @@ def test_an_escaped_exception_is_500_internal_with_no_detail(stack: Stack):
 FORBIDDEN_WORDS = ("order", "fund", "holding", "position", "trade", "margin", "cancel", "modify")
 
 
-def test_route_set_is_exactly_the_nine_contract_routes_and_nothing_order_like(stack: Stack):
+def test_route_set_is_exactly_the_ten_contract_routes_and_nothing_order_like(stack: Stack):
     paths = {route.path for route in stack.app.routes}
     assert paths == {
         "/v1/health",
@@ -679,6 +679,7 @@ def test_route_set_is_exactly_the_nine_contract_routes_and_nothing_order_like(st
         "/v1/login/complete",
         "/v1/session/revoke",
         "/v1/bars/daily",
+        "/v1/bars/intraday",
         "/v1/quotes",
         "/v1/preview-order",
         "/v1/security-master",
@@ -688,7 +689,10 @@ def test_route_set_is_exactly_the_nine_contract_routes_and_nothing_order_like(st
     for path in paths - {"/v1/preview-order"}:
         assert not any(word in path.lower() for word in FORBIDDEN_WORDS)
     methods = {route.path: route.methods for route in stack.app.routes}
-    for path in ("/v1/health", "/v1/budget", "/v1/bars/daily", "/v1/quotes", "/v1/preview-order", "/v1/security-master"):
+    for path in (
+        "/v1/health", "/v1/budget", "/v1/bars/daily", "/v1/bars/intraday", "/v1/quotes",
+        "/v1/preview-order", "/v1/security-master",
+    ):
         assert methods[path] == {"GET"}
     for path in ("/v1/login/arm", "/v1/login/complete", "/v1/session/revoke"):
         assert methods[path] == {"POST"}
@@ -944,6 +948,7 @@ ROUTE_VALID_CALLS = {
     "/v1/login/complete": ("post", ""),
     "/v1/session/revoke": ("post", ""),
     "/v1/bars/daily": ("get", "stock_code=RELIND&from=2025-06-02&to=2025-06-13"),
+    "/v1/bars/intraday": ("get", "stock_code=RELIND&date=2025-06-02&interval=1minute"),
     "/v1/quotes": ("get", "stock_code=RELIND&exchange=NSE"),
     "/v1/preview-order": ("get", "stock_code=RELIND&action=buy&quantity=35&price=1402.30"),
     "/v1/security-master": ("get", ""),

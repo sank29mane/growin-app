@@ -31,8 +31,10 @@ from .errors import (
     EgressMismatch,
     IdentityMismatch,
     InternalRelayError,
+    IntradayRouteUnavailable,
     LoginAttemptInvalid,
     NoSession,
+    NotFound,
     RelayArgumentError,
     RelayContractMismatch,
     RelayError,
@@ -74,6 +76,7 @@ ROUTE_LOGIN_ARM = "/v1/login/arm"
 ROUTE_LOGIN_COMPLETE = "/v1/login/complete"
 ROUTE_SESSION_REVOKE = "/v1/session/revoke"
 ROUTE_BARS_DAILY = "/v1/bars/daily"
+ROUTE_BARS_INTRADAY = "/v1/bars/intraday"
 ROUTE_QUOTES = "/v1/quotes"
 ROUTE_PREVIEW_ORDER = "/v1/preview-order"
 ROUTE_SECURITY_MASTER = "/v1/security-master"
@@ -88,6 +91,7 @@ ROUTES = frozenset(
         ROUTE_LOGIN_COMPLETE,
         ROUTE_SESSION_REVOKE,
         ROUTE_BARS_DAILY,
+        ROUTE_BARS_INTRADAY,
         ROUTE_QUOTES,
         ROUTE_PREVIEW_ORDER,
         ROUTE_SECURITY_MASTER,
@@ -99,6 +103,7 @@ API_QUOTES_V1 = "breeze-quotes-v1"
 API_PREVIEW_V1 = "breeze-preview-order-v1"
 API_SECURITY_MASTER = "icici-security-master-zip"
 DAILY_INTERVAL = "1day"
+INTRADAY_INTERVAL = "1minute"
 
 # ----------------------------------------------------------------- limits
 
@@ -264,6 +269,7 @@ class _ByteRoute:
 
 _BYTE_ROUTES: Mapping[str, _ByteRoute] = {
     ROUTE_BARS_DAILY: _ByteRoute(API_BARS_V2, "application/json", True, DAILY_INTERVAL),
+    ROUTE_BARS_INTRADAY: _ByteRoute(API_BARS_V2, "application/json", True, INTRADAY_INTERVAL),
     ROUTE_QUOTES: _ByteRoute(API_QUOTES_V1, "application/json", True),
     ROUTE_PREVIEW_ORDER: _ByteRoute(API_PREVIEW_V1, "application/json", True),
     ROUTE_SECURITY_MASTER: _ByteRoute(API_SECURITY_MASTER, "application/zip", False),
@@ -334,6 +340,30 @@ def _exchange(value: str) -> str:
     if value != "NSE":
         raise RelayArgumentError("exchange")
     return value
+
+
+_UPSTREAM_EXCHANGE_KEYS = ("exch_code", "exchange_code")
+
+
+def _intraday_echo_ok(echo: Mapping[str, str], code: str, day: date) -> bool:
+    """The exact upstream parameter set the VM documents for one whole-day minute window.
+
+    Same rigour as the daily backfill's echo check: exactly stock_code, one exchange key (NSE),
+    from_date, to_date, interval and product_type, each equal to what this request implies.
+    """
+    exchange_keys = [key for key in _UPSTREAM_EXCHANGE_KEYS if key in echo]
+    if len(exchange_keys) != 1:
+        return False
+    if set(echo) != {"stock_code", "from_date", "to_date", "interval", "product_type", exchange_keys[0]}:
+        return False
+    return (
+        echo[exchange_keys[0]] == "NSE"
+        and echo["stock_code"] == code
+        and echo["from_date"] == f"{day.isoformat()}T00:00:00.000Z"
+        and echo["to_date"] == f"{day.isoformat()}T23:59:59.000Z"
+        and echo["product_type"] == "cash"
+        and echo["interval"] == INTRADAY_INTERVAL
+    )
 
 
 def _day(value: date, name: str) -> date:
@@ -1021,6 +1051,45 @@ class RelayClient:
                 ("exchange", _exchange(exchange)),
             ],
         )
+
+    def intraday_bars(
+        self,
+        stock_code: str,
+        session_date: date,
+        *,
+        interval: str = INTRADAY_INTERVAL,
+        exchange: str = "NSE",
+    ) -> UpstreamPayload:
+        """One session of minute bars: the exact upstream bytes with sha256 verified. No retry.
+
+        Only the approved interval is accepted. An older VM answers 404, which is raised as
+        IntradayRouteUnavailable (never retried, never routed to the daily endpoint). An empty
+        answer comes back with ``empty`` set; a capped one is recognised by its row count.
+        """
+        code = _stock_code(stock_code)
+        day = _day(session_date, "date")
+        if interval != INTRADAY_INTERVAL:
+            raise RelayArgumentError("interval")
+        try:
+            payload = self._bytes(
+                ROUTE_BARS_INTRADAY,
+                [
+                    ("stock_code", code),
+                    ("date", day.isoformat()),
+                    ("interval", interval),
+                    ("exchange", _exchange(exchange)),
+                ],
+            )
+        except NotFound as err:
+            raise IntradayRouteUnavailable(
+                err.code,
+                http_status=err.http_status,
+                reason="route_unavailable",
+                request_id=err.request_id,
+            ) from None
+        if not _intraday_echo_ok(payload.upstream_request, code, day):
+            raise _protocol("bad_header", payload.request_id)
+        return payload
 
     def quote(self, stock_code: str, *, exchange: str = "NSE") -> UpstreamPayload:
         return self._bytes(

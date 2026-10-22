@@ -2,14 +2,18 @@
 
     PYTHONPATH=backend uv run --project backend --no-sync python -m brokers.breeze_gateway.cli <command>
 
-Commands: health, budget, revoke, tunnel, probe-daily, login --paste, orders-state,
+Commands: health, budget, revoke, tunnel, probe-daily, probe-intraday, login --paste, orders-state,
 orders-audit (growin-orders/1 reads: names, numbers and ids only, never a price or a quantity).
+
+`probe-intraday step` runs one checklist step of the intraday probe through the relay and the
+Mac-side ledger (see intraday_probe.py); `probe-intraday compare` is offline and builds no client.
 
 `login --paste` is the hidden-prompt fallback (D-12, OD-12): the API session code
 is read with getpass, sent only as a JSON body over the IAP tunnel and never
 printed, logged or written to disk. Output never holds the code, the login URL or
 the relay token. Exit codes: 0 ok, 1 relay error, 2 usage or no terminal,
-3 config error, 4 tunnel error.
+3 config error, 4 tunnel error, 5 saved evidence refused (probe-intraday compare). A
+`probe-intraday step` whose slot ended in an upstream error prints `status INCONCLUSIVE` and exits 1.
 """
 
 from __future__ import annotations
@@ -22,11 +26,13 @@ import subprocess
 import sys
 import time
 from datetime import date
+from pathlib import Path
 from typing import Callable, Sequence, TextIO
 
 from .client import RelayClient
 from .config import ConfigError, GatewayConfig, load_gateway_config
 from .errors import RelayArgumentError, RelayError, TunnelError
+from .intraday_probe import STEPS, EvidenceError, ProbeError, compare, day_window, run_step
 from .orders import OrdersClient
 from .tunnel import Tunnel
 
@@ -35,6 +41,7 @@ EXIT_RELAY = 1
 EXIT_USAGE = 2
 EXIT_CONFIG = 3
 EXIT_TUNNEL = 4
+EXIT_EVIDENCE = 5
 
 PORTAL_NOTE = "Log in through the ICICI API portal, then enter the code it shows."
 
@@ -66,6 +73,17 @@ def _parser() -> argparse.ArgumentParser:
     probe.add_argument("--stock-code", required=True)
     probe.add_argument("--from", dest="from_date", required=True, type=_day)
     probe.add_argument("--to", dest="to_date", required=True, type=_day)
+    intraday = sub.add_parser("probe-intraday", help="intraday route probe (operator checklist)")
+    modes = intraday.add_subparsers(dest="probe_mode", required=True)
+    step = modes.add_parser("step", help="run one probe step through the relay and the probe ledger")
+    step.add_argument("--step", required=True, choices=STEPS)
+    step.add_argument("--probe-dir", required=True, type=Path)
+    step.add_argument("--symbol", help="S-7 only: the thinly traded symbol the operator picked")
+    step.add_argument("--date", dest="holiday", type=_day, help="S-8 only: the past holiday date from S-2")
+    offline = modes.add_parser("compare", help="offline S-11b: saved S-6 answers against the local bhavcopy")
+    offline.add_argument("--saved", required=True, type=Path)
+    offline.add_argument("--pilot-store", required=True, type=Path)
+    offline.add_argument("--probe-date", type=_day, help="default: the latest saved probe date")
     sub.add_parser("orders-state", help="VM order state: kill, latches, drawdown (read only)")
     audit = sub.add_parser("orders-audit", help="VM order audit entries (read only)")
     audit.add_argument("--after-seq", type=int, default=0)
@@ -115,6 +133,7 @@ def main(
     isatty: Callable[[], bool] | None = None,
     wait: Callable[[object], None] = _wait_for_interrupt,
     out: TextIO | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> int:
     stream = out if out is not None else sys.stdout
     factory = client_factory if client_factory is not None else RelayClient.open
@@ -133,6 +152,9 @@ def main(
             return _tunnel(make(config_loader(), args.verbose), say, wait)
         if args.command == "login":
             return _login(args, factory, getpass_fn, opener, isatty, say)
+        if args.command == "probe-intraday" and args.probe_mode == "compare":
+            # Offline: no client factory, no HTTP, no tunnel.
+            return compare(args.saved, args.pilot_store, say, window=day_window(), probe_date=args.probe_date)
         with factory() as relay:
             if args.command == "health":
                 health = relay.health()
@@ -168,6 +190,19 @@ def main(
                         f"intent_sha256 {entry.intent_sha256 or 'none'} "
                         f"codes {','.join(entry.codes) or 'none'}"
                     )
+            elif args.command == "probe-intraday":
+                code = run_step(
+                    relay,
+                    args.probe_dir,
+                    args.step,
+                    say,
+                    sleep=sleep,
+                    window=day_window(),
+                    symbol=args.symbol,
+                    holiday=args.holiday,
+                )
+                if code != EXIT_OK:
+                    return code  # an INCONCLUSIVE step: no answer, so no success
             else:  # probe-daily
                 payload = relay.daily_bars(args.stock_code, args.from_date, args.to_date)
                 say(f"request_id {payload.request_id}")
@@ -182,6 +217,12 @@ def main(
     except RelayArgumentError as err:
         say(str(err))
         return EXIT_USAGE
+    except ProbeError as err:
+        say(f"probe_error {err.code}")
+        return EXIT_USAGE
+    except EvidenceError as err:
+        say(f"evidence_error {err.code}")
+        return EXIT_EVIDENCE
     except ConfigError as err:
         say(f"config_error {err}")
         return EXIT_CONFIG

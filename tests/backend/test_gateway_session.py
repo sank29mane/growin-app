@@ -80,8 +80,10 @@ class DataRoute:
 # Every route that hands the Breeze session token to an upstream call. The session
 # revalidation tests below run over all of them, and the guard test below fails if
 # app.py grows a Breeze-backed route that is not listed here.
+INTRADAY_QUERY = "/v1/bars/intraday?stock_code=RELIND&date=2025-06-02&interval=1minute"
 DATA_ROUTES = {
     "bars_daily": DataRoute("bars_daily", BARS_QUERY, lambda s: s.transport.bars_requests()),
+    "bars_intraday": DataRoute("bars_intraday", INTRADAY_QUERY, lambda s: s.transport.bars_requests()),
     "quotes": DataRoute("quotes", QUOTES_QUERY, lambda s: s.transport.quote_requests()),
     "preview_order": DataRoute("preview_order", PREVIEW_QUERY, lambda s: s.transport.preview_requests()),
 }

@@ -90,6 +90,21 @@ LOGIN_URL = "https://login.example.invalid/apiuser/login?api_key=CANARY-LOGIN-UR
 EXPIRY = datetime(2026, 10, 22, 0, 0, tzinfo=timezone(timedelta(hours=5, minutes=30)))
 FETCHED = "2026-10-21T04:30:00.000Z"
 UPSTREAM_REQUEST = json.dumps({"stock_code": "RELIND"}, sort_keys=True, separators=(",", ":"))
+INTRADAY_ECHO = {
+    "exch_code": "NSE",
+    "from_date": "2026-10-21T00:00:00.000Z",
+    "interval": "1minute",
+    "product_type": "cash",
+    "stock_code": "RELIND",
+    "to_date": "2026-10-21T23:59:59.000Z",
+}
+
+
+def echo_header(echo: dict) -> str:
+    return json.dumps(echo, sort_keys=True, separators=(",", ":"))
+
+
+INTRADAY_UPSTREAM_REQUEST = echo_header(INTRADAY_ECHO)
 ZIP_BODY = b"PK\x03\x04fake-zip"
 
 
@@ -223,10 +238,14 @@ class Canned:
             )
         api = {
             "/v1/bars/daily": client_mod.API_BARS_V2,
+            "/v1/bars/intraday": client_mod.API_BARS_V2,
             "/v1/quotes": client_mod.API_QUOTES_V1,
             "/v1/preview-order": client_mod.API_PREVIEW_V1,
         }[path]
-        extra = {client_mod.HDR_UP_INTERVAL: "1day"} if path == "/v1/bars/daily" else {}
+        intervals = {"/v1/bars/daily": "1day", "/v1/bars/intraday": "1minute"}
+        extra = {client_mod.HDR_UP_INTERVAL: intervals[path]} if path in intervals else {}
+        if path == "/v1/bars/intraday":
+            extra[client_mod.HDR_UP_REQUEST] = INTRADAY_UPSTREAM_REQUEST
         return bars_response(BARS_BODY, **{client_mod.HDR_UP_API: api, **extra})
 
 
@@ -1824,3 +1843,186 @@ def test_the_daily_use_block_runs_only_the_cli_and_every_command_exists():
     )
     known = set(cli_mod._parser()._subparsers._group_actions[0].choices)
     assert {line.split("breeze_gateway.cli ")[1].split()[0] for line in commands} == known
+
+
+# ------------------------------------------------- intraday_bars (64-02 Task 2)
+
+
+def intraday_response(body: bytes = BARS_BODY, **over: str) -> httpx.Response:
+    return bars_response(
+        body, **{client_mod.HDR_UP_INTERVAL: "1minute", client_mod.HDR_UP_REQUEST: INTRADAY_UPSTREAM_REQUEST, **over}
+    )
+
+
+def intraday(relay: RelayClient, **kwargs) -> UpstreamPayload:
+    return relay.intraday_bars("RELIND", date(2026, 10, 21), **kwargs)
+
+
+def test_intraday_tracer_against_the_real_vm_app(stack_fixture: Stack):
+    stack = stack_fixture
+    with RelayClient(http=stack.client, token_store=MemoryTokenStore()) as relay:
+        attempt = relay.login_arm()
+        relay.login_complete(attempt.attempt_id, CODE)
+        payload = intraday(relay)
+    assert payload.body == BARS_BODY and payload.sha256 == sha(BARS_BODY)
+    assert payload.route == "/v1/bars/intraday"
+    assert dict(payload.query) == {
+        "stock_code": "RELIND", "date": "2026-10-21", "interval": "1minute", "exchange": "NSE",
+    }
+    assert payload.upstream_api == "breeze-historicalcharts-v2"
+    assert payload.upstream_interval == "1minute"
+    assert payload.upstream_request["interval"] == "1minute"
+    assert payload.upstream_request["from_date"] == "2026-10-21T00:00:00.000Z"
+    assert payload.provenance()["route"] == "/v1/bars/intraday"
+
+
+def test_intraday_sends_one_get_to_the_intraday_route_only():
+    seen = Canned()
+    relay = relay_with(seen)
+    attempt = relay.login_arm()
+    relay.login_complete(attempt.attempt_id, CODE)
+    seen.requests.clear()
+    intraday(relay)
+    assert [(r.method, r.url.path) for r in seen.requests] == [("GET", "/v1/bars/intraday")]
+    assert dict(seen.requests[0].url.params) == {
+        "stock_code": "RELIND", "date": "2026-10-21", "interval": "1minute", "exchange": "NSE",
+    }
+
+
+def test_intraday_a_mismatched_sha256_is_refused():
+    tampered = bytearray(BARS_BODY)
+    tampered[10] ^= 0x01
+    response = intraday_response(bytes(tampered), **{client_mod.HDR_UP_SHA256: sha(BARS_BODY)})
+    with pytest.raises(RelayHashMismatch):
+        intraday(one_response(response))
+
+
+def test_intraday_404_from_an_older_vm_is_a_typed_error_never_retried_never_daily():
+    attempts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(request.url.path)
+        return error_response("NOT_FOUND", 404)
+
+    with pytest.raises(client_mod.IntradayRouteUnavailable) as info:
+        intraday(relay_with(handler))
+    assert attempts == ["/v1/bars/intraday"]  # one try, no retry, no fallback to the daily route
+    assert isinstance(info.value, NotFound) and info.value.reason == "route_unavailable"
+    with pytest.raises(NotFound):  # a caller that only knows NotFound still catches it
+        intraday(relay_with(handler))
+
+
+def test_daily_404_stays_a_plain_not_found():
+    with pytest.raises(NotFound) as info:
+        bars(one_response(error_response("NOT_FOUND", 404)))
+    assert not isinstance(info.value, client_mod.IntradayRouteUnavailable)
+
+
+@pytest.mark.parametrize("interval", ["1day", "5minute", "1Minute", "", "1minute "])
+def test_intraday_refuses_any_other_interval_before_sending(interval):
+    seen = Canned()
+    with pytest.raises(RelayArgumentError):
+        intraday(relay_with(seen), interval=interval)
+    assert seen.requests == []
+
+
+@pytest.mark.parametrize("stock_code", ["relind", "", "RELIANCEINDUSTRIES", "RELIND\n"])
+def test_intraday_refuses_a_bad_stock_code_before_sending(stock_code):
+    seen = Canned()
+    with pytest.raises(RelayArgumentError):
+        relay_with(seen).intraday_bars(stock_code, date(2026, 10, 21))
+    assert seen.requests == []
+
+
+def test_intraday_refuses_a_non_date_before_sending():
+    seen = Canned()
+    with pytest.raises(RelayArgumentError):
+        relay_with(seen).intraday_bars("RELIND", "2026-10-21")  # type: ignore[arg-type]
+    with pytest.raises(RelayArgumentError):
+        relay_with(seen).intraday_bars("RELIND", datetime(2026, 10, 21, 9, 15))  # type: ignore[arg-type]
+    assert seen.requests == []
+
+
+def test_intraday_an_answer_labelled_with_another_interval_is_a_protocol_error():
+    with pytest.raises(RelayProtocolError):
+        intraday(one_response(bars_response(**{client_mod.HDR_UP_INTERVAL: "1day"})))
+
+
+def test_intraday_empty_flag_is_carried_not_interpreted():
+    payload = intraday(one_response(intraday_response(**{client_mod.HDR_EMPTY: "true"})))
+    assert payload.empty is True
+
+
+def test_intraday_an_upstream_error_is_not_resent():
+    attempts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(request.url.path)
+        return error_response("UPSTREAM_ERROR", 502)
+
+    with pytest.raises(UpstreamError):
+        intraday(relay_with(handler))
+    assert attempts == ["/v1/bars/intraday"]
+
+
+def test_the_client_route_set_still_equals_the_vm_with_intraday():
+    assert client_mod.ROUTE_BARS_INTRADAY == vm.ROUTE_BARS_INTRADAY
+    assert client_mod.ROUTES == vm.ROUTES
+    assert client_mod.INTRADAY_INTERVAL == vm.INTRADAY_INTERVAL_SEMANTIC
+
+
+def test_intraday_an_upstream_request_that_did_not_ask_for_one_minute_is_a_protocol_error():
+    wrong = json.dumps({"stock_code": "RELIND", "interval": "1day"}, sort_keys=True, separators=(",", ":"))
+    with pytest.raises(RelayProtocolError):
+        intraday(one_response(intraday_response(**{client_mod.HDR_UP_REQUEST: wrong})))
+
+
+def _echo_without(key: str) -> dict:
+    return {k: v for k, v in INTRADAY_ECHO.items() if k != key}
+
+
+@pytest.mark.parametrize(
+    "echo",
+    [
+        {**INTRADAY_ECHO, "stock_code": "TCS"},
+        {**INTRADAY_ECHO, "from_date": "2020-01-01T00:00:00.000Z"},
+        {**INTRADAY_ECHO, "to_date": "2020-01-01T23:59:59.000Z"},
+        {**INTRADAY_ECHO, "from_date": "2026-10-21T00:00:00Z"},
+        {**INTRADAY_ECHO, "to_date": "2026-10-22T23:59:59.000Z"},
+        {**INTRADAY_ECHO, "product_type": "margin"},
+        {**INTRADAY_ECHO, "interval": "1day"},
+        {**INTRADAY_ECHO, "exch_code": "BSE"},
+        _echo_without("stock_code"),
+        _echo_without("from_date"),
+        _echo_without("to_date"),
+        _echo_without("product_type"),
+        _echo_without("interval"),
+        _echo_without("exch_code"),
+        {**INTRADAY_ECHO, "extra": "x"},
+        {**INTRADAY_ECHO, "exchange_code": "NSE"},
+        {},
+    ],
+    ids=[
+        "stock", "from", "to", "from-format", "to-other-day", "product", "interval", "exchange-value",
+        "no-stock", "no-from", "no-to", "no-product", "no-interval", "no-exchange-key", "extra-key",
+        "two-exchange-keys", "empty",
+    ],
+)
+def test_intraday_refuses_an_echo_that_is_not_exactly_what_was_asked(echo):
+    response = intraday_response(**{client_mod.HDR_UP_REQUEST: echo_header(echo)})
+    with pytest.raises(RelayProtocolError):
+        intraday(one_response(response))
+
+
+def test_intraday_accepts_the_alternate_exchange_key_the_vm_may_emit():
+    echo = {**_echo_without("exch_code"), "exchange_code": "NSE"}
+    response = intraday_response(**{client_mod.HDR_UP_REQUEST: echo_header(echo)})
+    assert intraday(one_response(response)).upstream_request["exchange_code"] == "NSE"
+
+
+def test_intraday_checks_the_echo_against_the_day_and_code_asked_for():
+    response = intraday_response()
+    with pytest.raises(RelayProtocolError):
+        one_response(response).intraday_bars("RELIND", date(2026, 10, 20))
+    with pytest.raises(RelayProtocolError):
+        one_response(response).intraday_bars("TCS", date(2026, 10, 21))

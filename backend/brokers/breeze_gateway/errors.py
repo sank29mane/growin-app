@@ -98,6 +98,15 @@ class NotFound(RelayError):
     code = "NOT_FOUND"
 
 
+class IntradayRouteUnavailable(NotFound):
+    """The VM answered 404 for /v1/bars/intraday: it runs a build older than 64-02.
+
+    Raised only by RelayClient.intraday_bars. The caller records INCONCLUSIVE
+    ``no_evidence_fetched`` with reason ``route_unavailable``; nothing retries and nothing falls
+    back to the daily route.
+    """
+
+
 class MethodNotAllowed(RelayError):
     code = "METHOD_NOT_ALLOWED"
 
