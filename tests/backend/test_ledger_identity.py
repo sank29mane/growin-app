@@ -28,6 +28,7 @@ from execution import (
     practice_ledger_path,
 )
 from execution.models import OrderIntent
+from execution import ledger as ledger_module
 from ledger_fixture_support import replay_v5_fixture
 
 
@@ -748,7 +749,16 @@ def test_a_v6_ledger_written_before_66_opens_with_no_structural_change(tmp_path)
         assert ledger.get_order("fixture-1") is not None
 
     after = structure(path)
-    assert after["objects"] == before["objects"]
+    # The one structural addition on reopen is the ``<table>_no_replace`` guard for each write-once
+    # table the file already has (an INSERT OR REPLACE would otherwise skip the DELETE triggers).
+    # Nothing else may appear: no venue table, no other trigger, no index, no table dropped.
+    added = sorted(set(after["objects"]) - set(before["objects"]))
+    assert added == sorted(
+        ("trigger", f"{table}_no_replace")
+        for table in ledger_module._NO_REPLACE_KEYS
+        if ("table", table) in set(before["objects"])
+    )
+    assert set(before["objects"]) <= set(after["objects"])
     assert after["counts"] == before["counts"]
 
 
