@@ -8,9 +8,10 @@ whatever its date).
 
 One look-ahead path sits in code this module may not edit: ``build_lineage`` links an ISIN change to a split event
 without checking when the event was first seen. ``_as_of_lineage`` removes any link whose evidence event was first
-seen after ``as_of``, which is the lineage an earlier run would have built, and the accepted bars of the days that
-link had resolved go with it. Rows are written only into a store that carries a ``session_store_seeds`` row, never
-into the research store.
+seen after ``as_of``, which is the lineage an earlier run would have built. The cross-check runs on that trimmed
+lineage (``lineage_override``), so which bhavcopy rows match, which earlier quarantines exclude a day and which bars
+are accepted never depend on an ISIN or an event the store only learned after ``as_of``. Rows are written only into
+a store that carries a ``session_store_seeds`` row, never into the research store.
 """
 
 from __future__ import annotations
@@ -159,26 +160,28 @@ def bars_as_of(store: PilotDataStore, *, targets: TargetUniverseResult, decision
     _require_session_store(store)
     _check_dates(store, decision_session, as_of, window_start)
     report = run_crosscheck(store, targets=targets, window_start=window_start, window_end=as_of, as_of=as_of,
-                            tolerances=tolerances, workspace=workspace)
+                            tolerances=tolerances, workspace=workspace,
+                            lineage_override=lambda member, built: _as_of_lineage(store, built, as_of))
     accepted = accepted_bars(store, report.run_id)
     policy = AdjustmentPolicy()
-    # The cross-check built each lineage from every event in the store. Everything below reads the as-of lineage, so
-    # rawness, the refusal, the basis and the composition never depend on an event first seen after as_of.
+    # The cross-check ran on the as-of lineage too, so its acceptance, its earlier-quarantine exclusions and its
+    # rawness never saw a link first seen after as_of. The rawness it computed still read every event of that lineage,
+    # so a trimmed lineage recomputes it from the events an earlier run would have had.
     states: dict[str, dict] = {}
     for member in report.members:
         if member.status != "checked":
             continue
         built = build_lineage(store, anchor_isin=member.anchor_isin, anchor_series=member.anchor_series, as_of=as_of,
                               workspace=workspace, stock_code=member.stock_code)
-        if built.content_sha256() != member.lineage_sha256:
-            raise PilotDataError("lineage_drift", f"lineage for {member.stock_code} differs from the cross-check run")
         lineage = _as_of_lineage(store, built, as_of)
+        if lineage.content_sha256() != member.lineage_sha256:
+            raise PilotDataError("lineage_drift", f"as-of lineage for {member.stock_code} differs from the cross-check run")
         reference = primary_bars_for_lineage(store, lineage, start=window_start, end=as_of)
         factor_set = compute_factor_set(lineage, reference, _as_of_events(store, lineage, as_of), as_of=as_of, policy=policy)
+        from_store = compute_factor_set(lineage, reference, events_for_lineage(store, lineage), as_of=as_of, policy=policy)
+        if from_store.factor_set_sha256 != member.factor_set_sha256:
+            raise PilotDataError("factor_set_drift", f"factor set for {member.stock_code} differs from the cross-check run")
         if lineage is built:
-            from_store = compute_factor_set(lineage, reference, events_for_lineage(store, lineage), as_of=as_of, policy=policy)
-            if from_store.factor_set_sha256 != member.factor_set_sha256:
-                raise PilotDataError("factor_set_drift", f"factor set for {member.stock_code} differs from the cross-check run")
             rawness = member.rawness_overall
         else:
             rawness = _as_of_rawness(store, member, lineage, reference, factor_set, window_start=window_start,
@@ -189,7 +192,7 @@ def bars_as_of(store: PilotDataStore, *, targets: TargetUniverseResult, decision
     parts: list[dict] = []
     for stock_code in sorted({bar.stock_code for bar in accepted}):
         member, lineage, factor_set = (states[stock_code][key] for key in ("member", "lineage", "factor_set"))
-        mine = [bar for bar in accepted if bar.stock_code == stock_code and lineage.isin_on(bar.trade_date) == bar.isin]
+        mine = [bar for bar in accepted if bar.stock_code == stock_code]
         if not mine:
             continue
         stored = {

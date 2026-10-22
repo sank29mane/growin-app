@@ -262,6 +262,58 @@ def test_a_repeated_announcement_in_a_file_after_as_of_moves_no_hash_the_basis_o
     assert any(row.adjusted_quarantined for row in first.rows)  # the rights event is in the factor set: evidence counts
 
 
+def old_isin_quarantine(check, reason, day_from, day_to):
+    """A raw-scope quarantine on the OLD ISIN only (no stock code), the shape an upstream check leaves for a dead ISIN."""
+    def add(st):
+        st.record_quarantine([QuarantineRecord(workspace="india", check=check, reason_code=reason, scope="raw",
+                                               isin=cc.OLD, date_from=day_from, date_to=day_to)])
+    return add
+
+
+def test_an_old_isin_hold_cannot_drop_rows_because_of_a_relink_first_seen_after_as_of(tmp_path):
+    """Codex r2: the cross-check matched quarantines on every ISIN of the untrimmed lineage, so a relink first seen on
+    S pulled the old ISIN's operator hold onto the new ISIN's bars and 8 rows became 5."""
+    hold = old_isin_quarantine("manual_review", "operator_hold", D1, D5)
+    plain, linked = tmp_path / "plain", tmp_path / "linked"
+    build_world(plain, extra=hold)
+    build_world(linked, frozenset({"relink"}), extra=hold)
+    with PilotDataStore(linked, workspace="india", read_only=True) as st:  # the precondition: the link exists, dated S
+        assert {row[0] for row in st.query("SELECT file_date FROM corporate_action_sightings_rev_c")} == {S}
+    before, after = compose(plain), compose(linked)
+    assert len(before.rows) == len(after.rows) == 8
+    assert {row.trade_date for row in after.rows if row.stock_code == "CANBAN"} == {D3, D4, D5}
+    assert canon(before) == canon(after) and before.composition_sha256 == after.composition_sha256
+
+
+def test_a_price_band_quarantine_on_the_old_isin_dated_before_as_of_leaves_the_same_days_with_or_without_the_relink(tmp_path):
+    """Opus r2: the same untrimmed match dropped D4 only in the world that learned the link on S."""
+    band = old_isin_quarantine("price_band", "band_exceeded", D4, D4)
+    plain, linked = tmp_path / "plain", tmp_path / "linked"
+    build_world(plain, extra=band)
+    build_world(linked, frozenset({"relink"}), extra=band)
+    before, after = compose(plain), compose(linked)
+    for result in (before, after):
+        assert [row.trade_date for row in result.rows if row.stock_code == "CANBAN"] == [D3, D4, D5]
+    assert canon(before) == canon(after)
+
+
+def test_a_relink_known_by_as_of_still_lets_an_old_isin_hold_exclude_the_days_it_covers(tmp_path):
+    """The other direction: once the link is known, the old ISIN is part of the lineage and its hold applies."""
+    hold = old_isin_quarantine("manual_review", "operator_hold", D1, D5)
+
+    def known_relink_and_hold(st):  # the split is first seen on D4, before as_of
+        ingest_pr_zip(st, cc.desc(kind="pr_zip"),
+                      pr_zip_on(D4, [kit.bc_row("EQ", "CANBK", "CANARA BANK", "FVSPLT FRM RS 10 TO RS 2", ex_date=D3)]),
+                      trade_date=D4)
+        derive_corporate_actions(st, workspace="india")
+        hold(st)
+
+    root = tmp_path / "known"
+    build_world(root, extra=known_relink_and_hold)
+    result = compose(root)
+    assert {row.stock_code for row in result.rows} == {"STEADY"}  # D1..D5 of CANBAN are all held
+
+
 # --------------------------------------------------------------------------- 2: parity with the frozen dataset
 @pytest.fixture(scope="module")
 def frozen(tmp_path_factory):
