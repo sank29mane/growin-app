@@ -39,7 +39,7 @@ KEY_TABLES = [
     "execution_approvals",
     "ledger_identity",
 ]
-VENUE_TABLES = ["ledger_venue_binding", "ledger_venue_limits"]
+VENUE_TABLES = ["ledger_venue_binding", "ledger_venue_limits", "ledger_quantity_reservations"]
 ALL_TABLES = KEY_TABLES + VENUE_TABLES
 
 
@@ -109,6 +109,32 @@ def _populate_venue_ledger(path: Path) -> None:
     binding = VenueBinding(venue="t212_practice", account_id="acct-synthetic-0001", currency="GBP")
     with ExecutionLedger(path, workspace="uk", venue=binding) as ledger:
         ledger.configure_venue_limits("1000", "500", workspace="uk")
+        intent = ledger.register_intent(
+            OrderIntent(
+                proposal_id="res-1",
+                workspace="uk",
+                account="acct-synthetic-0001",
+                broker="t212_practice",
+                mode="PRACTICE",
+                ticker="VODl_EQ",
+                side="SELL",
+                quantity="1",
+                client_order_id="growin-res-1",
+            )
+        )
+    # The ledger only writes a reservation after an admission and a reconciled position, which is
+    # a whole practice stack. The row is what matters here, so it goes in raw, once, at set-up.
+    plain = sqlite3.connect(path, isolation_level=None)
+    try:
+        plain.execute(
+            "INSERT INTO ledger_quantity_reservations (proposal_id, workspace, account, currency, "
+            "ticker, intent_hash, reserved, state, created_at, updated_at) "
+            "VALUES ('res-1', 'uk', 'acct-synthetic-0001', 'GBP', 'VODl_EQ', ?, '1', 'ACTIVE', "
+            "'2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+            (intent.intent_hash,),
+        )
+    finally:
+        plain.close()
 
 
 @pytest.fixture
@@ -250,6 +276,19 @@ def test_every_guarded_table_has_its_trigger_on_a_new_ledger(main_path, venue_pa
             names = {row[0] for row in plain.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'")}
         finally:
             plain.close()
+        assert {f"{table}_no_replace" for table in tables} <= names
+
+
+def test_a_fresh_ledger_is_guarded_by_its_own_schema_not_only_by_the_open_step(
+    tmp_path, monkeypatch
+):
+    # Every open arms missing guards, which would hide a gap in the fresh-install SQL. With that
+    # step off, a brand-new main ledger and a brand-new venue ledger must still carry every trigger.
+    monkeypatch.setattr(ExecutionLedger, "_ensure_no_replace_guards", lambda self: None)
+    _populate_main_ledger(tmp_path / "main.sqlite3")
+    _populate_venue_ledger(tmp_path / "venue.sqlite3")
+    for path, tables in ((tmp_path / "main.sqlite3", KEY_TABLES), (tmp_path / "venue.sqlite3", VENUE_TABLES)):
+        names = _trigger_names(path)
         assert {f"{table}_no_replace" for table in tables} <= names
 
 

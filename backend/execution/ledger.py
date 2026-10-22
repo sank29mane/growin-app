@@ -755,6 +755,7 @@ _NO_REPLACE_KEYS: Mapping[str, tuple[tuple[str, ...], ...]] = {
     "ledger_identity": (("singleton",),),
     _VENUE_BINDING_TABLE: (("singleton",),),
     _VENUE_LIMITS_TABLE: (("singleton",),),
+    "ledger_quantity_reservations": (("proposal_id",),),
 }
 
 
@@ -943,6 +944,7 @@ def _install_quantity_reservations_table(connection: sqlite3.Connection) -> None
         END
         """
     )
+    connection.execute(_no_replace_trigger_sql(_QUANTITY_TABLE, _NO_REPLACE_KEYS[_QUANTITY_TABLE]))
     connection.execute(
         f"""
         CREATE TRIGGER IF NOT EXISTS {_QUANTITY_TABLE}_workspace_insert_guard
