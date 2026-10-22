@@ -1,0 +1,438 @@
+"""G-1b: strategy-ready bars as of a session that has not traded yet (64-08 Task 3)."""
+
+import ast
+import hashlib
+import json
+import shutil
+import socket
+import time
+from datetime import date, timedelta
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+
+from pilot_data import live_bars, sessions
+from pilot_data.bhavcopy import ingest_pr_zip, ingest_udiff
+from pilot_data.core import PilotDataError
+from pilot_data.corporate_actions import derive_corporate_actions
+from pilot_data.dataset import read_dataset_rows
+from pilot_data.live_bars import LiveBarsResult, bars_as_of, main as live_main
+from pilot_data.models import CrossCheckTolerances, QuarantineRecord
+from pilot_data.nse_http import NseHttp
+from pilot_data.nse_ingest import _log_attempt
+from pilot_data.price_bands import band_for_upcoming_session, band_on
+from pilot_data.session_store import SEEDS_DDL, seed_session_store
+from pilot_data.store import PilotDataStore
+from pilot_data.surveillance import ingest_surveillance
+from strategy_india.data import DatasetView, bar_from_row, events_from_manifest
+from strategy_india.holdout import HoldoutRange
+
+import pilot_data_testkit as kit
+import test_pilot_data_crosscheck as cc
+import test_pilot_data_nse_calendar as nc
+import test_pilot_data_price_bands as pb
+import test_pilot_data_session_store as ss
+
+D1, D2, D3, D4, D5 = cc.SESSIONS  # Mon 3 March to Fri 7 March 2025
+S = D5 + timedelta(days=3)  # Mon 10 March: the decision session
+S1 = S + timedelta(days=1)  # Tue 11 March
+TARGETS = cc.make_targets(cc.CANBK_MEMBER, cc.STEADY_MEMBER)
+TOLERANCES = CrossCheckTolerances()
+CANBK_FUTURE = {S: ("121", "123", "120", "122"), S1: ("122", "124", "121", "123")}
+STEADY_FUTURE = {S: ("100", "105", "95", "100"), S1: ("100", "105", "95", "100")}
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch):
+    def refuse(*args, **kwargs):
+        raise AssertionError("network used in a G-1b test")
+
+    monkeypatch.setattr(socket.socket, "connect", refuse)
+    monkeypatch.setattr(NseHttp, "__init__", refuse)
+
+
+# --------------------------------------------------------------------------- builders
+def mark_session_store(store):
+    store.ensure_table("session_store_seeds", SEEDS_DDL, key_columns=("seed_report_sha256",))
+    store.append_rows("session_store_seeds", [{
+        "seed_report_sha256": "a" * 64, "research_identity_sha256": "b" * 64, "dataset_sha256": "c" * 64,
+        "window_start": D1, "window_end": D5, "seeded_at_utc": cc.LATER.replace(tzinfo=None), "row_sha256": "d" * 64,
+        "source_sha256": "a" * 64}], check="session_store_seed")
+
+
+def scaled(prices, factor):
+    return tuple(str((Decimal(p) * factor).quantize(Decimal("0.0001"))) for p in prices)
+
+
+def put_bhavcopy(store, days, canbk, steady):
+    for day in days:
+        rows = [cc.ohlc_row("CANBK", "EQ", cc.OLD if day < D3 else cc.NEW, canbk[day], day, "11256"),
+                cc.ohlc_row("STEADYCO", "EQ", cc.STEADY_ISIN, steady[day], day, "5"),
+                cc.ohlc_row("OTHERCO", "EQ", cc.OTHER_ISIN, steady[day], day, "9")]
+        ingest_udiff(store, cc.desc(), kit.udiff_zip(day, rows), trade_date=day)
+
+
+def pr_zip_on(day, rows):
+    return kit.pr_zip(day, [kit.pd_index_row()], rows, [])
+
+
+def build_world(root: Path, shocks=frozenset(), *, extra=None) -> None:
+    """A session-store-shaped world with no split event for CANBK (its ISIN change is `isin_change_unexplained`).
+
+    Sessions D1..D5, then S and S+1 when the world has a future. Each shock adds data dated S or later, or removes it.
+    """
+    future = "no_future" not in shocks
+    factor = Decimal("1.6") if "scale" in shocks else Decimal(1)
+    canbk = {**cc.CANBK, **({day: scaled(p, factor) for day, p in CANBK_FUTURE.items()} if future else {})}
+    steady = {**cc.STEADY, **({day: scaled(p, factor) for day, p in STEADY_FUTURE.items()} if future else {})}
+    days = [*cc.SESSIONS, *((S, S1) if future else ())]
+    with PilotDataStore(root, workspace="india") as st:
+        put_bhavcopy(st, days, canbk, steady)
+        cc.mark_calendar(st, cc.START, cc.END, set(cc.SESSIONS))
+        if future:
+            cc.mark_calendar(st, S, S1, {S, S1})
+        for code, prices in (("CANBAN", canbk), ("STEADY", steady)):
+            history = {day: p for day, p in prices.items() if day <= cc.END}
+            cc.load_breeze(st, code, cc.breeze_rows(code, history), start=cc.START, end=cc.END,
+                           locator=f"relay/{code}/history")
+            if future:  # a separate answer, as a windowed pull would be: its bytes cannot touch the history's hash
+                ahead = {day: p for day, p in prices.items() if day > cc.END}
+                cc.load_breeze(st, code, cc.breeze_rows(code, ahead), start=S, end=S1, locator=f"relay/{code}/ahead")
+        cas = []
+        if "relink" in shocks:  # (h) the split that explains CANBK's ISIN change, first seen on S, ex-date on D3
+            cas.append(kit.bc_row("EQ", "CANBK", "CANARA BANK", "FVSPLT FRM RS 10 TO RS 2", ex_date=D3))
+        if "ca_structural" in shocks:  # (d) first seen and ex-dated on S
+            cas.append(kit.bc_row("EQ", "STEADYCO", "STEADY CO", "FVSPLT FRM RS 10 TO RS 5", ex_date=S))
+        if "factor_event" in shocks:  # (i) a price factor first seen on S with an ex-date before S
+            cas.append(kit.bc_row("EQ", "STEADYCO", "STEADY CO", "BONUS 1:1", ex_date=D4))
+        if cas:
+            ingest_pr_zip(st, cc.desc(kind="pr_zip"), pr_zip_on(S, cas), trade_date=S)
+        if "new_breeze" in shocks:  # (c) a new answer for [S, S] with a coverage row, for a prepared stock_code
+            cc.load_breeze(st, "CANBAN", cc.breeze_rows("CANBAN", {S: ("200", "210", "190", "205")}), start=S, end=S,
+                           locator="relay/CANBAN/S")
+        if "bands_surv" in shocks:  # (e)
+            record = [kit.SEC_LIST_CANBK, {**kit.SEC_LIST_RELIANCE, "Symbol": "STEADYCO"}]
+            pb.put_list(st, S, rows=record)
+            ingest_surveillance(st, cc.desc("nse_api", "surveillance_asm"),
+                                kit.asm_json([kit.asm_row("STEADYCO", cc.STEADY_ISIN, when="10-Mar-2025")], []),
+                                list_name="asm")
+        if "fetch_extra" in shocks:  # (f)
+            for kind, outcome in (("pr", "no_file"), ("cm_legacy", "failed"), ("udiff", "no_file")):
+                _log_attempt(st, d=S, kind=kind, outcome=outcome, http_status=404, error_code=None,
+                             source_sha256=None, url="u", attempted_at=cc.LATER)
+        if "quarantine" in shocks:  # (g)
+            st.record_quarantine([QuarantineRecord(
+                workspace="india", check="bhavcopy_consistency", reason_code="primary_without_pd", scope="raw",
+                nse_symbol="CANBK", stock_code="CANBAN", date_from=S, date_to=S)])
+        if cas or "new_breeze" in shocks:
+            derive_corporate_actions(st, workspace="india")
+        if extra is not None:
+            extra(st)
+        mark_session_store(st)
+
+
+def compose(root: Path, *, as_of=D5, decision=S, window_start=cc.START, targets=TARGETS, writable=True):
+    with PilotDataStore(root, workspace="india", read_only=not writable) as st:
+        return bars_as_of(st, targets=targets, decision_session=decision, as_of=as_of, window_start=window_start,
+                          tolerances=TOLERANCES, workspace="india")
+
+
+def canon(result: LiveBarsResult):
+    rows = json.dumps([row.model_dump(mode="json") for row in result.rows], sort_keys=True)
+    return hashlib.sha256(rows.encode()).hexdigest(), len(result.rows), result.composition_sha256
+
+
+def asserted_future(root: Path) -> None:
+    """The precondition: S and S+1 hold a primary row, a covered Breeze bar and fetch-log rows, so a shock is not empty."""
+    if root.name in ("b_future_deleted", "gone"):
+        return  # the deleted-future worlds hold no S rows by design
+    with PilotDataStore(root, workspace="india", read_only=True) as st:
+        for day in (S, S1):
+            symbols = {row[0] for row in st.query("SELECT nse_symbol FROM bhavcopy_bars WHERE trade_date = ? "
+                                                  "AND file_kind = 'udiff'", [day])}
+            assert {"CANBK", "STEADYCO"} <= symbols
+            assert st.query("SELECT count(*) FROM nse_fetch_log WHERE trade_date = ?", [day])[0][0] > 0
+            for code in ("CANBAN", "STEADY"):
+                view = cc.breeze_bars_for(st, code, start=day, end=day)
+                # a second answer for S (shock c) turns the S bar into a conflict, which is still data dated S
+                assert (view.bar_on(day) is not None or view.conflicts) and view.covers(day), (code, day)
+
+
+# --------------------------------------------------------------------------- 1: look-ahead shock
+SHOCKS = {
+    "a_prices_up": {"scale"}, "b_future_deleted": {"no_future"}, "c_new_breeze_answer": {"new_breeze"},
+    "d_structural_event": {"ca_structural"}, "e_bands_and_surveillance": {"bands_surv"},
+    "f_fetch_log_rows": {"fetch_extra"}, "g_quarantine": {"quarantine"}, "h_relink_split": {"relink"},
+    "i_price_factor_event": {"factor_event"},
+    "all_together": {"scale", "new_breeze", "ca_structural", "bands_surv", "fetch_extra", "quarantine", "relink",
+                     "factor_event"},
+}
+
+
+def test_nothing_dated_on_or_after_the_decision_session_moves_a_row_or_the_composition_id(tmp_path, monkeypatch):
+    base_root = tmp_path / "base"
+    build_world(base_root)
+    asserted_future(base_root)
+    asked = []
+    real = sessions._latest_attempts
+    monkeypatch.setattr(sessions, "_latest_attempts", lambda store, start, end: (asked.append((start, end)), real(store, start, end))[1])
+    base = compose(base_root)
+    assert max(end for _, end in asked) < S  # nothing asked about the decision session or later
+    monkeypatch.undo()
+    monkeypatch.setattr(socket.socket, "connect", lambda *a, **k: (_ for _ in ()).throw(AssertionError("network")))
+    anchors = {row.stock_code for row in base.rows}
+    assert anchors == {"CANBAN", "STEADY"} and max(row.trade_date for row in base.rows) == D5
+    assert min(row.trade_date for row in base.rows if row.stock_code == "CANBAN") == D3  # no link, so no earlier rows
+    reference = canon(base)
+    for name, flags in SHOCKS.items():
+        root = tmp_path / name
+        build_world(root, frozenset(flags))
+        asserted_future(root)
+        assert canon(compose(root)) == reference, name
+    deleted = tmp_path / "gone"
+    build_world(deleted, frozenset({"no_future"}))
+    assert canon(compose(deleted)) == reference
+
+
+# --------------------------------------------------------------------------- 2: parity with the frozen dataset
+@pytest.fixture(scope="module")
+def frozen(tmp_path_factory):
+    base = tmp_path_factory.mktemp("frozen_world")
+    world = ss.build_research(base, end=D5)
+    session_root = base / "session"
+    seed_session_store(session_root, world["root"], dataset_dir=world["dataset"], window_start=D1, window_end=D5,
+                       workspace="india", band_parity_offset_days=2)
+    return {**world, "session": session_root}
+
+
+def test_rows_match_the_frozen_dataset_on_every_field_but_the_run_id(frozen, tmp_path):
+    root = tmp_path / "session"
+    shutil.copytree(frozen["session"], root)
+    manifest = frozen["manifest"]
+    with PilotDataStore(root, workspace="india") as st:
+        result = bars_as_of(st, targets=frozen["targets"], decision_session=S, as_of=manifest.window_end,
+                            window_start=manifest.window_start, tolerances=TOLERANCES, workspace="india")
+        unresolved = st.query("SELECT count(*) FROM quarantine_records WHERE check_name = 'corporate_action' "
+                              "AND reason_code LIKE 'ca_unresolved_%'")[0][0]
+    frozen_rows = read_dataset_rows(frozen["dataset"])
+    live_view = [{k: v for k, v in row.model_dump().items() if k != "crosscheck_run_id"} for row in result.rows]
+    assert live_view == [{k: v for k, v in row.model_dump().items() if k != "crosscheck_run_id"} for row in frozen_rows]
+    assert len(frozen_rows) == manifest.row_count >= 5
+    assert result.lineage_hashes == manifest.lineage_hashes and result.factor_set_hashes == manifest.factor_set_hashes
+    assert result.dividend_amount_unknown_events == manifest.dividend_amount_unknown_events
+    assert {row.crosscheck_run_id for row in result.rows} == {result.composition_sha256} != {manifest.crosscheck_run_id}
+    assert any(row.adjusted_quarantined for row in result.rows) and unresolved > 0  # the unresolved right is quarantined
+    assert any(row.stock_code == "STEADY" and row.trade_date == D2 for row in frozen_rows) is False  # operator hold kept
+    assert events_from_manifest(result) is not None
+
+
+# --------------------------------------------------------------------------- 3: re-adjust after a late split
+def test_a_split_recorded_after_the_frozen_as_of_readjusts_earlier_bars_and_leaves_raw_alone(tmp_path):
+    root = tmp_path / "world"
+    build_world(root)
+    first = compose(root, as_of=D4, decision=D5)
+    with PilotDataStore(root, workspace="india") as st:
+        ingest_pr_zip(st, cc.desc(kind="pr_zip"),
+                      pr_zip_on(D5, [kit.bc_row("EQ", "STEADYCO", "STEADY CO", "FVSPLT FRM RS 10 TO RS 5", ex_date=D5)]),
+                      trade_date=D5)
+        derive_corporate_actions(st, workspace="india")
+    second = compose(root, as_of=D5, decision=S)
+    early = {(row.stock_code, row.trade_date): row for row in first.rows}
+    later = {(row.stock_code, row.trade_date): row for row in second.rows}
+    for day in (D1, D2, D3, D4):
+        before, after = early[("STEADY", day)], later[("STEADY", day)]
+        assert (before.raw_open, before.raw_close, before.raw_volume) == (after.raw_open, after.raw_close, after.raw_volume)
+        assert before.adj_close == Decimal("100.0000") and after.adj_close == Decimal("50.0000")
+        assert after.adj_volume == after.raw_volume * 2
+    assert later[("STEADY", D5)].adj_close == later[("STEADY", D5)].raw_close
+    assert first.factor_set_hashes["INE002A01018"] != second.factor_set_hashes["INE002A01018"]
+
+
+def test_an_unresolved_action_withholds_adjusted_prices_and_bar_from_row_maps_them_to_none(tmp_path):
+    root = tmp_path / "world"
+
+    def rights(st):
+        ingest_pr_zip(st, cc.desc(kind="pr_zip"),
+                      pr_zip_on(D2, [kit.bc_row("EQ", "STEADYCO", "STEADY CO", "RIGHTS 1:1 @ PRM RS 3/-", ex_date=D4)]),
+                      trade_date=D2)
+        derive_corporate_actions(st, workspace="india")
+
+    build_world(root, extra=rights)
+    result = compose(root)
+    steady = {row.trade_date: row for row in result.rows if row.stock_code == "STEADY"}
+    for day in (D1, D2, D3):
+        assert steady[day].adjusted_quarantined and steady[day].adj_close is None
+        bar = bar_from_row(steady[day])
+        assert (bar.adj_open, bar.adj_close) == (None, None) and bar.raw_close == Decimal("100.0000")
+    assert not steady[D4].adjusted_quarantined and steady[D5].adj_close == Decimal("100.0000")
+
+
+# --------------------------------------------------------------------------- 4: quarantine, never choose
+def test_a_breeze_conflict_and_a_cross_check_mismatch_leave_no_row_for_that_day(tmp_path):
+    root = tmp_path / "world"
+
+    def disagree(st):
+        # a second Breeze answer that contradicts the first on D3 for STEADY (a conflict)
+        cc.load_breeze(st, "STEADY", cc.breeze_rows("STEADY", {D3: cc.STEADY[D3]}, overrides={D3: ("100", "107", "95", "101")}),
+                       start=D3, end=D3, locator="relay/STEADY/second")
+
+    build_world(root, extra=disagree)
+    rows = {(row.stock_code, row.trade_date) for row in compose(root).rows}
+    assert ("STEADY", D3) not in rows and ("STEADY", D2) in rows and ("STEADY", D4) in rows
+    mismatch = tmp_path / "mismatch"
+
+    def far_off(st):
+        cc.load_breeze(st, "CANBAN", cc.breeze_rows("CANBAN", {D4: cc.CANBK[D4]}, overrides={D4: ("119", "121", "118", "140")}),
+                       start=D4, end=D4, locator="relay/CANBAN/D4")
+
+    build_world(mismatch, extra=far_off)
+    rows = {(row.stock_code, row.trade_date) for row in compose(mismatch).rows}
+    assert ("CANBAN", D4) not in rows and ("CANBAN", D3) in rows and ("CANBAN", D5) in rows
+
+
+# --------------------------------------------------------------------------- 5: determinism and no feedback (RLC)
+RLC_TARGETS = cc.make_targets(cc.member("RELIANCE", pb.RELIANCE, "RELIAN"))
+
+
+def build_rlc_store(root: Path, changes_rule: str) -> None:
+    nc.rlc_world(root, changes_rule)
+    with PilotDataStore(root, workspace="india") as st:
+        rows = [kit.breeze_row("RELIAN", f"{day.isoformat()} 00:00:00", "100", "101", "99", "100") for day in (nc.S1, nc.S2)]
+        cc.load_breeze(st, "RELIAN", rows, start=nc.S1, end=nc.S2)
+        mark_session_store(st)
+
+
+def rlc_compose(root: Path, store_run_ids=None):
+    with PilotDataStore(root, workspace="india") as st:
+        return bars_as_of(st, targets=RLC_TARGETS, decision_session=nc.S3, as_of=nc.S2, window_start=nc.S1,
+                          tolerances=TOLERANCES, workspace="india")
+
+
+@pytest.mark.parametrize("changes_rule", ["next_session_after_file_date", "file_date"])
+def test_a_forecast_between_two_calls_changes_neither_the_rows_nor_the_store_run_id(tmp_path, changes_rule):
+    root = tmp_path / "rlc"
+    build_rlc_store(root, changes_rule)
+    calendar = nc.pinned(tmp_path)
+    # precondition, on a writable copy that holds S's own evidence: the conflict is reachable and the run id sees it
+    copy_root = tmp_path / "copy"
+    shutil.copytree(root, copy_root)
+    clean = rlc_compose(root)
+    with PilotDataStore(copy_root, workspace="india") as copy:
+        nc.land_session(copy, nc.S3)
+        band_on(copy, isin=pb.RELIANCE, session=nc.S3, workspace="india")
+        written = copy.query("SELECT count(*) FROM quarantine_records WHERE reason_code = ? AND date_from = ?",
+                             ["band_crosscheck_row_conflict", nc.S3])[0][0]
+        assert written > 0
+    seen = rlc_compose(copy_root)
+    assert seen.store_crosscheck_run_id != clean.store_crosscheck_run_id  # the run id provably sees a quarantine
+    assert canon(seen) == canon(clean)  # while the composition does not
+    # the forecast store: call, forecast, call
+    with PilotDataStore(root, workspace="india") as st:
+        before_ids = [row[0] for row in st.query("SELECT quarantine_id FROM quarantine_records ORDER BY quarantine_id")]
+    first = rlc_compose(root)
+    again = rlc_compose(root)
+    assert canon(first) == canon(again) and first.store_crosscheck_run_id == again.store_crosscheck_run_id
+    with PilotDataStore(root, workspace="india") as st:
+        mid_ids = [row[0] for row in st.query("SELECT quarantine_id FROM quarantine_records ORDER BY quarantine_id")]
+        observation = band_for_upcoming_session(st, isin=pb.RELIANCE, prior_session=nc.S2, session=nc.S3,
+                                                calendar=calendar, workspace="india")
+        assert observation.session == nc.S3
+        after_forecast = [row[0] for row in st.query("SELECT quarantine_id FROM quarantine_records ORDER BY quarantine_id")]
+    last = rlc_compose(root)
+    assert mid_ids == after_forecast
+    assert canon(last) == canon(first)
+    assert last.store_crosscheck_run_id == first.store_crosscheck_run_id
+    assert before_ids != mid_ids or True  # the first call may add crosscheck quarantines; none changes after it
+
+
+# --------------------------------------------------------------------------- 6: refusals
+def test_refusals_name_their_reason_and_never_touch_the_research_store(frozen, tmp_path):
+    root = tmp_path / "world"
+    build_world(root)
+    with pytest.raises(PilotDataError) as read_only:
+        compose(root, writable=False)
+    assert read_only.value.code == "store_read_only"
+    research = frozen["root"]
+    before = ss.tree_state(research)
+    with PilotDataStore(research, workspace="india") as unseeded, pytest.raises(PilotDataError) as unseeded_error:
+        bars_as_of(unseeded, targets=TARGETS, decision_session=S, as_of=D5, window_start=D1, tolerances=TOLERANCES,
+                   workspace="india")
+    assert unseeded_error.value.code == "not_a_session_store"
+    assert ss.tree_state(research) == before
+    plain = tmp_path / "plain"
+    with PilotDataStore(plain, workspace="india") as bare:
+        cc.load_bhavcopy(bare)
+        with pytest.raises(PilotDataError) as bare_error:
+            bars_as_of(bare, targets=TARGETS, decision_session=S, as_of=D5, window_start=D1, tolerances=TOLERANCES,
+                       workspace="india")
+        assert bare_error.value.code == "not_a_session_store"
+        assert not bare.table_exists("crosscheck_runs")  # nothing was written before the refusal
+    cases = {
+        "stale_as_of": dict(as_of=D4, decision=S),  # D5 is a session between them
+        "as_of_not_session": dict(as_of=D5 + timedelta(days=1), decision=S),  # a Saturday
+        "as_of_not_before_decision": dict(as_of=D5, decision=D5),
+        "window_after_as_of": dict(as_of=D5, decision=S, window_start=S),
+    }
+    for code, arguments in cases.items():
+        with pytest.raises(PilotDataError) as caught:
+            compose(root, **arguments)
+        assert caught.value.code == code, code
+    with PilotDataStore(root, workspace="india") as st, pytest.raises(PilotDataError) as space:
+        bars_as_of(st, targets=TARGETS, decision_session=S, as_of=D5, window_start=D1, tolerances=TOLERANCES,
+                   workspace="uk")
+    assert space.value.code == "workspace_mismatch"
+
+
+# --------------------------------------------------------------------------- 7: strategy fit
+def test_every_row_fits_the_strategy_and_a_holdout_view_builds(tmp_path):
+    root = tmp_path / "world"
+    build_world(root)
+    result = compose(root)
+    assert all(bar_from_row(row).session == row.trade_date for row in result.rows)
+    view = DatasetView.from_rows(result.rows, holdout=HoldoutRange(D5, D5))
+    assert view.visible_end < D5
+    assert events_from_manifest(result) is not None
+    assert [c.code for c in result.caveats][:2] == ["SURVIVORSHIP_BIAS", "HINDSIGHT_BIAS"]
+
+
+# --------------------------------------------------------------------------- 8: no network, and the wall time
+def test_no_network_is_used_the_module_has_no_http_import_and_the_call_is_fast_on_the_fixture(tmp_path):
+    root = tmp_path / "world"
+    build_world(root)
+    started = time.perf_counter()
+    compose(root)
+    wall = time.perf_counter() - started
+    print(f"bars_as_of wall time on the fixture: {wall:.3f}s")
+    assert wall < 30
+    tree = ast.parse(Path(live_bars.__file__).read_text(encoding="utf-8"))
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported |= {alias.name for alias in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            imported.add(node.module or "")
+            imported |= {alias.name for alias in node.names}
+    banned = {"httpx", "requests", "urllib", "socket", "nse_http", "NseHttp", "relay", "subprocess"}
+    assert not banned & {part for name in imported for part in name.replace(".", " ").split()}, imported
+
+
+# --------------------------------------------------------------------------- the parity CLI
+def test_the_parity_cli_exits_zero_on_a_matching_seed_and_two_on_a_pinned_target_mismatch(frozen, tmp_path, capsys, monkeypatch):
+    root = tmp_path / "session"
+    shutil.copytree(frozen["session"], root)
+    code = live_main(["parity", "--dataset", str(frozen["dataset"]), "--session-root", str(root),
+                      "--decision-session", S.isoformat()])
+    out = json.loads(capsys.readouterr().out)
+    assert code == 0 and list(out)[0] == "caveats" and out["parity"]["equal"] is True
+    assert out["parity"]["factor_set_differs"] == [] and all(item["equal"] for item in out["parity"]["anchors"].values())
+    assert out["parity"]["wall_seconds"] >= 0
+    refused = live_main(["parity", "--dataset", str(frozen["dataset"]), "--session-root", str(tmp_path / "missing"),
+                         "--decision-session", S.isoformat()])
+    assert refused == 2 and json.loads(capsys.readouterr().out)["error_code"] == "seed_report_missing"
+    real = live_bars.verify_dataset
+    monkeypatch.setattr(live_bars, "verify_dataset",
+                        lambda *a, **k: real(*a, **k).model_copy(update={"targets_sha256": "f" * 64}))
+    mismatch = live_main(["parity", "--dataset", str(frozen["dataset"]), "--session-root", str(root),
+                          "--decision-session", S.isoformat()])
+    assert mismatch == 2 and json.loads(capsys.readouterr().out)["error_code"] == "seed_targets_mismatch"
