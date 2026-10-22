@@ -573,3 +573,125 @@ def test_an_abort_outranks_a_run_end_and_a_run_end_outranks_a_pause(tmp_path):
         state.require_entry(policy.STEP_ADMIT, ISIN)
     with pytest.raises(RunAborted):
         state.require(policy.STEP_BOOK)
+
+
+# --- buys stop, sells stay (D-08): the events that create an exit must not block it --------------------------------
+
+
+ENTRY_STEPS = (policy.STEP_ADMIT, policy.STEP_MINT)
+
+
+def test_the_side_defaults_to_the_stricter_buy_and_an_unknown_side_is_refused(tmp_path):
+    store = make_store(tmp_path)
+    raise_event(store, policy.DRAWDOWN_HALT, "equity_at_or_below_minus_8_percent_of_peak")
+    state = run_state(store)
+    for step in ENTRY_STEPS:
+        assert state.blocks(step, isin=ISIN) and state.blocks(step, isin=ISIN, side=policy.SIDE_BUY)
+        assert not state.blocks(step, isin=ISIN, side=policy.SIDE_SELL)
+    for side in ("", "BUY", "short", None, 5, "buy\n", "sell\n"):
+        for step in ALL_STEPS:
+            with pytest.raises(PolicyError) as caught:
+                state.blocks(step, isin=ISIN, side=side)  # type: ignore[arg-type]
+            assert caught.value.code == "unknown_side"
+            with pytest.raises(PolicyError) as required:
+                state.require(step, isin=ISIN, side=side)  # type: ignore[arg-type]
+            assert required.value.code == "unknown_side"
+
+
+@pytest.mark.parametrize("step", ENTRY_STEPS)
+def test_the_flatten_sell_passes_after_the_run_end_while_a_buy_is_refused(tmp_path, step):
+    store = make_store(tmp_path)
+    end_run(store)
+    state = run_state(store)
+    state.require_entry(step, ISIN, side=policy.SIDE_SELL)
+    state.require(step, isin=ISIN, side=policy.SIDE_SELL)
+    assert not state.blocks(step, isin=ISIN, side=policy.SIDE_SELL)
+    with pytest.raises(policy.RunEnded) as caught:
+        state.require_entry(step, ISIN, side=policy.SIDE_BUY)
+    assert caught.value.code == "run_ended"
+    with pytest.raises(policy.RunEnded):
+        state.require_entry(step, ISIN)  # the default side is the buy
+
+
+@pytest.mark.parametrize("step", ENTRY_STEPS)
+def test_the_halve_sell_passes_under_drawdown_halt_while_a_buy_is_refused(tmp_path, step):
+    store = make_store(tmp_path)
+    raise_event(store, policy.DRAWDOWN_HALT, "equity_at_or_below_minus_8_percent_of_peak")
+    state = run_state(store)
+    state.require_entry(step, ISIN, side=policy.SIDE_SELL)
+    with pytest.raises(RunPaused):
+        state.require_entry(step, ISIN, side=policy.SIDE_BUY)
+
+
+@pytest.mark.parametrize("event", ENTRIES_PAUSE)
+@pytest.mark.parametrize("step", ENTRY_STEPS)
+def test_an_entries_pause_blocks_buys_only(tmp_path, event, step):
+    store = make_store(tmp_path)
+    raise_event(store, event, "operator review needed")
+    state = run_state(store)
+    assert state.blocks(step, isin=CLEAR_ISIN, side=policy.SIDE_BUY)
+    assert not state.blocks(step, isin=CLEAR_ISIN, side=policy.SIDE_SELL)
+
+
+@pytest.mark.parametrize("event", D07_PAUSE_ISIN)
+@pytest.mark.parametrize("step", ENTRY_STEPS)
+def test_an_instrument_pause_blocks_a_buy_of_that_name_and_never_its_sell(tmp_path, event, step):
+    store = make_store(tmp_path)
+    raise_event(store, event, "data problem", isin=ISIN)
+    state = run_state(store)
+    assert state.blocks(step, isin=ISIN, side=policy.SIDE_BUY)
+    assert not state.blocks(step, isin=ISIN, side=policy.SIDE_SELL)
+    assert not state.blocks(step, isin=OTHER_ISIN, side=policy.SIDE_BUY)
+
+
+@pytest.mark.parametrize("step", ENTRY_STEPS)
+def test_a_sell_still_needs_a_real_isin(tmp_path, step):
+    state = run_state(make_store(tmp_path))
+    for bad in (None, "", "ine002a01018", ISIN + "\n", "\n" + ISIN, 5):
+        with pytest.raises(PolicyError) as caught:
+            state.blocks(step, isin=bad, side=policy.SIDE_SELL)  # type: ignore[arg-type]
+        assert caught.value.code == "isin_required"
+        with pytest.raises(PolicyError) as required:
+            state.require_entry(step, bad, side=policy.SIDE_SELL)  # type: ignore[arg-type]
+        assert required.value.code == "isin_required"
+
+
+@pytest.mark.parametrize("event", D07_PAUSE_ALL + P06_PAUSE_ALL)
+@pytest.mark.parametrize("step", ENTRY_STEPS)
+def test_an_all_pause_blocks_the_sell_too(tmp_path, event, step):
+    store = make_store(tmp_path)
+    raise_event(store, event, "operator review needed")
+    state = run_state(store)
+    with pytest.raises(RunPaused):
+        state.require_entry(step, ISIN, side=policy.SIDE_SELL)
+
+
+@pytest.mark.parametrize("step", ENTRY_STEPS)
+def test_an_abort_still_blocks_a_sell(tmp_path, step):
+    store = make_store(tmp_path)
+    raise_event(store, "audit_corrupt", "chain break")
+    state = run_state(store)
+    with pytest.raises(RunAborted):
+        state.require_entry(step, ISIN, side=policy.SIDE_SELL)
+    assert state.blocks(step, isin=ISIN, side=policy.SIDE_SELL)
+
+
+def test_an_abort_after_a_run_end_blocks_the_flatten_sell(tmp_path):
+    store = make_store(tmp_path)
+    end_run(store)
+    raise_event(store, "unexplained_account_position", "ticker not in the run universe")
+    state = run_state(store)
+    for step in ENTRY_STEPS:
+        with pytest.raises(RunAborted):
+            state.require_entry(step, ISIN, side=policy.SIDE_SELL)
+
+
+def test_a_sell_leaves_booking_expiry_and_reads_alone_and_the_side_changes_nothing_for_them(tmp_path):
+    store = make_store(tmp_path)
+    end_run(store)
+    raise_event(store, policy.DRAWDOWN_HALT, "equity_at_or_below_minus_8_percent_of_peak")
+    raise_event(store, "missing_bar", "no bar", isin=ISIN)
+    state = run_state(store)
+    for step in (policy.STEP_BOOK, policy.STEP_EXPIRE, policy.STEP_READ_ONLY):
+        for side in (policy.SIDE_BUY, policy.SIDE_SELL):
+            assert not state.blocks(step, side=side)

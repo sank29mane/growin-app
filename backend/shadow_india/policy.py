@@ -8,18 +8,26 @@ clear anything:
 
 - an abort is terminal. It blocks every later step, including read-only ones, and ``resume`` refuses it;
 - a pause blocks by scope and is cleared only by ``resume`` with a non-empty reason;
-- a run end (``drawdown_flatten_15``, D-08) is terminal for entries only: admission and mint are blocked for good,
-  while booking, expiry and read-only steps keep running so the simulated flatten can finish. No record clears it
-  and ``resume`` refuses it;
+- a run end (``drawdown_flatten_15``, D-08) is terminal for buys only: a buy's admission and mint are blocked for
+  good, while sell admission, sell mint, booking, expiry and read-only steps keep running so the simulated
+  flatten can finish. No record clears it and ``resume`` refuses it;
 - ``resume`` clears pauses and nothing else, and it refuses ``drawdown_halt``: the 63 latch in
   ``risk_india/drawdown.py`` refuses a reset while drawdown is at or below the halt line, so this file may not
   hold a weaker release. ``shadow_india.portfolio.ShadowPortfolio.release_halt`` is the latch-backed release: it
   resets the 63 latch first and only then writes the ``resume`` record for the halt pause. Parity with D-05.
 
-Scopes: ``all`` blocks every step except read-only checks; ``entries`` blocks admission and mint; ``isin:<ISIN>``
-blocks admission and mint for that instrument. Entry steps (admit, mint) always need a valid upper-case ISIN, so
-an ISIN-scoped pause cannot be skipped by omitting the instrument. A pause from the P-06 list (r3 ruling e) uses ``all`` so no
-later admission, mint, booking or expiry runs in the invocation.
+D-08 says buys stop and sells stay, so admit and mint take a ``side`` (``buy`` or ``sell``). Scopes: ``all`` blocks
+every step except read-only checks, on both sides; ``entries`` blocks the admission and mint of a BUY;
+``isin:<ISIN>`` blocks the admission and mint of a BUY of that instrument. The run end blocks buys the same way.
+An abort blocks both sides. Without that split the events that create an exit (the -8% halt, the -15% end, an
+unresolved corporate action on a held name) would block the exit they create.
+
+``side`` defaults to ``buy``, the stricter reading, so a caller that forgets it is refused more, never less. A
+sell is never refused by an ``entries`` or ``isin:`` scope, but it still names a valid ISIN: admit and mint always
+need one, on either side, so every entry-step check has the same shape, the audit line carries the instrument, and a
+future instrument-scoped sell rule cannot be skipped by omitting it. Booking and expiry take no side: they never
+open exposure. A pause from the P-06 list (r3 ruling e) uses ``all`` so no later admission, mint, booking or expiry
+runs in the invocation.
 """
 
 from __future__ import annotations
@@ -44,6 +52,10 @@ STEP_BOOK = "book"
 STEP_EXPIRE = "expire"
 STEP_READ_ONLY = "read_only"
 STEPS = frozenset({STEP_ADMIT, STEP_MINT, STEP_BOOK, STEP_EXPIRE, STEP_READ_ONLY})
+
+SIDE_BUY = "buy"
+SIDE_SELL = "sell"
+SIDES = frozenset({SIDE_BUY, SIDE_SELL})
 
 DRAWDOWN_HALT = "drawdown_halt"
 DRAWDOWN_FLATTEN_15 = "drawdown_flatten_15"
@@ -70,13 +82,13 @@ class RunPaused(PolicyError):
 
 
 class RunEnded(PolicyError):
-    """The run ended at the -15% flatten (D-08). Entry steps are blocked for good."""
+    """The run ended at the -15% flatten (D-08). A buy is blocked for good; sells stay."""
 
 
 @dataclass(frozen=True)
 class Rule:
     action: str  # PAUSE, ABORT or RUN_ENDED
-    scope: str  # SCOPE_ALL, SCOPE_ENTRIES or SCOPE_ISIN; aborts end the whole run, a run end blocks entries only
+    scope: str  # SCOPE_ALL, SCOPE_ENTRIES or SCOPE_ISIN; aborts end the whole run, a run end blocks buys only
 
 
 def _pause(scope: str) -> Rule:
@@ -123,9 +135,9 @@ POLICY: Mapping[str, Rule] = {
     "contract_mismatch": _pause(SCOPE_ALL),
     "hash_mismatch": _pause(SCOPE_ALL),
     "divergence_breach": _pause(SCOPE_ENTRIES),
-    # D-08: the -8% trailing drawdown halts entries. `resume` refuses it; Task 2 adds the latch-backed release.
+    # D-08: the -8% trailing drawdown halts buys (sells stay). `resume` refuses it; Task 2 adds the latch-backed release.
     DRAWDOWN_HALT: _pause(SCOPE_ENTRIES),
-    # D-08: the -15% flatten ends the run. Terminal for entries; booking, expiry and marks run until flat.
+    # D-08: the -15% flatten ends the run. Terminal for buys; sells, booking, expiry and marks run until flat.
     DRAWDOWN_FLATTEN_15: Rule(RUN_ENDED, SCOPE_ENTRIES),
     # P-06 pause: relay codes and answers that are not typed.
     "kill_label_unreadable": _pause(SCOPE_ALL),
@@ -173,44 +185,48 @@ class RunState:
     def ended(self) -> bool:
         return bool(self.ended_events)
 
-    def blocks(self, step: str, *, isin: str | None = None) -> bool:
+    def blocks(self, step: str, *, isin: str | None = None, side: str = SIDE_BUY) -> bool:
         if step not in STEPS:
             raise PolicyError("unknown_step")
+        if side not in SIDES:
+            raise PolicyError("unknown_side")
         if step in _ENTRY_STEPS and (not isinstance(isin, str) or not _ISIN.match(isin)):
             raise PolicyError("isin_required")
         if self.aborted:
             return True
-        if self.ended and step in _ENTRY_STEPS:
+        buy_entry = step in _ENTRY_STEPS and side == SIDE_BUY
+        if self.ended and buy_entry:
             return True
         for pause in self.open_pauses:
             if pause.scope == SCOPE_ALL and step in _ALL_BLOCKED:
                 return True
-            if pause.scope == SCOPE_ENTRIES and step in _ENTRY_STEPS:
+            if pause.scope == SCOPE_ENTRIES and buy_entry:
                 return True
-            if pause.scope == f"{SCOPE_ISIN}:{isin}" and step in _ENTRY_STEPS:
+            if pause.scope == f"{SCOPE_ISIN}:{isin}" and buy_entry:
                 return True
         return False
 
-    def require(self, step: str, *, isin: str | None = None) -> None:
+    def require(self, step: str, *, isin: str | None = None, side: str = SIDE_BUY) -> None:
         """Raise unless ``step`` may run. Call this before every admission, mint, booking and expiry.
 
-        Entry steps raise ``isin_required`` without a valid ISIN. Prefer ``require_entry`` for them.
+        Entry steps raise ``isin_required`` without a valid ISIN. Prefer ``require_entry`` for them. ``side`` is
+        ``buy`` by default; only a buy is refused by a run end, an ``entries`` pause or an ``isin:`` pause.
         """
 
-        if not self.blocks(step, isin=isin):
+        if not self.blocks(step, isin=isin, side=side):
             return
         if self.aborted:
             raise RunAborted("run_aborted")
-        if self.ended and step in _ENTRY_STEPS:
+        if self.ended and step in _ENTRY_STEPS and side == SIDE_BUY:
             raise RunEnded("run_ended")
         raise RunPaused("run_paused")
 
-    def require_entry(self, step: str, isin: str) -> None:
+    def require_entry(self, step: str, isin: str, *, side: str = SIDE_BUY) -> None:
         """``require`` for an entry step, with the instrument mandatory so a runner cannot forget it."""
 
         if step not in _ENTRY_STEPS:
             raise PolicyError("not_an_entry_step")
-        self.require(step, isin=isin)
+        self.require(step, isin=isin, side=side)
 
 
 def state_from_records(records: Sequence[Mapping[str, Any]]) -> RunState:
@@ -295,6 +311,9 @@ __all__ = [
     "STEP_EXPIRE",
     "STEP_MINT",
     "STEP_READ_ONLY",
+    "SIDES",
+    "SIDE_BUY",
+    "SIDE_SELL",
     "raise_event",
     "resume",
     "rule_for",
