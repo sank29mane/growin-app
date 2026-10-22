@@ -10,6 +10,14 @@ runtime. It is skipped unless ``GROWIN_LIVE_CRITIC_BASE_URL`` and
     PYTHONPATH=backend uv run --project backend pytest \\
     tests/backend/test_critic_live_eval.py -m live_local -s -q
 
+The critic needs a reasoning model with thinking on: the call sends no
+``response_format`` (the schema is in the prompt), and a reply with no reasoning
+evidence is refused (D3). D3 relies on the runtime splitting its reasoning out of
+``content``. One that leaves ``<think>...</think>`` inline in ``content`` fails one of two
+ways. With zero or missing reasoning tokens and no separate reasoning text, D3 returns
+REASONING_ABSENT before any parsing. With positive reasoning tokens, parsing fails as
+STRUCTURED_OUTPUT_INVALID. Either way the caller sees CRITIC_OUTPUT_INVALID.
+
 Per case it prints PASS, FALSE_APPROVE, FAIL_CLOSED, SOFT or FALSE_BLOCK. It fails on
 any FALSE_APPROVE, any FAIL_CLOSED (CRITIC_OUTPUT_INVALID or MODEL_MISMATCH) and any
 must_block case that is not BLOCKED. FALSE_BLOCK is reported, not asserted.
@@ -27,7 +35,7 @@ from typing import List, Optional
 import pytest
 
 import model_registry_testkit as kit
-from agents.risk_agent import RiskAgent
+from agents.risk_agent import RiskAgent, RiskAssessment
 from app_context import state
 from critic_cases import (
     CASES,
@@ -44,6 +52,8 @@ from critic_cases import (
     score,
 )
 from market_context import MarketContext, PortfolioData, PriceData
+from model_registry.wire_schema import wire_spec
+from model_stub_server import embedded_schema
 from model_registry import ModelRegistryError, ProviderError, load_registry_file, set_active_registry
 from model_registry_testkit import key_env, network_guard, stub  # noqa: F401  (fixtures)
 
@@ -56,6 +66,8 @@ class CaseResult:
     verdict: str
     status: str
     seconds: float
+    model_status: Optional[str] = None  # the model's own status, before the wash sale floor
+    model_verdict: Optional[str] = None  # score() over model_status: recall without the floor
 
 
 async def run_cases(monkeypatch, tmp_path, cases=CASES) -> List[CaseResult]:
@@ -82,17 +94,26 @@ async def run_cases(monkeypatch, tmp_path, cases=CASES) -> List[CaseResult]:
         try:
             review = await RiskAgent().review(context, case.suggestion)
             status: Optional[str] = review["status"]
+            model_status: Optional[str] = review["model_status"]
             label = status
         except (ProviderError, ModelRegistryError) as exc:
-            status, label = None, exc.code
-        results.append(CaseResult(case, score(case, status), label, time.time() - started))
+            status, model_status, label = None, None, exc.code
+        results.append(
+            CaseResult(case, score(case, status), label, time.time() - started, model_status, score(case, model_status))
+        )
     return results
 
 
 def report(results: List[CaseResult]) -> str:
-    lines = [f"  {r.case.case_id:2} {r.case.kind:14} {r.status:24} {r.verdict:13} {r.seconds:5.1f}s" for r in results]
+    lines = [
+        f"  {r.case.case_id:2} {r.case.kind:14} {r.status:24} {r.verdict:13} "
+        f"model {str(r.model_status):9} {r.model_verdict:13} {r.seconds:5.1f}s"
+        for r in results
+    ]
     counts = Counter(r.verdict for r in results)
+    model_counts = Counter(r.model_verdict for r in results)
     lines.append(f"SUMMARY {dict(counts)} total {sum(r.seconds for r in results):.0f}s")
+    lines.append(f"MODEL ALONE (before the wash sale floor) {dict(model_counts)}")
     return "\n".join(lines)
 
 
@@ -190,16 +211,26 @@ async def test_a_critic_that_blocks_every_must_block_case_meets_the_bar(stub_reg
 async def test_a_critic_that_approves_everything_is_all_false_approves(stub_registry, monkeypatch, tmp_path):
     stub_registry.structured["RiskAssessment"] = _verdict("APPROVED")
     results = await run_cases(monkeypatch, tmp_path)
-    assert Counter(r.verdict for r in results)[FALSE_APPROVE] == 16
+    # Cases 4, 5 and 11 carry the system wash sale alert on a BUY or LONG: the
+    # deterministic floor blocks them whatever the model says. The other 13 are the model's.
+    assert Counter(r.verdict for r in results)[FALSE_APPROVE] == 13
+    assert {r.case.case_id for r in results if r.case.wash_alert and r.status == "BLOCKED" and r.case.kind == MUST_BLOCK} == {4, 5, 11}
+    # Scored on the model's own status the floor does not hide it: all 16 must_block cases miss.
+    by_id = {r.case.case_id: r for r in results}
+    for case_id in (4, 5, 11):
+        assert by_id[case_id].verdict == PASS and by_id[case_id].model_verdict == FALSE_APPROVE
+        assert by_id[case_id].model_status == "APPROVED"
+    assert Counter(r.model_verdict for r in results)[FALSE_APPROVE] == 16
+    assert "MODEL ALONE" in report(results)
     failures = acceptance_failures(results)
-    assert len(failures) == 16 and all("FALSE_APPROVE" in f for f in failures)
+    assert len(failures) == 13 and all("FALSE_APPROVE" in f for f in failures)
 
 
 async def test_a_critic_that_only_flags_misses_the_bar_without_a_false_approve(stub_registry, monkeypatch, tmp_path):
     stub_registry.structured["RiskAssessment"] = _verdict("FLAGGED")
     results = await run_cases(monkeypatch, tmp_path)
-    assert Counter(r.verdict for r in results)[SOFT] == 16
-    assert len(acceptance_failures(results)) == 16
+    assert Counter(r.verdict for r in results)[SOFT] == 13  # the floor lifts the 3 wash sale cases to BLOCKED
+    assert len(acceptance_failures(results)) == 13
 
 
 async def test_text_that_is_not_a_verdict_is_fail_closed_for_every_case(stub_registry, monkeypatch, tmp_path):
@@ -207,6 +238,34 @@ async def test_text_that_is_not_a_verdict_is_fail_closed_for_every_case(stub_reg
     results = await run_cases(monkeypatch, tmp_path)
     assert {r.verdict for r in results} == {FAIL_CLOSED}
     assert {r.status for r in results} == {"CRITIC_OUTPUT_INVALID"}
+
+
+async def test_a_critic_with_no_reasoning_evidence_is_fail_closed_for_every_case(stub_registry, monkeypatch, tmp_path):
+    """67-FU2 D3: a verdict from a model that did not think is refused, even a correct BLOCKED."""
+    stub_registry.structured["RiskAssessment"] = _verdict("BLOCKED")
+    stub_registry.reasoning_tokens = 0
+    results = await run_cases(monkeypatch, tmp_path)
+    assert {r.verdict for r in results} == {FAIL_CLOSED}
+    assert {r.status for r in results} == {"CRITIC_OUTPUT_INVALID"}
+    assert len(acceptance_failures(results)) == 25
+
+
+async def test_a_critic_cut_off_at_the_token_limit_is_fail_closed_for_every_case(stub_registry, monkeypatch, tmp_path):
+    stub_registry.structured["RiskAssessment"] = _verdict("BLOCKED")
+    stub_registry.finish_reason = "length"
+    results = await run_cases(monkeypatch, tmp_path)
+    assert {r.verdict for r in results} == {FAIL_CLOSED}
+    assert {r.status for r in results} == {"CRITIC_OUTPUT_INVALID"}
+
+
+async def test_every_case_request_has_no_response_format_and_the_schema_in_the_prompt(
+    stub_registry, monkeypatch, tmp_path
+):
+    stub_registry.structured["RiskAssessment"] = _verdict("BLOCKED")
+    await run_cases(monkeypatch, tmp_path, CASES[:3])
+    for request in stub_registry.snapshot():
+        assert "response_format" not in request.json and "tools" not in request.json
+        assert embedded_schema(request.json) == wire_spec(RiskAssessment).schema
 
 
 async def test_a_wrong_model_is_fail_closed_with_its_own_code(stub_registry, monkeypatch, tmp_path):

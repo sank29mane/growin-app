@@ -31,6 +31,31 @@ class RiskAssessment(BaseModel):
     debate_refutation: str = Field(..., description="A sharp, adversarial argument challenging the core logic of the suggestion")
     requires_hitl: bool = Field(default=False, description="Whether human-in-the-loop approval is mandatory")
 
+WASH_SALE_FLOOR_NOTE = (
+    "Deterministic floor: the system wash sale alert is True and the proposal is a BUY or LONG entry, "
+    "so the status is BLOCKED whatever the model said."
+)
+
+
+def is_long_entry(suggestion: str) -> bool:
+    """True when the proposal text is a BUY or LONG entry (the check that gates the wash sale alert)."""
+    upper = suggestion.upper()
+    return any(word in upper for word in ("BUY", "LONG"))
+
+
+def apply_wash_sale_floor(assessment: RiskAssessment, wash_sale_alert: bool, long_entry: bool) -> RiskAssessment:
+    """Raise the verdict to BLOCKED when the system's wash sale alert meets a long entry.
+
+    A floor, not an override: it only tightens. An already BLOCKED assessment is
+    returned untouched, and no input can lower a status. The note is appended to
+    ``compliance_notes`` so the reviewer sees why the model's own status was raised.
+    """
+    if not (wash_sale_alert and long_entry) or assessment.status == "BLOCKED":
+        return assessment
+    notes = f"{assessment.compliance_notes}\n{WASH_SALE_FLOOR_NOTE}".strip()
+    return assessment.model_copy(update={"status": "BLOCKED", "compliance_notes": notes})
+
+
 RISK_AUDIT_TEMPLATE = (
     "Audit the proposal below.\n\n"
     "Workspace limits (trusted: read from the workspace configuration, not from the proposal):\n"
@@ -228,7 +253,7 @@ class RiskAgent(BaseAgent):
     async def analyze(self, context_dict: Dict[str, Any]) -> AgentResponse:
         """
         Main analysis method required by BaseAgent.
-        SOTA 2026: structured risk audit through the risk_critic role (json_schema output).
+        SOTA 2026: structured risk audit through the risk_critic role (schema in the prompt, strict parse).
         """
         # In this context, 'context' is the MarketContext object
         market_context: MarketContext = context_dict.get("context")
@@ -239,7 +264,8 @@ class RiskAgent(BaseAgent):
 
         # SOTA 2026: Wash Sale Detection logic
         wash_sale_alert = False
-        if any(word in suggestion.upper() for word in ["BUY", "LONG"]):
+        long_entry = is_long_entry(suggestion)
+        if long_entry:
             recent_trades = market_context.user_context.get("recent_trades", [])
             for trade in recent_trades:
                 if trade.get("ticker") == market_context.ticker and trade.get("side") == "SELL" and trade.get("pnl", 0) < 0:
@@ -271,7 +297,13 @@ class RiskAgent(BaseAgent):
                 RiskAssessment,
             )
 
+            # The model's own status is kept next to the floored one so an eval can
+            # score floor coverage and model recall separately. It never feeds a decision.
+            model_status = audit_result.status
+            audit_result = apply_wash_sale_floor(audit_result, wash_sale_alert, long_entry)
             data = audit_result.model_dump()
+            data["model_status"] = model_status
+            data["floored"] = audit_result.status != model_status
                 
             # Enforce HITL for any trade-related suggestion
             if any(word in suggestion.upper() for word in ["BUY", "SELL", "ORDER", "TRADE"]):
@@ -288,8 +320,10 @@ class RiskAgent(BaseAgent):
             )
                 
         except ProviderError as e:
-            if e.code == "STRUCTURED_OUTPUT_INVALID":
-                # Non-conforming critic output keeps its own typed refusal.
+            if e.code in ("STRUCTURED_OUTPUT_INVALID", "REASONING_ABSENT"):
+                # Non-conforming critic output, or a verdict from a model that showed
+                # no reasoning, keeps the critic's own typed refusal. Same downstream
+                # fail-closed path; the provider code stays distinct in its own logs.
                 raise ProviderError("CRITIC_OUTPUT_INVALID", ROLE_RISK_CRITIC) from None
             raise
         except ModelRegistryError:
@@ -318,6 +352,10 @@ class RiskAgent(BaseAgent):
             review = RiskAssessment.model_validate(res.data).model_dump()
         except (ValueError, TypeError):
             raise ProviderError("CRITIC_OUTPUT_INVALID", ROLE_RISK_CRITIC) from None
+        # Informational only: the final status above is the verdict; these two say what
+        # the model itself returned before the wash sale floor.
+        review["model_status"] = res.data.get("model_status", review["status"])
+        review["floored"] = bool(res.data.get("floored", False))
         if identity is not None:
             if context.user_context.get("deferred_proposal") is not proposal or proposal_identity(proposal) != identity:
                 raise ModelRegistryError("RISK_REVIEW_REQUIRED", ROLE_RISK_CRITIC)

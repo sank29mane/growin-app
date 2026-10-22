@@ -4,12 +4,18 @@ Answers ``POST /{prefix}/v1/chat/completions`` in plain JSON or SSE and records
 the path, headers and JSON body of every request. One server stands in for xAI,
 LM Studio and Ollama: the test chooses the prefix per provider.
 
-Structured outputs, two shapes:
+Structured outputs, three shapes:
 
-* ``response_format`` json_schema (the registry's ``run_structured``): the stub
-  answers with plain content taken from ``structured[schema_name]``. A dict is
-  sent as JSON; a string is sent verbatim, so a test can send JSON text with
-  fences, prose, or anything else a model might emit.
+* the registry's ``run_structured``: no ``response_format``. The last user message
+  ends with the fixed instruction and the JSON text of the wire schema; the stub
+  finds that schema (``embedded_schema``), names it by its property set
+  (``_SCHEMA_NAMES``) and answers with plain content taken from
+  ``structured[schema_name]``. A dict is sent as JSON; a string is sent verbatim,
+  so a test can send JSON text with fences, prose, or anything else a model might
+  emit. ``finish_reason``, ``reasoning_tokens`` and ``reasoning_content`` set what
+  the reply reports about how the model got there.
+* ``response_format`` json_schema: same lookup by ``json_schema.name``. No
+  production caller sends it now; the shape stays for the wire-schema tests.
 * a forced tool (magentic): the stub answers with a tool call whose arguments
   come from ``tool_arguments[function_name]``.
 
@@ -33,6 +39,49 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional
 
 _PATH = re.compile(r"^/(?P<prefix>[^/]+)/v1/chat/completions$")
+
+
+SCHEMA_MARKER = "JSON schema:\n"
+
+# Property set of each wire schema the tests use -> its name in ``structured``.
+_SCHEMA_NAMES = {
+    frozenset({"status", "confidence_score", "risk_assessment", "compliance_notes",
+               "recommendation_adjustment", "debate_refutation", "requires_hitl"}): "RiskAssessment",
+    frozenset({"tool_calls"}): "ToolCallList",
+    frozenset({"q", "qInTitle", "country", "category", "domain"}): "NewsDataQueryParams",
+    frozenset({"text"}): "Answer",
+}
+
+
+def last_user_text(body: Any) -> str:
+    """The text of the last user message of a request body ('' when there is none)."""
+    messages = body.get("messages") if isinstance(body, dict) else None
+    for message in reversed(messages or []):
+        if isinstance(message, dict) and message.get("role") == "user":
+            content = message.get("content")
+            if isinstance(content, list):
+                content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
+            return content if isinstance(content, str) else ""
+    return ""
+
+
+def embedded_schema(body: Any) -> Optional[Dict[str, Any]]:
+    """The wire schema ``run_structured`` appended to the last user message, or None."""
+    text = last_user_text(body)
+    head, marker, tail = text.rpartition(SCHEMA_MARKER)
+    if not marker:
+        return None
+    try:
+        schema = json.loads(tail)
+    except ValueError:
+        return None
+    return schema if isinstance(schema, dict) else None
+
+
+def embedded_schema_name(body: Any) -> Optional[str]:
+    schema = embedded_schema(body)
+    props = schema.get("properties") if isinstance(schema, dict) else None
+    return _SCHEMA_NAMES.get(frozenset(props)) if isinstance(props, dict) else None
 
 
 @dataclass
@@ -99,6 +148,9 @@ def strict_subset_violations(schema: Any, path: str = "$", root: Any = None) -> 
     return found
 
 
+_UNSET: Any = object()
+
+
 @dataclass
 class ModelStubServer:
     reply_text: str = "stub reply"
@@ -106,6 +158,15 @@ class ModelStubServer:
     structured: Dict[str, Any] = field(default_factory=dict)
     served_model: Optional[str] = None
     omit_model: bool = False
+    finish_reason: str = "stop"
+    # What the reply reports about reasoning. None leaves the field out, the way
+    # a runtime that does not count reasoning tokens does.
+    reasoning_tokens: Optional[int] = 7
+    # Verbatim wire value for reasoning_tokens (a string, a bool, null...). Overrides
+    # ``reasoning_tokens`` when set; ``_UNSET`` leaves ``reasoning_tokens`` in charge.
+    reasoning_tokens_raw: Any = _UNSET
+    reasoning_content: Optional[str] = None
+    reasoning_field: str = "reasoning_content"  # or "reasoning", the other name runtimes use
     requests: List[RecordedRequest] = field(default_factory=list)
     _server: Optional[ThreadingHTTPServer] = None
     _thread: Optional[threading.Thread] = None
@@ -215,7 +276,7 @@ class ModelStubServer:
             spec = fmt.get("json_schema")
             if isinstance(spec, dict):
                 return spec.get("name")
-        return None
+        return embedded_schema_name(body)
 
     def _respond(self, handler: BaseHTTPRequestHandler, body: Dict[str, Any]) -> None:
         model: Optional[str] = self.served_model if self.served_model is not None else body.get("model", "")
@@ -242,7 +303,9 @@ class ModelStubServer:
             reply = self.structured.get(schema_name, {})
             content = reply if isinstance(reply, str) else json.dumps(reply)
         message: Dict[str, Any] = {"role": "assistant", "content": content}
-        finish = "stop"
+        if self.reasoning_content is not None:
+            message[self.reasoning_field] = self.reasoning_content
+        finish = self.finish_reason
         if tool_name:
             message = {
                 "role": "assistant",
@@ -262,7 +325,18 @@ class ModelStubServer:
             "created": 0,
             **({} if model is None else {"model": model}),
             "choices": [{"index": 0, "message": message, "finish_reason": finish}],
-            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            "usage": {
+                "prompt_tokens": 1,
+                "completion_tokens": 1,
+                "total_tokens": 2,
+                **(
+                    {"completion_tokens_details": {"reasoning_tokens": self.reasoning_tokens_raw}}
+                    if self.reasoning_tokens_raw is not _UNSET
+                    else {}
+                    if self.reasoning_tokens is None
+                    else {"completion_tokens_details": {"reasoning_tokens": self.reasoning_tokens}}
+                ),
+            },
         }
         data = json.dumps(payload).encode("utf-8")
         handler.send_response(200)

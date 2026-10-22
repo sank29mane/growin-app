@@ -14,7 +14,7 @@ import pytest
 
 import model_registry_testkit as kit
 from model_registry.wire_schema import wire_spec
-from model_stub_server import strict_subset_violations
+from model_stub_server import embedded_schema, last_user_text, strict_subset_violations
 from agents.orchestrator_agent import OrchestratorAgent
 from agents.risk_agent import (
     RISK_AUDIT_TEMPLATE,
@@ -78,7 +78,7 @@ def _audit_messages(stub):
 # --- F1: json_schema, no forced tool, strict validation --------------------------------------------
 
 
-async def test_the_audit_request_is_a_json_schema_request_for_risk_assessment(
+async def test_the_audit_request_carries_the_risk_assessment_schema_in_the_prompt(
     stub, registry_factory, risk_workspace
 ):
     registry_factory(role_provider={"risk_critic": "lmstudio"})
@@ -88,9 +88,10 @@ async def test_the_audit_request_is_a_json_schema_request_for_risk_assessment(
 
     [request] = stub.snapshot()
     body = request.json
-    assert body["response_format"]["type"] == "json_schema"
-    assert body["response_format"]["json_schema"]["schema"] == wire_spec(RiskAssessment).schema
-    assert strict_subset_violations(body["response_format"]["json_schema"]["schema"]) == []
+    assert "response_format" not in body
+    assert embedded_schema(body) == wire_spec(RiskAssessment).schema
+    assert strict_subset_violations(embedded_schema(body)) == []
+    assert "single JSON object matching this JSON schema and nothing else" in last_user_text(body)
     assert "tool_choice" not in body and "tools" not in body
     assert body["model"] == kit.model_id_for("risk_critic")
     assert request.prefix == "lmstudio"
@@ -99,13 +100,13 @@ async def test_the_audit_request_is_a_json_schema_request_for_risk_assessment(
 @pytest.mark.parametrize(
     "reply",
     [
-        "```json\n" + json.dumps(_verdict()) + "\n```",
+        "Here:\n```json\n" + json.dumps(_verdict()) + "\n```",
         "Verdict: " + json.dumps(_verdict()),
         json.dumps(_verdict("NOT_A_VERDICT")),
         json.dumps({}),
         "",
     ],
-    ids=["fenced", "prose", "unknown_status", "empty_object", "empty_text"],
+    ids=["prose_then_fence", "prose", "unknown_status", "empty_object", "empty_text"],
 )
 async def test_a_reply_that_is_not_a_strict_verdict_is_critic_output_invalid(
     stub, registry_factory, risk_workspace, reply
@@ -118,6 +119,12 @@ async def test_a_reply_that_is_not_a_strict_verdict_is_critic_output_invalid(
     assert stub.count == 1  # no retry, no other model
 
 
+async def test_a_verdict_in_one_whole_content_json_fence_is_accepted(stub, registry_factory, risk_workspace):
+    registry_factory()
+    stub.structured["RiskAssessment"] = "```json\n" + json.dumps(_verdict("BLOCKED")) + "\n```"
+    assert (await RiskAgent().review(_context(), "BUY 1 share of AAPL"))["status"] == "BLOCKED"
+
+
 async def test_a_reply_from_another_model_is_a_mismatch_and_the_verdict_is_not_used(
     stub, registry_factory, risk_workspace
 ):
@@ -128,6 +135,63 @@ async def test_a_reply_from_another_model_is_a_mismatch_and_the_verdict_is_not_u
         await RiskAgent().review(_context(), "BUY 1 share of AAPL")
     assert caught.value.code == "MODEL_MISMATCH"
     assert stub.count == 1
+
+
+@pytest.mark.parametrize(
+    "tokens,text", [(None, None), (0, None), (0, "")], ids=["no_field", "zero_tokens", "empty_text"]
+)
+async def test_a_verdict_from_a_critic_that_did_not_reason_is_critic_output_invalid(
+    stub, registry_factory, risk_workspace, tokens, text
+):
+    """D3: the no-think false approve. A valid APPROVED verdict with no reasoning evidence is refused."""
+    registry_factory()
+    stub.structured["RiskAssessment"] = _verdict("APPROVED")
+    stub.reasoning_tokens = tokens
+    stub.reasoning_content = text
+    with pytest.raises(ProviderError) as caught:
+        await RiskAgent().review(_context(), "BUY 1 share of AAPL")
+    assert caught.value.code == "CRITIC_OUTPUT_INVALID"
+    assert stub.count == 1
+
+
+@pytest.mark.parametrize(
+    "wire",
+    ["7", True, 1.0, -1, None],
+    ids=["string_7", "bool_true", "float_1_0", "negative", "null"],
+)
+async def test_a_coerced_wire_token_count_cannot_approve_a_critic_that_did_not_reason(
+    stub, registry_factory, risk_workspace, wire
+):
+    """The SDK turns "7" and true into positive ints; the raw wire value is what counts."""
+    registry_factory()
+    stub.structured["RiskAssessment"] = _verdict("APPROVED")
+    stub.reasoning_tokens_raw = wire
+    stub.reasoning_content = ""
+    with pytest.raises(ProviderError) as caught:
+        await RiskAgent().review(_context(), "BUY 1 share of AAPL")
+    assert caught.value.code == "CRITIC_OUTPUT_INVALID"
+    assert stub.count == 1
+
+
+async def test_a_critic_verdict_cut_off_at_the_token_limit_is_critic_output_invalid(
+    stub, registry_factory, risk_workspace
+):
+    registry_factory()
+    stub.structured["RiskAssessment"] = _verdict("APPROVED")
+    stub.finish_reason = "length"
+    with pytest.raises(ProviderError) as caught:
+        await RiskAgent().review(_context(), "BUY 1 share of AAPL")
+    assert caught.value.code == "CRITIC_OUTPUT_INVALID"
+    assert stub.count == 1
+
+
+async def test_a_critic_that_reports_reasoning_tokens_is_accepted(stub, registry_factory, risk_workspace):
+    registry_factory()
+    stub.structured["RiskAssessment"] = _verdict("BLOCKED")
+    stub.reasoning_tokens = 412
+    assert (await RiskAgent().review(_context(), "BUY 1 share of AAPL"))["status"] == "BLOCKED"
+    stub.reasoning_tokens_raw = 7
+    assert (await RiskAgent().review(_context(), "BUY 1 share of AAPL"))["status"] == "BLOCKED"
 
 
 # --- F2: limits and currency come from the workspace config ----------------------------------------

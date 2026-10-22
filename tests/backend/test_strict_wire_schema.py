@@ -30,7 +30,7 @@ from model_registry_testkit import (  # noqa: F401  (fixtures)
     registry_factory,
     stub,
 )
-from model_stub_server import strict_subset_violations
+from model_stub_server import embedded_schema, strict_subset_violations
 
 SCHEMAS = [RiskAssessment, ToolCallList, NewsDataQueryParams]
 ROLE_FOR = {RiskAssessment: "risk_critic", ToolCallList: "decision", NewsDataQueryParams: "research"}
@@ -285,9 +285,10 @@ async def test_the_strict_stub_accepts_what_run_structured_sends(stub, registry_
     result = await run_structured(ROLE_FOR[schema], MESSAGES, schema)
     assert isinstance(result, schema)
     [request] = stub.snapshot()
-    spec = request.json["response_format"]["json_schema"]
-    assert spec["strict"] is True
-    assert strict_subset_violations(spec["schema"]) == []
+    assert "response_format" not in request.json
+    sent = embedded_schema(request.json)
+    assert sent == wire_spec(schema).schema
+    assert strict_subset_violations(sent) == []
 
 
 @pytest.mark.parametrize("schema", SCHEMAS, ids=lambda s: s.__name__)
@@ -310,18 +311,19 @@ async def test_the_strict_stub_rejects_the_raw_schema_with_400(stub, registry_fa
 
 
 @pytest.mark.asyncio
-async def test_run_structured_fails_against_a_strict_server_if_it_sends_the_raw_schema(
+async def test_the_prompt_schema_is_not_the_raw_pydantic_schema_break_proof(
     stub, registry_factory, monkeypatch
 ):
-    """Break-proof for the call site: swap the builder for the raw schema and the strict server refuses."""
+    """Break-proof for the call site: swap the builder for the raw schema and the sent schema leaves the strict subset."""
     registry_factory()
     real = wire_spec(RiskAssessment)
     monkeypatch.setattr(
         provider_module, "wire_spec", lambda model: WireSpec(schema=model.model_json_schema(), _decode=real._decode)
     )
-    with pytest.raises(ProviderError) as caught:
-        await run_structured("risk_critic", MESSAGES, RiskAssessment)
-    assert caught.value.code == "PROVIDER_REQUEST_REJECTED"
+    await run_structured("risk_critic", MESSAGES, RiskAssessment)
+    [request] = stub.snapshot()
+    violations = strict_subset_violations(embedded_schema(request.json))
+    assert any("additionalProperties" in v for v in violations)
 
 
 @pytest.mark.asyncio
