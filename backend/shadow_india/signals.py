@@ -501,11 +501,13 @@ def evaluate_session(evidence: EvidenceStore, inputs: SignalInputs, *, decision_
     if not _is_session(inputs.calendar, decision_session):
         raise SignalsError("decision_session_not_a_session")
     as_of = previous_session(inputs.calendar, decision_session)
+    open_all_pause = next((p for p in state.open_pauses if p.scope == policy.SCOPE_ALL), None)
     try:
         hashes = inputs.current_hashes()
     except PilotDataError as error:  # not a seeded session store: nothing can be pinned, nothing is read
-        return _pause(evidence, "stale_data", error.code, session=decision_session, as_of=as_of, hashes={})
-    open_all_pause = next((p for p in state.open_pauses if p.scope == policy.SCOPE_ALL), None)
+        if open_all_pause is None:
+            return _pause(evidence, "stale_data", error.code, session=decision_session, as_of=as_of, hashes={})
+        hashes = {}  # already paused: a repeat call must not append another pause record
     if open_all_pause is not None:  # a pause from the P-06 or D-07 list stops all processing: no read, no record
         return SignalResult(status=STATUS_PAUSED, session=decision_session, as_of=as_of, hashes=hashes,
                             pause_event=open_all_pause.event, pause_reason="already_paused")

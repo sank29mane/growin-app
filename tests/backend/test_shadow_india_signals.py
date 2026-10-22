@@ -1288,3 +1288,21 @@ def test_real_the_unbounded_default_callers_are_unchanged(tmp_path):
         assert classify_smallcap(store, lb.TARGETS)[cc.STEADY_ISIN] == "small"  # default still reads the latest
         assert classify_smallcap(store, lb.TARGETS, as_of=D5)[cc.STEADY_ISIN] == "not_small"
         assert evaluate_universe(store, **kwargs).result_sha256 != default.result_sha256  # unbounded callers move, as before
+
+
+# repeat calls on an unseeded store (opus-r2 residual 1) and band scale (codex-r2) ----------------------------------------------------
+
+
+def test_repeat_calls_on_an_unseeded_store_record_one_pause_not_one_per_call(tmp_path, stubs, monkeypatch):
+    inputs = make_inputs(tmp_path, eligibility=sup.StaticEligibility(ANCHORS), run_start=S)
+    evidence = make_evidence(tmp_path, inputs)
+    monkeypatch.setattr(signals, "seed_rows", REAL_SEED_ROWS)
+    with PilotDataStore(tmp_path / "empty-store-2", workspace="india") as store:
+        unseeded = replace(inputs, store=store)
+        first = evaluate_session(evidence, unseeded, decision_session=S)
+        second = evaluate_session(evidence, unseeded, decision_session=S)
+        third = evaluate_session(reopen_evidence(evidence), unseeded, decision_session=S)
+    assert first.pause_reason == "not_a_session_store" and first.recorded == 1
+    assert second.status == third.status == signals.STATUS_PAUSED and second.pause_reason == "already_paused"
+    assert second.recorded == third.recorded == 0
+    assert len(kinds(evidence, "pause")) == 1 and kinds(evidence, "signal") == []
