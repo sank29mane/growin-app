@@ -120,7 +120,11 @@ _ABORT_EVENTS: Mapping[str, str] = {
 
 
 class DecideRefused(Exception):
-    """A refusal before any step ran. ``code`` is stable and carries no value. Nothing was written."""
+    """A refusal. ``code`` is stable and carries no value.
+
+    The window, run, session and relay refusals come before anything is read or written. A ``signals:`` refusal comes
+    after recovery and expiry, which may already have written their records (they never need the signal step).
+    """
 
     def __init__(self, code: str) -> None:
         super().__init__(code)

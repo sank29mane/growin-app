@@ -58,6 +58,7 @@ from shadow_india.runner import (
     DecideReport,
     FillOutcome,
     FillQuery,
+    LiveTablePins,
     NoPostSubmissionEvidence,
     OpenRunRefused,
     RunnerPorts,
@@ -81,6 +82,7 @@ from shadow_india.signals import (
 )
 from test_gateway_orders_routes import PRIMARY, VECTORS, MetadataFake, OrderStack
 from test_shadow_india_admission import _FrozenDatetime, run
+from test_strategy_india_support import StaticEligibility
 from test_strategy_india_support import limits as limits62
 from test_strategy_india_support import params as params62
 
@@ -1707,6 +1709,50 @@ def test_the_tick_cost_and_scenario_pins_are_recomputed_from_the_live_tables_at_
         sha("tick-2"), sha("cost-2"), sha("scenario-2"),
     )
     assert world.inputs.tick_sha256 == sha("tick-1")  # the run's own inputs were not edited in place
+
+
+@pytest.mark.parametrize(
+    "table,patched,pin,fake",
+    [
+        ("tick", "committed_tick_table", "tick_sha256", lambda kind: SimpleNamespace(versions=[SimpleNamespace(version_hash="f" * 64)])),
+        ("cost", "load_schedule_set", "cost_sha256", lambda: SimpleNamespace(versions=[SimpleNamespace(schedule_hash="e" * 64)])),
+        ("scenario", "load_fill_scenarios", "scenario_sha256", lambda: SimpleNamespace(scenarios_hash="d" * 64)),
+    ],
+)
+def test_live_table_pins_follow_the_committed_tables_and_a_changed_table_pauses_hash_mismatch(
+    tmp_path, monkeypatch, table, patched, pin, fake
+):
+    """``LiveTablePins`` on the real committed tables, then the real signal step against a manifest built from them."""
+
+    import test_shadow_india_signals as sig
+
+    held = sig.Stubs(rows=sig.history())
+    for name, replacement in (
+        ("bars_as_of", held.bars), ("require_reference_freshness", held.freshness), ("snapshot_for", held.snapshot),
+        ("surveillance_entries", held.entries), ("band_for_upcoming_session", held.band), ("seed_rows", held.seeds),
+        ("current_band_convention", held.band_convention),
+    ):
+        monkeypatch.setattr(signals_module, name, replacement)
+    live = LiveTablePins()
+    first = {"tick_sha256": live.tick_sha256(), "cost_sha256": live.cost_sha256(), "scenario_sha256": live.scenario_sha256()}
+    assert len(set(first.values())) == 3 and all(len(v) == 64 for v in first.values())
+    assert first == {"tick_sha256": live.tick_sha256(), "cost_sha256": live.cost_sha256(), "scenario_sha256": live.scenario_sha256()}
+    root = tmp_path / "run"
+    root.mkdir()
+    inputs = sig.make_inputs(root, run_start=sig.S, eligibility=StaticEligibility(sig.ANCHORS), **first)
+    evidence = sig.make_evidence(root, inputs)
+
+    def decide() -> SignalResult:
+        now = replace(inputs, tick_sha256=live.tick_sha256(), cost_sha256=live.cost_sha256(), scenario_sha256=live.scenario_sha256())
+        return signals_module.evaluate_session(evidence, now, decision_session=sig.S)
+
+    assert decide().status == STATUS_EVALUATED  # unchanged tables: the pins equal the manifest
+    monkeypatch.setattr(runner_module, patched, fake)
+    changed = {"tick_sha256": live.tick_sha256(), "cost_sha256": live.cost_sha256(), "scenario_sha256": live.scenario_sha256()}
+    assert [k for k in first if changed[k] != first[k]] == [pin]  # only that table's pin moved
+    paused = decide()
+    assert paused.status == "paused" and paused.pause_event == "hash_mismatch" and paused.pause_reason == f"hash_mismatch:{pin}"
+    assert [p.event for p in policy.run_state(evidence).open_pauses] == ["hash_mismatch"]
 
 
 def test_a_restart_cannot_shift_the_cadence_anchor(world):
