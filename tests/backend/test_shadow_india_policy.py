@@ -1,0 +1,367 @@
+"""Phase 64-03 Task 1: the pause and abort policy table (D-07, D-08, P-06, T-64-16).
+
+State comes only from evidence records on disk. The restart rows reopen the store, once in a real child process.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+from shadow_india import policy
+from shadow_india.evidence import EvidenceAborted, EvidenceStore
+from shadow_india.policy import (
+    ABORT,
+    PAUSE,
+    POLICY,
+    PolicyError,
+    RunAborted,
+    RunPaused,
+    raise_event,
+    resume,
+    rule_for,
+    run_state,
+    state_from_records,
+)
+
+BACKEND = str(Path(__file__).resolve().parents[2] / "backend")
+HASHES = {"strategy_sha256": "a" * 64}
+ISIN = "INE002A01018"
+OTHER_ISIN = "INE009A01021"
+ALL_STEPS = (policy.STEP_ADMIT, policy.STEP_MINT, policy.STEP_BOOK, policy.STEP_EXPIRE, policy.STEP_READ_ONLY)
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.now = datetime(2026, 10, 22, 4, 0, tzinfo=timezone.utc)
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
+def make_store(tmp_path: Path, clock: Clock | None = None) -> EvidenceStore:
+    return EvidenceStore.create(
+        tmp_path, run_id="run1", run_class="plumbing", session_id="s-1", hashes=HASHES, clock=clock or Clock()
+    )
+
+
+def reopen(tmp_path: Path) -> EvidenceStore:
+    return EvidenceStore.open(tmp_path, run_id="run1", session_id="s-1")
+
+
+def blocked_steps(store: EvidenceStore, *, isin: str | None = None) -> set[str]:
+    state = run_state(store)
+    return {step for step in ALL_STEPS if state.blocks(step, isin=isin)}
+
+
+# --- the table ---------------------------------------------------------------------------------------
+
+D07_ABORT = [
+    "broker_mutation_attempted", "bypass_detected", "secret_leaked", "audit_corrupt", "state_corrupt",
+    "unexplained_account_position", "evidence_corrupt", "authorize_attempted", "ledger_evidence_disagree",
+]
+P06_ABORT = [
+    "vm_audit_broken", "vm_state_unreadable", "vm_state_unwritable", "vm_config_invalid", "vm_clock_inconsistent",
+    "vm_order_code", "vm_unknown_code", "code_status_mismatch", "vm_challenge_or_success", "vm_423_no_audit_entry",
+    "vm_audit_duplicate_entries", "vm_audit_codes_unexpected", "vm_audit_chain_break",
+]
+D07_PAUSE_ISIN = ["missing_bar", "unresolved_corporate_action", "identity_ambiguity", "band_ambiguity"]
+D07_PAUSE_ALL = [
+    "stale_data", "freshness_check_failed", "session_expired", "quota_failure", "egress_failure", "contract_mismatch",
+    "hash_mismatch",
+]
+P06_PAUSE_ALL = [
+    "kill_label_unreadable", "untyped_response", "relay_unauthorized", "relay_no_session", "relay_session_expired",
+    "relay_egress_mismatch", "relay_budget_unavailable", "relay_budget_exhausted", "relay_contract_mismatch",
+    "relay_forbidden_client",
+]
+ENTRIES_PAUSE = ["divergence_breach", "drawdown_halt"]
+
+
+@pytest.mark.parametrize("event", D07_ABORT + P06_ABORT)
+def test_abort_events_are_aborts(event):
+    assert rule_for(event) == policy.Rule(ABORT, policy.SCOPE_ALL)
+
+
+@pytest.mark.parametrize("event", D07_PAUSE_ISIN)
+def test_instrument_scoped_pauses(event):
+    assert rule_for(event) == policy.Rule(PAUSE, policy.SCOPE_ISIN)
+
+
+@pytest.mark.parametrize("event", D07_PAUSE_ALL + P06_PAUSE_ALL)
+def test_pauses_that_stop_all_processing(event):
+    assert rule_for(event) == policy.Rule(PAUSE, policy.SCOPE_ALL)
+
+
+@pytest.mark.parametrize("event", ENTRIES_PAUSE)
+def test_pauses_that_stop_new_entries(event):
+    assert rule_for(event) == policy.Rule(PAUSE, policy.SCOPE_ENTRIES)
+
+
+def test_the_table_is_exactly_the_events_above_and_every_row_is_a_pause_or_an_abort():
+    listed = set(
+        D07_ABORT + P06_ABORT + D07_PAUSE_ISIN + D07_PAUSE_ALL + P06_PAUSE_ALL + ENTRIES_PAUSE
+    )
+    assert set(POLICY) == listed
+    assert {rule.action for rule in POLICY.values()} == {PAUSE, ABORT}
+
+
+def test_an_unclassified_event_raises_and_writes_nothing(tmp_path):
+    store = make_store(tmp_path)
+    for event in ("never_heard_of_it", "", "KILL_SWITCH"):
+        with pytest.raises(PolicyError) as caught:
+            rule_for(event)
+        assert caught.value.code == "unknown_event"
+        with pytest.raises(PolicyError):
+            raise_event(store, event, "reason")
+    assert store.records() == []
+
+
+# --- raising an event ----------------------------------------------------------------------------------
+
+
+def test_raise_event_records_the_scoped_pause_or_the_abort(tmp_path):
+    store = make_store(tmp_path)
+    paused = raise_event(store, "stale_data", "bars older than one session")
+    assert (paused["kind"], paused["event"], paused["scope"]) == ("pause", "stale_data", "all")
+    isin_pause = raise_event(store, "band_ambiguity", "two bands on file", isin=ISIN)
+    assert isin_pause["scope"] == f"isin:{ISIN}"
+    aborted = raise_event(store, "audit_corrupt", "chain break")
+    assert (aborted["kind"], aborted["event"]) == ("abort", "audit_corrupt") and "scope" not in aborted
+
+
+@pytest.mark.parametrize("isin", [None, "", "short", "ine002a01018"])
+def test_an_instrument_pause_needs_a_real_isin(tmp_path, isin):
+    store = make_store(tmp_path)
+    with pytest.raises(PolicyError) as caught:
+        raise_event(store, "missing_bar", "no bar", isin=isin)
+    assert caught.value.code == "isin_required" and store.records() == []
+
+
+# --- what each scope blocks ---------------------------------------------------------------------------
+
+
+def test_scopes_block_exactly_their_steps(tmp_path):
+    store = make_store(tmp_path)
+    assert blocked_steps(store) == set()
+    raise_event(store, "divergence_breach", "gap")
+    assert blocked_steps(store) == {"admit", "mint"}  # bookings and expiries keep running
+    raise_event(store, "missing_bar", "no bar", isin=ISIN)
+    assert blocked_steps(store, isin=ISIN) == {"admit", "mint"}
+    assert blocked_steps(store, isin=OTHER_ISIN) == {"admit", "mint"}  # still the entries pause
+    raise_event(store, "stale_data", "old bars")
+    assert blocked_steps(store) == {"admit", "mint", "book", "expire"}  # read-only checks still run
+
+
+def test_an_instrument_pause_does_not_block_another_instrument(tmp_path):
+    store = make_store(tmp_path)
+    raise_event(store, "missing_bar", "no bar", isin=ISIN)
+    assert blocked_steps(store, isin=ISIN) == {"admit", "mint"}
+    assert blocked_steps(store, isin=OTHER_ISIN) == set()
+    assert blocked_steps(store) == set()
+    with pytest.raises(RunPaused) as caught:
+        run_state(store).require(policy.STEP_ADMIT, isin=ISIN)
+    assert caught.value.code == "run_paused"
+    run_state(store).require(policy.STEP_ADMIT, isin=OTHER_ISIN)
+
+
+@pytest.mark.parametrize("event", D07_PAUSE_ALL + P06_PAUSE_ALL)
+def test_a_pause_that_stops_processing_blocks_booking_and_expiry_too(tmp_path, event):
+    store = make_store(tmp_path)
+    raise_event(store, event, "operator review needed")
+    state = run_state(store)
+    for step in (policy.STEP_ADMIT, policy.STEP_MINT, policy.STEP_BOOK, policy.STEP_EXPIRE):
+        with pytest.raises(RunPaused):
+            state.require(step)
+    state.require(policy.STEP_READ_ONLY)
+
+
+def test_an_unknown_step_is_refused(tmp_path):
+    with pytest.raises(PolicyError) as caught:
+        run_state(make_store(tmp_path)).blocks("send_order")
+    assert caught.value.code == "unknown_step"
+
+
+# --- an abort is terminal -------------------------------------------------------------------------------
+
+
+def test_an_abort_blocks_every_step_and_resume_refuses_it(tmp_path):
+    store = make_store(tmp_path)
+    raise_event(store, "audit_corrupt", "chain break")
+    state = run_state(store)
+    assert state.aborted and state.abort_events == ("audit_corrupt",)
+    for step in ALL_STEPS:
+        with pytest.raises(RunAborted) as caught:
+            state.require(step)
+        assert caught.value.code == "run_aborted"
+    before = store.records()
+    for reason in ("operator reviewed", "x"):
+        with pytest.raises(PolicyError) as refused:
+            resume(store, reason)
+        assert refused.value.code == "resume_refused_abort"
+    assert store.records() == before
+
+
+def test_an_abort_after_a_pause_cannot_be_cleared_by_clearing_the_pause_first(tmp_path):
+    store = make_store(tmp_path)
+    paused = raise_event(store, "stale_data", "old bars")
+    raise_event(store, "bypass_detected", "a guard was skipped")  # an abort lands while the pause is open
+    with pytest.raises(PolicyError) as caught:
+        resume(store, "reviewed", pause_seqs=[paused["seq"]])
+    assert caught.value.code == "resume_refused_abort"
+    assert run_state(store).aborted and blocked_steps(store) == set(ALL_STEPS)
+
+
+def test_a_pause_cleared_earlier_does_not_undo_a_later_abort(tmp_path):
+    store = make_store(tmp_path)
+    raise_event(store, "stale_data", "old bars")
+    resume(store, "bars refreshed and checked")
+    raise_event(store, "vm_audit_broken", "503 audit_broken")
+    assert run_state(store).aborted
+    with pytest.raises(PolicyError):
+        resume(store, "again")
+
+
+def test_the_store_itself_stops_a_run_after_an_abort(tmp_path):
+    store = make_store(tmp_path)
+    raise_event(store, "secret_leaked", "canary in a log")
+    with pytest.raises(EvidenceAborted):
+        store.append("intent", _intent())
+    with pytest.raises(EvidenceAborted):
+        store.append("pause", {"event": "stale_data", "scope": "all", "reason": "late"})
+    store.append("session_close", {"outcome": "aborted"})
+
+
+def _intent() -> dict:
+    return {
+        "intent_id": "a" * 64, "signal_id": "sig-1", "leg": "entry", "intent_sha256": "b" * 64, "symbol": "RELIANCE",
+        "side": "BUY", "quantity": "2", "limit_price": "100.00",
+    }
+
+
+# --- the recognised corruption codes are aborts even while a pause is open ----------------------------------
+
+
+@pytest.mark.parametrize(
+    "event", ["vm_audit_broken", "vm_state_unreadable", "vm_state_unwritable", "vm_config_invalid", "vm_clock_inconsistent"]
+)
+def test_a_corruption_code_aborts_even_while_a_pause_is_open(tmp_path, event):
+    store = make_store(tmp_path)
+    raise_event(store, "relay_session_expired", "session expired")
+    assert not run_state(store).aborted
+    raise_event(store, event, "typed answer while paused")
+    assert run_state(store).aborted and run_state(store).abort_events == (event,)
+
+
+# --- resume --------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("reason", ["", "   ", "\n", None, 5])
+def test_resume_needs_a_non_empty_reason_and_writes_nothing_without_one(tmp_path, reason):
+    store = make_store(tmp_path)
+    raise_event(store, "stale_data", "old bars")
+    before = store.records()
+    with pytest.raises(PolicyError) as caught:
+        resume(store, reason)  # type: ignore[arg-type]
+    assert caught.value.code == "reason_required"
+    assert store.records() == before and run_state(store).blocks(policy.STEP_ADMIT)
+
+
+def test_resume_clears_only_pauses_after_a_reason(tmp_path):
+    store = make_store(tmp_path)
+    first = raise_event(store, "stale_data", "old bars")
+    second = raise_event(store, "missing_bar", "no bar", isin=ISIN)
+    cleared = resume(store, "  checked the bars by hand  ")
+    assert cleared["cleared_pause_seqs"] == [first["seq"], second["seq"]] and cleared["reason"] == "checked the bars by hand"
+    state = run_state(store)
+    assert state.open_pauses == () and not state.aborted and blocked_steps(store) == set()
+
+
+def test_resume_can_clear_one_named_pause_and_refuses_unknown_or_closed_ones(tmp_path):
+    store = make_store(tmp_path)
+    first = raise_event(store, "stale_data", "old bars")
+    second = raise_event(store, "divergence_breach", "gap")
+    resume(store, "bars fixed", pause_seqs=[first["seq"]])
+    assert [p.event for p in run_state(store).open_pauses] == ["divergence_breach"]
+    for seqs in ([first["seq"]], [999], []):
+        with pytest.raises(PolicyError) as caught:
+            resume(store, "again", pause_seqs=seqs)
+        assert caught.value.code == "unknown_pause"
+    resume(store, "gap explained", pause_seqs=[second["seq"]])
+    with pytest.raises(PolicyError) as nothing:
+        resume(store, "once more")
+    assert nothing.value.code == "nothing_to_resume"
+
+
+# --- no timer or restart clears anything (T-64-16) ---------------------------------------------------------
+
+
+def test_time_and_new_marks_never_release_a_drawdown_halt(tmp_path):
+    clock = Clock()
+    store = make_store(tmp_path, clock)
+    raise_event(store, "drawdown_halt", "trailing drawdown past 8 percent")
+    for day in range(1, 11):
+        clock.now += timedelta(days=day)
+        store.append(
+            "mark",
+            {
+                "as_of_date": f"2026-11-{day:02d}", "equity": "50000", "peak": "50000", "drawdown": "0",
+                "cash": "50000", "held_capital": "0", "exposure": "0",
+            },
+        )  # equity fully recovered, days pass: still halted
+        assert blocked_steps(store) == {"admit", "mint"}
+    assert [p.event for p in run_state(store).open_pauses] == ["drawdown_halt"]
+
+
+def test_a_pause_and_an_abort_survive_a_reopen(tmp_path):
+    store = make_store(tmp_path)
+    raise_event(store, "stale_data", "old bars")
+    raise_event(store, "missing_bar", "no bar", isin=ISIN)
+    assert [p.event for p in run_state(reopen(tmp_path)).open_pauses] == ["stale_data", "missing_bar"]
+    raise_event(store, "audit_corrupt", "chain break")
+    fresh = reopen(tmp_path)
+    assert run_state(fresh).aborted
+    with pytest.raises(PolicyError):
+        resume(fresh, "operator reviewed")
+
+
+STATE_CHILD = r"""
+import json, sys
+from shadow_india.evidence import EvidenceStore
+from shadow_india.policy import run_state
+
+store = EvidenceStore.open(sys.argv[1], run_id="run1", session_id="s-9")
+state = run_state(store)
+print(json.dumps({"aborted": state.aborted, "pauses": [p.event for p in state.open_pauses]}))
+"""
+
+
+def test_a_restart_in_a_new_process_reads_the_same_state(tmp_path):
+    store = make_store(tmp_path)
+    raise_event(store, "drawdown_halt", "trailing drawdown past 8 percent")
+    done = subprocess.run(
+        [sys.executable, "-P", "-c", STATE_CHILD, str(tmp_path)],
+        env={**os.environ, "PYTHONPATH": BACKEND},
+        capture_output=True,
+        timeout=60,
+    )
+    assert done.returncode == 0, done.stderr.decode()
+    assert json.loads(done.stdout) == {"aborted": False, "pauses": ["drawdown_halt"]}
+
+
+def test_the_policy_is_a_function_of_the_records_alone():
+    records = [
+        {"kind": "pause", "seq": 1, "event": "stale_data", "scope": "all"},
+        {"kind": "pause", "seq": 2, "event": "divergence_breach", "scope": "entries"},
+        {"kind": "resume", "seq": 3, "cleared_pause_seqs": [1]},
+    ]
+    state = state_from_records(records)
+    assert [(p.seq, p.event) for p in state.open_pauses] == [(2, "divergence_breach")]
+    assert state_from_records(records) == state
+    assert state_from_records([]) == policy.RunState((), ())
