@@ -148,14 +148,20 @@ def _clock_of(label: object) -> tuple[int, int] | None:
     return (int(match.group(1)), int(match.group(2))) if match else None
 
 
-def summarise_bars(body: bytes, window: tuple[time, time]) -> dict[str, Any] | None:
-    """Facts about one minute-bar body, or None when it has no ``Success`` list."""
+def summarise_bars(body: bytes, window: tuple[time, time], day: date) -> dict[str, Any] | None:
+    """Facts about one minute-bar body, or None when it has no ``Success`` list.
+
+    ``off_day_rows`` counts readable rows whose label does not start with the session date ``day``:
+    the request window is a whole UTC day and the label timezone is unproven, so spill from a
+    neighbouring day is counted here instead of being inferred from the first and last labels.
+    """
     rows = _success(body)
     if not isinstance(rows, list):
         return None
     start, end = (window[0].hour, window[0].minute), (window[1].hour, window[1].minute)
     volume_all = volume_day = 0
-    zero = single = bad = 0
+    zero = single = bad = off_day = 0
+    day_prefix = day.isoformat()
     after = {"1514": 0, "1515": 0, "1529": 0, "1535": 0}
     high: Decimal | None = None
     low: Decimal | None = None
@@ -171,6 +177,8 @@ def summarise_bars(body: bytes, window: tuple[time, time]) -> dict[str, Any] | N
             bad += 1
             continue
         labels.append(label)
+        if not label.startswith(day_prefix):
+            off_day += 1
         count = int(volume)
         volume_all += count
         clock = _clock_of(label)
@@ -189,6 +197,7 @@ def summarise_bars(body: bytes, window: tuple[time, time]) -> dict[str, Any] | N
     return {
         "rows": len(rows),
         "bad_rows": bad,
+        "off_day_rows": off_day,
         "first_label": labels[0] if labels else None,
         "last_label": labels[-1] if labels else None,
         "volume_all": volume_all,
@@ -211,7 +220,7 @@ def _text(value: object) -> str:
 
 
 def _bars_line(step: str, slot: Slot, seq: int, payload: UpstreamPayload, window: tuple[time, time]) -> str:
-    facts = summarise_bars(payload.body, window)
+    facts = summarise_bars(payload.body, window, slot.day)
     head = f"answer {step} {slot.kind} {slot.symbol} seq {seq} empty {_flag(payload.empty)}"
     if facts is None:
         return f"{head} rows unknown sha256 verified"
@@ -227,7 +236,7 @@ def _bars_line(step: str, slot: Slot, seq: int, payload: UpstreamPayload, window
     return (
         f"{head} rows {facts['rows']} first_label {json.dumps(facts['first_label'])} "
         f"last_label {json.dumps(facts['last_label'])} capped {_flag(facts['capped'])} "
-        f"bad_rows {facts['bad_rows']} volume_sum_all {facts['volume_all']} "
+        f"bad_rows {facts['bad_rows']} off_day_rows {facts['off_day_rows']} volume_sum_all {facts['volume_all']} "
         f"volume_sum_day_window {facts['volume_day_window']} after_1514 {after['1514']} "
         f"after_1515 {after['1515']} after_1529 {after['1529']} after_1535 {after['1535']} "
         f"zero_volume_rows {facts['zero_volume']} single_price_rows {facts['single_price']} "
@@ -702,7 +711,7 @@ def compare(
             raise EvidenceError(f"pilot_store_{err.code}") from None
         for symbol in sorted(answers):
             meta, body = answers[symbol]
-            facts = summarise_bars(body, window)
+            facts = summarise_bars(body, window, day)
             fetched = datetime.fromisoformat(meta["provenance"]["fetched_at_utc"].replace("Z", "+00:00"))
             fetched_ist = fetched.astimezone(IST)
             say(

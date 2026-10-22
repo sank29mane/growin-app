@@ -515,7 +515,7 @@ def test_probe_printed_lines_carry_the_s6_facts(env: Env):
     for needle in (
         "rows 375", 'first_label "2026-10-21 09:15:00"', 'last_label "2026-10-21 15:29:00"',
         "empty false", "capped false", "sha256 verified", "volume_sum_all 3750",
-        "volume_sum_day_window 3750", "after_1514 15", "after_1515 14", "after_1529 0", "after_1535 0",
+        "off_day_rows 0", "volume_sum_day_window 3750", "after_1514 15", "after_1515 14", "after_1529 0", "after_1535 0",
         "zero_volume_rows 0", "single_price_rows 0", "max_high 101", "min_low 99",
     ):
         assert needle in line, needle
@@ -593,14 +593,38 @@ def test_summarise_bars_reads_labels_as_given_and_flags_oddities():
         {"datetime": "garbage", "volume": "x", "high": "1", "low": "1"},
         "not a row",
     ]
-    facts = probe.summarise_bars(body_of(rows), window)
-    assert facts["rows"] == 6 and facts["bad_rows"] == 2
+    facts = probe.summarise_bars(body_of(rows), window, date(2026, 10, 21))
+    assert facts["rows"] == 6 and facts["bad_rows"] == 2 and facts["off_day_rows"] == 0
     assert facts["volume_all"] == 15 and facts["volume_day_window"] == 7  # 09:15 and 15:35 are inside D
     assert facts["zero_volume"] == 1 and facts["single_price"] == 1
     assert facts["after"] == {"1514": 2, "1515": 2, "1529": 2, "1535": 1}
     assert (facts["max_high"], facts["min_low"]) == (13, 7)
-    assert probe.summarise_bars(b'{"Success": null}', window) is None
-    assert probe.summarise_bars(b"not json", window) is None
+    assert probe.summarise_bars(b'{"Success": null}', window, date(2026, 10, 21)) is None
+    assert probe.summarise_bars(b"not json", window, date(2026, 10, 21)) is None
+
+
+def test_summarise_bars_counts_rows_labelled_with_another_day():
+    window = (time(9, 15), time(15, 35))
+    rows = [
+        {"datetime": "2026-10-20 23:59:00", "volume": "1", "high": "10", "low": "9"},
+        {"datetime": "2026-10-21 09:15:00", "volume": "1", "high": "10", "low": "9"},
+        {"datetime": "2026-10-22 00:01:00", "volume": "1", "high": "10", "low": "9"},
+        {"datetime": "21-10-2026 09:16:00", "volume": "1", "high": "10", "low": "9"},
+        {"datetime": "garbage", "volume": "x", "high": "1", "low": "1"},  # unreadable: counted as bad, not off-day
+    ]
+    facts = probe.summarise_bars(body_of(rows), window, date(2026, 10, 21))
+    assert facts["off_day_rows"] == 3 and facts["bad_rows"] == 1
+    assert probe.summarise_bars(body_of(rows), window, date(2026, 10, 22))["off_day_rows"] == 3
+
+
+def test_probe_answer_line_prints_the_off_day_row_count(env: Env):
+    spill = minute_rows(5)
+    spill[0]["datetime"] = "2026-10-20 23:59:00"
+    spill[4]["datetime"] = "2026-10-22 00:01:00"
+    env.relay.answers[("intraday", "RELIND")] = [make_payload(body_of(spill))]
+    _, lines = env.step("S-3")
+    line = next(line for line in lines if line.startswith("answer S-3 intraday RELIND"))
+    assert "rows 5" in line and "off_day_rows 2" in line
 
 
 def test_the_day_window_is_the_committed_r15_window():
