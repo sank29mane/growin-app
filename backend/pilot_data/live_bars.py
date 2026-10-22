@@ -36,6 +36,7 @@ from .crosscheck import accepted_bars, run_crosscheck
 from .dataset import DatasetRow, DividendAmountUnknownEvent, read_dataset_rows, verify_dataset
 from .lineage import build_lineage, primary_bars_for_lineage
 from .models import CrossCheckTolerances, Lineage, RawDailyBar
+from .nse_calendar import PinnedCalendar
 from .session_store import load_seed_report
 from .sessions import FINAL_STATUSES, day_status
 from .store import PilotDataStore
@@ -67,7 +68,16 @@ def _require_session_store(store: PilotDataStore) -> None:
         raise PilotDataError("not_a_session_store", "the store has no session_store_seeds row; seed a session store first")
 
 
-def _check_dates(store: PilotDataStore, decision_session: date, as_of: date, window_start: date) -> None:
+def _calendar_verdict(calendar: PinnedCalendar | None, day: date) -> Literal["non_session", "session", "special", "unknown"]:
+    if calendar is None or not calendar.covers(day):
+        return "unknown"
+    if calendar.is_special(day):
+        return "special"
+    return "non_session" if calendar.is_weekend(day) or calendar.is_holiday(day) else "session"
+
+
+def _check_dates(store: PilotDataStore, decision_session: date, as_of: date, window_start: date,
+                 calendar: PinnedCalendar | None) -> None:
     if as_of >= decision_session:
         raise PilotDataError("as_of_not_before_decision", "as_of must be before the decision session")
     if window_start > as_of:
@@ -77,9 +87,16 @@ def _check_dates(store: PilotDataStore, decision_session: date, as_of: date, win
     day = as_of + timedelta(days=1)
     while day < decision_session:  # decision_session itself is never asked about
         status = day_status(store, day)
+        listed = _calendar_verdict(calendar, day)
         if status == "session":
             raise PilotDataError("stale_as_of", f"{day.isoformat()} is a session between as_of and the decision session")
-        if status not in FINAL_STATUSES:  # an unknown day could be a session: fail closed, as sessions_between does
+        if status in FINAL_STATUSES:
+            if listed in ("session", "special"):  # the store says no session, the pinned table says there may be one
+                raise PilotDataError("calendar_conflict", f"{day.isoformat()} is {status} in the store but the pinned "
+                                                          f"calendar lists it as a {listed} day")
+        elif status == "unknown" and listed == "non_session":
+            pass  # the store has no fetch evidence for the day and the pinned table covers it as a weekend or holiday
+        else:  # pending and inconsistent never pass; an unknown day could be a session: fail closed, as sessions_between does
             raise PilotDataError("calendar_unknown_dates",
                                  f"{day.isoformat()} between as_of and the decision session is {status}, not a known non-session")
         day += timedelta(days=1)
@@ -154,11 +171,15 @@ def _events_payload(events: dict[str, tuple[DividendAmountUnknownEvent, ...]]) -
 
 
 def bars_as_of(store: PilotDataStore, *, targets: TargetUniverseResult, decision_session: date, as_of: date,
-               window_start: date, tolerances: CrossCheckTolerances, workspace: Literal["india"]) -> LiveBarsResult:
+               window_start: date, tolerances: CrossCheckTolerances, workspace: Literal["india"],
+               calendar: PinnedCalendar | None = None) -> LiveBarsResult:
+    """`calendar` is the operator's pinned table: it lets a day between as_of and the decision session that the store
+    has no fetch evidence for (a weekend a Friday-bounded seed never logged) count as a non-session. It is never read
+    for the decision session itself and never overrides store evidence."""
     if workspace != store.workspace:
         raise PilotDataError("workspace_mismatch", "workspace differs from the store workspace")
     _require_session_store(store)
-    _check_dates(store, decision_session, as_of, window_start)
+    _check_dates(store, decision_session, as_of, window_start, calendar)
     report = run_crosscheck(store, targets=targets, window_start=window_start, window_end=as_of, as_of=as_of,
                             tolerances=tolerances, workspace=workspace,
                             lineage_override=lambda member, built: _as_of_lineage(store, built, as_of))

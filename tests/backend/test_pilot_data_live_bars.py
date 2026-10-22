@@ -90,7 +90,8 @@ def build_world(root: Path, shocks=frozenset(), *, extra=None) -> None:
     days = [*cc.SESSIONS, *((S, S1) if future else ())]
     with PilotDataStore(root, workspace="india") as st:
         put_bhavcopy(st, days, canbk, steady)
-        cc.mark_calendar(st, cc.START, cc.END, set(cc.SESSIONS))
+        # a Friday-bounded seed copies fetch logs only to its window end: Sat and Sun were never attempted
+        cc.mark_calendar(st, cc.START, D5 if "friday_bound" in shocks else cc.END, set(cc.SESSIONS))
         if future:
             cc.mark_calendar(st, S, S1, {S, S1})
         for code, prices in (("CANBAN", canbk), ("STEADY", steady)):
@@ -138,10 +139,10 @@ def build_world(root: Path, shocks=frozenset(), *, extra=None) -> None:
         mark_session_store(st)
 
 
-def compose(root: Path, *, as_of=D5, decision=S, window_start=cc.START, targets=TARGETS, writable=True):
+def compose(root: Path, *, as_of=D5, decision=S, window_start=cc.START, targets=TARGETS, writable=True, calendar=None):
     with PilotDataStore(root, workspace="india", read_only=not writable) as st:
         return bars_as_of(st, targets=targets, decision_session=decision, as_of=as_of, window_start=window_start,
-                          tolerances=TOLERANCES, workspace="india")
+                          tolerances=TOLERANCES, workspace="india", calendar=calendar)
 
 
 def canon(result: LiveBarsResult):
@@ -505,24 +506,24 @@ def test_refusals_name_their_reason_and_never_touch_the_research_store(frozen, t
     assert space.value.code == "workspace_mismatch"
 
 
+def mark_monday_as(st, mark):
+    if mark == "pending":  # a 404 on the same IST day proves nothing: NSE publishes in the evening
+        for kind in ("pr", "udiff", "cm_legacy"):
+            _log_attempt(st, d=S, kind=kind, outcome="no_file", http_status=404, error_code=None,
+                         source_sha256=None, url="u", attempted_at=datetime(S.year, S.month, S.day, 8, 0, tzinfo=timezone.utc))
+    if mark == "inconsistent":  # a PR file was ingested, yet both primary files are absent
+        _log_attempt(st, d=S, kind="pr", outcome="ingested", http_status=200, error_code=None,
+                     source_sha256=None, url="u", attempted_at=cc.LATER)
+        for kind in ("udiff", "cm_legacy"):
+            _log_attempt(st, d=S, kind=kind, outcome="no_file", http_status=404, error_code=None,
+                         source_sha256=None, url="u", attempted_at=cc.LATER)
+
+
 @pytest.mark.parametrize("mark", ["unknown", "pending", "inconsistent"])
 def test_an_intervening_day_that_is_not_a_known_non_session_refuses_instead_of_passing_as_fresh(tmp_path, mark):
     """Codex r1: decision Tue S1 with Mon S not yet known must not accept Fri D5 as_of."""
     root = tmp_path / mark
-
-    def mark_monday(st):
-        if mark == "pending":  # a 404 on the same IST day proves nothing: NSE publishes in the evening
-            for kind in ("pr", "udiff", "cm_legacy"):
-                _log_attempt(st, d=S, kind=kind, outcome="no_file", http_status=404, error_code=None,
-                             source_sha256=None, url="u", attempted_at=datetime(S.year, S.month, S.day, 8, 0, tzinfo=timezone.utc))
-        if mark == "inconsistent":  # a PR file was ingested, yet both primary files are absent
-            _log_attempt(st, d=S, kind="pr", outcome="ingested", http_status=200, error_code=None,
-                         source_sha256=None, url="u", attempted_at=cc.LATER)
-            for kind in ("udiff", "cm_legacy"):
-                _log_attempt(st, d=S, kind=kind, outcome="no_file", http_status=404, error_code=None,
-                             source_sha256=None, url="u", attempted_at=cc.LATER)
-
-    build_world(root, frozenset({"no_future"}), extra=mark_monday)
+    build_world(root, frozenset({"no_future"}), extra=lambda st: mark_monday_as(st, mark))
     with PilotDataStore(root, workspace="india", read_only=True) as st:  # the precondition: S has the intended status
         assert sessions.day_status(st, S) == mark
     with pytest.raises(PilotDataError) as caught:
@@ -530,6 +531,111 @@ def test_an_intervening_day_that_is_not_a_known_non_session_refuses_instead_of_p
     assert caught.value.code == "calendar_unknown_dates" and S.isoformat() in str(caught.value)
     with PilotDataStore(root, workspace="india", read_only=True) as st:
         assert not st.table_exists("crosscheck_runs")  # refused before any cross-check ran
+
+
+# --------------------------------------------------------------------------- 6b: the pinned calendar fills unknown days
+SAT, SUN = D5 + timedelta(days=1), D5 + timedelta(days=2)
+FRIDAY_BOUND = frozenset({"no_future", "friday_bound"})
+
+
+def friday_world(root: Path, *, extra=None) -> None:
+    build_world(root, FRIDAY_BOUND, extra=extra)
+    with PilotDataStore(root, workspace="india", read_only=True) as st:  # the precondition: the weekend is unlogged
+        assert [sessions.day_status(st, day) for day in (SAT, SUN, S)] == ["unknown"] * 3
+
+
+def refused(root, code, mentions=None, **kwargs):
+    with pytest.raises(PilotDataError) as caught:
+        compose(root, **kwargs)
+    assert caught.value.code == code, (caught.value.code, str(caught.value))
+    if mentions is not None:
+        assert mentions.isoformat() in str(caught.value)
+
+
+def test_a_friday_bounded_seed_refuses_the_monday_decision_without_a_calendar_and_passes_with_a_covering_one(tmp_path):
+    """Codex r2: the seed copies fetch logs only to window_end, so Sat and Sun are unknown to the store."""
+    root = tmp_path / "friday"
+    friday_world(root)
+    refused(root, "calendar_unknown_dates", SAT)  # no calendar: fail closed, as before
+    calendar = nc.pinned(tmp_path)
+    passed = compose(root, calendar=calendar)
+    reference = tmp_path / "reference"
+    build_world(reference, frozenset({"no_future"}))  # the weekend logged as a 404 the day after
+    assert canon(passed) == canon(compose(reference)) and len(passed.rows) == 8
+
+
+def test_the_calendar_gives_nothing_outside_its_coverage_for_a_special_session_or_for_an_unresolved_weekday(tmp_path):
+    root = tmp_path / "friday"
+    friday_world(root)
+    short = nc.pinned(tmp_path, coverage=(date(2025, 3, 1), SAT))  # Sunday is outside
+    refused(root, "calendar_unknown_dates", SUN, calendar=short)
+    special = nc.pinned(tmp_path, special=(SAT,))
+    refused(root, "calendar_unknown_dates", SAT, calendar=special)
+    # Tuesday decision: Monday S is a plain weekday the table does not list as a holiday and the store has not logged
+    refused(root, "calendar_unknown_dates", S, decision=S1, calendar=nc.pinned(tmp_path))
+    holiday = nc.pinned(tmp_path, holidays=(S,))  # listed as a holiday, so Tuesday is the next session and as_of is fresh
+    assert len(compose(root, decision=S1, calendar=holiday).rows) == 8
+
+
+@pytest.mark.parametrize("mark", ["pending", "inconsistent"])
+def test_a_pending_or_inconsistent_day_is_not_rescued_by_a_calendar_that_lists_it_as_a_holiday(tmp_path, mark):
+    root = tmp_path / mark
+    build_world(root, FRIDAY_BOUND, extra=lambda st: mark_monday_as(st, mark))
+    refused(root, "calendar_unknown_dates", S, decision=S1, calendar=nc.pinned(tmp_path, holidays=(S,)))
+
+
+def test_a_contradiction_between_the_store_and_the_calendar_refuses(tmp_path):
+    def monday_holiday_in_store(st):
+        cc.mark_calendar(st, S, S, set())  # all three files 404 after S: a final holiday
+
+    def monday_session_in_store(st):
+        cc.mark_calendar(st, S, S, {S})
+
+    holiday_root, session_root = tmp_path / "holiday", tmp_path / "session"
+    build_world(holiday_root, FRIDAY_BOUND, extra=monday_holiday_in_store)
+    build_world(session_root, FRIDAY_BOUND, extra=monday_session_in_store)
+    with PilotDataStore(holiday_root, workspace="india", read_only=True) as st:
+        assert sessions.day_status(st, S) == "holiday"
+    # the store says holiday, the table says an ordinary weekday
+    refused(holiday_root, "calendar_conflict", S, decision=S1, calendar=nc.pinned(tmp_path))
+    # ... and the table says holiday too: nothing contradicts, so the day is a known non-session
+    assert len(compose(holiday_root, decision=S1, calendar=nc.pinned(tmp_path, holidays=(S,))).rows) == 8
+    # the store says a session, the table says holiday: stale, whatever the table says
+    refused(session_root, "stale_as_of", S, decision=S1, calendar=nc.pinned(tmp_path, holidays=(S,)))
+    # the store says holiday and the table lists the day as a special session
+    refused(holiday_root, "calendar_conflict", S, decision=S1, calendar=nc.pinned(tmp_path, special=(S,)))
+
+
+@pytest.fixture(scope="module")
+def friday_seed(frozen, tmp_path_factory):
+    """A real seeded session store through Friday only, with no weekend attempt marked (the `frozen` one marks it)."""
+    session_root = tmp_path_factory.mktemp("friday_seed") / "session"
+    seed_session_store(session_root, frozen["root"], dataset_dir=frozen["dataset"], window_start=D1, window_end=D5,
+                       workspace="india", band_parity_offset_days=2)
+    return session_root
+
+
+def test_a_real_friday_seed_needs_the_calendar_or_decision_session_one_day_on_and_both_give_the_frozen_rows(
+        frozen, friday_seed, tmp_path):
+    manifest = frozen["manifest"]
+    outcomes = {}
+    for name, decision, calendar in (("calendar", S, nc.pinned(tmp_path)), ("next_day", D5 + timedelta(days=1), None)):
+        root = tmp_path / name
+        shutil.copytree(friday_seed, root)
+        with PilotDataStore(root, workspace="india") as st:
+            outcomes[name] = bars_as_of(st, targets=frozen["targets"], decision_session=decision, as_of=manifest.window_end,
+                                        window_start=manifest.window_start, tolerances=TOLERANCES, workspace="india",
+                                        calendar=calendar)
+    root = tmp_path / "bare"
+    shutil.copytree(friday_seed, root)
+    with PilotDataStore(root, workspace="india") as st, pytest.raises(PilotDataError) as bare:
+        bars_as_of(st, targets=frozen["targets"], decision_session=S, as_of=manifest.window_end,
+                   window_start=manifest.window_start, tolerances=TOLERANCES, workspace="india")
+    assert bare.value.code == "calendar_unknown_dates"
+    assert canon(outcomes["calendar"]) == canon(outcomes["next_day"])  # the decision date is not in the composition
+    frozen_rows = read_dataset_rows(frozen["dataset"])
+    assert [row.model_dump(exclude={"crosscheck_run_id"}) for row in outcomes["calendar"].rows] == [
+        row.model_dump(exclude={"crosscheck_run_id"}) for row in frozen_rows]
 
 
 # --------------------------------------------------------------------------- 7: strategy fit
