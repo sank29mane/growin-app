@@ -26,6 +26,7 @@ from pilot_data.session_store import SEEDS_DDL, seed_session_store
 from pilot_data.store import PilotDataStore
 from pilot_data.surveillance import ingest_surveillance
 from strategy_india.data import DatasetView, bar_from_row, events_from_manifest
+from strategy_india.errors import HoldoutViolation
 from strategy_india.holdout import HoldoutRange
 
 import pilot_data_testkit as kit
@@ -485,8 +486,12 @@ def test_every_row_fits_the_strategy_and_a_holdout_view_builds(tmp_path):
     build_world(root)
     result = compose(root)
     assert all(bar_from_row(row).session == row.trade_date for row in result.rows)
-    view = DatasetView.from_rows(result.rows, holdout=HoldoutRange(D5, D5))
-    assert view.visible_end < D5
+    view = DatasetView.from_rows(result.rows, holdout=HoldoutRange(S, S))  # the decision session is the sealed one
+    assert view.visible_end == D5
+    with pytest.raises(HoldoutViolation):
+        view.guard(S)
+    view.guard(D5)  # every row the pilot composes is development data
+    assert all(row.trade_date < S for row in result.rows)  # none falls inside the sealed holdout
     assert events_from_manifest(result) is not None
     assert [c.code for c in result.caveats][:2] == ["SURVIVORSHIP_BIAS", "HINDSIGHT_BIAS"]
 
