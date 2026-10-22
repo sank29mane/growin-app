@@ -12,6 +12,7 @@ import ast
 import json
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -2795,7 +2796,7 @@ def test_grok_r4_the_floor_still_answers_past_a_shrunk_budget_with_no_search(tmp
         value = carried_after(store, D3)
         assert 0 < value
         if known_count:
-            assert value <= Decimal("14400")
+            assert value < Decimal("14400")  # the floor reads 9,599.99999985 here: strictly below the exact value
         assert "carry_unreconciled" in [p.event for p in policy.run_state(store).open_pauses]
         assert after.peak == Decimal("55000")
     finally:
@@ -2820,3 +2821,126 @@ def test_opus_r4_the_floor_is_the_cheapest_held_shares_not_held_times_the_cheape
     assert exact == Decimal("1300.5")
     assert Decimal("1300.5") - Decimal("0.000001") <= floor <= Decimal("1300.5")
     assert floor > 10 * Decimal(60)
+
+
+# --- _LotBook pinned against a per-share scan (Opus r5 residual on #611) --------------------------------------------------
+
+
+def scan_replay(
+    base_shares: int, base_value: int, rows: list[tuple[str, int, str, str]], *, dearest_first: bool,
+    adjust: tuple[int, int] | None,
+) -> tuple[Fraction, Fraction]:
+    """The reference: exact Fractions and a full scan of every lot for every sale step, no pointer and no heap. A sale
+    takes shares from the oldest live lot (the carried lot, then the bought lots in booking order) or, dearest first, from
+    the live lot with the highest value per share (ties to the oldest). A lot keeps its value per share when it is sold
+    from. A gain spreads the same value over more shares in every lot; a loss removes the dearest shares first."""
+
+    lots = [[Fraction(base_shares), Fraction(base_value)]]
+
+    def sell(quantity: Fraction, dearest: bool) -> None:
+        left = quantity
+        while left > 0:
+            live = [i for i, lot in enumerate(lots) if lot[0] > 0]
+            if not live:
+                return  # a sale past every lot is dropped
+            pick = max(live, key=lambda i: (lots[i][1] / lots[i][0], -i)) if dearest else live[0]
+            shares, value = lots[pick]
+            take = min(left, shares)
+            lots[pick] = [shares - take, value * (shares - take) / shares]
+            left -= take
+
+    for index in range(len(rows) + 1):
+        if adjust is not None and adjust[0] == index:
+            change = Fraction(adjust[1])
+            total = sum(lot[0] for lot in lots)
+            if change > 0 and total > 0:
+                for lot in lots:
+                    lot[0] = lot[0] * (total + change) / total
+            elif change < 0:
+                sell(-change, True)
+        if index == len(rows):
+            break
+        side, quantity, price, charges = rows[index]
+        if side == "BUY":
+            lots.append([Fraction(quantity), Fraction(quantity) * Fraction(price) + Fraction(charges)])
+        else:
+            sell(Fraction(quantity), dearest_first)
+    return sum(lot[0] for lot in lots), sum(lot[1] for lot in lots)
+
+
+def lot_bookings(rows: list[tuple[str, int, str, str]]) -> list[Any]:
+    return [
+        SimpleNamespace(
+            booking_id=f"b{i}", proposal_id=f"p{i}", side=side, ticker="NSE:CASH:AAA", delta_quantity=Decimal(q),
+            price=Decimal(price), charges=Decimal(charges),
+        )
+        for i, (side, q, price, charges) in enumerate(rows)
+    ]
+
+
+def assert_replay_matches_scan(base_shares, base_value, rows, dearest_first, adjust):
+    base = portfolio_module._Carry(Decimal(base_shares), Decimal(base_value), Decimal(base_value), 0)
+    got_shares, got_value = ShadowPortfolio._replay(
+        base, lot_bookings(rows), dearest_first=dearest_first,
+        adjust=None if adjust is None else (adjust[0], Decimal(adjust[1])),
+    )
+    want_shares, want_value = scan_replay(base_shares, base_value, rows, dearest_first=dearest_first, adjust=adjust)
+    context = (base_shares, base_value, rows, dearest_first, adjust)
+    assert abs(Fraction(got_shares) - want_shares) <= Fraction(1, 10**9), context
+    assert abs(Fraction(got_value) - want_value) <= Fraction(1, 10**9) * max(1, want_value), context
+    return want_shares, want_value
+
+
+def test_the_lot_book_replay_matches_a_per_share_scan_over_seeded_ledgers():
+    """Fixed seed, 1,200 ledgers x both sale orders x a gain, a loss and no adjustment at a random position. The lots are
+    partial (sales cut across them), charges vary, and sales run past what is held. A replay that drops the heap rebuild
+    after a gain, takes in sale order where a loss is dearest first, or starts its pointer past the carried lot, reads a
+    different value on some of these."""
+    import random
+
+    rng = random.Random(6411)
+    gain_then_sale = loss_then_sale = orders_differ = 0
+    for _ in range(1200):
+        rows = [
+            (rng.choice(["BUY", "SELL"]), rng.randint(1, 15), str(rng.randint(50, 250)), rng.choice(["0", "0.5", "7.5"]))
+            for _ in range(rng.randint(1, 6))
+        ]
+        base_shares, base_value = rng.randint(1, 15), rng.randint(100, 4000)
+        position = rng.randint(0, len(rows))
+        adjusts: list[tuple[int, int] | None] = [None, (position, rng.randint(1, 25)), (position, -rng.randint(1, 25))]
+        for adjust in adjusts:
+            outcomes = [assert_replay_matches_scan(base_shares, base_value, rows, d, adjust) for d in (False, True)]
+            orders_differ += outcomes[0] != outcomes[1]
+            if adjust is not None and any(side == "SELL" for side, *_ in rows[adjust[0]:]):
+                gain_then_sale += adjust[1] > 0
+                loss_then_sale += adjust[1] < 0
+    assert orders_differ > 300 and gain_then_sale > 300 and loss_then_sale > 300  # the draws reach what they pin
+
+
+@pytest.mark.parametrize("dearest_first", [False, True], ids=["oldest_first", "dearest_first"])
+def test_the_lot_book_replay_matches_the_scan_on_hand_picked_shapes(dearest_first):
+    """A sale cut across a partly sold lot, a charge in a lot's cost, a sale past every lot, a gain then a dearest sale,
+    a loss at the head and at the tail."""
+    shapes: list[tuple[int, int, list[tuple[str, int, str, str]], tuple[int, int] | None]] = [
+        (7, 2501, [("BUY", 3, "134", "0"), ("SELL", 10, "228", "0")], (0, 34)),
+        (10, 1000, [("BUY", 5, "200", "7.5"), ("SELL", 12, "100", "0"), ("SELL", 4, "100", "0")], None),
+        (10, 1000, [("BUY", 5, "200", "0.5"), ("SELL", 40, "100", "0")], None),
+        (4, 400, [("BUY", 6, "150", "0.5"), ("BUY", 2, "60", "0"), ("SELL", 7, "1", "0")], (1, 8)),
+        (4, 400, [("BUY", 6, "150", "0.5"), ("SELL", 3, "1", "0")], (2, -5)),
+        (4, 400, [("BUY", 6, "150", "0.5"), ("SELL", 3, "1", "0")], (0, -3)),
+    ]
+    for base_shares, base_value, rows, adjust in shapes:
+        assert_replay_matches_scan(base_shares, base_value, rows, dearest_first, adjust)
+
+
+def test_a_gain_then_a_sale_carries_the_lowest_placement_not_a_stale_heap_reading(tmp_path):
+    """7 carried at 2,501, then a buy of 3 at 134 and a sale of 10, held 34. The ledger stock is 0, so the 34 shares are
+    an unexplained gain, searched at every position and in both sale orders. The lowest reading is 2,074. A replay that
+    keeps the heap keys from before the gain picks the wrong lot to sell from and lifts it to 2,090.99."""
+    world = Fake(tmp_path)
+    holding = Holding(Instrument(A, "AAA", "AAA"), 34, Decimal(2501))
+    base = portfolio_module._Carry(Decimal(7), Decimal(2501), Decimal(2501), 0)
+    rows = [("BUY", 3, "134", "0"), ("SELL", 10, "228", "0")]
+    value, reconciled = world.portfolio._carried_value(holding, base, lot_bookings(rows))
+    assert not reconciled
+    assert value == Decimal("2074")
