@@ -57,10 +57,12 @@ quantity the ledger reconciled at the same cost, so it cannot lift the peak. No 
 position gets a cost equal to the carried value), it moves nothing in the drawdown, a buy of it is blocked, and any
 exit owed on it (a halve or the terminal flatten) stays in the latch but is held out of ``exit_proposals`` (``held_out``)
 so it is not sold at the post-adjustment quote. Only ``release_corporate_action`` clears the pause (``policy.resume``
-refuses it). A sell while carried takes the sold shares' value (and a loss on them) out of the carry, and a buy that
-books beside it adds its booked cost: sells and buys are reconciled separately from the bookings since the last
-committed valuation (a ``booking_baseline`` latch line holds the count, written before the latch moves), not from the
-net quantity. The release refuses ``corporate_action_not_booked`` for a name that is still
+refuses it). The bookings since the last committed valuation (a ``booking_baseline`` latch line holds the count, written before
+the latch moves) are replayed in ledger order: a sell takes only the shares held at that moment, the carried lot first
+and then the bought lots in booking order (oldest first), and a buy opens a
+lot at its booked cost. Where the count is missing or the replay does not land on the held quantity, the value is the
+lowest plausible reading and the ISIN gets a ``carry_unreconciled`` pause that only an operator ``resume`` clears: no
+fallback can lift the peak. The release refuses ``corporate_action_not_booked`` for a name that is still
 held unless the account exposes an explicit adjustment record (``corporate_action_adjustments``: ticker, kind, ex_date)
 that matches a committed ex-date mark of the name. Nothing is inferred from quantity or cost: equal cost with another
 quantity is also what a buy and a sell give. It also refuses ``exit_owed_in_pre_adjustment_units`` while a halve is open
@@ -107,6 +109,7 @@ EVALUATION_INPUTS = "evaluation_inputs"
 LATCH_BOOKING_BASELINE = "booking_baseline"  # how many bookings of a name the ledger held at an evaluation
 LATCH_SELL_BASELINE = "sell_baseline"  # the sell booking boundary, written before the evaluation
 AMBIGUOUS_EXIT_FILL = policy.AMBIGUOUS_EXIT_FILL
+CARRY_UNRECONCILED = policy.CARRY_UNRECONCILED
 TICKER_PREFIX = "NSE:CASH:"
 
 _ISIN = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]\Z")
@@ -426,37 +429,114 @@ class ShadowPortfolio:
             )
         return None
 
-    def _carried_value(self, holding: Holding, base: _Carry, bookings: Sequence[Any]) -> Decimal:
-        """The carried value of ``holding`` given the last committed valuation ``base``.
+    @staticmethod
+    def _take(lots: list[list[Decimal]], quantity: Decimal, *, dearest_first: bool) -> None:
+        """Remove up to ``quantity`` shares from ``lots`` ([shares, value] pairs), each lot losing value pro rata. The
+        oldest lot goes first (the carried lot, then the bought lots in booking order), or with ``dearest_first`` the
+        lot with the highest value per share, which leaves the lowest value behind. A quantity past every lot
+        drains them and is dropped; the caller sees it as a share count that no longer matches."""
 
-        Sells and buys booked since ``base`` are reconciled separately, from the bookings and not from the net
-        quantity: a sell takes its shares out of the carried lot at the carried value per share, and a buy adds the
-        cost the ledger booked (price x quantity plus charges). Reading only the net quantity would value a buy that
-        books beside a sell at the old carried price per share and drop its cost. A sell past the carried lot takes
-        the remainder from the bought shares at their cost. When there are no bookings since, the value moves only by
-        the ledger cost (a quantity reconciled at the same cost moves nothing). A line with no booking count, or
-        bookings that do not add up to the holding, falls back to the net-quantity rule."""
+        left = quantity
+        while left > 0:
+            live = [lot for lot in lots if lot[0] > 0]
+            if not live:
+                return
+            lot = max(live, key=lambda x: x[1] / x[0]) if dearest_first else live[0]
+            take = min(left, lot[0])
+            lot[1] = lot[1] * (lot[0] - take) / lot[0]
+            lot[0] -= take
+            left -= take
+
+    @classmethod
+    def _replay(
+        cls,
+        base: _Carry,
+        since: Sequence[Any],
+        *,
+        dearest_first: bool = False,
+        adjust: tuple[int, Decimal] | None = None,
+    ) -> tuple[Decimal, Decimal]:
+        """(shares, value) after the bookings in ``since``, replayed in ledger order from the committed ``base``: a
+        buy opens a lot at its booked cost (price x quantity plus charges), a sell takes only the shares held at that
+        moment. ``adjust`` is an unbooked share change (``u`` at position ``i``, before booking ``i``): a gain scales
+        every lot's shares at the same value (a bonus or split), a loss removes shares."""
+
+        lots: list[list[Decimal]] = [[base.quantity, base.value]]
+        for index in range(len(since) + 1):
+            if adjust is not None and adjust[0] == index:
+                change = adjust[1]
+                total = sum((lot[0] for lot in lots), Decimal(0))
+                if change > 0 and total > 0:
+                    for lot in lots:
+                        lot[0] = lot[0] * (total + change) / total
+                elif change < 0:
+                    cls._take(lots, -change, dearest_first=True)
+            if index == len(since):
+                break
+            booking = since[index]
+            if str(booking.side).upper() == "BUY":
+                lots.append([booking.delta_quantity, booking.delta_quantity * booking.price + booking.charges])
+            elif str(booking.side).upper() == "SELL":
+                cls._take(lots, booking.delta_quantity, dearest_first=dearest_first)
+        return sum((lot[0] for lot in lots), Decimal(0)), sum((lot[1] for lot in lots), Decimal(0))
+
+    def _adjustment_record(self, isin: str) -> bool:
+        """True when the account exposes an explicit adjustment record for the open corporate-action pause of ``isin``."""
+
+        seqs = [
+            p.seq
+            for p in policy.run_state(self._store).open_pauses
+            if p.event == CORPORATE_ACTION_PAUSE and p.scope == f"{policy.SCOPE_ISIN}:{isin}"
+        ]
+        return bool(seqs) and self._adjustment_booked(isin, min(seqs))
+
+    def _carried_value(self, holding: Holding, base: _Carry, bookings: Sequence[Any]) -> tuple[Decimal, bool]:
+        """(carried value, reconciled) of ``holding`` given the last committed valuation ``base``.
+
+        The bookings since ``base`` are replayed in ledger order (``_replay``): a sell takes only the shares held at
+        that moment, the carried lot first and then the bought lots in booking order, and a buy opens a lot at the
+        cost the ledger booked. That is the reconciled value, and it is used when the booking count is known and the
+        replay lands on the held quantity (or the shortfall is a gain the account's own adjustment record explains,
+        a bonus or split, valued as the lowest placement of it).
+
+        Anything else is unreconciled and fails closed: a mark with no booking count, or bookings that do not add up
+        to the held quantity. The value is then the LOWEST of every plausible reading (each boundary the count could
+        have been, the oldest-first and the dearest-first sale order, the unexplained quantity as an adjustment at
+        every position among the bookings, and the net-quantity rule), so the fallback cannot lift the peak, and the
+        caller raises the ISIN-scoped ``carry_unreconciled`` pause for the operator."""
 
         held = Decimal(holding.quantity)
-        if base.bookings is not None and base.quantity > 0:
+        if base.quantity <= 0:
+            return holding.cost, False
+        tolerance = Decimal("1e-9")
+
+        def readings(since: Sequence[Any]) -> list[Decimal]:
+            values: list[Decimal] = []
+            for dearest in (False, True):
+                shares, value = self._replay(base, since, dearest_first=dearest)
+                if abs(shares - held) <= tolerance:
+                    values.append(value)
+                    continue
+                gap = held - shares
+                for position in range(len(since) + 1):
+                    shares, value = self._replay(base, since, dearest_first=dearest, adjust=(position, gap))
+                    if abs(shares - held) <= tolerance:
+                        values.append(value)
+            return values
+
+        if base.bookings is not None:
             since = bookings[base.bookings :]
-            if not since:
-                return base.value + (holding.cost - base.cost)
-            sells = [b for b in since if str(b.side).upper() == "SELL"]
-            buys = [b for b in since if str(b.side).upper() == "BUY"]
-            sold = sum((b.delta_quantity for b in sells), Decimal(0))
-            bought = sum((b.delta_quantity for b in buys), Decimal(0))
-            bought_cost = sum((b.delta_quantity * b.price + b.charges for b in buys), Decimal(0))
-            kept = max(base.quantity - sold, Decimal(0))
-            overflow = max(sold - base.quantity, Decimal(0))
-            if kept + bought - overflow == held:
-                value = base.value * kept / base.quantity
-                if bought > 0:
-                    value += bought_cost * (bought - overflow) / bought
-                return value
-        if held < base.quantity:
-            return base.value * held / base.quantity
-        return base.value + (holding.cost - base.cost)
+            shares, value = self._replay(base, since)
+            if abs(shares - held) <= tolerance:
+                return value, True
+            adjusted = readings(since)
+            if adjusted and shares < held and self._adjustment_record(holding.instrument.isin):
+                return min(adjusted), True
+            candidates = adjusted
+        else:
+            candidates = [v for k in range(len(bookings) + 1) for v in readings(bookings[k:])]
+        net = base.value * held / base.quantity if held < base.quantity else base.value + (holding.cost - base.cost)
+        return min([net, *candidates]), False
 
     def _has_mark(self, session: date) -> bool:
         return any(r.get("kind") == "mark" and r.get("as_of_date") == session.isoformat() for r in self._records())
@@ -595,7 +675,13 @@ class ShadowPortfolio:
                     Decimal(holding.quantity), holding.cost, holding.cost, len(ledger[isin])
                 )
                 held_quantity = Decimal(holding.quantity)
-                value = self._carried_value(holding, base, ledger[isin])
+                value, reconciled = self._carried_value(holding, base, ledger[isin])
+                if not reconciled:
+                    self._pause_isin(
+                        CARRY_UNRECONCILED,
+                        isin,
+                        "carried value does not reconcile to the ledger bookings: valued at its lowest reading until operator review",
+                    )
                 if not value > 0:
                     value = holding.cost
                 carry[isin] = _Carry(held_quantity, value, holding.cost)

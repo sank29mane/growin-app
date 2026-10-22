@@ -73,7 +73,7 @@ P06_ABORT = [
     "vm_audit_duplicate_entries", "vm_audit_codes_unexpected", "vm_audit_chain_break",
 ]
 D07_PAUSE_ISIN = [
-    "missing_bar", "unresolved_corporate_action", "ambiguous_exit_fill", "identity_ambiguity", "band_ambiguity",
+    "missing_bar", "unresolved_corporate_action", "ambiguous_exit_fill", "carry_unreconciled", "identity_ambiguity", "band_ambiguity",
 ]
 D07_PAUSE_ALL = [
     "stale_data", "freshness_check_failed", "session_expired", "quota_failure", "egress_failure", "contract_mismatch",

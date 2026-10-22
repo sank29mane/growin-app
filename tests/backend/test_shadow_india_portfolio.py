@@ -2103,7 +2103,7 @@ def test_codex_r3_3_a_partial_sale_of_a_carried_name_scales_the_carried_value_by
         sell_and_fill(rig, "trim-by-hand", "RELIANCE", 40)
         after = portfolio.mark_session(D3, {R_ISIN: Decimal("75")})
         (line,) = [r for r in store.records() if r["kind"] == "position_mark" and r["as_of_date"] == D3.isoformat()]
-        assert (line["quantity"], line["carried_quantity"], line["carried_value"]) == ("60", "60", "9000.00")
+        assert (line["quantity"], line["carried_quantity"], Decimal(line["carried_value"])) == ("60", "60", Decimal("9000"))
         assert after.equity == Decimal("44000") + Decimal("9000")
     finally:
         rig.close()
@@ -2186,9 +2186,11 @@ def test_codex_r5_1_the_next_carried_mark_starts_from_the_last_one_and_counts_on
     world.account.buy("AAA", 20, "101")
     world.mark(D3, AAA="50")
     world.account.sell("AAA", 10, "100")
+    world.account.buy("AAA", 5, "102")
     world.mark(D4, AAA="50")
     line = carried_line(world, D4)
-    assert (line["carried_quantity"], line["carried_value"]) == ("70", "7017.5")  # 8020 x 70 / 80
+    # 8020 x 70 / 80 = 7017.5 from D3's value, plus the 510 the new buy cost. Counting D3's bookings again, or none, misses it.
+    assert (line["carried_quantity"], line["carried_value"]) == ("75", "7527.5")
 
 
 def test_codex_r5_1_a_full_sale_leaves_nothing_in_the_carry_and_the_pause_releases_by_flat(tmp_path):
@@ -2212,15 +2214,6 @@ def test_codex_r5_1_a_sale_past_the_carried_lot_takes_the_rest_from_the_bought_s
     world.mark(D3, AAA="50")
     line = carried_line(world, D3)
     assert (line["carried_quantity"], line["carried_value"]) == ("10", "1010")
-
-
-def test_codex_r5_1_a_line_with_no_booking_count_falls_back_to_the_net_quantity_rule(tmp_path):
-    world = carried_world(tmp_path)
-    world.account.sell("AAA", 40, "75")
-    holding = world.portfolio.snapshot().holdings[0]
-    base = world.portfolio._carry_base(A)
-    legacy = replace(base, bookings=None)
-    assert world.portfolio._carried_value(holding, legacy, world.account.bookings) == Decimal("9000")
 
 
 def test_codex_r5_1_on_the_real_ledger_a_buy_booked_beside_a_hand_sell_carries_its_cost_and_no_false_halt(tmp_path):
@@ -2248,5 +2241,108 @@ def test_codex_r5_1_on_the_real_ledger_a_buy_booked_beside_a_hand_sell_carries_i
         # TCS and INFY at 80.02 against a cost of 100 stop out on their own; the carried name must not move the halt.
         assert not after.state.halt and not [b for b in after.batches if b.reason == "halve"]
         assert R_ISIN not in after.state.open_exits
+    finally:
+        rig.close()
+
+
+# --- review r1 (Codex r1 + Opus r1 at 5c5c6bc5): the fallback is fail-closed, sales replay in order, buys carry charges ------------------------
+
+
+def legacy_mark(world: Fake) -> None:
+    """The last committed mark has no booking count (a line written before the count existed)."""
+    world.portfolio._booking_boundary = lambda isin, session: None  # type: ignore[method-assign]
+
+
+def pauses(world: Fake) -> list[str]:
+    return [p.event for p in policy.run_state(world.store).open_pauses if p.scope == f"isin:{A}"]
+
+
+def test_codex_r1_1_a_mark_with_no_booking_count_never_values_above_the_ledger_reading_and_pauses_the_name(tmp_path):
+    """Codex probe on the fake ledger: 100 carried at 15000, sell 40 at 100, a pre-admitted buy of 20 books at 101. The
+    ledger reading is 60 x 150 + 20 x 101 = 11020; the net-quantity fallback said 12000 and lifted the equity."""
+    world = carried_world(tmp_path)
+    legacy_mark(world)
+    world.account.sell("AAA", 40, "100")
+    world.account.buy("AAA", 20, "101")
+    after = world.mark(D3, AAA="75")
+    value = Decimal(carried_line(world, D3)["carried_value"])
+    assert value <= Decimal("11020") and value > 0
+    assert after.equity <= world.account.cash + Decimal("11020") and after.peak == Decimal("55000")
+    assert "carry_unreconciled" in pauses(world) and world.portfolio.buys_blocked(A)
+
+
+def test_opus_r1_1_a_bonus_with_no_booking_row_then_a_sell_never_lifts_the_peak(tmp_path):
+    """Opus probe B: 100 carried at 15000, a 1:1 bonus booked as a quantity change only (no adjustment record), then 40
+    sold at 75. Held 160, cost 8000. The fallback read 15000 + (8000 - 10000) = 13000 and moved the peak."""
+    world = carried_world(tmp_path)
+    world.account.held["AAA"] = (200, world.account.held["AAA"][1])  # quantity only: no booking, no adjustment record
+    world.account.sell("AAA", 40, "75")
+    after = world.mark(D3, AAA="75")
+    value = Decimal(carried_line(world, D3)["carried_value"])
+    assert 0 < value <= Decimal("12000")  # the fair reading (bonus first, then the sell) is 12000
+    assert after.peak == Decimal("55000") and after.equity <= world.account.cash + Decimal("12000")
+    assert "carry_unreconciled" in pauses(world)
+
+
+def test_opus_r1_1_an_explicit_adjustment_record_explains_the_extra_shares_without_a_second_pause(tmp_path):
+    world = carried_world(tmp_path)
+    world.account.adjust("AAA", 200)
+    world.account.sell("AAA", 40, "75")
+    after = world.mark(D3, AAA="75")
+    assert Decimal(carried_line(world, D3)["carried_value"]) <= Decimal("12000")
+    assert after.peak == Decimal("55000")
+    assert "carry_unreconciled" not in pauses(world)
+
+
+def test_a_replay_that_misses_the_held_quantity_pauses_and_the_operator_clears_it_with_resume(tmp_path):
+    world = carried_world(tmp_path)
+    world.account.held["AAA"] = (90, world.account.held["AAA"][1])  # ten shares gone with no booking
+    after = world.mark(D3, AAA="75")
+    assert Decimal(carried_line(world, D3)["carried_value"]) <= Decimal("13500") and after.peak == Decimal("55000")
+    assert "carry_unreconciled" in pauses(world)
+    seq = next(p.seq for p in policy.run_state(world.store).open_pauses if p.event == "carry_unreconciled")
+    policy.resume(world.store, "operator reviewed the ledger", pause_seqs=[seq])
+    assert "carry_unreconciled" not in pauses(world)
+
+
+def test_a_reconciled_carry_raises_no_unreconciled_pause(tmp_path):
+    world = carried_world(tmp_path)
+    world.account.sell("AAA", 40, "75")
+    world.account.buy("AAA", 20, "101")
+    world.mark(D3, AAA="75")
+    assert Decimal(carried_line(world, D3)["carried_value"]) == Decimal("11020")
+    assert "carry_unreconciled" not in pauses(world)
+
+
+def test_codex_r1_2_a_sale_consumes_only_the_lots_held_when_it_books_not_a_later_buy(tmp_path):
+    """Carry 100 at 10000; buy 20 at 101; sell 110 at 100; buy 20 at 99. The sale takes the carried lot and 10 of the
+    first buy; the second buy was not held yet. Remaining: 10 x 101 + 20 x 99 = 2990. Pooling the buys said 3000."""
+    world = Fake(tmp_path)
+    world.account.buy("AAA", 100, "100")
+    world.mark(D1, AAA="100")
+    world.portfolio.mark_session(D2, {A: Decimal("50")}, structural_actions={A: "bonus"})
+    world.account.buy("AAA", 20, "101")
+    world.account.sell("AAA", 110, "100")
+    world.account.buy("AAA", 20, "99")
+    after = world.mark(D3, AAA="50")
+    line = carried_line(world, D3)
+    assert (line["carried_quantity"], Decimal(line["carried_value"])) == ("30", Decimal("2990"))
+    assert after.equity == world.account.cash + Decimal("2990") and "carry_unreconciled" not in pauses(world)
+
+
+def test_opus_r1_3_a_buy_charge_is_part_of_the_cost_a_carried_buy_adds_on_the_real_ledger(tmp_path):
+    """Codex's probe with a 7.50 charge on the buy: 100 carried at 15000, 40 sold, 20 bought at 101 plus 7.50."""
+    rig, store, portfolio = real_world(tmp_path, "RELIANCE")
+    try:
+        own(rig, "RELIANCE", 100)
+        portfolio.mark_session(D1, {R_ISIN: Decimal("150")})
+        admission = run(rig.adapter.prepare(buy_intent(rig, "late-buy", "RELIANCE", 20, "101.00"), samples_for("RELIANCE", "101.00")))
+        assert admission.decision is AdmissionDecision.ADMITTED, admission.reason_code
+        portfolio.mark_session(D2, {R_ISIN: Decimal("75")}, structural_actions={R_ISIN: "bonus"})
+        sell_and_fill(rig, "trim-by-hand", "RELIANCE", 40)
+        book(rig, "late-buy", 20, "101", charges="7.50", attempt="attempt-late")
+        portfolio.mark_session(D3, {R_ISIN: Decimal("75")})
+        (line,) = [r for r in store.records() if r["kind"] == "position_mark" and r["as_of_date"] == D3.isoformat() and r["isin"] == R_ISIN]
+        assert Decimal(line["carried_value"]) == Decimal("11027.50")
     finally:
         rig.close()
