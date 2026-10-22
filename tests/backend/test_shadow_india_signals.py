@@ -1306,3 +1306,21 @@ def test_repeat_calls_on_an_unseeded_store_record_one_pause_not_one_per_call(tmp
     assert second.status == third.status == signals.STATUS_PAUSED and second.pause_reason == "already_paused"
     assert second.recorded == third.recorded == 0
     assert len(kinds(evidence, "pause")) == 1 and kinds(evidence, "signal") == []
+
+
+def test_a_band_percent_that_differs_only_in_decimal_scale_is_the_same_evaluation(tmp_path, stubs, monkeypatch):
+    _, _, base = run_step(tmp_path, run_start=S)  # the stub band is Decimal("20")
+    _band_override(stubs, monkeypatch, percent=Decimal("20.00"))
+    _, _, scaled = run_step(tmp_path, run_start=S)
+    assert scaled.status == base.status == signals.STATUS_EVALUATED
+    assert scaled.evaluation_sha256 == base.evaluation_sha256 and scaled.decision_bytes() == base.decision_bytes()
+    _band_override(stubs, monkeypatch, percent=Decimal("2E+1"))
+    _, _, exponent = run_step(tmp_path, run_start=S)
+    assert exponent.evaluation_sha256 == base.evaluation_sha256
+
+
+def test_the_decimal_text_is_one_form_per_number_and_distinct_numbers_stay_distinct():
+    assert {signals._decimal_text(Decimal(text)) for text in ("20", "20.0", "20.00", "2E+1")} == {"20"}
+    assert {signals._decimal_text(Decimal(text)) for text in ("0", "0.00", "-0", "0E+3")} == {"0"}
+    assert signals._decimal_text(Decimal("2.5")) == signals._decimal_text(Decimal("2.50")) == "2.5"
+    assert len({signals._decimal_text(Decimal(text)) for text in ("20", "2", "0.2", "5", "10")}) == 5

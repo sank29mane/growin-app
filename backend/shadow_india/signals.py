@@ -454,6 +454,12 @@ def _pause(evidence: EvidenceStore, event: str, code: str, *, session: date, as_
     )
 
 
+def _decimal_text(value: Decimal) -> str:
+    """One text per number: Decimal("20") and Decimal("20.0") are the same band, so they hash the same."""
+
+    return format(value.normalize() + 0, "f")  # + 0 turns a negative zero into zero
+
+
 def _evaluation_fingerprint(result: SignalResult, live: LiveBarsResult, snapshot: EligibilitySnapshot,
                             blocked_isins: frozenset[str], blocked_symbols: frozenset[str], convention: Any) -> str:
     """Everything a decision for the session depends on, so two evaluations that differ anywhere differ here.
@@ -477,7 +483,7 @@ def _evaluation_fingerprint(result: SignalResult, live: LiveBarsResult, snapshot
                         "smallcap": dict(sorted(snapshot.smallcap.items()))},
         "overlay": {"sha256": result.overlay_sha256, "isins": sorted(blocked_isins), "symbols": sorted(blocked_symbols)},
         "adjusted_inputs_sha256": result.adjusted_inputs_sha256, "raw_inputs_sha256": result.raw_inputs_sha256,
-        "bands": {isin: [band.status, None if band.percent is None else str(band.percent), band.nse_symbol,
+        "bands": {isin: [band.status, None if band.percent is None else _decimal_text(band.percent), band.nse_symbol,
                          band.series, band.source_kind, sorted(band.source_sha256s), band.reason]
                   for isin, band in sorted(result.bands.items())},
         "band_convention": None if convention is None else convention.model_dump(mode="json"),
