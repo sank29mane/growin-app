@@ -853,6 +853,10 @@ GOOD: dict[str, dict[str, Any]] = {
     "abort": {"event": "audit_corrupt", "reason": "chain break"},
     "resume": {"reason": "operator reviewed the bars", "cleared_pause_seqs": [3]},
     "session_close": {"outcome": "ok", "record_count": 12},
+    "run_start": {
+        "run_start_session": "2026-10-22", "audit_base_seq": 0, "audit_base_sha256": "0" * 64, "window_start": "2026-04-01",
+    },
+    "vm_intent": {**INTENT, "vm_intent_id": "i" + "a" * 40, "vm_intent_sha256": sha("v")},
 }
 
 
