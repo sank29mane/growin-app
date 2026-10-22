@@ -62,7 +62,8 @@ the latch moves) are replayed in ledger order: a sell takes only the shares held
 and then the bought lots in booking order (oldest first), and a buy opens a
 lot at its booked cost. Where the count is missing or the replay does not land on the held quantity, the value is the
 lowest plausible reading and the ISIN gets a ``carry_unreconciled`` pause that only an operator ``resume`` clears: no
-fallback can lift the peak. The release refuses ``corporate_action_not_booked`` for a name that is still
+fallback can lift the peak. That search is enumerative and bounded (``CARRY_SEARCH_BUDGET`` replay steps); past the
+bound the value is a floor that no plausible reading can fall below (``_carry_floor``), found in one pass. The release refuses ``corporate_action_not_booked`` for a name that is still
 held unless the account exposes an explicit adjustment record (``corporate_action_adjustments``: ticker, kind, ex_date)
 that matches a committed ex-date mark of the name. Nothing is inferred from quantity or cost: equal cost with another
 quantity is also what a buy and a sell give. It also refuses ``exit_owed_in_pre_adjustment_units`` while a halve is open
@@ -110,6 +111,10 @@ LATCH_BOOKING_BASELINE = "booking_baseline"  # how many bookings of a name the l
 LATCH_SELL_BASELINE = "sell_baseline"  # the sell booking boundary, written before the evaluation
 AMBIGUOUS_EXIT_FILL = policy.AMBIGUOUS_EXIT_FILL
 CARRY_UNRECONCILED = policy.CARRY_UNRECONCILED
+# Work budget of the unreconciled-carry search, in replay steps (one booking applied to the lots = one step). The
+# search tries every boundary x both sale orders x every adjustment position, which grows with the cube of the booking
+# count; past the budget the search is skipped and ``_carry_floor`` answers instead, in a single pass.
+CARRY_SEARCH_BUDGET = 20_000
 TICKER_PREFIX = "NSE:CASH:"
 
 _ISIN = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]\Z")
@@ -490,6 +495,57 @@ class ShadowPortfolio:
         ]
         return bool(seqs) and self._adjustment_booked(isin, min(seqs))
 
+    @staticmethod
+    def _search_cost(bookings: int) -> int:
+        """Replay steps the exhaustive search spends on a window of ``bookings`` bookings: two sale orders, each one plain
+        replay plus one per adjustment position, every replay applying at most ``bookings`` bookings."""
+
+        return 2 * (bookings + 2) * (bookings + 1)
+
+    @staticmethod
+    def _carry_floor(base: _Carry, window: Sequence[Any], held: Decimal, *, every_boundary: bool) -> Decimal:
+        """A value at or below every reading the exhaustive search could return, computed in one pass over ``window``.
+
+        A reading from boundary ``k`` opens the base lot and every buy of ``window[k:]``, and the lots only ever lose
+        shares afterwards (a sale, a loss adjustment, or a gain adjustment that adds shares at no value). Every lot's
+        value per share is fixed by how it opened (a sale or a loss takes value pro rata) or goes down (a gain adjustment
+        spreads the same value over more shares), so no share ever carries more than ``u_max``, the dearest opening unit
+        value. The value of a reading is therefore at least the value that opened, ``v_in``, less ``u_max`` for every
+        share that left. Shares in are ``q0`` plus the buys plus a gain ``g``, shares out are all but ``held``, and
+        ``g = held - shares`` of the plain replay, which is at most ``held - max(0, q0 + buys - sells)`` (a sale past
+        every lot is dropped, which only keeps shares). The minimum of that bound over the boundaries is returned.
+
+        It is also never below ``u_min * held / (1 + held)``. Shares are whole, so a gain is applied to at least one
+        share, and a gain of ``g <= held`` shares scales the unit value of the lots it touches by at least
+        ``1 / (1 + held)``; no unit value is below ``u_min``. That second bound keeps the floor above zero, which
+        ``mark_session`` would read as "no value" and replace by the ledger cost."""
+
+        zero = Decimal(0)
+        buys = [b for b in window if str(b.side).upper() == "BUY"]
+        units = [base.value / base.quantity] + [(b.delta_quantity * b.price + b.charges) / b.delta_quantity for b in buys]
+        u_min, u_max = min(units), max(units)
+        positive = u_min * held / (1 + held) if u_min > 0 else zero
+        slack = Decimal("1e-9")  # the share tolerance the search accepts a reading within
+        best: Decimal | None = None
+        value_in, bought, sold = base.value, zero, zero
+        for index in range(len(window), -1, -1):
+            if index < len(window):
+                booking = window[index]
+                side = str(booking.side).upper()
+                if side == "BUY":
+                    value_in += booking.delta_quantity * booking.price + booking.charges
+                    bought += booking.delta_quantity
+                elif side == "SELL":
+                    sold += booking.delta_quantity
+            if not every_boundary and index != 0:
+                continue
+            plain = max(zero, base.quantity + bought - sold)
+            gain = max(zero, held - plain)
+            shares_out = max(zero, base.quantity + bought + gain - held)
+            reading = value_in - u_max * (shares_out + slack)
+            best = reading if best is None else min(best, reading)
+        return max(best if best is not None else zero, positive)
+
     def _carried_value(self, holding: Holding, base: _Carry, bookings: Sequence[Any]) -> tuple[Decimal, bool]:
         """(carried value, reconciled) of ``holding`` given the last committed valuation ``base``.
 
@@ -503,7 +559,12 @@ class ShadowPortfolio:
         to the held quantity. The value is then the LOWEST of every plausible reading (each boundary the count could
         have been, the oldest-first and the dearest-first sale order, the unexplained quantity as an adjustment at
         every position among the bookings, and the net-quantity rule), so the fallback cannot lift the peak, and the
-        caller raises the ISIN-scoped ``carry_unreconciled`` pause for the operator."""
+        caller raises the ISIN-scoped ``carry_unreconciled`` pause for the operator.
+
+        The search is bounded: when its replay steps would pass ``CARRY_SEARCH_BUDGET`` it is not run, and the value is
+        the lower of the net-quantity rule and ``_carry_floor``, which no reading can fall below. A name carried
+        through a bonus with a booked adjustment record is also left unreconciled in that case (the pause stands until
+        the operator reviews it), since its exact lowest placement was not searched."""
 
         held = Decimal(holding.quantity)
         if base.quantity <= 0:
@@ -524,18 +585,22 @@ class ShadowPortfolio:
                         values.append(value)
             return values
 
+        net = base.value * held / base.quantity if held < base.quantity else base.value + (holding.cost - base.cost)
         if base.bookings is not None:
             since = bookings[base.bookings :]
             shares, value = self._replay(base, since)
             if abs(shares - held) <= tolerance:
                 return value, True
+            if self._search_cost(len(since)) > CARRY_SEARCH_BUDGET:
+                return min(net, self._carry_floor(base, since, held, every_boundary=False)), False
             adjusted = readings(since)
             if adjusted and shares < held and self._adjustment_record(holding.instrument.isin):
                 return min(adjusted), True
             candidates = adjusted
         else:
+            if sum(self._search_cost(len(bookings) - k) for k in range(len(bookings) + 1)) > CARRY_SEARCH_BUDGET:
+                return min(net, self._carry_floor(base, bookings, held, every_boundary=True)), False
             candidates = [v for k in range(len(bookings) + 1) for v in readings(bookings[k:])]
-        net = base.value * held / base.quantity if held < base.quantity else base.value + (holding.cost - base.cost)
         return min([net, *candidates]), False
 
     def _has_mark(self, session: date) -> bool:

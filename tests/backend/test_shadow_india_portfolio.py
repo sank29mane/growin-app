@@ -24,6 +24,7 @@ from india_limits_support import NOW, make_evidence
 from risk_india import drawdown, exits, rules
 from risk_india.state import LatchStore, state_path_for, write_state
 from shadow_india import policy
+from shadow_india import portfolio as portfolio_module
 from shadow_india.admission import SIMULATOR_DRAWDOWN_BASIS, QuoteSample
 from shadow_india.evidence import EvidenceStore
 from shadow_india.portfolio import (
@@ -31,6 +32,7 @@ from shadow_india.portfolio import (
     MARK_RAW_CLOSE,
     PEAK_SOURCE,
     ExitPlan,
+    Holding,
     Instrument,
     PortfolioAborted,
     PortfolioError,
@@ -2345,3 +2347,128 @@ def test_opus_r1_3_a_buy_charge_is_part_of_the_cost_a_carried_buy_adds_on_the_re
         assert Decimal(line["carried_value"]) == Decimal("11027.50")
     finally:
         rig.close()
+
+
+# --- review r2 (Codex r2 + Opus r2 at 553eb8e6): the unreconciled search is bounded, a crashed attempt's boundary is read by session -----------
+
+
+def spy_on_replays(monkeypatch: pytest.MonkeyPatch, ceiling: int) -> list[int]:
+    """Count the replay steps (one booking applied = one step) and stop the row the moment the work passes ``ceiling``,
+    so a search that lost its bound turns the row red in milliseconds instead of running for a minute."""
+
+    real = ShadowPortfolio._replay
+    steps = [0]
+
+    def counted(base: Any, since: Any, **kwargs: Any):
+        steps[0] += len(since) + 1
+        assert steps[0] <= ceiling, f"the unreconciled search spent {steps[0]} replay steps, past {ceiling}"
+        return real(base, since, **kwargs)
+
+    monkeypatch.setattr(ShadowPortfolio, "_replay", staticmethod(counted))
+    return steps
+
+
+def many_bookings_world(tmp_path: Path, pairs: int) -> Fake:
+    """100 carried at 15000 (unit 150); then ``pairs`` times a buy of 2 at 101 and a sell of 1 at 100, so the ledger holds
+    100 + pairs shares. Every boundary but the first is short of the held quantity: the worst case for the search."""
+    world = carried_world(tmp_path)
+    for _ in range(pairs):
+        world.account.buy("AAA", 2, "101")
+        world.account.sell("AAA", 1, "100")
+    return world
+
+
+@pytest.mark.parametrize("known_count", [False, True], ids=["legacy_line_no_count", "count_known_but_short"])
+def test_codex_r2_1_an_800_booking_unreconciled_row_is_valued_in_bounded_work_and_still_pauses(tmp_path, monkeypatch, known_count):
+    """Codex r2 P2: 401 and 801 bookings each took over 50 seconds. The work is counted, not timed (timing rows flake
+    under xdist): the replays stay inside the budget, the value is at or below a reading the exhaustive search would have
+    had (the first boundary, 50500), above zero, and the name still pauses with its buys blocked."""
+    world = many_bookings_world(tmp_path, 400)
+    if known_count:
+        world.portfolio._booking_boundary = lambda isin, session: 1 if session == D2 else None  # type: ignore[method-assign]
+        world.account.held["AAA"] = (world.account.held["AAA"][0] + 7, world.account.held["AAA"][1])  # 7 shares no booking explains
+    else:
+        legacy_mark(world)
+    assert len(world.account.bookings) == 801
+    steps = spy_on_replays(monkeypatch, portfolio_module.CARRY_SEARCH_BUDGET)
+    after = world.mark(D3, AAA="75")
+    assert steps[0] <= 801  # at most the one plain replay
+    value = Decimal(carried_line(world, D3)["carried_value"])
+    assert 0 < value <= Decimal("50500")
+    assert after.peak == Decimal("55000") and after.equity <= world.account.cash + Decimal("50500")
+    assert "carry_unreconciled" in pauses(world) and world.portfolio.buys_blocked(A)
+
+
+def test_codex_r2_1_the_floor_is_the_one_pass_answer_when_the_search_would_pass_the_budget(tmp_path, monkeypatch):
+    """The legacy line with 801 bookings: the first boundary's reading is 50,500; the floor is the end boundary's
+    (the base lot less its one sale): 15000 - 150 = 14850, found with no search at all."""
+    world = many_bookings_world(tmp_path, 400)
+    legacy_mark(world)
+    steps = spy_on_replays(monkeypatch, 0)
+    world.mark(D3, AAA="75")
+    assert steps[0] == 0
+    value = Decimal(carried_line(world, D3)["carried_value"])
+    assert Decimal("14850") - Decimal("0.0001") <= value <= Decimal("14850.0001"), value
+
+
+def small_scenarios() -> list[tuple[int, str, list[tuple[str, int, str]], int]]:
+    """(base quantity, base value, bookings, held quantity): hand-picked shapes plus seeded random ones, all small."""
+    import random
+
+    rng = random.Random(611)
+    out: list[tuple[int, str, list[tuple[str, int, str]], int]] = [
+        (100, "15000", [("SELL", 40, "100"), ("BUY", 20, "101")], 80),
+        (100, "15000", [("BUY", 20, "101"), ("SELL", 110, "100"), ("BUY", 20, "99")], 30),
+        (100, "15000", [("SELL", 40, "75")], 160),
+        (100, "15000", [("SELL", 40, "75")], 90),
+        (100, "15000", [], 100),
+        (100, "15000", [("SELL", 100, "75"), ("BUY", 3, "90")], 3),
+    ]
+    for _ in range(250):
+        n = rng.randint(0, 5)
+        rows = [(rng.choice(["BUY", "SELL"]), rng.randint(1, 40), str(rng.randint(60, 220))) for _ in range(n)]
+        held = rng.randint(1, 200)
+        out.append((rng.randint(1, 150), str(rng.randint(500, 30000)), rows, held))
+    return out
+
+
+@pytest.mark.parametrize("base_bookings", [None, 0], ids=["legacy_count", "known_count"])
+def test_codex_r2_1_the_capped_value_is_never_above_the_exhaustive_search_and_never_zero(tmp_path, monkeypatch, base_bookings):
+    """The cap path against the exhaustive one over the same ledgers: a budget of zero (floor only) never reads above the
+    full search, and never reads zero (``mark_session`` would turn a zero into the ledger cost)."""
+    world = Fake(tmp_path)
+    holding = Holding(Instrument(A, "AAA", "AAA"), 1, Decimal(0))
+    checked = 0
+    for quantity, value, rows, held in small_scenarios():
+        bookings = [
+            SimpleNamespace(
+                booking_id=f"b{i}", proposal_id=f"p{i}", side=side, ticker="NSE:CASH:AAA", delta_quantity=Decimal(q),
+                price=Decimal(price), charges=Decimal("0.5"),
+            )
+            for i, (side, q, price) in enumerate(rows)
+        ]
+        holding = Holding(Instrument(A, "AAA", "AAA"), held, Decimal(held) * 100)
+        base = portfolio_module._Carry(Decimal(quantity), Decimal(value), Decimal(quantity) * 100, base_bookings)
+        monkeypatch.setattr(portfolio_module, "CARRY_SEARCH_BUDGET", 10**12)
+        exhaustive, exhaustive_ok = world.portfolio._carried_value(holding, base, bookings)
+        monkeypatch.setattr(portfolio_module, "CARRY_SEARCH_BUDGET", 0)
+        capped, capped_ok = world.portfolio._carried_value(holding, base, bookings)
+        if exhaustive_ok:
+            continue  # reconciled to the ledger: the replay answers, the cap never applies
+        assert not capped_ok
+        assert 0 < capped <= exhaustive, (quantity, value, rows, held, capped, exhaustive)
+        checked += 1
+    assert checked > 100
+
+
+def test_codex_r2_1_a_search_inside_the_budget_is_still_exhaustive(tmp_path, monkeypatch):
+    """The r1 probe sits far under the budget: the search still runs (replays are counted) and still reads at or below
+    the ledger reading, 11020."""
+    world = carried_world(tmp_path)
+    legacy_mark(world)
+    steps = spy_on_replays(monkeypatch, portfolio_module.CARRY_SEARCH_BUDGET)
+    world.account.sell("AAA", 40, "100")
+    world.account.buy("AAA", 20, "101")
+    world.mark(D3, AAA="75")
+    assert steps[0] > 0
+    assert 0 < Decimal(carried_line(world, D3)["carried_value"]) <= Decimal("11020")
