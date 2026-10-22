@@ -144,9 +144,11 @@ class Site:
     def __init__(self):
         self.routes = {}
         self.hosts = []
+        self.urls = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.hosts.append(request.url.host)
+        self.urls.append(str(request.url))
         route = self.routes.get(str(request.url), 404)
         return httpx.Response(200, content=route) if isinstance(route, bytes) else httpx.Response(route, content=b"x")
 
@@ -175,11 +177,13 @@ def test_run_daily_runs_every_step_in_order_and_never_asks_for_the_master(store)
     site = today_site()
     report = run_daily(store, site.http(), today_ist=D5, workspace="india", clock=lambda: datetime(2026, 10, 5, 15, 15, tzinfo=timezone.utc))
     assert [(s.step, s.outcome) for s in report.steps] == [
-        ("bhavcopy_day", "ok"), ("surveillance", "ok"), ("price_bands", "ok"), ("security_master", "skipped")]
-    assert report.steps[3].error_code == "security_master_refresh_requires_relay"
+        ("settle_days", "ok"), ("bhavcopy_day", "ok"), ("surveillance", "ok"), ("price_bands", "ok"),
+        ("security_master", "skipped")]
+    assert report.steps[4].error_code == "security_master_refresh_requires_relay"
     assert set(site.hosts) <= NSE_HOSTS  # no ICICI or Breeze host, and nothing for the master
     rows = store.query("SELECT step, outcome, ist_date FROM reference_refresh_runs ORDER BY started_at_utc, step")
-    assert sorted(r[0] for r in rows) == ["bhavcopy_day", "price_bands", "security_master", "surveillance"]
+    assert sorted(r[0] for r in rows) == [
+        "bhavcopy_day", "price_bands", "security_master", "settle_days", "surveillance"]
     assert {r[2] for r in rows} == {D5}
     assert [c.code for c in report.caveats] == ["SURVIVORSHIP_BIAS", "HINDSIGHT_BIAS", "SURVEILLANCE_HISTORY_UNAVAILABLE"]
     dumped = report.model_dump(mode="json")
@@ -235,6 +239,129 @@ def test_a_weekend_skips_the_band_step(store):
     report = run_daily(store, site.http(), today_ist=saturday, workspace="india", clock=lambda: LATER)
     steps = {s.step: s for s in report.steps}
     assert (steps["price_bands"].outcome, steps["price_bands"].error_code) == ("skipped", "not_a_session")
+
+
+# ------------------------------------------------------------------ settling days the job never ran on
+def at_ist_evening(day):
+    return lambda: datetime(day.year, day.month, day.day, 15, 15, tzinfo=timezone.utc)
+
+
+def log_session(store, day, when=LATER):
+    ensure_fetch_log(store)
+    _log_attempt(store, d=day, kind="udiff", outcome="ingested", http_status=200, error_code=None,
+                 source_sha256=None, url="u", attempted_at=when)
+
+
+def step_of(report, name):
+    return {s.step: s for s in report.steps}[name]
+
+
+def test_a_monday_run_settles_the_unlogged_weekend(store):
+    log_session(store, D2)
+    saturday, sunday = date(2026, 10, 3), date(2026, 10, 4)
+    assert day_status(store, saturday) == day_status(store, sunday) == "unknown"
+    site = today_site(D5)
+    report = run_daily(store, site.http(), today_ist=D5, workspace="india", clock=at_ist_evening(D5))
+    settle = step_of(report, "settle_days")
+    assert settle.outcome == "ok"
+    assert settle.detail == {"attempted": "2026-10-03,2026-10-04", "2026-10-03": "weekend_no_session",
+                             "2026-10-04": "weekend_no_session"}
+    assert day_status(store, saturday) == day_status(store, sunday) == "weekend_no_session"
+    # one PR request per weekend day, nothing else for them
+    assert site.urls.count(pr_zip_url(saturday)) == site.urls.count(pr_zip_url(sunday)) == 1
+    assert not [u for u in site.urls if u in (udiff_url(saturday), udiff_url(sunday))]
+    stored = store.query("SELECT outcome FROM reference_refresh_runs WHERE step = 'settle_days'")
+    assert stored == [("ok",)]
+
+
+def test_a_weekday_holiday_left_pending_by_a_same_day_404_settles_on_the_next_run(store):
+    wednesday, thursday, friday = date(2026, 9, 30), D1, D2
+    log_session(store, wednesday)
+    ensure_fetch_log(store)
+    for kind in ("pr", "udiff", "cm_legacy"):  # Thursday evening: the files are not up yet, or it is a holiday
+        _log_attempt(store, d=thursday, kind=kind, outcome="no_file", http_status=404, error_code=None,
+                     source_sha256=None, url="u", attempted_at=datetime(2026, 10, 1, 15, 15, tzinfo=timezone.utc))
+    assert day_status(store, thursday) == "pending"
+    site = today_site(friday)
+    report = run_daily(store, site.http(), today_ist=friday, workspace="india", clock=at_ist_evening(friday))
+    settle = step_of(report, "settle_days")
+    assert settle.outcome == "ok" and settle.detail == {"attempted": "2026-10-01", "2026-10-01": "holiday"}
+    assert day_status(store, thursday) == "holiday"
+    assert [u for u in site.urls if u in (pr_zip_url(thursday), udiff_url(thursday))] == [
+        pr_zip_url(thursday), udiff_url(thursday)]
+
+
+def test_final_days_are_not_fetched_again(store):
+    log_session(store, date(2026, 9, 30))
+    mark_calendar(store, D1, D1, set())  # Thursday holiday, all three files 404 on later attempts
+    saturday = date(2026, 10, 3)
+    before = _fetch_log_count(store)
+    site = today_site(D2)
+    report = run_daily(store, site.http(), today_ist=D2, workspace="india", clock=at_ist_evening(D2))
+    settle = step_of(report, "settle_days")
+    assert settle.outcome == "ok" and settle.detail == {"attempted": ""}
+    dated = (date(2026, 9, 30), D1, saturday)
+    assert not [u for u in site.urls if any(u in (pr_zip_url(d), udiff_url(d)) for d in dated)]
+    assert _fetch_log_count(store) > before  # only today's own attempts were logged
+    assert store.query("SELECT count(*) FROM nse_fetch_log WHERE trade_date < ?", [D2])[0][0] == before
+
+
+def test_a_final_day_between_pending_days_is_skipped_inside_the_settle_range(store):
+    log_session(store, date(2026, 9, 30))
+    ensure_fetch_log(store)
+    for kind in ("pr", "udiff", "cm_legacy"):  # Thursday: same-day 404s, still pending
+        _log_attempt(store, d=D1, kind=kind, outcome="no_file", http_status=404, error_code=None,
+                     source_sha256=None, url="u", attempted_at=datetime(2026, 10, 1, 15, 15, tzinfo=timezone.utc))
+    log_session(store, D2)  # Friday is final and sits between Thursday and the weekend
+    site = today_site(D5)
+    report = run_daily(store, site.http(), today_ist=D5, workspace="india", clock=at_ist_evening(D5))
+    settle = step_of(report, "settle_days")
+    assert settle.outcome == "ok" and settle.detail["attempted"] == "2026-10-01,2026-10-03,2026-10-04"
+    assert [day_status(store, d) for d in (D1, D2)] == ["holiday", "session"]
+    assert not [u for u in site.urls if u in (pr_zip_url(D2), udiff_url(D2))]
+    assert store.query("SELECT count(*) FROM nse_fetch_log WHERE trade_date = ?", [D2])[0][0] == 1
+
+
+def test_a_pending_day_older_than_the_lookback_is_refused_with_a_typed_code_and_no_fetch(store):
+    mark_calendar(store, date(2026, 9, 14), date(2026, 9, 16), {date(2026, 9, 14), date(2026, 9, 15), date(2026, 9, 16)})
+    site = today_site(D2)
+    report = run_daily(store, site.http(), today_ist=D2, workspace="india", clock=at_ist_evening(D2))
+    settle = step_of(report, "settle_days")
+    assert (settle.outcome, settle.error_code) == ("failed", "settle_lookback_exceeded")
+    assert settle.detail["older_non_final"].startswith("2026-09-17") and settle.detail["lookback_days"] == "10"
+    earlier = [date(2026, 9, 1) + timedelta(days=n) for n in range(30)]  # Sep 1 to Sep 30, plus Oct 1 below
+    earlier.append(D1)
+    assert site.urls and not [u for u in site.urls if any(u in (pr_zip_url(d), udiff_url(d)) for d in earlier)]
+    assert step_of(report, "bhavcopy_day").outcome == "ok"  # the failure does not block today
+    assert day_status(store, D2) == "session"
+
+
+def test_a_failed_settle_fetch_is_reported_and_still_runs_todays_steps(store):
+    log_session(store, D2)
+    site = today_site(D5)
+    saturday = date(2026, 10, 3)
+    site.routes[pr_zip_url(saturday)] = 500
+    report = run_daily(store, site.http(), today_ist=D5, workspace="india", clock=at_ist_evening(D5))
+    settle = step_of(report, "settle_days")
+    assert settle.outcome == "failed" and settle.error_code == "nse_ingest_failed"
+    assert settle.detail["2026-10-03"] == "unknown" and settle.detail["2026-10-04"] == "weekend_no_session"
+    assert step_of(report, "bhavcopy_day").outcome == "ok"
+
+
+def test_require_reference_freshness_passes_after_a_monday_run_that_settles_the_weekend(store, monkeypatch):
+    mark_calendar(store, D1, D2, {D1, D2})
+    snapshots(store, D1)
+    snapshots(store, D2)
+    site = today_site(D5)
+    with monkeypatch.context() as old:  # the job as it was: Monday ingests only Monday
+        old.setattr(rr, "_settle_plan", lambda store, today: ((), ()))
+        run_daily(store, site.http(), today_ist=D5, workspace="india", clock=at_ist_evening(D5))
+    with pytest.raises(PilotDataError) as refused:
+        require_reference_freshness(store, today_ist=D5)
+    assert refused.value.code == "calendar_unknown_dates" and "2026-10-03" in str(refused.value)
+    run_daily(store, site.http(), today_ist=D5, workspace="india", clock=at_ist_evening(D5))
+    ok = require_reference_freshness(store, today_ist=D5)
+    assert ok.fresh and ok.unknown_calendar_dates == ()
 
 
 # ------------------------------------------------------------------ plist rendering
