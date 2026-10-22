@@ -13,8 +13,9 @@ from pathlib import Path
 import pytest
 
 from pilot_data import live_bars, sessions
-from pilot_data.bhavcopy import ingest_pr_zip, ingest_udiff
-from pilot_data.core import PilotDataError
+from pilot_data.bhavcopy import ensure_pr_tables, ingest_pr_zip, ingest_udiff
+from pilot_data.breeze_bars import ensure_breeze_tables
+from pilot_data.core import PilotDataError, SourceDescriptor
 from pilot_data.corporate_actions import derive_corporate_actions
 from pilot_data.dataset import read_dataset_rows
 from pilot_data.live_bars import LiveBarsResult, bars_as_of, main as live_main
@@ -643,6 +644,70 @@ def test_a_weekend_with_no_fetch_log_file_or_bar_is_still_rescued_next_to_a_day_
     friday_world(root)  # Sat and Sun were never fetched and nothing is stored for them
     with PilotDataStore(root, workspace="india", read_only=True) as st:
         assert all(live_bars._local_session_evidence(st, day) is None for day in (SAT, SUN))
+    assert len(compose(root, calendar=nc.pinned(tmp_path)).rows) == 8
+
+
+def only_source_file(st):
+    """A UDiFF committed by `register_source` on Monday and the process stopped before any bar or file row."""
+    st.register_source(SourceDescriptor(source="nse_archive", kind="udiff_cm", locator="https://nsearchives.nseindia.com/m",
+                                        fetched_at=cc.LATER, for_date=S), b"monday udiff, interrupted")
+
+
+def only_ca_raw_row(st):
+    """A PR interrupted right after its corporate-action row committed: no bar, no file row."""
+    ensure_pr_tables(st)
+    st.append_rows("bhavcopy_ca_raw", [{
+        "row_sha256": "e" * 64, "source_sha256": "f" * 64, "file_date": S, "series": "EQ", "nse_symbol": "CANBK",
+        "security": "Canara Bank", "record_date": None, "bc_start": None, "bc_end": None, "ex_date": None,
+        "nd_start": None, "nd_end": None, "purpose_raw": "DIVIDEND"}], check="bhavcopy_ca_raw")
+
+
+def only_etf_info_row(st):
+    ensure_pr_tables(st)
+    st.append_rows("bhavcopy_etf_info", [{
+        "file_date": S, "nse_symbol": "GOLDBEES", "series": "EQ", "security": "Gold ETF", "underlying": "Gold",
+        "source_sha256": "f" * 64, "row_sha256": "e" * 64}], check="bhavcopy_etf_info")
+
+
+def only_breeze_row(st):
+    ensure_breeze_tables(st)
+    st.append_rows("breeze_bars_raw", [{
+        "stock_code": "CANBK", "trade_date": S, "source_sha256": "f" * 64, "raw_datetime": "2025-03-10 07:00:00",
+        "open": Decimal("1"), "high": Decimal("2"), "low": Decimal("1"), "close": Decimal("2"), "volume": 1,
+        "api": "historicalcharts", "interval": "1day", "adjustment_basis": "unknown", "row_sha256": "e" * 64}],
+        check="breeze_bars_raw")
+
+
+def failed_pr_on_saturday(st):
+    """A PR attempt that failed before anything was stored: it is a log line, not evidence of a session."""
+    _log_attempt(st, d=SAT, kind="pr", outcome="failed", http_status=None, error_code="timeout",
+                 source_sha256=None, url="u", attempted_at=cc.LATER)
+
+
+@pytest.mark.parametrize("seed, table", [(only_source_file, "source_files"), (only_ca_raw_row, "bhavcopy_ca_raw"),
+                                         (only_etf_info_row, "bhavcopy_etf_info"), (only_breeze_row, "breeze_bars_raw")])
+def test_a_day_whose_only_persisted_trace_is_one_early_commit_is_not_rescued_by_a_wrong_holiday_listing(tmp_path, seed, table):
+    """Codex r4-1: each commit an ingest makes before its bars is evidence on its own, under its own date column."""
+    root = tmp_path / table
+    build_world(root, FRIDAY_BOUND, extra=seed)
+    with PilotDataStore(root, workspace="india", read_only=True) as st:  # the preconditions: unknown, nothing else for Monday
+        assert sessions.day_status(st, S) == "unknown"
+        for other in ("bhavcopy_files", "bhavcopy_bars"):
+            assert st.query(f"SELECT count(*) FROM {other} WHERE trade_date = ?", [S])[0][0] == 0
+        assert st.query("SELECT count(*) FROM nse_fetch_log WHERE trade_date = ?", [S])[0][0] == 0
+    refused(root, "session_evidence_unknown_status", S, decision=S1, calendar=nc.pinned(tmp_path, holidays=(S,)))
+    with PilotDataStore(root, workspace="india", read_only=True) as st:
+        assert not st.table_exists("crosscheck_runs")
+
+
+def test_a_failed_attempt_with_nothing_persisted_does_not_stop_the_calendar_rescuing_a_weekend(tmp_path):
+    """Opus r4: only an `ingested` attempt counts, so a failed PR on the weekend leaves the day rescuable."""
+    root = tmp_path / "failed"
+    build_world(root, FRIDAY_BOUND, extra=failed_pr_on_saturday)
+    with PilotDataStore(root, workspace="india", read_only=True) as st:
+        assert st.query("SELECT count(*) FROM nse_fetch_log WHERE trade_date = ? AND outcome = 'failed'",
+                        [SAT])[0][0] == 1
+        assert live_bars._local_session_evidence(st, SAT) is None
     assert len(compose(root, calendar=nc.pinned(tmp_path)).rows) == 8
 
 

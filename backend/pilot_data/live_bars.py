@@ -81,7 +81,11 @@ def _local_session_evidence(store: PilotDataStore, day: date) -> str | None:
     if store.table_exists("nse_fetch_log") and store.query(
             "SELECT 1 FROM nse_fetch_log WHERE trade_date = ? AND outcome = 'ingested' LIMIT 1", [day]):
         return "an ingested fetch-log attempt"
-    for table, column in (("bhavcopy_files", "trade_date"), ("bhavcopy_bars", "trade_date"), ("breeze_bars_raw", "trade_date")):
+    # An ingest can stop after any commit: a registered source file, a PR's corporate-action or ETF rows, a parsed
+    # file row, the bars. Each of those carries the day under its own column name.
+    for table, column in (("source_files", "for_date"), ("bhavcopy_files", "trade_date"), ("bhavcopy_bars", "trade_date"),
+                          ("bhavcopy_ca_raw", "file_date"), ("bhavcopy_etf_info", "file_date"),
+                          ("breeze_bars_raw", "trade_date")):
         if store.table_exists(table) and store.query(f"SELECT 1 FROM {table} WHERE {column} = ? LIMIT 1", [day]):
             return f"a persisted row in {table}"
     return None
@@ -192,8 +196,9 @@ def bars_as_of(store: PilotDataStore, *, targets: TargetUniverseResult, decision
                calendar: PinnedCalendar | None = None) -> LiveBarsResult:
     """`calendar` is the operator's pinned table: it lets a day between as_of and the decision session that the store
     has no evidence for (a weekend a Friday-bounded seed never logged) count as a non-session. A day with an
-    ingested fetch-log attempt or a persisted file or bar is never rescued, whatever its status. The calendar is never
-    read for the decision session itself."""
+    ingested fetch-log attempt or a persisted file, corporate-action row or bar is never rescued while its status is
+    unknown; a day the store already calls a holiday or weekend keeps that status. The calendar is never read for the
+    decision session itself."""
     if workspace != store.workspace:
         raise PilotDataError("workspace_mismatch", "workspace differs from the store workspace")
     _require_session_store(store)
