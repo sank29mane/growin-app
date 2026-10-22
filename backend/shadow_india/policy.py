@@ -63,6 +63,7 @@ SIDES = frozenset({SIDE_BUY, SIDE_SELL})
 
 DRAWDOWN_HALT = "drawdown_halt"
 UNRESOLVED_CORPORATE_ACTION = "unresolved_corporate_action"
+AMBIGUOUS_EXIT_FILL = "ambiguous_exit_fill"
 DRAWDOWN_FLATTEN_15 = "drawdown_flatten_15"
 
 _ENTRY_STEPS = frozenset({STEP_ADMIT, STEP_MINT})
@@ -130,6 +131,8 @@ POLICY: Mapping[str, Rule] = {
     # D-07 pause: data, identity and band problems stay scoped where the instrument is known.
     "missing_bar": _pause(SCOPE_ISIN),
     UNRESOLVED_CORPORATE_ACTION: _pause(SCOPE_ISIN),
+    # A sell booked on a name with an open halve under an id that is not that halve's: what the halve still owes is unknown.
+    AMBIGUOUS_EXIT_FILL: _pause(SCOPE_ISIN),
     "identity_ambiguity": _pause(SCOPE_ISIN),
     "band_ambiguity": _pause(SCOPE_ISIN),
     "stale_data": _pause(SCOPE_ALL),
@@ -301,6 +304,7 @@ def resume(store: EvidenceStore, reason: str, *, pause_seqs: Sequence[int] | Non
 
 __all__ = [
     "ABORT",
+    "AMBIGUOUS_EXIT_FILL",
     "DRAWDOWN_FLATTEN_15",
     "DRAWDOWN_HALT",
     "PAUSE",

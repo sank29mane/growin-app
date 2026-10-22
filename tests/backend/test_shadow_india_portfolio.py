@@ -31,6 +31,7 @@ from shadow_india.portfolio import (
     MARK_CARRIED_EX_DATE,
     MARK_RAW_CLOSE,
     PEAK_SOURCE,
+    ExitPlan,
     Instrument,
     PortfolioAborted,
     PortfolioError,
@@ -176,7 +177,8 @@ class Fake:
         return self.portfolio.mark_session(day, {ISINS[s]: Decimal(c) for s, c in closes.items()})
 
     def records(self, kind: str) -> list[dict[str, Any]]:
-        return [r for r in self.store.records() if r["kind"] == kind]
+        """The evidence lines of ``kind``. The ``sell_baseline`` latch lines are bookkeeping, read through ``store``."""
+        return [r for r in self.store.records() if r["kind"] == kind and r.get("latch") != "sell_baseline"]
 
     def exit_id(self, isin: str, attempt: int = 1) -> str:
         """The intent id a runner builds for the open exit on ``isin`` (read from the latch, as a runner would)."""
@@ -1109,7 +1111,7 @@ def test_a_halve_the_evidence_never_recorded_falls_back_to_the_latch_quantity_ca
     )
     assert world.records("position_mark") == [] and world.latch.load().open_exits[A].quantity == 50
     assert [p.quantity for p in world.portfolio.exit_proposals(D2).proposals] == [50]
-    world.account.sell("AAA", 70, "460")
+    world.account.adjust("AAA", 30)  # a reverse split booked: 30 held
     assert [p.quantity for p in world.portfolio.exit_proposals(D2).proposals] == [30]  # never more than held
 
 
@@ -1323,19 +1325,10 @@ def test_hooks_before_the_booking_and_after_it_in_any_order_change_nothing(tmp_p
     assert world.portfolio.exit_proposals(D2).proposals == () and A not in world.latch.load().open_exits
 
 
-def test_a_sell_that_is_not_the_exits_and_an_exit_of_another_day_do_not_reduce_the_halve(tmp_path):
-    world = halved_world(tmp_path)
-    world.account.sell("AAA", 20, "460")  # manual id
-    world.account.sell("AAA", 5, "460", proposal_id=exit_intent_id(exit_obligation_id("halve", A, D2), 1))  # other day
-    world.account.sell("AAA", 5, "460", proposal_id=exit_intent_id(exit_obligation_id("halve", A, D1), 1) + "x")
-    world.account.sell("AAA", 5, "460", proposal_id="x" + exit_intent_id(exit_obligation_id("halve", A, D1), 1))
-    assert world.portfolio.exit_proposals(D2).proposals[0].quantity == 50 - 0  # capped by held 65, owed 50
-
-
 def test_the_halve_never_exceeds_what_is_held_even_when_it_is_owed_more(tmp_path):
     world = halved_world(tmp_path)
-    world.account.sell("AAA", 80, "460")  # a sell that is not the exit's leaves 20 held
-    assert world.portfolio.exit_proposals(D2).proposals[0].quantity == 20
+    world.account.adjust("AAA", 30)  # a reverse split booked: 30 held, 50 still owed
+    assert world.portfolio.exit_proposals(D2).proposals[0].quantity == 30
 
 
 def test_a_booking_counts_once_by_its_booking_id(tmp_path):
@@ -1575,10 +1568,13 @@ def test_a_halt_does_not_halve_a_carried_name_at_the_post_bonus_quote_until_it_i
     again = world.restart().portfolio.exit_proposals(D3)
     assert again.held_out == (A,) and [p.isin for p in again.proposals] == [B]  # a restart changes nothing
     world.account.adjust("AAA", 80)
-    world.portfolio.release_corporate_action(A, "bonus booked")
+    with pytest.raises(PortfolioError) as stale:  # the held-out 20 is in pre-bonus units: see the r3 row below
+        world.portfolio.release_corporate_action(A, "bonus booked")
+    assert stale.value.code == "exit_owed_in_pre_adjustment_units"
+    world.account.sell("AAA", 80, "250")  # the operator flattens the name by hand: the halve closes with it
+    world.portfolio.release_corporate_action(A, "flattened, nothing left to adjust")
     released = world.portfolio.exit_proposals(D3)
-    assert sorted((p.isin, p.reason, p.quantity) for p in released.proposals) == [(A, "halve", 20), (B, "stop", 60)]
-    assert released.held_out == ()
+    assert [(p.isin, p.reason, p.quantity) for p in released.proposals] == [(B, "stop", 60)] and released.held_out == ()
 
 
 def test_a_carried_name_that_owes_no_exit_has_nothing_held_out(tmp_path):
@@ -1674,3 +1670,257 @@ def test_on_the_real_ledger_the_release_is_refused_because_it_cannot_book_an_adj
         assert portfolio.entry_block_reasons(isin) == ()
     finally:
         rig.close()
+
+
+# --- review r3: the release guard, the commit's seqs, an ambiguous halve fill, a held-out halve -------------------------------------------------
+
+R_ISIN, T_ISIN = ISINS["RELIANCE"], ISINS["TCS"]
+
+
+def real_world(tmp_path: Path, *symbols: str):
+    rig = make_rig(tmp_path)
+    store = make_evidence_store(tmp_path / "evidence")
+    return rig, store, ShadowPortfolio(rig.ledger, rig.guard.store, store, instruments(*symbols))
+
+
+def rebuy(rig: Rig, proposal_id: str, symbol: str, quantity: int, price: str = "100.00") -> None:
+    admission = run(rig.adapter.prepare(buy_intent(rig, proposal_id, symbol, quantity, price), samples_for(symbol, price)))
+    assert admission.decision is AdmissionDecision.ADMITTED, admission.reason_code
+    book(rig, proposal_id, quantity, price, attempt=f"attempt-{proposal_id}")
+
+
+def test_a_buy_booked_on_the_ex_date_session_is_not_an_adjustment_and_the_release_is_refused(tmp_path):
+    """opus-r3-1. Own 150 marked at 100; a buy of 10 books before the ex-date close mark; the bonus mark carries. The
+    ledger quantity (160) differs from the last pre-ex mark (150) only because of the buy. Released, the next mark read
+    160 x 50 against a carried 16000 (-50%) and ended the run."""
+    rig, store, portfolio = real_world(tmp_path, "RELIANCE")
+    try:
+        own(rig, "RELIANCE", 150)
+        portfolio.mark_session(D1, {R_ISIN: Decimal("100")})
+        rebuy(rig, "exdate-buy", "RELIANCE", 10)
+        carried = portfolio.mark_session(D2, {R_ISIN: Decimal("50")}, structural_actions={R_ISIN: "bonus"})
+        assert carried.equity == Decimal("50000") and carried.paused_isins == (R_ISIN,)
+        before = store.records()
+        with pytest.raises(PortfolioError) as caught:
+            portfolio.release_corporate_action(R_ISIN, "operator reviewed")
+        assert caught.value.code == "corporate_action_not_booked"
+        assert store.records() == before and portfolio.entry_block_reasons(R_ISIN) == ("instrument_paused",)
+        later = portfolio.mark_session(D3, {R_ISIN: Decimal("50")})
+        assert later.equity == Decimal("50000") and not later.state.ended and not later.state.halt
+    finally:
+        rig.close()
+
+
+def test_a_partial_non_exit_sell_booked_on_the_ex_date_session_is_not_an_adjustment_either(tmp_path):
+    rig, store, portfolio = real_world(tmp_path, "RELIANCE")
+    try:
+        own(rig, "RELIANCE", 150)
+        portfolio.mark_session(D1, {R_ISIN: Decimal("100")})
+        sell_and_fill(rig, "trim-by-hand", "RELIANCE", 50)
+        portfolio.mark_session(D2, {R_ISIN: Decimal("50")}, structural_actions={R_ISIN: "bonus"})
+        with pytest.raises(PortfolioError) as caught:
+            portfolio.release_corporate_action(R_ISIN, "operator reviewed")
+        assert caught.value.code == "corporate_action_not_booked"
+        later = portfolio.mark_session(D3, {R_ISIN: Decimal("50")})
+        assert not later.state.ended and later.equity == Decimal("45000") + Decimal("5000")
+    finally:
+        rig.close()
+
+
+def test_a_booked_adjustment_releases_before_and_after_a_further_carried_mark_but_not_after_a_buy_and_sell(tmp_path):
+    world = Fake(tmp_path)
+    world.account.buy("AAA", 100, "500")
+    world.mark(D1, AAA="500")
+    world.portfolio.mark_session(D2, {A: Decimal("250")}, structural_actions={A: "bonus"})
+    world.account.adjust("AAA", 200)  # booked after the ex-date mark
+    world.mark(D3, AAA="250")  # a later mark already records the adjusted quantity
+    assert world.mark(D3, AAA="250").equity == Decimal("50000")
+    world.portfolio.release_corporate_action(A, "bonus booked")
+    assert world.portfolio.entry_block_reasons(A) == ()
+    # A buy and a sell both move the cost basis: neither is an adjustment.
+    other = Fake(tmp_path / "other")
+    other.account.buy("AAA", 100, "500")
+    other.mark(D1, AAA="500")
+    other.account.buy("AAA", 10, "500")
+    other.account.sell("AAA", 20, "500")
+    other.portfolio.mark_session(D2, {A: Decimal("250")}, structural_actions={A: "bonus"})
+    other.mark(D3, AAA="250")
+    with pytest.raises(PortfolioError) as caught:
+        other.portfolio.release_corporate_action(A, "operator reviewed")
+    assert caught.value.code == "corporate_action_not_booked"
+
+
+def test_a_line_of_a_name_the_retry_no_longer_held_is_not_committed_with_the_evaluation(tmp_path, monkeypatch):
+    """opus-r3-2. Attempt 1 marks AAA 500 and BBB 300 and dies before the latch; BBB is sold; the retry marks AAA only.
+    The commit names the retry's line, not the latest line per ISIN, which included BBB's stale 300."""
+    w = Fake(tmp_path)
+    w.account.buy("AAA", 50, "500")
+    w.account.buy("BBB", 50, "500")
+    w.mark(D1, AAA="500", BBB="500")
+    crash_before_latch(w, monkeypatch)
+    with pytest.raises(Died):
+        w.mark(D2, AAA="500", BBB="300")
+    monkeypatch.undo()
+    w.account.sell("BBB", 50, "500")
+    again = w.restart()
+    again.mark(D2, AAA="500")
+    (commit,) = [r for r in again.records("evaluation_commit") if r["as_of_date"] == D2.isoformat()]
+    lines = [r for r in again.records("position_mark") if r["as_of_date"] == D2.isoformat()]
+    stale = [r["seq"] for r in lines if r["isin"] == B]
+    assert stale and commit["position_mark_seqs"] == [r["seq"] for r in lines if r["isin"] == A]
+    # BBB is bought again and a bonus pauses it: the carry reads the committed 500, not the unfinished 300.
+    again.account.buy("BBB", 50, "500")
+    carried = again.portfolio.mark_session(D3, {A: Decimal("500"), B: Decimal("250")}, structural_actions={B: "bonus"})
+    assert carried.equity == Decimal("50000") - Decimal("25000") + Decimal("25000") and not carried.state.ended
+
+
+def test_the_commit_a_crash_after_the_latch_lost_is_repaired_with_the_inputs_of_the_attempt_that_moved_the_latch(
+    tmp_path, monkeypatch
+):
+    w = Fake(tmp_path)
+    w.account.buy("AAA", 50, "500")
+    w.account.buy("BBB", 50, "500")
+    w.mark(D1, AAA="500", BBB="500")
+    crash_before_latch(w, monkeypatch)
+    with pytest.raises(Died):
+        w.mark(D2, AAA="500", BBB="300")
+    monkeypatch.undo()
+    w.account.sell("BBB", 50, "500")
+    retry = w.restart()
+    die_after_latch_write(retry, monkeypatch)
+    with pytest.raises(Died):
+        retry.mark(D2, AAA="500")  # the latch moved on AAA only, then the process died before the commit line
+    monkeypatch.undo()
+    repaired = w.restart()
+    repaired.portfolio.on_booked_sell(A, 0)
+    (commit,) = [r for r in repaired.records("evaluation_commit") if r["as_of_date"] == D2.isoformat()]
+    bbb = [r["seq"] for r in repaired.records("position_mark") if r["isin"] == B and r["as_of_date"] == D2.isoformat()]
+    assert bbb and not set(bbb) & set(commit["position_mark_seqs"]) and len(commit["position_mark_seqs"]) == 1
+
+
+def test_on_a_real_ledger_a_stale_line_of_a_sold_name_never_becomes_a_carried_value(tmp_path, monkeypatch):
+    """codex-r3-2, on the real ledger. TCS is marked at 60 by an attempt that never reached the latch, then sold; it is
+    bought again and a bonus pauses it. The carry is the committed 100, so equity and the peak stay at 50000."""
+    rig, store, portfolio = real_world(tmp_path, "RELIANCE", "TCS")
+    try:
+        own(rig, "RELIANCE", 150)
+        own(rig, "TCS", 150)
+        portfolio.mark_session(D1, {R_ISIN: Decimal("100"), T_ISIN: Decimal("100")})
+
+        def die(*args: Any, **kwargs: Any):
+            raise Died
+
+        with monkeypatch.context() as patched:  # not monkeypatch.undo(): that would also undo the frozen service clock
+            patched.setattr(rig.guard.store, "evaluate_session", die)
+            with pytest.raises(Died):
+                portfolio.mark_session(D2, {R_ISIN: Decimal("100"), T_ISIN: Decimal("60")})
+        sell_and_fill(rig, "sell-tcs", "TCS", 150)
+        portfolio.mark_session(D2, {R_ISIN: Decimal("100")})
+        rebuy(rig, "rebuy-tcs", "TCS", 150)
+        carried = portfolio.mark_session(
+            D3, {R_ISIN: Decimal("100"), T_ISIN: Decimal("50")}, structural_actions={T_ISIN: "bonus"}
+        )
+        assert carried.equity == Decimal("50000") == carried.peak and carried.paused_isins == (T_ISIN,)
+        assert not carried.state.ended and carried.state.stops == {}
+    finally:
+        rig.close()
+
+
+def ambiguous_pauses(store: EvidenceStore) -> list[Any]:
+    return [p for p in policy.run_state(store).open_pauses if p.event == "ambiguous_exit_fill"]
+
+
+def halve_on_real_ledger(rig: Rig, portfolio: ShadowPortfolio):
+    """Own 100 RELIANCE; the latch raises a halve of 50 at D1. The first decide records what the ledger held."""
+    own(rig, "RELIANCE", 100)
+    rig.guard.store.evaluate_session(
+        {R_ISIN: Decimal("95")}, D1, cash=Decimal("36000"),
+        positions=[exits.Position(R_ISIN, "RELIANCE", 100, Decimal("10000"))],
+    )
+    assert rig.guard.store.load().open_exits[R_ISIN].quantity == 50
+    assert [p.quantity for p in portfolio.exit_proposals(D2).proposals] == [50]
+
+
+def test_a_halve_part_filled_under_an_ordinary_order_id_is_never_proposed_again(tmp_path):
+    """codex-r3-1. The runner books 20 of the halve's 50 under an ordinary order id and expires the rest. Reconciliation
+    ignored that fill and proposed 50 again (70 sold, 30 held, 30 more proposed)."""
+    rig, store, portfolio = real_world(tmp_path, "RELIANCE")
+    try:
+        halve_on_real_ledger(rig, portfolio)
+        sell_and_fill(rig, "ordinary-order-1", "RELIANCE", 20)
+        plan = portfolio.exit_proposals(D2)
+        assert plan.proposals == () and plan.ambiguous == (R_ISIN,)
+        assert [(p.event, p.scope) for p in ambiguous_pauses(store)] == [("ambiguous_exit_fill", f"isin:{R_ISIN}")]
+        assert "instrument_paused" in portfolio.entry_block_reasons(R_ISIN)
+        assert rig.guard.store.load().open_exits[R_ISIN].quantity == 50  # the latch still owes it
+        portfolio.on_booked_sell(R_ISIN, 20)
+        again = ShadowPortfolio(rig.ledger, rig.guard.store, store, instruments("RELIANCE"))
+        assert again.exit_proposals(D2).proposals == () and again.exit_proposals(D2).ambiguous == (R_ISIN,)
+        assert len(ambiguous_pauses(store)) == 1  # the pause is raised once, not on every call
+        # The way out is to flatten the name by hand: the exit closes, and the pause can then be resumed.
+        sell_and_fill(rig, "flatten-by-hand", "RELIANCE", 80)
+        assert again.exit_proposals(D2) == ExitPlan((), ())
+        policy.resume(store, "operator flattened the name", pause_seqs=[p.seq for p in ambiguous_pauses(store)])
+        assert ambiguous_pauses(store) == []
+    finally:
+        rig.close()
+
+
+@pytest.mark.parametrize("proposal_id", [
+    "manual-sell",
+    exit_intent_id(exit_obligation_id("halve", A, D2), 1),  # another day's halve
+    exit_intent_id(exit_obligation_id("halve", A, D1), 1) + "x",
+    "x" + exit_intent_id(exit_obligation_id("halve", A, D1), 1),
+    exit_intent_id(exit_obligation_id("stop", A, D1), 1),  # another reason
+])
+def test_any_sell_not_booked_under_the_halves_own_id_makes_it_ambiguous(tmp_path, proposal_id):
+    world = halved_world(tmp_path)
+    assert [p.quantity for p in world.portfolio.exit_proposals(D2).proposals] == [50]
+    world.account.sell("AAA", 5, "460", proposal_id=proposal_id)
+    plan = world.portfolio.exit_proposals(D2)
+    assert plan.proposals == () and plan.ambiguous == (A,)
+    assert [p.event for p in ambiguous_pauses(world.store)] == ["ambiguous_exit_fill"]
+    assert world.restart().portfolio.exit_proposals(D2).ambiguous == (A,)  # a restart changes nothing
+
+
+def test_sells_before_the_halve_was_raised_and_the_halves_own_fills_are_not_ambiguous(tmp_path):
+    world = Fake(tmp_path)
+    world.account.buy("AAA", 120, "500")
+    world.account.sell("AAA", 20, "500")  # an ordinary trim, long before the halt
+    result = world.mark(D1, AAA="460")
+    assert result.state.halt and result.state.open_exits[A].quantity == 50
+    world.sell_for_exit("AAA", 20, "460")
+    world.account.buy("AAA", 10, "460")
+    plan = world.portfolio.exit_proposals(D2)
+    assert plan.ambiguous == () and [p.quantity for p in plan.proposals] == [30]
+    assert ambiguous_pauses(world.store) == []
+
+
+def test_an_ambiguous_halve_does_not_hold_back_a_stop_on_another_name_and_marks_keep_evaluating(tmp_path):
+    world = probe_world(tmp_path, structural=False)  # AAA owes a halve of 20, BBB a stop of 60
+    world.account.sell("AAA", 5, "500")  # not the halve's
+    plan = world.portfolio.exit_proposals(D3)
+    assert [(p.isin, p.reason) for p in plan.proposals] == [(B, "stop")] and plan.ambiguous == (A,)
+    result = world.mark(D3, AAA="500", BBB="430")  # marks never refuse because of it
+    assert result.evaluated and world.latch.load().open_exits[A].quantity == 20
+
+
+def test_a_halve_held_out_across_a_corporate_action_pause_is_not_released_in_pre_adjustment_units(tmp_path):
+    """codex-r3-4. A halve of 20 of 40 is held out through a 1:1 bonus; released, it would stay 20 of 80 (a quarter)."""
+    world = probe_world(tmp_path / "world", structural=True)
+    plan = world.portfolio.exit_proposals(D3)
+    assert plan.held_out == (A,) and world.latch.load().open_exits[A].quantity == 20
+    world.account.adjust("AAA", 80)
+    before = world.store.records()
+    with pytest.raises(PortfolioError) as caught:
+        world.portfolio.release_corporate_action(A, "bonus booked")
+    assert caught.value.code == "exit_owed_in_pre_adjustment_units"
+    assert world.store.records() == before and world.portfolio.exit_proposals(D3).held_out == (A,)
+    # A stop owes what is held, in whatever units: it does not block the release.
+    flatten = Fake(tmp_path / "flatten")
+    flatten.account.buy("AAA", 40, "500")
+    flatten.mark(D1, AAA="500")
+    flatten.portfolio.mark_session(D2, {A: Decimal("250")}, structural_actions={A: "bonus"})
+    flatten.account.adjust("AAA", 80)
+    flatten.portfolio.release_corporate_action(A, "bonus booked")
+    assert flatten.portfolio.entry_block_reasons(A) == ()

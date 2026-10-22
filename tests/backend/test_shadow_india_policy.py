@@ -72,7 +72,9 @@ P06_ABORT = [
     "vm_order_code", "vm_unknown_code", "code_status_mismatch", "vm_challenge_or_success", "vm_423_no_audit_entry",
     "vm_audit_duplicate_entries", "vm_audit_codes_unexpected", "vm_audit_chain_break",
 ]
-D07_PAUSE_ISIN = ["missing_bar", "unresolved_corporate_action", "identity_ambiguity", "band_ambiguity"]
+D07_PAUSE_ISIN = [
+    "missing_bar", "unresolved_corporate_action", "ambiguous_exit_fill", "identity_ambiguity", "band_ambiguity",
+]
 D07_PAUSE_ALL = [
     "stale_data", "freshness_check_failed", "session_expired", "quota_failure", "egress_failure", "contract_mismatch",
     "hash_mismatch",

@@ -32,7 +32,11 @@ under that obligation's own intent ids (``exit_obligation_id`` and ``exit_intent
 capped at what is held and at what the latch still owes. It is never read from the aggregate holding: a buy that
 books later, or a sell that is not the exit's, cannot change it. The same reconcile run twice, or after a crash
 between the booking and the hook, gives the same answer, and ``on_booked_sell`` is a nudge to reconcile: its
-``sold_quantity`` is validated and never trusted. A runner must mint every exit sell under ``exit_intent_id``.
+``sold_quantity`` is validated and never trusted. A runner must mint every exit sell under ``exit_intent_id``. A sell of
+a name with an open halve that is booked under any other id, after the halve was first seen, makes what the halve still
+owes unknowable (it may or may not have been meant as the halve): the name gets an ``ambiguous_exit_fill`` pause, the
+halve is listed in ``ExitPlan.ambiguous`` and never proposed again, and the exit stays in the latch until the name is
+flat. Stop and flatten sell what is held, so a foreign sell cannot make them over-sell.
 
 The terminal flatten obligation covers every holding, not only the ones held at the -15% close: once the latch or the
 run says ``ended``, any name still held (a buy admitted before the end that books after it) is owed a flatten. The
@@ -53,9 +57,12 @@ quantity the ledger reconciled at the same cost, so it cannot lift the peak. No 
 position gets a cost equal to the carried value), it moves nothing in the drawdown, a buy of it is blocked, and any
 exit owed on it (a halve or the terminal flatten) stays in the latch but is held out of ``exit_proposals`` (``held_out``)
 so it is not sold at the post-adjustment quote. Only ``release_corporate_action`` clears the pause (``policy.resume``
-refuses it), and it refuses ``corporate_action_not_booked`` while the ledger still holds the pre-ex carried quantity:
-the real ``ExecutionLedger`` has no split or bonus booking path yet, so until one exists the operator flattens the name
-or leaves it paused. No factor adjustment is made here.
+refuses it), and it refuses ``corporate_action_not_booked`` unless a committed mark since the pause carries the ledger's cost with a
+different quantity: a booked adjustment moves the quantity and not the cost, while a buy or a sell moves the cost (a buy
+on the ex-date session raises the quantity too and is not an adjustment). It also refuses
+``exit_owed_in_pre_adjustment_units`` while a halve is open for the name, because a halve is a share count fixed before
+the adjustment. The real ``ExecutionLedger`` has no split or bonus booking path yet, so until one exists the operator
+flattens the name (which closes the exit and the pause releases) or leaves it paused. No factor adjustment is made here.
 
 Keys: this latch file is keyed by ISIN (``Position.isin`` carries the ISIN and ``RiskState.stops`` and
 ``open_exits`` use it), while ``risk_india/state.py`` documents the Mac latch as keyed by the ledger's execution
@@ -88,6 +95,9 @@ CORPORATE_ACTION_PAUSE = policy.UNRESOLVED_CORPORATE_ACTION
 LATCH_FLATTEN = "flatten"
 LATCH_HALVE_BASELINE = "halve_baseline"
 EVALUATION_COMMIT = "evaluation_commit"
+EVALUATION_INPUTS = "evaluation_inputs"
+LATCH_SELL_BASELINE = "sell_baseline"
+AMBIGUOUS_EXIT_FILL = policy.AMBIGUOUS_EXIT_FILL
 TICKER_PREFIX = "NSE:CASH:"
 
 _ISIN = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]\Z")
@@ -219,6 +229,7 @@ class ExitPlan:
     proposals: tuple[ExitProposal, ...]
     waiting: tuple[str, ...]  # ISINs whose earlier exit order is still open in the ledger
     held_out: tuple[str, ...] = ()  # ISINs with an exit owed but an open corporate-action pause: not proposed yet
+    ambiguous: tuple[str, ...] = ()  # ISINs whose halve cannot be sized: a sell booked under an id that is not its own
 
 
 def _dec(value: Decimal) -> str:
@@ -344,9 +355,11 @@ class ShadowPortfolio:
     def _commit_session(self, state: RiskState) -> None:
         """Bind the latch's latest evaluation to the ``position_mark`` lines it used (idempotent, crash safe).
 
-        A ``position_mark`` is evaluation input until the latch shows its session; this line says which lines the
-        committed evaluation read (the latest per ISIN for that session, a retry's superseding line included).
-        A crash between the latch write and this line is repaired by the next call, before any read of the marks.
+        A ``position_mark`` is evaluation input until the latch shows its session. ``mark_session`` writes an
+        ``evaluation_inputs`` line naming the exact lines an attempt will hand the latch, before the latch moves; this
+        line copies the latest of those for the session. It is never "the latest line per ISIN": a line an earlier
+        attempt wrote for a name the retry no longer held is not an input. A crash between the latch write and this
+        line is repaired by the next call, before any read of the marks, from the same ``evaluation_inputs`` line.
         """
 
         if state.last_session is None:
@@ -355,14 +368,25 @@ class ShadowPortfolio:
         records = self._records()
         if any(r.get("kind") == EVALUATION_COMMIT and r.get("as_of_date") == tag for r in records):
             return
-        latest: dict[str, int] = {}
+        seqs: list[int] = []
         for record in records:
-            if record.get("kind") == "position_mark" and record.get("as_of_date") == tag:
-                latest[str(record["isin"])] = int(record["seq"])
-        payload: dict[str, Any] = {"as_of_date": tag, "position_mark_seqs": sorted(latest.values())}
+            if record.get("kind") == EVALUATION_INPUTS and record.get("as_of_date") == tag:
+                seqs = sorted(int(s) for s in record["position_mark_seqs"])
+        payload: dict[str, Any] = {"as_of_date": tag, "position_mark_seqs": seqs}
         if state.last_equity is not None:
             payload["equity"] = _dec(state.last_equity)
         self._append(EVALUATION_COMMIT, payload)
+
+    def _record_evaluation_inputs(self, session: date, seqs: Sequence[int]) -> None:
+        """Write which ``position_mark`` lines this attempt hands the latch, unless the latest attempt wrote the same."""
+
+        tag = session.isoformat()
+        latest = None
+        for record in self._records():
+            if record.get("kind") == EVALUATION_INPUTS and record.get("as_of_date") == tag:
+                latest = sorted(int(s) for s in record["position_mark_seqs"])
+        if latest != sorted(seqs):
+            self._append(EVALUATION_INPUTS, {"as_of_date": tag, "position_mark_seqs": sorted(seqs)})
 
     def _committed_marks(self) -> list[Mapping[str, Any]]:
         """The ``position_mark`` lines a committed evaluation read, in evidence order. An unfinished attempt's
@@ -433,9 +457,10 @@ class ShadowPortfolio:
         carry: Mapping[str, _Carry],
         *,
         supersede: bool,
-    ) -> None:
+    ) -> list[int]:
         """Persist the evaluation inputs. Appends a line when none exists for (session, ISIN), and, with
-        ``supersede``, when the existing line differs (a retry after a crash before the latch moved)."""
+        ``supersede``, when the existing line differs (a retry after a crash before the latch moved). Returns the
+        seqs of the lines that stand for the holdings of ``snap``: the lines this evaluation reads."""
 
         latest = self._session_position_marks(session)
         for holding in snap.holdings:
@@ -458,6 +483,8 @@ class ShadowPortfolio:
             if prior is not None and (not supersede or all(prior.get(k) == v for k, v in payload.items())):
                 continue
             self._append("position_mark", payload)
+        standing = self._session_position_marks(session)
+        return sorted(int(standing[h.instrument.isin]["seq"]) for h in snap.holdings if h.instrument.isin in standing)
 
     def mark_session(
         self,
@@ -540,7 +567,9 @@ class ShadowPortfolio:
         evaluated = before.last_session is None or session > before.last_session
         # The inputs reach the evidence BEFORE the latch moves: a crash after the latch write must not lose the raw
         # close a later carried mark or halve target reads.
-        self._write_position_marks(session, snap, used, basis, structural, carry, supersede=evaluated)
+        input_seqs = self._write_position_marks(session, snap, used, basis, structural, carry, supersede=evaluated)
+        if evaluated:
+            self._record_evaluation_inputs(session, input_seqs)
         batches: tuple[ExitBatch, ...] = ()
         config_errors: tuple[str, ...] = ()
         if evaluated:
@@ -560,6 +589,7 @@ class ShadowPortfolio:
         self._commit_session(after)
         self._reconcile(after)
         self._flatten_obligations(after, snap)
+        self._record_sell_baselines(after)
         for error in config_errors:
             self._append("latch", {"latch": "stop_config", "scope": "session", "reason": error})
 
@@ -697,6 +727,19 @@ class ShadowPortfolio:
         self._append("latch", {"latch": LATCH_HALVE_BASELINE, "scope": scope, "reason": f"{tag}{current.quantity}"})
         return current.quantity
 
+    def _sell_bookings(self, instrument: Instrument) -> list[Any]:
+        """The SELL bookings of ``instrument`` in ledger order, each booking id once."""
+
+        seen: dict[str, Any] = {}
+        for booking in self._account.simulated_bookings():
+            if str(booking.side).upper() == "SELL" and booking.ticker == instrument.ticker:
+                seen.setdefault(str(booking.booking_id), booking)
+        return list(seen.values())
+
+    @staticmethod
+    def _own_id(obligation_id: str) -> re.Pattern[str]:
+        return re.compile(re.escape(obligation_id) + r"(-t[0-9]+)?\Z")
+
     def _attributed_sold(self, obligation_id: str, instrument: Instrument) -> int:
         """Shares sold by the sell fills booked under this obligation's intent ids (``exit_intent_id``).
 
@@ -704,17 +747,53 @@ class ShadowPortfolio:
         another id, and every buy, is not this obligation's.
         """
 
-        own = re.compile(re.escape(obligation_id) + r"(-t[0-9]+)?\Z")
-        sold: dict[str, Decimal] = {}
-        for booking in self._account.simulated_bookings():
-            if str(booking.side).upper() != "SELL" or booking.ticker != instrument.ticker:
-                continue
-            if own.match(str(booking.proposal_id)):
-                sold[str(booking.booking_id)] = booking.delta_quantity
+        own = self._own_id(obligation_id)
         try:
-            return sum((_whole(q) for q in sold.values()), 0)
+            return sum(
+                (_whole(b.delta_quantity) for b in self._sell_bookings(instrument) if own.match(str(b.proposal_id))), 0
+            )
         except PortfolioError:
             self._abort("state_corrupt", "booked_sell_quantity_not_whole")
+
+    def _sell_baseline(self, isin: str, since: date) -> int:
+        """How many sells of ``isin`` the ledger already held when this halve was first seen (recorded once).
+
+        Sells before it are history, not part of the halve. The ledger is append-only, so a sell past this count
+        was booked while the halve was open."""
+
+        scope = f"{policy.SCOPE_ISIN}:{isin}"
+        tag = f"since_{since.isoformat()}_sells_"
+        for record in self._records():
+            if record.get("kind") == "latch" and record.get("latch") == LATCH_SELL_BASELINE and record.get("scope") == scope:
+                reason = str(record["reason"])
+                if reason.startswith(tag):
+                    return int(reason.removeprefix(tag))
+        count = len(self._sell_bookings(self._by_isin[isin]))
+        self._append("latch", {"latch": LATCH_SELL_BASELINE, "scope": scope, "reason": f"{tag}{count}"})
+        return count
+
+    def _record_sell_baselines(self, state: RiskState) -> None:
+        for isin in sorted(state.open_exits):
+            if state.open_exits[isin].reason == HALVE:
+                self._sell_baseline(isin, state.open_exits[isin].since)
+
+    def _ambiguous_exit_fill(self, isin: str, current: OpenExit) -> bool:
+        """True when a sell booked while this halve was open is not under its own intent ids (and pauses the name).
+
+        The halve owes ``floor(q / 2)`` less its own fills. A sell under any other id (the runner minted an ordinary
+        order id, a hand sale) may or may not have been meant as the halve, so what is still owed cannot be known.
+        Proposing it again could sell the same shares twice, so the exit is held until an operator flattens the name.
+        """
+
+        if current.reason != HALVE:
+            return False
+        own = self._own_id(exit_obligation_id(HALVE, isin, current.since))
+        baseline = self._sell_baseline(isin, current.since)
+        sells = self._sell_bookings(self._by_isin[isin])
+        if not any(not own.match(str(b.proposal_id)) for b in sells[baseline:]):
+            return False
+        self._pause_isin(AMBIGUOUS_EXIT_FILL, isin, "sell booked on a name with an open halve under an id that is not the halve's")
+        return True
 
     def _due(self, isin: str, current: OpenExit, held_quantity: int) -> int:
         """What the open exit still owes. Stop and flatten sell what is held. A halve owes what it was raised for less
@@ -744,6 +823,8 @@ class ShadowPortfolio:
             elif current is None:
                 continue
             else:
+                if self._ambiguous_exit_fill(isin, current):
+                    continue  # fail closed: leave the exit as the latch has it, and propose nothing from it
                 due = self._due(isin, current, quantity)
                 if due == current.quantity or (current.reason != HALVE and quantity == current.quantity):
                     continue
@@ -822,9 +903,13 @@ class ShadowPortfolio:
         # not proposed. It would sell the unadjusted quantity at the adjusted quote and book a loss that is not real.
         frozen = self._frozen_isins({h.instrument.isin for h in snap.holdings})
         held_out = tuple(sorted(isin for isin in every if isin in frozen))
-        view = replace(state, open_exits={i: e for i, e in every.items() if i not in frozen})
+        held = {h.instrument.isin for h in snap.holdings}
+        ambiguous = tuple(
+            sorted(i for i, e in every.items() if i in held and i not in frozen and self._ambiguous_exit_fill(i, e))
+        )
+        view = replace(state, open_exits={i: e for i, e in every.items() if i not in frozen and i not in ambiguous})
         if not view.open_exits:
-            return ExitPlan((), (), held_out)
+            return ExitPlan((), (), held_out, ambiguous)
         try:
             batches = pending_batches(view, self._positions(snap.holdings), state.last_session)
         except (ExitError, StateInconsistent):
@@ -852,7 +937,7 @@ class ShadowPortfolio:
                         reproposed=since < intent.decided_on,
                     )
                 )
-        return ExitPlan(tuple(proposals), tuple(sorted(set(waiting))), held_out)
+        return ExitPlan(tuple(proposals), tuple(sorted(set(waiting))), held_out, ambiguous)
 
     def on_booked_sell(self, isin: str, sold_quantity: int) -> RiskState:
         """Nudge the latch after a simulated sell booked. Idempotent: it reconciles with the holdings.
@@ -874,14 +959,33 @@ class ShadowPortfolio:
 
     # -- release -----------------------------------------------------------------------------------
 
+    def _adjustment_booked(self, isin: str, holding: Holding, pause_seq: int) -> bool:
+        """True when the ledger quantity moved at an unchanged cost basis since the pause was raised.
+
+        A booked split or bonus changes the quantity and leaves the cost where it was. A buy or a sell moves the cost,
+        so a quantity that differs only because of one is not an adjustment (a buy booked on the ex-date session, before
+        the close mark, raises the quantity too). The reference is every committed mark of the name since the pause
+        that carries the ledger's current cost; with none, nothing says the adjustment was booked.
+        """
+
+        quantity = Decimal(holding.quantity)
+        return any(
+            Decimal(str(r["cost"])) == holding.cost and Decimal(str(r["quantity"])) != quantity
+            for r in self._committed_marks()
+            if r.get("isin") == isin and int(r["seq"]) > pause_seq
+        )
+
     def release_corporate_action(self, isin: str, reason: str) -> Mapping[str, Any]:
         """The release of an ``unresolved_corporate_action`` pause (Q-6). ``policy.resume`` refuses it.
 
-        Refused ``corporate_action_not_booked`` while the ledger still holds the pre-ex carried quantity of a name that
-        is still held: no split or bonus adjustment has been booked, so the next mark would value the unadjusted
-        quantity at the adjusted close (the false -50%). The real ``ExecutionLedger`` has no booking path for a
-        split or bonus yet; until one exists the operator flattens the name or the pause stays open. A name that is no
-        longer held is released freely. Exits held out for the name are proposed again from the next decide.
+        Refused ``corporate_action_not_booked`` for a name that is still held unless the ledger shows an adjustment: a
+        quantity that differs from a committed mark since the pause at the same cost basis. Without one the next mark
+        would value the unadjusted quantity at the adjusted close (the false -50%); a buy or a partial sell that books
+        on the ex-date session changes the quantity at another cost and is not an adjustment. Refused
+        ``exit_owed_in_pre_adjustment_units`` while a halve is open for it. The real ``ExecutionLedger`` has no
+        booking path for a split or bonus yet; until one exists the operator flattens the name or the pause stays open.
+        A name that is no longer held is released freely. A stop or flatten held out for the name is proposed again
+        from the next decide (both sell what is held).
         """
 
         run = policy.run_state(self._store)
@@ -896,12 +1000,17 @@ class ShadowPortfolio:
         )
         if not seqs:
             raise policy.PolicyError("nothing_to_resume")
-        self._commit_session(self._state())
+        state = self._state()
+        self._commit_session(state)
         holding = next((h for h in self.snapshot().holdings if h.instrument.isin == isin), None)
         if holding is not None:
-            base = self._carry_base(isin)
-            if base is None or Decimal(holding.quantity) == base.quantity:
+            if not self._adjustment_booked(isin, holding, min(seqs)):
                 raise PortfolioError("corporate_action_not_booked")
+            current = state.open_exits.get(isin)
+            if current is not None and current.reason == HALVE:
+                # A halve is a number of shares fixed before the adjustment. Re-proposed after it, it would sell the
+                # wrong fraction. Fail closed: the operator flattens the name, which closes the exit.
+                raise PortfolioError("exit_owed_in_pre_adjustment_units")
         return self._append("resume", {"reason": reason.strip(), "cleared_pause_seqs": seqs})
 
     def release_halt(self, actor: str, reason: str, *, rebase_halt_anchor: bool = False) -> Mapping[str, Any]:

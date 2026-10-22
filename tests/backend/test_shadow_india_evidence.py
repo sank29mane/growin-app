@@ -844,6 +844,7 @@ GOOD: dict[str, dict[str, Any]] = {
         "as_of_date": "2026-10-21", "isin": "INE002A01018", "symbol": "RELIANCE", "quantity": "10", "close": "100.50",
         "cost": "1000", "mark_basis": "raw_close",
     },
+    "evaluation_inputs": {"as_of_date": "2026-10-21", "position_mark_seqs": [4, 5]},
     "evaluation_commit": {"as_of_date": "2026-10-21", "position_mark_seqs": [4, 5], "equity": "49990.50"},
     "stop_open_report": {"as_of_date": "2026-10-21", "isins": ["INE002A01018"], "buys_blocked": True},
     "run_ended": {"event": "drawdown_flatten_15", "reason": "equity_at_or_below_minus_15_percent_of_peak"},
