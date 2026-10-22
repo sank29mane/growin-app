@@ -1,0 +1,64 @@
+name: Findings Ledger
+
+# Prototype, warn-only. Checks that the latest `## Review round N` section of
+# the PR body gives every review finding a disposition, and keeps one sticky
+# comment current. It never blocks a merge: the job has continue-on-error and
+# the script runs with --warn-only, so it exits 0 even when findings are open.
+# Design and the path to enforcement: docs/ci/findings-ledger-design.md.
+#
+# SECURITY: the script reads review text, which anyone can post on a public
+# repo. It counts only owner, member and collaborator reviews (plus named
+# bots), and reduces every string to a safe excerpt before it reaches the
+# comment. It reads Python test files with ast and Swift test files as text
+# to confirm `fixed` tests exist, and never imports, builds or runs PR code. On fork PRs the token is read-only, so the
+# comment step only warns.
+on:
+  pull_request:
+    types: [ opened, edited, synchronize, reopened, ready_for_review ]
+  pull_request_review:
+    types: [ submitted, edited, dismissed ]
+  # A new inline comment always arrives inside a review, so `submitted`
+  # covers it. Only edits and deletes need the comment event.
+  pull_request_review_comment:
+    types: [ edited, deleted ]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: findings-ledger-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  ledger:
+    name: Findings ledger (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    steps:
+      # Only the script and the Python and Swift test files (to confirm
+      # `fixed` tests exist). Nothing here is built or run.
+      - name: Check out the PR head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/ci
+            tests
+            GrowinTests
+            GrowinUITests
+
+      - name: Check the ledger
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 -I scripts/ci/findings_ledger.py check \
+            --repo "$REPO" --pr "$PR" --head-sha "$HEAD_SHA" \
+            --repo-root . --out "$RUNNER_TEMP/ledger.md" \
+            --annotate --post --warn-only
+          cat "$RUNNER_TEMP/ledger.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
