@@ -53,7 +53,40 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--session", required=True, type=_day, help="session date, YYYY-MM-DD")
         if name in ("resume", "hand-flatten"):
             command.add_argument("--reason", required=True)
+        if name == "resume":
+            command.add_argument(
+                "--pause-seq", type=int, action="append", dest="pause_seq", metavar="N",
+                help="clear only this open pause (repeatable); without it every pause `resume` may clear is cleared",
+            )
     return parser
+
+
+# An open pause ``policy.resume`` refuses to clear, and the typed refusal it would raise. Without ``--pause-seq`` the
+# CLI clears what it can and names these, so one halt cannot keep a relay pause open forever.
+_NOT_RESUMABLE = {
+    policy.DRAWDOWN_HALT: "drawdown_resume_requires_latch",
+    policy.UNRESOLVED_CORPORATE_ACTION: "corporate_action_resume_requires_portfolio",
+}
+
+
+def _resume(store: EvidenceStore, reason: str, pause_seqs: Optional[Sequence[int]]) -> dict[str, Any]:
+    if pause_seqs:
+        record = policy.resume(store, reason, pause_seqs=pause_seqs)  # a named pause is cleared or refused, never skipped
+        return {"resumed": record["cleared_pause_seqs"], "seq": record["seq"], "skipped": []}
+    state = policy.run_state(store)
+    clearable = [p.seq for p in state.open_pauses if p.event not in _NOT_RESUMABLE]
+    skipped = [
+        {"seq": p.seq, "event": p.event, "why": _NOT_RESUMABLE[p.event]}
+        for p in state.open_pauses
+        if p.event in _NOT_RESUMABLE
+    ]
+    if not clearable:
+        if skipped and not state.aborted and isinstance(reason, str) and reason.strip():
+            raise policy.PolicyError(str(skipped[0]["why"]))
+        record = policy.resume(store, reason)  # the typed refusal: abort, blank reason, run end, nothing open
+        return {"resumed": record["cleared_pause_seqs"], "seq": record["seq"], "skipped": []}
+    record = policy.resume(store, reason, pause_seqs=clearable)
+    return {"resumed": record["cleared_pause_seqs"], "seq": record["seq"], "skipped": skipped}
 
 
 def _print(out: TextIO, payload: dict[str, Any]) -> None:
@@ -87,8 +120,7 @@ def main(
                     "records": seq, "head": head,
                 })
                 return EXIT_OK
-            record = policy.resume(store, args.reason)
-            _print(out, {"resumed": record["cleared_pause_seqs"], "seq": record["seq"]})
+            _print(out, _resume(store, args.reason, args.pause_seq))
             return EXIT_OK
         runtime = (runtime_factory or _default_runtime)(args)
         runner: ShadowRunner = runtime.runner if hasattr(runtime, "runner") else runtime

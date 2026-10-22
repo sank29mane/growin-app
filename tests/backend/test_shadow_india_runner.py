@@ -1811,6 +1811,58 @@ def test_the_cli_status_resume_and_refusals(world):
     assert code == 0 and ok["resumed"] and open_events(world) == []
 
 
+def open_seq(world: World, event: str) -> int:
+    return next(p.seq for p in policy.run_state(world.evidence).open_pauses if p.event == event)
+
+
+def test_the_cli_resume_clears_a_relay_pause_under_an_open_halt_and_the_next_decide_marks_with_entries_blocked(world):
+    """Break-proof: pass every open pause to ``policy.resume`` again and the halt refuses the whole call."""
+    three_down(world, "89")  # -11% each: past the -8% halt, short of the stop and the flatten
+    world.script.result = evaluated("DDD", "EEE")
+    world.decide()
+    halt = open_seq(world, policy.DRAWDOWN_HALT)
+    policy.raise_event(world.evidence, "untyped_response", "relay did not answer")
+    relay = open_seq(world, "untyped_response")
+    assert world.decide().stopped == "open_pause"  # both are open: nothing runs
+    code, ok = run_cli(cli_args(world, "resume", "--reason", "relay reviewed"))
+    assert code == 0 and ok["resumed"] == [relay] and ok["skipped"] == [
+        {"seq": halt, "event": policy.DRAWDOWN_HALT, "why": "drawdown_resume_requires_latch"}
+    ]
+    assert open_events(world) == [policy.DRAWDOWN_HALT]  # the halt stays: only the latch releases it
+    buys = len(intents_of(world, "BUY"))
+    report = world.decide()
+    assert report.status == "done" and report.marked is True and len(intents_of(world, "BUY")) == buys
+    code, refused = run_cli(cli_args(world, "resume", "--reason", "x"))  # only the halt is open now
+    assert (code, refused) == (1, {"refused": "drawdown_resume_requires_latch"})
+
+
+def test_the_cli_resume_pause_seq_clears_exactly_the_named_pause_and_refuses_one_it_may_not_clear(world):
+    three_down(world, "89")
+    world.script.result = evaluated("DDD", "EEE")
+    world.decide()
+    halt = open_seq(world, policy.DRAWDOWN_HALT)
+    policy.raise_event(world.evidence, "untyped_response", "one")
+    policy.raise_event(world.evidence, "stale_data", "two")
+    stale = open_seq(world, "stale_data")
+    code, refused = run_cli(cli_args(world, "resume", "--reason", "x", "--pause-seq", str(halt)))
+    assert (code, refused) == (1, {"refused": "drawdown_resume_requires_latch"})
+    code, unknown = run_cli(cli_args(world, "resume", "--reason", "x", "--pause-seq", "999"))
+    assert (code, unknown) == (1, {"refused": "unknown_pause"})
+    code, ok = run_cli(cli_args(world, "resume", "--reason", "x", "--pause-seq", str(stale)))
+    assert code == 0 and ok["resumed"] == [stale] and ok["skipped"] == []
+    assert sorted(open_events(world)) == sorted([policy.DRAWDOWN_HALT, "untyped_response"])
+
+
+def test_the_cli_resume_names_a_corporate_action_pause_it_skips_and_refuses_when_only_that_is_open(world):
+    policy.raise_event(world.evidence, policy.UNRESOLVED_CORPORATE_ACTION, "split", isin=ISINS["AAA"])
+    code, refused = run_cli(cli_args(world, "resume", "--reason", "x"))
+    assert (code, refused) == (1, {"refused": "corporate_action_resume_requires_portfolio"})
+    policy.raise_event(world.evidence, "band_ambiguity", "band", isin=ISINS["BBB"])
+    code, ok = run_cli(cli_args(world, "resume", "--reason", "x"))
+    assert code == 0 and [s["event"] for s in ok["skipped"]] == [policy.UNRESOLVED_CORPORATE_ACTION]
+    assert open_events(world) == [policy.UNRESOLVED_CORPORATE_ACTION]
+
+
 def test_the_cli_resume_refuses_an_abort_and_a_run_end(world):
     policy.raise_event(world.evidence, "vm_audit_broken", "audit_broken")
     code, refused = run_cli(cli_args(world, "resume", "--reason", "x"))
