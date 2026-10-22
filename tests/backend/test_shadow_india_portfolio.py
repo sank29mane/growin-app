@@ -96,6 +96,7 @@ class FakeAccount:
         self.buys: list[tuple[str, Decimal, Decimal]] = []
         self.sells: dict[str, Decimal] = {}
         self.bookings: list[SimpleNamespace] = []
+        self.adjustments: list[SimpleNamespace] = []
 
     def _book(self, side: str, symbol: str, quantity: int, proposal_id: str) -> None:
         self.bookings.append(
@@ -121,9 +122,14 @@ class FakeAccount:
         self.cash += quantity * Decimal(price) - Decimal(charges)
         self._book("SELL", symbol, quantity, proposal_id or f"manual-{len(self.bookings) + 1}")
 
-    def adjust(self, symbol: str, quantity: int) -> None:
-        """A split or bonus booked: the quantity changes, the cost basis does not."""
+    def adjust(self, symbol: str, quantity: int, kind: str = "bonus", ex_date: date | None = None) -> None:
+        """A split or bonus booked: the quantity changes, the cost basis does not, and an explicit adjustment record
+        is exposed (the real ledger has no such record). ``ex_date`` defaults to ``D2``, the ex-date the rows use."""
         self.held[symbol] = (quantity, self.held[symbol][1])
+        self.adjustments.append(SimpleNamespace(ticker=f"NSE:CASH:{symbol}", kind=kind, ex_date=ex_date or D2))
+
+    def corporate_action_adjustments(self) -> list[SimpleNamespace]:
+        return list(self.adjustments)
 
     def simulated_bookings(self, proposal_id: str | None = None) -> list[SimpleNamespace]:
         return [b for b in self.bookings if proposal_id is None or b.proposal_id == proposal_id]
@@ -187,6 +193,14 @@ class Fake:
 
     def sell_for_exit(self, symbol: str, quantity: int, price: str, attempt: int = 1) -> None:
         self.account.sell(symbol, quantity, price, proposal_id=self.exit_id(ISINS[symbol], attempt))
+
+
+def latch_evaluate(portfolio: ShadowPortfolio, latch: LatchStore, *args: Any, **kwargs: Any):
+    """An evaluation as the portfolio runs it for a halve: the sell booking boundary is persisted, then the latch
+    moves. Rows that write the latch with no boundary (an outside writer) call ``latch.evaluate_session`` directly."""
+    session = args[1]
+    portfolio._record_sell_boundaries(session, portfolio.snapshot())
+    return latch.evaluate_session(*args, **kwargs)
 
 
 def at_peak(tmp_path: Path, **kw: Any) -> Fake:
@@ -813,7 +827,7 @@ def test_a_carried_name_is_flattened_with_the_rest_once_the_operator_releases_it
 def test_a_latch_written_before_the_evidence_is_repaired_by_the_next_call(tmp_path):
     world = at_peak(tmp_path)
     # The crash window: the latch file took the evaluation, the evidence write never happened.
-    world.latch.evaluate_session(
+    latch_evaluate(world.portfolio, world.latch,
         {A: Decimal("460")}, D1, cash=Decimal(0), positions=[exits.Position(A, "AAA", 100, Decimal("50000"))]
     )
     assert policy.run_state(world.store).open_pauses == ()
@@ -825,7 +839,7 @@ def test_a_latch_written_before_the_evidence_is_repaired_by_the_next_call(tmp_pa
 
 def test_the_repair_runs_before_anything_that_can_raise_so_a_refused_mark_still_leaves_the_pause(tmp_path):
     world = at_peak(tmp_path)
-    world.latch.evaluate_session(
+    latch_evaluate(world.portfolio, world.latch,
         {A: Decimal("460")}, D1, cash=Decimal(0), positions=[exits.Position(A, "AAA", 100, Decimal("50000"))]
     )
     again = world.restart()
@@ -1106,7 +1120,7 @@ def test_a_halve_the_evidence_never_recorded_falls_back_to_the_latch_quantity_ca
     """Only a latch written outside the portfolio (no position mark for the raising session) takes this path:
     the target cannot be derived, so the exit is never larger than the latch says nor than the holdings."""
     world = at_peak(tmp_path)
-    world.latch.evaluate_session(
+    latch_evaluate(world.portfolio, world.latch,
         {A: Decimal("460")}, D1, cash=Decimal(0), positions=[exits.Position(A, "AAA", 100, Decimal("50000"))]
     )
     assert world.records("position_mark") == [] and world.latch.load().open_exits[A].quantity == 50
@@ -1342,7 +1356,7 @@ def test_the_fallback_path_without_a_position_mark_nets_the_booked_sell_across_a
     """The latch was written outside the portfolio, so no position mark names the raising quantity. The first sight is
     recorded in the evidence once; a booked sell of 20 and a booked buy of 20 still leave 30."""
     world = at_peak(tmp_path)
-    world.latch.evaluate_session(
+    latch_evaluate(world.portfolio, world.latch,
         {A: Decimal("460")}, D1, cash=Decimal(0), positions=[exits.Position(A, "AAA", 100, Decimal("50000"))]
     )
     assert world.records("position_mark") == [] and world.latch.load().open_exits[A].quantity == 50
@@ -1384,7 +1398,7 @@ def test_on_a_real_ledger_a_halve_booked_under_its_intent_id_is_netted_across_a_
         admitted = run(rig.adapter.prepare(buy_intent(rig, "late-buy", "RELIANCE", 20), samples_for("RELIANCE")))
         assert admitted.decision is AdmissionDecision.ADMITTED, admitted.reason_code
         # A halve of 50 raised by the latch (cash and close chosen so only the -8% line is crossed).
-        rig.guard.store.evaluate_session(
+        latch_evaluate(portfolio, rig.guard.store,
             {isin: Decimal("95")}, D1, cash=Decimal("36000"),
             positions=[exits.Position(isin, "RELIANCE", 100, Decimal("10000"))],
         )
@@ -1506,7 +1520,7 @@ def test_a_bonus_reconciled_on_the_ledger_while_paused_moves_neither_equity_nor_
     (mark3,) = [r for r in world.records("mark") if r["as_of_date"] == D3.isoformat()]
     assert (mark3["equity"], mark3["peak"], mark3["exposure"]) == ("50000", "50000", "50000")
     day3 = [r for r in world.records("position_mark") if r["as_of_date"] == D3.isoformat()]
-    assert [(r["quantity"], r["carried_quantity"], r["carried_value"]) for r in day3] == [("200", "100", "50000")]
+    assert [(r["quantity"], r["carried_quantity"], r["carried_value"]) for r in day3] == [("200", "200", "50000")]
     world.portfolio.release_corporate_action(A, "bonus shares booked")
     resumed = world.mark(D4, AAA="250")
     assert resumed.equity == Decimal("50000") and resumed.state.stops == {} and not resumed.state.ended
@@ -1833,7 +1847,7 @@ def ambiguous_pauses(store: EvidenceStore) -> list[Any]:
 def halve_on_real_ledger(rig: Rig, portfolio: ShadowPortfolio):
     """Own 100 RELIANCE; the latch raises a halve of 50 at D1. The first decide records what the ledger held."""
     own(rig, "RELIANCE", 100)
-    rig.guard.store.evaluate_session(
+    latch_evaluate(portfolio, rig.guard.store,
         {R_ISIN: Decimal("95")}, D1, cash=Decimal("36000"),
         positions=[exits.Position(R_ISIN, "RELIANCE", 100, Decimal("10000"))],
     )
@@ -1924,3 +1938,171 @@ def test_a_halve_held_out_across_a_corporate_action_pause_is_not_released_in_pre
     flatten.account.adjust("AAA", 80)
     flatten.portfolio.release_corporate_action(A, "bonus booked")
     assert flatten.portfolio.entry_block_reasons(A) == ()
+
+
+# --- review r4: the sell boundary is persisted first, a release needs an explicit record, a carried sell scales --------------------------------
+
+
+def two_names_at_ninety(tmp_path: Path):
+    """RELIANCE 200 and TCS 200 bought at 100 (cash 10000): a close of 89 on both is -8.8% (a halt, a halve of
+    half the shares held each) while 89 stays above the -12% stop at 88."""
+    rig = make_rig(tmp_path)
+    store = make_evidence_store(tmp_path / "evidence")
+    portfolio = ShadowPortfolio(rig.ledger, rig.guard.store, store, instruments("RELIANCE", "TCS"))
+    own(rig, "RELIANCE", 200)
+    own(rig, "TCS", 200)
+    portfolio.mark_session(D1, {R_ISIN: Decimal("100"), T_ISIN: Decimal("100")})
+    return rig, store, portfolio
+
+
+def admit_ordinary_sell(rig: Rig, proposal_id: str, quantity: int) -> None:
+    admission = run(rig.adapter.prepare(sell_intent(rig, proposal_id, "RELIANCE", quantity), samples_for("RELIANCE")))
+    assert admission.decision is AdmissionDecision.ADMITTED, admission.reason_code
+
+
+def book_pending_sell(rig: Rig, proposal_id: str, quantity: int) -> None:
+    book(rig, proposal_id, quantity, "100.00", attempt="attempt-exit")
+
+
+def test_codex_r4_1_an_ordinary_sell_admitted_before_the_halve_and_booked_after_a_crash_is_ambiguous(tmp_path, monkeypatch):
+    """Admit an ordinary 20-share sell, raise the halve of 100, die after the latch write, book the pending sell before
+    any reconciliation. Recovery recorded the baseline AFTER that booking (1), saw no ambiguity and proposed 100 of the
+    remaining 180: 120 sold, 80 held. The boundary written before the latch (0) makes the booking ambiguous."""
+    rig, store, portfolio = two_names_at_ninety(tmp_path)
+    try:
+        admit_ordinary_sell(rig, "ordinary-20", 20)
+        real = rig.guard.store.evaluate_session
+
+        def evaluate_then_die(*args: Any, **kwargs: Any):
+            real(*args, **kwargs)
+            raise Died
+
+        monkeypatch.setattr(rig.guard.store, "evaluate_session", evaluate_then_die)
+        with pytest.raises(Died):
+            portfolio.mark_session(D2, {R_ISIN: Decimal("89"), T_ISIN: Decimal("89")})
+        monkeypatch.undo()
+        assert rig.guard.store.load().open_exits[R_ISIN].quantity == 100
+        book_pending_sell(rig, "ordinary-20", 20)
+        recovered = ShadowPortfolio(rig.ledger, rig.guard.store, store, instruments("RELIANCE", "TCS"))
+        plan = recovered.exit_proposals(D3)
+        assert [p.isin for p in plan.proposals] == [T_ISIN] and plan.ambiguous == (R_ISIN,)
+        assert [(p.event, p.scope) for p in ambiguous_pauses(store)] == [("ambiguous_exit_fill", f"isin:{R_ISIN}")]
+        assert recovered.exit_proposals(D3).ambiguous == (R_ISIN,)  # a restart changes nothing
+    finally:
+        rig.close()
+
+
+@pytest.mark.parametrize(
+    ("crash_at", "ambiguous"),
+    [
+        ("before_boundary", False),  # nothing moved: the sell booked before any evaluation, so it is history
+        ("after_boundary_before_latch", False),  # the retry supersedes the boundary: the latch had not moved either
+        ("after_latch", True),  # the halve was already open when the sell booked
+    ],
+)
+def test_codex_r4_1_a_crash_at_each_boundary_never_proposes_a_halve_on_top_of_an_ordinary_sell(
+    tmp_path, monkeypatch, crash_at, ambiguous
+):
+    rig, store, portfolio = two_names_at_ninety(tmp_path)
+    try:
+        admit_ordinary_sell(rig, "ordinary-20", 20)
+        closes = {R_ISIN: Decimal("89"), T_ISIN: Decimal("89")}
+
+        def die(*args: Any, **kwargs: Any):
+            raise Died
+
+        if crash_at == "before_boundary":
+            monkeypatch.setattr(portfolio, "_record_sell_boundaries", die)
+        elif crash_at == "after_boundary_before_latch":
+            monkeypatch.setattr(rig.guard.store, "evaluate_session", die)
+        else:
+            real = rig.guard.store.evaluate_session
+
+            def evaluate_then_die(*args: Any, **kwargs: Any):
+                real(*args, **kwargs)
+                raise Died
+
+            monkeypatch.setattr(rig.guard.store, "evaluate_session", evaluate_then_die)
+        with pytest.raises(Died):
+            portfolio.mark_session(D2, closes)
+        monkeypatch.undo()
+        book_pending_sell(rig, "ordinary-20", 20)
+        retry = ShadowPortfolio(rig.ledger, rig.guard.store, store, instruments("RELIANCE", "TCS"))
+        retry.mark_session(D2, closes)
+        plan = retry.exit_proposals(D3)
+        reliance = [p for p in plan.proposals if p.isin == R_ISIN]
+        if ambiguous:
+            assert plan.ambiguous == (R_ISIN,) and reliance == []
+        else:
+            assert plan.ambiguous == () and [p.quantity for p in reliance] == [90]  # half of the 180 held then
+    finally:
+        rig.close()
+
+
+def test_codex_r4_1_a_halve_with_no_recorded_boundary_is_never_sized_from_current_bookings(tmp_path):
+    """A latch written outside the portfolio leaves no boundary line. The old code counted the bookings it saw at first
+    sight, which hid every sell booked after the halve opened."""
+    world = at_peak(tmp_path)
+    world.latch.evaluate_session(
+        {A: Decimal("460")}, D1, cash=Decimal(0), positions=[exits.Position(A, "AAA", 100, Decimal("50000"))]
+    )
+    world.account.sell("AAA", 20, "460")  # an ordinary sell booked after the halve opened
+    plan = world.portfolio.exit_proposals(D2)
+    assert plan.proposals == () and plan.ambiguous == (A,)
+    assert [r for r in world.store.records() if r["kind"] == "latch" and r["latch"] == "sell_baseline"] == []
+
+
+def test_codex_r4_2_equal_cost_with_another_quantity_is_not_an_adjustment(tmp_path):
+    """Hold 100 costing 10000; a buy of 40 at 50 was admitted before the bonus pause; then a 20-share sell and the delayed
+    buy book. Holdings 120 at cost 10000: the old cost-equality rule released it and the next mark read 45000, a halt and
+    a 120-share stop. Without an explicit record the release is refused."""
+    world = Fake(tmp_path)
+    world.account.buy("AAA", 100, "100")
+    world.mark(D1, AAA="100")
+    world.portfolio.mark_session(D2, {A: Decimal("50")}, structural_actions={A: "bonus"})
+    world.account.sell("AAA", 20, "50")
+    world.account.buy("AAA", 40, "50")
+    assert world.account.held["AAA"] == (120, Decimal("10000"))  # the probe's own numbers
+    world.mark(D3, AAA="50")
+    before = world.store.records()
+    with pytest.raises(PortfolioError) as caught:
+        world.portfolio.release_corporate_action(A, "operator reviewed")
+    assert caught.value.code == "corporate_action_not_booked"
+    assert world.store.records() == before and world.portfolio.entry_block_reasons(A) == ("instrument_paused",)
+
+
+def test_codex_r4_2_only_an_explicit_record_for_this_kind_and_ex_date_releases(tmp_path):
+    world = at_peak(tmp_path)
+    world.mark(D1, AAA="500")
+    world.portfolio.mark_session(D2, {A: Decimal("250")}, structural_actions={A: "bonus"})
+    world.account.held["AAA"] = (200, world.account.held["AAA"][1])  # the quantity moved, no record booked
+    with pytest.raises(PortfolioError) as bare:
+        world.portfolio.release_corporate_action(A, "operator reviewed")
+    assert bare.value.code == "corporate_action_not_booked"
+    world.account.adjustments.append(SimpleNamespace(ticker="NSE:CASH:AAA", kind="split", ex_date=D2))  # wrong kind
+    world.account.adjustments.append(SimpleNamespace(ticker="NSE:CASH:AAA", kind="bonus", ex_date=D3))  # wrong date
+    world.account.adjustments.append(SimpleNamespace(ticker="NSE:CASH:BBB", kind="bonus", ex_date=D2))  # wrong name
+    with pytest.raises(PortfolioError) as wrong:
+        world.portfolio.release_corporate_action(A, "operator reviewed")
+    assert wrong.value.code == "corporate_action_not_booked"
+    world.account.adjustments.append(SimpleNamespace(ticker="NSE:CASH:AAA", kind="bonus", ex_date=D2))
+    world.portfolio.release_corporate_action(A, "operator reviewed")
+    assert world.portfolio.entry_block_reasons(A) == ()
+
+
+def test_codex_r3_3_a_partial_sale_of_a_carried_name_scales_the_carried_value_by_the_shares_held(tmp_path):
+    """Own 100 marked at 150 (value 15000, cost 10000); the bonus pause carries 15000; 40 are sold. Cost falls to 6000
+    and the old cost delta left 11000 in the carry (the sold shares' value still in it). 60 of 100 shares are 9000."""
+    rig, store, portfolio = real_world(tmp_path, "RELIANCE")
+    try:
+        own(rig, "RELIANCE", 100)
+        portfolio.mark_session(D1, {R_ISIN: Decimal("150")})
+        carried = portfolio.mark_session(D2, {R_ISIN: Decimal("75")}, structural_actions={R_ISIN: "bonus"})
+        assert carried.paused_isins == (R_ISIN,) and carried.equity == Decimal("55000")
+        sell_and_fill(rig, "trim-by-hand", "RELIANCE", 40)
+        after = portfolio.mark_session(D3, {R_ISIN: Decimal("75")})
+        (line,) = [r for r in store.records() if r["kind"] == "position_mark" and r["as_of_date"] == D3.isoformat()]
+        assert (line["quantity"], line["carried_quantity"], line["carried_value"]) == ("60", "60", "9000.00")
+        assert after.equity == Decimal("44000") + Decimal("9000")
+    finally:
+        rig.close()

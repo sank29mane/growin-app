@@ -57,12 +57,18 @@ quantity the ledger reconciled at the same cost, so it cannot lift the peak. No 
 position gets a cost equal to the carried value), it moves nothing in the drawdown, a buy of it is blocked, and any
 exit owed on it (a halve or the terminal flatten) stays in the latch but is held out of ``exit_proposals`` (``held_out``)
 so it is not sold at the post-adjustment quote. Only ``release_corporate_action`` clears the pause (``policy.resume``
-refuses it), and it refuses ``corporate_action_not_booked`` unless a committed mark since the pause carries the ledger's cost with a
-different quantity: a booked adjustment moves the quantity and not the cost, while a buy or a sell moves the cost (a buy
-on the ex-date session raises the quantity too and is not an adjustment). It also refuses
-``exit_owed_in_pre_adjustment_units`` while a halve is open for the name, because a halve is a share count fixed before
-the adjustment. The real ``ExecutionLedger`` has no split or bonus booking path yet, so until one exists the operator
+refuses it). A sell while carried scales the carried value by the shares still held, so the sold shares' value (and a
+loss on them) does not stay in the carry. The release refuses ``corporate_action_not_booked`` for a name that is still
+held unless the account exposes an explicit adjustment record (``corporate_action_adjustments``: ticker, kind, ex_date)
+that matches a committed ex-date mark of the name. Nothing is inferred from quantity or cost: equal cost with another
+quantity is also what a buy and a sell give. It also refuses ``exit_owed_in_pre_adjustment_units`` while a halve is open
+for the name, because a halve is a share count fixed before the adjustment. The real ``ExecutionLedger`` has no split or
+bonus booking path and exposes no such record, so on it the release is refused while the name is held: the operator
 flattens the name (which closes the exit and the pause releases) or leaves it paused. No factor adjustment is made here.
+
+The sell booking boundary of a halve (how many sells the ledger held when the raising evaluation ran) is persisted
+before that evaluation moves the latch, never rebuilt from later bookings. A halve with no recorded boundary (a latch
+written outside the portfolio, or a line lost) cannot be sized and is treated as ``ambiguous_exit_fill``.
 
 Keys: this latch file is keyed by ISIN (``Position.isin`` carries the ISIN and ``RiskState.stops`` and
 ``open_exits`` use it), while ``risk_india/state.py`` documents the Mac latch as keyed by the ledger's execution
@@ -96,7 +102,7 @@ LATCH_FLATTEN = "flatten"
 LATCH_HALVE_BASELINE = "halve_baseline"
 EVALUATION_COMMIT = "evaluation_commit"
 EVALUATION_INPUTS = "evaluation_inputs"
-LATCH_SELL_BASELINE = "sell_baseline"
+LATCH_SELL_BASELINE = "sell_baseline"  # the sell booking boundary, written before the evaluation
 AMBIGUOUS_EXIT_FILL = policy.AMBIGUOUS_EXIT_FILL
 TICKER_PREFIX = "NSE:CASH:"
 
@@ -544,10 +550,17 @@ class ShadowPortfolio:
                 # booked): a quantity the ledger reconciled at the same cost (a bonus or split booked) moves nothing,
                 # so a paused name can neither fire a stop nor lift the peak.
                 base = self._carry_base(isin) or _Carry(Decimal(holding.quantity), holding.cost, holding.cost)
-                value = base.value + (holding.cost - base.cost)
+                held_quantity = Decimal(holding.quantity)
+                if held_quantity < base.quantity:
+                    # A sell while carried: the value of the shares still held is what is left, in proportion. The
+                    # ledger cost falls by the sold shares' cost, which is not their carried value, so the cost delta
+                    # would leave the sold shares' value (and any loss on them) in the carry.
+                    value = base.value * held_quantity / base.quantity
+                else:
+                    value = base.value + (holding.cost - base.cost)
                 if not value > 0:
                     value = holding.cost
-                carry[isin] = _Carry(base.quantity, value, holding.cost)
+                carry[isin] = _Carry(held_quantity, value, holding.cost)
                 used[isin] = value / holding.quantity
                 basis[isin] = MARK_CARRIED_EX_DATE
                 continue
@@ -570,6 +583,8 @@ class ShadowPortfolio:
         input_seqs = self._write_position_marks(session, snap, used, basis, structural, carry, supersede=evaluated)
         if evaluated:
             self._record_evaluation_inputs(session, input_seqs)
+            # The sell boundary is also persisted before the latch can open an exit, never inferred afterwards.
+            self._record_sell_boundaries(session, snap)
         batches: tuple[ExitBatch, ...] = ()
         config_errors: tuple[str, ...] = ()
         if evaluated:
@@ -589,7 +604,6 @@ class ShadowPortfolio:
         self._commit_session(after)
         self._reconcile(after)
         self._flatten_obligations(after, snap)
-        self._record_sell_baselines(after)
         for error in config_errors:
             self._append("latch", {"latch": "stop_config", "scope": "session", "reason": error})
 
@@ -755,27 +769,43 @@ class ShadowPortfolio:
         except PortfolioError:
             self._abort("state_corrupt", "booked_sell_quantity_not_whole")
 
-    def _sell_baseline(self, isin: str, since: date) -> int:
-        """How many sells of ``isin`` the ledger already held when this halve was first seen (recorded once).
+    def _sell_boundary(self, isin: str, since: date) -> int | None:
+        """How many sells of ``isin`` the ledger held at the evaluation of ``since``, read from the line
+        ``_record_sell_boundaries`` wrote BEFORE that evaluation moved the latch. ``None`` when there is none.
 
-        Sells before it are history, not part of the halve. The ledger is append-only, so a sell past this count
-        was booked while the halve was open."""
+        Sells before the boundary are history, not part of a halve raised at ``since``. The ledger is append-only,
+        so a sell past this count was booked after the halve may have been raised. The boundary is never rebuilt
+        from the bookings of a later moment: a latch written outside the portfolio, or a line lost to a crash,
+        leaves no boundary, and the halve is then unsizable (``ambiguous_exit_fill``)."""
 
         scope = f"{policy.SCOPE_ISIN}:{isin}"
         tag = f"since_{since.isoformat()}_sells_"
+        found: int | None = None
         for record in self._records():
             if record.get("kind") == "latch" and record.get("latch") == LATCH_SELL_BASELINE and record.get("scope") == scope:
                 reason = str(record["reason"])
                 if reason.startswith(tag):
-                    return int(reason.removeprefix(tag))
-        count = len(self._sell_bookings(self._by_isin[isin]))
-        self._append("latch", {"latch": LATCH_SELL_BASELINE, "scope": scope, "reason": f"{tag}{count}"})
-        return count
+                    found = int(reason.removeprefix(tag))
+        return found
 
-    def _record_sell_baselines(self, state: RiskState) -> None:
-        for isin in sorted(state.open_exits):
-            if state.open_exits[isin].reason == HALVE:
-                self._sell_baseline(isin, state.open_exits[isin].since)
+    def _record_sell_boundaries(self, session: date, snap: AccountSnapshot) -> None:
+        """Persist the sell booking count of every held name before the latch can open an exit for ``session``.
+
+        The latest line for (name, session) stands, so a retry after a crash that never reached the latch supersedes
+        the earlier attempt. Once the latch has evaluated the session this is not called again."""
+
+        for holding in snap.holdings:
+            isin = holding.instrument.isin
+            count = len(self._sell_bookings(holding.instrument))
+            if self._sell_boundary(isin, session) != count:
+                self._append(
+                    "latch",
+                    {
+                        "latch": LATCH_SELL_BASELINE,
+                        "scope": f"{policy.SCOPE_ISIN}:{isin}",
+                        "reason": f"since_{session.isoformat()}_sells_{count}",
+                    },
+                )
 
     def _ambiguous_exit_fill(self, isin: str, current: OpenExit) -> bool:
         """True when a sell booked while this halve was open is not under its own intent ids (and pauses the name).
@@ -788,9 +818,12 @@ class ShadowPortfolio:
         if current.reason != HALVE:
             return False
         own = self._own_id(exit_obligation_id(HALVE, isin, current.since))
-        baseline = self._sell_baseline(isin, current.since)
+        boundary = self._sell_boundary(isin, current.since)
+        if boundary is None:
+            self._pause_isin(AMBIGUOUS_EXIT_FILL, isin, "no sell booking boundary was recorded before this halve opened")
+            return True
         sells = self._sell_bookings(self._by_isin[isin])
-        if not any(not own.match(str(b.proposal_id)) for b in sells[baseline:]):
+        if not any(not own.match(str(b.proposal_id)) for b in sells[boundary:]):
             return False
         self._pause_isin(AMBIGUOUS_EXIT_FILL, isin, "sell booked on a name with an open halve under an id that is not the halve's")
         return True
@@ -959,31 +992,36 @@ class ShadowPortfolio:
 
     # -- release -----------------------------------------------------------------------------------
 
-    def _adjustment_booked(self, isin: str, holding: Holding, pause_seq: int) -> bool:
-        """True when the ledger quantity moved at an unchanged cost basis since the pause was raised.
+    def _adjustment_booked(self, isin: str, pause_seq: int) -> bool:
+        """True when the account exposes an explicit adjustment record for this name and the ex-date it was paused on.
 
-        A booked split or bonus changes the quantity and leaves the cost where it was. A buy or a sell moves the cost,
-        so a quantity that differs only because of one is not an adjustment (a buy booked on the ex-date session, before
-        the close mark, raises the quantity too). The reference is every committed mark of the name since the pause
-        that carries the ledger's current cost; with none, nothing says the adjustment was booked.
+        The evidence is a record the account books (``corporate_action_adjustments``: ticker, kind, ex_date), never an
+        inference from quantities or cost: equal cost with a different quantity can be a buy and a sell as well as a
+        bonus. A committed mark since the pause names the kind and the ex-date session; the record must match both.
+        The real ``ExecutionLedger`` exposes no such record, so on it nothing is ever booked.
         """
 
-        quantity = Decimal(holding.quantity)
-        return any(
-            Decimal(str(r["cost"])) == holding.cost and Decimal(str(r["quantity"])) != quantity
+        records = getattr(self._account, "corporate_action_adjustments", None)
+        if records is None:
+            return False
+        ticker = self._by_isin[isin].ticker
+        wanted = {
+            (str(r["corporate_action"]), str(r["as_of_date"]))
             for r in self._committed_marks()
-            if r.get("isin") == isin and int(r["seq"]) > pause_seq
+            if r.get("isin") == isin and int(r["seq"]) > pause_seq and r.get("corporate_action")
+        }
+        return any(
+            a.ticker == ticker and (str(a.kind), a.ex_date.isoformat()) in wanted for a in records()
         )
 
     def release_corporate_action(self, isin: str, reason: str) -> Mapping[str, Any]:
         """The release of an ``unresolved_corporate_action`` pause (Q-6). ``policy.resume`` refuses it.
 
-        Refused ``corporate_action_not_booked`` for a name that is still held unless the ledger shows an adjustment: a
-        quantity that differs from a committed mark since the pause at the same cost basis. Without one the next mark
-        would value the unadjusted quantity at the adjusted close (the false -50%); a buy or a partial sell that books
-        on the ex-date session changes the quantity at another cost and is not an adjustment. Refused
-        ``exit_owed_in_pre_adjustment_units`` while a halve is open for it. The real ``ExecutionLedger`` has no
-        booking path for a split or bonus yet; until one exists the operator flattens the name or the pause stays open.
+        Refused ``corporate_action_not_booked`` for a name that is still held unless the account exposes an explicit
+        adjustment record for the ex-date (see ``_adjustment_booked``); without one the next mark would value the
+        unadjusted quantity at the adjusted close (the false -50%). Refused ``exit_owed_in_pre_adjustment_units`` while
+        a halve is open for it. The real ``ExecutionLedger`` has no adjustment record, so on it the release is refused
+        while the name is held; the operator flattens the name or the pause stays open.
         A name that is no longer held is released freely. A stop or flatten held out for the name is proposed again
         from the next decide (both sell what is held).
         """
@@ -1004,7 +1042,7 @@ class ShadowPortfolio:
         self._commit_session(state)
         holding = next((h for h in self.snapshot().holdings if h.instrument.isin == isin), None)
         if holding is not None:
-            if not self._adjustment_booked(isin, holding, min(seqs)):
+            if not self._adjustment_booked(isin, min(seqs)):
                 raise PortfolioError("corporate_action_not_booked")
             current = state.open_exits.get(isin)
             if current is not None and current.reason == HALVE:
