@@ -2472,3 +2472,23 @@ def test_codex_r2_1_a_search_inside_the_budget_is_still_exhaustive(tmp_path, mon
     world.mark(D3, AAA="75")
     assert steps[0] > 0
     assert 0 < Decimal(carried_line(world, D3)["carried_value"]) <= Decimal("11020")
+
+
+def test_opus_r2_probe_e_a_crashed_attempts_boundary_is_never_read_as_the_session_before_it(tmp_path, monkeypatch):
+    """Opus r2 probe E: carried at D2 (100 at 15000). A buy of 20 at 101 books, the D3 attempt dies before the latch line
+    (its boundary line is written, naming 2 bookings), then a sell of 10 books and the retry writes its own line (3). The
+    carry starts from D2's boundary (1 booking), so it replays buy and sell: 90 x 150 + 2020 = 15520, reconciled, no
+    pause. A boundary that ignores the session reads the retry's line for D2 and sees no bookings since."""
+    world = carried_world(tmp_path)
+    world.account.buy("AAA", 20, "101")
+    crash_before_latch(world, monkeypatch)
+    with pytest.raises(Died):
+        world.mark(D3, AAA="75")
+    monkeypatch.undo()
+    world.account.sell("AAA", 10, "100")
+    again = world.restart()
+    after = again.mark(D3, AAA="75")
+    line = [r for r in again.records("position_mark") if r["as_of_date"] == D3.isoformat() and r["isin"] == A][-1]  # the retry's line supersedes the attempt's
+    assert (line["carried_quantity"], Decimal(line["carried_value"])) == ("110", Decimal("15520"))
+    assert after.equity == again.account.cash + Decimal("15520") and after.peak == Decimal("55000")
+    assert "carry_unreconciled" not in pauses(again)
