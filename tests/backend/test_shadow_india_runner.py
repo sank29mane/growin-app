@@ -1666,6 +1666,29 @@ def test_the_real_held_name_read_uses_the_signal_steps_quarantine_window(tmp_pat
         held_names_quarantined(inputs, held, sig.AS_OF, sig.S)
 
 
+def test_a_held_name_bought_under_a_successor_isin_is_flagged_by_a_quarantined_bar_in_the_window(tmp_path, monkeypatch):
+    """Break-proof: read only the anchor ISIN as held (``{anchor} & held``) and this name, held under its successor, goes unflagged."""
+
+    import test_shadow_india_signals as sig
+
+    victim, clean = sig.ANCHORS[3], sig.ANCHORS[4]
+    successor, clean_successor = "INE9SUCCESSOR1", "INE9SUCCESSOR2"
+    cut = sig.HIST[-20]  # the ISIN change: sessions from here carry the successor, the quarantined bar is after it
+    rows = []
+    for row in sig.history(quarantined=[(victim, sig.HIST[-12])]):
+        if row.trade_date >= cut and row.anchor_isin in (victim, clean):
+            row = row.model_copy(update={"isin": successor if row.anchor_isin == victim else clean_successor})
+        rows.append(row)
+    assert {r.isin for r in rows if r.anchor_isin == victim} == {victim, successor}  # a two-segment lineage
+    monkeypatch.setattr(
+        signals_module, "bars_as_of",
+        lambda store, **kw: sig.live_result(rows, as_of=kw["as_of"], decision=kw["decision_session"]))
+    inputs = sig.make_inputs(tmp_path)
+    assert held_names_quarantined(inputs, [successor], sig.AS_OF, sig.S) == frozenset({successor})
+    assert held_names_quarantined(inputs, [victim, clean_successor], sig.AS_OF, sig.S) == frozenset({victim})  # old segment too
+    assert held_names_quarantined(inputs, [clean_successor], sig.AS_OF, sig.S) == frozenset()  # same shape, no quarantined bar
+
+
 def test_a_non_evaluation_day_without_a_quarantine_still_marks_and_stops_normally(world):
     own(world, "AAA", 160)
     premark(world)
