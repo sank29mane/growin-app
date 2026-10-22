@@ -12,7 +12,9 @@ runtime. It is skipped unless ``GROWIN_LIVE_CRITIC_BASE_URL`` and
 
 The critic needs a reasoning model with thinking on: the call sends no
 ``response_format`` (the schema is in the prompt), and a reply with no reasoning
-evidence is refused (D3).
+evidence is refused (D3). D3 relies on the runtime splitting its reasoning out of
+``content``; one that leaves ``<think>...</think>`` inline in ``content`` fails strict
+parsing as STRUCTURED_OUTPUT_INVALID (reported as CRITIC_OUTPUT_INVALID), not REASONING_ABSENT.
 
 Per case it prints PASS, FALSE_APPROVE, FAIL_CLOSED, SOFT or FALSE_BLOCK. It fails on
 any FALSE_APPROVE, any FAIL_CLOSED (CRITIC_OUTPUT_INVALID or MODEL_MISMATCH) and any
