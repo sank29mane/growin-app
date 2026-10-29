@@ -527,6 +527,11 @@ SEEDED_SIDE_TAMPERS = {
     "fetch time of an older snapshot": ("UPDATE index_list_snapshots SET fetched_at_utc = fetched_at_utc + "
                                         "INTERVAL 1 MINUTE WHERE source_sha256 = ?", [blob_sha("n_old")]),
     "a whole older snapshot": ("DELETE FROM index_list_snapshots WHERE source_sha256 = ?", [blob_sha("n_old")]),
+    # extra rows, not missing ones: a seeded-side read bounded by the cutoff would hide both
+    "a late snapshot row": ("INSERT INTO index_list_snapshots VALUES (?, 'nifty500', ?, 500, '[]', ?)",
+                            [blob_sha("n_late"), INDEX_LISTS["n_late"][1].replace(tzinfo=None), "0" * 64]),
+    "an orphan member row": ("INSERT INTO index_list_members VALUES (?, 'nifty500', 'INE000000000', 'ORPHANCO', 'EQ', "
+                             "'Orphan Co', 'Industry', ?)", ["f" * 64, "0" * 64]),
 }
 
 

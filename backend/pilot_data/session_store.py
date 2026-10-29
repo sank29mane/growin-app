@@ -532,7 +532,8 @@ def _parity(research: PilotDataStore, session: PilotDataStore, *, targets: Targe
         got_members = session.query(members.format(join=""))
         if got_members != want_members:
             raise _fail("latest_index_list", f"the seeded index list members ({len(got_members)}) differ from the "
-                                              f"research members of those snapshots ({len(want_members)})")
+                                              "research members of the snapshots fetched by window_start "
+                                              f"({len(want_members)})")
         out.append(ParityRow(reader="latest_index_list", compared=len(want_snapshots) + len(want_members),
                              detail="every snapshot fetched by window_start with its metadata, and every member row"))
     a, b = latest_snapshot(session, on_or_before=window[1]), latest_snapshot(research, on_or_before=window[1])

@@ -72,7 +72,8 @@ def _parser() -> argparse.ArgumentParser:
         if name in ("resume", "status"):
             command.add_argument(
                 "--private-dir", default=None,
-                help="private/ directory holding india/shadow_forbidden.json (the registered forbidden literals)",
+                help="private/ directory holding india/shadow_forbidden.json (the registered forbidden literals). "
+                     "Required: resume and status refuse without it (forbidden_literals_not_registered)",
             )
         if name in ("resume", "hand-flatten"):
             command.add_argument("--reason", required=True)
