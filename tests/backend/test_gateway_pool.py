@@ -20,6 +20,7 @@ from __future__ import annotations
 import http.client
 import select
 import socket
+import ssl
 import struct
 import sys
 import threading
@@ -31,7 +32,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "gateway" / "vm"))
 
-from gateway_vm.pool import PooledTransport  # noqa: E402
+from gateway_vm.pool import PooledTransport, _CountingSocket, _peer_has_spoken  # noqa: E402
 from gateway_vm.transport import (  # noqa: E402
     AllowedHost,
     HttpClientTransport,
@@ -429,7 +430,7 @@ class _BrokenWriteSocket:
         self._inner = inner
         self.writes = 0
 
-    def sendall(self, data):
+    def send(self, data, flags=0):  # the pool's counting wrapper sends through send, so zero bytes leave
         self.writes += 1
         raise BrokenPipeError
 
@@ -487,6 +488,103 @@ def test_a_reset_after_the_server_read_a_reused_request_is_protocol_and_never_re
     transport.close()
 
 
+class _HeaderThenResetServer:
+    """Raw loopback server. /first gets a 200; any other request is read up to the end
+    of its headers (the body is never read), then the connection is reset with RST."""
+
+    def __init__(self) -> None:
+        self.request_lines: list[str] = []
+        self.listener = socket.create_server(("127.0.0.1", 0))
+        self.port = self.listener.getsockname()[1]
+        self.thread = threading.Thread(target=self._accept, daemon=True)
+        self.thread.start()
+
+    def _accept(self) -> None:
+        while True:
+            try:
+                conn, _ = self.listener.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
+
+    def _serve(self, conn: socket.socket) -> None:
+        conn.settimeout(10)
+        buf = b""
+        try:
+            while True:
+                while b"\r\n\r\n" not in buf:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        return
+                    buf += chunk
+                head, _, buf = buf.partition(b"\r\n\r\n")
+                line = head.split(b"\r\n")[0].decode()
+                if b"x-test" not in head.lower():  # a stray local client
+                    conn.sendall(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+                    continue
+                self.request_lines.append(line)
+                if " /first" in line:
+                    conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                    continue
+                conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                return
+        except OSError:
+            pass
+        finally:
+            conn.close()  # with SO_LINGER 0 set above this is the RST
+
+    def stop(self) -> None:
+        self.listener.close()
+
+
+class _WaitForResetAfterFirstSend:
+    """Real socket underneath. After the first send (the headers) it waits until the
+    server's RST has arrived, so the next send (the body) fails with a real error."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self.sends = 0
+
+    def send(self, data, flags=0):
+        self.sends += 1
+        taken = self._inner.send(data, flags)  # raises for real once the RST has arrived
+        if self.sends == 1:
+            readable, _, _ = select.select([self._inner], [], [], 5)
+            assert readable, "the server never reset the connection"
+        return taken
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_a_reset_between_the_headers_and_the_body_is_protocol_and_never_resent(connect_spy, method):
+    """http.client sends headers and body separately (Breeze sends GETs with bodies).
+
+    The server read the headers, then reset before the body was written. The write
+    raised, but the request was partly delivered, so it is neither retried nor 'connect'.
+    """
+    server = _HeaderThenResetServer()
+    transport = PooledTransport({"127.0.0.1": AllowedHost("http", server.port)})
+    try:
+        url = f"http://127.0.0.1:{server.port}"
+        assert get(transport, url + "/first").body == b"ok"
+        (pool,) = transport._pools.values()
+        ((conn, _last_used),) = pool.idle
+        spy_sock = conn.sock = _WaitForResetAfterFirstSend(conn.sock)
+        connect_spy.clear()
+        with pytest.raises(TransportError) as err:
+            get(transport, url + "/again", method=method, body=b'{"x":1}')
+        assert err.value.kind == "protocol"
+        assert spy_sock.sends == 2  # the headers went, then the body write failed for real
+        assert server.request_lines == ["GET /first HTTP/1.1",f"{method} /again HTTP/1.1"]
+        assert connect_spy == []  # no replacement connection was opened to resend on
+        assert idle_count(transport) == 0
+    finally:
+        transport.close()
+        server.stop()
+
+
 def test_a_connection_idle_longer_than_idle_s_is_not_reused(up):
     clock = ManualClock()
     transport = pooled(up, idle_s=4.0, clock=clock)
@@ -498,6 +596,103 @@ def test_a_connection_idle_longer_than_idle_s_is_not_reused(up):
     get(transport, up.url("/c"))
     assert up.connections == 2
     transport.close()
+
+
+# ------------------------------------------------------------- the probe
+
+
+@pytest.fixture()
+def socket_pair():
+    a, b = socket.socketpair()
+    yield a, b
+    a.close()
+    b.close()
+
+
+def conn_with(sock) -> http.client.HTTPConnection:
+    conn = http.client.HTTPConnection("127.0.0.1")
+    conn.sock = sock
+    return conn
+
+
+def test_the_probe_calls_a_quiet_idle_socket_alive_and_a_spoken_or_closed_one_dead(socket_pair):
+    a, b = socket_pair
+    conn = conn_with(a)
+    assert _peer_has_spoken(conn) is False
+    b.send(b"x")  # bytes nobody asked for
+    assert _peer_has_spoken(conn) is True
+    a.recv(1)
+    assert _peer_has_spoken(conn) is False
+    b.close()  # EOF
+    assert _peer_has_spoken(conn) is True
+
+
+def test_the_probe_sees_through_the_counting_wrapper(socket_pair):
+    a, b = socket_pair
+    conn = conn_with(_CountingSocket(a))
+    assert _peer_has_spoken(conn) is False
+    b.close()
+    assert _peer_has_spoken(conn) is True
+
+
+def test_the_probe_treats_a_missing_or_closed_socket_as_dead(socket_pair):
+    a, _b = socket_pair
+    assert _peer_has_spoken(conn_with(None)) is True
+    a.close()
+    assert _peer_has_spoken(conn_with(a)) is True
+
+
+def test_the_probe_works_for_descriptors_at_or_above_1024(socket_pair):
+    """select.select raises ValueError there, which used to read as 'dead' and turned pooling off."""
+    import fcntl
+    import resource
+
+    a, b = socket_pair
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    want = 2048
+    if soft < want:
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (want if hard == resource.RLIM_INFINITY else min(want, hard), hard))
+        except (ValueError, OSError):
+            pytest.skip("cannot raise the descriptor limit")
+    try:
+        try:
+            fd = fcntl.fcntl(a.fileno(), fcntl.F_DUPFD, 1100)
+        except OSError:
+            pytest.skip("cannot get a descriptor above 1024")
+        high = socket.socket(fileno=fd)
+        try:
+            assert high.fileno() >= 1024
+            conn = conn_with(high)
+            assert _peer_has_spoken(conn) is False  # quiet and alive
+            b.send(b"x")
+            assert _peer_has_spoken(conn) is True
+        finally:
+            high.close()
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
+def test_the_probe_calls_a_tls_socket_with_buffered_decrypted_bytes_dead(socket_pair):
+    """SSL can hold decrypted bytes the descriptor no longer shows as readable."""
+
+    class FakeTLS(ssl.SSLSocket):
+        buffered = 3
+
+        def pending(self):
+            return self.buffered
+
+    a, _b = socket_pair
+    fake = FakeTLS.__new__(FakeTLS)
+    socket.socket.__init__(fake, fileno=a.detach())  # SSLSocket.__init__ refuses direct use; this is a quiet open fd
+    try:
+        conn = conn_with(fake)
+        assert _peer_has_spoken(conn) is True
+        FakeTLS.buffered = 0
+        assert _peer_has_spoken(conn) is False
+    finally:
+        FakeTLS.buffered = 3
+        fake.close()
 
 
 # --------------------------------------------- what never returns to the pool

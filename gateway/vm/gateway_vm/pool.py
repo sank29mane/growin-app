@@ -18,9 +18,13 @@ A request is never sent twice because a response failed to arrive. An idle
 connection is probed before reuse: if its socket is readable the peer closed it
 (or sent junk), so it is dropped and a fresh one is opened before anything is
 written. A reused connection whose write itself fails (the request never left)
-is replaced once, for GET only. A failure after the write completed, such as the
-peer resetting or closing before any response byte, is TransportError("protocol")
-and nothing is resent: the client cannot tell "never read" from "read, then died".
+is replaced once, for GET only, and only when the socket provably took zero bytes
+of the request: every send on a pooled socket is counted. http.client writes the
+headers and the body separately (and Breeze sends GETs with bodies), so an error
+partway through a request can follow bytes the server already read. Those are
+TransportError("protocol"), never resent. So is a failure after the write completed,
+such as the peer resetting or closing before any response byte: the client cannot
+tell "never read" from "read, then died". Zero bytes written is "connect".
 
 Nothing is written to disk and no body is kept past the call (OD-17).
 """
@@ -28,7 +32,7 @@ Nothing is written to disk and no body is kept past the call (OD-17).
 from __future__ import annotations
 
 import http.client
-import select
+import selectors
 import ssl
 import threading
 import time
@@ -50,10 +54,12 @@ from .transport import (
 
 _CHUNK = 64 * 1024
 
-# A reused connection the peer already closed can fail while the request is
-# being written. Only these, raised from conn.request(), mean the request did not
-# reach the peer. RemoteDisconnected and a reset from getresponse() are not here
-# on purpose: the write had completed, so the server may have read the request.
+# A reused connection the peer already closed can fail while the request is being
+# written. These, raised from conn.request() with zero bytes handed to the socket,
+# mean the request did not reach the peer. Once any byte was sent they prove nothing
+# (the server may have read the headers), so they are never retried then.
+# RemoteDisconnected and a reset from getresponse() are not here on purpose: the
+# write had completed, so the server may have read the request.
 # Timeouts are not here either: a request that timed out may have been processed.
 _WRITE_PHASE_ERRORS = (
     http.client.CannotSendRequest,
@@ -64,24 +70,57 @@ _WRITE_PHASE_ERRORS = (
 
 
 class _StaleConnection(Exception):
-    """A reused connection failed while the request was being written."""
+    """A reused connection took none of the request before its write failed."""
+
+
+class _CountingSocket:
+    """Delegates to a real socket and counts the bytes its sends actually took.
+
+    sendall is a loop over send, so when a write fails `sent` is exactly what was
+    handed to the kernel before the error: zero means the request never left.
+    """
+
+    def __init__(self, raw) -> None:
+        self.raw = raw
+        self.sent = 0
+
+    def send(self, data, flags: int = 0) -> int:
+        taken = self.raw.send(data, flags)
+        self.sent += taken
+        return taken
+
+    def sendall(self, data, flags: int = 0) -> None:
+        view = memoryview(data).cast("B")
+        while view:
+            view = view[self.send(view, flags) :]
+
+    def __getattr__(self, name):
+        return getattr(self.raw, name)
 
 
 def _peer_has_spoken(conn: http.client.HTTPConnection) -> bool:
     """True when an idle connection must not be reused: no socket, or its socket is readable.
 
     An idle HTTP/1.1 connection has nothing to read. Readable means the peer closed
-    it (EOF), reset it, or sent bytes nobody asked for. Non-blocking, like
-    urllib3's is_connection_dropped.
+    it (EOF), reset it, or sent bytes nobody asked for. For TLS, bytes already
+    decrypted and buffered by SSL (pending) are invisible to the descriptor, so they
+    count as the peer having spoken too. A late TLS 1.3 session ticket can make a
+    healthy socket look readable; that is a false discard, which costs one handshake
+    and is safe. Non-blocking, like urllib3's is_connection_dropped. A selector, not
+    select.select, because select raises ValueError for descriptors >= 1024.
     """
     sock = conn.sock
     if sock is None:
         return True
+    raw = sock.raw if isinstance(sock, _CountingSocket) else sock
     try:
-        readable, _, _ = select.select([sock], [], [], 0)
+        if isinstance(raw, ssl.SSLSocket) and raw.pending() > 0:
+            return True
+        with selectors.DefaultSelector() as selector:
+            selector.register(raw, selectors.EVENT_READ)
+            return bool(selector.select(0))
     except (OSError, ValueError):  # closed or invalid descriptor
         return True
-    return bool(readable)
 
 
 @dataclass
@@ -213,7 +252,7 @@ class PooledTransport:
                     return response
                 except _StaleConnection:
                     if method == "GET" and attempt == 0:
-                        continue  # the write failed, so nothing was delivered: one replacement, reads only
+                        continue  # the write failed with zero bytes sent: one replacement, reads only
                     raise TransportError("connect", host) from None
                 finally:
                     if keep:
@@ -241,12 +280,22 @@ class PooledTransport:
         set_timeout = HttpClientTransport._set_timeout
         try:
             set_timeout(conn, host, timeouts, deadline)
+            sock = conn.sock
+            if sock is None:  # the probe or _connect left one; never let http.client reopen it unseen
+                raise TransportError("connect", host)
+            if not isinstance(sock, _CountingSocket):
+                sock = conn.sock = _CountingSocket(sock)
+            sock.sent = 0
             try:
                 conn.request(method, path, body=body, headers=dict(headers))
-            except _WRITE_PHASE_ERRORS:
-                if reused:
+            except (TimeoutError, ssl.SSLError):
+                raise  # classified below, as before
+            except (*_WRITE_PHASE_ERRORS, OSError) as exc:
+                if sock.sent:  # part of the request left: the server may have seen it
+                    raise TransportError("protocol", host) from None
+                if reused and isinstance(exc, _WRITE_PHASE_ERRORS):
                     raise _StaleConnection from None
-                raise TransportError("protocol", host) from None
+                raise TransportError("connect", host) from None
             set_timeout(conn, host, timeouts, deadline)
             resp = conn.getresponse()  # a drop from here on is "protocol": the request was written
         except TransportError:
