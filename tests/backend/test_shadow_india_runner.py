@@ -1494,6 +1494,20 @@ def test_an_entry_the_vm_body_refuses_stays_a_skip_and_records_no_pause(world, m
     assert report.intents == [] and open_events(world) == []
 
 
+def test_a_strategy_sell_the_vm_body_refuses_stays_a_skip_and_records_no_pause(world, monkeypatch):
+    """Break-proof: pause on a refused strategy sell too (``leg in (LEG_EXIT, LEG_SWING)``) and this goes red."""
+    own(world, "AAA", 100)
+    premark(world)
+    set_closes(world, AAA="100")  # no stop: AAA only falls out of the hold cutoff
+    world.script.result = evaluated("CCC", entries=False)
+    refuse_body(world, monkeypatch, "SELL", MintMismatch("quantity"))
+    report = world.decide()
+    assert (ISINS["AAA"], "body_invalid:quantity") in report.skipped
+    assert intents_of(world, "SELL") == [] and report.refused_exits == []
+    assert pauses_of(world, "contract_mismatch") == [] and open_events(world) == []
+    assert report.status == "done"
+
+
 def test_an_unexpected_error_building_an_exit_body_propagates_and_is_not_swallowed(world, monkeypatch):
     own(world, "AAA", 160)
     premark(world)
