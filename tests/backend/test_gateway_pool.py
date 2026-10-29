@@ -3,10 +3,16 @@
 A real ThreadingHTTPServer on 127.0.0.1 stands in for the upstream; nothing
 leaves the machine. The server counts accepted connections and requests in
 flight so reuse and the connection cap are measured, not assumed.
+
+The port is an ephemeral one on a shared loopback, so other local processes can
+and do connect to it (a node dev tool probing for servers was caught doing
+`GET /`). Only requests carrying the X-Test header that `get` sends are counted;
+anything else gets a bare 404 and leaves every counter alone.
 """
 
 from __future__ import annotations
 
+import http.client
 import socket
 import sys
 import threading
@@ -46,6 +52,8 @@ class Upstream:
         self.max_in_flight = 0
         self.bodies: list[bytes] = []
         self.lock = threading.Lock()
+        self.entered = threading.Event()  # a /hold request is inside the handler
+        self.release = threading.Event()  # lets every /hold request finish
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -53,8 +61,7 @@ class Upstream:
 
             def setup(self):
                 super().setup()
-                with outer.lock:
-                    outer.connections += 1
+                self.counted = False  # this connection has not yet carried one of our requests
 
             def log_message(self, *_a):
                 pass
@@ -62,13 +69,24 @@ class Upstream:
             def _serve(self):
                 length = int(self.headers.get("content-length") or 0)
                 body = self.rfile.read(length) if length else b""
+                if self.headers.get("X-Test") is None:  # not from `get`: a stray local client
+                    self.send_response(404)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 with outer.lock:
+                    if not self.counted:
+                        self.counted = True
+                        outer.connections += 1
                     outer.requests += 1
                     outer.bodies.append(body)
                     outer.in_flight += 1
                     outer.max_in_flight = max(outer.max_in_flight, outer.in_flight)
                 try:
                     path = self.path
+                    if path.startswith("/hold"):  # blocks until the test releases it; no timing guess
+                        outer.entered.set()
+                        outer.release.wait(10)  # safety cap so a broken pool cannot hang the suite
                     if path.startswith("/slow"):
                         time.sleep(float(path.split("=")[1]) if "=" in path else 0.4)
                     if path.startswith("/redirect"):
@@ -147,6 +165,7 @@ class Upstream:
 def up():
     server = Upstream()
     yield server
+    server.release.set()  # never leave a /hold handler parked
     server.stop()
 
 
@@ -247,20 +266,37 @@ def test_a_caller_that_cannot_get_a_slot_in_time_is_a_timeout_and_busy_calls_fin
     results: list[object] = []
 
     def busy():
-        results.append(get(transport, up.url("/slow?t=1.0")).status)
+        results.append(get(transport, up.url("/hold")).status)
 
     thread = threading.Thread(target=busy)
     thread.start()
-    time.sleep(0.2)  # the busy call holds the only slot
+    assert up.entered.wait(10)  # the busy call is inside the upstream, so it holds the only slot
     started = time.monotonic()
     with pytest.raises(TransportError) as err:
         get(transport, up.url("/x"))
     waited = time.monotonic() - started
-    assert err.value.kind == "timeout" and 0.25 <= waited < 0.9
+    assert err.value.kind == "timeout" and waited >= 0.25  # it waited out pool_wait_s, not less
+    # The busy call cannot finish until released, so timing out proves the pool did
+    # not make the refused caller wait for it, with no upper wall-clock bound to flake.
+    assert thread.is_alive() and results == []
+    up.release.set()
     thread.join(10)
-    assert results == [200]
+    assert not thread.is_alive() and results == [200]
     assert up.requests == 1  # the refused caller never reached the upstream
     assert get(transport, up.url("/after")).status == 200  # the slot came back
+    transport.close()
+
+
+def test_stray_loopback_traffic_is_not_counted_as_upstream_requests(up):
+    """A foreign client on the test's port must not move any counter (the flake this fixes)."""
+    transport = pooled(up)
+    stray = http.client.HTTPConnection("127.0.0.1", up.port, timeout=5)
+    stray.request("GET", "/", headers={"User-Agent": "node"})
+    assert stray.getresponse().status == 404
+    stray.close()
+    assert get(transport, up.url("/ok")).status == 200
+    assert (up.requests, up.connections, len(up.bodies)) == (1, 1, 1)
+    assert up.max_in_flight == 1
     transport.close()
 
 
