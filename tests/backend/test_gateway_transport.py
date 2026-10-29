@@ -54,6 +54,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/slow":
                 self.server.held.set()  # type: ignore[attr-defined]
                 self.server.release.wait(timeout=5)  # type: ignore[attr-defined]
+                self.server.done.set()  # type: ignore[attr-defined]
                 self._send(200, b"late")
             elif path == "/trickle":
                 self.send_response(200)
@@ -63,6 +64,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
                 self.server.held.set()  # type: ignore[attr-defined]
                 self.server.release.wait(timeout=5)  # type: ignore[attr-defined]
+                self.server.done.set()  # type: ignore[attr-defined]
             elif path == "/big":
                 self._send(200, b"z" * (2 * 1024 * 1024))
             elif path == "/bigstream":
@@ -96,6 +98,7 @@ def server():
     srv.paths = []  # type: ignore[attr-defined]
     srv.held = threading.Event()  # type: ignore[attr-defined]
     srv.release = threading.Event()  # type: ignore[attr-defined]
+    srv.done = threading.Event()  # type: ignore[attr-defined]  # set by a handler that got past release
     thread = threading.Thread(
         target=lambda: srv.serve_forever(poll_interval=0.02), daemon=True
     )
@@ -160,7 +163,7 @@ def test_read_timeout(server):
             call(transport, base + "/slow", timeouts=tr.Timeouts(2.0, 0.3, 10.0))
         assert err.value.kind == "timeout"
         assert server.held.is_set()
-        assert not server.release.is_set()
+        assert not server.done.is_set()  # the handler is still blocked
         # Returned on the read budget. The handler is still blocked, so this is
         # not "the slow body eventually finished".
         assert time.monotonic() - start < 2.0
@@ -176,7 +179,7 @@ def test_total_deadline_stops_a_trickling_body(server):
             call(transport, base + "/trickle", timeouts=tr.Timeouts(2.0, 5.0, 0.3))
         assert err.value.kind == "timeout"
         assert server.held.is_set()
-        assert not server.release.is_set()
+        assert not server.done.is_set()  # the handler is still blocked
         assert time.monotonic() - start < 2.0
     finally:
         server.release.set()

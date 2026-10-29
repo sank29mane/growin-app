@@ -32,11 +32,12 @@ class MockMLXModel(nn.Module):
         if 'w2' in params:
             self.w2 = params['w2']
 
-def test_live_trading_loop_integration():
+def _run_loop():
     """
     Simulates 10k iterations of live market ticks, running them through:
     tick -> Online Features -> Welford standardization -> Numba GMM -> MLX Swap + Risk Scale
-    Asserts end-to-end processing latency stays strictly under 2.5ms.
+    Asserts the loop's correctness and returns (avg, p95) latency in ms. The
+    2.5ms tick budget is asserted by the performance test below.
     """
     # 1. Load the real GMM parameters
     gmm_params = load_gmm_params()
@@ -152,9 +153,13 @@ def test_live_trading_loop_integration():
     return avg_latency, p95_latency
 
 
+def test_live_trading_loop_integration():
+    _run_loop()
+
+
 @pytest.mark.performance
 def test_live_trading_loop_latency_budget():
     """The per-tick budget, on a quiet core and without coverage."""
-    avg_latency, p95_latency = test_live_trading_loop_integration()
+    avg_latency, p95_latency = _run_loop()
     assert avg_latency < 2.5, f"Average end-to-end latency {avg_latency:.2f}ms exceeds the 2.5ms budget"
     assert p95_latency < 2.5, f"95th percentile end-to-end latency {p95_latency:.2f}ms exceeds the 2.5ms budget"

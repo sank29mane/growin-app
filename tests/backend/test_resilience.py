@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 from resilience import CircuitBreaker, retry_with_backoff, fallback, CircuitState
 
 class _Clock:
@@ -62,6 +62,20 @@ async def test_retry_with_backoff():
     
     assert result == "Success"
     assert mock_func.call_count == 3
+
+@pytest.mark.asyncio
+async def test_retry_without_a_sleeper_looks_up_asyncio_sleep_per_retry():
+    """Patching asyncio.sleep after the decorator ran must still take effect."""
+    mock_func = AsyncMock(side_effect=[ValueError("Fail 1"), ValueError("Fail 2"), "Success"])
+
+    @retry_with_backoff(max_retries=3, base_delay=0.01, jitter=0.0)
+    async def sensitive_op():
+        return await mock_func()
+
+    with patch("asyncio.sleep", new=AsyncMock()) as fake_sleep:
+        assert await sensitive_op() == "Success"
+    assert fake_sleep.await_count == 2
+
 
 @pytest.mark.asyncio
 async def test_retry_exhausted():

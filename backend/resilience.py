@@ -169,8 +169,6 @@ def retry_with_backoff(
             return await api.get_data()
     """
     def decorator(func: Callable) -> Callable:
-        sleep = sleeper or asyncio.sleep
-
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
             last_exception = None
@@ -191,7 +189,7 @@ def retry_with_backoff(
                     delay = max(0.1, delay)  # Ensure positive delay
                     
                     logger.warning(f"Retry {attempt + 1}/{max_retries} for {func.__name__} in {delay:.2f}s: {e}")
-                    await sleep(delay)
+                    await (sleeper or asyncio.sleep)(delay)
             
             raise last_exception
         

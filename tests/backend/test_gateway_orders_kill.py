@@ -32,6 +32,7 @@ class Fake(ThreadingHTTPServer):
         self.mode = {"status": 200, "body": b"enabled", "delay": 0.0, "headers": {}, "hold": False}
         self.entered = threading.Event()
         self.release = threading.Event()
+        self.done = threading.Event()  # set by a handler that got past release
         self.project = (200, b"enabled")
         self.requests: list[tuple[str, dict[str, str]]] = []
 
@@ -55,6 +56,7 @@ class Handler(BaseHTTPRequestHandler):
             if server.mode["hold"]:
                 server.entered.set()
                 server.release.wait(timeout=5)
+                server.done.set()
             elif server.mode["delay"]:
                 time.sleep(server.mode["delay"])
             status, body = server.mode["status"], server.mode["body"]
@@ -132,7 +134,7 @@ def test_slow_metadata_server_blocks_on_the_timeout(fake):
     elapsed = time.monotonic() - started
     try:
         assert fake.entered.is_set(), "the reader timed out before the request arrived"
-        assert not fake.release.is_set()
+        assert not fake.done.is_set()  # the handler is still blocked
         assert state.enabled is False and state.label == "unreadable"
         assert elapsed < 2.0
     finally:
