@@ -12,8 +12,15 @@ A caller takes a slot with a bounded wait (`pool_wait_s`); no slot in time is
 TransportError("timeout"), which the relay answers as 504. A connection goes
 back to the pool only after a complete response that did not ask to close; a
 too-large, timed-out, cut-short, redirected or Connection: close response
-closes it. A reused connection that fails before any response byte arrived is
-replaced once, for GET only. Nothing else is ever resent.
+closes it.
+
+A request is never sent twice because a response failed to arrive. An idle
+connection is probed before reuse: if its socket is readable the peer closed it
+(or sent junk), so it is dropped and a fresh one is opened before anything is
+written. A reused connection whose write itself fails (the request never left)
+is replaced once, for GET only. A failure after the write completed, such as the
+peer resetting or closing before any response byte, is TransportError("protocol")
+and nothing is resent: the client cannot tell "never read" from "read, then died".
 
 Nothing is written to disk and no body is kept past the call (OD-17).
 """
@@ -21,6 +28,7 @@ Nothing is written to disk and no body is kept past the call (OD-17).
 from __future__ import annotations
 
 import http.client
+import select
 import ssl
 import threading
 import time
@@ -42,11 +50,12 @@ from .transport import (
 
 _CHUNK = 64 * 1024
 
-# A reused connection the peer already closed fails in one of these ways before
-# any response byte arrives. Timeouts are deliberately not on the list: a
-# request that timed out may have been processed, so it is never replayed.
-_STALE_ERRORS = (
-    http.client.RemoteDisconnected,
+# A reused connection the peer already closed can fail while the request is
+# being written. Only these, raised from conn.request(), mean the request did not
+# reach the peer. RemoteDisconnected and a reset from getresponse() are not here
+# on purpose: the write had completed, so the server may have read the request.
+# Timeouts are not here either: a request that timed out may have been processed.
+_WRITE_PHASE_ERRORS = (
     http.client.CannotSendRequest,
     http.client.CannotSendHeader,
     http.client.NotConnected,
@@ -55,7 +64,24 @@ _STALE_ERRORS = (
 
 
 class _StaleConnection(Exception):
-    """A reused connection died before any response byte arrived."""
+    """A reused connection failed while the request was being written."""
+
+
+def _peer_has_spoken(conn: http.client.HTTPConnection) -> bool:
+    """True when an idle connection must not be reused: no socket, or its socket is readable.
+
+    An idle HTTP/1.1 connection has nothing to read. Readable means the peer closed
+    it (EOF), reset it, or sent bytes nobody asked for. Non-blocking, like
+    urllib3's is_connection_dropped.
+    """
+    sock = conn.sock
+    if sock is None:
+        return True
+    try:
+        readable, _, _ = select.select([sock], [], [], 0)
+    except (OSError, ValueError):  # closed or invalid descriptor
+        return True
+    return bool(readable)
 
 
 @dataclass
@@ -139,9 +165,9 @@ class PooledTransport:
                 if not pool.idle:
                     break
                 conn, last_used = pool.idle.pop()
-            if now - last_used < self._idle_s:
+            if now - last_used < self._idle_s and not _peer_has_spoken(conn):
                 return conn, True
-            conn.close()  # idle too long: the peer has probably closed it
+            conn.close()  # idle too long, or the peer closed it: nothing was written to it
         if rule.scheme == "https":
             fresh: http.client.HTTPConnection = http.client.HTTPSConnection(
                 host, port, timeout=timeouts.connect_s, context=self._tls()
@@ -187,7 +213,7 @@ class PooledTransport:
                     return response
                 except _StaleConnection:
                     if method == "GET" and attempt == 0:
-                        continue  # one transparent replacement, reads only
+                        continue  # the write failed, so nothing was delivered: one replacement, reads only
                     raise TransportError("connect", host) from None
                 finally:
                     if keep:
@@ -215,19 +241,20 @@ class PooledTransport:
         set_timeout = HttpClientTransport._set_timeout
         try:
             set_timeout(conn, host, timeouts, deadline)
-            conn.request(method, path, body=body, headers=dict(headers))
+            try:
+                conn.request(method, path, body=body, headers=dict(headers))
+            except _WRITE_PHASE_ERRORS:
+                if reused:
+                    raise _StaleConnection from None
+                raise TransportError("protocol", host) from None
             set_timeout(conn, host, timeouts, deadline)
-            resp = conn.getresponse()
+            resp = conn.getresponse()  # a drop from here on is "protocol": the request was written
         except TransportError:
             raise
         except TimeoutError:
             raise TransportError("timeout", host) from None
         except ssl.SSLError:
             raise TransportError("tls", host) from None
-        except _STALE_ERRORS:
-            if reused:
-                raise _StaleConnection from None
-            raise TransportError("protocol", host) from None
         except (http.client.HTTPException, OSError, ValueError):
             raise TransportError("protocol", host) from None
 

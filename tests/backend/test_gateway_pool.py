@@ -18,7 +18,9 @@ connects a socket to through `socket.socket.connect` or `connect_ex`. A raw
 from __future__ import annotations
 
 import http.client
+import select
 import socket
+import struct
 import sys
 import threading
 import time
@@ -117,6 +119,13 @@ class Upstream:
                         self.wfile.write(payload)
                         self.wfile.flush()
                         self.close_connection = True
+                        return
+                    if path.startswith("/reset"):  # read the request, then RST before any response byte
+                        self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                        self.close_connection = True
+                        self.rfile.close()
+                        self.wfile.close()
+                        self.connection.close()
                         return
                     if path.startswith("/short"):  # promises 100 bytes, sends 10, then closes
                         self.send_response(200)
@@ -364,12 +373,24 @@ def test_a_slot_is_returned_after_every_kind_of_failure(up):
 # ------------------------------------------------------------- staleness
 
 
+def wait_until_peer_closed(transport, timeout: float = 5.0) -> None:
+    """Block until every idle socket is readable (the server's FIN or RST has arrived). No sleep guess."""
+    for pool in transport._pools.values():
+        for conn, _last_used in pool.idle:
+            readable, _, _ = select.select([conn.sock], [], [], timeout)
+            assert readable, "the server never closed the idle connection"
+
+
 def test_a_server_that_closes_after_every_response_still_answers_five_gets(up):
+    # The probe, not a resend, replaces each dead idle connection. The server's close is awaited:
+    # a request written in the instant before the FIN lands is the unavoidable window, and is a
+    # "protocol" error by design (see the double-submit tests), not something this test may paper over.
     transport = pooled(up)
     for i in range(5):
         resp = get(transport, up.url(f"/hangup{i}"))
         assert resp.status == 200 and resp.body == b"bye"
-    assert up.requests >= 5  # a replaced stale connection may add a request; never a failure
+        wait_until_peer_closed(transport)
+    assert up.requests == 5 and up.connections == 5  # exactly one request per request, never a replay
     transport.close()
 
 
@@ -377,26 +398,92 @@ def peer_closed_idle_connection(up, transport) -> None:
     """Leave one pooled connection that the server has already closed."""
     assert get(transport, up.url("/hangup")).body == b"bye"
     assert idle_count(transport) == 1  # the client could not know: no Connection: close was sent
-    time.sleep(0.1)  # let the server's close reach the idle socket
+    wait_until_peer_closed(transport)  # the server's close has reached the idle socket
 
 
-def test_a_dead_idle_connection_is_replaced_once_for_a_get(up):
+def test_a_dead_idle_connection_is_replaced_once_for_a_get(up, connect_spy):
     transport = pooled(up)
     peer_closed_idle_connection(up, transport)
+    connect_spy.clear()
     assert get(transport, up.url("/again")).body == b"ok:/again"
     assert up.connections == 2 and up.requests == 2
+    assert connect_spy == [("127.0.0.1", up.port)]  # the probe discarded the dead socket: one fresh connect
+    assert idle_count(transport) == 1
     transport.close()
 
 
-def test_a_post_on_a_dead_reused_connection_is_connect_and_never_resent(up):
+def test_a_dead_idle_connection_is_discarded_by_the_probe_even_for_a_post(up):
+    # Nothing is written to a connection the probe rejects, so a fresh one is not a resend.
     transport = pooled(up)
     peer_closed_idle_connection(up, transport)
-    before = up.requests
+    resp = get(transport, up.url("/order-like"), method="POST", body=b'{"x":1}')
+    assert resp.status == 200
+    assert up.requests == 2 and up.bodies[1:] == [b'{"x":1}']  # the body reached the server exactly once
+    transport.close()
+
+
+class _BrokenWriteSocket:
+    """Delegates to a real socket, but every write fails the way a peer-closed one does."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self.writes = 0
+
+    def sendall(self, data):
+        self.writes += 1
+        raise BrokenPipeError
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def break_the_idle_socket_write(transport) -> _BrokenWriteSocket:
+    """The idle connection still looks alive to the probe (not readable) but the write will fail."""
+    (pool,) = transport._pools.values()
+    ((conn, _last_used),) = pool.idle
+    conn.sock = _BrokenWriteSocket(conn.sock)
+    return conn.sock
+
+
+def test_a_write_phase_failure_on_a_reused_get_is_retried_exactly_once(up, connect_spy):
+    transport = pooled(up)
+    get(transport, up.url("/first"))
+    broken = break_the_idle_socket_write(transport)
+    connect_spy.clear()
+    assert get(transport, up.url("/again")).body == b"ok:/again"
+    assert broken.writes == 1  # the dead write was attempted once, never repeated on that socket
+    assert up.requests == 2 and up.connections == 2  # /first, then /again once on a fresh connection
+    assert connect_spy == [("127.0.0.1", up.port)]
+    transport.close()
+
+
+def test_a_write_phase_failure_on_a_reused_post_is_connect_and_never_resent(up, connect_spy):
+    transport = pooled(up)
+    get(transport, up.url("/first"))
+    break_the_idle_socket_write(transport)
+    connect_spy.clear()
     with pytest.raises(TransportError) as err:
         get(transport, up.url("/order-like"), method="POST", body=b"{}")
     assert err.value.kind == "connect"
-    assert up.requests == before  # the body was not delivered again on a fresh connection
+    assert up.requests == 1 and connect_spy == []  # no replacement connection was even opened
     assert idle_count(transport) == 0
+    transport.close()
+
+
+@pytest.mark.parametrize("method, body", [("GET", None), ("POST", b'{"x":1}')])
+def test_a_reset_after_the_server_read_a_reused_request_is_protocol_and_never_resent(up, connect_spy, method, body):
+    """The double-submit: the server read /again and died before any response byte."""
+    transport = pooled(up)
+    get(transport, up.url("/first"))
+    assert idle_count(transport) == 1
+    connect_spy.clear()
+    with pytest.raises(TransportError) as err:
+        get(transport, up.url("/reset/again"), method=method, body=body)
+    assert err.value.kind == "protocol"
+    assert up.requests == 2 and up.connections == 1  # /first and /reset/again, each exactly once
+    assert connect_spy == []  # no replacement connection was opened to resend on
+    assert idle_count(transport) == 0
+    assert get(transport, up.url("/after")).status == 200  # the slot and the pool are healthy
     transport.close()
 
 
