@@ -10,8 +10,9 @@ and do connect to it (a node dev tool probing for servers was caught doing
 carrying the X-Test header that `get` sends are counted; anything else gets a
 bare 404 and leaves every counter alone. A server-side accept count cannot tell
 the pool's socket from an idle probe's, so "the pool opened no socket" is
-checked in-process instead: `connect_spy` records every socket connect to the
-upstream's port made by this process.
+checked in-process instead: `connect_spy` records every address this process
+connects a socket to through `socket.socket.connect` or `connect_ex`. A raw
+`_socket` connect would slip past it; the pool has no such path.
 """
 
 from __future__ import annotations
@@ -170,12 +171,18 @@ def connect_spy(monkeypatch):
     """Every (host, port) this process connects a socket to. Stray loopback clients cannot appear here."""
     seen: list[tuple[str, int]] = []
     real = socket.socket.connect
+    real_ex = socket.socket.connect_ex
 
     def spy(self, address):
         seen.append(tuple(address[:2]))
         return real(self, address)
 
+    def spy_ex(self, address):
+        seen.append(tuple(address[:2]))
+        return real_ex(self, address)
+
     monkeypatch.setattr(socket.socket, "connect", spy)
+    monkeypatch.setattr(socket.socket, "connect_ex", spy_ex)
     return seen
 
 
