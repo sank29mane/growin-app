@@ -23,6 +23,8 @@ if str(ROOT / "gateway" / "vm") not in sys.path:
 from gateway_vm import transport as tr  # noqa: E402
 
 FAKE_TOKEN = "FAKE-session-token-abc123"
+_TRICKLE_BYTES = 100
+_TRICKLE_GAP_S = 0.05  # full trickle takes about 5s
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -57,14 +59,18 @@ class Handler(BaseHTTPRequestHandler):
                 self.server.done.set()  # type: ignore[attr-defined]
                 self._send(200, b"late")
             elif path == "/trickle":
+                # One byte every 50ms for ~5s. Each gap is far under the read
+                # timeout, so only the total deadline can stop the client.
                 self.send_response(200)
-                self.send_header("Content-Length", "25")
+                self.send_header("Content-Length", str(_TRICKLE_BYTES))
                 self.end_headers()
-                self.wfile.write(b"x")
-                self.wfile.flush()
-                self.server.held.set()  # type: ignore[attr-defined]
-                self.server.release.wait(timeout=5)  # type: ignore[attr-defined]
-                self.server.done.set()  # type: ignore[attr-defined]
+                for _ in range(_TRICKLE_BYTES):
+                    self.wfile.write(b"x")
+                    self.wfile.flush()
+                    self.server.held.set()  # type: ignore[attr-defined]
+                    if self.server.release.wait(timeout=_TRICKLE_GAP_S):  # type: ignore[attr-defined]
+                        return
+                self.server.done.set()  # type: ignore[attr-defined]  # the whole body was delivered
             elif path == "/big":
                 self._send(200, b"z" * (2 * 1024 * 1024))
             elif path == "/bigstream":
@@ -179,7 +185,8 @@ def test_total_deadline_stops_a_trickling_body(server):
             call(transport, base + "/trickle", timeouts=tr.Timeouts(2.0, 5.0, 0.3))
         assert err.value.kind == "timeout"
         assert server.held.is_set()
-        assert not server.done.is_set()  # the handler is still blocked
+        assert not server.done.is_set()  # the body had not finished arriving
+        # Well under the ~5s the body needs. A blocking read(n) waits for it all.
         assert time.monotonic() - start < 2.0
     finally:
         server.release.set()

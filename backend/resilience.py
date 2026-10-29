@@ -44,8 +44,8 @@ class CircuitBreaker:
     failure_threshold: int = 3
     recovery_timeout: float = 30.0
     half_open_max_calls: int = 1
-    # Tests pass a fake clock. Production uses the wall clock.
-    clock: Callable[[], float] = time.time
+    # Tests pass a fake clock. None means the wall clock, looked up per call.
+    clock: Optional[Callable[[], float]] = None
     
     # Internal state
     _state: CircuitState = field(default=CircuitState.CLOSED, init=False)
@@ -53,11 +53,14 @@ class CircuitBreaker:
     _last_failure_time: float = field(default=0.0, init=False)
     _half_open_calls: int = field(default=0, init=False)
 
+    def _now(self) -> float:
+        return (self.clock or time.time)()
+
     @property
     def state(self) -> CircuitState:
         """Get current state, auto-transitioning from OPEN to HALF_OPEN if timeout passed."""
         if self._state == CircuitState.OPEN:
-            if self.clock() - self._last_failure_time >= self.recovery_timeout:
+            if self._now() - self._last_failure_time >= self.recovery_timeout:
                 self._state = CircuitState.HALF_OPEN
                 self._half_open_calls = 0
                 logger.info(f"CircuitBreaker[{self.name}]: OPEN -> HALF_OPEN (recovery timeout passed)")
@@ -76,7 +79,7 @@ class CircuitBreaker:
     def record_failure(self, error: Exception):
         """Record failed call, potentially opening the circuit."""
         self._failure_count += 1
-        self._last_failure_time = self.clock()
+        self._last_failure_time = self._now()
         
         if self._state == CircuitState.HALF_OPEN:
             # Failure during testing reopens immediately

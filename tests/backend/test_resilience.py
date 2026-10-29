@@ -113,3 +113,15 @@ async def test_fallback_function():
         
     result = await failing_op()
     assert result == "Recovered from Crash"
+
+
+def test_default_clock_resolves_time_time_per_call():
+    """A patch applied after construction must still reach the breaker."""
+    cb = CircuitBreaker(name="late_patch", failure_threshold=1, recovery_timeout=10.0)
+    with patch("time.time", return_value=5_000.0):
+        cb.record_failure(Exception("boom"))
+    assert cb._last_failure_time == 5_000.0
+    with patch("time.time", return_value=5_009.0):
+        assert cb.state == CircuitState.OPEN
+    with patch("time.time", return_value=5_010.0):
+        assert cb.state == CircuitState.HALF_OPEN
