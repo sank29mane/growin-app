@@ -36,6 +36,7 @@ from relay_orders_support import RecordingHttp
 from pilot_data.core import PilotDataError
 from risk_india import rules
 from risk_india.state import LatchStore
+from execution.ledger import InvalidTransition
 from shadow_india import __main__ as cli
 from shadow_india import policy, vm_codes
 from shadow_india.admission import (
@@ -58,6 +59,7 @@ from shadow_india.runner import (
     DecideReport,
     FillOutcome,
     FillQuery,
+    LEG_SWING,
     LiveTablePins,
     NoPostSubmissionEvidence,
     OpenRunRefused,
@@ -2059,3 +2061,109 @@ def test_the_cli_turns_a_relay_error_into_a_typed_message_and_a_nonzero_exit_nev
 def test_a_missing_argument_is_a_usage_error(world):
     code, _ = run_cli(["decide", "--root", str(world.root)])
     assert code == 2
+
+
+# --- resume and an ambiguous exit fill still open in the portfolio -----------------------------------------------------------
+
+
+def ordinary_sell(world: World, symbol: str, quantity: int, price: str = "89", tag: str = "a") -> str:
+    """A sell booked under an id that is not the halve's own (a hand sale, a runner bug): what makes a halve ambiguous."""
+
+    report = DecideReport(S)
+    outcome = run(
+        world.runner._submit(
+            session=S, instrument=instrument_of(world, symbol), side="SELL", quantity=quantity,
+            limit=Decimal(price), reason="exit", batch_id=None, signal_id=f"manual-{symbol}-{tag}", leg=LEG_SWING, report=report,
+        )
+    )
+    assert outcome is not None and outcome.status == "vm_decided", (outcome, report.skipped)
+    pid = report.intents[-1][0]
+    world.runner._prep.book_fill(
+        proposal_id=pid, cumulative_quantity=Decimal(quantity), price=Decimal(price), charges=Decimal(0),
+        schedule_sha256=sha("schedule"), scenario_set_sha256=sha(f"scenario-{symbol}"), attempt_id=f"att-manual-{symbol}-{tag}",
+    )
+    return pid
+
+
+def flatten_aaa_by_hand(world: World) -> None:
+    """The documented way out: the halve's open day order is expired, then the operator sells the whole holding."""
+
+    for record in intents_of(world, "SELL"):
+        if record["symbol"] != "AAA":
+            continue
+        try:
+            world.ledger.expire_simulated_order(record["intent_id"], f"expiry-{record['intent_id'][:12]}", "day_close")
+        except InvalidTransition:  # the ordinary sell is already filled
+            continue
+    ordinary_sell(world, "AAA", holdings(world)["AAA"], tag="flat")
+
+
+def ambiguous_world(world: World) -> int:
+    """AAA, BBB, CCC at -11%: the halt queues a halve each. An ordinary sell of AAA then makes AAA's halve ambiguous."""
+
+    three_down(world, "89")
+    world.script.result = evaluated("DDD", "EEE")
+    world.decide()
+    ordinary_sell(world, "AAA", 10)
+    world.script.result = evaluated("DDD", "EEE")
+    world.runner._portfolio.exit_proposals(S)  # the next sync: the pause is raised once
+    assert policy.AMBIGUOUS_EXIT_FILL in open_events(world)
+    return open_seq(world, policy.AMBIGUOUS_EXIT_FILL)
+
+
+def test_resume_refuses_an_ambiguous_exit_fill_pause_while_the_exit_is_still_ambiguous(world):
+    """Break-proof: drop the ``ambiguous_isins`` check in ``policy.resume`` and both resumes clear the pause."""
+    seq = ambiguous_world(world)
+    assert ISINS["AAA"] in world.runner.ambiguous_exit_isins()
+    before = len(world.evidence.records())
+    with pytest.raises(policy.PolicyError) as refused:
+        world.runner.resume("operator reviewed", pause_seqs=[seq])
+    assert refused.value.code == "ambiguous_exit_still_open"
+    with pytest.raises(policy.PolicyError) as swept:  # the halt is open too, and it is refused first: nothing is swept away
+        world.runner.resume("operator reviewed")
+    assert swept.value.code == "drawdown_resume_requires_latch"
+    code, out = run_cli(
+        cli_args(world, "resume", "--reason", "reviewed", "--pause-seq", str(seq)), runtime_factory=lambda args: world.runner
+    )
+    assert code == 1 and out == {"refused": "ambiguous_exit_still_open"}
+    assert len(world.evidence.records()) == before  # nothing was written
+    assert policy.AMBIGUOUS_EXIT_FILL in open_events(world)
+    # the next decide admits no buy for the name: the pause blocks it
+    buys = {r["symbol"] for r in intents_of(world, "BUY")}
+    world.script.result = evaluated("AAA", "DDD")
+    world.decide()
+    assert {r["symbol"] for r in intents_of(world, "BUY")} == buys
+    assert policy.AMBIGUOUS_EXIT_FILL in open_events(world)
+
+
+def test_resume_clears_the_ambiguous_exit_fill_pause_once_the_name_is_flat(world):
+    seq = ambiguous_world(world)
+    flatten_aaa_by_hand(world)  # nothing is held, so nothing is ambiguous
+    assert holdings(world).get("AAA", 0) == 0
+    assert world.runner.ambiguous_exit_isins() == frozenset()
+    record = world.runner.resume("operator flattened AAA", pause_seqs=[seq])
+    assert record["cleared_pause_seqs"] == [seq]
+    assert policy.AMBIGUOUS_EXIT_FILL not in open_events(world)
+
+
+def test_the_default_resume_clears_the_other_pauses_and_lists_the_ambiguous_one_as_skipped(world):
+    seq = ambiguous_world(world)
+    policy.raise_event(world.evidence, "untyped_response", "relay did not answer")
+    relay = open_seq(world, "untyped_response")
+    code, ok = run_cli(cli_args(world, "resume", "--reason", "relay reviewed"), runtime_factory=lambda args: world.runner)
+    assert code == 0 and relay in ok["resumed"] and seq not in ok["resumed"]
+    assert {"seq": seq, "event": policy.AMBIGUOUS_EXIT_FILL, "why": "ambiguous_exit_still_open"} in ok["skipped"]
+    assert policy.AMBIGUOUS_EXIT_FILL in open_events(world) and "untyped_response" not in open_events(world)
+    flatten_aaa_by_hand(world)  # resolved: the CLI now clears it by default, the halt still stays
+    code, ok = run_cli(cli_args(world, "resume", "--reason", "flattened"), runtime_factory=lambda args: world.runner)
+    halt = open_seq(world, policy.DRAWDOWN_HALT)
+    assert code == 0 and ok["resumed"] == [seq]
+    assert ok["skipped"] == [{"seq": halt, "event": policy.DRAWDOWN_HALT, "why": "drawdown_resume_requires_latch"}]
+    assert open_events(world) == [policy.DRAWDOWN_HALT]
+
+
+def test_the_cli_without_a_wired_runtime_keeps_an_ambiguous_exit_fill_pause_open(world):
+    seq = ambiguous_world(world)
+    code, refused = run_cli(cli_args(world, "resume", "--reason", "x", "--pause-seq", str(seq)))
+    assert (code, refused) == (1, {"refused": "ambiguous_exit_resume_requires_portfolio"})
+    assert policy.AMBIGUOUS_EXIT_FILL in open_events(world)

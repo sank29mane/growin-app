@@ -18,7 +18,12 @@ clear anything:
 - ``resume`` refuses ``unresolved_corporate_action`` too: only the ledger knows whether the split or bonus was booked, so
   ``ShadowPortfolio.release_corporate_action`` is the release. It refuses ``corporate_action_not_booked`` unless an
   explicit ``corporate_action_adjustments`` record exists, because resuming then would mark an unadjusted quantity at
-  the adjusted close and read a false -50%.
+  the adjusted close and read a false -50%;
+- ``resume`` refuses ``ambiguous_exit_fill`` while the ambiguity is still in the portfolio: a sell booked under a
+  foreign id on a name with an open halve is not cleared by saying so, because the next sync would raise it again
+  and a buy could be admitted for the name in the gap. Only the portfolio knows, so the caller passes
+  ``ambiguous_isins`` (``ShadowPortfolio.ambiguous_exit_isins``). Without it the refusal is
+  ``ambiguous_exit_resume_requires_portfolio`` (fail closed); with the name in it, ``ambiguous_exit_still_open``.
 
 D-08 says buys stop and sells stay, so admit and mint take a ``side`` (``buy`` or ``sell``). Scopes: ``all`` blocks
 every step except read-only checks, on both sides; ``entries`` blocks the admission and mint of a BUY;
@@ -38,7 +43,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any, Collection, Mapping, Sequence
 
 from .evidence import EvidenceStore
 
@@ -280,7 +285,28 @@ def raise_event(store: EvidenceStore, event: str, reason: str, *, isin: str | No
     return store.append(PAUSE, {"event": event, "scope": scope, "reason": reason})
 
 
-def resume(store: EvidenceStore, reason: str, *, pause_seqs: Sequence[int] | None = None) -> Mapping[str, Any]:
+def ambiguous_exit_refusal(pause: OpenPause, ambiguous_isins: Collection[str] | None) -> str | None:
+    """The typed refusal for an ``ambiguous_exit_fill`` pause while the portfolio still holds the ambiguity, else ``None``.
+
+    ``ambiguous_isins`` is the portfolio's current set. ``None`` means the caller has no portfolio: refused, because
+    nothing here can tell that the fill was resolved."""
+
+    if pause.event != AMBIGUOUS_EXIT_FILL:
+        return None
+    if ambiguous_isins is None:
+        return "ambiguous_exit_resume_requires_portfolio"
+    if pause.scope in {f"{SCOPE_ISIN}:{isin}" for isin in ambiguous_isins}:
+        return "ambiguous_exit_still_open"
+    return None
+
+
+def resume(
+    store: EvidenceStore,
+    reason: str,
+    *,
+    pause_seqs: Sequence[int] | None = None,
+    ambiguous_isins: Collection[str] | None = None,
+) -> Mapping[str, Any]:
     """Clear open pauses after operator review. Refuses an abort, a blank reason and an empty request.
 
     No timer, restart or caller state reaches this: it reads the evidence and writes one ``resume`` record.
@@ -303,6 +329,9 @@ def resume(store: EvidenceStore, reason: str, *, pause_seqs: Sequence[int] | Non
         raise PolicyError("drawdown_resume_requires_latch")
     if any(pause.event == UNRESOLVED_CORPORATE_ACTION for pause in state.open_pauses if pause.seq in chosen):
         raise PolicyError("corporate_action_resume_requires_portfolio")
+    for pause in state.open_pauses:
+        if pause.seq in chosen and (code := ambiguous_exit_refusal(pause, ambiguous_isins)) is not None:
+            raise PolicyError(code)
     return store.append("resume", {"reason": reason.strip(), "cleared_pause_seqs": chosen})
 
 
@@ -331,6 +360,7 @@ __all__ = [
     "SIDE_BUY",
     "SIDE_SELL",
     "UNRESOLVED_CORPORATE_ACTION",
+    "ambiguous_exit_refusal",
     "raise_event",
     "resume",
     "rule_for",

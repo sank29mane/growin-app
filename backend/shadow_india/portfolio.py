@@ -1128,12 +1128,13 @@ class ShadowPortfolio:
                     },
                 )
 
-    def _ambiguous_exit_fill(self, isin: str, current: OpenExit) -> bool:
+    def _ambiguous_exit_fill(self, isin: str, current: OpenExit, *, pause: bool = True) -> bool:
         """True when a sell booked while this halve was open is not under its own intent ids (and pauses the name).
 
         The halve owes ``floor(q / 2)`` less its own fills. A sell under any other id (the runner minted an ordinary
         order id, a hand sale) may or may not have been meant as the halve, so what is still owed cannot be known.
         Proposing it again could sell the same shares twice, so the exit is held until an operator flattens the name.
+        ``pause=False`` is the read-only question (``ambiguous_exit_isins``): it writes nothing.
         """
 
         if current.reason != HALVE:
@@ -1141,13 +1142,31 @@ class ShadowPortfolio:
         own = self._own_id(exit_obligation_id(HALVE, isin, current.since))
         boundary = self._sell_boundary(isin, current.since)
         if boundary is None:
-            self._pause_isin(AMBIGUOUS_EXIT_FILL, isin, "no sell booking boundary was recorded before this halve opened")
+            if pause:
+                self._pause_isin(AMBIGUOUS_EXIT_FILL, isin, "no sell booking boundary was recorded before this halve opened")
             return True
         sells = self._sell_bookings(self._by_isin[isin])
         if not any(not own.match(str(b.proposal_id)) for b in sells[boundary:]):
             return False
-        self._pause_isin(AMBIGUOUS_EXIT_FILL, isin, "sell booked on a name with an open halve under an id that is not the halve's")
+        if pause:
+            self._pause_isin(AMBIGUOUS_EXIT_FILL, isin, "sell booked on a name with an open halve under an id that is not the halve's")
         return True
+
+    def ambiguous_exit_isins(self) -> frozenset[str]:
+        """The held names whose open halve is still ambiguous right now. Read-only: it raises and writes nothing.
+
+        ``policy.resume`` clears an ``ambiguous_exit_fill`` pause only for a name not in this set. The ambiguity ends when
+        the name is no longer held (the exit closes with the flat holding) or when its halve is no longer open (an
+        operator flatten replaced it); until then the next sync would raise the pause again, and in the gap a buy could be
+        admitted for the name. Corporate-action-frozen names are included on purpose: the stricter answer."""
+
+        state = self._state()
+        held = {h.instrument.isin for h in self.snapshot().holdings}
+        return frozenset(
+            isin
+            for isin, current in state.open_exits.items()
+            if isin in held and isin in self._by_isin and self._ambiguous_exit_fill(isin, current, pause=False)
+        )
 
     def _due(self, isin: str, current: OpenExit, held_quantity: int) -> int:
         """What the open exit still owes. Stop and flatten sell what is held. A halve owes what it was raised for less

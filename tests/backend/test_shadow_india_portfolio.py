@@ -1877,10 +1877,25 @@ def test_a_halve_part_filled_under_an_ordinary_order_id_is_never_proposed_again(
         # The way out is to flatten the name by hand: the exit closes, and the pause can then be resumed.
         sell_and_fill(rig, "flatten-by-hand", "RELIANCE", 80)
         assert again.exit_proposals(D2) == ExitPlan((), ())
-        policy.resume(store, "operator flattened the name", pause_seqs=[p.seq for p in ambiguous_pauses(store)])
+        policy.resume(
+            store, "operator flattened the name", pause_seqs=[p.seq for p in ambiguous_pauses(store)],
+            ambiguous_isins=again.ambiguous_exit_isins(),
+        )
         assert ambiguous_pauses(store) == []
     finally:
         rig.close()
+
+
+def test_ambiguous_exit_isins_reads_the_ambiguity_without_raising_or_writing(tmp_path):
+    world = halved_world(tmp_path)
+    assert world.portfolio.ambiguous_exit_isins() == frozenset()
+    world.account.sell("AAA", 5, "460", proposal_id="manual-sell")
+    before = world.store.records()
+    assert world.portfolio.ambiguous_exit_isins() == frozenset({A})
+    assert world.store.records() == before and ambiguous_pauses(world.store) == []  # asking never pauses
+    world.account.sell("AAA", 45, "460", proposal_id="flatten-by-hand")
+    world.account.sell("AAA", 50, "460", proposal_id="flatten-by-hand-2")
+    assert world.portfolio.ambiguous_exit_isins() == frozenset()  # flat: the ambiguity is gone
 
 
 @pytest.mark.parametrize("proposal_id", [
